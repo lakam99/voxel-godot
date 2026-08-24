@@ -3,6 +3,8 @@ class_name VoxelTerrainRuntime
 
 const GENERATOR_SCRIPT := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
 const CONTEXT_SCRIPT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
+const LANDMARK_MANIFEST_CACHE_SCRIPT := preload("res://scripts/world/LandmarkManifestCache.gd")
+const TERRAIN_GENERATION_FAILURE_AUTHORITY_SCRIPT := preload("res://scripts/terrain/TerrainGenerationFailureAuthority.gd")
 const STARTUP_READINESS_RESULT_SCRIPT := preload("res://scripts/world/StartupReadinessResult.gd")
 const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader")
 
@@ -38,6 +40,8 @@ var viewer: VoxelViewer
 var generator
 var authority_ready := false
 var authority_refresh_pending := false
+var generation_failure_authority
+var generation_authority_failure: Dictionary = {}
 var published_mesh_blocks := {}
 var configured_seed := ""
 var last_volume_revision := -1
@@ -289,6 +293,11 @@ func build_generation_state() -> Dictionary:
 		return {"ok": false, "reason": "voxel_terrain_generation_main_missing"}
 	var context = CONTEXT_SCRIPT.new()
 	context.setup_from_main(main)
+	context.landmark_manifest_cache = LANDMARK_MANIFEST_CACHE_SCRIPT.new()
+	context.generation_failure_authority = TERRAIN_GENERATION_FAILURE_AUTHORITY_SCRIPT.new()
+	prewarm_initial_landmark_manifests(context)
+	if context.generation_failure_authority.has_failure():
+		return {"ok": false, "reason": "terrain_generation_authority_failed", "failure": context.generation_failure_authority.snapshot()}
 	var signatures := {}
 	for cell_value in context.initial_terrain_edits.keys():
 		var state: Dictionary = context.initial_terrain_edits[cell_value]
@@ -299,12 +308,41 @@ func build_generation_state() -> Dictionary:
 	return {
 		"ok": true,
 		"generator": next_generator,
+		"generationFailureAuthority": context.generation_failure_authority,
 		"editSignatures": signatures,
 		"volumeRevision": int(service.get("revision")) if service != null else -1
 	}
 
+func prewarm_initial_landmark_manifests(context) -> void:
+	if context == null:
+		return
+	if main == null or not context.has_method("prewarm_landmark_regions"):
+		if context.has_method("report_generation_failure"):
+			context.call("report_generation_failure", "landmark_manifest_initial_prewarm_context_invalid")
+		else:
+			push_error("Landmark manifest initial prewarm context invalid")
+		return
+	var player_value = main.get("player")
+	var position := (player_value as Node3D).global_position if player_value is Node3D and is_instance_valid(player_value) else Vector3.ZERO
+	var center := Vector2i(floori(position.x / CELL / 420.0), floori(position.z / CELL / 420.0))
+	var regions: Array[Vector2i] = []
+	for offset_z in range(-1, 2):
+		for offset_x in range(-1, 2):
+			regions.append(center + Vector2i(offset_x, offset_z))
+	var generation = main.get("world_generation_system")
+	if generation != null and generation.has_method("natural_landmark_site_sample") and main.has_method("town_region"):
+		context.call("prewarm_landmark_regions", regions, Callable(generation, "natural_landmark_site_sample"), Callable(main, "town_region"))
+	else:
+		context.call("report_generation_failure", "landmark_manifest_initial_prewarm_dependencies_missing", {
+			"worldGenerationAvailable": generation != null,
+			"surfaceSamplerAvailable": generation != null and generation.has_method("natural_landmark_site_sample"),
+			"townResolverAvailable": main.has_method("town_region")
+		})
+
 func apply_generation_tracking(generation_state: Dictionary) -> void:
 	generator = generation_state.get("generator")
+	generation_failure_authority = generation_state.get("generationFailureAuthority")
+	generation_authority_failure.clear()
 	var signatures_value = generation_state.get("editSignatures", {})
 	applied_edit_signatures = (signatures_value as Dictionary).duplicate(true) if signatures_value is Dictionary else {}
 	last_volume_revision = int(generation_state.get("volumeRevision", -1))
@@ -750,6 +788,8 @@ func expand_vertical_bounds_step() -> void:
 	)
 
 func _process(delta: float) -> void:
+	if detect_generation_authority_failure():
+		return
 	if authority_ready:
 		update_viewer_position()
 		update_viewer_distance(delta)
@@ -758,6 +798,8 @@ func _process(delta: float) -> void:
 		process_pending_edit_sections()
 
 func _physics_process(_delta: float) -> void:
+	if detect_generation_authority_failure():
+		return
 	if authority_ready:
 		process_pending_gameplay_chunk_publications()
 		advance_startup_auxiliary_viewer_queue()
@@ -785,6 +827,23 @@ func begin_shutdown() -> void:
 	desired_gameplay_chunks.clear()
 	view_distance_expansion_elapsed = 0.0
 	view_distance_expansion_requested = false
+
+func detect_generation_authority_failure() -> bool:
+	if not generation_authority_failure.is_empty():
+		return true
+	if generation_failure_authority == null or not generation_failure_authority.has_method("has_failure") or not bool(generation_failure_authority.call("has_failure")):
+		return false
+	generation_authority_failure = generation_failure_authority.call("snapshot")
+	authority_ready = false
+	authority_refresh_pending = false
+	if terrain != null and is_instance_valid(terrain):
+		terrain.automatic_loading_enabled = false
+	if viewer != null and is_instance_valid(viewer):
+		viewer.requires_visuals = false
+		viewer.requires_collisions = false
+	invalidate_gameplay_publication()
+	push_error("Voxel terrain publication blocked by generation authority failure: %s" % JSON.stringify(generation_authority_failure))
+	return true
 
 
 func request_final_view_distance_expansion() -> void:
@@ -859,6 +918,7 @@ func on_mesh_block_exited(block_position: Vector3i) -> void:
 func stats() -> Dictionary:
 	return {
 		"ready": authority_ready,
+		"generationAuthorityFailure": generation_authority_failure.duplicate(true),
 		"publishedMeshBlocks": published_mesh_blocks.size(),
 		"pendingEditSections": pending_edit_sections.size(),
 		"editBatchesApplied": edit_batches_applied,
@@ -1060,6 +1120,7 @@ func gameplay_publication_diagnostics(chunk_keys: Array) -> Dictionary:
 	return {
 		"configuredSeed": configured_seed,
 		"authorityReady": authority_ready,
+		"generationAuthorityFailure": generation_authority_failure.duplicate(true),
 		"viewerPosition": viewer.global_position if viewer != null and is_instance_valid(viewer) else Vector3.ZERO,
 		"viewerRequiresVisuals": bool(viewer.requires_visuals) if viewer != null and is_instance_valid(viewer) else false,
 		"viewerRequiresCollisions": bool(viewer.requires_collisions) if viewer != null and is_instance_valid(viewer) else false,

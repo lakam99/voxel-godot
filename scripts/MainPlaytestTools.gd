@@ -3598,9 +3598,27 @@ func spawn_chunk_detail_batches(chunk: Node3D, cx: int, cz: int) -> void:
     spawn_chunk_detail_batches_from_transforms(chunk, batches)
 
 func natural_props_blocked_at_cell(x: int, z: int) -> bool:
+    if landmark_blocks_natural_prop_at_cell(x, z):
+        return true
     if structure_system != null and structure_system.has_method("blocks_natural_prop_at_cell"):
         return bool(structure_system.call("blocks_natural_prop_at_cell", x, z))
     return false
+
+func landmark_blocks_natural_prop_at_cell(x: int, z: int) -> bool:
+    if world_generation_system == null or not world_generation_system.has_method("landmark_site_for_surface_cell3"):
+        return false
+    var site_value = world_generation_system.call("landmark_site_for_surface_cell3", Vector3i(x, 0, z))
+    if not (site_value is Dictionary) or (site_value as Dictionary).is_empty():
+        return false
+    var site: Dictionary = site_value
+    var terrain: Dictionary = site.get("terrain", {}) if site.get("terrain", {}) is Dictionary else {}
+    var bounds: Dictionary = terrain.get("propExclusionBounds", terrain.get("reservedBounds", {})) if terrain.get("propExclusionBounds", terrain.get("reservedBounds", {})) is Dictionary else {}
+    var minimum = bounds.get("minCell", null)
+    var maximum = bounds.get("maxCell", null)
+    if not (minimum is Vector2i) or not (maximum is Vector2i):
+        return false
+    return x >= (minimum as Vector2i).x and x <= (maximum as Vector2i).x \
+        and z >= (minimum as Vector2i).y and z <= (maximum as Vector2i).y
 
 func surface_volume_spawn_sample_at_cell(cell_x: int, cell_z: int) -> Dictionary:
     var column_cell := Vector3i(cell_x, 0, cell_z)
@@ -4211,6 +4229,8 @@ func natural_tree_blocked_at_cell(
     natural_exclusion_margin_world: float,
     structure_footprint_margin_world: float
 ) -> bool:
+    if landmark_blocks_natural_prop_at_cell(x, z):
+        return true
     if structure_system == null:
         return false
     var natural_margin_cells := ceili(maxf(0.0, natural_exclusion_margin_world) / CELL)

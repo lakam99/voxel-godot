@@ -7,6 +7,7 @@ extends "res://scripts/testing/buildings/FurnishedCottageWalkthroughRunner.gd"
 
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const CastleFurnishingPlannerScript := preload("res://scripts/buildings/CastleFurnishingPlanner.gd")
+const BuildingCollisionProbeScript := preload("res://scripts/buildings/BuildingCollisionProbe.gd")
 
 var registered_door_count := 0
 var selected_citadel_scale := 6.0
@@ -262,18 +263,22 @@ func write_automated_report() -> void:
 		await get_tree().process_frame
 	var gate_portal_check := await verify_gate_portal_contract()
 	var courtyard_entry_check := verify_published_courtyard_entry_orientation()
+	var physical_integrity: Dictionary = blueprint.validate_physical_integrity() if blueprint != null else {"passed": false}
+	var walkable_surface_collision: Dictionary = await BuildingCollisionProbeScript.audit_explicit_walkable_surfaces(self, player, cottage_root, blueprint.parts) if blueprint != null else {"passed": false}
 	var expected_residences := (blueprint.recipe.get("courtyardResidences", []) as Array).size() if blueprint != null else 0
 	var courtyard_furnishing := CastleFurnishingPlannerScript.summary(furnishing_plan, expected_residences)
 	var review_captures := await capture_review_views()
 	var report := {
 		"runnerId": "castle_walkthrough",
 		"evidenceLevel": "headed-fixture-startup + published-door transform audit + direct door-service contract",
-		"status": "passed" if blueprint != null and front_door != null and registered_door_count >= 2 and bool(gate_portal_check.get("passed", false)) and bool(courtyard_entry_check.get("passed", false)) and bool(courtyard_furnishing.get("allResidencesFurnished", false)) and not is_rebuilding else "failed",
+		"status": "passed" if blueprint != null and front_door != null and registered_door_count >= 2 and bool(physical_integrity.get("passed", false)) and bool(walkable_surface_collision.get("passed", false)) and bool(gate_portal_check.get("passed", false)) and bool(courtyard_entry_check.get("passed", false)) and bool(courtyard_furnishing.get("allResidencesFurnished", false)) and not is_rebuilding else "failed",
 		"seed": selected_seed,
 		"recipe": blueprint.recipe if blueprint != null else {},
 		"buildingPublication": building_publisher.summary() if building_publisher != null else {},
 		"furnishingPublication": furnishing_publisher.summary() if furnishing_publisher != null else {},
 		"courtyardFurnishing": courtyard_furnishing,
+		"physicalIntegrity": physical_integrity,
+		"walkableSurfaceCollision": walkable_surface_collision,
 		"reviewCaptures": review_captures,
 		"registeredDoorCount": registered_door_count,
 		"gatePortalCheck": gate_portal_check,

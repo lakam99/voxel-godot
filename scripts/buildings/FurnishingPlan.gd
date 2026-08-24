@@ -15,6 +15,7 @@ var parts: Array = []
 # sample against the same lanes, but this prevents direct decoration or a
 # transformed sub-plan from bypassing a declared building access.
 var protected_access_reservations: Array[AABB] = []
+var egress_diagnostics := {}
 
 
 func _init(plan_id := "", plan_seed := 0, blueprint_id := "") -> void:
@@ -75,6 +76,7 @@ func snapshot() -> Dictionary:
 		"id": id,
 		"seed": seed,
 		"sourceBlueprintId": source_blueprint_id,
+		"egressDiagnostics": egress_diagnostics.duplicate(true),
 		"parts": snapshots
 	}
 

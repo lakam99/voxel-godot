@@ -182,6 +182,22 @@ func release_owner(owner_id: String, reason := "released") -> int:
 	metrics["released"] = int(metrics.get("released", 0)) + count
 	return count
 
+func release_owner_except_group(owner_id: String, preserved_group_id: String, reason := "released") -> int:
+	var ids: Array = (reservations_by_owner.get(owner_id, []) as Array).duplicate()
+	var count := 0
+	for reservation_id in ids:
+		var reservation = reservations_by_id.get(reservation_id)
+		if reservation != null and String(reservation.get("group_id")) == preserved_group_id:
+			continue
+		if _release_reservation(String(reservation_id), reason):
+			count += 1
+	wait_graph.clear_actor(owner_id)
+	owner_requests.erase(owner_id)
+	_dequeue_owner(owner_id)
+	cycle_resolution_by_owner.erase(owner_id)
+	metrics["released"] = int(metrics.get("released", 0)) + count
+	return count
+
 func cancel_owner(owner_id: String) -> int:
 	return release_owner(owner_id, "cancelled")
 
@@ -342,6 +358,26 @@ func to_summary() -> Dictionary:
 		"traceSize": trace.size()
 	}
 
+func certify_active_group(group_id: String, owner_id: String, expected_reservation_ids: Array) -> Dictionary:
+	if group_id.is_empty() or owner_id.is_empty() or expected_reservation_ids.is_empty():
+		return {"ok": false, "reason": "missing_group_identity"}
+	var indexed_ids: Array = (reservations_by_group.get(group_id, []) as Array).duplicate()
+	var expected_ids: Array = expected_reservation_ids.duplicate()
+	indexed_ids.sort()
+	expected_ids.sort()
+	if indexed_ids != expected_ids:
+		return {"ok": false, "reason": "reservation_set_changed", "activeReservationIds": indexed_ids, "expectedReservationIds": expected_ids}
+	for reservation_id_value in expected_ids:
+		var reservation_id := String(reservation_id_value)
+		var reservation = reservations_by_id.get(reservation_id)
+		if reservation == null or not bool(reservation.call("is_active")):
+			return {"ok": false, "reason": "reservation_inactive", "reservationId": reservation_id}
+		if String(reservation.get("group_id")) != group_id or String(reservation.get("owner_id")) != owner_id:
+			return {"ok": false, "reason": "reservation_owner_changed", "reservationId": reservation_id}
+		if String(reservation.get("status")) != TrafficReservationScript.STATUS_GRANTED or not bool(reservation.get("active_crossing")):
+			return {"ok": false, "reason": "reservation_not_granted_crossing", "reservationId": reservation_id}
+	return {"ok": true, "reason": "", "groupId": group_id, "ownerId": owner_id, "reservationIds": expected_ids}
+
 func _existing_group_result(owner_id: String, group_id: String, request: Dictionary) -> Dictionary:
 	var ids: Array = reservations_by_group.get(group_id, [])
 	if ids.is_empty():
@@ -397,6 +433,13 @@ func _plan_group_interval(resources: Array, request: Dictionary) -> Dictionary:
 			var spec: Dictionary = spec_value
 			var existing: Array = _relevant_reservations_for_spec(spec, request)
 			var capacity := maxi(1, int(spec.get("capacity", 1)))
+			var active_crossing_blockers: Array = existing.filter(func(reservation) -> bool:
+				return reservation != null \
+					and String(reservation.get("status")) == TrafficReservationScript.STATUS_GRANTED \
+					and bool(reservation.get("active_crossing"))
+			)
+			if active_crossing_blockers.size() >= capacity:
+				return {"ok": false, "reason": "active_crossing_occupied", "start": start, "end": start + duration, "blockers": active_crossing_blockers}
 			var interval: Dictionary = planner.find_interval(String(spec.get("resourceId", "")), _merged_metadata(request, { "earliestStart": start, "latestStart": latest, "duration": duration }), existing, capacity)
 			if not bool(interval.get("ok", false)):
 				return interval
@@ -695,6 +738,8 @@ func _expire_old_reservations() -> void:
 		var reservation = reservations_by_id.get(reservation_id)
 		if reservation == null:
 			reservations_by_id.erase(reservation_id)
+			continue
+		if String(reservation.get("status")) == TrafficReservationScript.STATUS_GRANTED and bool(reservation.get("active_crossing")):
 			continue
 		if float(reservation.get("interval_end")) + NpcConstantsScript.TRAFFIC_RESERVATION_EXPIRE_GRACE_SECONDS < now:
 			if _release_reservation(String(reservation_id), "expired"):

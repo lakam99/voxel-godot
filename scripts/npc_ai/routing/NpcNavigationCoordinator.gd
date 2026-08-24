@@ -77,11 +77,12 @@ func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
     return { "ok": false, "reason": "missing_route_planner" }
 
 
-func prebake_building_navigation_topology() -> Dictionary:
+func prebake_building_navigation_topology(required_tile_keys: Array = []) -> Dictionary:
     ensure_ready()
     if route_planner != null and route_planner.has_method("prebake_building_navigation_topology"):
-        return route_planner.prebake_building_navigation_topology()
+        return route_planner.prebake_building_navigation_topology(required_tile_keys)
     return { "ok": false, "reason": "missing_route_planner" }
+
 
 func plan_source_navigation_route(entry: Dictionary, intent: Dictionary) -> Dictionary:
     ensure_ready()
@@ -102,6 +103,11 @@ func begin_frame() -> void:
         route_ticket_broker.begin_frame()
     if locomotion != null:
         locomotion.begin_frame()
+
+func advance_navmesh_publication_frame() -> void:
+    ensure_ready()
+    if route_planner != null and route_planner.has_method("advance_navmesh_publication_frame"):
+        route_planner.advance_navmesh_publication_frame()
 
 func stats() -> Dictionary:
     ensure_ready()
@@ -133,6 +139,22 @@ func process_navigation_events(events: Array, max_expansions := 128) -> Array[Di
     if route_planner == null or not route_planner.has_method("process_navigation_events"):
         return []
     return route_planner.process_navigation_events(events, max_expansions)
+
+func request_navmesh_snapshot_replacements(tile_keys: Array, priority := true, reason := "external_request") -> Dictionary:
+    ensure_ready()
+    if route_planner != null and route_planner.has_method("request_navmesh_snapshot_replacements"):
+        return route_planner.request_navmesh_snapshot_replacements(tile_keys, priority, reason)
+    return {"ok": false, "reason": "missing_route_planner"}
+
+func navmesh_snapshot_replacements_ready(tile_keys: Array) -> Dictionary:
+    ensure_ready()
+    if route_planner != null and route_planner.has_method("navmesh_snapshot_replacements_ready"):
+        return route_planner.navmesh_snapshot_replacements_ready(tile_keys)
+    return {"ready": false, "reason": "missing_route_planner", "pendingTiles": tile_keys.duplicate()}
+
+func pending_navmesh_snapshot_replacement_count() -> int:
+    ensure_ready()
+    return int(route_planner.pending_navmesh_snapshot_replacement_count()) if route_planner != null and route_planner.has_method("pending_navmesh_snapshot_replacement_count") else 0
 
 func cleanup_actor_state(actor_id: String) -> Dictionary:
     ensure_ready()

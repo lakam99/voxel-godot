@@ -79,7 +79,9 @@ func compute_safe_velocity(entry: Dictionary, body: CharacterBody3D, desired_vel
 		metrics["portalModeFrames"] = int(metrics.get("portalModeFrames", 0)) + 1
 		disable_actor(actor_id)
 		var portal_velocity := project_to_axis(desired_velocity, corridor_direction, NpcConstantsScript.AVOIDANCE_PORTAL_LATERAL_SCALE)
-		return result(false, desired_velocity, portal_velocity, "portal", "portal_reservation_authority", false, false)
+		var portal_result := result(false, desired_velocity, portal_velocity, "portal", "portal_reservation_authority", false, false)
+		portal_result["corridorConstrained"] = true
+		return portal_result
 	var velocity_snapshot: Dictionary = context.get("actorVelocitySnapshot", {}) if context.get("actorVelocitySnapshot", {}) is Dictionary else {}
 	var requested_velocity_snapshot: Dictionary = context.get("actorRequestedVelocitySnapshot", {}) if context.get("actorRequestedVelocitySnapshot", {}) is Dictionary else {}
 	var relevant_actors := relevant_moving_actors(entry, body, actors, desired_velocity, velocity_snapshot, requested_velocity_snapshot)

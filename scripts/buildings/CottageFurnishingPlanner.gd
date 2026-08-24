@@ -9,6 +9,7 @@ class_name CottageFurnishingPlanner
 const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd")
 const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 const FurnishingArchetypeCatalogScript := preload("res://scripts/buildings/FurnishingArchetypeCatalog.gd")
+const BuildingInteriorProgramScript := preload("res://scripts/buildings/BuildingInteriorProgram.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 
 const FLOOR_Y := 0.70
@@ -83,6 +84,7 @@ static func build(blueprint, furnishing_seed: int, furnishing_options: Dictionar
 	if rng.randf() < 0.72:
 		var art_wall := String(sleeping_shelf.recipe.get("supportingWall", "back")) if sleeping_shelf != null else String(chest.recipe.get("supportingWall", "back")) if chest != null else "back"
 		place_wall_art(plan, sleeping_room, "sleeping_art", art_material, art_wall, rng.randf_range(0.18, 0.82), Vector3(0.82, 0.62, 0.08), 2.10)
+	BuildingInteriorProgramScript.apply_to_plan(blueprint, plan)
 	return plan
 
 
@@ -109,15 +111,15 @@ static func place_essential_bed(plan, occupied: Array[AABB], room: Dictionary, p
 		Vector2(0.50, 0.84)
 	]
 	for normalized in candidates:
-		var bed = place(plan, occupied, room, "bed", "bed", "timber_beam", normalized, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10})
+		var bed = place(plan, occupied, room, "bed", "bed", "timber_beam", normalized, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10, "interactionClearance": 1.45})
 		if bed != null:
 			return bed
 	for wall_id in ["right", "back", "left"]:
-		var wall_bed = place_against_wall(plan, occupied, room, "bed", "bed", "timber_beam", wall_id, 0.66, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10})
+		var wall_bed = place_against_wall(plan, occupied, room, "bed", "bed", "timber_beam", wall_id, 0.66, Vector3(2.26, 0.76, 1.28), {"semantic": "bed", "blanket": blanket_material, "clearance": 0.10, "interactionClearance": 1.45})
 		if wall_bed != null:
 			return wall_bed
 	for normalized in [Vector2(0.72, 0.66), Vector2(0.72, 0.50), Vector2(0.50, 0.70)]:
-		var compact_bed = place(plan, occupied, room, "bed", "bed", "timber_beam", normalized, Vector3(1.34, 0.76, 2.08), {"semantic": "bed", "blanket": blanket_material, "bedVariant": "single", "clearance": 0.10})
+		var compact_bed = place(plan, occupied, room, "bed", "bed", "timber_beam", normalized, Vector3(1.34, 0.76, 2.08), {"semantic": "bed", "blanket": blanket_material, "bedVariant": "single", "clearance": 0.10, "interactionClearance": 1.45})
 		if compact_bed != null:
 			return compact_bed
 	return null
@@ -402,6 +404,8 @@ static func place_at(plan, occupied: Array[AABB], part_id: String, room_id: Stri
 		if interaction_depth > 0.0 and InteriorFurnishingLayoutScript.intersects_any(interaction, occupied):
 			return null
 	var part = add_part(plan, part_id, room_id, archetype, material, position, size, options)
+	if part == null:
+		return null
 	if bool(options.get("collision", true)) and not room.is_empty() and not plan_room_is_walkable(plan, room):
 		plan.parts.erase(part)
 		return null

@@ -177,6 +177,9 @@ func _apply_leaf_state(open: bool, reason: String) -> void:
 		door.set_meta("door_state", String(portal.state))
 		door.set_meta("door_state_revision", portal.state_revision)
 		door.set_meta("door_portal_id", portal.portal_id)
+		if not door.has_meta("door_closed_collision_layer"):
+			door.set_meta("door_closed_collision_layer", door.collision_layer)
+		door.collision_layer = 0 if open else int(door.get_meta("door_closed_collision_layer", 1))
 		door.rotation.y = float(door.get_meta("closed_rotation", door.rotation.y))
 		var pivot := door.get_node_or_null("DoorPivot") as Node3D
 		if pivot != null:
@@ -195,6 +198,7 @@ func _apply_leaf_state(open: bool, reason: String) -> void:
 		for child in door.get_children():
 			if child is CollisionShape3D:
 				(child as CollisionShape3D).disabled = open
+				(child as CollisionShape3D).set_deferred("disabled", open)
 	portal.rebuild_geometry()
 	portal.trace.append({ "kind": "apply_leaf_state", "reason": reason, "open": open })
 

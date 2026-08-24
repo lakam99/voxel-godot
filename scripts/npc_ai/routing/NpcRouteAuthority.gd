@@ -51,6 +51,10 @@ func begin_frame() -> void:
 	if delegate != null and delegate.has_method("begin_frame"):
 		delegate.begin_frame()
 
+func advance_navmesh_publication_frame() -> void:
+	if delegate != null and delegate.has_method("advance_navmesh_publication_frame"):
+		delegate.advance_navmesh_publication_frame()
+
 func invalidate() -> void:
 	route_generations.clear()
 	probe_cursors.clear()
@@ -61,6 +65,19 @@ func process_navigation_events(events: Array, max_expansions := 128) -> Array[Di
 	if delegate != null and delegate.has_method("process_navigation_events"):
 		return delegate.process_navigation_events(events, max_expansions)
 	return []
+
+func request_navmesh_snapshot_replacements(tile_keys: Array, priority := true, reason := "external_request") -> Dictionary:
+	if delegate != null and delegate.has_method("request_navmesh_snapshot_replacements"):
+		return delegate.request_navmesh_snapshot_replacements(tile_keys, priority, reason)
+	return {"ok": false, "reason": "missing_route_delegate"}
+
+func navmesh_snapshot_replacements_ready(tile_keys: Array) -> Dictionary:
+	if delegate != null and delegate.has_method("navmesh_snapshot_replacements_ready"):
+		return delegate.navmesh_snapshot_replacements_ready(tile_keys)
+	return {"ready": false, "reason": "missing_route_delegate", "pendingTiles": tile_keys.duplicate()}
+
+func pending_navmesh_snapshot_replacement_count() -> int:
+	return int(delegate.pending_navmesh_snapshot_replacement_count()) if delegate != null and delegate.has_method("pending_navmesh_snapshot_replacement_count") else 0
 
 func route_cost(entry: Dictionary, target: Vector3, allow_outside := false, moving_home := false, arrival_radius := 1.1475, approach_cells: Array = [], require_ready := false) -> float:
 	if delegate != null and delegate.has_method("route_cost"):
@@ -73,9 +90,9 @@ func prebake_area_tiles(center_cell: Vector2i, radius_cells: int) -> Dictionary:
 	return { "ok": false, "reason": "missing_prebake_delegate" }
 
 
-func prebake_building_navigation_topology() -> Dictionary:
+func prebake_building_navigation_topology(required_tile_keys: Array = []) -> Dictionary:
 	if delegate != null and delegate.has_method("prebake_building_navigation_topology"):
-		return delegate.prebake_building_navigation_topology()
+		return delegate.prebake_building_navigation_topology(required_tile_keys)
 	return { "ok": false, "reason": "missing_prebake_delegate" }
 
 func plan_route(entry: Dictionary, intent: Dictionary) -> Dictionary:

@@ -39,6 +39,7 @@ static func from_tile_snapshot(snapshot: Dictionary):
 	descriptor.revision = int(snapshot.get("sourceRevision", snapshot.get("topologyRevision", 1)))
 	descriptor.metadata = {
 		"source": "tile_snapshot",
+		"sourceKey": String(snapshot.get("sourceKey", "")),
 		"semanticRevision": int(snapshot.get("semanticRevision", 0))
 	}
 	var has_bounds := false

@@ -24,6 +24,9 @@ func place_spawn(body: CharacterBody3D, requested_position: Vector3, profile = n
 		var rejected := result(false, position, String(validation.get("reason", "invalid_capsule")))
 		if validation.has("collider"):
 			rejected["collider"] = String(validation.get("collider", ""))
+		for key in ["colliderKind", "buildingPartId", "buildingSemantic", "buildingSourceBlueprint"]:
+			if validation.has(key):
+				rejected[key] = validation.get(key)
 		return rejected
 	if body.is_inside_tree():
 		body.global_position = position
@@ -64,7 +67,17 @@ func validate_capsule(body: CharacterBody3D, position: Vector3, profile = null) 
 		var block_type := String(collider.get_meta("block_type", ""))
 		if kind == "block" and block_type in ["cobblestonePath", "torch"]:
 			continue
-		return { "ok": false, "reason": "occupied_capsule", "collider": collider.name }
+		var rejection := {"ok": false, "reason": "occupied_capsule", "collider": collider.name, "colliderKind": kind}
+		var shape_index := int(hit_dict.get("shape", -1))
+		if collider is CollisionObject3D and shape_index >= 0:
+			var owner_id := (collider as CollisionObject3D).shape_find_owner(shape_index)
+			if owner_id >= 0:
+				var owner = (collider as CollisionObject3D).shape_owner_get_owner(owner_id)
+				if owner is CollisionShape3D:
+					rejection["buildingPartId"] = String((owner as CollisionShape3D).get_meta("building_part_id", ""))
+					rejection["buildingSemantic"] = String((owner as CollisionShape3D).get_meta("building_semantic", ""))
+		rejection["buildingSourceBlueprint"] = String(collider.get_meta("building_source_blueprint", ""))
+		return rejection
 	return { "ok": true, "reason": "" }
 
 func result(ok: bool, position: Vector3, reason: String) -> Dictionary:

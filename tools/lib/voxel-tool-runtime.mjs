@@ -326,6 +326,8 @@ const scriptTools = {
   'run-biome-environment-catalog-contract-tests': ['res://scripts/testing/BiomeEnvironmentCatalogContractRunner.gd', 'VOXEL_BIOME_ENVIRONMENT_CONTRACT_REPORT'],
   'run-biome-region-field-contract-tests': ['res://scripts/testing/BiomeRegionFieldContractRunner.gd', 'VOXEL_BIOME_REGION_FIELD_REPORT'],
 	'run-building-navigation-manifest-contract': ['res://scripts/testing/buildings/BuildingNavigationManifestContractRunner.gd', 'VOXEL_BUILDING_NAVIGATION_MANIFEST_REPORT'],
+  'run-citadel-residence-manifest-contract': ['res://scripts/testing/buildings/CitadelResidenceManifestContractRunner.gd', 'VOXEL_CITADEL_RESIDENCE_MANIFEST_REPORT'],
+  'run-citadel-door-portal-contract': ['res://scripts/testing/buildings/CitadelDoorPortalContractRunner.gd', 'VOXEL_CITADEL_DOOR_PORTAL_CONTRACT_REPORT'],
   'run-canopy-asset-import-contract-tests': ['res://scripts/testing/CanopyAssetImportContractRunner.gd', 'VOXEL_CANOPY_IMPORT_CONTRACT_REPORT'],
   'run-canopy-runtime-contract-tests': ['res://scripts/testing/CanopyRuntimeContractRunner.gd', 'VOXEL_CANOPY_RUNTIME_CONTRACT_REPORT'],
   'run-combat-target-policy-contract': ['res://scripts/testing/combat/CombatTargetPolicyContractRunner.gd', 'VOXEL_COMBAT_TARGET_POLICY_REPORT'],
@@ -425,9 +427,11 @@ const headedAcceptanceGuards = {
   'run-citadel-life-playtest': ['scripts/testing/npc/CitadelLifePlaytestRunner.gd', [
     'safe_place_npc.*citadel_life_day_spawn',
     'safe_place_npc.*citadel_crowd_pre_act_lineup',
+    'safe_place_npc.*citadel_surface_continuity_pre_act_lineup',
+    'player\\.global_position\\s*=\\s*fixture_origin.*fixture_site\\.get\\("radius"',
     'player\\.global_position\\s*=\\s*fixture_origin.*gate_depth',
     'player\\.global_position\\s*=\\s*fixture_origin.*span',
-    'player\\.global_position\\s*=\\s*fixture_streaming_focus_offset'
+    'player\\.global_position\\s*=\\s*fixture_origin.*fixture_streaming_focus_offset'
   ]],
   'npc/run-actual-gameplay-mira-porch-regression': ['scripts/testing/npc/NpcActualGameplayMiraPorchRegressionRunner.gd', []],
   'npc/run-npc-go-home-visual-playtest': ['scripts/testing/npc/NpcGoHomeVisualPlaytestRunner.gd', ['safe_place_npc.*visual_go_home_spawn', 'player\\.global_position\\s*=\\s*Vector3\\(float\\(center\\.x - 10\\)']],
@@ -536,6 +540,17 @@ async function runConfiguredGodot(toolId, rawArgs) {
   }
   if (!(await exists(reportPath))) throw new Error(`Missing report from ${toolId}: ${reportPath}`);
   const report = await readJson(reportPath);
+  if (toolId === 'run-citadel-door-portal-contract') {
+    const rows = report.rows;
+    const invalidRows = !Array.isArray(rows)
+      || rows.length === 0
+      || rows.some((row) => !row
+        || !Number.isInteger(row.seed)
+        || !Number.isInteger(row.doorCount)
+        || !Array.isArray(row.proofs)
+        || row.proofs.length === 0);
+    if (invalidRows) throw new Error(`Invalid contract output from ${toolId}; the Godot runner did not produce complete seed evidence.`);
+  }
   if (isVisual && report.runToken && report.runToken !== runToken) throw new Error(`Stale report token from ${toolId}`);
   for (const screenshotName of visualRequiredScreenshots[toolId] ?? []) {
     const screenshotPath = join(screenshotDir, screenshotName);

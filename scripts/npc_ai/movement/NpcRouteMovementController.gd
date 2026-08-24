@@ -1574,7 +1574,10 @@ func release_stale_active_door_route(entry: Dictionary) -> void:
         return
     var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
     if system != null and system.has_method("release_npc_door_hold") and actor_id != "":
-        system.release_npc_door_hold(actor_id, true)
+        var release_evidence := {}
+        if system.has_method("active_private_home_departure_clearance_evidence"):
+            release_evidence = system.call("active_private_home_departure_clearance_evidence", entry, String(entry.get("activeDoorPortalId", ""))) as Dictionary
+        system.call("release_npc_door_hold", actor_id, true, release_evidence)
     if system != null and system.has_method("release_npc_traffic_reservations"):
         system.release_npc_traffic_reservations(entry, "active_door_route_replan")
     entry.erase("activeDoorPortalId")

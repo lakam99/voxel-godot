@@ -475,6 +475,9 @@ func ensure_voxel_terrain_authority() -> bool:
             if bool(voxel_terrain_runtime.get("authority_refresh_pending")):
                 voxel_authority_initialization_reason = "voxel_terrain_authority_refresh_pending"
                 return false
+            var generation_failure_value = voxel_terrain_runtime.get("generation_authority_failure")
+            if generation_failure_value is Dictionary and not (generation_failure_value as Dictionary).is_empty():
+                voxel_authority_initialization_reason = String((generation_failure_value as Dictionary).get("code", "terrain_generation_authority_failed"))
             return false
         push_error("Voxel terrain seed mismatch requires the staged runtime reset contract")
         return false

@@ -85,9 +85,10 @@ func cases() -> Array[Dictionary]:
 		["npc_visual_terminal_arrival_publishes_idle_pose", "test_visual_terminal_arrival_publishes_idle_pose"],
 		["npc_visual_door_stage_wait_publishes_idle_pose", "test_visual_door_stage_wait_publishes_idle_pose"],
 		["npc_avoidance_missing_callback_isolates_local_component", "test_missing_callback_isolates_local_component"],
-		["npc_avoidance_unresolved_stationary_is_edge_triggered", "test_unresolved_stationary_is_edge_triggered"],
+		["npc_avoidance_active_lease_is_not_rebound_stationary", "test_active_lease_is_not_rebound_stationary"],
 		["npc_avoidance_dynamic_contact_reaches_shared_motor", "test_dynamic_contact_reaches_shared_motor"],
 		["npc_avoidance_order_replacement_invalidates_executor_ticket", "test_order_replacement_invalidates_executor_ticket"],
+		["npc_avoidance_deferred_motor_failure_reaches_route_owner", "test_deferred_motor_failure_reaches_route_owner"],
 		["npc_avoidance_missing_shared_authority_blocks", "test_missing_shared_authority_blocks"],
 		["npc_avoidance_stale_callback_safe_stop", "test_stale_callback_safe_stop"],
 		["npc_avoidance_callback_command_generation_bound", "test_callback_command_generation_bound"],
@@ -526,7 +527,7 @@ func test_missing_callback_isolates_local_component(_mode: String) -> Dictionary
 	var diagnosed := int(ticket_stats.get("missingCallbackFrames", 0)) == 1 and int(ticket_stats.get("missingCallbackTickets", 0)) == 1
 	return outcome(isolated and diagnosed, "deliveries=%s tickets=%s" % [JSON.stringify(ticket_deliveries), JSON.stringify(ticket_stats)], ["ready_component_commits_independently", "missing_component_retries_next_frame", "missing_callback_is_diagnosed"], {"deliveries": ticket_deliveries.duplicate(), "tickets": ticket_stats})
 
-func test_unresolved_stationary_is_edge_triggered(_mode: String) -> Dictionary:
+func test_active_lease_is_not_rebound_stationary(_mode: String) -> Dictionary:
 	var service := NpcCrowdVelocityServiceScript.new()
 	service.setup(null, null)
 	var body := make_actor("npc-unresolved", Vector3.ZERO)
@@ -540,8 +541,10 @@ func test_unresolved_stationary_is_edge_triggered(_mode: String) -> Dictionary:
 		service.begin_physics_frame([entry])
 		service.end_physics_frame()
 	var corrections := int(service.stats().get("realizedVelocityCorrections", 0))
-	var passed := corrections == 1 and bool(entry.get("_crowdUnresolvedStationary", false))
-	return outcome(passed, "corrections=%d unresolved=%s" % [corrections, str(entry.get("_crowdUnresolvedStationary", false))], ["unresolved_episode_forces_solver_once", "unresolved_stationary_state_persists_until_submission"], {"corrections": corrections})
+	var agent = service.adapter.agents_by_actor_id.get("npc-unresolved")
+	var request_key := String(agent.get_meta("npc_avoidance_request_key", "")) if agent != null else ""
+	var passed := corrections == 0 and request_key != "__stationary__" and not entry.has("_crowdUnresolvedStationary")
+	return outcome(passed, "corrections=%d request=%s" % [corrections, request_key], ["active_lease_preserves_solver_binding", "partial_frame_close_cannot_publish_stationary"], {"corrections": corrections, "requestKey": request_key})
 
 
 func record_ticket_delivery(_velocity: Vector3, _request_key: String, actor_id: String) -> void:
@@ -593,6 +596,32 @@ func test_order_replacement_invalidates_executor_ticket(_mode: String) -> Dictio
 		and (body.get_meta("npc_applied_velocity", Vector3.ONE) as Vector3).is_zero_approx() \
 		and body.global_position.is_zero_approx()
 	return outcome(passed, "entry=%s requested=%s applied=%s position=%s" % [JSON.stringify(entry), str(body.get_meta("npc_requested_velocity")), str(body.get_meta("npc_applied_velocity")), str(body.global_position)], ["replacement_advances_executor_generation", "same_key_stale_callback_cannot_move_rebound_order", "replacement_publishes_stationary_velocity"], {})
+
+
+func test_deferred_motor_failure_reaches_route_owner(_mode: String) -> Dictionary:
+	var body := make_actor("npc-deferred-motor", Vector3.ZERO)
+	var executor := NpcRouteLeaseExecutorScript.new()
+	executor.setup(null, null, null, InactiveCrowdVelocityService.new())
+	var entry := {"id": "npc-deferred-motor", "body": body}
+	var lease := {"state": "ready", "waypoints": [Vector3(4.0, 0.0, 0.0)], "actions": {}, "probeCertificate": {"ok": true, "authoritative": true}}
+	executor.execute(entry, "deferred-motor-request", lease, DT)
+	var generation := int(entry.get("_v2LeaseExecutorGeneration", -1))
+	entry["routeLeaseDeferredExecution"] = {
+		"ok": false,
+		"status": "waiting",
+		"reason": "unexpected_collision",
+		"classification": "motor_static_contact",
+		"requestId": "deferred-motor-request",
+		"executionGeneration": generation,
+		"motor": {"blockedContactCategory": "static_collision"}
+	}
+	var before := body.global_position
+	var result: Dictionary = executor.execute(entry, "deferred-motor-request", lease, DT)
+	var passed := String(result.get("reason", "")) == "unexpected_collision" \
+		and String((result.get("motor", {}) as Dictionary).get("blockedContactCategory", "")) == "static_collision" \
+		and not entry.has("routeLeaseDeferredExecution") \
+		and body.global_position.is_equal_approx(before)
+	return outcome(passed, "result=%s" % JSON.stringify(result), ["deferred_motor_failure_returned_to_route_owner", "matching_generation_required", "no_second_command_before_failure_handled"], {"result": result, "generation": generation})
 
 func test_missing_shared_authority_blocks(_mode: String) -> Dictionary:
 	var service = NpcCrowdVelocityServiceScript.new()

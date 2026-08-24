@@ -54,7 +54,7 @@ static func circulation_reservations(room_records: Array, actor_radius := 0.34, 
 			var entry: Dictionary = entries[entry_index]
 			var target_position: Vector3 = entry.get("position", Vector3.ZERO) as Vector3
 			var height := maxf(float(anchor.get("height", 0.10)), float(entry.get("height", 0.10)))
-			var corner := Vector3(target_position.x, FLOOR_Y, anchor_position.z)
+			var corner := Vector3(target_position.x, anchor_position.y, anchor_position.z)
 			append_circulation_segment(reservations, anchor_position, corner, corridor_width, height)
 			append_circulation_segment(reservations, corner, target_position, corridor_width, height)
 	return reservations
@@ -66,7 +66,7 @@ static func access_reservation(access: Dictionary) -> AABB:
 	if size.x <= 0.0 or size.z <= 0.0:
 		return AABB()
 	return AABB(
-		Vector3(position.x - size.x * 0.5, FLOOR_Y, position.z - size.z * 0.5),
+		Vector3(position.x - size.x * 0.5, position.y, position.z - size.z * 0.5),
 		Vector3(size.x, maxf(0.10, size.y), size.z)
 	)
 
@@ -84,7 +84,7 @@ static func append_circulation_segment(reservations: Array[AABB], start: Vector3
 		minimum_z -= half_width
 		maximum_z += half_width
 	reservations.append(AABB(
-		Vector3(minimum_x, FLOOR_Y, minimum_z),
+		Vector3(minimum_x, minf(start.y, end.y) - height * 0.5, minimum_z),
 		Vector3(maximum_x - minimum_x, maxf(0.10, height), maximum_z - minimum_z)
 	))
 
@@ -157,7 +157,7 @@ static func horizontal_bounds(position: Vector3, size: Vector3, rotation: Vector
 	var extent_x := absf(cos(yaw)) * size.x + absf(sin(yaw)) * size.z
 	var extent_z := absf(sin(yaw)) * size.x + absf(cos(yaw)) * size.z
 	return AABB(
-		Vector3(position.x - extent_x * 0.5 - padding, FLOOR_Y, position.z - extent_z * 0.5 - padding),
+		Vector3(position.x - extent_x * 0.5 - padding, position.y, position.z - extent_z * 0.5 - padding),
 		Vector3(extent_x + padding * 2.0, maxf(0.10, size.y), extent_z + padding * 2.0)
 	)
 

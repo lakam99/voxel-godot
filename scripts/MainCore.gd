@@ -72,6 +72,9 @@ var volume_edit_markers := {}
 var town_region_cache := {}
 var town_slope_apron_cache := {}
 var settlement_site_authority
+var landmark_site_authority
+var citadel_landmark_catalog
+var landmark_catalog_context_open := false
 var blocks := {}
 var removed_props := {}
 var inventory := {}
@@ -678,17 +681,24 @@ func startup_physics_gate_readiness() -> Dictionary:
     return StartupReadinessResultScript.ready({}, metrics)
 
 func reinitialize_voxel_terrain_authority_staged() -> Dictionary:
+    landmark_catalog_context_open = true
+    var catalog_result := prepare_seeded_citadel_catalog()
+    if not bool(catalog_result.get("ok", false)):
+        landmark_catalog_context_open = false
+        return StartupReadinessResultScript.failed("citadel_landmark_catalog_failed", {}, [], catalog_result)
     var runtime = get("voxel_terrain_runtime")
     var reset_result := StartupReadinessResultScript.ready({}, {})
     if runtime == null or not is_instance_valid(runtime):
         if not has_method("ensure_voxel_terrain_authority") \
             or not bool(call("ensure_voxel_terrain_authority")):
+            landmark_catalog_context_open = false
             return StartupReadinessResultScript.failed("voxel_terrain_authority_initialization_failed", {}, [], {
                 "seed": seed_text
             })
         runtime = get("voxel_terrain_runtime")
     elif String(runtime.get("configured_seed")) != seed_text:
         if not runtime.has_method("reset_for_current_seed_staged"):
+            landmark_catalog_context_open = false
             return StartupReadinessResultScript.failed("voxel_terrain_seed_reset_api_missing", {}, [], {
                 "expectedSeed": seed_text,
                 "configuredSeed": String(runtime.get("configured_seed"))
@@ -698,7 +708,9 @@ func reinitialize_voxel_terrain_authority_staged() -> Dictionary:
             "invalid_voxel_terrain_seed_reset_result"
         )
         if not startup_result_is_ready(reset_result):
+            landmark_catalog_context_open = false
             return reset_result
+    landmark_catalog_context_open = false
     if runtime == null or not is_instance_valid(runtime) \
         or not bool(runtime.get("authority_ready")) \
         or String(runtime.get("configured_seed")) != seed_text:
@@ -709,7 +721,8 @@ func reinitialize_voxel_terrain_authority_staged() -> Dictionary:
     return StartupReadinessResultScript.ready({}, {
         "seed": seed_text,
         "authorityReady": true,
-        "reset": reset_result.get("metrics", {}) if reset_result is Dictionary else {}
+        "reset": reset_result.get("metrics", {}) if reset_result is Dictionary else {},
+        "citadelCatalog": catalog_result
     })
 
 func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
@@ -973,36 +986,6 @@ func initial_navigation_route_delegate():
         return null
     return coordinator.get("route_delegate")
 
-func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: String) -> Dictionary:
-    if navigation_world == null or route_delegate == null or tile_key == "":
-        return { "ok": false, "reason": "missing_navigation_tile_publication_input" }
-    if not navigation_world.has_method("build_navmesh_tile_snapshot"):
-        return { "ok": false, "reason": "navigation_tile_snapshot_api_missing" }
-    var navmesh_world = route_delegate.get("navmesh_world")
-    if navmesh_world == null or not navmesh_world.has_method("register_tile_snapshot"):
-        return { "ok": false, "reason": "navmesh_tile_registration_api_missing" }
-    var snapshot_started_usec := Time.get_ticks_usec()
-    var snapshot: Dictionary = navigation_world.call("build_navmesh_tile_snapshot", tile_key)
-    var snapshot_ms := float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0
-    if snapshot.is_empty():
-        return { "ok": false, "reason": "empty_navigation_tile_snapshot", "snapshotMs": snapshot_ms }
-    var register_started_usec := Time.get_ticks_usec()
-    var result: Dictionary = navmesh_world.call("register_tile_snapshot", snapshot)
-    var register_ms := float(Time.get_ticks_usec() - register_started_usec) / 1000.0
-    var sync_ms := 0.0
-    if navmesh_world.has_method("sync_navigation_map_if_dirty"):
-        var sync_started_usec := Time.get_ticks_usec()
-        navmesh_world.call("sync_navigation_map_if_dirty")
-        sync_ms = float(Time.get_ticks_usec() - sync_started_usec) / 1000.0
-    var status := String(result.get("status", ""))
-    return {
-        "ok": bool(result.get("installed", false)) or status in ["installed", "updated", "registered"],
-        "status": status,
-        "snapshotMs": snapshot_ms,
-        "registerMs": register_ms,
-        "syncMs": sync_ms
-    }
-
 func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> Dictionary:
     if not NpcConstantsScript.NPC_NAV_ENABLE_STARTUP_TILE_PRIMING:
         return StartupReadinessResultScript.failed("startup_navigation_tile_priming_disabled")
@@ -1012,8 +995,7 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
     var route_delegate = initial_navigation_route_delegate()
     if route_delegate == null:
         return StartupReadinessResultScript.failed("missing_navigation_route_delegate")
-    var navmesh_world = route_delegate.get("navmesh_world")
-    if navmesh_world == null or not navmesh_world.has_method("tile_region_status"):
+    if not route_delegate.has_method("request_navmesh_snapshot_replacements") or not route_delegate.has_method("navmesh_snapshot_replacements_ready"):
         return StartupReadinessResultScript.failed("missing_navmesh_tile_publication_authority")
 
     var tile_keys := {}
@@ -1030,46 +1012,38 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
         return StartupReadinessResultScript.failed("no_startup_navigation_tiles_derived", {}, [], {
             "registeredNpcCount": entries.size()
         })
-    var published := 0
-    var tile_timings: Array[Dictionary] = []
-    for tile_key_value in keys:
-        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
-            break
-        var tile_key := String(tile_key_value)
+    keys = keys.slice(0, total)
+    var request: Dictionary = route_delegate.call("request_navmesh_snapshot_replacements", keys, true, "startup_navigation_readiness")
+    if not bool(request.get("ok", false)):
+        return StartupReadinessResultScript.failed("startup_navigation_tile_request_rejected", {}, [], request)
+    var started_usec := Time.get_ticks_usec()
+    var readiness: Dictionary = route_delegate.call("navmesh_snapshot_replacements_ready", keys)
+    while not bool(readiness.get("ready", false)):
+        var pending_tiles: Array = readiness.get("pendingTiles", []) if readiness.get("pendingTiles", []) is Array else []
+        var published := total - pending_tiles.size()
+        if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+            var timeout_metrics := {
+                "publishedTileCount": published,
+                "requiredTileCount": total,
+                "timeoutSeconds": INITIAL_READINESS_TIMEOUT_SECONDS,
+                "request": request.duplicate(true),
+                "readiness": readiness.duplicate(true),
+                "queue": route_delegate.call("stats") if route_delegate.has_method("stats") else {}
+            }
+            return StartupReadinessResultScript.failed("startup_navigation_tile_publication_timeout", {}, [], timeout_metrics)
         await startup_loading_yield("Preparing NPC route tiles %d/%d" % [published, total], "navigation_tiles", "pending", {
             "publishedTileCount": published,
             "requiredTileCount": total,
-            "tileKey": tile_key
+            "pendingTiles": pending_tiles.duplicate(),
+            "tileProofs": readiness.get("tileProofs", [])
         })
-        var publish_result: Dictionary = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
-        tile_timings.append({
-            "tileKey": tile_key,
-            "snapshotMs": float(publish_result.get("snapshotMs", 0.0)),
-            "registerMs": float(publish_result.get("registerMs", 0.0)),
-            "syncMs": float(publish_result.get("syncMs", 0.0))
-        })
-        if not bool(publish_result.get("ok", false)):
-            return StartupReadinessResultScript.failed("startup_navigation_tile_publication_failed", {}, [], {
-                "publishedTileCount": published,
-                "requiredTileCount": total,
-                "failedTileKey": tile_key,
-                "tileStatus": navmesh_world.call("tile_region_status", tile_key),
-                "publish": publish_result
-            })
-        var tile_status: Dictionary = navmesh_world.call("tile_region_status", tile_key)
-        if not bool(tile_status.get("installed", false)) or bool(tile_status.get("dirty", false)):
-            return StartupReadinessResultScript.failed("startup_navigation_tile_not_installed", {}, [], {
-                "publishedTileCount": published,
-                "requiredTileCount": total,
-                "failedTileKey": tile_key,
-                "tileStatus": tile_status
-            })
-        published += 1
+        readiness = route_delegate.call("navmesh_snapshot_replacements_ready", keys)
     var metrics := {
-        "publishedTileCount": published,
+        "publishedTileCount": total,
         "requiredTileCount": total,
-        "tileKeys": keys.slice(0, total),
-        "tileTimings": tile_timings
+        "tileKeys": keys,
+        "request": request,
+        "tileProofs": readiness.get("tileProofs", [])
     }
     await startup_loading_yield("NPC route tiles ready", "navigation_tiles", "ready", metrics)
     return StartupReadinessResultScript.ready({}, metrics)
@@ -1174,12 +1148,11 @@ func prime_initial_navigation_tiles(navigation_world, entries: Array) -> void:
         if entry_value is Dictionary:
             prime_navigation_tiles_for_entry(navigation_world, entry_value, tile_keys)
 
-    var published := 0
-    for tile_key_value in tile_keys.keys():
-        if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
-            break
-        if publish_startup_navmesh_tile(navigation_world, route_delegate, String(tile_key_value)):
-            published += 1
+    var keys: Array = tile_keys.keys()
+    keys.sort()
+    keys = keys.slice(0, mini(keys.size(), INITIAL_NAVMESH_PRIME_TILE_LIMIT))
+    if route_delegate.has_method("request_navmesh_snapshot_replacements"):
+        route_delegate.call("request_navmesh_snapshot_replacements", keys, true, "startup_navigation_legacy_request")
 
 func prime_navigation_tiles_for_entry(navigation_world, npc_entry: Dictionary, tile_keys: Dictionary) -> void:
     var body := npc_entry.get("body") as Node3D
@@ -1347,6 +1320,8 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     town_slope_apron_cache.clear()
     if settlement_site_authority != null and settlement_site_authority.has_method("reset_for_seed"):
         settlement_site_authority.call("reset_for_seed", seed_text)
+    if landmark_site_authority != null and landmark_site_authority.has_method("reset_for_seed"):
+        landmark_site_authority.call("reset_for_seed", seed_text)
     fishing_rng.seed = hash_string("%s:fishing" % seed_text)
     playtest_progress("apply_seed_setup_noise")
     setup_noise()
@@ -1583,6 +1558,11 @@ func setup_world_generation_system() -> void:
     if settlement_site_authority == null:
         settlement_site_authority = preload("res://scripts/world/SettlementSiteAuthority.gd").new()
         settlement_site_authority.reset_for_seed(seed_text)
+    if landmark_site_authority == null:
+        landmark_site_authority = preload("res://scripts/world/LandmarkSiteAuthority.gd").new()
+        landmark_site_authority.reset_for_seed(seed_text)
+    if citadel_landmark_catalog == null:
+        citadel_landmark_catalog = preload("res://scripts/world/CitadelLandmarkCatalog.gd").new()
     if world_generation_system == null:
         world_generation_system = WorldGenerationSystemScript.new()
     world_generation_system.setup(self)
@@ -1601,6 +1581,52 @@ func register_settlement_site(site: Dictionary) -> Dictionary:
         if world_generation_system != null and world_generation_system.has_method("invalidate_generated_surface_caches"):
             world_generation_system.call("invalidate_generated_surface_caches")
     return result
+
+func register_landmark_site(site: Dictionary) -> Dictionary:
+    setup_world_generation_system()
+    if landmark_site_authority == null or not landmark_site_authority.has_method("register_site"):
+        return {"accepted": false, "reason": "landmark_site_authority_missing"}
+    var runtime = get("voxel_terrain_runtime")
+    if runtime != null and is_instance_valid(runtime) and not landmark_catalog_context_open:
+        return {"accepted": false, "reason": "landmark_registration_requires_pre_terrain_context"}
+    var region_span := int(site.get("siteRegionCells", 420))
+    var result: Dictionary = landmark_site_authority.call("register_site", site, region_span)
+    if bool(result.get("accepted", false)) and bool(result.get("changed", false)) and world_generation_system != null and world_generation_system.has_method("invalidate_generated_surface_caches"):
+        world_generation_system.call("invalidate_generated_surface_caches")
+    return result
+
+func landmark_sites_for_region(region_x: int, region_z: int, region_span := 420) -> Array:
+    if region_span != 420:
+        return []
+    var result: Array = registered_landmark_sites_for_region(region_x, region_z)
+    if citadel_landmark_catalog != null and world_generation_system != null and world_generation_system.has_method("natural_landmark_site_sample"):
+        var resolved: Dictionary = CitadelLandmarkCatalog.resolved_manifest_for_region(
+            seed_text,
+            seed_hash,
+            region_x,
+            region_z,
+            Callable(world_generation_system, "natural_landmark_site_sample"),
+            Callable(self, "town_region"),
+            result
+        )
+        if not resolved.is_empty():
+            var resolved_id := String(resolved.get("id", ""))
+            if not result.any(func(value) -> bool: return value is Dictionary and String((value as Dictionary).get("id", "")) == resolved_id):
+                result.append(resolved)
+    result.sort_custom(func(left: Dictionary, right: Dictionary) -> bool: return String(left.get("id", "")) < String(right.get("id", "")))
+    return result
+
+func registered_landmark_sites_for_region(region_x: int, region_z: int) -> Array:
+    if landmark_site_authority == null or not landmark_site_authority.has_method("sites_for_region"):
+        return []
+    return landmark_site_authority.call("sites_for_region", region_x, region_z)
+
+func prepare_seeded_citadel_catalog() -> Dictionary:
+    if citadel_landmark_catalog == null or landmark_site_authority == null:
+        return {"ok": false, "reason": "citadel_landmark_authorities_missing"}
+    if not landmark_catalog_context_open:
+        return {"ok": false, "reason": "citadel_catalog_requires_pre_terrain_window"}
+    return {"ok": true, "authority": "implicit_seeded_field", "regionSpanCells": 420}
 
 func setup_story_systems() -> void:
     if region_story_generator == null:

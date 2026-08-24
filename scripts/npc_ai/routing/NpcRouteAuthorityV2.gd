@@ -189,8 +189,15 @@ func submit_request(entry: Dictionary, intent: Dictionary, options := {}) -> Dic
 func mark_pending_budget(request_id: String, reason := "pending_budget") -> Dictionary:
 	return transition_request(request_id, STATE_PENDING_BUDGET, reason)
 
-func mark_pending_nav_data(request_id: String, reason := "pending_nav_data") -> Dictionary:
-	return transition_request(request_id, STATE_PENDING_NAV_DATA, reason)
+func mark_pending_nav_data(request_id: String, reason := "pending_nav_data", awaited_navigation := {}) -> Dictionary:
+	if not requests_by_id.has(request_id):
+		return { "ok": false, "reason": "missing_request", "requestId": request_id }
+	var record: Dictionary = requests_by_id[request_id]
+	record["awaitedNavigation"] = awaited_navigation.duplicate(true) if awaited_navigation is Dictionary else {}
+	_transition_record(record, STATE_PENDING_NAV_DATA, reason)
+	requests_by_id[request_id] = record
+	_publish_record_to_entry(record)
+	return record_summary(record)
 
 func mark_probing(request_id: String, reason := "probing") -> Dictionary:
 	return transition_request(request_id, STATE_PROBING, reason)
@@ -619,6 +626,11 @@ func telemetry_for_entry(entry: Dictionary) -> Dictionary:
 func runtime_for_entry(entry: Dictionary) -> Dictionary:
 	return runtime_for_actor(actor_id_for_entry(entry))
 
+func runtime_for_request(request_id: String) -> Dictionary:
+	if request_id.is_empty() or not requests_by_id.has(request_id):
+		return {"hasRequest": false, "requestId": request_id, "state": STATE_NONE, "reason": "missing_request"}
+	return record_summary(requests_by_id[request_id])
+
 func runtime_for_actor(actor_id: String) -> Dictionary:
 	if actor_id == "":
 		return { "hasRequest": false, "state": STATE_NONE, "reason": "missing_actor_id" }
@@ -647,6 +659,7 @@ func runtime_for_actor(actor_id: String) -> Dictionary:
 		"pendingBudgetFrames": int(counts.get(STATE_PENDING_BUDGET, 0)),
 		"pendingNavDataFrames": int(counts.get(STATE_PENDING_NAV_DATA, 0)),
 		"pendingProbeFrames": int(counts.get(STATE_PROBING, 0)),
+		"awaitedNavigation": (record.get("awaitedNavigation", {}) as Dictionary).duplicate(true) if record.get("awaitedNavigation", {}) is Dictionary else {},
 		"routeLease": record.get("routeLease", {}),
 		"route": record.get("route", {}),
 		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else [],
@@ -781,6 +794,7 @@ func record_summary(record: Dictionary) -> Dictionary:
 		"interactionClaim": (lease.get("interactionClaim", {}) as Dictionary).duplicate(true) if lease.get("interactionClaim", {}) is Dictionary else {},
 		"routeLease": lease.duplicate(true),
 		"route": _record_route_summary(route),
+		"awaitedNavigation": (record.get("awaitedNavigation", {}) as Dictionary).duplicate(true) if record.get("awaitedNavigation", {}) is Dictionary else {},
 		"probeRepairAvoidCells": (record.get("probeRepairAvoidCells", []) as Array).duplicate() if record.get("probeRepairAvoidCells", []) is Array else [],
 		"probeRepairFailedGoalCells": (record.get("probeRepairFailedGoalCells", []) as Array).duplicate() if record.get("probeRepairFailedGoalCells", []) is Array else [],
 		"proof": proof.duplicate(true),
@@ -932,7 +946,8 @@ func _state_for_probe_certificate(certificate: Dictionary) -> String:
 	var kind := String(details.get("kind", ""))
 	var block_type := String(details.get("blockType", ""))
 	var collider_class := String(details.get("class", ""))
-	if kind in ["npc", "actor", "character"] or block_type in ["npc", "actor"] or collider_class in ["CharacterBody3D", "KinematicBody3D"]:
+	var obstacle_class := String(details.get("obstacleClass", ""))
+	if obstacle_class == "dynamic_actor" or kind in ["npc", "actor", "character"] or block_type in ["npc", "actor"] or collider_class in ["CharacterBody3D", "KinematicBody3D"]:
 		return STATE_BLOCKED_DYNAMIC
 	return STATE_UNREACHABLE_STATIC
 
@@ -967,7 +982,9 @@ func _probe_certificate_is_dynamic_actor_block(certificate: Dictionary, options:
 	var kind := String(details.get("kind", ""))
 	var block_type := String(details.get("blockType", ""))
 	var collider_class := String(details.get("class", ""))
-	return kind in ["npc", "actor", "character", "player"] \
+	var obstacle_class := String(details.get("obstacleClass", ""))
+	return obstacle_class == "dynamic_actor" \
+		or kind in ["npc", "actor", "character", "player"] \
 		or block_type in ["npc", "actor", "player"] \
 		or collider_class in ["CharacterBody3D", "KinematicBody3D"]
 
@@ -1144,6 +1161,8 @@ func _transition_record(record: Dictionary, state: String, reason: String) -> vo
 	record["reason"] = reason
 	record["updatedFrame"] = frame_serial
 	record["lastServicedFrame"] = frame_serial
+	if state != STATE_PENDING_NAV_DATA:
+		record.erase("awaitedNavigation")
 	_append_event(record, _event(state, reason))
 
 func _increment_state_frame(record: Dictionary) -> void:

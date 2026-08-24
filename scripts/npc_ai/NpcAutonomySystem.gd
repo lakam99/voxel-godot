@@ -543,26 +543,36 @@ func home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
 	return perception_service.home_interior_status(entry, position)
 
 func release_action_owned_state(entry: Dictionary, reason := "released") -> void:
-	release_npc_traffic_reservations(entry, reason)
+	var protected_crossing := npc_protected_door_crossing(entry)
+	if protected_crossing.is_empty():
+		release_npc_traffic_reservations(entry, reason)
+	elif traffic_reservations != null and traffic_reservations.has_method("release_owner_except_group"):
+		traffic_reservations.release_owner_except_group(
+			String(entry.get("id", "")),
+			String(protected_crossing.get("groupId", "")),
+			reason
+		)
 	var body := entry.get("body") as Node
-	release_npc_door_hold(body if body != null else String(entry.get("id", "")), true)
+	if protected_crossing.is_empty():
+		release_npc_door_hold(body if body != null else String(entry.get("id", "")), true)
 	if smart_objects != null and smart_objects.has_method("release_owner"):
 		smart_objects.release_owner(String(entry.get("id", "")), reason)
 
 func cancel_active_route_request(entry: Dictionary, reason := "order_replaced") -> Dictionary:
-	if plan_executor != null and plan_executor.has_method("cancel_route_execution"):
-		plan_executor.cancel_route_execution(entry)
-	if route_authority_v2 == null:
-		return {"ok": true, "cancelled": false, "reason": "missing_route_authority"}
-	var active: Dictionary = route_authority_v2.runtime_for_entry(entry)
-	if not bool(active.get("hasRequest", false)):
-		return {"ok": true, "cancelled": false, "reason": "no_active_request"}
-	var request_id := String(active.get("requestId", ""))
-	if request_id == "":
-		return {"ok": true, "cancelled": false, "reason": "missing_request_id"}
-	var result: Dictionary = route_authority_v2.cancel_request(request_id, reason)
-	result["cancelled"] = bool(result.get("ok", false))
-	return result
+	return supersede_semantic_routes(entry, reason)
+
+
+func supersede_semantic_routes(entry: Dictionary, reason := "order_replaced", preserved_semantic := "") -> Dictionary:
+	if plan_executor == null or not plan_executor.has_method("supersede_semantic_routes"):
+		return {"ok": false, "cancelled": false, "reason": "missing_plan_executor"}
+	return plan_executor.supersede_semantic_routes(entry, reason, preserved_semantic)
+
+
+func prepare_scripted_route_order(entry: Dictionary, order_kind: String, reason := "scripted_order") -> Dictionary:
+	if plan_executor == null or not plan_executor.has_method("prepare_scripted_route_order"):
+		return {"ok": false, "prepared": false, "reason": "missing_plan_executor"}
+	return plan_executor.prepare_scripted_route_order(entry, order_kind, reason)
+
 
 func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 	if simulation_lod == null:
@@ -711,8 +721,10 @@ func notify_door_state_changed(door: Node, open: bool) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_STATE, object_id, bounds, [tile_key])
 	telemetry.record_event("_system", &"door", "state_changed", NpcEnumsScript.DOOR_STATE_OPEN if open else NpcEnumsScript.DOOR_STATE_CLOSED, { "open": open })
 
-func notify_door_registered(door: Node) -> void:
-	register_door(door)
+func notify_door_registered(door: Node) -> Dictionary:
+	var portal_id := register_door(door)
+	if portal_id == "":
+		return {"ok": false, "reason": "door_registration_failed"}
 	var tile_key := "0,0"
 	var object_id := "door"
 	var bounds := AABB()
@@ -728,6 +740,16 @@ func notify_door_registered(door: Node) -> void:
 			bounds = AABB(position - Vector3.ONE * 0.5, Vector3.ONE)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED, object_id, bounds, [tile_key])
 	telemetry.increment(&"change_door_registered")
+	return {"ok": true, "portalId": portal_id}
+
+func unregister_door_portal(portal_id: String) -> Dictionary:
+	if door_portals == null or not door_portals.has_method("unregister_portal"):
+		return {"ok": false, "reason": "missing_door_portal_authority"}
+	if not bool(door_portals.unregister_portal(portal_id)):
+		return {"ok": false, "reason": "missing_door_portal", "portalId": portal_id}
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_STRUCTURE_METADATA, "door:%s" % portal_id, AABB(), [])
+	telemetry.increment(&"change_door_unregistered")
+	return {"ok": true, "portalId": portal_id}
 
 func register_door(door: Node, metadata := {}) -> String:
 	if smart_objects == null:
@@ -826,9 +848,33 @@ func request_npc_door_traversal(door: Node, actor: Node, entry: Dictionary = {},
 		telemetry.increment(&"reservation_waits")
 	return result
 
-func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
+func release_npc_door_hold(actor_or_id, schedule_close := true, release_evidence: Dictionary = {}) -> void:
 	if door_traversal != null:
-		door_traversal.release_actor(actor_or_id, schedule_close)
+		door_traversal.release_actor(actor_or_id, schedule_close, release_evidence)
+
+func cancel_npc_door_crossing(actor_or_id) -> void:
+	if door_traversal != null and door_traversal.has_method("cancel_actor"):
+		door_traversal.cancel_actor(actor_or_id)
+
+func bind_npc_door_crossing_successor(entry: Dictionary, request_id: String, generation: int, lease_id: String) -> Dictionary:
+	if door_traversal == null or not door_traversal.has_method("bind_successor_route"):
+		return {"ok": false, "reason": "missing_door_traversal"}
+	return door_traversal.bind_successor_route(entry, request_id, generation, lease_id)
+
+func npc_door_crossing_transaction(entry: Dictionary) -> Dictionary:
+	if door_traversal == null or not door_traversal.has_method("active_crossing_for_entry"):
+		return {}
+	return door_traversal.active_crossing_for_entry(entry)
+
+func npc_protected_door_crossing(entry: Dictionary) -> Dictionary:
+	if door_traversal == null or not door_traversal.has_method("protected_crossing_for_entry"):
+		return {}
+	return door_traversal.protected_crossing_for_entry(entry)
+
+func npc_completed_door_crossing(entry: Dictionary) -> Dictionary:
+	if door_traversal == null or not door_traversal.has_method("completed_crossing_for_entry"):
+		return {}
+	return door_traversal.completed_crossing_for_entry(entry)
 
 func advance_traffic(delta: float, mark_external := true) -> void:
 	if traffic_reservations != null:
@@ -882,6 +928,98 @@ func request_npc_traffic_step(entry: Dictionary, previous: Vector3, candidate: V
 			telemetry.increment(&"reservation_denials")
 	telemetry.observe_traffic_stats(traffic_reservations.stats())
 	return result
+
+func request_npc_navigation_transition(entry: Dictionary, action: Dictionary, intent := {}) -> Dictionary:
+	if traffic_reservations == null:
+		return {"ok": false, "status": "failed", "reason": "missing_traffic_authority"}
+	if not navigation_transition_action_is_current(action):
+		return {"ok": false, "status": "failed", "reason": "navigation_transition_topology_changed"}
+	var owner_id := String(entry.get("id", ""))
+	var link_id := String(action.get("linkId", ""))
+	if owner_id.is_empty() or link_id.is_empty():
+		return {"ok": false, "status": "failed", "reason": "invalid_navigation_transition"}
+	var generation := int(entry.get("trafficOwnerGeneration", entry.get("routeGeneration", entry.get("cancellation_generation", 1))))
+	if generation <= 0:
+		generation = 1
+		entry["trafficOwnerGeneration"] = generation
+	var priority_class: String = traffic_priority_policy.priority_class_for(entry, intent) if traffic_priority_policy != null else "idle"
+	var group_id := "navigation-transition:%s:%s:%d" % [link_id, owner_id, generation]
+	var result: Dictionary = traffic_reservations.request_span(owner_id, link_id, {
+		"groupId": group_id,
+		"ownerGeneration": generation,
+		"actionGeneration": int(entry.get("trafficActionGeneration", entry.get("actionGeneration", 0))),
+		"priority": int(intent.get("priority", entry.get("routePriority", 0))),
+		"priorityClass": priority_class,
+		"duration": NpcConstantsScript.TRAFFIC_PORTAL_CROSSING_SECONDS,
+		"direction": String(action.get("direction", "unknown")),
+		"activeCrossing": true,
+		"metadata": {
+			"kind": "surface_transition",
+			"capacity": maxi(1, int(action.get("capacity", 1))),
+			"linkId": link_id,
+			"seamCorridorId": String(action.get("seamCorridorId", "")),
+			"linkRid": int(action.get("linkRid", 0)),
+			"snapshotRevision": String(action.get("snapshotRevision", "")),
+			"certifiedCorridorWidth": float(action.get("certifiedCorridorWidth", 0.0))
+		}
+	})
+	result["linkId"] = link_id
+	result["groupId"] = String(result.get("groupId", group_id))
+	telemetry.observe_traffic_stats(traffic_reservations.stats())
+	return result
+
+func navigation_transition_action_is_current(action: Dictionary) -> bool:
+	return navmesh_world != null \
+		and navmesh_world.has_method("navigation_link_action_is_current") \
+		and bool(navmesh_world.call("navigation_link_action_is_current", action))
+
+func revalidate_navigation_transition_action(action: Dictionary, existing_certificate: Dictionary) -> Dictionary:
+	var navigation_adapter = generated_navigation_adapter()
+	if navigation_adapter == null or not navigation_adapter.has_method("cached_static_tile_snapshot") or not navigation_adapter.has_method("validate_surface_transition_action"):
+		return {"ok": false, "reason": "navigation_transition_validation_authority_unavailable"}
+	if not navigation_adapter.has_method("surface_transition_certificate_matches_action") \
+		or not bool(navigation_adapter.call("surface_transition_certificate_matches_action", action, existing_certificate)):
+		return {"ok": false, "reason": "navigation_transition_certificate_action_mismatch"}
+	var snapshot: Dictionary = navigation_adapter.cached_static_tile_snapshot(true, true)
+	var current_revision := int(snapshot.get("staticSnapshotRevision", -1))
+	var current_door_revision := int(snapshot.get("doorStateRevision", -1))
+	if current_revision >= 0 \
+		and current_revision == int(existing_certificate.get("staticSnapshotRevision", -2)) \
+		and current_door_revision >= 0 \
+		and current_door_revision == int(existing_certificate.get("doorStateRevision", -2)):
+		return {"ok": true, "reason": "", "certificate": existing_certificate, "revalidated": false, "staticSnapshotRevision": current_revision, "doorStateRevision": current_door_revision}
+	var certificate: Dictionary = navigation_adapter.validate_surface_transition_action(snapshot, action)
+	return {
+		"ok": bool(certificate.get("ok", false)),
+		"reason": String(certificate.get("reason", "navigation_transition_corridor_changed")),
+		"certificate": certificate,
+		"revalidated": true,
+		"staticSnapshotRevision": current_revision,
+		"doorStateRevision": current_door_revision
+	}
+
+func navigation_transition_infrastructure_readiness() -> Dictionary:
+	var navigation_adapter = generated_navigation_adapter()
+	var validator_ready: bool = navigation_adapter != null \
+		and navigation_adapter.has_method("cached_static_tile_snapshot") \
+		and navigation_adapter.has_method("validate_surface_transition_action") \
+		and navigation_adapter.has_method("surface_transition_certificate_matches_action")
+	return {
+		"validatorReady": validator_ready,
+		"trafficReady": traffic_reservations != null,
+		"validatorRevision": String(navigation_adapter.call("revision")) if validator_ready and navigation_adapter.has_method("revision") else ""
+	}
+
+func release_npc_navigation_transition(entry: Dictionary, reason := "navigation_transition_cleared") -> int:
+	if traffic_reservations == null:
+		return 0
+	var active: Dictionary = entry.get("activeNavigationTransition", {}) if entry.get("activeNavigationTransition", {}) is Dictionary else {}
+	var pending: Dictionary = entry.get("pendingNavigationTransition", {}) if entry.get("pendingNavigationTransition", {}) is Dictionary else {}
+	var group_id := String(active.get("groupId", pending.get("groupId", "")))
+	var released: int = int(traffic_reservations.release_group(group_id, reason)) if not group_id.is_empty() else 0
+	entry.erase("activeNavigationTransition")
+	entry.erase("pendingNavigationTransition")
+	return released
 
 func movement_step_requires_traffic_reservation(entry: Dictionary, from_cell: Vector2i, to_cell: Vector2i, world, intent := {}) -> bool:
 	if bool(intent.get("requiresTrafficReservation", false)):
@@ -991,6 +1129,168 @@ func building_navigation_manifest_snapshot() -> Array[Dictionary]:
 	return manifests
 
 
+func prove_building_door_topology(building_manifest: Dictionary, residence_manifest: Dictionary) -> Dictionary:
+	var navigation_adapter = generated_navigation_adapter()
+	if navmesh_world == null or navigation_adapter == null:
+		return {"ready": false, "reason": "navigation_topology_authority_unavailable"}
+	if navmesh_world.has_method("sync_navigation_map_if_dirty"):
+		navmesh_world.sync_navigation_map_if_dirty()
+	var map_readiness: Dictionary = navmesh_world.navigation_map_readiness() if navmesh_world.has_method("navigation_map_readiness") else {}
+	if not bool(map_readiness.get("ready", false)) or int(map_readiness.get("iterationId", 0)) <= 0:
+		return {"ready": false, "retryable": true, "classification": "pending_nav_data", "reason": "navigation_map_iteration_pending", "mapReadiness": map_readiness}
+	var doors_by_part_id := {}
+	for door_value in building_manifest.get("doors", []) as Array:
+		if door_value is Dictionary:
+			doors_by_part_id[String((door_value as Dictionary).get("sourcePartId", ""))] = door_value
+	var installed_door_links: Dictionary = (navmesh_world.debug_snapshot() as Dictionary).get("doorLinks", {}) as Dictionary
+	var proofs: Array[Dictionary] = []
+	var all_ready := true
+	var any_retryable_pending := false
+	var any_static_failure := false
+	for citizen_value in residence_manifest.get("citizens", []) as Array:
+		if not (citizen_value is Dictionary):
+			continue
+		var citizen: Dictionary = citizen_value
+		var door_part_id := String(citizen.get("doorPartId", ""))
+		var source_door: Dictionary = doors_by_part_id.get(door_part_id, {}) as Dictionary
+		var portal_id := String(source_door.get("id", citizen.get("doorPortalId", "")))
+		var owner_tile_key := String(source_door.get("ownerTileKey", ""))
+		var descriptor_link := {}
+		if not owner_tile_key.is_empty() and navigation_adapter.has_method("build_navmesh_tile_snapshot"):
+			var tile_snapshot: Dictionary = navigation_adapter.build_navmesh_tile_snapshot(owner_tile_key)
+			for link_value in tile_snapshot.get("doorLinks", []) as Array:
+				if link_value is Dictionary and String((link_value as Dictionary).get("portalId", "")) == portal_id:
+					descriptor_link = link_value
+					break
+		var source_links: Array[Dictionary] = []
+		for link_value in installed_door_links.get(portal_id, []) as Array:
+			if link_value is Dictionary and bool((link_value as Dictionary).get("sourceDoor", false)):
+				source_links.append(link_value)
+		var installed_link: Dictionary = source_links[0] if source_links.size() == 1 else {}
+		var start: Vector3 = installed_link.get("startPosition", Vector3.INF) as Vector3
+		var end: Vector3 = installed_link.get("endPosition", Vector3.INF) as Vector3
+		var home: Vector3 = citizen.get("homePosition", Vector3.INF) as Vector3
+		var porch: Vector3 = citizen.get("porchPosition", Vector3.INF) as Vector3
+		var enabled_query: Dictionary = navmesh_world.call("_query_path_points", home, porch, {"queryApi": "query_path"}) as Dictionary if home.is_finite() and porch.is_finite() else {}
+		var enabled_path: Array[Vector3] = []
+		for point_value in enabled_query.get("path", []) as Array:
+			if point_value is Vector3:
+				enabled_path.append(point_value as Vector3)
+		var disabled_path: Array = navmesh_world.diagnostic_query_path_without_door_links(home, porch, [portal_id], {"queryApi": "query_path"}) if home.is_finite() and porch.is_finite() and navmesh_world.has_method("diagnostic_query_path_without_door_links") else []
+		var enabled_actions: Dictionary = navmesh_world.diagnostic_door_actions_for_path(enabled_path, {}) if navmesh_world.has_method("diagnostic_door_actions_for_path") else {}
+		var enabled_endpoint: Vector3 = enabled_path.back() as Vector3 if not enabled_path.is_empty() and enabled_path.back() is Vector3 else Vector3.INF
+		var disabled_endpoint: Vector3 = disabled_path.back() as Vector3 if not disabled_path.is_empty() and disabled_path.back() is Vector3 else Vector3.INF
+		var start_owner: Dictionary = navmesh_world.call("_closest_walkable_from_server", start, 0.48) as Dictionary if start.is_finite() else {}
+		var end_owner: Dictionary = navmesh_world.call("_closest_walkable_from_server", end, 0.48) as Dictionary if end.is_finite() else {}
+		var home_owner: Dictionary = navmesh_world.call("_closest_walkable_from_server", home, 0.48) as Dictionary if home.is_finite() else {}
+		var porch_owner: Dictionary = navmesh_world.call("_closest_walkable_from_server", porch, 0.48) as Dictionary if porch.is_finite() else {}
+		var residence_link_ids: Array[String] = []
+		var residence_part_prefix := "castle_%s__" % String(citizen.get("residenceId", ""))
+		for link_collection_key in ["verticalLinks", "interiorPassageLinks"]:
+			for link_value in building_manifest.get(link_collection_key, []) as Array:
+				if not (link_value is Dictionary):
+					continue
+				var link: Dictionary = link_value
+				if String(link.get("id", "")).contains(residence_part_prefix):
+					residence_link_ids.append(String(link.get("id", "")))
+		residence_link_ids.sort()
+		var home_to_door_query: Dictionary = navmesh_world.call("_query_path_points", home, start, {"queryApi": "query_path"}) as Dictionary if home.is_finite() and start.is_finite() else {}
+		var home_to_door_path: Array = home_to_door_query.get("path", []) as Array if home_to_door_query.get("path", []) is Array else []
+		var home_to_door_without_links: Array = navmesh_world.diagnostic_query_path_without_navigation_links(home, start, residence_link_ids, {"queryApi": "query_path"}) if home.is_finite() and start.is_finite() and not residence_link_ids.is_empty() and navmesh_world.has_method("diagnostic_query_path_without_navigation_links") else []
+		var support_match := String(descriptor_link.get("startSupportId", "")) == String(source_door.get("interiorSupportId", "")) and String(descriptor_link.get("endSupportId", "")) == String(source_door.get("exteriorSupportId", "")) and String(installed_link.get("startSupportId", "")) == String(source_door.get("interiorSupportId", "")) and String(installed_link.get("endSupportId", "")) == String(source_door.get("exteriorSupportId", ""))
+		var porch_server_position: Vector3 = porch_owner.get("position", Vector3.INF) as Vector3
+		var enabled_crosses := enabled_endpoint.is_finite() and porch_server_position.is_finite() and enabled_endpoint.distance_to(porch_server_position) <= NpcConstantsScript.CORRIDOR_ARRIVAL_STOP_RADIUS
+		var disabled_crosses := disabled_endpoint.is_finite() and porch_server_position.is_finite() and disabled_endpoint.distance_to(porch_server_position) <= NpcConstantsScript.CORRIDOR_ARRIVAL_STOP_RADIUS
+		var home_endpoint: Vector3 = home_to_door_path.back() as Vector3 if not home_to_door_path.is_empty() and home_to_door_path.back() is Vector3 else Vector3.INF
+		var home_without_links_endpoint: Vector3 = home_to_door_without_links.back() as Vector3 if not home_to_door_without_links.is_empty() and home_to_door_without_links.back() is Vector3 else Vector3.INF
+		var home_reaches_door := home_endpoint.is_finite() and home_endpoint.distance_to(start) <= 0.001
+		var home_requires_declared_links := not home_without_links_endpoint.is_finite() or home_without_links_endpoint.distance_to(start) > 0.001
+		var requires_declared_transition := home.is_finite() and start.is_finite() and absf(home.y - start.y) > NpcConstantsScript.DEFAULT_NPC_STEP_UP
+		var exact_portal_action := false
+		for action_value in enabled_actions.values():
+			if action_value is Dictionary and String((action_value as Dictionary).get("portalId", "")) == portal_id:
+				exact_portal_action = true
+				break
+		var installed_dirty_serial := int(installed_link.get("installedDirtySerial", -1))
+		var installed_iteration_id := int(installed_link.get("installedIterationId", -1))
+		var published_after_install := installed_dirty_serial >= 0 and int(map_readiness.get("syncedSerial", -1)) >= installed_dirty_serial and (not bool(map_readiness.get("hasIterationApi", false)) or int(map_readiness.get("iterationId", -1)) > installed_iteration_id)
+		var passed := bool(source_door.get("sourcePortalReady", false)) and not descriptor_link.is_empty() and source_links.size() == 1 and support_match and published_after_install and bool(home_owner.get("found", false)) and bool(start_owner.get("found", false)) and bool(end_owner.get("found", false)) and bool(porch_owner.get("found", false)) and home_reaches_door and (not requires_declared_transition or (not residence_link_ids.is_empty() and home_requires_declared_links)) and enabled_crosses and exact_portal_action and not disabled_crosses
+		var pending_reasons: Array[String] = []
+		var static_failure_reasons: Array[String] = []
+		if not published_after_install:
+			pending_reasons.append("navigation_map_iteration_after_link_install_pending")
+		if not bool(source_door.get("sourcePortalReady", false)):
+			static_failure_reasons.append("source_portal_not_ready")
+		if descriptor_link.is_empty():
+			static_failure_reasons.append("descriptor_link_missing")
+		if source_links.size() != 1:
+			static_failure_reasons.append("installed_source_link_cardinality_invalid")
+		if not support_match:
+			static_failure_reasons.append("support_provenance_mismatch")
+		if not bool(home_owner.get("found", false)) or not bool(start_owner.get("found", false)) or not bool(end_owner.get("found", false)) or not bool(porch_owner.get("found", false)):
+			static_failure_reasons.append("server_endpoint_owner_missing")
+		if not home_reaches_door:
+			static_failure_reasons.append("home_does_not_reach_door")
+		if requires_declared_transition and (residence_link_ids.is_empty() or not home_requires_declared_links):
+			static_failure_reasons.append("declared_home_transition_invalid")
+		if not enabled_crosses:
+			static_failure_reasons.append("enabled_door_does_not_cross")
+		if not exact_portal_action:
+			static_failure_reasons.append("exact_portal_action_missing")
+		if disabled_crosses:
+			static_failure_reasons.append("disabled_door_still_crosses")
+		any_retryable_pending = any_retryable_pending or (not pending_reasons.is_empty() and static_failure_reasons.is_empty())
+		any_static_failure = any_static_failure or not static_failure_reasons.is_empty()
+		proofs.append({
+			"actorId": String(citizen.get("id", "")),
+			"residenceId": String(citizen.get("residenceId", "")),
+			"portalId": portal_id,
+			"passed": passed,
+			"sourceDoor": source_door.duplicate(true),
+			"descriptorLink": descriptor_link.duplicate(true),
+			"installedLinks": source_links.duplicate(true),
+			"supportProvenanceMatch": support_match,
+			"sourcePortalReady": bool(source_door.get("sourcePortalReady", false)),
+			"publishedAfterInstall": published_after_install,
+			"homeSupportId": String(citizen.get("homeSupportId", "")),
+			"residenceNavigationLinkIds": residence_link_ids,
+			"homeServerOwner": home_owner,
+			"porchServerOwner": porch_owner,
+			"porchPosition": porch,
+			"porchServerPosition": porch_server_position,
+			"homeToDoorPath": home_to_door_path.duplicate(),
+			"homeToDoorWithoutResidenceLinks": home_to_door_without_links.duplicate(),
+			"homeReachesDoor": home_reaches_door,
+			"homeRequiresDeclaredLinks": home_requires_declared_links,
+			"requiresDeclaredTransition": requires_declared_transition,
+			"serverStartOwner": start_owner,
+			"serverEndOwner": end_owner,
+			"enabledPath": enabled_path.duplicate(),
+			"enabledEndpoint": enabled_endpoint,
+			"enabledEndpointDistance": enabled_endpoint.distance_to(porch_server_position) if enabled_endpoint.is_finite() and porch_server_position.is_finite() else INF,
+			"enabledCrosses": enabled_crosses,
+			"enabledDoorActions": enabled_actions.duplicate(true),
+			"exactPortalAction": exact_portal_action,
+			"disabledPath": disabled_path.duplicate(),
+			"disabledEndpoint": disabled_endpoint,
+			"disabledEndpointDistance": disabled_endpoint.distance_to(porch_server_position) if disabled_endpoint.is_finite() and porch_server_position.is_finite() else INF,
+			"disabledCrosses": disabled_crosses,
+			"pendingReasons": pending_reasons,
+			"staticFailureReasons": static_failure_reasons
+		})
+		all_ready = all_ready and passed
+	var ready := all_ready and not proofs.is_empty()
+	var retryable := not ready and not any_static_failure and any_retryable_pending
+	return {
+		"ready": ready,
+		"retryable": retryable,
+		"classification": "ready" if ready else "pending_nav_data" if retryable else "invalid_topology",
+		"reason": "" if ready else "building_door_topology_publication_pending" if retryable else "building_door_topology_invalid",
+		"mapReadiness": map_readiness,
+		"proofs": proofs
+	}
+
+
 func register_navigation_collision_manifest(manifest: Dictionary) -> Dictionary:
 	var manifest_id := String(manifest.get("manifestId", ""))
 	if manifest_id == "":
@@ -1076,9 +1376,9 @@ func process_navigation_changes(max_events := -1, max_object_ids := -1) -> Array
 	return events
 
 func pending_navigation_change_count() -> int:
-	if change_bus == null or not change_bus.has_method("pending_count"):
-		return 0
-	return int(change_bus.pending_count())
+	var change_count := int(change_bus.pending_count()) if change_bus != null and change_bus.has_method("pending_count") else 0
+	var replacement_count := int(npc_system.call("navigation_snapshot_replacement_pending_count")) if npc_system != null and npc_system.has_method("navigation_snapshot_replacement_pending_count") else 0
+	return change_count + replacement_count
 
 func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
 	if not _navmesh_backend_active():
@@ -1087,19 +1387,16 @@ func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
 		return []
 	return navmesh_world.process_dirty_regions(max_jobs)
 
+
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
 	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
-	if navmesh_world != null \
-		and navigation_backend_config != null \
-		and navigation_backend_config.use_navmesh() \
-		and _is_publishable_navmesh_tile_snapshot(snapshot):
-		navmesh_world.register_tile_snapshot(snapshot)
+	if navigation_backend_config != null and navigation_backend_config.use_navmesh():
+		var tile_key := String(snapshot.get("tileKey", "")).strip_edges()
+		if not tile_key.is_empty() and npc_system != null and npc_system.has_method("request_navigation_snapshot_replacement_priority"):
+			result["navmeshPublication"] = npc_system.call("request_navigation_snapshot_replacement_priority", [tile_key], "navigation_tile_request")
 	if navigation_world != null:
 		telemetry.observe_navigation_stats(navigation_world.stats())
 	return result
-
-func _is_publishable_navmesh_tile_snapshot(snapshot: Dictionary) -> bool:
-	return snapshot.has("regionId") and snapshot.get("surfaces", null) is Array
 
 func _publish_door_portal_to_navmesh(door: Node, extra := {}) -> void:
 	if not _navmesh_backend_active() or navmesh_world == null or door_portals == null:

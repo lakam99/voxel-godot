@@ -6,9 +6,10 @@ class_name LandmarkBuildingBlueprintBuilder
 ## publication remains owned by the existing construction-part pipeline.
 
 const BuildingBlueprintScript := preload("res://scripts/buildings/BuildingBlueprint.gd")
+const GabledRoofFrameBuilderScript := preload("res://scripts/buildings/GabledRoofFrameBuilder.gd")
 const LandmarkBuildingRecipeSamplerScript := preload("res://scripts/buildings/LandmarkBuildingRecipeSampler.gd")
-const MANOR_STAIR_TRANSITION_WALL_CLEARANCE := 0.82
-const MANOR_STAIR_TRANSITION_DEPTH := 1.12
+const MANOR_STAIR_TRANSITION_WALL_CLEARANCE := 1.42
+const MANOR_STAIR_TRANSITION_DEPTH := 1.40
 const MANOR_TOWER_PASSAGE_CROSSING := 1.80
 const MANOR_TOWER_PASSAGE_HEIGHT := 2.48
 const MANOR_TOWER_PASSAGE_WIDTH := 1.80
@@ -64,11 +65,15 @@ static func build_manor(recipe: Dictionary):
 	# hiding a second rectangular mass behind the manor.
 	var wing_center := Vector3(lower_center.x - lower_width * 0.5 - wing_width * 0.5 + wall_thickness * 1.25, 0.0, lower_center.z - lower_depth * 0.18)
 	var wing_height := floor_height * 0.96
-	var tower_span := clampf(snappedf(width * 0.23, 0.20), 4.00, 5.40)
-	# The stair tower counterbalances the wing on the far/rear corner.  This
-	# keeps the attached components visually distinct without inventing a
-	# separate visual authority for the PoC.
-	var tower_center := Vector3(width * 0.35, 0.0, depth * 0.20)
+	var tower_span := clampf(snappedf(width * 0.23, 0.20), 5.00, 5.80)
+	# Keep the attached tower rear-biased, but derive that bias from the occupied
+	# room envelopes. A depth percentage placed both back walls through the stair
+	# landings on some sampled proportions.
+	var tower_back_limit := minf(
+		lower_center.z + lower_depth * 0.5 - tower_span * 0.5 - wall_thickness,
+		solar_center.z + solar_depth * 0.5 - tower_span * 0.5 - wall_thickness
+	)
+	var tower_center := Vector3(width * 0.35, 0.0, tower_back_limit)
 	var tower_height := floor_height * float(floor_count) + 1.55
 	var wing_passage_z := wing_center.z
 	var wing_passage_width := minf(1.62, wing_depth * 0.34)
@@ -79,22 +84,41 @@ static func build_manor(recipe: Dictionary):
 	var tower_passage := {"side": "right", "coordinate": tower_entry_z, "width": MANOR_TOWER_PASSAGE_WIDTH}
 	var upper_passage := {"side": "right", "coordinate": tower_entry_z, "width": MANOR_TOWER_PASSAGE_WIDTH}
 	var tower_passage_x := tower_center.x - tower_span * 0.5
-	var lower_tower_hall_access := manor_tower_passage_access("manor_lower_tower", tower_passage_x, foundation_height + 0.20, tower_entry_z, float(tower_passage.get("width", 1.40)), "manor_main_lower_floor")
-	var lower_tower_stair_access := manor_tower_passage_access("manor_lower_tower", tower_passage_x, foundation_height + 0.20, tower_entry_z, float(tower_passage.get("width", 1.40)), "manor_stair_tower_floor")
-	var upper_tower_room_access := manor_tower_passage_access("manor_solar_tower", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, float(upper_passage.get("width", 1.40)), "manor_solar_upper_floor")
-	var upper_tower_stair_access := manor_tower_passage_access("manor_solar_tower", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, float(upper_passage.get("width", 1.40)), "manor_stair_exit_0")
+	var passage_width := float(tower_passage.get("width", MANOR_TOWER_PASSAGE_WIDTH))
+	var lower_floor_access := manor_tower_passage_access("manor_lower_floor_to_bridge", tower_passage_x, foundation_height + 0.20, tower_entry_z, passage_width, "manor_main_lower_floor", -1)
+	var lower_bridge_room_access := manor_tower_passage_access("manor_lower_floor_to_bridge", tower_passage_x, foundation_height + 0.20, tower_entry_z, passage_width, "manor_lower_tower_bridge", 1)
+	var lower_bridge_stair_access := manor_tower_passage_access("manor_lower_bridge_to_stair", tower_passage_x, foundation_height + 0.20, tower_entry_z, passage_width, "manor_lower_tower_bridge", -1)
+	var lower_stair_access := manor_tower_passage_access("manor_lower_bridge_to_stair", tower_passage_x, foundation_height + 0.20, tower_entry_z, passage_width, "manor_stair_tower_floor", 1)
+	var upper_floor_access := manor_tower_passage_access("manor_solar_floor_to_bridge", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, passage_width, "manor_solar_upper_floor", -1)
+	var upper_bridge_room_access := manor_tower_passage_access("manor_solar_floor_to_bridge", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, passage_width, "manor_solar_tower_bridge", 1)
+	var upper_bridge_stair_access := manor_tower_passage_access("manor_solar_bridge_to_stair", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, passage_width, "manor_solar_tower_bridge", -1)
+	var upper_stair_access := manor_tower_passage_access("manor_solar_bridge_to_stair", tower_passage_x, foundation_height + floor_height + 0.20, tower_entry_z, passage_width, "manor_stair_exit_0", 1)
+	var tower_room_accesses: Array = [lower_bridge_room_access, lower_stair_access, upper_bridge_room_access, upper_stair_access]
+	if floor_count > 2:
+		var attic_floor_y := foundation_height + floor_height * 2.0 + 0.20
+		tower_room_accesses.append(manor_tower_passage_access("manor_attic_floor_to_bridge", tower_passage_x, attic_floor_y, tower_entry_z, passage_width, "manor_attic_tower_bridge", 1))
+		tower_room_accesses.append(manor_tower_passage_access("manor_attic_bridge_to_stair", tower_passage_x, attic_floor_y, tower_entry_z, passage_width, "manor_stair_exit_1", 1))
 
 	var lower_bounds := AABB(Vector3(lower_center.x - lower_width * 0.5, foundation_height, lower_center.z - lower_depth * 0.5), Vector3(lower_width, floor_height, lower_depth))
 	var solar_bounds := AABB(Vector3(solar_center.x - solar_width * 0.5, foundation_height + floor_height, solar_center.z - solar_depth * 0.5), Vector3(solar_width, floor_height, solar_depth))
 	var wing_bounds := AABB(Vector3(wing_center.x - wing_width * 0.5, foundation_height, wing_center.z - wing_depth * 0.5), Vector3(wing_width, wing_height, wing_depth))
 	var tower_bounds := AABB(Vector3(tower_center.x - tower_span * 0.5, foundation_height, tower_center.z - tower_span * 0.5), Vector3(tower_span, tower_height, tower_span))
+	var entry_door_width := minf(1.78, lower_width * 0.22)
+	var entry_access := {
+		"id": "manor_main_entry",
+		"kind": "exterior_entry",
+		"position": Vector3(lower_center.x, foundation_height + 0.20, lower_center.z - lower_depth * 0.5 + 0.82),
+		"size": Vector3(entry_door_width + 0.72, MANOR_TOWER_PASSAGE_HEIGHT, 2.20),
+		"furnishingSize": Vector3(entry_door_width + 1.04, MANOR_TOWER_PASSAGE_HEIGHT, 2.64),
+		"crossingAxis": Vector3.FORWARD
+	}
 	blueprint.set_room_records([
-		{"id": "entry_hall", "role": "entry_hall", "bounds": AABB(lower_bounds.position, Vector3(lower_bounds.size.x * 0.52, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": []},
-		{"id": "dining", "role": "dining", "bounds": AABB(Vector3(lower_bounds.position.x + lower_bounds.size.x * 0.52, foundation_height, lower_bounds.position.z), Vector3(lower_bounds.size.x * 0.48, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [lower_tower_hall_access]},
+		{"id": "entry_hall", "role": "entry_hall", "bounds": AABB(lower_bounds.position, Vector3(lower_bounds.size.x * 0.52, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [entry_access]},
+		{"id": "dining", "role": "dining", "bounds": AABB(Vector3(lower_bounds.position.x + lower_bounds.size.x * 0.52, foundation_height, lower_bounds.position.z), Vector3(lower_bounds.size.x * 0.48, floor_height, lower_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [lower_floor_access, lower_bridge_stair_access]},
 		{"id": "kitchen", "role": "kitchen", "bounds": wing_bounds, "wallMountInset": wall_thickness * 0.5, "accesses": []},
 		{"id": "private_chamber", "role": "private_chamber", "bounds": AABB(solar_bounds.position, Vector3(solar_bounds.size.x * 0.52, floor_height, solar_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": []},
-		{"id": "bedroom", "role": "bedroom", "bounds": AABB(Vector3(solar_bounds.position.x + solar_bounds.size.x * 0.52, solar_bounds.position.y, solar_bounds.position.z), Vector3(solar_bounds.size.x * 0.48, floor_height, solar_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [upper_tower_room_access]},
-		{"id": "store", "role": "store", "bounds": tower_bounds, "wallMountInset": wall_thickness * 0.5, "accesses": [lower_tower_stair_access, upper_tower_stair_access]}
+		{"id": "bedroom", "role": "bedroom", "bounds": AABB(Vector3(solar_bounds.position.x + solar_bounds.size.x * 0.52, solar_bounds.position.y, solar_bounds.position.z), Vector3(solar_bounds.size.x * 0.48, floor_height, solar_bounds.size.z)), "wallMountInset": wall_thickness * 0.5, "accesses": [upper_floor_access, upper_bridge_stair_access]},
+		{"id": "store", "role": "store", "bounds": tower_bounds, "wallMountInset": wall_thickness * 0.5, "accesses": tower_room_accesses}
 	])
 
 	add_manor_foundation(blueprint, "manor_main_foundation", lower_center, lower_width, lower_depth, foundation_height, variation)
@@ -113,24 +137,51 @@ static func build_manor(recipe: Dictionary):
 	var roof_width := solar_width
 	var roof_depth := solar_depth
 	var roof_eave_y := foundation_height + floor_height * 2.0
+	var roof_shell_prefix := "manor_solar_upper"
 	if floor_count >= 3:
 		# The third-storey attic sits inside the broader solar footprint. Publish
 		# that full ceiling/floor plane first: otherwise the narrower attic floor
 		# leaves a visible, physically open gap around the upper-storey wall.
-		add_part(blueprint, "manor_solar_upper_ceiling", "floor", "timber_board", Vector3(solar_center.x, roof_eave_y - 0.10, solar_center.z), Vector3(solar_width - wall_thickness * 0.35, 0.20, solar_depth - wall_thickness * 0.35), {"variation": variation, "semantic": "manor_solar_ceiling"})
+		# Match the occupied upper-storey floor envelope.  The previous wider
+		# ceiling sent its joists past the real wall headers, leaving a gap in
+		# their load path despite appearing to cover the room from below.
+		var ceiling_size := Vector3(solar_width - wall_thickness, 0.20, solar_depth - wall_thickness)
+		var ceiling: BuildingPart = add_part(blueprint, "manor_solar_upper_ceiling", "floor", "timber_board", Vector3(solar_center.x, roof_eave_y - 0.10, solar_center.z), ceiling_size, {"variation": variation, "semantic": "manor_solar_ceiling", "physicalAssemblyRole": "floor_diaphragm"})
+		var ceiling_bearer_ids: Array[String] = []
+		for bearer_index in range(3):
+			var bearer_z := lerpf(solar_center.z - ceiling_size.z * 0.5 + 0.18, solar_center.z + ceiling_size.z * 0.5 - 0.18, float(bearer_index) * 0.5)
+			var bearer_id := "manor_solar_upper_ceiling_bearer_%d" % bearer_index
+			ceiling_bearer_ids.append(bearer_id)
+			add_part(blueprint, bearer_id, "beam", beam_material, Vector3(solar_center.x, roof_eave_y - 0.18, bearer_z), Vector3(ceiling_size.x, 0.28, 0.30), {"variation": variation - 0.02, "semantic": "manor_solar_ceiling_bearer", "physicalAssemblyRole": "floor_bearer", "physicalRequiredSeatPartIds": ["manor_solar_upper_left_header", "manor_solar_upper_right_header"], "physicalRequiredSeatFacts": [{"seatId": "manor_solar_upper_left_header", "bearerFace": "min_x", "seatFace": "max_x"}, {"seatId": "manor_solar_upper_right_header", "bearerFace": "max_x", "seatFace": "min_x"}]})
+		ceiling.recipe["physicalRequiredSupportPartIds"] = ceiling_bearer_ids
+		ceiling.recipe["physicalRequiredCoverageByZIndex"] = ceiling_bearer_ids
 		var attic_width := solar_width * 0.76
 		var attic_depth := solar_depth * 0.78
 		var attic_center := solar_center + Vector3(0.20, 0.0, 0.08)
+		blueprint.rooms.append({
+			"id": "attic",
+			"role": "store",
+			"bounds": AABB(
+				Vector3(attic_center.x - attic_width * 0.5, foundation_height + floor_height * 2.0, attic_center.z - attic_depth * 0.5),
+				Vector3(attic_width, floor_height * 0.82, attic_depth)
+			),
+			"wallMountInset": wall_thickness * 0.5,
+			"accesses": [
+				manor_tower_passage_access("manor_attic_floor_to_bridge", tower_passage_x, foundation_height + floor_height * 2.0 + 0.20, tower_entry_z, passage_width, "manor_attic_floor", -1),
+				manor_tower_passage_access("manor_attic_bridge_to_stair", tower_passage_x, foundation_height + floor_height * 2.0 + 0.20, tower_entry_z, passage_width, "manor_attic_tower_bridge", -1)
+			]
+		})
 		add_manor_storey_shell(blueprint, "manor_attic", wall_material, attic_center, attic_width, attic_depth, foundation_height + floor_height * 2.0, floor_height * 0.82, wall_thickness, variation, false, upper_passage)
 		add_manor_tower_bridge(blueprint, "manor_attic_tower_bridge", tower_center, tower_span, attic_center, attic_width, tower_entry_z, float(upper_passage.get("width", MANOR_TOWER_PASSAGE_WIDTH)), foundation_height + floor_height * 2.0, variation)
 		roof_center = attic_center
 		roof_width = attic_width
 		roof_depth = attic_depth
 		roof_eave_y = foundation_height + floor_height * 2.0 + floor_height * 0.82
-	add_manor_gabled_roof(blueprint, "manor_main_roof", wall_material, beam_material, roof_center, roof_width, roof_depth, roof_eave_y, roof_rise, roof_overhang, variation)
+		roof_shell_prefix = "manor_attic"
+	add_manor_gabled_roof(blueprint, "manor_main_roof", wall_material, beam_material, roof_center, roof_width, roof_depth, roof_eave_y, roof_rise, roof_overhang, variation, ["%s_left_header" % roof_shell_prefix, "%s_right_header" % roof_shell_prefix], [0.0, 0.0], true)
 
 	add_manor_storey_shell(blueprint, "manor_service_wing", wall_material, wing_center, wing_width, wing_depth, foundation_height, wing_height, wall_thickness, variation, false, main_passage)
-	add_manor_gabled_roof(blueprint, "manor_service_roof", wall_material, beam_material, wing_center, wing_width, wing_depth, foundation_height + wing_height, roof_rise * 0.72, roof_overhang * 0.82, variation)
+	add_manor_gabled_roof(blueprint, "manor_service_roof", wall_material, beam_material, wing_center, wing_width, wing_depth, foundation_height + wing_height, roof_rise * 0.72, roof_overhang * 0.82, variation, ["manor_service_wing_left_header", "manor_service_wing_right_header"], [0.0, 0.0], true)
 
 	# The stair tower has a real exterior wall.  Its left side is split into one
 	# doorway-height opening per occupied storey, rather than being removed as a
@@ -140,7 +191,7 @@ static func build_manor(recipe: Dictionary):
 	add_manor_tower_left_wall_with_storey_passages(blueprint, "manor_stair_tower_left", wall_material, tower_center, tower_span, foundation_height, tower_height, floor_height, floor_count, tower_entry_z, float(tower_passage.get("width", 1.40)), wall_thickness, variation)
 	add_manor_tower_stairs(blueprint, tower_center, tower_span, foundation_height, floor_height, floor_count, variation)
 	add_part(blueprint, "manor_tower_crown", "beam", beam_material, Vector3(tower_center.x, foundation_height + tower_height + 0.18, tower_center.z), Vector3(tower_span + 0.32, 0.36, tower_span + 0.32), {"variation": variation, "semantic": "manor_tower_crown"})
-	add_manor_gabled_roof(blueprint, "manor_tower_roof", wall_material, beam_material, tower_center, tower_span + 0.24, tower_span + 0.24, foundation_height + tower_height + 0.34, roof_rise * 0.82, roof_overhang * 0.58, variation)
+	add_manor_gabled_roof(blueprint, "manor_tower_roof", wall_material, beam_material, tower_center, tower_span + 0.24, tower_span + 0.24, foundation_height + tower_height + 0.34, roof_rise * 0.82, roof_overhang * 0.58, variation, ["manor_tower_crown", "manor_tower_crown"], [0.0, 0.0], false)
 
 	# A threshold sits at the published opening shared by the main hall and the
 	# wing. It records the connection as a real construction fact rather than a
@@ -156,7 +207,27 @@ static func add_manor_storey_shell(blueprint, prefix: String, wall_material: Str
 	var back_z := center.z + depth * 0.5
 	var window_height := minf(1.34, height * 0.42)
 	var window_y := bottom_y + height * 0.60
-	add_part(blueprint, "%s_floor" % prefix, "floor", "timber_board", Vector3(center.x, bottom_y + 0.10, center.z), Vector3(width - thickness * 0.35, 0.20, depth - thickness * 0.35), {"variation": variation, "semantic": "%s_floor" % prefix})
+	var side_window_depth := minf(1.64, depth * 0.26)
+	var left_passage: Dictionary = side_passages.get("left", side_passage if String(side_passage.get("side", "")) == "left" else {}) as Dictionary
+	var right_passage: Dictionary = side_passages.get("right", side_passage if String(side_passage.get("side", "")) == "right" else {}) as Dictionary
+	var floor_size := Vector3(width - thickness, 0.20, depth - thickness)
+	var floor: BuildingPart = add_part(blueprint, "%s_floor" % prefix, "floor", "timber_board", Vector3(center.x, bottom_y + 0.10, center.z), floor_size, {"variation": variation, "semantic": "%s_floor" % prefix, "navigationRole": "walkable_support", "physicalAssemblyRole": "floor_diaphragm"})
+	if not open_sides.has("left") and not open_sides.has("right"):
+		var front_left_seat := "%s_front_left_sill" % prefix if has_entry_door else "%s_front_sill" % prefix
+		var front_right_seat := "%s_front_right_sill" % prefix if has_entry_door else "%s_front_sill" % prefix
+		var left_receiver_id := "%s_left_floor_ledger" % prefix
+		var right_receiver_id := "%s_right_floor_ledger" % prefix
+		add_part(blueprint, left_receiver_id, "beam", "timber_beam", Vector3(center.x - width * 0.5 + thickness * 0.25, bottom_y + 0.04, center.z), Vector3(thickness * 0.50, 0.30, floor_size.z), {"variation": variation - 0.025, "semantic": "%s_left_floor_ledger" % prefix, "physicalAssemblyRole": "floor_ledger", "physicalRequiredSeatPartIds": [front_left_seat, "%s_back_sill" % prefix], "physicalRequiredSeatFacts": [{"seatId": front_left_seat, "bearerFace": "min_z", "seatFace": "max_z"}, {"seatId": "%s_back_sill" % prefix, "bearerFace": "max_z", "seatFace": "min_z"}]})
+		add_part(blueprint, right_receiver_id, "beam", "timber_beam", Vector3(center.x + width * 0.5 - thickness * 0.25, bottom_y + 0.04, center.z), Vector3(thickness * 0.50, 0.30, floor_size.z), {"variation": variation - 0.025, "semantic": "%s_right_floor_ledger" % prefix, "physicalAssemblyRole": "floor_ledger", "physicalRequiredSeatPartIds": [front_right_seat, "%s_back_sill" % prefix], "physicalRequiredSeatFacts": [{"seatId": front_right_seat, "bearerFace": "min_z", "seatFace": "max_z"}, {"seatId": "%s_back_sill" % prefix, "bearerFace": "max_z", "seatFace": "min_z"}]})
+		var bearer_ids: Array[String] = []
+		for bearer_index in range(3):
+			var z_fraction := float(bearer_index) * 0.5
+			var bearer_z := lerpf(center.z - floor_size.z * 0.5 + 0.16, center.z + floor_size.z * 0.5 - 0.16, z_fraction)
+			var bearer_id := "%s_floor_bearer_%d" % [prefix, bearer_index]
+			bearer_ids.append(bearer_id)
+			add_part(blueprint, bearer_id, "beam", "timber_beam", Vector3(center.x, bottom_y + 0.04, bearer_z), Vector3(floor_size.x, 0.30, 0.32), {"variation": variation - 0.02, "semantic": "%s_floor_bearer" % prefix, "physicalAssemblyRole": "floor_bearer", "physicalRequiredSeatPartIds": [left_receiver_id, right_receiver_id], "physicalRequiredSeatFacts": [{"seatId": left_receiver_id, "bearerFace": "min_x", "seatFace": "max_x"}, {"seatId": right_receiver_id, "bearerFace": "max_x", "seatFace": "min_x"}]})
+		floor.recipe["physicalRequiredSupportPartIds"] = bearer_ids
+		floor.recipe["physicalRequiredCoverageByZIndex"] = bearer_ids
 	if has_entry_door:
 		var door_width := minf(1.78, width * 0.22)
 		var segment_width := (width - door_width) * 0.5
@@ -165,13 +236,10 @@ static func add_manor_storey_shell(blueprint, prefix: String, wall_material: Str
 		var side_window_width := minf(1.48, segment_width - 0.28)
 		add_manor_wall_with_window(blueprint, "%s_front_left" % prefix, wall_material, Vector3(left_center_x, wall_y, front_z), Vector3(segment_width, height, thickness), Vector3(left_center_x, window_y, front_z), Vector3(side_window_width, window_height, thickness + 0.05), variation)
 		add_manor_wall_with_window(blueprint, "%s_front_right" % prefix, wall_material, Vector3(right_center_x, wall_y, front_z), Vector3(segment_width, height, thickness), Vector3(right_center_x, window_y, front_z), Vector3(side_window_width, window_height, thickness + 0.05), variation)
-		add_part(blueprint, "%s_entry_door" % prefix, "door", "painted_door", Vector3(center.x, bottom_y + minf(height * 0.50, 1.28), front_z - thickness * 0.70), Vector3(door_width, minf(height - 0.44, 2.56), 0.16), {"variation": variation, "semantic": "manor_entry_door"})
+		add_part(blueprint, "%s_entry_door" % prefix, "door", "painted_door", Vector3(center.x, bottom_y + minf(height * 0.50, 1.28), front_z - thickness * 0.70), Vector3(door_width, minf(height - 0.44, 2.56), 0.16), {"variation": variation, "semantic": "manor_entry_door", "doorEgress": {"approachPartIds": ["manor_portico_floor", "manor_portico_transition"], "clearanceLaneWidth": door_width + 1.04, "outwardEndpointPartId": "manor_portico_transition"}})
 	else:
 		add_manor_wall_with_window(blueprint, "%s_front" % prefix, wall_material, Vector3(center.x, wall_y, front_z), Vector3(width, height, thickness), Vector3(center.x + width * 0.20, window_y, front_z), Vector3(minf(1.56, width * 0.22), window_height, thickness + 0.05), variation)
 	add_manor_wall_with_window(blueprint, "%s_back" % prefix, wall_material, Vector3(center.x, wall_y, back_z), Vector3(width, height, thickness), Vector3(center.x - width * 0.20, window_y, back_z), Vector3(minf(1.56, width * 0.22), window_height, thickness + 0.05), variation)
-	var side_window_depth := minf(1.64, depth * 0.26)
-	var left_passage: Dictionary = side_passages.get("left", side_passage if String(side_passage.get("side", "")) == "left" else {}) as Dictionary
-	var right_passage: Dictionary = side_passages.get("right", side_passage if String(side_passage.get("side", "")) == "right" else {}) as Dictionary
 	if open_sides.has("left"):
 		pass
 	elif not left_passage.is_empty():
@@ -187,14 +255,14 @@ static func add_manor_storey_shell(blueprint, prefix: String, wall_material: Str
 
 
 static func add_manor_foundation(blueprint, part_id: String, center: Vector3, width: float, depth: float, height: float, variation: float) -> void:
-	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, height * 0.5, center.z), Vector3(width + 0.42, height, depth + 0.42), {"variation": variation, "semantic": "manor_foundation"})
+	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, height * 0.5, center.z), Vector3(width + 0.42, height, depth + 0.42), {"variation": variation, "semantic": "manor_foundation", "navigationRole": "structural_mass"})
 
 
 static func manor_stair_run(tower_span: float) -> float:
 	return maxf(2.20, tower_span - MANOR_STAIR_TRANSITION_WALL_CLEARANCE * 2.0)
 
 
-static func manor_tower_passage_access(access_id: String, passage_x: float, floor_y: float, passage_z: float, passage_width: float, support_part_id: String) -> Dictionary:
+static func manor_tower_passage_access(access_id: String, passage_x: float, floor_y: float, passage_z: float, passage_width: float, support_part_id: String, endpoint_side: int) -> Dictionary:
 	return {
 		"id": access_id,
 		"kind": "interior_passage",
@@ -202,15 +270,15 @@ static func manor_tower_passage_access(access_id: String, passage_x: float, floo
 		"size": Vector3(MANOR_TOWER_PASSAGE_CROSSING, MANOR_TOWER_PASSAGE_HEIGHT, passage_width),
 		"furnishingSize": Vector3(MANOR_TOWER_PASSAGE_CROSSING + 0.80, MANOR_TOWER_PASSAGE_HEIGHT, passage_width + 0.40),
 		"crossingAxis": Vector3.RIGHT,
+		"endpointSide": endpoint_side,
 		"supportPartId": support_part_id
 	}
 
 
 static func add_manor_tower_stairs(blueprint, tower_center: Vector3, tower_span: float, foundation_height: float, floor_height: float, floor_count: int, variation: float) -> void:
-	# A real stair flight is repeated horizontal treads and risers. Each flight
-	# also owns a hidden continuous stringer collision volume from the same
-	# recipe; the player can therefore climb the visible stairs smoothly rather
-	# than snagging on tiny individual collision steps.
+	# A real stair flight uses visible treads, an exposed carriage below each
+	# flight, and one broad masonry pier beneath each landing. The collision
+	# surface therefore comes from the same construction members the player sees.
 	var run := manor_stair_run(tower_span)
 	var half_rise := floor_height * 0.5
 	var angle := atan2(half_rise, run)
@@ -222,18 +290,79 @@ static func add_manor_tower_stairs(blueprint, tower_center: Vector3, tower_span:
 	var tread_rise := half_rise / float(tread_count)
 	for level in range(maxi(1, floor_count - 1)):
 		var base_y := foundation_height + floor_height * float(level)
-		add_part(blueprint, "manor_stair_up_stringer_%d" % level, "ramp", "timber_board", Vector3(left_x, base_y + half_rise * 0.5, tower_center.z), Vector3(ramp_width, 0.18, run), {"rotation": Vector3(-angle, 0.0, 0.0), "visual": false, "variation": variation, "semantic": "manor_stair_stringer"})
+		var base_pier_id := "manor_stair_base_pier_%d" % level
+		var landing_pier_id := "manor_stair_landing_pier_%d" % level
+		var exit_pier_id := "manor_stair_exit_pier_%d" % level
+		var base_underframe_id := "manor_stair_base_underframe_%d" % level
+		var landing_underframe_id := "manor_stair_landing_underframe_%d" % level
+		var exit_underframe_id := "manor_stair_exit_underframe_%d" % level
+		var shoe_thickness := 0.14
+		add_manor_stair_bearing_pier(blueprint, base_pier_id, Vector3(tower_center.x, 0.0, tower_center.z - run * 0.5), base_y - 0.27, tower_span - 0.70, MANOR_STAIR_TRANSITION_DEPTH, variation)
+		add_manor_stair_bearing_pier(blueprint, landing_pier_id, Vector3(tower_center.x, 0.0, tower_center.z + run * 0.5), base_y + half_rise - 0.27, tower_span - 0.70, MANOR_STAIR_TRANSITION_DEPTH, variation)
+		add_manor_stair_bearing_pier(blueprint, exit_pier_id, Vector3(tower_center.x, 0.0, tower_center.z - run * 0.5), base_y + floor_height - 0.17, tower_span - 0.70, MANOR_STAIR_TRANSITION_DEPTH, variation)
+		add_part(blueprint, base_underframe_id, "beam", "timber_beam", Vector3(tower_center.x, base_y - 0.18, tower_center.z - run * 0.5), Vector3(tower_span - 0.70, 0.18, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation - 0.022, "semantic": "manor_stair_base_bearing_cap", "physicalAssemblyRole": "landing_underframe", "physicalRequiredSeatPartIds": [base_pier_id], "physicalRequiredSeatFacts": [{"seatId": base_pier_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -0.09, 0.0), "localPatchHalfExtents": Vector2((tower_span - 0.70) * 0.35, 0.10), "seatFace": "max_y"}]})
 		for tread_index in range(tread_count):
 			var up_z := tower_center.z - run * 0.5 + tread_run * (float(tread_index) + 0.5)
 			var up_y := base_y + tread_rise * float(tread_index + 1) - 0.055
 			add_part(blueprint, "manor_stair_up_tread_%d_%d" % [level, tread_index], "stair_tread", "timber_board", Vector3(left_x, up_y, up_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "manor_stair_tread"})
-		add_part(blueprint, "manor_stair_landing_%d" % level, "floor", "timber_board", Vector3(tower_center.x, base_y + half_rise, tower_center.z + run * 0.5), Vector3(tower_span - 0.70, 0.20, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation, "semantic": "manor_stair_landing"})
-		add_part(blueprint, "manor_stair_return_stringer_%d" % level, "ramp", "timber_board", Vector3(right_x, base_y + half_rise * 1.50, tower_center.z), Vector3(ramp_width, 0.18, run), {"rotation": Vector3(angle, 0.0, 0.0), "visual": false, "variation": variation, "semantic": "manor_stair_stringer"})
+		var landing_center := Vector3(tower_center.x, base_y + half_rise, tower_center.z + run * 0.5)
+		add_part(blueprint, "manor_stair_landing_%d" % level, "floor", "timber_board", landing_center, Vector3(tower_span - 0.70, 0.20, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation, "semantic": "manor_stair_landing"})
+		add_part(blueprint, landing_underframe_id, "beam", "timber_beam", Vector3(landing_center.x, landing_center.y - 0.18, landing_center.z), Vector3(tower_span - 0.70, 0.18, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation - 0.022, "semantic": "manor_stair_landing_underframe", "physicalAssemblyRole": "landing_underframe", "physicalRequiredSeatPartIds": [landing_pier_id], "physicalRequiredSeatFacts": [{"seatId": landing_pier_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -0.09, 0.0), "localPatchHalfExtents": Vector2((tower_span - 0.70) * 0.35, 0.10), "seatFace": "max_y"}]})
 		for tread_index in range(tread_count):
 			var return_z := tower_center.z + run * 0.5 - tread_run * (float(tread_index) + 0.5)
 			var return_y := base_y + half_rise + tread_rise * float(tread_index + 1) - 0.055
 			add_part(blueprint, "manor_stair_return_tread_%d_%d" % [level, tread_index], "stair_tread", "timber_board", Vector3(right_x, return_y, return_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "manor_stair_tread"})
-		add_part(blueprint, "manor_stair_exit_%d" % level, "floor", "timber_board", Vector3(tower_center.x, base_y + floor_height, tower_center.z - run * 0.5), Vector3(tower_span - 0.70, 0.20, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation, "semantic": "manor_stair_exit"})
+		var exit_center := Vector3(tower_center.x, base_y + floor_height + 0.10, tower_center.z - run * 0.5)
+		add_part(blueprint, "manor_stair_exit_%d" % level, "floor", "timber_board", exit_center, Vector3(tower_span - 0.70, 0.20, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation, "semantic": "manor_stair_exit"})
+		add_part(blueprint, exit_underframe_id, "beam", "timber_beam", Vector3(exit_center.x, exit_center.y - 0.18, exit_center.z), Vector3(tower_span - 0.70, 0.18, MANOR_STAIR_TRANSITION_DEPTH), {"variation": variation - 0.022, "semantic": "manor_stair_exit_underframe", "physicalAssemblyRole": "landing_underframe", "physicalRequiredSeatPartIds": [exit_pier_id], "physicalRequiredSeatFacts": [{"seatId": exit_pier_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -0.09, 0.0), "localPatchHalfExtents": Vector2((tower_span - 0.70) * 0.35, 0.10), "seatFace": "max_y"}]})
+		var up_lower_shoe_id := "manor_stair_up_lower_shoe_%d" % level
+		var up_upper_shoe_id := "manor_stair_up_upper_shoe_%d" % level
+		var up_assembly_id := "manor_stair_up_%d" % level
+		var up_lower_shoe_center := Vector3(left_x, base_y - 0.09 + shoe_thickness * 0.5, tower_center.z - run * 0.5)
+		var up_upper_shoe_center := Vector3(left_x, landing_center.y - 0.09 + shoe_thickness * 0.5, tower_center.z + run * 0.5)
+		var up_geometry := manor_stair_housed_geometry(up_lower_shoe_center, up_upper_shoe_center, ramp_width, 0.18)
+		var up_start_support_id := "manor_stair_tower_floor" if level == 0 else "manor_stair_exit_%d" % (level - 1)
+		add_manor_stair_shoe(blueprint, up_lower_shoe_id, up_lower_shoe_center, ramp_width, shoe_thickness, base_underframe_id, up_assembly_id, variation)
+		add_manor_stair_shoe(blueprint, up_upper_shoe_id, up_upper_shoe_center, ramp_width, shoe_thickness, landing_underframe_id, up_assembly_id, variation)
+		add_part(blueprint, "manor_stair_up_carriage_%d" % level, "ramp", "timber_board", up_geometry.get("carriageCenter", Vector3.ZERO) as Vector3, Vector3(ramp_width, 0.18, float(up_geometry.get("length", run))), {"rotation": up_geometry.get("rotation", Vector3.ZERO) as Vector3, "variation": variation - 0.025, "semantic": "manor_visible_stair_carriage", "navigationStartSupportPartId": up_start_support_id, "navigationEndSupportPartId": "manor_stair_landing_%d" % level, "physicalIntent": "structural_mass", "physicalAssemblyRole": "stair_sloped_span", "physicalStairAssemblyId": up_assembly_id, "physicalRequiredAssemblyBearingBlockIds": [up_lower_shoe_id, up_upper_shoe_id], "physicalRequiredSeatPartIds": [up_lower_shoe_id, up_upper_shoe_id], "physicalRequiredSeatFacts": [manor_stair_housed_joint_fact(up_lower_shoe_id, -1.0, up_geometry), manor_stair_housed_joint_fact(up_upper_shoe_id, 1.0, up_geometry)]})
+		var return_lower_shoe_id := "manor_stair_return_lower_shoe_%d" % level
+		var return_upper_shoe_id := "manor_stair_return_upper_shoe_%d" % level
+		var return_assembly_id := "manor_stair_return_%d" % level
+		var return_lower_shoe_center := Vector3(right_x, landing_center.y - 0.09 + shoe_thickness * 0.5, tower_center.z + run * 0.5)
+		var return_upper_shoe_center := Vector3(right_x, exit_center.y - 0.09 + shoe_thickness * 0.5, tower_center.z - run * 0.5)
+		var return_geometry := manor_stair_housed_geometry(return_lower_shoe_center, return_upper_shoe_center, ramp_width, 0.18)
+		add_manor_stair_shoe(blueprint, return_lower_shoe_id, return_lower_shoe_center, ramp_width, shoe_thickness, landing_underframe_id, return_assembly_id, variation)
+		add_manor_stair_shoe(blueprint, return_upper_shoe_id, return_upper_shoe_center, ramp_width, shoe_thickness, exit_underframe_id, return_assembly_id, variation)
+		add_part(blueprint, "manor_stair_return_carriage_%d" % level, "ramp", "timber_board", return_geometry.get("carriageCenter", Vector3.ZERO) as Vector3, Vector3(ramp_width, 0.18, float(return_geometry.get("length", run))), {"rotation": return_geometry.get("rotation", Vector3.ZERO) as Vector3, "variation": variation - 0.025, "semantic": "manor_visible_stair_carriage", "navigationStartSupportPartId": "manor_stair_landing_%d" % level, "navigationEndSupportPartId": "manor_stair_exit_%d" % level, "physicalIntent": "structural_mass", "physicalAssemblyRole": "stair_sloped_span", "physicalStairAssemblyId": return_assembly_id, "physicalRequiredAssemblyBearingBlockIds": [return_lower_shoe_id, return_upper_shoe_id], "physicalRequiredSeatPartIds": [return_lower_shoe_id, return_upper_shoe_id], "physicalRequiredSeatFacts": [manor_stair_housed_joint_fact(return_lower_shoe_id, -1.0, return_geometry), manor_stair_housed_joint_fact(return_upper_shoe_id, 1.0, return_geometry)]})
+
+
+static func add_manor_stair_bearing_pier(blueprint, part_id: String, center: Vector3, top_y: float, width: float, depth: float, variation: float) -> void:
+	var height := maxf(0.20, top_y)
+	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, height * 0.5, center.z), Vector3(width, height, depth), {"variation": variation - 0.028, "semantic": "manor_stair_bearing_pier", "physicalAssemblyRole": "stair_bearing_pier"})
+
+
+static func add_manor_stair_shoe(blueprint, part_id: String, center: Vector3, width: float, thickness: float, underframe_id: String, assembly_id: String, variation: float) -> void:
+	add_part(blueprint, part_id, "beam", "timber_beam", center, Vector3(width + 0.08, thickness, 0.56), {"variation": variation - 0.018, "semantic": "manor_stair_carriage_shoe", "physicalAssemblyRole": "stair_carriage_bearing_block", "physicalStairAssemblyId": assembly_id, "physicalRequiredSeatPartIds": [underframe_id], "physicalRequiredSeatFacts": [{"seatId": underframe_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -thickness * 0.5, 0.0), "localPatchHalfExtents": Vector2(width * 0.35, 0.10), "seatFace": "max_y"}]})
+
+
+static func manor_stair_housed_geometry(lower_shoe_center: Vector3, upper_shoe_center: Vector3, width: float, thickness: float) -> Dictionary:
+	const HOUSED_EMBED_CENTER := 0.14
+	const HOUSED_VERTICAL_CENTER := 0.04
+	var tangent := (upper_shoe_center - lower_shoe_center).normalized()
+	var normal := Vector3(0.0, tangent.z, -tangent.y).normalized()
+	if normal.y < 0.0:
+		normal = -normal
+	var lateral := normal.cross(tangent).normalized()
+	var basis := Basis(lateral, normal, tangent)
+	var lower_endpoint := lower_shoe_center - tangent * HOUSED_EMBED_CENTER - normal * HOUSED_VERTICAL_CENTER
+	var upper_endpoint := upper_shoe_center + tangent * HOUSED_EMBED_CENTER - normal * HOUSED_VERTICAL_CENTER
+	return {"carriageCenter": (lower_endpoint + upper_endpoint) * 0.5 + normal * (thickness * 0.5), "length": lower_endpoint.distance_to(upper_endpoint), "rotation": basis.get_euler(), "width": width, "housedEmbedCenter": HOUSED_EMBED_CENTER, "housedOverlapHalfExtents": Vector3(width * 0.25, 0.021, 0.061)}
+
+
+static func manor_stair_housed_joint_fact(shoe_id: String, end_sign: float, geometry: Dictionary) -> Dictionary:
+	var length := float(geometry.get("length", 0.0))
+	var embed_center := float(geometry.get("housedEmbedCenter", 0.14))
+	return {"seatId": shoe_id, "contactMode": "housed_overlap", "localOverlapCenter": Vector3(0.0, -0.05, end_sign * (length * 0.5 - embed_center)), "localOverlapHalfExtents": geometry.get("housedOverlapHalfExtents", Vector3(0.16, 0.021, 0.061)), "minimumLongitudinalEmbedment": 0.12, "minimumVerticalOverlap": 0.04}
 
 
 static func add_manor_tower_bridge(blueprint, part_id: String, tower_center: Vector3, tower_span: float, source_center: Vector3, source_width: float, exit_z: float, passage_width: float, floor_y: float, variation: float) -> void:
@@ -242,9 +371,15 @@ static func add_manor_tower_bridge(blueprint, part_id: String, tower_center: Vec
 	# Components can overlap slightly at upper floors, while the lower hall has
 	# a deliberate reveal.  A minimum bridge width keeps both cases continuous
 	# without a special collision-only patch.
-	var bridge_width := maxf(MANOR_TOWER_PASSAGE_CROSSING, tower_left - source_right + 0.44)
+	var bridge_width := maxf(MANOR_TOWER_PASSAGE_CROSSING, absf(tower_left - source_right) + 0.44)
 	var bridge_center_x := (tower_left + source_right) * 0.5
-	add_part(blueprint, part_id, "floor", "timber_board", Vector3(bridge_center_x, floor_y + 0.10, exit_z), Vector3(bridge_width, 0.20, passage_width), {"variation": variation, "semantic": "manor_tower_bridge"})
+	# The connector is an exposed framed bridge, not a floating collision slab.
+	# Its broad soffit is visible from the lower volume and carries the entire
+	# published deck without changing the clear walkable width above it.
+	var underframe_id := "%s_underframe" % part_id
+	add_part(blueprint, underframe_id, "beam", "timber_beam", Vector3(bridge_center_x, floor_y - 0.10, exit_z), Vector3(bridge_width, 0.20, passage_width), {"variation": variation - 0.024, "semantic": "manor_tower_bridge_underframe", "physicalIntent": "structural_mass", "allowEnclosingStructuralSupport": true})
+	var bridge: BuildingPart = add_part(blueprint, part_id, "floor", "timber_board", Vector3(bridge_center_x, floor_y + 0.10, exit_z), Vector3(bridge_width, 0.20, passage_width), {"variation": variation, "semantic": "manor_tower_bridge", "physicalAssemblyRole": "floor_diaphragm"})
+	bridge.recipe["physicalRequiredSupportPartIds"] = [underframe_id]
 
 
 static func add_manor_wall_with_passage(blueprint, prefix: String, material: String, center: Vector3, size: Vector3, passage_z: float, passage_width: float, bottom_y: float, variation: float) -> void:
@@ -295,15 +430,25 @@ static func add_manor_tower_left_wall_with_storey_passages(blueprint, prefix: St
 		add_wall(blueprint, "%s_crown" % prefix, material, Vector3(wall_x, current_y + (wall_top - current_y) * 0.5, tower_center.z), Vector3(thickness, wall_top - current_y, tower_span), variation)
 
 
-static func add_manor_gabled_roof(blueprint, prefix: String, wall_material: String, beam_material: String, center: Vector3, width: float, depth: float, eave_y: float, rise: float, overhang: float, variation: float) -> void:
-	var angle := atan2(rise, width * 0.5 + overhang)
-	var slope_length := sqrt(pow(width * 0.5 + overhang, 2.0) + pow(rise, 2.0))
-	var roof_y := eave_y + rise * 0.5
-	add_gable_end_cap(blueprint, "%s_front_gable" % prefix, wall_material, center.x, center.z - depth * 0.5, width, 0.30, eave_y, rise, variation)
-	add_gable_end_cap(blueprint, "%s_back_gable" % prefix, wall_material, center.x, center.z + depth * 0.5, width, 0.30, eave_y, rise, variation)
-	add_part(blueprint, "%s_left" % prefix, "roof", "roof_shingle", Vector3(center.x - width * 0.25, roof_y, center.z), Vector3(slope_length, 0.22, depth + overhang * 2.0), {"rotation": Vector3(0.0, 0.0, angle), "variation": variation, "semantic": "manor_roof"})
-	add_part(blueprint, "%s_right" % prefix, "roof", "roof_shingle", Vector3(center.x + width * 0.25, roof_y, center.z), Vector3(slope_length, 0.22, depth + overhang * 2.0), {"rotation": Vector3(0.0, 0.0, -angle), "variation": variation, "semantic": "manor_roof"})
-	add_part(blueprint, "%s_ridge" % prefix, "beam", beam_material, Vector3(center.x, eave_y + rise, center.z), Vector3(0.32, 0.26, depth + overhang * 2.0 + 0.08), {"variation": variation, "semantic": "manor_roof_ridge"})
+static func add_manor_gabled_roof(blueprint, prefix: String, wall_material: String, beam_material: String, center: Vector3, width: float, depth: float, eave_y: float, rise: float, overhang: float, variation: float, eave_bearing_part_ids: Array, eave_bearing_patch_offsets: Array, align_eave_plates_to_bearers: bool) -> void:
+	GabledRoofFrameBuilderScript.add_gabled_roof_frame(blueprint, {
+		"prefix": prefix,
+		"center": center,
+		"width": width,
+		"depth": depth,
+		"eaveY": eave_y,
+		"rise": rise,
+		"overhang": overhang,
+		"variation": variation,
+		"wallMaterial": wall_material,
+		"beamMaterial": beam_material,
+		"roofSemantic": "manor_roof",
+		"gableSemantic": "manor_roof_gable",
+		"eaveBearingPartIds": eave_bearing_part_ids,
+		"eaveBearingPatchOffsets": eave_bearing_patch_offsets,
+		"alignEavePlatesToBearers": align_eave_plates_to_bearers,
+		"gableIdStyle": "manor"
+	})
 
 
 static func add_manor_solar_corbels(blueprint, lower_center: Vector3, lower_width: float, lower_depth: float, solar_center: Vector3, solar_width: float, solar_depth: float, support_y: float, beam_material: String, variation: float) -> void:
@@ -315,18 +460,41 @@ static func add_manor_solar_corbels(blueprint, lower_center: Vector3, lower_widt
 	for x in [solar_bounds.position.x + 0.26, solar_bounds.end.x - 0.26]:
 		for z in [solar_bounds.position.z + 0.26, solar_bounds.end.z - 0.26]:
 			if x < lower_bounds.position.x - 0.08 or x > lower_bounds.end.x + 0.08 or z < lower_bounds.position.z - 0.08 or z > lower_bounds.end.z + 0.08:
-				add_part(blueprint, "manor_solar_corbel_%d" % blueprint.parts.size(), "beam", beam_material, Vector3(float(x), support_y - 0.22, float(z)), Vector3(0.32, 0.44, 0.32), {"variation": variation, "semantic": "manor_solar_corbel"})
+				var side_sign := -1.0 if x < solar_center.x else 1.0
+				var depth_sign := -1.0 if z < solar_center.z else 1.0
+				var ledger_id := "manor_solar_upper_left_floor_ledger" if side_sign < 0.0 else "manor_solar_upper_right_floor_ledger"
+				# This is exposed joinery below the overhang, not a hidden collision
+				# pillar.  It slightly enters the upper floor so its visible socket is
+				# attached to a collision-backed perimeter ledger rather than to the
+				# walkable floor surface itself.
+				add_part(blueprint, "manor_solar_corbel_%d" % blueprint.parts.size(), "beam", beam_material, Vector3(float(x), support_y - 0.22, float(z)), Vector3(0.32, 0.48, 0.32), {"collision": false, "variation": variation, "semantic": "manor_solar_corbel", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": [ledger_id], "physicalRequiredAnchorFacts": [{"anchorId": ledger_id, "contactMode": "attachment_socket", "localMountCenter": Vector3(side_sign * 0.14, 0.235, depth_sign * -0.155), "localMountHalfExtents": Vector3(0.012, 0.012, 0.012)}]})
 
 
 static func add_manor_portico(blueprint, lower_center: Vector3, lower_width: float, lower_depth: float, foundation_height: float, floor_height: float, beam_material: String, variation: float) -> void:
 	var front_z := lower_center.z - lower_depth * 0.5
 	var portico_z := front_z - 1.08
 	var height := minf(3.20, floor_height * 0.84)
-	add_part(blueprint, "manor_portico_floor", "floor", "timber_board", Vector3(lower_center.x, foundation_height + 0.10, front_z - 0.72), Vector3(minf(4.80, lower_width * 0.48), 0.20, 1.58), {"variation": variation, "semantic": "manor_portico"})
-	for post_x in [lower_center.x - minf(1.86, lower_width * 0.20), lower_center.x + minf(1.86, lower_width * 0.20)]:
-		add_part(blueprint, "manor_portico_post_%d" % blueprint.parts.size(), "beam", beam_material, Vector3(float(post_x), foundation_height + height * 0.5, portico_z), Vector3(0.36, height, 0.36), {"variation": variation, "semantic": "manor_portico"})
-	add_part(blueprint, "manor_portico_lintel", "beam", beam_material, Vector3(lower_center.x, foundation_height + height, portico_z), Vector3(minf(4.60, lower_width * 0.52), 0.30, 0.42), {"variation": variation, "semantic": "manor_portico"})
-	add_part(blueprint, "manor_portico_roof", "roof", "roof_shingle", Vector3(lower_center.x, foundation_height + height + 0.28, front_z - 0.74), Vector3(minf(5.00, lower_width * 0.56), 0.18, 2.02), {"rotation": Vector3(deg_to_rad(-8.0), 0.0, 0.0), "variation": variation, "semantic": "manor_portico_roof"})
+	add_part(blueprint, "manor_portico_floor", "floor", "timber_board", Vector3(lower_center.x, foundation_height + 0.10, front_z - 0.72), Vector3(minf(4.80, lower_width * 0.48), 0.20, 1.58), {"variation": variation, "semantic": "manor_portico", "navigationRole": "walkable_support", "doorEgressFor": "manor_main_lower_entry_door"})
+	var transition_size := Vector3(minf(4.46, lower_width * 0.44), 0.14, 1.36)
+	var transition_rotation := Vector3(-atan2(foundation_height + 0.18, transition_size.z), 0.0, 0.0)
+	var transition_basis := Basis.from_euler(transition_rotation)
+	var transition_upper_end := transition_basis * Vector3(0.0, transition_size.y * 0.5, transition_size.z * 0.5)
+	var portico_outer_edge_z := front_z - 1.51
+	var transition_position := Vector3(lower_center.x, foundation_height + 0.20 - transition_upper_end.y, portico_outer_edge_z - transition_upper_end.z)
+	add_part(blueprint, "manor_portico_transition", "ramp", "timber_board", transition_position, transition_size, {"rotation": transition_rotation, "variation": variation, "semantic": "entry_ramp", "navigationRole": "transition", "doorEgressFor": "manor_main_lower_entry_door"})
+	var post_ids: Array[String] = []
+	for side in [-1, 1]:
+		var post_id := "manor_portico_post_%d" % side
+		post_ids.append(post_id)
+		var post_x := lower_center.x + float(side) * minf(1.86, lower_width * 0.20)
+		add_part(blueprint, post_id, "beam", beam_material, Vector3(post_x, foundation_height + height * 0.5, portico_z), Vector3(0.36, height, 0.36), {"variation": variation, "semantic": "manor_portico"})
+	var lintel_width := minf(4.60, lower_width * 0.52)
+	var post_offset := minf(1.86, lower_width * 0.20)
+	var lintel_seat_facts: Array[Dictionary] = []
+	for side in [-1, 1]:
+		lintel_seat_facts.append({"seatId": "manor_portico_post_%d" % side, "loadDirection": "world_down", "localPatchCenter": Vector3(float(side) * post_offset, -0.15, 0.0), "localPatchHalfExtents": Vector2(0.12, 0.12), "seatFace": "max_y"})
+	add_part(blueprint, "manor_portico_lintel", "beam", beam_material, Vector3(lower_center.x, foundation_height + height + 0.15, portico_z), Vector3(lintel_width, 0.30, 0.42), {"variation": variation, "semantic": "manor_portico", "physicalRequiredSeatPartIds": post_ids, "physicalRequiredSeatFacts": lintel_seat_facts})
+	add_part(blueprint, "manor_portico_roof", "roof", "roof_shingle", Vector3(lower_center.x, foundation_height + height + 0.28, front_z - 0.74), Vector3(minf(5.00, lower_width * 0.56), 0.18, 2.02), {"rotation": Vector3(deg_to_rad(-8.0), 0.0, 0.0), "variation": variation, "semantic": "manor_portico_roof", "physicalRequiredSupportPartIds": ["manor_portico_lintel"]})
 
 
 static func build_town_hall(recipe: Dictionary):
@@ -351,7 +519,7 @@ static func build_town_hall(recipe: Dictionary):
 	blueprint.set_recipe(recipe)
 
 	var divider_z := snappedf(depth * 0.10, 0.20)
-	var passage_width := 1.36
+	var passage_width := 1.82
 	var public_depth := divider_z - front_z
 	var rear_depth := back_z - divider_z
 	var rear_rooms := town_hall_rear_room_specs(width, String(recipe.get("townHallLayout", "standard")))
@@ -366,14 +534,16 @@ static func build_town_hall(recipe: Dictionary):
 	for rear_room in rear_rooms:
 		var passage_id := String(rear_room.get("passageId", ""))
 		var passage_x := float(rear_room.get("passageX", 0.0))
-		var passage := {"id": passage_id, "kind": "interior_passage", "position": Vector3(passage_x, 0.70, divider_z), "size": Vector3(passage_width, 2.30, 1.18), "furnishingSize": Vector3(passage_width + 1.72, 2.30, 2.80)}
-		public_accesses.append(passage)
+		var public_passage := {"id": passage_id, "kind": "interior_passage", "position": Vector3(passage_x, 0.70, divider_z), "size": Vector3(passage_width, 2.30, 1.62), "furnishingSize": Vector3(passage_width + 1.72, 2.30, 2.80), "crossingAxis": Vector3.BACK, "endpointSide": -1, "supportPartId": "civic_floor"}
+		var rear_passage := public_passage.duplicate(true)
+		rear_passage["endpointSide"] = 1
+		public_accesses.append(public_passage)
 		room_records.append({
 			"id": String(rear_room.get("id", "rear_room")),
 			"role": String(rear_room.get("role", "civic_store")),
 			"bounds": AABB(Vector3(float(rear_room.get("minimumX", 0.0)), 0.0, divider_z), Vector3(float(rear_room.get("maximumX", 0.0)) - float(rear_room.get("minimumX", 0.0)), wall_height, rear_depth)),
 			"wallMountInset": wall_thickness * 0.5,
-			"accesses": [passage]
+			"accesses": [rear_passage]
 		})
 	blueprint.set_room_records(room_records)
 
@@ -434,17 +604,24 @@ static func build_town_hall(recipe: Dictionary):
 	add_window(blueprint, "right_window", Vector3(width * 0.5, window_y, depth * 0.20), side_window_size, variation)
 	add_window(blueprint, "back_window", Vector3(-width * 0.23, window_y, back_z), Vector3(2.10, 1.30, wall_thickness + 0.06), variation)
 
-	var roof_angle := atan2(roof_rise, width * 0.5 + roof_overhang)
-	var slope_length := sqrt(pow(width * 0.5 + roof_overhang, 2.0) + pow(roof_rise, 2.0))
-	var roof_y := foundation_height + wall_height + roof_rise * 0.5
-	# The roof is a volume, not two visible planes. Gable end caps close the
-	# physical triangular space from the wall eaves to the ridge so the interior
-	# cannot see sky through a roof/wall seam.
-	add_gable_end_cap(blueprint, "front_gable", wall_material, 0.0, front_z, width, wall_thickness, foundation_height + wall_height, roof_rise, variation)
-	add_gable_end_cap(blueprint, "back_gable", wall_material, 0.0, back_z, width, wall_thickness, foundation_height + wall_height, roof_rise, variation)
-	add_part(blueprint, "roof_left", "roof", "roof_shingle", Vector3(-width * 0.25, roof_y, 0.0), Vector3(slope_length, 0.24, depth + roof_overhang * 2.0), {"rotation": Vector3(0.0, 0.0, roof_angle), "variation": variation, "semantic": "roof"})
-	add_part(blueprint, "roof_right", "roof", "roof_shingle", Vector3(width * 0.25, roof_y, 0.0), Vector3(slope_length, 0.24, depth + roof_overhang * 2.0), {"rotation": Vector3(0.0, 0.0, -roof_angle), "variation": variation, "semantic": "roof"})
-	add_part(blueprint, "roof_ridge", "beam", beam_material, Vector3(0.0, foundation_height + wall_height + roof_rise, 0.0), Vector3(0.38, 0.30, depth + roof_overhang * 2.0 + 0.08), {"variation": variation, "semantic": "roof_ridge"})
+	GabledRoofFrameBuilderScript.add_gabled_roof_frame(blueprint, {
+		"prefix": "roof",
+		"center": Vector3.ZERO,
+		"width": width,
+		"depth": depth,
+		"eaveY": foundation_height + wall_height,
+		"rise": roof_rise,
+		"overhang": roof_overhang,
+		"variation": variation,
+		"wallMaterial": wall_material,
+		"beamMaterial": beam_material,
+		"roofSemantic": "civic_roof",
+		"gableSemantic": "civic_roof_gable",
+		"eaveBearingPartIds": ["left_header", "right_header"],
+		"eaveBearingPatchOffsets": [0.0, 0.0],
+		"alignEavePlatesToBearers": true,
+		"gableIdStyle": "manor"
+	})
 	# The square-facing facade is a structural hierarchy: public door, covered
 	# threshold, then a raised civic register/clock. It is generated from the
 	# same footprint and material choices, rather than being a per-scene decal.
@@ -614,8 +791,8 @@ static func add_window(blueprint, part_id: String, center: Vector3, size: Vector
 	add_part(blueprint, part_id, "window", "window_glass", center, size, {"variation": variation, "collision": true, "semantic": "window"})
 
 
-static func add_part(blueprint, part_id: String, kind: String, material: String, position: Vector3, size: Vector3, options: Dictionary = {}) -> void:
-	blueprint.add_part({
+static func add_part(blueprint, part_id: String, kind: String, material: String, position: Vector3, size: Vector3, options: Dictionary = {}) -> BuildingPart:
+	return blueprint.add_part({
 		"id": part_id,
 		"kind": kind,
 		"material": material,

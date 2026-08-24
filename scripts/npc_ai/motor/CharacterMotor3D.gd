@@ -49,15 +49,7 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 		monitor.end_section("npc_motor_move_and_slide", slide_start)
 	state.slide_collision_count = body.get_slide_collision_count()
 	if state.slide_collision_count > 0:
-		var collision := body.get_slide_collision(0)
-		var collider = collision.get_collider() if collision != null else null
-		if collider is Node:
-			var collider_node := collider as Node
-			state.blocked_contact_name = collider_node.name
-			state.blocked_contact_kind = String(collider_node.get_meta("kind", ""))
-			state.blocked_contact_type = collider_node.get_class()
-		elif collider != null:
-			state.blocked_contact_type = str(collider)
+		_attribute_slide_collisions(body, requested, state)
 	if state.jumped:
 		move_vertical_toward(body, pre_slide_position.y + float(profile.get("jump_speed")) * delta)
 		body.velocity.y = maxf(body.velocity.y, float(profile.get("jump_speed")))
@@ -86,6 +78,60 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 		state.blocked_contact_category = "dynamic_actor" if _is_dynamic_actor_contact(body, state) else "static_collision"
 	return state
 
+func _attribute_slide_collisions(body: CharacterBody3D, requested: Vector3, state) -> void:
+	var selected := {}
+	var selected_horizontal := false
+	var contacts: Array[Dictionary] = []
+	for collision_index in range(body.get_slide_collision_count()):
+		var collision := body.get_slide_collision(collision_index)
+		if collision == null:
+			continue
+		var contact := _collision_contact_summary(collision)
+		contacts.append(contact)
+		var normal: Vector3 = collision.get_normal()
+		var horizontal_blocker := Vector2(normal.x, normal.z).length_squared() > 0.09 and Vector2(requested.x, requested.z).dot(Vector2(normal.x, normal.z)) < -0.0001
+		if selected.is_empty() or (horizontal_blocker and not selected_horizontal):
+			selected = contact
+			selected_horizontal = horizontal_blocker
+	state.blocked_contacts = contacts
+	state.blocked_contact_name = String(selected.get("name", ""))
+	state.blocked_contact_kind = String(selected.get("kind", ""))
+	state.blocked_contact_type = String(selected.get("type", ""))
+	state.blocked_contact_shape_name = String(selected.get("shapeName", ""))
+	state.blocked_contact_part_id = String(selected.get("partId", ""))
+	state.blocked_contact_part_kind = String(selected.get("partKind", ""))
+	state.blocked_contact_semantic = String(selected.get("semantic", ""))
+
+func _collision_contact_summary(collision: KinematicCollision3D) -> Dictionary:
+	var result := {"normal": collision.get_normal()}
+	var collider = collision.get_collider()
+	if not (collider is Node):
+		result["type"] = str(collider) if collider != null else ""
+		return result
+	var collider_node := collider as Node
+	result["name"] = collider_node.name
+	result["kind"] = String(collider_node.get_meta("kind", ""))
+	result["type"] = collider_node.get_class()
+	result["partId"] = String(collider_node.get_meta("building_part_id", ""))
+	result["partKind"] = String(collider_node.get_meta("building_part_kind", ""))
+	result["semantic"] = String(collider_node.get_meta("building_semantic", ""))
+	if not (collider_node is CollisionObject3D):
+		return result
+	var collision_object := collider as CollisionObject3D
+	var shape_index := collision.get_collider_shape_index()
+	var owner_id := collision_object.shape_find_owner(shape_index)
+	if owner_id < 0:
+		return result
+	var owner = collision_object.shape_owner_get_owner(owner_id)
+	if not (owner is Node):
+		return result
+	var shape_owner := owner as Node
+	result["shapeName"] = shape_owner.name
+	result["partId"] = String(shape_owner.get_meta("building_part_id", result.get("partId", "")))
+	result["partKind"] = String(shape_owner.get_meta("building_part_kind", result.get("partKind", "")))
+	result["semantic"] = String(shape_owner.get_meta("building_semantic", result.get("semantic", "")))
+	return result
+
 func _is_dynamic_actor_contact(body: CharacterBody3D, state) -> bool:
 	if body == null or int(state.slide_collision_count) <= 0:
 		return false
@@ -101,6 +147,9 @@ func _is_dynamic_actor_contact(body: CharacterBody3D, state) -> bool:
 func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terrain_provider: Node, was_grounded: bool, jumped: bool, previous_position: Vector3, state) -> void:
 	if terrain_provider == null or (not terrain_provider.has_method("ground_y_near_position") and not terrain_provider.has_method("surface_y_at_position")):
 		state.terrain_grounded = body.is_on_floor()
+		return
+	if body.is_on_floor() and not jumped:
+		state.terrain_grounded = true
 		return
 
 	var ground_y: float = ground_y_for_body(terrain_provider, body.global_position)

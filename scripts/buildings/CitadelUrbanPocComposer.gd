@@ -3,6 +3,9 @@ class_name CitadelUrbanPocComposer
 
 const MARKET_LANE_X := 22.0
 const MARKET_TERRACE_RISE := 1.8
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
+const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
+const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
 
 
 static func compose(blueprint, seed: int):
@@ -12,6 +15,8 @@ static func compose(blueprint, seed: int):
 	for part in blueprint.parts:
 		var part_id := String(part.id) if part != null else ""
 		if part_id.begins_with("castle_courtyard_") and part_id not in ["castle_courtyard_foundation", "castle_courtyard_paving"]:
+			continue
+		if part_id.begins_with("castle_residence_") or part_id.begins_with("castle_route_frontage_") or part_id.begins_with("castle_sightline_screen_") or part_id.begins_with("castle_gate_market_") or part_id.begins_with("castle_route_neck_"):
 			continue
 		if part != null and String(part.kind) == "foundation" and (part_id.begins_with("castle_terrace_block_") or part_id.begins_with("castle_district_processional_")):
 			part.recipe["topSurfaceMaterial"] = "worn_cobble"
@@ -29,10 +34,10 @@ static func compose(blueprint, seed: int):
 	var front_z := -courtyard_depth * 0.5
 	var urban_layout := sample_urban_layout(seed, grammar, front_z, keep_front_z, foundation_height)
 	recipe["urbanPoc"] = urban_layout
+	recipe["pavingTreatments"] = paving_treatments(urban_layout, front_z, keep_front_z)
 	blueprint.set_recipe(recipe)
 	var variation := float(seed % 19) / 100.0 - 0.09
 	add_street_sequence(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout)
-	add_route_surface_history(blueprint, grammar, keep_front_z, foundation_height, variation)
 	add_civic_landmark(blueprint, Vector3(-14.0, 0.0, keep_front_z - 4.0), foundation_height + 2.0, variation)
 	add_terraced_edge(blueprint, Vector3(17.5, 0.0, keep_front_z - 9.0), foundation_height, variation)
 	add_civic_quarter(blueprint, keep_front_z, foundation_height, variation)
@@ -41,8 +46,157 @@ static func compose(blueprint, seed: int):
 	add_civic_service_yard(blueprint, Vector3(37.0, foundation_height, keep_front_z - 8.5), variation)
 	add_dressing_clusters(blueprint, front_z, keep_front_z, foundation_height, variation)
 	add_bunting_lines(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout)
-	add_tree_contact_pockets(blueprint, city_tree_placements(blueprint), variation)
+	var selected_tree_sites := select_open_paving_tree_sites(blueprint, seed)
+	if not selected_tree_sites.is_empty():
+		urban_layout["treePlacements"] = build_tree_placement_records(selected_tree_sites, seed)
+		recipe["urbanPoc"] = urban_layout
+		recipe["landscapeTrees"] = urban_layout["treePlacements"]
+		blueprint.set_recipe(recipe)
 	return blueprint
+
+
+static func build_tree_placement_records(sites: Array, seed: int) -> Array:
+	var catalog = BiomeEnvironmentCatalogScript.new()
+	if not catalog.setup():
+		return sites.duplicate(true)
+	var profile = catalog.profile_for_biome("town")
+	if profile == null:
+		return sites.duplicate(true)
+	var request_builder = TreeRuntimeRequestBuilderScript.new()
+	var tree_service = TreeSpawnServiceScript.new()
+	var records: Array = []
+	for index in range(sites.size()):
+		var position: Vector3 = sites[index] as Vector3
+		var tree_id := "citadel-urban-tree-%d:%d,%d:%02d" % [seed, roundi(position.x), roundi(position.z), index]
+		var rotation_y := float(index) * 1.17
+		var request: Dictionary = request_builder.build(profile, "town", tree_id, 6.2 + float(index % 3) * 0.9, Vector2i(roundi(position.x), roundi(position.z)), str(seed))
+		request["treeId"] = tree_id
+		request["worldSeed"] = str(seed)
+		request["biome"] = "town"
+		request["presentation"] = "runtime"
+		request["worldPosition"] = position
+		request["worldRotationY"] = rotation_y
+		var tree_recipe: Dictionary = tree_service.build_recipe(request)
+		var interaction_facts: Dictionary = tree_recipe.get("interactionFacts", {}) as Dictionary
+		records.append({
+			"id": tree_id,
+			"position": position,
+			"rotationY": rotation_y,
+			"canopyRadius": float(tree_recipe.get("canopyRadius", 3.4)),
+			"rootButtressFootprints": interaction_facts.get("rootButtresses", []) as Array,
+			"treeRequest": request
+		})
+	return records
+
+
+static func add_seeded_room_life(blueprint, seed: int, variation: float) -> void:
+	for room_value in blueprint.rooms:
+		if not room_value is Dictionary:
+			continue
+		var room: Dictionary = room_value as Dictionary
+		var room_id := String(room.get("id", "")).strip_edges()
+		var role := String(room.get("role", "")).strip_edges()
+		var bounds: AABB = room.get("bounds", AABB()) as AABB
+		if room_id.is_empty() or bounds.size.x < 1.8 or bounds.size.z < 1.8 or bounds.size.y < 1.5 or role == "interior_passage":
+			continue
+		var phase := stable_unit(seed, "interior:%s" % room_id)
+		var floor_y := bounds.position.y + 0.04
+		var inset_x := minf(0.72, bounds.size.x * 0.20)
+		var inset_z := minf(0.72, bounds.size.z * 0.20)
+		var furnishing_x := lerpf(bounds.position.x + inset_x, bounds.end.x - inset_x, phase)
+		var furnishing_z := lerpf(bounds.position.z + inset_z, bounds.end.z - inset_z, fposmod(phase * 2.71, 1.0))
+		var opposite_x := lerpf(bounds.end.x - inset_x, bounds.position.x + inset_x, phase)
+		var opposite_z := lerpf(bounds.end.z - inset_z, bounds.position.z + inset_z, fposmod(phase * 3.83, 1.0))
+		var prefix := "interior_%s" % room_id
+		add_part(blueprint, "%s_barrel" % prefix, "barrel", "timber_board", Vector3(furnishing_x, floor_y + 0.44, furnishing_z), Vector3(0.70, 0.88, 0.70), {"collision": false, "variation": variation + phase * 0.025, "semantic": "interior_storage", "roomId": room_id, "roomRole": role})
+		add_part(blueprint, "%s_crate" % prefix, "crate", "timber_board", Vector3(opposite_x, floor_y + 0.32, opposite_z), Vector3(0.74, 0.64, 0.68), {"collision": false, "variation": variation - phase * 0.018, "semantic": "interior_storage", "roomId": room_id, "roomRole": role})
+		add_part(blueprint, "%s_sack" % prefix, "sack", "linen", Vector3(furnishing_x + (opposite_x - furnishing_x) * 0.24, floor_y + 0.28, furnishing_z + (opposite_z - furnishing_z) * 0.24), Vector3(0.58, 0.56, 0.52), {"collision": false, "variation": variation + 0.012, "semantic": "interior_supplies", "roomId": room_id, "roomRole": role})
+		add_part(blueprint, "%s_pottery" % prefix, "pottery", "ceramic_glaze", Vector3(opposite_x + (furnishing_x - opposite_x) * 0.18, floor_y + 0.24, opposite_z + (furnishing_z - opposite_z) * 0.18), Vector3(0.32, 0.44, 0.32), {"collision": false, "variation": variation - 0.014, "semantic": "interior_tableware", "roomId": room_id, "roomRole": role})
+		var light_position := bounds.get_center() + Vector3((phase - 0.5) * minf(0.72, bounds.size.x * 0.16), minf(2.20, bounds.size.y * 0.58), (fposmod(phase * 5.19, 1.0) - 0.5) * minf(0.72, bounds.size.z * 0.16))
+		add_part(blueprint, "%s_lamp" % prefix, "decor", "candle_flame", light_position, Vector3(0.15, 0.25, 0.15), {"collision": false, "variation": variation, "semantic": "interior_practical_light", "roomId": room_id, "roomRole": role, "practicalLight": true, "lightEnergy": 1.38 + phase * 0.48, "lightRange": 4.4 + phase * 1.4})
+
+
+static func select_open_paving_tree_sites(blueprint, seed: int) -> Array[Vector3]:
+	var candidates: Array[Dictionary] = []
+	for paving_part in blueprint.parts:
+		if not is_primary_tree_paving(paving_part):
+			continue
+		var half: Vector3 = paving_part.size * 0.5
+		for factor_x in [-0.78, -0.52, -0.26, 0.0, 0.26, 0.52, 0.78]:
+			for factor_z in [-0.78, -0.52, -0.26, 0.0, 0.26, 0.52, 0.78]:
+				var position: Vector3 = paving_part.position + Vector3(factor_x * maxf(0.40, half.x - 1.10), half.y + 0.05, factor_z * maxf(0.40, half.z - 1.10))
+				if not tree_site_is_open(blueprint, position) or not tree_site_has_clear_paving_run(blueprint, position):
+					continue
+				var key := "%d:%s:%d,%d" % [seed, String(paving_part.id), int(round(factor_x * 100.0)), int(round(factor_z * 100.0))]
+				candidates.append({"position": position, "score": stable_unit(seed, "tree-open-paving:%s" % key), "id": key})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if is_equal_approx(float(a.get("score", 0.0)), float(b.get("score", 0.0))):
+			return String(a.get("id", "")) < String(b.get("id", ""))
+		return float(a.get("score", 0.0)) > float(b.get("score", 0.0))
+	)
+	var result: Array[Vector3] = []
+	for candidate in candidates:
+		var position: Vector3 = (candidate as Dictionary).get("position", Vector3.ZERO) as Vector3
+		var separated := true
+		for existing in result:
+			if Vector2(position.x - existing.x, position.z - existing.z).length() < 8.0:
+				separated = false
+				break
+		if separated:
+			result.append(position)
+		if result.size() >= 4:
+			break
+	return result
+
+
+static func is_primary_tree_paving(part) -> bool:
+	if part == null or String(part.kind) != "foundation" or String(part.material_id) not in ["cobblestone", "worn_cobble"]:
+		return false
+	return String(part.semantic) in ["castle_courtyard_paving", "citadel_market_plaza", "citadel_perimeter_alley"]
+
+
+static func tree_site_is_open(blueprint, position: Vector3) -> bool:
+	var site_bounds := AABB(position - Vector3(1.90, 0.05, 1.90), Vector3(3.80, 8.0, 3.80))
+	for part in blueprint.parts:
+		if part == null or String(part.material_id) in ["cobblestone", "worn_cobble"] or not bool(part.recipe.get("visual", true)):
+			continue
+		if part.size.y < 0.20:
+			continue
+		if AABB(part.position - part.size * 0.5, part.size).intersects(site_bounds):
+			return false
+	return true
+
+
+static func tree_site_has_clear_paving_run(blueprint, position: Vector3) -> bool:
+	for direction in [Vector3(-1.0, 0.0, 0.0), Vector3(1.0, 0.0, 0.0), Vector3(0.0, 0.0, -1.0), Vector3(0.0, 0.0, 1.0)]:
+		var shaded := primary_paving_surface_at(blueprint, position + direction * 2.1)
+		var open := primary_paving_surface_at(blueprint, position + direction * 6.2)
+		if shaded == Vector3.INF or open == Vector3.INF:
+			continue
+		if tree_paving_sample_is_open(blueprint, shaded) and tree_paving_sample_is_open(blueprint, open):
+			return true
+	return false
+
+
+static func primary_paving_surface_at(blueprint, point: Vector3) -> Vector3:
+	for part in blueprint.parts:
+		if not is_primary_tree_paving(part):
+			continue
+		var half: Vector3 = part.size * 0.5
+		if point.x < part.position.x - half.x or point.x > part.position.x + half.x or point.z < part.position.z - half.z or point.z > part.position.z + half.z:
+			continue
+		return Vector3(point.x, part.position.y + half.y + 0.04, point.z)
+	return Vector3.INF
+
+
+static func tree_paving_sample_is_open(blueprint, point: Vector3) -> bool:
+	var sample_bounds := AABB(point - Vector3(0.72, 0.02, 0.72), Vector3(1.44, 2.40, 1.44))
+	for part in blueprint.parts:
+		if part == null or String(part.kind) in ["foundation", "floor", "ground_patch", "ramp", "stair_tread"] or not bool(part.recipe.get("visual", true)):
+			continue
+		if AABB(part.position - part.size * 0.5, part.size).intersects(sample_bounds):
+			return false
+	return true
 
 
 static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_front_z: float, base_y: float, variation: float) -> void:
@@ -63,7 +217,7 @@ static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_fro
 			var material := materials[(row_index + (2 if side > 0.0 else 0)) % materials.size()]
 			add_street_house(blueprint, "urban_perimeter_%s_%02d" % ["east" if side > 0.0 else "west", row_index], Vector3(side * side_x, 0.0, center_z), width, depth, height, -side, base_y, material, variation + side * 0.018 + float(row_index) * 0.011)
 			var alley_x: float = side * (side_x - width * 0.5 - 1.15)
-			add_part(blueprint, "urban_perimeter_alley_%d_%02d" % [int(side), row_index], "ground_patch", "worn_cobble", Vector3(alley_x, base_y + 0.154, center_z), Vector3(2.1, 0.02, depth * 0.82), {"collision": false, "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley"})
+			add_part(blueprint, "urban_perimeter_alley_%d_%02d" % [int(side), row_index], "foundation", "worn_cobble", Vector3(alley_x, base_y + 0.16, center_z), Vector3(2.1, 0.10, depth * 0.82), {"collision": false, "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley", "pavingFamily": "lane_cobbles", "pavingRegion": "citadel_perimeter_alley_%d_%02d" % [int(side), row_index], "pavingHeading": "z"})
 
 
 static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, keep_front_z: float, foundation_height: float) -> Dictionary:
@@ -94,14 +248,16 @@ static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, 
 		var base_offset: Vector3 = stall.get("base", Vector3.ZERO) as Vector3
 		var offset := base_offset + Vector3(lerpf(-0.58, 0.58, stable_unit(seed, "stall-x-%d" % stall_index)), 0.0, lerpf(-0.42, 0.42, stable_unit(seed, "stall-z-%d" % stall_index)))
 		market_stalls.append({"offset": offset, "side": stall.get("side", 1.0), "depth": stall.get("depth", 1.0), "variation": lerpf(-0.035, 0.035, stable_unit(seed, "stall-material-%d" % stall_index))})
+	var usable_depth := maxf(42.0, keep_front_z - front_z - 5.0)
+	var market_z := front_z + usable_depth * 0.655
+	var market_tree_y := foundation_height + market_terrace_rise + 0.345
 	var courtyard_width := float(grammar.get("courtyardWidth", 104.0))
 	var perimeter_x := maxf(33.0, courtyard_width * 0.5 - 8.0)
-	var tree_placements: Array[Vector3] = [
-		Vector3(lerpf(-10.0, -5.0, stable_unit(seed, "tree-inner-x")), foundation_height + 2.0, keep_front_z - lerpf(8.0, 12.5, stable_unit(seed, "tree-inner-z"))),
-		Vector3(perimeter_x, foundation_height + 0.145, keep_front_z - lerpf(5.5, 9.5, stable_unit(seed, "tree-east-z"))),
+	var tree_placements: Array = market_edge_tree_sites(seed, market_lane_x, market_z, market_tree_y, market_stalls)
+	tree_placements.append_array([
 		Vector3(-perimeter_x + lerpf(-1.2, 1.2, stable_unit(seed, "tree-west-x")), foundation_height + 0.145, keep_front_z + lerpf(12.0, 18.5, stable_unit(seed, "tree-west-z"))),
 		Vector3(perimeter_x - lerpf(0.5, 3.5, stable_unit(seed, "tree-rear-x")), foundation_height + 0.145, keep_front_z + lerpf(21.0, 29.0, stable_unit(seed, "tree-rear-z")))
-	]
+	])
 	return {
 		"schemaVersion": 2,
 		"layoutSeed": seed,
@@ -121,12 +277,34 @@ static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, 
 	}
 
 
+static func market_edge_tree_sites(seed: int, lane_x: float, market_z: float, surface_y: float, market_stalls: Array) -> Array[Vector3]:
+	var candidates: Array[Dictionary] = []
+	for side in [-1.0, 1.0]:
+		for depth_index in [-1.0, 1.0]:
+			var position := Vector3(lane_x + side * lerpf(6.85, 7.65, stable_unit(seed, "tree-edge-x-%d-%d" % [int(side), int(depth_index)])), surface_y, market_z + depth_index * lerpf(7.40, 10.20, stable_unit(seed, "tree-edge-z-%d-%d" % [int(side), int(depth_index)])))
+			var clear := true
+			for stall_value in market_stalls:
+				var offset: Vector3 = (stall_value as Dictionary).get("offset", Vector3.ZERO) as Vector3
+				if Vector2(position.x - lane_x - offset.x, position.z - market_z - offset.z).length() < 4.10:
+					clear = false
+					break
+			if clear:
+				candidates.append({"position": position, "score": stable_unit(seed, "tree-edge-score-%d-%d" % [int(side), int(depth_index)])})
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a.get("score", 0.0)) > float(b.get("score", 0.0)))
+	var result: Array[Vector3] = []
+	for candidate in candidates.slice(0, mini(2, candidates.size())):
+		result.append((candidate as Dictionary).get("position", Vector3.ZERO) as Vector3)
+	return result
+
+
 static func city_tree_placements(blueprint) -> Array[Vector3]:
 	var urban_layout: Dictionary = blueprint.recipe.get("urbanPoc", {}) as Dictionary
 	var sampled_placements: Array[Vector3] = []
 	for placement_value in urban_layout.get("treePlacements", []):
 		if placement_value is Vector3:
 			sampled_placements.append(placement_value as Vector3)
+		elif placement_value is Dictionary:
+			sampled_placements.append((placement_value as Dictionary).get("position", Vector3.ZERO) as Vector3)
 	if not sampled_placements.is_empty():
 		return sampled_placements
 	var grammar: Dictionary = blueprint.recipe.get("castleGrammar", {}) as Dictionary
@@ -142,24 +320,6 @@ static func city_tree_placements(blueprint) -> Array[Vector3]:
 		Vector3(-44.0, foundation_height + 0.145, keep_front_z + 15.5),
 		Vector3(45.0, foundation_height + 0.145, keep_front_z + 25.0)
 	]
-
-
-static func add_tree_contact_pockets(blueprint, placements: Array[Vector3], variation: float) -> void:
-	for index in range(placements.size()):
-		var center := placements[index]
-		add_part(blueprint, "urban_tree_soil_%02d" % index, "ground_patch", "ground_soil", center + Vector3(0.0, 0.018, 0.0), Vector3(0.54, 0.02, 0.46), {"collision": false, "variation": variation + float(index) * 0.017, "semantic": "citadel_tree_contact"})
-		for root_index in range(10):
-			var root_angle := float(root_index) * TAU / 10.0 + float(index) * 0.47
-			var root_length := 0.75 + float(root_index % 4) * 0.31
-			var root_center := center + Vector3(cos(root_angle) * root_length * 0.44, 0.022, sin(root_angle) * root_length * 0.44)
-			add_part(blueprint, "urban_tree_root_trace_%02d_%02d" % [index, root_index], "ground_patch", "ground_soil" if root_index % 3 == 0 else "wall_growth", root_center, Vector3(root_length, 0.02, 0.16 + float(root_index % 3) * 0.05), {"rotation": Vector3(0.0, -root_angle, 0.0), "collision": false, "variation": variation - 0.05 + float(root_index) * 0.007, "semantic": "citadel_tree_root_transition"})
-		for pocket_index in range(18):
-			var angle := float(pocket_index) * 2.399963 + float(index) * 0.63
-			var radius := 0.72 + float(pocket_index % 6) * 0.31
-			var pocket_center := center + Vector3(cos(angle) * radius, 0.026 + float(pocket_index % 2) * 0.004, sin(angle) * radius)
-			var pocket_size := 0.20 + float((index + pocket_index) % 5) * 0.075
-			var pocket_material := "leaf_litter" if pocket_index % 4 != 0 else "wall_growth"
-			add_part(blueprint, "urban_tree_joint_pocket_%02d_%02d" % [index, pocket_index], "ground_patch", pocket_material, pocket_center, Vector3(pocket_size * 1.45, 0.02, pocket_size), {"collision": false, "variation": variation - 0.04 + float(pocket_index) * 0.009, "semantic": "citadel_tree_contact"})
 
 
 static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> void:
@@ -189,13 +349,10 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 			var center_x := lane_x + float(side) * (lane_width * 0.5 + width * 0.5)
 			var material := palette[(row_index * 2 + (1 if side > 0 else 0)) % palette.size()]
 			add_street_house(blueprint, "urban_row_%02d_%s" % [row_index, "right" if side > 0 else "left"], Vector3(center_x, 0.0, row_z), width, row_depth, wall_height, float(-side), elevations[row_index], material, variation + float(row_index) * 0.012)
-		add_lane_edge_age(blueprint, "urban_lane_%02d" % row_index, lane_x, row_z, lane_width, row_depth, elevations[row_index] + (0.334 if row_index == 2 else 0.154), variation + float(row_index) * 0.011)
 	var plaza_z := centers[2]
 	var market_y := elevations[2]
-	add_part(blueprint, "urban_market_plaza_retaining", "foundation", "stone_foundation", Vector3(lane_centers[2], market_y + 0.12, plaza_z), Vector3(18.0, 0.24, segment_depth * 0.82), {"variation": variation - 0.05, "semantic": "citadel_market_plaza_retaining"})
-	add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"variation": variation - 0.04, "semantic": "citadel_market_plaza"})
-	for drain_side in [-1.0, 1.0]:
-		add_part(blueprint, "urban_market_edge_drain_%d" % int(drain_side), "ground_patch", "drainage_stain", Vector3(lane_centers[2] + drain_side * 8.10, market_y + 0.334, plaza_z + drain_side * 0.24), Vector3(0.72, 0.02, segment_depth * 0.72), {"collision": false, "variation": variation + drain_side * 0.018, "semantic": "citadel_market_drainage"})
+	add_grounded_foundation(blueprint, "urban_market_plaza_retaining", Vector3(lane_centers[2], 0.0, plaza_z), 18.0, segment_depth * 0.82, market_y + 0.24, variation - 0.05, "citadel_market_plaza_retaining")
+	add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"variation": variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
 	add_street_climb(blueprint, float(lane_centers[2]), centers[1] + row_depths[1] * 0.48, centers[2] - row_depths[2] * 0.46, base_y, market_terrace_rise, variation)
 	add_street_climb(blueprint, float(lane_centers[3]), centers[2] + row_depths[2] * 0.48, centers[3] - row_depths[3] * 0.46, market_y, market_terrace_rise, variation)
 	add_market_stalls(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z), variation, urban_layout)
@@ -203,19 +360,7 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 
 
 static func add_lane_edge_age(blueprint, prefix: String, lane_x: float, row_z: float, lane_width: float, row_depth: float, surface_y: float, variation: float) -> void:
-	var pocket_count := maxi(5, roundi(row_depth / 1.55))
-	for side in [-1.0, 1.0]:
-		for pocket_index in range(pocket_count):
-			var phase := fposmod(sin(float(pocket_index + 1) * 19.73 + side * 7.11 + variation * 53.0) * 13457.91, 1.0)
-			if phase < 0.22:
-				continue
-			var longitudinal := lerpf(-row_depth * 0.45, row_depth * 0.45, (float(pocket_index) + 0.5) / float(pocket_count))
-			longitudinal += (phase - 0.5) * 0.72
-			var edge_x: float = lane_x + side * (lane_width * 0.5 - 0.18 + phase * 0.22)
-			var material := "wall_growth" if pocket_index % 4 == 0 else ("leaf_litter" if pocket_index % 3 == 0 else "drainage_stain")
-			var width: float = 0.34 + phase * 0.48
-			var depth: float = 0.46 + fposmod(phase * 2.73, 1.0) * 0.88
-			add_part(blueprint, "%s_edge_age_%d_%02d" % [prefix, int(side), pocket_index], "ground_patch", material, Vector3(edge_x, surface_y + float(pocket_index % 2) * 0.003, row_z + longitudinal), Vector3(width, 0.02, depth), {"collision": false, "variation": variation - 0.04 + phase * 0.035, "semantic": "citadel_lane_edge_age"})
+	return
 
 
 static func add_street_house(blueprint, prefix: String, center: Vector3, width: float, depth: float, wall_height: float, street_side: float, ground_y: float, material: String, variation: float) -> void:
@@ -224,6 +369,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	var upper_center_x := center.x + street_side * 0.31
 	var facade_x := upper_center_x + street_side * (upper_width * 0.5 + 0.14)
 	var room_id := "%s_interior" % prefix
+	add_grounded_foundation(blueprint, "%s_foundation" % prefix, center, width + 0.28, depth + 0.28, ground_y, variation - 0.02, "citadel_urban_house_foundation")
 	blueprint.rooms.append({
 		"id": room_id,
 		"bounds": AABB(Vector3(upper_center_x - upper_width * 0.5 + 0.34, ground_y + 0.18, center.z - depth * 0.5 + 0.34), Vector3(upper_width - 0.68, wall_height - 0.22, depth - 0.68)),
@@ -231,7 +377,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		"citadelUrbanRoom": true,
 		"accesses": [{"id": "%s_entry" % prefix, "kind": "exterior_door", "position": Vector3(facade_x - street_side * 0.84, ground_y + 0.72, center.z), "size": Vector3(1.86, 2.18, 1.86)}]
 	})
-	add_part(blueprint, "%s_interior_floor" % prefix, "floor", "timber_board", Vector3(upper_center_x - street_side * 0.16, ground_y + 0.11, center.z), Vector3(maxf(0.8, upper_width - 0.74), 0.20, maxf(0.8, depth - 0.74)), {"variation": variation - 0.015, "semantic": "citadel_urban_interior_floor"})
+	add_part(blueprint, "%s_interior_floor" % prefix, "floor", "timber_board", Vector3(upper_center_x - street_side * 0.16, ground_y + 0.11, center.z), Vector3(maxf(0.8, upper_width - 0.74), 0.20, maxf(0.8, depth - 0.74)), {"variation": variation - 0.015, "semantic": "citadel_urban_interior_floor", "physicalIntent": "walkable_surface"})
 	var floor_count := maxi(2, roundi(wall_height / 3.1))
 	var upper_openings: Array[Dictionary] = [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": 1.48}]
 	for floor_index in range(1, floor_count):
@@ -260,7 +406,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		if wall_height > 5.6:
 			for window_sign in [-1.0, 1.0]:
 				var gable_window_material := "window_warm_glass" if posmod(prefix.hash() + int(gable_sign * 7.0) + int(window_sign * 13.0), 4) != 0 else "window_glass"
-				add_part(blueprint, "%s_gable_window_%d_%d" % [prefix, int(gable_sign), int(window_sign)], "window", gable_window_material, Vector3(upper_center_x + window_sign * upper_width * 0.22, ground_y + minf(5.05, wall_height * 0.58), gable_z + gable_sign * 0.015), Vector3(0.88, 1.14, 0.10), {"collision": false, "variation": variation, "semantic": "citadel_urban_window"})
+				add_part(blueprint, "%s_gable_recess_%d_%d" % [prefix, int(gable_sign), int(window_sign)], "decor", "window_recess", Vector3(upper_center_x + window_sign * upper_width * 0.22, ground_y + minf(5.05, wall_height * 0.58), gable_z + gable_sign * 0.015), Vector3(0.88, 1.14, 0.10), {"collision": false, "variation": variation, "semantic": "citadel_urban_gable_blind_recess"})
 	add_part(blueprint, "%s_door_recess" % prefix, "decor", "window_recess", Vector3(facade_x - street_side * 0.18, ground_y + 1.30, center.z), Vector3(0.12, 2.66, 1.56), {"collision": false, "variation": variation - 0.03, "semantic": "citadel_urban_door_reveal"})
 	add_part(blueprint, "%s_door" % prefix, "door", "painted_door", Vector3(facade_x - street_side * 0.10, ground_y + 1.25, center.z), Vector3(0.14, 2.5, 1.25), {"collision": true, "variation": variation, "semantic": "citadel_urban_door", "roomId": room_id})
 	add_part(blueprint, "%s_door_lintel" % prefix, "beam", "timber_beam", Vector3(facade_x + street_side * 0.03, ground_y + 2.64, center.z), Vector3(0.24, 0.22, 1.82), {"collision": false, "variation": variation - 0.015, "semantic": "citadel_urban_door_joinery"})
@@ -289,8 +435,6 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		add_part(blueprint, "%s_hanging_sign" % prefix, "sign", "painted_decor", Vector3(facade_x + street_side * 0.40, ground_y + 2.28, sign_z + 0.42), Vector3(0.12, 0.72, 0.62), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_sign"})
 	var window_box_z := center.z - minf(depth * 0.25, 2.2)
 	add_part(blueprint, "%s_window_box" % prefix, "crate", "timber_board", Vector3(facade_x + street_side * 0.16, ground_y + 2.18, window_box_z), Vector3(0.36, 0.28, 1.14), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_window_box"})
-	for box_growth in range(3):
-		add_part(blueprint, "%s_window_box_growth_%02d" % [prefix, box_growth], "ground_patch", "wall_growth", Vector3(facade_x + street_side * 0.38, ground_y + 2.34 + float(box_growth % 2) * 0.05, window_box_z - 0.34 + float(box_growth) * 0.34), Vector3(0.38, 0.02, 0.46 + float(box_growth % 2) * 0.12), {"rotation": Vector3(0.0, 0.0, street_side * PI * 0.5), "collision": false, "variation": variation + float(box_growth) * 0.013, "semantic": "citadel_household_window_growth"})
 	if household_phase > 0.30:
 		add_part(blueprint, "%s_household_tool_rack" % prefix, "tool_rack", "ironwork", Vector3(facade_x + street_side * 0.24, ground_y + 1.78, center.z - lerpf(1.65, 2.30, household_phase)), Vector3(0.20, 1.28, 1.12), {"rotation": Vector3(0.0, street_side * PI * 0.5, 0.0), "collision": false, "variation": variation, "semantic": "citadel_household_tools"})
 	if household_phase < 0.58:
@@ -300,12 +444,10 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	if household_phase > 0.60:
 		var bay_z := center.z + lerpf(-depth * 0.22, depth * 0.22, household_phase)
 		var bay_y := ground_y + minf(wall_height * 0.66, 5.1)
-		add_part(blueprint, "%s_projecting_bay" % prefix, "wall", material, Vector3(facade_x + street_side * 0.42, bay_y, bay_z), Vector3(0.78, 2.05, 2.20), {"collision": false, "variation": variation + 0.025, "semantic": "citadel_household_projecting_bay"})
+		add_part(blueprint, "%s_projecting_bay_backing" % prefix, "wall", material, Vector3(facade_x + street_side * 0.16, bay_y, bay_z), Vector3(1.18, 2.20, 1.76), {"collision": true, "variation": variation + 0.012, "semantic": "citadel_household_projecting_bay_backing", "physicalIntent": "structural_mass", "requiresStructuralSupport": true})
+		add_part(blueprint, "%s_projecting_bay" % prefix, "wall", material, Vector3(facade_x + street_side * 0.42, bay_y, bay_z), Vector3(0.78, 2.05, 2.20), {"collision": false, "variation": variation + 0.025, "semantic": "citadel_household_projecting_bay", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": ["%s_projecting_bay_backing" % prefix]})
 		add_part(blueprint, "%s_projecting_bay_window" % prefix, "window", "window_glass", Vector3(facade_x + street_side * 0.84, bay_y + 0.08, bay_z), Vector3(0.12, 1.22, 1.10), {"collision": false, "variation": variation, "semantic": "citadel_household_projecting_bay"})
 		add_part(blueprint, "%s_projecting_bay_roof" % prefix, "decor", "roof_shingle", Vector3(facade_x + street_side * 0.44, bay_y + 1.20, bay_z), Vector3(1.12, 0.18, 2.62), {"rotation": Vector3(0.0, 0.0, street_side * deg_to_rad(-8.0)), "collision": false, "variation": variation - 0.02, "semantic": "citadel_household_projecting_bay"})
-	if household_phase < 0.68:
-		add_part(blueprint, "%s_wall_growth" % prefix, "ground_patch", "wall_growth", Vector3(facade_x + street_side * 0.045, ground_y + 1.34 + household_phase * 1.5, center.z + lerpf(-depth * 0.31, depth * 0.30, household_phase)), Vector3(1.65 + household_phase, 0.02, 2.25), {"rotation": Vector3(0.0, 0.0, street_side * PI * 0.5), "collision": false, "variation": variation - 0.04, "semantic": "citadel_wall_growth"})
-	add_part(blueprint, "%s_threshold_wear" % prefix, "ground_patch", "worn_cobble", Vector3(facade_x + street_side * 1.18, ground_y + 0.034, center.z + (household_phase - 0.5) * 0.42), Vector3(2.65, 0.02, 1.38), {"collision": false, "variation": variation - 0.03, "semantic": "citadel_threshold_wear"})
 	if household_phase > 0.54:
 		var shop_z := center.z + lerpf(-depth * 0.22, depth * 0.22, household_phase)
 		for awning_strip in range(5):
@@ -383,40 +525,8 @@ static func add_street_climb(blueprint, center_x: float, from_z: float, to_z: fl
 	var step_count := 8
 	var tread_depth := maxf(0.48, (to_z - from_z) / float(step_count))
 	for step_index in range(step_count):
-		var step_height := rise * float(step_index + 1) / float(step_count)
-		add_part(blueprint, "urban_street_climb_%d_%02d" % [int(round(base_y * 100.0)), step_index], "stair_tread", "cobblestone", Vector3(center_x, base_y + step_height * 0.5, from_z + tread_depth * (float(step_index) + 0.5)), Vector3(6.4, step_height, tread_depth + 0.03), {"variation": variation, "semantic": "citadel_street_climb"})
-
-
-static func add_route_surface_history(blueprint, grammar: Dictionary, keep_front_z: float, base_y: float, variation: float) -> void:
-	var courtyard_width := float(grammar.get("courtyardWidth", 104.0))
-	var courtyard_depth := float(grammar.get("courtyardDepth", 96.0))
-	var route_start := keep_front_z + 4.5
-	var route_end := courtyard_depth * 0.5 - 5.0
-	var route_length := maxf(8.0, route_end - route_start)
-	for side in [-1.0, 1.0]:
-		var route_x: float = float(side) * (courtyard_width * 0.5 - 18.0)
-		var building_side_x: float = route_x + side * 5.15
-		add_part(blueprint, "urban_perimeter_drain_%d" % int(side), "ground_patch", "drainage_stain", Vector3(route_x + side * 3.82, base_y + 0.166, route_start + route_length * 0.5), Vector3(0.58, 0.02, route_length * 0.94), {"collision": false, "variation": variation - 0.05, "semantic": "citadel_route_history"})
-		for verge_index in range(11):
-			var verge_phase := fposmod(sin(float(verge_index + 3) * 11.83 + side * 23.7 + variation * 61.0) * 29171.37, 1.0)
-			var verge_length := route_length / 11.0
-			var verge_z := route_start + verge_length * (float(verge_index) + 0.5) + (verge_phase - 0.5) * 0.82
-			var verge_width := 1.65 + verge_phase * 1.15
-			var verge_depth := verge_length * (0.78 + verge_phase * 0.13)
-			var verge_material := "ground_soil" if verge_index % 4 in [0, 1] else ("wall_growth" if verge_index % 4 == 2 else "leaf_litter")
-			add_part(blueprint, "urban_perimeter_verge_%d_%02d" % [int(side), verge_index], "ground_patch", verge_material, Vector3(building_side_x + side * (verge_phase - 0.5) * 0.36, base_y + 0.171 + float(verge_index % 2) * 0.003, verge_z), Vector3(verge_width, 0.02, verge_depth), {"rotation": Vector3(0.0, (verge_phase - 0.5) * 0.12, 0.0), "collision": false, "variation": variation - 0.05 + verge_phase * 0.035, "semantic": "citadel_route_verge"})
-		for rut_index in range(8):
-			var rut_phase := fposmod(sin(float(rut_index + 5) * 17.41 + side * 13.1 + variation * 37.0) * 18367.91, 1.0)
-			var rut_z := lerpf(route_start, route_end, (float(rut_index) + 0.5) / 8.0) + (rut_phase - 0.5) * 1.4
-			var rut_x: float = route_x - side * (0.58 + rut_phase * 0.54)
-			add_part(blueprint, "urban_perimeter_rut_%d_%02d" % [int(side), rut_index], "ground_patch", "worn_cobble" if rut_index % 3 != 0 else "ground_soil", Vector3(rut_x, base_y + 0.173, rut_z), Vector3(0.52 + rut_phase * 0.62, 0.02, 1.8 + rut_phase * 2.4), {"rotation": Vector3(0.0, (rut_phase - 0.5) * 0.10, 0.0), "collision": false, "variation": variation - 0.05 + rut_phase * 0.03, "semantic": "citadel_route_rut"})
-		for patch_index in range(18):
-			var phase := fposmod(sin(float(patch_index + 1) * 13.71 + side * 19.3 + variation * 43.0) * 41731.13, 1.0)
-			var z := lerpf(route_start, route_end, (float(patch_index) + 0.5) / 18.0) + (phase - 0.5) * 1.25
-			var edge_bias := -1.0 if patch_index % 3 == 0 else 1.0
-			var x: float = route_x + float(side) * edge_bias * (4.0 + phase * 2.4)
-			var material := "ground_soil" if patch_index % 5 == 0 else ("leaf_litter" if patch_index % 3 == 0 else ("wall_growth" if patch_index % 4 == 0 else "worn_cobble"))
-			add_part(blueprint, "urban_route_history_%d_%02d" % [int(side), patch_index], "ground_patch", material, Vector3(x, base_y + 0.169 + float(patch_index % 2) * 0.003, z), Vector3(0.65 + phase * 1.65, 0.02, 0.58 + fposmod(phase * 2.17, 1.0) * 1.85), {"rotation": Vector3(0.0, phase * TAU, 0.0), "collision": false, "variation": variation - 0.05 + phase * 0.04, "semantic": "citadel_route_history"})
+		var step_top_y := base_y + rise * float(step_index + 1) / float(step_count)
+		add_part(blueprint, "urban_street_climb_%d_%02d" % [int(round(base_y * 100.0)), step_index], "stair_tread", "cobblestone", Vector3(center_x, step_top_y * 0.5, from_z + tread_depth * (float(step_index) + 0.5)), Vector3(6.4, step_top_y, tread_depth + 0.03), {"variation": variation, "semantic": "citadel_street_climb", "pavingFamily": "lane_cobbles", "pavingRegion": "urban_street_climb_%d" % int(round(base_y * 100.0)), "pavingHeading": "z"})
 
 
 static func add_market_stalls(blueprint, center: Vector3, variation: float, urban_layout: Dictionary) -> void:
@@ -462,16 +572,13 @@ static func add_terminal_shop_row(blueprint, center: Vector3, variation: float) 
 			var goods_z := center.z - 1.34 + float(goods_index % 2) * 0.48
 			var goods_size := Vector3(0.46, 0.72, 0.42) if goods_kind == "sack" else Vector3(0.48, 0.46, 0.48)
 			add_part(blueprint, "urban_%s_goods_%02d" % [bay_key, goods_index], goods_kind, goods_material, Vector3(goods_x, goods_y, goods_z), goods_size, {"rotation": Vector3(0.0, deg_to_rad(float(goods_index - 2) * 8.0), 0.0), "collision": false, "variation": variation + float(goods_index) * 0.015, "semantic": "citadel_terminal_shop_goods"})
-		add_part(blueprint, "urban_%s_wall_growth" % bay_key, "ground_patch", "wall_growth", Vector3(bay_x - 1.34 + float(bay_index) * 0.22, center.y + 0.62, center.z + 0.15), Vector3(0.70, 0.02, 1.18), {"rotation": Vector3(PI * 0.5, 0.0, 0.0), "collision": false, "variation": variation - 0.04, "semantic": "citadel_wall_growth"})
-		add_part(blueprint, "urban_%s_wear" % bay_key, "ground_patch", "worn_cobble", Vector3(bay_x, center.y + 0.042, center.z - 2.46), Vector3(2.75, 0.02, 3.20), {"collision": false, "variation": variation - 0.04, "semantic": "citadel_terminal_shop_wear"})
+		add_traffic_wear(blueprint, "urban_%s_wear" % bay_key, Vector3(bay_x, center.y + 0.042, center.z - 2.46), Vector2(2.75, 3.20), 0.0, variation - 0.04, "citadel_terminal_shop_wear")
 
 
 static func add_civic_service_yard(blueprint, center: Vector3, variation: float) -> void:
-	for patch_index in range(7):
-		var patch_x := center.x - 6.0 + float(patch_index % 4) * 3.4
-		var patch_z := center.z - 4.4 + float(patch_index / 4) * 4.1 + float(patch_index % 2) * 0.55
-		add_part(blueprint, "urban_civic_route_wear_%02d" % patch_index, "ground_patch", "worn_cobble", Vector3(patch_x, center.y + 0.232, patch_z), Vector3(4.6 + float(patch_index % 2), 0.02, 3.0 + float((patch_index + 1) % 3) * 0.44), {"collision": false, "variation": variation - 0.05 + float(patch_index) * 0.009, "semantic": "citadel_civic_route_wear"})
-	add_part(blueprint, "urban_civic_drain", "ground_patch", "drainage_stain", center + Vector3(2.8, 0.238, -0.2), Vector3(0.82, 0.02, 11.5), {"collision": false, "variation": variation - 0.03, "semantic": "citadel_civic_drainage"})
+	for route_index in range(3):
+		var route_z := center.z - 4.0 + float(route_index) * 3.9
+		add_traffic_wear(blueprint, "urban_civic_route_wear_%02d" % route_index, Vector3(center.x - 1.0 + float(route_index % 2) * 0.68, center.y + 0.232, route_z), Vector2(12.8, 1.72 + float(route_index % 2) * 0.18), 0.0, variation - 0.05 + float(route_index) * 0.011, "citadel_civic_route_wear")
 	var shed_center := center + Vector3(4.2, 0.0, 1.2)
 	for post_side in [-1.0, 1.0]:
 		add_part(blueprint, "urban_civic_shed_post_%d" % int(post_side), "beam", "timber_beam", shed_center + Vector3(post_side * 2.0, 1.30, -0.72), Vector3(0.22, 2.60, 0.22), {"collision": false, "variation": variation + post_side * 0.018, "semantic": "citadel_civic_service_shed"})
@@ -487,13 +594,10 @@ static func add_civic_service_yard(blueprint, center: Vector3, variation: float)
 		var log_row := log_index / 4
 		var log_column := log_index % 4
 		add_part(blueprint, "urban_civic_firewood_%02d" % log_index, "beam", "timber_board", center + Vector3(-4.8 + float(log_column) * 0.25, 0.10 + float(log_row) * 0.15, 2.8), Vector3(0.14, 0.14, 0.92), {"rotation": Vector3(0.0, deg_to_rad(float(log_column - 2) * 3.0), 0.0), "collision": false, "variation": variation + float(log_index) * 0.007, "semantic": "citadel_civic_firewood"})
-	for growth_index in range(8):
-		var growth_angle := float(growth_index) * TAU / 8.0
-		add_part(blueprint, "urban_civic_joint_growth_%02d" % growth_index, "ground_patch", "wall_growth", center + Vector3(cos(growth_angle) * (4.2 + float(growth_index % 2)), 0.242, sin(growth_angle) * 3.6), Vector3(0.48 + float(growth_index % 3) * 0.16, 0.02, 0.34 + float((growth_index + 1) % 3) * 0.13), {"collision": false, "variation": variation + float(growth_index) * 0.009, "semantic": "citadel_civic_drainage"})
 
 
 static func add_civic_quarter(blueprint, keep_front_z: float, base_y: float, variation: float) -> void:
-	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, base_y + 0.18, keep_front_z - 8.0), Vector3(48.0, 0.08, 32.0), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving"})
+	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, base_y + 0.18, keep_front_z - 8.0), Vector3(48.0, 0.08, 32.0), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
 	var houses := [
 		{"id": "urban_civic_house_east", "center": Vector3(43.0, 0.0, keep_front_z - 2.5), "width": 10.2, "depth": 12.0, "height": 9.3, "material": "painted_brick_ochre"},
 		{"id": "urban_civic_house_wall", "center": Vector3(56.0, 0.0, keep_front_z - 14.0), "width": 8.8, "depth": 10.4, "height": 7.2, "material": "painted_brick_sage"}
@@ -501,25 +605,13 @@ static func add_civic_quarter(blueprint, keep_front_z: float, base_y: float, var
 	for house_value in houses:
 		var house: Dictionary = house_value as Dictionary
 		add_street_house(blueprint, String(house.get("id", "urban_civic_house")), house.get("center", Vector3.ZERO) as Vector3, float(house.get("width", 8.0)), float(house.get("depth", 9.0)), float(house.get("height", 7.0)), -1.0, base_y, String(house.get("material", "painted_brick_cream")), variation + float(String(house.get("id", "house")).hash() % 17) * 0.003)
-	for route_index in range(6):
-		var route_x := 23.0 + float(route_index) * 6.1
-		var route_z := keep_front_z - 13.5 + float(route_index % 2) * 5.2
-		add_part(blueprint, "urban_civic_quarter_route_%02d" % route_index, "ground_patch", "worn_cobble", Vector3(route_x, base_y + 0.232, route_z), Vector3(7.4, 0.02, 4.2), {"collision": false, "variation": variation - 0.04 + float(route_index) * 0.008, "semantic": "citadel_civic_route_wear"})
-	for corner_index in range(10):
-		var corner_x := 30.0 + float(corner_index % 5) * 6.0
-		var corner_z := keep_front_z - 19.0 + float(corner_index / 5) * 16.0
-		add_part(blueprint, "urban_civic_quarter_growth_%02d" % corner_index, "ground_patch", "wall_growth", Vector3(corner_x, base_y + 0.242, corner_z), Vector3(0.48 + float(corner_index % 3) * 0.18, 0.02, 0.40 + float((corner_index + 1) % 3) * 0.14), {"collision": false, "variation": variation + float(corner_index) * 0.007, "semantic": "citadel_civic_drainage"})
+	for route_index in range(3):
+		var route_z := keep_front_z - 13.5 + float(route_index) * 5.2
+		add_traffic_wear(blueprint, "urban_civic_quarter_route_%02d" % route_index, Vector3(37.8, base_y + 0.232, route_z), Vector2(27.0, 1.84), 0.0, variation - 0.04 + float(route_index) * 0.011, "citadel_civic_route_wear")
 
 
 static func add_civic_commons(blueprint, keep_front_z: float, base_y: float, variation: float) -> void:
 	var center := Vector3(28.0, base_y + 0.244, keep_front_z - 18.0)
-	for patch_index in range(18):
-		var angle := float(patch_index) * 2.399963 + variation * 3.7
-		var radius := 1.2 + float(patch_index % 6) * 0.58
-		var phase := fposmod(sin(float(patch_index + 1) * 17.31 + variation * 41.0) * 21937.71, 1.0)
-		var patch_center := center + Vector3(cos(angle) * radius, float(patch_index % 2) * 0.003, sin(angle) * radius * 0.72)
-		var patch_material := "ground_soil" if patch_index % 5 == 0 else ("leaf_litter" if patch_index % 3 == 0 else "wall_growth")
-		add_part(blueprint, "urban_civic_commons_patch_%02d" % patch_index, "ground_patch", patch_material, patch_center, Vector3(0.42 + phase * 0.74, 0.02, 0.34 + fposmod(phase * 2.41, 1.0) * 0.66), {"rotation": Vector3(0.0, phase * TAU, 0.0), "collision": false, "variation": variation - 0.05 + phase * 0.04, "semantic": "citadel_civic_commons_growth"})
 	for stone_index in range(9):
 		var angle := float(stone_index) * TAU / 9.0 + 0.31
 		var phase := fposmod(sin(float(stone_index + 3) * 12.73) * 17357.19, 1.0)
@@ -533,7 +625,7 @@ static func add_civic_commons(blueprint, keep_front_z: float, base_y: float, var
 static func add_market_stall_household(blueprint, stall_center: Vector3, side: float, depth_slot: float, variation: float) -> void:
 	var stall_key := "%d_%d" % [int(side), int(depth_slot)]
 	var canopy_material := "wool_rust" if side * depth_slot < 0.0 else "wool_moss"
-	add_part(blueprint, "urban_market_compaction_%s" % stall_key, "ground_patch", "worn_cobble", stall_center + Vector3(-side * 2.10, 0.035, -depth_slot * 0.08), Vector3(4.85, 0.02, 1.46 + (0.18 if depth_slot > 0.0 else 0.0)), {"collision": false, "variation": variation - 0.04, "semantic": "citadel_market_compaction"})
+	add_traffic_wear(blueprint, "urban_market_compaction_%s" % stall_key, stall_center + Vector3(-side * 2.10, 0.035, -depth_slot * 0.08), Vector2(4.85, 1.46 + (0.18 if depth_slot > 0.0 else 0.0)), 0.0, variation - 0.04, "citadel_market_compaction")
 	for post_side in [-1.0, 1.0]:
 		for post_depth in [-1.0, 1.0]:
 			add_part(blueprint, "urban_market_knee_%s_%d_%d" % [stall_key, int(post_side), int(post_depth)], "beam", "timber_beam", stall_center + Vector3(post_side * 1.04, 2.14, post_depth * 0.72), Vector3(0.14, 0.92, 0.14), {"rotation": Vector3(0.0, 0.0, post_side * deg_to_rad(43.0)), "collision": false, "variation": variation + post_depth * 0.01, "semantic": "citadel_market_joinery"})
@@ -582,7 +674,9 @@ static func add_market_stall_household(blueprint, stall_center: Vector3, side: f
 
 
 static func add_overhead_bridge(blueprint, center: Vector3, span: float, base_y: float, variation: float) -> void:
-	add_part(blueprint, "urban_bridge_deck", "floor", "timber_beam", Vector3(center.x, base_y + 6.9, center.z), Vector3(span, 0.34, 2.4), {"variation": variation, "semantic": "citadel_overhead_bridge"})
+	for side in [-1.0, 1.0]:
+		add_part(blueprint, "urban_bridge_abutment_%d" % int(side), "wall", "stone_foundation", Vector3(center.x + side * (span * 0.5 - 0.42), (base_y + 6.9) * 0.5, center.z), Vector3(0.84, base_y + 6.9, 2.6), {"variation": variation - 0.03, "semantic": "citadel_overhead_bridge_abutment", "physicalIntent": "structural_mass"})
+	add_part(blueprint, "urban_bridge_deck", "floor", "timber_beam", Vector3(center.x, base_y + 6.9, center.z), Vector3(span, 0.34, 2.4), {"variation": variation, "semantic": "citadel_overhead_bridge", "physicalIntent": "walkable_surface", "playerSurfaceAudit": true})
 	for side in [-1.0, 1.0]:
 		add_part(blueprint, "urban_bridge_rail_%d" % int(side), "beam", "timber_beam", Vector3(center.x, base_y + 7.55, center.z + side * 1.05), Vector3(span, 1.0, 0.18), {"collision": false, "variation": variation, "semantic": "citadel_overhead_bridge_rail"})
 
@@ -591,9 +685,10 @@ static func add_civic_landmark(blueprint, center: Vector3, base_y: float, variat
 	var width := 8.4
 	var depth := 9.0
 	var height := 17.0
+	add_grounded_foundation(blueprint, "urban_civic_tower_foundation", center, width + 0.36, depth + 0.36, base_y, variation - 0.025, "citadel_civic_landmark_foundation")
 	add_part(blueprint, "urban_civic_tower", "wall", "painted_brick_cream", Vector3(center.x, base_y + height * 0.5, center.z), Vector3(width, height, depth), {"variation": variation, "semantic": "citadel_civic_landmark"})
 	for level in [4.2, 8.0, 11.8]:
-		add_part(blueprint, "urban_civic_window_%d" % int(level * 10.0), "window", "window_glass", Vector3(center.x + width * 0.5 + 0.04, base_y + level, center.z), Vector3(0.10, 1.45, 1.05), {"collision": false, "variation": variation, "semantic": "citadel_civic_window"})
+		add_part(blueprint, "urban_civic_recess_%d" % int(level * 10.0), "decor", "window_recess", Vector3(center.x + width * 0.5 + 0.04, base_y + level, center.z), Vector3(0.10, 1.45, 1.05), {"collision": false, "variation": variation, "semantic": "citadel_civic_blind_recess"})
 	var roof_rise := 6.8
 	var slope := sqrt(pow(width * 0.5 + 0.6, 2.0) + roof_rise * roof_rise)
 	var angle := atan2(roof_rise, width * 0.5 + 0.6)
@@ -604,11 +699,12 @@ static func add_civic_landmark(blueprint, center: Vector3, base_y: float, variat
 
 static func add_terraced_edge(blueprint, center: Vector3, base_y: float, variation: float) -> void:
 	for level in range(3):
-		var terrace_y := base_y + float(level) * 0.72
+		var terrace_top_y := base_y + float(level + 1) * 0.72
 		var terrace_z := center.z + float(level) * 2.4
-		add_part(blueprint, "urban_terrace_%02d" % level, "foundation", "stone_foundation", Vector3(center.x, terrace_y + 0.36, terrace_z), Vector3(12.0 - float(level) * 1.4, 0.72, 4.8), {"variation": variation, "semantic": "citadel_urban_terrace"})
+		add_grounded_foundation(blueprint, "urban_terrace_%02d" % level, Vector3(center.x, 0.0, terrace_z), 12.0 - float(level) * 1.4, 4.8, terrace_top_y, variation, "citadel_urban_terrace")
 		for step in range(4):
-			add_part(blueprint, "urban_terrace_step_%02d_%02d" % [level, step], "stair_tread", "stone_foundation", Vector3(center.x - 6.6 + float(step) * 0.42, base_y + float(level) * 0.72 + float(step + 1) * 0.18, terrace_z - 2.0 + float(step) * 0.42), Vector3(1.5, 0.18, 0.46), {"variation": variation, "semantic": "citadel_urban_stair"})
+			var step_top_y := base_y + float(level) * 0.72 + float(step + 1) * 0.18
+			add_part(blueprint, "urban_terrace_step_%02d_%02d" % [level, step], "stair_tread", "stone_foundation", Vector3(center.x - 6.6 + float(step) * 0.42, step_top_y * 0.5, terrace_z - 2.0 + float(step) * 0.42), Vector3(1.5, step_top_y, 0.46), {"variation": variation, "semantic": "citadel_urban_stair"})
 
 
 static func add_dressing_clusters(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float) -> void:
@@ -651,6 +747,24 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 			var sag := sin(ratio * PI) * 0.28
 			var material := cloth_materials[(line_index + pennant_index) % cloth_materials.size()]
 			add_part(blueprint, "urban_bunting_%02d_%02d" % [line_index, pennant_index], "pennant", material, Vector3(pennant_x, line_y - sag, line_z), Vector3(maxf(0.38, (end_x - start_x) / float(pennant_count) * 0.56), 0.68, 0.055), {"rotation": Vector3(0.0, 0.0, deg_to_rad(-8.0 if pennant_index % 2 == 0 else 8.0)), "collision": false, "variation": variation + float(pennant_index) * 0.006, "semantic": "citadel_bunting"})
+
+
+static func add_traffic_wear(blueprint, prefix: String, center: Vector3, span: Vector2, heading: float, variation: float, semantic: String) -> void:
+	return
+
+
+static func add_grounded_foundation(blueprint, part_id: String, center: Vector3, width: float, depth: float, top_y: float, variation: float, semantic: String) -> void:
+	if top_y <= 0.02:
+		return
+	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, top_y * 0.5, center.z), Vector3(width, top_y, depth), {"variation": variation, "semantic": semantic, "physicalIntent": "structural_mass"})
+
+
+static func paving_treatments(urban_layout: Dictionary, front_z: float, keep_front_z: float) -> Array:
+	var lanes: Array = urban_layout.get("laneCenters", []) as Array
+	var result: Array = []
+	for lane_value in lanes:
+		result.append({"center": Vector3(float(lane_value), 0.0, (front_z + keep_front_z) * 0.5), "span": Vector2(maxf(12.0, keep_front_z - front_z - 4.0), 2.1), "heading": PI * 0.5})
+	return result
 
 
 static func add_part(blueprint, part_id: String, kind: String, material: String, position: Vector3, size: Vector3, options: Dictionary = {}) -> void:

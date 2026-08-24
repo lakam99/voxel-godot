@@ -18,8 +18,6 @@ const GENERATED_CELL_BRIDGE_FRAME_MAX_USEC := 7000
 const GENERATED_CELL_BRIDGE_MAX_VALIDATION_STEPS := 160
 const GENERATED_CELL_BRIDGE_ACTIVE_JOB_MAX_VALIDATION_STEPS := 80
 const GENERATED_CELL_BRIDGE_ROUTINE_MAX_VALIDATION_STEPS := 24
-const ROUTINE_TARGET_SNAP_DISTANCE := CELL * 1.65
-const ROUTINE_START_SNAP_DISTANCE := CELL * 3.1
 
 var navmesh_world = null
 var system = null
@@ -548,15 +546,7 @@ func _routine_route_kind(route_kind: String) -> bool:
 	return route_kind in ["guard", "work", "forage", "job", "idle", "move"]
 
 func _snap_distances_for_route_kind(route_kind: String, arrival_radius: float, routine_snap_enabled := true) -> Dictionary:
-	var target_snap := maxf(arrival_radius, CELL * 0.95)
-	var start_snap := target_snap
-	if routine_snap_enabled and _routine_route_kind(route_kind):
-		target_snap = maxf(target_snap, ROUTINE_TARGET_SNAP_DISTANCE)
-		start_snap = maxf(start_snap, ROUTINE_START_SNAP_DISTANCE)
-	return {
-		"start": start_snap,
-		"target": target_snap
-	}
+	return NpcConstantsScript.route_snap_distances(route_kind, arrival_radius, routine_snap_enabled)
 
 func _generated_bridge_search(entry: Dictionary, source, snapshot: Dictionary, start_cell: Vector2i, target_lookup: Dictionary, bounds: Dictionary, max_visits: int, max_usec: int, allow_partial := false, forbidden_cells := {}) -> Vector2i:
 	_generated_bridge_came_from = {}
@@ -846,6 +836,7 @@ func _build_runtime_route_from_navmesh(entry: Dictionary, intent: Dictionary, ge
 		return _route_failure("blocked", "partial_endpoint_rejected", target_cell, partial_route)
 	var status := "arrived" if waypoints.is_empty() else "routed"
 	var reason := route_reason
+	var query_options: Dictionary = route.get("options", {}) if route.get("options", {}) is Dictionary else {}
 	return {
 		"ok": true,
 		"status": status,
@@ -858,6 +849,13 @@ func _build_runtime_route_from_navmesh(entry: Dictionary, intent: Dictionary, ge
 		"snapshotRevision": String(route.get("snapshotRevision", "")),
 		"source": "navmesh",
 		"legacyFallbackUsed": false,
+		"endpointPolicy": {
+			"arrivalRadius": float(query_options.get("arrivalRadius", intent.get("arrivalRadius", CELL * 0.75))),
+			"maxSnapDistance": float(query_options.get("maxSnapDistance", CELL * 0.95)),
+			"targetMaxSnapDistance": float(query_options.get("targetMaxSnapDistance", query_options.get("maxSnapDistance", CELL * 0.95))),
+			"queryApi": String(query_options.get("queryApi", _runtime_query_api(intent))),
+			"preferDescriptorEndpoint": bool(query_options.get("preferDescriptorEndpoint", true))
+		},
 		"navmeshRoute": route
 	}
 
@@ -953,6 +951,13 @@ func _validate_generated_world_route(entry: Dictionary, intent: Dictionary, gene
 		var action_cell = action.get("cell")
 		if action_cell is Vector2i:
 			target_lookup[action_cell] = true
+		if String(action.get("kind", "")) == "surface_transition":
+			if not source.has_method("validate_surface_transition_action"):
+				return {"ok": false, "reason": "missing_surface_transition_certificate_authority"}
+			var transition_certificate: Dictionary = source.call("validate_surface_transition_action", snapshot, action) as Dictionary
+			if not bool(transition_certificate.get("ok", false)):
+				return transition_certificate
+			action["corridorCertificate"] = transition_certificate
 	var route_actions: Dictionary = route.get("actions", {}) if route.get("actions", {}) is Dictionary else {}
 	return source.validate_waypoint_route(entry, snapshot, points, target_lookup, true, route_actions)
 
@@ -965,7 +970,7 @@ func _path_waypoints(path_value, start: Vector3, target: Vector3, generated_worl
 		for point in path_value:
 			if point is Vector3:
 				result.append(point)
-	while not result.is_empty() and result[0].distance_to(start) <= CELL * 0.08:
+	while not result.is_empty() and result[0].distance_to(start) <= CELL * 0.08 and not _waypoint_has_scripted_link_action(result[0], route_actions):
 		result.remove_at(0)
 	result = _prune_initial_hairpin_waypoints(result, start, target, route_actions)
 	if result.is_empty() and start.distance_to(target) > CELL * 0.08:
@@ -1004,7 +1009,18 @@ func _route_has_door_actions(actions_value) -> bool:
 	if not (actions_value is Dictionary):
 		return false
 	for action_value in (actions_value as Dictionary).values():
-		if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) == "door":
+		if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) in ["door", "surface_transition"]:
+			return true
+	return false
+
+func _waypoint_has_scripted_link_action(waypoint: Vector3, actions_value) -> bool:
+	if not (actions_value is Dictionary):
+		return false
+	for action_value in (actions_value as Dictionary).values():
+		if not (action_value is Dictionary) or String((action_value as Dictionary).get("kind", "")) != "surface_transition":
+			continue
+		var entry_value = (action_value as Dictionary).get("entryPosition", null)
+		if entry_value is Vector3 and waypoint.distance_to(entry_value as Vector3) <= 0.001:
 			return true
 	return false
 

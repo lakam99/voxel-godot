@@ -1,10 +1,13 @@
 extends Node
 class_name StorySitePlacement
 
+const StoryReservationField := preload("res://scripts/story/data/StorySiteReservationField.gd")
+
 const SITE_VERSION := 1
 const MIN_SITE_SEPARATION_CELLS := 8
 const WATER_MARGIN := 1.2
 const MAX_LOCAL_VARIATION := 2.4
+const LANDMARK_RESERVATION_RADIUS_CELLS := 8
 
 const SITE_DEFINITIONS := [
     {
@@ -79,17 +82,69 @@ func ensure_sites(region_record: Dictionary) -> Array:
     region_record["storySites"] = sites
     return sites
 
+func landmark_reservations(region_record: Dictionary) -> Array:
+    var reservations: Array = []
+    for site_value in ensure_sites(region_record):
+        if not (site_value is Dictionary):
+            continue
+        var site: Dictionary = site_value
+        var cell := site_cell(site)
+        reservations.append({
+            "id": "story:%s" % String(site.get("id", "")),
+            "kind": "story_site",
+            "reservedBounds": {
+                "minCell": cell - Vector2i(LANDMARK_RESERVATION_RADIUS_CELLS, LANDMARK_RESERVATION_RADIUS_CELLS),
+                "maxCell": cell + Vector2i(LANDMARK_RESERVATION_RADIUS_CELLS, LANDMARK_RESERVATION_RADIUS_CELLS)
+            }
+        })
+    reservations.sort_custom(func(left: Dictionary, right: Dictionary) -> bool: return String(left.get("id", "")) < String(right.get("id", "")))
+    return reservations
+
 func generate_sites(region_record: Dictionary, region_id: String) -> Array:
-    var result: Array = []
     if region_generator == null:
-        return result
-    var seed_value := int(region_record.get("seed", region_generator.stable_hash(region_id)))
-    var center: Vector2i = region_generator.region_center_cell(region_id)
-    for definition in SITE_DEFINITIONS:
-        var site := choose_site(definition, region_id, seed_value, center, result)
-        if not site.is_empty():
-            result.append(site)
-    return result
+        return []
+    var coords: Vector2i = region_generator.region_coords(region_id)
+    return StoryReservationField.sites_for_region(
+        String(region_generator.world_seed_text),
+        int(region_generator.world_seed_hash),
+        coords.x,
+        coords.y,
+        Callable(self, "story_surface_sample")
+    )
+
+func story_surface_sample(cell: Vector2i) -> Dictionary:
+    if main == null:
+        return {}
+    var generation = main.get("world_generation_system")
+    if generation != null and generation.has_method("natural_landmark_site_sample"):
+        var sample_value = generation.call("natural_landmark_site_sample", cell)
+        var sample: Dictionary = sample_value.duplicate(true) if sample_value is Dictionary else {}
+        sample["inLandmark"] = landmark_intersects_story_footprint(cell)
+        return sample
+    return {}
+
+func landmark_intersects_story_footprint(cell: Vector2i) -> bool:
+    if main == null or not main.has_method("landmark_sites_for_region"):
+        return false
+    var story_min := cell - Vector2i(LANDMARK_RESERVATION_RADIUS_CELLS, LANDMARK_RESERVATION_RADIUS_CELLS)
+    var story_max := cell + Vector2i(LANDMARK_RESERVATION_RADIUS_CELLS, LANDMARK_RESERVATION_RADIUS_CELLS)
+    var min_region := Vector2i(floori(float(story_min.x) / 420.0), floori(float(story_min.y) / 420.0))
+    var max_region := Vector2i(floori(float(story_max.x) / 420.0), floori(float(story_max.y) / 420.0))
+    for region_z in range(min_region.y, max_region.y + 1):
+        for region_x in range(min_region.x, max_region.x + 1):
+            var sites_value = main.call("landmark_sites_for_region", region_x, region_z, 420)
+            if not (sites_value is Array):
+                continue
+            for site_value in sites_value:
+                if not (site_value is Dictionary):
+                    continue
+                var terrain: Dictionary = (site_value as Dictionary).get("terrain", {}) if (site_value as Dictionary).get("terrain", {}) is Dictionary else {}
+                var bounds: Dictionary = terrain.get("reservedBounds", {}) if terrain.get("reservedBounds", {}) is Dictionary else {}
+                var minimum: Variant = bounds.get("minCell", null)
+                var maximum: Variant = bounds.get("maxCell", null)
+                if minimum is Vector2i and maximum is Vector2i and story_min.x <= maximum.x and minimum.x <= story_max.x and story_min.y <= maximum.y and minimum.y <= story_max.y:
+                    return true
+    return false
 
 func choose_site(definition: Dictionary, region_id: String, seed_value: int, center: Vector2i, existing_sites: Array) -> Dictionary:
     var region_size := int(region_generator.get("region_cell_size")) if region_generator != null else 280

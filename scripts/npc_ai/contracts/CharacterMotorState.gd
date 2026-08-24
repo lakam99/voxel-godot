@@ -15,6 +15,11 @@ var blocked_contact_category := ""
 var blocked_contact_name := ""
 var blocked_contact_kind := ""
 var blocked_contact_type := ""
+var blocked_contact_shape_name := ""
+var blocked_contact_part_id := ""
+var blocked_contact_part_kind := ""
+var blocked_contact_semantic := ""
+var blocked_contacts: Array[Dictionary] = []
 var slide_collision_count := 0
 var jump_snap_time := 0.0
 var upward_terrain_correction := 0.0
@@ -41,6 +46,11 @@ func to_summary() -> Dictionary:
 		"blockedContactName": blocked_contact_name,
 		"blockedContactKind": blocked_contact_kind,
 		"blockedContactType": blocked_contact_type,
+		"blockedContactShapeName": blocked_contact_shape_name,
+		"blockedContactPartId": blocked_contact_part_id,
+		"blockedContactPartKind": blocked_contact_part_kind,
+		"blockedContactSemantic": blocked_contact_semantic,
+		"blockedContacts": blocked_contacts.duplicate(true),
 		"slideCollisionCount": slide_collision_count,
 		"jumpSnapTime": jump_snap_time,
 		"upwardTerrainCorrection": upward_terrain_correction,

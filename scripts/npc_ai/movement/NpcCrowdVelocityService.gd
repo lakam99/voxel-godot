@@ -83,8 +83,7 @@ func begin_physics_frame(entries: Array) -> void:
 		bodies_by_spatial_cell[spatial_cell] = bucket
 		var lease: Dictionary = entry.get("routeLease", {}) if entry.get("routeLease", {}) is Dictionary else {}
 		var execution_active := not lease.is_empty() and String(entry.get("routeStatus", "")) in ["moving", "waiting"]
-		var unresolved_stationary := bool(entry.get("_crowdUnresolvedStationary", false))
-		var solver_active := execution_active and not unresolved_stationary
+		var solver_active := execution_active
 		var observed_velocity: Vector3 = body.get_meta("npc_applied_velocity", body.velocity) if solver_active else Vector3.ZERO
 		var requested_velocity: Vector3 = body.get_meta("npc_requested_velocity", body.velocity) if solver_active else Vector3.ZERO
 		velocity_snapshot_by_instance_id[body.get_instance_id()] = observed_velocity
@@ -156,7 +155,6 @@ func resolve_safe_velocity(entry: Dictionary, body: CharacterBody3D, desired_vel
 		begin_physics_frame(entries)
 	var request: Dictionary = context.duplicate(true)
 	var actor_id := String(entry.get("id", body.name if body != null else ""))
-	entry["_crowdUnresolvedStationary"] = false
 	resolved_actor_ids[actor_id] = true
 	request["actors"] = _nearby_bodies(body)
 	request["actorVelocitySnapshot"] = velocity_snapshot_by_instance_id
@@ -198,12 +196,8 @@ func end_physics_frame() -> void:
 		var actor_id := String(entry.get("id", body.name))
 		var lease: Dictionary = entry.get("routeLease", {}) if entry.get("routeLease", {}) is Dictionary else {}
 		var execution_active := not lease.is_empty() and String(entry.get("routeStatus", "")) in ["moving", "waiting"]
-		if execution_active and not resolved_actor_ids.has(actor_id):
-			if not bool(entry.get("_crowdUnresolvedStationary", false)):
-				adapter.sync_physical_actor(entry, body, Vector3.ZERO, false)
-			entry["_crowdUnresolvedStationary"] = true
-		elif not execution_active:
-			entry["_crowdUnresolvedStationary"] = false
+		if not execution_active:
+			adapter.sync_physical_actor(entry, body, Vector3.ZERO, false)
 	submissions_closed = true
 	_commit_ready_tickets()
 

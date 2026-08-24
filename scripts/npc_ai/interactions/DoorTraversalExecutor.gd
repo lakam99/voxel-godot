@@ -15,6 +15,8 @@ var bottleneck_classifier = null
 var traffic_priority_policy = null
 var wait_graph = null
 var active_crossings := {}
+var completed_crossings_by_actor := {}
+var crossing_sequence := 0
 var metrics := {
 	"requests": 0,
 	"granted": 0,
@@ -91,21 +93,36 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 		"actors": [actor],
 		"authorized": bool(entry.get("canUseLockedDoors", false)),
 		"direction": direction,
-		"actionCell": _cell_summary(action.get("cell"))
+		"actionCell": _cell_summary(action.get("cell")),
+		"routeRequestId": String(entry.get("_v2LeaseExecutorRequestId", "")),
+		"routeGeneration": int(entry.get("routeLeaseGeneration", -1)),
+		"routeLeaseId": String(entry.get("routeLeaseId", ""))
 	})
 	if result == null or result.status != NpcEnumsScript.INTERACTION_STATUS_SUCCEEDED:
 		if traffic_reservations != null and String(traffic_result.get("groupId", "")) != "":
 			traffic_reservations.release_group(String(traffic_result.get("groupId", "")), "door_open_failed")
 		metrics["waiting"] = int(metrics.get("waiting", 0)) + 1
 		return { "ok": false, "status": "waiting", "reason": String(result.reason) if result != null else "door_failed", "portalId": portal_id }
-	active_crossings[active_key] = {
-		"portalId": portal_id,
-		"actorId": actor_id,
-		"direction": direction,
-		"actor": actor,
-		"groupId": String(traffic_result.get("groupId", "")),
-		"reservationIds": traffic_result.get("reservationIds", [])
-	}
+	if active.is_empty():
+		crossing_sequence += 1
+		active = {
+			"crossingId": "door-crossing:%d" % crossing_sequence,
+			"portalId": portal_id,
+			"actorId": actor_id,
+			"direction": direction,
+			"actor": actor,
+			"groupId": String(traffic_result.get("groupId", "")),
+			"reservationIds": (traffic_result.get("reservationIds", []) as Array).duplicate(),
+			"initiatingRouteRequestId": String(entry.get("_v2LeaseExecutorRequestId", "")),
+			"initiatingRouteGeneration": int(entry.get("routeLeaseGeneration", -1)),
+			"initiatingRouteLeaseId": String(entry.get("routeLeaseId", "")),
+			"successorRouteRequestId": "",
+			"successorRouteGeneration": -1,
+			"successorRouteLeaseId": "",
+			"requiresExteriorClearanceCertificate": _requires_exterior_clearance_certificate(portal, direction, entry),
+			"openedFrame": Engine.get_physics_frames()
+		}
+		active_crossings[active_key] = active
 	if entry is Dictionary:
 		entry["activeDoorPortalId"] = portal_id
 		entry["activeDoorActorId"] = actor_id
@@ -114,25 +131,113 @@ func request_crossing(door: Node, actor: Node, entry: Dictionary = {}, action: D
 	metrics["granted"] = int(metrics.get("granted", 0)) + 1
 	if bool(traffic_result.get("activeContinuity", false)):
 		metrics["trafficContinuity"] = int(metrics.get("trafficContinuity", 0)) + 1
-	return { "ok": true, "status": "open", "reason": "", "portalId": portal_id, "result": result.to_summary() }
+	return { "ok": true, "status": "open", "reason": "", "portalId": portal_id, "crossingId": String(active.get("crossingId", "")), "result": result.to_summary() }
 
-func release_actor(actor_or_id, schedule_close := true) -> void:
+func bind_successor_route(entry: Dictionary, request_id: String, generation: int, lease_id: String) -> Dictionary:
+	var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
+	var portal_id := String(entry.get("activeDoorPortalId", ""))
+	if actor_id.is_empty() or portal_id.is_empty():
+		return {"ok": false, "reason": "missing_active_crossing"}
+	var active_key := _active_key(portal_id, actor_id)
+	var active: Dictionary = active_crossings.get(active_key, {})
+	if active.is_empty():
+		return {"ok": false, "reason": "missing_active_crossing"}
+	if String(active.get("portalId", "")) != portal_id or String(active.get("actorId", "")) != actor_id:
+		return {"ok": false, "reason": "crossing_owner_changed"}
+	var entry_group_id := String(entry.get("activeDoorTrafficGroupId", ""))
+	if entry_group_id.is_empty() or entry_group_id != String(active.get("groupId", "")):
+		return {"ok": false, "reason": "crossing_traffic_owner_changed", "crossing": _crossing_summary(active)}
+	var traffic_continuity := _traffic_continuity(active)
+	if not bool(traffic_continuity.get("ok", false)):
+		return {"ok": false, "reason": "crossing_traffic_continuity_lost", "trafficContinuity": traffic_continuity, "crossing": _crossing_summary(active)}
+	if request_id.is_empty() or generation < 0 or lease_id.is_empty():
+		return {"ok": false, "reason": "invalid_successor_route"}
+	if request_id == String(active.get("initiatingRouteRequestId", "")):
+		return {"ok": true, "reason": "initiating_route_still_active", "crossing": _crossing_summary(active)}
+	var existing_request_id := String(active.get("successorRouteRequestId", ""))
+	if not existing_request_id.is_empty():
+		if existing_request_id != request_id \
+				or int(active.get("successorRouteGeneration", -1)) != generation \
+				or String(active.get("successorRouteLeaseId", "")) != lease_id:
+			return {"ok": false, "reason": "crossing_successor_already_bound", "crossing": _crossing_summary(active)}
+		return {"ok": true, "reason": "successor_route_already_bound", "crossing": _crossing_summary(active)}
+	active["successorRouteRequestId"] = request_id
+	active["successorRouteGeneration"] = generation
+	active["successorRouteLeaseId"] = lease_id
+	active["successorBoundFrame"] = Engine.get_physics_frames()
+	active_crossings[active_key] = active
+	return {"ok": true, "reason": "successor_route_bound", "crossing": _crossing_summary(active)}
+
+func active_crossing_for_entry(entry: Dictionary) -> Dictionary:
+	var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
+	var portal_id := String(entry.get("activeDoorPortalId", ""))
+	if actor_id.is_empty() or portal_id.is_empty():
+		return {}
+	return _crossing_summary(active_crossings.get(_active_key(portal_id, actor_id), {}))
+
+func completed_crossing_for_entry(entry: Dictionary) -> Dictionary:
+	return (completed_crossings_by_actor.get(String(entry.get("id", "")), {}) as Dictionary).duplicate(true)
+
+func protected_crossing_for_entry(entry: Dictionary) -> Dictionary:
+	var active := active_crossing_for_entry(entry)
+	if active.is_empty() or not bool(active.get("requiresExteriorClearanceCertificate", false)):
+		return {}
+	return active
+
+func _crossing_summary(active: Dictionary) -> Dictionary:
+	if active.is_empty():
+		return {}
+	var summary := active.duplicate(true)
+	summary.erase("actor")
+	summary["trafficContinuity"] = _traffic_continuity(active)
+	return summary
+
+func _traffic_continuity(active: Dictionary) -> Dictionary:
+	if traffic_reservations == null or not traffic_reservations.has_method("certify_active_group"):
+		return {"ok": false, "reason": "traffic_authority_unavailable"}
+	return traffic_reservations.certify_active_group(
+		String(active.get("groupId", "")),
+		String(active.get("actorId", "")),
+		active.get("reservationIds", []) as Array
+	)
+
+func release_actor(actor_or_id, schedule_close := true, release_evidence: Dictionary = {}) -> Dictionary:
 	if door_portals == null:
-		return
+		return {"ok": false, "released": 0, "reason": "missing_door_service"}
 	var actor_id := ""
 	if actor_or_id is Node:
 		actor_id = _actor_id(actor_or_id, {})
 	else:
 		actor_id = String(actor_or_id)
+	var released := 0
+	var rejected := false
 	for active_key in active_crossings.keys().duplicate():
 		var active: Dictionary = active_crossings[active_key]
 		if String(active.get("actorId", "")) == actor_id:
+			var requires_certificate := bool(active.get("requiresExteriorClearanceCertificate", false))
+			var certified := bool(release_evidence.get("exteriorClearanceCertified", false))
+			var forced_cancellation := bool(release_evidence.get("forcedCancellation", false))
+			if requires_certificate and not certified and not forced_cancellation:
+				rejected = true
+				continue
+			var completed := _crossing_summary(active)
+			completed["releaseFrame"] = Engine.get_physics_frames()
+			completed["releaseEvidence"] = release_evidence.duplicate(true)
+			completed["completionKind"] = "cancelled" if forced_cancellation else "cleared"
+			completed["releaseTrafficContinuity"] = _traffic_continuity(active)
+			completed_crossings_by_actor[actor_id] = completed
 			active_crossings.erase(active_key)
 			var portal_id := String(active.get("portalId", ""))
 			if traffic_reservations != null and String(active.get("groupId", "")) != "":
 				traffic_reservations.release_group(String(active.get("groupId", "")), "door_crossing_released")
 			door_portals.release_actor(portal_id, actor_id, schedule_close)
 			metrics["released"] = int(metrics.get("released", 0)) + 1
+			released += 1
+	return {
+		"ok": released > 0 or not rejected,
+		"released": released,
+		"reason": "exterior_clearance_certificate_required" if rejected and released == 0 else ""
+	}
 
 func cancel_actor(actor_or_id) -> void:
 	var actor_id := ""
@@ -142,7 +247,7 @@ func cancel_actor(actor_or_id) -> void:
 		actor_id = String(actor_or_id)
 	if traffic_reservations != null:
 		traffic_reservations.cancel_owner(actor_id)
-	release_actor(actor_or_id, true)
+	release_actor(actor_or_id, true, {"forcedCancellation": true, "reason": "cancel_actor"})
 
 func stats() -> Dictionary:
 	return {
@@ -192,6 +297,25 @@ func _actor_id(actor: Node, entry: Dictionary) -> String:
 			return String(actor.get_meta("npc_stable_id"))
 		return "%s:%d" % [actor.name, actor.get_instance_id()]
 	return "npc"
+
+func _requires_exterior_clearance_certificate(portal, direction: String, entry: Dictionary) -> bool:
+	if portal == null or String(portal.get("policy_id")) != "private_home":
+		return false
+	var interior_value = entry.get("doorInteriorPosition", Vector3.INF)
+	var exterior_value = entry.get("doorExteriorPosition", Vector3.INF)
+	if not (interior_value is Vector3) or not (exterior_value is Vector3):
+		return false
+	var interior: Vector3 = interior_value
+	var exterior: Vector3 = exterior_value
+	if not interior.is_finite() or not exterior.is_finite():
+		return false
+	var delta := exterior - interior
+	var outbound_direction := "unknown"
+	if String(portal.get("crossing_axis")) == "x" and absf(delta.x) > 0.001:
+		outbound_direction = "x+" if delta.x > 0.0 else "x-"
+	elif String(portal.get("crossing_axis")) == "z" and absf(delta.z) > 0.001:
+		outbound_direction = "z+" if delta.z > 0.0 else "z-"
+	return direction == outbound_direction
 
 func _direction_for_action(action: Dictionary, entry: Dictionary) -> String:
 	var explicit_direction := String(action.get("direction", ""))

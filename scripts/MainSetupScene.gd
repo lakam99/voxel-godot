@@ -824,6 +824,8 @@ func _process(delta: float) -> void:
     if trace_post_startup:
         startup_loading_step.emit("Runtime frame: npcs")
     var npc_start := Time.get_ticks_usec()
+    if npc_system != null and npc_system.has_method("advance_navigation_publication_frame"):
+        npc_system.advance_navigation_publication_frame()
     var heavy_after_hostiles := not tutorial_realtime_simulation and profiled_ms(frame_start) >= FRAME_BUDGET_DEFER_SIMULATION_MS
     var npc_defer_requested := not tutorial_realtime_simulation and (should_defer_frame_work(frame_start, defer_noncritical_frame_work, FRAME_BUDGET_DEFER_SIMULATION_MS) or heavy_after_hostiles)
     var npc_deferred_total := minf(deferred_npc_simulation_delta + delta, DEFERRED_NPC_SIMULATION_DELTA_CAP)

@@ -72,7 +72,7 @@ class FakeAutonomy:
 	func release_npc_traffic_reservations(_entry_or_id, _reason := "released") -> int:
 		return 0
 
-	func release_npc_door_hold(_actor_or_id, _schedule_close := true) -> void:
+	func release_npc_door_hold(_actor_or_id, _schedule_close := true, _release_evidence: Dictionary = {}) -> void:
 		pass
 
 class OpenWorld:

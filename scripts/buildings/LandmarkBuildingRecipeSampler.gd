@@ -171,7 +171,9 @@ static func sample_castle_grammar(seed: int, context: Dictionary) -> Dictionary:
 	var keep_offset_z := snappedf(rng.randf_range(0.08, 0.25), 0.02)
 	var uses_district_grid := profile == "grand_citadel" and (courtyard_width > 88.0 or courtyard_depth > 80.0)
 	var route_sign := -1.0 if rng.randi_range(0, 1) == 0 else 1.0
-	var courtyard_grid := castle_courtyard_occupancy_lattice(courtyard_width, courtyard_depth, keep_width, keep_depth, keep_offset_z, gate_width, tower_span, uses_district_grid, route_sign)
+	var palace_grammar := sample_castle_palace_grammar(seed, context, keep_width, keep_depth, floor_height, keep_storeys, palace_material_for_seed(seed, context))
+	palace_grammar["entryApproach"] = castle_entry_approach_descriptor(courtyard_depth * keep_offset_z, keep_depth, palace_grammar)
+	var courtyard_grid := castle_courtyard_occupancy_lattice(courtyard_width, courtyard_depth, keep_width, keep_depth, keep_offset_z, gate_width, tower_span, uses_district_grid, route_sign, palace_grammar)
 	# The courtyard is a filled, mirrored settlement lattice. Only the keep
 	# footprint and the continuous gate-to-keep route are reserved; the remaining
 	# flank cells are eligible for real shared residence recipes.  The exact
@@ -187,7 +189,6 @@ static func sample_castle_grammar(seed: int, context: Dictionary) -> Dictionary:
 	var courtyard_building_count := 2 if profile == "compact_keep" else 6 if profile == "walled_bailey" else 12
 	var courtyard_program := sample_district_castle_courtyard_program(rng, courtyard_grid) if uses_district_grid else sample_castle_courtyard_program(rng, courtyard_building_count, courtyard_width, courtyard_depth)
 	var citadel_masonry := sample_citadel_masonry_palette(seed, context)
-	var palace_grammar := sample_castle_palace_grammar(seed, context, keep_width, keep_depth, floor_height, keep_storeys, masonry_palette_residence_material(citadel_masonry))
 	return {
 		"profile": profile,
 		"grandScale": grand_scale,
@@ -227,6 +228,12 @@ static func sample_castle_palace_grammar(seed: int, context: Dictionary, keep_wi
 	var dominant_side := -1.0 if rng.randi_range(0, 1) == 0 else 1.0
 	var plan_wing_depth_bias := 0.0 if plan_family == "u_court" else 0.10 if plan_family == "offset_court" else 0.16
 	var plan_gallery_depth_bias := 0.0 if plan_family == "u_court" else -0.06 if plan_family == "offset_court" else 0.08
+	var hall_roof_families: Array[String] = ["terraced_crown", "offset_crown", "court_pavilions"]
+	var hall_roof_family := hall_roof_families[rng.randi_range(0, hall_roof_families.size() - 1)]
+	if plan_family == "e_court":
+		hall_roof_family = "court_pavilions"
+	elif plan_family == "offset_court":
+		hall_roof_family = "offset_crown"
 	var dominant_gallery_depth_scale := snappedf(rng.randf_range(0.68, 0.84), 0.02)
 	var secondary_gallery_depth_scale := snappedf(rng.randf_range(0.44, 0.64), 0.02)
 	if plan_family == "e_court":
@@ -241,7 +248,7 @@ static func sample_castle_palace_grammar(seed: int, context: Dictionary, keep_wi
 		wing_offset_left = wing_offset_right
 		wing_offset_right = swap_offset
 	return {
-		"schemaVersion": 1,
+		"schemaVersion": 2,
 		"recipeSeed": palace_recipe_seed,
 		"planFamily": plan_family,
 		"palaceMaterial": palace_material,
@@ -259,6 +266,18 @@ static func sample_castle_palace_grammar(seed: int, context: Dictionary, keep_wi
 		"secondaryWingForwardBias": snappedf(rng.randf_range(-0.03, 0.03), 0.01),
 		"hallStoreys": hall_storeys,
 		"hallRoofRiseRatio": snappedf(rng.randf_range(0.17, 0.23), 0.01),
+		"hallRoofFamily": hall_roof_family,
+		"hallRoofCoreWidthRatio": snappedf(rng.randf_range(0.34, 0.46), 0.01),
+		"hallRoofCoreDepthRatio": snappedf(rng.randf_range(0.38, 0.54), 0.01),
+		"hallRoofCoreOffsetXRatio": snappedf(rng.randf_range(0.03, 0.10) * dominant_side, 0.01) if hall_roof_family == "offset_crown" else 0.0,
+		"hallRoofCoreOffsetZRatio": snappedf(rng.randf_range(-0.10, 0.06), 0.01),
+		"hallRoofCoreHeightAdd": snappedf(rng.randf_range(4.6, 7.8), 0.20),
+		"hallRoofPavilionWidthRatio": snappedf(rng.randf_range(0.18, 0.26), 0.01),
+		"hallRoofPavilionDepthRatio": snappedf(rng.randf_range(0.28, 0.40), 0.01),
+		"hallRoofPavilionBaseHeight": snappedf(rng.randf_range(1.6, 2.6), 0.20),
+		"hallRoofDominantPavilionHeight": snappedf(rng.randf_range(2.4, 4.2), 0.20),
+		"hallRoofSecondaryPavilionHeight": snappedf(rng.randf_range(1.2, 2.4), 0.20),
+		"hallRoofParapetHeight": snappedf(rng.randf_range(0.72, 1.18), 0.02),
 		"upperWidthRatio": snappedf(rng.randf_range(0.31, 0.38), 0.01),
 		"upperDepthRatio": snappedf(rng.randf_range(0.35, 0.43), 0.01),
 		"upperOffsetXRatio": snappedf(rng.randf_range(0.05, 0.11) * dominant_side, 0.01),
@@ -266,6 +285,16 @@ static func sample_castle_palace_grammar(seed: int, context: Dictionary, keep_wi
 		"entranceBayWidthRatio": snappedf(rng.randf_range(0.22, 0.28), 0.01),
 		"entranceBayDepthRatio": snappedf(rng.randf_range(0.07, 0.12), 0.01),
 		"entranceBayHeightRatio": snappedf(rng.randf_range(0.76, 0.88), 0.02),
+		"entranceTowerWidthRatio": snappedf(rng.randf_range(0.38, 0.50), 0.01),
+		"entranceTowerDepthRatio": snappedf(rng.randf_range(0.08, 0.14), 0.01),
+		"entranceTowerHeightAdd": snappedf(rng.randf_range(1.4, 3.4), 0.20),
+		"entranceTowerRoofRise": snappedf(rng.randf_range(3.6, 5.4), 0.20),
+		"entrancePortalHeightRatio": snappedf(rng.randf_range(0.48, 0.62), 0.01),
+		"entrancePortalWidthRatio": snappedf(rng.randf_range(0.48, 0.60), 0.01),
+		"entranceApproachWidthAdd": snappedf(rng.randf_range(1.6, 3.0), 0.20),
+		"facadeBayCount": rng.randi_range(2, 4),
+		"facadeWindowLevelCount": rng.randi_range(2, 3),
+		"facadeStringCourseCount": rng.randi_range(2, 3),
 		"entranceFlankStepRatio": snappedf(rng.randf_range(0.10, 0.15), 0.01),
 		"rotundaRootWidthRatio": snappedf(rng.randf_range(0.24, 0.31), 0.01),
 		"rotundaRootProjectionRatio": snappedf(rng.randf_range(0.04, 0.08), 0.01),
@@ -325,6 +354,10 @@ static func masonry_palette_residence_material(palette: Dictionary) -> String:
 		if String(material_value) == "painted_brick_cream":
 			return "painted_brick_cream"
 	return String(residence_materials[0]) if not residence_materials.is_empty() else "painted_brick_cream"
+
+
+static func palace_material_for_seed(seed: int, context: Dictionary) -> String:
+	return "aged_castle_stone"
 
 
 static func sample_citadel_masonry_palette(seed: int, context: Dictionary) -> Dictionary:
@@ -455,7 +488,7 @@ static func sample_district_castle_courtyard_program(rng: RandomNumberGenerator,
 	return program
 
 
-static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard_depth := 0.0, keep_width := 0.0, keep_depth := 0.0, keep_offset_z := 0.0, gate_width := 0.0, tower_span := 0.0, district_grid := false, route_sign := 1.0) -> Dictionary:
+static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard_depth := 0.0, keep_width := 0.0, keep_depth := 0.0, keep_offset_z := 0.0, gate_width := 0.0, tower_span := 0.0, district_grid := false, route_sign := 1.0, palace_grammar: Dictionary = {}) -> Dictionary:
 	if district_grid:
 		# Grand citadels use a processional graph rather than a centred boulevard.
 		# The route makes two deterministic turns: the first terminates the gate view
@@ -482,9 +515,25 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 		var terrace_step_height := 1.80
 		var keep_center_z := courtyard_depth * keep_offset_z
 		var keep_front_z := keep_center_z - keep_depth * 0.5
+		var entry_approach: Dictionary = palace_grammar.get("entryApproach", {}) as Dictionary
+		var palace_entry_route_terminal_z := float(entry_approach.get("routeTerminalZ", keep_front_z - 4.80))
 		var turn_offset := route_sign * clampf(courtyard_width * 0.15, 12.0, 17.0)
 		var first_turn_z := float(row_centers[0]) + cell_spacing * 0.15 if not row_centers.is_empty() else -courtyard_depth * 0.30
 		var final_turn_z := keep_front_z - clampf(keep_depth * 0.45, 10.0, 14.0)
+		var stair_run := 7.0 * 0.48
+		var processional_tread_half_depth := 0.26
+		var entry_ramp_start_z := float(entry_approach.get("rampStartZ", palace_entry_route_terminal_z - 3.00))
+		var second_stair_end_z := entry_ramp_start_z
+		# add_citadel_processional_steps places its final tread one nominal tread
+		# behind the supplied centre. Its physical front edge is therefore centre
+		# minus 0.22m (0.48m tread with 0.04m overlap).
+		var second_stair_center_z := second_stair_end_z + 0.22
+		var second_stair_start_z := second_stair_center_z - stair_run - processional_tread_half_depth
+		# The turn must clear the first physical tread. Otherwise the street
+		# publisher correctly removes its overlapping roadbed and leaves a gap at
+		# the turn's forward edge. This keeps the route ordered: turn -> roadbed
+		# -> stairs -> forecourt.
+		final_turn_z = minf(final_turn_z, second_stair_start_z - route_half_width)
 		var route_centers: Array[float] = []
 		for resolved_row_index in range(rows):
 			var row_z := float(row_centers[resolved_row_index])
@@ -532,11 +581,16 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 					left_center_z += gate_room_depth
 					right_center_z += gate_room_depth
 					left_center_x -= route_sign * 1.6
-					# The route-facing shop sits beyond the turn rather than inside its
-					# stair approach. Its public facade terminates the gate court while
-					# preserving a full player/NPC clearance volume around route_x.
-					var route_facing_shift := clampf(outer_center_limit - absf(right_center_x) - 6.0, 3.2, 10.0)
-					right_center_x += route_sign * route_facing_shift
+					# The route-facing shop sits beyond the *entire* horizontal turn,
+					# not merely beyond the lane centre. Its reserved lot envelope must
+					# leave enough room for its transformed floor/eaves and the shared
+					# player/NPC motor corridor on either sign of the generated bend.
+					var turn_outer_edge := turn_offset + route_sign * route_half_width
+					var lot_clearance := lot_pitch * 0.5 + 1.50
+					if route_sign > 0.0:
+						right_center_x = maxf(right_center_x, turn_outer_edge + lot_clearance)
+					else:
+						left_center_x = minf(left_center_x, turn_outer_edge - lot_clearance)
 				if band_index == 1:
 					left_center_x = maxf(-outer_center_limit, left_center_x)
 					right_center_x = minf(outer_center_limit, right_center_x)
@@ -599,7 +653,6 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 				})
 			cells.append(row)
 		var boulevard_front_z := -half_depth + tower_span * 0.5 + 1.0
-		var stair_run := 7.0 * 0.48
 		var first_transition_index := 0
 		var second_transition_index := maxi(0, row_centers.size() - 1)
 		for transition_index in range(row_centers.size()):
@@ -611,15 +664,22 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 				break
 		var first_stair_center_z := float(row_centers[first_transition_index]) - 1.6
 		var first_stair_start_z := first_stair_center_z - stair_run
-		var second_stair_center_z := float(row_centers[second_transition_index]) - 1.6
-		var second_stair_start_z := second_stair_center_z - stair_run
+		# The entry landing is the single owner of the final processional seam.
+		# The compound builder consumes this same centre override when publishing
+		# the real stair geometry.
+		var processional_step_centers := {str(second_transition_index): second_stair_center_z}
 		street_records.append({"id": "processional_00_gate_lane", "x": 0.0, "z": (boulevard_front_z + first_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": first_turn_z - boulevard_front_z, "elevation": 0.0})
 		street_records.append({"id": "processional_01_first_turn", "x": turn_offset * 0.5, "z": first_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": 0.0})
 		street_records.append({"id": "processional_02a_civic_approach", "x": turn_offset, "z": (first_turn_z + first_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, first_stair_start_z - first_turn_z), "elevation": 0.0})
 		street_records.append({"id": "processional_02b_civic_climb", "x": turn_offset, "z": (first_stair_center_z + final_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, final_turn_z - first_stair_center_z), "elevation": terrace_step_height})
 		street_records.append({"id": "processional_03_final_turn", "x": turn_offset * 0.5, "z": final_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": terrace_step_height})
-		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, second_stair_start_z - final_turn_z), "elevation": terrace_step_height})
-		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_center_z + keep_front_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, keep_front_z - second_stair_center_z), "elevation": terrace_step_height * 2.0})
+		var final_stair_owner_ids: Array[String] = []
+		for final_stair_step_index in range(1, 8):
+			final_stair_owner_ids.append("castle_terrace_stair_%02d_%02d" % [second_transition_index, final_stair_step_index])
+		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, second_stair_start_z - final_turn_z), "elevation": terrace_step_height, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_start_z, "handoffTransitionOwnerId": String(final_stair_owner_ids.front()), "handoffTransitionSemantic": "castle_processional_step"})
+		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_start_z + second_stair_end_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, second_stair_end_z - second_stair_start_z), "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_stairs", "transitionOwned": true, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_end_z, "handoffSourceOwnerId": String(final_stair_owner_ids.back()), "handoffSourceSemantic": "castle_processional_step", "handoffTransitionOwnerId": "castle_keep_palace_entry_forecourt", "handoffTransitionSemantic": "castle_keep_palace_entry_forecourt"})
+		var entry_transition_owner_ids: Array[String] = ["castle_keep_palace_entry_forecourt"]
+		street_records.append({"id": "processional_04c_palace_entry_transition", "x": 0.0, "z": (entry_ramp_start_z + palace_entry_route_terminal_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, palace_entry_route_terminal_z - entry_ramp_start_z), "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_forecourt", "transitionOwned": true, "allowedTransitionOwnerIds": entry_transition_owner_ids})
 		var urban_rooms := {
 			"gate": {"center": Vector3(0.0, 0.0, first_turn_z - cell_spacing * 0.28), "width": absf(turn_offset) + route_half_width * 2.0, "depth": cell_spacing * 0.72, "sightlineTarget": Vector3(turn_offset, terrace_step_height + 2.2, first_stair_center_z + 2.0)},
 			"palace": {"center": Vector3(0.0, terrace_step_height * 2.0, (final_turn_z + keep_front_z) * 0.5), "width": keep_width * 1.55, "depth": keep_front_z - final_turn_z, "sightlineTarget": Vector3(0.0, terrace_step_height * 2.0 + clampf(keep_depth * 0.28, 7.0, 10.0), keep_center_z)}
@@ -646,6 +706,7 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 			"firstTurnZ": first_turn_z,
 			"finalTurnZ": final_turn_z,
 			"terraceStepHeight": terrace_step_height,
+			"processionalStepCenters": processional_step_centers,
 			"cells": cells,
 			"lotPairs": lot_pairs,
 			"lotPairCount": lot_pairs.size(),
@@ -654,6 +715,8 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 			"routeNecks": route_necks,
 			"reserved": "keep_palace_court_and_bent_processional_route"
 		}
+
+
 	# 1 means a residence may claim the cell; 0 is permanently reserved for the
 	# keep footprint or its public gate-to-door approach.  A later footprint
 	# check may reject a cell for a tower or an unusually broad source recipe,
@@ -671,6 +734,15 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 		],
 		"reserved": "keep_and_gate_to_keep_route"
 	}
+
+
+static func castle_entry_approach_descriptor(keep_center_z: float, keep_depth: float, palace_grammar: Dictionary) -> Dictionary:
+	var keep_front_z := keep_center_z - keep_depth * 0.5
+	var civic_core_depth := clampf(keep_depth * float(palace_grammar.get("hallRoofCoreDepthRatio", 0.46)), 9.0, keep_depth * 0.62)
+	var entrance_tower_depth := clampf(civic_core_depth * float(palace_grammar.get("entranceTowerDepthRatio", 0.11)), 4.6, 8.8)
+	var portal_front_z := keep_front_z - 0.04 - entrance_tower_depth
+	var ramp_approach_length := 3.00
+	return {"portalFrontZ": portal_front_z, "routeTerminalZ": portal_front_z - 0.50, "terminalInset": 0.50, "rampApproachLength": ramp_approach_length, "rampStartZ": portal_front_z - ramp_approach_length, "civicCoreDepth": civic_core_depth, "entranceTowerDepth": entrance_tower_depth}
 
 
 static func normalized_context(raw_context: Dictionary, family: String) -> Dictionary:

@@ -29,7 +29,7 @@ func configure(next_visual_root: Node3D, next_skeleton: Skeleton3D, next_anatomy
 	arm_left_index = skeleton.find_bone("ArmLeft")
 	arm_right_index = skeleton.find_bone("ArmRight")
 	spine_index = skeleton.find_bone("Spine")
-	visual_yaw = visual_root.global_rotation.y if visual_root != null else 0.0
+	visual_yaw = visual_root.global_rotation.y if visual_root != null and visual_root.is_inside_tree() else (visual_root.rotation.y if visual_root != null else 0.0)
 
 
 func apply_velocity(world_velocity: Vector3, delta: float) -> void:

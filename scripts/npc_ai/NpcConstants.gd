@@ -12,7 +12,20 @@ const NPC_NAV_ENABLE_ROUTE_TICKET_PIPELINE := true
 const NPC_NAV_DEBUG_ROUTE_REASONS := true
 
 const CELL_SIZE := 1.35
+const ROUTINE_TARGET_SNAP_DISTANCE := CELL_SIZE * 1.65
+const ROUTINE_START_SNAP_DISTANCE := CELL_SIZE * 3.1
 const DOOR_PORTAL_PATH_POINT_EPSILON := CELL_SIZE * 0.02
+
+
+static func route_snap_distances(route_kind: String, arrival_radius: float, routine_snap_enabled := true) -> Dictionary:
+	var target_snap := maxf(arrival_radius, CELL_SIZE * 0.95)
+	var start_snap := target_snap
+	if routine_snap_enabled and route_kind in ["guard", "work", "forage", "job", "idle", "move"]:
+		target_snap = maxf(target_snap, ROUTINE_TARGET_SNAP_DISTANCE)
+		start_snap = maxf(start_snap, ROUTINE_START_SNAP_DISTANCE)
+	return {"start": start_snap, "target": target_snap}
+const DOOR_PORTAL_CLEARANCE_DEPTH_CELLS := 2.35
+const DOOR_PORTAL_CLEARANCE_DEPTH := CELL_SIZE * DOOR_PORTAL_CLEARANCE_DEPTH_CELLS
 const NAV_TILE_CELL_SIZE := 16
 const NAV_BUILD_MAX_JOBS_PER_TICK := 1
 const NAV_BUILD_HARD_SLICE_USEC := 4000
@@ -126,4 +139,5 @@ const DEFAULT_DOOR_MINIMUM_WIDTH := 0.78
 const DEFAULT_HEADROOM_MARGIN := 0.08
 const DEFAULT_PERSONAL_SPACE_MARGIN := 0.10
 const TRAFFIC_RETREAT_CLEARANCE := DEFAULT_NPC_RADIUS * 2.0 + DEFAULT_PERSONAL_SPACE_MARGIN
+const NAVIGATION_TRANSITION_PHASE_RADIUS := 0.18
 const TRAFFIC_RETREAT_DISTANCE_SCALE := 0.45

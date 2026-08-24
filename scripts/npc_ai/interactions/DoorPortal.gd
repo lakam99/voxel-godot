@@ -97,11 +97,11 @@ func rebuild_geometry() -> void:
 	var leaf_span_x := maxf(cell, absf(max_x - min_x) + cell)
 	var leaf_span_z := maxf(cell, absf(max_z - min_z) + cell)
 	var threshold_size := Vector3(leaf_span_x, height, cell * 0.72)
-	var clearance_size := Vector3(leaf_span_x + cell * 0.25, height, cell * 2.35)
+	var clearance_size := Vector3(leaf_span_x + cell * 0.25, height, NpcConstantsScript.DOOR_PORTAL_CLEARANCE_DEPTH)
 	var sweep_size := Vector3(leaf_span_x + cell * 0.35, height, cell * 1.45)
 	if crossing_axis == "x":
 		threshold_size = Vector3(cell * 0.72, height, leaf_span_z)
-		clearance_size = Vector3(cell * 2.35, height, leaf_span_z + cell * 0.25)
+		clearance_size = Vector3(NpcConstantsScript.DOOR_PORTAL_CLEARANCE_DEPTH, height, leaf_span_z + cell * 0.25)
 		sweep_size = Vector3(cell * 1.45, height, leaf_span_z + cell * 0.35)
 	threshold_bounds = AABB(center - threshold_size * 0.5, threshold_size)
 	clearance_bounds = AABB(center - clearance_size * 0.5, clearance_size)

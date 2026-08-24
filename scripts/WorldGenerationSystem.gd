@@ -3,6 +3,7 @@ class_name WorldGenerationSystem
 
 const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
 const BiomeRegionFieldScript := preload("res://scripts/world/BiomeRegionField.gd")
+const CitadelTerrainOperationPolicyScript := preload("res://scripts/world/CitadelTerrainOperationPolicy.gd")
 
 const UNDERGROUND_AIR_BIOME := "underground_air"
 const NATURAL_SURFACE_MIN_OVERBURDEN_CELLS := 3.0
@@ -26,6 +27,7 @@ var natural_surface_y_cache := {}
 var base_surface_y_cache := {}
 var surface_biome_cache := {}
 var minimum_overburden_cache := {}
+var landmark_sites_by_region_cache := {}
 var terrain_volume_service
 var biome_region_field = BiomeRegionFieldScript.new()
 
@@ -45,6 +47,7 @@ func reset() -> void:
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
 	minimum_overburden_cache.clear()
+	landmark_sites_by_region_cache.clear()
 
 func reset_for_seed() -> void:
 	excavation_brushes.clear()
@@ -56,6 +59,7 @@ func reset_for_seed() -> void:
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
 	minimum_overburden_cache.clear()
+	landmark_sites_by_region_cache.clear()
 
 func invalidate_generated_surface_caches() -> void:
 	# A deterministic settlement manifest changed before a new terrain generator
@@ -67,6 +71,7 @@ func invalidate_generated_surface_caches() -> void:
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
 	minimum_overburden_cache.clear()
+	landmark_sites_by_region_cache.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("invalidate_generated_surface_caches"):
 		terrain_volume_service.invalidate_generated_surface_caches()
 
@@ -222,6 +227,9 @@ func generated_solid_material_for_cell(cell: Vector3i, surface_y: float, surface
 	var s := cell_size()
 	if cell.y <= world_bottom_cell_y() + 1:
 		return "bedrock"
+	var landmark_material := landmark_material_for_cell(cell, depth)
+	if landmark_material != "":
+		return landmark_material
 	if depth <= s * 1.20:
 		return top_material_for_biome(surface_biome)
 	if depth <= s * 4.65:
@@ -739,6 +747,9 @@ func material_from_sample_components(position: Vector3, density: float, surface_
 	if density < 0.0:
 		return "air"
 	var depth := maxf(0.0, surface_y - position.y)
+	var landmark_material := landmark_material_for_cell(cell, depth)
+	if landmark_material != "":
+		return landmark_material
 	if depth <= cell_size() * 1.20:
 		return top_material_for_biome(surface_biome)
 	if depth <= cell_size() * 4.65:
@@ -747,6 +758,27 @@ func material_from_sample_components(position: Vector3, density: float, surface_
 	if ore != "":
 		return ore
 	return "stone"
+
+func landmark_material_for_cell(cell: Vector3i, depth := 0.0) -> String:
+	if depth > cell_size() * 4.65:
+		return ""
+	var site := landmark_site_for_surface_cell3(cell)
+	if site.is_empty():
+		return ""
+	var terrain: Dictionary = site.get("terrain", {}) if site.get("terrain", {}) is Dictionary else {}
+	var operations: Array = terrain.get("terrainOperations", []) if terrain.get("terrainOperations", []) is Array else []
+	var center: Variant = site.get("center", Vector2i.ZERO)
+	if not (center is Vector2i):
+		return ""
+	var center_cell: Vector2i = center
+	var distance := Vector2(float(cell.x - center_cell.x), float(cell.z - center_cell.y)).length()
+	for operation_value in operations:
+		if not (operation_value is Dictionary):
+			continue
+		var operation: Dictionary = operation_value
+		if distance <= float(operation.get("radiusCells", 0)):
+			return String(operation.get("material", ""))
+	return ""
 
 func underground_air_density_at(position: Vector3, surface_y: float, depth_cells: float) -> float:
 	if position.y <= float(world_bottom_cell_y() + 2) * cell_size():
@@ -1001,6 +1033,11 @@ func base_surface_y_for_cell(cell: Vector3i) -> float:
 		var value: float = lerp(level, natural, eased)
 		base_surface_y_cache[key] = value
 		return value
+	var landmark := landmark_site_for_surface_cell3(cell)
+	if not landmark.is_empty():
+		var landmark_value := landmark_surface_y_for_cell(landmark, cell)
+		base_surface_y_cache[key] = landmark_value
+		return landmark_value
 	var value: float = natural_surface_y_for_cell(cell)
 	base_surface_y_cache[key] = value
 	return value
@@ -1045,6 +1082,27 @@ func natural_surface_y_for_cell(cell: Vector3i) -> float:
 	var value: float = clamp(round(raw / terrace) * terrace, float(main.MIN_HEIGHT), float(main.MAX_HEIGHT))
 	natural_surface_y_cache[key] = value
 	return value
+
+func natural_landmark_site_sample(cell: Vector2i) -> Dictionary:
+	var surface_cell := Vector3i(cell.x, 0, cell.y)
+	var surface_y := natural_surface_y_for_cell(surface_cell)
+	var minimum := surface_y
+	var maximum := surface_y
+	for offset_z in range(-2, 3):
+		for offset_x in range(-2, 3):
+			var nearby := natural_surface_y_for_cell(Vector3i(cell.x + offset_x, 0, cell.y + offset_z))
+			minimum = minf(minimum, nearby)
+			maximum = maxf(maximum, nearby)
+	var biome := "ocean" if surface_y < float(main.WATER_LEVEL) + 0.3 else "beach" if surface_y < float(main.WATER_LEVEL) + 1.7 else String(biome_region_for_cell3(surface_cell).get("biome", "plains"))
+	return {
+		"surfaceY": surface_y,
+		"solid": surface_y > float(main.WATER_LEVEL) + 1.2,
+		"fluid": "",
+		"biome": biome,
+		"inTown": not town_region_at_cell3(surface_cell).is_empty(),
+		"variation": maximum - minimum,
+		"waterLevel": float(main.WATER_LEVEL)
+	}
 
 func surface_biome_for_cell3(cell: Vector3i) -> String:
 	var key := Vector2i(cell.x, cell.z)
@@ -1264,6 +1322,38 @@ func town_region_for_surface_cell3(cell: Vector3i) -> Dictionary:
 				best_town = town
 				best_distance = distance
 	return best_town
+
+func landmark_site_for_surface_cell3(cell: Vector3i) -> Dictionary:
+	if main == null or not main.has_method("landmark_sites_for_region"):
+		return {}
+	const REGION_SPAN := 420
+	var region_x := floori(float(cell.x) / float(REGION_SPAN))
+	var region_z := floori(float(cell.z) / float(REGION_SPAN))
+	var key := Vector2i(region_x, region_z)
+	var sites_value = landmark_sites_by_region_cache.get(key, null)
+	if sites_value == null:
+		sites_value = main.call("landmark_sites_for_region", region_x, region_z, REGION_SPAN)
+		landmark_sites_by_region_cache[key] = sites_value.duplicate(true) if sites_value is Array else []
+	if not (sites_value is Array):
+		return {}
+	for site_value in sites_value:
+		if not (site_value is Dictionary):
+			continue
+		var site: Dictionary = site_value
+		var terrain: Dictionary = site.get("terrain", {}) if site.get("terrain", {}) is Dictionary else {}
+		var bounds: Dictionary = terrain.get("reservedBounds", {}) if terrain.get("reservedBounds", {}) is Dictionary else {}
+		var minimum: Variant = bounds.get("minCell", null)
+		var maximum: Variant = bounds.get("maxCell", null)
+		if not (minimum is Vector2i) or not (maximum is Vector2i):
+			continue
+		var min_cell: Vector2i = minimum
+		var max_cell: Vector2i = maximum
+		if cell.x >= min_cell.x and cell.x <= max_cell.x and cell.z >= min_cell.y and cell.z <= max_cell.y:
+			return site
+	return {}
+
+func landmark_surface_y_for_cell(site: Dictionary, cell: Vector3i) -> float:
+	return CitadelTerrainOperationPolicyScript.surface_y_for_cell(site, cell, Callable(self, "natural_surface_y_for_cell"))
 
 func town_slope_apron_cells(town: Dictionary) -> int:
 	if main == null:

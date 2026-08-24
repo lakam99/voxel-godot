@@ -17,6 +17,7 @@ var collision_count := 0
 var visual_piece_count := 0
 var publication_usec := 0
 var furnishing_navigation_manifest: Dictionary = {}
+var active_publication_started_usec := 0
 
 
 func _init() -> void:
@@ -35,38 +36,55 @@ func _init() -> void:
 
 
 func publish(plan, parent: Node3D) -> Dictionary:
-	clear_published()
-	if plan == null or parent == null:
+	if not begin_publication(plan, parent):
 		return summary()
-	var started := Time.get_ticks_usec()
-	for part in plan.parts:
-		if part != null:
-			publish_part(part, parent)
-	publish_navigation_manifest(plan, parent)
-	publication_usec = Time.get_ticks_usec() - started
-	return summary()
+	publish_part_batch(plan, parent, 0, plan.parts.size())
+	return finish_publication(plan, parent)
 
 
 func publish_incremental(plan, parent: Node3D, parts_per_frame := 5) -> Dictionary:
 	# Matches publish() exactly, but yields between bounded record batches. A
 	# loading UI can therefore continue presenting frames while real furnishing
 	# visuals and their collision bodies publish from the shared plan.
+	if not begin_publication(plan, parent):
+		return summary()
+	var frame_budget := maxi(1, parts_per_frame)
+	var part_index := 0
+	while part_index < plan.parts.size():
+		part_index = publish_part_batch(plan, parent, part_index, frame_budget)
+		if part_index < plan.parts.size():
+			await parent.get_tree().process_frame
+	return finish_publication(plan, parent)
+
+
+func begin_publication(plan, parent: Node3D) -> bool:
 	clear_published()
 	if plan == null or parent == null:
+		return false
+	active_publication_started_usec = Time.get_ticks_usec()
+	return true
+
+
+func publish_part_batch(plan, parent: Node3D, start_index: int, max_parts: int) -> int:
+	if plan == null or parent == null:
+		return start_index
+	var part_index := clampi(start_index, 0, plan.parts.size())
+	var processed := 0
+	while part_index < plan.parts.size() and processed < maxi(1, max_parts):
+		var part = plan.parts[part_index]
+		part_index += 1
+		processed += 1
+		if part != null:
+			publish_part(part, parent)
+	return part_index
+
+
+func finish_publication(plan, parent: Node3D) -> Dictionary:
+	if plan == null or parent == null:
 		return summary()
-	var started := Time.get_ticks_usec()
-	var frame_budget := maxi(1, parts_per_frame)
-	var published_this_frame := 0
-	for part in plan.parts:
-		if part == null:
-			continue
-		publish_part(part, parent)
-		published_this_frame += 1
-		if published_this_frame >= frame_budget:
-			published_this_frame = 0
-			await parent.get_tree().process_frame
 	publish_navigation_manifest(plan, parent)
-	publication_usec = Time.get_ticks_usec() - started
+	publication_usec = Time.get_ticks_usec() - active_publication_started_usec if active_publication_started_usec > 0 else 0
+	active_publication_started_usec = 0
 	return summary()
 
 
@@ -78,6 +96,7 @@ func clear_published() -> void:
 	collision_count = 0
 	visual_piece_count = 0
 	publication_usec = 0
+	active_publication_started_usec = 0
 	furnishing_navigation_manifest.clear()
 
 
@@ -325,6 +344,7 @@ func publish_hearth(part, parent: Node3D) -> void:
 	add_box(parent, Vector3(1.68, 1.50, 0.64), Vector3(0.0, 0.75, 0.0), material_for("fired_brick", part), "HearthBody")
 	add_box(parent, Vector3(0.92, 0.78, 0.075), Vector3(0.0, 0.72, -0.36), material_for("mortar", part), "Firebox")
 	add_box(parent, Vector3(0.58, 0.20, 0.055), Vector3(0.0, 0.58, -0.41), material_for("candle_flame", part), "HearthGlow")
+	add_practical_light(parent, Vector3(0.0, 0.74, -0.26), Color(1.0, 0.42, 0.16), 1.65, 6.0)
 	add_box(parent, Vector3(1.98, 0.15, 0.78), Vector3(0.0, 1.52, 0.0), material_for("timber_beam", part), "HearthMantel")
 	add_box(parent, Vector3(0.40, 0.38, 0.45), Vector3(0.0, 1.75, 0.04), material_for("fired_brick", part), "HearthChimney")
 
@@ -361,6 +381,17 @@ func publish_candle(part, parent: Node3D) -> void:
 	# a tabletop candle read as a duplicated lower half rather than a fixture.
 	add_cylinder(parent, 0.078, 0.30, Vector3(0.0, 0.15, 0.0), material_for("candle_wax", part), "CandleWax")
 	add_sphere(parent, 0.075, Vector3(0.0, 0.39, 0.0), material_for("candle_flame", part), "CandleFlame", Vector3(0.62, 1.34, 0.62))
+	add_practical_light(parent, Vector3(0.0, 0.42, 0.0), Color(1.0, 0.56, 0.26), 0.55, 3.0)
+
+
+func add_practical_light(parent: Node3D, position: Vector3, color: Color, energy: float, light_range: float) -> void:
+	var light := OmniLight3D.new()
+	light.position = position
+	light.light_color = color
+	light.light_energy = energy
+	light.omni_range = light_range
+	light.shadow_enabled = false
+	parent.add_child(light)
 
 
 func publish_pot_plant(part, parent: Node3D) -> void:

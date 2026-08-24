@@ -132,6 +132,63 @@ static func portal_volume_occupied(portal, position: Vector3, volume: String, ra
 	expanded.size.y += NpcConstantsScript.CELL_SIZE
 	return expanded.has_point(position)
 
+
+static func exterior_clearance_target(entry: Dictionary, portal, fallback: Vector3, arrival_radius := 0.0) -> Vector3:
+	if portal == null:
+		return fallback
+	var bounds_value = portal.get("clearance_bounds")
+	if not (bounds_value is AABB):
+		return fallback
+	var bounds: AABB = bounds_value
+	if bounds.size == Vector3.ZERO:
+		return fallback
+	var outward := exterior_direction_for_entry(entry)
+	if outward.length_squared() <= 0.0001:
+		return fallback
+	var expanded := bounds.grow(NpcConstantsScript.DEFAULT_NPC_RADIUS + maxf(0.0, arrival_radius) + NpcConstantsScript.DOOR_PORTAL_PATH_POINT_EPSILON)
+	var center := expanded.get_center()
+	var extent := absf(outward.x) * expanded.size.x * 0.5 + absf(outward.z) * expanded.size.z * 0.5
+	var fallback_projection := (fallback - center).dot(outward)
+	var target := center + outward * maxf(extent + NpcConstantsScript.DOOR_PORTAL_PATH_POINT_EPSILON, fallback_projection)
+	target.y = fallback.y
+	return target
+
+
+static func has_exterior_clearance(entry: Dictionary, portal, position: Vector3) -> bool:
+	var home_status := status(entry, position, portal)
+	if bool(home_status.get("strictInside", false)) or not bool(home_status.get("clearOfDoor", false)):
+		return false
+	var outward := exterior_direction_for_entry(entry)
+	if outward.length_squared() <= 0.0001:
+		return true
+	var bounds_value = portal.get("clearance_bounds") if portal != null else null
+	if bounds_value is AABB:
+		var bounds: AABB = bounds_value
+		if bounds.size != Vector3.ZERO:
+			var expanded := bounds.grow(NpcConstantsScript.DEFAULT_NPC_RADIUS)
+			var center := expanded.get_center()
+			var extent := absf(outward.x) * expanded.size.x * 0.5 + absf(outward.z) * expanded.size.z * 0.5
+			return (position - center).dot(outward) > extent + NpcConstantsScript.DOOR_PORTAL_PATH_POINT_EPSILON
+	var interior = entry.get("doorInteriorPosition", Vector3.INF)
+	var exterior = entry.get("doorExteriorPosition", Vector3.INF)
+	if interior is Vector3 and exterior is Vector3 and (interior as Vector3).is_finite() and (exterior as Vector3).is_finite():
+		return (position - ((interior as Vector3 + exterior as Vector3) * 0.5)).dot(outward) > NpcConstantsScript.DOOR_PORTAL_PATH_POINT_EPSILON
+	return true
+
+
+static func exterior_direction_for_entry(entry: Dictionary) -> Vector3:
+	var interior = entry.get("doorInteriorPosition", Vector3.INF)
+	var exterior = entry.get("doorExteriorPosition", Vector3.INF)
+	if interior is Vector3 and exterior is Vector3 and (interior as Vector3).is_finite() and (exterior as Vector3).is_finite():
+		var direction: Vector3 = (exterior as Vector3) - (interior as Vector3)
+		direction.y = 0.0
+		if direction.length_squared() > 0.0001:
+			return direction.normalized()
+	var inward := inward_direction_for_entry(entry)
+	if inward != Vector2i.ZERO:
+		return Vector3(-float(inward.x), 0.0, -float(inward.y))
+	return Vector3.ZERO
+
 static func door_cell_for_entry(entry: Dictionary) -> Vector2i:
 	var home_cell := cell_value(entry.get("homeCell", INVALID_CELL), INVALID_CELL)
 	var porch_cell := cell_value(entry.get("porchCell", home_cell), home_cell)

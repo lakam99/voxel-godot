@@ -39,6 +39,21 @@ const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement
 const NpcRouteLeaseExecutorScript := preload("res://scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd")
 const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
 
+class PassthroughCrowdVelocityService:
+	extends RefCounted
+
+	func resolve_safe_velocity(_entry: Dictionary, _body: CharacterBody3D, desired_velocity: Vector3, _context := {}) -> Dictionary:
+		return {
+			"active": false,
+			"safeVelocity": desired_velocity,
+			"status": "synthetic_callback",
+			"reason": "route_executor_contract",
+			"callbackFresh": true,
+			"fallbackUsed": false,
+			"movementBlocked": false,
+			"activeRegistrationCount": 1
+		}
+
 class FakeAuthorityRouteDelegate:
 	extends RefCounted
 	var route := {}
@@ -430,6 +445,24 @@ func contract_cases() -> Array[Dictionary]:
 			"callable": Callable(self, "test_route_authority_v2_probe_blocked_before_movement")
 		},
 		{
+			"id": "npc_contract_route_authority_v2_dynamic_static_body_is_retryable",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_dynamic_static_body_is_retryable")
+		},
+		{
+			"id": "npc_contract_dynamic_actor_not_baked_as_static_prop",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_dynamic_actor_not_baked_as_static_prop")
+		},
+		{
+			"id": "npc_contract_static_prop_reserves_actor_clearance",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_static_prop_reserves_actor_clearance")
+		},
+		{
 			"id": "npc_contract_route_authority_v2_repairs_static_probe_block",
 			"suite": "contract",
 			"timeModes": ["day", "night"],
@@ -452,6 +485,12 @@ func contract_cases() -> Array[Dictionary]:
 			"suite": "contract",
 			"timeModes": ["day", "night"],
 			"callable": Callable(self, "test_route_lease_executor_follows_v2_lease")
+		},
+		{
+			"id": "npc_contract_route_lease_executor_requires_crowd_authority",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_lease_executor_requires_crowd_authority")
 		},
 		{
 			"id": "npc_contract_route_lease_executor_accepts_crossed_waypoint",
@@ -694,6 +733,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_discards_unresolved_building_link_endpoints", "test_navmesh_discards_unresolved_building_link_endpoints"],
 		["npc_navmesh_chunk_unload_cleans_region", "test_navmesh_chunk_unload_cleans_region"],
 		["npc_navmesh_door_portal_installs_nav_link", "test_navmesh_door_portal_installs_nav_link"],
+		["npc_navmesh_cross_region_door_link_lifecycle", "test_navmesh_cross_region_door_link_lifecycle"],
 		["npc_navmesh_route_through_door_link_emits_action", "test_navmesh_route_through_door_link_emits_action"],
 		["npc_navmesh_actor_path_status", "test_navmesh_actor_path_status"],
 		["npc_navmesh_door_state_toggles_nav_link", "test_navmesh_door_state_toggles_nav_link"],
@@ -1688,6 +1728,84 @@ func test_route_authority_v2_probe_blocked_before_movement(_mode: String) -> Dic
 		{ "blocked": blocked, "moving": moving, "proof": proof }
 	)
 
+func test_route_authority_v2_dynamic_static_body_is_retryable(_mode: String) -> Dictionary:
+	var probe := FakeRouteAuthorityV2Probe.new()
+	probe.response = {
+		"ok": false,
+		"status": "blocked",
+		"reason": "blocked_capsule_probe",
+		"authoritative": true,
+		"sampleCount": 2,
+		"details": {
+			"collider": "Wildlife_boar",
+			"class": "StaticBody3D",
+			"kind": "prop",
+			"obstacleClass": "dynamic_actor",
+			"cell": Vector2i(1, 0)
+		}
+	}
+	var authority := NpcRouteAuthorityV2Script.new()
+	authority.setup(null, null, probe)
+	var entry := { "id": "v2-dynamic-static-body-npc" }
+	var request: Dictionary = authority.submit_request(entry, { "kind": "move", "targetCell": Vector2i(2, 0) }, { "priority": 120 })
+	var request_id := String(request.get("requestId", ""))
+	var blocked: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(), { "kind": "move", "targetCell": Vector2i(2, 0) })
+	var moving: Dictionary = authority.begin_moving(request_id, "should_wait_for_dynamic_clearance")
+	var passed := String(blocked.get("state", "")) == "blocked_dynamic" \
+		and not bool(blocked.get("hasLease", true)) \
+		and not bool(moving.get("ok", true)) \
+		and String(moving.get("reason", "")) == "route_not_ready"
+	return outcome(
+		passed,
+		"blocked=%s moving=%s" % [JSON.stringify(blocked), JSON.stringify(moving)],
+		["v2_moving_static_body_is_dynamic_block", "v2_dynamic_block_remains_unleased", "v2_static_wall_contract_remains_separate"],
+		{ "blocked": blocked, "moving": moving }
+	)
+
+func test_dynamic_actor_not_baked_as_static_prop(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var wildlife := StaticBody3D.new()
+	wildlife.set_meta("kind", "prop")
+	wildlife.set_meta("material", "wildlife")
+	wildlife.set_meta("navigation_obstacle_class", "dynamic_actor")
+	var ore := StaticBody3D.new()
+	ore.set_meta("kind", "prop")
+	ore.set_meta("material", "ironOre")
+	var wildlife_static := adapter.prop_blocks_npc(wildlife)
+	var ore_static := adapter.prop_blocks_npc(ore)
+	wildlife.free()
+	ore.free()
+	var passed := not wildlife_static and ore_static
+	return outcome(
+		passed,
+		"wildlifeStatic=%s oreStatic=%s" % [str(wildlife_static), str(ore_static)],
+		["moving_wildlife_excluded_from_static_nav_publication", "ordinary_props_remain_static_blockers"],
+		{ "wildlifeStatic": wildlife_static, "oreStatic": ore_static }
+	)
+
+func test_static_prop_reserves_actor_clearance(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var prop := StaticBody3D.new()
+	add_child(prop)
+	prop.global_position = Vector3.ZERO
+	adapter.call("_index_prop_clearance", prop, Vector2i.ZERO)
+	var clearance: Dictionary = adapter.get("cached_prop_clearance")
+	var cardinal_cells := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+	var cardinal_reserved := true
+	for cell in cardinal_cells:
+		if clearance.get(cell, null) != prop:
+			cardinal_reserved = false
+	var diagonals_reserved := clearance.has(Vector2i(1, 1))
+	remove_child(prop)
+	prop.free()
+	var passed := cardinal_reserved and not diagonals_reserved
+	return outcome(
+		passed,
+		"clearanceCells=%s" % JSON.stringify(clearance.keys()),
+		["static_prop_reserves_npc_radius", "clearance_is_bounded_to_required_cells"],
+		{ "clearanceCells": clearance.keys(), "cardinalReserved": cardinal_reserved, "diagonalsReserved": diagonals_reserved }
+	)
+
 func test_route_authority_v2_repairs_static_probe_block(_mode: String) -> Dictionary:
 	var probe := FakeSequenceRouteAuthorityV2Probe.new()
 	probe.responses = [
@@ -1892,7 +2010,7 @@ func test_route_lease_executor_follows_v2_lease(_mode: String) -> Dictionary:
 	})
 	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
 	var executor = NpcRouteLeaseExecutorScript.new()
-	executor.setup(authority, self)
+	executor.setup(authority, self, null, PassthroughCrowdVelocityService.new())
 	var last := {}
 	for _i in range(16):
 		authority.begin_frame()
@@ -1924,6 +2042,48 @@ func test_route_lease_executor_follows_v2_lease(_mode: String) -> Dictionary:
 		"last=%s debug=%s finalDistance=%.3f events=%s" % [JSON.stringify(last), JSON.stringify(debug), final_distance, JSON.stringify(events)],
 		["v2_executor_consumes_ready_lease", "v2_executor_uses_motor_to_arrive", "v2_executor_reports_segments_to_authority"],
 		{ "last": last, "debug": debug, "finalDistance": final_distance, "events": events }
+	)
+
+
+func test_route_lease_executor_requires_crowd_authority(_mode: String) -> Dictionary:
+	var authority := NpcRouteAuthorityV2Script.new()
+	var body := CharacterBody3D.new()
+	add_child(body)
+	body.global_position = Vector3.ZERO
+	var entry := {
+		"id": "v2-executor-missing-crowd",
+		"body": body,
+		"motorProfile": CharacterMotorProfileScript.npc_default()
+	}
+	var request: Dictionary = authority.submit_request(entry, { "kind": "move", "targetCell": Vector2i(1, 0) }, { "priority": 100 })
+	var request_id := String(request.get("requestId", ""))
+	var route := v2_probe_contract_route()
+	route["targetCell"] = Vector2i(1, 0)
+	route["fallbackCell"] = Vector2i(1, 0)
+	route["cells"] = [Vector2i(0, 0), Vector2i(1, 0)]
+	route["waypoints"] = [Vector3.ZERO, Vector3(0.65, 0.0, 0.0)]
+	var ready: Dictionary = authority.mark_ready(request_id, route, {
+		"ok": true,
+		"status": "passed",
+		"reason": "",
+		"authoritative": true
+	})
+	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
+	var executor := NpcRouteLeaseExecutorScript.new()
+	executor.setup(authority, self)
+	authority.begin_frame()
+	var result: Dictionary = executor.execute(entry, request_id, lease, 0.1, { "waypointRadius": 0.12 })
+	var avoidance: Dictionary = result.get("avoidance", {}) if result.get("avoidance", {}) is Dictionary else {}
+	body.queue_free()
+	var passed := String(result.get("status", "")) == "waiting" \
+		and String(result.get("reason", "")) == "blocked_dynamic" \
+		and String(avoidance.get("reason", "")) == "missing_crowd_authority" \
+		and float(result.get("moved", -1.0)) == 0.0
+	return outcome(
+		passed,
+		"result=%s avoidance=%s" % [JSON.stringify(result), JSON.stringify(avoidance)],
+		["v2_executor_requires_crowd_authority", "v2_executor_missing_crowd_fails_closed", "v2_executor_missing_crowd_never_moves"],
+		{ "result": result, "avoidance": avoidance }
 	)
 
 
@@ -3784,11 +3944,44 @@ func test_navmesh_door_portal_installs_nav_link(_mode: String) -> Dictionary:
 	var passed: bool = String(registered.get("status", "")) == "installed" and int(stats.get("installedDoorLinkCount", 0)) == 1 and not links.is_empty() and bool(link.get("enabled", false)) and String(link.get("state", "")) == "closed"
 	return outcome(passed, "registered=%s stats=%s links=%s" % [JSON.stringify(registered), JSON.stringify(stats), JSON.stringify(links)], ["door_portal_installs_nav_link_rid", "closed_openable_door_link_enabled"], { "registered": registered, "stats": stats, "links": links })
 
+func test_navmesh_cross_region_door_link_lifecycle(_mode: String) -> Dictionary:
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
+	var interior = NavigationBakeDescriptorScript.create("region:door:interior", "door-interior", AABB(Vector3(-1.0, -0.1, -1.0), Vector3(2.0, 0.2, 1.2)))
+	interior.add_walkable_surface("surface:door:interior", Vector3(0.0, 0.0, -0.45), Vector3(1.35, 0.05, 0.9))
+	interior.add_door_portal("door:cross-region", Vector3(0.0, 0.0, -0.12), Vector3(0.0, 0.0, 0.12), {"state": "closed", "openable": true})
+	interior.add_door_link("surface:door:interior", "surface:door:exterior", "door:cross-region", {"id": "door-link:cross-region", "sourceDoor": true, "startRegionId": "region:door:interior", "endRegionId": "region:door:exterior"})
+	var exterior = NavigationBakeDescriptorScript.create("region:door:exterior", "door-exterior", AABB(Vector3(-1.0, -0.1, 0.0), Vector3(2.0, 0.2, 1.2)))
+	exterior.add_walkable_surface("surface:door:exterior", Vector3(0.0, 0.0, 0.45), Vector3(1.35, 0.05, 0.9))
+	service.register_chunk_descriptor(interior)
+	var pending_before_endpoint: Dictionary = service.stats()
+	service.register_chunk_descriptor(exterior)
+	for _pass in range(4):
+		service.process_dirty_regions(1, 100000)
+	service.sync_navigation_map_if_dirty()
+	var installed: Dictionary = service.stats()
+	var installed_snapshot: Dictionary = service.debug_snapshot()
+	service.unregister_chunk("region:door:exterior")
+	var deferred: Dictionary = service.stats()
+	service.register_chunk_descriptor(exterior)
+	for _pass in range(4):
+		service.process_dirty_regions(1, 100000)
+	service.sync_navigation_map_if_dirty()
+	var recovered: Dictionary = service.stats()
+	service.clear()
+	var installed_links: Array = (installed_snapshot.get("doorLinks", {}) as Dictionary).get("door:cross-region", []) as Array
+	var passed := int(pending_before_endpoint.get("pendingNavigationLinkCount", 0)) == 1 and int(pending_before_endpoint.get("installedDoorLinkCount", 0)) == 0 and int(installed.get("pendingNavigationLinkCount", -1)) == 0 and int(installed.get("installedDoorLinkCount", 0)) == 1 and installed_links.size() == 1 and int(deferred.get("pendingNavigationLinkCount", 0)) == 1 and int(deferred.get("installedDoorLinkCount", -1)) == 0 and int(recovered.get("pendingNavigationLinkCount", -1)) == 0 and int(recovered.get("installedDoorLinkCount", 0)) == 1
+	return outcome(passed, "pending=%s installed=%s deferred=%s recovered=%s" % [JSON.stringify(pending_before_endpoint), JSON.stringify(installed), JSON.stringify(deferred), JSON.stringify(recovered)], ["door_link_waits_for_both_endpoint_regions", "endpoint_unload_defers_door_link", "endpoint_republication_restores_door_link"], {"pending": pending_before_endpoint, "installed": installed, "installedSnapshot": installed_snapshot, "deferred": deferred, "recovered": recovered})
+
 func test_navmesh_route_through_door_link_emits_action(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
 	service.setup(NavigationBackendConfigScript.from_value("navmesh", "test"))
 	service.register_chunk_descriptor(navmesh_door_descriptor("region:chunk:door-route", "door-route", "door:route"))
+	service.sync_navigation_map_if_dirty()
 	var route: Dictionary = service.query_route(Vector3(0.0, 0.0, 0.0), Vector3(0.0, 0.0, 2.7), { "maxSnapDistance": 4.0 })
+	var endpoint_certificate: Dictionary = service.certify_route_endpoint(Vector3(0.0, 0.0, 2.7), Vector3(0.0, 0.0, 2.7), { "maxSnapDistance": 4.0 })
+	var wrong_elevation_certificate: Dictionary = service.certify_route_endpoint(Vector3(0.0, 4.0, 2.7), Vector3(0.0, 0.0, 2.7), { "maxSnapDistance": 4.0 })
+	var beyond_snap_certificate: Dictionary = service.certify_route_endpoint(Vector3(20.0, 0.0, 20.0), Vector3(20.0, 0.0, 20.0), { "maxSnapDistance": 0.5, "targetMaxSnapDistance": 0.5 })
 	var actions: Dictionary = route.get("actions", {})
 	var door_action := {}
 	for action_value in actions.values():
@@ -3805,14 +3998,14 @@ func test_navmesh_route_through_door_link_emits_action(_mode: String) -> Diction
 			"pathSegmentIndex": 1
 		}
 	}
-	var sequenced_value = service.call("_with_door_portal_waypoints", raw_path, raw_actions)
-	var sequenced_path: Array = sequenced_value if sequenced_value is Array else []
+	var sequenced_result: Dictionary = service.call("_scripted_navigation_waypoint_result", raw_path, raw_actions) as Dictionary
+	var sequenced_path: Array = sequenced_result.get("path", []) if sequenced_result.get("path", []) is Array else []
 	var has_entry := sequenced_path.size() >= 4 and sequenced_path[1] is Vector3 and (sequenced_path[1] as Vector3).distance_to(Vector3(0.0, 0.0, 0.9)) <= 0.001
 	var has_exit := sequenced_path.size() >= 4 and sequenced_path[2] is Vector3 and (sequenced_path[2] as Vector3).distance_to(Vector3(0.0, 0.0, 1.8)) <= 0.001
 	var stats: Dictionary = service.stats()
 	service.clear()
-	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and has_entry and has_exit and int(stats.get("pathQueryFailureCount", 0)) == 0
-	return outcome(passed, "route=%s action=%s sequencedPath=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(sequenced_path), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action", "door_action_inserts_entry_and_exit_waypoints"], { "route": route, "action": door_action, "sequencedPath": sequenced_path, "stats": stats })
+	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and bool(endpoint_certificate.get("ok", false)) and not bool(wrong_elevation_certificate.get("ok", true)) and not bool(beyond_snap_certificate.get("ok", true)) and bool(sequenced_result.get("ok", false)) and has_entry and has_exit and int(stats.get("pathQueryFailureCount", 0)) == 0
+	return outcome(passed, "route=%s action=%s endpoint=%s wrongElevation=%s beyondSnap=%s sequenced=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(endpoint_certificate), JSON.stringify(wrong_elevation_certificate), JSON.stringify(beyond_snap_certificate), JSON.stringify(sequenced_result), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action", "route_endpoint_matches_support_owner_and_plane", "wrong_elevation_endpoint_rejected", "coincident_endpoint_beyond_snap_policy_rejected", "door_action_materialization_succeeds", "door_action_inserts_entry_and_exit_waypoints"], { "route": route, "action": door_action, "endpointCertificate": endpoint_certificate, "wrongElevationCertificate": wrong_elevation_certificate, "beyondSnapCertificate": beyond_snap_certificate, "sequencedResult": sequenced_result, "sequencedPath": sequenced_path, "stats": stats })
 
 func test_navmesh_actor_path_status(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()

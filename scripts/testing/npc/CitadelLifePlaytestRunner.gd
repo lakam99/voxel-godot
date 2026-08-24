@@ -13,11 +13,15 @@ const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd
 const BuildingPartPublisherScript := preload("res://scripts/buildings/BuildingPartPublisher.gd")
 const FurnishingPublisherScript := preload("res://scripts/buildings/FurnishingPublisher.gd")
 const CitadelResidenceManifestBuilderScript := preload("res://scripts/buildings/CitadelResidenceManifestBuilder.gd")
+const CitadelUrbanPocComposerScript := preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
+const BuildingInteriorProgramScript := preload("res://scripts/buildings/BuildingInteriorProgram.gd")
+const BuildingCollisionProbeScript := preload("res://scripts/buildings/BuildingCollisionProbe.gd")
+const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
-const NpcBipedRecipeBuilderScript := preload("res://scripts/characters/NpcBipedRecipeBuilder.gd")
-const NpcBipedVisualFactoryScript := preload("res://scripts/characters/NpcBipedVisualFactory.gd")
 const CharacterMotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+const CitadelSiteManifestPlannerScript := preload("res://scripts/world/CitadelSiteManifestPlanner.gd")
 
 const CELL := 1.35
 const WATER_LEVEL := 11.1
@@ -37,6 +41,20 @@ const MAX_FAILURE_DIAGNOSTIC_CAPTURES := 12
 const MAX_DAY_DEPARTURE_TIMEOUT_CAPTURES := 3
 const DEFAULT_ACCEPTANCE_DAY_SECONDS := 12.0
 const DEFAULT_ACCEPTANCE_NIGHT_SECONDS := 24.0
+const DAY_ROUTE_COMMITMENT_SECONDS := 60.0
+const DAY_DEPARTURE_MIN_PROGRESS_MPS := 0.55
+const DAY_DEPARTURE_ROUTE_OVERHEAD_SECONDS := 12.0
+const DAY_DEPARTURE_MAX_SECONDS := 120.0
+const NIGHT_HOME_ROUTE_SETTLE_FRAMES := 12
+const NIGHT_HOME_MIN_PROGRESS_MPS := 0.55
+const NIGHT_HOME_ROUTE_OVERHEAD_SECONDS := 10.0
+const NIGHT_HOME_MAX_SECONDS := 120.0
+const NIGHT_HOME_PROGRESS_GRACE_SECONDS := 8.0
+const NIGHT_HOME_PROGRESS_DELTA := 0.12
+const DOOR_LIFECYCLE_SAMPLE_INTERVAL_FRAMES := 6
+const ACCEPTANCE_SNAPSHOT_INTERVAL_SECONDS := 3.0
+const NIGHT_CHECKPOINT_INTERVAL_SECONDS := 15
+const DOOR_CLEARANCE_ARRIVAL_RADIUS := 0.32
 const CROWD_LINEUP_MIN_SECONDS := 18.0
 const CROWD_LINEUP_MAX_SECONDS := 240.0
 const CROWD_LINEUP_MIN_PROGRESS_MPS := 0.55
@@ -47,15 +65,23 @@ const CROWD_CROSSING_SECONDS := 24.0
 const CROWD_FORMATION_SLOT_MARGIN := 0.28
 const CROWD_FORMATION_LANE_OFFSET := 0.65
 const CROWD_FORMATION_ARRIVAL_RADIUS := 0.36
+const CROWD_FIXTURE_CONTACT_BAND := 0.16
+const CROWD_FIXTURE_SPAWN_LIFT := 0.16
+const SURFACE_CONTINUITY_SEAM_HALF_BAND := 0.90
+const SURFACE_CONTINUITY_SEAM_LATERAL_LIMIT := 0.55
+const SURFACE_CONTINUITY_SEAM_ARM_DISTANCE := 0.12
+const SURFACE_CONTINUITY_TIMELINE_INTERVAL_FRAMES := 6
 const ACCEPTANCE_ORDER_ADMISSION_TIMEOUT_MS := 8000.0
 const ACCEPTANCE_ORDER_ADMISSION_MAX_MS := 2000.0
 const ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES := 120
+const PRODUCTION_INPUT_READY_MAX_FRAMES := 7200
 
 var main: Node3D
 var player: CharacterBody3D
 var npc_system: Node
 var citadel_root: Node3D
 var furnishing_root: Node3D
+var living_tree_root: Node3D
 var building_publisher
 var furnishing_publisher
 var building_publishers: Array = []
@@ -66,10 +92,22 @@ var blueprint
 var furnishing_plan
 var core_blueprint
 var residence_manifest: Dictionary = {}
+var living_tree_records: Array[Dictionary] = []
+var generated_living_tree_count := 0
+var keep_entry_collision_evidence: Dictionary = {}
+var keep_entry_player_sweep_evidence: Dictionary = {}
+var raised_route_transition_handoff_evidence: Dictionary = {}
+var raised_route_junction_traversal_evidence: Dictionary = {}
+var raised_route_junction_captures: Array[Dictionary] = []
+var raised_route_roadbed_evidence: Dictionary = {}
+var raised_route_collision_negative_controls: Dictionary = {}
+var residence_foundation_support_evidence: Dictionary = {}
+var walkable_surface_collision_evidence: Dictionary = {}
 var fixture_origin := Vector3.ZERO
 var fixture_center := Vector2i.ZERO
 var fixture_level := 0.0
 var fixture_site: Dictionary = {}
+var fixture_site_search_diagnostics: Dictionary = {}
 var selected_seed := DEFAULT_SEED
 var selected_citadel_scale := DEFAULT_CITADEL_SCALE
 var observed_world_phase := ""
@@ -86,6 +124,7 @@ var civic_order_metrics := {
 var civic_order_batches: Array[Dictionary] = []
 var rebuilding := false
 var fixture_failure_reason := ""
+var fixture_failure_details := {}
 var citizens: Array[Dictionary] = []
 var spawned_citizen_ids := {}
 var queued_citizen_ids := {}
@@ -129,10 +168,22 @@ var acceptance_result: Dictionary = {}
 var acceptance_failure_diagnostics: Array[Dictionary] = []
 var acceptance_post_navigation_audit: Dictionary = {}
 var acceptance_order_admissions: Dictionary = {}
+var acceptance_door_lifecycle: Dictionary = {}
+var acceptance_day_door_lifecycle: Dictionary = {}
+var acceptance_door_lifecycle_summary: Dictionary = {}
+var acceptance_night_progress: Dictionary = {}
+var acceptance_day_route_commitment: Dictionary = {}
+var acceptance_day_generation := -1
+var acceptance_day_started_physics_frame := -1
+var acceptance_day_started_msec := 0
+var acceptance_night_started_msec := 0
+var acceptance_door_lifecycle_capture_ids := {}
 var acceptance_day_seconds := DEFAULT_ACCEPTANCE_DAY_SECONDS
 var acceptance_night_seconds := DEFAULT_ACCEPTANCE_NIGHT_SECONDS
 var link_diagnostics_mode := false
 var link_diagnostics: Array[Dictionary] = []
+var surface_continuity_acceptance_mode := false
+var surface_continuity_acceptance_result: Dictionary = {}
 var profile_status_elapsed := 0.0
 var status_elapsed := 0.0
 var crowd_physics_evidence: Dictionary = {}
@@ -182,6 +233,9 @@ func read_arguments() -> void:
 		elif argument == "--link-diagnostics":
 			profile_mode = true
 			link_diagnostics_mode = true
+		elif argument == "--surface-continuity-acceptance":
+			profile_mode = true
+			surface_continuity_acceptance_mode = true
 
 
 func bootstrap() -> void:
@@ -191,11 +245,24 @@ func bootstrap() -> void:
 	visual_captures.clear()
 	acceptance_timeline.clear()
 	acceptance_result.clear()
+	acceptance_door_lifecycle.clear()
+	acceptance_day_door_lifecycle.clear()
+	acceptance_door_lifecycle_summary.clear()
+	acceptance_night_progress.clear()
+	acceptance_day_route_commitment.clear()
+	acceptance_day_generation = -1
+	acceptance_day_started_physics_frame = -1
+	acceptance_door_lifecycle_capture_ids.clear()
 	crowd_stress_result.clear()
 	acceptance_failure_diagnostics.clear()
 	acceptance_post_navigation_audit.clear()
 	acceptance_order_admissions.clear()
+	acceptance_door_lifecycle.clear()
+	acceptance_day_door_lifecycle.clear()
+	acceptance_door_lifecycle_summary.clear()
+	acceptance_night_progress.clear()
 	link_diagnostics.clear()
+	surface_continuity_acceptance_result.clear()
 	reset_crowd_physics_evidence()
 	profile_begin_stage("ordinary_game_boot")
 	set_loading("Starting the ordinary game scene")
@@ -215,16 +282,33 @@ func bootstrap() -> void:
 	await wait_physics_frames(36)
 	profile_end_stage("ordinary_world_startup_settle")
 	await rebuild_citadel()
-	if profile_mode and not rebuilding and main != null and not citizens.is_empty():
-		if link_diagnostics_mode:
+	if profile_mode and not rebuilding and main != null and (link_diagnostics_mode or surface_continuity_acceptance_mode or not citizens.is_empty()):
+		var diagnostics_passed := true
+		if surface_continuity_acceptance_mode:
+			var publication_probe := collect_citadel_surface_transition_publication_probe()
+			link_diagnostics.append(publication_probe)
+			if bool(publication_probe.get("passed", false)):
+				var materialization := await materialize_surface_continuity_acceptance_actors(publication_probe)
+				if bool(materialization.get("passed", false)):
+					await run_surface_continuity_actor_acceptance(publication_probe)
+				else:
+					surface_continuity_acceptance_result = materialization
+			else:
+				surface_continuity_acceptance_result = {"passed": false, "reason": String(publication_probe.get("reason", "surface_continuity_publication_failed"))}
+			diagnostics_passed = bool(surface_continuity_acceptance_result.get("passed", false))
+			write_profile_report("completed" if diagnostics_passed else "failed", String(surface_continuity_acceptance_result.get("reason", "surface_continuity_actor_acceptance_failed")))
+		elif link_diagnostics_mode:
 			collect_manor_stair_link_diagnostics()
-			write_profile_report("completed")
+			var publication_probe := collect_citadel_surface_transition_publication_probe()
+			diagnostics_passed = bool(publication_probe.get("passed", false))
+			link_diagnostics.append(publication_probe)
+			write_profile_report("completed" if diagnostics_passed else "failed", String(publication_probe.get("reason", "citadel_surface_transition_publication_probe_failed")))
 		elif acceptance_mode:
 			await run_citadel_life_acceptance()
 		else:
 			await run_profile_observation()
 		await prepare_profile_shutdown()
-		get_tree().quit()
+		get_tree().quit(0 if diagnostics_passed else 1)
 
 
 func bind_scene_nodes() -> void:
@@ -266,6 +350,257 @@ func rebuild_citadel() -> void:
 		return
 	rebuilding = true
 	fixture_failure_reason = ""
+	fixture_failure_details = {}
+	set_loading("Locating a seeded Citadel in the ordinary world")
+	var structure_system = main.get("structure_system") if main != null else null
+	if structure_system == null or not structure_system.has_method("citadel_runtime_record"):
+		fail_fixture_loading("The ordinary structure authority is unavailable")
+		return
+	fixture_site = nearest_normal_world_citadel_manifest()
+	if fixture_site.is_empty():
+		fail_fixture_loading("No deterministic Citadel manifest was found in the search window", fixture_site_search_diagnostics)
+		return
+	fixture_center = fixture_site.get("center", Vector2i.ZERO) as Vector2i
+	fixture_level = float(fixture_site.get("level", WATER_LEVEL + 3.0))
+	fixture_origin = Vector3(float(fixture_center.x) * CELL, fixture_level, float(fixture_center.y) * CELL)
+	player.global_position = fixture_origin + Vector3(0.0, 3.0, -float(int(fixture_site.get("radius", 76))) * CELL)
+	set_loading("Streaming the ordinary Citadel structure, collision and navigation")
+	var runtime_record := {}
+	var failed_publication_state := {}
+	for _frame in range(14400):
+		structure_system.call("update_around_budgeted", fixture_center, true)
+		runtime_record = structure_system.call("citadel_runtime_record", String(fixture_site.get("id", "")))
+		if not runtime_record.is_empty():
+			break
+		var publication_states: Array = structure_system.call("citadel_publication_snapshot") as Array
+		var fixture_publication_state := {}
+		for state_value in publication_states:
+			var state: Dictionary = state_value as Dictionary if state_value is Dictionary else {}
+			var state_manifest: Dictionary = state.get("manifest", {}) if state.get("manifest", {}) is Dictionary else {}
+			if String(state_manifest.get("id", "")) != String(fixture_site.get("id", "")):
+				continue
+			fixture_publication_state = state
+			if String(state.get("status", "")) == "failed":
+				failed_publication_state = state.duplicate(true)
+			break
+		if _frame % 120 == 0 and not fixture_publication_state.is_empty():
+			var last_failure: Dictionary = fixture_publication_state.get("lastRegistrationFailure", {}) as Dictionary
+			var failure_details: Dictionary = last_failure.get("details", {}) as Dictionary
+			var map_readiness: Dictionary = failure_details.get("mapReadiness", {}) as Dictionary
+			var failed_proof_summary := {}
+			for proof_value in failure_details.get("tileProofs", failure_details.get("proofs", [])) as Array:
+				if not (proof_value is Dictionary) or bool((proof_value as Dictionary).get("passed", false)):
+					continue
+				var proof: Dictionary = proof_value
+				failed_proof_summary = {
+					"portalId": String(proof.get("portalId", "")),
+					"descriptor": not (proof.get("descriptorLink", {}) as Dictionary).is_empty(),
+					"installedLinkCount": (proof.get("installedLinks", []) as Array).size(),
+					"supportMatch": bool(proof.get("supportProvenanceMatch", false)),
+					"sourcePortalReady": bool(proof.get("sourcePortalReady", false)),
+					"publishedAfterInstall": bool(proof.get("publishedAfterInstall", false)),
+					"homeOwned": bool((proof.get("homeServerOwner", {}) as Dictionary).get("found", false)),
+					"porchOwned": bool((proof.get("porchServerOwner", {}) as Dictionary).get("found", false)),
+					"startOwned": bool((proof.get("serverStartOwner", {}) as Dictionary).get("found", false)),
+					"endOwned": bool((proof.get("serverEndOwner", {}) as Dictionary).get("found", false)),
+					"homeReachesDoor": bool(proof.get("homeReachesDoor", false)),
+					"requiresTransition": bool(proof.get("requiresDeclaredTransition", false)),
+					"requiresLinks": bool(proof.get("homeRequiresDeclaredLinks", false)),
+					"enabledPathCount": (proof.get("enabledPath", []) as Array).size(),
+					"porch": proof.get("porchPosition", Vector3.INF),
+					"porchServer": proof.get("porchServerPosition", Vector3.INF),
+					"enabledEndpoint": proof.get("enabledEndpoint", Vector3.INF),
+					"enabledEndpointDistance": float(proof.get("enabledEndpointDistance", INF)),
+					"enabledCrosses": bool(proof.get("enabledCrosses", false)),
+					"doorActionCount": (proof.get("enabledDoorActions", {}) as Dictionary).size(),
+					"exactPortalAction": bool(proof.get("exactPortalAction", false)),
+					"disabledPathCount": (proof.get("disabledPath", []) as Array).size(),
+					"disabledEndpoint": proof.get("disabledEndpoint", Vector3.INF),
+					"disabledEndpointDistance": float(proof.get("disabledEndpointDistance", INF)),
+					"disabledCrosses": bool(proof.get("disabledCrosses", false))
+				}
+				break
+			var pending_structure_operations := int(structure_system.call("pending_structure_op_count")) if structure_system.has_method("pending_structure_op_count") else -1
+			var pathing_stats: Dictionary = npc_system.get("pathing").call("stats") if npc_system != null and npc_system.get("pathing") != null and npc_system.get("pathing").has_method("stats") else {}
+			var route_authority_stats: Dictionary = pathing_stats.get("routePlanner", {}) if pathing_stats.get("routePlanner", {}) is Dictionary else {}
+			var route_delegate_stats: Dictionary = route_authority_stats.get("delegate", {}) if route_authority_stats.get("delegate", {}) is Dictionary else {}
+			write_profile_progress("stage=normal_world_citadel_publication status=%s shell=%d/%d furnishings=%d/%d pendingStructureOps=%d attempts=%d reason=%s detail=%s pendingTiles=%s queue=%s lastQueue=%s dirtySerial=%d syncedSerial=%d iteration=%d firstFailedProof=%s" % [
+				String(fixture_publication_state.get("status", "")),
+				int(fixture_publication_state.get("publishedPartCount", 0)),
+				int(fixture_publication_state.get("partCount", 0)),
+				int(fixture_publication_state.get("publishedFurnishingPartCount", 0)),
+				int(fixture_publication_state.get("furnishingPartCount", 0)),
+				pending_structure_operations,
+				int(fixture_publication_state.get("registrationAttempts", 0)),
+				String(last_failure.get("reason", "")),
+				String(failure_details.get("reason", "")),
+				JSON.stringify(failure_details.get("pendingTiles", [])),
+				JSON.stringify(route_delegate_stats.get("queuedNavmeshTileKeys", [])),
+				JSON.stringify(route_delegate_stats.get("lastNavmeshTileQueueDebug", [])),
+				int(map_readiness.get("dirtySerial", -1)),
+				int(map_readiness.get("syncedSerial", -1)),
+				int(map_readiness.get("iterationId", -1)),
+				JSON.stringify(failed_proof_summary)
+			])
+		if not failed_publication_state.is_empty():
+			break
+		await get_tree().process_frame
+	if runtime_record.is_empty():
+		fail_fixture_loading("The normal-world Citadel did not finish publication", {"site": fixture_site, "failedState": failed_publication_state, "states": structure_system.call("citadel_publication_snapshot")})
+		return
+	citadel_root = runtime_record.get("root") as Node3D
+	blueprint = runtime_record.get("blueprint")
+	core_blueprint = blueprint
+	furnishing_plan = runtime_record.get("furnishingPlan")
+	building_publisher = runtime_record.get("buildingPublisher")
+	furnishing_publisher = runtime_record.get("furnishingPublisher")
+	residence_manifest = runtime_record.get("residenceManifest", {}) as Dictionary
+	building_publishers = [building_publisher] if building_publisher != null else []
+	furnishing_publishers = [furnishing_publisher] if furnishing_publisher != null else []
+	active_district_ids.clear()
+	for residence_value in residence_manifest.get("residences", []) as Array:
+		if residence_value is Dictionary:
+			active_district_ids[String((residence_value as Dictionary).get("residenceId", ""))] = true
+	if link_diagnostics_mode or surface_continuity_acceptance_mode:
+		rebuilding = false
+		profile_load_completed_usec = Time.get_ticks_usec()
+		set_loading_visible(false)
+		return
+	set_loading("Waiting for ordinary generated residents")
+	await bind_normal_world_residents()
+	if citizens.size() != (residence_manifest.get("citizens", []) as Array).size():
+		var spawn_diagnostics: Dictionary = npc_system.call("generated_resident_spawn_diagnostics_snapshot") if npc_system.has_method("generated_resident_spawn_diagnostics_snapshot") else {}
+		fail_fixture_loading("The normal NPC population authority did not materialize every Citadel resident", {"expected": (residence_manifest.get("citizens", []) as Array).size(), "actual": citizens.size(), "spawnDiagnostics": spawn_diagnostics})
+		return
+	place_player_at_gate(blueprint.recipe if blueprint != null else {})
+	enable_interactive_player()
+	rebuilding = false
+	set_world_display_hour(11.0)
+	refresh_world_phase(true)
+	acceptance_day_started_msec = Time.get_ticks_msec()
+	update_status()
+	set_loading_visible(false)
+	profile_load_completed_usec = Time.get_ticks_usec()
+	write_profile_report("ready")
+	print("[Citadel Life] Observing normal-world site %s: %d residents" % [String(fixture_site.get("id", "")), citizens.size()])
+
+func nearest_normal_world_citadel_manifest() -> Dictionary:
+	if main == null or not main.has_method("landmark_sites_for_region"):
+		return {}
+	var player_cell := Vector2i(roundi(player.global_position.x / CELL), roundi(player.global_position.z / CELL)) if player != null else Vector2i.ZERO
+	var center_region := Vector2i(floori(float(player_cell.x) / 420.0), floori(float(player_cell.y) / 420.0))
+	var scanned_regions := {}
+	var candidates: Array[Dictionary] = []
+	for radius in range(0, 13):
+		for region_z in range(center_region.y - radius, center_region.y + radius + 1):
+			for region_x in range(center_region.x - radius, center_region.x + radius + 1):
+				if radius > 0 and absi(region_x - center_region.x) < radius and absi(region_z - center_region.y) < radius:
+					continue
+				scanned_regions[Vector2i(region_x, region_z)] = true
+				for site_value in main.call("landmark_sites_for_region", region_x, region_z, 420) as Array:
+					if site_value is Dictionary and String((site_value as Dictionary).get("kind", "")) == "citadel":
+						candidates.append((site_value as Dictionary).duplicate(true))
+		if not candidates.is_empty():
+			break
+	var distant_windows: Array[Dictionary] = []
+	if candidates.is_empty():
+		var rng := RandomNumberGenerator.new()
+		rng.seed = int(("%d|citadel-life-normal-world-search" % selected_seed).hash())
+		for window_index in range(12):
+			var angle := rng.randf_range(-PI, PI)
+			var distance := rng.randi_range(28, 72)
+			var window_center := center_region + Vector2i(roundi(cos(angle) * float(distance)), roundi(sin(angle) * float(distance)))
+			var window_record := {"index": window_index, "center": window_center, "scannedRegionCount": 0, "candidateCount": 0}
+			for region_z in range(window_center.y - 4, window_center.y + 5):
+				for region_x in range(window_center.x - 4, window_center.x + 5):
+					var region := Vector2i(region_x, region_z)
+					if scanned_regions.has(region):
+						continue
+					scanned_regions[region] = true
+					window_record["scannedRegionCount"] = int(window_record["scannedRegionCount"]) + 1
+					for site_value in main.call("landmark_sites_for_region", region_x, region_z, 420) as Array:
+						if site_value is Dictionary and String((site_value as Dictionary).get("kind", "")) == "citadel":
+							candidates.append((site_value as Dictionary).duplicate(true))
+			window_record["candidateCount"] = candidates.size()
+			distant_windows.append(window_record)
+			if not candidates.is_empty():
+				break
+	candidates.sort_custom(func(left: Dictionary, right: Dictionary) -> bool: return String(left.get("id", "")) < String(right.get("id", "")))
+	fixture_site_search_diagnostics = {"centerRegion": center_region, "scannedRegionCount": scanned_regions.size(), "distantWindows": distant_windows, "candidateCount": candidates.size()}
+	if candidates.is_empty():
+		fixture_site_search_diagnostics["rejectionBreakdown"] = citadel_site_rejection_breakdown(scanned_regions.keys())
+	return candidates[0] if not candidates.is_empty() else {}
+
+func citadel_site_rejection_breakdown(region_values: Array) -> Dictionary:
+	var regions: Array[Vector2i] = []
+	for region_value in region_values:
+		if region_value is Vector2i:
+			regions.append(region_value)
+	regions.sort_custom(func(left: Vector2i, right: Vector2i) -> bool: return left.y < right.y or (left.y == right.y and left.x < right.x))
+	var spawn_eligible := 0
+	var terrain_eligible := 0
+	var examples: Array[Dictionary] = []
+	for region in regions:
+		var flat_manifest: Dictionary = CitadelSiteManifestPlannerScript.manifest_for_region(String(main.get("seed_text")), region.x, region.y, 420, Callable(self, "flat_landmark_sample"))
+		if flat_manifest.is_empty():
+			continue
+		spawn_eligible += 1
+		var terrain_manifest: Dictionary = CitadelSiteManifestPlannerScript.manifest_for_region(String(main.get("seed_text")), region.x, region.y, 420, Callable(self, "production_landmark_sample"))
+		if not terrain_manifest.is_empty():
+			terrain_eligible += 1
+		if examples.size() < 8:
+			examples.append(citadel_region_terrain_diagnostic(region, not terrain_manifest.is_empty()))
+	return {"spawnEligibleRegionCount": spawn_eligible, "terrainEligibleRegionCount": terrain_eligible, "examples": examples}
+
+func flat_landmark_sample(_cell: Vector3i) -> Dictionary:
+	return {"surfaceY": 27.0, "solid": true, "fluid": "", "biome": "plains"}
+
+func production_landmark_sample(cell: Vector3i) -> Dictionary:
+	var generation = main.get("world_generation_system") if main != null else null
+	if generation == null or not generation.has_method("natural_landmark_site_sample"):
+		return {}
+	var sample_value = generation.call("natural_landmark_site_sample", Vector2i(cell.x, cell.z))
+	return sample_value if sample_value is Dictionary else {}
+
+func citadel_region_terrain_diagnostic(region: Vector2i, terrain_eligible: bool) -> Dictionary:
+	var candidate_records: Array[Dictionary] = []
+	for candidate_value in CitadelSiteManifestPlannerScript._candidates(String(main.get("seed_text")), region.x, region.y):
+		var candidate: Dictionary = candidate_value
+		var center: Vector2i = candidate.get("center", Vector2i.ZERO)
+		var minimum := INF
+		var maximum := -INF
+		var invalid_sample_count := 0
+		for offset in CitadelSiteManifestPlannerScript._support_sample_offsets():
+			var sample := production_landmark_sample(Vector3i(center.x + offset.x, 0, center.y + offset.y))
+			var surface_y := float(sample.get("surfaceY", NAN))
+			var biome := String(sample.get("biome", ""))
+			if is_nan(surface_y) or not bool(sample.get("solid", false)) or String(sample.get("fluid", "")) != "" or biome in ["", "ocean", "beach", "underground", "underground_air"]:
+				invalid_sample_count += 1
+			else:
+				minimum = minf(minimum, surface_y)
+				maximum = maxf(maximum, surface_y)
+		candidate_records.append({"center": center, "minimumSurfaceY": minimum, "maximumSurfaceY": maximum, "surfaceVariance": maximum - minimum, "invalidSampleCount": invalid_sample_count})
+	return {"region": region, "terrainEligible": terrain_eligible, "candidates": candidate_records}
+
+func bind_normal_world_residents() -> void:
+	citizens.clear()
+	for _frame in range(3600):
+		citizens.clear()
+		for index in range((residence_manifest.get("citizens", []) as Array).size()):
+			var citizen: Dictionary = (residence_manifest.get("citizens", []) as Array)[index] as Dictionary
+			var entry: Dictionary = npc_system.call("npc_entry_for_actor", String(citizen.get("id", ""))) as Dictionary
+			var body := entry.get("body") as CharacterBody3D
+			if body != null and is_instance_valid(body):
+				citizens.append({"body": body, "manifest": citizen, "index": index, "locomotion": body.get_node_or_null("NpcBipedVisual/NpcBipedLocomotionPresenter")})
+		if citizens.size() == (residence_manifest.get("citizens", []) as Array).size():
+			return
+		await get_tree().process_frame
+
+func rebuild_legacy_fixture_citadel() -> void:
+	if rebuilding:
+		return
+	rebuilding = true
+	fixture_failure_reason = ""
 	observed_world_phase = ""
 	civic_order_queue.clear()
 	civic_order_metrics = {"queued": 0, "submitted": 0, "superseded": 0, "discarded": 0}
@@ -298,12 +633,23 @@ func rebuild_citadel() -> void:
 	district_prefetch_elapsed = 0.0
 	building_publishers.clear()
 	furnishing_publishers.clear()
+	living_tree_records.clear()
+	generated_living_tree_count = 0
+	keep_entry_collision_evidence.clear()
+	keep_entry_player_sweep_evidence.clear()
+	raised_route_transition_handoff_evidence.clear()
+	raised_route_junction_traversal_evidence.clear()
+	raised_route_junction_captures.clear()
+	raised_route_roadbed_evidence.clear()
+	residence_foundation_support_evidence.clear()
+	walkable_surface_collision_evidence.clear()
 	if citadel_root != null and is_instance_valid(citadel_root):
 		citadel_root.queue_free()
 	if furnishing_root != null and is_instance_valid(furnishing_root):
 		furnishing_root.queue_free()
 	citadel_root = null
 	furnishing_root = null
+	living_tree_root = null
 	await get_tree().process_frame
 	profile_end_stage("fixture_reset")
 
@@ -315,6 +661,7 @@ func rebuild_citadel() -> void:
 		"siteKey": "citadel-life",
 		"citadelScale": selected_citadel_scale
 	})
+	integrate_living_surface_tree_facts()
 	var recipe: Dictionary = blueprint.recipe if blueprint != null else {}
 	var span := maxf(float(recipe.get("width", 80.0)), float(recipe.get("depth", 80.0)))
 	fixture_site = select_fixture_site(span)
@@ -368,6 +715,10 @@ func rebuild_citadel() -> void:
 
 	core_blueprint = core_blueprint_slice(blueprint)
 	district_catalog = district_catalog_from(blueprint, furnishing_plan)
+	var core_route_preflight := CastleCompoundBlueprintBuilderScript.validate_raised_route_coverage(core_blueprint)
+	if not bool(core_route_preflight.get("passed", false)):
+		fail_fixture_loading("Citadel core slice omitted a required raised-route owner or support", {"raisedRouteCoverage": core_route_preflight})
+		return
 	profile_begin_stage("structure_publication")
 	set_loading("Publishing the shared castle core (%d records)" % core_blueprint.parts.size())
 	citadel_root = Node3D.new()
@@ -379,9 +730,59 @@ func rebuild_citadel() -> void:
 	furnishing_root.position = fixture_origin
 	add_child(furnishing_root)
 	building_publisher = BuildingPartPublisherScript.new()
-	await building_publisher.publish_incremental(core_blueprint, citadel_root, loading_frame_budget(core_blueprint.parts.size()), {"batchStaticParts": true})
+	await building_publisher.publish_incremental(core_blueprint, citadel_root, loading_frame_budget(core_blueprint.parts.size()), {"batchStaticParts": true, "progressCallback": Callable(self, "record_core_publication_progress")})
 	building_publishers.append(building_publisher)
+	var core_physical_integrity: Dictionary = (building_publisher.summary().get("physicalIntegrity", {}) as Dictionary).duplicate(true)
+	if not bool(core_physical_integrity.get("passed", false)):
+		profile_end_stage("structure_publication", {"physicalIntegrity": core_physical_integrity})
+		fail_fixture_loading("Citadel core publication was blocked by an invalid physical support contract", core_physical_integrity)
+		return
+	var core_route_coverage: Dictionary = (building_publisher.summary().get("raisedRouteCoverage", {}) as Dictionary).duplicate(true)
+	if not bool(core_route_coverage.get("passed", false)):
+		profile_end_stage("structure_publication", {"raisedRouteCoverage": core_route_coverage})
+		fail_fixture_loading("Citadel core publication did not prove complete raised-route coverage", core_route_coverage)
+		return
+	write_profile_progress("stage=structure_publication checkpoint=core_published")
 	register_published_building_navigation_manifest(building_publisher)
+	write_profile_progress("stage=structure_publication checkpoint=navigation_manifest_registered")
+	publish_living_surface_trees()
+	write_profile_progress("stage=structure_publication checkpoint=living_trees_published")
+	write_profile_progress("stage=structure_publication audit=keep_entry_supports")
+	keep_entry_collision_evidence = await BuildingCollisionProbeScript.audit_keep_entry_supports(self, citadel_root, core_blueprint.parts)
+	if not bool(keep_entry_collision_evidence.get("passed", false)):
+		profile_end_stage("structure_publication", {"keepEntryCollision": keep_entry_collision_evidence})
+		fail_fixture_loading("Published keep approach has no authoritative player collision", keep_entry_collision_evidence)
+		return
+	write_profile_progress("stage=structure_publication audit=raised_route_transition_handoff")
+	raised_route_transition_handoff_evidence = await BuildingCollisionProbeScript.audit_player_raised_route_transition_handoff(self, player, citadel_root, core_route_coverage.get("records", []) as Array)
+	if not bool(raised_route_transition_handoff_evidence.get("passed", false)):
+		profile_end_stage("structure_publication", {"raisedRouteTransitionHandoff": raised_route_transition_handoff_evidence})
+		fail_fixture_loading("The real player could not cross the published processional route into the keep entry", raised_route_transition_handoff_evidence)
+		return
+	write_profile_progress("stage=structure_publication audit=raised_route_junction_traversals")
+	raised_route_junction_traversal_evidence = await BuildingCollisionProbeScript.audit_player_raised_route_junction_traversals(self, player, citadel_root, core_route_coverage.get("records", []) as Array)
+	if not bool(raised_route_junction_traversal_evidence.get("passed", false)):
+		profile_end_stage("structure_publication", {"raisedRouteJunctionTraversals": raised_route_junction_traversal_evidence})
+		fail_fixture_loading("The real player could not cross every published raised-route junction", raised_route_junction_traversal_evidence)
+		return
+	write_profile_progress("stage=structure_publication audit=raised_route_roadbeds")
+	raised_route_roadbed_evidence = await BuildingCollisionProbeScript.audit_citadel_raised_route_roadbeds(self, citadel_root, core_blueprint.parts, core_route_coverage.get("records", []) as Array)
+	if not bool(raised_route_roadbed_evidence.get("passed", false)):
+		profile_end_stage("structure_publication", {"raisedRouteRoadbeds": raised_route_roadbed_evidence})
+		fail_fixture_loading("Raised Citadel routes are not continuously supported by published collision", raised_route_roadbed_evidence)
+		return
+	write_profile_progress("stage=structure_publication audit=raised_route_collision_negative_controls")
+	raised_route_collision_negative_controls = await BuildingCollisionProbeScript.audit_raised_route_collision_negative_controls(self, player, citadel_root, core_blueprint.parts, core_route_coverage.get("records", []) as Array)
+	if not bool(raised_route_collision_negative_controls.get("passed", false)):
+		profile_end_stage("structure_publication", {"raisedRouteCollisionNegativeControls": raised_route_collision_negative_controls})
+		fail_fixture_loading("Raised Citadel collision contracts did not fail closed when their named support was removed", raised_route_collision_negative_controls)
+		return
+	write_profile_progress("stage=structure_publication audit=walkable_surface_collision")
+	walkable_surface_collision_evidence = await BuildingCollisionProbeScript.audit_citadel_walkable_surface_collision(self, player, citadel_root, core_blueprint.parts)
+	if not bool(walkable_surface_collision_evidence.get("passed", false)):
+		profile_end_stage("structure_publication", {"walkableSurfaceCollision": walkable_surface_collision_evidence})
+		fail_fixture_loading("Citadel walkable surfaces do not match published collision", walkable_surface_collision_evidence)
+		return
 	for _district_index in range(mini(INITIAL_RELEVANT_DISTRICTS, district_catalog.size())):
 		await publish_next_relevant_district(district_publication_generation, true)
 	if profile_mode:
@@ -432,17 +833,49 @@ func rebuild_citadel() -> void:
 	rebuilding = false
 	set_world_display_hour(11.0)
 	refresh_world_phase(true)
+	acceptance_day_started_msec = Time.get_ticks_msec()
 	profile_begin_stage("fixture_hud_presentation")
 	update_status()
 	await get_tree().process_frame
 	profile_end_stage("fixture_hud_presentation")
 	set_loading_visible(false)
+	# A production input event cannot be accepted while the fixture loading overlay
+	# owns the viewport. Keep collision/fall proof in the loading phase, then run
+	# the actual player right-click and threshold crossing only after the ordinary
+	# Main scene has returned its unhandled-input authority.
+	var production_input_readiness := await wait_for_production_input_readiness()
+	if not bool(production_input_readiness.get("ready", false)):
+		fail_fixture_loading("The ordinary game never returned player input before Citadel entry acceptance", production_input_readiness)
+		return
+	var post_load_keep_sweep := await BuildingCollisionProbeScript.audit_player_keep_entry_sweep(self, player, citadel_root, core_blueprint.parts)
+	keep_entry_player_sweep_evidence = post_load_keep_sweep.duplicate(true)
+	keep_entry_player_sweep_evidence["productionInputReadiness"] = production_input_readiness
+	keep_entry_player_sweep_evidence["preInteractiveCollision"] = keep_entry_collision_evidence.duplicate(true)
+	if not bool(post_load_keep_sweep.get("passed", false)):
+		fail_fixture_loading("The real player could not cross the keep approach after interactive presentation", post_load_keep_sweep)
+		return
+	await capture_viewport("keep_entry_player_collision_sweep")
+	place_player_at_gate(recipe)
 	await capture_viewport("interactive_ready")
+	raised_route_junction_captures = await capture_raised_route_junction_views()
 	profile_load_completed_usec = Time.get_ticks_usec()
 	write_profile_report("ready")
 	print("[Citadel Life] Ready: seed %d, %d citizens, %d furnished beds" % [selected_seed, citizens.size(), (residence_manifest.get("citizens", []) as Array).size()])
 	if not profile_mode:
 		request_relevant_district_publication()
+
+
+func wait_for_production_input_readiness() -> Dictionary:
+	for frame in range(PRODUCTION_INPUT_READY_MAX_FRAMES):
+		if main != null and not bool(main.get("startup_loading_active")) and main.is_processing_unhandled_input():
+			return {"ready": true, "frames": frame, "startupLoadingActive": false, "unhandledInputEnabled": true}
+		await get_tree().physics_frame
+	return {
+		"ready": false,
+		"frames": PRODUCTION_INPUT_READY_MAX_FRAMES,
+		"startupLoadingActive": bool(main.get("startup_loading_active")) if main != null else true,
+		"unhandledInputEnabled": main.is_processing_unhandled_input() if main != null else false
+	}
 
 
 func publish_structure_navigation_fact(span: float) -> void:
@@ -484,6 +917,59 @@ func register_published_furnishing_navigation_manifest(publisher) -> void:
 		registered_navigation_collision_manifest_ids[String(result.get("manifestId", ""))] = true
 
 
+func integrate_living_surface_tree_facts() -> void:
+	# The life fixture keeps the production residence blueprint intact. It only
+	# derives stable landscape records from open, already-published courtyard
+	# paving, then both the surface-history publisher and tree service consume
+	# those same records.
+	living_tree_records.clear()
+	if blueprint == null:
+		return
+	var sites: Array = CitadelUrbanPocComposerScript.select_open_paving_tree_sites(blueprint, selected_seed)
+	var records: Array = CitadelUrbanPocComposerScript.build_tree_placement_records(sites, selected_seed)
+	for record_value in records:
+		if record_value is Dictionary:
+			living_tree_records.append((record_value as Dictionary).duplicate(true))
+	if living_tree_records.is_empty():
+		return
+	var recipe: Dictionary = blueprint.recipe.duplicate(true)
+	recipe["landscapeTrees"] = living_tree_records.duplicate(true)
+	blueprint.set_recipe(recipe)
+
+
+func publish_living_surface_trees() -> void:
+	generated_living_tree_count = 0
+	if citadel_root == null or living_tree_records.is_empty():
+		return
+	living_tree_root = Node3D.new()
+	living_tree_root.name = "CitadelLifeGeneratedTrees"
+	citadel_root.add_child(living_tree_root)
+	var tree_service = TreeSpawnServiceScript.new()
+	for index in range(living_tree_records.size()):
+		var record: Dictionary = living_tree_records[index]
+		var request: Dictionary = record.get("treeRequest", {}) as Dictionary
+		var position: Vector3 = record.get("position", Vector3.ZERO) as Vector3
+		var tree_id := String(record.get("id", "citadel-life-tree-%d" % index))
+		if request.is_empty():
+			continue
+		request = request.duplicate(true)
+		request["treeId"] = tree_id
+		request["worldPosition"] = position
+		request["worldRotationY"] = float(record.get("rotationY", 0.0))
+		var tree_recipe: Dictionary = tree_service.build_recipe(request)
+		if tree_recipe.is_empty():
+			continue
+		var tree: Node3D = tree_service.instantiate_recipe(tree_recipe, String(request.get("biome", "town")), tree_id)
+		if tree == null:
+			continue
+		tree.name = "CitadelLifeTree%02d" % index
+		tree.position = position
+		tree.rotation.y = float(record.get("rotationY", 0.0))
+		tree.set_meta("citadel_life_generated_tree", true)
+		living_tree_root.add_child(tree)
+		generated_living_tree_count += 1
+
+
 func core_blueprint_slice(source):
 	var core = BuildingBlueprintScript.new("%s.core" % String(source.id), int(source.seed), String(source.style))
 	var source_recipe: Dictionary = source.recipe.duplicate(true)
@@ -494,12 +980,38 @@ func core_blueprint_slice(source):
 		if room_value is Dictionary and not bool((room_value as Dictionary).get("castleCourtyardResidence", false)):
 			core_rooms.append(room_value)
 	core.set_room_records(core_rooms)
+	var required_route_part_ids := core_route_part_dependency_ids(source)
 	for part in source.parts:
 		if part == null:
 			continue
-		if String(part.recipe.get("castleResidenceId", "")).is_empty():
+		if String(part.recipe.get("castleResidenceId", "")).is_empty() or required_route_part_ids.has(String(part.id)):
 			core.parts.append(part)
 	return core
+
+
+func core_route_part_dependency_ids(source) -> Dictionary:
+	var required := {}
+	var changed := true
+	while changed:
+		changed = false
+		for part in source.parts:
+			if part == null:
+				continue
+			var part_id := String(part.id)
+			var semantic := String(part.semantic)
+			var is_route_surface := String(part.recipe.get("routeStreetId", "")) != "" or semantic in ["castle_processional_step", "castle_keep_palace_entry_forecourt", "castle_keep_palace_entry_forecourt_root"]
+			if not is_route_surface and not required.has(part_id):
+				continue
+			if is_route_surface and not required.has(part_id):
+				required[part_id] = true
+				changed = true
+			for relationship_key in ["physicalRequiredSupportPartIds", "routeTransitionRootPartIds"]:
+				for dependency_value in part.recipe.get(relationship_key, []) as Array:
+					var dependency_id := String(dependency_value)
+					if not dependency_id.is_empty() and not required.has(dependency_id):
+						required[dependency_id] = true
+						changed = true
+	return required
 
 
 func district_catalog_from(source, source_furnishing_plan) -> Array[Dictionary]:
@@ -515,6 +1027,7 @@ func district_catalog_from(source, source_furnishing_plan) -> Array[Dictionary]:
 		var district_blueprint = BuildingBlueprintScript.new("%s.district.%s" % [String(source.id), residence_id], int(source.seed), String(source.style))
 		var source_recipe: Dictionary = source.recipe.duplicate(true)
 		source_recipe["sourceBlueprintId"] = String(source.id)
+		source_recipe["publicationScope"] = "residence_district"
 		district_blueprint.set_recipe(source_recipe)
 		var rooms: Array = []
 		for room_value in source.rooms:
@@ -533,6 +1046,7 @@ func district_catalog_from(source, source_furnishing_plan) -> Array[Dictionary]:
 			"id": residence_id,
 			"center": center,
 			"blueprint": district_blueprint,
+			"structuralAuthorityBlueprint": source,
 			"furnishingPlan": district_plan
 		})
 	records.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
@@ -560,9 +1074,21 @@ func publish_next_relevant_district(generation: int, loading_publication := fals
 		shell_root.queue_free()
 		return false
 	var building = BuildingPartPublisherScript.new()
-	await building.publish_incremental(district_blueprint, shell_root, loading_frame_budget(district_blueprint.parts.size()), {"batchStaticParts": true})
+	await building.publish_incremental(district_blueprint, shell_root, loading_frame_budget(district_blueprint.parts.size()), {"batchStaticParts": true, "structuralAuthorityBlueprint": selected.get("structuralAuthorityBlueprint")})
 	if generation != district_publication_generation or not is_instance_valid(citadel_root):
 		shell_root.queue_free()
+		return false
+	var district_physical_integrity: Dictionary = (building.summary().get("physicalIntegrity", {}) as Dictionary).duplicate(true)
+	if not bool(district_physical_integrity.get("passed", false)):
+		shell_root.queue_free()
+		profile_end_stage("structure_publication", {"districtId": district_id, "physicalIntegrity": district_physical_integrity})
+		fail_fixture_loading("Citadel district publication was blocked by an invalid physical support contract", district_physical_integrity)
+		return false
+	var district_foundation_support := BuildingCollisionProbeScript.audit_citadel_residence_foundation_supports(citadel_root, district_blueprint.parts)
+	record_residence_foundation_support(district_id, district_foundation_support)
+	if not bool(district_foundation_support.get("passed", false)):
+		profile_end_stage("structure_publication", {"residenceFoundationSupports": residence_foundation_support_evidence})
+		fail_fixture_loading("Published Citadel residence foundations are not structurally rooted in the compound base", residence_foundation_support_evidence)
 		return false
 	var decor_root := Node3D.new()
 	decor_root.name = "CitadelDistrictFurnishings_%s" % district_id
@@ -590,6 +1116,29 @@ func publish_next_relevant_district(generation: int, loading_publication := fals
 		npc_system.call("prebake_building_navigation_topology")
 	queue_manifest_citizens()
 	return true
+
+
+func record_residence_foundation_support(district_id: String, evidence: Dictionary) -> void:
+	if not residence_foundation_support_evidence.has("districts"):
+		residence_foundation_support_evidence = {"passed": true, "districts": {}, "checkedFoundationCount": 0, "checkedSampleCount": 0, "checks": [], "violations": []}
+	var districts: Dictionary = residence_foundation_support_evidence.get("districts", {}) as Dictionary
+	districts[district_id] = evidence.duplicate(true)
+	residence_foundation_support_evidence["districts"] = districts
+	residence_foundation_support_evidence["checkedFoundationCount"] = int(residence_foundation_support_evidence.get("checkedFoundationCount", 0)) + int(evidence.get("checkedFoundationCount", 0))
+	residence_foundation_support_evidence["checkedSampleCount"] = int(residence_foundation_support_evidence.get("checkedSampleCount", 0)) + int(evidence.get("checkedSampleCount", 0))
+	var checks: Array = residence_foundation_support_evidence.get("checks", []) as Array
+	for check_value in evidence.get("checks", []) as Array:
+		if not check_value is Dictionary:
+			continue
+		var check: Dictionary = (check_value as Dictionary).duplicate(true)
+		check["districtId"] = district_id
+		checks.append(check)
+	residence_foundation_support_evidence["checks"] = checks
+	if not bool(evidence.get("passed", false)):
+		residence_foundation_support_evidence["passed"] = false
+		var violations: Array = residence_foundation_support_evidence.get("violations", []) as Array
+		violations.append_array(evidence.get("violations", []) as Array)
+		residence_foundation_support_evidence["violations"] = violations
 
 
 func next_relevant_district() -> Dictionary:
@@ -638,13 +1187,17 @@ func publish_relevant_district_background(generation: int) -> void:
 
 
 func building_publication_summary() -> Dictionary:
-	var summary := {"publisherCount": building_publishers.size(), "publishedPartCount": 0, "collisionPartCount": 0, "publishedNodeCount": 0, "visualBatchCount": 0, "publicationUsec": 0, "recipeBuildUsec": 0}
+	var summary := {"publisherCount": building_publishers.size(), "publishedPartCount": 0, "collisionPartCount": 0, "publishedNodeCount": 0, "visualBatchCount": 0, "publicationUsec": 0, "recipeBuildUsec": 0, "physicalIntegrityPassed": true, "physicalIntegrity": []}
 	for publisher in building_publishers:
 		if publisher == null or not publisher.has_method("summary"):
 			continue
 		var item: Dictionary = publisher.summary()
 		for key in ["publishedPartCount", "collisionPartCount", "publishedNodeCount", "visualBatchCount", "publicationUsec", "recipeBuildUsec"]:
 			summary[key] = int(summary.get(key, 0)) + int(item.get(key, 0))
+		var physical_integrity: Dictionary = item.get("physicalIntegrity", {}) as Dictionary
+		summary["physicalIntegrity"].append({"sourceBlueprintId": String(item.get("sourceBlueprintId", "")), "passed": bool(physical_integrity.get("passed", false)), "checkedPartCount": int(physical_integrity.get("checkedPartCount", 0)), "violations": physical_integrity.get("violations", [])})
+		if not bool(physical_integrity.get("passed", false)):
+			summary["physicalIntegrityPassed"] = false
 	summary["batchedStaticParts"] = true
 	return summary
 
@@ -869,12 +1422,6 @@ func spawn_citizen(citizen: Dictionary, position: Vector3, index: int) -> Dictio
 	if not bool(placement.get("ok", false)):
 		body.queue_free()
 		return {"ok": false, "reason": String(placement.get("reason", "safe_placement_rejected")), "placement": placement, "body": body}
-	# Attach the visual only after the real CharacterBody3D has completed the
-	# production safe-placement contract, so a rejected body never becomes a
-	# visible origin placeholder.
-	var profile_id := String(citizen.get("id", "citadel_citizen_%d" % index))
-	var appearance_recipe := NpcBipedRecipeBuilderScript.build(selected_seed + index * 104729, profile_id)
-	NpcBipedVisualFactoryScript.add_biped(body, appearance_recipe, "Citizen %02d" % (index + 1))
 	var profile := citizen.duplicate(true)
 	profile.merge({
 		"name": "Citizen %02d" % (index + 1),
@@ -903,12 +1450,11 @@ func issue_civic_orders() -> void:
 		var index := int(citizen_entry.get("index", 0))
 		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
 		var is_departure_round := civic_order_round == 1
-		var target := civic_departure_anchor(manifest) if is_departure_round else civic_anchor_for(index, civic_order_round)
+		var target := civic_anchor_for(index, maxi(2, civic_order_round))
 		# Civic targets live on the shared courtyard/street surface, not on the
 		# citizen's bed storey. A manor resident can sleep upstairs but must still
 		# receive a ground-level public target when leaving home for the day.
-		if not is_departure_round:
-			target.y = civic_walk_level() + 0.04
+		target = published_navigation_position(target)
 		staged.append({
 			"body": body,
 			"kind": "go_to",
@@ -932,7 +1478,8 @@ func civic_departure_anchor(manifest: Dictionary) -> Vector3:
 	# part of the shared exterior paving.  Use that published surface height for
 	# the public target; sending an upstairs bed height to an outdoor porch leaves
 	# the regular collision-backed planner no physically valid endpoint.
-	return npc_system.call("cell_to_position", porch_cell, civic_walk_level() + 0.04) as Vector3
+	var porch_navigation_seed := npc_system.call("cell_to_position", porch_cell, fixture_level) as Vector3
+	return published_navigation_position(porch_navigation_seed)
 
 
 func begin_civic_night() -> void:
@@ -949,7 +1496,7 @@ func begin_civic_night() -> void:
 	replace_civic_order_queue(staged, "night")
 
 
-func stage_crowd_crossing_orders(crossing: bool) -> Dictionary:
+func stage_crowd_crossing_orders(crossing: bool, source_positions := {}, publish_orders := true) -> Dictionary:
 	var endpoints := crowd_crossing_endpoints()
 	if endpoints.is_empty():
 		return {"ok": false, "reason": "missing_crowd_crossing_endpoints"}
@@ -966,6 +1513,8 @@ func stage_crowd_crossing_orders(crossing: bool) -> Dictionary:
 		return {"ok": false, "reason": "incomplete_crowd_formation_assignment", "assignmentCount": crowd_formation_assignment_by_actor_id.size()}
 	var staged: Array[Dictionary] = []
 	var targets := {}
+	var route_certifications := {}
+	var all_routes_certified := true
 	var initial_distances := {}
 	var maximum_initial_distance := 0.0
 	for citizen_entry in citizens:
@@ -975,6 +1524,7 @@ func stage_crowd_crossing_orders(crossing: bool) -> Dictionary:
 		var index := int(citizen_entry.get("index", 0))
 		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
 		var actor_id := String(manifest.get("id", body.name))
+		var route_start: Vector3 = source_positions.get(actor_id, body.global_position) as Vector3 if source_positions is Dictionary and source_positions.get(actor_id, body.global_position) is Vector3 else body.global_position
 		var assignment: Dictionary = crowd_formation_assignment_by_actor_id.get(actor_id, {}) if crowd_formation_assignment_by_actor_id.get(actor_id, {}) is Dictionary else {}
 		var group_index := int(assignment.get("slotIndex", 0))
 		var group_size := maxi(1, int(assignment.get("groupSize", 1)))
@@ -987,9 +1537,13 @@ func stage_crowd_crossing_orders(crossing: bool) -> Dictionary:
 		var queue_offset := -travel_direction * centered_slot * crowd_formation_slot_spacing()
 		var target := destination_endpoint if crossing else source_endpoint
 		target += travel_right * CROWD_FORMATION_LANE_OFFSET + queue_offset
-		target.y = civic_walk_level() + 0.04
-		var initial_distance := Vector2(body.global_position.x - target.x, body.global_position.z - target.z).length()
+		target = published_navigation_position(target)
+		var initial_distance := Vector2(route_start.x - target.x, route_start.z - target.z).length()
 		targets[actor_id] = target
+		if crossing:
+			var route_certification := certify_crowd_lane_route(route_start, target)
+			route_certifications[actor_id] = route_certification
+			all_routes_certified = all_routes_certified and bool(route_certification.get("passed", false))
 		initial_distances[actor_id] = initial_distance
 		maximum_initial_distance = maxf(maximum_initial_distance, initial_distance)
 		var staged_entry := {
@@ -998,25 +1552,68 @@ func stage_crowd_crossing_orders(crossing: bool) -> Dictionary:
 			"reason": "citadel_life_crowd_crossing" if crossing else "citadel_life_crowd_lineup",
 			"index": index
 		}
-		if crossing:
+		if crossing and bool((route_certifications.get(actor_id, {}) as Dictionary).get("passed", false)):
 			staged_entry["target"] = target
 			staged_entry["arrivalRadius"] = CROWD_FORMATION_ARRIVAL_RADIUS
 		staged.append(staged_entry)
 	var phase := "crowd_crossing" if crossing else "crowd_lineup"
 	var envelope_validation := validate_crowd_target_arrival_envelopes(targets)
-	if crossing:
+	if crossing and publish_orders:
 		crowd_crossing_targets_by_actor_id = targets.duplicate(true)
-	replace_civic_order_queue(staged, phase)
+	if publish_orders and (not crossing or all_routes_certified):
+		replace_civic_order_queue(staged, phase)
 	return {
-		"ok": staged.size() == citizens.size() and bool(envelope_validation.get("ok", false)),
+		"ok": staged.size() == citizens.size() and bool(envelope_validation.get("ok", false)) and (not crossing or all_routes_certified),
+		"reason": "" if not crossing or all_routes_certified else "crowd_lane_route_certification_failed",
 		"phase": phase,
+		"preview": not publish_orders,
 		"expectedCount": citizens.size(),
 		"queuedCount": staged.size(),
 		"endpoints": endpoints,
 		"targets": targets,
 		"initialDistances": initial_distances,
 		"maximumInitialDistance": maximum_initial_distance,
-		"arrivalEnvelopeValidation": envelope_validation
+		"arrivalEnvelopeValidation": envelope_validation,
+		"routeCertifications": route_certifications
+	}
+
+
+func certify_crowd_lane_route(start: Vector3, target: Vector3) -> Dictionary:
+	var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+	var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+	if navmesh_world == null or not navmesh_world.has_method("query_route"):
+		return {"passed": false, "reason": "missing_navmesh_world"}
+	var options := {
+		"kind": "scripted",
+		"arrivalRadius": CROWD_FORMATION_ARRIVAL_RADIUS,
+		"maxSnapDistance": CELL * 0.95,
+		"startMaxSnapDistance": CELL * 0.95,
+		"targetMaxSnapDistance": CELL * 0.95,
+		"queryApi": "query_path"
+	}
+	var forward: Dictionary = navmesh_world.call("query_route", start, target, options) as Dictionary
+	var reverse: Dictionary = navmesh_world.call("query_route", target, start, options) as Dictionary
+	var forward_target: Vector3 = forward.get("targetPosition", Vector3.INF) as Vector3
+	var reverse_target: Vector3 = reverse.get("targetPosition", Vector3.INF) as Vector3
+	var forward_endpoint_distance := forward_target.distance_to(target) if forward_target.is_finite() else INF
+	var reverse_endpoint_distance := reverse_target.distance_to(start) if reverse_target.is_finite() else INF
+	var passed := bool(forward.get("ok", false)) \
+		and bool(reverse.get("ok", false)) \
+		and String(forward.get("source", "")) == "navmesh" \
+		and String(reverse.get("source", "")) == "navmesh" \
+		and String(forward.get("queryApi", "")) == "query_path" \
+		and String(reverse.get("queryApi", "")) == "query_path" \
+		and forward_endpoint_distance <= CROWD_FORMATION_ARRIVAL_RADIUS \
+		and reverse_endpoint_distance <= CROWD_FORMATION_ARRIVAL_RADIUS
+	return {
+		"passed": passed,
+		"reason": "" if passed else "bidirectional_navigation_server_route_incomplete",
+		"start": start,
+		"target": target,
+		"forwardEndpointDistance": forward_endpoint_distance,
+		"reverseEndpointDistance": reverse_endpoint_distance,
+		"forward": forward,
+		"reverse": reverse
 	}
 
 
@@ -1134,7 +1731,7 @@ func place_crowd_lineup_fixture(setup: Dictionary) -> Dictionary:
 			placements[actor_id] = {"ok": false, "reason": "missing_body_or_target"}
 			continue
 		var target: Vector3 = targets.get(actor_id)
-		var placement: Dictionary = npc_system.call("safe_place_npc", body, target, null, "citadel_crowd_pre_act_lineup") as Dictionary
+		var placement := await fixture_place_crowd_lineup_actor(body, target)
 		placements[actor_id] = placement.duplicate(true)
 		if bool(placement.get("ok", false)):
 			body.velocity = Vector3.ZERO
@@ -1158,7 +1755,7 @@ func place_crowd_lineup_fixture(setup: Dictionary) -> Dictionary:
 			var placement: Dictionary = {}
 			for inward_distance in [0.0, 0.1, 0.2]:
 				var candidate := target + inward * float(inward_distance)
-				placement = npc_system.call("safe_place_npc", body, candidate, null, "citadel_crowd_pre_act_lineup") as Dictionary
+				placement = await fixture_place_crowd_lineup_actor(body, candidate)
 				placement["inwardOffset"] = float(inward_distance)
 				attempts.append(placement.duplicate(true))
 				if bool(placement.get("ok", false)):
@@ -1173,17 +1770,187 @@ func place_crowd_lineup_fixture(setup: Dictionary) -> Dictionary:
 			body.set_meta("npc_applied_velocity", Vector3.ZERO)
 			placed_count += 1
 			await get_tree().physics_frame
+	var negative_control := fixture_crowd_lineup_negative_control()
 	return {
-		"ok": placed_count == citizens.size(),
+		"ok": placed_count == citizens.size() and bool(negative_control.get("passed", false)),
 		"placedCount": placed_count,
 		"expectedCount": citizens.size(),
 		"authority": "NpcSystem fixture placement",
 		"phase": "pre_act_fixture_setup",
-		"placements": placements
+		"placements": placements,
+		"negativeControl": negative_control
 	}
 
 
+func fixture_place_crowd_lineup_actor(body: CharacterBody3D, target: Vector3) -> Dictionary:
+	var support := fixture_crowd_lineup_support(target)
+	var contact_overlap := fixture_crowd_lineup_overlap_report(body, target, support)
+	if not bool(contact_overlap.get("ok", false)):
+		return {
+			"ok": false,
+			"position": target,
+			"reason": String(contact_overlap.get("reason", "occupied_capsule")),
+			"fixtureSetup": {
+				"target": target,
+				"contactBand": CROWD_FIXTURE_CONTACT_BAND,
+				"support": support,
+				"contactOverlap": contact_overlap
+			}
+		}
+	var spawn_position := target + Vector3.UP * CROWD_FIXTURE_SPAWN_LIFT
+	var placement: Dictionary = npc_system.call("safe_place_npc", body, spawn_position, null, "citadel_crowd_pre_act_lineup") as Dictionary
+	annotate_crowd_fixture_collision(placement)
+	var spawn_overlap := fixture_crowd_lineup_overlap_report(body, spawn_position, support)
+	placement["fixtureSetup"] = {
+		"target": target,
+		"spawnPosition": spawn_position,
+		"contactBand": CROWD_FIXTURE_CONTACT_BAND,
+		"support": support,
+		"contactOverlap": contact_overlap,
+		"spawnOverlap": spawn_overlap,
+		"usesSafePlacement": true
+	}
+	if not bool(placement.get("ok", false)) or not bool(spawn_overlap.get("ok", false)):
+		placement["ok"] = false
+		placement["reason"] = String(placement.get("reason", "occupied_capsule")) if not bool(placement.get("ok", false)) else String(spawn_overlap.get("reason", "occupied_capsule"))
+		return placement
+	await get_tree().physics_frame
+	var fixture_setup: Dictionary = placement.get("fixtureSetup", {}) as Dictionary
+	fixture_setup["settle"] = {
+		"position": body.global_position,
+		"grounded": body.is_on_floor(),
+		"horizontalDelta": Vector2(body.global_position.x - target.x, body.global_position.z - target.z).length(),
+		"overlap": fixture_crowd_lineup_overlap_report(body, body.global_position, support)
+	}
+	placement["fixtureSetup"] = fixture_setup
+	return placement
+
+
+func fixture_crowd_lineup_support(target: Vector3) -> Dictionary:
+	if citadel_root == null or citadel_root.get_world_3d() == null:
+		return {"ok": false, "reason": "missing_collision_world", "target": target}
+	var query := PhysicsRayQueryParameters3D.create(target + Vector3.UP * 1.0, target - Vector3.UP * 1.0, NpcConstantsScript.COLLISION_NPC_SAFE_PLACEMENT_MASK)
+	query.collide_with_areas = false
+	var hit: Dictionary = citadel_root.get_world_3d().direct_space_state.intersect_ray(query)
+	if hit.is_empty():
+		return {"ok": false, "reason": "missing_floor_support", "target": target, "rayHit": {}}
+	var surface: Vector3 = hit.get("position", Vector3.INF) as Vector3
+	var source := BuildingCollisionProbeScript._part_collision_source_for_ray(hit)
+	var candidates := BuildingCollisionProbeScript._part_collision_candidates_at_contact(citadel_root, surface)
+	var support_part_ids := {}
+	for candidate_value in candidates:
+		if not (candidate_value is Dictionary):
+			continue
+		var candidate: Dictionary = candidate_value
+		var shape_size: Vector3 = candidate.get("shapeSize", Vector3.ZERO) as Vector3
+		var local_contact: Vector3 = candidate.get("localContact", Vector3.INF) as Vector3
+		var part_id := String(candidate.get("partId", ""))
+		if part_id.is_empty() or shape_size.y <= 0.0 or not local_contact.is_finite():
+			continue
+		if absf(local_contact.y - shape_size.y * 0.5) <= CROWD_FIXTURE_CONTACT_BAND:
+			support_part_ids[part_id] = true
+	var primary_part_id := String(source.get("partId", ""))
+	if not primary_part_id.is_empty():
+		support_part_ids[primary_part_id] = true
+	var selected_part_ids: Array[String] = []
+	for part_id_value in support_part_ids.keys():
+		selected_part_ids.append(String(part_id_value))
+	selected_part_ids.sort()
+	return {
+		"ok": not selected_part_ids.is_empty() and surface.is_finite(),
+		"reason": "" if not selected_part_ids.is_empty() and surface.is_finite() else "missing_selected_floor_support",
+		"target": target,
+		"surface": surface,
+		"primarySource": source,
+		"selectedPartIds": selected_part_ids,
+		"surfaceCandidates": candidates
+	}
+
+
+func fixture_crowd_lineup_overlap_report(body: CharacterBody3D, position: Vector3, support: Dictionary) -> Dictionary:
+	if body == null or body.get_world_3d() == null:
+		return {"ok": false, "reason": "missing_body_or_world", "rawHits": [], "filteredHits": []}
+	var profile = CharacterMotorProfileScript.npc_default()
+	var shape := CapsuleShape3D.new()
+	shape.radius = float(profile.get("capsule_radius"))
+	shape.height = float(profile.get("capsule_height"))
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis(), position + Vector3.UP * (shape.height * 0.5))
+	query.collision_mask = NpcConstantsScript.COLLISION_NPC_SAFE_PLACEMENT_MASK
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
+	query.exclude = [body.get_rid()]
+	var selected_part_ids := {}
+	for part_id_value in support.get("selectedPartIds", []) as Array:
+		selected_part_ids[String(part_id_value)] = true
+	var surface: Vector3 = support.get("surface", Vector3.INF) as Vector3
+	var raw_hits: Array = body.get_world_3d().direct_space_state.intersect_shape(query, 16)
+	var raw_report: Array[Dictionary] = []
+	var filtered_report: Array[Dictionary] = []
+	for hit_value in raw_hits:
+		if not (hit_value is Dictionary):
+			continue
+		var hit: Dictionary = hit_value
+		var source := BuildingCollisionProbeScript._part_collision_source_for_ray(hit)
+		var part_id := String(source.get("partId", ""))
+		var allowed_support := selected_part_ids.has(part_id) and surface.is_finite() and absf(position.y - surface.y) <= CROWD_FIXTURE_CONTACT_BAND
+		var record := {
+			"collider": String((hit.get("collider") as Node).name) if hit.get("collider") is Node else "",
+			"shapeIndex": int(hit.get("shape", -1)),
+			"source": source,
+			"allowedSupportContact": allowed_support
+		}
+		raw_report.append(record)
+		if not allowed_support:
+			filtered_report.append(record)
+	return {
+		"ok": bool(support.get("ok", false)) and filtered_report.is_empty(),
+		"reason": "" if bool(support.get("ok", false)) and filtered_report.is_empty() else "occupied_capsule",
+		"position": position,
+		"capsuleRadius": shape.radius,
+		"capsuleHeight": shape.height,
+		"rawHits": raw_report,
+		"filteredHits": filtered_report
+	}
+
+
+func fixture_crowd_lineup_negative_control() -> Dictionary:
+	if citadel_root == null:
+		return {"passed": false, "reason": "missing_citadel_root"}
+	for collision_value in citadel_root.find_children("*", "CollisionShape3D", true, false):
+		var collision := collision_value as CollisionShape3D
+		if collision == null or collision.disabled or String(collision.get_meta("building_part_kind", "")) != "wall":
+			continue
+		var box := collision.shape as BoxShape3D
+		if box == null:
+			continue
+		var local_position := Vector3(0.0, -box.size.y * 0.5 + 0.04, 0.0)
+		var position := collision.global_transform * local_position
+		var probe_body := valid_citizen_body(citizens[0] as Dictionary) if not citizens.is_empty() else null
+		var overlap := fixture_crowd_lineup_overlap_report(probe_body, position, {"ok": true, "selectedPartIds": [], "surface": Vector3.INF})
+		return {
+			"passed": not bool(overlap.get("ok", true)) and not (overlap.get("rawHits", []) as Array).is_empty(),
+			"partId": String(collision.get_meta("building_part_id", "")),
+			"position": position,
+			"overlap": overlap
+		}
+	return {"passed": false, "reason": "missing_wall_collision"}
+
+
+func annotate_crowd_fixture_collision(placement: Dictionary) -> void:
+	if bool(placement.get("ok", false)) or citadel_root == null:
+		return
+	var rejected_position: Vector3 = placement.get("position", Vector3.INF) as Vector3
+	if not rejected_position.is_finite():
+		return
+	placement["publishedCollisionSources"] = BuildingCollisionProbeScript._part_collision_candidates_at_contact(citadel_root, rejected_position)
+
+
 func crowd_crossing_endpoints() -> Dictionary:
+	var processional_endpoints := processional_crowd_crossing_endpoints()
+	if not processional_endpoints.is_empty():
+		return processional_endpoints
 	var anchors := civic_street_anchors()
 	if anchors.size() < 2:
 		var recipe: Dictionary = blueprint.recipe if blueprint != null else {}
@@ -1213,6 +1980,69 @@ func crowd_crossing_endpoints() -> Dictionary:
 				best_left = anchors[left_index]
 				best_right = anchors[right_index]
 	return {"left": best_left, "right": best_right, "distance": Vector2(best_left.x - best_right.x, best_left.z - best_right.z).length()}
+
+
+func processional_crowd_crossing_endpoints() -> Dictionary:
+	if blueprint == null:
+		return {}
+	var grammar: Dictionary = blueprint.recipe.get("castleGrammar", {}) as Dictionary
+	var grid: Dictionary = grammar.get("courtyardGrid", {}) as Dictionary
+	if String(grid.get("layoutFamily", "")) != "bent_processional":
+		return {}
+	var candidates: Array[Dictionary] = []
+	for record_value in grid.get("streetRecords", []) as Array:
+		if not record_value is Dictionary:
+			continue
+		var record: Dictionary = record_value as Dictionary
+		var width := float(record.get("width", 0.0))
+		var depth := float(record.get("depth", 0.0))
+		var runs_along_z := depth >= width
+		var longitudinal_span := depth if runs_along_z else width
+		var cross_span := width if runs_along_z else depth
+		# Street records include their structural joins at both ends.  Those joins
+		# can meet a stair, terrace, or facade, so a head-on crowd fixture must use
+		# the record's pedestrian interior rather than its decorative extents.
+		var endpoint_inset := maxf(CELL * 1.1, minf(3.0, longitudinal_span * 0.20))
+		var usable_span := longitudinal_span - endpoint_inset * 2.0
+		if usable_span < 8.0 or cross_span < CELL * 1.5:
+			continue
+		var travel_distance := minf(18.0, minf(26.0, usable_span))
+		var center := fixture_origin + Vector3(float(record.get("x", 0.0)), 0.0, float(record.get("z", 0.0)))
+		var axis := Vector3.FORWARD if runs_along_z else Vector3.RIGHT
+		var half_distance := travel_distance * 0.5
+		var record_id := String(record.get("id", "processional"))
+		var corridor_rank := 0 if record_id in ["processional_00_gate_lane", "processional_02a_civic_approach", "processional_04a_palace_approach"] else 1
+		candidates.append({
+			"id": record_id,
+			"left": center - axis * half_distance,
+			"right": center + axis * half_distance,
+			"distance": travel_distance,
+			"endpointInset": endpoint_inset,
+			"corridorRank": corridor_rank,
+			"score": absf(travel_distance - 18.0)
+		})
+	if candidates.is_empty():
+		return {}
+	candidates.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		var left_corridor_rank := int(left.get("corridorRank", 1))
+		var right_corridor_rank := int(right.get("corridorRank", 1))
+		if left_corridor_rank != right_corridor_rank:
+			return left_corridor_rank < right_corridor_rank
+		var left_score := float(left.get("score", INF))
+		var right_score := float(right.get("score", INF))
+		if not is_equal_approx(left_score, right_score):
+			return left_score < right_score
+		return String(left.get("id", "")) < String(right.get("id", ""))
+	)
+	var selected: Dictionary = candidates.front() as Dictionary
+	return {
+		"left": selected.get("left", Vector3.ZERO),
+		"right": selected.get("right", Vector3.ZERO),
+		"distance": float(selected.get("distance", 0.0)),
+		"source": "generated_processional_street_record",
+		"streetRecordId": String(selected.get("id", "")),
+		"endpointInset": float(selected.get("endpointInset", 0.0))
+	}
 
 
 func replace_civic_order_queue(staged: Array[Dictionary], phase: String) -> void:
@@ -1303,6 +2133,7 @@ func record_civic_order_submission(batch_index: int, request: Dictionary, result
 	var submissions: Array = batch.get("submissions", []) as Array
 	submissions.append({
 		"actorId": String(entry.get("id", body.name if body != null and is_instance_valid(body) else "")),
+		"orderId": String(result.get("id", "")),
 		"kind": String(request.get("kind", "")),
 		"accepted": accepted,
 		"state": String(result.get("state", "")),
@@ -1406,17 +2237,28 @@ func await_civic_order_batch_admission(phase: String, generation: int) -> Dictio
 	while float(Time.get_ticks_usec() - started_usec) / 1000.0 < ACCEPTANCE_ORDER_ADMISSION_TIMEOUT_MS:
 		var snapshot := civic_order_batch_snapshot(generation)
 		if bool(snapshot.get("drained", false)):
-			snapshot["timely"] = bool(snapshot.get("allAccepted", false)) \
-				and float(snapshot.get("elapsedMs", INF)) <= ACCEPTANCE_ORDER_ADMISSION_MAX_MS \
-				and int(snapshot.get("processFrames", ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES + 1)) <= ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES
-			snapshot["reason"] = "" if bool(snapshot.get("timely", false)) else "order_admission_slow_or_rejected"
+			decorate_order_admission_timing(snapshot, false)
 			return snapshot
 		await get_tree().process_frame
 	var timed_out := civic_order_batch_snapshot(generation)
 	timed_out["phase"] = phase
-	timed_out["timely"] = false
-	timed_out["reason"] = "order_admission_timeout"
+	decorate_order_admission_timing(timed_out, true)
 	return timed_out
+
+
+func decorate_order_admission_timing(snapshot: Dictionary, timed_out: bool) -> void:
+	var process_frames := int(snapshot.get("processFrames", ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES + 1))
+	var elapsed_ms := float(snapshot.get("elapsedMs", INF))
+	var admission_correct := not timed_out \
+		and bool(snapshot.get("allAccepted", false)) \
+		and process_frames <= ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES
+	var wall_performance_passed := not timed_out and elapsed_ms <= ACCEPTANCE_ORDER_ADMISSION_MAX_MS
+	snapshot["timely"] = admission_correct
+	snapshot["admissionCorrect"] = admission_correct
+	snapshot["wallPerformancePassed"] = wall_performance_passed
+	snapshot["wallMsPerProcessFrame"] = elapsed_ms / float(maxi(1, process_frames)) if is_finite(elapsed_ms) else INF
+	snapshot["reason"] = "" if admission_correct else ("order_admission_timeout" if timed_out else "order_admission_rejected_or_frame_budget_exceeded")
+	snapshot["performanceReason"] = "" if wall_performance_passed else "order_admission_wall_stall"
 
 
 func set_world_display_hour(hour: float) -> void:
@@ -1503,6 +2345,8 @@ func civic_street_anchors() -> Array[Vector3]:
 		if not (value is Dictionary):
 			continue
 		var record: Dictionary = value as Dictionary
+		if absf(float(record.get("elevation", 0.0))) > 0.01:
+			continue
 		var width := float(record.get("width", 0.0))
 		var depth := float(record.get("depth", 0.0))
 		if width < CELL * 1.5 or depth < CELL * 1.5:
@@ -1519,21 +2363,17 @@ func civic_street_anchors() -> Array[Vector3]:
 	return anchors
 
 
-func civic_walk_level() -> float:
-	# The same castle part records publish both the visible paving and its physical
-	# support. Resolve the highest shared courtyard/street surface once, so every
-	# daytime order uses a real ground elevation rather than a home-storey level.
-	var level := fixture_level
-	if blueprint == null:
-		return level
-	for part in blueprint.parts:
-		if part == null:
-			continue
-		var semantic := String(part.semantic)
-		if semantic not in ["castle_courtyard_paving", "castle_courtyard_street"]:
-			continue
-		level = maxf(level, fixture_origin.y + part.position.y + part.size.y * 0.5)
-	return level
+func published_navigation_position(position: Vector3) -> Vector3:
+	if npc_system == null:
+		return position
+	var autonomy = npc_system.get("autonomy_system")
+	if autonomy == null or not autonomy.has_method("generated_navigation_adapter"):
+		return position
+	var adapter = autonomy.call("generated_navigation_adapter")
+	if adapter == null or not adapter.has_method("navigation_query_position"):
+		return position
+	var resolved: Variant = adapter.call("navigation_query_position", position)
+	return resolved as Vector3 if resolved is Vector3 and (resolved as Vector3).is_finite() else position
 
 
 func place_player_at_gate(recipe: Dictionary) -> void:
@@ -1799,6 +2639,14 @@ func loading_frame_budget(record_count: int) -> int:
 	return clampi(ceili(float(maxi(record_count, 1)) / 540.0), 5, 36)
 
 
+func record_core_publication_progress(progress: Dictionary) -> void:
+	write_profile_progress("stage=structure_publication publisher=core reason=%s parts=%d/%d pendingInstances=%d staticFlushes=%d" % [String(progress.get("reason", "")), int(progress.get("publishedParts", 0)), int(progress.get("totalParts", 0)), int(progress.get("pendingStaticVisualInstances", 0)), int(progress.get("staticFlushCount", 0))])
+
+
+func report_collision_probe_progress(probe_id: String, completed_count: int, total_count: int) -> void:
+	write_profile_progress("stage=structure_publication audit=%s sample=%d/%d fps=%.2f processMs=%.3f physicsMs=%.3f" % [probe_id, completed_count, total_count, Engine.get_frames_per_second(), Performance.get_monitor(Performance.TIME_PROCESS) * 1000.0, Performance.get_monitor(Performance.TIME_PHYSICS_PROCESS) * 1000.0])
+
+
 func wait_physics_frames(count: int) -> void:
 	for _frame in range(count):
 		await get_tree().physics_frame
@@ -1827,14 +2675,13 @@ func _process(delta: float) -> void:
 	if main == null or citizens.is_empty():
 		return
 	refresh_world_phase()
-	if observed_world_phase == "day" and not crowd_stress_active:
+	if observed_world_phase == "day" and not crowd_stress_active and not acceptance_mode:
 		civic_order_elapsed += delta
 		if civic_order_elapsed >= 14.0:
 			civic_order_elapsed = 0.0
 			issue_civic_orders()
 	drain_civic_order_queue()
 	update_civic_order_batch_motion_evidence()
-	update_biped_presenters(delta)
 	status_elapsed += delta
 	if status_elapsed >= 0.25:
 		status_elapsed = 0.0
@@ -1844,6 +2691,12 @@ func _process(delta: float) -> void:
 func _physics_process(delta: float) -> void:
 	if not acceptance_mode or rebuilding or citizens.size() < 2:
 		return
+	# Citizens begin their ordinary daytime departure as soon as the published
+	# fixture becomes playable. Keep the door observer on the real physics loop
+	# from that point, rather than beginning evidence after the departure has
+	# already crossed and released its portal.
+	if acceptance_day_started_msec > 0:
+		record_door_lifecycle_observations("night_home" if observed_world_phase == "night" else "day_civic")
 	observe_crowd_physics_frame(delta)
 
 
@@ -2058,18 +2911,8 @@ func capture_crowd_minimum_pair(pair: Dictionary, capture_index: int) -> void:
 	crowd_capture_pending = false
 
 
-func update_biped_presenters(delta: float) -> void:
-	for citizen_entry in citizens:
-		var body := citizen_entry.get("body") as CharacterBody3D
-		var locomotion = citizen_entry.get("locomotion")
-		if body == null or not is_instance_valid(body) or locomotion == null or not is_instance_valid(locomotion):
-			continue
-		locomotion.apply_body_motion(body, delta)
-
-
 func settle_biped_presentation() -> void:
 	await get_tree().process_frame
-	update_biped_presenters(0.0)
 	await RenderingServer.frame_post_draw
 
 
@@ -2208,7 +3051,15 @@ func save_current_viewport(capture_id: String) -> void:
 
 
 func fail_fixture_loading(message: String, details: Dictionary = {}) -> void:
-	fixture_failure_reason = "%s: %s" % [message, JSON.stringify(details)]
+	var failed_state: Dictionary = details.get("failedState", {}) if details.get("failedState", {}) is Dictionary else {}
+	var concise_reason := String(failed_state.get("failureReason", details.get("reason", ""))).strip_edges()
+	concise_reason = " ".join(concise_reason.replace("\r", "\n").split("\n", false)).strip_edges()
+	if concise_reason.length() > 160:
+		concise_reason = "%s..." % concise_reason.left(157)
+	fixture_failure_reason = message if concise_reason.is_empty() else "%s: %s" % [message, concise_reason]
+	if fixture_failure_reason.length() > 240:
+		fixture_failure_reason = "%s..." % fixture_failure_reason.left(237)
+	fixture_failure_details = details.duplicate(true)
 	loading_message = "Setup remains incomplete"
 	rebuilding = false
 	set_loading_visible(true)
@@ -2283,6 +3134,227 @@ func run_profile_observation() -> void:
 	write_profile_report("completed")
 
 
+func materialize_surface_continuity_acceptance_actors(publication_probe: Dictionary) -> Dictionary:
+	var certificates: Array = publication_probe.get("continuityCertificates", []) as Array
+	if certificates.size() != 1 or not (certificates[0] is Dictionary):
+		return {"passed": false, "reason": "missing_unique_surface_continuity_certificate"}
+	var lane_positions: Array = (certificates[0] as Dictionary).get("lanePositions", []) as Array
+	var resident_records: Array = residence_manifest.get("citizens", []) as Array
+	if lane_positions.size() < 2 or resident_records.size() < 2:
+		return {"passed": false, "reason": "insufficient_surface_continuity_fixture_inputs", "laneCount": lane_positions.size(), "residentRecordCount": resident_records.size()}
+	var spawn_results: Array[Dictionary] = []
+	for index in range(2):
+		if not (resident_records[index] is Dictionary):
+			return {"passed": false, "reason": "invalid_surface_continuity_resident_record", "index": index}
+		var body := npc_system.call("spawn_generated_resident", (resident_records[index] as Dictionary).duplicate(true), index) as CharacterBody3D if npc_system.has_method("spawn_generated_resident") else null
+		if body == null or not is_instance_valid(body):
+			spawn_results.append({"ok": false, "index": index, "reason": "production_generated_resident_spawn_failed"})
+			return {"passed": false, "reason": "surface_continuity_actor_materialization_failed", "spawnResults": spawn_results}
+		var locomotion := body.get_node_or_null("NpcBipedVisual/NpcBipedLocomotionPresenter")
+		var locomotion_script = locomotion.get_script() if locomotion != null else null
+		var locomotion_script_path := String(locomotion_script.resource_path) if locomotion_script is Script else ""
+		var production_biped := locomotion != null \
+			and locomotion.has_method("apply_body_motion") \
+			and locomotion_script_path == "res://scripts/characters/NpcBipedLocomotionPresenter.gd"
+		spawn_results.append({"ok": production_biped, "index": index, "actorId": String((resident_records[index] as Dictionary).get("id", "")), "productionSpawnApi": "NpcSystem.spawn_generated_resident", "locomotionPresenterPath": locomotion_script_path})
+		if not production_biped:
+			return {"passed": false, "reason": "surface_continuity_production_biped_presenter_missing", "spawnResults": spawn_results}
+		citizens.append({"body": body, "manifest": (resident_records[index] as Dictionary).duplicate(true), "index": index, "locomotion": locomotion})
+	await wait_physics_frames(8)
+	return {"passed": citizens.size() == 2, "reason": "" if citizens.size() == 2 else "surface_continuity_actor_count_mismatch", "actorCount": citizens.size(), "spawnResults": spawn_results}
+
+
+func run_surface_continuity_actor_acceptance(publication_probe: Dictionary) -> void:
+	var certificates: Array = publication_probe.get("continuityCertificates", []) as Array
+	if certificates.size() != 1 or not (certificates[0] is Dictionary):
+		surface_continuity_acceptance_result = {"passed": false, "reason": "missing_unique_surface_continuity_certificate"}
+		return
+	var certificate: Dictionary = certificates[0]
+	var lane_positions: Array = certificate.get("lanePositions", []) as Array
+	if lane_positions.size() < 2 or citizens.size() < 2 or not (lane_positions[0] is Vector3) or not (lane_positions[1] is Vector3):
+		surface_continuity_acceptance_result = {"passed": false, "reason": "insufficient_live_actor_or_lane_capacity"}
+		return
+	var forecourt_id := ""
+	var segment_03_id := ""
+	for owner_value in certificate.get("sourceOwners", []) as Array:
+		var owner_id := String(owner_value)
+		if owner_id.contains("castle_keep_palace_entry_forecourt"):
+			forecourt_id = owner_id
+		elif owner_id.contains("castle_compound_paving_segment_03"):
+			segment_03_id = owner_id
+	if forecourt_id.is_empty() or segment_03_id.is_empty():
+		surface_continuity_acceptance_result = {"passed": false, "reason": "surface_continuity_support_owners_missing", "sourceOwners": certificate.get("sourceOwners", [])}
+		return
+	var selected: Array[Dictionary] = [citizens[0] as Dictionary, citizens[1] as Dictionary]
+	var selected_bodies: Array[CharacterBody3D] = []
+	var actor_ids: Array[String] = []
+	for citizen_entry in selected:
+		var body := valid_citizen_body(citizen_entry)
+		if body == null:
+			surface_continuity_acceptance_result = {"passed": false, "reason": "surface_continuity_actor_missing"}
+			return
+		selected_bodies.append(body)
+		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+		actor_ids.append(String(manifest.get("id", body.name)))
+	crowd_stress_active = true
+	var autonomy = npc_system.get("autonomy_system")
+	var adapter = autonomy.call("generated_navigation_adapter") if autonomy != null and autonomy.has_method("generated_navigation_adapter") else null
+	var crowd_service = autonomy.get("crowd_velocity_service") if autonomy != null else null
+	var traffic_service = autonomy.get("traffic_reservations") if autonomy != null else null
+	var wait_orders: Array[Dictionary] = []
+	for citizen_entry in citizens:
+		var body := valid_citizen_body(citizen_entry as Dictionary)
+		if body != null:
+			wait_orders.append({"body": body, "kind": "wait", "reason": "citadel_surface_continuity_pre_act_wait"})
+	replace_civic_order_queue(wait_orders, "surface_continuity_pre_act_wait")
+	var wait_admission := await await_civic_order_batch_admission("surface_continuity_pre_act_wait", civic_order_generation)
+	await wait_physics_frames(8)
+	var source_positions: Array[Vector3] = [(lane_positions[0] as Vector3) + Vector3(0.0, 0.04, -2.0), (lane_positions[1] as Vector3) + Vector3(0.0, 0.04, 2.0)]
+	var targets: Array[Vector3] = [(lane_positions[0] as Vector3) + Vector3(0.0, 0.04, 2.0), (lane_positions[1] as Vector3) + Vector3(0.0, 0.04, -2.0)]
+	var expected_source_owners: Array[String] = [forecourt_id, segment_03_id]
+	var expected_target_owners: Array[String] = [segment_03_id, forecourt_id]
+	var placements: Array[Dictionary] = []
+	var pre_act_owner_certifications: Array[Dictionary] = []
+	for actor_index in range(selected_bodies.size()):
+		var placement: Dictionary = npc_system.call("safe_place_npc", selected_bodies[actor_index], source_positions[actor_index], null, "citadel_surface_continuity_pre_act_lineup") as Dictionary
+		placements.append(placement.duplicate(true))
+		if not bool(placement.get("ok", false)):
+			crowd_stress_active = false
+			surface_continuity_acceptance_result = {"passed": false, "reason": "surface_continuity_pre_act_placement_failed", "placements": placements}
+			return
+	await wait_physics_frames(6)
+	var all_pre_act_owners_certified := true
+	for actor_index in range(selected_bodies.size()):
+		var source_owner: Dictionary = adapter.call("building_support_for_position", selected_bodies[actor_index].global_position, CELL * 0.92) as Dictionary if adapter != null and adapter.has_method("building_support_for_position") else {}
+		var source_owner_certified := String(source_owner.get("id", "")) == expected_source_owners[actor_index] \
+			and Vector2(selected_bodies[actor_index].global_position.x - source_positions[actor_index].x, selected_bodies[actor_index].global_position.z - source_positions[actor_index].z).length() <= 0.45
+		all_pre_act_owners_certified = all_pre_act_owners_certified and source_owner_certified
+		pre_act_owner_certifications.append({"actorId": actor_ids[actor_index], "passed": source_owner_certified, "expectedSupportId": expected_source_owners[actor_index], "actualSupportId": String(source_owner.get("id", "")), "requestedPosition": source_positions[actor_index], "resolvedPosition": selected_bodies[actor_index].global_position})
+	if not all_pre_act_owners_certified:
+		crowd_stress_active = false
+		surface_continuity_acceptance_result = {"passed": false, "reason": "surface_continuity_pre_act_owner_mismatch", "placements": placements, "preActOwnerCertifications": pre_act_owner_certifications}
+		return
+	await capture_crowd_encounter_view("surface_continuity_pre_act", actor_ids[0], actor_ids[1])
+	var staged: Array[Dictionary] = []
+	for actor_index in range(selected_bodies.size()):
+		staged.append({"body": selected_bodies[actor_index], "kind": "go_to", "target": targets[actor_index], "arrivalRadius": 0.32, "reason": "citadel_surface_continuity_live_crossing"})
+	replace_civic_order_queue(staged, "surface_continuity_live_crossing")
+	var crossing_admission := await await_civic_order_batch_admission("surface_continuity_live_crossing", civic_order_generation)
+	var crowd_stats_before: Dictionary = crowd_service.call("stats") as Dictionary if crowd_service != null and crowd_service.has_method("stats") else {}
+	var airborne_frames := {}
+	var actor_collision_frames := {}
+	var active_transition_frames := {}
+	var scripted_action_frames := {}
+	var maximum_active_traffic_reservations := 0
+	var minimum_separation := INF
+	var stable_arrival_frames := 0
+	var sampled_frames := 0
+	var midpoint_capture_taken := false
+	var seam_crossings := {}
+	var previous_signed_seam_distances := {}
+	var owner_sequences := {}
+	var maximum_lane_deviation := {}
+	var matched_crowd_callback_frames := {}
+	for actor_index in range(selected_bodies.size()):
+		var actor_id := actor_ids[actor_index]
+		var direction := (targets[actor_index] - source_positions[actor_index]).normalized()
+		previous_signed_seam_distances[actor_id] = (selected_bodies[actor_index].global_position - (lane_positions[actor_index] as Vector3)).dot(direction)
+		owner_sequences[actor_id] = [expected_source_owners[actor_index]]
+		maximum_lane_deviation[actor_id] = 0.0
+		matched_crowd_callback_frames[actor_id] = 0
+	for frame_index in range(1800):
+		await get_tree().physics_frame
+		sampled_frames += 1
+		var all_arrived := true
+		var both_in_motion_window := true
+		for actor_index in range(selected_bodies.size()):
+			var body := selected_bodies[actor_index]
+			var actor_id := actor_ids[actor_index]
+			var npc_entry: Dictionary = npc_system.call("npc_entry_for_actor", body) as Dictionary
+			var lease: Dictionary = npc_entry.get("routeLease", {}) if npc_entry.get("routeLease", {}) is Dictionary else {}
+			if not (lease.get("actions", {}) as Dictionary).is_empty():
+				scripted_action_frames[actor_id] = int(scripted_action_frames.get(actor_id, 0)) + 1
+			if not (npc_entry.get("activeNavigationTransition", {}) as Dictionary).is_empty():
+				active_transition_frames[actor_id] = int(active_transition_frames.get(actor_id, 0)) + 1
+			if frame_index >= 4 and not body.is_on_floor():
+				airborne_frames[actor_id] = int(airborne_frames.get(actor_id, 0)) + 1
+			for collision_index in range(body.get_slide_collision_count()):
+				var collision := body.get_slide_collision(collision_index)
+				if collision != null and collision.get_collider() in selected_bodies:
+					actor_collision_frames[actor_id] = int(actor_collision_frames.get(actor_id, 0)) + 1
+			var target_distance := Vector2(body.global_position.x - targets[actor_index].x, body.global_position.z - targets[actor_index].z).length()
+			var order: Dictionary = npc_entry.get("scriptedOrder", {}) if npc_entry.get("scriptedOrder", {}) is Dictionary else {}
+			all_arrived = all_arrived and target_distance <= 0.40 and String(order.get("state", "")) == "ARRIVED"
+			var lane_position: Vector3 = lane_positions[actor_index]
+			var travel_direction := (targets[actor_index] - source_positions[actor_index]).normalized()
+			var signed_seam_distance := (body.global_position - lane_position).dot(travel_direction)
+			var previous_signed_distance := float(previous_signed_seam_distances.get(actor_id, signed_seam_distance))
+			if previous_signed_distance < -0.05 and signed_seam_distance > 0.05 and not seam_crossings.has(actor_id):
+				seam_crossings[actor_id] = {"physicsFrame": Engine.get_physics_frames(), "position": body.global_position, "previousSignedDistance": previous_signed_distance, "signedDistance": signed_seam_distance, "lanePosition": lane_position}
+			previous_signed_seam_distances[actor_id] = signed_seam_distance
+			if absf(signed_seam_distance) <= 0.80:
+				var lateral_axis := Vector3(-travel_direction.z, 0.0, travel_direction.x)
+				maximum_lane_deviation[actor_id] = maxf(float(maximum_lane_deviation.get(actor_id, 0.0)), absf((body.global_position - lane_position).dot(lateral_axis)))
+			var current_owner: Dictionary = adapter.call("building_support_for_position", body.global_position, CELL * 0.92) as Dictionary if adapter != null and adapter.has_method("building_support_for_position") else {}
+			var current_owner_id := String(current_owner.get("id", ""))
+			var owner_sequence: Array = owner_sequences.get(actor_id, []) as Array
+			if not current_owner_id.is_empty() and (owner_sequence.is_empty() or String(owner_sequence.back()) != current_owner_id):
+				owner_sequence.append(current_owner_id)
+				owner_sequences[actor_id] = owner_sequence
+			var solver_adapter = crowd_service.get("adapter") if crowd_service != null else null
+			var solver_diagnostics: Dictionary = solver_adapter.call("agent_diagnostics", actor_id) as Dictionary if solver_adapter != null and solver_adapter.has_method("agent_diagnostics") else {}
+			var submission: Dictionary = solver_diagnostics.get("submission", {}) as Dictionary
+			var callback: Dictionary = solver_diagnostics.get("callback", {}) as Dictionary
+			if not String(submission.get("submissionKey", "")).is_empty() \
+			and String(submission.get("submissionKey", "")) == String(callback.get("submissionKey", "")) \
+			and String(submission.get("requestKey", "")) == String(callback.get("requestKey", "")) \
+			and callback.get("safeVelocity") is Vector3:
+				matched_crowd_callback_frames[actor_id] = int(matched_crowd_callback_frames.get(actor_id, 0)) + 1
+			var route_span := Vector2(targets[actor_index].x - source_positions[actor_index].x, targets[actor_index].z - source_positions[actor_index].z).length()
+			var progress := Vector2(body.global_position.x - source_positions[actor_index].x, body.global_position.z - source_positions[actor_index].z).length() / maxf(route_span, 0.001)
+			both_in_motion_window = both_in_motion_window and progress >= 0.25 and progress <= 0.85
+		var separation := Vector2(selected_bodies[0].global_position.x - selected_bodies[1].global_position.x, selected_bodies[0].global_position.z - selected_bodies[1].global_position.z).length()
+		minimum_separation = minf(minimum_separation, separation)
+		if traffic_service != null and traffic_service.has_method("stats"):
+			maximum_active_traffic_reservations = maxi(maximum_active_traffic_reservations, int((traffic_service.call("stats") as Dictionary).get("activeReservations", 0)))
+		if not midpoint_capture_taken and both_in_motion_window:
+			midpoint_capture_taken = true
+			await capture_crowd_encounter_view("surface_continuity_live_crossing", actor_ids[0], actor_ids[1])
+		if all_arrived:
+			stable_arrival_frames += 1
+			if stable_arrival_frames >= 12:
+				break
+		else:
+			stable_arrival_frames = 0
+	await capture_crowd_encounter_view("surface_continuity_arrived", actor_ids[0], actor_ids[1])
+	var crowd_stats_after: Dictionary = crowd_service.call("stats") as Dictionary if crowd_service != null and crowd_service.has_method("stats") else {}
+	var actor_results: Array[Dictionary] = []
+	var all_endpoint_owners_certified := true
+	var all_seam_crossings_certified := true
+	for actor_index in range(selected_bodies.size()):
+		var body := selected_bodies[actor_index]
+		var npc_entry: Dictionary = npc_system.call("npc_entry_for_actor", body) as Dictionary
+		var order: Dictionary = npc_entry.get("scriptedOrder", {}) if npc_entry.get("scriptedOrder", {}) is Dictionary else {}
+		var owner: Dictionary = adapter.call("building_support_for_position", body.global_position, CELL * 0.92) as Dictionary if adapter != null and adapter.has_method("building_support_for_position") else {}
+		var owner_certified := String(owner.get("id", "")) == expected_target_owners[actor_index]
+		all_endpoint_owners_certified = all_endpoint_owners_certified and owner_certified
+		var owner_sequence: Array = owner_sequences.get(actor_ids[actor_index], []) as Array
+		var source_owner_index := owner_sequence.find(expected_source_owners[actor_index])
+		var target_owner_index := owner_sequence.find(expected_target_owners[actor_index])
+		var seam_crossing_certified := seam_crossings.has(actor_ids[actor_index]) \
+			and source_owner_index >= 0 \
+			and target_owner_index > source_owner_index \
+			and float(maximum_lane_deviation.get(actor_ids[actor_index], INF)) <= 0.55 \
+			and int(matched_crowd_callback_frames.get(actor_ids[actor_index], 0)) > 0
+		all_seam_crossings_certified = all_seam_crossings_certified and seam_crossing_certified
+		actor_results.append({"actorId": actor_ids[actor_index], "source": source_positions[actor_index], "target": targets[actor_index], "finalPosition": body.global_position, "targetDistance": Vector2(body.global_position.x - targets[actor_index].x, body.global_position.z - targets[actor_index].z).length(), "orderState": String(order.get("state", "")), "expectedSourceSupportId": expected_source_owners[actor_index], "expectedTargetSupportId": expected_target_owners[actor_index], "actualTargetSupportId": String(owner.get("id", "")), "endpointOwnerCertified": owner_certified, "ownerSequence": owner_sequence, "seamCrossing": seam_crossings.get(actor_ids[actor_index], {}), "maximumLaneDeviation": float(maximum_lane_deviation.get(actor_ids[actor_index], INF)), "matchedCrowdCallbackFrames": int(matched_crowd_callback_frames.get(actor_ids[actor_index], 0)), "seamCrossingCertified": seam_crossing_certified, "routeLease": (npc_entry.get("routeLease", {}) as Dictionary).duplicate(true), "avoidance": (npc_entry.get("routeLeaseAvoidance", {}) as Dictionary).duplicate(true)})
+	var required_separation := npc_body_collision_radius(selected_bodies[0]) + npc_body_collision_radius(selected_bodies[1])
+	var orca_callbacks_certified := int(crowd_stats_after.get("computeCalls", 0)) > int(crowd_stats_before.get("computeCalls", 0)) and int(crowd_stats_after.get("registeredAgents", 0)) >= 2 and matched_crowd_callback_frames.values().all(func(value) -> bool: return int(value) > 0)
+	var passed := bool(wait_admission.get("allAccepted", false)) and bool(crossing_admission.get("allAccepted", false)) and all_pre_act_owners_certified and stable_arrival_frames >= 12 and all_endpoint_owners_certified and all_seam_crossings_certified and airborne_frames.is_empty() and actor_collision_frames.is_empty() and active_transition_frames.is_empty() and scripted_action_frames.is_empty() and maximum_active_traffic_reservations == 0 and minimum_separation + 0.015 >= required_separation and midpoint_capture_taken and orca_callbacks_certified
+	surface_continuity_acceptance_result = {"passed": passed, "reason": "" if passed else "surface_continuity_live_actor_contract_failed", "evidenceBoundary": "Actors are placed only before the act; production public go_to orders, planner, collision-backed lease executor, CharacterBody3D motor and ORCA own every crossing frame.", "seamCertificate": certificate.duplicate(true), "waitAdmission": wait_admission, "crossingAdmission": crossing_admission, "placements": placements, "preActOwnerCertifications": pre_act_owner_certifications, "actors": actor_results, "sampledPhysicsFrames": sampled_frames, "stableArrivalFrames": stable_arrival_frames, "airborneFrames": airborne_frames, "actorCollisionFrames": actor_collision_frames, "activeTransitionFrames": active_transition_frames, "scriptedActionFrames": scripted_action_frames, "maximumActiveTrafficReservations": maximum_active_traffic_reservations, "minimumSeparation": minimum_separation, "requiredSeparation": required_separation, "midpointCaptureTaken": midpoint_capture_taken, "seamCrossings": seam_crossings, "ownerSequences": owner_sequences, "maximumLaneDeviation": maximum_lane_deviation, "matchedCrowdCallbackFrames": matched_crowd_callback_frames, "orcaCallbacksCertified": orca_callbacks_certified, "crowdStatsBefore": crowd_stats_before, "crowdStatsAfter": crowd_stats_after}
+	crowd_stress_active = false
+
+
 func run_citadel_life_acceptance() -> void:
 	# This is a headed, production-scene exercise. It gives the real, interactive
 	# player a fixed pre-act view of the gate and uses only public NpcSystem orders
@@ -2294,10 +3366,21 @@ func run_citadel_life_acceptance() -> void:
 	var monitor = main.get("runtime_perf_monitor") if main != null else null
 	if monitor != null and monitor.has_method("reset"):
 		monitor.call("reset")
+	acceptance_door_lifecycle.clear()
+	acceptance_day_door_lifecycle.clear()
+	acceptance_day_route_commitment.clear()
+	acceptance_door_lifecycle_capture_ids.clear()
+	acceptance_day_started_msec = Time.get_ticks_msec()
+	acceptance_day_started_physics_frame = Engine.get_physics_frames()
+	record_door_lifecycle_observations("acceptance_start")
+	civic_order_round = 0
 	set_world_display_hour(11.0)
 	refresh_world_phase(true)
 	var day_generation := civic_order_generation
-	var day_admission := await await_civic_order_batch_admission("day", day_generation)
+	acceptance_day_generation = day_generation
+	var day_commitment := await await_day_departure_route_commitment(day_generation, DAY_ROUTE_COMMITMENT_SECONDS)
+	acceptance_day_route_commitment = day_commitment.duplicate(true)
+	var day_admission: Dictionary = day_commitment.get("admission", {}) if day_commitment.get("admission", {}) is Dictionary else {}
 	acceptance_order_admissions["day"] = day_admission.duplicate(true)
 	acceptance_timeline.append({
 		"label": "day_civic_order_admission",
@@ -2305,12 +3388,73 @@ func run_citadel_life_acceptance() -> void:
 		"physicsFrame": Engine.get_physics_frames(),
 		"civicOrderAdmission": day_admission.duplicate(true)
 	})
-	await acceptance_observation_phase("day_civic", acceptance_day_seconds, "day_civic")
+	acceptance_timeline.append({
+		"label": "day_civic_route_commitment",
+		"processFrame": Engine.get_process_frames(),
+		"physicsFrame": Engine.get_physics_frames(),
+		"dayRouteCommitment": day_commitment.duplicate(true)
+	})
+	if not bool(day_commitment.get("passed", false)):
+		acceptance_day_door_lifecycle = acceptance_door_lifecycle.duplicate(true)
+		acceptance_result = {
+			"passed": false,
+			"reason": "Citadel civic departures did not publish accepted collision-backed leases for every resident",
+			"phase": "day_civic_route_commitment",
+			"dayRouteCommitment": day_commitment,
+			"dayDoorLifecycleTrace": compact_door_lifecycle_map(acceptance_day_door_lifecycle)
+		}
+		write_profile_report("failed", String(acceptance_result.get("reason", "")))
+		return
+	var day_budget := acceptance_day_observation_budget(day_commitment)
+	acceptance_timeline.append({
+		"label": "day_civic_time_budget",
+		"processFrame": Engine.get_process_frames(),
+		"physicsFrame": Engine.get_physics_frames(),
+		"dayBudget": day_budget.duplicate(true)
+	})
+	await acceptance_observation_phase("day_civic", float(day_budget.get("effectiveSeconds", acceptance_day_seconds)), "day_civic")
 	var day_snapshot: Dictionary = citizen_observation_snapshot("day_civic_complete")
 	acceptance_timeline.append(day_snapshot)
+	record_door_lifecycle_observations("day_civic_complete")
+	var day_lifecycle_evidence := day_departure_lifecycle_evidence_map()
+	var day_departures_complete := _observation_all_civic_departures_complete(day_snapshot)
+	acceptance_day_door_lifecycle = acceptance_door_lifecycle.duplicate(true)
+	acceptance_door_lifecycle.clear()
 	await capture_representative_citizen_view("day_civic_citizen", day_snapshot)
 	await capture_closest_crowd_pair_view("day_civic_closest_pair", day_snapshot)
 	await capture_route_failure_evidence(day_snapshot)
+	write_profile_report("acceptance_day_civic_checkpoint")
+	if not day_departures_complete:
+		acceptance_result = {
+			"passed": false,
+			"reason": "Citadel civic departures did not complete within their route-derived budget; crowd fixture staging was not started",
+			"phase": "day_civic",
+			"dayBudget": day_budget,
+			"daySnapshot": day_snapshot,
+			"dayLifecycleEvidence": day_lifecycle_evidence
+		}
+		write_profile_report("failed", String(acceptance_result.get("reason", "")))
+		return
+	var lineup_preview := stage_crowd_crossing_orders(false, {}, false)
+	var preview_source_positions: Dictionary = lineup_preview.get("targets", {}) if lineup_preview.get("targets", {}) is Dictionary else {}
+	var crossing_preview := stage_crowd_crossing_orders(true, preview_source_positions, false)
+	acceptance_timeline.append({
+		"label": "crowd_fixture_route_preflight",
+		"processFrame": Engine.get_process_frames(),
+		"physicsFrame": Engine.get_physics_frames(),
+		"lineupPreview": lineup_preview.duplicate(true),
+		"crossingPreview": crossing_preview.duplicate(true)
+	})
+	if not bool(lineup_preview.get("ok", false)) or not bool(crossing_preview.get("ok", false)):
+		acceptance_result = {
+			"passed": false,
+			"reason": "Crowd fixture route preflight failed; no wait orders or safe-placement teleports were published",
+			"phase": "crowd_fixture_route_preflight",
+			"lineupPreview": lineup_preview,
+			"crossingPreview": crossing_preview
+		}
+		write_profile_report("failed", String(acceptance_result.get("reason", "")))
+		return
 	crowd_stress_active = true
 	var lineup_setup := stage_crowd_crossing_orders(false)
 	var lineup_generation := civic_order_generation
@@ -2338,17 +3482,21 @@ func run_citadel_life_acceptance() -> void:
 	reset_crowd_physics_evidence()
 	if bool(lineup_convergence.get("passed", false)):
 		crossing_setup = stage_crowd_crossing_orders(true)
-		var crossing_generation := civic_order_generation
-		crossing_admission = await await_civic_order_batch_admission("crowd_crossing", crossing_generation)
-		await acceptance_observation_phase("crowd_crossing", CROWD_CROSSING_SECONDS, "crowd_crossing")
-		var crossing_snapshot := citizen_observation_snapshot("crowd_crossing_complete")
-		acceptance_timeline.append(crossing_snapshot)
-		await capture_closest_crowd_pair_view("crowd_crossing_closest_pair", crossing_snapshot)
-		await capture_closest_crowd_pair_view("crowd_final_docking", crossing_snapshot)
+		if bool(crossing_setup.get("ok", false)):
+			var crossing_generation := civic_order_generation
+			crossing_admission = await await_civic_order_batch_admission("crowd_crossing", crossing_generation)
+			await acceptance_observation_phase("crowd_crossing", CROWD_CROSSING_SECONDS, "crowd_crossing")
+			var crossing_snapshot := citizen_observation_snapshot("crowd_crossing_complete")
+			acceptance_timeline.append(crossing_snapshot)
+			await capture_closest_crowd_pair_view("crowd_crossing_closest_pair", crossing_snapshot)
+			await capture_closest_crowd_pair_view("crowd_final_docking", crossing_snapshot)
 	crowd_stress_result = crowd_crossing_summary(crossing_start_positions, lineup_setup, lineup_admission, crossing_setup, crossing_admission)
 	crowd_stress_active = false
+	write_profile_report("acceptance_crowd_crossing_checkpoint")
+	acceptance_door_lifecycle.clear()
 	set_world_display_hour(19.0)
 	refresh_world_phase(true)
+	acceptance_night_started_msec = Time.get_ticks_msec()
 	var night_generation := civic_order_generation
 	var night_admission := await await_civic_order_batch_admission("night", night_generation)
 	acceptance_order_admissions["night"] = night_admission.duplicate(true)
@@ -2358,33 +3506,841 @@ func run_citadel_life_acceptance() -> void:
 		"physicsFrame": Engine.get_physics_frames(),
 		"civicOrderAdmission": night_admission.duplicate(true)
 	})
-	await acceptance_observation_phase("night_home", acceptance_night_seconds, "night_home")
+	await wait_physics_frames(NIGHT_HOME_ROUTE_SETTLE_FRAMES)
+	var night_budget := acceptance_night_observation_budget()
+	acceptance_timeline.append({
+		"label": "night_home_time_budget",
+		"processFrame": Engine.get_process_frames(),
+		"physicsFrame": Engine.get_physics_frames(),
+		"nightBudget": night_budget.duplicate(true)
+	})
+	write_profile_report("acceptance_night_admission_checkpoint")
+	await acceptance_observation_phase("night_home", float(night_budget.get("effectiveSeconds", acceptance_night_seconds)), "night_home")
 	var final_snapshot: Dictionary = citizen_observation_snapshot("night_home_complete")
 	acceptance_timeline.append(final_snapshot)
+	record_door_lifecycle_observations("night_home_complete")
+	acceptance_night_progress = night_home_progress_evidence()
+	acceptance_door_lifecycle_summary = door_lifecycle_acceptance_evidence(acceptance_day_door_lifecycle, acceptance_door_lifecycle)
+	acceptance_timeline.append({
+		"label": "night_home_progress_evidence",
+		"processFrame": Engine.get_process_frames(),
+		"physicsFrame": Engine.get_physics_frames(),
+		"nightProgress": acceptance_night_progress.duplicate(true)
+	})
+	acceptance_timeline.append({
+		"label": "door_lifecycle_evidence",
+		"processFrame": Engine.get_process_frames(),
+		"physicsFrame": Engine.get_physics_frames(),
+		"doorLifecycle": acceptance_door_lifecycle_summary.duplicate(true)
+	})
+	write_profile_report("acceptance_night_observation_checkpoint")
 	await capture_representative_citizen_view("night_home_citizen", final_snapshot)
 	acceptance_post_navigation_audit = post_acceptance_navigation_audit(final_snapshot)
 	acceptance_result = acceptance_summary(final_snapshot, day_snapshot, acceptance_order_admissions)
 	write_profile_report("completed" if bool(acceptance_result.get("passed", false)) else "failed", String(acceptance_result.get("reason", "")))
 
 
+func acceptance_night_observation_budget() -> Dictionary:
+	var route_distances := {}
+	var maximum_route_distance := 0.0
+	var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+	var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+	for citizen_entry in citizens:
+		var body := citizen_entry.get("body") as CharacterBody3D
+		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+		var actor_id := String(manifest.get("id", body.name if body != null else ""))
+		if actor_id.is_empty() or navmesh_world == null or not navmesh_world.has_method("actor_path_status"):
+			continue
+		var path_status: Dictionary = navmesh_world.call("actor_path_status", actor_id) as Dictionary
+		var route_distance := maxf(0.0, float(path_status.get("distance", 0.0)))
+		if route_distance <= 0.0:
+			continue
+		route_distances[actor_id] = route_distance
+		maximum_route_distance = maxf(maximum_route_distance, route_distance)
+	var route_seconds := maximum_route_distance / NIGHT_HOME_MIN_PROGRESS_MPS + NIGHT_HOME_ROUTE_OVERHEAD_SECONDS
+	var effective_seconds := clampf(maxf(acceptance_night_seconds, route_seconds), acceptance_night_seconds, NIGHT_HOME_MAX_SECONDS)
+	return {
+		"requestedSeconds": acceptance_night_seconds,
+		"effectiveSeconds": effective_seconds,
+		"maximumSeconds": NIGHT_HOME_MAX_SECONDS,
+		"minimumProgressMps": NIGHT_HOME_MIN_PROGRESS_MPS,
+		"routeOverheadSeconds": NIGHT_HOME_ROUTE_OVERHEAD_SECONDS,
+		"maximumRouteDistance": maximum_route_distance,
+		"routeDistances": route_distances
+	}
+
+
+func acceptance_day_observation_budget(commitment: Dictionary) -> Dictionary:
+	var route_distances: Dictionary = commitment.get("committedRouteLengths", {}) if commitment.get("committedRouteLengths", {}) is Dictionary else {}
+	var maximum_route_distance := maxf(0.0, float(commitment.get("maximumRouteLength", 0.0)))
+	var route_seconds := maximum_route_distance / DAY_DEPARTURE_MIN_PROGRESS_MPS + DAY_DEPARTURE_ROUTE_OVERHEAD_SECONDS
+	return {
+		"requestedSeconds": acceptance_day_seconds,
+		"effectiveSeconds": clampf(maxf(acceptance_day_seconds, route_seconds), acceptance_day_seconds, DAY_DEPARTURE_MAX_SECONDS),
+		"maximumSeconds": DAY_DEPARTURE_MAX_SECONDS,
+		"minimumProgressMps": DAY_DEPARTURE_MIN_PROGRESS_MPS,
+		"routeOverheadSeconds": DAY_DEPARTURE_ROUTE_OVERHEAD_SECONDS,
+		"maximumRouteDistance": maximum_route_distance,
+		"routeDistances": route_distances.duplicate(true),
+		"source": "accepted_collision_backed_route_lease_waypoints"
+	}
+
+
+func await_day_departure_route_commitment(day_generation: int, publication_timeout_seconds: float) -> Dictionary:
+	var started_usec := Time.get_ticks_usec()
+	var committed_actors := {}
+	var committed_route_lengths := {}
+	var route_chains := {}
+	var actor_diagnostics := {}
+	var expected_orders := {}
+	var admitted_batch := {}
+	var admission_timed_out := false
+	while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < publication_timeout_seconds:
+		admitted_batch = civic_order_batch_snapshot(day_generation)
+		for submission_value in admitted_batch.get("submissions", []) as Array:
+			if not (submission_value is Dictionary):
+				continue
+			var submission: Dictionary = submission_value as Dictionary
+			if bool(submission.get("accepted", false)):
+				expected_orders[String(submission.get("actorId", ""))] = String(submission.get("orderId", ""))
+		actor_diagnostics.clear()
+		for citizen_entry in citizens:
+			var body := valid_citizen_body(citizen_entry)
+			var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+			var actor_id := String(manifest.get("id", body.name if body != null else ""))
+			if body == null or actor_id.is_empty():
+				continue
+			var npc_entry: Dictionary = npc_system.call("npc_entry_for_actor", body) as Dictionary
+			var order: Dictionary = npc_entry.get("scriptedOrder", {}) if npc_entry.get("scriptedOrder", {}) is Dictionary else {}
+			var lease: Dictionary = npc_entry.get("routeLease", {}) if npc_entry.get("routeLease", {}) is Dictionary else {}
+			var intent: Dictionary = npc_entry.get("_routineRouteV2Intent", {}) if npc_entry.get("_routineRouteV2Intent", {}) is Dictionary else {}
+			var autonomy = npc_system.get("autonomy_system")
+			var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+			var route_authority = autonomy.get("route_authority_v2") if autonomy != null else null
+			var authority_debug: Dictionary = autonomy.call("route_authority_v2_debug_for_entry", npc_entry) as Dictionary if autonomy != null and autonomy.has_method("route_authority_v2_debug_for_entry") else {}
+			var certificate: Dictionary = lease.get("probeCertificate", {}) if lease.get("probeCertificate", {}) is Dictionary else {}
+			var endpoint_policy: Dictionary = lease.get("endpointPolicy", {}) if lease.get("endpointPolicy", {}) is Dictionary else {}
+			var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+			var order_target_value = order.get("target", Vector3.INF)
+			var order_target: Vector3 = order_target_value as Vector3 if order_target_value is Vector3 else Vector3.INF
+			var intent_target_value = intent.get("target", Vector3.INF)
+			var intent_target: Vector3 = intent_target_value as Vector3 if intent_target_value is Vector3 else Vector3.INF
+			var endpoint_certificate := {}
+			if intent_target.is_finite() and not waypoints.is_empty() and waypoints.back() is Vector3:
+				var final_waypoint: Vector3 = waypoints.back() as Vector3
+				var target_snap_distance := float(endpoint_policy.get("targetMaxSnapDistance", INF))
+				if navmesh_world != null and navmesh_world.has_method("certify_route_endpoint") and is_finite(target_snap_distance) and target_snap_distance > 0.0:
+					endpoint_certificate = navmesh_world.call("certify_route_endpoint", final_waypoint, intent_target, endpoint_policy) as Dictionary
+			var final_matches := bool(endpoint_certificate.get("ok", false))
+			var current_request_id := String(npc_entry.get("routineRouteV2RequestId", ""))
+			var expected_order_id := String(expected_orders.get(actor_id, ""))
+			var current_order_bound := not expected_order_id.is_empty() \
+				and String(order.get("id", "")) == expected_order_id \
+				and String(order.get("kind", "")) == "go_to"
+			var current_request_bound := not current_request_id.is_empty() \
+				and String(authority_debug.get("requestId", "")) == current_request_id \
+				and int(authority_debug.get("generation", -1)) == int(lease.get("generation", -2))
+			var semantic_kind := String(intent.get("semanticKind", ""))
+			var intent_reason := String(intent.get("reason", ""))
+			var current_intent_bound := String(intent.get("kind", "")) == "scripted" \
+				and order_target.is_finite() and intent_target.is_finite() \
+				and ((semantic_kind == "home_departure_clearance" and intent_reason == "scripted_departure_home_exit") \
+					or (semantic_kind == "scripted_target" and intent_reason == "scripted_go_to" and intent_target.distance_to(order_target) <= 0.01))
+			var authority_proof: Dictionary = authority_debug.get("proof", {}) if authority_debug.get("proof", {}) is Dictionary else {}
+			var accepted_collision_backed := String(lease.get("state", "")) == "ready" \
+				and not String(lease.get("leaseId", "")).is_empty() \
+				and String(lease.get("ownerNpcId", "")) == actor_id \
+				and current_order_bound \
+				and current_request_bound \
+				and current_intent_bound \
+				and bool(authority_proof.get("ok", false)) \
+				and bool(authority_proof.get("authoritative", false)) \
+				and bool(authority_proof.get("collisionBacked", false)) \
+				and bool(certificate.get("ok", false)) \
+				and bool(certificate.get("authoritative", false)) \
+				and String(certificate.get("status", "")) == "passed" \
+				and final_matches
+			var route_length := route_waypoint_length(body.global_position, waypoints)
+			var chain: Dictionary = route_chains.get(actor_id, {"orderId": expected_order_id}) if route_chains.get(actor_id, {}) is Dictionary else {"orderId": expected_order_id}
+			if String(chain.get("orderId", "")).is_empty() and not expected_order_id.is_empty():
+				chain["orderId"] = expected_order_id
+			var generation := int(lease.get("generation", -1))
+			var porch_target_value = npc_entry.get("porchPosition", Vector3.INF)
+			var porch_target: Vector3 = porch_target_value as Vector3 if porch_target_value is Vector3 else Vector3.INF
+			var door_snapshot := door_lifecycle_snapshot(npc_entry, body)
+			var home_portal = door_portal_for_lifecycle(autonomy, door_snapshot)
+			var door_exterior_value = npc_entry.get("doorExteriorPosition", Vector3.INF)
+			var door_exterior: Vector3 = door_exterior_value as Vector3 if door_exterior_value is Vector3 else Vector3.INF
+			var clearance_target := HomeInteriorServiceScript.exterior_clearance_target(npc_entry, home_portal, door_exterior, DOOR_CLEARANCE_ARRIVAL_RADIUS) if home_portal != null and door_exterior.is_finite() else Vector3.INF
+			var door_target_certificate := certify_expected_route_target(navmesh_world, intent_target, porch_target, endpoint_policy)
+			var clearance_target_certificate := certify_expected_route_target(navmesh_world, intent_target, clearance_target, endpoint_policy)
+			var matches_door_target := strict_position_matches(intent_target, porch_target) and bool(door_target_certificate.get("ok", false))
+			var matches_clearance_target := strict_position_matches(intent_target, clearance_target) and bool(clearance_target_certificate.get("ok", false))
+			if accepted_collision_backed and semantic_kind == "home_departure_clearance":
+				record_day_departure_stage(chain, "door" if matches_door_target else ("clearance" if matches_clearance_target else "other"), current_request_id, generation)
+			var leg := {
+					"physicsFrame": Engine.get_physics_frames(),
+					"orderId": String(order.get("id", "")),
+					"requestId": current_request_id,
+					"leaseId": String(lease.get("leaseId", "")),
+					"generation": generation,
+					"source": String(lease.get("source", "")),
+					"semanticKind": semantic_kind,
+					"reason": intent_reason,
+					"target": intent_target,
+					"routeLength": route_length,
+					"probeCertificate": certificate.duplicate(true),
+					"endpointCertificate": endpoint_certificate.duplicate(true)
+				}
+			leg["portalId"] = String(door_snapshot.get("portalId", ""))
+			var door_edges: Array = authority_proof.get("doorProbeEdges", []) if authority_proof.get("doorProbeEdges", []) is Array else []
+			var owns_door_edge := route_proof_owns_portal(door_edges, String(npc_entry.get("doorPortalId", "")))
+			var door_exit_history := route_request_runtime(route_authority, String((chain.get("doorExit", {}) as Dictionary).get("requestId", "")))
+			var door_exit_handoff := day_door_leg_handoff_observed(
+				actor_id,
+				expected_order_id,
+				chain.get("doorExit", {}) as Dictionary,
+				current_request_id,
+				generation,
+				String(lease.get("leaseId", "")),
+				door_exit_history
+			)
+			var direct_clearance_transaction := matches_clearance_target and day_direct_clearance_transaction_observed(
+				actor_id,
+				expected_order_id,
+				current_request_id,
+				generation,
+				String(lease.get("leaseId", "")),
+				String(door_snapshot.get("portalId", ""))
+			)
+			var candidate_leg_kind := classify_day_departure_chain_leg(chain, {
+				"accepted": accepted_collision_backed,
+				"semanticKind": semantic_kind,
+				"matchesDoorTarget": matches_door_target,
+				"matchesClearanceTarget": matches_clearance_target,
+				"ownsDoorEdge": owns_door_edge,
+				"requestId": current_request_id,
+				"generation": generation,
+				"doorExitHandoff": door_exit_handoff,
+				"directDoorClearance": direct_clearance_transaction,
+				"stageCycleDetected": bool(chain.get("stageCycleDetected", false)),
+				"exteriorClearanceArrived": route_request_has_arrived(route_authority, String((chain.get("exteriorClearance", {}) as Dictionary).get("requestId", ""))) \
+					or day_clearance_release_observed(actor_id, expected_order_id, chain)
+			})
+			if accepted_collision_backed and candidate_leg_kind.is_empty() and chain.has("doorExit"):
+				var rejected_candidates: Array = chain.get("rejectedCandidates", []) if chain.get("rejectedCandidates", []) is Array else []
+				var rejected_candidate := {
+						"physicsFrame": Engine.get_physics_frames(),
+						"requestId": current_request_id,
+						"generation": generation,
+						"semanticKind": semantic_kind,
+						"intentTarget": intent_target,
+						"expectedDoorTarget": porch_target,
+						"expectedClearanceTarget": clearance_target,
+						"matchesDoorTarget": matches_door_target,
+						"matchesClearanceTarget": matches_clearance_target,
+						"doorExitHandoff": door_exit_handoff,
+						"doorExitHistory": door_exit_history,
+						"exteriorClearanceHistory": route_request_runtime(route_authority, String((chain.get("exteriorClearance", {}) as Dictionary).get("requestId", "")))
+					}
+				var existing_rejection_index := -1
+				for rejection_index in range(rejected_candidates.size()):
+					if rejected_candidates[rejection_index] is Dictionary \
+							and String((rejected_candidates[rejection_index] as Dictionary).get("requestId", "")) == current_request_id:
+						existing_rejection_index = rejection_index
+						break
+				if existing_rejection_index >= 0:
+					rejected_candidates[existing_rejection_index] = rejected_candidate
+				elif rejected_candidates.size() < 12:
+					rejected_candidates.append(rejected_candidate)
+				chain["rejectedCandidates"] = rejected_candidates
+			if accepted_collision_backed:
+				if candidate_leg_kind == "doorExit":
+					chain["doorExit"] = leg.duplicate(true)
+				elif candidate_leg_kind == "exteriorClearance":
+					chain["exteriorClearance"] = leg.duplicate(true)
+				elif candidate_leg_kind == "directClearance":
+					chain["doorExit"] = leg.duplicate(true)
+					chain["exteriorClearance"] = leg.duplicate(true)
+					chain["directClearanceTransaction"] = true
+				elif candidate_leg_kind == "civicTarget":
+					chain["civicTarget"] = leg.duplicate(true)
+			route_chains[actor_id] = chain
+			if chain.has("doorExit") and chain.has("exteriorClearance") and chain.has("civicTarget") and not committed_actors.has(actor_id):
+				committed_actors[actor_id] = chain.duplicate(true)
+				committed_route_lengths[actor_id] = float((chain.get("exteriorClearance", {}) as Dictionary).get("routeLength", 0.0)) \
+					+ float((chain.get("civicTarget", {}) as Dictionary).get("routeLength", 0.0))
+				if not bool(chain.get("directClearanceTransaction", false)):
+					committed_route_lengths[actor_id] += float((chain.get("doorExit", {}) as Dictionary).get("routeLength", 0.0))
+			actor_diagnostics[actor_id] = {
+				"expectedOrderId": expected_order_id,
+				"orderId": String(order.get("id", "")),
+				"orderState": String(order.get("state", "")),
+				"orderTarget": order_target,
+				"departureTarget": intent_target,
+				"leaseId": String(lease.get("leaseId", "")),
+				"leaseState": String(lease.get("state", "")),
+				"leaseOwnerNpcId": String(lease.get("ownerNpcId", "")),
+				"leaseSource": String(lease.get("source", "")),
+				"currentOrderBound": current_order_bound,
+				"currentRequestId": current_request_id,
+				"authorityRequestId": String(authority_debug.get("requestId", "")),
+				"currentRequestBound": current_request_bound,
+				"currentIntentBound": current_intent_bound,
+				"intent": intent.duplicate(true),
+				"authorityProof": authority_proof.duplicate(true),
+				"waypointCount": waypoints.size(),
+				"waypointLength": route_length,
+				"finalMatchesOrderTarget": final_matches,
+				"matchesDoorExitTarget": matches_door_target,
+				"matchesExteriorClearanceTarget": matches_clearance_target,
+				"doorExitTargetCertificate": door_target_certificate.duplicate(true),
+				"exteriorClearanceTargetCertificate": clearance_target_certificate.duplicate(true),
+				"ownsResidentDoorEdge": owns_door_edge,
+				"endpointCertificate": endpoint_certificate.duplicate(true),
+				"endpointPolicy": endpoint_policy.duplicate(true),
+				"probeCertificate": certificate.duplicate(true),
+				"routeChain": chain.duplicate(true),
+				"commitmentLatched": committed_actors.get(actor_id, {})
+			}
+		if committed_actors.size() == citizens.size() and bool(admitted_batch.get("drained", false)):
+			break
+		if not bool(admitted_batch.get("drained", false)) and float(Time.get_ticks_usec() - started_usec) / 1000.0 >= ACCEPTANCE_ORDER_ADMISSION_TIMEOUT_MS:
+			admission_timed_out = true
+			break
+		record_door_lifecycle_observations("day_civic")
+		await get_tree().physics_frame
+	admitted_batch = civic_order_batch_snapshot(day_generation)
+	var admission_timely := not admission_timed_out \
+		and bool(admitted_batch.get("allAccepted", false)) \
+		and int(admitted_batch.get("processFrames", ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES + 1)) <= ACCEPTANCE_ORDER_ADMISSION_MAX_PROCESS_FRAMES
+	decorate_order_admission_timing(admitted_batch, admission_timed_out)
+	var maximum_route_length := 0.0
+	for route_length_value in committed_route_lengths.values():
+		maximum_route_length = maxf(maximum_route_length, float(route_length_value))
+	var passed := admission_timely and committed_actors.size() == citizens.size() and not committed_actors.is_empty()
+	return {
+		"passed": passed,
+		"reason": "" if passed else (String(admitted_batch.get("reason", "")) if not admission_timely else "day_route_publication_timeout"),
+		"committedCount": committed_actors.size(),
+		"expectedCount": citizens.size(),
+		"elapsedMs": float(Time.get_ticks_usec() - started_usec) / 1000.0,
+		"maximumRouteLength": maximum_route_length,
+		"committedActors": committed_actors.duplicate(true),
+		"committedRouteLengths": committed_route_lengths.duplicate(true),
+		"routeChains": route_chains.duplicate(true),
+		"admission": admitted_batch.duplicate(true),
+		"admittedBatch": admitted_batch.duplicate(true),
+		"actorDiagnostics": actor_diagnostics.duplicate(true)
+	}
+
+
+func route_waypoint_length(start_position: Vector3, waypoints: Array) -> float:
+	var length := 0.0
+	var previous := start_position
+	for waypoint_value in waypoints:
+		if not (waypoint_value is Vector3):
+			continue
+		var waypoint: Vector3 = waypoint_value as Vector3
+		length += Vector2(previous.x - waypoint.x, previous.z - waypoint.z).length()
+		previous = waypoint
+	return length
+
+
+func classify_day_departure_chain_leg(chain: Dictionary, candidate: Dictionary) -> String:
+	if not bool(candidate.get("accepted", false)):
+		return ""
+	var semantic_kind := String(candidate.get("semanticKind", ""))
+	var request_id := String(candidate.get("requestId", ""))
+	var generation := int(candidate.get("generation", -1))
+	if semantic_kind == "home_departure_clearance" \
+			and bool(candidate.get("matchesClearanceTarget", false)) \
+			and bool(candidate.get("ownsDoorEdge", false)) \
+			and bool(candidate.get("directDoorClearance", false)) \
+			and not bool(candidate.get("stageCycleDetected", false)):
+		return "directClearance"
+	if not chain.has("doorExit"):
+		return "doorExit" if semantic_kind == "home_departure_clearance" \
+			and bool(candidate.get("matchesDoorTarget", false)) \
+			and bool(candidate.get("ownsDoorEdge", false)) else ""
+	var door_leg: Dictionary = chain.get("doorExit", {}) as Dictionary
+	if not chain.has("exteriorClearance"):
+		return "exteriorClearance" if semantic_kind == "home_departure_clearance" \
+			and bool(candidate.get("matchesClearanceTarget", false)) \
+			and request_id != String(door_leg.get("requestId", "")) \
+			and generation > int(door_leg.get("generation", -1)) \
+			and bool(candidate.get("doorExitHandoff", false)) else ""
+	var clearance_leg: Dictionary = chain.get("exteriorClearance", {}) as Dictionary
+	if not chain.has("civicTarget"):
+		return "civicTarget" if semantic_kind == "scripted_target" \
+			and request_id != String(clearance_leg.get("requestId", "")) \
+			and generation > int(clearance_leg.get("generation", -1)) \
+			and bool(candidate.get("exteriorClearanceArrived", false)) else ""
+	return ""
+
+func record_day_departure_stage(chain: Dictionary, stage_kind: String, request_id: String, generation: int) -> void:
+	if stage_kind not in ["door", "clearance"] or request_id.is_empty() or generation < 0:
+		return
+	var history: Array = chain.get("departureStageHistory", []) if chain.get("departureStageHistory", []) is Array else []
+	if not history.is_empty() and history.back() is Dictionary and String((history.back() as Dictionary).get("requestId", "")) == request_id:
+		return
+	var previous_kind := String((history.back() as Dictionary).get("kind", "")) if not history.is_empty() and history.back() is Dictionary else ""
+	if previous_kind == "clearance" and stage_kind == "door":
+		chain["stageCycleDetected"] = true
+	history.append({"kind": stage_kind, "requestId": request_id, "generation": generation})
+	chain["departureStageHistory"] = history
+
+
+func strict_position_matches(first: Vector3, second: Vector3, tolerance := 0.03) -> bool:
+	return first.is_finite() and second.is_finite() and first.distance_to(second) <= tolerance
+
+
+func certify_expected_route_target(navmesh_world, intent_target: Vector3, expected_target: Vector3, endpoint_policy: Dictionary) -> Dictionary:
+	if navmesh_world == null or not navmesh_world.has_method("certify_route_endpoint") \
+			or not intent_target.is_finite() or not expected_target.is_finite():
+		return {"ok": false, "reason": "expected_target_authority_unavailable"}
+	var target_snap_distance := float(endpoint_policy.get("targetMaxSnapDistance", INF))
+	if not is_finite(target_snap_distance) or target_snap_distance <= 0.0:
+		return {"ok": false, "reason": "missing_target_snap_policy"}
+	return navmesh_world.call("certify_route_endpoint", intent_target, expected_target, endpoint_policy) as Dictionary
+
+
+func route_proof_owns_portal(door_edges: Array, portal_id: String) -> bool:
+	if portal_id.is_empty():
+		return false
+	for edge_value in door_edges:
+		if edge_value is Dictionary and String((edge_value as Dictionary).get("portalId", "")) == portal_id:
+			return true
+	return false
+
+
+func day_door_leg_handoff_observed(actor_id: String, order_id: String, door_leg: Dictionary, successor_request_id: String, successor_generation: int, successor_lease_id: String, door_exit_history: Dictionary) -> bool:
+	if actor_id.is_empty() or order_id.is_empty() or door_leg.is_empty() or successor_request_id.is_empty() or successor_generation < 0 or successor_lease_id.is_empty():
+		return false
+	if not valid_door_exit_supersession(door_exit_history):
+		return false
+	var tracker: Dictionary = acceptance_door_lifecycle.get(actor_id, {}) if acceptance_door_lifecycle.get(actor_id, {}) is Dictionary else {}
+	var initiating_request_id := String(door_leg.get("requestId", ""))
+	var initiating_generation := int(door_leg.get("generation", -1))
+	var initiating_lease_id := String(door_leg.get("leaseId", ""))
+	var portal_id := String(door_leg.get("portalId", ""))
+	if initiating_lease_id.is_empty():
+		return false
+	var interior_side := manifest_door_plane_side(actor_id, true)
+	var crossing_id := ""
+	var traffic_group_id := ""
+	var previous_frame := -1
+	for event_value in tracker.get("events", []) as Array:
+		if not (event_value is Dictionary):
+			continue
+		var event: Dictionary = event_value as Dictionary
+		if String(event.get("phase", "")) != "day_civic" \
+				or String(event.get("scriptedOrderId", "")) != order_id:
+			continue
+		if String(event.get("crossingInitiatingRequestId", "")) != initiating_request_id \
+				or int(event.get("crossingInitiatingGeneration", -1)) != initiating_generation \
+				or String(event.get("crossingInitiatingLeaseId", "")) != initiating_lease_id:
+			if not crossing_id.is_empty():
+				return false
+			continue
+		var event_crossing_id := String(event.get("crossingId", ""))
+		var event_traffic_group_id := String(event.get("crossingTrafficGroupId", ""))
+		if event_crossing_id.is_empty() or event_traffic_group_id.is_empty() \
+				or String(event.get("crossingPortalId", "")) != portal_id \
+				or String(event.get("activeDoorPortalId", "")) != portal_id \
+				or (event.get("crossingReservationIds", []) as Array).is_empty():
+			return false
+		if not bool((event.get("crossingTrafficContinuity", {}) as Dictionary).get("ok", false)):
+			return false
+		if crossing_id.is_empty():
+			crossing_id = event_crossing_id
+			traffic_group_id = event_traffic_group_id
+		elif event_crossing_id != crossing_id or event_traffic_group_id != traffic_group_id:
+			return false
+		var physics_frame := int(event.get("physicsFrame", -1))
+		if previous_frame >= 0 and physics_frame != previous_frame + 1:
+			return false
+		previous_frame = physics_frame
+		if not bool(event.get("allLeafCollisionDisabled", false)):
+			return false
+		var bound_successor_id := String(event.get("crossingSuccessorRequestId", ""))
+		if not bound_successor_id.is_empty() and (bound_successor_id != successor_request_id \
+				or int(event.get("crossingSuccessorGeneration", -1)) != successor_generation \
+				or String(event.get("crossingSuccessorLeaseId", "")) != successor_lease_id):
+			return false
+		if not bool(event.get("strictInside", false)) \
+				and bound_successor_id == successor_request_id \
+				and String(event.get("crossingSuccessorLeaseId", "")) == successor_lease_id \
+				and String(event.get("routeRequestId", "")) == successor_request_id \
+				and int(event.get("routeGeneration", -1)) == successor_generation \
+				and String(event.get("routeLeaseId", "")) == successor_lease_id \
+				and opposite_door_side(float(event.get("doorPlaneSide", 0.0)), interior_side):
+			return true
+	return false
+
+func valid_door_exit_supersession(history: Dictionary) -> bool:
+	return String(history.get("state", "")) == "cancelled" \
+		and String(history.get("reason", "")) == "routine_route_key_changed"
+
+func day_direct_clearance_transaction_observed(actor_id: String, order_id: String, request_id: String, generation: int, lease_id: String, portal_id: String) -> bool:
+	if actor_id.is_empty() or order_id.is_empty() or request_id.is_empty() or generation < 0 or lease_id.is_empty() or portal_id.is_empty():
+		return false
+	var tracker: Dictionary = acceptance_door_lifecycle.get(actor_id, {}) if acceptance_door_lifecycle.get(actor_id, {}) is Dictionary else {}
+	var crossing_id := ""
+	var traffic_group_id := ""
+	var previous_frame := -1
+	var interior_side := manifest_door_plane_side(actor_id, true)
+	for event_value in tracker.get("events", []) as Array:
+		if not (event_value is Dictionary):
+			continue
+		var event: Dictionary = event_value as Dictionary
+		if String(event.get("phase", "")) != "day_civic" or String(event.get("scriptedOrderId", "")) != order_id:
+			continue
+		if String(event.get("crossingInitiatingRequestId", "")) != request_id \
+				or int(event.get("crossingInitiatingGeneration", -1)) != generation \
+				or String(event.get("crossingInitiatingLeaseId", "")) != lease_id:
+			if not crossing_id.is_empty():
+				return false
+			continue
+		var event_crossing_id := String(event.get("crossingId", ""))
+		var event_traffic_group_id := String(event.get("crossingTrafficGroupId", ""))
+		if event_crossing_id.is_empty() or event_traffic_group_id.is_empty() \
+				or String(event.get("crossingPortalId", "")) != portal_id \
+				or String(event.get("activeDoorPortalId", "")) != portal_id \
+				or (event.get("crossingReservationIds", []) as Array).is_empty() \
+				or not bool((event.get("crossingTrafficContinuity", {}) as Dictionary).get("ok", false)) \
+				or not bool(event.get("allLeafCollisionDisabled", false)):
+			return false
+		if crossing_id.is_empty():
+			crossing_id = event_crossing_id
+			traffic_group_id = event_traffic_group_id
+		elif event_crossing_id != crossing_id or event_traffic_group_id != traffic_group_id:
+			return false
+		var physics_frame := int(event.get("physicsFrame", -1))
+		if previous_frame >= 0 and physics_frame != previous_frame + 1:
+			return false
+		previous_frame = physics_frame
+		if String(event.get("routeRequestId", "")) == request_id \
+				and int(event.get("routeGeneration", -1)) == generation \
+				and String(event.get("routeLeaseId", "")) == lease_id \
+				and String(event.get("crossingSuccessorRequestId", "")).is_empty() \
+				and String(event.get("crossingSuccessorLeaseId", "")).is_empty() \
+				and not bool(event.get("strictInside", false)) \
+				and opposite_door_side(float(event.get("doorPlaneSide", 0.0)), interior_side):
+			return true
+	return false
+
+
+func day_clearance_release_observed(actor_id: String, order_id: String, chain: Dictionary) -> bool:
+	var door_leg: Dictionary = chain.get("doorExit", {}) if chain.get("doorExit", {}) is Dictionary else {}
+	var clearance_leg: Dictionary = chain.get("exteriorClearance", {}) if chain.get("exteriorClearance", {}) is Dictionary else {}
+	if actor_id.is_empty() or order_id.is_empty() or door_leg.is_empty() or clearance_leg.is_empty():
+		return false
+	var direct := bool(chain.get("directClearanceTransaction", false))
+	var tracker: Dictionary = acceptance_door_lifecycle.get(actor_id, {}) if acceptance_door_lifecycle.get(actor_id, {}) is Dictionary else {}
+	for event_value in tracker.get("events", []) as Array:
+		if not (event_value is Dictionary):
+			continue
+		var event: Dictionary = event_value as Dictionary
+		if String(event.get("phase", "")) != "day_civic" or String(event.get("scriptedOrderId", "")) != order_id:
+			continue
+		var matches := String(event.get("completedCrossingPortalId", "")) == String(door_leg.get("portalId", "")) \
+			and String(event.get("completedCrossingInitiatingRequestId", "")) == String(door_leg.get("requestId", "")) \
+			and int(event.get("completedCrossingInitiatingGeneration", -1)) == int(door_leg.get("generation", -1)) \
+			and String(event.get("completedCrossingInitiatingLeaseId", "")) == String(door_leg.get("leaseId", ""))
+		if matches and direct:
+			matches = String(event.get("completedCrossingSuccessorRequestId", "")).is_empty() \
+				and String(event.get("completedCrossingSuccessorLeaseId", "")).is_empty()
+		elif matches:
+			matches = String(event.get("completedCrossingSuccessorRequestId", "")) == String(clearance_leg.get("requestId", "")) \
+				and int(event.get("completedCrossingSuccessorGeneration", -1)) == int(clearance_leg.get("generation", -1)) \
+				and String(event.get("completedCrossingSuccessorLeaseId", "")) == String(clearance_leg.get("leaseId", ""))
+		if matches \
+				and bool((event.get("completedCrossingTrafficContinuity", {}) as Dictionary).get("ok", false)) \
+				and bool(completed_crossing_release_certificate(actor_id, event).get("ok", false)):
+			return true
+	return false
+
+
+func route_request_has_arrived(route_authority, request_id: String) -> bool:
+	var summary := route_request_runtime(route_authority, request_id)
+	if String(summary.get("state", "")) == "arrived":
+		return true
+	for event_value in summary.get("recentEvents", []) as Array:
+		if event_value is Dictionary and String((event_value as Dictionary).get("state", "")) == "arrived":
+			return true
+	return false
+
+
+func route_request_runtime(route_authority, request_id: String) -> Dictionary:
+	if route_authority == null or request_id.is_empty() or not route_authority.has_method("runtime_for_request"):
+		return {"hasRequest": false, "requestId": request_id, "reason": "request_history_unavailable"}
+	return route_authority.call("runtime_for_request", request_id) as Dictionary
+
+
 func acceptance_observation_phase(phase_name: String, duration_seconds: float, capture_prefix: String) -> void:
 	profile_begin_stage("acceptance_%s" % phase_name)
 	var started_usec := Time.get_ticks_usec()
+	var started_physics_frame := Engine.get_physics_frames()
+	var duration_frames := maxi(1, ceili(duration_seconds * float(Engine.physics_ticks_per_second)))
 	var next_sample_seconds := 0.0
 	var capture_index := 0
-	while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < duration_seconds:
-		var elapsed_seconds := float(Time.get_ticks_usec() - started_usec) / 1000000.0
+	var last_progress_seconds := -1
+	var last_night_checkpoint_seconds := 0
+	while Engine.get_physics_frames() - started_physics_frame < duration_frames:
+		var elapsed_seconds := float(Engine.get_physics_frames() - started_physics_frame) / float(Engine.physics_ticks_per_second)
+		var elapsed_whole_seconds := int(floor(elapsed_seconds))
+		if elapsed_whole_seconds != last_progress_seconds:
+			last_progress_seconds = elapsed_whole_seconds
+			var wall_elapsed_seconds := float(Time.get_ticks_usec() - started_usec) / 1000000.0
+			write_profile_progress("acceptancePhase=%s simulatedElapsed=%.2f wallElapsed=%.2f" % [phase_name, elapsed_seconds, wall_elapsed_seconds])
 		if elapsed_seconds >= next_sample_seconds:
-			acceptance_timeline.append(citizen_observation_snapshot("%s_%02d" % [phase_name, int(floor(elapsed_seconds))]))
-			next_sample_seconds += 1.0
+			var observation := citizen_observation_snapshot("%s_%02d" % [phase_name, int(floor(elapsed_seconds))])
+			acceptance_timeline.append(observation)
+			next_sample_seconds += ACCEPTANCE_SNAPSHOT_INTERVAL_SECONDS
 			if capture_index < 2 and elapsed_seconds >= float(capture_index) * maxf(3.0, duration_seconds * 0.45):
 				await capture_viewport("%s_%d" % [capture_prefix, capture_index + 1])
 				capture_index += 1
-		await get_tree().process_frame
+			if phase_name == "night_home" and _observation_all_citizens_strictly_inside(observation):
+				break
+			if phase_name == "day_civic" and _observation_all_civic_departures_complete(observation):
+				break
+		if phase_name == "night_home" \
+				and elapsed_whole_seconds >= last_night_checkpoint_seconds + NIGHT_CHECKPOINT_INTERVAL_SECONDS:
+			last_night_checkpoint_seconds = elapsed_whole_seconds
+			acceptance_night_progress = night_home_progress_evidence()
+			write_profile_report("acceptance_night_progress_checkpoint")
+		record_door_lifecycle_observations(phase_name)
+		await get_tree().physics_frame
 	profile_end_stage("acceptance_%s" % phase_name, {
 		"activeCitizenCount": citizens.size(),
 		"sceneNodeCount": count_scene_nodes(get_tree().root)
 	})
+
+
+func _observation_all_citizens_strictly_inside(observation: Dictionary) -> bool:
+	var records: Array = observation.get("citizens", []) if observation.get("citizens", []) is Array else []
+	if records.size() != citizens.size() or records.is_empty():
+		return false
+	for record_value in records:
+		if not (record_value is Dictionary) or not bool((record_value as Dictionary).get("physicallyInsideStrictInterior", false)):
+			return false
+	return true
+
+
+func _observation_all_civic_departures_complete(observation: Dictionary) -> bool:
+	var records: Array = observation.get("citizens", []) if observation.get("citizens", []) is Array else []
+	if records.size() != citizens.size() or records.is_empty():
+		return false
+	for record_value in records:
+		if not (record_value is Dictionary):
+			return false
+		var record: Dictionary = record_value as Dictionary
+		if bool(record.get("physicallyInsideStrictInterior", true)):
+			return false
+		if String(record.get("orderState", "")) != "ARRIVED" or String(record.get("routeStatus", "")) != "arrived":
+			return false
+		if String(record.get("homeDepartureState", "")) != "outside":
+			return false
+		var active_door: Dictionary = record.get("activeDoor", {}) if record.get("activeDoor", {}) is Dictionary else {}
+		if not String(active_door.get("portalId", "")).is_empty() \
+				or not String(active_door.get("trafficGroupId", "")).is_empty() \
+				or bool(active_door.get("stageActive", false)) \
+				or not String(record.get("activeTrafficStepGroup", "")).is_empty():
+			return false
+		if not (record.get("activeNavigationTransition", {}) as Dictionary).is_empty():
+			return false
+		if not day_departure_lifecycle_evidence(String(record.get("id", ""))).get("passed", false):
+			return false
+	return true
+
+
+func day_departure_lifecycle_evidence_map() -> Dictionary:
+	var result := {}
+	for citizen_entry in citizens:
+		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+		var actor_id := String(manifest.get("id", ""))
+		if not actor_id.is_empty():
+			result[actor_id] = day_departure_lifecycle_evidence(actor_id)
+	return result
+
+
+func day_departure_lifecycle_evidence(actor_id: String) -> Dictionary:
+	var tracker: Dictionary = acceptance_door_lifecycle.get(actor_id, {}) if acceptance_door_lifecycle.get(actor_id, {}) is Dictionary else {}
+	var events: Array = tracker.get("events", []) if tracker.get("events", []) is Array else []
+	var committed_actors: Dictionary = acceptance_day_route_commitment.get("committedActors", {}) if acceptance_day_route_commitment.get("committedActors", {}) is Dictionary else {}
+	var commitment: Dictionary = committed_actors.get(actor_id, {}) if committed_actors.get(actor_id, {}) is Dictionary else {}
+	var expected_order_id := String(commitment.get("orderId", ""))
+	var door_leg: Dictionary = commitment.get("doorExit", {}) if commitment.get("doorExit", {}) is Dictionary else {}
+	var clearance_leg: Dictionary = commitment.get("exteriorClearance", {}) if commitment.get("exteriorClearance", {}) is Dictionary else {}
+	var civic_leg: Dictionary = commitment.get("civicTarget", {}) if commitment.get("civicTarget", {}) is Dictionary else {}
+	var expected_door_request_id := String(door_leg.get("requestId", ""))
+	var expected_door_generation := int(door_leg.get("generation", -1))
+	var expected_door_lease_id := String(door_leg.get("leaseId", ""))
+	var expected_clearance_request_id := String(clearance_leg.get("requestId", ""))
+	var expected_clearance_generation := int(clearance_leg.get("generation", -1))
+	var expected_clearance_lease_id := String(clearance_leg.get("leaseId", ""))
+	var direct_clearance_transaction := bool(commitment.get("directClearanceTransaction", false))
+	var day_order_events: Array = events.filter(func(event: Dictionary) -> bool:
+		return (String(event.get("phase", "")) == "day_civic" or String(event.get("phase", "")) == "day_civic_complete") \
+			and int(event.get("physicsFrame", -1)) >= acceptance_day_started_physics_frame \
+			and int(event.get("acceptanceDayGeneration", -1)) == acceptance_day_generation \
+			and not expected_order_id.is_empty() and String(event.get("scriptedOrderId", "")) == expected_order_id
+	)
+	var transaction_events: Array = day_order_events.filter(func(event: Dictionary) -> bool:
+		return not expected_door_request_id.is_empty() \
+			and String(event.get("crossingInitiatingRequestId", "")) == expected_door_request_id \
+			and expected_door_generation > 0 and int(event.get("crossingInitiatingGeneration", -1)) == expected_door_generation \
+			and not expected_door_lease_id.is_empty() and String(event.get("crossingInitiatingLeaseId", "")) == expected_door_lease_id
+	)
+	var clearance_events: Array = day_order_events.filter(func(event: Dictionary) -> bool:
+		return not expected_clearance_request_id.is_empty() \
+			and String(event.get("routeRequestId", "")) == expected_clearance_request_id \
+			and expected_clearance_generation > 0 and int(event.get("routeGeneration", -1)) == expected_clearance_generation \
+			and not expected_clearance_lease_id.is_empty() and String(event.get("routeLeaseId", "")) == expected_clearance_lease_id
+	)
+	var interior_side := manifest_door_plane_side(actor_id, true)
+	if is_zero_approx(interior_side):
+		interior_side = first_signed_door_side(transaction_events, true)
+	var open_index := -1
+	var crossing_index := -1
+	var clearance_index := -1
+	var release_index := -1
+	var closed_index := -1
+	var crossing_frame := -1
+	var clearance_frame := -1
+	var clearance_evidence := {}
+	var release_certificate := {}
+	for index in range(transaction_events.size()):
+		if not (transaction_events[index] is Dictionary):
+			continue
+		var event: Dictionary = transaction_events[index] as Dictionary
+		if open_index < 0 and String(event.get("portalState", "")) == "open" and bool(event.get("allLeafCollisionDisabled", false)):
+			open_index = index
+		if open_index >= 0 and crossing_index < 0 \
+				and ((direct_clearance_transaction \
+						and expected_door_lease_id == expected_clearance_lease_id \
+						and String(event.get("crossingSuccessorRequestId", "")).is_empty() \
+						and String(event.get("crossingSuccessorLeaseId", "")).is_empty()) \
+					or (String(event.get("crossingSuccessorRequestId", "")) == expected_clearance_request_id \
+						and int(event.get("crossingSuccessorGeneration", -1)) == expected_clearance_generation \
+						and String(event.get("crossingSuccessorLeaseId", "")) == expected_clearance_lease_id)) \
+				and String(event.get("routeRequestId", "")) == expected_clearance_request_id \
+				and String(event.get("routeLeaseId", "")) == expected_clearance_lease_id \
+				and not bool(event.get("strictInside", false)) \
+				and opposite_door_side(float(event.get("doorPlaneSide", 0.0)), interior_side):
+			crossing_index = index
+			crossing_frame = int(event.get("physicsFrame", -1))
+	var crossing_id := String((transaction_events.front() as Dictionary).get("crossingId", "")) if not transaction_events.is_empty() and transaction_events.front() is Dictionary else ""
+	for index in range(day_order_events.size()):
+		if not (day_order_events[index] is Dictionary):
+			continue
+		var event: Dictionary = day_order_events[index] as Dictionary
+		var completed_matches := not crossing_id.is_empty() \
+			and String(event.get("completedCrossingId", "")) == crossing_id \
+			and String(event.get("completedCrossingPortalId", "")) == String(door_leg.get("portalId", "")) \
+			and String(event.get("completedCrossingInitiatingRequestId", "")) == expected_door_request_id \
+			and int(event.get("completedCrossingInitiatingGeneration", -1)) == expected_door_generation \
+			and String(event.get("completedCrossingInitiatingLeaseId", "")) == expected_door_lease_id
+		if completed_matches and direct_clearance_transaction:
+			completed_matches = String(event.get("completedCrossingSuccessorRequestId", "")).is_empty() \
+				and String(event.get("completedCrossingSuccessorLeaseId", "")).is_empty()
+		elif completed_matches:
+			completed_matches = String(event.get("completedCrossingSuccessorRequestId", "")) == expected_clearance_request_id \
+				and int(event.get("completedCrossingSuccessorGeneration", -1)) == expected_clearance_generation \
+				and String(event.get("completedCrossingSuccessorLeaseId", "")) == expected_clearance_lease_id
+		var candidate_release_certificate := completed_crossing_release_certificate(actor_id, event) if completed_matches else {}
+		if release_index < 0 and crossing_frame >= 0 and completed_matches \
+				and int(event.get("completedCrossingReleaseFrame", -1)) >= crossing_frame \
+				and bool(candidate_release_certificate.get("ok", false)) \
+				and bool((event.get("completedCrossingTrafficContinuity", {}) as Dictionary).get("ok", false)) \
+				and String(event.get("activeDoorPortalId", "")).is_empty() \
+				and String(event.get("crossingId", "")).is_empty():
+			clearance_index = index
+			clearance_frame = int(event.get("completedCrossingReleaseFrame", -1))
+			clearance_evidence = (candidate_release_certificate.get("observation", {}) as Dictionary).duplicate(true)
+			release_certificate = candidate_release_certificate.duplicate(true)
+			release_index = index
+		if release_index >= 0 and closed_index < 0 and index >= release_index \
+				and String(event.get("portalState", "")) == "closed" \
+				and not bool(event.get("collisionDisabled", false)):
+			closed_index = index
+	var portal_id := String((transaction_events.front() as Dictionary).get("portalId", "")) if not transaction_events.is_empty() and transaction_events.front() is Dictionary else ""
+	var trace_end_msec := acceptance_night_started_msec if acceptance_night_started_msec > acceptance_day_started_msec else -1
+	var trace := actor_door_lifecycle_trace(actor_id, portal_id, acceptance_day_started_msec, trace_end_msec)
+	var open_transition_msec := actor_door_trace_success_msec(trace, ["open", "hold"], "open", expected_door_request_id, expected_door_generation)
+	var open_observation_msec := int((transaction_events[open_index] as Dictionary).get("elapsedMsec", -1)) if open_index >= 0 else -1
+	var actor_opened := open_transition_msec >= 0 and open_observation_msec >= open_transition_msec
+	var collision_clear_before_crossing := open_index >= 0 and crossing_index >= open_index + 1 and interior_side != 0.0
+	var clearance_verified := crossing_frame >= 0 and clearance_index >= 0 and bool(clearance_evidence.get("satisfied", false))
+	return {
+		"passed": not door_leg.is_empty() and not clearance_leg.is_empty() and not civic_leg.is_empty() and actor_opened and collision_clear_before_crossing and clearance_verified and release_index >= 0 and closed_index >= release_index,
+		"actorId": actor_id,
+		"acceptanceDayGeneration": acceptance_day_generation,
+		"acceptanceDayStartedPhysicsFrame": acceptance_day_started_physics_frame,
+		"expectedOrderId": expected_order_id,
+		"doorExitLeg": door_leg.duplicate(true),
+		"exteriorClearanceLeg": clearance_leg.duplicate(true),
+		"civicTargetLeg": civic_leg.duplicate(true),
+		"dayEventCount": day_order_events.size(),
+		"dayDoorEventCount": transaction_events.size(),
+		"dayClearanceEventCount": clearance_events.size(),
+		"dayInteriorSide": interior_side,
+		"dayOpenCollisionClearIndex": open_index,
+		"dayExteriorPlaneCrossingIndex": crossing_index,
+		"dayExteriorClearanceIndex": clearance_index,
+		"dayCrossingReleaseIndex": release_index,
+		"dayClosedCollisionRestoredIndex": closed_index,
+		"dayActorOpenedDoor": actor_opened,
+		"dayCollisionClearObservedBeforeCrossing": collision_clear_before_crossing,
+		"dayExteriorClearanceVerified": clearance_verified,
+		"dayExteriorClearance": clearance_evidence,
+		"dayCompletedCrossingReleaseCertificate": release_certificate,
+		"directClearanceTransaction": direct_clearance_transaction,
+		"dayOpenTransitionMsec": open_transition_msec,
+		"dayActorTrace": compact_door_trace(trace),
+		"dayEvents": compact_door_events(day_order_events)
+	}
+
+
+func completed_crossing_release_certificate(actor_id: String, event: Dictionary) -> Dictionary:
+	var portal_id := String(event.get("completedCrossingPortalId", ""))
+	if actor_id.is_empty() or portal_id.is_empty():
+		return {"ok": false, "reason": "missing_completed_crossing_owner"}
+	for citizen_entry in citizens:
+		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+		if String(manifest.get("id", "")) != actor_id:
+			continue
+		var body := valid_citizen_body(citizen_entry)
+		if body == null or npc_system == null:
+			return {"ok": false, "reason": "missing_completed_crossing_actor"}
+		var entry: Dictionary = npc_system.call("npc_entry_for_actor", body) as Dictionary
+		var autonomy = npc_system.get("autonomy_system")
+		var portal = door_portal_for_lifecycle(autonomy, {"portalId": portal_id})
+		return certify_completed_crossing_release(entry, manifest, portal, event)
+	return {"ok": false, "reason": "completed_crossing_actor_not_found"}
+
+
+func certify_completed_crossing_release(entry: Dictionary, manifest: Dictionary, portal, event: Dictionary) -> Dictionary:
+	var evidence: Dictionary = event.get("completedCrossingReleaseEvidence", {}) if event.get("completedCrossingReleaseEvidence", {}) is Dictionary else {}
+	var position_value = evidence.get("position", Vector3.INF)
+	var position: Vector3 = position_value as Vector3 if position_value is Vector3 else Vector3.INF
+	var expected_portal_id := String(event.get("completedCrossingPortalId", ""))
+	var actual_portal_id := String(portal.get("portal_id")) if portal != null else ""
+	if not bool(evidence.get("exteriorClearanceCertified", false)):
+		return {"ok": false, "reason": "release_clearance_not_certified"}
+	if not position.is_finite():
+		return {"ok": false, "reason": "release_position_invalid"}
+	if expected_portal_id.is_empty() or actual_portal_id != expected_portal_id:
+		return {"ok": false, "reason": "release_portal_mismatch", "expectedPortalId": expected_portal_id, "actualPortalId": actual_portal_id}
+	var observation := exterior_clearance_observation(entry, manifest, portal, position)
+	return {
+		"ok": bool(observation.get("satisfied", false)),
+		"reason": "" if bool(observation.get("satisfied", false)) else "release_position_not_exterior_clearance",
+		"portalId": expected_portal_id,
+		"releasePosition": position,
+		"observation": observation
+	}
 
 
 func await_crowd_lineup_route_commitment(setup: Dictionary, publication_timeout_seconds: float) -> Dictionary:
@@ -2638,16 +4594,23 @@ func crowd_crossing_summary(start_positions: Dictionary, lineup_setup: Dictionar
 	for value in (crowd_physics_evidence.get("maxCommandedStationaryFramesByActor", {}) as Dictionary).values():
 		max_stationary_frames = maxi(max_stationary_frames, int(value))
 	var admission_ok := bool(lineup_admission.get("allAccepted", false)) and bool(crossing_admission.get("timely", false))
-	var congestion_observed := minimum_separation < 2.0
+	var avoidance_observed := false
+	for actor_key in ["leftAvoidance", "rightAvoidance"]:
+		var avoidance: Dictionary = minimum_pair.get(actor_key, {}) as Dictionary
+		var metrics: Dictionary = avoidance.get("metrics", {}) as Dictionary
+		if bool(avoidance.get("active", false)) and int(metrics.get("callbackHits", 0)) > 0:
+			avoidance_observed = true
+			break
 	var movement_ok := moved_count == citizens.size() and arrived_count == citizens.size() and unchanged_target_count == citizens.size() and crowd_replan_count == 0
 	return {
-		"passed": bool(lineup_setup.get("ok", false)) and bool(crossing_setup.get("ok", false)) and admission_ok and congestion_observed and overlap_frames == 0 and minimum_separation >= required_separation and max_stationary_frames <= 90 and movement_ok,
+		"passed": bool(lineup_setup.get("ok", false)) and bool(crossing_setup.get("ok", false)) and admission_ok and avoidance_observed and overlap_frames == 0 and minimum_separation >= required_separation and max_stationary_frames <= 90 and movement_ok,
 		"lineupSetup": lineup_setup,
 		"lineupAdmission": lineup_admission,
 		"crossingSetup": crossing_setup,
 		"crossingAdmission": crossing_admission,
 		"minimumSeparation": minimum_separation,
 		"requiredSeparation": required_separation,
+		"avoidanceObserved": avoidance_observed,
 		"overlapFrameCount": overlap_frames,
 		"maxCommandedStationaryFrames": max_stationary_frames,
 		"movedAtLeastFourMetersCount": moved_count,
@@ -2676,6 +4639,7 @@ func citizen_observation_snapshot(label: String) -> Dictionary:
 		var entry: Dictionary = npc_system.call("npc_entry_for_actor", body) as Dictionary
 		var order: Dictionary = entry.get("scriptedOrder", {}) as Dictionary
 		var autonomy = npc_system.get("autonomy_system")
+		var home_status: Dictionary = autonomy.call("home_interior_status", entry, body.global_position) as Dictionary if autonomy != null and autonomy.has_method("home_interior_status") else {}
 		var route_debug: Dictionary = autonomy.call("route_authority_v2_debug_for_entry", entry) as Dictionary if autonomy != null and autonomy.has_method("route_authority_v2_debug_for_entry") else {}
 		var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
 		var navmesh_path: Dictionary = navmesh_world.call("actor_path_status", String(manifest.get("id", body.name))) as Dictionary if navmesh_world != null and navmesh_world.has_method("actor_path_status") else {}
@@ -2684,6 +4648,9 @@ func citizen_observation_snapshot(label: String) -> Dictionary:
 		var navigation_body_radius := float(motor_profile.capsule_radius) if motor_profile != null else body_radius
 		var locomotion = citizen_entry.get("locomotion")
 		var presentation := biped_presentation_snapshot(locomotion)
+		var route_service_kind := String(entry.get("routePhysicsServiceKind", ""))
+		var route_plan: Dictionary = entry.get("homeRouteV2LastPlan", {}) if route_service_kind == "home" else entry.get("routineRouteV2LastPlan", {})
+		var route_execution: Dictionary = entry.get("homeRouteV2LastExecution", {}) if route_service_kind == "home" else entry.get("routineRouteV2LastExecution", {})
 		records.append({
 			"id": String(manifest.get("id", body.name)),
 			"residenceId": String(manifest.get("residenceId", "")),
@@ -2700,8 +4667,13 @@ func citizen_observation_snapshot(label: String) -> Dictionary:
 			"routeAuthority": route_debug,
 			"navmeshPath": navmesh_path,
 			"routeCandidates": entry.get("routineRouteV2LastCandidates", {}),
-			"routePlan": entry.get("routineRouteV2LastPlan", {}),
-			"routeExecution": entry.get("routineRouteV2LastExecution", {}),
+			"routePlan": route_plan,
+			"routeExecution": route_execution,
+			"homeRouteExecution": entry.get("homeRouteV2LastExecution", {}),
+			"routineRouteExecution": entry.get("routineRouteV2LastExecution", {}),
+			"deferredRouteExecution": entry.get("routeLeaseDeferredExecution", {}),
+			"activeNavigationTransition": entry.get("activeNavigationTransition", {}),
+			"pendingNavigationTransition": entry.get("pendingNavigationTransition", {}),
 			"crowdAvoidance": entry.get("routeLeaseAvoidance", {}),
 			"bodyRadius": body_radius,
 			"navigationBodyRadius": navigation_body_radius,
@@ -2739,6 +4711,9 @@ func citizen_observation_snapshot(label: String) -> Dictionary:
 				"stageActive": bool(entry.get("doorStageActive", false)),
 				"stagePosition": entry.get("doorStagePosition", Vector3.INF)
 			},
+			"activeTrafficStepGroup": String(entry.get("activeTrafficStepGroup", "")),
+			"homeInteriorStatus": home_status,
+			"doorLifecycle": door_lifecycle_snapshot(entry, body),
 			"physicallyInsideStrictInterior": physically_inside
 		})
 	var crowd_summary := crowd_proximity_summary(records)
@@ -2757,6 +4732,466 @@ func citizen_observation_snapshot(label: String) -> Dictionary:
 		"crowd": crowd_summary,
 		"citizens": records
 	}
+
+
+func door_lifecycle_snapshot(entry: Dictionary, body: CharacterBody3D) -> Dictionary:
+	var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+	var door_portals = autonomy.get("door_portals") if autonomy != null else null
+	var portal_id := String(entry.get("doorPortalId", ""))
+	var result := {
+		"portalId": portal_id,
+		"portalState": "missing",
+		"leafCount": 0,
+		"collisionDisabled": false,
+		"allLeafCollisionDisabled": false
+	}
+	if portal_id.is_empty() or door_portals == null:
+		return result
+	var portal = (door_portals.get("portals") as Dictionary).get(portal_id)
+	if portal == null:
+		return result
+	result["portalState"] = String(portal.get("state"))
+	var leaf_count := 0
+	var disabled_count := 0
+	for leaf_value in portal.get("leaf_nodes") as Array:
+		var leaf := leaf_value as Node
+		if leaf == null or not is_instance_valid(leaf):
+			continue
+		for collision_value in leaf.find_children("*", "CollisionShape3D", true, false):
+			var collision := collision_value as CollisionShape3D
+			if collision == null:
+				continue
+			leaf_count += 1
+			if collision.disabled or leaf.collision_layer == 0:
+				disabled_count += 1
+	result["leafCount"] = leaf_count
+	result["collisionDisabled"] = disabled_count > 0
+	result["allLeafCollisionDisabled"] = leaf_count > 0 and disabled_count == leaf_count
+	return result
+
+
+func record_door_lifecycle_observations(phase: String) -> void:
+	if npc_system == null:
+		return
+	var physics_frame := Engine.get_physics_frames()
+	for citizen_entry in citizens:
+		var body := citizen_entry.get("body") as CharacterBody3D
+		if body == null or not is_instance_valid(body):
+			continue
+		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+		var actor_id := String(manifest.get("id", body.name))
+		var entry: Dictionary = npc_system.call("npc_entry_for_actor", body) as Dictionary
+		var scripted_order: Dictionary = entry.get("scriptedOrder", {}) if entry.get("scriptedOrder", {}) is Dictionary else {}
+		var autonomy = npc_system.get("autonomy_system")
+		var route_authority: Dictionary = autonomy.call("route_authority_v2_debug_for_entry", entry) as Dictionary if autonomy != null and autonomy.has_method("route_authority_v2_debug_for_entry") else {}
+		var crossing_transaction: Dictionary = autonomy.call("npc_door_crossing_transaction", entry) as Dictionary if autonomy != null and autonomy.has_method("npc_door_crossing_transaction") else {}
+		var completed_crossing: Dictionary = autonomy.call("npc_completed_door_crossing", entry) as Dictionary if autonomy != null and autonomy.has_method("npc_completed_door_crossing") else {}
+		var force_sample := phase.ends_with("complete") or phase == "acceptance_start"
+		var owned_door_traversal := not String(entry.get("activeDoorPortalId", "")).is_empty() or bool(entry.get("doorStageActive", false))
+		if physics_frame % DOOR_LIFECYCLE_SAMPLE_INTERVAL_FRAMES != 0 and not owned_door_traversal and not force_sample:
+			continue
+		var home_status: Dictionary = autonomy.call("home_interior_status", entry, body.global_position) as Dictionary if autonomy != null and autonomy.has_method("home_interior_status") else {}
+		var door: Dictionary = door_lifecycle_snapshot(entry, body)
+		var portal = door_portal_for_lifecycle(autonomy, door)
+		var interior_position: Vector3 = manifest.get("doorInteriorPosition", Vector3.INF) as Vector3
+		var exterior_position: Vector3 = manifest.get("doorExteriorPosition", Vector3.INF) as Vector3
+		var plane_side := 0.0
+		if interior_position.is_finite() and exterior_position.is_finite():
+			var door_axis := exterior_position - interior_position
+			door_axis.y = 0.0
+			if door_axis.length_squared() > 0.0001:
+				plane_side = (body.global_position - (interior_position + exterior_position) * 0.5).dot(door_axis.normalized())
+		var current := {
+			"phase": phase,
+			"acceptanceDayGeneration": acceptance_day_generation,
+			"scriptedOrderId": String(scripted_order.get("id", "")),
+			"routeRequestId": String(route_authority.get("requestId", "")),
+			"routeGeneration": int(route_authority.get("generation", -1)),
+			"routeLeaseId": String((entry.get("routeLease", {}) as Dictionary).get("leaseId", "")) if entry.get("routeLease", {}) is Dictionary else "",
+			"position": body.global_position,
+			"strictInside": bool(home_status.get("strictInside", false)),
+			"clearOfDoor": bool(home_status.get("clearOfDoor", false)),
+			"homeDepartureState": String(entry.get("homeDepartureState", "")),
+			"portalId": String(door.get("portalId", "")),
+			"portalState": String(door.get("portalState", "")),
+			"leafCount": int(door.get("leafCount", 0)),
+			"collisionDisabled": bool(door.get("collisionDisabled", false)),
+			"allLeafCollisionDisabled": bool(door.get("allLeafCollisionDisabled", false)),
+			"activeDoorPortalId": String(entry.get("activeDoorPortalId", "")),
+			"crossingId": String(crossing_transaction.get("crossingId", "")),
+			"crossingPortalId": String(crossing_transaction.get("portalId", "")),
+			"crossingTrafficGroupId": String(crossing_transaction.get("groupId", "")),
+			"crossingReservationIds": (crossing_transaction.get("reservationIds", []) as Array).duplicate(),
+			"crossingTrafficContinuity": (crossing_transaction.get("trafficContinuity", {}) as Dictionary).duplicate(true),
+			"crossingInitiatingRequestId": String(crossing_transaction.get("initiatingRouteRequestId", "")),
+			"crossingInitiatingGeneration": int(crossing_transaction.get("initiatingRouteGeneration", -1)),
+			"crossingInitiatingLeaseId": String(crossing_transaction.get("initiatingRouteLeaseId", "")),
+			"crossingSuccessorRequestId": String(crossing_transaction.get("successorRouteRequestId", "")),
+			"crossingSuccessorGeneration": int(crossing_transaction.get("successorRouteGeneration", -1)),
+			"crossingSuccessorLeaseId": String(crossing_transaction.get("successorRouteLeaseId", "")),
+			"completedCrossingId": String(completed_crossing.get("crossingId", "")),
+			"completedCrossingPortalId": String(completed_crossing.get("portalId", "")),
+			"completedCrossingInitiatingRequestId": String(completed_crossing.get("initiatingRouteRequestId", "")),
+			"completedCrossingInitiatingGeneration": int(completed_crossing.get("initiatingRouteGeneration", -1)),
+			"completedCrossingInitiatingLeaseId": String(completed_crossing.get("initiatingRouteLeaseId", "")),
+			"completedCrossingSuccessorRequestId": String(completed_crossing.get("successorRouteRequestId", "")),
+			"completedCrossingSuccessorGeneration": int(completed_crossing.get("successorRouteGeneration", -1)),
+			"completedCrossingSuccessorLeaseId": String(completed_crossing.get("successorRouteLeaseId", "")),
+			"completedCrossingReleaseFrame": int(completed_crossing.get("releaseFrame", -1)),
+			"completedCrossingReleaseEvidence": (completed_crossing.get("releaseEvidence", {}) as Dictionary).duplicate(true),
+			"completedCrossingTrafficContinuity": (completed_crossing.get("releaseTrafficContinuity", {}) as Dictionary).duplicate(true),
+			"routeStatus": String(entry.get("routeStatus", "")),
+			"movedDistance": float(entry.get("routePhysicsServiceMovedDistance", 0.0)),
+			"doorPlaneSide": plane_side,
+			"exteriorClearance": exterior_clearance_observation(entry, manifest, portal, body.global_position)
+		}
+		var tracker: Dictionary = acceptance_door_lifecycle.get(actor_id, {"events": [], "last": {}}) as Dictionary
+		var last: Dictionary = tracker.get("last", {}) as Dictionary
+		if int(last.get("physicsFrame", -1)) == physics_frame:
+			continue
+		current["physicsFrame"] = physics_frame
+		current["elapsedMsec"] = Time.get_ticks_msec()
+		var capture_id := door_lifecycle_capture_id(actor_id, phase, last, current)
+		if not capture_id.is_empty():
+			current["visualCapturePath"] = profile_screenshot_dir.path_join("%s.png" % capture_id)
+			call_deferred("capture_doorway_lifecycle_view", capture_id, body)
+		var events: Array = tracker.get("events", []) as Array
+		events.append(current.duplicate(true))
+		tracker["events"] = events
+		tracker["last"] = current.duplicate(true)
+		acceptance_door_lifecycle[actor_id] = tracker
+
+
+func door_portal_for_lifecycle(autonomy, door: Dictionary):
+	if autonomy == null:
+		return null
+	var door_portals = autonomy.get("door_portals")
+	if door_portals == null or not (door_portals.get("portals") is Dictionary):
+		return null
+	return (door_portals.get("portals") as Dictionary).get(String(door.get("portalId", "")))
+
+
+func exterior_clearance_observation(entry: Dictionary, manifest: Dictionary, portal, position: Vector3) -> Dictionary:
+	var geometry_entry := entry.duplicate(false)
+	for key in ["doorInteriorPosition", "doorExteriorPosition"]:
+		var value = geometry_entry.get(key, Vector3.INF)
+		if not (value is Vector3) or not (value as Vector3).is_finite():
+			geometry_entry[key] = manifest.get(key, Vector3.INF)
+	var exterior = geometry_entry.get("doorExteriorPosition", Vector3.INF)
+	var target := exterior as Vector3 if exterior is Vector3 else Vector3.INF
+	if target.is_finite():
+		target = HomeInteriorServiceScript.exterior_clearance_target(geometry_entry, portal, target, DOOR_CLEARANCE_ARRIVAL_RADIUS)
+	var outward := HomeInteriorServiceScript.exterior_direction_for_entry(geometry_entry)
+	var signed_distance := 0.0
+	var interior = geometry_entry.get("doorInteriorPosition", Vector3.INF)
+	if interior is Vector3 and exterior is Vector3 and (interior as Vector3).is_finite() and (exterior as Vector3).is_finite() and outward.length_squared() > 0.0001:
+		signed_distance = (position - ((interior as Vector3 + exterior as Vector3) * 0.5)).dot(outward)
+	return {
+		"target": target,
+		"actualPosition": position,
+		"targetDistance": position.distance_to(target) if target.is_finite() else INF,
+		"signedExteriorPlaneDistance": signed_distance,
+		"satisfied": HomeInteriorServiceScript.has_exterior_clearance(geometry_entry, portal, position)
+	}
+
+
+func door_lifecycle_capture_id(actor_id: String, phase: String, previous: Dictionary, current: Dictionary) -> String:
+	if profile_screenshot_dir.is_empty() or phase not in ["day_civic", "night_home"]:
+		return ""
+	var state := String(current.get("portalState", ""))
+	var previous_state := String(previous.get("portalState", ""))
+	var stage := ""
+	if state == "open" and bool(current.get("allLeafCollisionDisabled", false)) and previous_state != "open":
+		stage = "open_collision_clear"
+	elif bool(previous.get("strictInside", false)) != bool(current.get("strictInside", false)):
+		stage = "door_plane_crossing"
+	elif state == "closed" and previous_state != "closed" and not bool(current.get("collisionDisabled", false)):
+		stage = "closed_collision_restored"
+	if stage.is_empty():
+		return ""
+	var capture_id := "door_%s_%s_%s_%s" % [phase, stage, actor_id.validate_filename().left(44), actor_id.md5_text().left(8)]
+	if acceptance_door_lifecycle_capture_ids.has(capture_id):
+		return ""
+	acceptance_door_lifecycle_capture_ids[capture_id] = true
+	return capture_id
+
+
+func capture_doorway_lifecycle_view(capture_id: String, body: CharacterBody3D) -> void:
+	if body == null or not is_instance_valid(body) or profile_screenshot_dir.is_empty():
+		return
+	var viewport := get_viewport()
+	var previous_camera := viewport.get_camera_3d()
+	var observation_camera := Camera3D.new()
+	add_child(observation_camera)
+	var capture_light := OmniLight3D.new()
+	observation_camera.add_child(capture_light)
+	capture_light.light_energy = 2.4
+	capture_light.omni_range = 12.0
+	capture_light.shadow_enabled = false
+	var target := body.global_position + Vector3(0.0, 0.9, 0.0)
+	observation_camera.global_position = nearby_observation_camera_position(body, target)
+	observation_camera.look_at(target, Vector3.UP)
+	observation_camera.make_current()
+	await get_tree().process_frame
+	await RenderingServer.frame_post_draw
+	save_current_viewport(capture_id)
+	if previous_camera != null and is_instance_valid(previous_camera):
+		previous_camera.current = true
+	observation_camera.queue_free()
+
+
+func night_home_progress_evidence() -> Dictionary:
+	var actors := {}
+	var passed := true
+	for actor_id_value in acceptance_door_lifecycle.keys():
+		var actor_id := String(actor_id_value)
+		var tracker: Dictionary = acceptance_door_lifecycle.get(actor_id, {}) as Dictionary
+		var events: Array = tracker.get("events", []) as Array
+		var night_events: Array = []
+		for event_value in events:
+			if event_value is Dictionary and String((event_value as Dictionary).get("phase", "")) == "night_home":
+				night_events.append(event_value as Dictionary)
+		var last_progress_frame := -1
+		var last_moved_distance := -INF
+		var stalled := false
+		var final_inside := false
+		var arrival_frame := -1
+		var final_frame := -1
+		for event_value in night_events:
+			var event: Dictionary = event_value as Dictionary
+			var moved_distance := float(event.get("movedDistance", 0.0))
+			var physics_frame := int(event.get("physicsFrame", -1))
+			final_frame = physics_frame
+			if moved_distance >= last_moved_distance + NIGHT_HOME_PROGRESS_DELTA:
+				last_moved_distance = moved_distance
+				last_progress_frame = physics_frame
+			if bool(event.get("strictInside", false)) and not final_inside:
+				final_inside = true
+				arrival_frame = physics_frame
+			if not final_inside and last_progress_frame >= 0 and physics_frame - last_progress_frame > roundi(NIGHT_HOME_PROGRESS_GRACE_SECONDS * float(Engine.physics_ticks_per_second)):
+				stalled = true
+		if not final_inside and last_progress_frame >= 0 and final_frame - last_progress_frame > roundi(NIGHT_HOME_PROGRESS_GRACE_SECONDS * float(Engine.physics_ticks_per_second)):
+			stalled = true
+		var actor_passed := not night_events.is_empty() and final_inside and not stalled
+		actors[actor_id] = {
+			"passed": actor_passed,
+			"eventCount": night_events.size(),
+			"finalStrictInside": final_inside,
+			"stalled": stalled,
+			"arrivalFrame": arrival_frame,
+			"finalObservationFrame": final_frame,
+			"lastProgressFrame": last_progress_frame,
+			"lastMovedDistance": last_moved_distance if last_moved_distance > -INF else 0.0
+		}
+		passed = passed and actor_passed
+	return {
+		"passed": passed and not actors.is_empty(),
+		"sampleIntervalFrames": DOOR_LIFECYCLE_SAMPLE_INTERVAL_FRAMES,
+		"progressGraceSeconds": NIGHT_HOME_PROGRESS_GRACE_SECONDS,
+		"progressDelta": NIGHT_HOME_PROGRESS_DELTA,
+		"actors": actors
+	}
+
+
+func door_lifecycle_acceptance_evidence(day_lifecycle: Dictionary, night_lifecycle: Dictionary) -> Dictionary:
+	var actors := {}
+	var passed := true
+	for actor_id_value in day_lifecycle.keys():
+		var actor_id := String(actor_id_value)
+		var day_tracker: Dictionary = day_lifecycle.get(actor_id, {}) as Dictionary
+		var night_tracker: Dictionary = night_lifecycle.get(actor_id, {}) as Dictionary
+		var day_events: Array = day_tracker.get("events", []) as Array
+		var night_events: Array = night_tracker.get("events", []) as Array
+		night_events = night_events.filter(func(event: Dictionary) -> bool: return String(event.get("phase", "")) == "night_home" or String(event.get("phase", "")) == "night_home_complete")
+		var baseline_leaf_count := 0
+		var day_open_index := -1
+		var day_crossing_index := -1
+		var day_clearance_index := -1
+		var day_clearance_verified := false
+		var day_clearance_evidence := {}
+		var day_interior_side := manifest_door_plane_side(actor_id, true)
+		if is_zero_approx(day_interior_side):
+			day_interior_side = first_signed_door_side(day_events, true)
+		for index in range(day_events.size()):
+			if not (day_events[index] is Dictionary):
+				continue
+			var event: Dictionary = day_events[index] as Dictionary
+			baseline_leaf_count = max(baseline_leaf_count, int(event.get("leafCount", 0)))
+			if day_open_index < 0 and String(event.get("portalState", "")) == "open" and bool(event.get("allLeafCollisionDisabled", false)):
+				day_open_index = index
+			if day_open_index >= 0 and day_crossing_index < 0 and not bool(event.get("strictInside", false)) and bool(event.get("clearOfDoor", false)) and opposite_door_side(float(event.get("doorPlaneSide", 0.0)), day_interior_side):
+				day_crossing_index = index
+			if day_crossing_index >= 0 and day_clearance_index < 0 and not bool(event.get("strictInside", false)) and opposite_door_side(float(event.get("doorPlaneSide", 0.0)), day_interior_side) and bool((event.get("exteriorClearance", {}) as Dictionary).get("satisfied", false)):
+				day_clearance_index = index
+				day_clearance_evidence = event.get("exteriorClearance", {}) as Dictionary
+				day_clearance_verified = bool(day_clearance_evidence.get("satisfied", false))
+		var night_open_index := -1
+		var night_return_index := -1
+		var night_closed_index := -1
+		var night_exterior_side := manifest_door_plane_side(actor_id, false)
+		if is_zero_approx(night_exterior_side):
+			night_exterior_side = first_signed_door_side(night_events, false)
+		for index in range(night_events.size()):
+			if not (night_events[index] is Dictionary):
+				continue
+			var event: Dictionary = night_events[index] as Dictionary
+			if night_open_index < 0 and String(event.get("portalState", "")) == "open" and bool(event.get("allLeafCollisionDisabled", false)):
+				night_open_index = index
+			if night_open_index >= 0 and night_return_index < 0 and bool(event.get("strictInside", false)) and opposite_door_side(float(event.get("doorPlaneSide", 0.0)), night_exterior_side):
+				night_return_index = index
+			if night_return_index >= 0 and night_closed_index < 0 and String(event.get("portalState", "")) == "closed" and not bool(event.get("collisionDisabled", false)) and int(event.get("leafCount", 0)) == baseline_leaf_count and baseline_leaf_count > 0:
+				night_closed_index = index
+		var portal_id := String((day_events.front() as Dictionary).get("portalId", "")) if not day_events.is_empty() and day_events.front() is Dictionary else ""
+		var day_trace := actor_door_lifecycle_trace(actor_id, portal_id, acceptance_day_started_msec, acceptance_night_started_msec)
+		var night_trace := actor_door_lifecycle_trace(actor_id, portal_id, acceptance_night_started_msec)
+		var day_open_transition_msec := actor_door_trace_success_msec(day_trace, ["open", "hold"], "open")
+		var night_open_transition_msec := actor_door_trace_success_msec(night_trace, ["open", "hold"], "open")
+		var night_release_transition_msec := actor_door_trace_success_msec(night_trace, ["release"])
+		var day_open_elapsed_msec := int((day_events[day_open_index] as Dictionary).get("elapsedMsec", -1)) if day_open_index >= 0 else -1
+		var night_open_elapsed_msec := int((night_events[night_open_index] as Dictionary).get("elapsedMsec", -1)) if night_open_index >= 0 else -1
+		var day_actor_opened := day_open_transition_msec >= 0 and day_open_elapsed_msec >= day_open_transition_msec
+		var night_actor_opened := night_open_transition_msec >= 0 and night_open_elapsed_msec >= night_open_transition_msec
+		var night_actor_released := night_release_transition_msec >= 0
+		var day_open_delayed := day_open_index >= 0 and day_crossing_index >= day_open_index + 1 and day_interior_side != 0.0
+		var night_open_delayed := night_open_index >= 0 and night_return_index >= night_open_index + 1 and night_exterior_side != 0.0
+		var close_delayed := false
+		if night_return_index >= 0 and night_closed_index >= night_return_index:
+			if night_closed_index > night_return_index:
+				close_delayed = true
+			else:
+				var closing_event: Dictionary = night_events[night_closed_index] as Dictionary
+				close_delayed = bool(closing_event.get("strictInside", false)) and bool(closing_event.get("clearOfDoor", false))
+		var actor_passed := day_actor_opened and night_actor_opened and night_actor_released and day_open_delayed and day_clearance_verified and night_open_delayed and close_delayed
+		actors[actor_id] = {
+			"passed": actor_passed,
+			"dayEventCount": day_events.size(),
+			"nightEventCount": night_events.size(),
+			"baselineLeafColliderCount": baseline_leaf_count,
+			"dayInteriorSide": day_interior_side,
+			"nightExteriorSide": night_exterior_side,
+			"dayOpenCollisionClearIndex": day_open_index,
+			"dayExteriorPlaneCrossingIndex": day_crossing_index,
+			"dayExteriorClearanceIndex": day_clearance_index,
+			"nightOpenCollisionClearIndex": night_open_index,
+			"nightStrictInteriorPlaneCrossingIndex": night_return_index,
+			"nightClosedCollisionRestoredIndex": night_closed_index,
+			"dayActorOpenedDoor": day_actor_opened,
+			"dayExteriorClearanceVerified": day_clearance_verified,
+			"dayExteriorClearance": day_clearance_evidence,
+			"nightActorOpenedDoor": night_actor_opened,
+			"nightActorReleasedDoor": night_actor_released,
+			"dayOpenTransitionMsec": day_open_transition_msec,
+			"nightOpenTransitionMsec": night_open_transition_msec,
+			"nightReleaseTransitionMsec": night_release_transition_msec,
+			"dayCollisionClearObservedBeforeCrossing": day_open_delayed,
+			"nightCollisionClearObservedBeforeCrossing": night_open_delayed,
+			"collisionRestoredAfterReturn": close_delayed,
+			"dayActorTrace": compact_door_trace(day_trace),
+			"nightActorTrace": compact_door_trace(night_trace),
+			"dayEvents": compact_door_events(day_events),
+			"nightEvents": compact_door_events(night_events)
+		}
+		passed = passed and actor_passed
+	return {"passed": passed and not actors.is_empty(), "actors": actors}
+
+
+func actor_door_lifecycle_trace(actor_id: String, portal_id: String, start_msec: int, end_msec := -1) -> Array[Dictionary]:
+	var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+	var door_portals = autonomy.get("door_portals") if autonomy != null else null
+	var rows: Array[Dictionary] = []
+	if portal_id.is_empty() or door_portals == null or not door_portals.has_method("lifecycle_trace_snapshot"):
+		return rows
+	for row_value in door_portals.call("lifecycle_trace_snapshot", portal_id, 256):
+		if not (row_value is Dictionary):
+			continue
+		var row: Dictionary = row_value as Dictionary
+		var elapsed_msec := int(row.get("elapsedMsec", -1))
+		if elapsed_msec < start_msec or (end_msec >= 0 and elapsed_msec >= end_msec):
+			continue
+		var metadata: Dictionary = row.get("metadata", {}) as Dictionary
+		var request: Dictionary = metadata.get("request", {}) as Dictionary
+		if String(request.get("actorId", "")) != actor_id:
+			continue
+		rows.append(row.duplicate(true))
+	return rows
+
+
+func first_signed_door_side(events: Array, strict_inside: bool) -> float:
+	for event_value in events:
+		if not (event_value is Dictionary):
+			continue
+		var event: Dictionary = event_value as Dictionary
+		var side := float(event.get("doorPlaneSide", 0.0))
+		if bool(event.get("strictInside", false)) == strict_inside and absf(side) > 0.20:
+			return side
+	return 0.0
+
+
+func manifest_door_plane_side(actor_id: String, interior: bool) -> float:
+	for citizen_entry in citizens:
+		var manifest: Dictionary = citizen_entry.get("manifest", {}) as Dictionary
+		if String(manifest.get("id", "")) != actor_id:
+			continue
+		var interior_position: Vector3 = manifest.get("doorInteriorPosition", Vector3.INF) as Vector3
+		var exterior_position: Vector3 = manifest.get("doorExteriorPosition", Vector3.INF) as Vector3
+		if not interior_position.is_finite() or not exterior_position.is_finite():
+			return 0.0
+		var axis := exterior_position - interior_position
+		axis.y = 0.0
+		if axis.length_squared() <= 0.0001:
+			return 0.0
+		var point := interior_position if interior else exterior_position
+		return (point - (interior_position + exterior_position) * 0.5).dot(axis.normalized())
+	return 0.0
+
+
+func opposite_door_side(side: float, baseline_side: float) -> bool:
+	return absf(side) > 0.20 and absf(baseline_side) > 0.20 and side * baseline_side < -0.04
+
+
+func actor_door_trace_success_msec(rows: Array[Dictionary], commands: Array[String], expected_state := "", route_request_id := "", route_generation := -1) -> int:
+	for row in rows:
+		var metadata: Dictionary = row.get("metadata", {}) as Dictionary
+		var request: Dictionary = metadata.get("request", {}) as Dictionary
+		var result: Dictionary = metadata.get("result", {}) as Dictionary
+		var request_metadata: Dictionary = request.get("metadata", {}) if request.get("metadata", {}) is Dictionary else {}
+		if not route_request_id.is_empty() and String(request_metadata.get("routeRequestId", "")) != route_request_id:
+			continue
+		if route_generation > 0 and int(request_metadata.get("routeGeneration", -1)) != route_generation:
+			continue
+		if String(request.get("command", "")) in commands and String(result.get("status", "")) == "succeeded" and (expected_state.is_empty() or String(metadata.get("stateAfter", "")) == expected_state):
+			return int(row.get("elapsedMsec", -1))
+	return -1
+
+
+func compact_door_trace(rows: Array[Dictionary]) -> Array[Dictionary]:
+	var compact: Array[Dictionary] = []
+	for row in rows:
+		var metadata: Dictionary = row.get("metadata", {}) as Dictionary
+		var request: Dictionary = metadata.get("request", {}) as Dictionary
+		var result: Dictionary = metadata.get("result", {}) as Dictionary
+		var request_metadata: Dictionary = request.get("metadata", {}) if request.get("metadata", {}) is Dictionary else {}
+		compact.append({"elapsedMsec": int(row.get("elapsedMsec", -1)), "kind": String(row.get("kind", "")), "command": String(request.get("command", "")), "status": String(result.get("status", "")), "stateAfter": String(metadata.get("stateAfter", "")), "routeRequestId": String(request_metadata.get("routeRequestId", "")), "routeGeneration": int(request_metadata.get("routeGeneration", -1)), "routeLeaseId": String(request_metadata.get("routeLeaseId", ""))})
+	return compact
+
+
+func compact_door_events(events: Array) -> Array[Dictionary]:
+	var compact: Array[Dictionary] = []
+	for event_value in events:
+		if not (event_value is Dictionary):
+			continue
+		var event: Dictionary = event_value as Dictionary
+		if String(event.get("portalState", "")) == "open" or not bool(event.get("clearOfDoor", true)) or not bool(event.get("strictInside", false)) or event.has("visualCapturePath"):
+			compact.append({"physicsFrame": int(event.get("physicsFrame", -1)), "elapsedMsec": int(event.get("elapsedMsec", -1)), "acceptanceDayGeneration": int(event.get("acceptanceDayGeneration", -1)), "scriptedOrderId": String(event.get("scriptedOrderId", "")), "routeRequestId": String(event.get("routeRequestId", "")), "routeGeneration": int(event.get("routeGeneration", -1)), "routeLeaseId": String(event.get("routeLeaseId", "")), "portalState": String(event.get("portalState", "")), "portalId": String(event.get("portalId", "")), "activeDoorPortalId": String(event.get("activeDoorPortalId", "")), "crossingId": String(event.get("crossingId", "")), "crossingPortalId": String(event.get("crossingPortalId", "")), "crossingTrafficGroupId": String(event.get("crossingTrafficGroupId", "")), "crossingReservationIds": event.get("crossingReservationIds", []), "crossingTrafficContinuity": event.get("crossingTrafficContinuity", {}), "crossingInitiatingRequestId": String(event.get("crossingInitiatingRequestId", "")), "crossingInitiatingGeneration": int(event.get("crossingInitiatingGeneration", -1)), "crossingInitiatingLeaseId": String(event.get("crossingInitiatingLeaseId", "")), "crossingSuccessorRequestId": String(event.get("crossingSuccessorRequestId", "")), "crossingSuccessorGeneration": int(event.get("crossingSuccessorGeneration", -1)), "crossingSuccessorLeaseId": String(event.get("crossingSuccessorLeaseId", "")), "completedCrossingId": String(event.get("completedCrossingId", "")), "completedCrossingReleaseFrame": int(event.get("completedCrossingReleaseFrame", -1)), "completedCrossingReleaseEvidence": event.get("completedCrossingReleaseEvidence", {}), "completedCrossingTrafficContinuity": event.get("completedCrossingTrafficContinuity", {}), "allLeafCollisionDisabled": bool(event.get("allLeafCollisionDisabled", false)), "strictInside": bool(event.get("strictInside", false)), "clearOfDoor": bool(event.get("clearOfDoor", false)), "doorPlaneSide": float(event.get("doorPlaneSide", 0.0)), "routeStatus": String(event.get("routeStatus", "")), "exteriorClearance": event.get("exteriorClearance", {}), "visualCapturePath": String(event.get("visualCapturePath", ""))})
+	return compact
+
+
+func compact_door_lifecycle_map(lifecycle: Dictionary) -> Dictionary:
+	var compact := {}
+	for actor_id in lifecycle.keys():
+		var tracker: Dictionary = lifecycle.get(actor_id, {}) if lifecycle.get(actor_id, {}) is Dictionary else {}
+		compact[String(actor_id)] = compact_door_events(tracker.get("events", []) as Array)
+	return compact
 
 
 func biped_presentation_snapshot(locomotion) -> Dictionary:
@@ -2988,6 +5423,42 @@ func capture_crowd_encounter_view(capture_id: String, actor_id: String, encounte
 	observation_camera.queue_free()
 
 
+func capture_raised_route_junction_views() -> Array[Dictionary]:
+	var captures: Array[Dictionary] = []
+	if profile_screenshot_dir.is_empty() or citadel_root == null or core_blueprint == null:
+		return captures
+	var viewport := get_viewport()
+	var previous_camera := viewport.get_camera_3d()
+	if previous_camera != null and is_instance_valid(previous_camera):
+		previous_camera.current = false
+	var capture_index := 0
+	for part in core_blueprint.parts:
+		if part == null or String(part.semantic) != "castle_route_junction":
+			continue
+		capture_index += 1
+		var observation_camera := Camera3D.new()
+		add_child(observation_camera)
+		var capture_light := OmniLight3D.new()
+		observation_camera.add_child(capture_light)
+		capture_light.light_energy = 2.4
+		capture_light.omni_range = 20.0
+		capture_light.shadow_enabled = false
+		var target := citadel_root.to_global(part.position) + Vector3.UP * maxf(0.35, part.size.y * 0.4)
+		var lateral := Vector3(1.0 if capture_index % 2 == 0 else -1.0, 0.0, 1.0).normalized()
+		observation_camera.global_position = target + lateral * 7.0 + Vector3.UP * 5.2
+		observation_camera.look_at(target, Vector3.UP)
+		observation_camera.make_current()
+		await get_tree().process_frame
+		await RenderingServer.frame_post_draw
+		var capture_id := "interactive_route_junction_%02d" % capture_index
+		save_current_viewport(capture_id)
+		captures.append({"junctionId": String(part.id), "path": profile_screenshot_dir.path_join("%s.png" % capture_id)})
+		observation_camera.queue_free()
+	if previous_camera != null and is_instance_valid(previous_camera):
+		previous_camera.current = true
+	return captures
+
+
 func capture_route_failure_views(record: Dictionary, capture_index: int, evidence_kind := "route_failure") -> Dictionary:
 	var body := citizen_body_for_id(String(record.get("id", "")))
 	if body == null:
@@ -3136,9 +5607,9 @@ func source_navigation_facts_for_failure(record: Dictionary) -> Dictionary:
 	var source_part_id := String(collision.get("sourcePartId", ""))
 	var door_part_id := String(citizen.get("doorPartId", residence.get("doorPartId", "")))
 	var residence_part_prefix := door_part_id
-	var manor_marker := residence_part_prefix.find("__manor_")
-	if manor_marker > 0:
-		residence_part_prefix = residence_part_prefix.left(manor_marker)
+	var part_delimiter := residence_part_prefix.find("__")
+	if part_delimiter > 0:
+		residence_part_prefix = residence_part_prefix.left(part_delimiter + 2)
 	var route_start: Vector3 = navmesh_path.get("startPosition", Vector3.ZERO) as Vector3
 	var route_target: Vector3 = navmesh_path.get("targetPosition", Vector3.ZERO) as Vector3
 	var route_corridor := AABB(route_start, Vector3.ZERO).expand(route_target).grow(0.64)
@@ -3301,6 +5772,260 @@ func collect_manor_stair_link_diagnostics() -> void:
 		})
 
 
+func collect_citadel_surface_transition_publication_probe() -> Dictionary:
+	var expected_source_part_ids := [
+		"castle_compound_paving_segment_02",
+		"castle_keep_palace_entry_forecourt",
+		"castle_compound_paving_segment_03"
+	]
+	var support_records := {}
+	for source_part_id in expected_source_part_ids:
+		support_records[source_part_id] = []
+	if npc_system != null and npc_system.has_method("building_navigation_manifest_snapshot"):
+		for manifest_value in npc_system.call("building_navigation_manifest_snapshot") as Array:
+			if not (manifest_value is Dictionary):
+				continue
+			var manifest: Dictionary = manifest_value
+			for support_value in manifest.get("supports", []) as Array:
+				if not (support_value is Dictionary):
+					continue
+				var support: Dictionary = support_value
+				var source_part_id := String(support.get("sourcePartId", ""))
+				if not support_records.has(source_part_id):
+					continue
+				(support_records[source_part_id] as Array).append({
+					"id": String(support.get("id", "")),
+					"sourcePartId": source_part_id,
+					"sourceCollisionPartId": String(support.get("sourceCollisionPartId", "")),
+					"producerTileKey": String(support.get("producerTileKey", "")),
+					"tileKeys": (support.get("tileKeys", []) as Array).duplicate(),
+					"polygon": (support.get("polygon", []) as Array).duplicate(true)
+				})
+	var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+	var adapter = autonomy.call("generated_navigation_adapter") if autonomy != null and autonomy.has_method("generated_navigation_adapter") else null
+	var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
+	var requested_tile_keys := ["-17,146", "-17,147"]
+	var tile_snapshots := {}
+	if adapter != null and adapter.has_method("build_navmesh_tile_snapshot"):
+		for tile_key in requested_tile_keys:
+			var snapshot_value = adapter.call("build_navmesh_tile_snapshot", tile_key)
+			tile_snapshots[tile_key] = (snapshot_value as Dictionary).duplicate(true) if snapshot_value is Dictionary else {}
+	var navmesh_snapshot: Dictionary = navmesh_world.call("debug_snapshot") as Dictionary if navmesh_world != null and navmesh_world.has_method("debug_snapshot") else {}
+	var forecourt_records: Array = support_records.get("castle_keep_palace_entry_forecourt", []) as Array
+	var segment_03_records: Array = support_records.get("castle_compound_paving_segment_03", []) as Array
+	var forecourt_id := String((forecourt_records[0] as Dictionary).get("id", "")) if forecourt_records.size() == 1 and forecourt_records[0] is Dictionary else ""
+	var segment_03_id := String((segment_03_records[0] as Dictionary).get("id", "")) if segment_03_records.size() == 1 and segment_03_records[0] is Dictionary else ""
+	var selected_tile_links: Array[Dictionary] = []
+	var selected_ids := {}
+	for tile_key in requested_tile_keys:
+		var tile_snapshot: Dictionary = tile_snapshots.get(tile_key, {}) as Dictionary
+		for link_value in tile_snapshot.get("navigationLinks", []) as Array:
+			if not (link_value is Dictionary):
+				continue
+			var link: Dictionary = link_value
+			var start_support_id := String(link.get("startSupportId", ""))
+			var end_support_id := String(link.get("endSupportId", ""))
+			if not ((start_support_id == forecourt_id and end_support_id == segment_03_id) or (start_support_id == segment_03_id and end_support_id == forecourt_id)):
+				continue
+			var link_id := String(link.get("id", ""))
+			if selected_ids.has(link_id):
+				continue
+			selected_ids[link_id] = true
+			selected_tile_links.append(link.duplicate(true))
+	var installed_by_id := {}
+	var installed_support_pair_links: Array[Dictionary] = []
+	for link_value in navmesh_snapshot.get("navigationLinks", []) as Array:
+		if link_value is Dictionary:
+			var installed_link: Dictionary = link_value
+			installed_by_id[String(installed_link.get("id", ""))] = installed_link
+			var installed_start_support_id := String(installed_link.get("startSupportId", ""))
+			var installed_end_support_id := String(installed_link.get("endSupportId", ""))
+			if (installed_start_support_id == forecourt_id and installed_end_support_id == segment_03_id) \
+			or (installed_start_support_id == segment_03_id and installed_end_support_id == forecourt_id):
+				installed_support_pair_links.append(installed_link.duplicate(true))
+	var pending_matches: Array[Dictionary] = []
+	for link_value in navmesh_snapshot.get("pendingNavigationLinks", []) as Array:
+		if not (link_value is Dictionary):
+			continue
+		var pending_link: Dictionary = link_value
+		var pending_id := String(pending_link.get("id", pending_link.get("linkId", "")))
+		if selected_ids.has(pending_id):
+			pending_matches.append(pending_link.duplicate(true))
+	var publication_failures: Array[Dictionary] = []
+	var continuity_certificates: Array[Dictionary] = []
+	var continuity_by_id := {}
+	if adapter != null:
+		var failure_value = adapter.get("surface_transition_publication_failures")
+		if failure_value is Array:
+			for failure_entry_value in failure_value as Array:
+				if not (failure_entry_value is Dictionary):
+					continue
+				var serialized_failure := JSON.stringify(failure_entry_value)
+				if serialized_failure.contains("castle_keep_palace_entry_forecourt") or serialized_failure.contains("castle_compound_paving_segment_03"):
+					publication_failures.append((failure_entry_value as Dictionary).duplicate(true))
+		var continuity_value = adapter.get("continuous_surface_transition_certificates")
+		if continuity_value is Array:
+			for certificate_value in continuity_value as Array:
+				if not (certificate_value is Dictionary):
+					continue
+				var certificate: Dictionary = certificate_value
+				var owners_serialized := JSON.stringify(certificate.get("sourceOwners", []))
+				if owners_serialized.contains(forecourt_id) and owners_serialized.contains(segment_03_id):
+					continuity_by_id[String(certificate.get("seamCorridorId", ""))] = certificate.duplicate(true)
+		var continuity_ids: Array = continuity_by_id.keys()
+		continuity_ids.sort()
+		for continuity_id in continuity_ids:
+			continuity_certificates.append(continuity_by_id.get(continuity_id, {}) as Dictionary)
+	var support_sample_diagnostics: Array[Dictionary] = []
+	if adapter != null and adapter.has_method("building_support_navigation_sample_diagnostics"):
+		for support_id in [forecourt_id, segment_03_id]:
+			for tile_key in requested_tile_keys:
+				var sample_value = adapter.call("building_support_navigation_sample_diagnostics", support_id, tile_key)
+				if sample_value is Dictionary:
+					support_sample_diagnostics.append((sample_value as Dictionary).duplicate(true))
+	var seam_collision: Array[Dictionary] = []
+	var seam_bounds := AABB(Vector3(-365.2, 22.8, 3170.8), Vector3(9.5, 2.8, 6.2))
+	for tile_key in requested_tile_keys:
+		var tile_snapshot: Dictionary = tile_snapshots.get(tile_key, {}) as Dictionary
+		for collision_value in tile_snapshot.get("staticCollision", []) as Array:
+			if not (collision_value is Dictionary):
+				continue
+			var collision: Dictionary = collision_value
+			var bounds: AABB = collision.get("bounds", AABB()) if collision.get("bounds", AABB()) is AABB else AABB()
+			if bounds.size.length_squared() > 0.0 and bounds.intersects(seam_bounds):
+				seam_collision.append(collision.duplicate(true))
+	var lane_numbers: Array[int] = []
+	var installed_links: Array[Dictionary] = []
+	var invalid_installed_links: Array[Dictionary] = []
+	var endpoint_tiles := {}
+	for tile_link in selected_tile_links:
+		var lane_number := int(tile_link.get("laneNumber", -1))
+		if not lane_numbers.has(lane_number):
+			lane_numbers.append(lane_number)
+		endpoint_tiles[String(tile_link.get("startTileKey", ""))] = true
+		endpoint_tiles[String(tile_link.get("endTileKey", ""))] = true
+		var link_id := String(tile_link.get("id", ""))
+		var installed_link: Dictionary = installed_by_id.get(link_id, {}) as Dictionary
+		var link_rid = installed_link.get("linkRid")
+		var valid_rid: bool = typeof(link_rid) == TYPE_RID and link_rid.is_valid()
+		var valid: bool = not installed_link.is_empty() \
+			and bool(installed_link.get("enabled", false)) \
+			and bool(installed_link.get("bidirectional", false)) \
+			and valid_rid
+		var installed_summary := {
+			"id": link_id,
+			"laneNumber": lane_number,
+			"ownerTileKey": String(installed_link.get("ownerTileKey", "")),
+			"startTileKey": String(installed_link.get("startTileKey", "")),
+			"endTileKey": String(installed_link.get("endTileKey", "")),
+			"startTileSourceKey": String(installed_link.get("startTileSourceKey", "")),
+			"endTileSourceKey": String(installed_link.get("endTileSourceKey", "")),
+			"enabled": bool(installed_link.get("enabled", false)),
+			"bidirectional": bool(installed_link.get("bidirectional", false)),
+			"validRid": valid_rid,
+			"valid": valid
+		}
+		installed_links.append(installed_summary)
+		if not valid:
+			invalid_installed_links.append(installed_summary)
+	lane_numbers.sort()
+	var support_counts_valid := true
+	for source_part_id in expected_source_part_ids:
+		if (support_records.get(source_part_id, []) as Array).size() != 1:
+			support_counts_valid = false
+	var expected_endpoint_tiles := {"-17,146": true, "-17,147": true}
+	var endpoint_tiles_valid := endpoint_tiles.size() == expected_endpoint_tiles.size()
+	for tile_key in expected_endpoint_tiles.keys():
+		endpoint_tiles_valid = endpoint_tiles_valid and endpoint_tiles.has(tile_key)
+	var lanes_valid := lane_numbers == [0, 1, 2, 3, 4, 5]
+	var owners_valid := selected_tile_links.all(func(link: Dictionary) -> bool: return String(link.get("ownerTileKey", "")) == "-17,146")
+	var source_keys_valid := true
+	for tile_key in requested_tile_keys:
+		source_keys_valid = source_keys_valid and not String((tile_snapshots.get(tile_key, {}) as Dictionary).get("sourceKey", "")).is_empty()
+	var direct_route_probes: Array[Dictionary] = []
+	for continuity_certificate in continuity_certificates:
+		for lane_position_value in continuity_certificate.get("lanePositions", []) as Array:
+			if not (lane_position_value is Vector3):
+				continue
+			var lane_position: Vector3 = lane_position_value
+			var route_start := lane_position + Vector3(0.0, 0.04, -2.0)
+			var route_target := lane_position + Vector3(0.0, 0.04, 2.0)
+			var forward_route: Dictionary = navmesh_world.call("query_route", route_start, route_target, {"maxSnapDistance": 1.0, "queryApi": "query_path"}) as Dictionary if navmesh_world != null and navmesh_world.has_method("query_route") else {}
+			var reverse_route: Dictionary = navmesh_world.call("query_route", route_target, route_start, {"maxSnapDistance": 1.0, "queryApi": "query_path"}) as Dictionary if navmesh_world != null and navmesh_world.has_method("query_route") else {}
+			var forward_path: Array = forward_route.get("path", []) as Array
+			var reverse_path: Array = reverse_route.get("path", []) as Array
+			var forward_endpoint: Vector3 = forward_path.back() as Vector3 if not forward_path.is_empty() and forward_path.back() is Vector3 else Vector3.INF
+			var reverse_endpoint: Vector3 = reverse_path.back() as Vector3 if not reverse_path.is_empty() and reverse_path.back() is Vector3 else Vector3.INF
+			var forward_owner: Dictionary = adapter.call("building_support_for_position", forward_endpoint, CELL * 0.92) as Dictionary if adapter != null and forward_endpoint.is_finite() and adapter.has_method("building_support_for_position") else {}
+			var reverse_owner: Dictionary = adapter.call("building_support_for_position", reverse_endpoint, CELL * 0.92) as Dictionary if adapter != null and reverse_endpoint.is_finite() and adapter.has_method("building_support_for_position") else {}
+			var forward_endpoint_certified := forward_endpoint.is_finite() \
+				and Vector2(forward_endpoint.x - route_target.x, forward_endpoint.z - route_target.z).length() <= 0.05 \
+				and String(forward_owner.get("id", "")) == segment_03_id
+			var reverse_endpoint_certified := reverse_endpoint.is_finite() \
+				and Vector2(reverse_endpoint.x - route_start.x, reverse_endpoint.z - route_start.z).length() <= 0.05 \
+				and String(reverse_owner.get("id", "")) == forecourt_id
+			direct_route_probes.append({
+				"lanePosition": lane_position,
+				"forward": forward_route,
+				"reverse": reverse_route,
+				"forwardEndpointCertification": {"passed": forward_endpoint_certified, "endpoint": forward_endpoint, "expectedSupportId": segment_03_id, "actualSupportId": String(forward_owner.get("id", ""))},
+				"reverseEndpointCertification": {"passed": reverse_endpoint_certified, "endpoint": reverse_endpoint, "expectedSupportId": forecourt_id, "actualSupportId": String(reverse_owner.get("id", ""))},
+				"passed": bool(forward_route.get("ok", false)) and bool(reverse_route.get("ok", false)) \
+					and String(forward_route.get("status", "")) == "complete" \
+					and String(reverse_route.get("status", "")) == "complete" \
+					and (forward_route.get("actions", {}) as Dictionary).is_empty() \
+					and (reverse_route.get("actions", {}) as Dictionary).is_empty() \
+					and forward_endpoint_certified \
+					and reverse_endpoint_certified
+			})
+	var continuity_valid := continuity_certificates.size() == 1 \
+		and bool(continuity_certificates[0].get("passed", false)) \
+		and int(continuity_certificates[0].get("laneCount", 0)) >= 2 \
+		and not bool(continuity_certificates[0].get("positiveOverlap", true)) \
+		and float(continuity_certificates[0].get("maximumContactGap", INF)) <= 0.01 \
+		and float(continuity_certificates[0].get("maximumHeightDelta", INF)) <= 0.01
+	var direct_routes_valid := direct_route_probes.size() >= 2 and direct_route_probes.all(func(probe: Dictionary) -> bool: return bool(probe.get("passed", false)))
+	var passed := support_counts_valid \
+		and continuity_valid \
+		and direct_routes_valid \
+		and selected_tile_links.is_empty() \
+		and installed_support_pair_links.is_empty() \
+		and installed_links.is_empty() \
+		and invalid_installed_links.is_empty() \
+		and pending_matches.is_empty() \
+		and source_keys_valid
+	return {
+		"diagnosticOnly": true,
+		"probe": "citadel_surface_transition_publication",
+		"passed": passed,
+		"reason": "" if passed else "citadel_surface_transition_publication_contract_failed",
+		"seed": selected_seed,
+		"supportRecords": support_records,
+		"supportCountsValid": support_counts_valid,
+		"requestedTileKeys": requested_tile_keys,
+		"tileSourceKeys": {
+			"-17,146": String((tile_snapshots.get("-17,146", {}) as Dictionary).get("sourceKey", "")),
+			"-17,147": String((tile_snapshots.get("-17,147", {}) as Dictionary).get("sourceKey", ""))
+		},
+		"selectedTileLinks": selected_tile_links,
+		"selectedLinkCount": selected_tile_links.size(),
+		"laneNumbers": lane_numbers,
+		"ownersValid": owners_valid,
+		"endpointTiles": endpoint_tiles.keys(),
+		"installedLinks": installed_links,
+		"installedSupportPairLinks": installed_support_pair_links,
+		"invalidInstalledLinks": invalid_installed_links,
+		"pendingMatches": pending_matches,
+		"continuityCertificates": continuity_certificates,
+		"directRouteProbes": direct_route_probes,
+		"publicationFailures": publication_failures,
+		"supportSampleDiagnostics": support_sample_diagnostics,
+		"seamCollision": seam_collision,
+		"navigationMapReadiness": navmesh_snapshot.get("navigationMapReadiness", {}),
+		"navmeshStats": navmesh_world.call("stats") if navmesh_world != null and navmesh_world.has_method("stats") else {}
+	}
+
+
 func route_corridor_contains_residence_collision(corridor: AABB, residence_part_prefix: String, collision_fact: Dictionary) -> bool:
 	if residence_part_prefix.is_empty() or not String(collision_fact.get("sourcePartId", "")).begins_with(residence_part_prefix):
 		return false
@@ -3420,11 +6145,76 @@ func post_acceptance_navigation_audit(final_snapshot: Dictionary) -> Dictionary:
 	var navmesh_world = autonomy.get("navmesh_world") if autonomy != null else null
 	if navmesh_world == null or not navmesh_world.has_method("query_route"):
 		return {"reason": "missing_navmesh_world"}
+	var navmesh_snapshot: Dictionary = navmesh_world.call("debug_snapshot") as Dictionary if navmesh_world.has_method("debug_snapshot") else {}
+	var installed_door_links: Dictionary = navmesh_snapshot.get("doorLinks", {}) as Dictionary
 	var routes: Array[Dictionary] = []
+	var source_portals: Array[Dictionary] = []
+	var source_portals_passed := true
 	for record_value in final_snapshot.get("citizens", []) as Array:
 		if not (record_value is Dictionary):
 			continue
 		var record: Dictionary = record_value as Dictionary
+		var source_navigation := source_navigation_facts_for_failure(record)
+		var source_door: Dictionary = source_navigation.get("door", {}) as Dictionary
+		var portal_id := String(source_navigation.get("portalId", ""))
+		var link_records: Array = installed_door_links.get(portal_id, []) as Array
+		var source_links: Array[Dictionary] = []
+		var fallback_links: Array[Dictionary] = []
+		for link_value in link_records:
+			if not (link_value is Dictionary):
+				continue
+			var link: Dictionary = link_value as Dictionary
+			if bool(link.get("sourceDoor", false)):
+				source_links.append(link.duplicate(true))
+			else:
+				fallback_links.append(link.duplicate(true))
+		var source_interior: Vector3 = source_door.get("interior", Vector3.INF) as Vector3
+		var source_exterior: Vector3 = source_door.get("exterior", Vector3.INF) as Vector3
+		var endpoint_match := false
+		var support_provenance_match := false
+		var topology_proof := {}
+		for source_link in source_links:
+			var start: Vector3 = source_link.get("startPosition", Vector3.INF) as Vector3
+			var end: Vector3 = source_link.get("endPosition", Vector3.INF) as Vector3
+			var endpoint_resolution: Dictionary = source_link.get("endpointResolution", {}) as Dictionary
+			var resolved_interior: Vector3 = endpoint_resolution.get("interior", Vector3.INF) as Vector3
+			var resolved_exterior: Vector3 = endpoint_resolution.get("exterior", Vector3.INF) as Vector3
+			if not start.is_finite() or not end.is_finite() or not resolved_interior.is_finite() or not resolved_exterior.is_finite():
+				continue
+			endpoint_match = endpoint_match or (start.distance_to(resolved_interior) <= 0.001 and end.distance_to(resolved_exterior) <= 0.001) or (start.distance_to(resolved_exterior) <= 0.001 and end.distance_to(resolved_interior) <= 0.001)
+			support_provenance_match = String(source_link.get("startSupportId", "")) == String(source_door.get("interiorSupportId", "")) and String(source_link.get("endSupportId", "")) == String(source_door.get("exteriorSupportId", ""))
+			var enabled_probe := navmesh_diagnostic_probe(navmesh_world, start, end, portal_id)
+			var disabled_probe := navmesh_diagnostic_probe_without_door_links(navmesh_world, start, end, portal_id)
+			var server_owners := navmesh_server_closest_points(navmesh_world, {"interior": start, "exterior": end})
+			var interior_owner: Dictionary = (server_owners.get("interior", {}) as Dictionary).get("result", {}) as Dictionary
+			var exterior_owner: Dictionary = (server_owners.get("exterior", {}) as Dictionary).get("result", {}) as Dictionary
+			var enabled_crosses := bool(enabled_probe.get("usesExpectedDoorPortal", false)) and float(enabled_probe.get("endpointDistance", INF)) <= 0.001
+			var disabled_crosses := float(disabled_probe.get("endpointDistance", INF)) <= 0.001
+			topology_proof = {
+				"enabled": enabled_probe,
+				"disabled": disabled_probe,
+				"serverOwners": server_owners,
+				"serverEndpointsOwned": bool(interior_owner.get("found", false)) and bool(exterior_owner.get("found", false)) and not String(interior_owner.get("regionId", "")).is_empty() and not String(exterior_owner.get("regionId", "")).is_empty(),
+				"enabledCrossesExactLink": enabled_crosses,
+				"disabledFailsCrossing": not disabled_crosses
+			}
+		var readiness: Dictionary = navmesh_snapshot.get("navigationMapReadiness", {}) as Dictionary
+		var topology_passed := bool(topology_proof.get("serverEndpointsOwned", false)) and bool(readiness.get("ready", false)) and int(readiness.get("iterationId", 0)) > 0
+		var source_portal_passed := not portal_id.is_empty() and bool(source_door.get("sourcePortalReady", false)) and source_links.size() == 1 and fallback_links.is_empty() and endpoint_match and support_provenance_match and topology_passed
+		source_portals.append({
+			"actorId": String(record.get("id", "")),
+			"residenceId": String(record.get("residenceId", "")),
+			"portalId": portal_id,
+			"sourcePortalReady": bool(source_door.get("sourcePortalReady", false)),
+			"sourceDoor": source_door,
+			"sourceLinks": source_links,
+			"fallbackLinks": fallback_links,
+			"endpointMatch": endpoint_match,
+			"supportProvenanceMatch": support_provenance_match,
+			"topologyProof": topology_proof,
+			"passed": source_portal_passed
+		})
+		source_portals_passed = source_portals_passed and source_portal_passed
 		var navmesh_path: Dictionary = record.get("navmeshPath", {}) as Dictionary
 		var start: Vector3 = navmesh_path.get("startPosition", Vector3.INF) as Vector3
 		var target: Vector3 = navmesh_path.get("targetPosition", Vector3.INF) as Vector3
@@ -3446,6 +6236,10 @@ func post_acceptance_navigation_audit(final_snapshot: Dictionary) -> Dictionary:
 	return {
 		"navigationMapReadiness": navmesh_world.call("navigation_map_readiness") if navmesh_world.has_method("navigation_map_readiness") else {},
 		"stats": navmesh_world.call("stats") if navmesh_world.has_method("stats") else {},
+		"sourcePortalRoutes": {
+			"passed": source_portals_passed and not source_portals.is_empty(),
+			"portals": source_portals
+		},
 		"routes": routes
 	}
 
@@ -3573,6 +6367,7 @@ func navmesh_diagnostic_probes(navmesh_world, navmesh_path: Dictionary, source_f
 		"interiorPassages": passage_probes,
 		"verticalLinks": vertical_probes,
 		"throughDoor": navmesh_diagnostic_probe(navmesh_world, interior, exterior, portal_id),
+		"throughDoorWithoutDoorLink": navmesh_diagnostic_probe_without_door_links(navmesh_world, interior, exterior, portal_id),
 		"exteriorToTarget": navmesh_diagnostic_probe(navmesh_world, exterior, target, portal_id)
 	}
 
@@ -3631,9 +6426,13 @@ func navmesh_diagnostic_route(navmesh_world, start: Vector3, target: Vector3, pr
 func navmesh_diagnostic_probe(navmesh_world, start: Vector3, target: Vector3, portal_id: String) -> Dictionary:
 	if navmesh_world == null or not navmesh_world.has_method("_query_path_points"):
 		return {"reason": "missing_raw_navmesh_query"}
-	var points_value = navmesh_world.call("_query_path_points", start, target, {"queryApi": "query_path"})
-	var points: Array = points_value if points_value is Array else []
-	var door_actions_value = navmesh_world.call("_door_actions_for_path", points, {}) if navmesh_world.has_method("_door_actions_for_path") else {}
+	var query_value = navmesh_world.call("_query_path_points", start, target, {"queryApi": "query_path"})
+	var query: Dictionary = query_value as Dictionary if query_value is Dictionary else {}
+	var points: Array[Vector3] = []
+	for point_value in query.get("path", []) as Array:
+		if point_value is Vector3:
+			points.append(point_value as Vector3)
+	var door_actions_value = navmesh_world.call("diagnostic_door_actions_for_path", points, {}) if navmesh_world.has_method("diagnostic_door_actions_for_path") else {}
 	var door_actions: Dictionary = door_actions_value as Dictionary if door_actions_value is Dictionary else {}
 	var matched_portal := false
 	for action_value in door_actions.values():
@@ -3677,6 +6476,26 @@ func navmesh_diagnostic_probe_without_navigation_links(navmesh_world, start: Vec
 		"endpoint": endpoint,
 		"endpointDistance": endpoint.distance_to(target),
 		"usesExpectedDoorPortal": matched_portal
+	}
+
+
+func navmesh_diagnostic_probe_without_door_links(navmesh_world, start: Vector3, target: Vector3, portal_id: String) -> Dictionary:
+	if navmesh_world == null or not navmesh_world.has_method("diagnostic_query_path_without_door_links"):
+		return {"reason": "missing_door_link_diagnostic"}
+	var points_value = navmesh_world.call("diagnostic_query_path_without_door_links", start, target, [portal_id], {"queryApi": "query_path"})
+	var points: Array = points_value if points_value is Array else []
+	var endpoint := Vector3.INF
+	if not points.is_empty() and points[points.size() - 1] is Vector3:
+		endpoint = points[points.size() - 1] as Vector3
+	return {
+		"diagnosticOnly": true,
+		"disabledDoorPortalId": portal_id,
+		"start": start,
+		"target": target,
+		"pointCount": points.size(),
+		"path": points,
+		"endpoint": endpoint,
+		"endpointDistance": endpoint.distance_to(target)
 	}
 
 
@@ -3805,6 +6624,20 @@ func route_failure_capture_slug(reason: String) -> String:
 	return result if not result.is_empty() else "unknown"
 
 
+func route_record_is_terminal_failure(record: Dictionary) -> bool:
+	if String(record.get("routeStatus", "")) in ["unreachable", "unreachable_static", "invalid_goal", "failed_internal"]:
+		return true
+	if String(record.get("routeReason", "")) == "path_endpoint_mismatch":
+		return true
+	var authority: Dictionary = record.get("routeAuthority", {}) if record.get("routeAuthority", {}) is Dictionary else {}
+	if String(authority.get("state", "")) in ["unreachable", "unreachable_static", "invalid_goal", "failed_internal"]:
+		return true
+	if String(authority.get("reason", "")) == "path_endpoint_mismatch":
+		return true
+	var authority_route: Dictionary = authority.get("route", {}) if authority.get("route", {}) is Dictionary else {}
+	return String(authority_route.get("reason", "")) == "path_endpoint_mismatch"
+
+
 func acceptance_summary(final_snapshot: Dictionary, day_snapshot: Dictionary = {}, order_admissions: Dictionary = {}) -> Dictionary:
 	var records: Array = final_snapshot.get("citizens", []) as Array
 	var inside_count := 0
@@ -3815,7 +6648,7 @@ func acceptance_summary(final_snapshot: Dictionary, day_snapshot: Dictionary = {
 		var record: Dictionary = record_value as Dictionary
 		if bool(record.get("physicallyInsideStrictInterior", false)):
 			inside_count += 1
-		if String(record.get("routeStatus", "")) in ["unreachable_static", "invalid_goal"]:
+		if route_record_is_terminal_failure(record):
 			blocked_count += 1
 	var day_records: Array = day_snapshot.get("citizens", []) as Array
 	var day_outside_count := 0
@@ -3826,18 +6659,30 @@ func acceptance_summary(final_snapshot: Dictionary, day_snapshot: Dictionary = {
 		var day_record: Dictionary = record_value as Dictionary
 		if not bool(day_record.get("physicallyInsideStrictInterior", false)):
 			day_outside_count += 1
-		if String(day_record.get("routeStatus", "")) in ["unreachable_static", "invalid_goal"]:
+		if route_record_is_terminal_failure(day_record):
 			day_blocked_count += 1
 	var expected_count := (residence_manifest.get("citizens", []) as Array).size()
 	var day_admission: Dictionary = order_admissions.get("day", {}) if order_admissions.get("day", {}) is Dictionary else {}
 	var night_admission: Dictionary = order_admissions.get("night", {}) if order_admissions.get("night", {}) is Dictionary else {}
 	var orders_admitted := bool(day_admission.get("timely", false)) and bool(night_admission.get("timely", false))
+	var order_admission_performance_passed := bool(day_admission.get("wallPerformancePassed", false)) and bool(night_admission.get("wallPerformancePassed", false))
 	var route_outcome_passed := expected_count > 0 and records.size() == expected_count and inside_count == expected_count and blocked_count == 0 and day_records.size() == expected_count and day_outside_count == expected_count and day_blocked_count == 0
 	var crowd_stress_passed := bool(crowd_stress_result.get("passed", false))
-	var passed := route_outcome_passed and orders_admitted and crowd_stress_passed
+	var door_lifecycle_passed := bool(acceptance_door_lifecycle_summary.get("passed", false))
+	var night_progress_passed := bool(acceptance_night_progress.get("passed", false))
+	var source_portal_routes_passed := bool((acceptance_post_navigation_audit.get("sourcePortalRoutes", {}) as Dictionary).get("passed", false))
+	var passed := route_outcome_passed and orders_admitted and order_admission_performance_passed and crowd_stress_passed and door_lifecycle_passed and night_progress_passed and source_portal_routes_passed
 	var reason := ""
 	if not orders_admitted:
 		reason = "Citadel civic orders were not all accepted promptly through the public NPC order contract"
+	elif not order_admission_performance_passed:
+		reason = "Citadel civic order admission encountered a wall-clock frame stall"
+	elif not source_portal_routes_passed:
+		reason = "Citadel residents did not retain source-authored door portal links through the live navigation lifecycle"
+	elif not door_lifecycle_passed:
+		reason = "Citadel citizens did not prove open, collision-clear, exterior-clearance, strict-return, and close through their real home doors"
+	elif not night_progress_passed:
+		reason = "Citadel night routes exhausted their progress grace without reaching strict interiors"
 	elif not crowd_stress_passed:
 		reason = "Citadel production citizens did not complete the headed bidirectional crowd crossing without overlap"
 	elif not route_outcome_passed:
@@ -3851,6 +6696,10 @@ func acceptance_summary(final_snapshot: Dictionary, day_snapshot: Dictionary = {
 		"dayOutsideCount": day_outside_count,
 		"dayBlockedRouteCount": day_blocked_count,
 		"crowdStress": crowd_stress_result.duplicate(true),
+		"doorLifecycle": acceptance_door_lifecycle_summary.duplicate(true),
+		"nightProgress": acceptance_night_progress.duplicate(true),
+		"sourcePortalRoutes": (acceptance_post_navigation_audit.get("sourcePortalRoutes", {}) as Dictionary).duplicate(true),
+		"orderAdmissionPerformancePassed": order_admission_performance_passed,
 		"orderAdmissions": {
 			"day": day_admission,
 			"night": night_admission
@@ -3909,10 +6758,12 @@ func write_profile_report(status: String, failure_reason := "") -> void:
 		"runner": "citadel_life_playtest",
 		"runToken": profile_run_token,
 		"status": status,
-		"passed": status != "failed" and (not acceptance_mode or bool(acceptance_result.get("passed", false))),
+		"passed": status != "failed" \
+			and (not acceptance_mode or bool(acceptance_result.get("passed", false))) \
+			and (not surface_continuity_acceptance_mode or bool(surface_continuity_acceptance_result.get("passed", false))),
 		"failureCount": 1 if status == "failed" else 0,
-		"evidenceLevel": "integration",
-		"scope": "Headed Citadel Life loading and steady-state performance diagnostic. It measures the real fixture's production Main scene, terrain collision, published building records, doors, NPC bodies and clock, but is not a player gameplay acceptance claim.",
+		"evidenceLevel": "acceptance" if surface_continuity_acceptance_mode else "integration",
+		"scope": "Headed normal-world Citadel seam acceptance with production NPC bodies, routing, motor, collision and ORCA." if surface_continuity_acceptance_mode else "Headed Citadel Life loading and steady-state performance diagnostic. It measures the real fixture's production Main scene, terrain collision, published building records, doors, NPC bodies and clock, but is not a player gameplay acceptance claim.",
 		"seed": selected_seed,
 		"citadelScale": selected_citadel_scale,
 		"citadelSpan": maxf(float(recipe.get("width", 0.0)), float(recipe.get("depth", 0.0))),
@@ -3921,6 +6772,8 @@ func write_profile_report(status: String, failure_reason := "") -> void:
 		"loadingStages": profile_stages.duplicate(true),
 		"steadyStateSamples": profile_phase_samples.duplicate(true),
 		"acceptance": acceptance_result.duplicate(true),
+		"doorLifecycle": acceptance_door_lifecycle_summary.duplicate(true),
+		"nightProgress": acceptance_night_progress.duplicate(true),
 		"acceptanceConfiguration": {
 			"daySeconds": acceptance_day_seconds,
 			"nightSeconds": acceptance_night_seconds,
@@ -3928,8 +6781,10 @@ func write_profile_report(status: String, failure_reason := "") -> void:
 			"defaultNightSeconds": DEFAULT_ACCEPTANCE_NIGHT_SECONDS
 		},
 		"failureDiagnostics": acceptance_failure_diagnostics.duplicate(true),
+		"fixtureFailureDetails": fixture_failure_details.duplicate(true),
 		"postAcceptanceNavigationAudit": acceptance_post_navigation_audit.duplicate(true),
 		"linkDiagnostics": link_diagnostics.duplicate(true),
+		"surfaceContinuityAcceptance": surface_continuity_acceptance_result.duplicate(true),
 		"timeline": acceptance_timeline.duplicate(true),
 		"crowdPhysicsEvidence": crowd_physics_evidence.duplicate(true),
 		"crowdStress": crowd_stress_result.duplicate(true),
@@ -3937,6 +6792,8 @@ func write_profile_report(status: String, failure_reason := "") -> void:
 		"sourceCounts": {
 			"blueprintParts": blueprint.parts.size() if blueprint != null else 0,
 			"furnishingParts": furnishing_plan.parts.size() if furnishing_plan != null else 0,
+			"livingSurfaceTreeRecordCount": living_tree_records.size(),
+			"generatedLivingTreeCount": generated_living_tree_count,
 			"districtCount": district_catalog.size(),
 			"activeDistrictCount": active_district_ids.size(),
 			"residentManifestCount": (residence_manifest.get("citizens", []) as Array).size(),
@@ -3949,12 +6806,53 @@ func write_profile_report(status: String, failure_reason := "") -> void:
 		"buildingNavigation": building_navigation_summary(),
 		"buildingPublication": building_publication_summary(),
 		"furnishingPublication": furnishing_publication_summary(),
+		"keepEntryCollision": keep_entry_collision_evidence.duplicate(true),
+		"keepEntryPlayerSweep": keep_entry_player_sweep_evidence.duplicate(true),
+		"raisedRouteTransitionHandoff": raised_route_transition_handoff_evidence.duplicate(true),
+		"raisedRouteJunctionTraversals": raised_route_junction_traversal_evidence.duplicate(true),
+		"raisedRouteJunctionCaptures": raised_route_junction_captures.duplicate(true),
+		"raisedRouteRoadbeds": raised_route_roadbed_evidence.duplicate(true),
+		"raisedRouteCollisionNegativeControls": raised_route_collision_negative_controls.duplicate(true),
+		"residenceFoundationSupports": residence_foundation_support_evidence.duplicate(true),
+		"walkableSurfaceCollision": walkable_surface_collision_evidence.duplicate(true),
+		"livedInSurfaceEvidence": lived_in_surface_evidence(),
 		"captures": visual_captures.duplicate(true),
 		"failureReason": failure_reason,
 		"finishedUtc": Time.get_datetime_string_from_system(true, true)
 	}
 	write_text_file(profile_report_path, JSON.stringify(report, "\t"))
 	write_profile_progress("status=%s loadDurationMs=%.3f" % [status, float(report.get("loadDurationMs", 0.0))])
+
+
+func lived_in_surface_evidence() -> Dictionary:
+	var history_event_counts := {}
+	var repair_cluster_count := 0
+	var published_tree_ids: Array[String] = []
+	if living_tree_root != null and is_instance_valid(living_tree_root):
+		for tree in living_tree_root.get_children():
+			if tree is Node3D and bool((tree as Node3D).get_meta("citadel_life_generated_tree", false)):
+				published_tree_ids.append(String((tree as Node3D).name))
+	for publisher in building_publishers:
+		if publisher == null or not publisher.has_method("summary"):
+			continue
+		var publication: Dictionary = publisher.summary()
+		repair_cluster_count += int(publication.get("masonryRepairClusterCount", 0))
+		var history: Dictionary = publication.get("surfaceHistory", {}) as Dictionary
+		var publisher_counts: Dictionary = history.get("eventCounts", {}) as Dictionary
+		for kind_value in publisher_counts.keys():
+			var kind := String(kind_value)
+			history_event_counts[kind] = int(history_event_counts.get(kind, 0)) + int(publisher_counts.get(kind, 0))
+	var window_program := BuildingInteriorProgramScript.audit_plan(blueprint, furnishing_plan) if blueprint != null and furnishing_plan != null else {}
+	return {
+		"usesSharedBuildingPartPublisher": not building_publishers.is_empty(),
+		"usesProductionTreeSpawnService": generated_living_tree_count == living_tree_records.size(),
+		"treeRecordCount": living_tree_records.size(),
+		"publishedTreeCount": generated_living_tree_count,
+		"publishedTreeIds": published_tree_ids,
+		"surfaceHistoryEventCounts": history_event_counts,
+		"masonryRepairClusterCount": repair_cluster_count,
+		"windowInteriorProgram": window_program
+	}
 
 
 func building_navigation_summary() -> Dictionary:

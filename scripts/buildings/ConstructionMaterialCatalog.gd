@@ -9,16 +9,16 @@ const BUILDING_SHADER := preload("res://resources/visual/building_material.gdsha
 
 const DEFINITIONS := {
 	"timber_board": {
-		"base": Color(0.385, 0.225, 0.112), "accent": Color(0.125, 0.058, 0.022),
+		"base": Color(0.305, 0.182, 0.090), "accent": Color(0.105, 0.047, 0.018),
 		"roughness": 0.88, "breakup": 0.14, "grid": 0.035,
-		"grain": 0.54, "grain_scale": 15.5, "grain_color": Color(0.070, 0.021, 0.008),
-		"age": 0.62, "damp": 0.16
+		"grain": 0.34, "grain_scale": 11.5, "grain_color": Color(0.062, 0.018, 0.006),
+		"age": 0.70, "damp": 0.22
 	},
 	"timber_beam": {
-		"base": Color(0.155, 0.072, 0.026), "accent": Color(0.035, 0.014, 0.005),
+		"base": Color(0.135, 0.060, 0.020), "accent": Color(0.032, 0.012, 0.004),
 		"roughness": 0.90, "breakup": 0.10, "grid": 0.02,
-		"grain": 0.52, "grain_scale": 12.0, "grain_color": Color(0.045, 0.014, 0.005),
-		"age": 0.70, "damp": 0.22
+		"grain": 0.30, "grain_scale": 9.5, "grain_color": Color(0.040, 0.012, 0.004),
+		"age": 0.76, "damp": 0.28
 	},
 	"painted_door": {
 		"base": Color(0.075, 0.285, 0.295), "accent": Color(0.030, 0.120, 0.130),
@@ -78,22 +78,22 @@ const DEFINITIONS := {
 		"emission": Color(1.0, 0.14, 0.012), "emission_energy": 2.5
 	},
 	"fired_brick": {
-		"base": Color(0.315, 0.135, 0.078), "accent": Color(0.145, 0.042, 0.022),
+		"base": Color(0.275, 0.128, 0.082), "accent": Color(0.118, 0.047, 0.028),
 		"roughness": 0.92, "breakup": 0.20, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
-		"masonry": 0.82, "age": 0.50, "damp": 0.34, "moss": 0.10
+		"masonry": 0.86, "age": 0.66, "damp": 0.46, "moss": 0.14
 	},
 	"fired_brick_light": {
-		"base": Color(0.50, 0.225, 0.140), "accent": Color(0.29, 0.085, 0.048),
+		"base": Color(0.420, 0.235, 0.158), "accent": Color(0.220, 0.092, 0.052),
 		"roughness": 0.92, "breakup": 0.18, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
-		"masonry": 0.80, "age": 0.44, "damp": 0.30, "moss": 0.08
+		"masonry": 0.84, "age": 0.56, "damp": 0.40, "moss": 0.10
 	},
 	"fired_brick_dark": {
-		"base": Color(0.285, 0.080, 0.048), "accent": Color(0.135, 0.030, 0.016),
+		"base": Color(0.235, 0.082, 0.052), "accent": Color(0.100, 0.028, 0.016),
 		"roughness": 0.94, "breakup": 0.18, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
-		"masonry": 0.86, "age": 0.58, "damp": 0.38, "moss": 0.10
+		"masonry": 0.88, "age": 0.70, "damp": 0.50, "moss": 0.16
 	},
 	# City masonry is still individually published brick, not a flat paint overlay.
 	# Castle grammar selects these as a civic palette per seed; residences then
@@ -145,6 +145,12 @@ const DEFINITIONS := {
 		"roughness": 0.94, "breakup": 0.24, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
 		"masonry": 0.92, "age": 0.62, "damp": 0.46, "moss": 0.20, "detail_scale": 3.8
+	},
+	"repair_stone": {
+		"base": Color(0.420, 0.425, 0.385), "accent": Color(0.235, 0.255, 0.225),
+		"roughness": 0.97, "breakup": 0.28, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
+		"masonry": 0.94, "age": 0.70, "damp": 0.48, "moss": 0.18, "detail_scale": 3.6
 	},
 	"aged_castle_stone": {
 		"base": Color(0.305, 0.315, 0.292), "accent": Color(0.160, 0.174, 0.150),
@@ -201,21 +207,33 @@ const DEFINITIONS := {
 		"base": Color(0.125, 0.150, 0.145), "accent": Color(0.052, 0.070, 0.066),
 		"roughness": 0.91, "breakup": 0.16, "grid": 0.02,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
-		"age": 0.58, "damp": 0.24, "moss": 0.16, "moss_color": Color(0.075, 0.125, 0.055)
+		"age": 0.58, "damp": 0.24, "moss": 0.16, "roof": 1.0, "moss_color": Color(0.075, 0.125, 0.055)
+	},
+	"roof_slate_weathered": {
+		"base": Color(0.092, 0.126, 0.134), "accent": Color(0.032, 0.058, 0.061),
+		"roughness": 0.96, "breakup": 0.25, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
+		"age": 0.86, "damp": 0.52, "moss": 0.26, "roof": 1.0, "moss_color": Color(0.060, 0.112, 0.048)
+	},
+	"roof_slate_cap": {
+		"base": Color(0.105, 0.132, 0.136), "accent": Color(0.040, 0.058, 0.060),
+		"roughness": 0.94, "breakup": 0.18, "grid": 0.0,
+		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
+		"age": 0.74, "damp": 0.40, "moss": 0.16, "roof": 1.0, "moss_color": Color(0.060, 0.108, 0.046)
 	},
 	"window_glass": {
 		# Keep the cool glint while allowing an exterior reader to see the actual
 		# furnished rooms beyond the opening rather than a blue opaque pane.
-		"base": Color(0.34, 0.68, 0.76, 0.30), "accent": Color(0.72, 0.88, 0.90, 0.30),
+		"base": Color(0.34, 0.68, 0.76, 0.018), "accent": Color(0.72, 0.88, 0.90, 0.018),
 		"roughness": 0.20, "breakup": 0.04, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
 		"transparent": true
 	},
 	"window_warm_glass": {
-		"base": Color(0.92, 0.54, 0.20, 0.38), "accent": Color(1.0, 0.78, 0.34, 0.34),
+		"base": Color(0.92, 0.54, 0.20, 0.024), "accent": Color(1.0, 0.78, 0.34, 0.024),
 		"roughness": 0.28, "breakup": 0.05, "grid": 0.0,
 		"grain": 0.0, "grain_scale": 1.0, "grain_color": Color.BLACK,
-		"transparent": true, "emission": Color(1.0, 0.30, 0.055), "emission_energy": 0.86
+		"transparent": true, "emission": Color(1.0, 0.30, 0.055), "emission_energy": 0.04
 	}
 }
 
@@ -228,7 +246,7 @@ static func definition_for(material_id: String) -> Dictionary:
 
 static func is_masonry_material(material_id: String) -> bool:
 	var normalized := material_id.strip_edges().to_lower()
-	return normalized.begins_with("fired_brick") or normalized.begins_with("painted_brick_") or normalized == "stone_foundation"
+	return normalized.begins_with("fired_brick") or normalized.begins_with("painted_brick_") or normalized in ["stone_foundation", "aged_castle_stone"]
 
 
 static func is_cobble_material(material_id: String) -> bool:
@@ -278,4 +296,5 @@ static func create_material(material_id: String, variation := 0.0) -> Material:
 	material.set_shader_parameter("moss_color", definition.get("moss_color", Color(0.11, 0.17, 0.075)))
 	material.set_shader_parameter("detail_scale", float(definition.get("detail_scale", 5.0)))
 	material.set_shader_parameter("cobble_strength", float(definition.get("cobble", 0.0)))
+	material.set_shader_parameter("roof_strength", float(definition.get("roof", 0.0)))
 	return material

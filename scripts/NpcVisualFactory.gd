@@ -2,6 +2,8 @@ extends RefCounted
 class_name NpcVisualFactory
 
 const CharacterAssetRegistryScript := preload("res://scripts/visual/CharacterAssetRegistry.gd")
+const NpcBipedRecipeBuilderScript := preload("res://scripts/characters/NpcBipedRecipeBuilder.gd")
+const NpcBipedVisualFactoryScript := preload("res://scripts/characters/NpcBipedVisualFactory.gd")
 
 var main
 var character_assets
@@ -144,10 +146,44 @@ func add_collider(parent: Node3D) -> void:
     collider.position.y = 0.84
     parent.add_child(collider)
 
-func add_visual(parent: Node3D, body_material: StandardMaterial3D, accent: StandardMaterial3D, npc_name: String, role: String) -> void:
-    if add_generated_visual(parent, body_material, accent, npc_name, role):
-        return
-    add_primitive_visual(parent, body_material, accent, npc_name, role)
+func add_visual(parent: Node3D, _body_material: StandardMaterial3D, _accent: StandardMaterial3D, npc_name: String, role: String, actor_id := "") -> Dictionary:
+    if parent == null:
+        return {}
+    var existing := parent.get_node_or_null("NpcBipedVisual")
+    if existing != null:
+        return {
+            "visualRoot": existing,
+            "locomotion": existing.get_node_or_null("NpcBipedLocomotionPresenter")
+        }
+    var stable_actor_id := actor_id.strip_edges()
+    if stable_actor_id.is_empty():
+        stable_actor_id = "%s:%s" % [npc_name, role]
+    var appearance_seed := NpcBipedRecipeBuilderScript.stable_hash(stable_actor_id)
+    var recipe := NpcBipedRecipeBuilderScript.build(appearance_seed, stable_actor_id)
+    var result: Dictionary = NpcBipedVisualFactoryScript.add_biped(parent, recipe, npc_name)
+    parent.set_meta("npc_visual_actor_id", stable_actor_id)
+    parent.set_meta("npc_visual_recipe_signature", NpcBipedRecipeBuilderScript.signature(recipe))
+    return result
+
+func ensure_biped_visual(parent: Node3D, world_seed: String, actor_id: String, npc_name: String, role: String) -> Dictionary:
+    if parent == null or actor_id.strip_edges().is_empty():
+        return {}
+    var appearance_key := "%s:%s" % [world_seed.strip_edges(), actor_id.strip_edges()]
+    var existing := parent.get_node_or_null("NpcBipedVisual")
+    if existing != null and String(parent.get_meta("npc_visual_actor_id", "")) == appearance_key:
+        return {
+            "visualRoot": existing,
+            "locomotion": existing.get_node_or_null("NpcBipedLocomotionPresenter")
+        }
+    if existing != null:
+        parent.remove_child(existing)
+        existing.queue_free()
+    var appearance_seed := NpcBipedRecipeBuilderScript.stable_hash(appearance_key)
+    var recipe := NpcBipedRecipeBuilderScript.build(appearance_seed, appearance_key)
+    var result: Dictionary = NpcBipedVisualFactoryScript.add_biped(parent, recipe, npc_name)
+    parent.set_meta("npc_visual_actor_id", appearance_key)
+    parent.set_meta("npc_visual_recipe_signature", NpcBipedRecipeBuilderScript.signature(recipe))
+    return result
 
 func add_generated_visual(parent: Node3D, body_material: StandardMaterial3D, accent: StandardMaterial3D, npc_name: String, role: String) -> bool:
     if character_assets == null or not character_assets.is_ready():

@@ -179,6 +179,7 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
     body.position = position
     body.rotation.y = rng.randf() * TAU
     body.set_meta("kind", "prop")
+    body.set_meta("navigation_obstacle_class", "dynamic_actor")
     body.set_meta("prop_id", prop_id)
     body.set_meta("drop", "rawMeat")
     body.set_meta("material", "wildlife")

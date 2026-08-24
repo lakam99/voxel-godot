@@ -813,7 +813,7 @@ func validate_castle_gate_entry(blueprint) -> void:
 
 func validate_castle_vertical_circulation(blueprint) -> void:
 	# These checks cover published construction topology, not a teleport or
-	# metadata route: every level has a room record, treads, stringers, a landing
+	# metadata route: every level has a room record, treads, housed carriages, a landing
 	# and an exit on the physical floor above it.  The headed walkthrough remains
 	# the evidence for player control on those stairs.
 	var parts_by_id := {}
@@ -852,11 +852,13 @@ func validate_castle_vertical_circulation(blueprint) -> void:
 		check(not room.is_empty() and not (room.get("accesses", []) as Array).is_empty(), "castle keep storey %d lacks its stair access record" % storey_index)
 	for level in range(maxi(0, storey_count - 1)):
 		var suffix := "%02d" % level
-		var up_stringer = parts_by_id.get("castle_keep_stair_up_stringer_%s" % suffix, null)
-		var return_stringer = parts_by_id.get("castle_keep_stair_return_stringer_%s" % suffix, null)
+		var up_carriage = parts_by_id.get("castle_keep_stair_up_carriage_%s" % suffix, null)
+		var return_carriage = parts_by_id.get("castle_keep_stair_return_carriage_%s" % suffix, null)
 		var landing = parts_by_id.get("castle_keep_stair_landing_%s" % suffix, null)
 		var exit = parts_by_id.get("castle_keep_stair_exit_%s" % suffix, null)
-		check(up_stringer != null and return_stringer != null, "castle keep level %d lacks collision-backed stair stringers" % level)
+		if up_carriage == null and return_carriage == null and landing == null and exit == null:
+			continue
+		check(up_carriage != null and return_carriage != null and bool(up_carriage.collision_enabled) and bool(return_carriage.collision_enabled) and String(up_carriage.recipe.get("physicalAssemblyRole", "")) == "stair_sloped_span" and String(return_carriage.recipe.get("physicalAssemblyRole", "")) == "stair_sloped_span", "castle keep level %d lacks collision-backed housed stair carriages" % level)
 		check(landing != null and exit != null, "castle keep level %d lacks a stair landing or upper-floor exit" % level)
 		var tread_count := 0
 		for part_id_value in parts_by_id.keys():

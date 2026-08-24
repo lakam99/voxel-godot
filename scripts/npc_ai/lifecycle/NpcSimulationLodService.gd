@@ -344,9 +344,12 @@ func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 		"avoidance": 0
 	}
 	if autonomy_system != null:
+		if autonomy_system.has_method("cancel_npc_door_crossing"):
+			autonomy_system.cancel_npc_door_crossing(actor_id)
+			released["doorHolds"] = 1
 		if autonomy_system.has_method("release_npc_traffic_reservations"):
 			released["traffic"] = int(autonomy_system.release_npc_traffic_reservations(actor_id, reason))
-		if autonomy_system.has_method("release_npc_door_hold"):
+		if not autonomy_system.has_method("cancel_npc_door_crossing") and autonomy_system.has_method("release_npc_door_hold"):
 			autonomy_system.release_npc_door_hold(actor_id, true)
 			released["doorHolds"] = 1
 		var smart_objects = autonomy_system.get("smart_objects")

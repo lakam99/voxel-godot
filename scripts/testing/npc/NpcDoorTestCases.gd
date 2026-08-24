@@ -5,6 +5,7 @@ const DoorPortalServiceScript := preload("res://scripts/npc_ai/interactions/Door
 const DoorTraversalExecutorScript := preload("res://scripts/npc_ai/interactions/DoorTraversalExecutor.gd")
 const InteractionRequestScript := preload("res://scripts/npc_ai/contracts/InteractionRequest.gd")
 const NpcSystemScript := preload("res://scripts/NpcSystem.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 
 const CELL := 1.35
 
@@ -12,6 +13,10 @@ var runner = null
 
 class FakeAutonomyForDoorHold:
 	var door_portals = null
+	var release_receipts: Array[Dictionary] = []
+
+	func release_npc_door_hold(actor_or_id, schedule_close := true, release_evidence: Dictionary = {}) -> void:
+		release_receipts.append({"actorId": String(actor_or_id), "scheduleClose": schedule_close, "releaseEvidence": release_evidence.duplicate(true)})
 
 func setup(owner) -> void:
 	runner = owner
@@ -23,11 +28,14 @@ func cases() -> Array[Dictionary]:
 		["npc_door_single_open_cross_close", "test_single_open_cross_close"],
 		["npc_door_double_coordinated_portal", "test_double_coordinated_portal"],
 		["npc_door_metadata_portal_overrides_stale_action_id", "test_metadata_portal_overrides_stale_action_id"],
+		["npc_door_crossing_transaction_preserves_route_handoff", "test_crossing_transaction_preserves_route_handoff"],
+		["npc_door_private_home_transaction_requires_certified_release", "test_private_home_transaction_requires_certified_release"],
 		["npc_door_player_npc_shared_authority", "test_player_npc_shared_authority"],
 		["npc_door_threshold_occupied_no_close", "test_threshold_occupied_no_close"],
 		["npc_door_sweep_occupied_no_close", "test_sweep_occupied_no_close"],
 		["npc_door_clearance_volume_occupied_no_close", "test_clearance_volume_occupied_no_close"],
 		["npc_door_crossing_releases_after_sweep_clearance", "test_crossing_releases_after_sweep_clearance"],
+		["npc_door_private_home_departure_holds_through_exterior_clearance", "test_private_home_departure_holds_through_exterior_clearance"],
 		["npc_door_arrived_route_still_holds_threshold_actor", "test_arrived_route_still_holds_threshold_actor"],
 		["npc_door_obstructed_closing_reopens", "test_obstructed_closing_reopens"],
 		["npc_door_queue_inherits_opening", "test_queue_inherits_opening"],
@@ -95,24 +103,176 @@ func test_metadata_portal_overrides_stale_action_id(_mode: String) -> Dictionary
 	var executor = DoorTraversalExecutorScript.new()
 	executor.setup(setup.service)
 	var actor := make_actor("npc-a", Vector3.ZERO)
-	var entry := { "id": actor_id(actor), "routeGoalCell": Vector2i(0, 1) }
+	var entry := {
+		"id": actor_id(actor),
+		"routeGoalCell": Vector2i(0, 1),
+		"_v2LeaseExecutorRequestId": "npc-a:v2:7:fixture",
+		"routeLeaseGeneration": 7,
+		"routeLeaseId": "npc-a:7:fixture"
+	}
 	var stale_action := { "cell": Vector2i(0, 1), "portalId": "door:%s" % String(setup.door.name) }
 	var crossing: Dictionary = executor.request_crossing(setup.door, actor, entry, stale_action)
 	var portal = setup.service.portal_for_door(setup.door)
 	var both_open: bool = bool(setup.door.get_meta("open", false)) and bool(setup.secondDoor.get_meta("open", false))
 	var both_clear: bool = primary_collider(setup.door).disabled and primary_collider(setup.secondDoor).disabled
+	var lifecycle_trace: Array[Dictionary] = setup.service.lifecycle_trace_snapshot(setup.portalId, 8)
+	var interaction_metadata := {}
+	for row in lifecycle_trace:
+		var metadata: Dictionary = row.get("metadata", {}) if row.get("metadata", {}) is Dictionary else {}
+		var request: Dictionary = metadata.get("request", {}) if metadata.get("request", {}) is Dictionary else {}
+		if String(request.get("command", "")) == "hold":
+			interaction_metadata = (request.get("metadata", {}) as Dictionary).duplicate(true) if request.get("metadata", {}) is Dictionary else {}
 	var passed: bool = bool(crossing.get("ok", false)) \
 		and String(crossing.get("portalId", "")) == setup.portalId \
 		and String(entry.get("activeDoorPortalId", "")) == setup.portalId \
 		and portal != null \
 		and portal.leaf_nodes.size() == 2 \
 		and both_open \
-		and both_clear
+		and both_clear \
+		and String(interaction_metadata.get("routeRequestId", "")) == "npc-a:v2:7:fixture" \
+		and int(interaction_metadata.get("routeGeneration", -1)) == 7 \
+		and String(interaction_metadata.get("routeLeaseId", "")) == "npc-a:7:fixture"
 	return outcome(
 		passed,
 		"crossing=%s entryPortal=%s expected=%s leaves=%d" % [JSON.stringify(crossing), String(entry.get("activeDoorPortalId", "")), setup.portalId, portal.leaf_nodes.size() if portal != null else 0],
-		["door_service_prefers_authoritative_portal_metadata", "stale_leaf_action_opens_all_grouped_leaves"],
-		{ "crossing": crossing, "entryPortal": String(entry.get("activeDoorPortalId", "")), "expectedPortal": setup.portalId, "bothOpen": both_open, "bothClear": both_clear }
+		["door_service_prefers_authoritative_portal_metadata", "stale_leaf_action_opens_all_grouped_leaves", "door_trace_preserves_route_request_generation"],
+		{ "crossing": crossing, "entryPortal": String(entry.get("activeDoorPortalId", "")), "expectedPortal": setup.portalId, "bothOpen": both_open, "bothClear": both_clear, "interactionMetadata": interaction_metadata }
+	)
+
+func test_crossing_transaction_preserves_route_handoff(_mode: String) -> Dictionary:
+	var setup := door_setup()
+	var executor = DoorTraversalExecutorScript.new()
+	executor.setup(setup.service)
+	var actor := make_actor("npc-crossing-continuity", Vector3.ZERO)
+	var entry := {
+		"id": actor_id(actor),
+		"routeGoalCell": Vector2i(0, 1),
+		"_v2LeaseExecutorRequestId": "npc-crossing-continuity:v2:1:door",
+		"routeLeaseGeneration": 1,
+		"routeLeaseId": "npc-crossing-continuity:1:door"
+	}
+	var opened: Dictionary = executor.request_crossing(setup.door, actor, entry, {"cell": Vector2i(0, 1), "portalId": setup.portalId})
+	var initial: Dictionary = executor.active_crossing_for_entry(entry)
+	var successor := executor.bind_successor_route(entry, "npc-crossing-continuity:v2:2:clearance", 2, "npc-crossing-continuity:2:clearance")
+	var continued: Dictionary = executor.active_crossing_for_entry(entry)
+	var second_successor := executor.bind_successor_route(entry, "npc-crossing-continuity:v2:3:wrong", 3, "npc-crossing-continuity:3:wrong")
+	var changed_generation := executor.bind_successor_route(entry, "npc-crossing-continuity:v2:2:clearance", 3, "npc-crossing-continuity:2:clearance")
+	var changed_lease := executor.bind_successor_route(entry, "npc-crossing-continuity:v2:2:clearance", 2, "npc-crossing-continuity:2:changed")
+	var wrong_portal_entry := entry.duplicate(true)
+	wrong_portal_entry["activeDoorPortalId"] = "portal:wrong"
+	var wrong_portal := executor.bind_successor_route(wrong_portal_entry, "npc-crossing-continuity:v2:2:clearance", 2, "npc-crossing-continuity:2:clearance")
+	var wrong_traffic_entry := entry.duplicate(true)
+	wrong_traffic_entry["activeDoorTrafficGroupId"] = "traffic:wrong"
+	var wrong_traffic := executor.bind_successor_route(wrong_traffic_entry, "npc-crossing-continuity:v2:2:clearance", 2, "npc-crossing-continuity:2:clearance")
+	executor.traffic_reservations.release_group(String(continued.get("groupId", "")), "test_lost_continuity")
+	var lost_traffic := executor.bind_successor_route(entry, "npc-crossing-continuity:v2:2:clearance", 2, "npc-crossing-continuity:2:clearance")
+	executor.release_actor(actor, false)
+	var released := executor.active_crossing_for_entry(entry)
+	for key in ["activeDoorPortalId", "activeDoorActorId", "activeDoorDirection", "activeDoorTrafficGroupId"]:
+		entry.erase(key)
+	entry["_v2LeaseExecutorRequestId"] = "npc-crossing-continuity:v2:4:reopen"
+	entry["routeLeaseGeneration"] = 4
+	entry["routeLeaseId"] = "npc-crossing-continuity:4:reopen"
+	var reopened: Dictionary = executor.request_crossing(setup.door, actor, entry, {"cell": Vector2i(0, 1), "portalId": setup.portalId})
+	var replacement: Dictionary = executor.active_crossing_for_entry(entry)
+	executor.release_actor(actor, false, {"reason": "focused_clearance", "position": actor.global_position, "exteriorClearanceCertified": true})
+	var completed: Dictionary = executor.completed_crossing_for_entry(entry)
+	var passed := bool(opened.get("ok", false)) \
+		and not String(initial.get("crossingId", "")).is_empty() \
+		and bool(successor.get("ok", false)) \
+		and String(continued.get("crossingId", "")) == String(initial.get("crossingId", "")) \
+		and String(continued.get("initiatingRouteRequestId", "")) == "npc-crossing-continuity:v2:1:door" \
+		and String(continued.get("successorRouteRequestId", "")) == "npc-crossing-continuity:v2:2:clearance" \
+		and String(second_successor.get("reason", "")) == "crossing_successor_already_bound" \
+		and String(changed_generation.get("reason", "")) == "crossing_successor_already_bound" \
+		and String(changed_lease.get("reason", "")) == "crossing_successor_already_bound" \
+		and not bool(wrong_portal.get("ok", false)) \
+		and String(wrong_traffic.get("reason", "")) == "crossing_traffic_owner_changed" \
+		and String(lost_traffic.get("reason", "")) == "crossing_traffic_continuity_lost" \
+		and released.is_empty() \
+		and bool(reopened.get("ok", false)) \
+		and String(replacement.get("crossingId", "")) != String(initial.get("crossingId", "")) \
+		and String(replacement.get("successorRouteRequestId", "")) == "" \
+		and String(completed.get("crossingId", "")) == String(replacement.get("crossingId", "")) \
+		and String(completed.get("initiatingRouteLeaseId", "")) == "npc-crossing-continuity:4:reopen" \
+		and bool((completed.get("releaseEvidence", {}) as Dictionary).get("exteriorClearanceCertified", false)) \
+		and bool((completed.get("releaseTrafficContinuity", {}) as Dictionary).get("ok", false))
+	return outcome(
+		passed,
+		"initial=%s continued=%s second=%s changedGeneration=%s changedLease=%s wrongPortal=%s wrongTraffic=%s lostTraffic=%s replacement=%s completed=%s" % [JSON.stringify(initial), JSON.stringify(continued), JSON.stringify(second_successor), JSON.stringify(changed_generation), JSON.stringify(changed_lease), JSON.stringify(wrong_portal), JSON.stringify(wrong_traffic), JSON.stringify(lost_traffic), JSON.stringify(replacement), JSON.stringify(completed)],
+		["crossing_id_immutable_across_route_handoff", "initiating_and_successor_routes_bound", "second_successor_rejected", "successor_generation_and_lease_immutable", "portal_and_traffic_owner_changes_rejected", "released_reservations_break_continuity", "release_reopen_creates_new_transaction", "release_receipt_preserves_clearance_and_live_traffic"],
+		{"initial": initial, "continued": continued, "secondSuccessor": second_successor, "changedGeneration": changed_generation, "changedLease": changed_lease, "wrongPortal": wrong_portal, "wrongTraffic": wrong_traffic, "lostTraffic": lost_traffic, "released": released, "replacement": replacement, "completed": completed}
+	)
+
+func test_private_home_transaction_requires_certified_release(_mode: String) -> Dictionary:
+	var setup := door_setup()
+	var executor = DoorTraversalExecutorScript.new()
+	executor.setup(setup.service)
+	var portal = setup.service.portals.get(setup.portalId)
+	var center: Vector3 = portal.threshold_bounds.get_center()
+	var actor := make_actor("npc-certified-private-departure", center - Vector3(0.0, 0.0, CELL))
+	var entry := {
+		"id": actor_id(actor),
+		"body": actor,
+		"routeGoalCell": Vector2i(0, 2),
+		"doorInteriorPosition": center - Vector3(0.0, 0.0, CELL),
+		"doorExteriorPosition": center + Vector3(0.0, 0.0, CELL),
+		"_v2LeaseExecutorRequestId": "npc-certified-private-departure:v2:1:door",
+		"routeLeaseGeneration": 1,
+		"routeLeaseId": "npc-certified-private-departure:1:door"
+	}
+	var opened: Dictionary = executor.request_crossing(setup.door, actor, entry, {"cell": Vector2i.ZERO, "portalId": setup.portalId, "direction": "z+"})
+	var active: Dictionary = executor.active_crossing_for_entry(entry)
+	var protected: Dictionary = executor.protected_crossing_for_entry(entry)
+	var rejected: Dictionary = executor.release_actor(actor, true)
+	var retained: Dictionary = executor.active_crossing_for_entry(entry)
+	var no_receipt: Dictionary = executor.completed_crossing_for_entry(entry)
+	var retained_traffic: Dictionary = executor.traffic_reservations.certify_active_group(
+		String(active.get("groupId", "")), actor_id(actor), active.get("reservationIds", []) as Array
+	)
+	var release_position := center + Vector3(0.0, 0.0, CELL * 2.0)
+	var certified: Dictionary = executor.release_actor(actor, true, {
+		"reason": "focused_exterior_clearance",
+		"position": release_position,
+		"exteriorClearanceCertified": true
+	})
+	var receipt: Dictionary = executor.completed_crossing_for_entry(entry)
+	for key in ["activeDoorPortalId", "activeDoorActorId", "activeDoorDirection", "activeDoorTrafficGroupId"]:
+		entry.erase(key)
+	entry["_v2LeaseExecutorRequestId"] = "npc-certified-private-departure:v2:2:cancel"
+	entry["routeLeaseGeneration"] = 2
+	entry["routeLeaseId"] = "npc-certified-private-departure:2:cancel"
+	var reopened: Dictionary = executor.request_crossing(setup.door, actor, entry, {"cell": Vector2i.ZERO, "portalId": setup.portalId, "direction": "z+"})
+	var cancelled_active: Dictionary = executor.active_crossing_for_entry(entry)
+	executor.cancel_actor(actor)
+	var after_cancel: Dictionary = executor.active_crossing_for_entry(entry)
+	var cancel_receipt: Dictionary = executor.completed_crossing_for_entry(entry)
+	var cancelled_traffic: Dictionary = executor.traffic_reservations.certify_active_group(
+		String(cancelled_active.get("groupId", "")), actor_id(actor), cancelled_active.get("reservationIds", []) as Array
+	)
+	var passed := bool(opened.get("ok", false)) \
+		and bool(active.get("requiresExteriorClearanceCertificate", false)) \
+		and String(protected.get("crossingId", "")) == String(active.get("crossingId", "")) \
+		and not bool(rejected.get("ok", true)) \
+		and String(rejected.get("reason", "")) == "exterior_clearance_certificate_required" \
+		and String(retained.get("crossingId", "")) == String(active.get("crossingId", "")) \
+		and no_receipt.is_empty() \
+		and bool(retained_traffic.get("ok", false)) \
+		and bool(certified.get("ok", false)) \
+		and int(certified.get("released", 0)) == 1 \
+		and String(receipt.get("completionKind", "")) == "cleared" \
+		and bool((receipt.get("releaseEvidence", {}) as Dictionary).get("exteriorClearanceCertified", false)) \
+		and bool(reopened.get("ok", false)) \
+		and not cancelled_active.is_empty() \
+		and after_cancel.is_empty() \
+		and String(cancel_receipt.get("completionKind", "")) == "cancelled" \
+		and not bool((cancel_receipt.get("releaseEvidence", {}) as Dictionary).get("exteriorClearanceCertified", false)) \
+		and not bool(cancelled_traffic.get("ok", true))
+	return outcome(
+		passed,
+		"active=%s rejected=%s retainedTraffic=%s receipt=%s cancelReceipt=%s cancelledTraffic=%s" % [JSON.stringify(active), JSON.stringify(rejected), JSON.stringify(retained_traffic), JSON.stringify(receipt), JSON.stringify(cancel_receipt), JSON.stringify(cancelled_traffic)],
+		["private_home_outbound_transaction_is_immutable", "uncertified_release_rejected_without_receipt", "portal_traffic_survives_rejected_release", "certified_release_creates_clearance_receipt", "forced_cancel_cleans_without_clearance_acceptance"],
+		{"active": active, "rejected": rejected, "retained": retained, "retainedTraffic": retained_traffic, "receipt": receipt, "cancelReceipt": cancel_receipt, "cancelledTraffic": cancelled_traffic}
 	)
 
 func test_player_npc_shared_authority(_mode: String) -> Dictionary:
@@ -162,6 +322,58 @@ func test_crossing_releases_after_sweep_clearance(_mode: String) -> Dictionary:
 		"stillNeedsHold=%s processed=%s" % [str(still_needs_hold), JSON.stringify(processed)],
 		["traffic_hold_releases_after_sweep_clearance", "clearance_still_blocks_close"],
 		{ "stillNeedsHold": still_needs_hold, "processed": processed, "doorOpen": setup.door.get_meta("open") }
+	)
+
+func test_private_home_departure_holds_through_exterior_clearance(_mode: String) -> Dictionary:
+	var setup := door_setup()
+	var npc_system = NpcSystemScript.new()
+	var fake_autonomy := FakeAutonomyForDoorHold.new()
+	fake_autonomy.door_portals = setup.service
+	npc_system.set("autonomy_system", fake_autonomy)
+	var portal = setup.service.portals.get(setup.portalId)
+	var center: Vector3 = portal.threshold_bounds.get_center()
+	var actor := make_actor("npc-private-home-departure", center + Vector3(0.0, 0.0, CELL * 0.82))
+	var entry := {
+		"id": actor_id(actor),
+		"body": actor,
+		"activeDoorPortalId": setup.portalId,
+		"activeDoorActorId": actor_id(actor),
+		"activeDoorDirection": "z+",
+		"homeDepartureState": "clearing",
+		"homeDepartureClearanceCommitted": true,
+		"doorInteriorPosition": center - Vector3(0.0, 0.0, CELL),
+		"doorExteriorPosition": center + Vector3(0.0, 0.0, CELL)
+	}
+	var near_still_held := npc_system.active_door_crossing_still_needs_hold(entry, setup.portalId)
+	var near_not_cleared := not npc_system.active_door_crossing_has_cleared(entry, setup.portalId)
+	var near_release_evidence := npc_system.active_private_home_departure_clearance_evidence(entry, setup.portalId)
+	npc_system.set("npcs", [entry])
+	npc_system.release_completed_door_holds()
+	var near_release_count := fake_autonomy.release_receipts.size()
+	entry["homeDepartureState"] = "outside"
+	var stale_outside_state_still_held := npc_system.active_door_crossing_still_needs_hold(entry, setup.portalId)
+	entry["homeDepartureState"] = "clearing"
+	var clear_position := HomeInteriorServiceScript.exterior_clearance_target(entry, portal, entry.get("doorExteriorPosition"), 0.0)
+	clear_position += HomeInteriorServiceScript.exterior_direction_for_entry(entry) * 0.05
+	set_actor_position(actor, clear_position)
+	var clear_releases := not npc_system.active_door_crossing_still_needs_hold(entry, setup.portalId)
+	var clear_certified := npc_system.active_door_crossing_has_cleared(entry, setup.portalId)
+	var clear_release_evidence := npc_system.active_private_home_departure_clearance_evidence(entry, setup.portalId)
+	npc_system.release_completed_door_holds()
+	var production_release_receipt: Dictionary = fake_autonomy.release_receipts.back() if not fake_autonomy.release_receipts.is_empty() else {}
+	npc_system.free()
+	return outcome(
+		near_still_held and near_not_cleared and near_release_evidence.is_empty() and stale_outside_state_still_held \
+			and near_release_count == 0 \
+			and clear_releases and clear_certified \
+			and bool(clear_release_evidence.get("exteriorClearanceCertified", false)) \
+			and clear_release_evidence.get("position") == clear_position \
+			and fake_autonomy.release_receipts.size() == 1 \
+			and bool((production_release_receipt.get("releaseEvidence", {}) as Dictionary).get("exteriorClearanceCertified", false)) \
+			and (production_release_receipt.get("releaseEvidence", {}) as Dictionary).get("position") == clear_position,
+		"nearHeld=%s nearNotCleared=%s clearReleases=%s clearCertified=%s clearPosition=%s" % [str(near_still_held), str(near_not_cleared), str(clear_releases), str(clear_certified), str(clear_position)],
+		["threshold_radius_does_not_release_private_home_departure", "monotonic_clearance_commitment_survives_stale_outside_state", "authoritative_exterior_clearance_releases_private_home_departure", "release_receipt_uses_authoritative_clearance_pose", "release_completed_door_holds_preserves_clearance_receipt"],
+		{"nearStillHeld": near_still_held, "nearNotCleared": near_not_cleared, "nearReleaseEvidence": near_release_evidence, "nearReleaseCount": near_release_count, "staleOutsideStateStillHeld": stale_outside_state_still_held, "clearReleases": clear_releases, "clearCertified": clear_certified, "clearReleaseEvidence": clear_release_evidence, "productionReleaseReceipt": production_release_receipt, "clearPosition": clear_position}
 	)
 
 func test_arrived_route_still_holds_threshold_actor(_mode: String) -> Dictionary:

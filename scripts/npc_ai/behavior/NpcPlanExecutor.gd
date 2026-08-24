@@ -34,6 +34,7 @@ var job_selections_this_frame := 0
 var guard_target_frame := -1
 var guard_target_refreshes_this_frame := 0
 var update_frame_serial := 0
+var physics_route_execution_depth := 0
 var home_route_substrate = null
 var home_route_executor = null
 var home_route_world = null
@@ -71,6 +72,86 @@ func begin_update_frame() -> void:
 func cancel_route_execution(entry: Dictionary) -> void:
 	if home_route_executor != null and home_route_executor.has_method("cancel_entry"):
 		home_route_executor.cancel_entry(entry)
+
+
+func prepare_scripted_route_order(entry: Dictionary, order_kind: String, reason: String) -> Dictionary:
+	if order_kind != "go_home":
+		return {"ok": true, "prepared": false, "reason": "route_request_deferred_to_motion_service"}
+	var supersession := supersede_semantic_routes(entry, reason)
+	NpcRouteStateStoreScript.clear_route_lease(entry, "NpcPlanExecutor.prepare_scripted_route_order")
+	NpcRouteStateStoreScript.write_status(entry, "pending", "go_home_request_queued", "NpcPlanExecutor.prepare_scripted_route_order")
+	if bool(entry.get("insideHome", false)):
+		return {"ok": true, "prepared": false, "reason": "already_inside_home", "supersession": supersession}
+	var components := _ensure_home_v2_components()
+	if not bool(components.get("ok", false)):
+		return {"ok": false, "prepared": false, "reason": String(components.get("reason", "home_v2_unavailable")), "supersession": supersession}
+	var authority = components.get("authority")
+	var request := _home_v2_request(authority, entry, reason)
+	return {
+		"ok": String(request.get("requestId", "")) != "",
+		"prepared": String(request.get("requestId", "")) != "",
+		"reason": String(request.get("reason", "queued")),
+		"requestId": String(request.get("requestId", "")),
+		"state": String(request.get("state", "")),
+		"supersession": supersession
+	}
+
+
+func supersede_semantic_routes(entry: Dictionary, reason: String, preserved_semantic := "") -> Dictionary:
+	var protected_departure_crossing: bool = autonomy_system != null \
+		and autonomy_system.has_method("npc_protected_door_crossing") \
+		and not (autonomy_system.call("npc_protected_door_crossing", entry) as Dictionary).is_empty()
+	if not protected_departure_crossing:
+		entry.erase("homeDepartureClearanceCommitted")
+	var authority = autonomy_system.get("route_authority_v2") if autonomy_system != null else null
+	var had_home_state := String(entry.get("homeRouteV2RequestId", "")) != "" or entry.has("_homeRouteV2Intent") or entry.has("_homeRouteV2Route")
+	var had_routine_state := String(entry.get("routineRouteV2RequestId", "")) != "" or entry.has("_routineRouteV2Intent") or entry.has("_routineRouteV2Route")
+	var preserved_request_id := ""
+	if preserved_semantic == "home":
+		preserved_request_id = String(entry.get("homeRouteV2RequestId", ""))
+	elif preserved_semantic == "routine":
+		preserved_request_id = String(entry.get("routineRouteV2RequestId", ""))
+	var request_ids: Array[String] = []
+	for request_id in [
+		String(entry.get("homeRouteV2RequestId", "")),
+		String(entry.get("routineRouteV2RequestId", ""))
+	]:
+		if request_id != "" and request_id != preserved_request_id and not request_ids.has(request_id):
+			request_ids.append(request_id)
+	if authority != null and authority.has_method("runtime_for_entry"):
+		var active: Dictionary = authority.runtime_for_entry(entry)
+		var active_request_id := String(active.get("requestId", ""))
+		if bool(active.get("hasRequest", false)) and String(active.get("state", "")) != "cancelled" and active_request_id != "" and active_request_id != preserved_request_id and not request_ids.has(active_request_id):
+			request_ids.append(active_request_id)
+	var executor_request_id := String(entry.get("_v2LeaseExecutorRequestId", ""))
+	var cancel_executor := preserved_semantic == "" or (executor_request_id != "" and executor_request_id != preserved_request_id) or (preserved_semantic == "home" and had_routine_state) or (preserved_semantic == "routine" and had_home_state)
+	if cancel_executor and home_route_executor != null and home_route_executor.has_method("cancel_entry"):
+		home_route_executor.cancel_entry(entry)
+	var cancelled_request_ids: Array[String] = []
+	if authority != null and authority.has_method("cancel_request"):
+		for request_id in request_ids:
+			var cancellation: Dictionary = authority.cancel_request(request_id, reason)
+			if bool(cancellation.get("ok", false)):
+				cancelled_request_ids.append(request_id)
+	if preserved_semantic != "home" and had_home_state:
+		_clear_home_v2_route_state(entry)
+	if preserved_semantic != "routine" and had_routine_state:
+		_clear_routine_v2_route_state(entry)
+	var released_action_state := false
+	var release_action_state := preserved_semantic == "" or cancel_executor or not request_ids.is_empty()
+	if release_action_state and autonomy_system != null and autonomy_system.has_method("release_action_owned_state"):
+		autonomy_system.release_action_owned_state(entry, reason)
+		released_action_state = true
+	return {
+		"ok": cancelled_request_ids.size() == request_ids.size(),
+		"cancelled": not cancelled_request_ids.is_empty(),
+		"cancelledRequestIds": cancelled_request_ids,
+		"requestedCancellationIds": request_ids,
+		"preservedSemantic": preserved_semantic,
+		"preservedRequestId": preserved_request_id,
+		"executorCancelled": cancel_executor,
+		"actionOwnedStateReleased": released_action_state
+	}
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
 	if npc_system == null:
@@ -183,6 +264,7 @@ func advance_physics_route_service(entry: Dictionary, delta: float) -> Dictionar
 	if service_kind == "":
 		return { "advanced": false, "reason": "no_active_route_service_work" }
 	var result: Dictionary = {}
+	physics_route_execution_depth += 1
 	match service_kind:
 		"home":
 			_execute_home(entry, body, entry.get("activeMotionPerception", {}) if entry.get("activeMotionPerception", {}) is Dictionary else {}, delta)
@@ -197,7 +279,9 @@ func advance_physics_route_service(entry: Dictionary, delta: float) -> Dictionar
 		"routine":
 			result = _advance_physics_routine_route(entry, body, delta)
 		_:
+			physics_route_execution_depth -= 1
 			return { "advanced": false, "reason": "unknown_route_service_kind" }
+	physics_route_execution_depth -= 1
 	_record_physics_route_service(entry, service_kind, result)
 	return result
 
@@ -414,7 +498,7 @@ func _active_job_motion_goal(entry: Dictionary, current_night_factor: float) -> 
 func _advance_scripted_motion(entry: Dictionary, body: Node3D, perception: Dictionary, delta: float) -> Dictionary:
 	var order_kind := _scripted_order_kind(body, entry)
 	if order_kind == "" and not body.has_meta("npc_scripted_target"):
-		_release_action_owned_state(entry, "scripted_order_cancelled")
+		_release_action_owned_state(entry, "scripted_order_cancelled", true)
 		return { "advanced": false, "reason": "scripted_order_cancelled", "intentKind": "scripted" }
 	_execute_scripted(entry, body, perception, delta)
 	return _motion_result(entry, "scripted", "scripted_order")
@@ -568,9 +652,14 @@ func _complete_home_departure_stage(entry: Dictionary, body: Node3D, reason: Str
 	if not _home_departure_at_exterior_clearance(entry, body):
 		return false
 	_set_home_departure_state(entry, "outside", "exterior_clearance_reached")
+	entry.erase("homeDepartureClearanceCommitted")
 	if autonomy_system != null:
 		if String(entry.get("activeDoorPortalId", "")) != "" and autonomy_system.has_method("release_npc_door_hold"):
-			autonomy_system.call("release_npc_door_hold", body if body != null else String(entry.get("id", "")), true)
+			autonomy_system.call("release_npc_door_hold", body if body != null else String(entry.get("id", "")), true, {
+				"reason": reason,
+				"position": body.global_position if body != null else Vector3.INF,
+				"exteriorClearanceCertified": true
+			})
 		if autonomy_system.has_method("release_npc_traffic_reservations"):
 			autonomy_system.call("release_npc_traffic_reservations", entry, reason)
 	for key in [
@@ -699,7 +788,7 @@ func _execute_scripted(entry: Dictionary, body: Node3D, perception: Dictionary, 
 		_execute_scripted_combat_overlay(entry, body, perception)
 		_execute_scripted_go_to_route_v2(entry, body, delta)
 	else:
-		_release_action_owned_state(entry, "scripted_order_cancelled")
+		_release_action_owned_state(entry, "scripted_order_cancelled", true)
 		_mark_scripted_order(entry, "FAILED_TARGET_GONE", "missing_scripted_target")
 
 func _execute_scripted_go_to_route_v2(entry: Dictionary, body: Node3D, delta: float) -> Dictionary:
@@ -828,6 +917,7 @@ func _execute_home(entry: Dictionary, body: Node3D, perception: Dictionary, delt
 	if npc_system.has_method("settle_home_if_reached"):
 		npc_system.call("settle_home_if_reached", entry)
 	if bool(entry.get("insideHome", false)):
+		entry.erase("homeDepartureClearanceCommitted")
 		_set_home_departure_state(entry, "inside", "home_arrival")
 		entry["homeReturnTime"] = 0.0
 		entry["lastMoveDistance"] = 0.0
@@ -902,6 +992,8 @@ func _execute_home_route_v2(entry: Dictionary, body: Node3D, delta: float, speed
 		if String(probe_result.get("state", "")) in ["ready", "moving"]:
 			return _execute_home_v2_lease(entry, body, authority, executor, probe_result, delta, speed)
 		return _home_v2_pending_or_failure_result(probe_result)
+	if state == "pending_nav_data" and not _v2_navigation_retry_released(active, world):
+		return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 	if state in ["queued", "pending_nav_data", "pending_budget"]:
 		return _plan_and_commit_home_v2_route(entry, body, authority, substrate, world, active, delta, speed)
 	if state == "blocked_dynamic":
@@ -909,9 +1001,13 @@ func _execute_home_route_v2(entry: Dictionary, body: Node3D, delta: float, speed
 			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 		entry.erase("homeRouteV2RequestId")
 	if state in ["unreachable_static", "invalid_goal", "arrived", "cancelled"]:
-		if not bool(entry.get("routeForceReplan", false)):
+		var terminal_revision := String(entry.get("homeRouteV2TerminalTopologyRevision", ""))
+		var topology_changed := not terminal_revision.is_empty() and terminal_revision != _v2_topology_revision_signature(world)
+		if not topology_changed:
+			entry["routeForceReplan"] = false
 			return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0 }
 		entry.erase("homeRouteV2RequestId")
+		entry.erase("homeRouteV2TerminalTopologyRevision")
 	return _plan_and_commit_home_v2_route(entry, body, authority, substrate, world, {}, delta, speed)
 
 
@@ -940,8 +1036,11 @@ func _plan_and_commit_home_v2_route(entry: Dictionary, body: Node3D, authority, 
 	if not bool(route.get("ok", false)):
 		var failure := _apply_home_v2_route_failure(authority, request_id, route)
 		entry["homeRouteV2LastAuthority"] = failure
+		if String(failure.get("state", "")) in ["unreachable_static", "invalid_goal"]:
+			entry["homeRouteV2TerminalTopologyRevision"] = _v2_topology_revision_signature(world)
 		return _home_v2_pending_or_failure_result(failure)
 	entry["_homeRouteV2Route"] = route.duplicate(true)
+	entry.erase("homeRouteV2TerminalTopologyRevision")
 	entry["routeForceReplan"] = false
 	var commit_options := _v2_probe_repair_commit_options(substrate, start_cell, candidate_cells, plan_options, route)
 	var commit: Dictionary = authority.commit_route_after_probe(entry, request_id, route, intent, commit_options)
@@ -960,6 +1059,8 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 		lease = refreshed.get("routeLease", {}) if refreshed.get("routeLease", {}) is Dictionary else {}
 	if lease.is_empty():
 		return { "ok": false, "status": "pending", "state": "pending_budget", "reason": "home_v2_missing_lease", "moved": 0.0 }
+	if physics_route_execution_depth <= 0:
+		return { "ok": true, "status": "moving", "state": "ready", "reason": "physics_route_service_pending", "moved": 0.0, "executionDeferred": true }
 	var execution: Dictionary = executor.execute(entry, request_id, lease, delta, {
 		"speed": speed,
 		"waypointRadius": HOME_V2_WAYPOINT_RADIUS,
@@ -972,6 +1073,10 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 		"movingHome": true
 	})
 	entry["homeRouteV2LastExecution"] = execution
+	var transition_failure := _handle_v2_transition_execution_failure(entry, authority, executor, request_id, execution)
+	if not transition_failure.is_empty():
+		entry["homeRouteV2LastAuthority"] = transition_failure.get("authority", {})
+		return transition_failure
 	if String(execution.get("status", "")) == "route_complete":
 		if npc_system != null and npc_system.has_method("settle_home_if_reached"):
 			npc_system.call("settle_home_if_reached", entry)
@@ -985,9 +1090,10 @@ func _execute_home_v2_lease(entry: Dictionary, body: Node3D, authority, executor
 		_cancel_home_v2_request(authority, entry, reason)
 		entry["homeRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + V2_EXECUTION_REPAIR_RETRY_FRAMES
 		return { "ok": false, "status": "pending_budget", "state": "pending_budget", "reason": reason, "moved": float(execution.get("moved", 0.0)) }
-	if not bool(execution.get("ok", false)) and String(execution.get("reason", "")) in ["unexpected_collision", "stuck", "door_stage_blocked"]:
-		entry["homeRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + _v2_execution_retry_frames(entry, String(execution.get("reason", "")))
-		_report_v2_route_repair(authority, request_id, "home_execution_repair_pending", execution)
+	var motion_failure := _handle_v2_motion_execution_failure(entry, authority, executor, request_id, execution, "homeRouteV2RetryAfterFrame", "home_execution_repair_pending")
+	if not motion_failure.is_empty():
+		entry["homeRouteV2LastAuthority"] = motion_failure.get("authority", {})
+		return motion_failure
 	return execution
 
 
@@ -1080,7 +1186,7 @@ func _ensure_home_v2_components() -> Dictionary:
 		home_route_world = world
 	if home_route_executor == null or home_route_authority != authority:
 		home_route_executor = NpcRouteLeaseExecutorScript.new()
-		home_route_executor.setup(authority, main, npc_system, crowd_velocity_service)
+		home_route_executor.setup(authority, main, autonomy_system, crowd_velocity_service)
 		home_route_authority = authority
 	return {
 		"ok": true,
@@ -1181,6 +1287,7 @@ func _home_v2_intent(entry: Dictionary, candidate_cells: Array) -> Dictionary:
 	var target_cell: Vector2i = candidate_cells[0] if not candidate_cells.is_empty() and candidate_cells[0] is Vector2i else entry.get("homeCell", Vector2i.ZERO)
 	return {
 		"kind": "home",
+		"semanticKind": "home_interior",
 		"movingHome": true,
 		"allowOutside": false,
 		"priority": int(entry.get("routePriority", 140)),
@@ -1368,12 +1475,23 @@ func _home_v2_navmesh_validation_debug(validation_value) -> Dictionary:
 		"blockType": String(validation.get("blockType", "")),
 		"collision": {
 			"id": String(collision.get("id", "")),
+			"blockType": String(collision.get("blockType", "")),
+			"nodeName": String(collision.get("nodeName", "")),
+			"parentName": String(collision.get("parentName", "")),
+			"propId": String(collision.get("propId", "")),
+			"material": String(collision.get("material", "")),
+			"drop": String(collision.get("drop", "")),
+			"obstacleClass": String(collision.get("obstacleClass", "")),
 			"sourcePartId": String(collision.get("sourcePartId", "")),
 			"sourceBlueprintId": String(collision.get("sourceBlueprintId", "")),
 			"kind": String(collision.get("kind", "")),
 			"semantic": String(collision.get("semantic", "")),
 			"minY": float(collision.get("minY", 0.0)),
-			"maxY": float(collision.get("maxY", 0.0))
+			"maxY": float(collision.get("maxY", 0.0)),
+			"minX": float(collision.get("minX", 0.0)),
+			"maxX": float(collision.get("maxX", 0.0)),
+			"minZ": float(collision.get("minZ", 0.0)),
+			"maxZ": float(collision.get("maxZ", 0.0))
 		}
 	}
 
@@ -1394,7 +1512,7 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 	var executor = components.get("executor")
 	var world = components.get("world")
 	var target_cell := _home_v2_world_cell(world, target)
-	var route_key := _routine_v2_route_key(entry, intent_kind, semantic_kind, target_cell, allow_outside, reason)
+	var route_key := _routine_v2_route_key(entry, intent_kind, semantic_kind, target, target_cell, allow_outside, reason)
 	var active := _routine_v2_active_summary(authority, entry, route_key)
 	var state := String(active.get("state", "none"))
 	if bool(entry.get("routeForceReplan", false)):
@@ -1424,6 +1542,8 @@ func _execute_routine_route_v2(entry: Dictionary, body: Node3D, delta: float, sp
 		if String(probe_result.get("state", "")) in ["ready", "moving"]:
 			return _execute_routine_v2_lease(entry, body, authority, executor, probe_result, delta, speed, intent_kind, semantic_kind)
 		return _routine_v2_pending_or_failure_result(probe_result)
+	if state == "pending_nav_data" and not _v2_navigation_retry_released(active, world):
+		return { "ok": false, "status": state, "state": state, "reason": String(active.get("reason", state)), "moved": 0.0, "authority": active }
 	if state in ["queued", "pending_nav_data", "pending_budget"]:
 		return _plan_and_commit_routine_v2_route(entry, body, authority, substrate, world, active, delta, speed, intent_kind, target, semantic_kind, allow_outside, priority, reason, route_key)
 	if state == "blocked_dynamic":
@@ -1545,6 +1665,8 @@ func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, execu
 		lease = refreshed.get("routeLease", {}) if refreshed.get("routeLease", {}) is Dictionary else {}
 	if lease.is_empty():
 		return { "ok": false, "status": "pending", "state": "pending_budget", "reason": "routine_v2_missing_lease", "moved": 0.0 }
+	if physics_route_execution_depth <= 0:
+		return { "ok": true, "status": "moving", "state": "ready", "reason": "physics_route_service_pending", "moved": 0.0, "executionDeferred": true }
 	var execution: Dictionary = executor.execute(entry, request_id, lease, delta, {
 		"speed": speed,
 		"waypointRadius": ROUTINE_V2_WAYPOINT_RADIUS,
@@ -1558,10 +1680,159 @@ func _execute_routine_v2_lease(entry: Dictionary, body: Node3D, authority, execu
 	entry["routineRouteV2LastExecution"] = execution
 	entry["routineRouteV2IntentKind"] = intent_kind
 	entry["routineRouteV2SemanticKind"] = semantic_kind
-	if not bool(execution.get("ok", false)) and String(execution.get("reason", "")) in ["unexpected_collision", "stuck", "door_stage_blocked"]:
-		entry["routineRouteV2RetryAfterFrame"] = Engine.get_physics_frames() + _v2_execution_retry_frames(entry, String(execution.get("reason", "")))
-		_report_v2_route_repair(authority, request_id, "routine_execution_repair_pending", execution)
+	var transition_failure := _handle_v2_transition_execution_failure(entry, authority, executor, request_id, execution)
+	if not transition_failure.is_empty():
+		entry["routineRouteV2LastAuthority"] = transition_failure.get("authority", {})
+		return transition_failure
+	var motion_failure := _handle_v2_motion_execution_failure(entry, authority, executor, request_id, execution, "routineRouteV2RetryAfterFrame", "routine_execution_repair_pending")
+	if not motion_failure.is_empty():
+		entry["routineRouteV2LastAuthority"] = motion_failure.get("authority", {})
+		return motion_failure
 	return execution
+
+
+func _handle_v2_transition_execution_failure(entry: Dictionary, authority, executor, request_id: String, execution: Dictionary) -> Dictionary:
+	if bool(execution.get("ok", false)):
+		entry.erase("v2LastTransitionActionMismatchSignature")
+		return {}
+	var reason := String(execution.get("reason", ""))
+	var classification := String(execution.get("classification", ""))
+	if classification == "navigation_transition_certificate_action_mismatch":
+		reason = classification
+	var pending_reasons := ["navigation_transition_corridor_changed", "navigation_transition_topology_changed", "surface_transition_revision_mismatch"]
+	pending_reasons.append("navigation_transition_certificate_action_mismatch")
+	var infrastructure_reasons := ["navigation_transition_validation_authority_unavailable", "surface_transition_missing_corridor_certificate", "missing_navigation_transition_traffic"]
+	if not (reason in pending_reasons) and not (reason in infrastructure_reasons):
+		return {}
+	if executor != null and executor.has_method("cancel_entry"):
+		executor.cancel_entry(entry)
+	var authority_result: Dictionary = {}
+	if (reason in pending_reasons or reason in infrastructure_reasons) and authority != null and authority.has_method("mark_pending_nav_data"):
+		var wait_signature := _v2_navigation_wait_signature(execution, reason)
+		if reason == "navigation_transition_certificate_action_mismatch":
+			var action_signature := _v2_transition_action_signature(execution)
+			var first_refresh := action_signature != String(entry.get("v2LastTransitionActionMismatchSignature", ""))
+			entry["v2LastTransitionActionMismatchSignature"] = action_signature
+			wait_signature["immediateActionRefresh"] = first_refresh
+		authority_result = authority.mark_pending_nav_data(request_id, reason, wait_signature)
+		return {
+			"ok": false,
+			"status": "pending_nav_data",
+			"state": "pending_nav_data",
+			"reason": reason,
+			"moved": float(execution.get("moved", 0.0)),
+			"authority": authority_result,
+			"execution": execution
+		}
+	return {
+		"ok": false,
+		"status": "infrastructure_failure",
+		"state": "infrastructure_failure",
+		"reason": reason,
+		"moved": float(execution.get("moved", 0.0)),
+		"authority": authority_result,
+		"execution": execution
+	}
+
+func _v2_navigation_wait_signature(execution: Dictionary, reason: String) -> Dictionary:
+	var action: Dictionary = execution.get("action", {}) if execution.get("action", {}) is Dictionary else {}
+	var world = autonomy_system.call("generated_navigation_adapter") if autonomy_system != null and autonomy_system.has_method("generated_navigation_adapter") else null
+	var navmesh_world = autonomy_system.get("navmesh_world") if autonomy_system != null else null
+	var infrastructure := _v2_transition_infrastructure_readiness()
+	return {
+		"reason": reason,
+		"linkId": String(action.get("linkId", "")),
+		"sourceRevision": int(action.get("sourceRevision", -1)),
+		"topologyRevision": int(action.get("topologyRevision", -1)),
+		"worldRevision": String(world.call("revision")) if world != null and world.has_method("revision") else "",
+		"navmeshRevision": String(navmesh_world.call("revision")) if navmesh_world != null and navmesh_world.has_method("revision") else "",
+		"validatorReady": bool(infrastructure.get("validatorReady", false)),
+		"trafficReady": bool(infrastructure.get("trafficReady", false)),
+		"validatorRevision": String(infrastructure.get("validatorRevision", ""))
+	}
+
+func _v2_navigation_retry_released(active: Dictionary, world) -> bool:
+	var awaited: Dictionary = active.get("awaitedNavigation", {}) if active.get("awaitedNavigation", {}) is Dictionary else {}
+	if awaited.is_empty():
+		return false
+	var reason := String(awaited.get("reason", active.get("reason", "")))
+	if reason == "navigation_transition_certificate_action_mismatch" and bool(awaited.get("immediateActionRefresh", false)):
+		return true
+	var infrastructure := _v2_transition_infrastructure_readiness()
+	if reason == "navigation_transition_validation_authority_unavailable":
+		return bool(infrastructure.get("validatorReady", false)) and (not bool(awaited.get("validatorReady", false)) or String(infrastructure.get("validatorRevision", "")) != String(awaited.get("validatorRevision", "")))
+	if reason == "missing_navigation_transition_traffic":
+		return bool(infrastructure.get("trafficReady", false)) and not bool(awaited.get("trafficReady", false))
+	var navmesh_world = autonomy_system.get("navmesh_world") if autonomy_system != null else null
+	var world_revision := String(world.call("revision")) if world != null and world.has_method("revision") else ""
+	var navmesh_revision := String(navmesh_world.call("revision")) if navmesh_world != null and navmesh_world.has_method("revision") else ""
+	return (not world_revision.is_empty() and world_revision != String(awaited.get("worldRevision", ""))) \
+		or (not navmesh_revision.is_empty() and navmesh_revision != String(awaited.get("navmeshRevision", "")))
+
+
+func _v2_topology_revision_signature(world) -> String:
+	var generated_revision := ""
+	if world != null:
+		var revision_value = world.get("topology_revision")
+		if revision_value != null:
+			generated_revision = str(int(revision_value))
+	var navmesh_world = autonomy_system.get("navmesh_world") if autonomy_system != null else null
+	var navmesh_revision := String(navmesh_world.call("topology_revision_key")) if navmesh_world != null and navmesh_world.has_method("topology_revision_key") else ""
+	return "%s|%s" % [generated_revision, navmesh_revision]
+
+func _v2_transition_action_signature(execution: Dictionary) -> String:
+	var action: Dictionary = execution.get("action", {}) if execution.get("action", {}) is Dictionary else {}
+	return var_to_str({
+		"linkId": String(action.get("linkId", "")),
+		"direction": String(action.get("direction", "")),
+		"sourceRevision": int(action.get("sourceRevision", -1)),
+		"topologyRevision": int(action.get("topologyRevision", -1)),
+		"snapshotRevision": String(action.get("snapshotRevision", "")),
+		"queuePosition": action.get("queuePosition", Vector3.INF),
+		"stagingPosition": action.get("stagingPosition", Vector3.INF),
+		"entryPosition": action.get("entryPosition", Vector3.INF),
+		"exitPosition": action.get("exitPosition", Vector3.INF),
+		"clearancePosition": action.get("clearancePosition", Vector3.INF),
+		"entrySupportId": String(action.get("entrySupportId", "")),
+		"exitSupportId": String(action.get("exitSupportId", "")),
+		"corridorCertificate": (action.get("corridorCertificate", {}) as Dictionary).duplicate(true) if action.get("corridorCertificate", {}) is Dictionary else {}
+	})
+
+func _v2_transition_infrastructure_readiness() -> Dictionary:
+	if autonomy_system == null or not autonomy_system.has_method("navigation_transition_infrastructure_readiness"):
+		return {"validatorReady": false, "trafficReady": false, "validatorRevision": ""}
+	var value = autonomy_system.call("navigation_transition_infrastructure_readiness")
+	return value as Dictionary if value is Dictionary else {"validatorReady": false, "trafficReady": false, "validatorRevision": ""}
+
+
+func _handle_v2_motion_execution_failure(entry: Dictionary, authority, executor, request_id: String, execution: Dictionary, retry_key: String, repair_reason: String) -> Dictionary:
+	if bool(execution.get("ok", false)):
+		return {}
+	var reason := String(execution.get("reason", ""))
+	if reason not in ["unexpected_collision", "stuck", "door_stage_blocked"]:
+		return {}
+	_report_v2_route_repair(authority, request_id, repair_reason, execution)
+	if executor != null and executor.has_method("cancel_entry"):
+		executor.cancel_entry(entry)
+	var motor: Dictionary = execution.get("motor", {}) if execution.get("motor", {}) is Dictionary else {}
+	var static_contact := reason == "unexpected_collision" and String(motor.get("blockedContactCategory", motor.get("blocked_contact_category", ""))) == "static_collision"
+	var authority_result: Dictionary = {}
+	if static_contact and authority != null and authority.has_method("report_unreachable_static"):
+		authority_result = authority.report_unreachable_static(request_id, reason)
+	else:
+		entry[retry_key] = Engine.get_physics_frames() + _v2_execution_retry_frames(entry, reason)
+		if authority != null and authority.has_method("report_blocked_dynamic"):
+			authority_result = authority.report_blocked_dynamic(request_id, reason)
+	var state := String(authority_result.get("state", "unreachable_static" if static_contact else "blocked_dynamic"))
+	return {
+		"ok": false,
+		"status": state,
+		"state": state,
+		"reason": reason,
+		"moved": float(execution.get("moved", 0.0)),
+		"authority": authority_result,
+		"execution": execution
+	}
 
 
 func _v2_execution_retry_frames(entry: Dictionary, reason: String) -> int:
@@ -1720,14 +1991,7 @@ func _cancel_routine_v2_request(authority, entry: Dictionary, reason: String) ->
 			"routeKey": String(entry.get("routineRouteV2Key", ""))
 		})
 		authority.cancel_request(request_id, reason)
-	entry.erase("routineRouteV2RequestId")
-	entry.erase("routineRouteV2Key")
-	entry.erase("_routineRouteV2Route")
-	entry.erase("_routineRouteV2Intent")
-	entry.erase("routineRouteV2RetryAfterFrame")
-	entry["routeActions"] = {}
-	entry["routeCells"] = []
-	entry["pathWaypoints"] = []
+	_clear_routine_v2_route_state(entry)
 
 
 func _cancel_home_v2_request(authority, entry: Dictionary, reason: String) -> void:
@@ -1760,8 +2024,18 @@ func _routine_v2_repair_replan_due(entry: Dictionary) -> bool:
 	return retry_after > 0 and Engine.get_physics_frames() >= retry_after
 
 
-func _routine_v2_route_key(entry: Dictionary, intent_kind: String, semantic_kind: String, target_cell: Vector2i, allow_outside: bool, reason: String) -> String:
-	return "%s|%s|%s|%d,%d|%s|%s|%s|%d" % [
+func _routine_v2_route_key(entry: Dictionary, intent_kind: String, semantic_kind: String, target: Vector3, target_cell: Vector2i, allow_outside: bool, reason: String) -> String:
+	var exact_target_key := ""
+	# The departure leg can switch from a porch endpoint to an exterior-clearance
+	# endpoint inside one navigation cell. Reusing an arrived porch request would
+	# strand the actor in the doorway clearance volume and keep its portal hold
+	# alive. The horizontal endpoint is stable across motor floor settling.
+	if semantic_kind == "home_departure_clearance":
+		exact_target_key = "|%d,%d" % [
+			roundi(target.x * 100.0),
+			roundi(target.z * 100.0)
+		]
+	return "%s|%s|%s|%d,%d|%s|%s|%s|%d%s" % [
 		String(entry.get("id", "")),
 		intent_kind,
 		semantic_kind,
@@ -1770,7 +2044,8 @@ func _routine_v2_route_key(entry: Dictionary, intent_kind: String, semantic_kind
 		str(allow_outside),
 		String(entry.get("jobObjectId", "")),
 		reason,
-		int(entry.get("forageSearchSerial", 0))
+		int(entry.get("forageSearchSerial", 0)),
+		exact_target_key
 	]
 
 
@@ -1787,10 +2062,24 @@ func _clear_home_v2_route_state(entry: Dictionary) -> void:
 	entry.erase("_homeRouteV2Intent")
 	entry.erase("homeRouteV2RequestId")
 	entry.erase("homeRouteV2RetryAfterFrame")
+	entry.erase("homeRouteV2TerminalTopologyRevision")
 	entry["routeActions"] = {}
 	entry["routeCells"] = []
 	entry["pathWaypoints"] = []
 	entry["routeMovingHome"] = false
+
+
+func _clear_routine_v2_route_state(entry: Dictionary) -> void:
+	entry.erase("routineRouteV2RequestId")
+	entry.erase("routineRouteV2Key")
+	entry.erase("_routineRouteV2Route")
+	entry.erase("_routineRouteV2Intent")
+	entry.erase("routineRouteV2RetryAfterFrame")
+	entry.erase("routineRouteV2IntentKind")
+	entry.erase("routineRouteV2SemanticKind")
+	entry["routeActions"] = {}
+	entry["routeCells"] = []
+	entry["pathWaypoints"] = []
 
 
 func _cell_distance(a: Vector2i, b: Vector2i) -> int:
@@ -1798,6 +2087,7 @@ func _cell_distance(a: Vector2i, b: Vector2i) -> int:
 
 
 func _preempt_job_for_home(entry: Dictionary) -> void:
+	supersede_semantic_routes(entry, "schedule_home", "home")
 	var phase := String(entry.get("jobPhase", "idle"))
 	if not (phase in ["outbound", "searching", "gathering", "returning", "stall"]):
 		return
@@ -2074,8 +2364,11 @@ func _staged_departure_motion_target(entry: Dictionary, body: Node3D, target: Ve
 func _home_exit_stage_target(entry: Dictionary, body: Node3D) -> Vector3:
 	if body == null:
 		return _home_exit_clearance_target(entry, 0.0)
+	if bool(entry.get("homeDepartureClearanceCommitted", false)):
+		return _home_exit_clearance_target(entry, body.global_position.y)
 	if _inside_home_now(entry, body) or _inside_home_bounds_now(entry, body.global_position):
 		return _home_door_exit_target(entry, body.global_position.y)
+	entry["homeDepartureClearanceCommitted"] = true
 	return _home_exit_clearance_target(entry, body.global_position.y)
 
 func _home_departure_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
@@ -2085,6 +2378,16 @@ func _home_departure_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
 	if bool(status.get("strictInside", false)):
 		_set_home_departure_state(entry, "inside", "strict_interior")
 		_set_home_departure_state(entry, "clearing", "outbound_from_interior")
+		return true
+	if bool(entry.get("homeDepartureClearanceCommitted", false)):
+		if _home_departure_at_exterior_clearance(entry, body):
+			var authority = autonomy_system.get("route_authority_v2") if autonomy_system != null else null
+			var request_id := String(entry.get("routineRouteV2RequestId", ""))
+			if authority != null and authority.has_method("report_arrived") and not request_id.is_empty():
+				authority.report_arrived(request_id, "home_departure_exterior_clearance_reached")
+			_complete_home_departure_stage(entry, body, "committed_exterior_clearance_reached")
+			return false
+		_set_home_departure_state(entry, "clearing", "committed_exterior_clearance_pending")
 		return true
 	var state := String(entry.get("homeDepartureState", ""))
 	if state == "clearing":
@@ -2103,10 +2406,7 @@ func _home_departure_needs_clearance(entry: Dictionary, body: Node3D) -> bool:
 func _home_departure_at_exterior_clearance(entry: Dictionary, body: Node3D) -> bool:
 	if body == null:
 		return false
-	var status := _home_interior_status(entry, body.global_position)
-	if bool(status.get("strictInside", false)) or not bool(status.get("clearOfDoor", false)):
-		return false
-	return _flat_cell_for_position(body.global_position) == _home_exit_clearance_cell(entry)
+	return HomeInteriorServiceScript.has_exterior_clearance(entry, _home_door_portal(entry), body.global_position)
 
 func _set_home_departure_state(entry: Dictionary, state: String, reason: String) -> void:
 	var previous := String(entry.get("homeDepartureState", ""))
@@ -2141,10 +2441,13 @@ func _inside_home_bounds_now(entry: Dictionary, position: Vector3) -> bool:
 	return bool(_home_interior_status(entry, position).get("strictInside", false))
 
 func _home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
-	var portal = null
+	return HomeInteriorServiceScript.status(entry, position, _home_door_portal(entry))
+
+
+func _home_door_portal(entry: Dictionary):
 	if autonomy_system != null and autonomy_system.get("door_portals") != null:
-		portal = HomeInteriorServiceScript.portal_for_entry(entry, autonomy_system.get("door_portals"))
-	return HomeInteriorServiceScript.status(entry, position, portal)
+		return HomeInteriorServiceScript.portal_for_entry(entry, autonomy_system.get("door_portals"))
+	return null
 
 func _home_exit_clearance_cell(entry: Dictionary) -> Vector2i:
 	var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
@@ -2178,6 +2481,9 @@ func _home_door_exit_target(entry: Dictionary, fallback_y: float) -> Vector3:
 	return position
 
 func _home_exit_clearance_target(entry: Dictionary, fallback_y: float) -> Vector3:
+	var published_exterior := _published_home_door_exterior(entry)
+	if published_exterior.is_finite():
+		return HomeInteriorServiceScript.exterior_clearance_target(entry, _home_door_portal(entry), published_exterior, ROUTINE_V2_WAYPOINT_RADIUS)
 	var porch_cell: Vector2i = entry.get("porchCell", entry.get("homeCell", Vector2i.ZERO))
 	var exit_cell := _home_exit_clearance_cell(entry)
 	if exit_cell == porch_cell:
@@ -2187,6 +2493,12 @@ func _home_exit_clearance_target(entry: Dictionary, fallback_y: float) -> Vector
 	if main != null and main.has_method("surface_y_at_position"):
 		position.y = float(main.call("surface_y_at_position", position)) + 0.04
 	return position
+
+func _published_home_door_exterior(entry: Dictionary) -> Vector3:
+	var exterior = entry.get("doorExteriorPosition", Vector3.INF)
+	if exterior is Vector3 and (exterior as Vector3).is_finite():
+		return exterior as Vector3
+	return Vector3.INF
 
 func _town_exit_toward(entry: Dictionary, target: Vector3, fallback_y: float) -> Vector3:
 	var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
@@ -3080,19 +3392,24 @@ func _publish_debug(entry: Dictionary, blackboard, goal: Dictionary, plan: Dicti
 		body.set_meta("npc_schedule_compliance", compliance)
 		body.set_meta("npc_inside_home", bool(perception.get("insideHome", false)))
 
-func _release_action_owned_state(entry: Dictionary, reason: String) -> void:
-	var body := entry.get("body") as Node
+func _release_action_owned_state(entry: Dictionary, reason: String, force_door_cancellation := false) -> void:
+	var protected_crossing := {}
 	if autonomy_system != null:
-		if autonomy_system.has_method("release_npc_traffic_reservations"):
-			autonomy_system.call("release_npc_traffic_reservations", entry, reason)
-		if autonomy_system.has_method("release_npc_door_hold"):
-			autonomy_system.call("release_npc_door_hold", body if body != null else String(entry.get("id", "")), true)
+		if autonomy_system.has_method("npc_protected_door_crossing"):
+			protected_crossing = autonomy_system.call("npc_protected_door_crossing", entry) as Dictionary
+		if force_door_cancellation and autonomy_system.has_method("cancel_npc_door_crossing"):
+			var door_actor = entry.get("body")
+			autonomy_system.call("cancel_npc_door_crossing", door_actor if door_actor is Node else String(entry.get("id", "")))
+			protected_crossing = {}
+		if autonomy_system.has_method("release_action_owned_state"):
+			autonomy_system.call("release_action_owned_state", entry, reason)
 	if npc_system != null and npc_system.has_method("release_job_reservation"):
 		npc_system.call("release_job_reservation", entry, reason)
-	entry["activeDoorTrafficGroupId"] = ""
-	entry["activeTrafficStepGroup"] = ""
+	if protected_crossing.is_empty():
+		entry["activeDoorTrafficGroupId"] = ""
+		entry["activeTrafficStepGroup"] = ""
 	var blackboard = entry.get("blackboard")
-	if blackboard != null:
+	if blackboard != null and protected_crossing.is_empty():
 		blackboard.traffic_reservations.clear()
 		blackboard.door_request_token = ""
 

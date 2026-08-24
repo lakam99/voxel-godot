@@ -314,6 +314,34 @@ func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 		return descriptor_result
 	return server_result if not server_result.is_empty() else descriptor_result
 
+func certify_route_endpoint(endpoint: Vector3, target: Vector3, options := {}) -> Dictionary:
+	var endpoint_check := _path_endpoint_check([endpoint], target, options)
+	var max_snap := float(options.get("targetMaxSnapDistance", options.get("maxSnapDistance", INF)))
+	var query_api := _route_query_api(options)
+	var prefer_descriptor_endpoint := bool(options.get("preferDescriptorEndpoint", false))
+	var endpoint_walkable := _closest_walkable_for_query_endpoint(endpoint, max_snap, query_api, prefer_descriptor_endpoint)
+	var target_walkable := _closest_walkable_for_query_endpoint(target, max_snap, query_api, prefer_descriptor_endpoint)
+	var endpoint_region_id := String(endpoint_walkable.get("regionId", ""))
+	var target_region_id := String(target_walkable.get("regionId", ""))
+	var endpoint_surface_id := String(endpoint_walkable.get("surfaceId", ""))
+	var target_surface_id := String(target_walkable.get("surfaceId", ""))
+	var support_owner_match := bool(endpoint_walkable.get("found", false)) \
+		and bool(target_walkable.get("found", false)) \
+		and not endpoint_region_id.is_empty() \
+		and not endpoint_surface_id.is_empty() \
+		and endpoint_region_id == target_region_id \
+		and endpoint_surface_id == target_surface_id
+	return {
+		"ok": bool(endpoint_check.get("ok", false)) and support_owner_match,
+		"reason": "" if bool(endpoint_check.get("ok", false)) and support_owner_match else (String(endpoint_check.get("reason", "path_endpoint_mismatch")) if not bool(endpoint_check.get("ok", false)) else "path_endpoint_support_owner_mismatch"),
+		"endpoint": endpoint,
+		"target": target,
+		"endpointCheck": endpoint_check,
+		"supportOwnerMatch": support_owner_match,
+		"endpointWalkable": endpoint_walkable,
+		"targetWalkable": target_walkable
+	}
+
 func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	path_query_count += 1
@@ -461,7 +489,8 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 				"startWalkable": start_walkable,
 				"targetWalkable": target_walkable
 			}), options)
-	var path: Array[Vector3] = _query_path_points(query_start, query_target, options)
+	var path_query: Dictionary = _query_path_points(query_start, query_target, options)
+	var path: Array[Vector3] = path_query.get("path", []) as Array[Vector3]
 	if path.is_empty():
 		var map_readiness := _navigation_map_readiness(false)
 		if not bool(map_readiness.get("ready", false)) and String(map_readiness.get("reason", "")) != "pending_navigation_links":
@@ -484,10 +513,12 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 		if query_api_used == "query_path" and NavigationServer3D.has_method("map_get_path"):
 			var fallback_options := options.duplicate(true)
 			fallback_options["queryApi"] = "map_get_path"
-			fallback_path = _query_path_points(query_start, query_target, fallback_options)
+			var fallback_query: Dictionary = _query_path_points(query_start, query_target, fallback_options)
+			fallback_path = fallback_query.get("path", []) as Array[Vector3]
 			fallback_endpoint_check = _path_endpoint_check(fallback_path, query_target, options)
 			if bool(fallback_endpoint_check.get("ok", false)):
 				path = fallback_path
+				path_query = fallback_query
 				endpoint_check = fallback_endpoint_check
 				query_api_used = "map_get_path_endpoint_retry"
 		if bool(endpoint_check.get("ok", false)):
@@ -557,8 +588,29 @@ func query_route(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 					direct_path.append(point)
 			if not direct_path.is_empty():
 				path = direct_path
+				path_query = {"path": path}
 			door_actions = direct_door_route.get("actions", {})
-	path = _with_door_portal_waypoints(path, door_actions)
+	var navigation_link_actions_result := _navigation_link_actions_for_query(path, path_query)
+	if not bool(navigation_link_actions_result.get("ok", false)):
+		var navigation_link_failure_reason := String(navigation_link_actions_result.get("reason", "unattributed_navigation_link"))
+		var navigation_link_failure_status := "pending" if navigation_link_failure_reason == "navigation_path_metadata_unavailable" else "blocked"
+		return _finish_route_query(started, _route_query_failure(navigation_link_failure_status, navigation_link_failure_reason, start, target, options, navigation_link_actions_result), options)
+	for action_key in (navigation_link_actions_result.get("actions", {}) as Dictionary).keys():
+		door_actions[action_key] = (navigation_link_actions_result.get("actions", {}) as Dictionary)[action_key]
+	var scripted_waypoint_result := _scripted_navigation_waypoint_result(path, door_actions)
+	if not bool(scripted_waypoint_result.get("ok", false)):
+		return _finish_route_query(started, _route_query_failure("blocked", String(scripted_waypoint_result.get("reason", "scripted_navigation_waypoint_materialization_failed")), start, target, options, scripted_waypoint_result), options)
+	path = scripted_waypoint_result.get("path", path) as Array[Vector3]
+	if bool(options.get("simplifyPath", false)) and not door_actions.is_empty():
+		var simplified_options := options.duplicate(true)
+		simplified_options["allowScriptedLinkSimplification"] = true
+		var simplified_query: Dictionary = _query_path_points(query_start, query_target, simplified_options)
+		var simplified_path: Array[Vector3] = simplified_query.get("path", []) as Array[Vector3]
+		if bool(_path_endpoint_check(simplified_path, query_target, options).get("ok", false)):
+			var reinjected_result := _inject_scripted_actions_into_simplified_path(simplified_path, door_actions)
+			if not bool(reinjected_result.get("ok", false)):
+				return _finish_route_query(started, _route_query_failure("blocked", String(reinjected_result.get("reason", "scripted_navigation_simplification_failed")), start, target, options, reinjected_result), options)
+			path = reinjected_result.get("path", path) as Array[Vector3]
 	return _finish_route_query(started, {
 		"ok": true,
 		"status": "complete",
@@ -730,6 +782,8 @@ func _navigation_links_debug_summary() -> Array[Dictionary]:
 			result.append({
 				"id": String(record.get("id", "")),
 				"regionId": region_id,
+				"startSupportId": String(metadata.get("startSupportId", "")),
+				"endSupportId": String(metadata.get("endSupportId", "")),
 				"requiredRegionIds": _navigation_link_required_region_ids(region_id, metadata),
 				"start": record.get("start", Vector3.ZERO),
 				"end": record.get("end", Vector3.ZERO),
@@ -787,9 +841,12 @@ func tile_region_status(tile_key: String) -> Dictionary:
 		"registered": descriptor != null,
 		"state": String(region_states.get(region_id, "")),
 		"surfaceCount": surface_count,
+		"sourceRevision": int(descriptor.get("revision")) if descriptor != null else 0,
+		"sourceKey": String((descriptor.get("metadata") as Dictionary).get("sourceKey", "")) if descriptor != null and descriptor.get("metadata") is Dictionary else "",
 		"installed": region_rids_by_region.has(region_id),
 		"dirty": dirty_regions_by_region.has(region_id),
-		"installStatus": String(metrics.get("status", ""))
+		"installStatus": String(metrics.get("status", "")),
+		"install": metrics.duplicate(true)
 	}
 
 func sync_navigation_map_if_dirty() -> bool:
@@ -797,6 +854,9 @@ func sync_navigation_map_if_dirty() -> bool:
 
 func navigation_map_readiness() -> Dictionary:
 	return _navigation_map_readiness(false)
+
+func diagnostic_door_actions_for_path(path: Array[Vector3], options := {}) -> Dictionary:
+	return _door_actions_for_path(path, options)
 
 func reset_timing_stats() -> void:
 	last_install_usec = 0
@@ -1139,6 +1199,7 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 
 func _release_region(region_id: String, defer_dependent_navigation_links := false) -> void:
 	if defer_dependent_navigation_links:
+		_defer_door_links_requiring_region(region_id)
 		_defer_navigation_links_requiring_region(region_id)
 	_release_door_links_for_region(region_id)
 	_release_navigation_links_for_region(region_id)
@@ -1371,11 +1432,13 @@ func _closest_surface_id(region_id: String, position: Vector3) -> String:
 			best_id = String(surface.get("id", ""))
 	return best_id
 
-func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array[Vector3]:
+func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Dictionary:
 	var points: Array[Vector3] = []
+	var path_rids: Array[RID] = []
+	var path_types := PackedInt32Array()
 	var map_readiness := _navigation_map_readiness(true)
 	if not bool(map_readiness.get("ready", false)) and String(map_readiness.get("reason", "")) != "pending_navigation_links":
-		return points
+		return {"path": points, "pathRids": path_rids, "pathTypes": path_types, "queryApi": "unready"}
 	var use_map_get_path := _route_query_api(options) == "map_get_path"
 	if not use_map_get_path and NavigationServer3D.has_method("query_path"):
 		for attempt in range(SERVER_PATH_QUERY_ATTEMPTS):
@@ -1386,8 +1449,9 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 			parameters.target_position = target
 			parameters.navigation_layers = int(options.get("navigationLayers", 1))
 			parameters.path_postprocessing = int(options.get("pathPostprocessing", NavigationPathQueryParameters3D.PATH_POSTPROCESSING_EDGECENTERED))
-			parameters.simplify_path = bool(options.get("simplifyPath", false))
+			parameters.simplify_path = bool(options.get("simplifyPath", false)) and (not _has_scripted_navigation_links() or bool(options.get("allowScriptedLinkSimplification", false)))
 			parameters.simplify_epsilon = float(options.get("simplifyEpsilon", 0.0))
+			parameters.metadata_flags = NavigationPathQueryParameters3D.PATH_METADATA_INCLUDE_TYPES | NavigationPathQueryParameters3D.PATH_METADATA_INCLUDE_RIDS
 			var result := NavigationPathQueryResult3D.new()
 			var returned_path = NavigationServer3D.call("query_path", parameters, result)
 			var raw_path = result.call("get_path") if result.has_method("get_path") else result.get("path")
@@ -1395,37 +1459,304 @@ func _query_path_points(start: Vector3, target: Vector3, options := {}) -> Array
 			if points.is_empty():
 				points = _vector_path_to_array(returned_path)
 			if not points.is_empty():
+				path_rids = result.get_path_rids()
+				path_types = result.get_path_types()
 				break
 	if points.is_empty() and NavigationServer3D.has_method("map_get_path"):
 		_sync_navigation_map_if_dirty()
 		var map_path = NavigationServer3D.call("map_get_path", navigation_map, start, target, bool(options.get("optimizePath", true)))
 		points = _vector_path_to_array(map_path)
-	return points
+	return {"path": points, "pathRids": path_rids, "pathTypes": path_types, "queryApi": "query_path" if not path_rids.is_empty() else "map_get_path"}
+
+func _navigation_link_actions_for_query(path: Array[Vector3], query: Dictionary) -> Dictionary:
+	var actions := {}
+	var path_rids: Array = query.get("pathRids", []) if query.get("pathRids", []) is Array else []
+	var path_types = query.get("pathTypes", PackedInt32Array())
+	if path_rids.is_empty() or not (path_types is PackedInt32Array):
+		if _has_scripted_navigation_links():
+			return {"ok": false, "reason": "navigation_path_metadata_unavailable", "queryApi": String(query.get("queryApi", "")), "scriptedLinkCount": _scripted_navigation_link_count()}
+		return {"ok": true, "actions": actions}
+	if path_rids.size() != path.size() or path_types.size() != path.size():
+		return {"ok": false, "reason": "navigation_path_metadata_size_mismatch", "pathPointCount": path.size(), "ridCount": path_rids.size(), "typeCount": path_types.size()}
+	var seen := {}
+	for point_index in range(path.size()):
+		if int(path_types[point_index]) != NavigationPathQueryResult3D.PATH_SEGMENT_TYPE_LINK:
+			continue
+		var link_rid: RID = path_rids[point_index] as RID
+		var rid_key := link_rid.get_id()
+		if seen.has(rid_key):
+			continue
+		seen[rid_key] = true
+		var record := _navigation_link_record_for_rid(link_rid)
+		if record.is_empty():
+			if not _door_link_record_for_rid(link_rid).is_empty():
+				continue
+			return {"ok": false, "reason": "unattributed_navigation_link", "pathIndex": point_index, "linkRid": rid_key}
+		var metadata: Dictionary = record.get("metadata", {}) as Dictionary
+		if not bool(metadata.get("requiresScriptedTraversal", false)):
+			continue
+		var link_id := String(record.get("id", ""))
+		var start: Vector3 = record.get("start", Vector3.INF) as Vector3
+		var end: Vector3 = record.get("end", Vector3.INF) as Vector3
+		var travel_direction := _navigation_link_path_direction(path, point_index, start, end)
+		var traversal_key := "forwardTraversal" if travel_direction == "forward" else "reverseTraversal"
+		var traversal_value = metadata.get(traversal_key, {})
+		if not (traversal_value is Dictionary):
+			return {"ok": false, "reason": "navigation_transition_phase_bundle_missing", "linkId": link_id, "direction": travel_direction}
+		var traversal: Dictionary = traversal_value as Dictionary
+		var entry_position: Vector3 = traversal.get("entryPosition", Vector3.INF) as Vector3
+		var exit_position: Vector3 = traversal.get("exitPosition", Vector3.INF) as Vector3
+		var staging_position: Vector3 = traversal.get("stagingPosition", Vector3.INF) as Vector3
+		var queue_position: Vector3 = traversal.get("queuePosition", Vector3.INF) as Vector3
+		var clearance_position: Vector3 = traversal.get("clearancePosition", Vector3.INF) as Vector3
+		var entry_support_id := String(traversal.get("entrySupportId", ""))
+		var exit_support_id := String(traversal.get("exitSupportId", ""))
+		var corridor_certificate: Dictionary = traversal.get("corridorCertificate", {}) if traversal.get("corridorCertificate", {}) is Dictionary else {}
+		if not _navigation_transition_phase_bundle_is_valid(traversal, link_id, travel_direction):
+			return {"ok": false, "reason": "navigation_transition_phase_bundle_invalid", "linkId": link_id, "direction": travel_direction}
+		var last_link_index := point_index
+		while last_link_index + 1 < path.size() and int(path_types[last_link_index + 1]) == NavigationPathQueryResult3D.PATH_SEGMENT_TYPE_LINK and path_rids[last_link_index + 1] == link_rid:
+			last_link_index += 1
+		actions["navigation_link:%s" % link_id] = {
+			"kind": String(metadata.get("kind", "navigation_link")),
+			"actionId": "traverse",
+			"linkId": link_id,
+			"linkRid": rid_key,
+			"entryPosition": entry_position,
+			"exitPosition": exit_position,
+			"entrySupportId": entry_support_id,
+			"exitSupportId": exit_support_id,
+			"stagingPosition": staging_position,
+			"queuePosition": queue_position,
+			"clearancePosition": clearance_position,
+			"corridorCertificate": corridor_certificate.duplicate(true),
+			"direction": travel_direction,
+			"seamCorridorId": String(metadata.get("seamCorridorId", "")),
+			"crossingAxis": String(metadata.get("crossingAxis", "")),
+			"certifiedCorridorWidth": float(metadata.get("certifiedCorridorWidth", 0.0)),
+			"capacity": maxi(1, int(metadata.get("capacity", 1))),
+			"sourceRevision": int(metadata.get("sourceRevision", 0)),
+			"topologyRevision": int(metadata.get("topologyRevision", 0)),
+			"startTileKey": String(metadata.get("startTileKey", "")),
+			"endTileKey": String(metadata.get("endTileKey", "")),
+			"startTileSourceKey": String(metadata.get("startTileSourceKey", "")),
+			"endTileSourceKey": String(metadata.get("endTileSourceKey", "")),
+			"participatingTiles": metadata.get("participatingTiles", []).duplicate(true) if metadata.get("participatingTiles", []) is Array else [],
+			"snapshotRevision": revision(),
+			"pathPointIndex": point_index,
+			"exitPathPointIndex": last_link_index,
+			"cell": Vector2i(roundi(exit_position.x / CELL), roundi(exit_position.z / CELL)),
+			"enabled": true,
+			"navLink": true
+		}
+	return {"ok": true, "actions": actions}
+
+func _navigation_transition_phase_bundle_is_valid(traversal: Dictionary, link_id: String, travel_direction: String) -> bool:
+	var corridor_certificate: Dictionary = traversal.get("corridorCertificate", {}) if traversal.get("corridorCertificate", {}) is Dictionary else {}
+	if String(traversal.get("linkId", "")) != link_id or String(traversal.get("direction", "")) != travel_direction:
+		return false
+	if not bool(traversal.get("ok", false)) or not bool(corridor_certificate.get("ok", false)) \
+		or not bool(corridor_certificate.get("collisionBacked", false)) or not bool(corridor_certificate.get("standable", false)):
+		return false
+	if String(corridor_certificate.get("linkId", "")) != link_id \
+		or String(corridor_certificate.get("direction", "")) != travel_direction \
+		or int(corridor_certificate.get("staticSnapshotRevision", -1)) != int(traversal.get("staticSnapshotRevision", -2)) \
+		or int(corridor_certificate.get("doorStateRevision", -1)) != int(traversal.get("doorStateRevision", -2)):
+		return false
+	var positions: Dictionary = corridor_certificate.get("positions", {}) if corridor_certificate.get("positions", {}) is Dictionary else {}
+	var phase_contracts := {
+		"queue": ["queuePosition", "entrySupportId"],
+		"staging": ["stagingPosition", "entrySupportId"],
+		"entry": ["entryPosition", "entrySupportId"],
+		"exit": ["exitPosition", "exitSupportId"],
+		"clearance": ["clearancePosition", "exitSupportId"]
+	}
+	for phase_value in phase_contracts.keys():
+		var phase := String(phase_value)
+		var contract: Array = phase_contracts[phase]
+		var phase_position = traversal.get(String(contract[0]), Vector3.INF)
+		var support_id := String(traversal.get(String(contract[1]), ""))
+		var certified: Dictionary = positions.get(phase, {}) if positions.get(phase, {}) is Dictionary else {}
+		if not (phase_position is Vector3) or not (phase_position as Vector3).is_finite() or support_id.is_empty():
+			return false
+		if not bool(certified.get("ok", false)) or not bool(certified.get("collisionBacked", false)) or not bool(certified.get("standable", false)):
+			return false
+		if certified.get("position", Vector3.INF) != phase_position \
+			or String(certified.get("expectedSupportId", "")) != support_id \
+			or String(certified.get("supportId", "")).is_empty():
+			return false
+	return true
+
+func _has_scripted_navigation_links() -> bool:
+	return _scripted_navigation_link_count() > 0
+
+func _scripted_navigation_link_count() -> int:
+	var count := 0
+	for records_value in navigation_link_records_by_region.values():
+		for record_value in records_value as Array:
+			if record_value is Dictionary and bool(((record_value as Dictionary).get("metadata", {}) as Dictionary).get("requiresScriptedTraversal", false)):
+				count += 1
+	return count
+
+func _navigation_link_record_for_rid(link_rid: RID) -> Dictionary:
+	for records_value in navigation_link_records_by_region.values():
+		for record_value in records_value as Array:
+			if record_value is Dictionary and (record_value as Dictionary).get("rid", RID()) == link_rid:
+				return record_value as Dictionary
+	return {}
+
+func navigation_link_action_is_current(action: Dictionary) -> bool:
+	var link_rid_id := int(action.get("linkRid", 0))
+	var link_id := String(action.get("linkId", ""))
+	if link_rid_id <= 0 or link_id.is_empty():
+		return false
+	for records_value in navigation_link_records_by_region.values():
+		for record_value in records_value as Array:
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			var record_rid: RID = record.get("rid", RID()) as RID
+			if not record_rid.is_valid() or record_rid.get_id() != link_rid_id or String(record.get("id", "")) != link_id:
+				continue
+			var metadata: Dictionary = record.get("metadata", {}) as Dictionary
+			return bool(metadata.get("requiresScriptedTraversal", false)) \
+				and bool(metadata.get("enabled", true)) \
+				and int(metadata.get("sourceRevision", 0)) == int(action.get("sourceRevision", 0)) \
+				and int(metadata.get("topologyRevision", 0)) == int(action.get("topologyRevision", 0)) \
+				and _navigation_link_endpoint_sources_are_current(metadata)
+	return false
+
+func _navigation_link_endpoint_sources_are_current(metadata: Dictionary) -> bool:
+	var participating_tiles: Array = metadata.get("participatingTiles", []) if metadata.get("participatingTiles", []) is Array else []
+	if not participating_tiles.is_empty():
+		for participant_value in participating_tiles:
+			if not (participant_value is Dictionary):
+				return false
+			var participant: Dictionary = participant_value
+			var participant_tile_key := String(participant.get("tileKey", ""))
+			var participant_source_key := String(participant.get("sourceKey", ""))
+			if participant_tile_key.is_empty() or participant_source_key.is_empty():
+				return false
+			var participant_region_id := NavigationBakeDescriptorScript.chunk_region_id(participant_tile_key)
+			if not descriptors_by_region.has(participant_region_id) or not region_rids_by_region.has(participant_region_id):
+				return false
+			var participant_descriptor = descriptors_by_region.get(participant_region_id)
+			var participant_metadata: Dictionary = participant_descriptor.get("metadata") as Dictionary if participant_descriptor != null and participant_descriptor.get("metadata") is Dictionary else {}
+			if String(participant_metadata.get("sourceKey", "")) != participant_source_key:
+				return false
+	var start_source_key := String(metadata.get("startTileSourceKey", ""))
+	var end_source_key := String(metadata.get("endTileSourceKey", ""))
+	if start_source_key.is_empty() and end_source_key.is_empty():
+		return true
+	if start_source_key.is_empty() or end_source_key.is_empty():
+		return false
+	for prefix in ["start", "end"]:
+		var tile_key := String(metadata.get("%sTileKey" % prefix, ""))
+		var expected_source_key := String(metadata.get("%sTileSourceKey" % prefix, ""))
+		if tile_key.is_empty() or expected_source_key.is_empty():
+			return false
+		var region_id := NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+		if not descriptors_by_region.has(region_id) or not region_rids_by_region.has(region_id):
+			return false
+		var descriptor = descriptors_by_region.get(region_id)
+		var descriptor_metadata: Dictionary = descriptor.get("metadata") as Dictionary if descriptor != null and descriptor.get("metadata") is Dictionary else {}
+		if String(descriptor_metadata.get("sourceKey", "")) != expected_source_key:
+			return false
+	return true
+
+func _door_link_record_for_rid(link_rid: RID) -> Dictionary:
+	for records_value in door_link_records_by_portal.values():
+		for record_value in records_value as Array:
+			if record_value is Dictionary and (record_value as Dictionary).get("rid", RID()) == link_rid:
+				return record_value as Dictionary
+	return {}
+
+func _navigation_link_path_direction(path: Array[Vector3], point_index: int, start: Vector3, end: Vector3) -> String:
+	var path_start := path[maxi(0, point_index - 1)]
+	var path_end := path[mini(path.size() - 1, point_index + 1)]
+	var path_axis := path_end - path_start
+	path_axis.y = 0.0
+	var link_axis := end - start
+	link_axis.y = 0.0
+	return "forward" if path_axis.dot(link_axis) >= 0.0 else "reverse"
+
+func _navigation_link_clearance_position(origin: Vector3, path_neighbor: Vector3, opposite_endpoint: Vector3, clearance: float, entry_side: bool) -> Vector3:
+	var outward := path_neighbor - origin
+	outward.y = 0.0
+	if outward.length_squared() <= 0.0001:
+		outward = origin - opposite_endpoint
+		outward.y = 0.0
+	if outward.length_squared() <= 0.0001:
+		return origin
+	var result := origin + outward.normalized() * clearance
+	result.y = origin.y
+	if not entry_side and path_neighbor.distance_squared_to(origin) > 0.0001:
+		var neighbor_distance := Vector2(path_neighbor.x - origin.x, path_neighbor.z - origin.z).length()
+		if neighbor_distance < clearance:
+			result = path_neighbor
+	return result
 
 func _query_path_points_with_door_links_disabled(start: Vector3, target: Vector3, options := {}, portal_ids := []) -> Array[Vector3]:
-	var disabled_records := _temporarily_disable_door_links(portal_ids)
-	if disabled_records.is_empty():
+	var excluded_rids: Array[RID] = []
+	for portal_value in portal_ids:
+		for record_value in door_link_records_by_portal.get(String(portal_value), []) as Array:
+			if record_value is Dictionary:
+				var link_rid: RID = (record_value as Dictionary).get("rid", RID())
+				if link_rid.is_valid():
+					excluded_rids.append(link_rid)
+	return _query_path_points_excluding_owners(start, target, excluded_rids, options)
+
+
+func diagnostic_query_path_without_door_links(start: Vector3, target: Vector3, portal_ids := [], options := {}) -> Array[Vector3]:
+	var excluded_rids: Array[RID] = []
+	for portal_value in portal_ids:
+		for record_value in door_link_records_by_portal.get(String(portal_value), []) as Array:
+			if record_value is Dictionary:
+				var link_rid: RID = (record_value as Dictionary).get("rid", RID())
+				if link_rid.is_valid():
+					excluded_rids.append(link_rid)
+	return _query_path_points_excluding_owners(start, target, excluded_rids, options)
+
+
+func _query_path_points_excluding_owners(start: Vector3, target: Vector3, excluded_rids: Array[RID], options := {}) -> Array[Vector3]:
+	if excluded_rids.is_empty() or not NavigationServer3D.has_method("query_path"):
 		return []
-	_mark_navigation_map_dirty()
-	_sync_navigation_map_if_dirty()
-	var points := _query_path_points(start, target, options)
-	_restore_temporarily_disabled_door_links(disabled_records)
-	_mark_navigation_map_dirty()
-	_sync_navigation_map_if_dirty()
-	return points
+	var map_readiness := _navigation_map_readiness(true)
+	if not bool(map_readiness.get("ready", false)):
+		return []
+	var parameters := NavigationPathQueryParameters3D.new()
+	parameters.map = navigation_map
+	parameters.start_position = start
+	parameters.target_position = target
+	parameters.navigation_layers = int(options.get("navigationLayers", 1))
+	parameters.path_postprocessing = int(options.get("pathPostprocessing", NavigationPathQueryParameters3D.PATH_POSTPROCESSING_EDGECENTERED))
+	parameters.excluded_regions = excluded_rids
+	var result := NavigationPathQueryResult3D.new()
+	NavigationServer3D.call("query_path", parameters, result)
+	var raw_path = result.call("get_path") if result.has_method("get_path") else result.get("path")
+	return _vector_path_to_array(raw_path)
 
 
 func diagnostic_query_path_without_navigation_links(start: Vector3, target: Vector3, link_ids := [], options := {}) -> Array[Vector3]:
-	var disabled_records := _temporarily_disable_navigation_links(link_ids)
-	if disabled_records.is_empty():
-		return []
-	_mark_navigation_map_dirty()
-	_sync_navigation_map_if_dirty()
-	var points := _query_path_points(start, target, options)
-	_restore_temporarily_disabled_navigation_links(disabled_records)
-	_mark_navigation_map_dirty()
-	_sync_navigation_map_if_dirty()
-	return points
+	var ids := {}
+	for link_id_value in link_ids:
+		var link_id := String(link_id_value)
+		if not link_id.is_empty():
+			ids[link_id] = true
+	var excluded_rids: Array[RID] = []
+	for records_value in navigation_link_records_by_region.values():
+		if not (records_value is Array):
+			continue
+		for record_value in records_value as Array:
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			if not ids.has(String(record.get("id", ""))):
+				continue
+			var link_rid: RID = record.get("rid", RID())
+			if link_rid.is_valid():
+				excluded_rids.append(link_rid)
+	return _query_path_points_excluding_owners(start, target, excluded_rids, options)
 
 func _temporarily_disable_door_links(portal_ids := []) -> Array[Dictionary]:
 	var disabled_records: Array[Dictionary] = []
@@ -1442,10 +1773,11 @@ func _temporarily_disable_door_links(portal_ids := []) -> Array[Dictionary]:
 			var link_rid: RID = record.get("rid", RID())
 			if not link_rid.is_valid():
 				continue
-			_set_link_enabled(link_rid, false)
+			NavigationServer3D.call("link_set_map", link_rid, RID())
+			_mark_navigation_map_dirty()
 			disabled_records.append({
 				"rid": link_rid,
-				"enabled": true
+				"detached": true
 			})
 	return disabled_records
 
@@ -1453,7 +1785,8 @@ func _restore_temporarily_disabled_door_links(disabled_records: Array[Dictionary
 	for record in disabled_records:
 		var link_rid: RID = record.get("rid", RID())
 		if link_rid.is_valid():
-			_set_link_enabled(link_rid, bool(record.get("enabled", true)))
+			NavigationServer3D.call("link_set_map", link_rid, navigation_map)
+			_mark_navigation_map_dirty()
 
 
 func _temporarily_disable_navigation_links(link_ids := []) -> Array[Dictionary]:
@@ -1739,6 +2072,7 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 			})
 	link_specs.sort_custom(func(a, b): return String(a.get("id", a.get("portalId", ""))) < String(b.get("id", b.get("portalId", ""))))
 	var installed := 0
+	var pending := 0
 	var failures := 0
 	for link_spec_value in link_specs:
 		if not (link_spec_value is Dictionary):
@@ -1755,44 +2089,75 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 		if start_position == end_position:
 			failures += 1
 			continue
-		var link_value = NavigationServer3D.call("link_create")
-		if not (link_value is RID):
-			failures += 1
+		base_metadata["id"] = String(link_spec.get("id", base_metadata.get("id", "door-link:%s" % portal_id)))
+		base_metadata["portalId"] = portal_id
+		base_metadata["start"] = start_position
+		base_metadata["end"] = end_position
+		base_metadata["linkKind"] = "door"
+		if _navigation_link_is_installed(region_id, String(base_metadata.get("id", ""))):
 			continue
-		var link_rid: RID = link_value
-		NavigationServer3D.call("link_set_map", link_rid, navigation_map)
-		NavigationServer3D.call("link_set_start_position", link_rid, start_position)
-		NavigationServer3D.call("link_set_end_position", link_rid, end_position)
-		NavigationServer3D.call("link_set_bidirectional", link_rid, bool(base_metadata.get("bidirectional", true)))
-		if NavigationServer3D.has_method("link_set_navigation_layers"):
-			NavigationServer3D.call("link_set_navigation_layers", link_rid, int(base_metadata.get("navigationLayers", 1)))
-		if NavigationServer3D.has_method("link_set_enter_cost"):
-			NavigationServer3D.call("link_set_enter_cost", link_rid, float(base_metadata.get("enterCost", base_metadata.get("cost", 1.0))))
-		if NavigationServer3D.has_method("link_set_travel_cost"):
-			NavigationServer3D.call("link_set_travel_cost", link_rid, float(base_metadata.get("travelCost", base_metadata.get("cost", 1.0))))
-		var enabled := _door_link_enabled(base_metadata)
-		_set_link_enabled(link_rid, enabled)
-		var record := {
-			"rid": link_rid,
-			"regionId": region_id,
-			"portalId": portal_id,
-			"linkId": String(base_metadata.get("id", "door-link:%s" % portal_id)),
-			"start": start_position,
-			"end": end_position,
-			"enabled": enabled,
-			"baseMetadata": base_metadata.duplicate(true),
-			"metadata": base_metadata.duplicate(true)
-		}
-		if not door_link_records_by_region.has(region_id):
-			door_link_records_by_region[region_id] = []
-		door_link_records_by_region[region_id].append(record)
-		if not door_link_records_by_portal.has(portal_id):
-			door_link_records_by_portal[portal_id] = []
-		door_link_records_by_portal[portal_id].append(record)
-		installed += 1
+		if not _navigation_link_required_regions_ready(region_id, base_metadata):
+			_queue_pending_navigation_link(region_id, base_metadata)
+			pending += 1
+			continue
+		var install_result := _install_door_link_record(region_id, base_metadata)
+		if bool(install_result.get("installed", false)):
+			installed += 1
+		else:
+			failures += 1
 	installed_door_link_count += installed
 	door_link_install_failure_count += failures
-	return { "status": "installed", "installed": installed, "failed": failures }
+	var status := "installed" if failures == 0 and pending == 0 else "pending" if failures == 0 else "partial"
+	return { "status": status, "installed": installed, "pending": pending, "failed": failures }
+
+
+func _install_door_link_record(region_id: String, base_metadata: Dictionary) -> Dictionary:
+	if not _link_api_supported() or not region_rids_by_region.has(region_id):
+		return {"installed": false, "reason": "link_or_region_unavailable"}
+	var portal_id := String(base_metadata.get("portalId", ""))
+	var link_id := String(base_metadata.get("id", ""))
+	var start_position: Vector3 = base_metadata.get("start", Vector3.ZERO) as Vector3
+	var end_position: Vector3 = base_metadata.get("end", Vector3.ZERO) as Vector3
+	if portal_id.is_empty() or link_id.is_empty() or start_position.distance_to(end_position) <= 0.001:
+		return {"installed": false, "reason": "invalid_door_link"}
+	var link_value = NavigationServer3D.call("link_create")
+	if not (link_value is RID):
+		return {"installed": false, "reason": "link_create_failed"}
+	var link_rid: RID = link_value
+	NavigationServer3D.call("link_set_map", link_rid, navigation_map)
+	NavigationServer3D.call("link_set_start_position", link_rid, start_position)
+	NavigationServer3D.call("link_set_end_position", link_rid, end_position)
+	NavigationServer3D.call("link_set_bidirectional", link_rid, bool(base_metadata.get("bidirectional", true)))
+	if NavigationServer3D.has_method("link_set_navigation_layers"):
+		NavigationServer3D.call("link_set_navigation_layers", link_rid, int(base_metadata.get("navigationLayers", 1)))
+	if NavigationServer3D.has_method("link_set_enter_cost"):
+		NavigationServer3D.call("link_set_enter_cost", link_rid, float(base_metadata.get("enterCost", base_metadata.get("cost", 1.0))))
+	if NavigationServer3D.has_method("link_set_travel_cost"):
+		NavigationServer3D.call("link_set_travel_cost", link_rid, float(base_metadata.get("travelCost", base_metadata.get("cost", 1.0))))
+	var enabled := _door_link_enabled(base_metadata)
+	_set_link_enabled(link_rid, enabled)
+	var record := {
+		"rid": link_rid,
+		"id": link_id,
+		"regionId": region_id,
+		"portalId": portal_id,
+		"linkId": link_id,
+		"start": start_position,
+		"end": end_position,
+		"enabled": enabled,
+		"baseMetadata": base_metadata.duplicate(true),
+		"metadata": base_metadata.duplicate(true)
+	}
+	if not door_link_records_by_region.has(region_id):
+		door_link_records_by_region[region_id] = []
+	(door_link_records_by_region[region_id] as Array).append(record)
+	if not door_link_records_by_portal.has(portal_id):
+		door_link_records_by_portal[portal_id] = []
+	(door_link_records_by_portal[portal_id] as Array).append(record)
+	_mark_navigation_map_dirty()
+	record["installedIterationId"] = _navigation_map_iteration_id()
+	record["installedDirtySerial"] = navigation_map_dirty_serial
+	return {"installed": true, "id": link_id, "portalId": portal_id}
 
 func _descriptor_array(descriptor, property_name: String) -> Array:
 	if descriptor == null:
@@ -2013,6 +2378,9 @@ func _navigation_link_is_installed(region_id: String, link_id: String) -> bool:
 	for record_value in records:
 		if record_value is Dictionary and String((record_value as Dictionary).get("id", "")) == link_id:
 			return true
+	for record_value in door_link_records_by_region.get(region_id, []) as Array:
+		if record_value is Dictionary and String((record_value as Dictionary).get("linkId", (record_value as Dictionary).get("id", ""))) == link_id:
+			return true
 	return false
 
 
@@ -2103,6 +2471,42 @@ func _defer_navigation_links_requiring_region(region_id: String) -> int:
 	return released
 
 
+func _defer_door_links_requiring_region(region_id: String) -> int:
+	var released := 0
+	var owner_region_ids: Array = door_link_records_by_region.keys()
+	owner_region_ids.sort()
+	for owner_region_value in owner_region_ids:
+		var owner_region_id := String(owner_region_value)
+		if owner_region_id == region_id:
+			continue
+		var retained: Array = []
+		for record_value in door_link_records_by_region.get(owner_region_id, []) as Array:
+			if not (record_value is Dictionary):
+				continue
+			var record: Dictionary = record_value
+			var metadata: Dictionary = record.get("metadata", {}) as Dictionary
+			if not _navigation_link_required_region_ids(owner_region_id, metadata).has(region_id):
+				retained.append(record)
+				continue
+			var link_rid: RID = record.get("rid", RID())
+			if link_rid.is_valid():
+				NavigationServer3D.free_rid(link_rid)
+				_mark_navigation_map_dirty()
+				released += 1
+			_queue_pending_navigation_link(owner_region_id, metadata, true)
+			var portal_id := String(record.get("portalId", ""))
+			if door_link_records_by_portal.has(portal_id):
+				(door_link_records_by_portal[portal_id] as Array).erase(record)
+				if (door_link_records_by_portal[portal_id] as Array).is_empty():
+					door_link_records_by_portal.erase(portal_id)
+		if retained.is_empty():
+			door_link_records_by_region.erase(owner_region_id)
+		else:
+			door_link_records_by_region[owner_region_id] = retained
+	installed_door_link_count = maxi(0, installed_door_link_count - released)
+	return released
+
+
 func _release_navigation_links_for_region(region_id: String) -> int:
 	var records: Array = navigation_link_records_by_region.get(region_id, [])
 	var released := 0
@@ -2173,6 +2577,9 @@ func _navigation_map_readiness(sync_dirty := false) -> Dictionary:
 	elif _pending_navigation_link_count() > 0:
 		ready = false
 		reason = "pending_navigation_links"
+	elif navigation_map_synced_serial < navigation_map_dirty_serial:
+		ready = false
+		reason = "navigation_map_sync_pending"
 	elif has_iteration_api and iteration_id <= 0:
 		ready = false
 		reason = "navigation_map_sync_pending"
@@ -2265,9 +2672,15 @@ func _door_actions_for_path(path: Array[Vector3], options := {}) -> Dictionary:
 				actions[_cell_key(action.get("cell", Vector2i.ZERO))] = action
 	return actions
 
-func _with_door_portal_waypoints(path: Array[Vector3], actions: Dictionary) -> Array[Vector3]:
-	if path.size() < 2 or actions.is_empty():
-		return path
+func _scripted_navigation_waypoint_result(path: Array[Vector3], actions: Dictionary) -> Dictionary:
+	if actions.is_empty():
+		return {"ok": true, "path": path}
+	if path.size() < 2:
+		for action_key in actions.keys():
+			var action_value = actions.get(action_key, {})
+			if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) in ["door", "surface_transition"]:
+				return _scripted_navigation_waypoint_failure(action_key, action_value as Dictionary, "path_too_short", path.size())
+		return {"ok": true, "path": path}
 	var action_rows: Array[Dictionary] = []
 	var action_keys := actions.keys()
 	action_keys.sort()
@@ -2276,16 +2689,21 @@ func _with_door_portal_waypoints(path: Array[Vector3], actions: Dictionary) -> A
 		if not (action_value is Dictionary):
 			continue
 		var action: Dictionary = action_value
-		if String(action.get("kind", "")) != "door":
+		var action_kind := String(action.get("kind", ""))
+		if action_kind != "door" and action_kind != "surface_transition":
 			continue
-		var segment_index := int(action.get("pathSegmentIndex", -1))
-		if segment_index < 1 or segment_index >= path.size():
-			continue
+		var segment_index := int(action.get("pathSegmentIndex", -1)) if action_kind == "door" else int(action.get("pathPointIndex", -1))
+		var minimum_index := 1 if action_kind == "door" else 0
+		if segment_index < minimum_index or segment_index >= path.size():
+			return _scripted_navigation_waypoint_failure(action_key, action, "path_index_out_of_bounds", path.size())
 		var entry_value = action.get("entryPosition", null)
 		var exit_value = action.get("exitPosition", null)
-		if not (entry_value is Vector3) or not (exit_value is Vector3):
-			continue
-		var segment_start := path[segment_index - 1]
+		if not (entry_value is Vector3) or not (exit_value is Vector3) or not (entry_value as Vector3).is_finite() or not (exit_value as Vector3).is_finite():
+			return _scripted_navigation_waypoint_failure(action_key, action, "phase_position_invalid", path.size())
+		var consume_through_index := int(action.get("exitPathPointIndex", segment_index)) if action_kind == "surface_transition" else -1
+		if action_kind == "surface_transition" and (consume_through_index < segment_index or consume_through_index >= path.size()):
+			return _scripted_navigation_waypoint_failure(action_key, action, "exit_path_index_invalid", path.size())
+		var segment_start := path[maxi(0, segment_index - 1)]
 		var segment_end := path[segment_index]
 		var segment := segment_end - segment_start
 		var segment_length_sq := segment.length_squared()
@@ -2295,12 +2713,13 @@ func _with_door_portal_waypoints(path: Array[Vector3], actions: Dictionary) -> A
 			progress = clampf((portal_center - segment_start).dot(segment) / segment_length_sq, 0.0, 1.0)
 		action_rows.append({
 			"segmentIndex": segment_index,
+			"consumeThroughIndex": consume_through_index,
 			"progress": progress,
 			"portalId": String(action.get("portalId", action_key)),
 			"action": action
 		})
 	if action_rows.is_empty():
-		return path
+		return {"ok": true, "path": path}
 	action_rows.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
 		var left_segment := int(left.get("segmentIndex", -1))
 		var right_segment := int(right.get("segmentIndex", -1))
@@ -2313,13 +2732,25 @@ func _with_door_portal_waypoints(path: Array[Vector3], actions: Dictionary) -> A
 		return String(left.get("portalId", "")) < String(right.get("portalId", ""))
 	)
 	var actions_by_segment := {}
+	var consumed_surface_link_indices := {}
 	for row in action_rows:
 		var segment_index := int(row.get("segmentIndex", -1))
 		var segment_actions: Array = actions_by_segment.get(segment_index, [])
 		segment_actions.append(row.get("action", {}))
 		actions_by_segment[segment_index] = segment_actions
+		var consume_through_index := int(row.get("consumeThroughIndex", -1))
+		if consume_through_index >= segment_index:
+			for consumed_index in range(segment_index, consume_through_index + 1):
+				consumed_surface_link_indices[consumed_index] = true
 	var sequenced_path: Array[Vector3] = []
-	_append_distinct_path_point(sequenced_path, path[0])
+	for action_value in actions_by_segment.get(0, []):
+		if not (action_value is Dictionary):
+			continue
+		var action: Dictionary = action_value
+		_append_distinct_path_point(sequenced_path, action.get("entryPosition", path[0]))
+		_append_distinct_path_point(sequenced_path, action.get("exitPosition", path[0]))
+	if not consumed_surface_link_indices.has(0):
+		_append_distinct_path_point(sequenced_path, path[0])
 	for segment_index in range(1, path.size()):
 		for action_value in actions_by_segment.get(segment_index, []):
 			if not (action_value is Dictionary):
@@ -2327,8 +2758,101 @@ func _with_door_portal_waypoints(path: Array[Vector3], actions: Dictionary) -> A
 			var action: Dictionary = action_value
 			_append_distinct_path_point(sequenced_path, action.get("entryPosition", path[segment_index - 1]))
 			_append_distinct_path_point(sequenced_path, action.get("exitPosition", path[segment_index]))
-		_append_distinct_path_point(sequenced_path, path[segment_index])
-	return sequenced_path
+		if not consumed_surface_link_indices.has(segment_index):
+			_append_distinct_path_point(sequenced_path, path[segment_index])
+	var index_result := _update_scripted_navigation_action_waypoint_indices(sequenced_path, actions)
+	if not bool(index_result.get("ok", false)):
+		return index_result
+	return {"ok": true, "path": sequenced_path}
+
+
+func _inject_scripted_actions_into_simplified_path(path: Array[Vector3], actions: Dictionary) -> Dictionary:
+	if path.size() < 2:
+		return {"ok": false, "reason": "simplified_scripted_path_too_short", "path": path}
+	var ordered_actions: Array[Dictionary] = []
+	for action_value in actions.values():
+		if action_value is Dictionary and String((action_value as Dictionary).get("kind", "")) in ["door", "surface_transition"]:
+			ordered_actions.append(action_value as Dictionary)
+	ordered_actions.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		return int(left.get("pathPointIndex", left.get("pathSegmentIndex", 0))) < int(right.get("pathPointIndex", right.get("pathSegmentIndex", 0)))
+	)
+	var action_segments: Array[int] = []
+	var minimum_segment := 1
+	for action in ordered_actions:
+		var entry_position: Vector3 = action.get("entryPosition", Vector3.INF) as Vector3
+		var exit_position: Vector3 = action.get("exitPosition", Vector3.INF) as Vector3
+		if not entry_position.is_finite() or not exit_position.is_finite():
+			return {"ok": false, "reason": "simplified_scripted_action_endpoint_invalid", "action": action}
+		var center := (entry_position + exit_position) * 0.5
+		var best_segment := -1
+		var best_distance := INF
+		for segment_index in range(minimum_segment, path.size()):
+			var segment_start: Vector3 = path[segment_index - 1]
+			var segment_end: Vector3 = path[segment_index]
+			var segment := segment_end - segment_start
+			var progress := clampf((center - segment_start).dot(segment) / maxf(segment.length_squared(), 0.000001), 0.0, 1.0)
+			var distance := center.distance_squared_to(segment_start + segment * progress)
+			if distance < best_distance:
+				best_distance = distance
+				best_segment = segment_index
+		if best_segment < 1:
+			return {"ok": false, "reason": "simplified_scripted_action_segment_missing", "action": action}
+		action_segments.append(best_segment)
+		minimum_segment = best_segment
+	var result: Array[Vector3] = []
+	_append_distinct_path_point(result, path[0])
+	var copied_through := 0
+	for action_index in range(ordered_actions.size()):
+		var segment_index := action_segments[action_index]
+		for path_index in range(copied_through + 1, segment_index):
+			_append_distinct_path_point(result, path[path_index])
+		var action: Dictionary = ordered_actions[action_index]
+		_append_distinct_path_point(result, action.get("entryPosition", path[segment_index - 1]))
+		_append_distinct_path_point(result, action.get("exitPosition", path[segment_index]))
+		copied_through = segment_index - 1
+	for path_index in range(copied_through + 1, path.size()):
+		_append_distinct_path_point(result, path[path_index])
+	var index_result := _update_scripted_navigation_action_waypoint_indices(result, actions)
+	if not bool(index_result.get("ok", false)):
+		return index_result
+	return {"ok": true, "path": result}
+
+func _update_scripted_navigation_action_waypoint_indices(path: Array[Vector3], actions: Dictionary) -> Dictionary:
+	for action_key in actions.keys():
+		var action_value = actions.get(action_key, {})
+		if not (action_value is Dictionary):
+			continue
+		var action: Dictionary = action_value
+		if String(action.get("kind", "")) != "surface_transition":
+			continue
+		var entry_position: Vector3 = action.get("entryPosition", Vector3.INF) as Vector3
+		var exit_position: Vector3 = action.get("exitPosition", Vector3.INF) as Vector3
+		var entry_index := -1
+		var exit_index := -1
+		for index in range(path.size()):
+			if entry_index < 0 and entry_position.is_finite() and path[index].distance_to(entry_position) <= DOOR_PORTAL_PATH_POINT_EPSILON:
+				entry_index = index
+			if entry_index >= 0 and exit_position.is_finite() and path[index].distance_to(exit_position) <= DOOR_PORTAL_PATH_POINT_EPSILON:
+				exit_index = index
+				break
+		action["pathPointIndex"] = entry_index
+		action["exitPathPointIndex"] = exit_index
+		if entry_index < 0 or exit_index <= entry_index:
+			return _scripted_navigation_waypoint_failure(action_key, action, "ordered_exact_waypoints_missing", path.size())
+	return {"ok": true}
+
+func _scripted_navigation_waypoint_failure(action_key, action: Dictionary, detail_reason: String, path_point_count: int) -> Dictionary:
+	return {
+		"ok": false,
+		"reason": "scripted_navigation_waypoint_materialization_failed",
+		"detailReason": detail_reason,
+		"actionKey": String(action_key),
+		"actionKind": String(action.get("kind", "")),
+		"linkId": String(action.get("linkId", action.get("portalId", ""))),
+		"pathPointCount": path_point_count,
+		"pathPointIndex": int(action.get("pathPointIndex", -1)),
+		"exitPathPointIndex": int(action.get("exitPathPointIndex", -1))
+	}
 
 func _append_distinct_path_point(path: Array[Vector3], point_value) -> void:
 	if not (point_value is Vector3):
@@ -2661,6 +3185,7 @@ func _door_links_debug_summary() -> Dictionary:
 				"linkId": String(record.get("linkId", "")),
 				"regionId": String(record.get("regionId", "")),
 				"portalId": String(record.get("portalId", "")),
+				"sourceDoor": bool(metadata.get("sourceDoor", false)),
 				"enabled": bool(record.get("enabled", false)),
 				"state": String(metadata.get("state", "")),
 				"locked": bool(metadata.get("locked", false)),
@@ -2668,6 +3193,14 @@ func _door_links_debug_summary() -> Dictionary:
 				"destroyed": bool(metadata.get("destroyed", false)),
 				"unloaded": bool(metadata.get("unloaded", false)),
 				"openable": bool(metadata.get("openable", true)),
+				"requiredRegionIds": _navigation_link_required_region_ids(String(record.get("regionId", "")), metadata),
+				"startSupportId": String(metadata.get("startSupportId", "")),
+				"endSupportId": String(metadata.get("endSupportId", "")),
+				"endpointResolution": (metadata.get("endpointResolution", {}) as Dictionary).duplicate(true),
+				"installedIterationId": int(record.get("installedIterationId", -1)),
+				"installedDirtySerial": int(record.get("installedDirtySerial", -1)),
+				"startPosition": record.get("start", Vector3.ZERO),
+				"endPosition": record.get("end", Vector3.ZERO),
 				"start": _vector3_summary(record.get("start", Vector3.ZERO)),
 				"end": _vector3_summary(record.get("end", Vector3.ZERO))
 			})

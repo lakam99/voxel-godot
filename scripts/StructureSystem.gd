@@ -5,15 +5,36 @@ const StructureDoorRulesScript := preload("res://scripts/StructureDoorRules.gd")
 const StructureLootScript := preload("res://scripts/StructureLoot.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
+const BuildingPartPublisherScript := preload("res://scripts/buildings/BuildingPartPublisher.gd")
+const FurnishingPublisherScript := preload("res://scripts/buildings/FurnishingPublisher.gd")
+const CitadelBlueprintBuildJobScript := preload("res://scripts/buildings/CitadelBlueprintBuildJob.gd")
+const CitadelRecipeContextScript := preload("res://scripts/world/CitadelRecipeContext.gd")
 
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
 const STREAMING_STRUCTURE_QUEUE_COMPACT_THRESHOLD := 256
+const CITADEL_REGION_CELLS := 420
+const CITADEL_REGISTRATION_MAX_ATTEMPTS := 3600
+const CITADEL_TOPOLOGY_PENDING_TIMEOUT_MSEC := 300000
 
 var main
 var loot
 var generated_towns := {}
 var generated_structures := {}
+var generated_landmark_regions := {}
+var citadel_publication_states := {}
+var citadel_roots := {}
+var citadel_publishers := {}
+var citadel_furnishing_publishers := {}
+var citadel_residence_manifests := {}
+var citadel_blueprints := {}
+var citadel_furnishing_plans := {}
+var citadel_recipe_jobs := {}
+var citadel_registration_jobs := {}
+var registered_citadel_navigation_ids := {}
+var registered_citadel_door_portal_ids := {}
+var registered_citadel_furnishing_navigation_ids := {}
+var citadel_publication_generation := 0
 var generated_building_count := 0
 var generated_town_count := 0
 var generated_mine_count := 0
@@ -43,6 +64,24 @@ func setup(main_node) -> void:
 func reset() -> void:
     generated_towns.clear()
     generated_structures.clear()
+    generated_landmark_regions.clear()
+    unregister_all_citadel_navigation()
+    citadel_publication_generation += 1
+    retire_active_citadel_recipe_jobs()
+    for root_value in citadel_roots.values():
+        if root_value != null and is_instance_valid(root_value):
+            root_value.queue_free()
+    citadel_publication_states.clear()
+    citadel_roots.clear()
+    citadel_publishers.clear()
+    citadel_furnishing_publishers.clear()
+    citadel_residence_manifests.clear()
+    citadel_blueprints.clear()
+    citadel_furnishing_plans.clear()
+    citadel_registration_jobs.clear()
+    registered_citadel_navigation_ids.clear()
+    registered_citadel_door_portal_ids.clear()
+    registered_citadel_furnishing_navigation_ids.clear()
     generated_building_count = 0
     generated_town_count = 0
     generated_mine_count = 0
@@ -97,6 +136,9 @@ func update_around(center_cell: Vector2i) -> void:
     terrain_surface_sample_cache.clear()
     update_towns(center_cell)
     update_standalone_structures(center_cell)
+    update_citadels(center_cell)
+    poll_citadel_recipe_jobs()
+    poll_citadel_registration_jobs()
 
 func update_around_budgeted(center_cell: Vector2i, allow_builds := true) -> int:
     if main == null:
@@ -111,11 +153,128 @@ func update_around_budgeted(center_cell: Vector2i, allow_builds := true) -> int:
     update_standalone_structures(center_cell, true, 1)
     if monitor != null:
         monitor.end_section("structure_scan_standalone", standalone_start)
+    var citadels_start: int = monitor.begin_section("structure_scan_citadels") if monitor != null else Time.get_ticks_usec()
+    update_citadels(center_cell, true)
+    poll_citadel_recipe_jobs()
+    poll_citadel_registration_jobs()
+    if monitor != null:
+        monitor.end_section("structure_scan_citadels", citadels_start)
     if not allow_builds:
         if monitor != null:
             monitor.increment_counter("structure_op_queue_depth", pending_structure_op_count())
         return 0
     return process_pending_structure_ops()
+
+func update_citadels(center_cell: Vector2i, defer_builds := false) -> void:
+    if main == null or not main.has_method("landmark_sites_for_region"):
+        return
+    var center_region := Vector2i(floori(float(center_cell.x) / float(CITADEL_REGION_CELLS)), floori(float(center_cell.y) / float(CITADEL_REGION_CELLS)))
+    for region_z in range(center_region.y - 1, center_region.y + 2):
+        for region_x in range(center_region.x - 1, center_region.x + 2):
+            var region_key := Vector2i(region_x, region_z)
+            if generated_landmark_regions.has(region_key):
+                continue
+            var sites_value = main.call("landmark_sites_for_region", region_x, region_z, CITADEL_REGION_CELLS)
+            var sites: Array = sites_value if sites_value is Array else []
+            var citadel := {}
+            for site_value in sites:
+                if site_value is Dictionary and String((site_value as Dictionary).get("kind", "")) == "citadel":
+                    citadel = (site_value as Dictionary).duplicate(true)
+                    break
+            if citadel.is_empty():
+                generated_landmark_regions[region_key] = false
+                continue
+            var site_center := Vector2i(int(citadel.get("centerX", 0)), int(citadel.get("centerZ", 0)))
+            var distance := Vector2(float(center_cell.x - site_center.x), float(center_cell.y - site_center.y)).length()
+            var active_render_distance: int = int(main.get("render_distance"))
+            if active_render_distance <= 0:
+                active_render_distance = main.RENDER_DISTANCE
+            var chunk_size: int = main.CHUNK_SIZE
+            var activation_range := float(int(citadel.get("radius", 76)) + chunk_size * active_render_distance + 20)
+            if distance > activation_range:
+                continue
+            generated_landmark_regions[region_key] = true
+            enqueue_citadel_build(citadel, defer_builds)
+
+func enqueue_citadel_build(manifest: Dictionary, defer_builds := true) -> void:
+    var site_id := String(manifest.get("id", "")).strip_edges()
+    if site_id == "":
+        return
+    if citadel_recipe_jobs.has(site_id):
+        var active_job: Dictionary = citadel_recipe_jobs.get(site_id, {}) as Dictionary
+        active_job["restartManifest"] = manifest.duplicate(true)
+        active_job["restartGeneration"] = citadel_publication_generation
+        citadel_recipe_jobs[site_id] = active_job
+        citadel_publication_states[site_id] = {
+            "status": "waiting_for_retired_recipe",
+            "manifest": manifest.duplicate(true),
+            "publishedPartCount": 0,
+            "failureReason": ""
+        }
+        return
+    if citadel_publication_states.has(site_id):
+        return
+    citadel_publication_states[site_id] = {
+        "status": "queued",
+        "manifest": manifest.duplicate(true),
+        "publishedPartCount": 0,
+        "failureReason": ""
+    }
+    var op := {"type": "citadel_build_start", "siteId": site_id, "manifest": manifest.duplicate(true)}
+    if defer_builds:
+        enqueue_structure_op(op)
+    else:
+        execute_structure_op(op)
+
+func citadel_publication_snapshot() -> Array:
+    var records: Array = []
+    var site_ids := citadel_publication_states.keys()
+    site_ids.sort()
+    for site_id_value in site_ids:
+        var state: Dictionary = citadel_publication_states.get(site_id_value, {}) as Dictionary
+        var record := state.duplicate(true)
+        record.erase("blueprint")
+        record.erase("publisher")
+        record.erase("root")
+        records.append(record)
+    return records
+
+func citadel_residence_records_snapshot() -> Dictionary:
+    var result := {}
+    for site_id_value in citadel_residence_manifests.keys():
+        var site_id := String(site_id_value)
+        var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+        if String(state.get("status", "")) != "published":
+            continue
+        var manifest: Dictionary = citadel_residence_manifests.get(site_id, {}) as Dictionary
+        var site_manifest: Dictionary = state.get("manifest", {}) if state.get("manifest", {}) is Dictionary else {}
+        var citizens: Array = []
+        for citizen_value in manifest.get("citizens", []) as Array:
+            if not (citizen_value is Dictionary):
+                continue
+            var citizen: Dictionary = (citizen_value as Dictionary).duplicate(true)
+            citizen["siteId"] = site_id
+            citizen["blueprintId"] = String(manifest.get("blueprintId", ""))
+            citizen["townCenter"] = site_manifest.get("center", Vector2i.ZERO)
+            citizen["townRadius"] = int(site_manifest.get("radius", 76))
+            citizens.append(citizen)
+        result[site_id] = citizens
+    return result
+
+func citadel_runtime_record(site_id: String) -> Dictionary:
+    var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+    if String(state.get("status", "")) != "published":
+        return {}
+    return {
+        "siteId": site_id,
+        "state": state.duplicate(true),
+        "root": citadel_roots.get(site_id),
+        "blueprint": citadel_blueprints.get(site_id),
+        "furnishingPlan": citadel_furnishing_plans.get(site_id),
+        "buildingPublisher": citadel_publishers.get(site_id),
+        "furnishingPublisher": citadel_furnishing_publishers.get(site_id),
+        "residenceManifest": (citadel_residence_manifests.get(site_id, {}) as Dictionary).duplicate(true)
+    }
 
 func update_towns(center_cell: Vector2i, defer_builds := false) -> void:
     var center_region := Vector2i(floori(float(center_cell.x) / float(main.TOWN_REGION_CELLS)), floori(float(center_cell.y) / float(main.TOWN_REGION_CELLS)))
@@ -363,7 +522,7 @@ func performance_monitor():
     return main.get("runtime_perf_monitor")
 
 func pending_structure_op_count() -> int:
-    return max(0, pending_structure_ops.size() - pending_structure_op_index)
+    return max(0, pending_structure_ops.size() - pending_structure_op_index) + citadel_recipe_jobs.size() + citadel_registration_jobs.size()
 
 func enqueue_structure_op(op: Dictionary) -> void:
     if active_structure_town_key != "" and String(op.get("townKey", "")) == "":
@@ -425,7 +584,443 @@ func execute_structure_op(op: Dictionary) -> void:
         publish_deferred_town_home_records(String(op.get("townKey", "")))
     elif op_type == "town_build_phase":
         process_deferred_town_build_phase(op.get("state", {}))
+    elif op_type == "citadel_build_start":
+        process_citadel_build_start(op)
+    elif op_type == "citadel_publish_part":
+        process_citadel_publish_part(op)
+    elif op_type == "citadel_publish_furnishing":
+        process_citadel_publish_furnishing(op)
     defer_structure_ops = previous
+
+func process_citadel_build_start(op: Dictionary) -> void:
+    var site_id := String(op.get("siteId", ""))
+    var manifest: Dictionary = op.get("manifest", {}) if op.get("manifest", {}) is Dictionary else {}
+    if site_id == "" or manifest.is_empty() or main == null:
+        fail_citadel_publication(site_id, "invalid_manifest")
+        return
+    var context_result: Dictionary = CitadelRecipeContextScript.from_manifest(manifest, float(main.CELL))
+    if not bool(context_result.get("ok", false)):
+        fail_citadel_publication(site_id, String(context_result.get("reason", "invalid_recipe_context")))
+        return
+    var blueprint_seed := int(context_result.get("blueprintSeed", 0))
+    var recipe_context: Dictionary = context_result.get("context", {}) as Dictionary
+    recipe_context["recipeContextSignature"] = String(context_result.get("signature", ""))
+    var job = CitadelBlueprintBuildJobScript.new()
+    var task_id := WorkerThreadPool.add_task(Callable(job, "run").bind(blueprint_seed, recipe_context), true, "Citadel recipe %s" % site_id)
+    if task_id < 0:
+        fail_citadel_publication(site_id, "recipe_worker_submission_failed")
+        return
+    citadel_recipe_jobs[site_id] = {
+        "taskId": task_id,
+        "job": job,
+        "manifest": manifest.duplicate(true),
+        "recipeContextSignature": String(context_result.get("signature", "")),
+        "generation": citadel_publication_generation
+    }
+    var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+    state["status"] = "recipe_building"
+    state["recipeTaskId"] = task_id
+    state["recipeContextSignature"] = String(context_result.get("signature", ""))
+    citadel_publication_states[site_id] = state
+
+func poll_citadel_recipe_jobs() -> void:
+    var site_ids := citadel_recipe_jobs.keys()
+    site_ids.sort()
+    for site_id_value in site_ids:
+        var site_id := String(site_id_value)
+        var job_record: Dictionary = citadel_recipe_jobs.get(site_id, {}) as Dictionary
+        var task_id := int(job_record.get("taskId", -1))
+        if task_id < 0 or not WorkerThreadPool.is_task_completed(task_id):
+            continue
+        WorkerThreadPool.wait_for_task_completion(task_id)
+        citadel_recipe_jobs.erase(site_id)
+        if int(job_record.get("generation", -1)) != citadel_publication_generation:
+            var restart_manifest: Dictionary = job_record.get("restartManifest", {}) if job_record.get("restartManifest", {}) is Dictionary else {}
+            if not restart_manifest.is_empty() and int(job_record.get("restartGeneration", -1)) == citadel_publication_generation:
+                citadel_publication_states.erase(site_id)
+                enqueue_citadel_build(restart_manifest, true)
+            continue
+        var job = job_record.get("job")
+        var result: Dictionary = job.result_snapshot() if job != null and job.has_method("result_snapshot") else {}
+        var blueprint = result.get("blueprint")
+        var furnishing_plan = result.get("furnishingPlan")
+        var residence_manifest: Dictionary = result.get("residenceManifest", {}) if result.get("residenceManifest", {}) is Dictionary else {}
+        var residence_validation: Dictionary = result.get("residenceValidation", {}) if result.get("residenceValidation", {}) is Dictionary else {}
+        if not bool(result.get("finished", false)) or blueprint == null or furnishing_plan == null or not bool(residence_validation.get("passed", false)):
+            var failure_state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+            failure_state["recipeContextSignature"] = String(result.get("recipeContextSignature", ""))
+            failure_state["buildDiagnostics"] = (result.get("buildDiagnostics", {}) as Dictionary).duplicate(true)
+            citadel_publication_states[site_id] = failure_state
+            fail_citadel_publication(site_id, String(result.get("failureReason", "blueprint_build_failed")))
+            continue
+        citadel_residence_manifests[site_id] = residence_manifest.duplicate(true)
+        citadel_blueprints[site_id] = blueprint
+        citadel_furnishing_plans[site_id] = furnishing_plan
+        continue_citadel_after_recipe(site_id, job_record.get("manifest", {}) as Dictionary, blueprint, furnishing_plan)
+
+func continue_citadel_after_recipe(site_id: String, manifest: Dictionary, blueprint, furnishing_plan) -> void:
+    if blueprint == null:
+        fail_citadel_publication(site_id, "blueprint_build_failed")
+        return
+    var root := Node3D.new()
+    root.name = "ProceduralCitadel_%s" % site_id.replace(":", "_").replace(",", "_")
+    root.position = Vector3(
+        float(int(manifest.get("centerX", 0))) * float(main.CELL),
+        float(manifest.get("level", 0.0)),
+        float(int(manifest.get("centerZ", 0))) * float(main.CELL)
+    )
+    root.set_meta("landmark_site_manifest", manifest.duplicate(true))
+    main.add_child(root)
+    var publisher = BuildingPartPublisherScript.new()
+    if not publisher.begin_publication(blueprint, root, {"batchStaticParts": true}):
+        root.queue_free()
+        fail_citadel_publication(site_id, "publication_preflight_failed")
+        return
+    citadel_roots[site_id] = root
+    citadel_publishers[site_id] = publisher
+    citadel_publication_states[site_id] = {
+        "status": "publishing",
+        "manifest": manifest.duplicate(true),
+        "blueprintId": String(blueprint.id),
+        "partCount": blueprint.parts.size(),
+        "publishedPartCount": 0,
+        "failureReason": ""
+    }
+    enqueue_structure_op({
+        "type": "citadel_publish_part",
+        "siteId": site_id,
+        "manifest": manifest,
+        "blueprint": blueprint,
+        "furnishingPlan": furnishing_plan,
+        "publisher": publisher,
+        "root": root,
+        "partIndex": 0
+    })
+
+func process_citadel_publish_part(op: Dictionary) -> void:
+    var site_id := String(op.get("siteId", ""))
+    var blueprint = op.get("blueprint")
+    var publisher = op.get("publisher")
+    var root = op.get("root") as Node3D
+    if site_id == "" or blueprint == null or publisher == null or root == null or not is_instance_valid(root):
+        fail_citadel_publication(site_id, "publication_state_lost")
+        return
+    var next_index := int(publisher.publish_part_batch(blueprint, root, int(op.get("partIndex", 0)), 1))
+    var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+    state["publishedPartCount"] = next_index
+    citadel_publication_states[site_id] = state
+    if next_index < blueprint.parts.size():
+        op["partIndex"] = next_index
+        enqueue_structure_op(op)
+        return
+    var publication: Dictionary = publisher.finish_publication(blueprint, root)
+    state["status"] = "registering_navigation"
+    state["publishedPartCount"] = int(publication.get("publishedPartCount", 0))
+    state["publication"] = publication.duplicate(true)
+    citadel_publication_states[site_id] = state
+    citadel_registration_jobs[site_id] = {
+        "blueprint": blueprint,
+        "root": root,
+        "furnishingPlan": op.get("furnishingPlan"),
+        "publication": publication,
+        "generation": citadel_publication_generation,
+        "attempts": 0,
+        "phase": "shell"
+    }
+
+func fail_citadel_publication(site_id: String, reason: String) -> void:
+    if site_id == "":
+        push_error("Citadel publication failed without a site id: %s" % reason)
+        return
+    var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+    state["status"] = "failed"
+    state["failureReason"] = reason
+    citadel_publication_states[site_id] = state
+    retire_citadel_scene(site_id)
+    push_error("Citadel publication failed for %s: %s" % [site_id, reason])
+
+func retire_citadel_scene(site_id: String) -> void:
+    unregister_citadel_navigation(site_id)
+    citadel_registration_jobs.erase(site_id)
+    var root_value = citadel_roots.get(site_id)
+    if root_value != null and is_instance_valid(root_value):
+        root_value.queue_free()
+    citadel_roots.erase(site_id)
+    citadel_publishers.erase(site_id)
+    citadel_furnishing_publishers.erase(site_id)
+    citadel_residence_manifests.erase(site_id)
+    citadel_blueprints.erase(site_id)
+    citadel_furnishing_plans.erase(site_id)
+
+func retire_active_citadel_recipe_jobs() -> void:
+    for site_id_value in citadel_recipe_jobs.keys():
+        var site_id := String(site_id_value)
+        var job: Dictionary = citadel_recipe_jobs.get(site_id, {}) as Dictionary
+        job["generation"] = -1
+        job.erase("restartManifest")
+        job.erase("restartGeneration")
+        citadel_recipe_jobs[site_id] = job
+
+func poll_citadel_registration_jobs() -> void:
+    var site_ids := citadel_registration_jobs.keys()
+    site_ids.sort()
+    for site_id_value in site_ids:
+        var site_id := String(site_id_value)
+        var job: Dictionary = citadel_registration_jobs.get(site_id, {}) as Dictionary
+        if int(job.get("generation", -1)) != citadel_publication_generation:
+            citadel_registration_jobs.erase(site_id)
+            continue
+        var phase := String(job.get("phase", "shell"))
+        var result: Dictionary
+        if phase == "topology":
+            result = verify_citadel_topology_ready(job)
+        elif phase == "furnishing":
+            result = register_citadel_furnishing_navigation(site_id, job.get("publication", {}) as Dictionary)
+        else:
+            result = register_citadel_navigation(site_id, job.get("blueprint"), job.get("root") as Node3D, job.get("publication", {}) as Dictionary)
+        if bool(result.get("ok", false)):
+            citadel_registration_jobs.erase(site_id)
+            if phase == "shell":
+                begin_citadel_furnishing_publication(site_id, job.get("root") as Node3D, job.get("furnishingPlan"), result)
+            elif phase == "furnishing":
+                var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+                state["status"] = "prebaking_navigation_topology"
+                state["furnishingNavigationRegistration"] = result.duplicate(true)
+                citadel_publication_states[site_id] = state
+                var shell_publication: Dictionary = state.get("publication", {}) if state.get("publication", {}) is Dictionary else {}
+                citadel_registration_jobs[site_id] = {
+                    "phase": "topology",
+                    "tileKeys": citadel_navigation_tile_keys(state),
+                    "buildingNavigationManifest": (shell_publication.get("navigationManifest", {}) as Dictionary).duplicate(true),
+                    "residenceManifest": (citadel_residence_manifests.get(site_id, {}) as Dictionary).duplicate(true),
+                    "generation": citadel_publication_generation,
+                    "attempts": 0,
+                    "prebakeRequested": false
+                }
+            else:
+                var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+                state["status"] = "published"
+                state["topologyReadiness"] = result.duplicate(true)
+                var residence_manifest: Dictionary = citadel_residence_manifests.get(site_id, {}) as Dictionary
+                state["residentCount"] = (residence_manifest.get("citizens", []) as Array).size()
+                citadel_publication_states[site_id] = state
+            continue
+        if bool(result.get("pending", false)):
+            var pending_started_msec := int(job.get("pendingStartedMsec", Time.get_ticks_msec()))
+            job["pendingStartedMsec"] = pending_started_msec
+            job["pendingPolls"] = int(job.get("pendingPolls", 0)) + 1
+            job["lastFailure"] = result.duplicate(true)
+            citadel_registration_jobs[site_id] = job
+            var pending_state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+            pending_state["topologyPendingPolls"] = int(job.get("pendingPolls", 0))
+            pending_state["topologyPendingElapsedMsec"] = Time.get_ticks_msec() - pending_started_msec
+            pending_state["lastRegistrationFailure"] = result.duplicate(true)
+            citadel_publication_states[site_id] = pending_state
+            if Time.get_ticks_msec() - pending_started_msec >= CITADEL_TOPOLOGY_PENDING_TIMEOUT_MSEC:
+                citadel_registration_jobs.erase(site_id)
+                unregister_citadel_navigation(site_id)
+                fail_citadel_publication(site_id, "navigation_topology_readiness_timeout")
+            continue
+        job["attempts"] = int(job.get("attempts", 0)) + 1
+        job["lastFailure"] = result.duplicate(true)
+        citadel_registration_jobs[site_id] = job
+        var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+        state["registrationAttempts"] = int(job.get("attempts", 0))
+        state["lastRegistrationFailure"] = result.duplicate(true)
+        citadel_publication_states[site_id] = state
+        if int(job.get("attempts", 0)) >= CITADEL_REGISTRATION_MAX_ATTEMPTS:
+            citadel_registration_jobs.erase(site_id)
+            unregister_citadel_navigation(site_id)
+            fail_citadel_publication(site_id, "navigation_registration_retry_exhausted")
+
+func citadel_navigation_tile_keys(state: Dictionary) -> Array[String]:
+    var keys := {}
+    for publication_key in ["publication", "furnishingPublication"]:
+        var publication: Dictionary = state.get(publication_key, {}) if state.get(publication_key, {}) is Dictionary else {}
+        var manifest: Dictionary = publication.get("navigationManifest", {}) if publication.get("navigationManifest", {}) is Dictionary else {}
+        for collection_key in ["supports", "verticalLinks", "supportSeamLinks", "interiorPassageLinks", "doors", "staticCollision"]:
+            for fact_value in manifest.get(collection_key, []) as Array:
+                if fact_value is Dictionary:
+                    for tile_key_value in (fact_value as Dictionary).get("tileKeys", []) as Array:
+                        var tile_key := String(tile_key_value).strip_edges()
+                        if tile_key != "":
+                            keys[tile_key] = true
+    var result: Array[String] = []
+    for key_value in keys.keys():
+        result.append(String(key_value))
+    result.sort()
+    return result
+
+func verify_citadel_topology_ready(job: Dictionary) -> Dictionary:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null or not npc_system.has_method("request_navigation_snapshot_replacement_priority") or not npc_system.has_method("navigation_snapshot_replacements_ready") or not npc_system.has_method("prove_building_door_topology"):
+        return {"ok": false, "reason": "topology_readiness_authority_unavailable"}
+    var tile_keys: Array = job.get("tileKeys", []) if job.get("tileKeys", []) is Array else []
+    if tile_keys.is_empty():
+        return {"ok": false, "reason": "topology_tile_set_empty"}
+    if not bool(job.get("prebakeRequested", false)):
+        var publication_request: Dictionary = npc_system.call("request_navigation_snapshot_replacement_priority", tile_keys) as Dictionary
+        if not bool(publication_request.get("ok", false)):
+            return {"ok": false, "reason": "topology_publication_request_rejected", "details": publication_request}
+        job["prebakeRequested"] = true
+        job["prebake"] = publication_request.duplicate(true)
+    var priority_request: Dictionary = npc_system.call("request_navigation_snapshot_replacement_priority", tile_keys) as Dictionary
+    var readiness: Dictionary = npc_system.call("navigation_snapshot_replacements_ready", tile_keys)
+    if not bool(readiness.get("ready", false)):
+        return {"ok": false, "pending": true, "reason": "topology_snapshot_replacements_pending", "details": readiness, "priorityRequest": priority_request}
+    var door_topology: Dictionary = npc_system.call("prove_building_door_topology", job.get("buildingNavigationManifest", {}) as Dictionary, job.get("residenceManifest", {}) as Dictionary)
+    if not bool(door_topology.get("ready", false)):
+        return {"ok": false, "pending": bool(door_topology.get("retryable", false)), "reason": "door_topology_proof_pending" if bool(door_topology.get("retryable", false)) else "door_topology_proof_invalid", "details": door_topology}
+    return {"ok": true, "tileKeys": tile_keys.duplicate(), "publicationRequest": job.get("prebake", {}), "readiness": readiness, "doorTopology": door_topology}
+
+func begin_citadel_furnishing_publication(site_id: String, root: Node3D, furnishing_plan, shell_registration: Dictionary) -> void:
+    if root == null or not is_instance_valid(root) or furnishing_plan == null:
+        fail_citadel_publication(site_id, "furnishing_publication_state_lost")
+        return
+    var furnishing_root := Node3D.new()
+    furnishing_root.name = "CitadelFurnishings"
+    root.add_child(furnishing_root)
+    var publisher = FurnishingPublisherScript.new()
+    if not publisher.begin_publication(furnishing_plan, furnishing_root):
+        fail_citadel_publication(site_id, "furnishing_publication_preflight_failed")
+        return
+    citadel_furnishing_publishers[site_id] = publisher
+    var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+    state["status"] = "publishing_furnishings"
+    state["navigationRegistration"] = shell_registration.duplicate(true)
+    state["furnishingPartCount"] = furnishing_plan.parts.size()
+    state["publishedFurnishingPartCount"] = 0
+    citadel_publication_states[site_id] = state
+    enqueue_structure_op({"type": "citadel_publish_furnishing", "siteId": site_id, "plan": furnishing_plan, "publisher": publisher, "root": furnishing_root, "partIndex": 0})
+
+func process_citadel_publish_furnishing(op: Dictionary) -> void:
+    var site_id := String(op.get("siteId", ""))
+    var plan = op.get("plan")
+    var publisher = op.get("publisher")
+    var root = op.get("root") as Node3D
+    if site_id == "" or plan == null or publisher == null or root == null or not is_instance_valid(root):
+        fail_citadel_publication(site_id, "furnishing_publication_state_lost")
+        return
+    var next_index := int(publisher.publish_part_batch(plan, root, int(op.get("partIndex", 0)), 1))
+    var state: Dictionary = citadel_publication_states.get(site_id, {}) as Dictionary
+    state["publishedFurnishingPartCount"] = next_index
+    citadel_publication_states[site_id] = state
+    if next_index < plan.parts.size():
+        op["partIndex"] = next_index
+        enqueue_structure_op(op)
+        return
+    var publication: Dictionary = publisher.finish_publication(plan, root)
+    state["status"] = "registering_furnishing_navigation"
+    state["furnishingPublication"] = publication.duplicate(true)
+    citadel_publication_states[site_id] = state
+    citadel_registration_jobs[site_id] = {"phase": "furnishing", "publication": publication, "generation": citadel_publication_generation, "attempts": 0}
+
+func register_citadel_furnishing_navigation(site_id: String, publication: Dictionary) -> Dictionary:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null or not npc_system.has_method("register_navigation_collision_manifest"):
+        return {"ok": false, "reason": "furnishing_navigation_authority_unavailable"}
+    var manifest: Dictionary = publication.get("navigationManifest", {}) if publication.get("navigationManifest", {}) is Dictionary else {}
+    if manifest.is_empty():
+        return {"ok": false, "reason": "furnishing_navigation_manifest_missing"}
+    var result: Dictionary = npc_system.call("register_navigation_collision_manifest", manifest)
+    if not bool(result.get("ok", false)) or String(result.get("manifestId", "")) == "":
+        return {"ok": false, "reason": "furnishing_navigation_registration_rejected", "details": result}
+    registered_citadel_furnishing_navigation_ids[site_id] = String(result.get("manifestId", ""))
+    if npc_system.has_method("flush_navigation_change_bus"):
+        npc_system.call("flush_navigation_change_bus")
+    return result
+
+func register_citadel_navigation(site_id: String, blueprint, root: Node3D, publication: Dictionary) -> Dictionary:
+    if root == null or not is_instance_valid(root):
+        return {"ok": false, "reason": "citadel_root_unavailable"}
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return {"ok": false, "reason": "npc_system_unavailable"}
+    var navigation_manifest: Dictionary = publication.get("navigationManifest", {}) if publication.get("navigationManifest", {}) is Dictionary else {}
+    if navigation_manifest.is_empty() or not npc_system.has_method("register_building_navigation_manifest"):
+        return {"ok": false, "reason": "building_navigation_manifest_unavailable"}
+    var building_result: Dictionary = npc_system.call("register_building_navigation_manifest", navigation_manifest)
+    if not bool(building_result.get("ok", false)):
+        return {"ok": false, "reason": "building_navigation_registration_rejected", "details": building_result}
+    var building_id := String(building_result.get("buildingId", ""))
+    if building_id == "":
+        return {"ok": false, "reason": "building_navigation_id_missing"}
+    registered_citadel_navigation_ids[site_id] = building_id
+    var door_result := register_citadel_doors(root, npc_system)
+    if not bool(door_result.get("ok", false)):
+        return door_result
+    registered_citadel_door_portal_ids[site_id] = (door_result.get("portalIds", []) as Array).duplicate()
+    if npc_system.has_method("notify_navigation_structure_metadata_changed"):
+        var recipe: Dictionary = blueprint.recipe if blueprint != null and blueprint.recipe is Dictionary else {}
+        var width := float(recipe.get("width", 0.0))
+        var depth := float(recipe.get("depth", 0.0))
+        var height := float(recipe.get("wallHeight", 0.0)) + 8.0
+        npc_system.call("notify_navigation_structure_metadata_changed", String(blueprint.id), AABB(root.global_position + Vector3(-width * 0.5, 0.0, -depth * 0.5), Vector3(width, height, depth)), {
+            "source": "structure_system",
+            "siteId": site_id,
+            "family": "castle",
+            "published": true
+        })
+    if npc_system.has_method("flush_navigation_change_bus"):
+        npc_system.call("flush_navigation_change_bus")
+    return {"ok": true, "buildingId": building_id, "doorPortalIds": door_result.get("portalIds", [])}
+
+func register_citadel_doors(root: Node, npc_system) -> Dictionary:
+    var doors: Array[Node] = []
+    collect_citadel_doors_recursive(root, doors)
+    if doors.is_empty():
+        return {"ok": false, "reason": "citadel_doors_missing"}
+    var portal_ids: Array[String] = []
+    for door in doors:
+        var result: Dictionary = npc_system.call("notify_navigation_door_registered", door)
+        if not bool(result.get("ok", false)) or String(result.get("portalId", "")) == "":
+            if npc_system.has_method("unregister_navigation_door_portal"):
+                for portal_id in portal_ids:
+                    npc_system.call("unregister_navigation_door_portal", portal_id)
+            return {"ok": false, "reason": "door_registration_rejected", "door": String(door.name), "details": result}
+        portal_ids.append(String(result.get("portalId", "")))
+    portal_ids.sort()
+    return {"ok": true, "portalIds": portal_ids}
+
+func collect_citadel_doors_recursive(node: Node, doors: Array[Node]) -> void:
+    if node == null:
+        return
+    for child in node.get_children():
+        if child is StaticBody3D and String(child.get_meta("building_part_kind", "")) == "door":
+            doors.append(child)
+        collect_citadel_doors_recursive(child, doors)
+
+func unregister_all_citadel_navigation() -> void:
+    var site_ids := {}
+    for site_id_value in registered_citadel_navigation_ids.keys():
+        site_ids[String(site_id_value)] = true
+    for site_id_value in registered_citadel_door_portal_ids.keys():
+        site_ids[String(site_id_value)] = true
+    for site_id_value in registered_citadel_furnishing_navigation_ids.keys():
+        site_ids[String(site_id_value)] = true
+    for site_id_value in site_ids.keys():
+        unregister_citadel_navigation(String(site_id_value))
+
+func unregister_citadel_navigation(site_id: String) -> void:
+    var npc_system = main.get("npc_system") if main != null else null
+    if npc_system == null:
+        return
+    if npc_system.has_method("unregister_navigation_door_portal"):
+        var portal_ids_value = registered_citadel_door_portal_ids.get(site_id, [])
+        if portal_ids_value is Array:
+            for portal_id_value in portal_ids_value:
+                npc_system.call("unregister_navigation_door_portal", String(portal_id_value))
+    var building_id := String(registered_citadel_navigation_ids.get(site_id, ""))
+    if building_id != "" and npc_system.has_method("unregister_building_navigation_manifest"):
+        npc_system.call("unregister_building_navigation_manifest", building_id)
+    var furnishing_manifest_id := String(registered_citadel_furnishing_navigation_ids.get(site_id, ""))
+    if furnishing_manifest_id != "" and npc_system.has_method("unregister_navigation_collision_manifest"):
+        npc_system.call("unregister_navigation_collision_manifest", furnishing_manifest_id)
+    registered_citadel_door_portal_ids.erase(site_id)
+    registered_citadel_navigation_ids.erase(site_id)
+    registered_citadel_furnishing_navigation_ids.erase(site_id)
+    if npc_system.has_method("flush_navigation_change_bus"):
+        npc_system.call("flush_navigation_change_bus")
 
 func publish_deferred_town_home_records(town_key: String) -> void:
     if town_key == "":
@@ -1652,4 +2247,3 @@ func counts() -> Dictionary:
         "doors": generated_door_count,
         "utilities": generated_utility_count
     }
-

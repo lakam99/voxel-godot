@@ -50,6 +50,8 @@ var npcs: Array = []
 var npc_by_id := {}
 var pending_saved_npc_facts := {}
 var spawned_town_keys := {}
+var spawned_resident_site_ids := {}
+var generated_resident_spawn_diagnostics := {}
 var town_population_claims := {}
 var guard_shots := 0
 var guard_melee_strikes := 0
@@ -82,6 +84,7 @@ var components_initialized := false
 var component_init_attempted := false
 var component_init_in_progress := false
 var last_spawn_scan_frame := -1
+var navigation_publication_process_frame := -1
 var npc_update_cursor := 0
 var npc_motion_cursor := 0
 var npc_update_active := false
@@ -194,6 +197,8 @@ func clear() -> void:
     npcs.clear()
     npc_by_id.clear()
     spawned_town_keys.clear()
+    spawned_resident_site_ids.clear()
+    generated_resident_spawn_diagnostics.clear()
     town_population_claims.clear()
     published_navigation_semantics.clear()
     pending_saved_npc_facts.clear()
@@ -421,16 +426,19 @@ func apply_scripted_order(entry: Dictionary, kind: String, reason: String, targe
     elif body.has_meta("npc_scripted_target"):
         body.remove_meta("npc_scripted_target")
     entry["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME if kind == "go_home" else NpcEnumsScript.GOAL_KIND_SCRIPTED, "reason": reason }
+    if kind == "go_home" and autonomy_system != null and autonomy_system.has_method("prepare_scripted_route_order"):
+        var route_preparation: Dictionary = autonomy_system.prepare_scripted_route_order(entry, kind, "scripted_order_started:%s" % reason)
+        result["routePreparation"] = route_preparation
+        result["routeRequestId"] = String(route_preparation.get("requestId", ""))
+        entry["scriptedOrder"] = result
     return result
 
 func release_replaced_order_state(entry: Dictionary, reason: String) -> Dictionary:
     ensure_autonomy_system()
     var route_cancellation := {"ok": true, "cancelled": false, "reason": "missing_autonomy"}
     if autonomy_system != null:
-        if autonomy_system.has_method("cancel_active_route_request"):
-            route_cancellation = autonomy_system.cancel_active_route_request(entry, reason)
-        if autonomy_system.has_method("release_action_owned_state"):
-            autonomy_system.release_action_owned_state(entry, reason)
+        if autonomy_system.has_method("supersede_semantic_routes"):
+            route_cancellation = autonomy_system.supersede_semantic_routes(entry, reason)
     release_job_reservation(entry, reason)
     for key in [
         "pathWaypoints",
@@ -444,10 +452,17 @@ func release_replaced_order_state(entry: Dictionary, reason: String) -> Dictiona
         "routeFailureRetryFrame",
         "routeDynamicAvoidCells",
         "routeDynamicAvoidUntilFrame",
+        "activeMotionGoal",
+        "activeMotionPlan",
+        "activeMotionSchedule",
+        "activeMotionPerception",
         "homeRouteV2RequestId",
         "homeRouteV2Key",
+        "homeDepartureState",
+        "homeDepartureClearanceCommitted",
         "routineRouteV2RequestId",
         "routineRouteV2Key",
+        "_routineRouteV2Route",
         "_routineRouteV2Intent",
         "routineRouteV2IntentKind",
         "routineRouteV2SemanticKind",
@@ -613,6 +628,8 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "porchCell": porch_cell,
         "doorCell": door_cell,
         "doorPortalId": String(profile.get("doorPortalId", "")),
+        "doorInteriorPosition": profile.get("doorInteriorPosition", Vector3.INF),
+        "doorExteriorPosition": profile.get("doorExteriorPosition", Vector3.INF),
         "interiorLandingCell": interior_landing_cell,
         "guardCell": guard_cell,
         "homePosition": home_position,
@@ -703,6 +720,9 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         body.call("configure_agent", entry.get("motorProfile"))
     set_npc_speed_mode(entry, NPC_SPEED_MODE_WALKING, "spawn")
     publish_navigation_profile_semantics(entry)
+    var world_seed := String(main.get("seed_text")) if main != null else ""
+    var visual: Dictionary = visual_factory.ensure_biped_visual(body, world_seed, String(entry.get("id", body.name)), String(entry.get("name", body.name)), String(entry.get("displayRole", role)))
+    entry["locomotionPresenter"] = visual.get("locomotion")
     ensure_npc_held_item(entry)
     npcs.append(entry)
     npc_by_id[body.get_instance_id()] = entry
@@ -917,6 +937,24 @@ func safe_place_npc(body: Node3D, position: Vector3, profile = null, reason := "
     if character_body == null or safe_placement_service == null:
         return { "ok": false, "position": position, "reason": "missing_character_body" }
     var result: Dictionary = safe_placement_service.place_spawn(character_body, position, profile, reason)
+    if bool(result.get("ok", false)):
+        var entry := npc_entry_for_actor(character_body)
+        if not entry.is_empty():
+            settle_home_if_reached(entry)
+            if autonomy_system != null and autonomy_system.has_method("home_interior_status"):
+                var home_status: Dictionary = autonomy_system.home_interior_status(entry, character_body.global_position) as Dictionary
+                if not bool(home_status.get("strictInside", false)) and bool(home_status.get("clearOfDoor", false)):
+                    var previous_departure_state := String(entry.get("homeDepartureState", ""))
+                    entry.erase("homeDepartureClearanceCommitted")
+                    entry["insideHome"] = false
+                    character_body.set_meta("npc_inside_home", false)
+                    entry["homeDepartureState"] = "outside"
+                    entry["homeDepartureLastTransition"] = {
+                        "from": previous_departure_state,
+                        "to": "outside",
+                        "reason": "safe_placement_clear_outside",
+                        "frame": Engine.get_physics_frames()
+                    }
     if autonomy_system != null:
         var telemetry = autonomy_system.get("telemetry")
         if telemetry != null:
@@ -959,34 +997,89 @@ func spawn_generic_town_npcs() -> void:
             continue
         for i in range(records.size()):
             spawn_town_npc(records[i], i)
-        prebake_town_navmesh(records)
         spawned_town_keys[town_key] = true
+    spawn_generated_resident_populations()
 
-func prebake_town_navmesh(records: Array) -> void:
-    # Bake the static town (footprint + forager roam envelope) before the NPCs
-    # start scheduling so route planning finds ready nav data instead of
-    # spending the day window queued behind the per-frame tile publish budget.
-    if pathing == null or not pathing.has_method("prebake_town") or records.is_empty():
+func spawn_generated_resident_populations() -> void:
+    if main == null or main.structure_system == null or not main.structure_system.has_method("citadel_residence_records_snapshot"):
         return
-    var first: Dictionary = records[0] if records[0] is Dictionary else {}
-    var center: Vector2i = first.get("townCenter", Vector2i.ZERO)
-    var town_radius := int(first.get("townRadius", 18))
-    # Forager roam envelope extends ~24 cells past the town; add margin so
-    # perimeter routes and departures are pre-baked too.
-    var prebake_radius := town_radius + 30
-    var summary: Dictionary = pathing.prebake_town(center, prebake_radius)
-    var building_topology: Dictionary = prebake_building_navigation_topology()
-    var monitor = main.get("runtime_perf_monitor") if main != null else null
-    if monitor != null and monitor.has_method("increment_counter"):
-        monitor.increment_counter("navmesh_town_prebake_published", int(summary.get("published", 0)))
-        monitor.increment_counter("navmesh_town_prebake_tiles", int(summary.get("tiles", 0)))
-        monitor.increment_counter("navmesh_building_topology_prebake_published", int(building_topology.get("published", 0)))
-        monitor.increment_counter("navmesh_building_topology_prebake_tiles", int(building_topology.get("tiles", 0)))
+    var records_by_site: Dictionary = main.structure_system.citadel_residence_records_snapshot()
+    var site_ids := records_by_site.keys()
+    site_ids.sort()
+    for site_id_value in site_ids:
+        var site_id := String(site_id_value)
+        if site_id == "" or spawned_resident_site_ids.has(site_id):
+            continue
+        var records: Array = records_by_site.get(site_id, []) if records_by_site.get(site_id, []) is Array else []
+        if records.is_empty():
+            continue
+        var all_spawned := true
+        for index in range(records.size()):
+            if spawn_generated_resident(records[index] as Dictionary, index) == null:
+                all_spawned = false
+                continue
+        if all_spawned:
+            spawned_resident_site_ids[site_id] = true
 
-func prebake_building_navigation_topology() -> Dictionary:
-    if pathing == null or not pathing.has_method("prebake_building_navigation_topology"):
-        return { "ok": false, "reason": "missing_pathing" }
-    return pathing.prebake_building_navigation_topology()
+func spawn_generated_resident(record: Dictionary, index: int) -> CharacterBody3D:
+    ensure_components()
+    var citizen_id := String(record.get("id", "")).strip_edges()
+    if citizen_id == "":
+        return null
+    var existing: Dictionary = npc_entry_for_actor(citizen_id)
+    if not existing.is_empty():
+        var existing_body = existing.get("body") as CharacterBody3D
+        if existing_body != null and is_instance_valid(existing_body):
+            return existing_body
+    var home_position: Vector3 = record.get("homePosition", Vector3.INF) as Vector3
+    if not home_position.is_finite():
+        generated_resident_spawn_diagnostics[citizen_id] = {"citizenId": citizen_id, "homePosition": home_position, "reason": "missing_exact_home_position", "attemptFrame": Engine.get_physics_frames()}
+        return null
+    var role := String(record.get("role", "Citizen"))
+    var can_fight := bool(record.get("canFight", false))
+    var body := create_npc_body("GeneratedResident_%s" % citizen_id.replace(":", "_"), "npc")
+    body.set_meta("npc_name", "Citizen %02d" % (index + 1))
+    body.set_meta("npc_role", role)
+    add_npc_collider(body)
+    npc_root.add_child(body)
+    var level := float(record.get("level", 16.0))
+    var home_cell: Vector2i = record.get("homeCell", Vector2i.ZERO) as Vector2i
+    var requested_position := home_position
+    var placement: Dictionary = safe_place_npc(body, requested_position, CharacterMotorProfileScript.npc_default(), "generated_resident_spawn")
+    if not bool(placement.get("ok", false)):
+        generated_resident_spawn_diagnostics[citizen_id] = {"citizenId": citizen_id, "homeCell": home_cell, "homePosition": home_position, "requestedPosition": requested_position, "resultingPosition": placement.get("position", Vector3.INF), "level": level, "placement": placement.duplicate(true), "attemptFrame": Engine.get_physics_frames()}
+        body.collision_layer = 0
+        body.collision_mask = 0
+        body.queue_free()
+        return null
+    generated_resident_spawn_diagnostics.erase(citizen_id)
+    var profile := record.duplicate(true)
+    profile["id"] = citizen_id
+    profile["name"] = String(body.get_meta("npc_name"))
+    profile["role"] = role
+    profile["townKey"] = String(record.get("blueprintId", record.get("homeStableId", "citadel")))
+    profile["townCenter"] = record.get("townCenter", home_cell)
+    profile["townRadius"] = int(record.get("townRadius", 76))
+    profile["homeStableId"] = String(record.get("homeStableId", ""))
+    profile["startInsideHome"] = true
+    register_npc(body, profile)
+    return body
+
+func generated_resident_spawn_diagnostics_snapshot() -> Dictionary:
+    return generated_resident_spawn_diagnostics.duplicate(true)
+
+func navigation_snapshot_replacements_ready(tile_keys: Array) -> Dictionary:
+    if pathing == null or not pathing.has_method("navmesh_snapshot_replacements_ready"):
+        return {"ready": false, "reason": "missing_navigation_authority", "pendingTiles": tile_keys.duplicate()}
+    return pathing.navmesh_snapshot_replacements_ready(tile_keys)
+
+func request_navigation_snapshot_replacement_priority(tile_keys: Array, reason := "structure_topology_readiness") -> Dictionary:
+    if pathing == null or not pathing.has_method("request_navmesh_snapshot_replacements"):
+        return {"ok": false, "reason": "missing_navigation_priority_authority"}
+    return pathing.request_navmesh_snapshot_replacements(tile_keys, true, String(reason))
+
+func navigation_snapshot_replacement_pending_count() -> int:
+    return int(pathing.pending_navmesh_snapshot_replacement_count()) if pathing != null and pathing.has_method("pending_navmesh_snapshot_replacement_count") else 0
 
 func claim_town_population(town_key: String, owner_id: String) -> Dictionary:
     var normalized_town_key := town_key.strip_edges()
@@ -1023,7 +1116,6 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
     if can_fight:
         var guard_slot := int(floori(float(index) / float(maxi(1, roles.size()))))
         guard_cell = generated_town_guard_cell(record, guard_slot, guard_cell)
-    add_npc_visual(body, visual_factory.body_material(index), visual_factory.accent_material(index), name, role, can_fight)
     add_npc_collider(body)
     npc_root.add_child(body)
     safe_place_npc(body, cell_to_position(porch_cell, level), CharacterMotorProfileScript.npc_default(), "spawn")
@@ -1041,6 +1133,8 @@ func spawn_town_npc(record: Dictionary, index: int) -> CharacterBody3D:
         "porchCell": porch_cell,
         "doorCell": record.get("doorCell", porch_cell),
         "doorPortalId": String(record.get("doorPortalId", "")),
+        "doorInteriorPosition": record.get("doorInteriorPosition", Vector3.INF),
+        "doorExteriorPosition": record.get("doorExteriorPosition", Vector3.INF),
         "interiorLandingCell": record.get("interiorLandingCell", record.get("homeCell", Vector2i.ZERO)),
         "homeRouteCells": record.get("homeRouteCells", []),
         "interiorMinCell": record.get("interiorMinCell", record.get("homeCell", Vector2i.ZERO)),
@@ -1091,6 +1185,10 @@ func update_npc_home_record(actor_id, record: Dictionary) -> bool:
     entry["homeCell"] = home_cell
     entry["porchCell"] = porch_cell
     entry["doorCell"] = door_cell
+    if record.get("doorInteriorPosition") is Vector3:
+        entry["doorInteriorPosition"] = record.get("doorInteriorPosition") as Vector3
+    if record.get("doorExteriorPosition") is Vector3:
+        entry["doorExteriorPosition"] = record.get("doorExteriorPosition") as Vector3
     entry["interiorLandingCell"] = interior_landing_cell
     entry["homePosition"] = home_position
     entry["porchPosition"] = porch_position
@@ -1150,6 +1248,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
     update_door_policies(delta)
     if monitor != null:
         monitor.end_section("door_policy_update", door_start)
+    advance_navigation_publication_frame()
     if pathing != null and pathing.has_method("begin_frame"):
         pathing.begin_frame()
     if autonomy_system != null and autonomy_system.has_method("begin_update_frame"):
@@ -1450,8 +1549,10 @@ func npc_guard_motion_required(entry: Dictionary) -> bool:
 
 func update_npc(entry: Dictionary, delta: float, night_factor: float) -> void:
     var standalone_update := not npc_update_active
-    if standalone_update and pathing != null and pathing.has_method("begin_frame"):
-        pathing.begin_frame()
+    if standalone_update:
+        advance_navigation_publication_frame()
+        if pathing != null and pathing.has_method("begin_frame"):
+            pathing.begin_frame()
     if not npc_update_active and autonomy_system != null and autonomy_system.has_method("begin_update_frame"):
         autonomy_system.begin_update_frame()
     if standalone_update:
@@ -1568,6 +1669,13 @@ func update_npc_visual_state(entry: Dictionary, delta: float) -> void:
         body.set_meta("npc_jump_intent", false)
     update_name_label_visibility(entry)
     visual_factory.update_held_animation(entry, delta)
+    if body is CharacterBody3D:
+        var locomotion = entry.get("locomotionPresenter")
+        if locomotion == null or not is_instance_valid(locomotion):
+            locomotion = body.get_node_or_null("NpcBipedVisual/NpcBipedLocomotionPresenter")
+            entry["locomotionPresenter"] = locomotion
+        if locomotion != null and locomotion.has_method("apply_body_motion"):
+            locomotion.call("apply_body_motion", body as CharacterBody3D, delta)
 
 func update_npc_needs(entry: Dictionary, delta: float, night_factor: float) -> void:
     var max_hunger := float(entry.get("maxHunger", 100.0))
@@ -2830,10 +2938,10 @@ func release_npc_traffic_reservations(entry_or_id, reason := "released") -> int:
         return 0
     return autonomy_system.release_npc_traffic_reservations(entry_or_id, reason)
 
-func release_npc_door_hold(actor_or_id, schedule_close := true) -> void:
+func release_npc_door_hold(actor_or_id, schedule_close := true, release_evidence: Dictionary = {}) -> void:
     ensure_autonomy_system()
     if autonomy_system != null and autonomy_system.has_method("release_npc_door_hold"):
-        autonomy_system.release_npc_door_hold(actor_or_id, schedule_close)
+        autonomy_system.release_npc_door_hold(actor_or_id, schedule_close, release_evidence)
 
 func release_npc_traffic_generation(entry: Dictionary, reason := "generation_replaced") -> int:
     ensure_autonomy_system()
@@ -2975,7 +3083,8 @@ func release_completed_door_holds() -> void:
         if route_still_needs_active_door(entry, portal_id):
             continue
         var actor_id := String(entry.get("activeDoorActorId", entry.get("id", "")))
-        autonomy_system.release_npc_door_hold(actor_id, true)
+        var release_evidence := active_private_home_departure_clearance_evidence(entry, portal_id)
+        autonomy_system.release_npc_door_hold(actor_id, true, release_evidence)
         clear_completed_door_action(entry, portal_id)
         entry.erase("activeDoorPortalId")
         entry.erase("activeDoorActorId")
@@ -3056,6 +3165,8 @@ func active_door_crossing_still_needs_hold(entry: Dictionary, portal_id: String)
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         return false
+    if private_home_departure_requires_exterior_clearance(entry, portal):
+        return not HomeInteriorServiceScript.has_exterior_clearance(entry, portal, body.global_position)
     if not portal.occupied_actors([body], "threshold").is_empty() \
             or not portal.occupied_actors([body], "sweep").is_empty():
         return true
@@ -3082,6 +3193,8 @@ func active_door_crossing_has_cleared(entry: Dictionary, portal_id: String) -> b
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
         return false
+    if private_home_departure_requires_exterior_clearance(entry, portal):
+        return HomeInteriorServiceScript.has_exterior_clearance(entry, portal, body.global_position)
     var direction := String(entry.get("activeDoorDirection", ""))
     if direction == "":
         return false
@@ -3095,6 +3208,31 @@ func active_door_crossing_has_cleared(entry: Dictionary, portal_id: String) -> b
     if direction == "z-":
         return body.global_position.z < center.z - DOOR_TRAFFIC_RELEASE_RADIUS
     return false
+
+func private_home_departure_requires_exterior_clearance(entry: Dictionary, portal) -> bool:
+    if portal == null or String(portal.get("policy_id")) != "private_home":
+        return false
+    if String(entry.get("homeDepartureState", "")) not in ["departing", "clearing"] \
+            and not bool(entry.get("homeDepartureClearanceCommitted", false)):
+        return false
+    var interior = entry.get("doorInteriorPosition", Vector3.INF)
+    var exterior = entry.get("doorExteriorPosition", Vector3.INF)
+    return interior is Vector3 and exterior is Vector3 \
+        and (interior as Vector3).is_finite() and (exterior as Vector3).is_finite()
+
+func active_private_home_departure_clearance_evidence(entry: Dictionary, portal_id: String) -> Dictionary:
+    if autonomy_system == null or autonomy_system.door_portals == null:
+        return {}
+    var portal = autonomy_system.door_portals.portals.get(portal_id)
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body) or not private_home_departure_requires_exterior_clearance(entry, portal):
+        return {}
+    var certified := HomeInteriorServiceScript.has_exterior_clearance(entry, portal, body.global_position)
+    return {
+        "reason": "active_door_route_replan",
+        "position": body.global_position,
+        "exteriorClearanceCertified": certified
+    } if certified else {}
 
 func clear_completed_door_action(entry: Dictionary, portal_id: String) -> void:
     if portal_id == "":
@@ -3213,6 +3351,7 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
     if not npc_update_active and pathing.has_method("begin_frame"):
         var physics_frame := Engine.get_physics_frames()
         if external_move_budget_physics_frame != physics_frame:
+            advance_navigation_publication_frame()
             pathing.begin_frame()
             external_move_budget_physics_frame = physics_frame
         entry["_externalDirectMoveFrame"] = physics_frame
@@ -3221,6 +3360,15 @@ func move_npc(entry: Dictionary, target: Vector3, max_distance: float, moving_ho
     if external_direct_move:
         entry.erase("_externalDirectMoveFrame")
     return moved
+
+func advance_navigation_publication_frame() -> void:
+    ensure_components()
+    var process_frame := Engine.get_process_frames()
+    if navigation_publication_process_frame == process_frame:
+        return
+    navigation_publication_process_frame = process_frame
+    if pathing != null and pathing.has_method("advance_navmesh_publication_frame"):
+        pathing.advance_navmesh_publication_frame()
 
 func apply_npc_route_motion(entry: Dictionary, previous: Vector3, candidate: Vector3, physics_delta: float) -> Dictionary:
     if motion_controller == null:
@@ -3300,8 +3448,8 @@ func ensure_npc_held_item(entry: Dictionary) -> void:
 func add_npc_collider(parent: Node3D) -> void:
     visual_factory.add_collider(parent)
 
-func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_material: StandardMaterial3D, npc_name: String, role: String, can_fight := false) -> void:
-    visual_factory.add_visual(parent, body_material, accent_material, npc_name, role)
+func add_npc_visual(parent: Node3D, body_material: StandardMaterial3D, accent_material: StandardMaterial3D, npc_name: String, role: String, can_fight := false, actor_id := "") -> void:
+    visual_factory.add_visual(parent, body_material, accent_material, npc_name, role, actor_id)
 
 func notify_navigation_block_created(cell: Vector3i, block_type: String, block: Node = null) -> void:
     if autonomy_system:
@@ -3382,10 +3530,19 @@ func process_navigation_route_changes(events: Array) -> Array[Dictionary]:
         return []
     return pathing.process_navigation_events(events)
 
-func notify_navigation_door_registered(door: Node) -> void:
+func notify_navigation_door_registered(door: Node) -> Dictionary:
     if autonomy_system:
-        autonomy_system.notify_door_registered(door)
+        var result: Dictionary = autonomy_system.notify_door_registered(door)
         navigation_change_flush_pending = true
+        return result
+    return {"ok": false, "reason": "missing_navigation_authority"}
+
+func unregister_navigation_door_portal(portal_id: String) -> Dictionary:
+    if autonomy_system == null or not autonomy_system.has_method("unregister_door_portal"):
+        return {"ok": false, "reason": "missing_navigation_authority"}
+    var result: Dictionary = autonomy_system.unregister_door_portal(portal_id)
+    navigation_change_flush_pending = true
+    return result
 
 func notify_navigation_structure_metadata_changed(structure_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:
@@ -3410,6 +3567,12 @@ func building_navigation_manifest_snapshot() -> Array:
     if autonomy_system == null or not autonomy_system.has_method("building_navigation_manifest_snapshot"):
         return []
     return autonomy_system.building_navigation_manifest_snapshot()
+
+
+func prove_building_door_topology(building_manifest: Dictionary, residence_manifest: Dictionary) -> Dictionary:
+    if autonomy_system == null or not autonomy_system.has_method("prove_building_door_topology"):
+        return {"ready": false, "reason": "navigation_topology_authority_unavailable"}
+    return autonomy_system.prove_building_door_topology(building_manifest, residence_manifest)
 
 func register_navigation_collision_manifest(manifest: Dictionary) -> Dictionary:
     if autonomy_system == null or not autonomy_system.has_method("register_navigation_collision_manifest"):

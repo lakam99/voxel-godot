@@ -10,6 +10,8 @@ const DEFAULT_WAYPOINT_RADIUS := 0.18
 const STUCK_TIME_SECONDS := 0.75
 const MIN_PROGRESS_DISTANCE := 0.002
 const MIN_TARGET_PROGRESS_DISTANCE := 0.01
+const TRANSITION_STAGE_RADIUS := NpcConstantsScript.NAVIGATION_TRANSITION_PHASE_RADIUS
+const TRANSITION_ACTIVATION_DISTANCE := NpcConstantsScript.CELL_SIZE * 1.25
 
 var route_authority = null
 var terrain_provider = null
@@ -29,6 +31,7 @@ func setup(authority, terrain_node = null, system_node = null, crowd_service = n
 func cancel_entry(entry: Dictionary) -> void:
 	entry["_v2LeaseExecutorGeneration"] = int(entry.get("_v2LeaseExecutorGeneration", 0)) + 1
 	entry.erase("_v2LeaseExecutorPendingAvoidance")
+	_release_surface_transition(entry, "route_cancelled")
 	_clear_request(entry)
 	var body := entry.get("body") as CharacterBody3D
 	if body != null and is_instance_valid(body):
@@ -47,9 +50,20 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 	var waypoints: Array = lease.get("waypoints", [])
 	var waypoint_radius := float(options.get("waypointRadius", DEFAULT_WAYPOINT_RADIUS))
 	var final_waypoint_radius := float(options.get("finalWaypointRadius", waypoint_radius))
+	var deferred_execution := _take_deferred_execution_result(entry, request_id)
+	if not deferred_execution.is_empty():
+		return deferred_execution
 	var new_request := _reset_if_new_request(entry, request_id)
 	if new_request:
 		_mirror_lease_for_runtime_services(entry, lease, options)
+		if String(entry.get("activeDoorPortalId", "")) != "" and system != null and system.has_method("bind_npc_door_crossing_successor"):
+			entry["activeDoorSuccessorBinding"] = system.call(
+				"bind_npc_door_crossing_successor",
+				entry,
+				request_id,
+				int(lease.get("generation", -1)),
+				String(lease.get("leaseId", ""))
+			)
 	if not bool(entry.get("_v2LeaseExecutorMoving", false)):
 		var moving: Dictionary = route_authority.begin_moving(request_id, "lease_executor_started") if route_authority != null else { "ok": true }
 		if not bool(moving.get("ok", false)):
@@ -64,6 +78,10 @@ func execute(entry: Dictionary, request_id: String, lease: Dictionary, delta: fl
 		var arrived: Dictionary = route_authority.report_arrived(request_id, "lease_executor_arrived") if route_authority != null else { "ok": true }
 		_clear_request(entry)
 		return { "ok": true, "status": "arrived", "reason": "", "authority": arrived }
+	var transition_result := _handle_surface_transition(entry, request_id, lease, index, body, delta, options)
+	if bool(transition_result.get("handled", false)):
+		transition_result.erase("handled")
+		return transition_result
 	if int(entry.get("_v2LeaseExecutorActiveSegment", -1)) != index:
 		entry["_v2LeaseExecutorActiveSegment"] = index
 		entry["_v2LeaseExecutorSegmentStart"] = body.global_position
@@ -157,7 +175,21 @@ func _commit_deferred_safe_velocity(safe_velocity: Vector3, callback_request_key
 		pending.get("avoidance", {}),
 		safe_velocity
 	)
+	result["requestId"] = String(pending.get("requestId", ""))
+	result["executionGeneration"] = int(pending.get("generation", -1))
 	entry["routeLeaseDeferredExecution"] = result
+
+
+func _take_deferred_execution_result(entry: Dictionary, request_id: String) -> Dictionary:
+	var deferred: Dictionary = entry.get("routeLeaseDeferredExecution", {}) if entry.get("routeLeaseDeferredExecution", {}) is Dictionary else {}
+	entry.erase("routeLeaseDeferredExecution")
+	if deferred.is_empty():
+		return {}
+	if String(deferred.get("requestId", request_id)) != request_id:
+		return {}
+	if int(deferred.get("executionGeneration", int(entry.get("_v2LeaseExecutorGeneration", -1)))) != int(entry.get("_v2LeaseExecutorGeneration", -1)):
+		return {}
+	return deferred
 
 
 func _apply_velocity_and_advance(entry: Dictionary, request_id: String, lease: Dictionary, index: int, body: CharacterBody3D, target: Vector3, active_waypoint_radius: float, profile, speed: float, desired_velocity: Vector3, flat_distance: float, delta: float, options: Dictionary, avoidance: Dictionary, raw_safe_velocity: Vector3) -> Dictionary:
@@ -339,7 +371,10 @@ func _mirror_lease_for_runtime_services(entry: Dictionary, lease: Dictionary, op
 
 
 func _clear_request(entry: Dictionary) -> void:
+	_release_surface_transition(entry, "route_request_cleared")
+	entry.erase("pendingNavigationTransition")
 	entry.erase("_v2LeaseExecutorPendingAvoidance")
+	entry.erase("routeLeaseDeferredExecution")
 	entry.erase("_v2LeaseExecutorRequestId")
 	entry.erase("_v2LeaseExecutorWaypointIndex")
 	entry.erase("_v2LeaseExecutorActiveSegment")
@@ -376,7 +411,9 @@ func _skip_reached_waypoints(entry: Dictionary, request_id: String, body: Charac
 		var waypoint: Vector3 = waypoints[cursor]
 		var active_radius := final_waypoint_radius if cursor + 1 >= waypoints.size() else waypoint_radius
 		var reached := Vector2(body.global_position.x - waypoint.x, body.global_position.z - waypoint.z).length() <= active_radius
-		if not reached and cursor + 1 < waypoints.size() and _door_action_for_waypoint(lease, cursor).is_empty():
+		if not reached and cursor + 1 < waypoints.size() \
+			and _door_action_for_waypoint(lease, cursor).is_empty() \
+			and _surface_transition_action_for_waypoint(lease, cursor).is_empty():
 			reached = _actor_has_passed_waypoint(body.global_position, waypoint, waypoints[cursor + 1], waypoint_radius)
 		if not reached:
 			break
@@ -590,6 +627,191 @@ func _door_action_is_local(action: Dictionary, body: CharacterBody3D) -> bool:
 	return false
 
 
+func _handle_surface_transition(entry: Dictionary, request_id: String, lease: Dictionary, waypoint_index: int, body: CharacterBody3D, delta: float, options: Dictionary) -> Dictionary:
+	var active: Dictionary = entry.get("activeNavigationTransition", {}) if entry.get("activeNavigationTransition", {}) is Dictionary else {}
+	var pending: Dictionary = entry.get("pendingNavigationTransition", {}) if entry.get("pendingNavigationTransition", {}) is Dictionary else {}
+	var action: Dictionary = {}
+	if not active.is_empty() and active.get("action", {}) is Dictionary:
+		action = active.get("action", {}) as Dictionary
+	elif not pending.is_empty() and pending.get("action", {}) is Dictionary:
+		action = pending.get("action", {}) as Dictionary
+	else:
+		action = _surface_transition_action_for_waypoint(lease, waypoint_index)
+	if action.is_empty():
+		return {"handled": false}
+	var corridor_certificate: Dictionary = action.get("corridorCertificate", {}) if action.get("corridorCertificate", {}) is Dictionary else {}
+	if not bool(corridor_certificate.get("collisionBacked", false)) or not bool(corridor_certificate.get("standable", false)):
+		return {"handled": true, "ok": false, "status": "rejected", "reason": "surface_transition_missing_corridor_certificate", "moved": 0.0}
+	if system == null or not system.has_method("revalidate_navigation_transition_action"):
+		return {"handled": true, "ok": false, "status": "rejected", "reason": "navigation_transition_validation_authority_unavailable", "moved": 0.0}
+	var revalidation: Dictionary = system.call("revalidate_navigation_transition_action", action, corridor_certificate)
+	if not bool(revalidation.get("ok", false)):
+		_release_surface_transition(entry, "corridor_revalidation_failed")
+		return {"handled": true, "ok": false, "status": "rejected", "reason": "navigation_transition_corridor_changed", "classification": String(revalidation.get("reason", "uncertified")), "moved": 0.0, "revalidation": revalidation, "action": action.duplicate(true)}
+	if bool(revalidation.get("revalidated", false)) and revalidation.get("certificate", {}) is Dictionary:
+		corridor_certificate = revalidation.get("certificate", {}) as Dictionary
+		action["corridorCertificate"] = corridor_certificate
+		if not active.is_empty():
+			active["action"] = action.duplicate(true)
+			entry["activeNavigationTransition"] = active
+		elif not pending.is_empty():
+			pending["action"] = action.duplicate(true)
+			entry["pendingNavigationTransition"] = pending
+	if system == null or not system.has_method("navigation_transition_action_is_current") or not bool(system.call("navigation_transition_action_is_current", action)):
+		_release_surface_transition(entry, "topology_revision_changed")
+		return {"handled": true, "ok": false, "status": "rejected", "reason": "navigation_transition_topology_changed", "moved": 0.0, "action": action.duplicate(true)}
+	var lease_revision := String(lease.get("snapshotRevision", ""))
+	if not lease_revision.is_empty() and String(action.get("snapshotRevision", lease_revision)) != lease_revision:
+		_release_surface_transition(entry, "topology_revision_changed")
+		return {"handled": true, "ok": false, "status": "rejected", "reason": "surface_transition_revision_mismatch", "moved": 0.0, "action": action.duplicate(true)}
+	var staging_position: Vector3 = action.get("stagingPosition", action.get("entryPosition", Vector3.INF)) as Vector3
+	var clearance_position: Vector3 = action.get("clearancePosition", action.get("exitPosition", Vector3.INF)) as Vector3
+	if not staging_position.is_finite() or not clearance_position.is_finite():
+		return {"handled": true, "ok": false, "status": "rejected", "reason": "surface_transition_missing_corridor", "moved": 0.0}
+	if active.is_empty():
+		if pending.is_empty() and _flat_position_distance(body.global_position, staging_position) > TRANSITION_ACTIVATION_DISTANCE:
+			return {"handled": false}
+		if system == null or not system.has_method("request_npc_navigation_transition"):
+			return {"handled": true, "ok": false, "status": "rejected", "reason": "missing_navigation_transition_traffic", "moved": 0.0}
+		var reservation: Dictionary = system.call("request_npc_navigation_transition", entry, action, {
+			"priority": int(options.get("priority", entry.get("routePriority", 0))),
+			"kind": String(options.get("intentKind", "move"))
+		})
+		if not bool(reservation.get("ok", false)):
+			var queue_position: Vector3 = action.get("queuePosition", Vector3.INF) as Vector3
+			pending = {
+				"action": action.duplicate(true),
+				"groupId": String(reservation.get("groupId", "")),
+				"queuePosition": queue_position,
+				"snapshotRevision": lease_revision
+			}
+			entry["pendingNavigationTransition"] = pending
+			if not queue_position.is_finite():
+				_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
+				return {"handled": true, "ok": false, "status": "waiting", "reason": "surface_transition_missing_queue_position", "classification": "traffic_reservation", "moved": 0.0, "transition": reservation}
+			var queue_move := _move_toward_position(entry, request_id, body, queue_position, delta, options)
+			queue_move["handled"] = true
+			queue_move["ok"] = false
+			queue_move["status"] = "waiting"
+			queue_move["reason"] = String(reservation.get("reason", "traffic_wait"))
+			queue_move["classification"] = "traffic_reservation"
+			queue_move["transition"] = pending.duplicate(true)
+			return queue_move
+		entry.erase("pendingNavigationTransition")
+		var exit_waypoint_index := _surface_transition_exit_waypoint_index(lease, waypoint_index, action)
+		if exit_waypoint_index < waypoint_index:
+			if system.has_method("release_npc_navigation_transition"):
+				system.call("release_npc_navigation_transition", entry, "missing_exit_waypoint")
+			return {"handled": true, "ok": false, "status": "rejected", "reason": "surface_transition_missing_exit_waypoint", "moved": 0.0}
+		active = {
+			"action": action.duplicate(true),
+			"linkId": String(action.get("linkId", "")),
+			"linkRid": int(action.get("linkRid", 0)),
+			"groupId": String(reservation.get("groupId", "")),
+			"phase": "staging",
+			"entryWaypointIndex": waypoint_index,
+			"exitWaypointIndex": exit_waypoint_index,
+			"entryPosition": action.get("entryPosition", Vector3.INF),
+			"exitPosition": action.get("exitPosition", Vector3.INF),
+			"stagingPosition": staging_position,
+			"clearancePosition": clearance_position,
+			"snapshotRevision": lease_revision,
+			"corridorConstrained": true
+		}
+		entry["activeNavigationTransition"] = active
+	var phase := String(active.get("phase", "staging"))
+	var target := staging_position if phase == "staging" else clearance_position
+	if _flat_position_distance(body.global_position, target) <= TRANSITION_STAGE_RADIUS:
+		if phase == "staging":
+			active["phase"] = "crossing"
+			entry["activeNavigationTransition"] = active
+			target = clearance_position
+		else:
+			var exit_index := int(active.get("exitWaypointIndex", waypoint_index))
+			entry["_v2LeaseExecutorWaypointIndex"] = _surface_transition_clearance_successor_waypoint_index(lease, exit_index, action)
+			if route_authority != null:
+				route_authority.report_segment_completed(request_id, exit_index, {"position": body.global_position, "completion": "surface_transition_clearance"})
+			_release_surface_transition(entry, "surface_transition_cleared")
+			_publish_motion_metadata(body, Vector3.ZERO, Vector3.ZERO)
+			return {"handled": true, "ok": true, "status": "moving", "reason": "surface_transition_cleared", "moved": 0.0, "waypointIndex": exit_index + 1}
+	var move := _move_toward_position(entry, request_id, body, target, delta, options)
+	var move_reason := String(move.get("reason", ""))
+	if move_reason == "door_stage_blocked":
+		move["reason"] = "unexpected_collision"
+	elif move_reason not in ["blocked_dynamic", "stuck"]:
+		move["ok"] = true
+		move["status"] = "moving"
+		move["reason"] = "surface_transition_%s" % phase
+	move["handled"] = true
+	move["transition"] = active.duplicate(true)
+	return move
+
+
+func _surface_transition_action_for_waypoint(lease: Dictionary, waypoint_index: int) -> Dictionary:
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	if waypoint_index < 0 or waypoint_index >= waypoints.size() or not (waypoints[waypoint_index] is Vector3):
+		return {}
+	var waypoint: Vector3 = waypoints[waypoint_index]
+	var actions: Dictionary = lease.get("actions", {}) if lease.get("actions", {}) is Dictionary else {}
+	var keys := actions.keys()
+	keys.sort()
+	for key in keys:
+		var action_value = actions.get(key)
+		if not (action_value is Dictionary):
+			continue
+		var action: Dictionary = action_value
+		if String(action.get("kind", "")) != "surface_transition" or not bool(action.get("enabled", true)):
+			continue
+		var entry_value = action.get("entryPosition", null)
+		if entry_value is Vector3 and waypoint.distance_to(entry_value as Vector3) <= 0.001:
+			return action
+	return {}
+
+
+func _surface_transition_exit_waypoint_index(lease: Dictionary, entry_index: int, action: Dictionary) -> int:
+	var exit_value = action.get("exitPosition", null)
+	if not (exit_value is Vector3):
+		return -1
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	for index in range(entry_index + 1, waypoints.size()):
+		if waypoints[index] is Vector3 and (waypoints[index] as Vector3).distance_to(exit_value as Vector3) <= 0.001:
+			return index
+	return -1
+
+
+func _surface_transition_clearance_successor_waypoint_index(lease: Dictionary, exit_index: int, action: Dictionary) -> int:
+	var waypoints: Array = lease.get("waypoints", []) if lease.get("waypoints", []) is Array else []
+	var entry_position: Vector3 = action.get("entryPosition", Vector3.INF) as Vector3
+	var exit_position: Vector3 = action.get("exitPosition", Vector3.INF) as Vector3
+	var clearance_position: Vector3 = action.get("clearancePosition", Vector3.INF) as Vector3
+	var crossing_axis := exit_position - entry_position
+	crossing_axis.y = 0.0
+	if not entry_position.is_finite() or not exit_position.is_finite() or not clearance_position.is_finite() or crossing_axis.length_squared() <= 0.000001:
+		return mini(waypoints.size(), exit_index + 1)
+	crossing_axis = crossing_axis.normalized()
+	var clearance_projection := (clearance_position - exit_position).dot(crossing_axis)
+	for index in range(exit_index + 1, waypoints.size()):
+		if not (waypoints[index] is Vector3):
+			continue
+		var waypoint: Vector3 = waypoints[index] as Vector3
+		if (waypoint - exit_position).dot(crossing_axis) > clearance_projection + TRANSITION_STAGE_RADIUS:
+			return index
+	return waypoints.size()
+
+
+func _flat_position_distance(first: Vector3, second: Vector3) -> float:
+	return Vector2(first.x - second.x, first.z - second.z).length()
+
+
+func _release_surface_transition(entry: Dictionary, reason: String) -> void:
+	var has_active := entry.get("activeNavigationTransition", {}) is Dictionary and not (entry.get("activeNavigationTransition", {}) as Dictionary).is_empty()
+	var has_pending := entry.get("pendingNavigationTransition", {}) is Dictionary and not (entry.get("pendingNavigationTransition", {}) as Dictionary).is_empty()
+	if (has_active or has_pending) and system != null and system.has_method("release_npc_navigation_transition"):
+		system.call("release_npc_navigation_transition", entry, reason)
+	entry.erase("activeNavigationTransition")
+	entry.erase("pendingNavigationTransition")
+
+
 func _filter_reverse_velocity_candidate(safe_velocity: Vector3, entry: Dictionary, request_id: String, lease: Dictionary, segment_index: int, body: CharacterBody3D, target: Vector3, desired_velocity: Vector3, target_distance: float, arrival_radius: float, delta: float) -> Vector3:
 	var avoidance: Dictionary = entry.get("routeLeaseAvoidance", {}) if entry.get("routeLeaseAvoidance", {}) is Dictionary else {}
 	var result := _apply_bounded_reverse_yield(entry, request_id, lease, segment_index, body, target, desired_velocity, safe_velocity, target_distance, arrival_radius, delta, avoidance)
@@ -613,11 +835,14 @@ func _safe_velocity(entry: Dictionary, body: CharacterBody3D, desired_velocity: 
 			"movementBlocked": true,
 			"activeRegistrationCount": 0
 		}
+	var active_transition: Dictionary = entry.get("activeNavigationTransition", {}) if entry.get("activeNavigationTransition", {}) is Dictionary else {}
 	var corridor_direction := target - body.global_position
+	if String(active_transition.get("phase", "")) == "crossing":
+		corridor_direction = (active_transition.get("exitPosition", target) as Vector3) - (active_transition.get("entryPosition", body.global_position) as Vector3)
 	corridor_direction.y = 0.0
 	return crowd_velocity_service.resolve_safe_velocity(entry, body, desired_velocity, {
 		"profile": profile,
-		"portalMode": String(entry.get("activeDoorPortalId", "")) != "",
+		"portalMode": String(entry.get("activeDoorPortalId", "")) != "" or not active_transition.is_empty(),
 		"corridorDirection": corridor_direction,
 		"maxSpeed": desired_velocity.length(),
 		"priority": int(entry.get("routePriority", options.get("priority", 0))),
@@ -652,7 +877,7 @@ func _avoidance_debug(avoidance: Dictionary, desired_velocity: Vector3, raw_safe
 		"solverAgent": avoidance.get("solverAgent", {}),
 		"rawSafeVelocity": raw_safe_velocity,
 		"appliedVelocity": applied_velocity,
-		"corridorConstrained": not raw_safe_velocity.is_equal_approx(applied_velocity),
+		"corridorConstrained": bool(avoidance.get("corridorConstrained", false)) or not raw_safe_velocity.is_equal_approx(applied_velocity),
 		"metrics": avoidance.get("metrics", {})
 	}
 
@@ -821,6 +1046,11 @@ func _report_collision(entry: Dictionary, request_id: String, motor_state) -> vo
 			"blockedContactName": String(motor_state.get("blocked_contact_name")),
 			"blockedContactKind": String(motor_state.get("blocked_contact_kind")),
 			"blockedContactType": String(motor_state.get("blocked_contact_type")),
+			"blockedContactShapeName": String(motor_state.get("blocked_contact_shape_name")),
+			"blockedContactPartId": String(motor_state.get("blocked_contact_part_id")),
+			"blockedContactPartKind": String(motor_state.get("blocked_contact_part_kind")),
+			"blockedContactSemantic": String(motor_state.get("blocked_contact_semantic")),
+			"blockedContacts": (motor_state.get("blocked_contacts") as Array).duplicate(true),
 			"blockedContactCategory": String(motor_state.get("blocked_contact_category")),
 			"slideCollisionCount": int(motor_state.get("slide_collision_count"))
 		}

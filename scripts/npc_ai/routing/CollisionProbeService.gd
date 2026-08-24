@@ -200,6 +200,7 @@ func _blocking_overlap(entry: Dictionary, body: CharacterBody3D, shape: CapsuleS
 			"class": collider.get_class(),
 			"kind": String(collider.get_meta("kind", "")),
 			"blockType": String(collider.get_meta("block_type", "")),
+			"obstacleClass": String(collider.get_meta("navigation_obstacle_class", "")),
 			"position": collider_position,
 			"cell": Vector2i(roundi(collider_position.x / NpcConstantsScript.CELL_SIZE), roundi(collider_position.z / NpcConstantsScript.CELL_SIZE))
 		}

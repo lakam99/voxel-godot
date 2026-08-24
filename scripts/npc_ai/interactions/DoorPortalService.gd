@@ -61,6 +61,19 @@ func register_door(door: Node, metadata := {}) -> String:
 	door.set_meta("door_state_revision", portal.state_revision)
 	return portal_id
 
+func unregister_portal(portal_id: String) -> bool:
+	if portal_id == "" or not portals.has(portal_id):
+		return false
+	for instance_id_value in door_to_portal.keys():
+		if String(door_to_portal.get(instance_id_value, "")) == portal_id:
+			door_to_portal.erase(instance_id_value)
+	portals.erase(portal_id)
+	controllers.erase(portal_id)
+	scheduled_closes.erase(portal_id)
+	if owner != null and owner.get("traffic_reservations") != null:
+		owner.get("traffic_reservations").destroy_portal(portal_id)
+	return true
+
 func request_interaction(interaction_request, actors: Array = []):
 	var portal_id := resolve_portal_id(interaction_request.get("object_node"), String(interaction_request.get("object_id")))
 	if portal_id == "":

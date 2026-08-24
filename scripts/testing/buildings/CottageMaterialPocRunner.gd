@@ -5,7 +5,10 @@ extends Node3D
 ## BuildingPartPublisher used by future runtime structure publication.
 
 const CottageBlueprintBuilderScript := preload("res://scripts/buildings/CottageBlueprintBuilder.gd")
+const CottageFurnishingPlannerScript := preload("res://scripts/buildings/CottageFurnishingPlanner.gd")
+const BuildingInteriorProgramScript := preload("res://scripts/buildings/BuildingInteriorProgram.gd")
 const BuildingPartPublisherScript := preload("res://scripts/buildings/BuildingPartPublisher.gd")
+const FurnishingPublisherScript := preload("res://scripts/buildings/FurnishingPublisher.gd")
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
@@ -17,6 +20,9 @@ var selected_seed := 207154
 var blueprint
 var publisher
 var cottage_root: Node3D
+var furnishing_plan
+var furnishing_publisher
+var furnishing_root: Node3D
 var review_camera: Camera3D
 var status_label: Label
 var orbit_angle := deg_to_rad(-152.0)
@@ -54,10 +60,10 @@ func read_arguments() -> void:
 func build_review_world() -> void:
 	var environment := Environment.new()
 	environment.background_mode = Environment.BG_COLOR
-	environment.background_color = Color(0.49, 0.68, 0.74)
+	environment.background_color = Color(0.36, 0.40, 0.40)
 	environment.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	environment.ambient_light_color = Color(0.68, 0.76, 0.84)
-	environment.ambient_light_energy = 0.72
+	environment.ambient_light_color = Color(0.64, 0.66, 0.62)
+	environment.ambient_light_energy = 0.82
 	var world_environment := WorldEnvironment.new()
 	world_environment.environment = environment
 	add_child(world_environment)
@@ -65,8 +71,8 @@ func build_review_world() -> void:
 	var sun := DirectionalLight3D.new()
 	sun.name = "ReviewSun"
 	sun.rotation_degrees = Vector3(-54.0, -28.0, 0.0)
-	sun.light_color = Color(1.0, 0.84, 0.63)
-	sun.light_energy = 1.65
+	sun.light_color = Color(0.96, 0.79, 0.60)
+	sun.light_energy = 1.38
 	sun.shadow_enabled = true
 	sun.directional_shadow_max_distance = 44.0
 	add_child(sun)
@@ -139,20 +145,20 @@ func add_review_path_and_trees() -> void:
 
 
 func add_review_path_history() -> void:
-	for patch_index in range(16):
+	for patch_index in range(10):
 		var phase := fposmod(sin(float(patch_index + 1) * 17.17 + float(selected_seed) * 0.013) * 23171.7, 1.0)
 		var side := -1.0 if patch_index % 2 == 0 else 1.0
 		var patch := MeshInstance3D.new()
 		patch.name = "CottagePathHistory%02d" % patch_index
 		var patch_mesh := CylinderMesh.new()
-		var radius := 0.24 + phase * 0.30
+		var radius := 0.11 + phase * 0.14
 		patch_mesh.top_radius = radius
 		patch_mesh.bottom_radius = radius * 1.04
 		patch_mesh.height = 0.008
 		patch_mesh.radial_segments = 9 + patch_index % 4
 		patch.mesh = patch_mesh
-		patch.position = Vector3(-2.32 + side * (1.18 + phase * 0.22), 0.093 + float(patch_index % 3) * 0.001, -11.7 + float(patch_index / 2) * 1.08 + (phase - 0.5) * 0.38)
-		patch.scale.z = 0.72 + phase * 0.58
+		patch.position = Vector3(-2.32 + side * (1.46 + phase * 0.20), 0.093 + float(patch_index % 3) * 0.001, -11.7 + float(patch_index / 2) * 1.18 + (phase - 0.5) * 0.28)
+		patch.scale.z = 0.68 + phase * 0.34
 		patch.rotation.y = phase * TAU
 		var material_id := "wall_growth" if patch_index % 4 in [0, 1] else ("ground_soil" if patch_index % 4 == 2 else "leaf_litter")
 		patch.material_override = ConstructionMaterialCatalogScript.create_material(material_id, -0.05 + phase * 0.035)
@@ -236,12 +242,20 @@ func build_hud() -> void:
 func rebuild_cottage() -> void:
 	if cottage_root != null and is_instance_valid(cottage_root):
 		cottage_root.queue_free()
+	if furnishing_root != null and is_instance_valid(furnishing_root):
+		furnishing_root.queue_free()
 	cottage_root = Node3D.new()
 	cottage_root.name = "PublishedCottage_%s" % selected_style.capitalize()
 	add_child(cottage_root)
 	blueprint = CottageBlueprintBuilderScript.build(selected_seed, selected_style)
 	publisher = BuildingPartPublisherScript.new()
 	publisher.publish(blueprint, cottage_root)
+	furnishing_plan = CottageFurnishingPlannerScript.build(blueprint, selected_seed * 7919 + 37)
+	furnishing_root = Node3D.new()
+	furnishing_root.name = "PublishedCottageFurnishings"
+	add_child(furnishing_root)
+	furnishing_publisher = FurnishingPublisherScript.new()
+	furnishing_publisher.publish(furnishing_plan, furnishing_root)
 	update_hud()
 
 
@@ -249,7 +263,8 @@ func update_hud() -> void:
 	if status_label == null or blueprint == null or publisher == null:
 		return
 	var stats: Dictionary = publisher.summary()
-	status_label.text = "CONSTRUCTION-MATERIAL COTTAGE  |  %s\nseed %d  •  2 rooms  •  %d authoritative parts  •  %d collision volumes  •  %d visual batches\n[1] timber frame + planks   [2] brick masonry   [R] new deterministic seed   [Q/E] orbit   [Space] auto orbit" % [selected_style.to_upper(), selected_seed, int(stats.get("publishedPartCount", 0)), int(stats.get("collisionPartCount", 0)), int(stats.get("visualBatchCount", 0))]
+	var furnishing_count: int = furnishing_plan.parts.size() if furnishing_plan != null else 0
+	status_label.text = "CONSTRUCTION-MATERIAL COTTAGE  |  %s\nseed %d  •  2 rooms  •  %d shell parts  •  %d furnished records  •  %d collision volumes\n[1] timber frame + planks   [2] brick masonry   [R] new deterministic seed   [Q/E] orbit   [Space] auto orbit" % [selected_style.to_upper(), selected_seed, int(stats.get("publishedPartCount", 0)), furnishing_count, int(stats.get("collisionPartCount", 0))]
 
 
 func _process(delta: float) -> void:
@@ -296,12 +311,14 @@ func write_automated_report() -> void:
 	for _frame in range(12):
 		await get_tree().process_frame
 	var stats: Dictionary = publisher.summary() if publisher != null else {}
+	var furnishing_stats: Dictionary = furnishing_publisher.summary() if furnishing_publisher != null else {}
+	var window_sightlines := BuildingInteriorProgramScript.audit_plan(blueprint, furnishing_plan)
 	var capture_saved := false
 	if not capture_path.is_empty():
 		var viewport_texture := get_viewport().get_texture()
 		var viewport_image := viewport_texture.get_image() if viewport_texture != null else null
 		capture_saved = viewport_image != null and viewport_image.save_png(capture_path) == OK
-	var publication_passed := blueprint != null and int(stats.get("publishedPartCount", 0)) > 0 and int(stats.get("collisionPartCount", 0)) > 0
+	var publication_passed := blueprint != null and int(stats.get("publishedPartCount", 0)) > 0 and int(stats.get("collisionPartCount", 0)) > 0 and bool(window_sightlines.get("passed", false))
 	var report := {
 		"runnerId": "cottage_material_poc",
 		"evidenceLevel": "headed_visual_capture" if capture_saved else "recipe_publication_without_visual_acceptance",
@@ -315,7 +332,9 @@ func write_automated_report() -> void:
 		"captureSaved": capture_saved,
 		"blueprintSignature": hash(blueprint.deterministic_signature()) if blueprint != null else 0,
 		"publication": stats,
-		"notes": "The fixture publishes its cottage through the reusable material-aware blueprint and part publisher. Visual review still determines whether the architecture reads well."
+		"furnishingPublication": furnishing_stats,
+		"windowSightlines": window_sightlines,
+		"notes": "The fixture publishes its cottage shell and room-derived furnishing plan through their shared authorities. Visual review still determines whether the architecture reads well."
 	}
 	if capture_saved:
 		report["capturePath"] = capture_path

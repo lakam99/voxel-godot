@@ -7,6 +7,7 @@ class_name CottageBlueprintBuilder
 
 const BuildingBlueprintScript := preload("res://scripts/buildings/BuildingBlueprint.gd")
 const CottageRecipeSamplerScript := preload("res://scripts/buildings/CottageRecipeSampler.gd")
+const GabledRoofFrameBuilderScript := preload("res://scripts/buildings/GabledRoofFrameBuilder.gd")
 const MIN_INTERIOR_PASSAGE_WIDTH := 1.72
 
 
@@ -62,7 +63,7 @@ static func build_from_recipe(raw_recipe: Dictionary):
 			"wallMountInset": wall_thickness * 0.5,
 			"accesses": [
 				{"id": "front_entry", "kind": "exterior_door", "position": Vector3(door_x, 0.70, front_z + 0.93), "size": Vector3(door_width + 0.62, 2.10, 1.86)},
-				{"id": "hearth_to_sleeping", "kind": "interior_passage", "position": Vector3(divider_x, 0.70, 0.0), "size": Vector3(1.50, 2.10, divider_gap + 0.34)}
+				{"id": "hearth_to_sleeping", "kind": "interior_passage", "position": Vector3(divider_x, 0.70, 0.0), "size": Vector3(1.50, 2.10, divider_gap + 0.34), "crossingAxis": Vector3.RIGHT, "endpointSide": -1, "supportPartId": "board_floor"}
 			]
 		},
 		{
@@ -70,33 +71,42 @@ static func build_from_recipe(raw_recipe: Dictionary):
 			"bounds": AABB(Vector3(divider_x, 0.0, -depth * 0.5), Vector3(sleeping_width, wall_height, depth)),
 			"wallMountInset": wall_thickness * 0.5,
 			"accesses": [
-				{"id": "hearth_to_sleeping", "kind": "interior_passage", "position": Vector3(divider_x, 0.70, 0.0), "size": Vector3(1.50, 2.10, divider_gap + 0.34)}
+				{"id": "hearth_to_sleeping", "kind": "interior_passage", "position": Vector3(divider_x, 0.70, 0.0), "size": Vector3(1.50, 2.10, divider_gap + 0.34), "crossingAxis": Vector3.RIGHT, "endpointSide": 1, "supportPartId": "board_floor"}
 			]
 		}
 	])
 
 	var left_door_edge := door_x - door_width * 0.5
 	var right_door_edge := door_x + door_width * 0.5
-	add_part(blueprint, "foundation_front_left", "foundation", "stone_foundation", Vector3((-width * 0.5 + left_door_edge) * 0.5, foundation_height * 0.5, front_z), Vector3(left_door_edge + width * 0.5, foundation_height, 0.58), {"variation": variation})
-	add_part(blueprint, "foundation_front_right", "foundation", "stone_foundation", Vector3((right_door_edge + width * 0.5) * 0.5, foundation_height * 0.5, front_z), Vector3(width * 0.5 - right_door_edge, foundation_height, 0.58), {"variation": variation})
-	add_part(blueprint, "foundation_back", "foundation", "stone_foundation", Vector3(0.0, foundation_height * 0.5, depth * 0.5), Vector3(width + 0.46, foundation_height, 0.58), {"variation": variation})
-	add_part(blueprint, "foundation_left", "foundation", "stone_foundation", Vector3(-width * 0.5, foundation_height * 0.5, 0.0), Vector3(0.58, foundation_height, depth), {"variation": variation})
-	add_part(blueprint, "foundation_right", "foundation", "stone_foundation", Vector3(width * 0.5, foundation_height * 0.5, 0.0), Vector3(0.58, foundation_height, depth), {"variation": variation})
-	add_part(blueprint, "board_floor", "floor", "timber_board", Vector3(0.0, foundation_height + 0.10, 0.0), Vector3(width - 0.22, 0.20, depth - 0.22), {"variation": variation, "boardAxis": "z"})
+	add_part(blueprint, "foundation_front_left", "foundation", "stone_foundation", Vector3((-width * 0.5 + left_door_edge) * 0.5, foundation_height * 0.5, front_z), Vector3(left_door_edge + width * 0.5, foundation_height, 0.58), {"variation": variation, "navigationRole": "structural_mass"})
+	add_part(blueprint, "foundation_front_right", "foundation", "stone_foundation", Vector3((right_door_edge + width * 0.5) * 0.5, foundation_height * 0.5, front_z), Vector3(width * 0.5 - right_door_edge, foundation_height, 0.58), {"variation": variation, "navigationRole": "structural_mass"})
+	add_part(blueprint, "foundation_back", "foundation", "stone_foundation", Vector3(0.0, foundation_height * 0.5, depth * 0.5), Vector3(width + 0.46, foundation_height, 0.58), {"variation": variation, "navigationRole": "structural_mass"})
+	add_part(blueprint, "foundation_left", "foundation", "stone_foundation", Vector3(-width * 0.5, foundation_height * 0.5, 0.0), Vector3(0.58, foundation_height, depth), {"variation": variation, "navigationRole": "structural_mass"})
+	add_part(blueprint, "foundation_right", "foundation", "stone_foundation", Vector3(width * 0.5, foundation_height * 0.5, 0.0), Vector3(0.58, foundation_height, depth), {"variation": variation, "navigationRole": "structural_mass"})
+	add_part(blueprint, "foundation_core", "foundation", "stone_foundation", Vector3(0.0, foundation_height * 0.5, 0.0), Vector3(width - 0.54, foundation_height, depth - 0.54), {"variation": variation - 0.018, "navigationRole": "structural_mass", "physicalIntent": "structural_mass"})
+	add_part(blueprint, "board_floor", "floor", "timber_board", Vector3(0.0, foundation_height + 0.10, 0.0), Vector3(width - 0.22, 0.20, depth - 0.22), {"variation": variation, "boardAxis": "z", "navigationRole": "walkable_support", "physicalIntent": "walkable_surface"})
 
 	add_wall(blueprint, "front_left", wall_material, Vector3((-width * 0.5 + left_door_edge) * 0.5, foundation_height + wall_height * 0.5, front_z), Vector3(left_door_edge + width * 0.5, wall_height, wall_thickness), variation)
 	add_wall_with_window(blueprint, "front_right", wall_material, Vector3((right_door_edge + width * 0.5) * 0.5, foundation_height + wall_height * 0.5, front_z), Vector3(width * 0.5 - right_door_edge, wall_height, wall_thickness), front_window_center, front_window_size, variation)
 	add_wall(blueprint, "front_lintel", wall_material, Vector3(door_x, foundation_height + door_height + (wall_height - door_height) * 0.5, front_z), Vector3(door_width, wall_height - door_height, wall_thickness), variation)
-	add_part(blueprint, "front_door", "door", "painted_door", Vector3(door_x, foundation_height + door_height * 0.5, front_z - wall_thickness * 0.76), Vector3(door_width, door_height, 0.16), {"variation": variation, "semantic": "door"})
+	add_part(blueprint, "front_door", "door", "painted_door", Vector3(door_x, foundation_height + door_height * 0.5, front_z - wall_thickness * 0.76), Vector3(door_width, door_height, 0.16), {"variation": variation, "semantic": "door", "doorEgress": {"approachPartIds": ["front_entry_threshold", "front_entry_ramp"], "clearanceLaneWidth": door_width + 1.04, "outwardEndpointPartId": "front_entry_ramp"}})
 	var entry_ramp_length := 1.45
 	var entry_ramp_angle := -atan2(foundation_height + 0.18, entry_ramp_length)
-	add_part(blueprint, "front_entry_ramp", "ramp", "timber_board", Vector3(door_x, 0.38, front_z - 0.70), Vector3(door_width * 0.94, 0.14, entry_ramp_length), {"rotation": Vector3(entry_ramp_angle, 0.0, 0.0), "variation": variation, "semantic": "entry_ramp"})
+	var entry_threshold_size := Vector3(door_width + 0.90, 0.20, 0.74)
+	add_part(blueprint, "front_entry_threshold", "floor", "timber_board", Vector3(door_x, foundation_height + 0.10, front_z - 0.19), entry_threshold_size, {"variation": variation, "semantic": "entry_threshold", "navigationRole": "walkable_support", "doorEgressFor": "front_door"})
+	var entry_ramp_size := Vector3(door_width * 0.94, 0.14, entry_ramp_length)
+	var entry_ramp_rotation := Vector3(entry_ramp_angle, 0.0, 0.0)
+	var entry_ramp_basis := Basis.from_euler(entry_ramp_rotation)
+	var entry_ramp_upper_end := entry_ramp_basis * Vector3(0.0, entry_ramp_size.y * 0.5, entry_ramp_size.z * 0.5)
+	var entry_ramp_position := Vector3(door_x, foundation_height + 0.20 - entry_ramp_upper_end.y, front_z - 0.46 - entry_ramp_upper_end.z)
+	var entry_ramp_lower_end := entry_ramp_position + entry_ramp_basis * Vector3(0.0, entry_ramp_size.y * 0.5, -entry_ramp_size.z * 0.5)
+	var entry_paving_size := Vector3(door_width + 0.90, 0.14, 0.90)
+	add_part(blueprint, "front_entry_paving", "foundation", "cobblestone", Vector3(door_x, entry_ramp_lower_end.y - entry_paving_size.y * 0.5, entry_ramp_lower_end.z - 0.28), entry_paving_size, {"variation": variation - 0.02, "semantic": "entry_paving", "navigationRole": "walkable_support", "doorEgressFor": "front_door"})
+	add_part(blueprint, "front_entry_ramp", "ramp", "timber_board", entry_ramp_position, entry_ramp_size, {"rotation": entry_ramp_rotation, "variation": variation, "semantic": "entry_ramp", "navigationRole": "transition", "navigationStartSupportPartId": "front_entry_paving", "navigationEndSupportPartId": "front_entry_threshold", "doorEgressFor": "front_door"})
 
 	add_wall(blueprint, "back", wall_material, Vector3(0.0, foundation_height + wall_height * 0.5, depth * 0.5), Vector3(width, wall_height, wall_thickness), variation)
 	add_wall_with_window(blueprint, "left", wall_material, Vector3(-width * 0.5, foundation_height + wall_height * 0.5, 0.0), Vector3(wall_thickness, wall_height, depth), left_window_center, left_window_size, variation)
 	add_wall_with_window(blueprint, "right", wall_material, Vector3(width * 0.5, foundation_height + wall_height * 0.5, 0.0), Vector3(wall_thickness, wall_height, depth), right_window_center, right_window_size, variation)
-	add_gable_layers(blueprint, "front_gable", wall_material, -depth * 0.5, variation, width, roof_rise, foundation_height, wall_height, wall_thickness)
-	add_gable_layers(blueprint, "back_gable", wall_material, depth * 0.5, variation, width, roof_rise, foundation_height, wall_height, wall_thickness)
 
 	add_wall(blueprint, "divider_front", wall_material, Vector3(divider_x, foundation_height + wall_height * 0.5, (-depth * 0.5 - divider_gap * 0.5) * 0.5), Vector3(wall_thickness, wall_height, depth * 0.5 - divider_gap * 0.5), variation)
 	add_wall(blueprint, "divider_back", wall_material, Vector3(divider_x, foundation_height + wall_height * 0.5, (divider_gap * 0.5 + depth * 0.5) * 0.5), Vector3(wall_thickness, wall_height, depth * 0.5 - divider_gap * 0.5), variation)
@@ -119,13 +129,35 @@ static func build_from_recipe(raw_recipe: Dictionary):
 	add_window(blueprint, "left_window", left_window_center, left_window_size, variation)
 	add_window(blueprint, "right_window", right_window_center, right_window_size, variation, "window_warm_glass")
 
-	var roof_angle := atan2(roof_rise, width * 0.5 + roof_overhang)
-	var slope_length := sqrt(pow(width * 0.5 + roof_overhang, 2.0) + pow(roof_rise, 2.0))
-	var roof_y := foundation_height + wall_height + roof_rise * 0.5
-	add_part(blueprint, "roof_left", "roof", "roof_shingle", Vector3(-width * 0.25, roof_y, 0.0), Vector3(slope_length, 0.22, depth + roof_overhang * 2.0), {"rotation": Vector3(0.0, 0.0, roof_angle), "variation": variation, "semantic": "roof"})
-	add_part(blueprint, "roof_right", "roof", "roof_shingle", Vector3(width * 0.25, roof_y, 0.0), Vector3(slope_length, 0.22, depth + roof_overhang * 2.0), {"rotation": Vector3(0.0, 0.0, -roof_angle), "variation": variation, "semantic": "roof"})
-	add_part(blueprint, "ridge", "beam", "timber_beam", Vector3(0.0, foundation_height + wall_height + roof_rise, 0.0), Vector3(0.32, 0.26, depth + roof_overhang * 2.0 + 0.06), {"variation": variation, "semantic": "roof_ridge"})
-	add_part(blueprint, "chimney", "chimney", "fired_brick", Vector3(width * 0.18, foundation_height + wall_height + roof_rise * 0.66, depth * 0.16), Vector3(0.72, 2.20, 0.72), {"variation": variation})
+	# Cottages share the same explicit plate, tie, king-post, ridge and panel
+	# contract as landmark roofs.  This prevents transformed courtyard cottages
+	# from publishing an attractive roof whose collision has no proven load path.
+	var eave_cap_height := 0.20
+	for eave_side in [-1.0, 1.0]:
+		var side_name := "left" if eave_side < 0.0 else "right"
+		var header_id := "%s_header" % side_name
+		var cap_id := "%s_eave_cap" % side_name
+		add_part(blueprint, cap_id, "beam", beam_material, Vector3(eave_side * width * 0.5, foundation_height + wall_height + eave_cap_height * 0.5, 0.0), Vector3(0.52, eave_cap_height, depth), {"variation": variation + eave_side * 0.008, "semantic": "cottage_roof_eave_cap", "physicalIntent": "structural_mass", "physicalRequiredSeatPartIds": [header_id], "physicalRequiredSeatFacts": [{"seatId": header_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -eave_cap_height * 0.5, 0.0), "localPatchHalfExtents": Vector2(0.025, minf(depth * 0.34, 1.30)), "seatFace": "max_y"}]})
+	GabledRoofFrameBuilderScript.add_gabled_roof_frame(blueprint, {
+		"prefix": "roof",
+		"center": Vector3.ZERO,
+		"width": width,
+		"depth": depth,
+		"eaveY": foundation_height + wall_height + eave_cap_height,
+		"rise": roof_rise,
+		"overhang": roof_overhang,
+		"variation": variation,
+		"wallMaterial": wall_material,
+		"beamMaterial": beam_material,
+		"roofSemantic": "cottage_roof",
+		"gableSemantic": "cottage_roof_gable",
+		"eaveBearingPartIds": ["left_eave_cap", "right_eave_cap"],
+		"alignEavePlatesToBearers": true,
+		"gableIdStyle": "manor"
+	})
+	var chimney_top := foundation_height + wall_height + roof_rise * 0.66 + 1.10
+	var chimney_bottom := foundation_height
+	add_part(blueprint, "chimney", "chimney", "fired_brick", Vector3(width * 0.18, (chimney_bottom + chimney_top) * 0.5, depth * 0.16), Vector3(0.72, chimney_top - chimney_bottom, 0.72), {"variation": variation, "semantic": "chimney"})
 	return blueprint
 
 

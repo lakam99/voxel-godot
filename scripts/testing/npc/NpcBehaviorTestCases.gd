@@ -10,13 +10,18 @@ const NpcTaskPlannerScript := preload("res://scripts/npc_ai/behavior/NpcTaskPlan
 const NpcRecoveryPolicyScript := preload("res://scripts/npc_ai/behavior/NpcRecoveryPolicy.gd")
 const NpcPlanExecutorScript := preload("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd")
 const NpcPerceptionServiceScript := preload("res://scripts/npc_ai/behavior/NpcPerceptionService.gd")
+const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+const DoorPortalScript := preload("res://scripts/npc_ai/interactions/DoorPortal.gd")
 const NpcSemanticGoalPlannerScript := preload("res://scripts/npc_ai/behavior/NpcSemanticGoalPlanner.gd")
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcRouteAuthorityV2Script := preload("res://scripts/npc_ai/routing/NpcRouteAuthorityV2.gd")
+const NpcRouteStateStoreScript := preload("res://scripts/npc_ai/routing/NpcRouteStateStore.gd")
 const NpcSimulationLodServiceScript := preload("res://scripts/npc_ai/lifecycle/NpcSimulationLodService.gd")
 const HostileSystemScript := preload("res://scripts/HostileSystem.gd")
 const NpcCombatScript := preload("res://scripts/NpcCombat.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const NpcSystemScript := preload("res://scripts/NpcSystem.gd")
+const CitadelLifePlaytestRunnerScript := preload("res://scripts/testing/npc/CitadelLifePlaytestRunner.gd")
 const CELL := 1.35
 
 var runner = null
@@ -26,23 +31,62 @@ var selector
 var planner
 var recovery
 
+class PassthroughCrowdVelocityService:
+	extends RefCounted
+
+	func resolve_safe_velocity(_entry: Dictionary, _body: CharacterBody3D, desired_velocity: Vector3, _context := {}) -> Dictionary:
+		return {
+			"active": false,
+			"safeVelocity": desired_velocity,
+			"status": "synthetic_callback",
+			"reason": "behavior_route_contract",
+			"callbackFresh": true,
+			"fallbackUsed": false,
+			"movementBlocked": false,
+			"activeRegistrationCount": 1
+		}
+
 class FakeAutonomy:
 	extends Node
 	var traffic_releases := 0
 	var door_releases := 0
+	var door_cancellations := 0
 	var door_portals = null
 	var route_authority_v2 = null
 	var route_world = null
+	var action_state_releases := 0
+	var plan_executor = null
+	var protected_crossing := {}
 
 	func release_npc_traffic_reservations(_entry, _reason := "released") -> int:
 		traffic_releases += 1
 		return 1
 
-	func release_npc_door_hold(_actor_or_id, _schedule_close := true) -> void:
+	func release_npc_door_hold(_actor_or_id, _schedule_close := true, _release_evidence: Dictionary = {}) -> void:
 		door_releases += 1
+
+	func cancel_npc_door_crossing(_actor_or_id) -> void:
+		door_cancellations += 1
+		protected_crossing = {}
+
+	func release_action_owned_state(entry: Dictionary, reason := "released") -> void:
+		action_state_releases += 1
+		if not protected_crossing.is_empty():
+			return
+		release_npc_traffic_reservations(entry, reason)
+		release_npc_door_hold(entry.get("body"), true)
+
+	func npc_protected_door_crossing(_entry: Dictionary) -> Dictionary:
+		return protected_crossing.duplicate(true)
 
 	func generated_navigation_adapter():
 		return route_world
+
+	func supersede_semantic_routes(entry: Dictionary, reason := "order_replaced", preserved_semantic := "") -> Dictionary:
+		return plan_executor.supersede_semantic_routes(entry, reason, preserved_semantic) if plan_executor != null else {"ok": false, "reason": "missing_plan_executor"}
+
+	func prepare_scripted_route_order(entry: Dictionary, order_kind: String, reason := "scripted_order") -> Dictionary:
+		return plan_executor.prepare_scripted_route_order(entry, order_kind, reason) if plan_executor != null else {"ok": false, "reason": "missing_plan_executor"}
 
 	func is_inside_home_interior(entry: Dictionary, position: Vector3) -> bool:
 		var home_cell: Vector2i = entry.get("homeCell", Vector2i.ZERO)
@@ -53,6 +97,16 @@ class FakeAutonomy:
 			and cell.x <= maxi(min_cell.x, max_cell.x) \
 			and cell.y >= mini(min_cell.y, max_cell.y) \
 			and cell.y <= maxi(min_cell.y, max_cell.y)
+
+class OrderReplacementAutonomySpy:
+	extends Node
+	var supersession_calls := 0
+	var action_state_releases := 0
+
+	func supersede_semantic_routes(_entry: Dictionary, _reason := "order_replaced", _preserved_semantic := "") -> Dictionary:
+		supersession_calls += 1
+		action_state_releases += 1
+		return {"ok": true, "cancelled": false, "actionOwnedStateReleased": true}
 
 class FakeNavigationService:
 	extends RefCounted
@@ -119,6 +173,7 @@ class FakeHostileClockMain:
 
 class FakeRouteWorld:
 	extends RefCounted
+	var topology_revision := 1
 
 	func point_allowed(_entry: Dictionary, _position: Vector3, _allow_outside := false, _moving_home := false) -> bool:
 		return true
@@ -487,6 +542,10 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_executor_decays_guard_cooldown", "night", "test_executor_decays_guard_cooldown"),
 		case("npc_behavior_post_threat_schedule_restored", "night", "test_post_threat_schedule_restored"),
 		case("npc_behavior_night_job_phase_does_not_override_home_motion", "night", "test_night_job_phase_does_not_override_home_motion"),
+		case("npc_behavior_home_supersedes_routine_route_once", "night", "test_home_supersedes_routine_route_once"),
+		case("npc_behavior_blocked_routine_go_home_starts_fresh_request", "night", "test_blocked_routine_go_home_starts_fresh_request"),
+		case("npc_behavior_static_home_failure_waits_for_topology_revision", "night", "test_static_home_failure_waits_for_topology_revision"),
+		case("npc_behavior_order_replacement_releases_action_without_route", "night", "test_order_replacement_releases_action_without_route"),
 		case("npc_behavior_day_job_phase_overrides_stale_home_motion", "day", "test_day_job_phase_overrides_stale_home_motion"),
 		case("npc_behavior_home_motion_stops_once_inside", "night", "test_home_motion_stops_once_inside"),
 		case("npc_behavior_goal_hysteresis_no_thrashing", "day", "test_goal_hysteresis_no_thrashing"),
@@ -497,6 +556,9 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_scripted_go_home_arrival_clears_cached_motion", "day", "test_scripted_go_home_arrival_clears_cached_motion"),
 		case("npc_behavior_scripted_go_home_hold_arrival_stays_home", "day", "test_scripted_go_home_hold_arrival_stays_home"),
 		case("npc_behavior_scripted_go_to_hold_arrival_stays_at_target", "day", "test_scripted_go_to_hold_arrival_stays_at_target"),
+		case("npc_behavior_scripted_go_to_preserves_order_across_departure_chain", "day", "test_scripted_go_to_preserves_order_across_departure_chain"),
+		case("npc_behavior_home_departure_clearance_stage_is_monotonic", "day", "test_home_departure_clearance_stage_is_monotonic"),
+		case("npc_behavior_citadel_departure_chain_rejects_false_handoffs", "day", "test_citadel_departure_chain_rejects_false_handoffs"),
 		case("npc_behavior_scripted_semantic_arrival_owns_authority_report", "day", "test_scripted_semantic_arrival_owns_authority_report"),
 		case("npc_behavior_scripted_order_normal_profile_speed", "day", "test_scripted_order_normal_profile_speed"),
 		case("npc_behavior_scripted_order_sprint_profile_speed", "day", "test_scripted_order_sprint_profile_speed"),
@@ -510,7 +572,10 @@ func cases() -> Array[Dictionary]:
 		case("npc_behavior_scripted_combat_overlay_advances_with_v2_route_service", "day", "test_scripted_combat_overlay_advances_with_v2_route_service"),
 		case("npc_behavior_mira_no_inching_after_dialogue", "day", "test_mira_no_inching_after_dialogue"),
 		case("npc_behavior_morning_departures_not_brain_starved", "day", "test_morning_departures_not_brain_starved"),
-		case("npc_behavior_idle_worker_exits_home_clearance", "day", "test_idle_worker_exits_home_clearance"),
+	case("npc_behavior_home_departure_same_cell_clearance_replans", "day", "test_home_departure_same_cell_clearance_replans"),
+	case("npc_behavior_home_departure_replan_retains_door_hold", "day", "test_home_departure_replan_retains_door_hold"),
+	case("npc_behavior_home_departure_clearance_target_exits_portal_volume", "day", "test_home_departure_clearance_target_exits_portal_volume"),
+	case("npc_behavior_idle_worker_exits_home_clearance", "day", "test_idle_worker_exits_home_clearance"),
 		case("npc_behavior_job_selection_budget_ages_deferred_workers", "day", "test_job_selection_budget_ages_deferred_workers"),
 		case("npc_behavior_resource_worker_outbound_stays_town_bound", "day", "test_resource_worker_outbound_stays_town_bound"),
 		case("npc_behavior_forager_outbound_allows_outside", "day", "test_forager_outbound_allows_outside"),
@@ -675,6 +740,120 @@ func test_guard_departure_does_not_arrive_at_exit_as_post(_mode: String) -> Dict
 		["guard_departure_uses_ordered_interior_and_exterior_clearance_routes", "guard_physics_route_service_hands_off_to_assigned_post", "guard_route_does_not_use_legacy_move"],
 		{ "departureTargets": departure_request_targets, "guardPostIntent": guard_post_intent, "moveCalls": fake_npc.move_calls }
 	)
+
+
+func test_home_departure_same_cell_clearance_replans(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var executor: Variant = make_executor(fake_npc)
+	var entry_data := entry("Clearance", { "position": Vector3.ZERO })
+	var target_cell := Vector2i(14, -8)
+	var porch_target := Vector3(18.23, 0.04, -10.57)
+	var exterior_clearance_target := Vector3(19.08, 0.04, -10.57)
+	var settled_clearance_target := Vector3(19.08, 0.38, -10.57)
+	var porch_key := String(executor.call(
+		"_routine_v2_route_key",
+		entry_data,
+		"scripted",
+		"home_departure_clearance",
+		porch_target,
+		target_cell,
+		true,
+		"scripted_departure_home_exit"
+	))
+	var clearance_key := String(executor.call(
+		"_routine_v2_route_key",
+		entry_data,
+		"scripted",
+		"home_departure_clearance",
+		exterior_clearance_target,
+		target_cell,
+		true,
+		"scripted_departure_home_exit"
+	))
+	var repeated_clearance_key := String(executor.call(
+		"_routine_v2_route_key",
+		entry_data,
+		"scripted",
+		"home_departure_clearance",
+		exterior_clearance_target,
+		target_cell,
+		true,
+		"scripted_departure_home_exit"
+	))
+	var settled_clearance_key := String(executor.call(
+		"_routine_v2_route_key",
+		entry_data,
+		"scripted",
+		"home_departure_clearance",
+		settled_clearance_target,
+		target_cell,
+		true,
+		"scripted_departure_home_exit"
+	))
+	var passed := porch_key != clearance_key \
+		and clearance_key == repeated_clearance_key \
+		and clearance_key == settled_clearance_key
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"porchKey=%s clearanceKey=%s settledKey=%s" % [porch_key, clearance_key, settled_clearance_key],
+		["same_cell_home_departure_legs_have_distinct_route_identity", "repeated_exact_clearance_target_reuses_route", "vertical_motor_settling_does_not_churn_clearance_route"],
+		{ "porchKey": porch_key, "clearanceKey": clearance_key, "settledClearanceKey": settled_clearance_key }
+	)
+
+
+func test_home_departure_replan_retains_door_hold(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	var exterior := Vector3(CELL * 3.0, 0.0, 0.0)
+	var entry_data := entry("Clearance", {
+		"position": exterior,
+		"homeCell": Vector2i.ZERO,
+		"porchCell": Vector2i(1, 0)
+	})
+	entry_data["interiorMinCell"] = Vector2i(-1, -1)
+	entry_data["interiorMaxCell"] = Vector2i(1, 1)
+	entry_data["doorExteriorPosition"] = exterior
+	entry_data["homeDepartureState"] = "clearing"
+	entry_data["activeDoorPortalId"] = "door:home"
+	entry_data["routineRouteV2RequestId"] = "stale-clearance-request"
+	entry_data["routineRouteV2Key"] = "porch-clearance-key"
+	var active: Dictionary = executor.call("_routine_v2_active_summary", fake_autonomy.route_authority_v2, entry_data, "exterior-clearance-key")
+	var retained_before_clearance := String(entry_data.get("activeDoorPortalId", "")) == "door:home" and fake_autonomy.door_releases == 0
+	var released := bool(executor.call("_complete_home_departure_stage", entry_data, entry_data.get("body"), "test_exterior_clearance"))
+	var released_once := fake_autonomy.door_releases == 1 and String(entry_data.get("activeDoorPortalId", "")) == ""
+	var passed := active.is_empty() and retained_before_clearance and released and released_once
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"active=%s retained=%s released=%s doorReleases=%d" % [JSON.stringify(active), str(retained_before_clearance), str(released), fake_autonomy.door_releases],
+		["route_replacement_preserves_active_door_hold", "door_hold_releases_only_after_exterior_clearance", "door_hold_releases_once"],
+		{ "active": active, "retainedBeforeClearance": retained_before_clearance, "released": released, "doorReleases": fake_autonomy.door_releases }
+	)
+
+
+func test_home_departure_clearance_target_exits_portal_volume(_mode: String) -> Dictionary:
+	var portal = DoorPortalScript.new()
+	portal.clearance_bounds = AABB(Vector3(-0.80, -1.0, -1.60), Vector3(1.60, 3.0, 3.20))
+	var entry_data := entry("Clearance", { "position": Vector3(-2.0, 0.0, 0.0) })
+	entry_data["doorInteriorPosition"] = Vector3(-1.7, 0.04, 0.0)
+	entry_data["doorExteriorPosition"] = Vector3(1.2, 0.04, 0.0)
+	var target := HomeInteriorServiceScript.exterior_clearance_target(entry_data, portal, entry_data["doorExteriorPosition"] as Vector3, 0.32)
+	var outward := HomeInteriorServiceScript.exterior_direction_for_entry(entry_data)
+	var nearest_arrival_pose := target - outward * 0.32
+	var undershot_pose := nearest_arrival_pose - outward * (NpcConstantsScript.DOOR_PORTAL_PATH_POINT_EPSILON * 2.0)
+	var clear := HomeInteriorServiceScript.has_exterior_clearance(entry_data, portal, nearest_arrival_pose)
+	var undershot_rejected := not HomeInteriorServiceScript.has_exterior_clearance(entry_data, portal, undershot_pose)
+	var passed := clear and undershot_rejected and target.x > float((entry_data["doorExteriorPosition"] as Vector3).x)
+	return outcome(
+		passed,
+		"target=%s nearestArrival=%s clear=%s undershotRejected=%s" % [str(target), str(nearest_arrival_pose), str(clear), str(undershot_rejected)],
+		["clearance_target_uses_runtime_portal_bounds", "nearest_allowed_route_arrival_lands_beyond_actor_expanded_clearance", "undershoot_inside_clearance_is_rejected"],
+		{ "target": target, "nearestArrivalPose": nearest_arrival_pose, "clear": clear, "undershotRejected": undershot_rejected }
+	)
+
 
 func test_guard_near_porch_does_not_restart_departure(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
@@ -1098,7 +1277,7 @@ func test_night_job_phase_does_not_override_home_motion(_mode: String) -> Dictio
 	entry_data["activeMotionPerception"] = { "insideHome": false, "onPorch": true, "onThreshold": false }
 	var body := entry_data.get("body") as Node3D
 	var before := body.global_position
-	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 1.0)
+	var result: Dictionary = advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 1.0)
 	var after := body.global_position
 	var moved_toward_home := after.distance_to(entry_data.get("homePosition", Vector3.ZERO)) < before.distance_to(entry_data.get("homePosition", Vector3.ZERO))
 	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
@@ -1284,9 +1463,17 @@ func test_scripted_go_home_hold_arrival_stays_home(_mode: String) -> Dictionary:
 
 func test_scripted_go_to_hold_arrival_stays_at_target(_mode: String) -> Dictionary:
 	var fake_npc := FakeNpcSystem.new()
-	var executor: Variant = make_executor(fake_npc)
+	var autonomy := FakeAutonomy.new()
+	fake_npc.add_child(autonomy)
+	autonomy.route_world = FakeRouteWorld.new()
+	var authority := FakeSemanticArrivalAuthority.new()
+	authority.state = "arrived"
+	autonomy.route_authority_v2 = authority
+	var executor := NpcPlanExecutorScript.new()
+	executor.setup(autonomy, fake_npc, FakeMain.new(), {})
 	var target := Vector3(2.7, 0.0, 0.0)
 	var entry_data := entry("Villager", { "id": "go_to_hold", "position": target })
+	entry_data["routineRouteV2RequestId"] = "go-to-hold:1"
 	var body := entry_data.get("body") as Node3D
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_IDLE, "reason": "highest_utility" }
 	entry_data["scriptedOrder"] = { "kind": "go_to", "state": "ARRIVED", "reason": "target_reached", "target": target, "arrivalRadius": 0.45, "holdOnArrival": true }
@@ -1303,13 +1490,309 @@ func test_scripted_go_to_hold_arrival_stays_at_target(_mode: String) -> Dictiona
 	var passed: bool = body.global_position.distance_to(before) <= 0.001 \
 		and bool(result.get("advanced", false)) \
 		and String(result.get("intentKind", "")) == "scripted" \
-		and String(order.get("state", "")) == "ARRIVED"
+		and String(order.get("state", "")) == "ARRIVED" \
+		and authority.report_arrived_calls == 0
 	fake_npc.queue_free()
 	return outcome(
 		passed,
-		"before=%s after=%s result=%s order=%s" % [str(before), str(body.global_position), JSON.stringify(result), JSON.stringify(order)],
-		["held_go_to_arrival_keeps_scripted_goal", "held_go_to_does_not_resume_schedule"],
-		{ "before": before, "after": body.global_position, "result": result, "order": order }
+		"before=%s after=%s result=%s order=%s authorityCalls=%d" % [str(before), str(body.global_position), JSON.stringify(result), JSON.stringify(order), authority.report_arrived_calls],
+		["held_go_to_arrival_keeps_scripted_goal", "held_go_to_does_not_resume_schedule", "held_go_to_requires_authority_arrival_record"],
+		{ "before": before, "after": body.global_position, "result": result, "order": order, "authorityReportArrivedCalls": authority.report_arrived_calls }
+	)
+
+
+func test_scripted_go_to_preserves_order_across_departure_chain(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var autonomy := FakeAutonomy.new()
+	fake_npc.add_child(autonomy)
+	var portal_service := FakeDoorPortalService.new()
+	var portal := DoorPortalScript.new()
+	portal.portal_id = "door:scripted_departure_chain"
+	portal.leaf_cells = [Vector3i(1, 0, 0)]
+	portal.threshold_bounds = AABB(Vector3(CELL * 0.65, -1.0, -CELL), Vector3(CELL * 0.7, 3.0, CELL * 2.0))
+	portal.clearance_bounds = AABB(Vector3(CELL * 0.65, -1.0, -CELL), Vector3(CELL * 2.7, 3.0, CELL * 2.0))
+	portal_service.portals[portal.portal_id] = portal
+	autonomy.door_portals = portal_service
+	var executor: Variant = make_executor(fake_npc, autonomy)
+	var home_cell := Vector2i.ZERO
+	var porch_cell := Vector2i(2, 0)
+	var civic_target := Vector3(CELL * 7.0, 0.0, 0.0)
+	var entry_data := entry("Villager", {"id": "scripted_departure_chain", "position": Vector3.ZERO, "homeCell": home_cell, "porchCell": porch_cell})
+	entry_data["interiorMinCell"] = Vector2i(-1, -1)
+	entry_data["interiorMaxCell"] = Vector2i(1, 1)
+	entry_data["doorInteriorPosition"] = Vector3(CELL * 1.0, 0.0, 0.0)
+	entry_data["doorExteriorPosition"] = Vector3(CELL * 2.0, 0.0, 0.0)
+	entry_data["doorCell"] = Vector2i(1, 0)
+	entry_data["activeDoorPortalId"] = portal.portal_id
+	entry_data["insideHome"] = true
+	var body := entry_data.get("body") as CharacterBody3D
+	body.set_meta("npc_inside_home", true)
+	set_scripted_order_meta(entry_data, body, "go_to", "citadel_life_civic_departure", civic_target)
+	var scripted_order: Dictionary = entry_data.get("scriptedOrder", {}) as Dictionary
+	scripted_order["id"] = "scripted_departure_chain:go_to:1"
+	entry_data["scriptedOrder"] = scripted_order
+	body.set_meta("npc_scripted_order_id", String(scripted_order.get("id", "")))
+	var requests: Array[Dictionary] = []
+	var last_request_id := ""
+	for _frame in range(1200):
+		fake_npc.test_route_authority_v2.begin_frame()
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
+		var request_id := String(entry_data.get("routineRouteV2RequestId", ""))
+		var intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
+		var authority: Dictionary = fake_npc.test_route_authority_v2.runtime_for_entry(entry_data)
+		var order: Dictionary = entry_data.get("scriptedOrder", {}) if entry_data.get("scriptedOrder", {}) is Dictionary else {}
+		if not request_id.is_empty() and request_id != last_request_id:
+			last_request_id = request_id
+			requests.append({
+				"requestId": request_id,
+				"generation": int(authority.get("generation", -1)),
+				"semanticKind": String(intent.get("semanticKind", "")),
+				"reason": String(intent.get("reason", "")),
+				"target": intent.get("target", Vector3.INF),
+				"orderId": String(order.get("id", ""))
+			})
+		if String(order.get("state", "")) == "ARRIVED":
+			break
+	var final_order: Dictionary = entry_data.get("scriptedOrder", {}) if entry_data.get("scriptedOrder", {}) is Dictionary else {}
+	var ordered_semantics: Array[String] = []
+	var arrival_history: Array[Dictionary] = []
+	var generations_increase := true
+	var order_survives := true
+	for index in range(requests.size()):
+		var request: Dictionary = requests[index]
+		ordered_semantics.append(String(request.get("semanticKind", "")))
+		arrival_history.append(fake_npc.test_route_authority_v2.runtime_for_request(String(request.get("requestId", ""))))
+		order_survives = order_survives and String(request.get("orderId", "")) == "scripted_departure_chain:go_to:1"
+		if index > 0:
+			generations_increase = generations_increase and int(request.get("generation", -1)) > int(requests[index - 1].get("generation", -1))
+	var clearance_arrived := false
+	if arrival_history.size() > 1:
+		for event_value in arrival_history[1].get("recentEvents", []) as Array:
+			if event_value is Dictionary and String((event_value as Dictionary).get("state", "")) == "arrived":
+				clearance_arrived = true
+				break
+	var passed := ordered_semantics == ["home_departure_clearance", "home_departure_clearance", "scripted_target"] \
+		and generations_increase \
+		and order_survives \
+		and String(arrival_history[0].get("state", "")) == "cancelled" \
+		and String(arrival_history[0].get("reason", "")) == "routine_route_key_changed" \
+		and clearance_arrived \
+		and String(final_order.get("id", "")) == "scripted_departure_chain:go_to:1" \
+		and String(final_order.get("state", "")) == "ARRIVED" \
+		and body.global_position.distance_to(civic_target) <= 0.45
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"requests=%s histories=%s finalOrder=%s position=%s" % [JSON.stringify(requests), JSON.stringify(arrival_history), JSON.stringify(final_order), str(body.global_position)],
+		["scripted_order_survives_door_exit_leg", "door_exit_handoff_supersedes_endpoint_arrival", "scripted_order_survives_exterior_clearance_leg", "clearance_arrival_remains_queryable", "scripted_order_reaches_civic_target_through_newer_generation"],
+		{"requests": requests, "arrivalHistory": arrival_history, "finalOrder": final_order, "position": body.global_position}
+	)
+
+
+func test_citadel_departure_chain_rejects_false_handoffs(_mode: String) -> Dictionary:
+	var acceptance_runner := CitadelLifePlaytestRunnerScript.new()
+	acceptance_runner.citizens = [{"manifest": {"id": "citizen", "doorInteriorPosition": Vector3(-1.0, 0.0, 0.0), "doorExteriorPosition": Vector3(1.0, 0.0, 0.0)}}]
+	var door_chain := {
+		"orderId": "citizen:go_to:1",
+		"doorExit": {"requestId": "citizen:v2:1:1", "generation": 1, "leaseId": "citizen:1:lease", "portalId": "home:door"}
+	}
+	var same_target_repair := acceptance_runner.classify_day_departure_chain_leg(door_chain, {
+		"accepted": true,
+		"semanticKind": "home_departure_clearance",
+		"matchesDoorTarget": true,
+		"matchesClearanceTarget": false,
+		"ownsDoorEdge": true,
+		"requestId": "citizen:v2:2:2",
+		"generation": 2,
+		"doorExitHandoff": true
+	})
+	var wrong_height_matches := acceptance_runner.strict_position_matches(Vector3(2.7, 8.0, 0.0), Vector3(2.7, 0.0, 0.0))
+	var wrong_height_departure := acceptance_runner.classify_day_departure_chain_leg({}, {
+		"accepted": true,
+		"semanticKind": "home_departure_clearance",
+		"matchesDoorTarget": wrong_height_matches,
+		"ownsDoorEdge": true,
+		"requestId": "citizen:v2:1:height",
+		"generation": 1
+	})
+	var early_civic_target := acceptance_runner.classify_day_departure_chain_leg(door_chain, {
+		"accepted": true,
+		"semanticKind": "scripted_target",
+		"requestId": "citizen:v2:2:3",
+		"generation": 2,
+		"doorExitHandoff": true
+	})
+	var clearance_leg := acceptance_runner.classify_day_departure_chain_leg(door_chain, {
+		"accepted": true,
+		"semanticKind": "home_departure_clearance",
+		"matchesClearanceTarget": true,
+		"requestId": "citizen:v2:3:4",
+		"generation": 3,
+		"doorExitHandoff": true
+	})
+	var full_chain := door_chain.duplicate(true)
+	full_chain["exteriorClearance"] = {"requestId": "citizen:v2:3:4", "generation": 3}
+	var civic_before_clearance_arrival := acceptance_runner.classify_day_departure_chain_leg(full_chain, {
+		"accepted": true,
+		"semanticKind": "scripted_target",
+		"requestId": "citizen:v2:4:5",
+		"generation": 4,
+		"exteriorClearanceArrived": false
+	})
+	var civic_after_clearance_arrival := acceptance_runner.classify_day_departure_chain_leg(full_chain, {
+		"accepted": true,
+		"semanticKind": "scripted_target",
+		"requestId": "citizen:v2:4:5",
+		"generation": 4,
+		"exteriorClearanceArrived": true
+	})
+	var valid_supersession := acceptance_runner.valid_door_exit_supersession({"state": "cancelled", "reason": "routine_route_key_changed"})
+	var invalid_supersession := acceptance_runner.valid_door_exit_supersession({"state": "cancelled", "reason": "blocked_dynamic"})
+	var direct_chain := {}
+	acceptance_runner.record_day_departure_stage(direct_chain, "clearance", "citizen:v2:2:direct", 2)
+	var direct_clearance := acceptance_runner.classify_day_departure_chain_leg(direct_chain, {
+		"accepted": true,
+		"semanticKind": "home_departure_clearance",
+		"matchesClearanceTarget": true,
+		"ownsDoorEdge": true,
+		"requestId": "citizen:v2:2:direct",
+		"generation": 2,
+		"directDoorClearance": true,
+		"stageCycleDetected": false
+	})
+	var cycled_chain := {}
+	acceptance_runner.record_day_departure_stage(cycled_chain, "clearance", "citizen:v2:2:clearance", 2)
+	acceptance_runner.record_day_departure_stage(cycled_chain, "door", "citizen:v2:3:door", 3)
+	var cycled_direct_clearance := acceptance_runner.classify_day_departure_chain_leg(cycled_chain, {
+		"accepted": true,
+		"semanticKind": "home_departure_clearance",
+		"matchesClearanceTarget": true,
+		"ownsDoorEdge": true,
+		"requestId": "citizen:v2:4:clearance",
+		"generation": 4,
+		"directDoorClearance": true,
+		"stageCycleDetected": bool(cycled_chain.get("stageCycleDetected", false))
+	})
+	var transaction_event := {
+		"phase": "day_civic", "scriptedOrderId": "citizen:go_to:1", "physicsFrame": 10,
+		"crossingId": "crossing:1", "crossingPortalId": "home:door", "activeDoorPortalId": "home:door",
+		"crossingTrafficGroupId": "traffic:1", "crossingReservationIds": ["reservation:1"],
+		"crossingTrafficContinuity": {"ok": true}, "allLeafCollisionDisabled": true,
+		"crossingInitiatingRequestId": "citizen:v2:1:1", "crossingInitiatingGeneration": 1, "crossingInitiatingLeaseId": "citizen:1:lease",
+		"crossingSuccessorRequestId": "citizen:v2:2:2", "crossingSuccessorGeneration": 2, "crossingSuccessorLeaseId": "citizen:2:lease",
+		"routeRequestId": "citizen:v2:2:2", "routeGeneration": 2, "routeLeaseId": "citizen:2:lease",
+		"strictInside": false, "doorPlaneSide": 1.0
+	}
+	acceptance_runner.acceptance_door_lifecycle = {"citizen": {"events": [transaction_event]}}
+	var valid_lease_handoff := acceptance_runner.day_door_leg_handoff_observed("citizen", "citizen:go_to:1", door_chain.get("doorExit", {}), "citizen:v2:2:2", 2, "citizen:2:lease", {"state": "cancelled", "reason": "routine_route_key_changed"})
+	var changed_successor_lease_event := transaction_event.duplicate(true)
+	changed_successor_lease_event["crossingSuccessorLeaseId"] = "citizen:2:replacement"
+	acceptance_runner.acceptance_door_lifecycle = {"citizen": {"events": [changed_successor_lease_event]}}
+	var changed_successor_lease_accepted := acceptance_runner.day_door_leg_handoff_observed("citizen", "citizen:go_to:1", door_chain.get("doorExit", {}), "citizen:v2:2:2", 2, "citizen:2:lease", {"state": "cancelled", "reason": "routine_route_key_changed"})
+	var direct_event := transaction_event.duplicate(true)
+	direct_event["crossingInitiatingRequestId"] = "citizen:v2:2:direct"
+	direct_event["crossingInitiatingGeneration"] = 2
+	direct_event["crossingInitiatingLeaseId"] = "citizen:2:direct"
+	direct_event["crossingSuccessorRequestId"] = ""
+	direct_event["crossingSuccessorGeneration"] = -1
+	direct_event["crossingSuccessorLeaseId"] = ""
+	direct_event["routeRequestId"] = "citizen:v2:2:direct"
+	direct_event["routeGeneration"] = 2
+	direct_event["routeLeaseId"] = "citizen:2:direct"
+	acceptance_runner.acceptance_door_lifecycle = {"citizen": {"events": [direct_event]}}
+	var valid_direct_lease := acceptance_runner.day_direct_clearance_transaction_observed("citizen", "citizen:go_to:1", "citizen:v2:2:direct", 2, "citizen:2:direct", "home:door")
+	var changed_direct_lease_event := direct_event.duplicate(true)
+	changed_direct_lease_event["routeLeaseId"] = "citizen:2:replacement"
+	acceptance_runner.acceptance_door_lifecycle = {"citizen": {"events": [changed_direct_lease_event]}}
+	var changed_direct_lease_accepted := acceptance_runner.day_direct_clearance_transaction_observed("citizen", "citizen:go_to:1", "citizen:v2:2:direct", 2, "citizen:2:direct", "home:door")
+	var release_portal = DoorPortalScript.new()
+	release_portal.portal_id = "home:door"
+	release_portal.clearance_bounds = AABB(Vector3(-0.8, -1.0, -1.6), Vector3(1.6, 3.0, 3.2))
+	var release_entry := {"doorInteriorPosition": Vector3(-1.7, 0.0, 0.0), "doorExteriorPosition": Vector3(1.2, 0.0, 0.0)}
+	var clear_release_position := HomeInteriorServiceScript.exterior_clearance_target(release_entry, release_portal, release_entry.get("doorExteriorPosition"), 0.0)
+	clear_release_position += HomeInteriorServiceScript.exterior_direction_for_entry(release_entry) * 0.05
+	var bad_release_event := {
+		"completedCrossingPortalId": "home:door",
+		"completedCrossingReleaseEvidence": {"exteriorClearanceCertified": true, "position": Vector3.ZERO},
+		"exteriorClearance": {"satisfied": true, "actualPosition": clear_release_position}
+	}
+	var bad_release_certificate := acceptance_runner.certify_completed_crossing_release(release_entry, {}, release_portal, bad_release_event)
+	var valid_release_event := bad_release_event.duplicate(true)
+	valid_release_event["completedCrossingReleaseEvidence"] = {"exteriorClearanceCertified": true, "position": clear_release_position}
+	var valid_release_certificate := acceptance_runner.certify_completed_crossing_release(release_entry, {}, release_portal, valid_release_event)
+	acceptance_runner.free()
+	var passed := same_target_repair.is_empty() \
+		and not wrong_height_matches \
+		and wrong_height_departure.is_empty() \
+		and early_civic_target.is_empty() \
+		and clearance_leg == "exteriorClearance" \
+		and civic_before_clearance_arrival.is_empty() \
+		and civic_after_clearance_arrival == "civicTarget" \
+		and valid_supersession \
+		and not invalid_supersession \
+		and direct_clearance == "directClearance" \
+		and bool(cycled_chain.get("stageCycleDetected", false)) \
+		and cycled_direct_clearance.is_empty() \
+		and valid_lease_handoff \
+		and not changed_successor_lease_accepted \
+		and valid_direct_lease \
+		and not changed_direct_lease_accepted \
+		and not bool(bad_release_certificate.get("ok", false)) \
+		and bool(valid_release_certificate.get("ok", false))
+	return outcome(
+		passed,
+		"sameTargetRepair=%s wrongHeight=%s earlyCivic=%s clearance=%s civicBeforeArrival=%s civicAfterArrival=%s" % [same_target_repair, wrong_height_departure, early_civic_target, clearance_leg, civic_before_clearance_arrival, civic_after_clearance_arrival],
+		["same_target_repair_not_clearance", "same_footprint_wrong_height_not_departure", "early_civic_target_not_chain_completion", "predecessor_arrival_required_for_handoff", "door_exit_requires_exact_route_key_supersession", "direct_clearance_transaction_allowed", "clearance_to_door_stage_cycle_rejected", "handoff_rejects_lease_only_replacement", "direct_crossing_rejects_lease_only_replacement", "release_receipt_threshold_pose_rejected_despite_later_clear_pose"],
+		{"sameTargetRepair": same_target_repair, "wrongHeightMatches": wrong_height_matches, "wrongHeightDeparture": wrong_height_departure, "earlyCivicTarget": early_civic_target, "clearanceLeg": clearance_leg, "civicBeforeClearanceArrival": civic_before_clearance_arrival, "civicAfterClearanceArrival": civic_after_clearance_arrival, "validSupersession": valid_supersession, "invalidSupersession": invalid_supersession, "directClearance": direct_clearance, "cycledChain": cycled_chain, "cycledDirectClearance": cycled_direct_clearance, "validLeaseHandoff": valid_lease_handoff, "changedSuccessorLeaseAccepted": changed_successor_lease_accepted, "validDirectLease": valid_direct_lease, "changedDirectLeaseAccepted": changed_direct_lease_accepted, "badReleaseCertificate": bad_release_certificate, "validReleaseCertificate": valid_release_certificate}
+	)
+
+func test_home_departure_clearance_stage_is_monotonic(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	var entry_data := entry("MonotonicDeparture", {"position": Vector3.ZERO, "homeCell": Vector2i.ZERO, "porchCell": Vector2i(1, 0)})
+	entry_data["interiorMinCell"] = Vector2i(-1, -1)
+	entry_data["interiorMaxCell"] = Vector2i(1, 1)
+	entry_data["doorInteriorPosition"] = Vector3.ZERO
+	entry_data["doorExteriorPosition"] = Vector3(CELL * 2.0, 0.0, 0.0)
+	var body := entry_data.get("body") as CharacterBody3D
+	var porch_target: Vector3 = executor.call("_home_exit_stage_target", entry_data, body)
+	body.global_position = Vector3(CELL * 3.0, 0.0, 0.0)
+	var clearance_target: Vector3 = executor.call("_home_exit_stage_target", entry_data, body)
+	body.global_position = Vector3.ZERO
+	var retained_clearance_target: Vector3 = executor.call("_home_exit_stage_target", entry_data, body)
+	fake_autonomy.protected_crossing = {"crossingId": "protected-departure", "groupId": "portal-group"}
+	entry_data["activeDoorTrafficGroupId"] = "portal-group"
+	entry_data["activeTrafficStepGroup"] = "movement-group"
+	executor.call("_release_action_owned_state", entry_data, "protected_action_interrupt")
+	var protected_cleanup_retained := String(entry_data.get("activeDoorTrafficGroupId", "")) == "portal-group" \
+		and String(entry_data.get("activeTrafficStepGroup", "")) == "movement-group" \
+		and fake_autonomy.traffic_releases == 0 \
+		and fake_autonomy.door_releases == 0
+	executor.call("supersede_semantic_routes", entry_data, "order_replaced")
+	var protected_target: Vector3 = executor.call("_home_exit_stage_target", entry_data, body)
+	var protected_commitment := bool(entry_data.get("homeDepartureClearanceCommitted", false))
+	executor.call("_release_action_owned_state", entry_data, "explicit_scripted_cancel", true)
+	var forced_cleanup_completed := fake_autonomy.door_cancellations == 1 \
+		and fake_autonomy.protected_crossing.is_empty() \
+		and String(entry_data.get("activeDoorTrafficGroupId", "")) == ""
+	fake_autonomy.protected_crossing = {}
+	executor.call("supersede_semantic_routes", entry_data, "explicit_cancel")
+	var reset_target: Vector3 = executor.call("_home_exit_stage_target", entry_data, body)
+	var passed := porch_target.distance_to(clearance_target) > 0.1 \
+		and retained_clearance_target.distance_to(clearance_target) <= 0.01 \
+		and protected_target.distance_to(clearance_target) <= 0.01 \
+		and protected_commitment \
+		and protected_cleanup_retained \
+		and forced_cleanup_completed \
+		and reset_target.distance_to(porch_target) <= 0.01
+	fake_npc.queue_free()
+	return outcome(
+		passed,
+		"porch=%s clearance=%s retained=%s protected=%s reset=%s" % [str(porch_target), str(clearance_target), str(retained_clearance_target), str(protected_target), str(reset_target)],
+		["departure_target_advances_to_clearance", "transient_interior_sample_cannot_restore_porch", "protected_action_cleanup_preserves_door_and_traffic", "protected_portal_transaction_preserves_clearance_commitment", "explicit_cancellation_forces_non_clearance_cleanup", "explicit_order_replacement_resets_unprotected_stage"],
+		{"porchTarget": porch_target, "clearanceTarget": clearance_target, "retainedClearanceTarget": retained_clearance_target, "protectedTarget": protected_target, "protectedCommitment": protected_commitment, "protectedCleanupRetained": protected_cleanup_retained, "forcedCleanupCompleted": forced_cleanup_completed, "resetTarget": reset_target}
 	)
 
 
@@ -1358,7 +1841,7 @@ func test_scripted_order_normal_profile_speed(_mode: String) -> Dictionary:
 	var maximum_move := 0.0
 	for i in range(16):
 		fake_npc.test_route_authority_v2.begin_frame()
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 		maximum_move = maxf(maximum_move, float(entry_data.get("lastMoveDistance", 0.0)))
 	var source := read_text("res://scripts/npc_ai/behavior/NpcPlanExecutor.gd") + "\n" + read_text("res://scripts/NpcSystem.gd")
 	var no_hack_speed := source.find("speed = 20.0") < 0 and not text_contains_near(source, "holdIntroDoor", "speed", 160) and not text_contains_near(source, "speed", "holdIntroDoor", 160)
@@ -1377,7 +1860,7 @@ func test_scripted_order_sprint_profile_speed(_mode: String) -> Dictionary:
 	var maximum_move := 0.0
 	for i in range(16):
 		fake_npc.test_route_authority_v2.begin_frame()
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 		maximum_move = maxf(maximum_move, float(entry_data.get("lastMoveDistance", 0.0)))
 	var lower_bound_ok := maximum_move >= (6.4 * (1.0 / 60.0)) - 0.0001
 	var mode_ok := String(entry_data.get("npcSpeedMode", "")) == "sprinting" and bool(entry_data.get("npcRushing", false))
@@ -1435,7 +1918,7 @@ func test_every_active_actor_motion_tick_32_npcs(_mode: String) -> Dictionary:
 	for _frame in range(16):
 		fake_npc.test_route_authority_v2.begin_frame()
 		for entry_data in entries:
-			executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+			advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var source := read_text("res://scripts/NpcSystem.gd")
 	var active_pass_index := source.find("var active_entries")
 	var budget_loop_index := source.find("while scanned < update_count and processed < budget")
@@ -1459,7 +1942,7 @@ func test_brain_budget_does_not_skip_route_motion(_mode: String) -> Dictionary:
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_HOME }
 	entry_data["activeMotionPerception"] = { "insideHome": false, "onPorch": false, "onThreshold": false }
 	for i in range(6):
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
 	var distance := body.global_position.length()
 	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
@@ -1479,7 +1962,7 @@ func test_scripted_order_moves_while_brain_skipped(_mode: String) -> Dictionary:
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED }
 	for i in range(16):
 		fake_npc.test_route_authority_v2.begin_frame()
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var order: Dictionary = entry_data.get("scriptedOrder", {}) if entry_data.get("scriptedOrder", {}) is Dictionary else {}
 	var route_state := String(entry_data.get("routeStatus", ""))
 	var passed: bool = String(order.get("state", "")) in ["PENDING", "ACTIVE", "ARRIVED"] and route_state in ["pending", "moving", "arrived"] and body.global_position.x > 0.15
@@ -1542,7 +2025,7 @@ func test_mira_no_inching_after_dialogue(_mode: String) -> Dictionary:
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_SCRIPTED }
 	var moving_frames := 0
 	for i in range(8):
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 		if float(entry_data.get("lastMoveDistance", 0.0)) > 0.001:
 			moving_frames += 1
 	var passed: bool = moving_frames == 8 and body.global_position.x > 0.33
@@ -1557,7 +2040,7 @@ func test_morning_departures_not_brain_starved(_mode: String) -> Dictionary:
 	entry_data["jobTarget"] = Vector3(4.0, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
 	for i in range(10):
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
 	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
 	var passed: bool = fake_npc.move_calls == 0 \
@@ -1596,7 +2079,7 @@ func test_idle_worker_exits_home_clearance(_mode: String) -> Dictionary:
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
 	var body := entry_data.get("body") as Node3D
 	var before := body.global_position
-	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var result: Dictionary = advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var after := body.global_position
 	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
 	var passed: bool = fake_npc.move_calls == 0 \
@@ -1671,7 +2154,7 @@ func test_resource_worker_outbound_stays_town_bound(_mode: String) -> Dictionary
 	entry_data["jobTarget"] = Vector3(13.5, 0.0, 0.0)
 	entry_data["activeMotionGoal"] = { "goalKind": NpcEnumsScript.GOAL_KIND_WORK }
 	var before := (entry_data.get("body") as Node3D).global_position
-	executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var body := entry_data.get("body") as Node3D
 	var routine_intent: Dictionary = entry_data.get("_routineRouteV2Intent", {}) if entry_data.get("_routineRouteV2Intent", {}) is Dictionary else {}
 	var passed: bool = fake_npc.move_calls == 0 \
@@ -1696,7 +2179,7 @@ func test_forager_outbound_allows_outside(_mode: String) -> Dictionary:
 	for _tick in range(8):
 		if fake_npc.test_route_authority_v2 != null:
 			fake_npc.test_route_authority_v2.begin_frame()
-		executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+		advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 		if (entry_data.get("body") as Node3D).global_position.x > 0.0:
 			break
 	var body := entry_data.get("body") as Node3D
@@ -2328,6 +2811,266 @@ func test_vox42_forage_goal_cancels_stale_home_route(_mode: String) -> Dictionar
 	fake_npc.queue_free()
 	return outcome(passed, JSON.stringify(details), ["active_forage_goal_preempts_obsolete_home_route", "obsolete_home_route_cannot_starve_forager_lifecycle"], details)
 
+
+func test_home_supersedes_routine_route_once(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	var authority = fake_npc.test_route_authority_v2
+	var entry_data := entry("Worker", {
+		"id": "home-supersedes-routine",
+		"job": "worker",
+		"position": Vector3(CELL * 4.0, 0.0, 0.0),
+		"homeCell": Vector2i.ZERO,
+		"porchCell": Vector2i(1, 0)
+	})
+	var routine_intent := {"kind": "work", "semanticKind": "work_area", "target": Vector3(CELL * 8.0, 0.0, 0.0), "priority": 90}
+	var routine_request: Dictionary = authority.submit_request(entry_data, routine_intent, {"priority": 90})
+	var routine_request_id := String(routine_request.get("requestId", ""))
+	var routine_route := {
+		"ok": true,
+		"status": "reachable",
+		"classification": "reachable",
+		"reason": "route_found",
+		"source": "collision_backed_route_substrate",
+		"snapshotRevision": "fake-route-world",
+		"targetCell": Vector2i(8, 0),
+		"cells": [Vector2i(4, 0), Vector2i(8, 0)],
+		"waypoints": [Vector3(CELL * 4.0, 0.0, 0.0), Vector3(CELL * 8.0, 0.0, 0.0)],
+		"actions": {}
+	}
+	var routine_commit: Dictionary = authority.commit_route_after_probe(entry_data, routine_request_id, routine_route, routine_intent)
+	authority.begin_moving(routine_request_id, "focused_supersession_fixture")
+	var routine_had_lease := not ((authority.requests_by_id.get(routine_request_id, {}) as Dictionary).get("routeLease", {}) as Dictionary).is_empty()
+	entry_data["routineRouteV2RequestId"] = routine_request_id
+	entry_data["routineRouteV2Key"] = "routine"
+	entry_data["_routineRouteV2Intent"] = routine_intent
+	entry_data["routineRouteV2IntentKind"] = "work"
+	entry_data["routineRouteV2SemanticKind"] = "work_area"
+	var home_intent := {"kind": "home", "semanticKind": "home_interior", "target": entry_data.get("homePosition"), "priority": 170}
+	var home_request: Dictionary = authority.submit_request(entry_data, home_intent, {"priority": 170})
+	var home_request_id := String(home_request.get("requestId", ""))
+	entry_data["homeRouteV2RequestId"] = home_request_id
+	entry_data["homeRouteV2Key"] = "home"
+	entry_data["_homeRouteV2Intent"] = home_intent
+	executor.call("_ensure_home_v2_components")
+	entry_data["_v2LeaseExecutorGeneration"] = 4
+	entry_data["_v2LeaseExecutorRequestId"] = routine_request_id
+	entry_data["_v2LeaseExecutorPendingAvoidance"] = {"requestId": routine_request_id}
+	entry_data["routeLeaseDeferredExecution"] = {"requestId": routine_request_id, "executionGeneration": 4}
+	executor.call("_preempt_job_for_home", entry_data)
+	var routine_record: Dictionary = authority.requests_by_id.get(routine_request_id, {})
+	var home_runtime: Dictionary = authority.runtime_for_entry(entry_data)
+	var service_kind := String(executor.call("_physics_route_service_kind", entry_data))
+	var preserved_home_before_tick := String(entry_data.get("homeRouteV2RequestId", ""))
+	var request_count_before_tick := int((authority.counters as Dictionary).get("requests", 0))
+	var next_physics_result: Dictionary = executor.advance_physics_route_service(entry_data, 1.0 / 60.0)
+	var request_count_after_tick := int((authority.counters as Dictionary).get("requests", 0))
+	var next_runtime: Dictionary = authority.runtime_for_entry(entry_data)
+	var next_request_record: Dictionary = authority.requests_by_id.get(String(next_runtime.get("requestId", "")), {})
+	var next_request_intent: Dictionary = next_request_record.get("intent", {}) if next_request_record.get("intent", {}) is Dictionary else {}
+	var generation_after := int(entry_data.get("_v2LeaseExecutorGeneration", -1))
+	var passed := routine_request_id != "" \
+		and bool(routine_commit.get("ok", false)) \
+		and routine_had_lease \
+		and home_request_id != "" \
+		and String(routine_record.get("state", "")) == "cancelled" \
+		and String(entry_data.get("routineRouteV2RequestId", "")) == "" \
+		and preserved_home_before_tick == home_request_id \
+		and String(entry_data.get("homeRouteV2RequestId", "")) != "" \
+		and String(home_runtime.get("requestId", "")) == home_request_id \
+		and service_kind == "home" \
+		and String(next_physics_result.get("intentKind", "")) == "home" \
+		and request_count_after_tick <= request_count_before_tick + 1 \
+		and String(next_request_intent.get("kind", "")) == "home" \
+		and String(entry_data.get("routineRouteV2RequestId", "")) == "" \
+		and generation_after == 5 \
+		and not entry_data.has("_v2LeaseExecutorPendingAvoidance") \
+		and not entry_data.has("routeLeaseDeferredExecution") \
+		and fake_autonomy.action_state_releases == 1 \
+		and fake_autonomy.traffic_releases == 1 \
+		and fake_autonomy.door_releases == 1
+	var details := {
+		"routineCommit": routine_commit,
+		"routineHadLease": routine_had_lease,
+		"routineState": routine_record.get("state", ""),
+		"homeRuntime": home_runtime,
+		"preservedHomeBeforeTick": preserved_home_before_tick,
+		"serviceKind": service_kind,
+		"nextPhysicsResult": next_physics_result,
+		"requestCountBeforeTick": request_count_before_tick,
+		"requestCountAfterTick": request_count_after_tick,
+		"nextRuntime": next_runtime,
+		"nextRequestIntent": next_request_intent,
+		"generationAfter": generation_after,
+		"pendingAvoidance": entry_data.has("_v2LeaseExecutorPendingAvoidance"),
+		"deferredExecution": entry_data.has("routeLeaseDeferredExecution"),
+		"actionStateReleases": fake_autonomy.action_state_releases,
+		"trafficReleases": fake_autonomy.traffic_releases,
+		"doorReleases": fake_autonomy.door_releases
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["routine_request_cancelled", "home_request_is_sole_owner", "shared_executor_cancelled_once", "deferred_callback_cleared", "action_ownership_released_once"], details)
+
+
+func test_blocked_routine_go_home_starts_fresh_request(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	fake_autonomy.plan_executor = executor
+	var authority = fake_npc.test_route_authority_v2
+	var entry_data := entry("BlockedWorker", {
+		"id": "blocked-routine-go-home",
+		"job": "worker",
+		"position": Vector3(CELL * 4.0, 0.0, 0.0),
+		"homeCell": Vector2i.ZERO,
+		"porchCell": Vector2i(1, 0)
+	})
+	var body := entry_data.get("body") as Node3D
+	var routine_intent := {"kind": "scripted", "semanticKind": "scripted_target", "target": Vector3(CELL * 8.0, 0.0, 0.0), "priority": 180}
+	var routine_request: Dictionary = authority.submit_request(entry_data, routine_intent, {"priority": 180})
+	var routine_request_id := String(routine_request.get("requestId", ""))
+	var blocked_routine: Dictionary = authority.report_unreachable_static(routine_request_id, "path_endpoint_mismatch")
+	entry_data["routineRouteV2RequestId"] = routine_request_id
+	entry_data["routineRouteV2Key"] = "blocked_scripted"
+	entry_data["_routineRouteV2Intent"] = routine_intent.duplicate(true)
+	entry_data["_routineRouteV2Route"] = {"ok": false, "classification": "unreachable_static", "reason": "path_endpoint_mismatch"}
+	entry_data["routineRouteV2IntentKind"] = "scripted"
+	entry_data["routineRouteV2SemanticKind"] = "scripted_target"
+	entry_data["routeStatus"] = "blocked"
+	entry_data["routeReason"] = "path_endpoint_mismatch"
+	NpcRouteStateStoreScript.write_route_lease(entry_data, {"requestId": routine_request_id, "waypoints": [body.global_position, Vector3(CELL * 8.0, 0.0, 0.0)]}, "blocked_routine_fixture")
+	var npc_system := NpcSystemScript.new()
+	npc_system.autonomy_system = fake_autonomy
+	npc_system.npcs = [entry_data]
+	var order: Dictionary = npc_system.order_go_home(body, "focused_blocked_routine_go_home")
+	var home_request_id := String(entry_data.get("homeRouteV2RequestId", ""))
+	var home_runtime: Dictionary = authority.runtime_for_entry(entry_data)
+	var home_record: Dictionary = authority.requests_by_id.get(home_request_id, {})
+	var home_intent: Dictionary = home_record.get("intent", {}) if home_record.get("intent", {}) is Dictionary else {}
+	var routine_record: Dictionary = authority.requests_by_id.get(routine_request_id, {})
+	var route_lease: Dictionary = entry_data.get("routeLease", {}) if entry_data.get("routeLease", {}) is Dictionary else {}
+	var checks := {
+		"blockedFixtureReachedTerminal": String(blocked_routine.get("state", "")) == "unreachable_static",
+		"routineCancelled": String(routine_record.get("state", "")) == "cancelled",
+		"freshHomeRequest": home_request_id != "" and home_request_id != routine_request_id,
+		"homeRequestActive": String(home_runtime.get("requestId", "")) == home_request_id and String(home_runtime.get("state", "")) == "queued",
+		"homeIntent": String(home_intent.get("kind", "")) == "home" and String(home_intent.get("semanticKind", "")) == "home_interior",
+		"blockedStatusCleared": String(entry_data.get("routeStatus", "")) == "pending" and String(entry_data.get("routeReason", "")) != "path_endpoint_mismatch",
+		"staleLeaseCleared": route_lease.is_empty(),
+		"homeServiceOwnsNextTick": String(executor.call("_physics_route_service_kind", entry_data)) == "home",
+		"orderPending": String(order.get("state", "")) == "PENDING"
+	}
+	var passed := checks.values().all(func(value) -> bool: return bool(value))
+	var details := {
+		"blockedRoutine": blocked_routine,
+		"routineState": routine_record.get("state", ""),
+		"order": order,
+		"homeRuntime": home_runtime,
+		"homeIntent": home_intent,
+		"routeStatus": entry_data.get("routeStatus", ""),
+		"routeReason": entry_data.get("routeReason", ""),
+		"routeLease": route_lease,
+		"serviceKind": executor.call("_physics_route_service_kind", entry_data),
+		"checks": checks
+	}
+	npc_system.queue_free()
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["blocked_routine_cancelled", "fresh_home_request_created", "path_endpoint_mismatch_not_inherited", "home_service_owns_next_tick"], details)
+
+
+func test_static_home_failure_waits_for_topology_revision(_mode: String) -> Dictionary:
+	var fake_npc := FakeNpcSystem.new()
+	var fake_autonomy := FakeAutonomy.new()
+	fake_npc.add_child(fake_autonomy)
+	var executor: Variant = make_executor(fake_npc, fake_autonomy)
+	fake_autonomy.plan_executor = executor
+	var world := fake_autonomy.route_world as FakeRouteWorld
+	world.topology_revision = 7
+	var authority = fake_npc.test_route_authority_v2
+	var entry_data := entry("StaticHomeFailure", {
+		"id": "static-home-failure",
+		"position": Vector3(CELL * 4.0, 0.0, 0.0),
+		"homeCell": Vector2i.ZERO,
+		"homePosition": Vector3.ZERO,
+		"interiorMinCell": Vector2i(-1, -1),
+		"interiorMaxCell": Vector2i(1, 1)
+	})
+	var body := entry_data.get("body") as CharacterBody3D
+	var request: Dictionary = authority.submit_request(entry_data, {"kind": "home", "semanticKind": "home_interior", "priority": 190}, {"priority": 190})
+	var request_id := String(request.get("requestId", ""))
+	var terminal: Dictionary = authority.report_unreachable_static(request_id, "path_endpoint_mismatch")
+	entry_data["homeRouteV2RequestId"] = request_id
+	entry_data["homeRouteV2TerminalTopologyRevision"] = "7|"
+	entry_data["routeForceReplan"] = true
+	var request_count_before: int = authority.requests_by_id.size()
+	var retained: Dictionary = executor.call("_execute_home_route_v2", entry_data, body, 1.0 / 60.0, 2.4) as Dictionary
+	var request_count_retained: int = authority.requests_by_id.size()
+	var retained_request_id := String(entry_data.get("homeRouteV2RequestId", ""))
+	world.topology_revision = 8
+	authority.begin_frame()
+	var released: Dictionary = executor.call("_execute_home_route_v2", entry_data, body, 1.0 / 60.0, 2.4) as Dictionary
+	var replacement_request_id := String(entry_data.get("homeRouteV2RequestId", ""))
+	var checks := {
+		"fixtureTerminal": String(terminal.get("state", "")) == "unreachable_static",
+		"retainedSameRequest": retained_request_id == request_id,
+		"retainedRequestCount": request_count_retained == request_count_before,
+		"forceReplanConsumed": not bool(entry_data.get("routeForceReplan", false)),
+		"terminalReturned": String(retained.get("state", "")) == "unreachable_static",
+		"topologyChangeReleased": replacement_request_id != "" and replacement_request_id != request_id
+	}
+	var passed := checks.values().all(func(value) -> bool: return bool(value))
+	var details := {
+		"checks": checks,
+		"terminal": terminal,
+		"retained": retained,
+		"released": released,
+		"requestCountBefore": request_count_before,
+		"requestCountRetained": request_count_retained,
+		"retainedRequestId": retained_request_id,
+		"replacementRequestId": replacement_request_id
+	}
+	fake_npc.queue_free()
+	return outcome(passed, JSON.stringify(details), ["static_failure_request_latched", "generic_force_replan_cannot_thrash", "topology_revision_releases_retry"], details)
+
+
+func test_order_replacement_releases_action_without_route(_mode: String) -> Dictionary:
+	var npc_system := NpcSystemScript.new()
+	var autonomy_spy := OrderReplacementAutonomySpy.new()
+	npc_system.autonomy_system = autonomy_spy
+	var entry_data := {
+		"id": "action-hold-without-route",
+		"activeDoorPortalId": "door:held",
+		"activeTrafficStepGroup": "traffic:held",
+		"activeMotionGoal": {"goalKind": "home"},
+		"activeMotionPlan": {"planKind": "home"},
+		"homeDepartureState": "clearing",
+		"homeDepartureClearanceCommitted": true,
+		"routeStatus": "waiting"
+	}
+	var result: Dictionary = npc_system.release_replaced_order_state(entry_data, "focused_order_replacement")
+	var passed := autonomy_spy.supersession_calls == 1 \
+		and autonomy_spy.action_state_releases == 1 \
+		and not entry_data.has("activeDoorPortalId") \
+		and not entry_data.has("activeTrafficStepGroup") \
+		and not entry_data.has("activeMotionGoal") \
+		and not entry_data.has("activeMotionPlan") \
+		and not entry_data.has("homeDepartureState") \
+		and not entry_data.has("homeDepartureClearanceCommitted") \
+		and String(entry_data.get("routeStatus", "")) == "idle" \
+		and bool((result.get("routeCancellation", {}) as Dictionary).get("actionOwnedStateReleased", false))
+	var details := {
+		"result": result,
+		"supersessionCalls": autonomy_spy.supersession_calls,
+		"actionStateReleases": autonomy_spy.action_state_releases,
+		"entry": entry_data
+	}
+	npc_system.free()
+	autonomy_spy.free()
+	return outcome(passed, JSON.stringify(details), ["order_replacement_uses_semantic_supersession", "route_less_action_hold_released_once", "door_and_traffic_metadata_cleared"], details)
+
 func test_vox42_pending_forage_keeps_lifecycle_owner(_mode: String) -> Dictionary:
 	var setup := vox42_reserved_forager_setup("pending_lifecycle_owner")
 	var fake_npc: FakeNpcSystem = setup.fakeNpc
@@ -2438,7 +3181,7 @@ func test_door_crossing_continues_while_brain_skipped(_mode: String) -> Dictiona
 	entry_data["activeDoorPortalId"] = "door:test"
 	entry_data["activeTrafficStepGroup"] = "movement:test"
 	entry_data["activeDoorTrafficGroupId"] = "portal:test"
-	var result: Dictionary = executor.advance_motion_npc(entry_data, 1.0 / 60.0, 0.0)
+	var result: Dictionary = advance_fixture_motion(executor, entry_data, 1.0 / 60.0, 0.0)
 	var home_intent: Dictionary = entry_data.get("_homeRouteV2Intent", {}) if entry_data.get("_homeRouteV2Intent", {}) is Dictionary else {}
 	var passed: bool = fake_npc.move_calls == 0 \
 		and bool(result.get("advanced", false)) \
@@ -2493,13 +3236,14 @@ func test_all_generated_town_npcs_have_interior_home(_mode: String) -> Dictionar
 	var source := read_text("res://scripts/NpcSystem.gd")
 	var has_home_publish: bool = source.find("home_interior") >= 0 and source.find("publish_navigation_profile_semantics(entry)") >= 0
 	var spawn_profile_home: bool = source.find("\"homeCell\": record.get(\"homeCell\"") >= 0 and source.find("\"porchCell\": porch_cell") >= 0
+	var door_geometry_published: bool = source.count("\"doorInteriorPosition\"") >= 3 and source.count("\"doorExteriorPosition\"") >= 3
 	var role_files := ["guard", "farmer", "carpenter", "forager", "mason", "trader", "civilian", "tutorial"]
 	var missing := []
 	for role_id in role_files:
 		if not ResourceLoader.exists("res://resources/npc_roles/%s.tres" % role_id):
 			missing.append(role_id)
-	var passed: bool = has_home_publish and spawn_profile_home and missing.is_empty()
-	return outcome(passed, "homePublish=%s spawnHome=%s missing=%s" % [str(has_home_publish), str(spawn_profile_home), JSON.stringify(missing)], ["home_semantics_published", "spawn_profile_home_cells", "role_resources_present"], { "missing": missing })
+	var passed: bool = has_home_publish and spawn_profile_home and door_geometry_published and missing.is_empty()
+	return outcome(passed, "homePublish=%s spawnHome=%s doorGeometry=%s missing=%s" % [str(has_home_publish), str(spawn_profile_home), str(door_geometry_published), JSON.stringify(missing)], ["home_semantics_published", "spawn_profile_home_cells", "door_interior_exterior_geometry_published", "role_resources_present"], { "missing": missing, "doorGeometryPublished": door_geometry_published })
 
 func test_no_raw_random_world_goal(_mode: String) -> Dictionary:
 	var npc_source := read_text("res://scripts/NpcSystem.gd")
@@ -2554,9 +3298,29 @@ func make_executor(fake_npc: FakeNpcSystem, fake_autonomy: Variant = null) -> Va
 		"perception": perception,
 		"goalSelector": selector,
 		"taskPlanner": planner,
-		"recovery": recovery
+		"recovery": recovery,
+		"crowdVelocity": PassthroughCrowdVelocityService.new()
 	})
 	return executor
+
+
+func advance_fixture_motion(executor, entry_data: Dictionary, delta: float, night_factor := 0.0) -> Dictionary:
+	var brain_result: Dictionary = executor.advance_motion_npc(entry_data, delta, night_factor)
+	var physics_result: Dictionary = {}
+	if executor.physics_route_service_owns_motion(entry_data):
+		physics_result = executor.advance_physics_route_service(entry_data, delta)
+	return {
+		"brain": brain_result,
+		"physics": physics_result,
+		"advanced": bool(brain_result.get("advanced", false)) or bool(physics_result.get("advanced", false)),
+		"intentKind": String(brain_result.get("intentKind", physics_result.get("intentKind", ""))),
+		"reason": String(brain_result.get("reason", physics_result.get("reason", ""))),
+		"routeStatus": String(physics_result.get("routeStatus", brain_result.get("routeStatus", ""))),
+		"classification": String(physics_result.get("classification", brain_result.get("classification", ""))),
+		"status": String(physics_result.get("status", brain_result.get("status", ""))),
+		"moved": float(physics_result.get("moved", brain_result.get("moved", 0.0)))
+	}
+
 
 func schedule_for(entry_data: Dictionary, state: StringName) -> Dictionary:
 	schedule.inject_snapshot({
