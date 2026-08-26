@@ -1154,3 +1154,110 @@
 **Reusable rule**
 
 > Freeze anatomical placement before welding, and delete a seam experiment when every scalar sweep preserves the same collision family. A passed overlap composite is valid landmark evidence; it is not permission to call overlapping shells a finished mesh.
+
+## Iteration 691 — Regional passes do not compose by overlay
+
+- The non-destructive overlay preserved every accepted regional source, but exposed why preservation alone is not integration: the legacy trunk, bilateral forequarters, bilateral hindlimbs, and pelvis remain intersecting shells with duplicated load paths.
+- The side render was rejected at the whole-creature gate. The body reads as serial dorsal domes, the abdominal wall as a horizontal shelf, the rear limb as a hook, and the paws as slippers; open cage boundaries and duplicate limbs prevent professional anatomical judgment.
+- The preferred face remains the only immutable region. Its vertices cranial to `Y=-1.05` must be restored from iteration 289 after every operation with measured maximum displacement `0.0`.
+- The next branch is a new mirrored subdivision cage built from axial, joint, plantar, and pelvic landmarks. Accepted regional studies become silhouette measurements, not meshes pasted into the final topology.
+- The controlling coordinate prescription and gate criteria are recorded in `WHOLE_BEAR_REBUILD_BRIEF.md`.
+
+**Reusable rule**
+
+> A library of locally passed parts is not a passed creature. Rebuild one ownership graph in which torso loops own limb roots, joint chains own appendage direction, and the axial skeleton owns the silhouette; transfer the accepted envelopes only after that cage carries weight coherently.
+
+## Separate foreclaw gate — Iteration 692 rejected
+
+- The first curved-claw pass used nine-ring elliptical sweeps, buried centerlines, a symmetric `[-8,-4,0,4,8]` fan, symmetric lengths `[.094,.108,.116,.108,.094]`, and single-vertex terminal caps.
+- The raking and top renders expose spike construction: pale collars remain visible at every root, the first half rises before hooking, all sections are round/wide rather than laterally compressed, and bilateral symmetry makes the set look manufactured.
+- Brown-bear claw references require broad hidden roots, long gentle external arcs, dorsoventrally deep and mediolaterally narrow sections, asymmetric length hierarchy, restrained digit-owned fan, and finite worn tips.
+- Exact corrections and a separate pass standard are recorded in `FORECLAW_GATE.md`. The whole body remains rejected regardless of future claw progress.
+
+**Reusable rule**
+
+> A curved sweep is not automatically an ungual. Seat the root beneath soft tissue, preserve a deep asymmetric keratin section, delay curvature, hold mass through most of the length, and terminate on a worn finite profile; otherwise the result is a decorative spike.
+
+## Authoritative baseline reset — Iteration 695
+
+- Iteration 695 replaces iteration 691 as the active whole-creature comparison. The report verifies `bodyMaximumDisplacement=0.0`, the full iteration-289 body and preferred face remain exact, and ten curved foreclaw sweeps are present.
+- The veteran gate still rejects the whole bear. Preservation does not correct the three-dome dorsal contour, absent neck wedge, pillar forelegs, spherical detached pelvis, digitigrade/hooked rear chain, slab paws, intersecting support shapes, or visible integration seams.
+- The foreclaw gate also rejects the set independently. Root-to-tip lengths are approximately `[.105,.117,.131,.117,.105]` per paw, the mirrored hierarchy is mechanical, and the claws are too small relative to the unsegmented paw slabs to read as seated brown-bear unguals.
+- All further body work must preserve the preferred facial vertices exactly and rebuild caudally from a controlled neck transition. Claw work remains subordinate to a passed toe and paw envelope.
+
+**Reusable rule**
+
+> An immutable baseline is valuable because it prevents feature regression; it is not an anatomical endorsement. Freeze what the user prefers, rebuild what fails around it, and demand separate passes for body support and claw anatomy.
+
+## Iterations 696–709 — Closed sculpt substrate and mandatory claw continuity
+
+- Cutting limb apertures into the axial cage before a stable correspondence map created chest holes, apron sheets, and non-anatomical shoulder borders. Voxel remeshing could smooth those defects but could not recover missing volume ownership.
+- Iteration 705 established the first usable whole-body substrate by overlapping closed axial, limb, paw, digit, scapular, and gluteal lofts, then applying one body-only voxel union. The preferred iteration-289 face remains outside that destructive operation with measured displacement `0.0`.
+- Positive regional masses must be shallow and directional. An oversized nuchal addition became a dorsal fin; smaller scapular and gluteal bridges improved volume continuity but still require a professional seam and plane pass.
+- Iteration 708 exposed a workflow regression: five soft toe caps existed, but all keratin geometry had been deferred, so the paws still read as mitts. A secondary-form gate may postpone approval, but it must not silently remove a user-valued feature from whole-creature evidence.
+- Iteration 709 restores twenty toe-owned unguals to the authoritative rebuild. Foreclaws are longer than hind claws; each begins `26%` inside its toe axis, delays most curvature until the distal half, uses a laterally compressed asymmetric section, and ends on a finite worn profile. The first render remains pending critic correction for exposed roots and needle-like distal taper.
+
+**Reusable rule**
+
+> A gate controls approval, not feature visibility. Once a feature becomes part of the intended animal, keep it represented in every whole-creature review, label its maturity honestly, and improve its anatomical ownership instead of repeatedly deleting and re-adding it.
+
+## Iterations 710–724 — Freeze unions before continuous sculpting
+
+- Iteration 710 applied the claw critic literally: paw thickness increased, toe roots gained volume, foreclaws shortened and deepened, hind claws became shorter than foreclaws, and all twenty unguals remained visible. This fixed the mitt regression but did not pass the animal.
+- Large station edits made before neck fusion repeatedly changed Boolean intersection topology. One source-band voxel experiment shredded thin sculpt layers into visible strips; deeper Boolean runways either swallowed locked facial geometry or created more than one thousand nonmanifold neck edges. Every failed build aborted before saving through face-lock and manifold assertions.
+- Blender's exact Boolean union can preserve all `68,629` locked facial vertices with maximum displacement `0.0`, but only for a frozen intersection envelope. Iteration 716 is retained as that one-component, closed-manifold, clawed baseline.
+- Numeric critic offsets are directional evidence, not commands to apply cumulatively. Iteration 717 over-applied caudal elbow/hock changes and visibly regressed into a crouch; the pass was rejected and its heavy payload pruned.
+- Iteration 724 changes the workflow: the union is frozen first, then broad Gaussian deformation fields sculpt shoulder, triceps, sternum, abdomen, gluteal, thigh, hock, and sacral regions directly on the unified high-resolution mesh. The pass moved `89,596` vertices while retaining one component, zero boundary/nonmanifold edges, all twenty claws, and locked-face displacement `0.0`.
+- Temporary payload policy now pins iteration 716 and retains only the latest open sculpt iteration; rejected heavy studies are pruned while their reports and journal lessons remain.
+
+**Reusable rule**
+
+> Freeze fragile topology operations before artistic iteration. Once a union is proven manifold and the protected region is exact, sculpt the continuous result with bounded deformation fields; do not rebuild the Boolean inputs for every anatomical correction.
+
+## Iterations 727–737 — Visual gates must track separate anatomy
+
+- Scalar centerline shifts in iteration 727 exposed overlapping volume remnants rather than repairing their ownership. Iteration 729 improved the standing silhouette only after the elbow and hock were evaluated as load columns in the render instead of moved by coordinate labels alone.
+- A hard dorsal spatial cutoff in iteration 731 created a shelf. Feathering removed that discontinuity, but iteration 735 proved that normal inflation over a Boolean neck seam merely enlarges layered remnants. Visible transition defects require local retopology, not increasingly broad smoothing or inflation.
+- Iteration 734 retained twenty claw objects, yet its side evidence still read as mitts. The body paw envelope changed while the separate ungual objects did not participate in the refinement pass, and the whole-body renderer gave claws neither a dedicated silhouette view nor material-value separation.
+- Iteration 737 introduces a mandatory visual claw gate: buried roots remain fixed, only the exposed arcs gain projection and restrained terminal curvature, and untextured close views must show digit ownership. The renderer now includes low side and three-quarter paw evidence and distinct dark clay for keratin.
+
+**Reusable rule**
+
+> Object counts prove persistence, not visual preservation. Every separate anatomical object must follow the deformation authority that owns its attachment, and every user-valued feature needs a mandatory evidence view where silhouette, root seating, and neighboring soft tissue can be judged.
+
+## Iterations 738–749 — Paw authority passed; neck shortcuts rejected
+
+- Iteration 737 restored visibility but overextended the claws into uniform talons. Iterations 738–740 progressively shortened the exposed arc, deepened hidden roots, replaced rounded cones with analytical eighteen-section unguals, flattened the ventral profile, and added oblique finite wear planes.
+- Soft-tissue ownership—not claw count—remained the decisive paw problem. Interdigital valleys, nail folds, and plantar bulbs were sculpted on the unified paw. An overstrong pass produced faceted rake marks and was self-rejected; restrained fields plus localized relaxation produced continuous, load-bearing toe masses.
+- The veteran critic issued `CLAW/PAW GATE: PASS` for iteration 742. All five foreclaws belong to separate toe masses, roots sit beneath continuous folds, toe bulbs carry weight, and delayed curvature plus finite worn tips remain readable in front and three-quarter whole-body views. Iteration 742 is pinned as the paw/claw authority.
+- Explicit neck-band deletion reached a closed one-component mesh with zero boundary/nonmanifold edges and exact face lock, but index and arc-length zipper correspondence both produced long radial ribbons. Manifold topology did not make the surface anatomically valid.
+- Thresholded surface-patch deletion created self-touching boundary graphs; direct triangle filling generated overlapping and over-shared faces. A separate nuchal mantle could cover the seam only by becoming a detached collar or oversized hump. Those visual overlays were rejected and are not promoted.
+
+**Reusable rule**
+
+> A topology pass and a visual pass are independent. Never promote a closed manifold with stretched correspondence, and never hide a defective transition beneath a second shell. When both loop bridging and surface filling inherit self-touching Boolean boundaries, return to an earlier clean ownership graph and rebuild the transition before union.
+
+## Iterations 750–780 — Remove conserved ridges; transfer pelvic volume vertically
+
+- Neck experiments showed that volume-preserving relaxation can conserve the exact unwanted form. Guide projection, lateral inflation, throat fills, and pre-remesh collapse either retained the lower-head ridge or converted it into a lip, flap, or shelf.
+- Iteration 776 passed the neck gate after selective facial-landmark reprojection and bounded ordinary fairing removed excess lower-head volume. The preferred muzzle, brow, eyes, ears, passed paws, and all twenty claws remained protected.
+- The first torso/pelvis fields narrowed the abdomen but treated the rear overhang mainly as a caudal projection. Iterations 777–779 therefore retained a tabletop shelf above narrow hind columns even when the side silhouette improved.
+- Iteration 780 broadens the correction through the upper thigh and pulls caudal mass ventrally. It remains under critic review; no torso or pelvis pass is claimed yet.
+- Every torso candidate asserts one closed manifold body component, zero boundary and nonmanifold edges, zero protected-region displacement, and retention of the twenty passed claws.
+
+**Reusable rule**
+
+> Volume preservation is not a virtue when the volume itself is the defect. Remove inherited ridges with bounded non-conserving fairing, and correct a shelf-like pelvis by transferring mass caudoventrally into a continuous proximal-thigh load path—not by shrinking only its rear projection.
+
+## Iterations 789–827 — Compose passed authorities; detect the actual seam
+
+- Iteration 789 passed torso/pelvis after an inverted-U posterior remap transferred the shelf into a continuous pelvis and proximal thigh. Iteration 792 then passed the load-bearing limb gate by reducing the upper arm, supporting the forelimb root, and carrying a heavier distal hind column.
+- Iteration 793 corrected the oversized head with an occipital-anchored warp, but full-body remeshing in iteration 796 erased facial landmarks. Iteration 804 restored those landmarks with 90% normal-ray reprojection and automatic rollback of only intersecting vertices, retaining one closed component and all twenty claws.
+- Rebuilding accepted paws from deformation fields repeatedly oscillated between mitts, faceted grooves, shelves, and needle claws. The durable correction was authority reuse: iteration 814 reprojected the critic-passed iteration 742 paw surface and restored its exact twenty claw objects.
+- The adult-bear muzzle needed a broad maxillary transition rather than a hard local cage scale. A visible head ring persisted until its actual anchor was measured at `Y=-0.92`; iteration 818 fair-smoothed that exact band while locking the face, jaw edge, paws, and claws.
+- Generic smoothing could not remove the hind boot cuffs. The successful iteration 827 raised the upper heel into the crus, then fair-smoothed measured high-dihedral cuff vertices and their controlled neighborhood. It retained zero boundary edges, zero nonmanifold edges, zero nonadjacent intersections, one body component, and twenty claws.
+- The veteran critic issued `FINAL WHOLE-BEAR GATE: COMPLETE PASS` for iteration 827. The remaining ankle boundary is under the stated 20% circumference threshold, and no meaningful anatomy correction remains at this sculpt resolution.
+
+**Reusable rule**
+
+> Preserve passed anatomy as transferable authority, not as an instruction to re-sculpt it from memory. When smoothing fails, measure the actual high-curvature seam, correct volume ownership from the adjoining anatomical mass, and use local intersection rollback instead of weakening topology gates.

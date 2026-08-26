@@ -19,6 +19,12 @@ PINNED_ITERATIONS = {
     "iteration-670-measured-hind-paw-length",
     "iteration-672-elevated-pelvis-tail-seam",
     "iteration-674-buried-hip-placement",
+    "iteration-716-raised-neck-floor-hind-support",
+    "iteration-742-relaxed-toe-ownership",
+    "iteration-776-lower-head-ridge-removal",
+    "iteration-789-inverted-u-posterior-remap",
+    "iteration-792-heavy-distal-hind-column",
+    "iteration-827-deep-upper-heel-overlap",
 }
 HEAVY_SUFFIXES = {".blend", ".blend1", ".png", ".exr", ".tif", ".tiff"}
 EVIDENCE_PREFIXES = ("rejected-",)
