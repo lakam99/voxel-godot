@@ -12,6 +12,7 @@ var rotation := Vector3.ZERO
 var size := Vector3.ONE
 var collision_enabled := true
 var semantic := ""
+var physical_intent := ""
 var recipe: Dictionary = {}
 
 
@@ -26,6 +27,7 @@ func _init(values: Dictionary = {}) -> void:
 	collision_enabled = bool(values.get("collision", true))
 	semantic = String(values.get("semantic", kind)).strip_edges().to_lower()
 	recipe = (values.get("recipe", {}) as Dictionary).duplicate(true)
+	physical_intent = String(recipe.get("physicalIntent", values.get("physicalIntent", ""))).strip_edges().to_lower()
 
 
 func snapshot() -> Dictionary:
@@ -38,5 +40,6 @@ func snapshot() -> Dictionary:
 		"size": size,
 		"collision": collision_enabled,
 		"semantic": semantic,
+		"physicalIntent": physical_intent,
 		"recipe": recipe.duplicate(true)
 	}

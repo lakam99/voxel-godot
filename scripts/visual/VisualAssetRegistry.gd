@@ -336,6 +336,8 @@ func apply_render_policy_recursive(node: Node, family: String, shadow_policy: in
         if WIND_TREE_FAMILIES.has(family):
             apply_tree_wind_materials(mesh_instance)
             mesh_instance.extra_cull_margin = TREE_WIND_CULL_MARGIN
+        if family == "bush":
+            apply_bush_materials(mesh_instance)
     for child in node.get_children():
         apply_render_policy_recursive(child, family, shadow_policy, visibility_end)
 
@@ -347,6 +349,28 @@ func apply_tree_wind_materials(mesh_instance: MeshInstance3D) -> void:
         if source_material == null:
             source_material = mesh_instance.mesh.surface_get_material(surface_index)
         mesh_instance.set_surface_override_material(surface_index, shared_tree_wind_material(source_material))
+
+
+func apply_bush_materials(mesh_instance: MeshInstance3D) -> void:
+    if mesh_instance.mesh == null:
+        return
+    for surface_index in range(mesh_instance.mesh.get_surface_count()):
+        var source_material := mesh_instance.get_surface_override_material(surface_index)
+        if source_material == null:
+            source_material = mesh_instance.mesh.surface_get_material(surface_index)
+        var role := "leaf_primary"
+        if source_material != null:
+            role = String(source_material.resource_name).to_lower()
+        var material := StandardMaterial3D.new()
+        material.resource_name = role
+        material.roughness = 0.92
+        if "trunk" in role or "stem" in role:
+            material.albedo_color = Color(0.18, 0.075, 0.025)
+        elif "secondary" in role:
+            material.albedo_color = Color(0.13, 0.255, 0.085)
+        else:
+            material.albedo_color = Color(0.19, 0.34, 0.115)
+        mesh_instance.set_surface_override_material(surface_index, material)
 
 func shared_tree_wind_material(source_material: Material) -> ShaderMaterial:
     var role := "tree_default"

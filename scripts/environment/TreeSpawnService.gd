@@ -219,6 +219,8 @@ func normalize_request(request: Dictionary) -> Dictionary:
 		"renderLodTier": normalize_lod_tier(String(request.get("renderLodTier", "near"))),
 		"biomeParameters": biome_parameters,
 		"presentation": String(request.get("presentation", "runtime")),
+		"worldPosition": request.get("worldPosition", Vector3.ZERO) as Vector3,
+		"worldRotationY": float(request.get("worldRotationY", 0.0)),
 		# The ecological sampler's seed is a required genetic channel. Use a
 		# tree-local fallback only for review/direct-service callers that do not
 		# supply one; neither option touches shared world-generation RNG.
@@ -444,6 +446,19 @@ func adapt_grammar_recipe(raw: Dictionary, request: Dictionary) -> Dictionary:
 	recipe["biomeParameters"] = (request.get("biomeParameters", {}) as Dictionary).duplicate(true)
 	recipe["renderPolicy"] = render_policy(request)
 	recipe["branches"] = branches
+	var root_buttress_footprints: Array[Dictionary] = []
+	for footprint_value in raw.get("rootButtressFootprints", []) as Array:
+		if not footprint_value is Dictionary:
+			continue
+		var footprint: Dictionary = footprint_value as Dictionary
+		root_buttress_footprints.append({
+			"start": scale_position(footprint.get("start", Vector3.ZERO), horizontal_scale, vertical_scale),
+			"end": scale_position(footprint.get("end", Vector3.ZERO), horizontal_scale, vertical_scale),
+			"radiusStart": maxf(0.018, float(footprint.get("radiusStart", 0.04)) * radius_scale),
+			"radiusEnd": maxf(0.012, float(footprint.get("radiusEnd", 0.02)) * radius_scale),
+			"role": String(footprint.get("role", "root_buttress"))
+		})
+	recipe["rootButtressFootprints"] = root_buttress_footprints
 	recipe["foliage"] = foliage
 	# Preserve source totals as bounded diagnostic metadata.  Runtime reduction
 	# must be evidence-led: a healthy low-cost recipe arrives near the render
@@ -463,7 +478,7 @@ func render_recipe(canonical: Dictionary, request: Dictionary) -> Dictionary:
 	var recipe := canonical.duplicate(true)
 	if String(request.get("presentation", "runtime")) == "review":
 		recipe["pocContinuousWood"] = true
-		return recipe
+		return attach_interaction_facts(recipe, request)
 	var lod_tier := normalize_lod_tier(String(request.get("renderLodTier", "near")))
 	var budgets := runtime_render_budgets(request)
 	if lod_tier == "impostor":
@@ -475,7 +490,7 @@ func render_recipe(canonical: Dictionary, request: Dictionary) -> Dictionary:
 		recipe["runtimeImpostor"] = true
 		recipe["runtimeContinuousBole"] = false
 		recipe["pocContinuousWood"] = false
-		return recipe
+		return attach_interaction_facts(recipe, request)
 	var branch_budget := int(budgets.get("branchBudget", RUNTIME_BRANCH_BUDGET))
 	var foliage_budget := int(budgets.get("foliageBudget", RUNTIME_FOLIAGE_BUDGET))
 	# A tree is a directed support graph. A generic even sample can keep a child
@@ -493,6 +508,32 @@ func render_recipe(canonical: Dictionary, request: Dictionary) -> Dictionary:
 	# remain instanced under the same bounded render budget.
 	recipe["runtimeContinuousBole"] = true
 	recipe["pocContinuousWood"] = false
+	return attach_interaction_facts(recipe, request)
+
+
+func attach_interaction_facts(recipe: Dictionary, request: Dictionary) -> Dictionary:
+	var world_position: Vector3 = request.get("worldPosition", Vector3.ZERO) as Vector3
+	var world_rotation := float(request.get("worldRotationY", 0.0))
+	var basis := Basis(Vector3.UP, world_rotation)
+	var root_buttresses: Array[Dictionary] = []
+	for footprint_value in recipe.get("rootButtressFootprints", []) as Array:
+		if not footprint_value is Dictionary:
+			continue
+		var footprint: Dictionary = footprint_value as Dictionary
+		root_buttresses.append({
+			"start": world_position + basis * (footprint.get("start", Vector3.ZERO) as Vector3),
+			"end": world_position + basis * (footprint.get("end", Vector3.ZERO) as Vector3),
+			"radiusStart": float(footprint.get("radiusStart", 0.10)),
+			"radiusEnd": float(footprint.get("radiusEnd", 0.08)),
+			"role": String(footprint.get("role", "root_buttress"))
+		})
+	recipe["interactionFacts"] = {
+		"schemaVersion": 1,
+		"treeId": String(request.get("treeId", recipe.get("treeId", ""))),
+		"worldPosition": world_position,
+		"worldRotationY": world_rotation,
+		"rootButtresses": root_buttresses
+	}
 	return recipe
 
 func runtime_render_budgets(request: Dictionary) -> Dictionary:

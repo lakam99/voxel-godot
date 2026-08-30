@@ -137,6 +137,7 @@ func build_recipe(seed := DEFAULT_SEED, maturity := 0.92, growth_profile: Dictio
 		"pocContinuousWood": true,
 		"signature": signature,
 		"branches": branches,
+		"rootButtressFootprints": root_buttress_footprints(branches),
 		"foliage": foliage,
 		"branchCount": branches.size(),
 		"foliageClusterCount": foliage.size(),
@@ -1142,26 +1143,61 @@ func node_taper_factor(node: Dictionary, height: float, crown_base: float) -> fl
 
 func build_root_buttresses(trunk_radius: float, seed: int) -> Array[Dictionary]:
 	var roots: Array[Dictionary] = []
-	var root_count := 7
+	var root_count := 5 + posmod(seed, 4)
 	var phase := stable_unit("root-phase:%d" % seed) * TAU
 	for root_index in range(root_count):
 		var angle := phase + float(root_index) * TAU / float(root_count) \
-			+ stable_signed("root-angle:%d:%d" % [seed, root_index]) * 0.16
+			+ stable_signed("root-angle:%d:%d" % [seed, root_index]) * 0.24
 		var direction := Vector3(cos(angle), 0.0, sin(angle))
-		var length := trunk_radius * lerpf(1.25, 1.95, stable_unit("root-length:%d:%d" % [seed, root_index]))
-		var start := direction * trunk_radius * 0.24 + Vector3.UP * trunk_radius * 0.34
-		var end := direction * length + Vector3.UP * 0.07
+		var tangent := Vector3(-direction.z, 0.0, direction.x)
+		var length := trunk_radius * lerpf(1.45, 2.35, stable_unit("root-length:%d:%d" % [seed, root_index]))
+		var start := direction * trunk_radius * 0.12 + Vector3.UP * trunk_radius * lerpf(0.34, 0.58, stable_unit("root-flare-height:%d:%d" % [seed, root_index]))
+		var knee := direction * length * lerpf(0.34, 0.48, stable_unit("root-knee:%d:%d" % [seed, root_index])) \
+			+ tangent * trunk_radius * stable_signed("root-sweep:%d:%d" % [seed, root_index]) * 0.20 \
+			+ Vector3.UP * trunk_radius * 0.10
+		var end := direction * length + tangent * trunk_radius * stable_signed("root-tip-sweep:%d:%d" % [seed, root_index]) * 0.28 + Vector3.UP * 0.04
+		var flare_radius := trunk_radius * lerpf(0.52, 0.70, stable_unit("root-width:%d:%d" % [seed, root_index]))
 		roots.append({
 			"start": start,
-			"end": end,
-			"radiusStart": trunk_radius * lerpf(0.42, 0.58, stable_unit("root-width:%d:%d" % [seed, root_index])),
-			"radiusEnd": maxf(0.14, trunk_radius * 0.075),
+			"end": knee,
+			"radiusStart": flare_radius,
+			"radiusEnd": maxf(0.16, flare_radius * 0.46),
 			"generation": 0,
 			"order": 0,
 			"role": "root_buttress",
 			"windWeight": 0.0
 		})
+		roots.append({
+			"start": knee,
+			"end": end,
+			"radiusStart": maxf(0.16, flare_radius * 0.46),
+			"radiusEnd": maxf(0.10, trunk_radius * 0.060),
+			"generation": 0,
+			"order": 0,
+			"role": "root_buttress_tip",
+			"windWeight": 0.0
+		})
 	return roots
+
+
+func root_buttress_footprints(branches: Array[Dictionary]) -> Array[Dictionary]:
+	var footprints: Array[Dictionary] = []
+	for branch in branches:
+		var role := String(branch.get("role", ""))
+		if role not in ["root_buttress", "root_buttress_tip"]:
+			continue
+		var start: Vector3 = branch.get("start", Vector3.ZERO) as Vector3
+		var end: Vector3 = branch.get("end", Vector3.ZERO) as Vector3
+		if Vector2(end.x - start.x, end.z - start.z).length_squared() <= 0.0001:
+			continue
+		footprints.append({
+			"start": start,
+			"end": end,
+			"radiusStart": maxf(0.08, float(branch.get("radiusStart", 0.12))),
+			"radiusEnd": maxf(0.06, float(branch.get("radiusEnd", 0.08))),
+			"role": role
+		})
+	return footprints
 
 func build_twig_foliage(
 	nodes: Array[Dictionary],
