@@ -12,6 +12,13 @@ The user accepted the normal-game trees' slow-render appearance after the fresh
 `atlas-34217915` tree diagnostic. This is a product sign-off, not evidence that
 all tree species, rendering stages or exit resource leaks were verified clean.
 
+The user chose **rare standalone landmarks in any surface land biome**, excluding
+ocean and caves. Existing block-built towns, including the tutorial, stay in
+place for now; this is not a town replacement/migration. Initial site-field
+tuning is 35% occupancy of 2048-cell regions (about one raw candidate per
+21.8 square kilometres at 1.35 metres/cell), before eligibility exclusions.
+This is a tuning assumption, not measured final accepted-landmark density.
+
 ### Explicit baseline exception
 
 Before edits, the unchanged NPC scene was run headlessly, seed `atlas-1492`,
@@ -134,6 +141,97 @@ constitute an acceptable normal-world streaming/load-latency result.
 
 The independent critic accepted this narrowed checkpoint after inspecting all
 three reports, logs, watchdogs, the reference hash and the final diff. The review
-approved a focused commit, not world integration or runtime readiness. World
-hooks remain pending the user's standalone-landmark versus town-upgrade choice;
-standalone landmarks are recommended to preserve existing town/tutorial behavior.
+approved a focused commit, not world integration or runtime readiness. That
+checkpoint was committed as `af1bec6`. The world-placement product choice is now
+resolved above; terrain and publication work remain to be completed.
+
+## Checkpoint 2A: candidate field and generated-base survey (critic-approved)
+
+Starting at clean `af1bec6`, with the explicit NPC baseline exception unchanged.
+This is a source-only subdivision of checkpoint 2, not normal-world activation.
+
+- `CitadelSiteField` derives candidates and independent recipe seeds without
+  mutable RNG. Bounded jitter and disjoint region-interior reservations prevent
+  citadel/citadel envelope overlap independently of query order. Oversized or
+  boundary-crossing envelopes reject; no clipping, relocation or recipe edits.
+- `CitadelSiteSurvey` creates its own ordinary `VoxelWorldGenerationContext`
+  and `WorldGenerationSystem` from the seed and a canonical copied town-override
+  snapshot. It never reads a live scene while advancing. The source intentionally
+  excludes player edits: durable edits must not relocate deterministic sites.
+- Every rectangle column checks the existing town/apron query and production
+  surface-biome query. All land labels are allowed except town ownership;
+  ocean, cave and underground identifiers are rejected. An explicit underground
+  placement context is rejected before scanning. This does not prove that no
+  underground cavity exists beneath a land surface.
+- Surveys inspect at most 64 columns per call, with a default 2500-microsecond
+  requested budget clamped to 4000, and at most 262144 columns total. Timings and
+  overruns are measured, not disguised as a hard real-time guarantee. Private
+  generator creation and total large-envelope latency still require profiling
+  before runtime use.
+- Survey coordinates are conservatively limited to +/-1,000,000 cells, leaving
+  room for production town/apron lookups without integer wrap. Candidate field
+  arithmetic independently supports the int32 cell domain. Unsupported survey
+  coordinates reject explicitly, rather than wrapping into another region.
+- Source identity binds generated-base policy version, engine, seed and canonical
+  overrides. Request identity additionally binds survey policy, candidate,
+  rectangle and surface context. Source identity alone is never a result-cache
+  key. Snapshot timing explicitly excludes return-copy overhead; contracts
+  measure whole calls separately. Neither timing is a live frame guarantee.
+
+`surveyed` means only complete generated-base surface-policy/elevation coverage
+of the supplied rectangle. `publicationReady` is always false. Input envelopes
+are explicitly **caller-supplied/unverified**, not yet bound to actual recipe
+geometry. Other standalone-structure conflicts and durable-edit compatibility
+remain explicitly unresolved. The next subdivision must derive complete bounds,
+grounding/clearance and apron provenance from prepared source artifacts, resolve
+those other conflicts, and feed authoritative terrain before world activation.
+
+No existing terrain, recipe, tree, town, NPC, navigation, save, or runtime
+publication code is changed by 2A. No headed launch is authorized for this
+source-only boundary. Source contracts pass; the independent critic approved
+this narrowly scoped source-only checkpoint and its focused commit. This is
+not full checkpoint 2 acceptance or approval for a headed launch.
+
+### 2A source evidence
+
+Command (from this worktree; choose a fresh directory for repeats):
+
+```powershell
+./tools/run-citadel-site-selection-contract.ps1 -OutputDirectory "$PWD/artifacts/citadel-runtime-integration/site-contract-01"
+```
+
+The wrapper records the random seed and source SHA256 hashes in `launch.json`
+before launch. `report.json` contains checks, sample measurements and limitations;
+`stdout.log` records stages; `stderr.log` and `watchdog.json` record engine and
+owned-process exit evidence. No screenshots are required or claimed for these
+source contracts. Engine: Godot 4.6.1, official `14d19694e`.
+
+- **120/120 checks**, 0.716140 seconds, no failures, complete report. Fixed seed
+  `atlas-1492`; fresh seed `atlas-site-531a91f9bc0145f899a083f271708d8e`;
+  third density seed is the fresh seed plus `:density-secondary`.
+- 10,000 regions per seed: 3,475 / 3,523 / 3,493 raw candidates. Reverse-order
+  and fresh-instance replay, global-RNG isolation, negative seams, overflow
+  rejection and guarded envelope boundaries are covered.
+- Actual production WGS surveys match a separate every-column oracle for small
+  64/128-column rectangles. Different slice budgets, repeated cold instances,
+  input mutation, completed/partial/rejected reuse, request/source identities,
+  supported-coordinate bounds and real town-apron rejection are covered.
+- Whole-call maximum `begin`: **4.317 ms**; whole-call maximum `advance`:
+  **4.326 ms**; reported scan-loop maximum **4.319 ms**; single-column maximum
+  **0.821 ms**. Soft requested budgets can overrun by the last column and are
+  reported honestly. These figures do **not** pass a strict 4 ms runtime ceiling.
+  Large-envelope throughput, memory, disposal cost and gameplay frame timing
+  remain unverified. The 262,144-column ceiling was tested for admission only,
+  not fully scanned.
+- Empty stderr, no stdout engine errors, natural exit 0, clean watchdog with
+  zero owned members; global Godot process count zero after execution. Both
+  module and contract parse checks also exited cleanly.
+
+Biome exclusion predicates cover the enumerated surface-land and excluded
+labels (the predicate list does not explicitly test `alpine`). The executed
+world surveys are not proof of a rendered
+citadel in every biome, nor a physical ocean/coast/cave acceptance run. No warm
+runtime-cache or main-context/worker equivalence acceptance is claimed. Full
+recipe-envelope provenance, other structure conflicts, saved edits, terrain
+publication and live traversal remain for subsequent checkpoints. Existing NPC
+failures remain deferred by explicit user choice, not repaired or relabeled.
