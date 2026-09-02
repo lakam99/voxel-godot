@@ -15,6 +15,8 @@ const FacadeApertureDeclarationScript := preload("res://scripts/buildings/Facade
 const StreetHouseStructuralManifestScript := preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const StructuralCompletionRecipeScript := preload("res://scripts/buildings/CitadelStructuralCompletionRecipe.gd")
 const LowerFacadeBearingRecipeScript := preload("res://scripts/buildings/LowerFacadeBearingRecipe.gd")
+const RetainedBearingRecipeScript := preload("res://scripts/buildings/RetainedSurfaceBearingRecipe.gd")
+const DoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 
 
 static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector3, additional_reservations: Array[Rect2] = [], search_radius: float = 25.0, approach_width: float = 1.8) -> Dictionary:
@@ -168,11 +170,14 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	if not _emit_compose_diagnostic(diagnostic_callback, "base_layout_started"):
 		return null
 	var retained_parts: Array = []
+	var retired_roots: Array = []
 	for part in blueprint.parts:
 		var part_id := String(part.id) if part != null else ""
 		if part_id.begins_with("castle_courtyard_") and part_id not in ["castle_courtyard_foundation", "castle_courtyard_paving"]:
+			if blueprint.is_grounded_structural_root(part): retired_roots.append(part.snapshot())
 			continue
 		if part_id.begins_with("castle_residence_") or part_id.begins_with("castle_route_frontage_") or part_id.begins_with("castle_sightline_screen_") or part_id.begins_with("castle_gate_market_") or part_id.begins_with("castle_route_neck_"):
+			if blueprint.is_grounded_structural_root(part): retired_roots.append(part.snapshot())
 			continue
 		if part != null and String(part.kind) == "foundation" and (part_id.begins_with("castle_terrace_block_") or part_id.begins_with("castle_district_processional_")):
 			part.recipe["topSurfaceMaterial"] = "worn_cobble"
@@ -299,6 +304,23 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		original.recipe = part.recipe.duplicate(true)
 	if not _emit_compose_diagnostic(diagnostic_callback, "shop_merge_completed"):
 		return null
+	if not _emit_compose_diagnostic(diagnostic_callback, "retained_paving_prepare_started"):
+		return null
+	var retained_paving := prepare_retained_paving(blueprint, retired_roots, reservations.obstacles)
+	if not retained_paving.get("ready", false):
+		handoff["reason"] = "citadel_retained_paving_failed"
+		handoff["retainedPavingFailure"] = retained_paving
+		return null
+	if not _emit_compose_diagnostic(diagnostic_callback, "retained_paving_prepare_completed"):
+		return null
+	if not retained_paving.get("unchanged", false):
+		var retained_commit := _commit_retained_paving(blueprint, retained_paving.afterSnapshot)
+		if not retained_commit.ready:
+			handoff["reason"] = "citadel_retained_paving_commit_failed"
+			handoff["retainedPavingFailure"] = retained_commit
+			return null
+		handoff["retainedPaving"] = {"retiredRootCount": retired_roots.size(),
+			"surfaceIds": retained_paving.selectedIds, "addedPartIds": retained_paving.emitted.map(func(row): return row.part.id)}
 	# The same generic house/seat recipe used by the reviewed candidate runs
 	# against this generated source and the unchanged furnishing reservations.
 	# It stages atomically; no fixture artifact, seed-specific placement or
@@ -380,6 +402,65 @@ static func reset_street_house_structural_manifest(blueprint) -> Dictionary:
 		return {"ready": false, "reason": "invalid_manifest_reset_source"}
 	blueprint.recipe[StreetHouseStructuralManifestScript.KEY] = {}
 	return {"ready": true}
+
+
+static func prepare_retained_paving(blueprint, retired_roots: Array, furnishing_obstacles: Array) -> Dictionary:
+	# Input provenance is captured by the sole prune decision above. No removed
+	# geometry is inferred from a later fixture, seed, or name reconstruction.
+	if blueprint == null or blueprint.rooms.size() > 4096 or furnishing_obstacles.size() > 4096:
+		return {"ready": false, "reason": "retained_paving_input_limit"}
+	var work := FacadeBearingRecipeScript.validation_grid_work(blueprint)
+	if not work.ready: return work
+	var protected: Array = []
+	for obstacle in furnishing_obstacles:
+		if not obstacle is Dictionary or not obstacle.get("bounds") is AABB:
+			return {"ready": false, "reason": "invalid_retained_paving_furnishing"}
+		protected.append(obstacle.bounds)
+	for room in blueprint.rooms:
+		if not room is Dictionary or not room.get("bounds") is AABB or not RetainedBearingRecipeScript.valid_box(room.bounds) or not room.get("accesses", []) is Array:
+			return {"ready": false, "reason": "invalid_retained_paving_room"}
+		# Shared facade recipes reserve interiors, not a courtyard's entire ground.
+		if room.get("role", "") != "courtyard": protected.append(room.bounds)
+		if protected.size() + room.get("accesses", []).size() > 4096:
+			return {"ready": false, "reason": "retained_paving_reservation_limit"}
+		for access in room.get("accesses", []):
+			if not access is Dictionary or not access.get("position") is Vector3 or not access.get("size") is Vector3:
+				return {"ready": false, "reason": "invalid_retained_paving_access"}
+			protected.append(AABB(access.position - access.size * 0.5, access.size))
+	var targets: Array = []
+	for part in blueprint.parts:
+		if part.semantic == "castle_courtyard_paving" and part.collision_enabled: targets.append(part.id)
+		if part.kind != "door": continue
+		var sweep: Array = []
+		if part.recipe.get("doorPresentation", "") == "portcullis":
+			if ceili(part.size.x / 0.30) + protected.size() + 5 > 4096:
+				return {"ready": false, "reason": "retained_paving_door_limit"}
+			sweep = DoorGeometryScript.portcullis_sweep_bounds(part.size, blueprint.part_transform(part))
+		else:
+			var angle: Variant = part.recipe.get("openSwing", DoorGeometryScript.DEFAULT_OPEN_SWING)
+			if not (angle is float or angle is int): return {"ready": false, "reason": "invalid_retained_paving_door_angle"}
+			for primitive in DoorGeometryScript.ordinary_sweep_bounds(part.size, blueprint.part_transform(part), float(angle)):
+				sweep.append(primitive.bounds)
+		if sweep.is_empty(): return {"ready": false, "reason": "invalid_retained_paving_door"}
+		protected.append_array(sweep)
+		if protected.size() > 4096: return {"ready": false, "reason": "retained_paving_reservation_limit"}
+	for volume in protected:
+		if not volume is AABB or not RetainedBearingRecipeScript.valid_box(volume):
+			return {"ready": false, "reason": "invalid_retained_paving_reserved_volume"}
+	return RetainedBearingRecipeScript.prepare(blueprint, retired_roots, targets, protected)
+
+
+static func _commit_retained_paving(blueprint, snapshot: Dictionary) -> Dictionary:
+	if blueprint == null or not snapshot.get("parts") is Array or not snapshot.get("rooms") is Array or not snapshot.get("recipe") is Dictionary:
+		return {"ready": false, "reason": "invalid_retained_paving_snapshot"}
+	var count: int = blueprint.parts.size()
+	if snapshot.parts.size() < count or snapshot.parts.size() > count + RetainedBearingRecipeScript.MAX_FRAGMENTS:
+		return {"ready": false, "reason": "invalid_retained_paving_part_count"}
+	if var_to_bytes(snapshot.parts.slice(0,count)) != var_to_bytes(blueprint.part_snapshots()) or var_to_bytes(snapshot.rooms) != var_to_bytes(blueprint.rooms) or var_to_bytes(snapshot.recipe) != var_to_bytes(blueprint.recipe):
+		return {"ready": false, "reason": "retained_paving_changed_existing_source"}
+	# The existing transactional commit validates the complete result before
+	# mutation, preserving original part objects and their ordered records.
+	return _commit_structural_completion(blueprint, snapshot)
 
 
 static func _commit_structural_completion(blueprint, snapshot: Dictionary) -> Dictionary:

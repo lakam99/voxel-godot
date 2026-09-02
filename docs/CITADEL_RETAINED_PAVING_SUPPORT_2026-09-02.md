@@ -1,5 +1,8 @@
 # Retained paving support: standalone source recipe
 
+The subsequent composer hookup is recorded separately in
+[the composition evidence](CITADEL_RETAINED_PAVING_COMPOSITION_2026-09-02.md).
+
 Branch `codex/citadel-visuals-clean`, starting production source `a560d2a`.
 This is a source-preparation helper and contract, **not composer wiring or live
 citadel acceptance**. The independent critic approved standalone promotion only.
