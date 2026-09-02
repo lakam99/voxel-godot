@@ -4013,10 +4013,10 @@ func add_generated_tree_visual(body: StaticBody3D, prop_id: String, biome: Strin
             if player != null and is_instance_valid(player) and queue.has_method("set_viewer"):
                 queue.set_viewer(player)
             var request := runtime_spec.duplicate(true)
-            request["treeId"] = prop_id
-            request["biome"] = biome
-            request["worldSeed"] = seed_text
-            request["presentation"] = "runtime"
+            request["treeId"] = request.get("treeId", prop_id)
+            request["biome"] = request.get("biome", biome)
+            request["worldSeed"] = request.get("worldSeed", seed_text)
+            request["presentation"] = request.get("presentation", "runtime")
             request["treeWorldPosition"] = body.global_position
             # The queue owns only presentation.  Supplying the current viewer
             # distance lets it complete local canopies first without changing
@@ -4097,6 +4097,73 @@ func make_tree(
         canopy_radius + exclusion_margin
     ):
         return null
+    return _publish_tree_body(parent, prop_id, position, biome, spec, runtime_spec)
+
+## Publishes an already generated request without ecology/RNG or natural-prop
+## exclusion sampling. Position and yaw are explicitly parent-local; dimensions
+## are world units, so the parent must be rigid and upright. Only the copied
+## request's placement is rebound to world space, never its recipe identity.
+## The owner supplies a stable durable prop_id, prevents duplicate publication,
+## and retains/retries deferred requests. Harvest remains the removed_props
+## writer; neither rejection nor deferral records a durable removal.
+func make_tree_from_runtime_request(
+    parent: Node3D,
+    prop_id: String,
+    position: Vector3,
+    biome: String,
+    runtime_request: Dictionary,
+    rotation_y: float
+) -> Dictionary:
+    if parent == null or not is_instance_valid(parent) or not parent.is_inside_tree():
+        return {"status": "deferred", "reason": "parent_not_ready", "body": null}
+    if prop_id.is_empty() or not position.is_finite() or not is_finite(rotation_y):
+        return {"status": "rejected", "reason": "invalid_placement", "body": null}
+    if removed_props.has(prop_id):
+        return {"status": "skipped", "reason": "removed_prop", "body": null}
+    var parent_basis := parent.global_basis
+    if not parent_basis.is_equal_approx(parent_basis.orthonormalized()) or not parent_basis.y.is_equal_approx(Vector3.UP) or not is_equal_approx(parent_basis.determinant(), 1.0):
+        return {"status": "rejected", "reason": "parent_not_rigid_upright", "body": null}
+    if not TreeRuntimeRequestBuilderScript.is_procedural_request(runtime_request):
+        return {"status": "rejected", "reason": "invalid_runtime_request", "body": null}
+    # Reject unsupported dimensions rather than silently clamp an authored tree.
+    for key in ["visualHeight", "trunkRadius", "canopyRadius", "collisionHeight"]:
+        var value: Variant = runtime_request.get(key)
+        if not (value is float or value is int) or not is_finite(float(value)):
+            return {"status": "rejected", "reason": "invalid_dimensions", "body": null}
+    var height := float(runtime_request["visualHeight"])
+    var trunk_radius := float(runtime_request["trunkRadius"])
+    var canopy_radius := float(runtime_request["canopyRadius"])
+    var collision_height := float(runtime_request["collisionHeight"])
+    if height < 1.0 or trunk_radius < 0.12 or canopy_radius < trunk_radius or collision_height < 1.0 or collision_height > height:
+        return {"status": "rejected", "reason": "unsupported_dimensions", "body": null}
+    var world_position := parent.to_global(position)
+    if player != null and is_instance_valid(player) and _player_position_overlaps_tree_dimensions(player.global_position, world_position, height, trunk_radius):
+        return {"status": "deferred", "reason": "player_overlap", "body": null}
+    var runtime_spec := runtime_request.duplicate(true)
+    runtime_spec["worldPosition"] = world_position
+    runtime_spec["worldRotationY"] = parent_basis.get_euler().y + rotation_y
+    var spec := {
+        "rotation": rotation_y,
+        "height": height,
+        "trunk_radius": trunk_radius,
+        "canopy_radius": canopy_radius,
+        "runtime_spec": runtime_spec
+    }
+    var body = _publish_tree_body(parent, prop_id, position, biome, spec, runtime_spec, false)
+    return {"status": "published", "reason": "visual_queued", "body": body}
+
+func _publish_tree_body(
+    parent: Node,
+    prop_id: String,
+    position: Vector3,
+    biome: String,
+    spec: Dictionary,
+    runtime_spec: Dictionary,
+    resolve_player_overlap := true
+):
+    var legacy_height := float(spec.get("legacy_height", spec.get("height", 4.0)))
+    var trunk_radius := maxf(0.12, float(spec.get("trunk_radius", 0.36)))
+    var canopy_radius := maxf(trunk_radius, float(spec.get("canopy_radius", 1.8)))
     var body := StaticBody3D.new()
     body.name = "Tree"
     body.position = position
@@ -4142,7 +4209,8 @@ func make_tree(
     # enqueued; using global_position before this point asks Godot for an
     # invalid transform during ordinary chunk prop creation.
     add_tree_visual(body, prop_id, biome, spec)
-    resolve_player_tree_publication_overlap(body)
+    if resolve_player_overlap:
+        resolve_player_tree_publication_overlap(body)
     if npc_system and npc_system.has_method("notify_navigation_prop_created"):
         npc_system.notify_navigation_prop_created(prop_id, body)
     return body
@@ -4200,10 +4268,13 @@ func player_position_overlaps_generated_tree(position: Vector3, tree: Node3D) ->
         return false
     var center := tree.global_position
     var height := maxf(0.5, float(tree.get_meta("tree_visual_height", 4.0)))
+    return _player_position_overlaps_tree_dimensions(position, center, height, float(tree.get_meta("tree_trunk_radius", 0.36)))
+
+func _player_position_overlaps_tree_dimensions(position: Vector3, center: Vector3, height: float, trunk_radius: float) -> bool:
     if position.y < center.y - 0.5 or position.y > center.y + height + 0.5:
         return false
     var horizontal_delta := Vector2(position.x - center.x, position.z - center.z)
-    return horizontal_delta.length() < maxf(0.12, float(tree.get_meta("tree_trunk_radius", 0.36))) + 0.80
+    return horizontal_delta.length() < maxf(0.12, trunk_radius) + 0.80
 
 func natural_tree_blocked_at_cell(
     x: int,

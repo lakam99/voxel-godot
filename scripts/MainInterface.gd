@@ -415,6 +415,7 @@ func spawn_detail_batch(parent: Node3D, detail_type: String, transforms: Array) 
 func detail_material(detail_type: String) -> Material: return null
 func detail_mesh(detail_type: String) -> Mesh: return null
 func make_tree(parent: Node, prop_id: String, position: Vector3, biome: String, rng: RandomNumberGenerator): return null
+func make_tree_from_runtime_request(parent: Node3D, prop_id: String, position: Vector3, biome: String, runtime_request: Dictionary, rotation_y: float) -> Dictionary: return {}
 func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumberGenerator): return null
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array: return []
 func make_ore(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator): return null
