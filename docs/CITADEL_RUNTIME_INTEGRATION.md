@@ -92,6 +92,13 @@ this focused source follow-up. Ordinary runtime
 activation and headed acceptance remain unfinished; source readiness is not
 live spawning.
 
+The next runtime prerequisite is the owned Site build queue; see
+`CITADEL_SITE_BUILD_QUEUE_2026-09-02.md`. A full real worker preserves the
+actual candidate, and queue-owned payload disposal now runs off the main thread.
+Live dispatch remains disabled: structural preparation still has a measured
+232.534-second cancellation-checkpoint gap, and native terrain admission plus
+ordinary publication have not been integrated.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 
