@@ -86,6 +86,11 @@ func run() -> void:
 	check("parent_loss_fails",lost.status=="failed" and lost.reason=="static_flush_parent_lost")
 	stale_and_pending_controls()
 	failed_preparation_ownership()
+	metadata_cache_controls()
+	metadata_capture_controls()
+	metadata_selected_controls()
+	metadata_graph_controls()
+	prepared_metadata_controls()
 	original_submission_parity()
 	var report: Dictionary = {"evidence":"synthetic_static_batch_flush","checks":checks,"metrics":metrics,"passed":not checks.values().has(false)}
 	var path:=OS.get_environment("BUILDING_STATIC_FLUSH_REPORT")
@@ -93,6 +98,218 @@ func run() -> void:
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("STATIC FLUSH ",JSON.stringify(report))
 	quit(0 if report.passed else 1)
+
+func drain_metadata(publisher, parent: Node3D) -> bool:
+	publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())
+	publisher._begin_static_flush(parent,false)
+	for i in range(10000):
+		if not publisher.has_pending_static_flush(): return not publisher._publication_failed()
+		if publisher.advance_static_flush(parent,2500).status=="failed": return false
+	return false
+
+func metadata_cache_controls() -> void:
+	check("metadata_cache_controls_completed",false)
+	var parent:=Node3D.new(); root.add_child(parent)
+	var publisher:=StalePublisher.new()
+	var typed: Array[Vector3] = [Vector3.ONE,Vector3.ZERO]
+	for i in range(50): publisher.static_part_records[str(i)]={"id":str(i),"recipe":{"nested":[i,{"typed":typed.duplicate()}]}}
+	var body:=publisher.static_collision_batch(parent)
+	check("cache_first_flush",drain_metadata(publisher,parent))
+	var first: Dictionary = body.get_meta("building_part_records")
+	var first_bytes:=var_to_bytes(first)
+	check("cache_records_deeply_immutable",first["0"].is_read_only() and first["0"].recipe.is_read_only() and first["0"].recipe.nested.is_read_only() and first["0"].recipe.nested[1].typed.is_read_only())
+	publisher.static_part_records["new"]={"id":"new","recipe":{"nested":[100]}}
+	check("cache_second_flush",drain_metadata(publisher,parent))
+	var second: Dictionary = body.get_meta("building_part_records")
+	check("cache_independent_prefix_shared_record",not is_same(first,second) and is_same(first["0"],second["0"]))
+	check("cache_reuses_exact_records",publisher._static_record_cache_stats.copies==51 and publisher._static_record_cache_stats.hits==50)
+	check("cache_preserves_typed_ordered_bytes",var_to_bytes(second)==var_to_bytes(publisher.static_part_records))
+	publisher.static_part_records["0"].recipe.nested[0]=123
+	publisher.static_part_records.erase("1")
+	check("cache_changed_record_flush",drain_metadata(publisher,parent))
+	var third: Dictionary = body.get_meta("building_part_records")
+	check("cache_changed_record_isolated",not is_same(second["0"],third["0"]) and third["0"].recipe.nested[0]==123 and second["0"].recipe.nested[0]==0)
+	check("cache_drops_removed_record",not third.has("1") and not publisher._static_record_cache.has("1"))
+	check("cache_previous_snapshot_unchanged",var_to_bytes(first)==first_bytes)
+	check("cache_changed_exact_source",var_to_bytes(third)==var_to_bytes(publisher.static_part_records))
+	publisher.static_part_records["1"]={"id":"1","recipe":{"nested":[1,{"typed":typed.duplicate()}]}}
+	check("cache_readd_flush",drain_metadata(publisher,parent))
+	var readded: Dictionary = body.get_meta("building_part_records")
+	check("cache_readd_not_removed_entry",readded.has("1") and not is_same(first["1"],readded["1"]))
+	publisher.static_part_records["2"].recipe["other"]=7
+	check("cache_key_order_setup",drain_metadata(publisher,parent))
+	var before_order: Dictionary = body.get_meta("building_part_records")
+	var nested: Array = publisher.static_part_records["2"].recipe.nested
+	publisher.static_part_records["2"].recipe={"other":7,"nested":nested}
+	check("cache_key_order_flush",drain_metadata(publisher,parent))
+	var after_order: Dictionary = body.get_meta("building_part_records")
+	check("cache_key_order_identity_exact",not is_same(before_order["2"],after_order["2"]) and var_to_bytes(after_order)==var_to_bytes(publisher.static_part_records))
+	publisher.static_part_records["2"].recipe.nested[1].typed=[Vector3.ONE,Vector3.ZERO]
+	check("cache_type_change_flush",drain_metadata(publisher,parent))
+	var after_type: Dictionary = body.get_meta("building_part_records")
+	check("cache_typed_identity_exact",after_order["2"].recipe.nested[1].typed.is_typed() and not after_type["2"].recipe.nested[1].typed.is_typed() and not is_same(after_order["2"],after_type["2"]))
+	publisher.static_part_records["packed"]={"id":"packed","recipe":{"packed":PackedFloat32Array([1.0,2.0])}}
+	check("cache_unsupported_first_flush",drain_metadata(publisher,parent))
+	var packed_first: Dictionary = body.get_meta("building_part_records")
+	check("cache_unsupported_second_flush",drain_metadata(publisher,parent))
+	var packed_second: Dictionary = body.get_meta("building_part_records")
+	check("cache_unsupported_copied_not_reused",not is_same(packed_first["packed"],packed_second["packed"]) and not publisher._static_record_cache["packed"].reusable and publisher._static_record_cache_stats.unsupportedCopies==2)
+	check("cache_unsupported_type_preserved",typeof(packed_second["packed"].recipe.packed)==TYPE_PACKED_FLOAT32_ARRAY and var_to_bytes(packed_second)==var_to_bytes(publisher.static_part_records))
+	check("cache_unsupported_containers_unfrozen",not packed_second["packed"].is_read_only() and not packed_second["packed"].recipe.is_read_only())
+	packed_second["packed"].recipe["copyOnly"]=true
+	check("cache_unsupported_copy_mutation_isolated",not packed_first["packed"].recipe.has("copyOnly") and not publisher.static_part_records["packed"].recipe.has("copyOnly"))
+	var resource:=Resource.new()
+	publisher.static_part_records["resource"]={"id":"resource","recipe":{"resource":resource}}
+	check("cache_resource_first_flush",drain_metadata(publisher,parent))
+	var resource_first: Dictionary = body.get_meta("building_part_records")
+	check("cache_resource_second_flush",drain_metadata(publisher,parent))
+	var resource_second: Dictionary = body.get_meta("building_part_records")
+	check("cache_resource_not_reused",not is_same(resource_first["resource"],resource_second["resource"]) and not publisher._static_record_cache["resource"].reusable)
+	check("cache_resource_legacy_reference_semantics",resource_first["resource"].recipe.resource==resource and resource_second["resource"].recipe.resource==resource)
+	check("cache_resource_containers_unfrozen",not resource_second["resource"].is_read_only() and not resource_second["resource"].recipe.is_read_only())
+	publisher.static_part_records["path"]={"id":"path","recipe":{"nodePath":NodePath("a/b")}}
+	check("cache_node_path_first_flush",drain_metadata(publisher,parent))
+	var path_first: Dictionary = body.get_meta("building_part_records")
+	check("cache_node_path_second_flush",drain_metadata(publisher,parent))
+	resource_second=body.get_meta("building_part_records")
+	check("cache_node_path_stable_reuse",is_same(path_first.path,resource_second.path) and resource_second.path.recipe.nodePath==NodePath("a/b"))
+	var typed_resources: Array[Resource] = []
+	publisher.static_part_records["typedObjects"]={"recipe":{"objects":typed_resources}}
+	check("cache_empty_object_container_flush",drain_metadata(publisher,parent))
+	resource_second=body.get_meta("building_part_records")
+	check("cache_empty_object_container_unfrozen",not resource_second.typedObjects.is_read_only() and not resource_second.typedObjects.recipe.objects.is_read_only() and not publisher._static_record_cache.typedObjects.reusable)
+	var accepted_cache: Dictionary = publisher._static_record_cache
+	var accepted_copies: int = publisher._static_record_cache_stats.copies
+	publisher.static_part_records["new"].recipe.nested[0]=999
+	publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())
+	publisher._begin_static_flush(parent,false)
+	while publisher._static_flush.state!="commit": publisher._static_flush.advance(publisher,1)
+	publisher.source_valid=false
+	var rejected: Dictionary = publisher.advance_static_flush(parent,1)
+	check("cache_rejection_does_not_publish_staged_entries",rejected.status=="failed" and is_same(accepted_cache,publisher._static_record_cache) and publisher._static_record_cache_stats.copies==accepted_copies and is_same(resource_second,body.get_meta("building_part_records")))
+	parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	publisher.clear_published()
+	check("cache_reset_isolated",publisher._static_record_cache.is_empty() and publisher._static_record_cache_stats.copies==0 and publisher._static_record_cache_stats.hits==0)
+	check("metadata_cache_controls_completed",true)
+
+func metadata_capture_controls() -> void:
+	check("metadata_capture_controls_completed",false)
+	for mode: String in ["nested","replace","remove","add","nested_remove","nested_add"]:
+		var parent:=Node3D.new(); root.add_child(parent)
+		var publisher:=StalePublisher.new()
+		publisher.static_part_records["record"]={"recipe":{"nested":[1,2,3]}}
+		var body:=publisher.static_collision_batch(parent)
+		var old: Dictionary = {"old":true}
+		body.set_meta("building_part_records",old)
+		publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())
+		publisher._begin_static_flush(parent,false)
+		while publisher._static_flush.state!="metadata_copy": publisher._static_flush.advance(publisher,1)
+		match mode:
+			"nested": publisher.static_part_records.record.recipe.nested[0]=99
+			"replace": publisher.static_part_records.record={"recipe":{"different":true}}
+			"remove": publisher.static_part_records.erase("record")
+			"add": publisher.static_part_records["late"]={"recipe":{}}
+			"nested_remove": publisher.static_part_records.record.erase("recipe")
+			"nested_add": publisher.static_part_records.record["late"]=true
+		var result: Dictionary = {}
+		for i in range(1000):
+			result=publisher.advance_static_flush(parent,1)
+			if result.status!="pending_budget": break
+		check("cache_capture_"+mode+"_rejects",result.status=="failed" and publisher._static_record_cache.is_empty() and is_same(old,body.get_meta("building_part_records")))
+		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	check("metadata_capture_controls_completed",true)
+
+func metadata_selected_controls() -> void:
+	check("metadata_selected_controls_completed",false)
+	for reuse: bool in [false,true]:
+		var parent:=Node3D.new(); root.add_child(parent)
+		var publisher:=StalePublisher.new()
+		publisher.static_part_records={"first":{"nested":[1]},"second":{"nested":[2]}}
+		var body:=publisher.static_collision_batch(parent)
+		body.set_meta("building_part_records",{"old":true})
+		if reuse: check("selected_reuse_setup",drain_metadata(publisher,parent))
+		var old: Dictionary = body.get_meta("building_part_records")
+		var cache: Dictionary = publisher._static_record_cache
+		publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())
+		publisher._begin_static_flush(parent,false)
+		# Explicit unit stepping injects mutation after selection, before commit.
+		for i in range(1000):
+			publisher._static_flush._step(publisher)
+			if publisher._static_flush._record_index==1: break
+		check(str(reuse)+"_selected_first_record",publisher._static_flush._record_index==1)
+		publisher.static_part_records.first.nested[0]=99
+		var outcome: Dictionary = {}
+		for i in range(1000):
+			outcome=publisher.advance_static_flush(parent,1)
+			if outcome.status!="pending_budget": break
+		check(str(reuse)+"_selected_mutation_rejected",outcome.status=="failed" and outcome.reason=="metadata_source_changed_during_copy" and is_same(old,body.get_meta("building_part_records")) and is_same(cache,publisher._static_record_cache))
+		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	check("metadata_selected_controls_completed",true)
+
+func prepared_metadata_controls() -> void:
+	check("prepared_metadata_controls_completed",false)
+	for mode: String in ["unchanged","part_changed","identity_changed"]:
+		var parent:=Node3D.new(); root.add_child(parent)
+		var publisher:=StalePublisher.new()
+		var blueprint:=Blueprint.new("prepared",1,"timber")
+		blueprint.add_part({"id":"post","kind":"post","material":"timber_beam","recipe":{"visual":false,"nodePath":NodePath("a/b")}})
+		var compiled:=Preparation._compile_static_records(blueprint)
+		publisher._prepared_static_records=compiled.staticRecords
+		publisher._prepared_static_bindings=compiled.staticRecordBindings
+		if mode=="part_changed": blueprint.parts[0].position+=Vector3.ONE
+		publisher.publish_static_part(blueprint.parts[0],parent)
+		if mode=="part_changed":
+			check("prepared_changed_part_rejected_before_collision",publisher._publication_failed() and parent.get_child_count()==0 and publisher.static_part_records.is_empty())
+		else:
+			var body:=publisher.static_collision_batch(parent)
+			var old: Dictionary = {"old":true}
+			body.set_meta("building_part_records",old)
+			publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())
+			publisher._begin_static_flush(parent,false)
+			for i in range(1000):
+				publisher._static_flush._step(publisher)
+				if publisher._static_flush.state=="commit": break
+			if mode=="identity_changed": publisher.static_part_records.post=publisher.static_part_records.post.duplicate(true)
+			var outcome: Dictionary = publisher.advance_static_flush(parent,1)
+			if mode=="identity_changed":
+				check("prepared_equal_but_replaced_record_rejected",outcome.status=="failed" and is_same(old,body.get_meta("building_part_records")) and publisher._static_record_cache.is_empty())
+			else:
+				check("prepared_immutable_record_reused",outcome.status=="ready" and is_same(body.get_meta("building_part_records").post,compiled.staticRecords.post))
+				check("prepared_no_main_copy",publisher._static_record_cache_stats.copies==0 and publisher._static_record_cache_stats.preparedHits==1)
+		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	check("prepared_metadata_controls_completed",true)
+
+func metadata_graph_controls() -> void:
+	check("metadata_graph_controls_completed",false)
+	for mode: String in ["cycle","depth","late_cycle"]:
+		var parent:=Node3D.new(); root.add_child(parent)
+		var publisher:=StalePublisher.new()
+		var graph: Array = []
+		if mode=="cycle": graph.append(graph)
+		elif mode=="depth":
+			var cursor: Array = graph
+			for i in range(130):
+				var child: Array = []
+				cursor.append(child); cursor=child
+		publisher.static_part_records={"record":{"nested":graph}}
+		var body:=publisher.static_collision_batch(parent)
+		var old: Dictionary = {"old":true}
+		body.set_meta("building_part_records",old)
+		publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())
+		publisher._begin_static_flush(parent,false)
+		if mode=="late_cycle":
+			for i in range(1000):
+				publisher._static_flush._step(publisher)
+				if publisher._static_flush.state=="commit": break
+			graph.append(graph)
+		var result: Dictionary = {}
+		for i in range(1000):
+			result=publisher.advance_static_flush(parent,1)
+			if result.status!="pending_budget": break
+		check(mode+"_malformed_graph_rejected",result.status=="failed" and result.reason=="unsupported_metadata_graph" and publisher._static_record_cache.is_empty() and is_same(old,body.get_meta("building_part_records")))
+		graph.clear()
+		parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
+	check("metadata_graph_controls_completed",true)
 
 func failed_preparation_ownership() -> void:
 	check("failed_preparation_ownership_completed",false)
@@ -105,10 +322,14 @@ func failed_preparation_ownership() -> void:
 	var binding: Dictionary = {"siteId":"failed","sourceKey":"synthetic","generation":1}
 	prepared._binding=binding
 	prepared._payload={"blueprint":blueprint,"furnishingPlan":Plan.new("failed",1,"failed"),"physicalIntegrity":{"passed":true},"raisedRouteCoverage":{},"preparationUsec":0,"routeUsec":0,"physicalUsec":0}
+	var compiled:=Preparation._compile_static_records(blueprint)
+	prepared._payload["staticRecords"]=compiled.staticRecords
+	prepared._payload["staticRecordBindings"]=compiled.staticRecordBindings
 	blueprint=null
 	var outcome: Dictionary = publisher.begin_prepared_publication(prepared,parent,binding)
 	check("failed_begin_returns_owned_payload",not outcome.ready and not outcome.retirementPayload.is_empty() and reference.get_ref()!=null)
 	check("failed_begin_detaches_scene_aliases",publisher._scene_blueprint==null and publisher._scene_parent==null and parent.get_child_count()==0)
+	check("failed_begin_detaches_prepared_metadata",publisher._prepared_static_records.is_empty() and publisher._prepared_static_bindings.is_empty() and is_same(outcome.retirementPayload.staticRecords,compiled.staticRecords) and is_same(outcome.retirementPayload.scenePreparation.staticRecordBindings,compiled.staticRecordBindings))
 	outcome={}
 	check("failed_begin_source_released_with_payload",reference.get_ref()==null)
 	parent.free()

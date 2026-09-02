@@ -68,6 +68,17 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Prepared immutable metadata now removes repeated full-prefix copying from real
+scene construction. Final headless construction passes 62 checks in 21.134 s
+versus 49.994 s at the incremental baseline, with identical available scene
+facts and clean owned-process teardown. See
+`CITADEL_PREPARED_METADATA_PUBLICATION_2026-09-02.md`. Compiler controls pass
+69/69, flush controls 122/122 and existing lifecycle/paving/masonry controls
+remain green; NPC results match the explicitly accepted broken baseline.
+The independent critic approved this focused change and commit. Wall publication (40.533 ms), validation
+commit (22.533 ms) and masonry setup (11.358 ms) still exceed the budget.
+Ordinary service activation and headed/gameplay acceptance remain unfinished.
+
 The incremental paving/mesh/metadata follow-up is implemented and functionally
 verified; see `CITADEL_INCREMENTAL_SCENE_PUBLICATION_2026-09-02.md`. Geometry
 parity passes 910 checks, ownership/submission controls 62, cancellation controls

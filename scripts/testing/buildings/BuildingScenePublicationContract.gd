@@ -110,6 +110,7 @@ func actual_publication() -> void:
 	main.add_child(parent)
 	var job_script = load("res://scripts/buildings/BuildingScenePublicationJob.gd")
 	var job = job_script.new()
+	metrics.metadataPreparationUsec=completed.result.prepared._payload.get("metadataPreparationUsec",0)
 	var begin: Dictionary = job.begin(completed.result.prepared,profile,binding,parent,main.make_tree_from_runtime_request)
 	completed = {}; profile = {}
 	check("actual_begin_queued_without_nodes",begin.status=="pending_budget" and parent.get_child_count()==0)
@@ -129,6 +130,9 @@ func actual_publication() -> void:
 	metrics.publication = status
 	metrics.publisherStages = job._building.publication_timing() if job._building!=null else {}
 	metrics.retainedMetadata=measure_retained_metadata(job._building)
+	metrics.metadataCache=job._building._static_record_cache_stats.duplicate() if job._building!=null else {}
+	metrics.metadataCache["currentRecords"]=job._building._static_record_cache.size() if job._building!=null else 0
+	check("actual_metadata_prepared_without_main_copy",metrics.metadataCache.get("copies",-1)==0 and metrics.metadataCache.get("preparedHits",0)>3159 and metrics.metadataCache.currentRecords==3159)
 	var unit_resource: WeakRef = weakref(job._building.unit_box) if job._building!=null else null
 	var material_resource: WeakRef = weakref(job._building.material_cache.values()[0]) if job._building!=null and not job._building.material_cache.is_empty() else null
 	check("actual_scene_ready",status.sceneReady)

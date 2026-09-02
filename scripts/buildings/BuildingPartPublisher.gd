@@ -70,6 +70,10 @@ var _publication_stage_metrics: Dictionary = {}
 var _static_flush
 var _static_flush_notify := false
 var _publication_retirement: Array = []
+var _static_record_cache: Dictionary = {}
+var _static_record_cache_stats: Dictionary = {"copies":0,"hits":0,"preparedHits":0,"copiedEncodedBytes":0,"unsupportedCopies":0}
+var _prepared_static_records: Dictionary = {}
+var _prepared_static_bindings: Dictionary = {}
 var resumable_scene_publication := false
 var _finish_validated := false
 var _pending_paving
@@ -151,6 +155,8 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 	raised_route_coverage = source.raisedRouteCoverage
 	physical_integrity = source.physicalIntegrity
 	diagnostic_preparation_usec = source.preparationUsec
+	_prepared_static_records=source.get("staticRecords",{})
+	_prepared_static_bindings=source.get("staticRecordBindings",{})
 	var started := Time.get_ticks_usec()
 	var ready := _begin_scene_publication(source.blueprint, options, parent)
 	scene_preparation_usec = Time.get_ticks_usec() - started
@@ -160,7 +166,8 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 		source["scenePreparation"] = _detach_preparation_for_retirement()
 		return {"ready":false, "reason":"scene_preparation_failed", "retirementPayload":source}
 	return {"ready":true, "reason":"", "blueprint":source.blueprint, "furnishingPlan":source.furnishingPlan,
-		"preparationUsec":source.preparationUsec, "routeUsec":source.routeUsec, "physicalUsec":source.physicalUsec}
+		"preparationUsec":source.preparationUsec, "routeUsec":source.routeUsec, "physicalUsec":source.physicalUsec,
+		"metadataPreparationUsec":source.get("metadataPreparationUsec",0)}
 
 
 func _detach_preparation_for_retirement() -> Dictionary:
@@ -168,6 +175,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	# clearing aliased containers or retaining the failed blueprint in publisher.
 	var state := {"physicalIntegrity":physical_integrity, "raisedRouteCoverage":raised_route_coverage,
 		"sceneBlueprint":_scene_blueprint,
+		"staticRecords":_prepared_static_records,"staticRecordBindings":_prepared_static_bindings,
 		"pavingBlueprint":_paving_blueprint, "pavingParts":_paving_source_parts,
 		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
 		"pavingHistoryBinding":_paving_history_binding, "pavingTreatments":paving_treatments,
@@ -177,6 +185,8 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	raised_route_coverage = {}
 	_scene_blueprint=null
 	_scene_parent=null
+	_prepared_static_records={}
+	_prepared_static_bindings={}
 	_paving_blueprint = null
 	_paving_source_parts = {}
 	_paving_artifacts = {}
@@ -347,6 +357,10 @@ func clear_published() -> void:
 	_pending_part_index=-1
 	_static_flush = null
 	_publication_retirement = []
+	_static_record_cache={}
+	_static_record_cache_stats={"copies":0,"hits":0,"preparedHits":0,"copiedEncodedBytes":0,"unsupportedCopies":0}
+	_prepared_static_records={}
+	_prepared_static_bindings={}
 	_finish_validated = false
 	_scene_finalized = false
 	_publication_stage_metrics = {}
@@ -468,6 +482,12 @@ func publish_static_part(part, parent: Node3D) -> void:
 	# their individual bodies because DoorPortalService owns their interaction and
 	# collision state.
 	if part.collision_enabled:
+		var record: Dictionary = part.snapshot()
+		if _prepared_static_records.has(String(part.id)):
+			if not _prepared_static_bindings.has(String(part.id)) or PublicationPreparation.static_record_binding(record)!=_prepared_static_bindings[String(part.id)]:
+				_paving_reject("stale_prepared_metadata_source")
+				return
+			record=_prepared_static_records[String(part.id)]
 		var collision_body := static_collision_batch(parent)
 		var collision := CollisionShape3D.new()
 		var shape := BoxShape3D.new()
@@ -480,7 +500,7 @@ func publish_static_part(part, parent: Node3D) -> void:
 		collision.position = part.position
 		collision.rotation = part.rotation
 		collision_body.add_child(collision)
-		static_part_records[String(part.id)] = part.snapshot()
+		static_part_records[String(part.id)] = record
 		collision_count += 1
 	if bool(part.recipe.get("visual", true)):
 		static_visual_collecting = true

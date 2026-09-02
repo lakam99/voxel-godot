@@ -1,4 +1,5 @@
 extends RefCounted
+const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 ## One existing static-batch boundary, prepared in small main-thread units.
 ## No Node references survive a call. The owner pauses part publication until
 ## ready, and retains retired containers until its existing worker disposal.
@@ -12,6 +13,22 @@ var _records: Dictionary = {}
 var _keys: Array = []
 var _metadata: Dictionary = {}
 var _copy_stack: Array = []
+var _record_keys: Array = []
+var _record_index := 0
+var _record_key: Variant
+var _record_source: Dictionary = {}
+var _record_copy: Dictionary = {}
+var _record_binding := ""
+var _cache: Dictionary = {}
+var _cache_hits := 0
+var _copies := 0
+var _copied_encoded_bytes := 0
+var _record_reusable := true
+var _unsupported_copies := 0
+var _record_containers: Array = []
+var _freeze_index := 0
+var _all_records_prepared := true
+var _prepared_hits := 0
 var _group_index := 0
 var _instance_index := 0
 var _mesh: MultiMesh
@@ -91,29 +108,113 @@ func _step(publisher) -> void:
 			_group_index += 1
 			state = "group"
 		"metadata_begin":
-			# A single source part can contain a large nested recipe. Shallow-copy
-			# each container, then replace child containers one at a time. This
-			# preserves typed arrays/dictionaries without an atomic deep clone.
+			# Each prefix dictionary is independent. Its nested record values are
+			# immutable, allowing exact unchanged records to be shared safely.
 			_metadata = _records.duplicate(false)
-			_copy_stack.append({"source":_records,"target":_metadata,"keys":_records.keys(),"index":0})
+			_record_keys = _records.keys()
 			state = "metadata"
 		"metadata":
-			if _copy_stack.is_empty():
+			if _record_index >= _record_keys.size():
 				state="commit"
+				return
+			_record_key=_record_keys[_record_index]
+			if not _records.has(_record_key) or not _records[_record_key] is Dictionary:
+				state="failed"; reason="metadata_collection_changed_during_copy"; return
+			_record_source=_records[_record_key]
+			var prepared: Dictionary = publisher._prepared_static_records.get(_record_key,{})
+			if not prepared.is_empty() and is_same(_record_source,prepared):
+				_metadata[_record_key]=prepared
+				_cache[_record_key]={"source":publisher._prepared_static_bindings[_record_key],"value":prepared,"reusable":true}
+				_prepared_hits+=1
+				_record_index+=1
+				return
+			_all_records_prepared=false
+			if not _encoding_graph_safe(_record_source):
+				state="failed"; reason="unsupported_metadata_graph"; return
+			_record_binding=Preparation.static_record_binding(_record_source)
+			if _record_binding.is_empty():
+				state="failed"; reason="metadata_encoding_failed"; return
+			var cached: Dictionary = publisher._static_record_cache.get(_record_key,{})
+			# Exact bytes bind order, types and all nested values, not a lossy hash
+			# or mutable object identity. Cache updates remain private until commit.
+			if not cached.is_empty() and cached.get("reusable",false) and cached.source==_record_binding:
+				_metadata[_record_key]=cached.value
+				_cache[_record_key]=cached
+				_cache_hits+=1
+				_record_index+=1
+				return
+			_record_copy=_record_source.duplicate(false)
+			_record_reusable=_shareable_container(_record_source)
+			_record_containers=[_record_copy]
+			_freeze_index=0
+			_metadata[_record_key]=_record_copy
+			_copy_stack.append({"source":_record_source,"target":_record_copy,"keys":_record_source.keys(),"index":0})
+			state="metadata_copy"
+		"metadata_copy":
+			if _copy_stack.is_empty():
+				state="metadata_freeze" if _record_reusable else "metadata_finish"
 				return
 			var frame: Dictionary = _copy_stack[-1]
 			var source: Variant = frame.source
+			if source is Dictionary and source.keys()!=frame.keys:
+				state="failed"; reason="metadata_source_changed_during_copy"; return
 			if frame.index >= source.size():
 				_copy_stack.pop_back()
 				return
 			var key: Variant = frame.keys[frame.index] if source is Dictionary else frame.index
+			if source is Dictionary and not source.has(key):
+				state="failed"; reason="metadata_source_changed_during_copy"; return
+			if not _immutable_leaf(key): _record_reusable=false
 			frame.index+=1
 			var value: Variant = source[key]
 			if value is Dictionary or value is Array:
+				if _copy_stack.size()>=128:
+					state="failed"; reason="unsupported_metadata_graph"; return
+				for ancestor in _copy_stack:
+					if is_same(ancestor.source,value):
+						state="failed"; reason="unsupported_metadata_graph"; return
 				var copy: Variant = value.duplicate(false)
+				if not _shareable_container(value): _record_reusable=false
 				frame.target[key]=copy
+				_record_containers.append(copy)
 				_copy_stack.append({"source":value,"target":copy,"keys":value.keys() if value is Dictionary else [],"index":0})
+			elif not _immutable_leaf(value):
+				# Packed arrays, Resources, RIDs, callables and signals are not made
+				# immutable by freezing a containing Array/Dictionary. Preserve the
+				# old copy semantics but never reuse such a record across prefixes.
+				_record_reusable=false
+		"metadata_freeze":
+			if _freeze_index<_record_containers.size():
+				_record_containers[_freeze_index].make_read_only()
+				_freeze_index+=1
+			else:
+				state="metadata_finish"
+		"metadata_finish":
+			if not _encoding_graph_safe(_records.get(_record_key)) or not _encoding_graph_safe(_record_source):
+				state="failed"; reason="unsupported_metadata_graph"; return
+			if not _records.has(_record_key) or Preparation.static_record_binding(_records[_record_key])!=_record_binding or Preparation.static_record_binding(_record_source)!=_record_binding or Preparation.static_record_binding(_record_copy)!=_record_binding:
+				state="failed"; reason="metadata_source_changed_during_copy"; return
+			_cache[_record_key]={"source":_record_binding,"value":_record_copy,"reusable":_record_reusable}
+			_copies+=1
+			if not _record_reusable: _unsupported_copies+=1
+			_copied_encoded_bytes+=_record_binding.length() >> 1
+			_record_index+=1
+			state="metadata"
 		"commit":
+			if _records.keys()!=_record_keys:
+				state="failed"; reason="metadata_collection_changed_during_copy"; return
+			if _all_records_prepared:
+				# The compiler owns these deeply frozen values. Validate every
+				# selected reference and ordered membership, not dictionary equality.
+				for key in _record_keys:
+					if not is_same(_records[key],publisher._prepared_static_records.get(key)) or not is_same(_metadata[key],_records[key]):
+						state="failed"; reason="metadata_source_changed_during_copy"; return
+			elif not _encoding_graph_safe(_records):
+				state="failed"; reason="unsupported_metadata_graph"; return
+			elif Preparation.static_record_binding(_records)!=Preparation.static_record_binding(_metadata):
+				# Mutable compatibility inputs require exact final content proof,
+				# including earlier selections. This cost stays visible in metrics.
+				state="failed"; reason="metadata_source_changed_during_copy"; return
 			# No yield or callbacks between this proof and metadata replacement.
 			# Rejection leaves the previously published snapshot untouched.
 			if not publisher.validate_static_flush_source():
@@ -123,7 +224,47 @@ func _step(publisher) -> void:
 					publisher._publication_retirement.append(publisher.static_collision_body.get_meta("building_part_records"))
 				publisher.static_collision_body.set_meta("building_part_records", _metadata)
 			publisher._publication_retirement.append(_groups)
+			publisher._static_record_cache=_cache
+			publisher._static_record_cache_stats.copies+=_copies
+			publisher._static_record_cache_stats.hits+=_cache_hits
+			publisher._static_record_cache_stats.preparedHits+=_prepared_hits
+			publisher._static_record_cache_stats.copiedEncodedBytes+=_copied_encoded_bytes
+			publisher._static_record_cache_stats.unsupportedCopies+=_unsupported_copies
 			publisher.static_visual_batches = {}
 			publisher.static_visual_transform_count = 0
 			publisher.incremental_static_flush_count += 1
 			state = "ready"
+
+static func _immutable_leaf(value: Variant) -> bool:
+	# Godot's value-only Variant types through NodePath; later enum members
+	# include handles, Objects and mutable/copy-on-write collection wrappers.
+	return typeof(value)<=TYPE_NODE_PATH
+
+static func _shareable_container(value: Variant) -> bool:
+	# Empty typed Object containers still promise future mutable handles; match
+	# compiler eligibility rather than freezing them because they have no leaves.
+	if value is Dictionary:
+		return value.get_typed_key_builtin()<=TYPE_NODE_PATH and _shareable_value_type(value.get_typed_value_builtin())
+	return _shareable_value_type(value.get_typed_builtin())
+
+static func _shareable_value_type(kind: int) -> bool:
+	return kind<=TYPE_NODE_PATH or kind==TYPE_ARRAY or kind==TYPE_DICTIONARY
+
+static func _encoding_graph_safe(value: Variant, ancestors: Array = []) -> bool:
+	# Only the mutable compatibility path needs this guard. Prepared graphs were
+	# checked/frozen on the worker. Packed arrays and handles keep legacy semantics.
+	if not value is Dictionary and not value is Array: return true
+	if ancestors.size()>=128: return false
+	for ancestor in ancestors:
+		if is_same(ancestor,value): return false
+	ancestors.append(value)
+	if value is Dictionary:
+		for key in value:
+			if not _encoding_graph_safe(key,ancestors) or not _encoding_graph_safe(value[key],ancestors):
+				ancestors.pop_back(); return false
+	else:
+		for item in value:
+			if not _encoding_graph_safe(item,ancestors):
+				ancestors.pop_back(); return false
+	ancestors.pop_back()
+	return true
