@@ -76,6 +76,12 @@ boundary passed 33 checks and independent critic review; see
 activation remain in progress. The active goal is **continue until citadel
 spawns correctly**; no completion or headed approval is claimed.
 
+The subsequent fixed-axis placement repair is committed as `11cf54b`. The
+source-only Site preparation/cancellation boundary is critic-approved; see
+`CITADEL_SITE_PREPARATION_2026-09-02.md`. Its actual candidate replay still fails
+on four structural parts, while the reviewed reference's full geometry and
+furniture remain byte-identical. No ordinary-game spawning is enabled yet.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 
