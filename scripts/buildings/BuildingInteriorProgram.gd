@@ -1,7 +1,7 @@
 extends RefCounted
 class_name BuildingInteriorProgram
 
-const SCHEMA_VERSION := 1
+const SCHEMA_VERSION := 2
 
 
 static func apply_to_plan(blueprint, plan) -> Dictionary:
@@ -73,14 +73,17 @@ static func apply_to_plan(blueprint, plan) -> Dictionary:
 static func ensure_recipe_program(blueprint) -> Dictionary:
 	if blueprint == null:
 		return {"schemaVersion": SCHEMA_VERSION, "apertures": []}
-	var cached: Dictionary = blueprint.recipe.get("interiorProgram", {}) as Dictionary
-	if int(cached.get("schemaVersion", 0)) == SCHEMA_VERSION and cached.has("apertures"):
-		return cached.duplicate(true)
+	# Apertures are a derived view of the current authoritative parts and rooms.
+	# Rebuilding this small list prevents a cached program from surviving a room
+	# or facade revision and assigning a window through stale geometry.
 	var apertures: Array = []
 	for part in blueprint.parts:
 		if part == null or String(part.kind) != "window":
 			continue
-		var room: Dictionary = room_for_window(blueprint.rooms, part.position)
+		var declared_room_id := String(part.recipe.get("roomId", "")).strip_edges()
+		var declared_inward: Vector3 = part.recipe.get("interiorInwardDirection", Vector3.ZERO) as Vector3
+		var declared_wall_offset := float(part.recipe.get("interiorWallOffset", 0.0))
+		var room: Dictionary = room_for_window(blueprint.rooms, part.position, declared_room_id, declared_inward, declared_wall_offset)
 		if room.is_empty():
 			continue
 		var bounds: AABB = room.get("bounds", AABB()) as AABB
@@ -181,15 +184,45 @@ static func audit_plan(blueprint, plan) -> Dictionary:
 	}
 
 
-static func room_for_window(rooms: Array, position: Vector3) -> Dictionary:
+static func room_for_window(rooms: Array, position: Vector3, declared_room_id := "", declared_inward := Vector3.ZERO, declared_wall_offset := 0.0) -> Dictionary:
+	if not position.is_finite():
+		return {}
+	var room_id := String(declared_room_id).strip_edges()
+	if not room_id.is_empty():
+		var declared_matches: Array[Dictionary] = []
+		for room_value in rooms:
+			if room_value is Dictionary and String((room_value as Dictionary).get("id", "")).strip_edges() == room_id:
+				declared_matches.append(room_value as Dictionary)
+		if declared_matches.size() != 1:
+			return {}
+		var declared_room: Dictionary = declared_matches[0]
+		var bounds: AABB = declared_room.get("bounds", AABB()) as AABB
+		var inward := declared_inward as Vector3
+		var wall_offset := float(declared_wall_offset)
+		if not _valid_room_bounds(bounds) or not inward.is_finite() or not is_finite(wall_offset) or wall_offset <= 0.0 or wall_offset > 2.0:
+			return {}
+		if absf(inward.y) > 0.001 or (absf(inward.x) > 0.999) == (absf(inward.z) > 0.999):
+			return {}
+		inward = inward.normalized()
+		var wall_point := position + inward * wall_offset
+		if not bounds.grow(0.02).has_point(wall_point):
+			return {}
+		var expected_face := bounds.position.x if inward.x > 0.5 else bounds.end.x if inward.x < -0.5 else bounds.position.z if inward.z > 0.5 else bounds.end.z
+		var wall_coordinate := wall_point.x if absf(inward.x) > 0.5 else wall_point.z
+		return declared_room if absf(wall_coordinate - expected_face) <= 0.02 else {}
+	var spatial_matches: Array[Dictionary] = []
 	for room_value in rooms:
 		if not room_value is Dictionary:
 			continue
 		var room: Dictionary = room_value as Dictionary
 		var bounds: AABB = room.get("bounds", AABB()) as AABB
-		if bounds.grow(0.20).has_point(position):
-			return room
-	return {}
+		if _valid_room_bounds(bounds) and bounds.grow(0.20).has_point(position):
+			spatial_matches.append(room)
+	return spatial_matches[0] if spatial_matches.size() == 1 else {}
+
+
+static func _valid_room_bounds(bounds: AABB) -> bool:
+	return bounds.position.is_finite() and bounds.size.is_finite() and bounds.size.x > 0.0 and bounds.size.y > 0.0 and bounds.size.z > 0.0
 
 
 static func inward_direction(bounds: AABB, position: Vector3) -> Vector3:

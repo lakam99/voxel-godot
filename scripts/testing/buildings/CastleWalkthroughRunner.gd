@@ -22,6 +22,8 @@ func _ready() -> void:
 	build_world()
 	build_hud()
 	await rebuild_fixture(false)
+	if blueprint == null:
+		return
 	spawn_player()
 	update_hud()
 	if not report_path.is_empty():
@@ -104,7 +106,17 @@ func rebuild_fixture(reset_player := true) -> void:
 	# Give the loading text one visible frame before the deterministic recipe
 	# builder performs its bounded synchronous sampling work.
 	await get_tree().process_frame
-	blueprint = build_castle_blueprint()
+	blueprint = await prepare_castle_blueprint()
+	if blueprint == null:
+		set_loading("Castle blueprint construction failed")
+		is_rebuilding = false
+		if not report_path.is_empty():
+			var failure := FileAccess.open(report_path, FileAccess.WRITE)
+			if failure != null:
+				failure.store_string(JSON.stringify({"status": "failed", "reason": "blueprint_construction_failed", "seed": selected_seed, "citadelScale": selected_citadel_scale}))
+		push_error("Castle blueprint construction failed; publication cancelled")
+		get_tree().quit(2)
+		return
 	configure_walkthrough_ground()
 	await get_tree().process_frame
 
@@ -120,7 +132,13 @@ func rebuild_fixture(reset_player := true) -> void:
 	# constructed it.  The castle planner only applies the residence transform
 	# and namespace, then the shared publisher owns visual/collision publication.
 	await get_tree().process_frame
-	furnishing_plan = CastleFurnishingPlannerScript.build(blueprint, selected_seed * 7919 + 37)
+	furnishing_plan = await prepare_castle_furnishings()
+	if furnishing_plan == null:
+		set_loading("Castle furnishing preparation failed")
+		is_rebuilding = false
+		push_error("Castle furnishings are incomplete; publication cancelled")
+		get_tree().quit(2)
+		return
 	furnishing_root = Node3D.new()
 	furnishing_root.name = "PublishedCastleWalkthroughFurnishings"
 	add_child(furnishing_root)
@@ -140,6 +158,16 @@ func rebuild_fixture(reset_player := true) -> void:
 	is_rebuilding = false
 	set_loading_visible(false)
 	update_hud()
+
+
+func prepare_castle_blueprint():
+	# Specializations may keep source-only composition on an owned worker;
+	# scene publication below always remains on the main thread.
+	return build_castle_blueprint()
+
+
+func prepare_castle_furnishings():
+	return CastleFurnishingPlannerScript.build(blueprint, selected_seed * 7919 + 37)
 
 
 func build_castle_blueprint():

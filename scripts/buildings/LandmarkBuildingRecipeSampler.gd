@@ -693,20 +693,29 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 		var turn_offset := route_sign * clampf(courtyard_width * 0.15, 12.0, 17.0)
 		var first_turn_z := float(row_centers[0]) + cell_spacing * 0.15 if not row_centers.is_empty() else -courtyard_depth * 0.30
 		var final_turn_z := keep_front_z - clampf(keep_depth * 0.45, 10.0, 14.0)
-		var stair_run := 7.0 * 0.48
-		var processional_tread_half_depth := 0.26
+		var processional_step_count := 7
+		var processional_tread_spacing := 0.48
+		var processional_tread_depth := processional_tread_spacing + 0.04
+		var processional_transition_span := float(processional_step_count - 1) * processional_tread_spacing + processional_tread_depth
+		var processional_center_to_start := float(processional_step_count) * processional_tread_spacing + processional_tread_depth * 0.5
+		var processional_center_to_end := processional_tread_spacing - processional_tread_depth * 0.5
 		var entry_ramp_start_z := float(entry_approach["rampStartZ"])
 		var second_stair_end_z := entry_ramp_start_z
 		# add_citadel_processional_steps places its final tread one nominal tread
 		# behind the supplied centre. Its physical front edge is therefore centre
 		# minus 0.22m (0.48m tread with 0.04m overlap).
-		var second_stair_center_z := second_stair_end_z + 0.22
-		var second_stair_start_z := second_stair_center_z - stair_run - processional_tread_half_depth
+		var second_stair_center_z := second_stair_end_z + processional_center_to_end
+		var second_stair_start_z := second_stair_center_z - processional_center_to_start
 		# The turn must clear the first physical tread. Otherwise the street
 		# publisher correctly removes its overlapping roadbed and leaves a gap at
 		# the turn's forward edge. This keeps the route ordered: turn -> roadbed
 		# -> stairs -> forecourt.
 		final_turn_z = minf(final_turn_z, second_stair_start_z - route_half_width)
+		# Both elevation changes may occur inside one coarse district-row interval.
+		# Route geometry therefore owns two explicit transitions instead of keying a
+		# single stair override by row index. Make enough room between the two turn
+		# footprints for the first transition's real seven-tread AABB.
+		first_turn_z = minf(first_turn_z, final_turn_z - route_half_width * 2.0 - processional_transition_span)
 		var route_centers: Array[float] = []
 		for resolved_row_index in range(rows):
 			var row_z := float(row_centers[resolved_row_index])
@@ -826,31 +835,23 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 				})
 			cells.append(row)
 		var boulevard_front_z := -half_depth + tower_span * 0.5 + 1.0
-		var first_transition_index := 0
-		var second_transition_index := maxi(0, row_centers.size() - 1)
-		for transition_index in range(row_centers.size()):
-			var transition_z := float(row_centers[transition_index])
-			if transition_z >= first_turn_z and first_transition_index == 0:
-				first_transition_index = transition_index
-			if transition_z >= final_turn_z:
-				second_transition_index = transition_index
-				break
-		var first_stair_center_z := float(row_centers[first_transition_index]) - 1.6
-		var first_stair_start_z := first_stair_center_z - stair_run
-		# The entry landing is the single owner of the final processional seam.
-		# The compound builder consumes this same centre override when publishing
-		# the real stair geometry.
-		var processional_step_centers := {str(second_transition_index): second_stair_center_z}
+		var first_stair_start_z := first_turn_z + route_half_width
+		var first_stair_end_z := first_stair_start_z + processional_transition_span
+		var first_stair_center_z := first_stair_start_z + processional_center_to_start
+		var processional_transitions: Array[Dictionary] = [
+			{"ordinal": 0, "idPrefix": "castle_terrace_stair_00", "centerX": turn_offset, "centerZ": first_stair_center_z, "width": route_half_width * 2.0 * 1.12 * 1.82, "fromElevation": 0.0, "toElevation": terrace_step_height, "startZ": first_stair_start_z, "endZ": first_stair_end_z},
+			{"ordinal": 1, "idPrefix": "castle_terrace_stair_01", "centerX": 0.0, "centerZ": second_stair_center_z, "width": route_half_width * 2.0 * 1.12 * 1.82, "fromElevation": terrace_step_height, "toElevation": terrace_step_height * 2.0, "startZ": second_stair_start_z, "endZ": second_stair_end_z}
+		]
 		street_records.append({"id": "processional_00_gate_lane", "x": 0.0, "z": (boulevard_front_z + first_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": first_turn_z - boulevard_front_z, "elevation": 0.0})
 		street_records.append({"id": "processional_01_first_turn", "x": turn_offset * 0.5, "z": first_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": 0.0})
-		street_records.append({"id": "processional_02a_civic_approach", "x": turn_offset, "z": (first_turn_z + first_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, first_stair_start_z - first_turn_z), "elevation": 0.0})
-		street_records.append({"id": "processional_02b_civic_climb", "x": turn_offset, "z": (first_stair_center_z + final_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, final_turn_z - first_stair_center_z), "elevation": terrace_step_height})
+		street_records.append({"id": "processional_02a_civic_approach", "x": turn_offset, "z": (first_turn_z + first_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": first_stair_start_z - first_turn_z, "elevation": 0.0})
+		street_records.append({"id": "processional_02b_civic_climb", "x": turn_offset, "z": (first_stair_end_z + final_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": final_turn_z - first_stair_end_z, "elevation": terrace_step_height})
 		street_records.append({"id": "processional_03_final_turn", "x": turn_offset * 0.5, "z": final_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": terrace_step_height})
 		var final_stair_owner_ids: Array[String] = []
 		for final_stair_step_index in range(1, 8):
-			final_stair_owner_ids.append("castle_terrace_stair_%02d_%02d" % [second_transition_index, final_stair_step_index])
-		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, second_stair_start_z - final_turn_z), "elevation": terrace_step_height, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_start_z, "handoffTransitionOwnerId": String(final_stair_owner_ids.front()), "handoffTransitionSemantic": "castle_processional_step"})
-		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_start_z + second_stair_end_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, second_stair_end_z - second_stair_start_z), "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_stairs", "transitionOwned": true, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_end_z, "handoffSourceOwnerId": String(final_stair_owner_ids.back()), "handoffSourceSemantic": "castle_processional_step", "handoffTransitionOwnerId": "castle_keep_palace_entry_forecourt", "handoffTransitionSemantic": "castle_keep_palace_entry_forecourt"})
+			final_stair_owner_ids.append("castle_terrace_stair_01_%02d" % final_stair_step_index)
+		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": second_stair_start_z - final_turn_z, "elevation": terrace_step_height, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_start_z, "handoffTransitionOwnerId": String(final_stair_owner_ids.front()), "handoffTransitionSemantic": "castle_processional_step"})
+		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_start_z + second_stair_end_z) * 0.5, "width": route_half_width * 2.0, "depth": second_stair_end_z - second_stair_start_z, "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_stairs", "transitionOwned": true, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_end_z, "handoffSourceOwnerId": String(final_stair_owner_ids.back()), "handoffSourceSemantic": "castle_processional_step", "handoffTransitionOwnerId": "castle_keep_palace_entry_forecourt", "handoffTransitionSemantic": "castle_keep_palace_entry_forecourt"})
 		var entry_transition_owner_ids: Array[String] = ["castle_keep_palace_entry_forecourt"]
 		street_records.append({"id": "processional_04c_palace_entry_transition", "x": 0.0, "z": (entry_ramp_start_z + palace_entry_route_terminal_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, palace_entry_route_terminal_z - entry_ramp_start_z), "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_forecourt", "transitionOwned": true, "allowedTransitionOwnerIds": entry_transition_owner_ids})
 		var urban_rooms := {
@@ -879,7 +880,7 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 			"firstTurnZ": first_turn_z,
 			"finalTurnZ": final_turn_z,
 			"terraceStepHeight": terrace_step_height,
-			"processionalStepCenters": processional_step_centers,
+			"processionalTransitions": processional_transitions,
 			"cells": cells,
 			"lotPairs": lot_pairs,
 			"lotPairCount": lot_pairs.size(),

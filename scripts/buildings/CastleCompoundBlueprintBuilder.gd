@@ -168,6 +168,7 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 		{"id": "castle_keep", "role": "great_hall", "bounds": AABB(Vector3(keep_center.x - keep_width * 0.5, keep_foundation_height, keep_center.z - keep_depth * 0.5), Vector3(keep_width, keep_height, keep_depth)), "wallMountInset": 0.22, "accesses": []}
 	]
 	append_keep_storey_room_records(room_records, keep_center, keep_width, keep_depth, keep_foundation_height, keep_floor_height, enclosed_keep_storey_count)
+	append_declared_interior_program_rooms(room_records, blueprint.parts)
 	for building_value in courtyard_buildings:
 		var building: Dictionary = building_value as Dictionary
 		var building_center: Vector3 = building.get("center", Vector3.ZERO) as Vector3
@@ -241,6 +242,27 @@ static func append_keep_storey_room_records(records: Array, center: Vector3, wid
 			"accesses": [{"id": "keep_stair_%02d" % level, "kind": access_kind, "position": Vector3(stair_center.x, level_y + 0.86, stair_center.z), "size": Vector3(stair_width, 2.20, stair_depth)}],
 			"castleKeepStorey": level
 		})
+
+
+static func append_declared_interior_program_rooms(records: Array, parts: Array) -> void:
+	var known_ids: Dictionary = {}
+	for room_value in records:
+		if room_value is Dictionary:
+			known_ids[String((room_value as Dictionary).get("id", ""))] = true
+	for part in parts:
+		if part == null:
+			continue
+		var room_value: Variant = part.recipe.get("interiorProgramRoom")
+		if not room_value is Dictionary:
+			continue
+		var room: Dictionary = room_value as Dictionary
+		var room_id := String(room.get("id", "")).strip_edges()
+		var bounds: AABB = room.get("bounds", AABB()) as AABB
+		if room_id.is_empty() or known_ids.has(room_id) or not bounds.position.is_finite() or not bounds.size.is_finite() \
+				or bounds.size.x <= 0.0 or bounds.size.y <= 0.0 or bounds.size.z <= 0.0:
+			continue
+		known_ids[room_id] = true
+		records.append(room.duplicate(true))
 
 
 static func keep_stairwell_layout(center: Vector3, width: float, depth: float) -> Dictionary:
@@ -1102,7 +1124,6 @@ static func add_district_streets(blueprint, grammar: Dictionary, foundation_heig
 		var drain_size := Vector3(0.28, 0.055, depth) if runs_along_z else Vector3(width, 0.055, 0.28)
 		if not route_visual_overlaps_protected_support(drain_center, drain_size, protected_route_supports):
 			add_part(blueprint, "castle_district_%s_drain" % street_id, "foundation", "stone_foundation", drain_center, drain_size, {"collision": false, "variation": variation - 0.08, "semantic": "castle_route_constructed_gutter"})
-	blueprint.recipe["raisedRouteCoverage"] = route_coverage_records
 
 
 static func add_elevated_street_roadbed(blueprint, street_id: String, center: Vector3, width: float, depth: float, foundation_height: float, street_elevation: float, variation: float) -> void:
@@ -1148,6 +1169,11 @@ static func add_elevated_street_roadbed(blueprint, street_id: String, center: Ve
 			continue
 		var roadbed = add_part(blueprint, "castle_district_%s_roadbed_%02d" % [street_id, segment_index], "foundation", "stone_foundation", Vector3(segment_center.x, foundation_height + roadbed_height * 0.5, segment_center.z), Vector3(segment.size.x, roadbed_height, segment.size.z), {"variation": variation - 0.03, "semantic": "castle_route_terrace_walkway", "navigationRole": "walkable_support", "routeStreetId": street_id})
 		roadbed.recipe["physicalRequiredSupportPartIds"] = support_ids
+		# Every contacting foundation is a required bearing, including narrow strips
+		# between sample columns. Preserve the route owner's support list verbatim;
+		# prove named contacts as seats and independently require full rooted coverage.
+		roadbed.recipe["physicalRequiredSeatPartIds"] = support_ids.duplicate()
+		roadbed.recipe["physicalAssemblyRole"] = "walkable_subfloor"
 
 
 static func add_raised_route_junctions(blueprint, street_records: Array, foundation_height: float, variation: float) -> void:
@@ -1786,12 +1812,11 @@ static func add_citadel_terraces(blueprint, grammar: Dictionary, courtyard_width
 	var boulevard_half_width := float(grid.get("boulevardHalfWidth", 7.0))
 	var route_centers: Array = grid.get("routeCenters", []) as Array
 	var street_records: Array = grid.get("streetRecords", []) as Array
-	var processional_step_centers: Dictionary = grid.get("processionalStepCenters", {}) as Dictionary
+	var processional_transitions: Array = grid.get("processionalTransitions", []) as Array
 	var terrace_exclusions := courtyard_residence_egress_corridors(residences, foundation_height)
 	terrace_exclusions.append_array(courtyard_residence_structural_exclusions(residences))
 	terrace_exclusions.append_array(reserved_walkways)
 	var front_z := -courtyard_depth * 0.5 + 1.2
-	var previous_elevation := 0.0
 	for row_index in range(row_centers.size()):
 		var row_z := float(row_centers[row_index])
 		var next_z := float(row_centers[row_index + 1]) if row_index + 1 < row_centers.size() else courtyard_depth * 0.5 - 1.2
@@ -1820,11 +1845,32 @@ static func add_citadel_terraces(blueprint, grammar: Dictionary, courtyard_width
 		if elevation > 0.1:
 			for retaining_side in [-1.0, 1.0]:
 				add_citadel_terrace_retaining_wall_segments(blueprint, row_index, retaining_side, route_x + retaining_side * route_clear_half_width, front_z, next_z, foundation_height, elevation, variation, terrace_exclusions)
-		if elevation > previous_elevation + 0.01:
-			var step_center_z := float(processional_step_centers.get(str(row_index), row_z - 1.6))
-			add_citadel_processional_steps(blueprint, "castle_terrace_stair_%02d" % row_index, route_x, step_center_z, route_clear_half_width * 1.82, previous_elevation, elevation, foundation_height, variation)
-		previous_elevation = elevation
 		front_z = next_z
+	# Stair publication follows the route recipe rather than the coarse terrace
+	# row lattice. Two elevation changes can legitimately share one row interval;
+	# explicit ordered descriptors keep both transitions and their elevations.
+	var expected_from_elevation := 0.0
+	for transition_index in range(processional_transitions.size()):
+		var value: Variant = processional_transitions[transition_index]
+		if not value is Dictionary:
+			push_error("Citadel processional transition %d is not a descriptor" % transition_index)
+			continue
+		var transition: Dictionary = value as Dictionary
+		var ordinal := int(transition.get("ordinal", -1))
+		var prefix := String(transition.get("idPrefix", ""))
+		var center_x := float(transition.get("centerX", NAN))
+		var center_z := float(transition.get("centerZ", NAN))
+		var width := float(transition.get("width", 0.0))
+		var from_elevation := float(transition.get("fromElevation", NAN))
+		var to_elevation := float(transition.get("toElevation", NAN))
+		var start_z := float(transition.get("startZ", NAN))
+		var end_z := float(transition.get("endZ", NAN))
+		var valid := ordinal == transition_index and not prefix.is_empty() and is_finite(center_x) and is_finite(center_z) and width > 0.20 and is_finite(from_elevation) and is_finite(to_elevation) and to_elevation > from_elevation and is_equal_approx(from_elevation, expected_from_elevation) and is_finite(start_z) and is_finite(end_z) and end_z > start_z
+		if not valid:
+			push_error("Citadel processional transition %d is malformed or discontinuous: %s" % [transition_index, transition])
+			continue
+		add_citadel_processional_steps(blueprint, prefix, center_x, center_z, width, from_elevation, to_elevation, foundation_height, variation)
+		expected_from_elevation = to_elevation
 
 
 static func add_citadel_terrace_retaining_wall_segments(blueprint, row_index: int, retaining_side: float, wall_x: float, minimum_z: float, maximum_z: float, foundation_height: float, elevation: float, variation: float, exclusions: Array[Dictionary]) -> void:
@@ -2070,8 +2116,26 @@ static func add_citadel_processional_steps(blueprint, prefix: String, center_x: 
 		var step_height := elevation + surface_offset
 		var step_z := center_z - tread_depth * float(step_count - step_index)
 		var step_id := "%s_%02d" % [prefix, step_index + 1]
-		var step = add_part(blueprint, step_id, "foundation", "stone_foundation", Vector3(center_x, foundation_height + step_height * 0.5, step_z), Vector3(width, maxf(0.12, step_height), tread_depth + 0.04), {"variation": variation - 0.04, "semantic": "castle_processional_step", "navigationRole": "walkable_support", "physicalIntent": "structural_root", "physicalRoot": true})
-		step.recipe["routeTransitionRootPartIds"] = [step_id]
+		var step = add_part(blueprint, step_id, "foundation", "stone_foundation", Vector3(center_x, foundation_height + step_height * 0.5, step_z), Vector3(width, maxf(0.12, step_height), tread_depth + 0.04), {"variation": variation - 0.04, "semantic": "castle_processional_step", "navigationRole": "walkable_support", "physicalIntent": "structural_mass", "physicalAssemblyRole": "walkable_subfloor"})
+		# Raised masonry is carried by the generated foundations below it; its
+		# name/kind does not make it a ground root. Preserve every tread vertex.
+		var roots: Array[String] = []
+		if blueprint.is_grounded_structural_root(step):
+			roots.append(step_id)
+		else:
+			var step_bounds: AABB = blueprint.transformed_part_bounds(step)
+			for support in blueprint.parts:
+				if support == step or not blueprint.is_grounded_structural_root(support) or support.rotation != Vector3.ZERO:
+					continue
+				var support_bounds: AABB = blueprint.transformed_part_bounds(support)
+				if absf(support_bounds.end.y - step_bounds.position.y) > 0.04:
+					continue
+				if minf(step_bounds.end.x, support_bounds.end.x) <= maxf(step_bounds.position.x, support_bounds.position.x) or minf(step_bounds.end.z, support_bounds.end.z) <= maxf(step_bounds.position.z, support_bounds.position.z):
+					continue
+				roots.append(support.id)
+			roots.sort()
+			step.recipe["physicalRequiredSeatPartIds"] = roots.duplicate()
+		step.recipe["routeTransitionRootPartIds"] = roots
 
 
 static func add_citadel_residence_facade_details(blueprint, residences: Array[Dictionary], grammar: Dictionary, foundation_height: float, variation: float) -> void:
@@ -2944,6 +3008,13 @@ static func add_keep_civic_front_bay_walls(blueprint, core_center: Vector3, core
 	var window_level_count := clampi(int(palace_grammar.get("facadeWindowLevelCount", 2)), 2, 3)
 	var core_front_z := core_center.z - core_depth * 0.5
 	var core_height := core_eave_y - foundation_height
+	var core_room_id := "castle_keep_civic_core_interior"
+	var core_room_inset := 0.42
+	var core_room := {"id": core_room_id, "role": "civic_hall", "interiorProgramOnly": true,
+		"bounds": AABB(Vector3(core_center.x - core_width * 0.5 + core_room_inset, foundation_height + 0.10, core_center.z - core_depth * 0.5 + core_room_inset),
+			Vector3(core_width - core_room_inset * 2.0, core_height - 0.20, core_depth - core_room_inset * 2.0)),
+		"wallMountInset": 0.22, "accesses": []}
+	var core_window_wall_offset := core_room_inset + 0.03
 	var flank_span := maxf(3.2, (core_width - tower_width) * 0.5)
 	for side in [-1.0, 1.0]:
 		var flank_min_x: float = core_center.x - core_width * 0.5 if side < 0.0 else core_center.x + tower_width * 0.5
@@ -2964,7 +3035,7 @@ static func add_keep_civic_front_bay_walls(blueprint, core_center: Vector3, core
 				var jamb_width := maxf(0.18, (bay_width - window_width) * 0.5)
 				add_part(blueprint, "castle_keep_civic_core_front_%d_%02d_jamb_left_%02d" % [int(side), bay_index, level], "wall", masonry_material, Vector3(bay_min_x + jamb_width * 0.5, window_y, core_front_z), Vector3(jamb_width, 1.42, 0.82), {"variation": variation + side * 0.006, "semantic": "castle_keep_civic_window_jamb", "supportingWall": "castle_keep_civic_core_front_%d" % int(side)})
 				add_part(blueprint, "castle_keep_civic_core_front_%d_%02d_jamb_right_%02d" % [int(side), bay_index, level], "wall", masonry_material, Vector3(bay_min_x + bay_width - jamb_width * 0.5, window_y, core_front_z), Vector3(jamb_width, 1.42, 0.82), {"variation": variation + side * 0.006, "semantic": "castle_keep_civic_window_jamb", "supportingWall": "castle_keep_civic_core_front_%d" % int(side)})
-				add_part(blueprint, "castle_keep_civic_facade_window_%d_%02d_%02d" % [int(side), level, bay_index], "window", "window_glass", Vector3(bay_center_x, window_y, core_front_z - 0.03), Vector3(window_width, 1.42, 0.12), {"collision": false, "variation": variation + float(level) * 0.006 + side * 0.004, "semantic": "castle_keep_civic_facade_window", "supportingWall": "castle_keep_civic_core_front_%d" % int(side), "openingBacked": true})
+				add_part(blueprint, "castle_keep_civic_facade_window_%d_%02d_%02d" % [int(side), level, bay_index], "window", "window_glass", Vector3(bay_center_x, window_y, core_front_z - 0.03), Vector3(window_width, 1.42, 0.12), {"collision": false, "variation": variation + float(level) * 0.006 + side * 0.004, "semantic": "castle_keep_civic_facade_window", "supportingWall": "castle_keep_civic_core_front_%d" % int(side), "openingBacked": true, "roomId": core_room_id, "interiorProgramRoom": core_room, "interiorInwardDirection": Vector3.BACK, "interiorWallOffset": core_window_wall_offset})
 				cursor_y = opening_top
 			if core_eave_y > cursor_y + 0.04:
 				add_part(blueprint, "castle_keep_civic_core_front_%d_%02d_top" % [int(side), bay_index], "wall", masonry_material, Vector3(bay_center_x, (cursor_y + core_eave_y) * 0.5, core_front_z), Vector3(bay_width, core_eave_y - cursor_y, 0.82), {"variation": variation + side * 0.006, "semantic": "castle_keep_civic_core_front", "supportingWall": "castle_keep_civic_core_front_%d" % int(side)})
@@ -3127,6 +3198,12 @@ static func add_keep_palace_wings(blueprint, center: Vector3, width: float, dept
 		var wing_height := minf(hall_height * clampf(float(palace_grammar.get("wingHeightRatio", 0.74)) * 0.72, 0.42, 0.60), core_eave_y - foundation_height - 3.20)
 		var wing_x: float = core_center.x + side * (core_width * 0.5 + wing_width * 0.5 + 0.06)
 		var wing_center := Vector3(wing_x, 0.0, wing_front_z + wing_depth * 0.5)
+		var wing_room_id := "castle_keep_palace_wing_interior_%d" % int(side)
+		var wing_room_inset := 0.42
+		var wing_room := {"id": wing_room_id, "role": "palace_wing", "interiorProgramOnly": true,
+			"bounds": AABB(Vector3(wing_center.x - wing_width * 0.5 + wing_room_inset, foundation_height + 0.10, wing_center.z - wing_depth * 0.5 + wing_room_inset),
+				Vector3(wing_width - wing_room_inset * 2.0, wing_height - 0.20, wing_depth - wing_room_inset * 2.0)),
+			"wallMountInset": 0.22, "accesses": []}
 		add_part(blueprint, "castle_keep_palace_wing_%d" % int(side), "wall", masonry_material, Vector3(wing_center.x, foundation_height + wing_height * 0.5, wing_center.z), Vector3(wing_width, wing_height, wing_depth), {"variation": variation + side * 0.012, "semantic": "castle_keep_palace_wing"})
 		var wing_rise := minf(maxf(2.0, wing_width * 0.26), core_eave_y - (foundation_height + wing_height) - 0.80)
 		var wing_id := "castle_keep_palace_wing_%d" % int(side)
@@ -3139,7 +3216,7 @@ static func add_keep_palace_wings(blueprint, center: Vector3, width: float, dept
 			for level in range(2):
 				var window_y := foundation_height + 2.0 + float(level) * minf(2.8, wing_height * 0.36)
 				if window_y < foundation_height + wing_height - 0.70:
-					add_part(blueprint, "castle_keep_palace_wing_outer_window_%d_%02d_%02d" % [int(side), level, bay], "window", "window_glass", Vector3(outer_face_x + side * 0.14, window_y, bay_z), Vector3(0.12, 1.24, 0.82), {"collision": false, "variation": variation, "semantic": "castle_keep_palace_window"})
+					add_part(blueprint, "castle_keep_palace_wing_outer_window_%d_%02d_%02d" % [int(side), level, bay], "window", "window_glass", Vector3(outer_face_x + side * 0.14, window_y, bay_z), Vector3(0.12, 1.24, 0.82), {"collision": false, "variation": variation, "semantic": "castle_keep_palace_window", "roomId": wing_room_id, "interiorProgramRoom": wing_room, "interiorInwardDirection": Vector3(-side, 0.0, 0.0), "interiorWallOffset": wing_room_inset + 0.26})
 		add_part(blueprint, "castle_keep_palace_wing_outer_cornice_%d" % int(side), "beam", "stone_foundation", Vector3(outer_face_x, foundation_height + wing_height - 0.38, wing_center.z), Vector3(0.34, 0.38, wing_depth * 0.82), {"variation": variation - 0.02, "semantic": "castle_keep_palace_wing_outer_bay"})
 
 
@@ -3244,7 +3321,7 @@ static func add_keep_palace_forecourt_galleries(blueprint, center: Vector3, widt
 		var gallery_bearers := ["castle_keep_forecourt_gallery_outer_wall_%d" % int(side), "castle_keep_forecourt_gallery_upper_storey_%d" % int(side)] if side < 0.0 else ["castle_keep_forecourt_gallery_upper_storey_%d" % int(side), "castle_keep_forecourt_gallery_outer_wall_%d" % int(side)]
 		add_keep_gabled_roof(blueprint, "castle_keep_forecourt_gallery_roof_%d" % int(side), gallery_center, gallery_width, arcade_depth, foundation_height + gallery_height, 2.2, variation + side * 0.008, gallery_bearers)
 		add_part(blueprint, "castle_keep_forecourt_pavilion_foundation_%d" % int(side), "foundation", "stone_foundation", Vector3(pavilion_center.x, foundation_height * 0.5, pavilion_center.z), Vector3(pavilion_width + 0.36, foundation_height, pavilion_depth + 0.36), {"variation": variation + side * 0.010, "semantic": "castle_keep_forecourt_pavilion_plinth", "physicalIntent": "structural_root"})
-		add_part(blueprint, "castle_keep_forecourt_pavilion_%d" % int(side), "wall", masonry_material, Vector3(pavilion_center.x, foundation_height + pavilion_height * 0.5, pavilion_center.z), Vector3(pavilion_width, pavilion_height, pavilion_depth), {"variation": variation + side * 0.012, "semantic": "castle_keep_forecourt_pavilion"})
+		add_part(blueprint, "castle_keep_forecourt_pavilion_%d" % int(side), "wall", masonry_material, Vector3(pavilion_center.x, foundation_height + pavilion_height * 0.5, pavilion_center.z), Vector3(pavilion_width, pavilion_height, pavilion_depth), {"variation": variation + side * 0.012, "semantic": "castle_keep_forecourt_pavilion", "physicalPartyWallBearingModes": ["terminal_joint", "embedded_panel"]})
 		var pavilion_id := "castle_keep_forecourt_pavilion_%d" % int(side)
 		add_keep_gabled_roof(blueprint, "castle_keep_forecourt_pavilion_roof_%d" % int(side), pavilion_center, pavilion_width, pavilion_depth, foundation_height + pavilion_height, maxf(2.2, pavilion_width * 0.46), variation + side * 0.012, [pavilion_id, pavilion_id])
 		for level in range(2):

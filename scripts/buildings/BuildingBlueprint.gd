@@ -2,6 +2,8 @@ extends RefCounted
 class_name BuildingBlueprint
 
 const BuildingPartScript := preload("res://scripts/buildings/BuildingPart.gd")
+const GablePurlinFrameValidator := preload("res://scripts/buildings/GablePurlinFrameValidator.gd")
+const MandatoryPhysicalDependencyValidator := preload("res://scripts/buildings/MandatoryPhysicalDependencyValidator.gd")
 
 var id := ""
 var seed := 0
@@ -11,6 +13,7 @@ var rooms: Array = []
 var parts: Array = []
 var physical_parts_by_id: Dictionary = {}
 var structural_support_grid: Dictionary = {}
+var invalid_gable_part_ids: Dictionary = {}
 
 const PHYSICAL_SUPPORT_GRID_CELL := 4.0
 const PHYSICAL_CONTACT_MARGIN := 0.05
@@ -70,6 +73,11 @@ func validate_physical_integrity() -> Dictionary:
 		if bool(part.recipe.get("physicalTransformDependencyMissing", false)):
 			check["passed"] = false
 			violations.append("%s references a missing transformed physical dependency" % String(part.id))
+			checks.append(check)
+			continue
+		if GablePurlinFrameValidator.is_frame_part(part) and not GablePurlinFrameValidator.schema_valid(part):
+			check["passed"] = false
+			violations.append("%s has an invalid gable frame schema" % String(part.id))
 			checks.append(check)
 			continue
 		match intent:
@@ -174,6 +182,19 @@ func validate_physical_integrity() -> Dictionary:
 				check["passed"] = false
 				violations.append("%s has no declared physical intent" % String(part.id))
 		checks.append(check)
+	# Validate new frame obligations independently of physical intent. Existing
+	# bearer checks are available now, so incidental graph reachability cannot
+	# conceal a failed mandatory seat further down the load path.
+	var frame_context := GablePurlinFrameValidator.context_for(self, checks)
+	for check in checks:
+		var part = find_part(String(check.partId))
+		if part != null and GablePurlinFrameValidator.is_frame_part(part):
+			var frame_valid := GablePurlinFrameValidator.validates(self, part, frame_context)
+			check["hasValidGableFrame"] = frame_valid
+			if not frame_valid and bool(check.passed):
+				check["passed"] = false
+				violations.append("%s has no complete gable roof load path" % String(part.id))
+	MandatoryPhysicalDependencyValidator.apply(parts, checks, violations)
 	return {
 		"passed": violations.is_empty(),
 		"checkedPartCount": checks.size(),
@@ -185,6 +206,10 @@ func validate_physical_integrity() -> Dictionary:
 func resolve_physical_contracts() -> void:
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
+	invalid_gable_part_ids.clear()
+	for part in parts:
+		if part != null and GablePurlinFrameValidator.is_frame_part(part) and not GablePurlinFrameValidator.schema_valid(part):
+			invalid_gable_part_ids[String(part.id)] = true
 	for part in parts:
 		if part == null:
 			continue
@@ -207,6 +232,8 @@ func resolve_physical_contracts() -> void:
 	index_structural_support_candidates()
 	for part in parts:
 		if part == null:
+			continue
+		if invalid_gable_part_ids.has(String(part.id)):
 			continue
 		match String(part.physical_intent):
 			"structural_mass", "walkable_surface":
@@ -294,7 +321,7 @@ func resolved_attachment_anchor_ids(target) -> Array[String]:
 		var required_anchor = find_part(String(required_id_value))
 		if required_anchor != null and is_structural_support_candidate(required_anchor) and transformed_parts_overlap(target, required_anchor, PHYSICAL_CONTACT_MARGIN):
 			anchors.append(String(required_anchor.id))
-	for candidate in structural_candidates_near(part_transform(target).origin):
+	for candidate in structural_candidates_overlapping_part(target, PHYSICAL_CONTACT_MARGIN):
 		if candidate == null or candidate == target or not is_structural_support_candidate(candidate):
 			continue
 		if not anchors.has(String(candidate.id)) and transformed_parts_overlap(target, candidate, PHYSICAL_CONTACT_MARGIN):
@@ -303,7 +330,72 @@ func resolved_attachment_anchor_ids(target) -> Array[String]:
 
 
 func transformed_parts_overlap(first, second, margin := 0.05) -> bool:
-	return transformed_part_corner_within(first, second, margin) or transformed_part_corner_within(second, first, margin)
+	# Corner containment misses intersecting thin members with no enclosed corner.
+	# Keep the existing tolerance: expand either box, never both simultaneously.
+	return transformed_boxes_intersect(first, second, margin) or transformed_boxes_intersect(second, first, margin)
+
+
+func transformed_boxes_intersect(first, second, second_margin: float) -> bool:
+	if not is_finite(second_margin) or second_margin < 0.0 or not has_finite_positive_bounds(first) or not has_finite_positive_bounds(second):
+		return false
+	var first_basis := part_transform(first).basis
+	var second_basis := part_transform(second).basis
+	var first_axes: Array[Vector3] = [first_basis.x, first_basis.y, first_basis.z]
+	var second_axes: Array[Vector3] = [second_basis.x, second_basis.y, second_basis.z]
+	var axes: Array[Vector3] = []
+	axes.append_array(first_axes)
+	axes.append_array(second_axes)
+	for first_axis in first_axes:
+		for second_axis in second_axes:
+			axes.append(first_axis.cross(second_axis))
+	var first_half: Vector3 = first.size * 0.5
+	var second_half: Vector3 = second.size * 0.5 + Vector3.ONE * second_margin
+	var delta: Vector3 = second.position - first.position
+	for axis in axes:
+		if axis.length_squared() <= 1.0e-12:
+			continue
+		var first_radius := 0.0
+		var second_radius := 0.0
+		for index in range(3):
+			first_radius += first_half[index] * absf(axis.dot(first_axes[index]))
+			second_radius += second_half[index] * absf(axis.dot(second_axes[index]))
+		if absf(delta.dot(axis)) > first_radius + second_radius:
+			return false
+	return true
+
+
+func has_finite_positive_bounds(part) -> bool:
+	return part != null and part.position.is_finite() and part.rotation.is_finite() and part.size.is_finite() and part.size.x > 0.0 and part.size.y > 0.0 and part.size.z > 0.0
+
+
+func structural_candidates_overlapping_part(target, margin: float) -> Array:
+	if not is_finite(margin) or margin < 0.0 or not has_finite_positive_bounds(target):
+		return []
+	# A local-axis margin projects by up to sqrt(3) onto a world axis.
+	# This is broad-phase expansion only; the OBB test retains the exact margin.
+	var bounds := transformed_part_bounds(target).grow(margin * sqrt(3.0))
+	var result: Array = []
+	var seen: Dictionary = {}
+	for cell_x in range(floori(bounds.position.x / PHYSICAL_SUPPORT_GRID_CELL), floori(bounds.end.x / PHYSICAL_SUPPORT_GRID_CELL) + 1):
+		for cell_z in range(floori(bounds.position.z / PHYSICAL_SUPPORT_GRID_CELL), floori(bounds.end.z / PHYSICAL_SUPPORT_GRID_CELL) + 1):
+			for candidate in structural_support_grid.get("%d:%d" % [cell_x, cell_z], []) as Array:
+				if not seen.has(String(candidate.id)):
+					seen[String(candidate.id)] = true
+					result.append(candidate)
+	return result
+
+
+func transformed_part_bounds(part) -> AABB:
+	var transform := part_transform(part)
+	var minimum := Vector3(INF, INF, INF)
+	var maximum := Vector3(-INF, -INF, -INF)
+	for x_sign in [-1.0, 1.0]:
+		for y_sign in [-1.0, 1.0]:
+			for z_sign in [-1.0, 1.0]:
+				var corner: Vector3 = transform * (part.size * Vector3(x_sign, y_sign, z_sign) * 0.5)
+				minimum = minimum.min(corner)
+				maximum = maximum.max(corner)
+	return AABB(minimum, maximum - minimum)
 
 
 func transformed_part_corner_within(first, second, margin: float) -> bool:
@@ -330,6 +422,8 @@ func footprint_bottom_samples(part, resolution: int) -> Array[Dictionary]:
 
 
 func is_structural_support_candidate(part) -> bool:
+	if part != null and invalid_gable_part_ids.has(String(part.id)):
+		return false
 	return part != null and bool(part.collision_enabled) and String(part.physical_intent) in ["structural_root", "structural_mass", "walkable_surface"]
 
 
@@ -339,15 +433,11 @@ func part_transform(part) -> Transform3D:
 
 func index_structural_support_candidates() -> void:
 	for part in parts:
-		if not is_structural_support_candidate(part):
+		if not is_structural_support_candidate(part) or not has_finite_positive_bounds(part):
 			continue
-		var minimum := Vector3(INF, INF, INF)
-		var maximum := Vector3(-INF, -INF, -INF)
-		for x_sign in [-1.0, 1.0]:
-			for z_sign in [-1.0, 1.0]:
-				var corner := part_transform(part) * Vector3(part.size.x * 0.5 * x_sign, 0.0, part.size.z * 0.5 * z_sign)
-				minimum = minimum.min(corner)
-				maximum = maximum.max(corner)
+		var bounds := transformed_part_bounds(part)
+		var minimum := bounds.position
+		var maximum := bounds.end
 		var minimum_x := floori(minimum.x / PHYSICAL_SUPPORT_GRID_CELL)
 		var maximum_x := floori(maximum.x / PHYSICAL_SUPPORT_GRID_CELL)
 		var minimum_z := floori(minimum.z / PHYSICAL_SUPPORT_GRID_CELL)
@@ -377,6 +467,8 @@ func structural_candidates_near(point: Vector3) -> Array:
 
 
 func has_rooted_support_chain(part, visited: Dictionary) -> bool:
+	if invalid_gable_part_ids.has(String(part.id)):
+		return false
 	var part_id := String(part.id)
 	if bool(part.recipe.get("physicalRoot", false)):
 		return true

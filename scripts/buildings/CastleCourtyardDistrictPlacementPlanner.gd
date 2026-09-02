@@ -53,6 +53,9 @@ const DEFAULT_RESIDENCE_CLEARANCE := 0.08
 const DEFAULT_PAIR_CLEARANCE := 2.60
 const DEFAULT_BOUNDARY_CLEARANCE := 0.0
 const EPSILON := 0.00001
+const COUPLED_AXIS_CANDIDATE_LIMIT := 32
+const COUPLED_CANDIDATE_LIMIT := COUPLED_AXIS_CANDIDATE_LIMIT * COUPLED_AXIS_CANDIDATE_LIMIT
+const EDGE_SEPARATION := 0.0001
 
 
 static func plan(intents: Array, street_records: Array, structure_parts: Array, courtyard_bounds: Dictionary, options: Dictionary = {}) -> Dictionary:
@@ -258,10 +261,202 @@ static func _place_one(intent: Dictionary, courtyard_bounds: Dictionary, setting
 	var exact := _validate_exact_constraints(intent, composition, street_footprints, structure_parts, placements, placed_compositions, courtyard_bounds, settings, telemetry)
 	if not bool(exact.get("passed", false)):
 		var annotated_rejections := _annotate_prior_overlap_rejections(exact.get("rejections", []) as Array, intent, placements, placed_compositions, nominal_center, row_packed_center, row_packed_composition, fixed_packed_center, fixed_packed_composition, center, settings)
+		if adjustment.length_squared() > EPSILON * EPSILON:
+			var coupled := _resolve_coupled_candidate(intent, courtyard_bounds, settings, fixed_blockers, street_footprints, structure_parts, placements, placed_compositions, placed_blockers, nominal_center, row_packed_center, fixed_packed_center, center, composition, annotated_rejections, telemetry)
+			if bool(coupled.get("passed", false)):
+				return coupled
 		return {"passed": false, "phase": "exact_revalidation", "rejections": annotated_rejections}
 	var origin: Vector3 = description.get("origin", Vector3.ZERO) as Vector3
 	var record := _placement_record(intent, center, origin, composition)
 	return {"passed": true, "placement": record, "blocker": blocker_bounds}
+
+
+static func _resolve_coupled_candidate(intent: Dictionary, courtyard_bounds: Dictionary, settings: Dictionary, fixed_blockers: Array[Dictionary], street_footprints: Array[Dictionary], structure_parts: Array, prior_placements: Array[Dictionary], prior_compositions: Array[Dictionary], prior_blockers: Array[Dictionary], nominal_center: Vector3, row_packed_center: Vector3, fixed_packed_center: Vector3, staged_center: Vector3, staged_composition: Dictionary, trigger_rejections: Array, telemetry: Dictionary) -> Dictionary:
+	var aggregate := _composition_bounds(staged_composition)
+	if aggregate.is_empty():
+		_record_coupled_repair(telemetry, intent, trigger_rejections, [], [], [], -1, Vector3.ZERO, "", true, {"domainSignature": "", "work": {}, "evaluatedCount": 0})
+		return {"passed": false}
+	var half_x := (float(aggregate.maxX) - float(aggregate.minX)) * 0.5
+	var half_z := (float(aggregate.maxZ) - float(aggregate.minZ)) * 0.5
+	var aggregate_center_x := (float(aggregate.minX) + float(aggregate.maxX)) * 0.5
+	var aggregate_center_z := (float(aggregate.minZ) + float(aggregate.maxZ)) * 0.5
+	var offset_x := aggregate_center_x - staged_center.x
+	var offset_z := aggregate_center_z - staged_center.z
+	var x_values: Array[Dictionary] = []
+	var z_values: Array[Dictionary] = []
+	for source in [
+		{"kind": "nominal", "center": nominal_center},
+		{"kind": "row_packed", "center": row_packed_center},
+		{"kind": "fixed_packed", "center": fixed_packed_center},
+		{"kind": "boundary_adjusted", "center": staged_center}
+	]:
+		var source_center: Vector3 = source.center
+		_append_axis_candidate(x_values, source_center.x, String(source.kind), "", 0)
+		_append_axis_candidate(z_values, source_center.z, String(source.kind), "", 0)
+	var boundary_clearance := float(settings.get("boundaryClearance", DEFAULT_BOUNDARY_CLEARANCE))
+	_append_axis_candidate(x_values, float(courtyard_bounds.minX) + boundary_clearance + half_x - offset_x + EDGE_SEPARATION, "boundary", "min_x", 1)
+	_append_axis_candidate(x_values, float(courtyard_bounds.maxX) - boundary_clearance - half_x - offset_x - EDGE_SEPARATION, "boundary", "max_x", 1)
+	_append_axis_candidate(z_values, float(courtyard_bounds.minZ) + boundary_clearance + half_z - offset_z + EDGE_SEPARATION, "boundary", "min_z", 1)
+	_append_axis_candidate(z_values, float(courtyard_bounds.maxZ) - boundary_clearance - half_z - offset_z - EDGE_SEPARATION, "boundary", "max_z", 1)
+	var trigger_tokens := _coupled_trigger_tokens(trigger_rejections)
+	var fixed_clearance := float(settings.get("fixedClearance", DEFAULT_FIXED_CLEARANCE))
+	for blocker in fixed_blockers:
+		var blocker_bounds: Dictionary = blocker.get("bounds", {}) as Dictionary
+		var blocker_kind := String(blocker.get("kind", "fixed"))
+		var blocker_id := String(blocker.get("id", ""))
+		var priority := 0 if trigger_tokens.has("%s:%s" % [blocker_kind, blocker_id]) else 2
+		_append_obstacle_axis_candidates(x_values, z_values, blocker_bounds, fixed_clearance, half_x, half_z, offset_x, offset_z, blocker_kind, blocker_id, priority)
+	for prior_index in range(prior_blockers.size()):
+		var prior_id := String(prior_placements[prior_index].get("id", "")) if prior_index < prior_placements.size() else ""
+		var prior_pair_index := int(prior_placements[prior_index].get("pairIndex", -2)) if prior_index < prior_placements.size() else -2
+		var clearance := float(settings.get("pairClearance", DEFAULT_PAIR_CLEARANCE)) if prior_pair_index == int(intent.get("pairIndex", -1)) else float(settings.get("residenceClearance", DEFAULT_RESIDENCE_CLEARANCE))
+		var prior_priority := 0 if trigger_tokens.has("prior:%s" % prior_id) else 2
+		_append_obstacle_axis_candidates(x_values, z_values, prior_blockers[prior_index], clearance, half_x, half_z, offset_x, offset_z, "prior", prior_id, prior_priority)
+	x_values = _bounded_axis_candidates(x_values, nominal_center.x, staged_center.x)
+	z_values = _bounded_axis_candidates(z_values, nominal_center.z, staged_center.z)
+	var candidates: Array[Dictionary] = []
+	var seen_centers := {}
+	for x_source in x_values:
+		for z_source in z_values:
+			var candidate_center := Vector3(float(x_source.value), nominal_center.y, float(z_source.value))
+			var key := _vector_signature(candidate_center)
+			if seen_centers.has(key):
+				continue
+			seen_centers[key] = true
+			candidates.append({
+				"center": candidate_center,
+				"nominalDistanceSquared": Vector2(candidate_center.x - nominal_center.x, candidate_center.z - nominal_center.z).length_squared(),
+				"stagedDistanceSquared": Vector2(candidate_center.x - staged_center.x, candidate_center.z - staged_center.z).length_squared(),
+				"xSource": {"kind": x_source.kind, "id": x_source.id},
+				"zSource": {"kind": z_source.kind, "id": z_source.id}
+			})
+	candidates.sort_custom(func(left: Dictionary, right: Dictionary) -> bool: return _coupled_candidate_precedes(left, right))
+	if candidates.size() > COUPLED_CANDIDATE_LIMIT:
+		candidates.resize(COUPLED_CANDIDATE_LIMIT)
+	var candidate_tokens := PackedStringArray()
+	for candidate in candidates:
+		candidate_tokens.append("%s|%s:%s|%s:%s" % [_vector_signature(candidate.center as Vector3), String(candidate.xSource.kind), String(candidate.xSource.id), String(candidate.zSource.kind), String(candidate.zSource.id)])
+	var domain_signature := "\n".join(candidate_tokens).sha256_text()
+	var evaluated := 0
+	var work := {"descriptionCalls": 0, "exactStreetComparisons": 0, "exactStructureComparisons": 0, "exactPriorComparisons": 0, "boundsChecks": 0}
+	for ordinal in range(candidates.size()):
+		var candidate: Dictionary = candidates[ordinal]
+		var candidate_center: Vector3 = candidate.center
+		var scratch := _new_telemetry(1, street_footprints.size(), structure_parts.size())
+		var description := _describe(intent, candidate_center, scratch)
+		evaluated += 1
+		if bool(description.get("passed", false)):
+			var candidate_composition: Dictionary = description.get("composition", {}) as Dictionary
+			var exact := _validate_exact_constraints(intent, candidate_composition, street_footprints, structure_parts, prior_placements, prior_compositions, courtyard_bounds, settings, scratch)
+			_accumulate_coupled_work(work, scratch)
+			if bool(exact.get("passed", false)):
+				var origin: Vector3 = description.get("origin", Vector3.ZERO) as Vector3
+				var placement := _placement_record(intent, candidate_center, origin, candidate_composition)
+				_record_coupled_repair(telemetry, intent, trigger_rejections, x_values, z_values, candidates, ordinal, candidate_center, String(placement.placementSignature), false, {"domainSignature": domain_signature, "work": work, "xSource": candidate.xSource, "zSource": candidate.zSource, "evaluatedCount": evaluated})
+				return {"passed": true, "placement": placement, "blocker": _composition_bounds(candidate_composition)}
+		else:
+			_accumulate_coupled_work(work, scratch)
+	_record_coupled_repair(telemetry, intent, trigger_rejections, x_values, z_values, candidates, -1, Vector3.ZERO, "", true, {"domainSignature": domain_signature, "work": work, "evaluatedCount": evaluated})
+	return {"passed": false}
+
+
+static func _append_obstacle_axis_candidates(x_values: Array[Dictionary], z_values: Array[Dictionary], bounds: Dictionary, clearance: float, half_x: float, half_z: float, offset_x: float, offset_z: float, kind: String, identity: String, priority: int) -> void:
+	if _footprint_bounds(bounds).is_empty():
+		return
+	_append_axis_candidate(x_values, float(bounds.minX) - clearance - half_x - offset_x - EDGE_SEPARATION, kind, identity + ":min_x", priority)
+	_append_axis_candidate(x_values, float(bounds.maxX) + clearance + half_x - offset_x + EDGE_SEPARATION, kind, identity + ":max_x", priority)
+	_append_axis_candidate(z_values, float(bounds.minZ) - clearance - half_z - offset_z - EDGE_SEPARATION, kind, identity + ":min_z", priority)
+	_append_axis_candidate(z_values, float(bounds.maxZ) + clearance + half_z - offset_z + EDGE_SEPARATION, kind, identity + ":max_z", priority)
+
+
+static func _append_axis_candidate(values: Array[Dictionary], value: float, kind: String, identity: String, priority: int) -> void:
+	if not is_finite(value):
+		return
+	var key := "%.6f" % value
+	for index in range(values.size()):
+		if String(values[index].key) == key:
+			if priority < int(values[index].priority) or (priority == int(values[index].priority) and "%s:%s" % [kind, identity] < "%s:%s" % [values[index].kind, values[index].id]):
+				values[index] = {"key": key, "value": value, "kind": kind, "id": identity, "priority": priority}
+			return
+	values.append({"key": key, "value": value, "kind": kind, "id": identity, "priority": priority})
+
+
+static func _bounded_axis_candidates(values: Array[Dictionary], nominal: float, staged: float) -> Array[Dictionary]:
+	values.sort_custom(func(left: Dictionary, right: Dictionary) -> bool:
+		if int(left.priority) != int(right.priority): return int(left.priority) < int(right.priority)
+		var left_nominal := absf(float(left.value) - nominal)
+		var right_nominal := absf(float(right.value) - nominal)
+		if not is_equal_approx(left_nominal, right_nominal): return left_nominal < right_nominal
+		var left_staged := absf(float(left.value) - staged)
+		var right_staged := absf(float(right.value) - staged)
+		if not is_equal_approx(left_staged, right_staged): return left_staged < right_staged
+		if not is_equal_approx(float(left.value), float(right.value)): return float(left.value) < float(right.value)
+		if String(left.kind) != String(right.kind): return String(left.kind) < String(right.kind)
+		return String(left.id) < String(right.id)
+	)
+	if values.size() > COUPLED_AXIS_CANDIDATE_LIMIT:
+		values.resize(COUPLED_AXIS_CANDIDATE_LIMIT)
+	return values
+
+
+static func _coupled_candidate_precedes(left: Dictionary, right: Dictionary) -> bool:
+	if not is_equal_approx(float(left.nominalDistanceSquared), float(right.nominalDistanceSquared)):
+		return float(left.nominalDistanceSquared) < float(right.nominalDistanceSquared)
+	if not is_equal_approx(float(left.stagedDistanceSquared), float(right.stagedDistanceSquared)):
+		return float(left.stagedDistanceSquared) < float(right.stagedDistanceSquared)
+	var left_center: Vector3 = left.center
+	var right_center: Vector3 = right.center
+	if not is_equal_approx(left_center.x, right_center.x):
+		return left_center.x < right_center.x
+	if not is_equal_approx(left_center.z, right_center.z):
+		return left_center.z < right_center.z
+	var left_source := "%s:%s|%s:%s" % [left.xSource.kind, left.xSource.id, left.zSource.kind, left.zSource.id]
+	var right_source := "%s:%s|%s:%s" % [right.xSource.kind, right.xSource.id, right.zSource.kind, right.zSource.id]
+	return left_source < right_source
+
+
+static func _coupled_trigger_tokens(rejections: Array) -> Dictionary:
+	var tokens := {}
+	for value in rejections:
+		if not value is Dictionary:
+			continue
+		var rejection: Dictionary = value
+		var details: Dictionary = rejection.get("details", {}) as Dictionary
+		match String(rejection.get("code", "")):
+			"street_overlap": tokens["street:%s" % String(details.get("streetId", ""))] = true
+			"structure_overlap": tokens["structure:%s" % String(details.get("structurePartId", ""))] = true
+			"prior_residence_overlap": tokens["prior:%s" % String(details.get("priorResidenceId", ""))] = true
+	return tokens
+
+
+static func _accumulate_coupled_work(target: Dictionary, source: Dictionary) -> void:
+	for key in target.keys():
+		target[key] = int(target.get(key, 0)) + int(source.get(key, 0))
+
+
+static func _record_coupled_repair(telemetry: Dictionary, intent: Dictionary, trigger_rejections: Array, x_values: Array, z_values: Array, candidates: Array, selected_ordinal: int, selected_center: Vector3, selected_signature: String, exhausted: bool, extra: Dictionary) -> void:
+	var repairs: Array = telemetry.get("coupledRepairs", []) as Array
+	var record := {
+		"intentId": String(intent.get("id", "")),
+		"pairIndex": int(intent.get("pairIndex", -1)),
+		"side": String(intent.get("side", "")),
+		"triggerRejections": trigger_rejections.duplicate(true),
+		"axisCandidateLimit": COUPLED_AXIS_CANDIDATE_LIMIT,
+		"candidateCap": COUPLED_CANDIDATE_LIMIT,
+		"xCandidateCount": x_values.size(),
+		"zCandidateCount": z_values.size(),
+		"candidateDomainCount": candidates.size(),
+		"selectedOrdinal": selected_ordinal,
+		"selectedCenter": selected_center,
+		"selectedPlacementSignature": selected_signature,
+		"exhausted": exhausted,
+		"sourceKinds": ["staged_centers", "courtyard_edges", "fixed_blocker_edges", "prior_residence_edges"]
+	}
+	record.merge(extra, true)
+	repairs.append(record)
+	telemetry["coupledRepairs"] = repairs
+	telemetry["coupledRepairTriggerCount"] = int(telemetry.get("coupledRepairTriggerCount", 0)) + 1
+	telemetry["coupledCandidateEvaluatedCount"] = int(telemetry.get("coupledCandidateEvaluatedCount", 0)) + int(record.get("evaluatedCount", 0))
 
 
 static func _annotate_prior_overlap_rejections(rejection_values: Array, intent: Dictionary, prior_placements: Array[Dictionary], prior_compositions: Array[Dictionary], nominal_center: Vector3, row_packed_center: Vector3, row_packed_composition: Dictionary, fixed_packed_center: Vector3, fixed_packed_composition: Dictionary, final_center: Vector3, settings: Dictionary) -> Array:
@@ -594,11 +789,17 @@ static func _new_telemetry(intent_count: int, street_count: int, structure_count
 		"priorTraversals": [],
 		"boundsChecks": 0,
 		"boundaryAdjustments": 0,
+		"coupledRepairTriggerCount": 0,
+		"coupledCandidateEvaluatedCount": 0,
+		"coupledCandidateCapPerTrigger": COUPLED_CANDIDATE_LIMIT,
+		"coupledRepairs": [],
 		"maximumDescriptionCalls": intent_count * 4,
 		"maximumObstacleComparisons": intent_count * (street_count + structure_count) * 2,
 		"maximumPriorComparisons": intent_count * maxi(0, intent_count - 1),
 		"maximumPriorTraversalEntries": intent_count,
-		"maximumPriorTraversalItems": int(intent_count * maxi(0, intent_count - 1) / 2)
+		"maximumPriorTraversalItems": int(intent_count * maxi(0, intent_count - 1) / 2),
+		"maximumCoupledRepairTriggers": intent_count,
+		"maximumCoupledCandidateEvaluations": intent_count * COUPLED_CANDIDATE_LIMIT
 	}
 
 
@@ -611,6 +812,24 @@ static func _validate_telemetry_bounds(telemetry: Dictionary, rejections: Array[
 	var prior_comparisons := int(telemetry.get("algebraicPriorComparisons", 0)) + int(telemetry.get("exactPriorComparisons", 0))
 	if prior_comparisons > int(telemetry.get("maximumPriorComparisons", 0)):
 		rejections.append(_rejection("prior_comparison_bound_exceeded", "telemetry", "", -1, "", {"actual": prior_comparisons, "maximum": telemetry.get("maximumPriorComparisons", 0)}))
+	var coupled_repairs: Array = telemetry.get("coupledRepairs", []) as Array
+	var trigger_count := int(telemetry.get("coupledRepairTriggerCount", 0))
+	var evaluated_count := int(telemetry.get("coupledCandidateEvaluatedCount", 0))
+	if trigger_count != coupled_repairs.size() or trigger_count > int(telemetry.get("maximumCoupledRepairTriggers", 0)):
+		rejections.append(_rejection("coupled_repair_trigger_bound_exceeded", "telemetry", "", -1, "", {"actual": trigger_count, "recordCount": coupled_repairs.size(), "maximum": telemetry.get("maximumCoupledRepairTriggers", 0)}))
+	if evaluated_count > int(telemetry.get("maximumCoupledCandidateEvaluations", 0)):
+		rejections.append(_rejection("coupled_candidate_bound_exceeded", "telemetry", "", -1, "", {"actual": evaluated_count, "maximum": telemetry.get("maximumCoupledCandidateEvaluations", 0)}))
+	for record_value in coupled_repairs:
+		if not record_value is Dictionary:
+			rejections.append(_rejection("malformed_coupled_repair_telemetry", "telemetry", "", -1, "", {}))
+			continue
+		var record: Dictionary = record_value
+		if int(record.get("axisCandidateLimit", -1)) != COUPLED_AXIS_CANDIDATE_LIMIT or int(record.get("candidateCap", -1)) != COUPLED_CANDIDATE_LIMIT \
+				or int(record.get("xCandidateCount", -1)) < 0 or int(record.get("xCandidateCount", 0)) > COUPLED_AXIS_CANDIDATE_LIMIT \
+				or int(record.get("zCandidateCount", -1)) < 0 or int(record.get("zCandidateCount", 0)) > COUPLED_AXIS_CANDIDATE_LIMIT \
+				or int(record.get("candidateDomainCount", -1)) < 0 or int(record.get("candidateDomainCount", 0)) > COUPLED_CANDIDATE_LIMIT \
+				or int(record.get("evaluatedCount", -1)) < 0 or int(record.get("evaluatedCount", 0)) > int(record.get("candidateDomainCount", 0)):
+			rejections.append(_rejection("malformed_coupled_repair_bounds", "telemetry", String(record.get("intentId", "")), int(record.get("pairIndex", -1)), String(record.get("side", "")), record))
 
 
 static func _record_prior_traversal(telemetry: Dictionary, intent: Dictionary, progression_sign: int, traversed_prior_tokens: PackedStringArray) -> void:

@@ -2,6 +2,7 @@
 param(
     [ValidateSet('Import', 'Contract', 'Capture')][string]$Mode = 'Contract',
     [ValidateSet('urban', 'compound')][string]$Variant = 'urban',
+    [ValidateRange(1, 2147483647)][int]$Seed = 208159,
     [string]$ProjectPath = (Split-Path $PSScriptRoot -Parent),
     [string]$GodotExe = 'C:\Users\arkam\Desktop\Godot_v4.6.1-stable_win64.exe\Godot_v4.6.1-stable_win64_console.exe',
     [Parameter(Mandatory = $true)][string]$OutputDirectory
@@ -32,7 +33,7 @@ $priorEnvironment = @{}
 $watchdogArguments = @{
     ProjectPath = $projectRoot
     GodotExe = $GodotExe
-    TimeoutSeconds = 210
+    TimeoutSeconds = 360
     StdoutPath = (Join-Path $outputRoot 'stdout.log')
     StderrPath = (Join-Path $outputRoot 'stderr.log')
     SummaryPath = (Join-Path $outputRoot 'watchdog.json')
@@ -51,7 +52,7 @@ switch ($Mode) {
     }
     'Capture' {
         $watchdogArguments.Scene = 'res://scenes/testing/buildings/CitadelUrbanPocTest.tscn'
-        $watchdogArguments.SceneArguments = @('--', '--seed', '208159', '--citadel-scale', '1.25')
+        $watchdogArguments.SceneArguments = @('--', '--seed', [string]$Seed, '--citadel-scale', '1.25')
     }
 }
 try {
@@ -65,6 +66,10 @@ try {
     if ($resultCode -ne 0) { throw "Godot/watchdog failed ($resultCode); inspect $outputRoot." }
     if ($Mode -ne 'Import' -and -not (Test-Path -LiteralPath (Join-Path $outputRoot 'report.json'))) {
         throw 'Godot exited without its required report.'
+    }
+    if ($Mode -eq 'Capture') {
+        $captureReport = Get-Content -LiteralPath (Join-Path $outputRoot 'report.json') -Raw | ConvertFrom-Json
+        if ($captureReport.seed -ne $Seed) { throw 'Capture report does not match the requested seed.' }
     }
     if (@(Get-Process -Name '*godot*' -ErrorAction SilentlyContinue).Count -ne 0) {
         throw 'A Godot instance remains; inspect watchdog ownership evidence before any further launch.'

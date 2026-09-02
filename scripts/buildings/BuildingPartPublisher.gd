@@ -8,8 +8,19 @@ class_name BuildingPartPublisher
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const SurfaceHistoryFieldScript := preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
+const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
+const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
+const SettledCobbleGeometryScript := preload("res://scripts/buildings/SettledCobbleGeometry.gd")
+const PavingFootingAssemblyScript := preload("res://scripts/buildings/PavingFootingAssemblyRecipe.gd")
+const MasonryWallGeometryScript := preload("res://scripts/buildings/MasonryWallGeometry.gd")
+const MasonryAperturePublicationScript := preload("res://scripts/buildings/MasonryAperturePublication.gd")
+const MAX_JOINTED_FINISHES := 4
+const MAX_JOINTED_FEET := 16
 const INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT := 12000
 const MONUMENTAL_MASONRY_INSTANCE_BUDGET := 2400
+# Temporary user-authorized bypass on the visuals branch (2026-08-30).
+# Keep actual failures in reports; rendering does not certify structural safety.
+const PHYSICAL_INTEGRITY_REQUIRED_FOR_PUBLICATION := false
 
 var unit_box: BoxMesh
 var material_cache: Dictionary = {}
@@ -37,6 +48,15 @@ var masonry_repair_clusters: Array[Dictionary] = []
 var physical_integrity: Dictionary = {}
 var raised_route_coverage: Dictionary = {}
 var active_publication_started_usec := 0
+var _paving_artifacts: Dictionary = {}
+var _paving_source_parts: Dictionary = {}
+var _paving_blueprint = null
+var _paving_binding := PackedByteArray()
+var _paving_history_binding := PackedByteArray()
+var _paving_failure := ""
+var _paving_prepared := false
+var _paving_complete := false
+var _masonry_preparation
 
 
 func _init() -> void:
@@ -47,6 +67,9 @@ func _init() -> void:
 func publish(blueprint, parent: Node3D, options: Dictionary = {}) -> Dictionary:
 	if not begin_publication(blueprint, parent, options):
 		return summary()
+	while _masonry_preparation.state == "pending_budget":
+		_masonry_preparation.advance(self)
+	if _masonry_preparation.state != "ready": return summary()
 	publish_part_batch(blueprint, parent, 0, blueprint.parts.size())
 	return finish_publication(blueprint, parent)
 
@@ -57,10 +80,16 @@ func publish_incremental(blueprint, parent: Node3D, parts_per_frame := 6, option
 	# frames without inventing a second visual/collision publication authority.
 	if not begin_publication(blueprint, parent, options):
 		return summary()
+	while _masonry_preparation.state == "pending_budget":
+		_masonry_preparation.advance(self)
+		report_incremental_progress("masonry_preparation")
+		if _masonry_preparation.state == "pending_budget": await parent.get_tree().process_frame
+	if _masonry_preparation.state != "ready": return summary()
 	var frame_budget := maxi(1, parts_per_frame)
 	var part_index := 0
 	while part_index < blueprint.parts.size():
 		part_index = publish_part_batch(blueprint, parent, part_index, frame_budget)
+		if _publication_failed(): return summary()
 		if part_index < blueprint.parts.size():
 			report_incremental_progress("frame_budget")
 			await parent.get_tree().process_frame
@@ -74,10 +103,10 @@ func begin_publication(blueprint, parent: Node3D, options: Dictionary = {}) -> b
 	raised_route_coverage = CastleCompoundBlueprintBuilderScript.validate_raised_route_coverage(blueprint)
 	# Citadel route-publication requirements are retired on this visuals branch.
 	# Keep the real diagnostic (including failures) without making it a renderer
-	# prerequisite. Physical integrity below remains an independent hard gate.
+	# prerequisite. Physical integrity is temporarily diagnostic-only by request.
 	var structural_authority = options.get("structuralAuthorityBlueprint", blueprint)
 	physical_integrity = structural_authority.validate_physical_integrity() if structural_authority != null and structural_authority.has_method("validate_physical_integrity") else {"passed": true, "checkedPartCount": 0, "checks": [], "violations": []}
-	if not bool(physical_integrity.get("passed", false)):
+	if PHYSICAL_INTEGRITY_REQUIRED_FOR_PUBLICATION and not bool(physical_integrity.get("passed", false)):
 		push_error("Building publication blocked by invalid physical recipe: %s" % JSON.stringify(physical_integrity.get("violations", [])))
 		return false
 	configure_publication_options(options)
@@ -87,6 +116,8 @@ func begin_publication(blueprint, parent: Node3D, options: Dictionary = {}) -> b
 	source_blueprint_id = canonical_source_blueprint_id(blueprint)
 	paving_treatments = blueprint.recipe.get("pavingTreatments", []) as Array
 	surface_history.configure(blueprint.recipe, blueprint.parts)
+	if not _prepare_paving_publication(blueprint): return false
+	if not prepare_masonry_apertures(blueprint): return false
 	active_publication_started_usec = Time.get_ticks_usec()
 	return true
 
@@ -94,6 +125,11 @@ func begin_publication(blueprint, parent: Node3D, options: Dictionary = {}) -> b
 func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: int) -> int:
 	if blueprint == null or parent == null:
 		return start_index
+	if not _paving_session_valid(blueprint): return start_index
+	if _masonry_preparation != null and _masonry_preparation.state == "pending_budget":
+		_masonry_preparation.advance(self)
+		if _masonry_preparation.state != "ready": return start_index
+	if _publication_failed(): return start_index
 	var part_index := clampi(start_index, 0, blueprint.parts.size())
 	var processed := 0
 	while part_index < blueprint.parts.size() and processed < maxi(1, max_parts):
@@ -103,6 +139,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 		if part == null:
 			continue
 		publish_part(part, parent)
+		if _publication_failed(): return part_index - 1
 		incremental_published_parts += 1
 		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT:
 			flush_static_batches(parent)
@@ -113,10 +150,13 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 func finish_publication(blueprint, parent: Node3D) -> Dictionary:
 	if blueprint == null or parent == null:
 		return summary()
+	if not _paving_session_valid(blueprint): return summary()
+	if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return summary()
 	flush_static_batches(parent)
 	report_incremental_progress("complete")
 	publication_usec = Time.get_ticks_usec() - active_publication_started_usec if active_publication_started_usec > 0 else 0
 	active_publication_started_usec = 0
+	_paving_complete = incremental_published_parts == incremental_total_parts
 	return summary()
 
 
@@ -147,6 +187,15 @@ func clear_published() -> void:
 	physical_integrity.clear()
 	raised_route_coverage.clear()
 	active_publication_started_usec = 0
+	_paving_artifacts.clear()
+	_paving_source_parts.clear()
+	_paving_blueprint = null
+	_paving_binding.clear()
+	_paving_history_binding.clear()
+	_paving_failure = ""
+	_paving_prepared = false
+	_paving_complete = false
+	_masonry_preparation = null
 
 
 func configure_publication_options(options: Dictionary) -> void:
@@ -165,6 +214,8 @@ func canonical_source_blueprint_id(blueprint) -> String:
 
 
 func publish_part(part, parent: Node3D) -> StaticBody3D:
+	if not _paving_part_valid(part): return null
+	if not _masonry_part_valid(part): return null
 	var started := Time.get_ticks_usec()
 	published_part_count += 1
 	if batch_static_parts and String(part.kind) != "door":
@@ -209,6 +260,8 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 
 
 func publish_static_part(part, parent: Node3D) -> void:
+	if not _paving_part_valid(part): return
+	if not _masonry_part_valid(part): return
 	# Static construction records remain the source of visual and collision facts;
 	# this only composes their publication under shared scene nodes. Doors keep
 	# their individual bodies because DoorPortalService owns their interaction and
@@ -257,6 +310,8 @@ func static_collision_batch(parent: Node3D) -> StaticBody3D:
 
 
 func publish_visual(part, parent: Node3D) -> void:
+	if not _paving_part_valid(part): return
+	if not _masonry_part_valid(part): return
 	match String(part.kind):
 		"wall":
 			if ConstructionMaterialCatalogScript.is_masonry_material(String(part.material_id)):
@@ -368,6 +423,14 @@ func publish_timber_wall(part, parent: Node3D) -> void:
 
 func publish_aged_timber_beam(part, parent: Node3D) -> void:
 	var size: Vector3 = part.size
+	# Load-bearing joinery can opt into a straight profile: cosmetic segment
+	# bending must not pull visible bearing faces away from their real seats.
+	# Keep the same material and facade-condition custom-data pipeline.
+	var preserve_faces = part.recipe.get("preserveBearingFaces", false)
+	if preserve_faces is bool and preserve_faces:
+		var joined: Array[Transform3D] = [box_transform(Vector3.ZERO, size)]
+		add_box_batch(parent, joined, material_for(part), "BearingTimber", build_facade_custom_data(joined, part))
+		return
 	var longest_axis := 0
 	var longest_length := size.x
 	if size.y > longest_length:
@@ -405,6 +468,71 @@ func publish_aged_timber_beam(part, parent: Node3D) -> void:
 
 
 func publish_brick_wall(part, parent: Node3D) -> void:
+	if not _masonry_part_valid(part): return
+	var artifact: Dictionary = _masonry_preparation.artifact(part) if _masonry_preparation != null else {}
+	var geometry: Dictionary = artifact.geometry if not artifact.is_empty() else describe_masonry(part)
+	var size: Vector3 = part.size
+	var bed_material := material_for_id("mortar", variation_for(part) - 0.035)
+	add_box_visual(parent, geometry.mortarSize, Vector3.ZERO, bed_material, "MasonryBed")
+	var top_surface_material := String(part.recipe.get("topSurfaceMaterial", ""))
+	if String(part.kind) == "foundation" and not top_surface_material.is_empty():
+		add_box_visual(parent, Vector3(maxf(0.08, size.x - 0.05), 0.028, maxf(0.08, size.z - 0.05)), Vector3(0.0, size.y * 0.5 + 0.014, 0.0), material_for_id(top_surface_material, variation_for(part) - 0.025), "FoundationTopSurface")
+	var repair_profile: Dictionary = geometry.repairProfile
+	if not repair_profile.is_empty():
+		masonry_repair_clusters.append({"partId": String(part.id), "face": int(repair_profile.get("face", -1)), "centerY": float(repair_profile.get("centerY", 0.5)), "centerAlong": float(repair_profile.get("centerAlong", 0.5)), "radiusY": float(repair_profile.get("radiusY", 0.0)), "radiusAlong": float(repair_profile.get("radiusAlong", 0.0))})
+	var surface_material := material_for_id(geometry.surfaceMaterialId, masonry_family_variation(part))
+	if artifact.is_empty(): add_box_batch(parent, geometry.regularTransforms, surface_material, "BrickCourses", geometry.regularCustomData)
+	else: _publish_masonry_group(parent, artifact, "regular", surface_material, "BrickCourses")
+	if not geometry.repairTransforms.is_empty():
+		var repair_material := masonry_repair_material_for(part, geometry.surfaceMaterialId)
+		if artifact.is_empty(): add_box_batch(parent, geometry.repairTransforms, repair_material, "MasonryRepairCourses", geometry.repairCustomData)
+		else: _publish_masonry_group(parent, artifact, "repair", repair_material, "MasonryRepairCourses")
+
+
+func prepare_masonry_apertures(blueprint) -> bool:
+	_masonry_preparation = MasonryAperturePublicationScript.new()
+	return _masonry_preparation.begin(blueprint, self)
+
+
+func _publication_failed() -> bool:
+	return not _paving_failure.is_empty() or (_masonry_preparation != null and _masonry_preparation.state == "failed")
+
+
+func _masonry_part_valid(part) -> bool:
+	if _publication_failed(): return false
+	if _masonry_preparation != null and _masonry_preparation.state == "pending_budget": return false
+	if _masonry_preparation != null and not _masonry_preparation.validate_unit_source(self): return false
+	if _masonry_preparation != null and not _masonry_preparation.accepts_source_member(part): return false
+	var required: bool = part.recipe.has("masonryApertureSource") or (_masonry_preparation != null and _masonry_preparation.owns(part))
+	if not required: return true
+	if _masonry_preparation == null:
+		_masonry_preparation = MasonryAperturePublicationScript.new()
+		return _masonry_preparation._fail("unprepared_direct_masonry_publication")
+	return _masonry_preparation.ready_for(part, self)
+
+
+func _publish_masonry_group(parent: Node3D, artifact: Dictionary, group: String, material: Material, label: String) -> void:
+	var transforms: Array = []
+	var custom: Array = []
+	for entry: Dictionary in artifact.entries:
+		if entry.original.group != group: continue
+		if entry.unchanged:
+			transforms.append(entry.original.localTransform)
+			custom.append(entry.original.customData)
+			continue
+		if not transforms.is_empty():
+			add_box_batch(parent, transforms, material, label, custom)
+			transforms = []
+			custom = []
+		var prepared: Dictionary = artifact.preparedMeshes[entry.original.id]
+		if prepared.mesh != null:
+			add_mesh_batch(parent, prepared.mesh, [entry.original.localTransform], material, label, [entry.original.customData])
+	if not transforms.is_empty(): add_box_batch(parent, transforms, material, label, custom)
+
+
+func describe_masonry(part) -> Dictionary:
+	# One descriptor path for actual publication and recipe aperture construction.
+	# Keep the existing course arithmetic, instance order and custom data exact.
 	var size: Vector3 = part.size
 	var transforms: Array[Transform3D] = []
 	var repair_flags: Array[bool] = []
@@ -426,18 +554,9 @@ func publish_brick_wall(part, parent: Node3D) -> void:
 	# instances. Its thin axis is inset on both faces, so it cannot z-fight with
 	# a brick surface while course gaps remain a material fact rather than a
 	# texture.
-	var mortar_size := size
-	mortar_size.x = maxf(0.02, size.x - minf(0.16, size.x * 0.30))
-	mortar_size.z = maxf(0.02, size.z - minf(0.16, size.z * 0.30))
-	var bed_material := material_for_id("mortar", variation_for(part) - 0.035)
-	add_box_visual(parent, mortar_size, Vector3.ZERO, bed_material, "MasonryBed")
-	var top_surface_material := String(part.recipe.get("topSurfaceMaterial", ""))
-	if String(part.kind) == "foundation" and not top_surface_material.is_empty():
-		add_box_visual(parent, Vector3(maxf(0.08, size.x - 0.05), 0.028, maxf(0.08, size.z - 0.05)), Vector3(0.0, size.y * 0.5 + 0.014, 0.0), material_for_id(top_surface_material, variation_for(part) - 0.025), "FoundationTopSurface")
+	var mortar_size := MasonryWallGeometryScript.bed_size(size)
 	var masonry_phase := float(posmod(String(part.id).hash(), 1009)) / 1009.0
 	var repair_profile := masonry_repair_profile(part)
-	if not repair_profile.is_empty():
-		masonry_repair_clusters.append({"partId": String(part.id), "face": int(repair_profile.get("face", -1)), "centerY": float(repair_profile.get("centerY", 0.5)), "centerAlong": float(repair_profile.get("centerAlong", 0.5)), "radiusY": float(repair_profile.get("radiusY", 0.0)), "radiusAlong": float(repair_profile.get("radiusAlong", 0.0))})
 	append_brick_face_transforms(transforms, repair_flags, size, true, -1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 0)
 	append_brick_face_transforms(transforms, repair_flags, size, true, 1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 1)
 	append_brick_face_transforms(transforms, repair_flags, size, false, -1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 2)
@@ -451,156 +570,223 @@ func publish_brick_wall(part, parent: Node3D) -> void:
 		else:
 			regular_transforms.append(transform)
 	var surface_material_id := "aged_castle_stone" if uses_aged_castle_stone else material_id
-	var surface_material := material_for_id(surface_material_id, masonry_family_variation(part))
-	add_box_batch(parent, regular_transforms, surface_material, "BrickCourses", build_masonry_custom_data(regular_transforms, part))
+	var regular_custom_data := build_masonry_custom_data(regular_transforms, part)
+	var repair_custom_data: Array[Color] = []
 	if not repair_transforms.is_empty():
-		var repair_material := masonry_repair_material_for(part, surface_material_id)
 		var repair_custom_flags: Array[bool] = []
 		repair_custom_flags.resize(repair_transforms.size())
 		repair_custom_flags.fill(true)
-		add_box_batch(parent, repair_transforms, repair_material, "MasonryRepairCourses", build_masonry_custom_data(repair_transforms, part, repair_custom_flags, repair_profile))
+		repair_custom_data = build_masonry_custom_data(repair_transforms, part, repair_custom_flags, repair_profile)
+	return {"mortarSize": mortar_size, "regularTransforms": regular_transforms, "repairTransforms": repair_transforms,
+		"regularCustomData": regular_custom_data, "repairCustomData": repair_custom_data,
+		"surfaceMaterialId": surface_material_id, "repairProfile": repair_profile}
+
+
+func masonry_brick_solids(part, geometry: Dictionary) -> Array:
+	# Stable source identities describe the actual native unit-box instances.
+	# Group-local ordinals are not old/new correspondence after re-coursing.
+	var result: Array = []
+	var frame := Transform3D(Basis.from_euler(part.rotation), part.position)
+	for group: String in ["regular", "repair"]:
+		var transforms: Array = geometry[group + "Transforms"]
+		var custom: Array = geometry[group + "CustomData"]
+		var material_key := "%s:%0.3f" % [geometry.surfaceMaterialId, masonry_family_variation(part)]
+		if group == "repair": material_key = "masonry_repair:" + material_key
+		for index in range(transforms.size()):
+			result.append({"id": "%s:%s:%d" % [part.id, group, index], "group": group, "ordinal": index,
+				"materialKey": material_key, "surfaceMaterialId": geometry.surfaceMaterialId, "customData": custom[index],
+				"localTransform": transforms[index], "transform": frame * transforms[index]})
+	return result
 
 
 func publish_settled_cobble(part, parent: Node3D) -> void:
-	var size: Vector3 = part.size
-	var paving_family := paving_family_for(part)
-	var civic_setts := paving_family == "civic_setts" or paving_family == "courtyard_setts"
-	var bed_height := maxf(0.045, size.y * 0.48)
-	var joint_material_id := "stone_foundation" if civic_setts else "ground_soil"
-	add_box_visual(parent, Vector3(size.x, bed_height, size.z), Vector3(0.0, -size.y * 0.5 + bed_height * 0.5, 0.0), material_for_id(joint_material_id, variation_for(part) - 0.025), "CobbleJointBed")
-	var runs_along_x := paving_runs_along_x(part)
-	var along_span: float = size.x if runs_along_x else size.z
-	var cross_span: float = size.z if runs_along_x else size.x
-	var along_origin: float = part.position.x if runs_along_x else part.position.z
-	var cross_origin: float = part.position.z if runs_along_x else part.position.x
-	var target_along := 0.94 if civic_setts else 1.02
-	var target_cross := 0.62 if civic_setts else 0.76
-	var desired_count := maxi(1, ceili(along_span / target_along)) * maxi(1, ceili(cross_span / target_cross))
-	if desired_count > 6000:
-		var expansion := sqrt(float(desired_count) / 6000.0)
-		target_along *= expansion
-		target_cross *= expansion
-	var regular_transforms: Array[Transform3D] = []
-	var regular_custom_data: Array[Color] = []
-	var worn_transforms: Array[Transform3D] = []
-	var worn_custom_data: Array[Color] = []
-	var region_phase := paving_region_phase(part)
-	var cross_min := cross_origin - cross_span * 0.5
-	var row_index := floori(cross_min / target_cross) - 1
-	var cross_cursor := float(row_index) * target_cross - cross_origin
-	while cross_cursor < cross_span * 0.5 - 0.01:
-		var row_phase := fposmod(sin(float(row_index + 1) * 19.193 + region_phase * 71.713) * 15731.743, 1.0)
-		# Hand-laid paving cannot inherit an invisible perfect grid from the
-		# recipe bounds.  Courses, like real setts, advance by their own stable
-		# widths and only meet the border where a mason had to cut a stone.
-		var nominal_cross := target_cross * lerpf(0.78 if civic_setts else 0.70, 1.22 if civic_setts else 1.30, row_phase)
-		var cross_start := maxf(-cross_span * 0.5, cross_cursor)
-		var cross_end := minf(cross_span * 0.5, cross_cursor + nominal_cross)
-		if cross_end - cross_start < 0.10:
-			cross_cursor += nominal_cross
-			row_index += 1
-			continue
-		var cross_center := (cross_start + cross_end) * 0.5
-		var row_offset := target_along * lerpf(0.26, 0.72, row_phase) if posmod(row_index, 2) == 1 else target_along * lerpf(-0.22, 0.18, row_phase)
-		row_offset += (row_phase - 0.5) * (target_along * (0.20 if civic_setts else 0.42))
-		var along_min := along_origin - along_span * 0.5
-		var column_index := floori((along_min + row_offset) / target_along) - 1
-		var along_cursor := float(column_index) * target_along - row_offset - along_origin
-		while along_cursor < along_span * 0.5 - 0.01:
-			var stable := fposmod(sin(float(column_index + 1) * 12.9898 + float(row_index + 1) * 78.233 + region_phase * 37.719) * 43758.5453, 1.0)
-			var secondary := fposmod(sin(float(column_index + 1) * 41.173 + float(row_index + 1) * 19.317 + region_phase * 91.37) * 23171.31, 1.0)
-			var nominal_along := target_along * lerpf(0.76 if civic_setts else 0.66, 1.28 if civic_setts else 1.38, stable)
-			var along_start := maxf(-along_span * 0.5, along_cursor)
-			var along_end := minf(along_span * 0.5, along_cursor + nominal_along)
-			if along_end - along_start < 0.10:
-				along_cursor += nominal_along
-				column_index += 1
+	if not _paving_part_valid(part): return
+	if part.recipe.has("pavingFootingJoints"):
+		_publish_jointed_paving(part, parent)
+		return
+	var geometry: Dictionary = SettledCobbleGeometryScript.describe_source(part, surface_history, source_blueprint_id)
+	var bed: Dictionary = geometry.bed
+	add_box_visual(parent, bed.size, bed.position, material_for_id(bed.materialId, variation_for(part) - 0.025), "CobbleJointBed")
+	add_mesh_batch(parent, unit_box, geometry.regularTransforms, material_for(part), "SettledCobbleStones", geometry.regularCustomData)
+	if not geometry.wornTransforms.is_empty():
+		add_mesh_batch(parent, unit_box, geometry.wornTransforms, material_for_id("worn_cobble", variation_for(part) - 0.016), "WornSettledCobbleStones", geometry.wornCustomData)
+
+
+func _paving_reject(reason: String) -> bool:
+	if _paving_failure.is_empty(): _paving_failure = reason
+	_paving_complete = false
+	return false
+
+
+func _prepare_paving_publication(b) -> bool:
+	var finishes: Array = []
+	for part in b.parts:
+		if part != null and part.recipe.has("pavingFootingJoints"): finishes.append(part)
+	# Preserve the legacy source/material path when no declaration is present.
+	if finishes.is_empty(): return true
+	if b.parts.size() > 10000 or finishes.size() > MAX_JOINTED_FINISHES: return _paving_reject("paving_collection_limit")
+	var by_id: Dictionary = {}
+	for part in b.parts:
+		if part == null or part.id.is_empty() or by_id.has(part.id): return _paving_reject("paving_invalid_source_ids")
+		by_id[part.id] = part
+	var requests: Array = []
+	var all_feet: Dictionary = {}
+	# Validate ALL declarations and aggregate limits before any mesh preparation.
+	for finish in finishes:
+		var declaration: Variant = finish.recipe.pavingFootingJoints
+		if not declaration is Dictionary or declaration.size() != 4 or not declaration.get("footPartIds") is Array or not (declaration.get("nominalJoint") is float or declaration.get("nominalJoint") is int): return _paving_reject("paving_invalid_declaration")
+		for key in ["geometryDigest", "constructionDigest"]:
+			if not declaration.get(key) is String or declaration[key].length() != 64 or not declaration[key].is_valid_hex_number(false): return _paving_reject("paving_invalid_committed_digest")
+		var joint: float = declaration.nominalJoint
+		if not is_finite(joint) or joint <= 0.0 or joint > PavingFootingAssemblyScript.FootCuts.MAX_JOINT or declaration.footPartIds.is_empty() or declaration.footPartIds.size() > MAX_JOINTED_FEET: return _paving_reject("paving_invalid_joint_or_feet")
+		if finish.collision_enabled or finish.kind != "foundation" or not ConstructionMaterialCatalogScript.is_cobble_material(finish.material_id) or finish.recipe.get("visual", true) != true: return _paving_reject("paving_requires_visible_noncollision_finish")
+		var feet: Array = []
+		var seen: Dictionary = {}
+		for id in declaration.footPartIds:
+			if not id is String or id.is_empty() or id == finish.id or seen.has(id) or not by_id.has(id): return _paving_reject("paving_unresolved_or_duplicate_foot")
+			seen[id] = true
+			all_feet[id] = true
+			feet.append(by_id[id])
+		if all_feet.size() > MAX_JOINTED_FEET: return _paving_reject("paving_total_foot_limit")
+		requests.append({"finish": finish, "feet": feet, "joint": joint})
+	for request in requests:
+		_paving_source_parts[request.finish.id] = request.finish
+		for foot in request.feet: _paving_source_parts[foot.id] = foot
+	_paving_blueprint = b
+	var binding: PackedByteArray = _paving_source_binding(b)
+	if binding.is_empty(): return _paving_reject("paving_invalid_source_binding")
+	var staged: Dictionary = {}
+	for request in requests:
+		var result: Dictionary = PavingFootingAssemblyScript.prepare(b, [request.finish.id], request.feet, request.joint)
+		if not bool(result.get("ready", false)): return _paving_reject("paving_prepare:" + String(result.get("reason", "unknown")))
+		if not result.get("joints") is Dictionary or not result.joints.has(request.finish.id) or var_to_bytes(result.joints[request.finish.id]) != var_to_bytes(request.finish.recipe.pavingFootingJoints): return _paving_reject("paving_committed_geometry_mismatch")
+		if not result.get("artifacts") is Dictionary or result.artifacts.size() != 1 or not result.artifacts.has(request.finish.id): return _paving_reject("paving_missing_finalized_artifact")
+		var artifact: Dictionary = result.artifacts[request.finish.id]
+		if not _paving_artifact_valid(artifact, request.finish): return _paving_reject("paving_invalid_finalized_artifact")
+		staged[request.finish.id] = {"artifact": artifact, "sourceBinding": binding}
+	if binding != _paving_source_binding(b): return _paving_reject("paving_preparation_mutated_source")
+	_paving_artifacts = staged
+	_paving_binding = binding
+	_paving_history_binding = _paving_history_identity()
+	_paving_prepared = true
+	return true
+
+
+func _paving_source_binding(b) -> PackedByteArray:
+	if b == null or b.parts.size() > 10000: return PackedByteArray()
+	var ids: Dictionary = {}
+	var records: Array = []
+	for part in b.parts:
+		if part == null or part.id.is_empty() or ids.has(part.id): return PackedByteArray()
+		ids[part.id] = true
+		if _paving_source_parts.has(part.id) and _paving_source_parts[part.id] != part: return PackedByteArray()
+		# These are exactly the part families consumed by History.configure.
+		# Recipe is retained in full, including canonical ID, routes and trees.
+		if _paving_source_parts.has(part.id) or part.recipe.has("pavingFootingJoints") or part.kind in ["door", "window"] or part.semantic.contains("eave") or bool(part.recipe.get("weatheringEave", false)):
+			records.append(part.snapshot())
+	for id in _paving_source_parts:
+		if not ids.has(id): return PackedByteArray()
+	return var_to_bytes([canonical_source_blueprint_id(b), b.recipe, ids.keys(), records])
+
+
+func _paving_session_valid(b) -> bool:
+	if not _paving_failure.is_empty(): return false
+	if _paving_blueprint == null: return true
+	if not _paving_prepared or b != _paving_blueprint or source_blueprint_id != canonical_source_blueprint_id(b) or _paving_binding != _paving_source_binding(b) or _paving_history_binding != _paving_history_identity(): return _paving_reject("paving_stale_preparation")
+	return true
+
+
+func _paving_history_identity() -> PackedByteArray:
+	return var_to_bytes([surface_history.route_corridors, surface_history.tree_placements, surface_history.history_events, surface_history.history_event_cells])
+
+
+func _paving_part_valid(part) -> bool:
+	if not _paving_failure.is_empty(): return false
+	# Feet have no finish artifact, but their exact source identity/pose owns the
+	# aperture. Also recognize retained objects whose ID was changed after begin.
+	var bound: bool = _paving_source_parts.has(part.id) or _paving_source_parts.find_key(part) != null
+	var needs_artifact: bool = part.recipe.has("pavingFootingJoints") or _paving_artifacts.has(part.id)
+	if not bound and not needs_artifact: return true
+	if not _paving_prepared or _paving_source_parts.get(part.id) != part or (needs_artifact and not _paving_artifacts.has(part.id)): return _paving_reject("paving_unprepared_direct_publication")
+	if not _paving_session_valid(_paving_blueprint): return false
+	return true
+
+
+func _paving_artifact_valid(artifact: Dictionary, part) -> bool:
+	if artifact.get("completed") != true or artifact.get("stage") != "represented_publication_geometry" or not artifact.get("entries") is Array or artifact.entries.is_empty() or artifact.entries.size() > 8192: return false
+	var source_transform: Transform3D = Transform3D(Basis.from_euler(part.rotation), part.position)
+	if artifact.get("sourceTransform") != source_transform: return false
+	var group_index: int = 0
+	var ordinal: int = 0
+	for entry in artifact.entries:
+		if not entry is Dictionary or not entry.get("original") is Dictionary or not entry.get("unchanged") is bool: return false
+		var original: Dictionary = entry.original
+		var next_group: int = ["bed", "regular", "worn"].find(original.get("group"))
+		if next_group < group_index or next_group < 0: return false
+		if next_group != group_index:
+			group_index = next_group
+			ordinal = 0
+		if original.get("ordinal") != ordinal or not original.get("localTransform") is Transform3D or original.get("transform") != source_transform * original.localTransform: return false
+		ordinal += 1
+		if group_index == 0:
+			if ordinal != 1 or original.get("customData") != null or not original.get("materialKey") is String: return false
+		elif not original.get("customData") is Color: return false
+		if not entry.unchanged:
+			if not entry.has("mesh") or not entry.get("cells") is Array: return false
+			if entry.mesh == null:
+				if not entry.cells.is_empty(): return false
+			elif not entry.mesh is ArrayMesh or entry.mesh.get_surface_count() != 1: return false
+	return artifact.entries[0].original.group == "bed"
+
+
+func _publish_jointed_paving(part, parent: Node3D) -> void:
+	var artifact: Dictionary = _paving_artifacts[part.id].artifact
+	# No geometry recomputation or world-to-local round trip here. Artifacts are
+	# privately owned after preparation and never supplied through source caches.
+	var bed: Dictionary = artifact.entries[0]
+	var local: Transform3D = bed.original.localTransform
+	var bed_material: Material = material_for_id(bed.original.materialKey, variation_for(part) - 0.025)
+	if bed.unchanged:
+		add_box_visual(parent, Vector3(local.basis.x.x, local.basis.y.y, local.basis.z.z), local.origin, bed_material, "CobbleJointBed")
+	elif bed.mesh != null:
+		if static_visual_collecting:
+			add_mesh_batch(parent, bed.mesh, [local], bed_material, "CobbleJointBed", [Color(0.5, 0.5, 0.5, 1.0)])
+		else:
+			add_mesh_visual(parent, bed.mesh, Vector3(local.basis.x.x, local.basis.y.y, local.basis.z.z), local.origin, bed_material, "CobbleJointBed")
+	# Keep the original material evaluation order, including an empty regular
+	# group and fully removed entries; never warm a new material during prepare.
+	var regular_material: Material = material_for(part)
+	for group in ["regular", "worn"]:
+		var entries: Array = artifact.entries.filter(func(entry): return entry.original.group == group)
+		if entries.is_empty(): continue
+		var material: Material = regular_material if group == "regular" else material_for_id("worn_cobble", variation_for(part) - 0.016)
+		var label: String = "SettledCobbleStones" if group == "regular" else "WornSettledCobbleStones"
+		var transforms: Array = []
+		var custom: Array = []
+		for entry in entries:
+			if entry.unchanged:
+				transforms.append(entry.original.localTransform)
+				custom.append(entry.original.customData)
 				continue
-			var joint := 0.028 if civic_setts else 0.052
-			# The course generator owns the shared boundaries. Each sett fills its
-			# irregular slot except for one narrow mortar joint, so the joint bed
-			# cannot read as a broad rectangular backing plane.
-			var stone_along := maxf(0.12, along_end - along_start - joint)
-			var stone_cross := maxf(0.12, cross_end - cross_start - joint)
-			var stone_height := maxf(0.07, size.y * lerpf(0.54, 0.78, secondary) if civic_setts else size.y * lerpf(0.50, 0.82, secondary))
-			var along_center := (along_start + along_end) * 0.5
-			var along_jitter := 0.0
-			var cross_jitter := 0.0
-			var x := along_center + along_jitter if runs_along_x else cross_center + cross_jitter
-			var z := cross_center + cross_jitter if runs_along_x else along_center + along_jitter
-			var world_position: Vector3 = part.position + Vector3(x, 0.0, z)
-			var conditions := surface_history.conditions_at(world_position)
-			var wear_contact := surface_history.wear_contact_at(world_position)
-			var route_wear := float(wear_contact.get("influence", 0.0))
-			var footprint_extent := Vector2(stone_along, stone_cross) * 0.5 if runs_along_x else Vector2(stone_cross, stone_along) * 0.5
-			var root_contact := surface_history.root_buttress_contact(world_position, footprint_extent)
-			var root_disturbance := float(root_contact.get("influence", 0.0))
-			var root_direction: Vector3 = root_contact.get("direction", Vector3.ZERO) as Vector3
-			var settlement := (stable - 0.5) * (0.012 if civic_setts else 0.040)
-			settlement -= route_wear * 0.024
-			settlement += root_disturbance * lerpf(0.055, 0.115, secondary)
-			var y := size.y * 0.5 - stone_height * 0.48 + settlement
-			var yaw := (secondary - 0.5) * deg_to_rad(3.0 if civic_setts else 7.0)
-			if root_direction.length_squared() > 0.001:
-				var root_yaw := atan2(-root_direction.z, root_direction.x) if runs_along_x else atan2(root_direction.x, root_direction.z)
-				yaw = lerp_angle(yaw, root_yaw, root_disturbance * 0.68)
-			var tilt := (stable - 0.5) * deg_to_rad(3.0 if civic_setts else 8.0)
-			var stone_size := Vector3(stone_along, stone_height, stone_cross) if runs_along_x else Vector3(stone_cross, stone_height, stone_along)
-			var basis := (Basis(Vector3.UP, yaw) * Basis(Vector3.FORWARD, tilt)).scaled(stone_size)
-			var root_shift := Vector3.ZERO
-			if root_direction.length_squared() > 0.001:
-				var root_normal := Vector3(-root_direction.z, 0.0, root_direction.x).normalized()
-				var side := 1.0 if float(root_contact.get("lateral", 0.0)) >= 0.0 else -1.0
-				root_shift = root_normal * side * root_disturbance * lerpf(0.035, 0.095, secondary)
-			var local_position := Vector3(x, y, z) + root_shift
-			var transform := Transform3D(basis, local_position)
-			var root_moisture := root_disturbance * (0.54 + secondary * 0.36)
-			var canopy_deposit := float(conditions.get("canopyDeposit", 0.0))
-			# INSTANCE_CUSTOM carries only typed surface-history facts: runoff,
-			# route/threshold use, root disturbance and tree-canopy deposition.
-			var route_lateral := float(wear_contact.get("lateral", 1.0))
-			var custom := Color(0.0, pack_route_history(route_wear, route_lateral), clampf(root_moisture, 0.0, 1.0), clampf(canopy_deposit, 0.0, 1.0))
-			if root_disturbance > 0.30 or route_wear > 0.58:
-				worn_transforms.append(transform)
-				worn_custom_data.append(custom)
-			else:
-				regular_transforms.append(transform)
-				regular_custom_data.append(custom)
-			along_cursor += nominal_along
-			column_index += 1
-		cross_cursor += nominal_cross
-		row_index += 1
-	add_mesh_batch(parent, unit_box, regular_transforms, material_for(part), "SettledCobbleStones", regular_custom_data)
-	if not worn_transforms.is_empty():
-		add_mesh_batch(parent, unit_box, worn_transforms, material_for_id("worn_cobble", variation_for(part) - 0.016), "WornSettledCobbleStones", worn_custom_data)
+			if not transforms.is_empty():
+				add_mesh_batch(parent, unit_box, transforms, material, label, custom)
+				transforms = []
+				custom = []
+			if entry.mesh != null:
+				add_mesh_batch(parent, entry.mesh, [entry.original.localTransform], material, label, [entry.original.customData])
+		if not transforms.is_empty(): add_mesh_batch(parent, unit_box, transforms, material, label, custom)
 
 
 func paving_family_for(part) -> String:
-	var explicit_family := String(part.recipe.get("pavingFamily", ""))
-	if not explicit_family.is_empty():
-		return explicit_family
-	var semantic := String(part.semantic)
-	if semantic in ["citadel_market_plaza", "citadel_civic_quarter_paving", "castle_courtyard_paving"]:
-		return "civic_setts"
-	if semantic.contains("route") or semantic.contains("lane") or semantic.contains("alley") or semantic.contains("street"):
-		return "lane_cobbles"
-	return "irregular_cobbles"
+	return SettledCobbleGeometryScript.family_for(part)
 
 
 func paving_runs_along_x(part) -> bool:
-	var heading := String(part.recipe.get("pavingHeading", ""))
-	if heading == "x":
-		return true
-	if heading == "z":
-		return false
-	return part.size.x >= part.size.z
+	return SettledCobbleGeometryScript.runs_along_x(part)
 
 
 func paving_region_phase(part) -> float:
-	var region := String(part.recipe.get("pavingRegion", ""))
-	if region.is_empty():
-		region = "%s:%s" % [source_blueprint_id, String(part.semantic)]
-	return float(posmod(region.hash(), 1009)) / 1009.0
+	return SettledCobbleGeometryScript.region_phase(part, source_blueprint_id)
 
 
 func paving_treatment_strength(world_position: Vector3) -> float:
@@ -663,9 +849,7 @@ func history_custom_data(world_position: Vector3) -> Color:
 
 
 func pack_route_history(influence: float, lateral: float) -> float:
-	var packed_strength := clampi(roundi(clampf(influence, 0.0, 1.0) * 15.0), 0, 15)
-	var packed_lateral := clampi(roundi(clampf(lateral, 0.0, 1.0) * 15.0), 0, 15)
-	return float(packed_strength * 16 + packed_lateral) / 255.0
+	return SettledCobbleGeometryScript.pack_route_history(influence, lateral)
 
 
 func append_brick_face_transforms(transforms: Array[Transform3D], repair_flags: Array[bool], size: Vector3, axis_x: bool, face_sign: float, unit_length: float, unit_height: float, joint_width: float, face_depth: float, masonry_phase: float, repair_profile: Dictionary, face_index: int) -> void:
@@ -856,28 +1040,27 @@ func publish_roof_shingles(part, parent: Node3D) -> void:
 
 func publish_door_boards(part, parent: Node3D) -> void:
 	var size: Vector3 = part.size
+	var geometry: Dictionary = BuildingDoorGeometryScript.describe(size)
 	var pivot := Node3D.new()
 	pivot.name = "DoorPivot"
-	pivot.position = Vector3(-size.x * 0.5, 0.0, 0.0)
+	pivot.position = geometry.pivotPosition
 	parent.add_child(pivot)
 	var leaf := Node3D.new()
 	leaf.name = "DoorLeaf"
-	leaf.position = Vector3(size.x * 0.5, 0.0, 0.0)
+	leaf.position = geometry.leafPosition
 	pivot.add_child(leaf)
-	var count := 5
 	var transforms: Array[Transform3D] = []
-	for index in range(count):
-		var width := size.x / float(count)
-		transforms.append(box_transform(Vector3(-size.x * 0.5 + width * (float(index) + 0.5), 0.0, 0.0), Vector3(maxf(0.04, width - 0.018), size.y, size.z)))
+	for board in geometry.boards:
+		transforms.append(box_transform(board.position, board.size))
 	add_box_batch(leaf, transforms, material_for(part), "DoorBoards")
 	# The frame, brace and handle belong to the same semantic door part; they make
 	# the opening readable without creating a second collision authority.
-	add_box_visual(leaf, Vector3(size.x * 0.86, 0.10, size.z * 1.22), Vector3(0.0, -size.y * 0.10, size.z * 0.40), material_for_id("timber_beam", variation_for(part)), "DoorBrace")
+	add_box_visual(leaf, geometry.brace.size, geometry.brace.position, material_for_id("timber_beam", variation_for(part)), "DoorBrace")
 	var frame_material := material_for_id("timber_beam", variation_for(part))
-	add_box_visual(parent, Vector3(0.14, size.y * 1.12, size.z * 1.55), Vector3(-size.x * 0.58, 0.0, 0.0), frame_material, "DoorFrameLeft")
-	add_box_visual(parent, Vector3(0.14, size.y * 1.12, size.z * 1.55), Vector3(size.x * 0.58, 0.0, 0.0), frame_material, "DoorFrameRight")
-	add_box_visual(parent, Vector3(size.x * 1.28, 0.14, size.z * 1.55), Vector3(0.0, size.y * 0.56, 0.0), frame_material, "DoorFrameTop")
-	add_box_visual(leaf, Vector3(0.105, 0.105, 0.090), Vector3(size.x * 0.27, -0.04, -size.z * 0.70), material_for_id("brass", variation_for(part)), "DoorHandle")
+	add_box_visual(parent, geometry.frameLeft.size, geometry.frameLeft.position, frame_material, "DoorFrameLeft")
+	add_box_visual(parent, geometry.frameRight.size, geometry.frameRight.position, frame_material, "DoorFrameRight")
+	add_box_visual(parent, geometry.frameTop.size, geometry.frameTop.position, frame_material, "DoorFrameTop")
+	add_box_visual(leaf, geometry.handle.size, geometry.handle.position, material_for_id("brass", variation_for(part)), "DoorHandle")
 
 
 func publish_portcullis(part, parent: Node3D) -> void:
@@ -885,37 +1068,35 @@ func publish_portcullis(part, parent: Node3D) -> void:
 	# still one ordinary door part: the shared controller owns its closed
 	# collision and lifts the same visual leaf clear when opened.
 	var size: Vector3 = part.size
+	var geometry: Dictionary = BuildingDoorGeometryScript.describe_portcullis(size)
 	var pivot := Node3D.new()
 	pivot.name = "DoorPivot"
 	parent.add_child(pivot)
 	var leaf := Node3D.new()
 	leaf.name = "DoorLeaf"
 	pivot.add_child(leaf)
-	var bar_count := maxi(4, ceili(size.x / 0.30))
-	var bar_width := minf(0.12, size.x / float(bar_count) * 0.48)
 	var bars: Array[Transform3D] = []
-	for index in range(bar_count):
-		var x := -size.x * 0.5 + size.x * (float(index) + 0.5) / float(bar_count)
-		bars.append(box_transform(Vector3(x, 0.0, 0.0), Vector3(bar_width, size.y, maxf(0.12, size.z * 1.35))))
+	for bar in geometry.bars:
+		bars.append(box_transform(bar.position, bar.size))
 	add_box_batch(leaf, bars, material_for(part), "PortcullisBars")
-	for crossbar_ratio in [-0.30, 0.20]:
-		add_box_visual(leaf, Vector3(size.x, 0.12, maxf(0.14, size.z * 1.45)), Vector3(0.0, size.y * crossbar_ratio, 0.0), material_for(part), "PortcullisCrossbar")
+	for crossbar in geometry.crossbars:
+		add_box_visual(leaf, crossbar.size, crossbar.position, material_for(part), "PortcullisCrossbar")
 	publish_portcullis_lever(part, parent)
 
 
 func publish_portcullis_lever(part, parent: Node3D) -> void:
-	var size: Vector3 = part.size
+	var geometry: Dictionary = BuildingDoorGeometryScript.describe_portcullis(part.size)
 	var lever := Node3D.new()
 	lever.name = "PortcullisLever"
-	lever.position = Vector3(size.x * 0.5 + 0.42, -size.y * 0.24, -maxf(0.44, size.z * 2.60))
+	lever.position = geometry.leverPosition
 	parent.add_child(lever)
-	add_box_visual(lever, Vector3(0.34, 0.46, 0.12), Vector3.ZERO, material_for_id("stone_foundation", variation_for(part)), "LeverMount")
+	add_box_visual(lever, geometry.mount.size, geometry.mount.position, material_for_id("stone_foundation", variation_for(part)), "LeverMount")
 	var arm_pivot := Node3D.new()
 	arm_pivot.name = "LeverArmPivot"
-	arm_pivot.rotation.z = -0.52
+	arm_pivot.rotation = geometry.leverRotation
 	lever.add_child(arm_pivot)
-	add_box_visual(arm_pivot, Vector3(0.10, 0.58, 0.10), Vector3(0.0, 0.24, -0.09), material_for_id("ironwork", variation_for(part)), "LeverArm")
-	add_box_visual(arm_pivot, Vector3(0.19, 0.19, 0.19), Vector3(0.0, 0.52, -0.09), material_for_id("brass", variation_for(part)), "LeverHandle")
+	add_box_visual(arm_pivot, geometry.arm.size, geometry.arm.position, material_for_id("ironwork", variation_for(part)), "LeverArm")
+	add_box_visual(arm_pivot, geometry.handle.size, geometry.handle.position, material_for_id("brass", variation_for(part)), "LeverHandle")
 
 
 func configure_door_leaf(body: StaticBody3D, part) -> void:
@@ -926,10 +1107,10 @@ func configure_door_leaf(body: StaticBody3D, part) -> void:
 	body.set_meta("block_type", "door")
 	body.set_meta("open", false)
 	body.set_meta("closed_rotation", body.rotation.y)
-	body.set_meta("open_swing", -PI * 0.5)
+	body.set_meta("open_swing", BuildingDoorGeometryScript.DEFAULT_OPEN_SWING)
 	body.set_meta("door_motion", String(part.recipe.get("doorMotion", "swing")))
 	body.set_meta("door_presentation", String(part.recipe.get("doorPresentation", "door")))
-	body.set_meta("open_visual_offset", Vector3(0.0, part.size.y + 0.18, 0.0) if String(part.recipe.get("doorMotion", "swing")) == "raise" else Vector3.ZERO)
+	body.set_meta("open_visual_offset", BuildingDoorGeometryScript.raised_visual_offset(part.size) if String(part.recipe.get("doorMotion", "swing")) == "raise" else Vector3.ZERO)
 	body.set_meta("door_portal_id", portal_id)
 	body.set_meta("door_group_id", portal_id)
 	body.set_meta("door_building_id", source_blueprint_id)
@@ -1082,55 +1263,36 @@ func publish_irregular_ground_patch(part, parent: Node3D) -> void:
 
 
 func publish_sack(part, parent: Node3D) -> void:
-	var body := CylinderMesh.new()
-	body.top_radius = 0.34
-	body.bottom_radius = 0.48
-	body.height = 0.72
-	body.radial_segments = 10
-	add_mesh_visual(parent, body, Vector3(part.size.x, part.size.y, part.size.z), Vector3(0.0, -part.size.y * 0.08, 0.0), material_for(part), "ClothSackBody")
-	var shoulder := CylinderMesh.new()
-	shoulder.top_radius = 0.22
-	shoulder.bottom_radius = 0.38
-	shoulder.height = 0.28
-	shoulder.radial_segments = 10
-	add_mesh_visual(parent, shoulder, Vector3(part.size.x * 0.86, part.size.y * 0.42, part.size.z * 0.86), Vector3(0.0, part.size.y * 0.31, 0.0), material_for(part), "ClothSackShoulder")
-	add_box_visual(parent, Vector3(part.size.x * 0.28, part.size.y * 0.08, part.size.z * 0.28), Vector3(0.0, part.size.y * 0.47, 0.0), material_for_id("timber_board", variation_for(part) - 0.04), "SackTie")
-	add_box_visual(parent, Vector3(part.size.x * 0.82, part.size.y * 0.08, part.size.z * 0.76), Vector3(0.0, -part.size.y * 0.45, 0.0), material_for(part), "SackSettledBase")
+	_publish_goods_geometry(part, parent, "sack")
 
 
 func publish_pottery(part, parent: Node3D) -> void:
-	var size: Vector3 = part.size
-	var body := CylinderMesh.new()
-	body.top_radius = 0.34
-	body.bottom_radius = 0.47
-	body.height = 0.78
-	body.radial_segments = 12
-	add_mesh_visual(parent, body, Vector3(size.x, size.y, size.z), Vector3(0.0, -size.y * 0.06, 0.0), material_for(part), "PotteryBody")
-	var neck := CylinderMesh.new()
-	neck.top_radius = 0.32
-	neck.bottom_radius = 0.38
-	neck.height = 0.24
-	neck.radial_segments = 12
-	add_mesh_visual(parent, neck, Vector3(size.x * 0.72, size.y * 0.34, size.z * 0.72), Vector3(0.0, size.y * 0.38, 0.0), material_for(part), "PotteryNeck")
+	_publish_goods_geometry(part, parent, "pottery")
 
 
 func publish_basket(part, parent: Node3D) -> void:
-	var size: Vector3 = part.size
-	var body := CylinderMesh.new()
-	body.top_radius = 0.50
-	body.bottom_radius = 0.40
-	body.height = 0.62
-	body.radial_segments = 12
-	add_mesh_visual(parent, body, Vector3(size.x, size.y, size.z), Vector3(0.0, -size.y * 0.10, 0.0), material_for(part), "WovenBasketBody")
-	var rim := TorusMesh.new()
-	rim.inner_radius = 0.37
-	rim.outer_radius = 0.50
-	rim.rings = 12
-	rim.ring_segments = 6
-	add_mesh_visual(parent, rim, Vector3(size.x, size.y * 0.24, size.z), Vector3(0.0, size.y * 0.30, 0.0), material_for_id("timber_beam", variation_for(part) - 0.02), "BasketRim")
-	for side in [-1.0, 1.0]:
-		add_box_visual(parent, Vector3(size.x * 0.10, size.y * 0.72, size.z * 0.10), Vector3(side * size.x * 0.34, size.y * 0.28, 0.0), material_for_id("timber_beam", variation_for(part)), "BasketHandlePost")
-	add_box_visual(parent, Vector3(size.x * 0.78, size.y * 0.10, size.z * 0.10), Vector3(0.0, size.y * 0.62, 0.0), material_for_id("timber_beam", variation_for(part)), "BasketHandle")
+	_publish_goods_geometry(part, parent, "basket")
+
+
+func _publish_goods_geometry(part, parent: Node3D, kind: String) -> void:
+	for piece in BuildingGoodsGeometryScript.describe(kind, part.size):
+		var mesh: Mesh = null
+		if piece.primitive != "box":
+			mesh = BuildingGoodsGeometryScript.create_mesh(piece)
+		var request: Dictionary = piece.material
+		var material: Material
+		if request.mode == "part":
+			material = material_for(part)
+		elif request.has("subtract"):
+			material = material_for_id(String(request.id), variation_for(part) - float(request.subtract))
+		else:
+			# Do not add a zero offset: retain bare variation_for evaluation,
+			# including its signed-zero behavior and material request ordering.
+			material = material_for_id(String(request.id), variation_for(part))
+		if piece.primitive == "box":
+			add_box_visual(parent, piece.size, piece.position, material, piece.nodeName)
+		else:
+			add_mesh_visual(parent, mesh, piece.size, piece.position, material, piece.nodeName)
 
 
 func publish_tool_rack(part, parent: Node3D) -> void:
@@ -1395,7 +1557,7 @@ func masonry_repair_material_for(part, host_material_id: String) -> Material:
 
 
 func summary() -> Dictionary:
-	return {
+	var result: Dictionary = {
 		"publishedPartCount": published_part_count,
 		"publishedNodeCount": published_nodes.size(),
 		"collisionPartCount": collision_count,
@@ -1406,8 +1568,15 @@ func summary() -> Dictionary:
 		"masonryRepairClusters": masonry_repair_clusters.duplicate(true),
 		"surfaceHistory": surface_history.summary(),
 		"physicalIntegrity": physical_integrity.duplicate(true),
+		"physicalIntegrityRequiredForPublication": PHYSICAL_INTEGRITY_REQUIRED_FOR_PUBLICATION,
 		"raisedRouteCoverage": raised_route_coverage.duplicate(true),
 		"raisedRouteCoverageRequiredForPublication": false,
 		"recipeBuildUsec": recipe_build_usec,
 		"publicationUsec": publication_usec
 	}
+	if _paving_blueprint != null or not _paving_failure.is_empty():
+		result["pavingFootingPublication"] = {"prepared": _paving_prepared, "ready": _paving_prepared and _paving_failure.is_empty(),
+			"complete": _paving_complete and _paving_failure.is_empty(), "reason": _paving_failure, "finishCount": _paving_artifacts.size()}
+	if _masonry_preparation != null:
+		result["masonryAperturePublication"] = {"state": _masonry_preparation.state, "reason": _masonry_preparation.reason, "metrics": _masonry_preparation.metrics.duplicate()}
+	return result
