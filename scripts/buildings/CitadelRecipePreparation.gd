@@ -25,7 +25,9 @@ static func prepare(seed: int, context: Dictionary, continue_stage: Callable = C
 	# Preserve the exact reviewed context and call order. In particular, never
 	# run CastleFurnishingPlanner again after compose_prepared: the urban recipe
 	# has already prepared its furniture against the final access reservations.
-	var build_result := CastleBuilder.build_with_diagnostics(seed, context.duplicate(true))
+	var build_result := CastleBuilder.build_with_diagnostics(seed, context.duplicate(true), progress)
+	if build_result.get("diagnostics", {}).get("failureReason", "") == "cancelled":
+		return {"ready": false, "reason": "cancelled"}
 	var built = build_result.get("blueprint")
 	if built == null:
 		return {"ready": false, "reason": "blueprint_build_failed", "buildDiagnostics": build_result.get("diagnostics",{})}

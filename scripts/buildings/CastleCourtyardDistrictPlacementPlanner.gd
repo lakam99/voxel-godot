@@ -58,7 +58,18 @@ const COUPLED_CANDIDATE_LIMIT := COUPLED_AXIS_CANDIDATE_LIMIT * COUPLED_AXIS_CAN
 const EDGE_SEPARATION := 0.0001
 
 
-static func plan(intents: Array, street_records: Array, structure_parts: Array, courtyard_bounds: Dictionary, options: Dictionary = {}) -> Dictionary:
+static func _continue_placement(continuation: Callable, stage: String) -> bool:
+	return not continuation.is_valid() or continuation.call(stage) == true
+
+
+static func _cancelled() -> Dictionary:
+	# Never hand a partial placement list to construction or classify a stop as
+	# infeasible geometry. Callers propagate this before interpreting proof.
+	return {"passed": false, "status": "cancelled"}
+
+
+static func plan(intents: Array, street_records: Array, structure_parts: Array, courtyard_bounds: Dictionary, options: Dictionary = {}, continuation: Callable = Callable()) -> Dictionary:
+	if not _continue_placement(continuation, "compound_placement_inputs"): return _cancelled()
 	var telemetry := _new_telemetry(intents.size(), street_records.size(), structure_parts.size())
 	var input_check := _validate_inputs(intents, street_records, structure_parts, courtyard_bounds, options)
 	if not bool(input_check.get("passed", false)):
@@ -82,7 +93,9 @@ static func plan(intents: Array, street_records: Array, structure_parts: Array, 
 	var placed_blockers: Array[Dictionary] = []
 	var nominal_centers: Array[Vector3] = []
 	for intent in ordered_intents:
-		var placement_result := _place_one(intent, courtyard_bounds, settings, fixed_blockers, street_footprints, ordered_structure_parts, placements, placed_compositions, placed_blockers, nominal_centers, telemetry)
+		if not _continue_placement(continuation, "compound_placement_intent"): return _cancelled()
+		var placement_result := _place_one(intent, courtyard_bounds, settings, fixed_blockers, street_footprints, ordered_structure_parts, placements, placed_compositions, placed_blockers, nominal_centers, telemetry, continuation)
+		if placement_result.get("status", "") == "cancelled": return placement_result
 		if not bool(placement_result.get("passed", false)):
 			return _infeasible(intents.size(), telemetry, placement_result.get("rejections", []) as Array, String(placement_result.get("phase", "placement")))
 		var placement: Dictionary = placement_result.get("placement", {}) as Dictionary
@@ -95,14 +108,16 @@ static func plan(intents: Array, street_records: Array, structure_parts: Array, 
 	if not telemetry_rejections.is_empty():
 		return _infeasible(intents.size(), telemetry, telemetry_rejections, "telemetry")
 	var ready := _ready_plan(placements, intents.size(), telemetry)
-	var validation := validate_plan(ready, intents, street_records, structure_parts, courtyard_bounds, settings)
+	var validation := validate_plan(ready, intents, street_records, structure_parts, courtyard_bounds, settings, continuation)
+	if validation.get("status", "") == "cancelled": return validation
 	ready["validation"] = validation.duplicate(true)
 	if not bool(validation.get("passed", false)):
 		return _infeasible(intents.size(), telemetry, validation.get("rejections", []) as Array, "final_validation")
 	return ready
 
 
-static func validate_plan(candidate_plan: Dictionary, intents: Array, street_records: Array, structure_parts: Array, courtyard_bounds: Dictionary, options: Dictionary = {}) -> Dictionary:
+static func validate_plan(candidate_plan: Dictionary, intents: Array, street_records: Array, structure_parts: Array, courtyard_bounds: Dictionary, options: Dictionary = {}, continuation: Callable = Callable()) -> Dictionary:
+	if not _continue_placement(continuation, "compound_placement_validation"): return _cancelled()
 	var telemetry := _new_telemetry(intents.size(), street_records.size(), structure_parts.size())
 	var rejections: Array[Dictionary] = []
 	var input_check := _validate_inputs(intents, street_records, structure_parts, courtyard_bounds, options)
@@ -136,6 +151,7 @@ static func validate_plan(candidate_plan: Dictionary, intents: Array, street_rec
 	street_footprints.sort_custom(func(left: Dictionary, right: Dictionary) -> bool: return String(left.get("id", "")) < String(right.get("id", "")))
 	var ordered_structure_parts := _ordered_structure_parts(structure_parts)
 	for placement_index in range(placements.size()):
+		if not _continue_placement(continuation, "compound_placement_validate_record"): return _cancelled()
 		if not placements[placement_index] is Dictionary:
 			rejections.append(_rejection("placement_not_dictionary", "validation", "", -1, "", {"placementIndex": placement_index}))
 			continue
@@ -174,7 +190,8 @@ static func validate_plan(candidate_plan: Dictionary, intents: Array, street_rec
 		if not _counts_match(placement, composition):
 			rejections.append(_rejection("composition_count_mismatch", "validation", identity, int(intent.get("pairIndex", -1)), String(intent.get("side", "")), {}))
 			continue
-		var exact := _validate_exact_constraints(intent, composition, street_footprints, ordered_structure_parts, validated_placements, validated_compositions, courtyard_bounds, settings, telemetry)
+		var exact := _validate_exact_constraints(intent, composition, street_footprints, ordered_structure_parts, validated_placements, validated_compositions, courtyard_bounds, settings, telemetry, continuation)
+		if exact.get("status", "") == "cancelled": return exact
 		if not bool(exact.get("passed", false)):
 			rejections.append_array(exact.get("rejections", []) as Array)
 			continue
@@ -193,7 +210,7 @@ static func validate_plan(candidate_plan: Dictionary, intents: Array, street_rec
 	return _validation_result(rejections.is_empty(), telemetry, rejections)
 
 
-static func _place_one(intent: Dictionary, courtyard_bounds: Dictionary, settings: Dictionary, fixed_blockers: Array[Dictionary], street_footprints: Array[Dictionary], structure_parts: Array, placements: Array[Dictionary], placed_compositions: Array[Dictionary], placed_blockers: Array[Dictionary], nominal_centers: Array[Vector3], telemetry: Dictionary) -> Dictionary:
+static func _place_one(intent: Dictionary, courtyard_bounds: Dictionary, settings: Dictionary, fixed_blockers: Array[Dictionary], street_footprints: Array[Dictionary], structure_parts: Array, placements: Array[Dictionary], placed_compositions: Array[Dictionary], placed_blockers: Array[Dictionary], nominal_centers: Array[Vector3], telemetry: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var nominal_center: Vector3 = intent.get("nominalCenter", Vector3.ZERO) as Vector3
 	var center := nominal_center
 	var description := _describe(intent, center, telemetry)
@@ -258,14 +275,16 @@ static func _place_one(intent: Dictionary, courtyard_bounds: Dictionary, setting
 			return _placement_failure("invalid_composition_after_boundary_adjustment", "boundary", intent, {"geometryReason": description.get("reason", "")})
 		composition = description.get("composition", {}) as Dictionary
 		blocker_bounds = _composition_bounds(composition)
-	var exact := _validate_exact_constraints(intent, composition, street_footprints, structure_parts, placements, placed_compositions, courtyard_bounds, settings, telemetry)
+	var exact := _validate_exact_constraints(intent, composition, street_footprints, structure_parts, placements, placed_compositions, courtyard_bounds, settings, telemetry, continuation)
+	if exact.get("status", "") == "cancelled": return exact
 	if not bool(exact.get("passed", false)):
 		var annotated_rejections := _annotate_prior_overlap_rejections(exact.get("rejections", []) as Array, intent, placements, placed_compositions, nominal_center, row_packed_center, row_packed_composition, fixed_packed_center, fixed_packed_composition, center, settings)
 		# Any staged axis move can invalidate clearance proved on the other
 		# axis. Reconcile the same bounded, exact candidate domain after row or
 		# obstacle packing too, not only after a courtyard-boundary adjustment.
 		if adjustment.length_squared() > EPSILON * EPSILON or absf(x_delta) > EPSILON or absf(z_delta) > EPSILON:
-			var coupled := _resolve_coupled_candidate(intent, courtyard_bounds, settings, fixed_blockers, street_footprints, structure_parts, placements, placed_compositions, placed_blockers, nominal_center, row_packed_center, fixed_packed_center, center, composition, annotated_rejections, telemetry)
+			var coupled := _resolve_coupled_candidate(intent, courtyard_bounds, settings, fixed_blockers, street_footprints, structure_parts, placements, placed_compositions, placed_blockers, nominal_center, row_packed_center, fixed_packed_center, center, composition, annotated_rejections, telemetry, continuation)
+			if coupled.get("status", "") == "cancelled": return coupled
 			if bool(coupled.get("passed", false)):
 				return coupled
 		return {"passed": false, "phase": "exact_revalidation", "rejections": annotated_rejections}
@@ -274,7 +293,8 @@ static func _place_one(intent: Dictionary, courtyard_bounds: Dictionary, setting
 	return {"passed": true, "placement": record, "blocker": blocker_bounds}
 
 
-static func _resolve_coupled_candidate(intent: Dictionary, courtyard_bounds: Dictionary, settings: Dictionary, fixed_blockers: Array[Dictionary], street_footprints: Array[Dictionary], structure_parts: Array, prior_placements: Array[Dictionary], prior_compositions: Array[Dictionary], prior_blockers: Array[Dictionary], nominal_center: Vector3, row_packed_center: Vector3, fixed_packed_center: Vector3, staged_center: Vector3, staged_composition: Dictionary, trigger_rejections: Array, telemetry: Dictionary) -> Dictionary:
+static func _resolve_coupled_candidate(intent: Dictionary, courtyard_bounds: Dictionary, settings: Dictionary, fixed_blockers: Array[Dictionary], street_footprints: Array[Dictionary], structure_parts: Array, prior_placements: Array[Dictionary], prior_compositions: Array[Dictionary], prior_blockers: Array[Dictionary], nominal_center: Vector3, row_packed_center: Vector3, fixed_packed_center: Vector3, staged_center: Vector3, staged_composition: Dictionary, trigger_rejections: Array, telemetry: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if not _continue_placement(continuation, "compound_placement_candidate_domain"): return _cancelled()
 	var aggregate := _composition_bounds(staged_composition)
 	if aggregate.is_empty():
 		_record_coupled_repair(telemetry, intent, trigger_rejections, [], [], [], -1, Vector3.ZERO, "", true, {"domainSignature": "", "work": {}, "evaluatedCount": 0})
@@ -343,6 +363,7 @@ static func _resolve_coupled_candidate(intent: Dictionary, courtyard_bounds: Dic
 	var evaluated := 0
 	var work := {"descriptionCalls": 0, "exactStreetComparisons": 0, "exactStructureComparisons": 0, "exactPriorComparisons": 0, "boundsChecks": 0}
 	for ordinal in range(candidates.size()):
+		if not _continue_placement(continuation, "compound_placement_candidate"): return _cancelled()
 		var candidate: Dictionary = candidates[ordinal]
 		var candidate_center: Vector3 = candidate.center
 		var scratch := _new_telemetry(1, street_footprints.size(), structure_parts.size())
@@ -350,7 +371,8 @@ static func _resolve_coupled_candidate(intent: Dictionary, courtyard_bounds: Dic
 		evaluated += 1
 		if bool(description.get("passed", false)):
 			var candidate_composition: Dictionary = description.get("composition", {}) as Dictionary
-			var exact := _validate_exact_constraints(intent, candidate_composition, street_footprints, structure_parts, prior_placements, prior_compositions, courtyard_bounds, settings, scratch)
+			var exact := _validate_exact_constraints(intent, candidate_composition, street_footprints, structure_parts, prior_placements, prior_compositions, courtyard_bounds, settings, scratch, continuation)
+			if exact.get("status", "") == "cancelled": return exact
 			_accumulate_coupled_work(work, scratch)
 			if bool(exact.get("passed", false)):
 				var origin: Vector3 = description.get("origin", Vector3.ZERO) as Vector3
@@ -499,7 +521,7 @@ static func _annotate_prior_overlap_rejections(rejection_values: Array, intent: 
 	return result
 
 
-static func _validate_exact_constraints(intent: Dictionary, composition: Dictionary, street_footprints: Array[Dictionary], structure_parts: Array, prior_placements: Array[Dictionary], prior_compositions: Array[Dictionary], courtyard_bounds: Dictionary, settings: Dictionary, telemetry: Dictionary) -> Dictionary:
+static func _validate_exact_constraints(intent: Dictionary, composition: Dictionary, street_footprints: Array[Dictionary], structure_parts: Array, prior_placements: Array[Dictionary], prior_compositions: Array[Dictionary], courtyard_bounds: Dictionary, settings: Dictionary, telemetry: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var rejections: Array[Dictionary] = []
 	var identity := String(intent.get("id", ""))
 	var pair_index := int(intent.get("pairIndex", -1))
@@ -513,10 +535,12 @@ static func _validate_exact_constraints(intent: Dictionary, composition: Diction
 		if _footprints_overlap(aggregate as Dictionary, street, float(settings.get("fixedClearance", DEFAULT_FIXED_CLEARANCE))):
 			rejections.append(_rejection("street_overlap", "exact_revalidation", identity, pair_index, side, {"streetId": street.get("id", "")}))
 	for structure_index in range(structure_parts.size()):
+		if not _continue_placement(continuation, "compound_placement_structure_proof"): return _cancelled()
 		telemetry["exactStructureComparisons"] = int(telemetry.get("exactStructureComparisons", 0)) + 1
 		if CastleResidencePlacementGeometryScript.composition_overlaps_obstacles(composition, [structure_parts[structure_index]], float(settings.get("fixedClearance", DEFAULT_FIXED_CLEARANCE))):
 			rejections.append(_rejection("structure_overlap", "exact_revalidation", identity, pair_index, side, {"structurePartId": _part_id(structure_parts[structure_index]), "structureIndex": structure_index}))
 	for prior_index in range(prior_compositions.size()):
+		if not _continue_placement(continuation, "compound_placement_prior_proof"): return _cancelled()
 		telemetry["exactPriorComparisons"] = int(telemetry.get("exactPriorComparisons", 0)) + 1
 		var prior_pair_index := int(prior_placements[prior_index].get("pairIndex", -2)) if prior_index < prior_placements.size() else -2
 		var prior_clearance := float(settings.get("pairClearance", DEFAULT_PAIR_CLEARANCE)) if prior_pair_index == pair_index else float(settings.get("residenceClearance", DEFAULT_RESIDENCE_CLEARANCE))

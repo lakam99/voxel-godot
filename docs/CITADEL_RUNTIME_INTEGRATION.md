@@ -114,6 +114,18 @@ only its previously declared timing exemptions. See
 and other composition intervals still need cancellation work; native terrain
 admission and ordinary runtime publication remain unfinished.
 
+The compound-construction follow-up is independently critic-approved; see
+`CITADEL_COMPOUND_CANCELLATION_2026-09-02.md`. Profiling identified courtyard
+placement as 37.651 seconds of uninterrupted compound work. Inner placement
+checkpoints reduce the final measured largest compound callback gap to 222.905 ms;
+an actual final-code worker cancellation returns in 33.357 ms without a partial source or
+entering the urban composer. These are cancellation observations, not faster
+generation or a universal timing guarantee. All three final build modes and
+reused-diagnostics controls preserve complete old compound outputs exactly;
+late-cancellation controls also pass. Approval is source-only.
+Retained-paving/perimeter source cancellation, native
+terrain admission and live publication remain open; no headed run is approved.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 

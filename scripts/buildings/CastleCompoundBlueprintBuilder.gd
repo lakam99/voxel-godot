@@ -23,13 +23,27 @@ static func build(seed: int, raw_context: Dictionary = {}):
 	return build_with_diagnostics(seed, raw_context).get("blueprint")
 
 
-static func build_with_diagnostics(seed: int, raw_context: Dictionary = {}) -> Dictionary:
+static func build_with_diagnostics(seed: int, raw_context: Dictionary = {}, continuation: Callable = Callable()) -> Dictionary:
 	var context := raw_context.duplicate(true)
 	context["settlementTier"] = "city"
 	context["style"] = "masonry"
 	var diagnostics := {}
-	var blueprint = build_from_compound(LandmarkBuildingRecipeSamplerScript.sample_compound(seed, "castle", context), diagnostics)
+	if not _continue_compound(continuation, diagnostics, "compound_sampler_started"):
+		return {"blueprint": null, "diagnostics": diagnostics}
+	var compound := LandmarkBuildingRecipeSamplerScript.sample_compound(seed, "castle", context)
+	if not _continue_compound(continuation, diagnostics, "compound_sampler_completed"):
+		return {"blueprint": null, "diagnostics": diagnostics}
+	var blueprint = build_from_compound(compound, diagnostics, continuation)
 	return {"blueprint": blueprint, "diagnostics": diagnostics.duplicate(true)}
+
+
+static func _continue_compound(continuation: Callable, diagnostics: Dictionary, stage: String) -> bool:
+	if not continuation.is_valid() or continuation.call(stage) == true: return true
+	# Diagnostics are the caller-owned output channel, not generation input.
+	# Do not retain a partly successful placement handoff after cancellation.
+	diagnostics.clear()
+	diagnostics["failureReason"] = "cancelled"
+	return false
 
 
 static func build_keep_poc(seed: int, raw_context: Dictionary = {}):
@@ -77,7 +91,8 @@ static func build_keep_poc(seed: int, raw_context: Dictionary = {}):
 	return blueprint
 
 
-static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = {}):
+static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = {}, continuation: Callable = Callable()):
+	if not _continue_compound(continuation, diagnostics, "compound_geometry_started"): return null
 	var members: Array = compound.get("members", []) as Array
 	var keep_recipe := member_recipe(members, "keep")
 	var gatehouse_recipe := member_recipe(members, "gatehouse")
@@ -130,12 +145,28 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 	# the shared recipe builder. This prevents wings, courts, galleries or
 	# pavilions from becoming invisible-to-planning geometry as their seeded
 	# proportions change.
+	if not _continue_compound(continuation, diagnostics, "compound_keep_started"): return null
 	add_keep(blueprint, keep_center, keep_width, keep_depth, keep_height, keep_storey_count, keep_floor_height, keep_foundation_height, variation, fortification_material, palace_grammar)
+	if not _continue_compound(continuation, diagnostics, "compound_towers_started"): return null
 	for index in range(tower_specs.size()):
+		if not _continue_compound(continuation, diagnostics, "compound_tower"): return null
 		var tower_spec: Dictionary = tower_specs[index] as Dictionary
 		add_tower(blueprint, "castle_tower_%02d" % (index + 1), tower_spec.get("position", Vector3.ZERO) as Vector3, float(tower_spec.get("span", tower_span)), float(tower_spec.get("height", tower_height_base)), foundation_height, variation + float(index) * 0.006, fortification_material)
+	if not _continue_compound(continuation, diagnostics, "compound_courtyard_placement_started"): return null
 	var keep_structure_footprints := keep_collision_footprints(blueprint.parts)
-	var courtyard_buildings := courtyard_building_specs(courtyard_program, courtyard_width, courtyard_depth, keep_center, keep_width, keep_depth, keep_structure_footprints, gate_width, tower_specs, seed, context, masonry_palette, grammar, diagnostics)
+	# Diagnostics may be reused by a caller. Only this invocation's callback
+	# can cancel its construction; an old output marker is not a control input.
+	var placement_cancel := {"stopped": false}
+	var placement_continuation := Callable()
+	if continuation.is_valid():
+		placement_continuation = func(stage: String) -> bool:
+			if placement_cancel.stopped: return false
+			var permitted: bool = continuation.call(stage) == true
+			placement_cancel.stopped = not permitted
+			return permitted
+	var courtyard_buildings := courtyard_building_specs(courtyard_program, courtyard_width, courtyard_depth, keep_center, keep_width, keep_depth, keep_structure_footprints, gate_width, tower_specs, seed, context, masonry_palette, grammar, diagnostics, placement_continuation)
+	if placement_cancel.stopped: return null
+	if not _continue_compound(continuation, diagnostics, "compound_courtyard_placement_completed"): return null
 	if courtyard_buildings.size() != courtyard_program.size():
 		push_error("Castle seed %d could not publish its complete sampled courtyard program" % seed)
 		return null
@@ -163,6 +194,7 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 		"foundationHeight": foundation_height,
 		"landmarkRole": "fortified_compound"
 	})
+	if not _continue_compound(continuation, diagnostics, "compound_rooms_started"): return null
 	var room_records: Array = [
 		{"id": "castle_courtyard", "role": "courtyard", "bounds": AABB(Vector3(-courtyard_width * 0.5, foundation_height, -courtyard_depth * 0.5), Vector3(courtyard_width, wall_height, courtyard_depth)), "wallMountInset": 0.22, "accesses": []},
 		{"id": "castle_keep", "role": "great_hall", "bounds": AABB(Vector3(keep_center.x - keep_width * 0.5, keep_foundation_height, keep_center.z - keep_depth * 0.5), Vector3(keep_width, keep_height, keep_depth)), "wallMountInset": 0.22, "accesses": []}
@@ -170,6 +202,7 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 	append_keep_storey_room_records(room_records, keep_center, keep_width, keep_depth, keep_foundation_height, keep_floor_height, enclosed_keep_storey_count)
 	append_declared_interior_program_rooms(room_records, blueprint.parts)
 	for building_value in courtyard_buildings:
+		if not _continue_compound(continuation, diagnostics, "compound_residence_room"): return null
 		var building: Dictionary = building_value as Dictionary
 		var building_center: Vector3 = building.get("center", Vector3.ZERO) as Vector3
 		var building_width := float(building.get("width", 6.0))
@@ -208,16 +241,24 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 	add_curtain_z_segment(blueprint, "castle_left_wall", left_x, -half_depth + northwest_span * 0.5, half_depth - southwest_span * 0.5, wall_height, foundation_height, variation, fortification_material)
 	add_curtain_z_segment(blueprint, "castle_right_wall", right_x, -half_depth + northeast_span * 0.5, half_depth - southwest_span * 0.5, wall_height, foundation_height, variation, fortification_material)
 
+	if not _continue_compound(continuation, diagnostics, "compound_gatehouse_started"): return null
 	add_gatehouse(blueprint, gate_width, gate_depth, gate_height, foundation_height, front_z, variation, fortification_material)
+	if not _continue_compound(continuation, diagnostics, "compound_paving_started"): return null
 	var keep_entry_reserved_walkways := keep_entry_transition_exclusions(blueprint)
 	add_courtyard_foundation_and_paving(blueprint, courtyard_buildings, courtyard_width, courtyard_depth, foundation_height, variation, keep_entry_reserved_walkways)
+	if not _continue_compound(continuation, diagnostics, "compound_terraces_started"): return null
 	add_citadel_terraces(blueprint, grammar, courtyard_width, courtyard_depth, foundation_height, variation, courtyard_buildings, keep_entry_reserved_walkways)
+	if not _continue_compound(continuation, diagnostics, "compound_streets_started"): return null
 	add_district_streets(blueprint, grammar, foundation_height, variation)
+	if not _continue_compound(continuation, diagnostics, "compound_dressing_started"): return null
 	add_citadel_urban_room_dressing(blueprint, grammar, foundation_height, variation)
 	for building_value in courtyard_buildings:
+		if not _continue_compound(continuation, diagnostics, "compound_residence_started"): return null
 		add_courtyard_outbuilding(blueprint, building_value as Dictionary, foundation_height)
+	if not _continue_compound(continuation, diagnostics, "compound_facade_details_started"): return null
 	add_citadel_residence_facade_details(blueprint, courtyard_buildings, grammar, foundation_height, variation)
 	add_part(blueprint, "castle_banner_gate", "sign", "painted_decor", Vector3(0.0, foundation_height + gate_height * 0.72, front_z - gate_depth * 0.54), Vector3(1.32, 2.30, 0.10), {"variation": variation, "collision": false, "semantic": "castle_banner"})
+	if not _continue_compound(continuation, diagnostics, "compound_geometry_completed"): return null
 	return blueprint
 
 
@@ -335,7 +376,7 @@ static func tower_span_for_role(specs: Array[Dictionary], role: String, fallback
 	return fallback
 
 
-static func courtyard_building_specs(program: Array, courtyard_width: float, courtyard_depth: float, keep_center: Vector3, keep_width: float, keep_depth: float, keep_structure_footprints: Array[Dictionary], gate_width: float, tower_specs: Array[Dictionary], seed: int, context: Dictionary, masonry_palette: Dictionary, grammar: Dictionary, diagnostics: Dictionary = {}) -> Array[Dictionary]:
+static func courtyard_building_specs(program: Array, courtyard_width: float, courtyard_depth: float, keep_center: Vector3, keep_width: float, keep_depth: float, keep_structure_footprints: Array[Dictionary], gate_width: float, tower_specs: Array[Dictionary], seed: int, context: Dictionary, masonry_palette: Dictionary, grammar: Dictionary, diagnostics: Dictionary = {}, continuation: Callable = Callable()) -> Array[Dictionary]:
 	var courtyard_grid_value = grammar.get("courtyardGrid", null)
 	var district_grid := courtyard_grid_value as Dictionary if courtyard_grid_value is Dictionary else {}
 	if String(district_grid.get("mode", "")) == "district_grid":
@@ -351,11 +392,11 @@ static func courtyard_building_specs(program: Array, courtyard_width: float, cou
 			diagnostics["pairDiagnostics"] = {"mode": "post_geometry_exact", "attemptCount": 0, "fallback": false, "terminalReason": "incomplete_district_program", "pairIndex": -1, "programCount": program.size(), "lotPairCount": (lot_pairs_value as Array).size() if lot_pairs_value is Array else -1}
 			push_error("Castle seed %d district program does not cover every sampler-owned lot pair" % seed)
 			return []
-		return planned_district_courtyard_building_specs(program, lot_pairs_value as Array, district_grid, courtyard_width, courtyard_depth, keep_structure_footprints, seed, masonry_palette, diagnostics)
+		return planned_district_courtyard_building_specs(program, lot_pairs_value as Array, district_grid, courtyard_width, courtyard_depth, keep_structure_footprints, seed, masonry_palette, diagnostics, continuation)
 	return compact_courtyard_building_specs(program, courtyard_width, courtyard_depth, keep_center, keep_width, keep_depth, keep_structure_footprints, gate_width, tower_specs, seed, context, masonry_palette, grammar, diagnostics)
 
 
-static func planned_district_courtyard_building_specs(program: Array, lot_pairs: Array, grid: Dictionary, courtyard_width: float, courtyard_depth: float, keep_structure_footprints: Array[Dictionary], seed: int, masonry_palette: Dictionary, diagnostics: Dictionary) -> Array[Dictionary]:
+static func planned_district_courtyard_building_specs(program: Array, lot_pairs: Array, grid: Dictionary, courtyard_width: float, courtyard_depth: float, keep_structure_footprints: Array[Dictionary], seed: int, masonry_palette: Dictionary, diagnostics: Dictionary, continuation: Callable = Callable()) -> Array[Dictionary]:
 	if String(grid.get("mode", "")) != "district_grid":
 		return reject_post_geometry_district(diagnostics, seed, -1, "invalid_district_grid_mode")
 	var street_records_value = grid.get("streetRecords", null)
@@ -382,6 +423,7 @@ static func planned_district_courtyard_building_specs(program: Array, lot_pairs:
 		seen_pairs[pair_id] = true
 		var sources: Array[Dictionary] = [left_source, right_source]
 		for side_index in range(2):
+			if not _continue_compound(continuation, diagnostics, "compound_placement_source"): return []
 			var source: Dictionary = sources[side_index]
 			var side := "left" if side_index == 0 else "right"
 			var identity := String(source.get("id", ""))
@@ -438,7 +480,11 @@ static func planned_district_courtyard_building_specs(program: Array, lot_pairs:
 		"maxZ": courtyard_depth * 0.5
 	}
 	var options := {"fixedClearance": 0.04, "residenceClearance": 0.08, "pairClearance": 2.60, "boundaryClearance": 0.90}
-	var plan: Dictionary = CastleCourtyardDistrictPlacementPlannerScript.plan(intents, street_records_value as Array, keep_structure_footprints, courtyard_bounds, options)
+	var plan: Dictionary = CastleCourtyardDistrictPlacementPlannerScript.plan(intents, street_records_value as Array, keep_structure_footprints, courtyard_bounds, options, continuation)
+	if plan.get("status", "") == "cancelled":
+		diagnostics.clear()
+		diagnostics["failureReason"] = "cancelled"
+		return []
 	var plan_summary := plan.duplicate(true)
 	plan_summary.erase("placements")
 	diagnostics["districtPlacementPlan"] = plan_summary
@@ -462,6 +508,7 @@ static func planned_district_courtyard_building_specs(program: Array, lot_pairs:
 	var result: Array[Dictionary] = []
 	var pair_diagnostics: Array = []
 	for index in range(program.size()):
+		if not _continue_compound(continuation, diagnostics, "compound_placement_record"): return []
 		var source: Dictionary = program[index] as Dictionary
 		var identity := String(source.get("id", ""))
 		if not placements_by_id.has(identity):
