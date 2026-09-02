@@ -1288,27 +1288,33 @@ static func add_raised_route_junctions(blueprint, street_records: Array, foundat
 			junction.recipe["physicalRequiredSupportPartIds"] = support_ids
 
 
-static func raised_route_record_coverage(blueprint, street_id: String, center: Vector3, width: float, depth: float, foundation_height: float, street_elevation: float, verify_root_chain := false, allowed_transition_owner_ids: Array = [], handoff_seam_z := INF, handoff_transition_owner_id := "", handoff_transition_semantic := "", handoff_source_owner_id := "", handoff_source_semantic := "castle_route_terrace_walkway", transition_owned := false) -> Dictionary:
+static func raised_route_record_coverage(blueprint, street_id: String, center: Vector3, width: float, depth: float, foundation_height: float, street_elevation: float, verify_root_chain := false, allowed_transition_owner_ids: Array = [], handoff_seam_z := INF, handoff_transition_owner_id := "", handoff_transition_semantic := "", handoff_source_owner_id := "", handoff_source_semantic := "castle_route_terrace_walkway", transition_owned := false, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	if transition_owned:
-		return raised_route_transition_owned_record_coverage(blueprint, street_id, center, width, depth, foundation_height, verify_root_chain, allowed_transition_owner_ids, handoff_seam_z, handoff_source_owner_id, handoff_source_semantic, handoff_transition_owner_id, handoff_transition_semantic)
+		return raised_route_transition_owned_record_coverage(blueprint, street_id, center, width, depth, foundation_height, verify_root_chain, allowed_transition_owner_ids, handoff_seam_z, handoff_source_owner_id, handoff_source_semantic, handoff_transition_owner_id, handoff_transition_semantic, _route_control)
 	var samples: Array[Dictionary] = []
 	var violations: Array[String] = []
 	var expected_top_y := foundation_height + street_elevation + 0.20
 	for x_index in range(3):
+		if _route_control != null and not _route_control.poll("route_sample_row"): return _cancelled_route_diagnostic()
 		for z_index in range(3):
+			if _route_control != null and not _route_control.poll("route_sample"): return _cancelled_route_diagnostic()
 			var x_fraction := -0.42 + float(x_index) * 0.42
 			var z_fraction := -0.42 + float(z_index) * 0.42
 			var surface_point := Vector3(center.x + width * x_fraction, expected_top_y, center.z + depth * z_fraction)
-			var owner := raised_route_surface_owner_at(blueprint, street_id, surface_point, allowed_transition_owner_ids)
+			var owner := raised_route_surface_owner_at(blueprint, street_id, surface_point, allowed_transition_owner_ids, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var owner_id := String(owner.get("partId", ""))
 			var owner_semantic := String(owner.get("semantic", ""))
 			var is_roadbed := owner_semantic == "castle_route_terrace_walkway" or owner_semantic == "castle_route_junction"
 			var owner_part = blueprint.find_part(owner_id)
 			var declared_support_ids: Array = owner_part.recipe.get("physicalRequiredSupportPartIds", []) as Array if owner_part != null else []
-			var foundation_support := courtyard_foundation_owner_at(blueprint, Vector3(surface_point.x, foundation_height, surface_point.z), declared_support_ids) if is_roadbed else {}
-			var root_support := foundation_support if is_roadbed else transition_root_support_owner_at(blueprint, owner, surface_point)
+			var foundation_support := courtyard_foundation_owner_at(blueprint, Vector3(surface_point.x, foundation_height, surface_point.z), declared_support_ids, _route_control) if is_roadbed else {}
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
+			var root_support := foundation_support if is_roadbed else transition_root_support_owner_at(blueprint, owner, surface_point, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var sample_id := "%s_%d_%d" % [street_id, x_index, z_index]
-			var boundary_owner_ids := route_surface_boundary_owner_ids(blueprint, street_id, surface_point)
+			var boundary_owner_ids := route_surface_boundary_owner_ids(blueprint, street_id, surface_point, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var sample := {
 				"id": sample_id,
 				"position": surface_point,
@@ -1334,10 +1340,12 @@ static func raised_route_record_coverage(blueprint, street_id: String, center: V
 			if not passed:
 				violations.append("%s lacks a collision-backed route owner with a rooted support and traversable seam" % sample_id)
 			samples.append(sample)
-	var junction_seams := raised_route_junction_seam_pairs(blueprint, street_id, foundation_height, expected_top_y, verify_root_chain)
+	var junction_seams := raised_route_junction_seam_pairs(blueprint, street_id, foundation_height, expected_top_y, verify_root_chain, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	if not bool(junction_seams.get("passed", true)):
 		violations.append_array(junction_seams.get("violations", []) as Array)
-	var handoff_seam := raised_route_handoff_seam_coverage(blueprint, street_id, center.x, foundation_height, expected_top_y, handoff_seam_z, verify_root_chain, allowed_transition_owner_ids, handoff_source_owner_id, handoff_source_semantic, handoff_transition_owner_id, handoff_transition_semantic)
+	var handoff_seam := raised_route_handoff_seam_coverage(blueprint, street_id, center.x, foundation_height, expected_top_y, handoff_seam_z, verify_root_chain, allowed_transition_owner_ids, handoff_source_owner_id, handoff_source_semantic, handoff_transition_owner_id, handoff_transition_semantic, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	if not bool(handoff_seam.get("passed", true)):
 		violations.append("%s lacks a collision-continuous declared roadbed-to-transition seam" % street_id)
 	return {
@@ -1353,12 +1361,14 @@ static func raised_route_record_coverage(blueprint, street_id: String, center: V
 	}
 
 
-static func raised_route_transition_owned_record_coverage(blueprint, street_id: String, center: Vector3, width: float, depth: float, foundation_height: float, verify_root_chain: bool, allowed_transition_owner_ids: Array, handoff_seam_z: float, handoff_source_owner_id: String, handoff_source_semantic: String, handoff_transition_owner_id: String, handoff_transition_semantic: String) -> Dictionary:
+static func raised_route_transition_owned_record_coverage(blueprint, street_id: String, center: Vector3, width: float, depth: float, foundation_height: float, verify_root_chain: bool, allowed_transition_owner_ids: Array, handoff_seam_z: float, handoff_source_owner_id: String, handoff_source_semantic: String, handoff_transition_owner_id: String, handoff_transition_semantic: String, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var samples: Array[Dictionary] = []
 	var violations: Array[String] = []
-	var exclusivity := transition_route_collision_exclusivity(blueprint, street_id, allowed_transition_owner_ids)
+	var exclusivity := transition_route_collision_exclusivity(blueprint, street_id, allowed_transition_owner_ids, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	violations.append_array(exclusivity.get("violations", []) as Array)
-	var transition_bounds := declared_transition_bounds(blueprint, allowed_transition_owner_ids)
+	var transition_bounds := declared_transition_bounds(blueprint, allowed_transition_owner_ids, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	if transition_bounds.is_empty():
 		return {"streetId": street_id, "coverageMode": "transition_owned", "handoffSeam": {"declared": false, "passed": true}, "center": center, "size": Vector3(width, 0.0, depth), "samples": samples, "passed": false, "violations": ["%s declares no collision-backed transition geometry" % street_id]}
 	var minimum_x := float(transition_bounds.get("minX", center.x - width * 0.5))
@@ -1366,14 +1376,18 @@ static func raised_route_transition_owned_record_coverage(blueprint, street_id: 
 	var minimum_z := float(transition_bounds.get("minZ", center.z - depth * 0.5))
 	var maximum_z := float(transition_bounds.get("maxZ", center.z + depth * 0.5))
 	for x_index in range(3):
+		if _route_control != null and not _route_control.poll("route_transition_sample_row"): return _cancelled_route_diagnostic()
 		for z_index in range(3):
+			if _route_control != null and not _route_control.poll("route_transition_sample"): return _cancelled_route_diagnostic()
 			var x_fraction := -0.42 + float(x_index) * 0.42
 			var z_fraction := -0.42 + float(z_index) * 0.42
 			var surface_point := Vector3(lerpf(minimum_x, maximum_x, 0.5 + x_fraction * 0.5), foundation_height, lerpf(minimum_z, maximum_z, 0.5 + z_fraction * 0.5))
-			var owner := raised_route_surface_owner_at(blueprint, street_id, surface_point, allowed_transition_owner_ids)
+			var owner := raised_route_surface_owner_at(blueprint, street_id, surface_point, allowed_transition_owner_ids, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var owner_id := String(owner.get("partId", ""))
 			var owner_part = blueprint.find_part(owner_id)
-			var root_support := transition_root_support_owner_at(blueprint, owner, surface_point)
+			var root_support := transition_root_support_owner_at(blueprint, owner, surface_point, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var root_id := String(root_support.get("partId", ""))
 			var root_rooted := bool(root_support.get("rooted", false)) if verify_root_chain else not root_id.is_empty()
 			var sample_id := "%s_%d_%d" % [street_id, x_index, z_index]
@@ -1394,7 +1408,8 @@ static func raised_route_transition_owned_record_coverage(blueprint, street_id: 
 			if not passed:
 				violations.append("%s lacks a declared collision-backed transition surface with a rooted support" % sample_id)
 			samples.append(sample)
-	var handoff_seam := raised_route_handoff_seam_coverage(blueprint, street_id, center.x, foundation_height, foundation_height, handoff_seam_z, verify_root_chain, allowed_transition_owner_ids, handoff_source_owner_id, handoff_source_semantic, handoff_transition_owner_id, handoff_transition_semantic)
+	var handoff_seam := raised_route_handoff_seam_coverage(blueprint, street_id, center.x, foundation_height, foundation_height, handoff_seam_z, verify_root_chain, allowed_transition_owner_ids, handoff_source_owner_id, handoff_source_semantic, handoff_transition_owner_id, handoff_transition_semantic, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	if not bool(handoff_seam.get("passed", true)):
 		violations.append("%s lacks a collision-continuous declared transition-to-forecourt seam" % street_id)
 	return {
@@ -1410,15 +1425,17 @@ static func raised_route_transition_owned_record_coverage(blueprint, street_id: 
 	}
 
 
-static func transition_route_collision_exclusivity(blueprint, street_id: String, allowed_transition_owner_ids: Array) -> Dictionary:
+static func transition_route_collision_exclusivity(blueprint, street_id: String, allowed_transition_owner_ids: Array, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var transition_owners: Array = []
 	for owner_id_value in allowed_transition_owner_ids:
+		if _route_control != null and not _route_control.poll("route_transition_owner"): return _cancelled_route_diagnostic()
 		var owner = blueprint.find_part(String(owner_id_value))
 		if owner != null and bool(owner.collision_enabled):
 			transition_owners.append(owner)
 	var violations: Array[String] = []
 	var overlaps: Array[Dictionary] = []
 	for part in blueprint.parts:
+		if _route_control != null and not _route_control.poll("route_exclusivity_part"): return _cancelled_route_diagnostic()
 		if part == null or not bool(part.collision_enabled):
 			continue
 		var route_street_id := String(part.recipe.get("routeStreetId", ""))
@@ -1427,6 +1444,7 @@ static func transition_route_collision_exclusivity(blueprint, street_id: String,
 		if route_street_id == street_id:
 			violations.append("%s publishes a forbidden collision roadbed %s" % [street_id, String(part.id)])
 		for transition_owner in transition_owners:
+			if _route_control != null and not _route_control.poll("route_exclusivity_pair"): return _cancelled_route_diagnostic()
 			if positive_collision_volume_overlap(part, transition_owner):
 				overlaps.append({"roadbedId": String(part.id), "transitionOwnerId": String(transition_owner.id), "routeStreetId": route_street_id})
 	if not overlaps.is_empty():
@@ -1434,9 +1452,10 @@ static func transition_route_collision_exclusivity(blueprint, street_id: String,
 	return {"passed": violations.is_empty(), "overlaps": overlaps, "violations": violations}
 
 
-static func raised_route_collision_partition(blueprint) -> Dictionary:
+static func raised_route_collision_partition(blueprint, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var route_parts: Array = []
 	for part in blueprint.parts:
+		if _route_control != null and not _route_control.poll("route_partition_part"): return _cancelled_route_diagnostic()
 		if part == null or not bool(part.collision_enabled):
 			continue
 		var semantic := String(part.semantic)
@@ -1445,13 +1464,16 @@ static func raised_route_collision_partition(blueprint) -> Dictionary:
 		route_parts.append(part)
 	var overlaps: Array[Dictionary] = []
 	for first_index in range(route_parts.size()):
+		if _route_control != null and not _route_control.poll("route_partition_owner"): return _cancelled_route_diagnostic()
 		var first = route_parts[first_index]
 		for second_index in range(first_index + 1, route_parts.size()):
+			if _route_control != null and not _route_control.poll("route_partition_pair"): return _cancelled_route_diagnostic()
 			var second = route_parts[second_index]
 			if positive_collision_volume_overlap(first, second):
 				overlaps.append({"firstPartId": String(first.id), "firstSemantic": String(first.semantic), "secondPartId": String(second.id), "secondSemantic": String(second.semantic)})
 	var violations: Array[String] = []
 	for overlap in overlaps:
+		if _route_control != null and not _route_control.poll("route_partition_violation"): return _cancelled_route_diagnostic()
 		violations.append("Raised route collision partition overlaps %s and %s" % [String(overlap.get("firstPartId", "")), String(overlap.get("secondPartId", ""))])
 	return {"passed": overlaps.is_empty(), "overlaps": overlaps, "violations": violations}
 
@@ -1471,12 +1493,13 @@ static func positive_collision_volume_overlap(first, second) -> bool:
 	return overlap_x > 0.015 and overlap_y > 0.015 and overlap_z > 0.015
 
 
-static func declared_transition_bounds(blueprint, allowed_transition_owner_ids: Array) -> Dictionary:
+static func declared_transition_bounds(blueprint, allowed_transition_owner_ids: Array, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var minimum_x := INF
 	var maximum_x := -INF
 	var minimum_z := INF
 	var maximum_z := -INF
 	for owner_id_value in allowed_transition_owner_ids:
+		if _route_control != null and not _route_control.poll("route_transition_bounds"): return _cancelled_route_diagnostic()
 		var part = blueprint.find_part(String(owner_id_value))
 		if part == null or not bool(part.collision_enabled):
 			continue
@@ -1490,15 +1513,17 @@ static func declared_transition_bounds(blueprint, allowed_transition_owner_ids: 
 	return {} if is_inf(minimum_x) else {"minX": minimum_x, "maxX": maximum_x, "minZ": minimum_z, "maxZ": maximum_z}
 
 
-static func raised_route_handoff_seam_coverage(blueprint, street_id: String, center_x: float, foundation_height: float, expected_top_y: float, seam_z: float, verify_root_chain: bool, allowed_transition_owner_ids: Array, source_owner_id: String, source_semantic: String, transition_owner_id: String, transition_semantic: String) -> Dictionary:
+static func raised_route_handoff_seam_coverage(blueprint, street_id: String, center_x: float, foundation_height: float, expected_top_y: float, seam_z: float, verify_root_chain: bool, allowed_transition_owner_ids: Array, source_owner_id: String, source_semantic: String, transition_owner_id: String, transition_semantic: String, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	if is_inf(seam_z):
 		return {"declared": false, "passed": true}
 	var expected_transition_semantic := transition_semantic if not transition_semantic.is_empty() else "castle_keep_palace_entry_forecourt"
 	var handoff_owner_ids: Array = allowed_transition_owner_ids.duplicate()
 	if not transition_owner_id.is_empty() and not handoff_owner_ids.has(transition_owner_id):
 		handoff_owner_ids.append(transition_owner_id)
-	var center_roadbed := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(center_x, expected_top_y, seam_z - 0.020), foundation_height, verify_root_chain, handoff_owner_ids, source_semantic, source_owner_id)
-	var center_transition := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(center_x, expected_top_y, seam_z + 0.020), foundation_height, verify_root_chain, handoff_owner_ids, expected_transition_semantic, transition_owner_id)
+	var center_roadbed := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(center_x, expected_top_y, seam_z - 0.020), foundation_height, verify_root_chain, handoff_owner_ids, source_semantic, source_owner_id, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
+	var center_transition := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(center_x, expected_top_y, seam_z + 0.020), foundation_height, verify_root_chain, handoff_owner_ids, expected_transition_semantic, transition_owner_id, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	var roadbed_part = blueprint.find_part(String(center_roadbed.get("ownerId", "")))
 	var transition_part = blueprint.find_part(String(center_transition.get("ownerId", "")))
 	var roadbed_bounds := horizontal_part_bounds(roadbed_part)
@@ -1510,9 +1535,12 @@ static func raised_route_handoff_seam_coverage(blueprint, street_id: String, cen
 	var lane_offset := maxf(0.0, shared_width * 0.5 - RAISED_ROUTE_HANDOFF_AGENT_MARGIN)
 	var lanes: Array[Dictionary] = []
 	for lane_offset_multiplier in [-1.0, 0.0, 1.0]:
+		if _route_control != null and not _route_control.poll("route_handoff_lane"): return _cancelled_route_diagnostic()
 		var lane_x: float = center_x + lane_offset * lane_offset_multiplier
-		var roadbed := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(lane_x, expected_top_y, seam_z - 0.020), foundation_height, verify_root_chain, handoff_owner_ids, source_semantic, source_owner_id)
-		var transition := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(lane_x, expected_top_y, seam_z + 0.020), foundation_height, verify_root_chain, handoff_owner_ids, expected_transition_semantic, transition_owner_id)
+		var roadbed := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(lane_x, expected_top_y, seam_z - 0.020), foundation_height, verify_root_chain, handoff_owner_ids, source_semantic, source_owner_id, _route_control)
+		if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
+		var transition := raised_route_handoff_side_coverage(blueprint, street_id, Vector3(lane_x, expected_top_y, seam_z + 0.020), foundation_height, verify_root_chain, handoff_owner_ids, expected_transition_semantic, transition_owner_id, _route_control)
+		if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 		var lane_height_delta := absf(float(roadbed.get("topY", INF)) - float(transition.get("topY", INF)))
 		lanes.append({"offset": lane_offset * lane_offset_multiplier, "roadbed": roadbed, "transition": transition, "heightDelta": lane_height_delta, "passed": bool(roadbed.get("passed", false)) and bool(transition.get("passed", false)) and lane_height_delta <= MAX_RAISED_ROUTE_HANDOFF_HEIGHT_DELTA})
 	var contact_passed := contact_gap <= MAX_RAISED_ROUTE_HANDOFF_GAP
@@ -1540,15 +1568,18 @@ static func horizontal_part_bounds(part) -> Dictionary:
 	return {"minX": min_x, "maxX": max_x, "minZ": min_z, "maxZ": max_z}
 
 
-static func raised_route_handoff_side_coverage(blueprint, street_id: String, surface_point: Vector3, foundation_height: float, verify_root_chain: bool, allowed_transition_owner_ids: Array, expected_semantic: String, expected_owner_id: String) -> Dictionary:
-	var owner := raised_route_surface_owner_at(blueprint, street_id, surface_point, allowed_transition_owner_ids)
+static func raised_route_handoff_side_coverage(blueprint, street_id: String, surface_point: Vector3, foundation_height: float, verify_root_chain: bool, allowed_transition_owner_ids: Array, expected_semantic: String, expected_owner_id: String, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
+	var owner := raised_route_surface_owner_at(blueprint, street_id, surface_point, allowed_transition_owner_ids, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	var owner_id := String(owner.get("partId", ""))
 	var owner_semantic := String(owner.get("semantic", ""))
 	var is_roadbed := owner_semantic == "castle_route_terrace_walkway" or owner_semantic == "castle_route_junction"
 	var owner_part = blueprint.find_part(owner_id)
 	var declared_support_ids: Array = owner_part.recipe.get("physicalRequiredSupportPartIds", []) as Array if owner_part != null else []
-	var foundation_support := courtyard_foundation_owner_at(blueprint, Vector3(surface_point.x, foundation_height, surface_point.z), declared_support_ids) if is_roadbed else {}
-	var root_support := foundation_support if is_roadbed else transition_root_support_owner_at(blueprint, owner, surface_point)
+	var foundation_support := courtyard_foundation_owner_at(blueprint, Vector3(surface_point.x, foundation_height, surface_point.z), declared_support_ids, _route_control) if is_roadbed else {}
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
+	var root_support := foundation_support if is_roadbed else transition_root_support_owner_at(blueprint, owner, surface_point, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	var root_id := String(root_support.get("partId", ""))
 	var root_rooted := bool(root_support.get("rooted", false)) if verify_root_chain else not root_id.is_empty()
 	var expected_owner_matches := expected_owner_id.is_empty() or owner_id == expected_owner_id
@@ -1557,7 +1588,7 @@ static func raised_route_handoff_side_coverage(blueprint, street_id: String, sur
 	return {"position": surface_point, "ownerId": owner_id, "ownerSemantic": owner_semantic, "topY": float(owner.get("topY", INF)), "rootSupportId": root_id, "ownerCollisionEnabled": bool(owner.get("collisionEnabled", false)), "rootSupportCollisionEnabled": bool(root_support.get("collisionEnabled", false)), "rootSupportRooted": root_rooted, "expectedSemantic": expected_semantic, "expectedOwnerId": expected_owner_id, "passed": passed}
 
 
-static func raised_route_surface_owner_at(blueprint, street_id: String, surface_point: Vector3, allowed_transition_owner_ids: Array = []) -> Dictionary:
+static func raised_route_surface_owner_at(blueprint, street_id: String, surface_point: Vector3, allowed_transition_owner_ids: Array = [], _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var transition_semantics := {
 		"castle_processional_step": true,
 		"castle_keep_palace_entry_forecourt": true
@@ -1565,6 +1596,7 @@ static func raised_route_surface_owner_at(blueprint, street_id: String, surface_
 	var best_owner := {}
 	var best_top_y := -INF
 	for part in blueprint.parts:
+		if _route_control != null and not _route_control.poll("route_surface_part"): return _cancelled_route_diagnostic()
 		if part == null or not bool(part.collision_enabled):
 			continue
 		var semantic := String(part.semantic)
@@ -1583,9 +1615,10 @@ static func raised_route_surface_owner_at(blueprint, street_id: String, surface_
 	return best_owner
 
 
-static func route_surface_boundary_owner_ids(blueprint, street_id: String, surface_point: Vector3) -> Array[String]:
+static func route_surface_boundary_owner_ids(blueprint, street_id: String, surface_point: Vector3, _route_control: _RouteDiagnosticContinuation = null) -> Array[String]:
 	var owner_ids: Array[String] = []
 	for part in blueprint.parts:
+		if _route_control != null and not _route_control.poll("route_boundary_part"): return []
 		if part == null or not bool(part.collision_enabled):
 			continue
 		var semantic := String(part.semantic)
@@ -1603,14 +1636,16 @@ static func route_surface_boundary_owner_ids(blueprint, street_id: String, surfa
 	return owner_ids
 
 
-static func raised_route_junction_seam_pairs(blueprint, street_id: String, foundation_height: float, expected_top_y: float, verify_root_chain: bool) -> Dictionary:
+static func raised_route_junction_seam_pairs(blueprint, street_id: String, foundation_height: float, expected_top_y: float, verify_root_chain: bool, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var pairs: Array[Dictionary] = []
 	var violations: Array[String] = []
 	for junction in blueprint.parts:
+		if _route_control != null and not _route_control.poll("route_junction_part"): return _cancelled_route_diagnostic()
 		if junction == null or String(junction.semantic) != "castle_route_junction" or not (junction.recipe.get("routeIncidentStreetIds", []) as Array).has(street_id):
 			continue
 		var junction_bounds := horizontal_part_bounds(junction)
 		for roadbed in blueprint.parts:
+			if _route_control != null and not _route_control.poll("route_junction_pair"): return _cancelled_route_diagnostic()
 			if roadbed == null or String(roadbed.semantic) != "castle_route_terrace_walkway" or String(roadbed.recipe.get("routeStreetId", "")) != street_id:
 				continue
 			var roadbed_bounds := horizontal_part_bounds(roadbed)
@@ -1622,12 +1657,16 @@ static func raised_route_junction_seam_pairs(blueprint, street_id: String, found
 			var inset := 0.055
 			var roadbed_position := contact - direction * inset
 			var junction_position := contact + direction * inset
-			var roadbed_owner := raised_route_surface_owner_at(blueprint, street_id, roadbed_position)
-			var junction_owner := raised_route_surface_owner_at(blueprint, street_id, junction_position)
+			var roadbed_owner := raised_route_surface_owner_at(blueprint, street_id, roadbed_position, [], _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
+			var junction_owner := raised_route_surface_owner_at(blueprint, street_id, junction_position, [], _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var roadbed_is_surface := String(roadbed_owner.get("semantic", "")) == "castle_route_terrace_walkway"
 			var junction_is_surface := String(junction_owner.get("semantic", "")) == "castle_route_junction"
-			var roadbed_support := courtyard_foundation_owner_at(blueprint, Vector3(roadbed_position.x, foundation_height, roadbed_position.z), roadbed.recipe.get("physicalRequiredSupportPartIds", []) as Array)
-			var junction_support := courtyard_foundation_owner_at(blueprint, Vector3(junction_position.x, foundation_height, junction_position.z), junction.recipe.get("physicalRequiredSupportPartIds", []) as Array)
+			var roadbed_support := courtyard_foundation_owner_at(blueprint, Vector3(roadbed_position.x, foundation_height, roadbed_position.z), roadbed.recipe.get("physicalRequiredSupportPartIds", []) as Array, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
+			var junction_support := courtyard_foundation_owner_at(blueprint, Vector3(junction_position.x, foundation_height, junction_position.z), junction.recipe.get("physicalRequiredSupportPartIds", []) as Array, _route_control)
+			if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 			var gap := float(seam.get("gap", INF))
 			var roadbed_top_y := float(roadbed_owner.get("topY", expected_top_y))
 			var junction_top_y := float(junction_owner.get("topY", expected_top_y))
@@ -1662,8 +1701,9 @@ static func route_junction_shared_boundary(junction_bounds: Dictionary, roadbed_
 	return {}
 
 
-static func courtyard_foundation_owner_at(blueprint, surface_point: Vector3, declared_support_ids: Array = []) -> Dictionary:
+static func courtyard_foundation_owner_at(blueprint, surface_point: Vector3, declared_support_ids: Array = [], _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	for part in blueprint.parts:
+		if _route_control != null and not _route_control.poll("route_foundation_part"): return _cancelled_route_diagnostic()
 		if part == null or String(part.semantic) != "castle_courtyard_foundation" or not bool(part.collision_enabled):
 			continue
 		if not declared_support_ids.is_empty() and not declared_support_ids.has(String(part.id)):
@@ -1675,7 +1715,7 @@ static func courtyard_foundation_owner_at(blueprint, surface_point: Vector3, dec
 	return {}
 
 
-static func transition_root_support_owner_at(blueprint, owner: Dictionary, surface_point: Vector3) -> Dictionary:
+static func transition_root_support_owner_at(blueprint, owner: Dictionary, surface_point: Vector3, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	var owner_id := String(owner.get("partId", ""))
 	var owner_top_y := float(owner.get("topY", -INF))
 	var owner_part = blueprint.find_part(owner_id)
@@ -1688,6 +1728,7 @@ static func transition_root_support_owner_at(blueprint, owner: Dictionary, surfa
 	var best_support := {}
 	var best_top_y := -INF
 	for root_id_value in declared_root_ids:
+		if _route_control != null and not _route_control.poll("route_root_support"): return _cancelled_route_diagnostic()
 		var part = blueprint.find_part(String(root_id_value))
 		if part == null or not bool(part.collision_enabled):
 			continue
@@ -1701,12 +1742,46 @@ static func transition_root_support_owner_at(blueprint, owner: Dictionary, surfa
 	return best_support
 
 
-static func validate_raised_route_coverage(blueprint) -> Dictionary:
+## Per-invocation worker cancellation; never shared with another diagnostic or
+## stored on the blueprint. A rejected caller is never invoked again.
+class _RouteDiagnosticContinuation extends RefCounted:
+	var callback: Callable
+	var cancelled := false
+
+	func _init(continuation: Callable) -> void:
+		callback = continuation
+
+	func poll(stage: String) -> bool:
+		if cancelled: return false
+		if callback.call(stage) != true:
+			cancelled = true
+			return false
+		return true
+
+
+static func _cancelled_route_diagnostic() -> Dictionary:
+	return {"passed": false, "cancelled": true}
+
+
+## Geometry diagnostics only. Cancellation leaves derived physical facts on the
+## exclusively owned blueprint; discard it rather than publishing partial proof.
+static func validate_raised_route_coverage(blueprint, continuation: Callable = Callable()) -> Dictionary:
+	var control: _RouteDiagnosticContinuation = _RouteDiagnosticContinuation.new(continuation) if continuation.is_valid() else null
+	if control != null and not control.poll("route_validation_started"): return _cancelled_route_diagnostic()
+	var result := _validate_raised_route_coverage(blueprint, control)
+	if control != null:
+		if control.cancelled or bool(result.get("cancelled", false)): return _cancelled_route_diagnostic()
+		if not control.poll("route_validation_completed"): return _cancelled_route_diagnostic()
+	return result
+
+
+static func _validate_raised_route_coverage(blueprint, _route_control: _RouteDiagnosticContinuation = null) -> Dictionary:
 	if blueprint == null or not blueprint.recipe is Dictionary:
 		return {"passed": true, "records": [], "violations": []}
 	if String((blueprint.recipe as Dictionary).get("publicationScope", "")) == "residence_district":
 		var scope_violations: Array[String] = []
 		for part in blueprint.parts:
+			if _route_control != null and not _route_control.poll("route_residence_part"): return _cancelled_route_diagnostic()
 			if part != null and String(part.semantic) in ["castle_route_terrace_walkway", "castle_route_junction"]:
 				scope_violations.append("Residence district slice contains core-owned route part %s" % String(part.id))
 		return {"passed": scope_violations.is_empty(), "applicability": "not_applicable", "records": [], "violations": scope_violations}
@@ -1714,13 +1789,20 @@ static func validate_raised_route_coverage(blueprint) -> Dictionary:
 	var grid: Dictionary = grammar.get("courtyardGrid", {}) as Dictionary
 	if String(grid.get("mode", "")) != "district_grid":
 		return {"passed": true, "records": [], "violations": []}
-	blueprint.resolve_physical_contracts()
+	if _route_control == null:
+		# Preserve legacy virtual dispatch and the exact applicability branches.
+		blueprint.resolve_physical_contracts()
+	else:
+		if not blueprint.resolve_physical_contracts_cancellable(_route_control.poll):
+			return _cancelled_route_diagnostic()
 	var foundation_height := float((blueprint.recipe as Dictionary).get("foundationHeight", 0.62))
 	var records: Array[Dictionary] = []
 	var violations: Array[String] = []
-	var collision_partition := raised_route_collision_partition(blueprint)
+	var collision_partition := raised_route_collision_partition(blueprint, _route_control)
+	if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 	violations.append_array(collision_partition.get("violations", []) as Array)
 	for record_value in grid.get("streetRecords", []) as Array:
+		if _route_control != null and not _route_control.poll("route_street"): return _cancelled_route_diagnostic()
 		if not record_value is Dictionary:
 			continue
 		var record: Dictionary = record_value as Dictionary
@@ -1729,7 +1811,8 @@ static func validate_raised_route_coverage(blueprint) -> Dictionary:
 		if width <= 0.20 or depth <= 0.20:
 			continue
 		var elevation := float(record.get("elevation", citadel_terrace_elevation_at_z(grid, float(record.get("z", 0.0)))))
-		var coverage := raised_route_record_coverage(blueprint, String(record.get("id", "street")), Vector3(float(record.get("x", 0.0)), 0.0, float(record.get("z", 0.0))), width, depth, foundation_height, elevation, true, record.get("allowedTransitionOwnerIds", []) as Array, float(record.get("handoffSeamZ", INF)), String(record.get("handoffTransitionOwnerId", "")), String(record.get("handoffTransitionSemantic", "")), String(record.get("handoffSourceOwnerId", "")), String(record.get("handoffSourceSemantic", "castle_route_terrace_walkway")), bool(record.get("transitionOwned", false)))
+		var coverage := raised_route_record_coverage(blueprint, String(record.get("id", "street")), Vector3(float(record.get("x", 0.0)), 0.0, float(record.get("z", 0.0))), width, depth, foundation_height, elevation, true, record.get("allowedTransitionOwnerIds", []) as Array, float(record.get("handoffSeamZ", INF)), String(record.get("handoffTransitionOwnerId", "")), String(record.get("handoffTransitionSemantic", "")), String(record.get("handoffSourceOwnerId", "")), String(record.get("handoffSourceSemantic", "castle_route_terrace_walkway")), bool(record.get("transitionOwned", false)), _route_control)
+		if _route_control != null and _route_control.cancelled: return _cancelled_route_diagnostic()
 		records.append(coverage)
 		if not bool(coverage.get("passed", false)):
 			violations.append_array(coverage.get("violations", []) as Array)

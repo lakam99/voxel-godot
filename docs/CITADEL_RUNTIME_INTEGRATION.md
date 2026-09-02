@@ -68,6 +68,18 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Latest publication work: exact worker-side restoration is committed as
+`6919fbe`. Background diagnostic preparation and a one-shot, revision-bound
+entry to the existing building publisher are implemented and critic-reviewed.
+See `CITADEL_BACKGROUND_PUBLICATION_PREPARATION_2026-09-02.md`: final actual-source
+controls pass 67/67; main-thread begin measures 17.321 ms instead of the prior
+18.871 seconds. This is not a frame-budget pass: remaining scene preparation,
+part publication, ordinary lifecycle dispatch and shared tree/door integration
+are unfinished. No city-spawn or headed acceptance is claimed. Existing NPC
+assertion failures remain; final route logs contain 250 error headers rather
+than 244 due to extra visits in the same known timing-budget diagnostic, as
+independently classified by the critic and documented in the evidence report.
+
 Latest: native terrain admission and ordinary-runtime wiring are implemented and
 independently critic-approved for this focused checkpoint. See
 `CITADEL_NATIVE_TERRAIN_ADMISSION_2026-09-02.md`.

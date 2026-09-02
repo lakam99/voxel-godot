@@ -243,6 +243,16 @@ func resolve_physical_contracts() -> void:
 	_resolve_physical_contracts(Callable())
 
 
+## Owned proof copies only: cancellation leaves partial derived facts. Discard
+## the copy rather than resuming it or publishing its partial resolution.
+func resolve_physical_contracts_cancellable(continuation: Callable) -> bool:
+	if not continuation.is_valid():
+		# Preserve the legacy virtual entry point for empty-continuation callers.
+		resolve_physical_contracts()
+		return true
+	return _resolve_physical_contracts(continuation)
+
+
 func _resolve_physical_contracts(continuation: Callable) -> bool:
 	var cache_owner := _begin_validation_cache()
 	physical_parts_by_id.clear()

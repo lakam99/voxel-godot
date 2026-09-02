@@ -7,7 +7,9 @@ class_name BuildingPartPublisher
 
 const ConstructionMaterialCatalogScript := preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const SurfaceHistoryFieldScript := preload("res://scripts/buildings/SurfaceHistoryField.gd")
+# Existing review consumers access this public constant directly.
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
+const PublicationPreparation := preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const SettledCobbleGeometryScript := preload("res://scripts/buildings/SettledCobbleGeometry.gd")
@@ -30,6 +32,8 @@ var collision_count := 0
 var visual_batch_count := 0
 var recipe_build_usec := 0
 var publication_usec := 0
+var diagnostic_preparation_usec := 0
+var scene_preparation_usec := 0
 var source_blueprint_id := ""
 var batch_static_parts := false
 var static_collision_body: StaticBody3D
@@ -100,12 +104,71 @@ func begin_publication(blueprint, parent: Node3D, options: Dictionary = {}) -> b
 	clear_published()
 	if blueprint == null or parent == null:
 		return false
-	raised_route_coverage = CastleCompoundBlueprintBuilderScript.validate_raised_route_coverage(blueprint)
+	var prepared := PublicationPreparation.evaluate(blueprint, options)
+	if not prepared.ready: return false
+	raised_route_coverage = prepared.raisedRouteCoverage
+	physical_integrity = prepared.physicalIntegrity
+	diagnostic_preparation_usec = prepared.preparationUsec
+	var started := Time.get_ticks_usec()
+	var ready := _begin_scene_publication(blueprint, options)
+	scene_preparation_usec = Time.get_ticks_usec() - started
+	return ready
+
+
+## Consumes an exclusively owned, one-shot worker result. No proof replay or
+## whole-source hashing on the main thread. The owner supplies its current
+## site/source/generation binding; stale and already-consumed holders reject.
+## Scene preparation remains measured separately and is not yet frame-bounded.
+func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource, parent: Node3D, expected_binding: Dictionary, options: Dictionary = {}) -> Dictionary:
+	if prepared == null or parent == null or not PublicationPreparation.valid_binding(expected_binding) \
+			or options.has("structuralAuthorityBlueprint"):
+		return {"ready":false, "reason":"invalid_prepared_publication_request"}
+	var source := prepared.take(expected_binding)
+	if source.is_empty(): return {"ready":false, "reason":"stale_or_consumed_publication"}
+	clear_published()
+	raised_route_coverage = source.raisedRouteCoverage
+	physical_integrity = source.physicalIntegrity
+	diagnostic_preparation_usec = source.preparationUsec
+	var started := Time.get_ticks_usec()
+	var ready := _begin_scene_publication(source.blueprint, options)
+	scene_preparation_usec = Time.get_ticks_usec() - started
+	if not ready:
+		# Return ownership for retirement/retry; do not destroy the large source
+		# here or expose it as a successful/partially usable publication.
+		source["scenePreparation"] = _detach_preparation_for_retirement()
+		return {"ready":false, "reason":"scene_preparation_failed", "retirementPayload":source}
+	return {"ready":true, "reason":"", "blueprint":source.blueprint, "furnishingPlan":source.furnishingPlan,
+		"preparationUsec":source.preparationUsec, "routeUsec":source.routeUsec, "physicalUsec":source.physicalUsec}
+
+
+func _detach_preparation_for_retirement() -> Dictionary:
+	# begin creates no scene nodes. Transfer its CPU/resource state without
+	# clearing aliased containers or retaining the failed blueprint in publisher.
+	var state := {"physicalIntegrity":physical_integrity, "raisedRouteCoverage":raised_route_coverage,
+		"pavingBlueprint":_paving_blueprint, "pavingParts":_paving_source_parts,
+		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
+		"pavingHistoryBinding":_paving_history_binding, "pavingTreatments":paving_treatments,
+		"masonry":_masonry_preparation, "surfaceHistory":surface_history,
+		"progressCallback":incremental_progress_callback}
+	physical_integrity = {}
+	raised_route_coverage = {}
+	_paving_blueprint = null
+	_paving_source_parts = {}
+	_paving_artifacts = {}
+	_paving_binding = PackedByteArray()
+	_paving_history_binding = PackedByteArray()
+	paving_treatments = []
+	_masonry_preparation = null
+	surface_history = SurfaceHistoryFieldScript.new()
+	incremental_progress_callback = Callable()
+	_paving_prepared = false
+	return state
+
+
+func _begin_scene_publication(blueprint, options: Dictionary) -> bool:
 	# Citadel route-publication requirements are retired on this visuals branch.
 	# Keep the real diagnostic (including failures) without making it a renderer
 	# prerequisite. Physical integrity is temporarily diagnostic-only by request.
-	var structural_authority = options.get("structuralAuthorityBlueprint", blueprint)
-	physical_integrity = structural_authority.validate_physical_integrity() if structural_authority != null and structural_authority.has_method("validate_physical_integrity") else {"passed": true, "checkedPartCount": 0, "checks": [], "violations": []}
 	if PHYSICAL_INTEGRITY_REQUIRED_FOR_PUBLICATION and not bool(physical_integrity.get("passed", false)):
 		push_error("Building publication blocked by invalid physical recipe: %s" % JSON.stringify(physical_integrity.get("violations", [])))
 		return false
@@ -170,6 +233,8 @@ func clear_published() -> void:
 	visual_batch_count = 0
 	recipe_build_usec = 0
 	publication_usec = 0
+	diagnostic_preparation_usec = 0
+	scene_preparation_usec = 0
 	source_blueprint_id = ""
 	batch_static_parts = false
 	static_collision_body = null
@@ -181,7 +246,10 @@ func clear_published() -> void:
 	incremental_total_parts = 0
 	incremental_published_parts = 0
 	incremental_static_flush_count = 0
-	paving_treatments.clear()
+	# This array comes from the accepted blueprint recipe. Relinquish the
+	# publisher's alias; never erase retained source treatment declarations.
+	paving_treatments = []
+	incremental_progress_callback = Callable()
 	surface_history.configure({})
 	masonry_repair_clusters.clear()
 	physical_integrity.clear()
@@ -1572,6 +1640,8 @@ func summary() -> Dictionary:
 		"raisedRouteCoverage": raised_route_coverage.duplicate(true),
 		"raisedRouteCoverageRequiredForPublication": false,
 		"recipeBuildUsec": recipe_build_usec,
+		"diagnosticPreparationUsec": diagnostic_preparation_usec,
+		"scenePreparationUsec": scene_preparation_usec,
 		"publicationUsec": publication_usec
 	}
 	if _paving_blueprint != null or not _paving_failure.is_empty():
