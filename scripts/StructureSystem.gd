@@ -142,6 +142,7 @@ func update_towns(center_cell: Vector2i, defer_builds := false) -> void:
                 build_town(town)
 
 func update_standalone_structures(center_cell: Vector2i, defer_builds := false, max_new_regions := 9) -> int:
+    const Candidate := preload("res://scripts/world/StandaloneStructureCandidate.gd")
     var center_region := Vector2i(floori(float(center_cell.x) / float(main.STRUCTURE_REGION_CELLS)), floori(float(center_cell.y) / float(main.STRUCTURE_REGION_CELLS)))
     var new_regions := 0
     for rz in range(center_region.y - 1, center_region.y + 2):
@@ -150,18 +151,17 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false, 
             if generated_structures.has(key):
                 continue
             new_regions += 1
-            var roll: float = main.hash01("structure:%d,%d" % [rx, rz])
-            if roll > main.STRUCTURE_SPAWN_CHANCE:
+            var candidate := Candidate.candidate_for_region(main.seed_text, key, main.STRUCTURE_REGION_CELLS, main.STRUCTURE_SPAWN_CHANCE)
+            if candidate.is_empty():
                 generated_structures[key] = false
                 if max_new_regions > 0 and new_regions >= max_new_regions:
                     return new_regions
                 continue
-            var rng := RandomNumberGenerator.new()
-            rng.seed = main.hash_string("%s:structure:%d,%d" % [main.seed_text, rx, rz])
-            var base_x: int = rx * main.STRUCTURE_REGION_CELLS + rng.randi_range(16, main.STRUCTURE_REGION_CELLS - 18)
-            var base_z: int = rz * main.STRUCTURE_REGION_CELLS + rng.randi_range(16, main.STRUCTURE_REGION_CELLS - 18)
-            var structure_type := standalone_structure_type(rng)
-            var dimensions := structure_dimensions_for_type(structure_type, rng)
+            var rng := Candidate.continuation_rng(candidate)
+            var base_x: int = candidate.baseCell.x
+            var base_z: int = candidate.baseCell.y
+            var structure_type: String = candidate.structureType
+            var dimensions: Vector2i = candidate.dimensions
             var level := flat_level_for_footprint(base_x, base_z, dimensions.x, dimensions.y)
             if is_nan(level):
                 generated_structures[key] = false
@@ -448,25 +448,10 @@ func publish_deferred_town_home_records(town_key: String) -> void:
     })
 
 func standalone_structure_type(rng: RandomNumberGenerator) -> String:
-    var roll := rng.randf()
-    if roll < 0.12:
-        return "shrine"
-    if roll < 0.32:
-        return "mine"
-    if roll < 0.58:
-        return "ruin"
-    if roll < 0.74:
-        return "camp"
-    return "cabin"
+    return preload("res://scripts/world/StandaloneStructureCandidate.gd").standalone_structure_type(rng)
 
 func structure_dimensions_for_type(structure_type: String, rng: RandomNumberGenerator) -> Vector2i:
-    if structure_type == "shrine":
-        return Vector2i(9, 9)
-    if structure_type == "mine":
-        return Vector2i(rng.randi_range(10, 12), rng.randi_range(12, 14))
-    if structure_type == "camp":
-        return Vector2i(rng.randi_range(11, 13), rng.randi_range(10, 12))
-    return Vector2i(rng.randi_range(7, 10), rng.randi_range(7, 10))
+    return preload("res://scripts/world/StandaloneStructureCandidate.gd").structure_dimensions_for_type(structure_type, rng)
 
 func remember_terrain_surface_sample(cache_key: Vector2i, sample: Dictionary) -> Dictionary:
     terrain_surface_sample_cache[cache_key] = sample.duplicate(true)
