@@ -35,6 +35,7 @@ var publication_usec := 0
 var diagnostic_preparation_usec := 0
 var scene_preparation_usec := 0
 var source_blueprint_id := ""
+var publication_site_id := ""
 var batch_static_parts := false
 var static_collision_body: StaticBody3D
 var static_part_records: Dictionary = {}
@@ -61,6 +62,8 @@ var _paving_failure := ""
 var _paving_prepared := false
 var _paving_complete := false
 var _masonry_preparation
+var _scene_finalized := false
+var _publication_stage_metrics: Dictionary = {}
 
 
 func _init() -> void:
@@ -178,9 +181,17 @@ func _begin_scene_publication(blueprint, options: Dictionary) -> bool:
 	incremental_static_flush_count = 0
 	source_blueprint_id = canonical_source_blueprint_id(blueprint)
 	paving_treatments = blueprint.recipe.get("pavingTreatments", []) as Array
+	var stage_started := Time.get_ticks_usec()
 	surface_history.configure(blueprint.recipe, blueprint.parts)
-	if not _prepare_paving_publication(blueprint): return false
-	if not prepare_masonry_apertures(blueprint): return false
+	_record_publication_stage("history",Time.get_ticks_usec()-stage_started)
+	stage_started = Time.get_ticks_usec()
+	var paving_ready := _prepare_paving_publication(blueprint)
+	_record_publication_stage("paving_begin",Time.get_ticks_usec()-stage_started)
+	if not paving_ready: return false
+	stage_started = Time.get_ticks_usec()
+	var masonry_ready := prepare_masonry_apertures(blueprint)
+	_record_publication_stage("masonry_begin",Time.get_ticks_usec()-stage_started)
+	if not masonry_ready: return false
 	active_publication_started_usec = Time.get_ticks_usec()
 	return true
 
@@ -188,7 +199,10 @@ func _begin_scene_publication(blueprint, options: Dictionary) -> bool:
 func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: int) -> int:
 	if blueprint == null or parent == null:
 		return start_index
-	if not _paving_session_valid(blueprint): return start_index
+	var validation_started := Time.get_ticks_usec()
+	var paving_valid := _paving_session_valid(blueprint)
+	_record_publication_stage("paving_revalidation",Time.get_ticks_usec()-validation_started)
+	if not paving_valid: return start_index
 	if _masonry_preparation != null and _masonry_preparation.state == "pending_budget":
 		_masonry_preparation.advance(self)
 		if _masonry_preparation.state != "ready": return start_index
@@ -211,19 +225,47 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 
 
 func finish_publication(blueprint, parent: Node3D) -> Dictionary:
+	finish_scene_publication(blueprint,parent)
+	return summary()
+
+
+## Runtime orchestration uses bounded status, not summary()'s full copied proof
+## reports. Compatibility callers still receive that historical full summary.
+func finish_scene_publication(blueprint, parent: Node3D) -> Dictionary:
 	if blueprint == null or parent == null:
-		return summary()
-	if not _paving_session_valid(blueprint): return summary()
-	if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return summary()
+		return {"status":"failed","reason":"invalid_scene_publication_request","complete":false}
+	if not _paving_session_valid(blueprint): return publication_status()
+	if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return publication_status()
 	flush_static_batches(parent)
 	report_incremental_progress("complete")
 	publication_usec = Time.get_ticks_usec() - active_publication_started_usec if active_publication_started_usec > 0 else 0
 	active_publication_started_usec = 0
 	_paving_complete = incremental_published_parts == incremental_total_parts
-	return summary()
+	_scene_finalized = _paving_complete
+	return publication_status()
+
+
+func advance_scene_preparation(budget_usec := 2500) -> Dictionary:
+	if budget_usec < 1 or budget_usec > 4000:
+		return {"status":"failed","reason":"invalid_slice_budget","complete":false}
+	if _masonry_preparation != null and not _publication_failed() and _masonry_preparation.state == "pending_budget":
+		_masonry_preparation.advance(self,budget_usec)
+	return publication_status()
+
+
+func publication_status() -> Dictionary:
+	var reason := _paving_failure
+	if reason.is_empty() and _masonry_preparation != null: reason = _masonry_preparation.reason
+	if reason.is_empty() and _masonry_preparation == null: reason = "scene_publication_not_started"
+	var state := "failed" if not reason.is_empty() else ("pending_budget" if _masonry_preparation.state == "pending_budget" else "ready")
+	return {"status":state,"reason":reason,"complete":_scene_finalized and state=="ready",
+		"publishedPartCount":incremental_published_parts,"totalParts":incremental_total_parts,
+		"collisionPartCount":collision_count,"visualBatchCount":visual_batch_count}
 
 
 func clear_published() -> void:
+	_scene_finalized = false
+	_publication_stage_metrics = {}
 	for node in published_nodes:
 		if node != null and is_instance_valid(node):
 			node.queue_free()
@@ -236,6 +278,7 @@ func clear_published() -> void:
 	diagnostic_preparation_usec = 0
 	scene_preparation_usec = 0
 	source_blueprint_id = ""
+	publication_site_id = ""
 	batch_static_parts = false
 	static_collision_body = null
 	static_part_records.clear()
@@ -268,6 +311,7 @@ func clear_published() -> void:
 
 func configure_publication_options(options: Dictionary) -> void:
 	batch_static_parts = bool(options.get("batchStaticParts", false))
+	publication_site_id = String(options.get("publicationSiteId", ""))
 	var callback_value = options.get("progressCallback")
 	incremental_progress_callback = callback_value as Callable if callback_value is Callable else Callable()
 
@@ -288,7 +332,9 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 	published_part_count += 1
 	if batch_static_parts and String(part.kind) != "door":
 		publish_static_part(part, parent)
-		recipe_build_usec += Time.get_ticks_usec() - started
+		var elapsed := Time.get_ticks_usec() - started
+		recipe_build_usec += elapsed
+		_record_publication_stage("part",elapsed,String(part.id))
 		return null
 	var body := StaticBody3D.new()
 	body.name = "ConstructionPart_%s" % String(part.id)
@@ -323,7 +369,9 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 		publish_practical_light(part, body)
 	if String(part.kind) == "door":
 		add_door_interaction_proxy(body, part)
-	recipe_build_usec += Time.get_ticks_usec() - started
+	var elapsed := Time.get_ticks_usec() - started
+	recipe_build_usec += elapsed
+	_record_publication_stage("part",elapsed,String(part.id))
 	return body
 
 
@@ -1171,7 +1219,10 @@ func configure_door_leaf(body: StaticBody3D, part) -> void:
 	# Match the established DoorPortal/DoorController leaf contract. The generic
 	# controller owns swing state and collider disabling; this publisher only
 	# provides a building-derived door leaf for it to operate on.
-	var portal_id := "building:%s:%s" % [source_blueprint_id, String(part.id)]
+	# One recipe can be published at multiple sites. Site identity is supplied
+	# by the revision-bound owner; it does not mutate the visual/source recipe.
+	var building_id := publication_site_id if not publication_site_id.is_empty() else source_blueprint_id
+	var portal_id := "building:%s:%s" % [building_id, String(part.id)]
 	body.set_meta("block_type", "door")
 	body.set_meta("open", false)
 	body.set_meta("closed_rotation", body.rotation.y)
@@ -1181,7 +1232,7 @@ func configure_door_leaf(body: StaticBody3D, part) -> void:
 	body.set_meta("open_visual_offset", BuildingDoorGeometryScript.raised_visual_offset(part.size) if String(part.recipe.get("doorMotion", "swing")) == "raise" else Vector3.ZERO)
 	body.set_meta("door_portal_id", portal_id)
 	body.set_meta("door_group_id", portal_id)
-	body.set_meta("door_building_id", source_blueprint_id)
+	body.set_meta("door_building_id", building_id)
 	body.set_meta("door_side", door_side_for_world_transform(body.global_transform))
 	body.set_meta("door_public_access", true)
 	body.set_meta("door_policy", "private_home")
@@ -1499,6 +1550,7 @@ func flush_static_batches(parent: Node3D) -> void:
 		return
 	var keys := static_visual_batches.keys()
 	keys.sort()
+	var render_started := Time.get_ticks_usec()
 	for key_value in keys:
 		var group: Dictionary = static_visual_batches.get(key_value, {}) as Dictionary
 		var transforms: Array = group.get("transforms", []) as Array
@@ -1507,11 +1559,29 @@ func flush_static_batches(parent: Node3D) -> void:
 		var instance := add_box_batch(parent, transforms, material, "ConstructionStaticVisualBatch", custom_data_values)
 		if instance != null:
 			published_nodes.append(instance)
+	_record_publication_stage("flush_render",Time.get_ticks_usec()-render_started)
+	var metadata_started := Time.get_ticks_usec()
 	if static_collision_body != null and is_instance_valid(static_collision_body):
 		static_collision_body.set_meta("building_part_records", static_part_records.duplicate(true))
+	_record_publication_stage("flush_metadata",Time.get_ticks_usec()-metadata_started)
 	static_visual_batches.clear()
 	static_visual_transform_count = 0
 	incremental_static_flush_count += 1
+
+
+func _record_publication_stage(stage: String, usec: int, detail := "") -> void:
+	if not _publication_stage_metrics.has(stage):
+		_publication_stage_metrics[stage] = {"calls":0,"totalUsec":0,"maxUsec":0,"detail":""}
+	var record: Dictionary = _publication_stage_metrics[stage]
+	record.calls += 1
+	record.totalUsec += usec
+	if usec > record.maxUsec:
+		record.maxUsec = usec
+		record.detail = detail.left(160)
+
+
+func publication_timing() -> Dictionary:
+	return _publication_stage_metrics.duplicate(true)
 
 
 func report_incremental_progress(reason: String) -> void:

@@ -68,6 +68,15 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The real building/furnishing publishers and shared tree queue now construct the
+complete accepted source through a cancellable scene job in a headless diagnostic.
+See `CITADEL_SCENE_PUBLICATION_2026-09-02.md`: final tiny controls pass 65/65 and
+actual publication 61/61, including exact blocking collision and resource cleanup.
+The earlier failed audit is explicitly invalid, not a green result. Scene
+publication still has measured paving/metadata/masonry stalls and is NOT enabled
+by the ordinary service yet. Player access/readiness, shared-door cleanup and
+live lifecycle/visual acceptance remain open. No headed approval is claimed.
+
 Ordinary streaming preparation is now wired through StructureSystem and native
 runtime maintenance, with current-generation admission, cache-eviction reuse,
 cancellation, loading/reset drains and combined shutdown. See
