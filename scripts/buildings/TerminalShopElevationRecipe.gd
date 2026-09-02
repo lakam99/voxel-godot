@@ -301,20 +301,34 @@ static func _lateral_clearance(records: Dictionary, members: Dictionary, support
 
 static func _support_closure(blueprint, records: Dictionary, members: Dictionary, support_id: String) -> Dictionary:
 	var selected = records[support_id].part
-	var footprint: Rect2 = records[support_id].footprint
+	if members.has(support_id) or selected.kind != "foundation" or not selected.collision_enabled:
+		return _fail("invalid_selected_support")
 	var pool := Blueprint.new("elevation_support_context", blueprint.seed, blueprint.style)
 	var pool_ids: Array = []
-	# Bounded foundation-only context below the selected seat. The physical
-	# authority, not this recipe, resolves contacts in these actual source boxes.
-	for id in records:
-		var part = records[id].part
-		if members.has(id) or part.kind != "foundation" or not part.collision_enabled:
-			continue
-		if id != support_id and (part.position.y >= selected.position.y or not footprint.intersects(records[id].footprint)):
-			continue
-		pool_ids.append(id)
-		if pool_ids.size() > MAX_SUPPORT_CONTEXT:
-			return _fail("support_context_limit")
+	# Proving a whole supporting part requires its WHOLE footprint. A narrow
+	# selected paving strip can rest on a wider raised foundation, whose roots
+	# lie outside that first strip. Expand the bounded geometric context downward
+	# through each candidate before the authority chooses actual support contacts.
+	var candidates: Array = [support_id]
+	var context_seen := {support_id: true}
+	var context_cursor := 0
+	while context_cursor < candidates.size():
+		var current_id: String = candidates[context_cursor]
+		context_cursor += 1
+		var current = records[current_id].part
+		pool_ids.append(current_id)
+		if blueprint.is_grounded_structural_root(current): continue
+		var current_footprint: Rect2 = records[current_id].footprint
+		for id in records:
+			var part = records[id].part
+			if context_seen.has(id) or members.has(id) or part.kind != "foundation" or not part.collision_enabled:
+				continue
+			if part.position.y >= current.position.y or not current_footprint.intersects(records[id].footprint):
+				continue
+			context_seen[id] = true
+			candidates.append(id)
+			if candidates.size() > MAX_SUPPORT_CONTEXT:
+				return _fail("support_context_limit")
 	pool_ids.sort()
 	for id in pool_ids:
 		var source = records[id].part
