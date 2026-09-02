@@ -15,6 +15,14 @@ var physical_parts_by_id: Dictionary = {}
 var structural_support_grid: Dictionary = {}
 var invalid_gable_part_ids: Dictionary = {}
 
+# Geometry is unchanged during synchronous resolve/validation; recipe proof facts
+# are not. Never retain these caches across passes (parts are directly mutable).
+var _validation_cache_active := false
+var _validation_transforms: Dictionary = {}
+var _validation_inverses: Dictionary = {}
+var _validation_bounds: Dictionary = {}
+var _validation_neighbors: Dictionary = {}
+
 const PHYSICAL_SUPPORT_GRID_CELL := 4.0
 const PHYSICAL_CONTACT_MARGIN := 0.05
 const STAIR_HOUSED_JOINT_INSET := 0.005
@@ -54,6 +62,7 @@ func part_snapshots() -> Array:
 
 
 func validate_physical_integrity() -> Dictionary:
+	var cache_owner := _begin_validation_cache()
 	resolve_physical_contracts()
 	var checks: Array[Dictionary] = []
 	var violations: Array[String] = []
@@ -195,6 +204,7 @@ func validate_physical_integrity() -> Dictionary:
 				check["passed"] = false
 				violations.append("%s has no complete gable roof load path" % String(part.id))
 	MandatoryPhysicalDependencyValidator.apply(parts, checks, violations)
+	_end_validation_cache(cache_owner)
 	return {
 		"passed": violations.is_empty(),
 		"checkedPartCount": checks.size(),
@@ -204,8 +214,10 @@ func validate_physical_integrity() -> Dictionary:
 
 
 func resolve_physical_contracts() -> void:
+	var cache_owner := _begin_validation_cache()
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
+	_validation_neighbors.clear()
 	invalid_gable_part_ids.clear()
 	for part in parts:
 		if part != null and GablePurlinFrameValidator.is_frame_part(part) and not GablePurlinFrameValidator.schema_valid(part):
@@ -243,6 +255,7 @@ func resolve_physical_contracts() -> void:
 			"facade_attachment":
 				var anchor_ids := resolved_attachment_anchor_ids(part)
 				part.recipe["physicalAnchorPartIds"] = anchor_ids
+	_end_validation_cache(cache_owner)
 
 
 func inferred_physical_intent(part) -> String:
@@ -295,7 +308,7 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 				continue
 			if String(candidate.id) == String(target.recipe.get("physicalSupportsPartId", "")):
 				continue
-			var local_point := part_transform(candidate).affine_inverse() * point
+			var local_point := part_inverse_transform(candidate) * point
 			if absf(local_point.x) > candidate.size.x * 0.5 + PHYSICAL_CONTACT_MARGIN or absf(local_point.z) > candidate.size.z * 0.5 + PHYSICAL_CONTACT_MARGIN:
 				continue
 			var candidate_bottom: float = candidate.position.y - candidate.size.y * 0.5
@@ -386,6 +399,8 @@ func structural_candidates_overlapping_part(target, margin: float) -> Array:
 
 
 func transformed_part_bounds(part) -> AABB:
+	if _validation_cache_active and _validation_bounds.has(part):
+		return _validation_bounds[part]
 	var transform := part_transform(part)
 	var minimum := Vector3(INF, INF, INF)
 	var maximum := Vector3(-INF, -INF, -INF)
@@ -395,11 +410,13 @@ func transformed_part_bounds(part) -> AABB:
 				var corner: Vector3 = transform * (part.size * Vector3(x_sign, y_sign, z_sign) * 0.5)
 				minimum = minimum.min(corner)
 				maximum = maximum.max(corner)
-	return AABB(minimum, maximum - minimum)
+	var bounds := AABB(minimum, maximum - minimum)
+	if _validation_cache_active: _validation_bounds[part] = bounds
+	return bounds
 
 
 func transformed_part_corner_within(first, second, margin: float) -> bool:
-	var first_to_second := part_transform(second).affine_inverse() * part_transform(first)
+	var first_to_second := part_inverse_transform(second) * part_transform(first)
 	for x_sign in [-1.0, 1.0]:
 		for y_sign in [-1.0, 1.0]:
 			for z_sign in [-1.0, 1.0]:
@@ -428,10 +445,38 @@ func is_structural_support_candidate(part) -> bool:
 
 
 func part_transform(part) -> Transform3D:
-	return Transform3D(Basis.from_euler(part.rotation), part.position)
+	if _validation_cache_active and _validation_transforms.has(part):
+		return _validation_transforms[part]
+	var transform := Transform3D(Basis.from_euler(part.rotation), part.position)
+	if _validation_cache_active: _validation_transforms[part] = transform
+	return transform
+
+
+func part_inverse_transform(part) -> Transform3D:
+	if _validation_cache_active and _validation_inverses.has(part):
+		return _validation_inverses[part]
+	var inverse := part_transform(part).affine_inverse()
+	if _validation_cache_active: _validation_inverses[part] = inverse
+	return inverse
+
+
+func _begin_validation_cache() -> bool:
+	if _validation_cache_active: return false
+	_validation_cache_active = true
+	return true
+
+
+func _end_validation_cache(owner: bool) -> void:
+	if not owner: return
+	_validation_cache_active = false
+	_validation_transforms.clear()
+	_validation_inverses.clear()
+	_validation_bounds.clear()
+	_validation_neighbors.clear()
 
 
 func index_structural_support_candidates() -> void:
+	_validation_neighbors.clear()
 	for part in parts:
 		if not is_structural_support_candidate(part) or not has_finite_positive_bounds(part):
 			continue
@@ -455,6 +500,9 @@ func structural_candidates_near(point: Vector3) -> Array:
 	var seen: Dictionary = {}
 	var origin_x := floori(point.x / PHYSICAL_SUPPORT_GRID_CELL)
 	var origin_z := floori(point.z / PHYSICAL_SUPPORT_GRID_CELL)
+	var origin := Vector2i(origin_x, origin_z)
+	if _validation_cache_active and _validation_neighbors.has(origin):
+		return _validation_neighbors[origin]
 	for cell_x in range(origin_x - 1, origin_x + 2):
 		for cell_z in range(origin_z - 1, origin_z + 2):
 			var key := "%d:%d" % [cell_x, cell_z]
@@ -463,6 +511,7 @@ func structural_candidates_near(point: Vector3) -> Array:
 				if not seen.has(candidate_id):
 					seen[candidate_id] = true
 					result.append(candidate)
+	if _validation_cache_active: _validation_neighbors[origin] = result
 	return result
 
 
@@ -519,7 +568,7 @@ func has_rooted_bearer_seat(bearer, seat_fact: Dictionary, visited: Dictionary =
 	var normal_gap := absf((seat_point - bearer_point).dot(bearer_normal))
 	if not opposing_faces or normal_gap > PHYSICAL_CONTACT_MARGIN:
 		return false
-	var bearer_patch_center: Vector3 = part_transform(seat).affine_inverse() * (bearer_plane.get("point", Vector3.ZERO) as Vector3)
+	var bearer_patch_center: Vector3 = part_inverse_transform(seat) * (bearer_plane.get("point", Vector3.ZERO) as Vector3)
 	var patch_in_seat := face_patch_within_seat(bearer, bearer_face, seat, seat_face, bearer_patch_center)
 	return patch_in_seat and has_rooted_support_chain(seat, visited)
 
@@ -537,7 +586,7 @@ func has_rooted_gravity_bearing_patch(bearer, seat, seat_fact: Dictionary, visit
 	var seat_point: Vector3 = seat_plane.get("point", Vector3.ZERO) as Vector3
 	for local_offset in [Vector2.ZERO, Vector2(-local_patch_half_extents.x, -local_patch_half_extents.y), Vector2(-local_patch_half_extents.x, local_patch_half_extents.y), Vector2(local_patch_half_extents.x, -local_patch_half_extents.y), Vector2(local_patch_half_extents.x, local_patch_half_extents.y)]:
 		var local_point := local_patch_center + Vector3(local_offset.x, 0.0, local_offset.y)
-		var point_in_seat := part_transform(seat).affine_inverse() * (part_transform(bearer) * local_point)
+		var point_in_seat := part_inverse_transform(seat) * (part_transform(bearer) * local_point)
 		if absf(point_in_seat.y - seat.size.y * 0.5) > PHYSICAL_CONTACT_MARGIN:
 			return false
 		if absf(point_in_seat.x) > seat.size.x * 0.5 - PHYSICAL_CONTACT_MARGIN or absf(point_in_seat.z) > seat.size.z * 0.5 - PHYSICAL_CONTACT_MARGIN:
@@ -556,7 +605,7 @@ func gravity_bearing_diagnostics(bearer, seat, seat_fact: Dictionary) -> Diction
 		return result
 	for local_offset in [Vector2.ZERO, Vector2(-local_patch_half_extents.x, -local_patch_half_extents.y), Vector2(-local_patch_half_extents.x, local_patch_half_extents.y), Vector2(local_patch_half_extents.x, -local_patch_half_extents.y), Vector2(local_patch_half_extents.x, local_patch_half_extents.y)]:
 		var local_point := local_patch_center + Vector3(local_offset.x, 0.0, local_offset.y)
-		result["points"].append(part_transform(seat).affine_inverse() * (part_transform(bearer) * local_point))
+		result["points"].append(part_inverse_transform(seat) * (part_transform(bearer) * local_point))
 	result["rootedSeat"] = has_rooted_support_chain(seat, {})
 	return result
 
@@ -572,7 +621,7 @@ func attachment_socket_diagnostics(attachment, anchor_fact: Dictionary) -> Dicti
 		for y_sign in [-1.0, 1.0]:
 			for z_sign in [-1.0, 1.0]:
 				var mount_point := local_center + Vector3(local_half_extents.x * x_sign, local_half_extents.y * y_sign, local_half_extents.z * z_sign)
-				result["cornerAnchorPositions"].append(part_transform(anchor).affine_inverse() * (part_transform(attachment) * mount_point))
+				result["cornerAnchorPositions"].append(part_inverse_transform(anchor) * (part_transform(attachment) * mount_point))
 	result["rootedAnchor"] = has_rooted_support_chain(anchor, {})
 	return result
 
@@ -598,7 +647,7 @@ func has_rooted_housed_overlap(bearer, seat, seat_fact: Dictionary, visited: Dic
 		for y_sign in [-1.0, 1.0]:
 			for z_sign in [-1.0, 1.0]:
 				var local_point := local_center + Vector3(local_half_extents.x * x_sign, local_half_extents.y * y_sign, local_half_extents.z * z_sign)
-				var point_in_seat := part_transform(seat).affine_inverse() * (part_transform(bearer) * local_point)
+				var point_in_seat := part_inverse_transform(seat) * (part_transform(bearer) * local_point)
 				for axis in [0, 1, 2]:
 					if absf(point_in_seat[axis]) >= seat.size[axis] * 0.5 - STAIR_HOUSED_JOINT_INSET:
 						return false
@@ -633,7 +682,7 @@ func housed_overlap_diagnostics(bearer, seat, seat_fact: Dictionary) -> Dictiona
 		for y_sign in [-1.0, 1.0]:
 			for z_sign in [-1.0, 1.0]:
 				var local_point := local_center + Vector3(local_half_extents.x * x_sign, local_half_extents.y * y_sign, local_half_extents.z * z_sign)
-				var point_in_seat := part_transform(seat).affine_inverse() * (part_transform(bearer) * local_point)
+				var point_in_seat := part_inverse_transform(seat) * (part_transform(bearer) * local_point)
 				corner_positions.append(point_in_seat)
 				for axis in [0, 1, 2]:
 					if absf(point_in_seat[axis]) >= seat.size[axis] * 0.5 - STAIR_HOUSED_JOINT_INSET:
@@ -667,7 +716,7 @@ func has_rooted_attachment_socket(attachment, anchor_fact: Dictionary) -> bool:
 		for y_sign in [-1.0, 1.0]:
 			for z_sign in [-1.0, 1.0]:
 				var mount_point := local_center + Vector3(local_half_extents.x * x_sign, local_half_extents.y * y_sign, local_half_extents.z * z_sign)
-				var point_in_anchor := part_transform(anchor).affine_inverse() * (part_transform(attachment) * mount_point)
+				var point_in_anchor := part_inverse_transform(anchor) * (part_transform(attachment) * mount_point)
 				for axis in [0, 1, 2]:
 					if absf(point_in_anchor[axis]) >= anchor.size[axis] * 0.5 - STAIR_HOUSED_JOINT_INSET:
 						return false
@@ -770,7 +819,7 @@ func has_rooted_point_bearing_seat(bearer, seat, seat_fact: Dictionary, visited:
 	var normal_gap := absf((world_bearing_point - seat_point).dot(bearer_normal))
 	if normal_gap > PHYSICAL_CONTACT_MARGIN:
 		return false
-	var point_in_seat := part_transform(seat).affine_inverse() * world_bearing_point
+	var point_in_seat := part_inverse_transform(seat) * world_bearing_point
 	var seat_axis := face_axis(seat_face)
 	for tangent_axis in [0, 1, 2]:
 		if tangent_axis != seat_axis and absf(point_in_seat[tangent_axis]) > seat.size[tangent_axis] * 0.5 - PHYSICAL_CONTACT_MARGIN:
@@ -816,7 +865,7 @@ func face_patch_within_seat(bearer, bearer_face: String, seat, seat_face: String
 				local_point[bearer_axis] = (-1.0 if bearer_face.begins_with("min_") else 1.0) * bearer.size[bearer_axis] * 0.5
 				local_point[first_axis] = first_sign * minf(patch_half_extent, bearer.size[first_axis] * 0.5)
 				local_point[second_axis] = second_sign * minf(patch_half_extent, bearer.size[second_axis] * 0.5)
-				var point_in_seat := part_transform(seat).affine_inverse() * (part_transform(bearer) * local_point)
+				var point_in_seat := part_inverse_transform(seat) * (part_transform(bearer) * local_point)
 				if absf(point_in_seat[first_axis]) > seat.size[first_axis] * 0.5 + PHYSICAL_CONTACT_MARGIN or absf(point_in_seat[second_axis]) > seat.size[second_axis] * 0.5 + PHYSICAL_CONTACT_MARGIN:
 					return false
 	return absf(bearer_plane_center_in_seat[seat_axis]) <= seat.size[seat_axis] * 0.5 + PHYSICAL_CONTACT_MARGIN
