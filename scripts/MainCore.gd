@@ -554,6 +554,10 @@ func begin_startup_loading_timeline() -> void:
     startup_loading_max_step.clear()
 
 func startup_loading_yield(message: String, domain := "general", status := "pending", metrics := {}) -> void:
+    # Main/native processing can be disabled during staged seed reset. Keep
+    # old publication work draining without dispatching against a partial world.
+    if structure_system != null:
+        structure_system.advance_citadel_publication()
     var now_usec := Time.get_ticks_usec()
     if startup_loading_started_usec <= 0:
         startup_loading_started_usec = now_usec
@@ -2187,8 +2191,13 @@ func wait_for_npc_navigation_before_quit() -> void:
 func wait_for_terrain_workers_before_quit() -> void:
     if structure_system != null:
         var admission = structure_system.citadel_terrain_admission
+        var publication = structure_system.citadel_publication
+        publication.request_shutdown()
         admission.request_shutdown()
-        while not bool(admission.advance().get("shutdownComplete",false)):
+        while true:
+            var source_done := bool(admission.advance().get("shutdownComplete",false))
+            var publication_done := bool(publication.advance().get("shutdownComplete",false))
+            if source_done and publication_done: break
             await startup_loading_yield("Stopping citadel preparation")
     var voxel_runtime = get("voxel_terrain_runtime")
     if voxel_runtime != null and is_instance_valid(voxel_runtime) and voxel_runtime.has_method("begin_shutdown"):

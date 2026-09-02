@@ -92,11 +92,28 @@ func request_source(region: Vector2i, priority := true) -> Dictionary:
 	if _closing: return _result("failed","shutting_down")
 	if not _fatal.is_empty(): return _result("failed",_fatal)
 	if not _town_inputs_finalized: return _result("failed","citadel_town_inputs_unfinalized")
-	if _sources.has(region): return {"status":"ready","source":_sources[region]}
+	if _sources.has(region):
+		return source_state(region)
 	var decision: Dictionary = _decisions.get(region,{})
 	if decision.get("status") in ["failed","absent"]: return decision.duplicate()
 	if not _requests.has(region): _requests[region] = {"priority":priority,"receipt":{}}
 	return _result("pending","preparing_citadel_source")
+
+func source_state(region: Vector2i) -> Dictionary:
+	# Non-enqueuing identity lookup: an existing prepared consumer must not
+	# rebuild the recipe just because the reconstructible source cache evicted it.
+	if _closing: return _result("failed","shutting_down")
+	if not _fatal.is_empty(): return _result("failed",_fatal)
+	if not _town_inputs_finalized: return _result("failed","citadel_town_inputs_unfinalized")
+	var decision: Dictionary = _decisions.get(region,{})
+	if decision.get("status") != "prepared": return decision.duplicate()
+	var result := {"status":"prepared", "binding":{"siteId":decision.siteId,
+		"sourceKey":decision.sourceKey, "generation":_generation},
+		"sourceSignature":decision.sourceSignature, "reservationCells":decision.reservationCells}
+	if _sources.has(region):
+		result.status = "ready"
+		result["source"] = _sources[region]
+	return result
 
 func advance() -> Dictionary:
 	var started := Time.get_ticks_usec()
@@ -166,7 +183,8 @@ func _accept(receipt: Dictionary) -> void:
 				_sources.erase(oldest)
 			_sources[region] = source
 			_decisions[region] = {"status":"prepared","reason":"","sourceKey":receipt.sourceKey,
-				"sourceSignature":profile.sourceSignature,"level":profile.level,"envelopeCells":profile.envelopeCells,"apronCells":profile.apronCells}
+				"sourceSignature":profile.sourceSignature,"siteId":profile.siteId,"reservationCells":source.reservationCells,
+				"level":profile.level,"envelopeCells":profile.envelopeCells,"apronCells":profile.apronCells}
 			_requests.erase(region)
 			return
 	elif state == "absent":

@@ -28,6 +28,10 @@ class PlayerHost extends Node:
 
 class Structures extends RefCounted:
 	var citadel_terrain_admission
+	# This native-terrain fixture deliberately has no building sources. The
+	# publication service itself is exercised by CitadelPublicationServiceContract.
+	func advance_citadel_publication(_bounds := Rect2i(), _allow_dispatch := false) -> Dictionary:
+		return {"publicationReady":false,"fixture":"synthetic_no_building_publication"}
 
 class ObservedRuntime extends Runtime:
 	var flat_fixture := false

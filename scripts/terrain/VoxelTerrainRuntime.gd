@@ -561,6 +561,13 @@ func expand_vertical_bounds_step() -> void:
 	)
 
 func _process(delta: float) -> void:
+	# StructureSystem owns publication preparation. Always pump retirement before
+	# native-generation early returns; only current player demand may dispatch.
+	if main != null and main.structure_system != null:
+		var can_prepare: bool = authority_ready and generation_context_current() \
+			and main.player != null and main.player.is_inside_tree()
+		var bounds := SITE_GATE_SCRIPT.footprint(main.player.global_position,FINAL_VIEW_DISTANCE) if can_prepare else Rect2i()
+		main.structure_system.advance_citadel_publication(bounds,can_prepare)
 	if authority_ready:
 		if not generation_context_current():
 			terrain.automatic_loading_enabled = false

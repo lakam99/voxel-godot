@@ -68,6 +68,17 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Ordinary streaming preparation is now wired through StructureSystem and native
+runtime maintenance, with current-generation admission, cache-eviction reuse,
+cancellation, loading/reset drains and combined shutdown. See
+`CITADEL_STREAMING_PREPARATION_2026-09-02.md`: worker controls pass 62/62 and
+service/lifecycle controls 69/69; existing admission/bootstrap/town-input checks
+pass 124/28/52, and native admission/player-collision controls pass 42/42.
+NPC results retain the accepted baseline failures and route
+stderr is exact to the prior final preparation run. This is preparation only:
+scene parts, furniture, trees and doors are not yet installed by this owner,
+and no real-game city-spawn or headed acceptance is claimed.
+
 Latest publication work: exact worker-side restoration is committed as
 `6919fbe`. Background diagnostic preparation and a one-shot, revision-bound
 entry to the existing building publisher are implemented and critic-reviewed.

@@ -6,6 +6,7 @@ const StructureLootScript := preload("res://scripts/StructureLoot.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const CitadelTerrainAdmissionScript := preload("res://scripts/world/CitadelTerrainAdmission.gd")
+const CitadelPublicationServiceScript := preload("res://scripts/world/CitadelPublicationService.gd")
 
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
@@ -37,6 +38,7 @@ var natural_prop_exclusion_records := {}
 var private_interior_records := {}
 var private_interior_revision := 0
 var citadel_terrain_admission = CitadelTerrainAdmissionScript.new()
+var citadel_publication = CitadelPublicationServiceScript.new()
 
 func setup(main_node) -> void:
     main = main_node
@@ -48,6 +50,10 @@ func configure_citadel_terrain_admission() -> void:
         "regionCells": int(main.STRUCTURE_REGION_CELLS),
         "spawnChance": float(main.STRUCTURE_SPAWN_CHANCE)
     })
+    citadel_publication.configure(citadel_terrain_admission)
+
+func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
+    return citadel_publication.advance(observer_bounds,allow_dispatch)
 
 func reset() -> void:
     configure_citadel_terrain_admission()
