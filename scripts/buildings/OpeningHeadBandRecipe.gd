@@ -31,7 +31,8 @@ static func prepare_all_first_rows(b, policy: Dictionary, continuation: Callable
 	for house in membership.houses:
 		if continuation.is_valid() and continuation.call("opening_head_house:" + String(house.prefix)) != true: return _fail("cancelled")
 		if callback.is_valid(): callback.call(house.prefix)
-		var proposal := prepare_first(staged, house.memberIds, policy)
+		var proposal := prepare_first(staged, house.memberIds, policy, continuation)
+		if proposal.get("reason", "") == "cancelled": return proposal
 		if continuation.is_valid() and continuation.call("opening_head_house_completed:" + String(house.prefix)) != true: return _fail("cancelled")
 		if not proposal.ready:
 			return {"ready": false, "reason": proposal.reason, "failedHouse": house.prefix, "completedHouseCount": proposals.size(), "failureEvidence": proposal}
@@ -43,7 +44,7 @@ static func prepare_all_first_rows(b, policy: Dictionary, continuation: Callable
 	if continuation.is_valid() and continuation.call("opening_heads_completed") != true: return _fail("cancelled")
 	return {"ready": true, "candidateSnapshot": staged.snapshot(), "houseProposals": proposals, "trimmedPanelIds": trimmed}
 
-static func prepare_first(b, producer_ids: Array, policy: Dictionary) -> Dictionary:
+static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	if b == null or b.parts.size() > 10000 or producer_ids.is_empty() or producer_ids.size() > 512:
 		return _fail("source_limit")
 	if not policy.get("furnitureParts") is Array or not policy.get("reservedVolumes") is Array or not policy.get("requiredHeadroom") is float or not is_finite(policy.requiredHeadroom) or policy.requiredHeadroom <= 0.0:
@@ -197,12 +198,14 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary) -> Diction
 		if by_id[id].semantic not in ["citadel_urban_facade", "citadel_opening_head_band", "citadel_opening_head_connection"]: support.add_part(by_id[id].snapshot())
 	Copy.clear_caches(support)
 	if not Copy.validation_grid_work(support).ready: return _fail("support_grid_limit")
-	var independent: Dictionary = support.validate_physical_integrity()
+	var independent: Dictionary = support.validate_physical_integrity_cancellable(continuation)
+	if independent.get("cancelled", false): return _fail("cancelled")
 	var roots: Array = independent.checks.filter(func(c): return root_ids.has(c.partId))
 	if roots.size() != root_ids.size() or not roots.all(func(c): return c.passed and c.reachesGroundRoot): return _fail("terminal_not_independently_rooted")
 	for record: Dictionary in pieces: support.add_part(record)
 	Copy.clear_caches(support)
-	var joint_report: Dictionary = support.validate_physical_integrity()
+	var joint_report: Dictionary = support.validate_physical_integrity_cancellable(continuation)
+	if joint_report.get("cancelled", false): return _fail("cancelled")
 	var piece_ids: Array = pieces.map(func(p): return p.id)
 	var joint_checks: Array = joint_report.checks.filter(func(c): return piece_ids.has(c.partId))
 	if joint_checks.size() != piece_ids.size() or not joint_checks.all(func(c): return c.passed): return _fail("finite_housed_end_joint_failed")
@@ -210,7 +213,8 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary) -> Diction
 	for record: Dictionary in pieces: staged.add_part(record)
 	for id in trimmed: support.add_part(staged.find_part(id).snapshot())
 	Copy.clear_caches(support)
-	var seated_report: Dictionary = support.validate_physical_integrity()
+	var seated_report: Dictionary = support.validate_physical_integrity_cancellable(continuation)
+	if seated_report.get("cancelled", false): return _fail("cancelled")
 	var seated: Array = seated_report.checks.filter(func(check): return trimmed.has(check.partId))
 	if seated.size() != trimmed.size() or not seated.all(func(check): return check.passed): return _fail("trimmed_panel_gravity_seat_failed")
 	for key in declarations.declarationKeys:

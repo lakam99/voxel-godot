@@ -105,6 +105,15 @@ still has a roughly 42.6-second interval. Live dispatch remains disabled until
 deep source cancellation, native terrain admission and ordinary publication are
 integrated; no gameplay completion or headed acceptance is claimed.
 
+The physical-proof cancellation follow-up now stops inside individual proof
+work: the measured actual source cancellation is 137.659 ms versus the earlier
+7.921 seconds. Old/current complete proof reports and post-proof snapshots are
+byte-exact without exemptions; the full actual Site result is also exact with
+only its previously declared timing exemptions. See
+`CITADEL_PHYSICAL_CANCELLATION_2026-09-02.md`. Initial compound, retained-paving
+and other composition intervals still need cancellation work; native terrain
+admission and ordinary runtime publication remain unfinished.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 

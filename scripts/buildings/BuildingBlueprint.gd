@@ -62,11 +62,29 @@ func part_snapshots() -> Array:
 
 
 func validate_physical_integrity() -> Dictionary:
+	return _validate_physical_integrity(Callable())
+
+
+## Use on exclusively owned base proof copies. Cancellation leaves partial
+## derived recipe facts: discard the copy; never publish or resume it.
+func validate_physical_integrity_cancellable(continuation: Callable) -> Dictionary:
+	return _validate_physical_integrity(continuation)
+
+
+func _validate_physical_integrity(continuation: Callable) -> Dictionary:
 	var cache_owner := _begin_validation_cache()
-	resolve_physical_contracts()
+	if not _continue_validation(continuation, "physical_validation_started"):
+		return _cancel_physical_validation(cache_owner)
+	if continuation.is_valid():
+		if not _resolve_physical_contracts(continuation): return _cancel_physical_validation(cache_owner)
+	else:
+		# Keep the legacy virtual entry point for existing subclasses.
+		resolve_physical_contracts()
 	var checks: Array[Dictionary] = []
 	var violations: Array[String] = []
 	for part in parts:
+		if not _continue_validation(continuation, "physical_validation_part"):
+			return _cancel_physical_validation(cache_owner)
 		if part == null:
 			continue
 		var intent := String(part.physical_intent)
@@ -194,8 +212,12 @@ func validate_physical_integrity() -> Dictionary:
 	# Validate new frame obligations independently of physical intent. Existing
 	# bearer checks are available now, so incidental graph reachability cannot
 	# conceal a failed mandatory seat further down the load path.
+	if not _continue_validation(continuation, "physical_frame_context"):
+		return _cancel_physical_validation(cache_owner)
 	var frame_context := GablePurlinFrameValidator.context_for(self, checks)
 	for check in checks:
+		if not _continue_validation(continuation, "physical_frame_part"):
+			return _cancel_physical_validation(cache_owner)
 		var part = find_part(String(check.partId))
 		if part != null and GablePurlinFrameValidator.is_frame_part(part):
 			var frame_valid := GablePurlinFrameValidator.validates(self, part, frame_context)
@@ -203,7 +225,11 @@ func validate_physical_integrity() -> Dictionary:
 			if not frame_valid and bool(check.passed):
 				check["passed"] = false
 				violations.append("%s has no complete gable roof load path" % String(part.id))
+	if not _continue_validation(continuation, "physical_dependencies_started"):
+		return _cancel_physical_validation(cache_owner)
 	MandatoryPhysicalDependencyValidator.apply(parts, checks, violations)
+	if not _continue_validation(continuation, "physical_validation_completed"):
+		return _cancel_physical_validation(cache_owner)
 	_end_validation_cache(cache_owner)
 	return {
 		"passed": violations.is_empty(),
@@ -214,15 +240,25 @@ func validate_physical_integrity() -> Dictionary:
 
 
 func resolve_physical_contracts() -> void:
+	_resolve_physical_contracts(Callable())
+
+
+func _resolve_physical_contracts(continuation: Callable) -> bool:
 	var cache_owner := _begin_validation_cache()
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
 	_validation_neighbors.clear()
 	invalid_gable_part_ids.clear()
 	for part in parts:
+		if not _continue_validation(continuation, "physical_resolve_schema"):
+			_end_validation_cache(cache_owner)
+			return false
 		if part != null and GablePurlinFrameValidator.is_frame_part(part) and not GablePurlinFrameValidator.schema_valid(part):
 			invalid_gable_part_ids[String(part.id)] = true
 	for part in parts:
+		if not _continue_validation(continuation, "physical_resolve_classification"):
+			_end_validation_cache(cache_owner)
+			return false
 		if part == null:
 			continue
 		physical_parts_by_id[String(part.id)] = part
@@ -237,12 +273,23 @@ func resolve_physical_contracts() -> void:
 			part.recipe["physicalIntent"] = "structural_root"
 			part.recipe["physicalRoot"] = true
 	for part in parts:
+		if not _continue_validation(continuation, "physical_resolve_roots"):
+			_end_validation_cache(cache_owner)
+			return false
 		if part != null and String(part.physical_intent) == "structural_mass" and is_grounded_structural_root(part):
 			part.physical_intent = "structural_root"
 			part.recipe["physicalIntent"] = "structural_root"
 			part.recipe["physicalRoot"] = true
-	index_structural_support_candidates()
+	if continuation.is_valid():
+		if not _index_structural_support_candidates(continuation):
+			_end_validation_cache(cache_owner)
+			return false
+	else:
+		index_structural_support_candidates()
 	for part in parts:
+		if not _continue_validation(continuation, "physical_resolve_support"):
+			_end_validation_cache(cache_owner)
+			return false
 		if part == null:
 			continue
 		if invalid_gable_part_ids.has(String(part.id)):
@@ -256,6 +303,21 @@ func resolve_physical_contracts() -> void:
 				var anchor_ids := resolved_attachment_anchor_ids(part)
 				part.recipe["physicalAnchorPartIds"] = anchor_ids
 	_end_validation_cache(cache_owner)
+	return true
+
+
+static func _continue_validation(continuation: Callable, stage: String) -> bool:
+	return not continuation.is_valid() or continuation.call(stage) == true
+
+
+func _cancel_physical_validation(cache_owner: bool) -> Dictionary:
+	_end_validation_cache(cache_owner)
+	physical_parts_by_id.clear()
+	structural_support_grid.clear()
+	invalid_gable_part_ids.clear()
+	_validation_neighbors.clear()
+	return {"passed": false, "cancelled": true, "checkedPartCount": 0,
+		"checks": [], "violations": ["physical_validation_cancelled"]}
 
 
 func inferred_physical_intent(part) -> String:
@@ -476,8 +538,14 @@ func _end_validation_cache(owner: bool) -> void:
 
 
 func index_structural_support_candidates() -> void:
+	_index_structural_support_candidates(Callable())
+
+
+func _index_structural_support_candidates(continuation: Callable) -> bool:
 	_validation_neighbors.clear()
+	var cells_since_checkpoint := 0
 	for part in parts:
+		if not _continue_validation(continuation, "physical_grid_part"): return false
 		if not is_structural_support_candidate(part) or not has_finite_positive_bounds(part):
 			continue
 		var bounds := transformed_part_bounds(part)
@@ -489,10 +557,14 @@ func index_structural_support_candidates() -> void:
 		var maximum_z := floori(maximum.z / PHYSICAL_SUPPORT_GRID_CELL)
 		for cell_x in range(minimum_x, maximum_x + 1):
 			for cell_z in range(minimum_z, maximum_z + 1):
+				if continuation.is_valid():
+					if cells_since_checkpoint == 0 and not _continue_validation(continuation, "physical_grid_cells"): return false
+					cells_since_checkpoint = (cells_since_checkpoint + 1) % 64
 				var key := "%d:%d" % [cell_x, cell_z]
 				if not structural_support_grid.has(key):
 					structural_support_grid[key] = []
 				(structural_support_grid[key] as Array).append(part)
+	return true
 
 
 func structural_candidates_near(point: Vector3) -> Array:

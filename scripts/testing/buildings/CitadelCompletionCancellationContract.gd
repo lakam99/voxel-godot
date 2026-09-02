@@ -31,6 +31,7 @@ var _checks: Dictionary = {}
 var _cases: Array = []
 var _fixture: Dictionary = {}
 var _progress_path := ""
+var _last_progress_key: Array = []
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -314,6 +315,11 @@ func _find_leaks(value: Variant, path: String, leaks: Array) -> void:
 		for index in range(value.size()): _find_leaks(value[index], path + "[%d]" % index, leaks)
 
 func _note(name: String, stage: String, allowed: bool) -> void:
+	# Callers record every callback before this presentation-only coalescing.
+	# A changed case, stage or decision always emits, including cancellation.
+	var key := [name, stage, allowed]
+	if key == _last_progress_key: return
+	_last_progress_key = key
 	print("CITADEL COMPLETION STAGE ", name, " ", stage, " allowed=", allowed)
 	if not _write_json(_progress_path, {"case": name, "stage": stage, "allowed": allowed, "completedCases": _cases.size()}):
 		_checks["progress_write_succeeded"] = false

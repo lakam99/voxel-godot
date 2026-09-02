@@ -30,7 +30,8 @@ static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary, co
 	if not snapshot.get("parts") is Array or snapshot.parts.size() > MAX_PARTS:
 		return _fail("invalid_completion_source")
 	var source: Dictionary = snapshot.duplicate(true)
-	var root_context := _build_root_context(Copy.copy_blueprint(source))
+	var root_context := _build_root_context(Copy.copy_blueprint(source), continuation)
+	if root_context.get("reason", "") == "cancelled": return root_context
 	if not _continue(continuation, "lower_facade_roots_completed"): return _fail("cancelled")
 	if not root_context.ready: return root_context
 	var stage_policy: Dictionary = policy.duplicate(true)
@@ -38,7 +39,8 @@ static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary, co
 	var driven := _run_independent_completion(source, stage_policy, continuation)
 	if not driven.get("ready", false): return driven
 	if not _continue(continuation, "lower_facade_verification_started"): return _fail("cancelled")
-	var verified := _verify_completion(source, driven.state, driven.accepted)
+	var verified := _verify_completion(source, driven.state, driven.accepted, continuation)
+	if verified.get("reason", "") == "cancelled": return verified
 	if not _continue(continuation, "lower_facade_completed"): return _fail("cancelled")
 	if not verified.ready: return verified
 	return {"ready": true, "exhausted": true, "fullyResolved": driven.remainingCandidateIds.is_empty(), "afterSnapshot": driven.state,
@@ -49,7 +51,8 @@ static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary, co
 
 static func _run_independent_completion(source: Dictionary, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	if not _continue(continuation, "lower_facade_initial_proof_started"): return _fail("cancelled")
-	var initial := _current_unsupported_bottom_panels(source)
+	var initial := _current_unsupported_bottom_panels(source, continuation)
+	if initial.get("reason", "") == "cancelled": return initial
 	if not _continue(continuation, "lower_facade_initial_proof_completed"): return _fail("cancelled")
 	if not initial.ready: return initial
 	var candidate_ids: Array = initial.eligible.duplicate()
@@ -64,7 +67,9 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 		if not _continue(continuation, "lower_facade_panel:" + panel_id): return _fail("cancelled")
 		if rooted.has(panel_id): continue
 		attempt_count += 1
-		var outcome := _completion_outcome(prepare(state, panel_id, policy))
+		var proposal := prepare(state, panel_id, policy, continuation)
+		if proposal.get("reason", "") == "cancelled": return proposal
+		var outcome := _completion_outcome(proposal)
 		if not _continue(continuation, "lower_facade_panel_completed:" + panel_id): return _fail("cancelled")
 		if outcome.ready:
 			var support_delta := _accepted_change_support_delta(state, outcome.afterState, panel_id)
@@ -80,7 +85,8 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 		else:
 			return {"ready": false, "reason": "completion_attempt_failed", "candidateId": panel_id, "detail": outcome}
 	if not _continue(continuation, "lower_facade_remaining_proof_started"): return _fail("cancelled")
-	var remaining := _current_unsupported_bottom_panels(state)
+	var remaining := _current_unsupported_bottom_panels(state, continuation)
+	if remaining.get("reason", "") == "cancelled": return remaining
 	if not _continue(continuation, "lower_facade_remaining_proof_completed"): return _fail("cancelled")
 	if not remaining.ready: return remaining
 	return {"ready": true, "exhausted": true, "state": state, "accepted": accepted, "rejected": rejected,
@@ -155,13 +161,14 @@ static func _could_supply_ordinary_support(target, candidate) -> bool:
 			if gap >= -0.14 and gap <= 0.26: return true
 	return false
 
-static func _current_unsupported_bottom_panels(snapshot: Dictionary) -> Dictionary:
+static func _current_unsupported_bottom_panels(snapshot: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var blueprint = Copy.copy_blueprint(snapshot)
 	Copy.clear_caches(blueprint)
 	var grid := Copy.validation_grid_work(blueprint)
 	if not grid.ready:
 		return grid
-	var report: Dictionary = blueprint.validate_physical_integrity()
+	var report: Dictionary = blueprint.validate_physical_integrity_cancellable(continuation)
+	if report.get("cancelled", false): return _fail("cancelled")
 	var checks: Dictionary = {}
 	var rooted: Dictionary = {}
 	for check: Dictionary in report.checks:
@@ -254,7 +261,7 @@ static func _contains_hard_failure(value: Variant) -> bool:
 			if _contains_hard_failure(child): return true
 	return false
 
-static func _verify_completion(source: Dictionary, staged: Dictionary, accepted: Array) -> Dictionary:
+static func _verify_completion(source: Dictionary, staged: Dictionary, accepted: Array, continuation: Callable = Callable()) -> Dictionary:
 	var before = Copy.copy_blueprint(source)
 	var after = Copy.copy_blueprint(staged)
 	Copy.clear_caches(before)
@@ -263,8 +270,10 @@ static func _verify_completion(source: Dictionary, staged: Dictionary, accepted:
 	var after_grid := Copy.validation_grid_work(after)
 	if not before_grid.ready or not after_grid.ready:
 		return _fail("completion_validation_work_limit")
-	var before_report: Dictionary = before.validate_physical_integrity()
-	var after_report: Dictionary = after.validate_physical_integrity()
+	var before_report: Dictionary = before.validate_physical_integrity_cancellable(continuation)
+	if before_report.get("cancelled", false): return _fail("cancelled")
+	var after_report: Dictionary = after.validate_physical_integrity_cancellable(continuation)
+	if after_report.get("cancelled", false): return _fail("cancelled")
 	var before_failed: Array = Copy.failed_ids(before_report)
 	var after_failed: Array = Copy.failed_ids(after_report)
 	if after_failed.any(func(id): return not before_failed.has(id)):
@@ -310,7 +319,7 @@ static func prepare_batch(snapshot: Dictionary, panel_ids: Array, policy: Dictio
 		"requestedPanelIds": ordered, "allRequestedAccepted": rejected.is_empty(),
 		"scope": "Partial source proposal only. Rejected panels remain unresolved; no publication, visual or gate acceptance."}
 
-static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary) -> Dictionary:
+static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var input := _read(snapshot, panel_id, policy)
 	if not input.ready: return input
 	var b = input.blueprint
@@ -338,7 +347,7 @@ static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary) 
 		bb = Connection._bounds(body)
 	# This graph excludes every mutable facade/timber record. Batch completion may
 	# reuse it only while its byte-bound masonry source remains exact.
-	var root_context := _root_context_for(b, policy)
+	var root_context := _root_context_for(b, policy, continuation)
 	if not root_context.ready: return root_context
 	var roots = root_context.roots
 	var rooted: Dictionary = root_context.rooted
@@ -357,7 +366,8 @@ static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary) 
 	var attempts: Array = []
 	var work := {"satPairs": 0}
 	for seat in candidates:
-		var trial := _fit(b, roots, panel, body, seat, input, work)
+		var trial := _fit(b, roots, panel, body, seat, input, work, continuation)
+		if trial.get("reason", "") == "cancelled": return trial
 		if trial.ready:
 			trial["independentSeatCheck"] = rooted[seat.id]
 			trial["apertureDeclarationKey"] = input.declarationKey
@@ -369,7 +379,7 @@ static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary) 
 		if work.satPairs >= Connection.MAX_SAT_WORK: break
 	return {"ready": false, "reason": "no_admitted_rooted_bottom_bearing", "panelId": panel_id, "attempts": attempts, "work": work}
 
-static func _build_root_context(source) -> Dictionary:
+static func _build_root_context(source, continuation: Callable = Callable()) -> Dictionary:
 	if source == null: return _fail("invalid_independent_masonry_source")
 	var records := _independent_masonry_records(source)
 	if not records.ready: return records
@@ -378,7 +388,8 @@ static func _build_root_context(source) -> Dictionary:
 	Copy.clear_caches(roots)
 	var grid: Dictionary = Copy.validation_grid_work(roots)
 	if not grid.ready: return grid
-	var root_report: Dictionary = roots.validate_physical_integrity()
+	var root_report: Dictionary = roots.validate_physical_integrity_cancellable(continuation)
+	if root_report.get("cancelled", false): return _fail("cancelled")
 	var rooted: Dictionary = {}
 	for check: Dictionary in root_report.checks:
 		if check.passed and check.get("intent") in ["structural_mass", "structural_root"] \
@@ -387,7 +398,7 @@ static func _build_root_context(source) -> Dictionary:
 	return {"ready": true, "context": {"sourceBytes": var_to_bytes(records.records),
 		"rootSnapshot": roots.snapshot(), "rooted": rooted}}
 
-static func _root_context_for(source, policy: Dictionary) -> Dictionary:
+static func _root_context_for(source, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var supplied: Variant = policy.get("_independentMasonryRootContext")
 	if supplied is Dictionary and supplied.get("sourceBytes") is PackedByteArray \
 			and supplied.get("rootSnapshot") is Dictionary and supplied.get("rooted") is Dictionary:
@@ -395,7 +406,7 @@ static func _root_context_for(source, policy: Dictionary) -> Dictionary:
 		if not records.ready: return records
 		if supplied.sourceBytes != var_to_bytes(records.records): return _fail("stale_independent_masonry_root_context")
 		return {"ready": true, "roots": Copy.copy_blueprint(supplied.rootSnapshot), "rooted": supplied.rooted.duplicate(true)}
-	var built := _build_root_context(source)
+	var built := _build_root_context(source, continuation)
 	if not built.ready: return built
 	return {"ready": true, "roots": Copy.copy_blueprint(built.context.rootSnapshot), "rooted": built.context.rooted.duplicate(true)}
 
@@ -458,7 +469,7 @@ static func _shorten_body(original, panel, obstacles: Array, volumes: Array) -> 
 		"testedBounds": occupied.size(), "intersectingBounds": intersecting,
 		"scope": "New sill fit only; two finite rooted connections and all final admissions still required."}
 
-static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: Dictionary) -> Dictionary:
+static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var body := Part.new(original_body.snapshot())
 	var core: Array = Connection._bounds_values(seat.position, Connection.Core.bed_size(seat.size))
 	var bb: Array = Connection._bounds(body)
@@ -523,7 +534,8 @@ static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: 
 	if not proof_grid.ready:
 		proof_grid["phase"] = "complete_assembly_before_validation"
 		return proof_grid
-	var physical: Dictionary = proof.validate_physical_integrity()
+	var physical: Dictionary = proof.validate_physical_integrity_cancellable(continuation)
+	if physical.get("cancelled", false): return _fail("cancelled")
 	var wanted: Array = additions.map(func(record): return record.id)
 	wanted.append(panel.id)
 	var checks: Array = physical.checks.filter(func(check): return wanted.has(check.partId))

@@ -337,7 +337,8 @@ static func _physical(source, continuation: Callable = Callable()) -> Dictionary
 	Copy.clear_caches(proof)
 	var grid := Copy.validation_grid_work(proof)
 	if not grid.ready: return _fail("completion_validation_work_limit")
-	var report: Dictionary = proof.validate_physical_integrity()
+	var report: Dictionary = proof.validate_physical_integrity_cancellable(continuation)
+	if report.get("cancelled", false): return _fail("cancelled")
 	if not _continue(continuation, "structural_physical_completed"): return _fail("cancelled")
 	return {"ready": true, "failedIds": Copy.failed_ids(report), "violations": report.violations,
 		"proof": proof, "report": report, "sourceBytes": source_bytes}
