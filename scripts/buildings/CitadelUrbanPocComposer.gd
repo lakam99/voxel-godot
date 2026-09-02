@@ -227,17 +227,41 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "perimeter_dressing_bunting_trees_started"):
 		return null
-	add_perimeter_neighborhoods(blueprint, grammar, keep_front_z, foundation_height, variation)
+	# Lower-level builders mutate this private source or return an Array. A
+	# terminal per-call latch distinguishes cancellation from an empty result.
+	var landscape_cancel := {"stopped": false}
+	var landscape_continuation := Callable()
+	if diagnostic_callback.is_valid():
+		landscape_continuation = func(stage: String) -> bool:
+			if landscape_cancel.stopped: return false
+			var permitted: bool = diagnostic_callback.call(stage) == true
+			landscape_cancel.stopped = not permitted
+			return permitted
+	add_perimeter_neighborhoods(blueprint, grammar, keep_front_z, foundation_height, variation, landscape_continuation)
+	if landscape_cancel.stopped:
+		handoff["reason"] = "cancelled"
+		return null
+	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_manifest_started"): return null
 	var structural_manifest := StreetHouseStructuralManifestScript.read(blueprint)
 	if not structural_manifest.ready:
 		push_error("Citadel street-house structural manifest failed: %s" % String(structural_manifest.get("reason", "unknown")))
 		return null
+	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_service_yard_started"): return null
 	add_civic_service_yard(blueprint, Vector3(37.0, foundation_height, keep_front_z - 8.5), variation)
+	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_dressing_started"): return null
 	add_dressing_clusters(blueprint, front_z, keep_front_z, foundation_height, variation)
+	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_bunting_started"): return null
 	add_bunting_lines(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout)
-	var selected_tree_sites := select_open_paving_tree_sites(blueprint, seed)
+	var selected_tree_sites := select_open_paving_tree_sites(blueprint, seed, landscape_continuation)
+	if landscape_cancel.stopped:
+		handoff["reason"] = "cancelled"
+		return null
 	if not selected_tree_sites.is_empty():
-		urban_layout["treePlacements"] = build_tree_placement_records(selected_tree_sites, seed)
+		var tree_records := build_tree_placement_records(selected_tree_sites, seed, landscape_continuation)
+		if landscape_cancel.stopped:
+			handoff["reason"] = "cancelled"
+			return null
+		urban_layout["treePlacements"] = tree_records
 		recipe["urbanPoc"] = urban_layout
 		recipe["landscapeTrees"] = urban_layout["treePlacements"]
 		# Preserve declarations emitted after the earlier recipe copy was made.
@@ -603,7 +627,8 @@ static func add_roof_frames(blueprint) -> Dictionary:
 	return {"ready": true, "frameCount": prefixes.size(), "partIds": added_ids}
 
 
-static func build_tree_placement_records(sites: Array, seed: int) -> Array:
+static func build_tree_placement_records(sites: Array, seed: int, continuation: Callable = Callable()) -> Array:
+	if not _emit_compose_diagnostic(continuation, "landscape_tree_records_started"): return []
 	var catalog = BiomeEnvironmentCatalogScript.new()
 	if not catalog.setup():
 		return sites.duplicate(true)
@@ -614,6 +639,7 @@ static func build_tree_placement_records(sites: Array, seed: int) -> Array:
 	var tree_service = TreeSpawnServiceScript.new()
 	var records: Array = []
 	for index in range(sites.size()):
+		if not _emit_compose_diagnostic(continuation, "landscape_tree_recipe"): return []
 		var position: Vector3 = sites[index] as Vector3
 		var tree_id := "citadel-urban-tree-%d:%d,%d:%02d" % [seed, roundi(position.x), roundi(position.z), index]
 		var rotation_y := float(index) * 1.17
@@ -634,6 +660,7 @@ static func build_tree_placement_records(sites: Array, seed: int) -> Array:
 			"rootButtressFootprints": interaction_facts.get("rootButtresses", []) as Array,
 			"treeRequest": request
 		})
+	if not _emit_compose_diagnostic(continuation, "landscape_tree_records_completed"): return []
 	return records
 
 
@@ -664,7 +691,8 @@ static func add_seeded_room_life(blueprint, seed: int, variation: float) -> void
 		add_part(blueprint, "%s_lamp" % prefix, "decor", "candle_flame", light_position, Vector3(0.15, 0.25, 0.15), {"collision": false, "variation": variation, "semantic": "interior_practical_light", "roomId": room_id, "roomRole": role, "practicalLight": true, "lightEnergy": 1.38 + phase * 0.48, "lightRange": 4.4 + phase * 1.4})
 
 
-static func select_open_paving_tree_sites(blueprint, seed: int) -> Array[Vector3]:
+static func select_open_paving_tree_sites(blueprint, seed: int, continuation: Callable = Callable()) -> Array[Vector3]:
+	if not _emit_compose_diagnostic(continuation, "landscape_tree_selection_started"): return []
 	var candidates: Array[Dictionary] = []
 	for paving_part in blueprint.parts:
 		if not is_primary_tree_paving(paving_part):
@@ -672,11 +700,13 @@ static func select_open_paving_tree_sites(blueprint, seed: int) -> Array[Vector3
 		var half: Vector3 = paving_part.size * 0.5
 		for factor_x in [-0.78, -0.52, -0.26, 0.0, 0.26, 0.52, 0.78]:
 			for factor_z in [-0.78, -0.52, -0.26, 0.0, 0.26, 0.52, 0.78]:
+				if not _emit_compose_diagnostic(continuation, "landscape_tree_candidate"): return []
 				var position: Vector3 = paving_part.position + Vector3(factor_x * maxf(0.40, half.x - 1.10), half.y + 0.05, factor_z * maxf(0.40, half.z - 1.10))
 				if not tree_site_is_open(blueprint, position) or not tree_site_has_clear_paving_run(blueprint, position):
 					continue
 				var key := "%d:%s:%d,%d" % [seed, String(paving_part.id), int(round(factor_x * 100.0)), int(round(factor_z * 100.0))]
 				candidates.append({"position": position, "score": stable_unit(seed, "tree-open-paving:%s" % key), "id": key})
+	if not _emit_compose_diagnostic(continuation, "landscape_tree_sort_started"): return []
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		if is_equal_approx(float(a.get("score", 0.0)), float(b.get("score", 0.0))):
 			return String(a.get("id", "")) < String(b.get("id", ""))
@@ -684,6 +714,7 @@ static func select_open_paving_tree_sites(blueprint, seed: int) -> Array[Vector3
 	)
 	var result: Array[Vector3] = []
 	for candidate in candidates:
+		if not _emit_compose_diagnostic(continuation, "landscape_tree_spacing"): return []
 		var position: Vector3 = (candidate as Dictionary).get("position", Vector3.ZERO) as Vector3
 		var separated := true
 		for existing in result:
@@ -694,6 +725,7 @@ static func select_open_paving_tree_sites(blueprint, seed: int) -> Array[Vector3
 			result.append(position)
 		if result.size() >= 4:
 			break
+	if not _emit_compose_diagnostic(continuation, "landscape_tree_selection_completed"): return []
 	return result
 
 
@@ -747,7 +779,7 @@ static func tree_paving_sample_is_open(blueprint, point: Vector3) -> bool:
 	return true
 
 
-static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_front_z: float, base_y: float, variation: float) -> void:
+static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_front_z: float, base_y: float, variation: float, continuation: Callable = Callable()) -> void:
 	var courtyard_width := float(grammar.get("courtyardWidth", 104.0))
 	var courtyard_depth := float(grammar.get("courtyardDepth", 96.0))
 	var side_x: float = courtyard_width * 0.5 - 7.3
@@ -757,6 +789,7 @@ static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_fro
 	var materials: Array[String] = ["painted_brick_ochre", "painted_brick_sage", "painted_brick_rose", "painted_brick_cream"]
 	for side in [-1.0, 1.0]:
 		for row_index in range(row_count):
+			if not _emit_compose_diagnostic(continuation, "landscape_perimeter_house"): return
 			var ratio := float(row_index) / float(maxi(1, row_count - 1))
 			var center_z: float = lerpf(start_z, end_z, ratio) + side * float(row_index % 2) * 0.55
 			var width: float = 6.5 + float((row_index + int(side) + 4) % 3) * 0.42

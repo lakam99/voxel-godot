@@ -135,6 +135,18 @@ entering structural completion, and shuts down cleanly. All six helper/adapter
 build modes preserve frozen old output exactly; eight historical cancellation
 cases and 49 synthetic controls also pass. This remains source-only acceptance.
 
+Retained-paving cancellation is committed as `f81799d`. Landscape cancellation
+is also independently critic-approved; see
+`CITADEL_LANDSCAPE_CANCELLATION_2026-09-02.md`. Historical phase contracts pass
+194/194; real owned Source cancellation passes 10/10 with a 27.730 ms result;
+the complete Site comparison passes 8/8 with unchanged geometry/furniture/profile
+and only the existing timing exemptions. Total runner elapsed including artifact
+comparison is 393.227095 seconds, not isolated generation time. All selected
+runs shut down cleanly. Remaining source callback intervals include 2.555 s shop
+preparation and 709 ms geometry-manifest work; these are not frame-time or hard
+shutdown guarantees. Critic approved proceeding to native terrain admission
+with those limits recorded. No ordinary runtime spawning or headed approval yet.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 
