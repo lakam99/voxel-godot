@@ -126,6 +126,15 @@ late-cancellation controls also pass. Approval is source-only.
 Retained-paving/perimeter source cancellation, native
 terrain admission and live publication remain open; no headed run is approved.
 
+Compound cancellation is committed as `d9cb0ce`. The next retained-paving
+cancellation follow-up is independently critic-approved; see
+`CITADEL_RETAINED_PAVING_CANCELLATION_2026-09-02.md`. Existing source/adapter
+contracts pass 21/21 and 17/17. Actual Queue -> Site -> Source cancellation
+inside retained validation returns in 56.112 ms, without partial output or
+entering structural completion, and shuts down cleanly. All six helper/adapter
+build modes preserve frozen old output exactly; eight historical cancellation
+cases and 49 synthetic controls also pass. This remains source-only acceptance.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 

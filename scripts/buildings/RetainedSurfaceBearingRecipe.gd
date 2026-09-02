@@ -1,6 +1,6 @@
 extends RefCounted
 ## Pure source preparation, not a gameplay-frame publication API.
-## Composer integration is separate; this helper has no runtime caller.
+## Used by source composition; never execute this work in a gameplay frame.
 ## Preserve a subset of retired real solids, never fabricate a footprint footing.
 const Copy = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.gd")
 const Part = preload("res://scripts/buildings/BuildingPart.gd")
@@ -78,10 +78,19 @@ static func subtract(rows: Array, cut: Rect2) -> Dictionary:
 		if out.size() > MAX_FRAGMENTS: return fail("fragment_limit")
 	return {"ready": true, "pieces": out}
 
-static func prepare(source, retired_records: Array, target_ids: Array, voids: Array) -> Dictionary:
+static func _continue_retained(continuation: Callable, stage: String) -> bool:
+	return not continuation.is_valid() or continuation.call(stage) == true
+
+static func _cancelled(private_copy = null) -> Dictionary:
+	if private_copy != null: Copy.clear_caches(private_copy)
+	return fail("cancelled")
+
+static func prepare(source, retired_records: Array, target_ids: Array, voids: Array, continuation: Callable = Callable()) -> Dictionary:
+	if not _continue_retained(continuation, "retained_inputs"): return _cancelled()
 	if source == null or source.parts.size() > MAX_PARTS or retired_records.size() > 1024 or target_ids.size() > 512 or voids.size() > 4096: return fail("input_limit")
 	var seen = {}
 	for p in source.parts:
+		if not _continue_retained(continuation, "retained_source_part"): return _cancelled()
 		if p == null or p.id.is_empty() or seen.has(p.id) or not source.has_finite_positive_bounds(p): return fail("invalid_source_part")
 		seen[p.id] = true
 	var target_seen = {}
@@ -96,6 +105,7 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 	var retired: Array = []
 	var retired_seen = {}
 	for record in retired_records:
+		if not _continue_retained(continuation, "retained_retired_root"): return _cancelled()
 		if not record is Dictionary or not record.get("id") is String or record.id.is_empty() or seen.has(record.id) or retired_seen.has(record.id): return fail("invalid_retired_id")
 		if not record.get("position") is Vector3 or not record.get("rotation") is Vector3 or not record.get("size") is Vector3 or not record.get("recipe", {}) is Dictionary: return fail("invalid_retired_geometry")
 		var p = Part.new(record)
@@ -109,7 +119,10 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 	Copy.clear_caches(b)
 	var initial_work = Copy.validation_grid_work(b)
 	if not initial_work.ready: return fail("initial_validation_work_limit")
-	var before: Dictionary = b.validate_physical_integrity()
+	if not _continue_retained(continuation, "retained_initial_proof"): return _cancelled(b)
+	var before: Dictionary = b.validate_physical_integrity_cancellable(continuation) if continuation.is_valid() else b.validate_physical_integrity()
+	if before.get("cancelled", false): return _cancelled(b)
+	if not _continue_retained(continuation, "retained_initial_proof_completed"): return _cancelled(b)
 	var checks = {}
 	for c in before.checks: checks[c.partId] = c
 	var ids = target_ids.duplicate()
@@ -118,6 +131,7 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 	var allocations: Array = []
 	var selected: Array = []
 	for id in ids:
+		if not _continue_retained(continuation, "retained_target"): return _cancelled(b)
 		var target = b.find_part(id)
 		if target == null or not axis_box(b,target) or target.rotation != Vector3.ZERO or not target.collision_enabled or target.kind != "foundation": return fail("unsupported_retained_surface")
 		if checks.get(id,{}).get("passed",false): continue
@@ -125,12 +139,14 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 		var top = box.position.y
 		var occupied: Array = []
 		for current in b.parts:
+			if not _continue_retained(continuation, "retained_existing_root"): return _cancelled(b)
 			if not b.is_grounded_structural_root(current) or not axis_box(b,current): continue
 			var bounds: AABB = b.transformed_part_bounds(current)
 			if bounds.position.y <= top and bounds.end.y >= top: occupied.append(rect(bounds))
 		occupied.sort_custom(rect_less)
 		var part_index = 0
 		for old in retired:
+			if not _continue_retained(continuation, "retained_retired_candidate"): return _cancelled(b)
 			var old_box: AABB = b.transformed_part_bounds(old)
 			if old_box.position.y >= top or old_box.end.y < top: continue
 			var intersection = rect(box).intersection(rect(old_box))
@@ -145,12 +161,14 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 				if protected.position.y < top and protected.end.y > old_box.position.y: cuts.append(rect(protected).grow(EPS))
 			cuts.sort_custom(rect_less)
 			for cut: Rect2 in cuts:
+				if not _continue_retained(continuation, "retained_cut"): return _cancelled(b)
 				var difference = subtract(pieces,cut)
 				if not difference.ready: return difference
 				pieces = difference.pieces
 			if pieces.size()+emitted.size() > MAX_FRAGMENTS: return fail("fragment_limit")
 			pieces.sort_custom(rect_less)
 			for footprint: Rect2 in pieces:
+				if not _continue_retained(continuation, "retained_fragment"): return _cancelled(b)
 				var proposed = AABB(Vector3(footprint.position.x,old_box.position.y,footprint.position.y),Vector3(footprint.size.x,top-old_box.position.y,footprint.size.y))
 				# Reserve a tiny empty horizontal margin INSIDE the candidate fragment.
 				# This is less retained stone, never permission to expand an old solid.
@@ -183,6 +201,7 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 					actual = b.transformed_part_bounds(p)
 				if not solid_containment(p,old,target) or not old_box.encloses(actual) or not rect(box).encloses(rect(actual)) or actual.end.y > top: return fail("retired_volume_containment_failed")
 				for protected: AABB in protected_boxes:
+					if not _continue_retained(continuation, "retained_fragment_reservation"): return _cancelled(b)
 					if actual.intersects(protected): return fail("constructed_volume_enters_reservation")
 				b.add_part(p.snapshot())
 				seen[bearing_id] = true
@@ -196,14 +215,19 @@ static func prepare(source, retired_records: Array, target_ids: Array, voids: Ar
 		# Only the final ordinary proof may decide whether this target is repaired.
 		selected.append(id)
 	if emitted.is_empty():
+		if not _continue_retained(continuation, "retained_finalize"): return _cancelled(b)
 		if not selected.is_empty(): return fail("no_retired_bearing_volume")
 		return {"ready":true,"unchanged":true,"afterSnapshot":original,"emitted":[]}
 	Copy.clear_caches(b)
 	var final_work = Copy.validation_grid_work(b)
 	if not final_work.ready: return fail("final_validation_work_limit")
-	var after: Dictionary = b.validate_physical_integrity()
+	if not _continue_retained(continuation, "retained_final_proof"): return _cancelled(b)
+	var after: Dictionary = b.validate_physical_integrity_cancellable(continuation) if continuation.is_valid() else b.validate_physical_integrity()
+	if after.get("cancelled", false): return _cancelled(b)
+	if not _continue_retained(continuation, "retained_final_proof_completed"): return _cancelled(b)
 	for c in after.checks:
 		if (selected.has(c.partId) or checks.get(c.partId,{}).get("passed",false) or not checks.has(c.partId)) and not c.passed: return fail("retirement_support_or_preservation_failed:"+String(c.partId))
 	var output = original.duplicate(true)
 	for record in emitted: output.parts.append(record.part)
+	if not _continue_retained(continuation, "retained_finalize"): return _cancelled(b)
 	return {"ready":true,"unchanged":false,"afterSnapshot":output,"emitted":emitted,"selectedIds":selected,"beforeChecks":before.checks.filter(func(c):return selected.has(c.partId)),"afterChecks":after.checks.filter(func(c):return selected.has(c.partId))}

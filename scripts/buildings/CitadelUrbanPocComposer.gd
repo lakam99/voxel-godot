@@ -306,7 +306,10 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "retained_paving_prepare_started"):
 		return null
-	var retained_paving := prepare_retained_paving(blueprint, retired_roots, reservations.obstacles)
+	var retained_paving := prepare_retained_paving(blueprint, retired_roots, reservations.obstacles, diagnostic_callback)
+	if retained_paving.get("reason", "") == "cancelled":
+		handoff["reason"] = "cancelled"
+		return null
 	if not retained_paving.get("ready", false):
 		handoff["reason"] = "citadel_retained_paving_failed"
 		handoff["retainedPavingFailure"] = retained_paving
@@ -407,7 +410,8 @@ static func reset_street_house_structural_manifest(blueprint) -> Dictionary:
 	return {"ready": true}
 
 
-static func prepare_retained_paving(blueprint, retired_roots: Array, furnishing_obstacles: Array) -> Dictionary:
+static func prepare_retained_paving(blueprint, retired_roots: Array, furnishing_obstacles: Array, continuation: Callable = Callable()) -> Dictionary:
+	if not _emit_compose_diagnostic(continuation, "retained_paving_inputs"): return {"ready": false, "reason": "cancelled"}
 	# Input provenance is captured by the sole prune decision above. No removed
 	# geometry is inferred from a later fixture, seed, or name reconstruction.
 	if blueprint == null or blueprint.rooms.size() > 4096 or furnishing_obstacles.size() > 4096:
@@ -416,10 +420,12 @@ static func prepare_retained_paving(blueprint, retired_roots: Array, furnishing_
 	if not work.ready: return work
 	var protected: Array = []
 	for obstacle in furnishing_obstacles:
+		if not _emit_compose_diagnostic(continuation, "retained_paving_furnishing"): return {"ready": false, "reason": "cancelled"}
 		if not obstacle is Dictionary or not obstacle.get("bounds") is AABB:
 			return {"ready": false, "reason": "invalid_retained_paving_furnishing"}
 		protected.append(obstacle.bounds)
 	for room in blueprint.rooms:
+		if not _emit_compose_diagnostic(continuation, "retained_paving_room"): return {"ready": false, "reason": "cancelled"}
 		if not room is Dictionary or not room.get("bounds") is AABB or not RetainedBearingRecipeScript.valid_box(room.bounds) or not room.get("accesses", []) is Array:
 			return {"ready": false, "reason": "invalid_retained_paving_room"}
 		# Shared facade recipes reserve interiors, not a courtyard's entire ground.
@@ -432,6 +438,7 @@ static func prepare_retained_paving(blueprint, retired_roots: Array, furnishing_
 			protected.append(AABB(access.position - access.size * 0.5, access.size))
 	var targets: Array = []
 	for part in blueprint.parts:
+		if not _emit_compose_diagnostic(continuation, "retained_paving_part"): return {"ready": false, "reason": "cancelled"}
 		if part.semantic == "castle_courtyard_paving" and part.collision_enabled: targets.append(part.id)
 		if part.kind != "door": continue
 		var sweep: Array = []
@@ -448,9 +455,10 @@ static func prepare_retained_paving(blueprint, retired_roots: Array, furnishing_
 		protected.append_array(sweep)
 		if protected.size() > 4096: return {"ready": false, "reason": "retained_paving_reservation_limit"}
 	for volume in protected:
+		if not _emit_compose_diagnostic(continuation, "retained_paving_reserved_volume"): return {"ready": false, "reason": "cancelled"}
 		if not volume is AABB or not RetainedBearingRecipeScript.valid_box(volume):
 			return {"ready": false, "reason": "invalid_retained_paving_reserved_volume"}
-	return RetainedBearingRecipeScript.prepare(blueprint, retired_roots, targets, protected)
+	return RetainedBearingRecipeScript.prepare(blueprint, retired_roots, targets, protected, continuation)
 
 
 static func _commit_retained_paving(blueprint, snapshot: Dictionary) -> Dictionary:
