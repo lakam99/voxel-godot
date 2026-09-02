@@ -30,6 +30,7 @@ var minimum_overburden_cache := {}
 var terrain_volume_service
 var biome_region_field = BiomeRegionFieldScript.new()
 var generated_site_profiles: Array = []
+var generated_site_profile_store
 
 func setup(main_node) -> void:
 	main = main_node
@@ -43,6 +44,7 @@ func setup(main_node) -> void:
 	terrain_volume_service.setup(main, self)
 
 func reset() -> void:
+	generated_site_profile_store = null
 	generated_site_profiles = []
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset"):
@@ -55,6 +57,7 @@ func reset() -> void:
 	minimum_overburden_cache.clear()
 
 func reset_for_seed() -> void:
+	generated_site_profile_store = null
 	generated_site_profiles = []
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset_for_seed"):
@@ -99,6 +102,28 @@ func configure_generated_site_profiles(profiles: Array) -> Dictionary:
 
 func generated_site_profiles_snapshot() -> Array:
 	return generated_site_profiles.duplicate(true)
+
+func bind_generated_site_profile_store(store) -> void:
+	# Lifecycle-only binding, before constructing a native generator. A running
+	# native template keeps its old store until its ordinary reset drain finishes.
+	var changed: bool = generated_site_profile_store != store
+	generated_site_profile_store = store
+	refresh_generated_site_profiles(changed)
+
+func refresh_generated_site_profiles(force := false) -> void:
+	if generated_site_profile_store == null: return
+	var profiles: Array = generated_site_profile_store.snapshot()
+	# Append-only within a generation: equal length means identical source values.
+	if not force and profiles.size() == generated_site_profiles.size(): return
+	generated_site_profiles = profiles
+	surface_projection_cache.clear()
+	deformed_surface_y_cache.clear()
+	base_surface_y_cache.clear()
+	surface_biome_cache.clear()
+	minimum_overburden_cache.clear()
+	if terrain_volume_service != null:
+		terrain_volume_service.sections.clear()
+		terrain_volume_service.top_surface_y_cache.clear()
 
 func generated_site_profile_for_cell(cell: Vector2i) -> Dictionary:
 	for profile: Dictionary in generated_site_profiles:

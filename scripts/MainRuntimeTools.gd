@@ -451,7 +451,7 @@ func update_legacy_terrain_chunks_for_diagnostics(force: bool = false) -> void:
 
 func ensure_voxel_terrain_authority() -> bool:
     if voxel_terrain_runtime != null and is_instance_valid(voxel_terrain_runtime):
-        if String(voxel_terrain_runtime.get("configured_seed")) == seed_text:
+        if voxel_terrain_runtime.generation_context_current():
             return bool(voxel_terrain_runtime.get("authority_ready"))
         push_error("Voxel terrain seed mismatch requires the staged runtime reset contract")
         return false
@@ -476,6 +476,7 @@ func report_voxel_authority_failure_once(source: String) -> void:
 func voxel_terrain_authority_active() -> bool:
     return voxel_terrain_runtime != null \
         and is_instance_valid(voxel_terrain_runtime) \
+        and voxel_terrain_runtime.generation_context_current() \
         and bool(voxel_terrain_runtime.get("authority_ready"))
 
 func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
@@ -563,9 +564,12 @@ func process_pending_chunk_loads(center: Vector2i) -> int:
         var chunk_key := nearest_pending_chunk_load(center)
         if chunk_key == Vector2i(999999, 999999):
             break
-        pending_chunk_loads.erase(chunk_key)
         if chunks.has(chunk_key):
+            pending_chunk_loads.erase(chunk_key)
             continue
+        if voxel_terrain_runtime != null and voxel_terrain_runtime.admit_gameplay_chunk(chunk_key).status != "ready":
+            break # Keep the exact request until its authoritative ground is ready.
+        pending_chunk_loads.erase(chunk_key)
         create_chunk(chunk_key.x, chunk_key.y, true, should_defer_streaming_chunk_collision(chunk_key, center))
         created += 1
     if monitor != null:
@@ -578,6 +582,8 @@ func nearest_pending_chunk_load(center: Vector2i) -> Vector2i:
     var best_distance := 2147483647
     for key_value in pending_chunk_loads.keys():
         var key: Vector2i = key_value
+        if voxel_terrain_runtime != null and voxel_terrain_runtime.admit_gameplay_chunk(key).status != "ready":
+            continue
         var distance := absi(key.x - center.x) + absi(key.y - center.y)
         if distance < best_distance:
             best = key
@@ -1613,6 +1619,9 @@ func create_legacy_terrain_chunk_for_diagnostics(cx: int, cz: int, defer_props :
 func create_voxel_authority_chunk_container(cx: int, cz: int, defer_props := false) -> void:
     var chunk_key := Vector2i(cx, cz)
     if chunks.has(chunk_key):
+        return
+    if voxel_terrain_runtime.admit_gameplay_chunk(chunk_key).status != "ready":
+        queue_chunk_load(chunk_key)
         return
     var monitor = runtime_perf_monitor
     var create_start: int = monitor.begin_section("chunk_create") if monitor != null else Time.get_ticks_usec()

@@ -22,15 +22,16 @@ var pinned_town_regions := {}
 var town_slope_apron_cache := {}
 var initial_terrain_edits := {}
 var generated_site_profiles: Array = []
+var generated_site_profile_store
 # Worker contexts need the generator only for a few callback-style terrain
 # queries. A strong reference here would close a RefCounted cycle with the
 # short-lived WorldGenerationSystem created by VoxelTerrain's native workers.
 var generator_ref: WeakRef
 
-func setup_from_main(main) -> void:
+func setup_from_main(main, generation_towns: Variant = null) -> void:
 	seed_text = String(main.get("seed_text"))
 	seed_hash = int(main.get("seed_hash"))
-	var main_town_cache = main.get("town_region_cache")
+	var main_town_cache = generation_towns if generation_towns is Dictionary else main.get("town_region_cache")
 	if main_town_cache is Dictionary:
 		for region_value in (main_town_cache as Dictionary).keys():
 			if not (region_value is Vector2i):
@@ -41,6 +42,10 @@ func setup_from_main(main) -> void:
 	if world_generation != null and world_generation.has_method("generated_site_profiles_snapshot"):
 		generated_site_profiles = world_generation.generated_site_profiles_snapshot()
 		preload("res://scripts/world/BuildingTerrainProfile.gd").freeze_profiles(generated_site_profiles)
+	# The holder is immutable in identity for this native generator's lifetime.
+	# Each block clone captures a single append-only snapshot under its mutex.
+	if world_generation != null:
+		generated_site_profile_store = world_generation.get("generated_site_profile_store")
 	var volume_service = world_generation.get("terrain_volume_service") if world_generation != null else null
 	var edited_value = volume_service.get("edited_cells") if volume_service != null else null
 	if edited_value is Dictionary:
@@ -59,7 +64,7 @@ func clone_for_worker():
 	context.seed_hash = seed_hash
 	context.pinned_town_regions = pinned_town_regions
 	context.initial_terrain_edits = initial_terrain_edits
-	context.generated_site_profiles = generated_site_profiles
+	context.generated_site_profiles = generated_site_profile_store.snapshot() if generated_site_profile_store != null else generated_site_profiles
 	# These noise resources are immutable after setup and safe to share for
 	# concurrent sampling. Reusing them avoids constructing five resources for
 	# every 16^3 VoxelTerrain generation block.

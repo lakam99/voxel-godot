@@ -142,7 +142,7 @@ func start_new_world() -> bool:
     last_dialogue_node = null
     return true
 
-func start_new_world_staged() -> Dictionary:
+func start_new_world_staged(before_world_preparation: Callable = Callable()) -> Dictionary:
     reset_startup_readiness_state()
     if main == null:
         return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_main"))
@@ -151,6 +151,14 @@ func start_new_world_staged() -> Dictionary:
     if town.is_empty():
         return remember_startup_readiness(StartupReadinessResultScript.failed("missing_tutorial_town"))
     reserve_tutorial_town_layout()
+    # Scenario geometry must be finalized before the host binds terrain inputs.
+    # Existing callers may still initialize terrain lazily after this stage.
+    if before_world_preparation.is_valid():
+        var preparation_result: Variant = await before_world_preparation.call()
+        if not bool(StartupReadinessResultScript.validate(preparation_result).get("ok", false)):
+            return remember_startup_readiness(StartupReadinessResultScript.failed("invalid_world_preparation_result"))
+        if not bool(preparation_result.get("ok", false)):
+            return remember_startup_readiness(preparation_result)
     started = true
     interacted.clear()
     completed_steps.clear()

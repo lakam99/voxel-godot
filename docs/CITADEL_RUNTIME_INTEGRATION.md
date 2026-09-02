@@ -68,6 +68,17 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Latest: native terrain admission and ordinary-runtime wiring are implemented and
+independently critic-approved for this focused checkpoint. See
+`CITADEL_NATIVE_TERRAIN_ADMISSION_2026-09-02.md`.
+Admission controls pass 124/124, actual-profile consistency 27/27, native
+loading/player-collision controls 42/42, bootstrap ordering 28/28 and finalized
+town-input/callback controls 52/52. Existing NPC failures remain identical to
+the accepted baseline exception. This is not a spawned city: ordinary building,
+furniture, shared-tree/door publication and lifecycle remain next, followed by
+critic-approved real-game visual/traversal/save/performance acceptance. No headed
+approval is claimed. The following entries preserve prior checkpoint history.
+
 Update: source preparation and candidate field are committed; ordinary structure
 candidate preservation (`ddea9d6`) and the exact-output physical validation cache
 (`6357aa3`) are also critic-approved and committed. The terrain source/mask

@@ -3,6 +3,7 @@ class_name VoxelTerrainRuntime
 
 const GENERATOR_SCRIPT := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
 const CONTEXT_SCRIPT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
+const SITE_GATE_SCRIPT := preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
 const STARTUP_READINESS_RESULT_SCRIPT := preload("res://scripts/world/StartupReadinessResult.gd")
 const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader")
 
@@ -52,6 +53,9 @@ var startup_auxiliary_viewers: Array[Dictionary] = []
 var startup_auxiliary_cleanup_requested := false
 var startup_auxiliary_cleanup_frames_remaining := 0
 var startup_auxiliary_viewers_created := 0
+var site_gate
+var site_traversal_waiting := false
+var last_site_wait_message_usec := 0
 
 func setup(main_node) -> Dictionary:
 	main = main_node
@@ -64,6 +68,7 @@ func setup(main_node) -> Dictionary:
 	apply_generation_tracking(generation_state)
 
 	terrain = VoxelTerrain.new()
+	terrain.automatic_loading_enabled = false
 	terrain.name = "VoxelTerrainAuthority"
 	terrain.set_meta("kind", "terrain")
 	terrain.set_meta("geometry_source", "voxel_sdf_authority")
@@ -90,18 +95,14 @@ func setup(main_node) -> Dictionary:
 	material.shader = TERRAIN_SHADER
 	terrain.material_override = material
 	add_child(terrain)
+	site_gate = SITE_GATE_SCRIPT.new()
+	site_gate.setup(self,terrain,main.structure_system.citadel_terrain_admission,main.world_generation_system)
 
 	viewer = VoxelViewer.new()
 	viewer.name = "VoxelTerrainViewer"
 	viewer.view_distance = STARTUP_VIEW_DISTANCE
 	viewer.requires_visuals = true
 	viewer.requires_collisions = true
-	var player_value = main.get("player")
-	if player_value is Node3D and is_instance_valid(player_value):
-		(player_value as Node3D).add_child(viewer)
-		viewer.position = Vector3.ZERO
-	else:
-		add_child(viewer)
 	update_viewer_position()
 	terrain.mesh_block_entered.connect(on_mesh_block_entered)
 	terrain.mesh_block_exited.connect(on_mesh_block_exited)
@@ -116,7 +117,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var next_seed := String(main.get("seed_text"))
 	if next_seed.strip_edges() == "":
 		return STARTUP_READINESS_RESULT_SCRIPT.failed("voxel_terrain_reset_seed_missing")
-	if configured_seed == next_seed and authority_ready:
+	if generation_context_current() and authority_ready:
 		return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {
 			"seed": configured_seed,
 			"resetMode": "already_current",
@@ -132,6 +133,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var previous_mesh_blocks := published_mesh_blocks.size()
 	var previous_gameplay_chunks := published_gameplay_chunks.size()
 	var invalidated_chunks := invalidate_gameplay_publication()
+	if site_gate != null: site_gate.stop()
 	clear_startup_auxiliary_viewers()
 	authority_ready = false
 	set_process(false)
@@ -169,7 +171,8 @@ func reset_for_current_seed_staged() -> Dictionary:
 	apply_generation_tracking(generation_state)
 	configured_seed = next_seed
 	apply_startup_vertical_bounds()
-	terrain.automatic_loading_enabled = true
+	site_gate = SITE_GATE_SCRIPT.new()
+	site_gate.setup(self,terrain,main.structure_system.citadel_terrain_admission,main.world_generation_system)
 	if viewer != null and is_instance_valid(viewer):
 		viewer.requires_visuals = true
 		viewer.requires_collisions = true
@@ -241,8 +244,20 @@ func wait_for_seed_reset_task_drain() -> Dictionary:
 func build_generation_state() -> Dictionary:
 	if main == null:
 		return {"ok": false, "reason": "voxel_terrain_generation_main_missing"}
+	var structures = main.get("structure_system")
+	if structures == null:
+		return {"ok":false,"reason":"terrain_structure_owner_missing"}
+	var admission = structures.citadel_terrain_admission
+	if admission.world_seed != String(main.seed_text) or admission.profile_store.world_seed() != String(main.seed_text):
+		if terrain != null: terrain.automatic_loading_enabled = false
+		return {"ok":false,"reason":"citadel_admission_seed_mismatch"}
+	var inputs: Dictionary = admission.finalize_town_inputs(main.town_region_cache)
+	if inputs.status != "ready":
+		if terrain != null: terrain.automatic_loading_enabled = false
+		return {"ok":false,"reason":inputs.reason}
+	main.world_generation_system.bind_generated_site_profile_store(structures.citadel_terrain_admission.profile_store)
 	var context = CONTEXT_SCRIPT.new()
-	context.setup_from_main(main)
+	context.setup_from_main(main,inputs.towns)
 	var signatures := {}
 	for cell_value in context.initial_terrain_edits.keys():
 		var state: Dictionary = context.initial_terrain_edits[cell_value]
@@ -262,6 +277,33 @@ func apply_generation_tracking(generation_state: Dictionary) -> void:
 	var signatures_value = generation_state.get("editSignatures", {})
 	applied_edit_signatures = (signatures_value as Dictionary).duplicate(true) if signatures_value is Dictionary else {}
 	last_volume_revision = int(generation_state.get("volumeRevision", -1))
+
+func generation_context_current() -> bool:
+	return main != null and configured_seed == String(main.seed_text) and site_gate != null and site_gate.current() \
+		and main.structure_system.citadel_terrain_admission.world_seed == configured_seed
+
+func admit_gameplay_chunk(chunk_key: Vector2i) -> Dictionary:
+	if site_gate == null: return {"status":"failed","reason":"terrain_site_gate_missing"}
+	return site_gate.request_cells(Rect2i(chunk_key*GAME_CHUNK_SIZE,Vector2i.ONE*GAME_CHUNK_SIZE).grow(2))
+
+func wait_for_site_admission(chunk_keys: Array) -> Dictionary:
+	# Source preparation precedes the existing chunk/collision readiness clocks.
+	# Keep the real loading overlay responsive; do not widen their timeouts.
+	while true:
+		var pending := false
+		for chunk_key: Vector2i in chunk_keys:
+			var result := admit_gameplay_chunk(chunk_key)
+			if result.status == "failed": return STARTUP_READINESS_RESULT_SCRIPT.failed(result.reason)
+			pending = pending or result.status != "ready"
+		var player_value = main.get("player")
+		if player_value is Node3D:
+			var result: Dictionary = site_gate.request_cells(SITE_GATE_SCRIPT.footprint(player_value.global_position,STARTUP_VIEW_DISTANCE))
+			if result.status == "failed": return STARTUP_READINESS_RESULT_SCRIPT.failed(result.reason)
+			pending = pending or result.status != "ready"
+		if not pending: return STARTUP_READINESS_RESULT_SCRIPT.ready({})
+		var admission = main.structure_system.citadel_terrain_admission
+		await main.startup_loading_yield("Preparing landmark foundations", "citadel_terrain", "pending",admission.stats())
+	return STARTUP_READINESS_RESULT_SCRIPT.failed("site_admission_interrupted")
 
 func invalidate_gameplay_publication() -> int:
 	var invalidated := published_gameplay_chunks.size()
@@ -346,8 +388,7 @@ func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) ->
 			auxiliary.requires_visuals = true
 			auxiliary.requires_collisions = true
 			auxiliary.set_meta("startup_auxiliary", true)
-			add_child(auxiliary)
-			auxiliary.global_position = spec.get("position", Vector3.ZERO)
+			site_gate.request_viewer(auxiliary,spec.get("position",Vector3.ZERO),auxiliary.view_distance)
 			startup_auxiliary_viewers.append({
 				"viewer": auxiliary,
 				"chunks": (spec.get("chunks", []) as Array).duplicate()
@@ -389,7 +430,7 @@ func connected_gameplay_chunk_components(chunk_keys: Array) -> Array:
 
 
 func primary_viewer_covers_component(component: Array) -> bool:
-	if viewer == null or not is_instance_valid(viewer) or component.is_empty():
+	if viewer == null or not is_instance_valid(viewer) or not viewer.is_inside_tree() or component.is_empty():
 		return false
 	var available_distance := maxf(0.0, float(viewer.view_distance) - CELL * 4.0)
 	var viewer_xz := Vector2(viewer.global_position.x, viewer.global_position.z)
@@ -459,6 +500,7 @@ func clear_startup_auxiliary_viewers() -> void:
 			continue
 		auxiliary.requires_visuals = false
 		auxiliary.requires_collisions = false
+		if site_gate != null: site_gate.remove_viewer(auxiliary)
 		auxiliary.queue_free()
 	startup_auxiliary_viewers.clear()
 	startup_auxiliary_cleanup_requested = false
@@ -520,6 +562,10 @@ func expand_vertical_bounds_step() -> void:
 
 func _process(delta: float) -> void:
 	if authority_ready:
+		if not generation_context_current():
+			terrain.automatic_loading_enabled = false
+			return
+		if site_gate != null: site_gate.advance()
 		update_viewer_position()
 		update_viewer_distance(delta)
 		prune_startup_auxiliary_viewers()
@@ -527,16 +573,18 @@ func _process(delta: float) -> void:
 		process_pending_edit_sections()
 
 func _physics_process(_delta: float) -> void:
-	if authority_ready:
+	if authority_ready and generation_context_current():
 		process_pending_gameplay_chunk_publications()
 
 
 func _exit_tree() -> void:
+	if site_gate != null: site_gate.stop()
 	if viewer != null and is_instance_valid(viewer) and viewer.get_parent() != self:
 		viewer.queue_free()
 
 func begin_shutdown() -> void:
 	authority_ready = false
+	if site_gate != null: site_gate.stop()
 	set_process(false)
 	set_physics_process(false)
 	if viewer != null and is_instance_valid(viewer):
@@ -563,7 +611,7 @@ func request_final_view_distance_expansion() -> void:
 	startup_auxiliary_cleanup_frames_remaining = 2
 
 func update_viewer_distance(delta: float) -> void:
-	if viewer == null or not is_instance_valid(viewer) or main == null:
+	if viewer == null or not is_instance_valid(viewer) or not viewer.is_inside_tree() or main == null:
 		return
 	var loading := bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active"))
 	if loading:
@@ -580,8 +628,9 @@ func update_viewer_distance(delta: float) -> void:
 	if view_distance_expansion_elapsed < VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS:
 		return
 	view_distance_expansion_elapsed = 0.0
-	viewer.view_distance = mini(FINAL_VIEW_DISTANCE, int(viewer.view_distance) + VIEW_DISTANCE_EXPANSION_STEP)
-	expand_vertical_bounds_step()
+	var next_distance := mini(FINAL_VIEW_DISTANCE,int(viewer.view_distance)+VIEW_DISTANCE_EXPANSION_STEP)
+	if site_gate.request_viewer(viewer,viewer.global_position,next_distance):
+		expand_vertical_bounds_step()
 
 func voxel_engine_task_stats() -> Dictionary:
 	if not Engine.has_singleton("VoxelEngine"):
@@ -608,7 +657,7 @@ func update_viewer_position() -> void:
 		return
 	var player_value = main.get("player")
 	if player_value is Node3D and is_instance_valid(player_value):
-		viewer.global_position = (player_value as Node3D).global_position
+		site_gate.request_viewer(viewer,(player_value as Node3D).global_position,viewer.view_distance)
 
 func required_classes_available() -> bool:
 	for class_name_value in ["VoxelTerrain", "VoxelViewer", "VoxelMesherTransvoxel", "VoxelFormat"]:
@@ -625,6 +674,8 @@ func on_mesh_block_exited(block_position: Vector3i) -> void:
 
 func stats() -> Dictionary:
 	return {
+		"citadelAdmission":main.structure_system.citadel_terrain_admission.stats() if main != null and main.structure_system != null else {},
+		"siteAdmissionFailure":site_gate.failure_reason() if site_gate != null else "",
 		"ready": authority_ready,
 		"publishedMeshBlocks": published_mesh_blocks.size(),
 		"pendingEditSections": pending_edit_sections.size(),
@@ -1058,6 +1109,14 @@ func collision_mesh_ready_for_body_position(world_position: Vector3, footprint_r
 
 
 func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
+	var start := Vector2i(floori(minf(from_position.x,to_position.x)/CELL),floori(minf(from_position.z,to_position.z)/CELL))
+	var end := Vector2i(ceili(maxf(from_position.x,to_position.x)/CELL),ceili(maxf(from_position.z,to_position.z)/CELL))
+	var source: Dictionary = site_gate.request_cells(Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)) \
+		if site_gate != null else {"status":"failed","reason":"terrain_site_gate_missing"}
+	if source.status != "ready":
+		site_traversal_waiting = true
+		_site_wait_message("Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
+		return {"passed":false,"reason":source.reason,"siteAdmission":source}
 	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
 	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
 	var proofs: Array = []
@@ -1079,6 +1138,7 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		}
 		proofs.append(proof)
 		if not bool(proof.get("passed", false)):
+			if site_traversal_waiting: _site_wait_message("Waiting for terrain collision…")
 			return {
 				"passed": false,
 				"reason": String(proof.get("reason", "collision_not_ready")),
@@ -1086,6 +1146,7 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 				"sampleCount": sample_count + 1,
 				"proofs": proofs
 			}
+	site_traversal_waiting = false
 	return {
 		"passed": true,
 		"reason": "collision_mesh_ready",
@@ -1093,6 +1154,12 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		"sampleCount": sample_count + 1,
 		"proofs": proofs
 	}
+
+func _site_wait_message(message: String) -> void:
+	var now := Time.get_ticks_usec()
+	if now-last_site_wait_message_usec < 1000000: return
+	last_site_wait_message_usec = now
+	if main != null and main.has_method("show_action_message"): main.show_action_message(message)
 
 func voxel_terrain_collider(value) -> bool:
 	if value == null or not is_instance_valid(value):

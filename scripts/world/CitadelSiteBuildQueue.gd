@@ -188,6 +188,13 @@ func request_shutdown() -> void:
 	_closing = true
 	reset()
 
+func retire_external_payload(payload: Dictionary) -> bool:
+	# A lifecycle consumer may relinquish previously consumed immutable sources.
+	# The same owned retirement worker handles final disposal, never a frame call.
+	if _thread != null or not _completed.is_empty() or not _retired.is_empty(): return false
+	_queue_retirement(payload)
+	return true
+
 func _next_index() -> int:
 	var indices: Array = range(_pending.size())
 	var regular: Array = indices.filter(func(index):return not _pending[index].priority)

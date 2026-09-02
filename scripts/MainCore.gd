@@ -682,7 +682,7 @@ func reinitialize_voxel_terrain_authority_staged() -> Dictionary:
                 "seed": seed_text
             })
         runtime = get("voxel_terrain_runtime")
-    elif String(runtime.get("configured_seed")) != seed_text:
+    elif not runtime.generation_context_current():
         if not runtime.has_method("reset_for_current_seed_staged"):
             return StartupReadinessResultScript.failed("voxel_terrain_seed_reset_api_missing", {}, [], {
                 "expectedSeed": seed_text,
@@ -714,6 +714,17 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     var urgent_keys := initial_gameplay_chunk_keys(urgent_radius)
     if urgent_keys.is_empty():
         return StartupReadinessResultScript.failed("missing_required_gameplay_chunks")
+    # Initial deferred boot formerly created this authority lazily in create_chunk.
+    # Source admission now precedes chunk creation, so initialize it first here.
+    var authority_result: Dictionary = await reinitialize_voxel_terrain_authority_staged()
+    if not startup_result_is_ready(authority_result):
+        return authority_result
+    var site_runtime = get("voxel_terrain_runtime")
+    if site_runtime == null:
+        return StartupReadinessResultScript.failed("missing_voxel_terrain_for_site_admission")
+    var site_admission_result: Dictionary = await site_runtime.wait_for_site_admission(urgent_keys)
+    if not startup_result_is_ready(site_admission_result):
+        return site_admission_result
     for key in urgent_keys:
         if not chunks.has(key):
             queue_chunk_load(key)
@@ -1348,6 +1359,8 @@ func apply_world_seed(new_seed: String, remember := false) -> void:
     if world_generation_system and world_generation_system.has_method("reset_for_seed"):
         playtest_progress("apply_seed_world_generation_reset")
         world_generation_system.reset_for_seed()
+    if structure_system != null:
+        structure_system.configure_citadel_terrain_admission()
     if weather_system and weather_system.has_method("reset_for_seed"):
         playtest_progress("apply_seed_weather_reset")
         weather_system.reset_for_seed(seed_hash)
@@ -2035,14 +2048,6 @@ func start_new_game_staged(show_message := true) -> bool:
     await startup_loading_yield("Resetting world")
     reset_runtime_world_state(false)
     await startup_loading_yield("Clearing previous world", "terrain_authority", "pending")
-    var terrain_authority_result := normalized_startup_result(
-        await reinitialize_voxel_terrain_authority_staged(),
-        "invalid_voxel_terrain_reinitialization_result"
-    )
-    if not startup_result_is_ready(terrain_authority_result):
-        await stop_startup_loading(terrain_authority_result, "voxel_terrain_reinitialization_failed")
-        return false
-    await startup_loading_yield("Terrain authority ready", "terrain_authority", "ready", terrain_authority_result.get("metrics", {}))
     var tutorial_result := StartupReadinessResultScript.failed("missing_tutorial_system")
     if tutorial_system:
         playtest_progress("new_game_staged_start_tutorial")
@@ -2050,7 +2055,7 @@ func start_new_game_staged(show_message := true) -> bool:
             await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_startup"))
             return false
         tutorial_result = normalized_startup_result(
-            await tutorial_system.call("start_new_world_staged"),
+            await tutorial_system.call("start_new_world_staged", reinitialize_voxel_terrain_authority_staged),
             "invalid_staged_tutorial_startup_result"
         )
     if not startup_result_is_ready(tutorial_result):
@@ -2180,6 +2185,11 @@ func wait_for_npc_navigation_before_quit() -> void:
         await startup_loading_yield("Stopping NPC navigation")
 
 func wait_for_terrain_workers_before_quit() -> void:
+    if structure_system != null:
+        var admission = structure_system.citadel_terrain_admission
+        admission.request_shutdown()
+        while not bool(admission.advance().get("shutdownComplete",false)):
+            await startup_loading_yield("Stopping citadel preparation")
     var voxel_runtime = get("voxel_terrain_runtime")
     if voxel_runtime != null and is_instance_valid(voxel_runtime) and voxel_runtime.has_method("begin_shutdown"):
         voxel_runtime.call("begin_shutdown")

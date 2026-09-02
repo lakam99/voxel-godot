@@ -5,6 +5,7 @@ const StructureDoorRulesScript := preload("res://scripts/StructureDoorRules.gd")
 const StructureLootScript := preload("res://scripts/StructureLoot.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
+const CitadelTerrainAdmissionScript := preload("res://scripts/world/CitadelTerrainAdmission.gd")
 
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
@@ -35,12 +36,21 @@ var terrain_footprint_records := {}
 var natural_prop_exclusion_records := {}
 var private_interior_records := {}
 var private_interior_revision := 0
+var citadel_terrain_admission = CitadelTerrainAdmissionScript.new()
 
 func setup(main_node) -> void:
     main = main_node
     loot = StructureLootScript.new()
+    configure_citadel_terrain_admission()
+
+func configure_citadel_terrain_admission() -> void:
+    citadel_terrain_admission.configure(String(main.seed_text), main.town_region_cache, {
+        "regionCells": int(main.STRUCTURE_REGION_CELLS),
+        "spawnChance": float(main.STRUCTURE_SPAWN_CHANCE)
+    })
 
 func reset() -> void:
+    configure_citadel_terrain_admission()
     generated_towns.clear()
     generated_structures.clear()
     generated_building_count = 0
