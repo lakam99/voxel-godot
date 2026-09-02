@@ -82,6 +82,16 @@ source-only Site preparation/cancellation boundary is critic-approved; see
 on four structural parts, while the reviewed reference's full geometry and
 furniture remain byte-identical. No ordinary-game spawning is enabled yet.
 
+Subsequent retained-paving source integration is committed as `316768d`.
+The sign source-placement follow-up now passes the fresh actual candidate's
+complete Site preparation (`actual-site-source-05`, 4,703 building parts and
+210 furnishings). See `CITADEL_SIGN_SOURCE_PLACEMENT_2026-09-02.md` for the
+policy, changed reference-sign boundary and source-only evidence. The full
+reference preservation check passed 51/51 and the independent critic approved
+this focused source follow-up. Ordinary runtime
+activation and headed acceptance remain unfinished; source readiness is not
+live spawning.
+
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.
 

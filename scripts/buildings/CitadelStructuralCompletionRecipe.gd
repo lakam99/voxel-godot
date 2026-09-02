@@ -7,7 +7,7 @@ const Facades = preload("res://scripts/buildings/CitadelFacadeCompletionRecipe.g
 const Manifest = preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const Chimneys = preload("res://scripts/buildings/ChimneyBearingRecipe.gd")
 const Brackets = preload("res://scripts/buildings/DoorHoodBracketMountRecipe.gd")
-const Signs = preload("res://scripts/buildings/HouseholdSignMountRecipe.gd")
+const Signs = preload("res://scripts/buildings/HouseholdSignPlacementRecipe.gd")
 const PartyWalls = preload("res://scripts/buildings/MasonryPartyWallBearingRecipe.gd")
 const Thresholds = preload("res://scripts/buildings/CitadelThresholdBearingRecipe.gd")
 const DoorGeometry = preload("res://scripts/buildings/BuildingDoorGeometry.gd")
@@ -78,6 +78,11 @@ static func prepare_later(blueprint, policy: Dictionary) -> Dictionary:
 	if not final.failedIds.is_empty():
 		return _fail("structural_completion_unresolved", {"failedIds": final.failedIds, "stages": stages,
 			"physicalFailureEvidence": FailureEvidence.collect(final.proof, final.report)})
+	# Generic physical attachment can name foreign mass and does not prove
+	# dressing clearance. Reuse the final proof after all structural changes;
+	# proposing another relocation here is a rejection, never a final-state pass.
+	var verified_signs := _verify_final_signs(final.proof, manifest.records, protected.bounds)
+	if not verified_signs.ready: return verified_signs
 	Copy.clear_caches(working)
 	if source_bytes != var_to_bytes(blueprint.snapshot()) or policy_bytes != var_to_bytes(policy): return _fail("later_completion_mutated_input")
 	return {"ready": true, "afterSnapshot": working.snapshot(), "stages": stages,
@@ -230,10 +235,11 @@ static func _complete_signs(working, records: Array, protected: Array) -> Dictio
 	if not physical.ready: return physical
 	var proof = physical.proof
 	var accepted: Array = []
+	var preserved: Array = []
 	var pending: Array = []
 	var attempts := 0
 	for record: Dictionary in records:
-		if record.signAssembly.is_empty() or not physical.failedIds.has(record.signAssembly.armId): continue
+		if record.signAssembly.is_empty(): continue
 		attempts += 1
 		if attempts > MAX_STAGE_ATTEMPTS: return _fail("sign_attempt_limit")
 		var anchors := _sign_anchor_parts(proof, record)
@@ -242,24 +248,39 @@ static func _complete_signs(working, records: Array, protected: Array) -> Dictio
 		var arm = proof.find_part(sign.armId)
 		var board = proof.find_part(sign.boardId)
 		var door = proof.find_part(record.doorId)
-		var result := Signs.plan(proof, arm, board, door, anchors.parts, protected)
+		var result := Signs.propose(proof, arm, board, door, record.facadeDeclarationKeys, protected, anchors.parts)
 		if result.ready:
-			var applied := Signs.apply(proof, sign.armId, sign.boardId, record.doorId,
-				anchors.parts.map(func(part): return part.id), protected)
-			if not applied.ready or var_to_bytes(applied) != var_to_bytes(result):
-				return _fail("sign_plan_apply_mismatch", {"id": sign.armId})
-			var working_arm = Manifest.find_part(working, sign.armId)
-			var working_board = Manifest.find_part(working, sign.boardId)
-			working_arm.position = result.armRecord.position
-			working_arm.recipe["physicalRequiredAnchorPartIds"] = result.armRecord.recipe.physicalRequiredAnchorPartIds.duplicate(true)
-			working_arm.recipe["physicalRequiredAnchorFacts"] = result.armRecord.recipe.physicalRequiredAnchorFacts.duplicate(true)
-			working_board.position = result.boardRecord.position
+			if result.mode == "existing_clear_exact":
+				preserved.append(sign.armId)
+				continue
+			# One commit of the proven records; do not reset the old capped planner's
+			# origin and re-run it. The proof copy also sees earlier accepted signs.
+			for target in [proof,working]:
+				var target_arm = Manifest.find_part(target, sign.armId)
+				var target_board = Manifest.find_part(target, sign.boardId)
+				target_arm.position = result.armRecord.position
+				target_arm.recipe["physicalRequiredAnchorPartIds"] = result.armRecord.recipe.physicalRequiredAnchorPartIds.duplicate(true)
+				target_arm.recipe["physicalRequiredAnchorFacts"] = result.armRecord.recipe.physicalRequiredAnchorFacts.duplicate(true)
+				target_board.position = result.boardRecord.position
 			accepted.append(sign.armId)
-		elif result.reason == "no_clear_rooted_structural_socket":
+		elif result.reason == "no_initial_placement_in_bounded_candidates":
 			pending.append({"id": sign.armId, "reason": result.reason, "detail": result})
 		else:
 			return _fail("sign_completion_failed", {"id": sign.armId, "detail": result})
-	return {"ready": true, "kind": "sign", "acceptedIds": accepted, "pending": pending, "attempts": attempts}
+	if not pending.is_empty():
+		return _fail("sign_initial_placement_unresolved", {"kind":"sign","pending":pending,"acceptedIds":accepted,"preservedIds":preserved,"attempts":attempts})
+	return {"ready": true, "kind": "sign", "acceptedIds": accepted, "preservedIds":preserved,"pending": pending, "attempts": attempts}
+
+
+static func _verify_final_signs(proof, records: Array, protected: Array) -> Dictionary:
+	for record: Dictionary in records:
+		if record.signAssembly.is_empty(): continue
+		var sign: Dictionary = record.signAssembly
+		var result := Signs.propose(proof, proof.find_part(sign.armId), proof.find_part(sign.boardId),
+			proof.find_part(record.doorId), record.facadeDeclarationKeys, protected)
+		if not result.ready or result.get("mode", "") != "existing_clear_exact":
+			return _fail("final_sign_source_invalid", {"id":sign.armId,"detail":result})
+	return {"ready":true}
 
 static func _complete_party_walls(working, records: Array) -> Dictionary:
 	var physical := _physical(working)
