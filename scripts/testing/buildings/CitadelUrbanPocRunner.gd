@@ -1,6 +1,7 @@
 extends "res://scripts/testing/buildings/CastleWalkthroughRunner.gd"
 
 const CitadelUrbanPocComposerScript := preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
+const CitadelRecipePreparationScript := preload("res://scripts/buildings/CitadelRecipePreparation.gd")
 const BuildingInteriorProgramScript := preload("res://scripts/buildings/BuildingInteriorProgram.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
@@ -75,8 +76,7 @@ func build_world() -> void:
 
 
 static func _generate_citadel(seed: int, scale: float):
-	var result = CastleCompoundBlueprintBuilderScript.build(seed, {"biome": "forest", "siteKey": "river-citadel", "citadelScale": scale})
-	return CitadelUrbanPocComposerScript.compose_prepared(result, seed)
+	return CitadelRecipePreparationScript.prepare(seed, {"biome": "forest", "siteKey": "river-citadel", "citadelScale": scale})
 
 
 func prepare_castle_blueprint():

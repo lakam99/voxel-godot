@@ -1,41 +1,59 @@
 extends RefCounted
 class_name CitadelBlueprintBuildJob
 
-const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
-const CastleFurnishingPlannerScript := preload("res://scripts/buildings/CastleFurnishingPlanner.gd")
-const CitadelResidenceManifestBuilderScript := preload("res://scripts/buildings/CitadelResidenceManifestBuilder.gd")
+const CitadelRecipePreparationScript := preload("res://scripts/buildings/CitadelRecipePreparation.gd")
 
 var mutex := Mutex.new()
 var blueprint
 var furnishing_plan
-var residence_manifest: Dictionary = {}
-var residence_validation: Dictionary = {}
+var interior_program: Dictionary = {}
 var build_diagnostics: Dictionary = {}
 var envelope_validation: Dictionary = {}
 var recipe_context_signature := ""
 var finished := false
+var running := false
 var failure_reason := ""
 
 
 func run(seed: int, context: Dictionary) -> void:
-	var build_result: Dictionary = CastleCompoundBlueprintBuilderScript.build_with_diagnostics(seed, context)
+	# Callers own the input until dispatch; all later reads use this one copy.
+	var source_context := context.duplicate(true)
+	# One owner per job; clear completed state before preparing the next source.
+	# Pollers must never see a previous revision as this run's completed result.
+	mutex.lock()
+	if running:
+		mutex.unlock()
+		push_error("Citadel recipe job already running")
+		return
+	running = true
+	finished = false
+	blueprint = null
+	furnishing_plan = null
+	interior_program = {}
+	build_diagnostics = {}
+	envelope_validation = {}
+	failure_reason = ""
+	recipe_context_signature = String(source_context.get("recipeContextSignature", ""))
+	mutex.unlock()
+	var build_result: Dictionary = CitadelRecipePreparationScript.prepare(seed, source_context)
 	var built = build_result.get("blueprint")
-	var built_diagnostics: Dictionary = build_result.get("diagnostics", {}) if build_result.get("diagnostics", {}) is Dictionary else {}
-	var built_envelope_validation := validate_blueprint_envelope(built, context)
+	var built_diagnostics: Dictionary = build_result.duplicate()
+	for key in ["blueprint", "furnishingPlan", "interiorProgram"]:
+		built_diagnostics.erase(key)
+	var built_envelope_validation := validate_blueprint_envelope(built, source_context)
 	if built != null and not bool(built_envelope_validation.get("passed", false)):
 		built = null
-	var built_furnishings = CastleFurnishingPlannerScript.build(built, seed * 7919 + 37, context.get("worldOrigin", Vector3.ZERO)) if built != null else null
-	var built_residences: Dictionary = CitadelResidenceManifestBuilderScript.build(built, built_furnishings, float(context.get("cellSize", 1.35)), context.get("worldOrigin", Vector3.ZERO)) if built != null and built_furnishings != null else {}
-	var built_residence_validation: Dictionary = CitadelResidenceManifestBuilderScript.validate_semantic_completeness(built_residences)
+	var built_furnishings = build_result.get("furnishingPlan") if built != null else null
+	var built_interior: Dictionary = build_result.get("interiorProgram", {}) if built != null else {}
 	mutex.lock()
 	blueprint = built
 	furnishing_plan = built_furnishings
-	residence_manifest = built_residences
-	residence_validation = built_residence_validation
+	interior_program = built_interior
 	build_diagnostics = built_diagnostics
 	envelope_validation = built_envelope_validation
-	recipe_context_signature = String(context.get("recipeContextSignature", ""))
-	failure_reason = "blueprint_envelope_exceeded" if not bool(built_envelope_validation.get("passed", false)) else "blueprint_build_failed" if built == null else "furnishing_plan_build_failed" if built_furnishings == null else "residence_manifest_incomplete" if not bool(built_residence_validation.get("passed", false)) else ""
+	recipe_context_signature = String(source_context.get("recipeContextSignature", ""))
+	failure_reason = "blueprint_envelope_exceeded" if not bool(built_envelope_validation.get("passed", false)) else String(build_result.get("reason", "blueprint_build_failed")) if built == null else ""
+	running = false
 	finished = true
 	mutex.unlock()
 
@@ -44,10 +62,10 @@ func result_snapshot() -> Dictionary:
 	mutex.lock()
 	var result := {
 		"finished": finished,
+		"ready": finished and failure_reason.is_empty() and blueprint != null and furnishing_plan != null,
 		"blueprint": blueprint,
 		"furnishingPlan": furnishing_plan,
-		"residenceManifest": residence_manifest.duplicate(true),
-		"residenceValidation": residence_validation.duplicate(true),
+		"interiorProgram": interior_program.duplicate(true),
 		"buildDiagnostics": build_diagnostics.duplicate(true),
 		"envelopeValidation": envelope_validation.duplicate(true),
 		"recipeContextSignature": recipe_context_signature,
