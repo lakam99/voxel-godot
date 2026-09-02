@@ -8,7 +8,9 @@ const OpeningHeads = preload("res://scripts/buildings/OpeningHeadBandRecipe.gd")
 const LowerBearings = preload("res://scripts/buildings/LowerFacadeBearingRecipe.gd")
 const REQUIRED_HEADROOM := 1.72
 
-static func prepare(blueprint, policy: Dictionary) -> Dictionary:
+static func prepare(blueprint, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if continuation.is_valid() and continuation.call("facade_started") != true:
+		return {"ready": false, "reason": "cancelled"}
 	if blueprint == null or not policy.get("furnitureParts") is Array or not policy.get("reservedVolumes") is Array:
 		return {"ready": false, "reason": "invalid_facade_completion_input"}
 	var source: Dictionary = blueprint.snapshot()
@@ -18,12 +20,16 @@ static func prepare(blueprint, policy: Dictionary) -> Dictionary:
 		"reservedVolumes": policy.reservedVolumes,
 		"requiredHeadroom": REQUIRED_HEADROOM
 	}
-	var opening := OpeningHeads.prepare_all_first_rows(private_source, stage_policy)
+	var opening := OpeningHeads.prepare_all_first_rows(private_source, stage_policy, continuation)
+	if opening.get("reason", "") == "cancelled": return opening
 	if not opening.get("ready", false):
 		return {"ready": false, "reason": "opening_head_completion_failed", "detail": opening}
-	var lower := LowerBearings.prepare_all_bottom_rows(opening.candidateSnapshot, stage_policy)
+	var lower := LowerBearings.prepare_all_bottom_rows(opening.candidateSnapshot, stage_policy, continuation)
+	if lower.get("reason", "") == "cancelled": return lower
 	if not lower.get("ready", false) or not lower.get("exhausted", false):
 		return {"ready": false, "reason": "lower_facade_completion_failed", "detail": lower}
+	if continuation.is_valid() and continuation.call("facade_completed") != true:
+		return {"ready": false, "reason": "cancelled"}
 	return {"ready": true, "exhausted": true, "fullyResolved": lower.get("fullyResolved", false), "afterSnapshot": lower.afterSnapshot,
 		"opening": _without_snapshot(opening), "lower": _without_snapshot(lower),
 		"scope": "Private generated-facade recipe result; caller has not committed or published it."}

@@ -92,12 +92,18 @@ this focused source follow-up. Ordinary runtime
 activation and headed acceptance remain unfinished; source readiness is not
 live spawning.
 
-The next runtime prerequisite is the owned Site build queue; see
+The owned Site build queue is committed as `be3929d`; see
 `CITADEL_SITE_BUILD_QUEUE_2026-09-02.md`. A full real worker preserves the
 actual candidate, and queue-owned payload disposal now runs off the main thread.
-Live dispatch remains disabled: structural preparation still has a measured
-232.534-second cancellation-checkpoint gap, and native terrain admission plus
-ordinary publication have not been integrated.
+The subsequent completion-checkpoint follow-up preserves the full candidate and
+proves actual source cancellation without returning partial geometry. See
+`CITADEL_COMPLETION_CANCELLATION_2026-09-02.md` for focused contracts, commands
+and honest timing limits. It replaces the earlier single 232.534-second
+structural callback interval with per-house/panel/stage checks, but cancellation
+during one inner proof still took 7.921 seconds and initial compound construction
+still has a roughly 42.6-second interval. Live dispatch remains disabled until
+deep source cancellation, native terrain admission and ordinary publication are
+integrated; no gameplay completion or headed acceptance is claimed.
 
 The following checkpoint-1 narrative records its historical boundary, not the
 latest total working-tree scope.

@@ -18,7 +18,8 @@ const EDGE_EPS := ConstructionMath.EDGE_EPS # grouping represented panel edges o
 const SOCKET_HALF := Vector3(0.04, 0.04, 0.07)
 const SOCKET_INSET := 0.02
 
-static func prepare_all_first_rows(b, policy: Dictionary) -> Dictionary:
+static func prepare_all_first_rows(b, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if continuation.is_valid() and continuation.call("opening_heads_started") != true: return _fail("cancelled")
 	var membership := Copy.street_house_memberships(b)
 	if not membership.ready: return membership
 	if membership.houses.is_empty(): return _fail("no_declared_houses")
@@ -28,8 +29,10 @@ static func prepare_all_first_rows(b, policy: Dictionary) -> Dictionary:
 	var proposals: Array = []
 	var trimmed: Array = []
 	for house in membership.houses:
+		if continuation.is_valid() and continuation.call("opening_head_house:" + String(house.prefix)) != true: return _fail("cancelled")
 		if callback.is_valid(): callback.call(house.prefix)
 		var proposal := prepare_first(staged, house.memberIds, policy)
+		if continuation.is_valid() and continuation.call("opening_head_house_completed:" + String(house.prefix)) != true: return _fail("cancelled")
 		if not proposal.ready:
 			return {"ready": false, "reason": proposal.reason, "failedHouse": house.prefix, "completedHouseCount": proposals.size(), "failureEvidence": proposal}
 		staged = Copy.copy_blueprint(proposal.candidateSnapshot)
@@ -37,6 +40,7 @@ static func prepare_all_first_rows(b, policy: Dictionary) -> Dictionary:
 		proposal.erase("candidateSnapshot")
 		proposal["house"] = house.prefix
 		proposals.append(proposal)
+	if continuation.is_valid() and continuation.call("opening_heads_completed") != true: return _fail("cancelled")
 	return {"ready": true, "candidateSnapshot": staged.snapshot(), "houseProposals": proposals, "trimmedPanelIds": trimmed}
 
 static func prepare_first(b, producer_ids: Array, policy: Dictionary) -> Dictionary:

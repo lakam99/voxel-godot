@@ -25,17 +25,21 @@ const MAX_COMPLETION_BATCHES := 128
 ## One panel is revalidated and attempted at a time. Explicit immutable-geometry
 ## rejection is exhausted once; infrastructure/schema/work failures abort the
 ## private transaction rather than being mistaken for ordinary rejection.
-static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary) -> Dictionary:
+static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if not _continue(continuation, "lower_facade_started"): return _fail("cancelled")
 	if not snapshot.get("parts") is Array or snapshot.parts.size() > MAX_PARTS:
 		return _fail("invalid_completion_source")
 	var source: Dictionary = snapshot.duplicate(true)
 	var root_context := _build_root_context(Copy.copy_blueprint(source))
+	if not _continue(continuation, "lower_facade_roots_completed"): return _fail("cancelled")
 	if not root_context.ready: return root_context
 	var stage_policy: Dictionary = policy.duplicate(true)
 	stage_policy["_independentMasonryRootContext"] = root_context.context
-	var driven := _run_independent_completion(source, stage_policy)
+	var driven := _run_independent_completion(source, stage_policy, continuation)
 	if not driven.get("ready", false): return driven
+	if not _continue(continuation, "lower_facade_verification_started"): return _fail("cancelled")
 	var verified := _verify_completion(source, driven.state, driven.accepted)
+	if not _continue(continuation, "lower_facade_completed"): return _fail("cancelled")
 	if not verified.ready: return verified
 	return {"ready": true, "exhausted": true, "fullyResolved": driven.remainingCandidateIds.is_empty(), "afterSnapshot": driven.state,
 		"accepted": driven.accepted, "rejected": driven.rejected,
@@ -43,8 +47,10 @@ static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary) ->
 		"batchCount": driven.attemptCount, "verification": verified,
 		"scope": "Generated facade-bottom recipe completion; publication and rendered appearance remain unproven."}
 
-static func _run_independent_completion(source: Dictionary, policy: Dictionary) -> Dictionary:
+static func _run_independent_completion(source: Dictionary, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if not _continue(continuation, "lower_facade_initial_proof_started"): return _fail("cancelled")
 	var initial := _current_unsupported_bottom_panels(source)
+	if not _continue(continuation, "lower_facade_initial_proof_completed"): return _fail("cancelled")
 	if not initial.ready: return initial
 	var candidate_ids: Array = initial.eligible.duplicate()
 	if candidate_ids.size() > MAX_COMPLETION_BATCHES: return _fail("completion_attempt_limit")
@@ -55,9 +61,11 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary) 
 	var support_graph: Dictionary = initial.supportGraph.duplicate(true)
 	var attempt_count := 0
 	for panel_id: String in candidate_ids:
+		if not _continue(continuation, "lower_facade_panel:" + panel_id): return _fail("cancelled")
 		if rooted.has(panel_id): continue
 		attempt_count += 1
 		var outcome := _completion_outcome(prepare(state, panel_id, policy))
+		if not _continue(continuation, "lower_facade_panel_completed:" + panel_id): return _fail("cancelled")
 		if outcome.ready:
 			var support_delta := _accepted_change_support_delta(state, outcome.afterState, panel_id)
 			if not support_delta.ready:
@@ -71,11 +79,16 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary) 
 			rejected.append({"panelId": panel_id, "reason": outcome.reason})
 		else:
 			return {"ready": false, "reason": "completion_attempt_failed", "candidateId": panel_id, "detail": outcome}
+	if not _continue(continuation, "lower_facade_remaining_proof_started"): return _fail("cancelled")
 	var remaining := _current_unsupported_bottom_panels(state)
+	if not _continue(continuation, "lower_facade_remaining_proof_completed"): return _fail("cancelled")
 	if not remaining.ready: return remaining
 	return {"ready": true, "exhausted": true, "state": state, "accepted": accepted, "rejected": rejected,
 		"remainingCandidateIds": remaining.eligible, "attemptCount": attempt_count,
 		"incrementalSupportProof": "Every accepted member is independently rooted; all exact new ordinary-support edges into existing parts are propagated through the immutable initial support graph."}
+
+static func _continue(continuation: Callable, stage: String) -> bool:
+	return not continuation.is_valid() or continuation.call(stage) == true
 
 static func _accepted_change_support_delta(before: Dictionary, after: Dictionary, panel_id: String) -> Dictionary:
 	if not before.get("parts") is Array or not after.get("parts") is Array or after.parts.size() < before.parts.size(): return _fail("invalid_independence_source")

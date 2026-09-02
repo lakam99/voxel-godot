@@ -330,7 +330,10 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	var structural_completion := StructuralCompletionRecipeScript.prepare(blueprint, {
 		"furnitureParts": furniture.snapshot().parts,
 		"reservedVolumes": furniture.protected_access_reservations,
-		"protectedObstacles": reservations.obstacles})
+		"protectedObstacles": reservations.obstacles}, diagnostic_callback)
+	if structural_completion.get("reason", "") == "cancelled":
+		handoff["reason"] = "cancelled"
+		return null
 	if not structural_completion.get("ready", false):
 		var failure_evidence: Dictionary = structural_completion.duplicate(true)
 		failure_evidence.erase("afterSnapshot")
