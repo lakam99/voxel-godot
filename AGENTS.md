@@ -505,7 +505,14 @@ visual-overhaul
 npc-pathing
 ```
 
-Commit only when the user asks or when a plan phase requires it. Commit messages should describe the behavior, not just files changed.
+The user has given standing approval to commit completed, verified chunks of
+work regularly. Make a focused commit after each coherent change and its
+applicable checks; do not wait for another commit request or accumulate a large
+uncommitted backlog. State any remaining failures or acceptance limits honestly.
+Stage only the task's files, preserve unrelated work, and leave generated test
+artifacts/import churn out. Commit messages should describe the behavior, not
+just files changed. Report the commit hash at handoff. This does not authorize
+pushing, merging, resetting, cleaning, or rewriting history.
 
 ## Local Files To Avoid Committing Accidentally
 

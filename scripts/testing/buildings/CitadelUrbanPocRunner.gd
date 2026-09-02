@@ -516,7 +516,7 @@ func make_part_review_view(id: String, subject: String, id_prefix: String, seman
 	var bounds := review_part_bounds(part)
 	var target := generated_review_focus(part, bounds)
 	var radial := generated_subject_radial_domain(bounds, maximum_distance, minimum_distance, preferred_distance, subject_radius)
-	var view := make_exterior_review_view(id, subject, target, float(radial.maximumDistance), float(radial.minimumDistance), float(radial.preferredDistance), float(radial.subjectRadius), preferred_direction_index, -INF, Callable(self, "generated_subject_readability_rejection").bind([String(part.id)]), Callable(self, "generated_part_visible_surface").bind(String(part.id)))
+	var view := make_exterior_review_view(id, subject, target, float(radial.maximumDistance), float(radial.minimumDistance), float(radial.preferredDistance), float(radial.subjectRadius), preferred_direction_index, -INF, Callable(self, "generated_subject_readability_rejection").bind([String(part.id)], target), Callable(self, "generated_part_visible_surface").bind(String(part.id)))
 	view["cameraSubjectIds"] = [String(part.id)]
 	view["cameraSubjectBounds"] = bounds
 	view["cameraCandidateDomain"] = {"type": "bounded_radial_generated_bounds", "count": 64, "minimumDistance": radial.minimumDistance, "preferredDistance": radial.preferredDistance, "subjectRadius": radial.subjectRadius}
@@ -530,7 +530,7 @@ func make_subject_review_view(id: String, subject: String, source: Dictionary, m
 	var readability_mode := String(source.get("readabilityMode", "all"))
 	var required_visible_ids: Array = source.get("requiredVisiblePartIds", []) as Array
 	var composition_subject_ids: Array = source.get("compositionSubjectIds", subject_ids) as Array
-	var rejection := Callable(self, "generated_family_readability_rejection").bind(subject_ids, required_visible_ids, composition_subject_ids) if not required_visible_ids.is_empty() else (Callable(self, "generated_any_subject_readability_rejection").bind(subject_ids) if readability_mode == "any" and not subject_ids.is_empty() else (Callable(self, "generated_subject_readability_rejection").bind(subject_ids) if not subject_ids.is_empty() else Callable()))
+	var rejection := Callable(self, "generated_family_readability_rejection").bind(subject_ids, required_visible_ids, composition_subject_ids, source.focus) if not required_visible_ids.is_empty() else (Callable(self, "generated_any_subject_readability_rejection").bind(subject_ids, [], source.focus) if readability_mode == "any" and not subject_ids.is_empty() else (Callable(self, "generated_subject_readability_rejection").bind(subject_ids, source.focus) if not subject_ids.is_empty() else Callable()))
 	var visibility_ids: Array = source.get("visibilityPartIds", []) as Array
 	var visibility := Callable(self, "generated_subject_visible_surface").bind(visibility_ids) if not visibility_ids.is_empty() else (Callable(self, "generated_part_visible_surface").bind(String(source.get("visibilityPartId", ""))) if not String(source.get("visibilityPartId", "")).is_empty() else Callable())
 	var candidates: Array = source.get("candidatePositions", []) as Array
@@ -749,11 +749,11 @@ func generated_part_has_published_visual(part) -> bool:
 	return part != null and bool(part.recipe.get("visual", true)) and part.size is Vector3 and part.size.is_finite() and part.size.x > 0.0 and part.size.y > 0.0 and part.size.z > 0.0
 
 
-func generated_subject_readability_rejection(camera_position: Vector3, subject_ids: Array) -> String:
+func generated_subject_readability_rejection(camera_position: Vector3, subject_ids: Array, camera_target: Variant = null) -> String:
 	if subject_ids.is_empty():
 		return "missing_subject_family"
 	var subject_bounds := generated_subject_bounds(subject_ids)
-	var framing_reason := generated_upper_framing_rejection(camera_position, subject_bounds)
+	var framing_reason := generated_upper_framing_rejection(camera_position, subject_bounds, camera_target)
 	if not framing_reason.is_empty():
 		_append_review_stage_rejection_evidence("subjectRequirements", {"subreason": "upperFrame", "reason": framing_reason, "selectedVisibleMember": "", "blockers": []})
 		return framing_reason
@@ -767,12 +767,12 @@ func generated_subject_readability_rejection(camera_position: Vector3, subject_i
 	return ""
 
 
-func generated_any_subject_readability_rejection(camera_position: Vector3, subject_ids: Array, composition_subject_ids: Array = []) -> String:
+func generated_any_subject_readability_rejection(camera_position: Vector3, subject_ids: Array, composition_subject_ids: Array = [], camera_target: Variant = null) -> String:
 	if subject_ids.is_empty():
 		return "missing_subject_family"
 	var composition_ids: Array = composition_subject_ids if not composition_subject_ids.is_empty() else subject_ids
 	var subject_bounds := generated_subject_bounds(subject_ids)
-	var framing_reason := generated_upper_framing_rejection(camera_position, subject_bounds)
+	var framing_reason := generated_upper_framing_rejection(camera_position, subject_bounds, camera_target)
 	if not framing_reason.is_empty():
 		_append_review_stage_rejection_evidence("subjectRequirements", {"subreason": "upperFrame", "reason": framing_reason, "selectedVisibleMember": "", "blockers": []})
 		return framing_reason
@@ -787,7 +787,7 @@ func generated_any_subject_readability_rejection(camera_position: Vector3, subje
 	return ""
 
 
-func generated_family_readability_rejection(camera_position: Vector3, subject_ids: Array, required_visible_ids: Array, composition_subject_ids: Array) -> String:
+func generated_family_readability_rejection(camera_position: Vector3, subject_ids: Array, required_visible_ids: Array, composition_subject_ids: Array, camera_target: Variant = null) -> String:
 	if subject_ids.is_empty() or required_visible_ids.is_empty():
 		return "missing_subject_family"
 	var subject_identity: Dictionary = {}
@@ -797,7 +797,7 @@ func generated_family_readability_rejection(camera_position: Vector3, subject_id
 		if not subject_identity.has(String(id_value)):
 			return "ambiguous_subject_family"
 	var subject_bounds := generated_subject_bounds(subject_ids)
-	var framing_reason := generated_upper_framing_rejection(camera_position, subject_bounds)
+	var framing_reason := generated_upper_framing_rejection(camera_position, subject_bounds, camera_target)
 	if not framing_reason.is_empty():
 		_append_review_stage_rejection_evidence("subjectRequirements", {"subreason": "upperFrame", "reason": framing_reason, "selectedVisibleMember": "", "blockers": []})
 		return framing_reason
@@ -850,12 +850,35 @@ func generated_foreground_bounds(subject_ids: Array) -> Array[AABB]:
 	return result
 
 
-func generated_upper_framing_rejection(camera_position: Vector3, subject_bounds: AABB) -> String:
-	if subject_bounds.size.x <= 0.0 or subject_bounds.size.y <= 0.0 or subject_bounds.size.z <= 0.0:
+func generated_upper_framing_rejection(camera_position: Vector3, subject_bounds: AABB, camera_target: Variant = null) -> String:
+	if not _review_family_bounds_are_valid(subject_bounds):
 		return "missing_subject_bounds"
-	var horizontal_distance := Vector2(camera_position.x, camera_position.z).distance_to(Vector2(subject_bounds.get_center().x, subject_bounds.get_center().z))
-	var upper_angle := atan2(subject_bounds.end.y - camera_position.y, maxf(0.01, horizontal_distance))
-	return "upper_frame_clipped" if upper_angle > deg_to_rad(31.0) else ""
+	var target: Variant = subject_bounds.get_center() if camera_target == null else camera_target
+	if not target is Vector3 or not target.is_finite():
+		return "invalid_camera_aim"
+	var direction: Vector3 = target - camera_position
+	if not camera_position.is_finite() or direction.length_squared() <= 0.0001 or direction.cross(Vector3.UP).length_squared() <= 0.0001:
+		return "invalid_camera_aim"
+	# Capture looks at the subject, not the horizon. Test the complete bounds
+	# in that pitched camera frame, including the nearer top corners.
+	return generated_upper_framing_for_transform(Transform3D(Basis.looking_at(direction, Vector3.UP), camera_position), subject_bounds)
+
+
+func generated_upper_framing_for_transform(camera_transform: Transform3D, subject_bounds: AABB, vertical_fov := 62.0) -> String:
+	if not _review_family_bounds_are_valid(subject_bounds):
+		return "missing_subject_bounds"
+	if not camera_transform.origin.is_finite() or not camera_transform.basis.is_finite() or absf(camera_transform.basis.determinant()) <= 0.0001 or not is_finite(vertical_fov) or vertical_fov <= 0.0 or vertical_fov >= 180.0:
+		return "invalid_camera_aim"
+	var inverse := camera_transform.affine_inverse()
+	var upper_limit := tan(deg_to_rad(vertical_fov) * 0.5)
+	for index in range(8):
+		var local: Vector3 = inverse * subject_bounds.get_endpoint(index)
+		var depth := -local.z
+		if depth <= 0.05:
+			return "subject_crosses_camera_plane"
+		if local.y > depth * upper_limit:
+			return "upper_frame_clipped"
+	return ""
 
 
 func generated_near_camera_visual_composition_rejection(camera_position: Vector3, subject_bounds: AABB, foreground_bounds: Array) -> String:
@@ -1270,7 +1293,7 @@ func _begin_perimeter_source_camera_job(source: Dictionary) -> ReviewCameraJob:
 			composition_ids = validation.ids as Array
 	var synthetic_readability: bool = has_method("chooser_subject_readability_rejection") and source.has("readabilityAllowed")
 	var readability_mode := String(source.get("readabilityMode", "all"))
-	var rejection := Callable(self, "chooser_subject_readability_rejection") if synthetic_readability else (Callable(self, "generated_any_subject_readability_rejection").bind(subject_ids, composition_ids) if readability_mode == "any" else Callable(self, "generated_subject_readability_rejection").bind(subject_ids))
+	var rejection := Callable(self, "chooser_subject_readability_rejection") if synthetic_readability else (Callable(self, "generated_any_subject_readability_rejection").bind(subject_ids, composition_ids, source.get("focus", Vector3.ZERO)) if readability_mode == "any" else Callable(self, "generated_subject_readability_rejection").bind(subject_ids, source.get("focus", Vector3.ZERO)))
 	var visibility_ids: Array = source.get("visibilityPartIds", []) as Array
 	var visibility := Callable(self, "generated_subject_visible_surface").bind(visibility_ids) if not visibility_ids.is_empty() else (Callable(self, "generated_part_visible_surface").bind(String(source.get("visibilityPartId", ""))) if not String(source.get("visibilityPartId", "")).is_empty() else Callable())
 	if synthetic_readability:
@@ -2420,6 +2443,12 @@ func audit_review_camera_contract(view: Dictionary, review_camera: Camera3D) -> 
 		"subjectFrameFraction": subject_frame_fraction,
 		"passed": requires_clear and sightline_valid and pose_ok and support_valid and frame_is_required and target_in_front and target_clear and target_distance <= maximum_distance and subject_frame_fraction >= MIN_REVIEW_SUBJECT_FRAME_FRACTION and subject_frame_fraction <= MAX_REVIEW_SUBJECT_FRAME_FRACTION
 	}
+	# Recheck against the camera actually used to capture, rather than trusting
+	# candidate metadata or assuming its final target remained at bounds centre.
+	if view.get("cameraSubjectBounds") is AABB:
+		var framing_reason := generated_upper_framing_for_transform(review_camera.global_transform, view.cameraSubjectBounds as AABB, review_camera.fov)
+		result["cameraUpperFramingReason"] = framing_reason
+		result["passed"] = bool(result.passed) and framing_reason.is_empty()
 	if not view.has("cameraRequiredVisiblePartIds"):
 		return result
 	var subject_ids_value: Variant = view.get("cameraSubjectIds")

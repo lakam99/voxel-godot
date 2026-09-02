@@ -116,7 +116,7 @@ func begin_radial_audit_job(spec: Dictionary) -> Dictionary:
 	var target := generated_review_focus(part, bounds)
 	var radial := generated_subject_radial_domain(bounds, float(spec.maximumDistance), float(spec.minimumDistance), float(spec.preferredDistance), float(spec.subjectRadius))
 	var subject_ids := [String(part.id)]
-	var job := begin_exterior_review_pose(target, float(radial.minimumDistance), float(radial.preferredDistance), float(radial.subjectRadius), int(spec.preferredDirectionIndex), -INF, Callable(self, "generated_subject_readability_rejection").bind(subject_ids), Callable(self, "generated_part_visible_surface").bind(String(part.id)))
+	var job := begin_exterior_review_pose(target, float(radial.minimumDistance), float(radial.preferredDistance), float(radial.subjectRadius), int(spec.preferredDirectionIndex), -INF, Callable(self, "generated_subject_readability_rejection").bind(subject_ids, target), Callable(self, "generated_part_visible_surface").bind(String(part.id)))
 	if job._candidate_positions.size() != RADIAL_CANDIDATE_LIMIT:
 		return {"valid": false, "reason": "invalid_radial_candidate_domain"}
 	for id_value in subject_ids:

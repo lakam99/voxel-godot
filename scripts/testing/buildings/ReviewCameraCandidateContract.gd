@@ -47,6 +47,11 @@ class SyntheticRunner extends Runner:
 	func review_visual_line_blocker(_from: Vector3, _target: Vector3) -> Dictionary:
 		return {} if visual_allowed else {"id": "synthetic_visual_blocker", "position": Vector3.ZERO}
 
+class CompositionOnlySyntheticRunner extends SyntheticRunner:
+	# These unit cases isolate family/foreign-object exclusion, not framing.
+	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB, _camera_target: Variant = null) -> String:
+		return ""
+
 class PerimeterChooserSyntheticRunner extends SyntheticRunner:
 	var active_source: Dictionary = {}
 	var predicate_counts: Dictionary = {}
@@ -97,7 +102,7 @@ class TelemetrySyntheticRunner extends Runner:
 		if rejection_mode != "nearFieldComposition": return {"clear": true, "blockedSamples": 0, "sampleCount": 8, "blockerIds": []}
 		_append_review_stage_rejection_evidence("nearFieldComposition", {"subreason": "blockedNearFrustum", "reason": "near_field_composition", "selectedVisibleMember": "", "blockedSamples": 8, "sampleCount": 8, "blockers": [_telemetry_provenance("family_blocker")]})
 		return {"clear": false, "blockedSamples": 8, "sampleCount": 8, "blockerIds": ["family_blocker"]}
-	func generated_subject_readability_rejection(_camera_position: Vector3, _subject_ids: Array) -> String:
+	func generated_subject_readability_rejection(_camera_position: Vector3, _subject_ids: Array, _camera_target: Variant = null) -> String:
 		if rejection_mode != "subjectRequirements": return ""
 		_append_review_stage_rejection_evidence("subjectRequirements", {"subreason": "nearCameraComposition", "reason": "near_camera_visual_volume", "selectedVisibleMember": "family_blocker", "blockers": [_telemetry_provenance("family_blocker"), _telemetry_provenance("foreign_blocker")]})
 		return "near_camera_visual_volume"
@@ -128,7 +133,7 @@ class SubjectSubtypeSyntheticRunner extends RealTelemetryRunner:
 	var subject_subtype := ""
 	func review_near_camera_visual_composition(_camera_position: Vector3, _target: Vector3) -> Dictionary:
 		return {"clear": true, "blockedSamples": 0, "sampleCount": 8, "blockerIds": []}
-	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB) -> String:
+	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB, _camera_target: Variant = null) -> String:
 		return "upper_frame_clipped" if subject_subtype == "upperFrame" else ""
 	func generated_subject_visible_surface_evidence(_camera_position: Vector3, _part_ids: Array) -> Dictionary:
 		if subject_subtype == "noReadableMember":
@@ -136,7 +141,7 @@ class SubjectSubtypeSyntheticRunner extends RealTelemetryRunner:
 		return {"valid": true, "partId": "family_blocker", "surface": Vector3(0.0, 1.5, -0.25)}
 
 class CompositionContextReadabilityRunner extends RealTelemetryRunner:
-	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB) -> String:
+	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB, _camera_target: Variant = null) -> String:
 		return ""
 	func generated_subject_visible_surface_evidence(_camera_position: Vector3, part_ids: Array) -> Dictionary:
 		return {"valid": not part_ids.is_empty(), "partId": String(part_ids[0]) if not part_ids.is_empty() else "", "surface": Vector3(0.0, 1.5, -0.25)}
@@ -144,7 +149,7 @@ class CompositionContextReadabilityRunner extends RealTelemetryRunner:
 class RequiredFamilyVisibilityRunner extends CompositionContextReadabilityRunner:
 	var requested_visible_ids: Array = []
 	var force_upper_clip := false
-	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB) -> String:
+	func generated_upper_framing_rejection(_camera_position: Vector3, _subject_bounds: AABB, _camera_target: Variant = null) -> String:
 		return "upper_frame_clipped" if force_upper_clip else ""
 	func generated_part_visible_surface(_camera_position: Vector3, part_id: String) -> Vector3:
 		requested_visible_ids.append(part_id)
@@ -879,6 +884,43 @@ func _visual_composition_negative_controls() -> void:
 	var missing_upper_job = r.begin_exterior_review_pose_from_candidates(Vector3(0.0, 1.58, 0.0), [Vector3(0.0, 1.58, -6.0)], 2.0, -INF, Callable(r, "generated_upper_framing_rejection").bind(AABB()))
 	var missing_upper: Dictionary = r.advance_exterior_review_pose(missing_upper_job, 64)
 	_check("upper_framing_missing_subject_bounds_fails_closed", not missing_upper.pose.ok and missing_upper.pose.rejectionExamples[0].reason == "subject:missing_subject_bounds")
+	# Observed failed roof bounds/candidate: horizon elevation is not clipping
+	# when the real 62-degree camera is aimed up at the roof's centre.
+	var roof_bounds := AABB(Vector3(-18.88291, 19.62, -0.668), Vector3(9.765823, 3.785618, 10.176))
+	var roof_camera := Vector3(-14.0, 4.05, -17.58)
+	_check("pitched_roof_is_not_rejected_by_horizon_elevation", r.generated_upper_framing_rejection(roof_camera, roof_bounds).is_empty())
+	var camera := Camera3D.new()
+	r.add_child(camera)
+	camera.fov = 62.0
+	camera.global_position = roof_camera
+	camera.look_at(roof_bounds.get_center(), Vector3.UP)
+	var projection := camera.get_camera_projection()
+	var inverse := camera.global_transform.affine_inverse()
+	var engine_upper_visible := true
+	for corner_index in range(8):
+		var local: Vector3 = inverse * roof_bounds.get_endpoint(corner_index)
+		var clip: Vector4 = projection * Vector4(local.x, local.y, local.z, 1.0)
+		engine_upper_visible = engine_upper_visible and clip.w > 0.0 and clip.y <= clip.w
+	_check("pitched_roof_matches_real_camera_projection", engine_upper_visible and r.generated_upper_framing_for_transform(camera.global_transform, roof_bounds, camera.fov).is_empty())
+	camera.look_at(roof_camera + Vector3.FORWARD, Vector3.UP)
+	_check("opposite_aim_rejects_subject_behind_camera", not r.generated_upper_framing_for_transform(camera.global_transform, roof_bounds, camera.fov).is_empty())
+	camera.look_at(Vector3(roof_bounds.get_center().x, roof_camera.y, roof_bounds.get_center().z), Vector3.UP)
+	_check("level_camera_still_rejects_roof_above_frame", r.generated_upper_framing_for_transform(camera.global_transform, roof_bounds, camera.fov) == "upper_frame_clipped")
+	var low_target := Vector3(roof_bounds.get_center().x, roof_camera.y, roof_bounds.get_center().z)
+	_check("offcentre_target_matches_final_camera_rejection", r.generated_upper_framing_rejection(roof_camera, roof_bounds, low_target) == r.generated_upper_framing_for_transform(camera.global_transform, roof_bounds, camera.fov))
+	_check("invalid_explicit_target_fails_closed", r.generated_upper_framing_rejection(roof_camera, roof_bounds, Vector3.INF) == "invalid_camera_aim")
+	var final_view := {"id": "synthetic_roof", "target": roof_bounds.get_center(), "cameraSubjectBounds": roof_bounds, "requiresClear": true, "maxDistance": 100.0, "cameraPoseOk": true, "cameraPoseSupport": roof_camera - Vector3(0, 1.58, 0), "cameraPoseFrameFraction": 0.4}
+	var final_audit: Dictionary = r.audit_review_camera_contract(final_view, camera)
+	_check("final_camera_audit_rechecks_actual_pitch", not bool(final_audit.passed) and final_audit.get("cameraUpperFramingReason") == "upper_frame_clipped")
+	camera.look_at(roof_bounds.get_center(), Vector3.UP)
+	var aimed_audit: Dictionary = r.audit_review_camera_contract(final_view, camera)
+	_check("same_final_metadata_passes_only_after_correct_camera_aim", bool(aimed_audit.passed) and aimed_audit.get("cameraUpperFramingReason") == "")
+	for offset in [Vector3.ZERO, Vector3(120, -40, 75)]:
+		var shifted := AABB(roof_bounds.position + offset, roof_bounds.size)
+		_check("roof_framing_translation_invariant_%s" % offset, r.generated_upper_framing_rejection(roof_camera + offset, shifted).is_empty())
+	_check("nonfinite_camera_fails_closed", r.generated_upper_framing_rejection(Vector3.INF, roof_bounds) == "invalid_camera_aim")
+	_check("nonfinite_bounds_fail_closed", r.generated_upper_framing_rejection(roof_camera, AABB(Vector3.INF, Vector3.ONE)) == "missing_subject_bounds")
+	camera.free()
 
 	var subject_bounds := AABB(Vector3(-1.0, 0.0, -0.25), Vector3(2.0, 3.2, 0.5))
 	var foreground_bounds := [
@@ -898,6 +940,11 @@ func _visual_composition_negative_controls() -> void:
 	var missing_foreground: Dictionary = r.advance_exterior_review_pose(missing_foreground_job, 64)
 	_check("near_camera_composition_missing_foreground_bounds_fails_closed", not missing_foreground.pose.ok and missing_foreground.pose.rejectionExamples[0].reason == "subject:missing_foreground_bounds")
 
+	var overhang_bounds := AABB(Vector3(-1, 0, -6.2), Vector3(2.8, 3.2, 6.45))
+	_check("near_family_crossing_camera_plane_is_not_full_frame_evidence", not r.generated_upper_framing_rejection(Vector3(0, 1.58, -6), overhang_bounds).is_empty())
+	r.free()
+	r = CompositionOnlySyntheticRunner.new()
+	root.add_child(r)
 	r.blueprint = Blueprint.new("same_family_foreground", 7, "test")
 	var visible_wall = r.blueprint.add_part({"id": "perimeter_family_a_wall", "kind": "wall", "material": "brick", "position": Vector3(0.0, 1.6, 0.0), "size": Vector3(2.0, 3.2, 0.5), "collision": false, "recipe": {"visual": true}})
 	var near_overhang = r.blueprint.add_part({"id": "perimeter_family_b_overhang", "kind": "beam", "material": "timber", "position": Vector3(0.8, 2.5, -5.7), "size": Vector3(2.0, 1.0, 1.0), "collision": false, "recipe": {"visual": true}})
