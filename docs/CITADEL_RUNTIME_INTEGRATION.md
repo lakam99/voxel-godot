@@ -68,6 +68,17 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Update: source preparation and candidate field are committed; ordinary structure
+candidate preservation (`ddea9d6`) and the exact-output physical validation cache
+(`6357aa3`) are also critic-approved and committed. The terrain source/mask
+boundary passed 33 checks and independent critic review; see
+`CITADEL_TERRAIN_SOURCE_2026-09-02.md`. Actual site preparation and runtime
+activation remain in progress. The active goal is **continue until citadel
+spawns correctly**; no completion or headed approval is claimed.
+
+The following checkpoint-1 narrative records its historical boundary, not the
+latest total working-tree scope.
+
 Checkpoint 1 is independently critic-approved: shared source preparation only.
 No terrain, streaming, NPC,
 navigation, tree-renderer, door, save or building/furnishing recipe changes have

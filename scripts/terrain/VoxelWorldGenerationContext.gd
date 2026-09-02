@@ -21,6 +21,7 @@ var town_region_cache := {}
 var pinned_town_regions := {}
 var town_slope_apron_cache := {}
 var initial_terrain_edits := {}
+var generated_site_profiles: Array = []
 # Worker contexts need the generator only for a few callback-style terrain
 # queries. A strong reference here would close a RefCounted cycle with the
 # short-lived WorldGenerationSystem created by VoxelTerrain's native workers.
@@ -37,6 +38,9 @@ func setup_from_main(main) -> void:
 			var town_value = main_town_cache[region_value]
 			pinned_town_regions[region_value] = town_value.duplicate(true) if town_value is Dictionary else {}
 	var world_generation = main.get("world_generation_system")
+	if world_generation != null and world_generation.has_method("generated_site_profiles_snapshot"):
+		generated_site_profiles = world_generation.generated_site_profiles_snapshot()
+		preload("res://scripts/world/BuildingTerrainProfile.gd").freeze_profiles(generated_site_profiles)
 	var volume_service = world_generation.get("terrain_volume_service") if world_generation != null else null
 	var edited_value = volume_service.get("edited_cells") if volume_service != null else null
 	if edited_value is Dictionary:
@@ -55,6 +59,7 @@ func clone_for_worker():
 	context.seed_hash = seed_hash
 	context.pinned_town_regions = pinned_town_regions
 	context.initial_terrain_edits = initial_terrain_edits
+	context.generated_site_profiles = generated_site_profiles
 	# These noise resources are immutable after setup and safe to share for
 	# concurrent sampling. Reusing them avoids constructing five resources for
 	# every 16^3 VoxelTerrain generation block.

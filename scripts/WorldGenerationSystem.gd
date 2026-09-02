@@ -3,6 +3,7 @@ class_name WorldGenerationSystem
 
 const TerrainVolumeServiceScript := preload("res://scripts/TerrainVolumeService.gd")
 const BiomeRegionFieldScript := preload("res://scripts/world/BiomeRegionField.gd")
+const BuildingTerrainProfileScript := preload("res://scripts/world/BuildingTerrainProfile.gd")
 
 const UNDERGROUND_AIR_BIOME := "underground_air"
 const NATURAL_SURFACE_MIN_OVERBURDEN_CELLS := 3.0
@@ -28,14 +29,21 @@ var surface_biome_cache := {}
 var minimum_overburden_cache := {}
 var terrain_volume_service
 var biome_region_field = BiomeRegionFieldScript.new()
+var generated_site_profiles: Array = []
 
 func setup(main_node) -> void:
 	main = main_node
+	var source_profiles = main.get("generated_site_profiles") if main != null else null
+	if source_profiles is Array:
+		# Worker contexts carry an immutable, already admitted source snapshot.
+		# They share it read-only; do not deep-copy every recipe root per voxel block.
+		generated_site_profiles = source_profiles
 	if terrain_volume_service == null:
 		terrain_volume_service = TerrainVolumeServiceScript.new()
 	terrain_volume_service.setup(main, self)
 
 func reset() -> void:
+	generated_site_profiles = []
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset"):
 		terrain_volume_service.reset()
@@ -47,6 +55,7 @@ func reset() -> void:
 	minimum_overburden_cache.clear()
 
 func reset_for_seed() -> void:
+	generated_site_profiles = []
 	excavation_brushes.clear()
 	if terrain_volume_service != null and terrain_volume_service.has_method("reset_for_seed"):
 		terrain_volume_service.reset_for_seed()
@@ -56,6 +65,46 @@ func reset_for_seed() -> void:
 	base_surface_y_cache.clear()
 	surface_biome_cache.clear()
 	minimum_overburden_cache.clear()
+
+func configure_generated_site_profiles(profiles: Array) -> Dictionary:
+	# Generation-input admission only. The lifecycle owner MUST call before
+	# affected terrain is requested and rebuild the native context snapshot.
+	# This is not an API for editing a live terrain mesh behind its authority.
+	var world_seed := String(main.get("seed_text")) if main != null else ""
+	var ids := {}
+	for index in range(profiles.size()):
+		var profile = profiles[index]
+		if not profile is Dictionary or not BuildingTerrainProfileScript.valid(profile, world_seed, cell_size()):
+			return {"ready": false, "reason": "invalid_generated_site_profile"}
+		if ids.has(profile.siteId):
+			return {"ready": false, "reason": "duplicate_generated_site_profile"}
+		ids[profile.siteId] = true
+		for previous in range(index):
+			if (profiles[previous].envelopeCells as Rect2i).intersects(profile.envelopeCells):
+				return {"ready": false, "reason": "overlapping_generated_site_profiles"}
+	generated_site_profiles = profiles.duplicate(true)
+	generated_site_profiles.sort_custom(func(a, b): return String(a.siteId) < String(b.siteId))
+	BuildingTerrainProfileScript.freeze_profiles(generated_site_profiles)
+	surface_projection_cache.clear()
+	deformed_surface_y_cache.clear()
+	base_surface_y_cache.clear()
+	surface_biome_cache.clear()
+	minimum_overburden_cache.clear()
+	# Only derived generated samples are discarded; every explicit saved edit,
+	# light override and scene-block record remains in its owning volume service.
+	if terrain_volume_service != null:
+		terrain_volume_service.sections.clear()
+		terrain_volume_service.top_surface_y_cache.clear()
+	return {"ready": true, "profileCount": generated_site_profiles.size()}
+
+func generated_site_profiles_snapshot() -> Array:
+	return generated_site_profiles.duplicate(true)
+
+func generated_site_profile_for_cell(cell: Vector2i) -> Dictionary:
+	for profile: Dictionary in generated_site_profiles:
+		if (profile.envelopeCells as Rect2i).has_point(cell):
+			return profile
+	return {}
 
 func biome_region_for_cell3(cell: Vector3i) -> Dictionary:
 	if biome_region_field == null:
@@ -779,7 +828,9 @@ func minimum_overburden_cells_for_position(position: Vector3) -> float:
 	if minimum_overburden_cache.has(key):
 		return float(minimum_overburden_cache[key])
 	var protected_town_surface := not town_region_for_surface_cell3(Vector3i(cell.x, 0, cell.z)).is_empty()
-	var result := TOWN_SURFACE_MIN_OVERBURDEN_CELLS if protected_town_surface else NATURAL_SURFACE_MIN_OVERBURDEN_CELLS
+	var site_profile := generated_site_profile_for_cell(Vector2i(cell.x, cell.z))
+	var protected_building_surface := not site_profile.is_empty() and BuildingTerrainProfileScript.contains_core(site_profile, Vector2i(cell.x, cell.z))
+	var result := TOWN_SURFACE_MIN_OVERBURDEN_CELLS if protected_town_surface or protected_building_surface else NATURAL_SURFACE_MIN_OVERBURDEN_CELLS
 	minimum_overburden_cache[key] = result
 	return result
 
@@ -989,6 +1040,9 @@ func base_surface_y_for_cell(cell: Vector3i) -> float:
 		base_surface_y_cache[key] = value
 		return value
 	var value: float = natural_surface_y_for_cell(cell)
+	var site_profile := generated_site_profile_for_cell(key)
+	if not site_profile.is_empty():
+		value = BuildingTerrainProfileScript.surface_y(site_profile, key, value)
 	base_surface_y_cache[key] = value
 	return value
 
