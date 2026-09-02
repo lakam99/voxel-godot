@@ -261,7 +261,10 @@ static func _place_one(intent: Dictionary, courtyard_bounds: Dictionary, setting
 	var exact := _validate_exact_constraints(intent, composition, street_footprints, structure_parts, placements, placed_compositions, courtyard_bounds, settings, telemetry)
 	if not bool(exact.get("passed", false)):
 		var annotated_rejections := _annotate_prior_overlap_rejections(exact.get("rejections", []) as Array, intent, placements, placed_compositions, nominal_center, row_packed_center, row_packed_composition, fixed_packed_center, fixed_packed_composition, center, settings)
-		if adjustment.length_squared() > EPSILON * EPSILON:
+		# Any staged axis move can invalidate clearance proved on the other
+		# axis. Reconcile the same bounded, exact candidate domain after row or
+		# obstacle packing too, not only after a courtyard-boundary adjustment.
+		if adjustment.length_squared() > EPSILON * EPSILON or absf(x_delta) > EPSILON or absf(z_delta) > EPSILON:
 			var coupled := _resolve_coupled_candidate(intent, courtyard_bounds, settings, fixed_blockers, street_footprints, structure_parts, placements, placed_compositions, placed_blockers, nominal_center, row_packed_center, fixed_packed_center, center, composition, annotated_rejections, telemetry)
 			if bool(coupled.get("passed", false)):
 				return coupled
