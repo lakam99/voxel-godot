@@ -100,6 +100,167 @@ func drain(job, label: String) -> void:
 	while worker.poll().busy and Time.get_ticks_msec() < deadline: await process_frame
 	check(label + "_worker_drained", not worker.poll().busy)
 
+## Real pending publisher helpers on synthetic geometry. The static-flush case
+## injects a labelled threshold-sized transform batch, not a generated building.
+func pending_holder(paving: bool) -> Preparation.PreparedSource:
+	var prepared := holder()
+	var blueprint = prepared._payload.blueprint
+	blueprint.parts.clear()
+	if paving:
+		blueprint.add_part({"id":"pending-paving", "kind":"foundation", "material":"cobblestone",
+			"collision":true, "size":Vector3(24, 0.12, 18), "position":Vector3(0, 0.1, 0),
+			"recipe":{"pavingFamily":"civic_setts", "pavingHeading":"x"}})
+	else:
+		blueprint.add_part({"id":"flush-trigger", "kind":"post", "material":"timber_beam",
+			"size":Vector3(0.2, 1.0, 0.2), "position":Vector3(0, 0.5, 0)})
+	blueprint.add_part({"id":"after-pending", "kind":"post", "material":"timber_beam",
+		"size":Vector3(0.2, 1.0, 0.2), "position":Vector3(2, 0.5, 0)})
+	return prepared
+
+func inject_synthetic_flush_threshold(job) -> void:
+	# One unchanged, explicitly synthetic batch at the production threshold.
+	var transforms: Array[Transform3D] = []
+	transforms.resize(job._building.INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT)
+	transforms.fill(Transform3D.IDENTITY)
+	var custom: Array[Color] = []
+	custom.resize(transforms.size())
+	custom.fill(Color(0.5, 0.5, 0.5, 1.0))
+	job._building.static_visual_batches["synthetic-threshold"] = {
+		"material":job._building.material_for_id("timber_beam", 0.0),
+		"transforms":transforms, "customData":custom}
+	job._building.static_visual_transform_count = transforms.size()
+
+func pending_target_reached(job, target: String) -> bool:
+	if job._building == null: return false
+	if target == "static_flush":
+		var flush = job._building._static_flush
+		return flush != null and flush.state == "instances" \
+			and flush._transforms.size() >= job._building.INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT \
+			and flush._instance_index > 0 and flush._instance_index < flush._transforms.size()
+	var paving = job._building._pending_paving
+	if paving == null: return false
+	if target == "paving_geometry":
+		return paving.state == "geometry" and paving._cursor != null \
+			and paving._cursor.status().status == "pending_budget" \
+			and paving._cursor.regular_ids.size() + paving._cursor.worn_ids.size() > 0
+	return paving.state == "upload" and paving._upload != null \
+		and paving._upload.state == "instances" and paving._upload._cursor > 0 \
+		and paving._upload._cursor < paving._upload._transforms.size()
+
+func collision_count_for(job, id: String) -> int:
+	var site: Node3D = job.own_node_root()
+	if site == null: return 0
+	var count := 0
+	for node: Node in site.find_children("*", "CollisionShape3D", true, false):
+		if node.get_meta("building_part_id", "") == id and node.get_meta("building_collision_role", "") == "blocking_part": count += 1
+	return count
+
+func pending_progress(job) -> Dictionary:
+	var publisher = job._building
+	var result := {"parts":publisher.published_part_count, "accepted":publisher.incremental_published_parts,
+		"collisions":publisher.collision_count, "visuals":publisher.visual_batch_count,
+		"cursor":job.status().buildingCursor, "stages":publisher._publication_stage_metrics.duplicate(true)}
+	if publisher._pending_paving != null:
+		var paving = publisher._pending_paving
+		result.pavingState = paving.state
+		if paving._cursor != null: result.geometryUnits = paving._cursor.status().units
+		if paving._upload != null: result.uploadCursor = paving._upload._cursor
+	if publisher._static_flush != null:
+		result.flushState = publisher._static_flush.state
+		result.flushUnits = publisher._static_flush.units
+		result.flushCursor = publisher._static_flush._instance_index
+	return result
+
+func watch_pending_resources(job) -> Dictionary:
+	# Weak references only: this audit must not itself keep Resources alive.
+	var publisher = job._building
+	var watched := {"publisher":weakref(publisher), "unitMesh":weakref(publisher.unit_box)}
+	for key: String in publisher.material_cache:
+		watched["material:" + key] = weakref(publisher.material_cache[key])
+	if publisher._pending_paving != null:
+		var paving = publisher._pending_paving
+		watched.paving = weakref(paving)
+		if paving._cursor != null: watched.geometry = weakref(paving._cursor)
+		if paving._upload != null:
+			watched.upload = weakref(paving._upload)
+			if paving._upload._multi != null: watched.pendingMultiMesh = weakref(paving._upload._multi)
+	if publisher._static_flush != null:
+		watched.flush = weakref(publisher._static_flush)
+		if publisher._static_flush._mesh != null: watched.pendingMultiMesh = weakref(publisher._static_flush._mesh)
+	return watched
+
+func pending_cancellation_case(target: String) -> void:
+	var trees := SyntheticTrees.new()
+	var job = Job.new()
+	start(job, trees, pending_holder(target != "static_flush"))
+	job.advance(1) # Establish real publishers; begin itself consumed no part.
+	if target == "static_flush": inject_synthetic_flush_threshold(job)
+	for index in range(10000):
+		if pending_target_reached(job, target): break
+		job.advance(1)
+		if job.status().status in ["failed", "ready"]: break
+	check(target + "_pending_reached", pending_target_reached(job, target))
+	if not pending_target_reached(job, target):
+		job.cancel()
+		await drain(job, target + "_setup_failed")
+		return
+	var part_id := "flush-trigger" if target == "static_flush" else "pending-paving"
+	var expected_cursor := 1 if target == "static_flush" else 0
+	check(target + "_one_initial_collider", collision_count_for(job, part_id) == 1 and job._building.collision_count == 1)
+	check(target + "_next_part_not_submitted", collision_count_for(job, "after-pending") == 0 and job.status().buildingCursor == expected_cursor)
+	# Retry the same pending cursor several times: neither collision creation nor
+	# source submission is repeated while geometry/upload/flush makes progress.
+	for index in range(6): job.advance(1)
+	check(target + "_retries_do_not_duplicate_collision", collision_count_for(job, part_id) == 1 and job._building.collision_count == 1 and job._building.published_part_count == 1)
+	check(target + "_cursor_stays_pending", pending_target_reached(job, target) and job.status().buildingCursor == expected_cursor)
+	var watched := watch_pending_resources(job)
+	if target != "paving_geometry": check(target + "_allocated_resource_under_test", watched.has("pendingMultiMesh"))
+	var before := var_to_bytes(pending_progress(job))
+	job.cancel()
+	check(target + "_cancel_immediate", job.status().status == "cancelled" and not job.status().sceneReady and not job.status().gameplayReady)
+	var leaf_only := true
+	var ever_ready := false
+	for index in range(10000):
+		if job.status().retirementReady: break
+		# Pure unit control avoids timing-dependent packing: one teardown step
+		# descends or frees one leaf, never recursively frees an owned subtree.
+		var site: Node3D = job.own_node_root()
+		var prior_nodes := site.find_children("*", "", true, false).size() + 1 if site != null else 0
+		var prior_freed: int = job.status().freedNodes
+		job._step(1)
+		site = job.own_node_root()
+		var next_nodes := site.find_children("*", "", true, false).size() + 1 if site != null else 0
+		leaf_only = leaf_only and prior_nodes - next_nodes <= 1 and job.status().freedNodes - prior_freed <= 1
+		ever_ready = ever_ready or job.status().sceneReady
+	check(target + "_leaf_cleanup", leaf_only and job.own_node_root() == null and job.status().retirementReady)
+	check(target + "_no_later_submissions", before == var_to_bytes(pending_progress(job)) and trees.calls == 0)
+	check(target + "_never_ready_after_cancel", not ever_ready and not job.status().sceneReady)
+	var retained := true
+	for reference: WeakRef in watched.values(): retained = retained and reference.get_ref() != null
+	check(target + "_resources_retained_until_handoff", retained)
+	await drain(job, target)
+	await process_frame
+	var released := true
+	for reference: WeakRef in watched.values(): released = released and reference.get_ref() == null
+	check(target + "_resources_released_after_worker_retirement", released)
+
+func pending_completion_control() -> void:
+	var trees := SyntheticTrees.new()
+	var job = Job.new()
+	start(job, trees, pending_holder(true))
+	var pending_observed := false
+	for index in range(10000):
+		job.advance(2500)
+		if job._building != null and job._building._pending_paving != null: pending_observed = true
+		if job.status().status in ["ready", "failed"]: break
+	check("pending_success_observed_and_completed", pending_observed and job.status().sceneReady)
+	check("pending_success_cursor_exact", job.status().buildingCursor == 2 and job._building.published_part_count == 2 and job._building.incremental_published_parts == 2)
+	check("pending_success_collision_exact_once", job._building.collision_count == 2 and collision_count_for(job, "pending-paving") == 1 and collision_count_for(job, "after-pending") == 1)
+	check("pending_success_trees_after_building", trees.calls == 2 and job.status().treeVisualsComplete == 2)
+	job.cancel()
+	await drain(job, "pending_success")
+	check("pending_success_tree_retirement", trees.retired == 2 and trees.retired_ids.values() == [1, 1])
+
 func _run() -> void:
 	parent = Node3D.new()
 	parent.position = Vector3(3, 0, 5)
@@ -237,6 +398,9 @@ func _run() -> void:
 			if job.status().status == "failed": break
 		check("bad_tree_state_" + state, job.status().status == "failed" and not job.status().sceneReady)
 		await drain(job, "bad_tree_" + state)
+	for target: String in ["paving_geometry", "paving_upload", "static_flush"]:
+		await pending_cancellation_case(target)
+	await pending_completion_control()
 	worker.request_shutdown()
 	var deadline := Time.get_ticks_msec() + 5000
 	while not worker.poll().shutdownComplete and Time.get_ticks_msec() < deadline: await process_frame

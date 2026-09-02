@@ -200,7 +200,7 @@ func _step(remaining_usec: int) -> bool:
 			_cpu["buildingPublisher"] = _building
 			if _cancelled: return false
 			var outcome: Dictionary = _building.begin_prepared_publication(_cpu.prepared, _root, _binding,
-				{"batchStaticParts":true, "publicationSiteId":_binding.siteId})
+				{"batchStaticParts":true, "publicationSiteId":_binding.siteId, "resumableScenePublication":true})
 			_cpu["buildingBegin"] = outcome
 			if _cancelled: return false
 			if not bool(outcome.get("ready", false)): return _fail(String(outcome.get("reason", "building_begin_failed")))
@@ -221,20 +221,27 @@ func _step(remaining_usec: int) -> bool:
 			if result.get("status") == "failed": return _fail(String(result.get("reason", "masonry_failed")))
 			if result.get("status") == "ready": _phase = "building"
 		"building":
-			if _building_cursor >= _blueprint.parts.size():
+			if _building.has_pending_static_flush():
+				var flushed: Dictionary = _building.advance_static_flush(_root,clampi(remaining_usec,1,4000))
+				if _cancelled: return false
+				if flushed.status=="failed": return _fail(String(flushed.reason))
+			elif _building_cursor >= _blueprint.parts.size():
 				_phase = "building_finish"
 			else:
-				var next: int = _building.publish_part_batch(_blueprint, _root, _building_cursor, 1)
+				var next: int = _building.publish_part_batch(_blueprint, _root, _building_cursor, 1,clampi(remaining_usec,1,4000))
 				if _cancelled: return false
 				var result: Dictionary = _building.publication_status()
 				if _cancelled: return false
 				if result.get("status") == "failed": return _fail(String(result.get("reason", "building_failed")))
-				if next <= _building_cursor: return _fail("building_cursor_stalled")
+				if next <= _building_cursor:
+					if result.get("status")=="pending_budget": return true
+					return _fail("building_cursor_stalled")
 				_building_cursor = next
 		"building_finish":
-			var result: Dictionary = _building.finish_scene_publication(_blueprint, _root)
+			var result: Dictionary = _building.finish_scene_publication(_blueprint, _root,clampi(remaining_usec,1,4000))
 			_cpu["buildingFinish"] = result
 			if _cancelled: return false
+			if result.get("status")=="pending_budget": return true
 			if not bool(result.get("complete", false)): return _fail(String(result.get("reason", "building_incomplete")))
 			_phase = "furniture_begin"
 		"furniture_begin":

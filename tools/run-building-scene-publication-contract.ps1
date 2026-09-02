@@ -7,6 +7,7 @@ if((Split-Path $run -Parent) -ne (Join-Path $project 'artifacts/citadel-runtime-
 if(Test-Path -LiteralPath $run){throw 'Fresh output required.'}
 New-Item -ItemType Directory -Path $run,(Join-Path $run 'userdata') | Out-Null
 $files=@('scripts/buildings/BuildingPartPublisher.gd','scripts/buildings/FurnishingPublisher.gd','scripts/buildings/BuildingPublicationPreparation.gd','scripts/buildings/BuildingPublicationWorker.gd','scripts/MainPlaytestTools.gd','scripts/environment/TreePublicationQueue.gd','scripts/testing/buildings/BuildingScenePublicationContract.gd','tools/run-building-scene-publication-contract.ps1')
+$files+=@('scripts/buildings/BuildingStaticBatchFlush.gd','scripts/buildings/BuildingMeshBatchUpload.gd','scripts/buildings/BuildingPavingPublication.gd','scripts/buildings/SettledCobbleGeometry.gd')
 if($Phase -eq 'actual'){$files+='scripts/buildings/BuildingScenePublicationJob.gd'}
 $hashes=[ordered]@{}
 foreach($file in $files){$hashes[$file]=(Get-FileHash -LiteralPath (Join-Path $project $file)).Hash.ToLowerInvariant()}

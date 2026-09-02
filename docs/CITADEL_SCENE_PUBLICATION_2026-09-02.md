@@ -73,6 +73,12 @@ owned-process shutdown on engine errors; no process-name kill is used.
   a complete render/metadata fingerprint: 2,703 render nodes, 128 unique meshes.
   `render-baseline.json` records native geometry arrays, transforms, instance
   buffers and material properties; this is a comparison artifact, not a screenshot.
+  **Correction discovered during incremental-flush tests:** the headless dummy
+  renderer returns empty MultiMesh buffers and placeholder instance getters.
+  These baseline files therefore prove mesh-resource arrays, scene-node transforms,
+  material properties and instance counts, NOT actual per-instance GPU transforms
+  or custom data. Native renderer validation remains mandatory before visual
+  acceptance. The earlier description of instance-buffer coverage was too broad.
   Audit/hash work is deliberately outside scene-publication slice measurements.
   Publication elapsed 16.676 seconds; paving maximum 235.782 ms, metadata maximum
   102.508 ms, masonry setup 10.744 ms and history setup 4.510 ms. Budgets still fail.

@@ -10,6 +10,9 @@ const SurfaceHistoryFieldScript := preload("res://scripts/buildings/SurfaceHisto
 # Existing review consumers access this public constant directly.
 const CastleCompoundBlueprintBuilderScript := preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const PublicationPreparation := preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
+const StaticBatchFlush := preload("res://scripts/buildings/BuildingStaticBatchFlush.gd")
+const MeshBatchUpload := preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
+const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublication.gd")
 const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const SettledCobbleGeometryScript := preload("res://scripts/buildings/SettledCobbleGeometry.gd")
@@ -64,6 +67,19 @@ var _paving_complete := false
 var _masonry_preparation
 var _scene_finalized := false
 var _publication_stage_metrics: Dictionary = {}
+var _static_flush
+var _static_flush_notify := false
+var _publication_retirement: Array = []
+var resumable_scene_publication := false
+var _finish_validated := false
+var _pending_paving
+var _pending_part_index := -1
+var _scene_blueprint
+var _scene_parent: WeakRef
+var _paving_history_snapshot
+var _paving_history_source
+var _paving_history_source_bytes := PackedByteArray()
+var _completed_paving: Array = []
 
 
 func _init() -> void:
@@ -77,7 +93,10 @@ func publish(blueprint, parent: Node3D, options: Dictionary = {}) -> Dictionary:
 	while _masonry_preparation.state == "pending_budget":
 		_masonry_preparation.advance(self)
 	if _masonry_preparation.state != "ready": return summary()
-	publish_part_batch(blueprint, parent, 0, blueprint.parts.size())
+	var cursor := 0
+	while cursor < blueprint.parts.size():
+		cursor=publish_part_batch(blueprint,parent,cursor,blueprint.parts.size())
+		if _publication_failed(): return summary()
 	return finish_publication(blueprint, parent)
 
 
@@ -113,7 +132,7 @@ func begin_publication(blueprint, parent: Node3D, options: Dictionary = {}) -> b
 	physical_integrity = prepared.physicalIntegrity
 	diagnostic_preparation_usec = prepared.preparationUsec
 	var started := Time.get_ticks_usec()
-	var ready := _begin_scene_publication(blueprint, options)
+	var ready := _begin_scene_publication(blueprint, options, parent)
 	scene_preparation_usec = Time.get_ticks_usec() - started
 	return ready
 
@@ -133,7 +152,7 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 	physical_integrity = source.physicalIntegrity
 	diagnostic_preparation_usec = source.preparationUsec
 	var started := Time.get_ticks_usec()
-	var ready := _begin_scene_publication(source.blueprint, options)
+	var ready := _begin_scene_publication(source.blueprint, options, parent)
 	scene_preparation_usec = Time.get_ticks_usec() - started
 	if not ready:
 		# Return ownership for retirement/retry; do not destroy the large source
@@ -148,6 +167,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	# begin creates no scene nodes. Transfer its CPU/resource state without
 	# clearing aliased containers or retaining the failed blueprint in publisher.
 	var state := {"physicalIntegrity":physical_integrity, "raisedRouteCoverage":raised_route_coverage,
+		"sceneBlueprint":_scene_blueprint,
 		"pavingBlueprint":_paving_blueprint, "pavingParts":_paving_source_parts,
 		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
 		"pavingHistoryBinding":_paving_history_binding, "pavingTreatments":paving_treatments,
@@ -155,6 +175,8 @@ func _detach_preparation_for_retirement() -> Dictionary:
 		"progressCallback":incremental_progress_callback}
 	physical_integrity = {}
 	raised_route_coverage = {}
+	_scene_blueprint=null
+	_scene_parent=null
 	_paving_blueprint = null
 	_paving_source_parts = {}
 	_paving_artifacts = {}
@@ -168,7 +190,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	return state
 
 
-func _begin_scene_publication(blueprint, options: Dictionary) -> bool:
+func _begin_scene_publication(blueprint, options: Dictionary, parent: Node3D) -> bool:
 	# Citadel route-publication requirements are retired on this visuals branch.
 	# Keep the real diagnostic (including failures) without making it a renderer
 	# prerequisite. Physical integrity is temporarily diagnostic-only by request.
@@ -176,6 +198,8 @@ func _begin_scene_publication(blueprint, options: Dictionary) -> bool:
 		push_error("Building publication blocked by invalid physical recipe: %s" % JSON.stringify(physical_integrity.get("violations", [])))
 		return false
 	configure_publication_options(options)
+	_scene_blueprint=blueprint
+	_scene_parent=weakref(parent)
 	incremental_total_parts = blueprint.parts.size()
 	incremental_published_parts = 0
 	incremental_static_flush_count = 0
@@ -196,9 +220,32 @@ func _begin_scene_publication(blueprint, options: Dictionary) -> bool:
 	return true
 
 
-func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: int) -> int:
+func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: int, budget_usec := 2500) -> int:
 	if blueprint == null or parent == null:
 		return start_index
+	if not _scene_owner_matches(blueprint,parent):
+		_paving_reject("scene_publication_owner_mismatch")
+		return start_index
+	if _pending_paving!=null:
+		if start_index!=_pending_part_index or start_index>=blueprint.parts.size() or blueprint.parts[start_index]!=_pending_paving.source_part():
+			_paving_reject("pending_part_cursor_mismatch")
+			return start_index
+		var pending: Dictionary = _pending_paving.advance(self,budget_usec)
+		if pending.status=="failed":
+			_paving_reject(String(pending.reason))
+			return start_index
+		if pending.status!="ready": return start_index
+		_publication_retirement.append(_pending_paving)
+		_completed_paving.append({"job":_pending_paving,"index":start_index})
+		_pending_paving=null
+		_pending_part_index=-1
+		incremental_published_parts+=1
+		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT: _begin_static_flush(parent,true)
+		return start_index+1
+	if has_pending_static_flush():
+		advance_static_flush(parent)
+		if has_pending_static_flush() or _publication_failed(): return start_index
+	_finish_validated = false
 	var validation_started := Time.get_ticks_usec()
 	var paving_valid := _paving_session_valid(blueprint)
 	_record_publication_stage("paving_revalidation",Time.get_ticks_usec()-validation_started)
@@ -217,31 +264,56 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 			continue
 		publish_part(part, parent)
 		if _publication_failed(): return part_index - 1
+		if _pending_paving!=null:
+			_pending_part_index=part_index-1
+			return _pending_part_index
 		incremental_published_parts += 1
 		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT:
-			flush_static_batches(parent)
-			report_incremental_progress("static_batch_flush")
+			if resumable_scene_publication:
+				_begin_static_flush(parent,true)
+				break
+			else:
+				flush_static_batches(parent)
+				report_incremental_progress("static_batch_flush")
 	return part_index
 
 
 func finish_publication(blueprint, parent: Node3D) -> Dictionary:
-	finish_scene_publication(blueprint,parent)
+	var result := finish_scene_publication(blueprint,parent)
+	# Only drain an actual in-flight flush here. Pending masonry/parts require
+	# their own advance calls; repeatedly asking finish cannot make them progress.
+	while result.get("status")=="pending_budget" and has_pending_static_flush(): result=finish_scene_publication(blueprint,parent)
 	return summary()
 
 
 ## Runtime orchestration uses bounded status, not summary()'s full copied proof
 ## reports. Compatibility callers still receive that historical full summary.
-func finish_scene_publication(blueprint, parent: Node3D) -> Dictionary:
+func finish_scene_publication(blueprint, parent: Node3D, budget_usec := 2500) -> Dictionary:
 	if blueprint == null or parent == null:
 		return {"status":"failed","reason":"invalid_scene_publication_request","complete":false}
-	if not _paving_session_valid(blueprint): return publication_status()
-	if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return publication_status()
-	flush_static_batches(parent)
+	if not _scene_owner_matches(blueprint,parent):
+		_paving_reject("scene_publication_owner_mismatch")
+		return publication_status()
+	if _pending_paving!=null: return {"status":"pending_budget","reason":"part_publication_pending","complete":false}
+	if not _finish_validated:
+		if not _paving_session_valid(blueprint): return publication_status()
+		if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return publication_status()
+		_finish_validated = true
+	if resumable_scene_publication:
+		if _static_flush==null and not static_visual_batches.is_empty(): _begin_static_flush(parent,false)
+		var result := advance_static_flush(parent,budget_usec)
+		if result.status!="ready": return {"status":result.status,"reason":result.get("reason",""),"complete":false}
+	else:
+		flush_static_batches(parent)
+	# Mutable legacy callers can change a source while finalization yields.
+	# Recheck at the commit boundary, not once per metadata-copy slice.
+	if not validate_static_flush_source(): return publication_status()
 	report_incremental_progress("complete")
 	publication_usec = Time.get_ticks_usec() - active_publication_started_usec if active_publication_started_usec > 0 else 0
 	active_publication_started_usec = 0
 	_paving_complete = incremental_published_parts == incremental_total_parts
 	_scene_finalized = _paving_complete
+	_finish_validated = false
 	return publication_status()
 
 
@@ -258,12 +330,24 @@ func publication_status() -> Dictionary:
 	if reason.is_empty() and _masonry_preparation != null: reason = _masonry_preparation.reason
 	if reason.is_empty() and _masonry_preparation == null: reason = "scene_publication_not_started"
 	var state := "failed" if not reason.is_empty() else ("pending_budget" if _masonry_preparation.state == "pending_budget" else "ready")
+	if state=="ready" and (_pending_paving!=null or _static_flush!=null): state="pending_budget"
 	return {"status":state,"reason":reason,"complete":_scene_finalized and state=="ready",
 		"publishedPartCount":incremental_published_parts,"totalParts":incremental_total_parts,
 		"collisionPartCount":collision_count,"visualBatchCount":visual_batch_count}
 
 
 func clear_published() -> void:
+	_paving_history_snapshot=null
+	_paving_history_source=null
+	_paving_history_source_bytes=PackedByteArray()
+	_completed_paving=[]
+	_scene_blueprint=null
+	_scene_parent=null
+	_pending_paving=null
+	_pending_part_index=-1
+	_static_flush = null
+	_publication_retirement = []
+	_finish_validated = false
 	_scene_finalized = false
 	_publication_stage_metrics = {}
 	for node in published_nodes:
@@ -311,6 +395,7 @@ func clear_published() -> void:
 
 func configure_publication_options(options: Dictionary) -> void:
 	batch_static_parts = bool(options.get("batchStaticParts", false))
+	resumable_scene_publication = bool(options.get("resumableScenePublication",false))
 	publication_site_id = String(options.get("publicationSiteId", ""))
 	var callback_value = options.get("progressCallback")
 	incremental_progress_callback = callback_value as Callable if callback_value is Callable else Callable()
@@ -719,6 +804,9 @@ func publish_settled_cobble(part, parent: Node3D) -> void:
 	if not _paving_part_valid(part): return
 	if part.recipe.has("pavingFootingJoints"):
 		_publish_jointed_paving(part, parent)
+		return
+	if resumable_scene_publication:
+		_pending_paving=PavingPublication.new(part,parent,static_visual_part_transform,static_visual_collecting,source_blueprint_id)
 		return
 	var geometry: Dictionary = SettledCobbleGeometryScript.describe_source(part, surface_history, source_blueprint_id)
 	var bed: Dictionary = geometry.bed
@@ -1447,15 +1535,14 @@ func add_box_batch(parent: Node3D, transforms: Array, material: Material, node_n
 			if transform_value is Transform3D:
 				collect_static_visual_transform(static_visual_part_transform * (transform_value as Transform3D), material, custom_data[index] as Color)
 		return null
-	var multi_mesh := MultiMesh.new()
+	var multi_mesh := create_mesh_batch()
 	multi_mesh.transform_format = MultiMesh.TRANSFORM_3D
 	multi_mesh.use_custom_data = true
 	multi_mesh.instance_count = transforms.size()
 	multi_mesh.mesh = unit_box
 	for index in range(transforms.size()):
 		var instance_transform := transforms[index] as Transform3D
-		multi_mesh.set_instance_transform(index, instance_transform)
-		multi_mesh.set_instance_custom_data(index, custom_data[index] as Color)
+		submit_mesh_batch_instance(multi_mesh,index,instance_transform,custom_data[index] as Color)
 	var instance := MultiMeshInstance3D.new()
 	instance.name = node_name
 	instance.multimesh = multi_mesh
@@ -1464,33 +1551,25 @@ func add_box_batch(parent: Node3D, transforms: Array, material: Material, node_n
 	parent.add_child(instance)
 	visual_batch_count += 1
 	return instance
+
+
+func create_mesh_batch() -> MultiMesh:
+	return MultiMesh.new()
+
+
+func submit_mesh_batch_instance(mesh: MultiMesh, index: int, transform: Transform3D, custom: Color) -> void:
+	mesh.set_instance_transform(index,transform)
+	mesh.set_instance_custom_data(index,custom)
 
 
 func add_mesh_batch(parent: Node3D, mesh: Mesh, transforms: Array, material: Material, node_name: String, custom_data_override: Array = []) -> MultiMeshInstance3D:
 	if transforms.is_empty() or mesh == null:
 		return null
 	var custom_data := custom_data_override if custom_data_override.size() == transforms.size() else build_batch_custom_data(transforms)
-	var multi_mesh := MultiMesh.new()
-	multi_mesh.transform_format = MultiMesh.TRANSFORM_3D
-	multi_mesh.use_custom_data = true
-	multi_mesh.instance_count = transforms.size()
-	multi_mesh.mesh = mesh
-	for index in range(transforms.size()):
-		var instance_transform := transforms[index] as Transform3D
-		if static_visual_collecting:
-			instance_transform = static_visual_part_transform * instance_transform
-		multi_mesh.set_instance_transform(index, instance_transform)
-		multi_mesh.set_instance_custom_data(index, custom_data[index] as Color)
-	var instance := MultiMeshInstance3D.new()
-	instance.name = node_name
-	instance.multimesh = multi_mesh
-	instance.material_override = material
-	instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-	parent.add_child(instance)
-	if static_visual_collecting:
-		published_nodes.append(instance)
-	visual_batch_count += 1
-	return instance
+	var upload := MeshBatchUpload.new(mesh,transforms,custom_data,material,node_name,parent,static_visual_part_transform,static_visual_collecting)
+	while upload.state not in ["ready","failed"]: upload.advance(self)
+	if upload.state=="failed": _paving_reject(upload.reason)
+	return upload.result()
 
 
 func build_batch_custom_data(transforms: Array) -> Array[Color]:
@@ -1546,27 +1625,88 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
 
 
 func flush_static_batches(parent: Node3D) -> void:
-	if static_visual_batches.is_empty() or parent == null:
-		return
-	var keys := static_visual_batches.keys()
-	keys.sort()
-	var render_started := Time.get_ticks_usec()
-	for key_value in keys:
-		var group: Dictionary = static_visual_batches.get(key_value, {}) as Dictionary
-		var transforms: Array = group.get("transforms", []) as Array
-		var custom_data_values: Array = group.get("customData", []) as Array
-		var material := group.get("material") as Material
-		var instance := add_box_batch(parent, transforms, material, "ConstructionStaticVisualBatch", custom_data_values)
-		if instance != null:
-			published_nodes.append(instance)
-	_record_publication_stage("flush_render",Time.get_ticks_usec()-render_started)
-	var metadata_started := Time.get_ticks_usec()
-	if static_collision_body != null and is_instance_valid(static_collision_body):
-		static_collision_body.set_meta("building_part_records", static_part_records.duplicate(true))
-	_record_publication_stage("flush_metadata",Time.get_ticks_usec()-metadata_started)
-	static_visual_batches.clear()
-	static_visual_transform_count = 0
-	incremental_static_flush_count += 1
+	if _static_flush==null: _begin_static_flush(parent,false)
+	while has_pending_static_flush():
+		if advance_static_flush(parent).status=="failed": break
+
+
+func _begin_static_flush(parent: Node3D, notify_progress: bool) -> void:
+	if _static_flush!=null or static_visual_batches.is_empty() or parent==null: return
+	_static_flush = StaticBatchFlush.new()
+	_static_flush_notify = notify_progress
+	_static_flush.begin(static_visual_batches,static_part_records,parent)
+
+
+func has_pending_static_flush() -> bool:
+	return _static_flush!=null
+
+
+func _scene_owner_matches(blueprint, parent: Node3D) -> bool:
+	return blueprint==_scene_blueprint and _scene_parent!=null and _scene_parent.get_ref()==parent
+
+
+func validate_static_flush_source() -> bool:
+	if _publication_failed(): return false
+	if _scene_blueprint!=null and not _paving_session_valid(_scene_blueprint): return false
+	if _masonry_preparation!=null and not _masonry_preparation._validate_all(self): return false
+	if not validate_paving_history_source(): return false
+	for completed in _completed_paving:
+		if _scene_blueprint==null or completed.index>=_scene_blueprint.parts.size() or _scene_blueprint.parts[completed.index]!=completed.job.source_part() or not completed.job.source_valid(self): return _paving_reject("stale_completed_paving_source")
+	return true
+
+
+func prepare_paving_history_snapshot():
+	if _paving_history_snapshot!=null: return _paving_history_snapshot
+	# Once per exclusively owned publication session, never once per stone or
+	# slice. Standalone edits to public history invalidate at publication commits;
+	# they do not rewrite history underneath an in-flight cursor.
+	var started:=Time.get_ticks_usec()
+	_paving_history_source=surface_history
+	_paving_history_source_bytes=_paving_history_identity()
+	var snapshot:=SurfaceHistoryFieldScript.new()
+	snapshot.route_corridors=surface_history.route_corridors.duplicate(true)
+	snapshot.tree_placements=surface_history.tree_placements.duplicate(true)
+	snapshot.history_events=surface_history.history_events.duplicate(true)
+	snapshot.history_event_cells=surface_history.history_event_cells.duplicate(true)
+	for value in [snapshot.route_corridors,snapshot.tree_placements,snapshot.history_events,snapshot.history_event_cells]: _freeze_publication_value(value)
+	_paving_history_snapshot=snapshot
+	_record_publication_stage("paving_history_snapshot",Time.get_ticks_usec()-started)
+	return snapshot
+
+
+static func _freeze_publication_value(value: Variant) -> void:
+	if value is Dictionary:
+		for key in value: _freeze_publication_value(value[key])
+		value.make_read_only()
+	elif value is Array:
+		for item in value: _freeze_publication_value(item)
+		value.make_read_only()
+
+
+func validate_paving_history_source() -> bool:
+	if _paving_history_snapshot==null: return true
+	var started:=Time.get_ticks_usec()
+	var valid: bool = surface_history==_paving_history_source and _paving_history_source_bytes==_paving_history_identity()
+	_record_publication_stage("paving_history_boundary_validation",Time.get_ticks_usec()-started)
+	return true if valid else _paving_reject("stale_paving_history")
+
+
+func advance_static_flush(parent: Node3D, budget_usec := 2500) -> Dictionary:
+	if parent==null: return {"status":"failed","reason":"static_flush_parent_lost"}
+	if _static_flush==null: return {"status":"ready","reason":""}
+	if _static_flush._parent.get_ref()!=parent:
+		_paving_reject("static_flush_parent_mismatch")
+		return {"status":"failed","reason":"static_flush_parent_mismatch"}
+	var result: Dictionary = _static_flush.advance(self,budget_usec)
+	if result.status=="failed": _paving_reject(String(result.reason))
+	if result.status in ["ready","failed"]:
+		# Keep old deep metadata and consumed arrays out of main-thread release.
+		_publication_retirement.append(_static_flush)
+		_static_flush = null
+		var notify := _static_flush_notify
+		_static_flush_notify = false
+		if result.status=="ready" and notify: report_incremental_progress("static_batch_flush")
+	return result
 
 
 func _record_publication_stage(stage: String, usec: int, detail := "") -> void:

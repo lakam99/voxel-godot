@@ -68,6 +68,16 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The incremental paving/mesh/metadata follow-up is implemented and functionally
+verified; see `CITADEL_INCREMENTAL_SCENE_PUBLICATION_2026-09-02.md`. Geometry
+parity passes 910 checks, ownership/submission controls 62, cancellation controls
+117 and final actual construction 61. Available scene facts match the prior
+baseline; headless MultiMesh readback cannot prove GPU instance fidelity.
+The large paving/copy units are split, but full construction is slower (49.994 s)
+and wall/masonry/commit stalls remain. This is not a full performance pass or
+ordinary activation. Reducing repeated metadata copying/retention and bounding
+the remaining wall/validation work are the next measured performance tasks.
+
 The real building/furnishing publishers and shared tree queue now construct the
 complete accepted source through a cancellable scene job in a headless diagnostic.
 See `CITADEL_SCENE_PUBLICATION_2026-09-02.md`: final tiny controls pass 65/65 and

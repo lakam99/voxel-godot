@@ -128,6 +128,7 @@ func actual_publication() -> void:
 	metrics.sceneElapsedUsec = Time.get_ticks_usec()-scene_started
 	metrics.publication = status
 	metrics.publisherStages = job._building.publication_timing() if job._building!=null else {}
+	metrics.retainedMetadata=measure_retained_metadata(job._building)
 	var unit_resource: WeakRef = weakref(job._building.unit_box) if job._building!=null else null
 	var material_resource: WeakRef = weakref(job._building.material_cache.values()[0]) if job._building!=null and not job._building.material_cache.is_empty() else null
 	check("actual_scene_ready",status.sceneReady)
@@ -172,6 +173,21 @@ func actual_publication() -> void:
 		check("actual_tree_queue_drained",metrics.treeQueue.pending==0 and metrics.treeQueue.activeWorkers==0 and metrics.treeQueue.completed==0)
 	main.free()
 	await process_frame
+
+func measure_retained_metadata(publisher) -> Dictionary:
+	# Keep observation aliases in a separate call frame: a for-loop iterator can
+	# retain the entire retirement array across later awaits in the caller.
+	# These are encoded bytes, not allocator/driver resident-memory measurements.
+	var prefixes:=0
+	var records:=0
+	var bytes:=0
+	if publisher!=null:
+		for value in publisher._publication_retirement:
+			if value is Dictionary and not value.is_empty():
+				var first: Variant = value.values()[0]
+				if first is Dictionary and first.has("recipe") and first.has("id"):
+					prefixes+=1; records+=value.size(); bytes+=var_to_bytes(value).size()
+	return {"prefixes":prefixes,"records":records,"encodedBytes":bytes,"notHeapMemory":true}
 
 func audit_scene(job) -> void:
 	# Exhaustive test-only scene inspection is outside job slice measurements.
