@@ -59,3 +59,180 @@ and avoid neighbours/access/civic props before dependent rooms, doors and
 furniture are generated. Connection admission and terminal physical validation
 must remain unchanged. No production placement change or successful spawn is
 claimed by this diagnostic checkpoint. No headed retry is approved.
+
+## Bounded placement work (not source acceptance)
+
+Diagnostic checkpoint committed as `fdbb46a`. The reusable fixed-X infill helper
+and its contract were independently reviewed and committed as `dfc5a27`.
+
+```powershell
+./tools/run-building-contract.ps1 -Contract BoundaryInfillPlacementContract.gd -OutputDirectory artifacts/citadel-runtime-integration/boundary-infill-02 -ReportEnvironment BOUNDARY_INFILL_REPORT -TimeoutSeconds 30
+./tools/run-building-contract.ps1 -Contract CivicRecipeGeometryContract.gd -OutputDirectory artifacts/citadel-runtime-integration/candidate-civic-infill-controls-02 -ReportEnvironment VOXEL_CITADEL_CIVIC_RECIPE_REPORT -TimeoutSeconds 30
+./tools/run-building-contract.ps1 -Contract CivicHouseInfillContract.gd -OutputDirectory artifacts/citadel-runtime-integration/civic-house-infill-01 -ReportEnvironment CITADEL_CIVIC_INFILL_OUTPUT -TimeoutSeconds 30
+```
+
+- Helper:361/361, clean logs, natural0, owned zero. Critic found a float32
+  endpoint-rounding defect in the initial326-pass version. The regression now
+  selects the adjacent legal Z0.2999999821 rather than the distant0.6 placement,
+  retaining strict domain and obstacle checks. This is bounded fixed-X search,
+  not a global two-dimensional packing proof.
+- Existing standalone civic producer:23/23, clean logs, natural0, owned zero.
+  Its unchanged geometry does not prove the new enclosure-aware placement.
+- Candidate B actual-producer subset:12/13,187899us, natural1, empty stderr,
+  unchanged measured sources, owned zero. The first civic house fails
+  `civic_infill_search_failed -> no_clear_fixed_x_placement` after5 candidates.
+  This is an honest geometric rejection, not a crash or successful source.
+  The sampled compound and curtain exactly match diagnostic03. Full castle,
+  structural completion, terminal clearance and gameplay are not proven.
+
+The uncommitted integration preserves each complete house's producer, rebuilding
+its room/door/structural declarations at the resolved position. Independent
+later producers are previewed as obstacles; trees, roof frames and furnishings
+still run from the actual resolved source. A terminal external-envelope audit
+includes actual later parts, own furnishing extents, foreign furnishings,
+access and tree footprints. Ownerless protected reservations receive no
+own-house exemption. This intentionally conservative audit does not replace
+physical proof or claim correctness of same-house furniture arrangements.
+The integration is not accepted while the actual candidate fit is rejected.
+
+## Actual producer fit recovered
+
+The fixed-X rejection was real for that column, but not a global impossibility.
+`civic-house-infill-02` identified two roughly7m Z windows versus a13.2m house.
+The full source-derived X endpoint diagnostic (`civic-house-infill-2d-03`)
+found a two-house arrangement in the same domain, without moving the service
+yard, removing objects, changing dimensions or enlarging paving. Earlier
+64-endpoint sampling did not prove that no placement existed.
+
+The generic column search is committed as `1ede03a`, after independent critic
+approval and `boundary-infill-columns-03`:550/550, clean natural0/owned zero.
+It orders finite geometry-derived columns by X displacement, then X; each
+column selects nearest Z. It is not global 2D distance minimization. The initial
+actual WALL search reached its work cap. Conservative whole-domain/fixed-Y
+obstacle filtering eliminated irrelevant repeated work without raising the
+cap; every original obstacle is still validated and checked at final output.
+
+Actual rebuilding then exposed a distinct recipe issue: roof rise depended on
+the relocated center, altering height by8.37cm in `civic-house-infill-05`.
+Civic design now samples the original roof-rise formula once at the seeded
+design center and carries that finite sample through placement. Other street
+and perimeter callers retain the original default formula. No clearance,
+connection-admission or physical-proof threshold was weakened.
+
+```powershell
+./tools/run-building-contract.ps1 -Contract BoundaryInfillPlacementContract.gd -OutputDirectory artifacts/citadel-runtime-integration/boundary-infill-columns-03 -ReportEnvironment BOUNDARY_INFILL_REPORT -TimeoutSeconds 30
+./tools/run-building-contract.ps1 -Contract CivicHouseInfillContract.gd -OutputDirectory artifacts/citadel-runtime-integration/civic-house-infill-07 -ReportEnvironment CITADEL_CIVIC_INFILL_OUTPUT -TimeoutSeconds 30
+./tools/run-building-contract.ps1 -Contract CivicRecipeGeometryContract.gd -OutputDirectory artifacts/citadel-runtime-integration/candidate-civic-infill-controls-04 -ReportEnvironment VOXEL_CITADEL_CIVIC_RECIPE_REPORT -TimeoutSeconds 30
+```
+
+`civic-house-infill-07`:102/102 in3.390247s, clean logs, natural0, owned zero,
+unchanged measured sources. Both actual regenerated houses fit, with roof and
+chimney dimensions, rotations and Y positions exactly matching the frozen
+original. Cancellation and negative late foreign-part, furniture, access,
+protected-volume, canopy and root controls pass. The terminal subset contains
+2,016 parts,114 real furnishings and1 tree from the ordinary shared recipe path.
+Standalone civic controls04 also pass23/23 after roof-design extraction.
+
+This subset still excludes the complete castle source and later shop/structural
+completion. It is not full-recipe, physical-proof, runtime/performance, or live
+spawn acceptance. The complete public Recipe gate and any later headed run
+still require separate critic readiness review. Run06's fixture property-name
+error was immediately stopped with owned-zero cleanup; it is not pass evidence.
+
+## Full-source gate07 and real courtyard-floor correction
+
+Expanded guards in `civic-house-infill-08` passed161/161 in3.916636s,
+including byte-exact comparison of all139 standalone civic part records and
+all rooms against diagnostic03. The critic then approved the bounded public
+Recipe run below; that permission was not a success or headed acceptance.
+
+```powershell
+./tools/run-citadel-candidate-recipe-diagnostic.ps1 -OutputDirectory artifacts/citadel-runtime-integration/candidate-recipe-07 -ExpectReady -CandidateRegion '-1,0' -ExpectedRecipeSeed 541151883 -Seed atlas-30895044
+```
+
+Gate07 **failed**, cleanly and within its unchanged deadline. Recipe elapsed
+160.287827s; context and all measured sources unchanged; no engine error,
+timeout or cancellation; natural1 and authoritative owned zero. No independent
+physical proof ran. EAST hit `column_work_limit_exceeded` after239 columns,
+717 candidates, with3,878 source obstacles and460 relevant obstacles. Failure
+BIN SHA256: `b21cb74bddcfe12278d7119e6acaaac407882e2fe9a5d3ddcd38e444a3767b5a`.
+
+The new collector was wrong about the existing floor producer. It recognized
+the old unsplit courtyard IDs, but the real castle emits canonical indexed
+`castle_compound_foundation_segment_*` and `castle_compound_paving_segment_*`
+records after carving entry/egress exclusions. Compatible floor slabs were
+therefore treated as blocking structures. This was a collector defect, not a
+reason to change the shared floor generator or increase the work budget.
+
+The correction recognizes canonical indexed producer IDs together with exact
+semantics, material, collision, egress/root/family/navigation-role tags, rotation,
+height and thickness. Other foundations/decorations remain obstacles; room and
+protected access handling is unchanged. No broad semantic-name exemption.
+
+`civic-house-infill-11` now calls the actual segmented-base producer:4 foundation
+and4 paving records with1 actual keep-entry exclusion. Residence cuts remain
+explicitly omitted in this subset.189/189 checks pass in4.782275s, including
+forged-ID/missing-egress/wrong-height controls, synthetic carving, the terminal
+subset with4 actual tree records, and139-record archive parity. Clean logs,
+natural0, unchanged sources and owned zero. The initial fixture09 and production
+typing10 parse failures were repaired; they are retained as failures, not passes.
+
+The complete public source still requires another critic-approved run; no
+successful spawn, full physical proof or headed acceptance follows from11.
+
+## Full-source gate08: still rejected
+
+```powershell
+./tools/run-citadel-candidate-recipe-diagnostic.ps1 -OutputDirectory artifacts/citadel-runtime-integration/candidate-recipe-08 -ExpectReady -CandidateRegion '-1,0' -ExpectedRecipeSeed 541151883 -Seed atlas-30895044
+```
+
+The separately critic-approved repeat also **failed** before physical proof.
+Recipe202.697158s; natural1, forced cleanup false, no engine errors, no timeout
+or cancellation, owned zero and unchanged source hashes/context. Failure BIN:
+`dc45aad8c6305b2a3c08f24cc53b0dc213a69fd26115ffd7aa9af2801eb91164`.
+EAST hit the unchanged work limit after264 columns/792 candidates. The corrected
+collector sees3,729 source/416 relevant obstacles, versus3,878/460 in07. The
+real floor mismatch is repaired, but that does not establish feasibility
+against the rest of the complete castle.
+
+Do not keep repeating long success-gate runs based on the smaller fixture or
+raise the work cap to call this green. The next bounded chunk needs exact failed
+caller/obstacle input capture, then cheap replay that names the remaining
+geometric blockers and measures the finite search. The existing failed-caller
+capture is diagnostic-only and must remain distinct from public-source success.
+No headed run or integration-completion commit is approved. The committed
+teleport runner remains available; the unfinished production integration and
+its expanded source tests remain uncommitted pending this gate.
+
+## Exact failed-caller capture and replay boundary
+
+The critic approved one headless `candidate-recipe-09 -CaptureBlueprint` run
+for B, using the existing450s source/540s outer measurement ceilings. This
+does not change production limits, the placement work cap, or headed approval.
+The capture path retains the typed Builder/Composer caller after failure and
+the exact candidate input; it does not invoke independent physical validation.
+`captureCompleted` is independent of `passed=false` and `recipePassed=false`.
+All engine warnings/errors stop this capture immediately. The wrapper's five
+synthetic watcher controls passed in `candidate-recipe-watcher-02`; these are
+process-watcher tests, not recipe or live-gameplay evidence.
+
+The next replay must reconstruct the exact failed East preparation inputs from
+that caller through the unchanged production preparation path. It must first
+reproduce08's failure/counts before testing any solver change. Capturing the
+upstream blueprint alone is not proof of exact placement-call equivalence.
+
+Capture09 completed in157.055108s, with false recipe/pass claims, unchanged
+context and755 audited source files, empty engine errors, natural0, no timeout
+or forced cleanup, and authoritative owned zero. The full failure BIN is
+byte-identical to08 (`dc45aad8c6305b2a3c08f24cc53b0dc213a69fd26115ffd7aa9af2801eb91164`),
+including264 columns/792 candidates and the same seven search fields. The typed
+caller SHA256 is `57ab941d9e714bb91415ee28b59efcbe8fde1b5c65699401c9df9178a561db12`.
+Command:
+
+```powershell
+./tools/run-citadel-candidate-recipe-diagnostic.ps1 -OutputDirectory artifacts/citadel-runtime-integration/candidate-recipe-09 -CaptureBlueprint -CandidateRegion '-1,0' -ExpectedRecipeSeed 541151883 -Seed atlas-30895044
+```
+
+Artifacts: `candidate-recipe-09/report.json`, `progress.json`, `timings.json`,
+`input.bin`, `caller-blueprint.bin`, `failure.bin`, `source-hash-audit.json`,
+and `watchdog.json`. No screenshots or gameplay claims apply to this capture.

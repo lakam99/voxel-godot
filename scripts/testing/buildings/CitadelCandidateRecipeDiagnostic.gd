@@ -97,6 +97,7 @@ var output := ""
 var state := Progress.new()
 var expect_ready := false
 var capture_failure := false
+var capture_blueprint := false
 
 func _initialize() -> void: call_deferred("_run")
 
@@ -105,6 +106,7 @@ func _run() -> void:
 	if output.is_empty() or not output.is_absolute_path(): push_error("Missing diagnostic output"); quit(2); return
 	expect_ready=OS.get_environment("CITADEL_CANDIDATE_EXPECT_READY")=="1"
 	capture_failure=OS.get_environment("CITADEL_CANDIDATE_CAPTURE_FAILURE")=="1"
+	capture_blueprint=OS.get_environment("CITADEL_CANDIDATE_CAPTURE_BLUEPRINT")=="1"
 	if capture_failure and (expect_ready or OS.get_environment("CITADEL_CANDIDATE_CAPTURE_BLUEPRINT")=="1"):
 		push_error("CaptureFailure requires only public failure replay"); quit(2); return
 	var selected_seed := OS.get_environment("CITADEL_CANDIDATE_RECIPE_SEED")
@@ -124,7 +126,7 @@ func _run() -> void:
 			push_error("Invalid expected recipe seed"); quit(2); return
 		expected_recipe=int(selected_recipe)
 	if expect_ready and OS.get_environment("CITADEL_CANDIDATE_CAPTURE_BLUEPRINT")=="1": push_error("ExpectReady requires public Recipe entry"); quit(2); return
-	state.started=Time.get_ticks_msec(); state.deadline=state.started+(450000 if expect_ready or capture_failure else 150000)
+	state.started=Time.get_ticks_msec(); state.deadline=state.started+(450000 if expect_ready or capture_failure or capture_blueprint else 150000)
 	state.begin_phase("source_preparation")
 	var worker := Thread.new()
 	if worker.start(_work)!=OK: push_error("Diagnostic worker start failed"); quit(2); return
@@ -141,6 +143,8 @@ func _run() -> void:
 	var expected: bool=receipt.get("reason")=="citadel_structural_completion_failed" and receipt.get("structuralReason")=="facade_completion_failed" and receipt.get("artifactsWritten",false)
 	var recipe_passed: bool=receipt.get("recipePassed",false)
 	var verified: bool=(recipe_passed and receipt.get("physicalPassed",false) and receipt.get("artifactsWritten",false) and receipt.get("contextUnchanged",false) and not timing.cancelled) if expect_ready else expected and not timing.cancelled and receipt.get("contextUnchanged",false)
+	var capture_completed: bool=capture_blueprint and not recipe_passed and receipt.get("callerBlueprintCaptured",false) and receipt.get("artifactsWritten",false) and receipt.get("sourceWithinDeadline",false) and receipt.get("contextUnchanged",false) and not timing.cancelled
+	if capture_blueprint: verified=capture_completed
 	var report := {"schema":"citadel-candidate-recipe-diagnostic/v1","passed":false,"diagnosticCompleted":true,"expectedFailureReproduced":expected,
 		"worldSeed":world_seed,"region":candidate_region,"recipeSeed":expected_recipe,"receipt":receipt,"progress":state.snapshot(),
 		"evidenceLevel":"source-only failing real candidate replay; no site acceptance, terrain publication, rendering or gameplay",
@@ -148,6 +152,10 @@ func _run() -> void:
 		"artifactFormat":"input.bin and failure.bin are FileAccess.store_var(..., false); full failure.json is human-readable, binary preserves types"}
 	report["phaseElapsedUsec"]=timing.phaseElapsedUsec
 	report["captureFailure"]=capture_failure
+	if capture_blueprint:
+		report.merge({"recipePassed":false,"captureBlueprint":true,"captureCompleted":capture_completed,
+			"evidenceLevel":"failed Composer caller snapshot capture only; not public Recipe success, placement replay, physical proof, rendering or gameplay",
+			"expectedEngineError":"","artifactFormat":"caller-blueprint.bin, input.bin and failure.bin preserve typed snapshots through FileAccess.store_var(..., false)."},true)
 	if expect_ready:
 		report.merge({"passed":verified,"recipePassed":recipe_passed,"expectReady":true,
 			"evidenceLevel":"public Recipe source-only replay plus full physical-integrity validation; no site, live physics, furniture-validation, rendering or gameplay acceptance",
@@ -186,7 +194,6 @@ func _work() -> Dictionary:
 	var recipe_started_usec := Time.get_ticks_usec()
 	var result: Dictionary
 	var captured := true
-	var capture_blueprint := OS.get_environment("CITADEL_CANDIDATE_CAPTURE_BLUEPRINT")=="1"
 	if capture_blueprint:
 		# Diagnostic old-equivalent sequence, NOT the public Recipe boundary or
 		# a successful source. Keep the caller object after failed composition.
@@ -214,7 +221,7 @@ func _work() -> Dictionary:
 		result=Recipe.prepare(candidate.recipeSeed,recipe_context,state.checkpoint)
 	var recipe_elapsed_usec := Time.get_ticks_usec()-recipe_started_usec
 	var source_within_deadline := true
-	if expect_ready or capture_failure: source_within_deadline=state.begin_phase("source_export",-1)
+	if expect_ready or capture_failure or capture_blueprint: source_within_deadline=state.begin_phase("source_export",-1)
 	if expect_ready and result.get("ready",false)==true:
 		var source: Dictionary=result.duplicate(false)
 		var blueprint = result.get("blueprint")
@@ -258,6 +265,7 @@ func _work() -> Dictionary:
 	return {"recipePassed":result.get("ready",false)==true,"reason":result.get("reason",""),"structuralReason":structural.get("reason",""),"reasonChain":chain,
 		"recipeElapsedUsec":recipe_elapsed_usec,"sourceWithinDeadline":source_within_deadline,
 		"contextUnchanged":before==var_to_bytes(recipe_context),"context":recipe_context,"artifactsWritten":written,"callerBlueprintCaptured":capture_blueprint,
+		"callerBlueprintSha256":FileAccess.get_sha256(output.path_join("caller-blueprint.bin")) if capture_blueprint and captured else "",
 		"inputSha256":FileAccess.get_sha256(output.path_join("input.bin")),"failureSha256":FileAccess.get_sha256(output.path_join("failure.bin"))}
 
 func _collect_reasons(value: Variant,path: String,rows: Array,depth: int) -> void:
@@ -265,7 +273,7 @@ func _collect_reasons(value: Variant,path: String,rows: Array,depth: int) -> voi
 	if value is Dictionary:
 		for key: String in ["reason","failedHouse","candidateId","panelId","partId","blockingPartId"]:
 			if value.has(key): rows.append({"path":path+"."+key,"value":value[key]})
-		for key: String in ["structuralCompletionFailure","detail","failureEvidence"]:
+		for key: String in ["structuralCompletionFailure","civicQuarterFailure","placement","detail","failureEvidence"]:
 			if value.has(key): _collect_reasons(value[key],path+"."+key,rows,depth+1)
 
 func _write_typed(name: String,value: Dictionary) -> bool:

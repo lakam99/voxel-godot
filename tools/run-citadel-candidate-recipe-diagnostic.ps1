@@ -17,16 +17,18 @@ if((Split-Path $run -Parent) -ine (Join-Path $project 'artifacts/citadel-runtime
 if(Test-Path -LiteralPath $run){throw 'Fresh output required.'}
 New-Item -ItemType Directory -Path $run,(Join-Path $run 'userdata') | Out-Null
 $expected='ERROR: Citadel structural completion failed: facade_completion_failed'
-if($ExpectReady){$expected=''}
-$runSeconds=if($ExpectReady -or $CaptureFailure){540}else{180}
-$sourceSeconds=if($ExpectReady -or $CaptureFailure){450}else{150}
+if($ExpectReady -or $CaptureBlueprint){$expected=''}
+$runSeconds=if($ExpectReady -or $CaptureFailure -or $CaptureBlueprint){540}else{180}
+$sourceSeconds=if($ExpectReady -or $CaptureFailure -or $CaptureBlueprint){450}else{150}
 $proofSeconds=if($ExpectReady){60}else{0}
+# CaptureBlueprint shares the existing bounded source measurement ceiling;
+# it exports only a failed caller and never runs independent physical proof.
 $script='res://scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd'
 $files=@(& git -C $project ls-files --cached --others --exclude-standard -- 'scripts/*.gd' 'scripts/**/*.gd')
 $files+=@('scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd','tools/run-citadel-candidate-recipe-diagnostic.ps1','tools/run-godot-scene-watchdog.ps1')
 $hashes=[ordered]@{}
 foreach($file in @($files|Sort-Object -Unique)){$hashes[$file]=(Get-FileHash (Join-Path $project $file)).Hash.ToLowerInvariant()}
-@{schema='candidate-recipe-diagnostic-launch/v1';sourceHashes=$hashes;head=(& git -C $project rev-parse HEAD);seed=$Seed;region=$regionCoordinates;recipeSeed=$ExpectedRecipeSeed;expectedError=$expected;runTimeoutSeconds=$runSeconds;sourcePreparationDeadlineSeconds=$sourceSeconds;independentPhysicalDeadlineSeconds=$proofSeconds;parseTimeoutSeconds=15;cleanupCeilingPerPhaseSeconds=15;maximumOwnedPhasesSeconds=($runSeconds+49);budgetScope='Source clock includes setup/survey and Recipe. CaptureFailure uses the existing 450s source ceiling solely to retain an inventoried failure; it is never recipe success. ExpectReady alone runs independent proof with a fresh 60s deadline after successful in-time Recipe. Export/report bounded by overall watchdog. No production or headed timeout changes.';script=$script}|ConvertTo-Json -Depth 4|Set-Content (Join-Path $run 'launch.json') -Encoding utf8
+@{schema='candidate-recipe-diagnostic-launch/v1';sourceHashes=$hashes;head=(& git -C $project rev-parse HEAD);seed=$Seed;region=$regionCoordinates;recipeSeed=$ExpectedRecipeSeed;expectedError=$expected;runTimeoutSeconds=$runSeconds;sourcePreparationDeadlineSeconds=$sourceSeconds;independentPhysicalDeadlineSeconds=$proofSeconds;parseTimeoutSeconds=15;cleanupCeilingPerPhaseSeconds=15;maximumOwnedPhasesSeconds=($runSeconds+49);budgetScope='Source clock includes setup/survey and Recipe. CaptureFailure retains an inventoried failure; CaptureBlueprint retains the failed typed Composer caller. Both use the existing 450s source ceiling for measurement only, never recipe success. ExpectReady alone runs independent proof with a fresh 60s deadline after successful in-time Recipe. Export/report bounded by overall watchdog. No production or headed timeout changes.';script=$script}|ConvertTo-Json -Depth 4|Set-Content (Join-Path $run 'launch.json') -Encoding utf8
 $values=@{APPDATA=(Join-Path $run 'userdata');LOCALAPPDATA=(Join-Path $run 'userdata');CITADEL_CANDIDATE_RECIPE_OUTPUT=$run}
 $values['CITADEL_CANDIDATE_CAPTURE_BLUEPRINT']=if($CaptureBlueprint){'1'}else{'0'}
 $values['CITADEL_CANDIDATE_EXPECT_READY']=if($ExpectReady){'1'}else{'0'}
@@ -80,12 +82,16 @@ try {
   if($w.overallExitCode -ne 0 -or -not $w.cleanupPassed -or -not $w.authoritativeZeroProven -or $watcherFailed -or $watcherErrors.Count -or (Test-Path ($stop+'.watcher-error.txt'))){throw "$phase failed; retain $summary and logs"}
   $errorLines=@(Select-String -LiteralPath $out,$err -Pattern 'SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|resources still in use'|ForEach-Object {$_.Line.Trim()})
   if(@($errorLines|Where-Object {$_ -cne $allowed}).Count){throw 'Unexpected engine error/warning.'}
-  if($phase -eq 'run' -and -not $ExpectReady -and $errorLines.Count -ne 1){throw 'Expected exactly one inventoried Composer error.'}
+  if($phase -eq 'run' -and -not $ExpectReady -and -not $CaptureBlueprint -and $errorLines.Count -ne 1){throw 'Expected exactly one inventoried Composer error.'}
  }
  $changed=@($hashes.Keys|Where-Object {(Get-FileHash (Join-Path $project $_)).Hash.ToLowerInvariant() -cne $hashes[$_]})
  $report=Get-Content (Join-Path $run 'report.json') -Raw|ConvertFrom-Json
  $verified=$changed.Count -eq 0 -and $report.diagnosticCompleted -and $report.expectedFailureReproduced -and -not $report.passed
  $recipePassed=$false;$payloadPath=Join-Path $run 'failure.json';$expectedErrors=@($expected)
+ if($CaptureBlueprint){
+  $payloadPath=Join-Path $run 'caller-blueprint.bin';$expectedErrors=@()
+  $verified=$changed.Count -eq 0 -and $report.diagnosticCompleted -and $report.captureCompleted -and -not $report.recipePassed -and -not $report.passed -and $report.receipt.contextUnchanged -and $report.receipt.sourceWithinDeadline -and (Test-Path -LiteralPath $payloadPath)
+ }
  if($ExpectReady){
   $recipePassed=$report.recipePassed -eq $true;$payloadPath=Join-Path $run 'source.bin';$expectedErrors=@()
   $verified=$changed.Count -eq 0 -and $report.diagnosticCompleted -and $recipePassed -and $report.passed -and $report.receipt.physicalPassed -and $report.receipt.physicalViolationCount -eq 0 -and $report.receipt.contextUnchanged -and (Test-Path -LiteralPath $payloadPath)
