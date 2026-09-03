@@ -1,6 +1,7 @@
 extends SceneTree
 ## Source attribution on a historical caller before structural completion, with
-## one actual full physical proof per variant. Never invents proofChecks or
+## one actual full physical proof per variant (plus terminal proof in prepare
+## mode after accepted construction). Never invents proofChecks or
 ## claims this caller is the later post-completion source.
 const Copy = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.gd")
 const Planes = preload("res://scripts/buildings/ThresholdBearingConstructionPlanes.gd")
@@ -10,6 +11,7 @@ const Housing = preload("res://scripts/buildings/ThresholdBearingHousingRecipe.g
 const Thresholds = preload("res://scripts/buildings/CitadelThresholdBearingRecipe.gd")
 const Composer = preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
+const Manifest = preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const INPUT := "res://artifacts/citadel-runtime-integration/candidate-recipe-02/caller-blueprint.bin"
 const SHA := "114a393279c1ae7676fca8f3ca9a9d7688c86c8cb0d587dbe203ab2a8d0a66b3"
 const TARGET := "urban_row_03_left_door_threshold"
@@ -49,8 +51,9 @@ func _run() -> void:
 func _diagnose() -> Dictionary:
 	var started := Time.get_ticks_usec()
 	var hashes: Dictionary={}
-	for script in [get_script(),Copy,Planes,Connection,Seats,Housing,Thresholds,Composer,Blueprint]: hashes[script.resource_path]=FileAccess.get_sha256(script.resource_path)
+	for script in [get_script(),Copy,Planes,Connection,Seats,Housing,Thresholds,Composer,Blueprint,Manifest]: hashes[script.resource_path]=FileAccess.get_sha256(script.resource_path)
 	hashes["res://scripts/buildings/StreetRowDepthPacking.gd"]=FileAccess.get_sha256("res://scripts/buildings/StreetRowDepthPacking.gd")
+	hashes["res://scripts/buildings/ThresholdBearingFootprintFitter.gd"]=FileAccess.get_sha256("res://scripts/buildings/ThresholdBearingFootprintFitter.gd")
 	if FileAccess.get_sha256(INPUT)!=SHA: return {"reason":"input_hash_mismatch"}
 	var file := FileAccess.open(INPUT,FileAccess.READ)
 	if file==null: return {"reason":"input_open_failed"}
@@ -145,17 +148,81 @@ func _diagnose() -> Dictionary:
 		"normalizedThreshold":threshold_snapshot,"foundation":foundation.snapshot(),"normalization":normalization,
 		"candidateSeats":inventory,"inputUnchanged":immutable,"globalPhysicalValidations":1,"proofChecksSupplied":true,"syntheticChecksSupplied":false,
 		"physicalViolationCount":physical.violations.size(),"checkedPartCount":physical.checkedPartCount,
-		"exactRun04FailureReproduced":proven_result.get("reason","")=="threshold_housing_footprint_outside_seat",
+		"observedProvenSeatReason":proven_result.get("reason",""),
 		"elapsedUsec":Time.get_ticks_usec()-started}
 	report["replacement"]=replacement
 	report["originalThresholdBytesExact"]=var_to_bytes(Thresholds._snapshot_part(original_raw,TARGET))==var_to_bytes(Thresholds._snapshot_part(proof_input,TARGET))
 	report["originalSelectedSeatBytesExact"]=var_to_bytes(Thresholds._snapshot_part(original_raw,selected_proven))==var_to_bytes(Thresholds._snapshot_part(proof_input,selected_proven))
 	if replacement.get("packed",false):
 		report.evidenceLevel="Packed producer-delta variant of locked unpacked pre-completion source. Exact original-value guards preserve all unrelated fields/parts; one real full proof. NOT post-completion or full recipe parity."
+	if OS.get_environment("CITADEL_THRESHOLD_PREPARE")=="1":
+		var preparation := _prepare_target(proof_input,checks)
+		report["prepareMode"]=true
+		report["preparation"]=preparation
+		report["passed"]=immutable and preparation.get("accepted",false)
+		report["globalPhysicalValidations"]=1+int(preparation.get("terminalValidationPerformed",false))
+		report["elapsedUsec"]=Time.get_ticks_usec()-started
+		report["qualification"]="Bound prepare uses real source-native rooms/access/doors/parts. Furnishing obstacles unavailable in caller-only archive: [] supplied explicitly, not reconstructed. Even success is NOT full original furniture-policy admission, full recipe, or post-completion acceptance."
 	if not _typed("geometry.bin",report): return {"reason":"typed_output_write_failed"}
 	for path: String in hashes:
 		if FileAccess.get_sha256(path)!=hashes[path]: return {"reason":"source_changed_during_diagnostic","path":path}
 	return report
+
+func _prepare_target(snapshot: Dictionary,checks: Dictionary) -> Dictionary:
+	var owner_source = Copy.copy_blueprint(snapshot)
+	var manifest: Dictionary=Manifest.read(owner_source)
+	if not manifest.get("ready",false): return {"accepted":false,"reason":"manifest_invalid","detail":manifest}
+	var ownership: Dictionary={}
+	for row: Dictionary in manifest.records:
+		if row.threshold.id==TARGET: ownership=row; break
+	if ownership.is_empty() or not checks.has(TARGET): return {"accepted":false,"reason":"missing_target_ownership_or_check"}
+	var bytes := var_to_bytes(snapshot)
+	var binding := {"partId":TARGET,"check":checks[TARGET].duplicate(true),"proofSourceBytes":bytes,
+		"currentSourceBytes":bytes,"proofChecks":checks,"permittedThresholdEdits":{}}
+	var started := Time.get_ticks_usec()
+	var prepared: Dictionary=Thresholds._prepare_bound(snapshot,ownership,[],binding)
+	var elapsed := Time.get_ticks_usec()-started
+	if not _typed("prepared.bin",prepared): return {"accepted":false,"reason":"prepared_write_failed"}
+	var input_unchanged := bytes==var_to_bytes(snapshot)
+	var detail: Dictionary=prepared.duplicate(false)
+	detail.erase("afterSnapshot")
+	var result := {"accepted":false,"prepareReady":prepared.get("ready",false),"reason":prepared.get("reason",""),
+		"detail":detail,"prepareElapsedUsec":elapsed,"inputUnchanged":input_unchanged,"terminalValidationPerformed":false,
+		"furnitureObstaclesAvailable":false,"furnitureObstacleCount":0}
+	if not prepared.get("ready",false) or not prepared.get("changed",false) or not prepared.get("afterSnapshot") is Dictionary: return result
+	if not input_unchanged or prepared.get("globalPhysicalValidations",-1)!=0: result.reason="bound_prepare_contract_failed"; return result
+	var terminal = Copy.copy_blueprint(prepared.afterSnapshot)
+	Copy.clear_caches(terminal)
+	var work: Dictionary=Copy.validation_grid_work(terminal)
+	if not work.ready: result.reason="terminal_work_rejected"; result.work=work; return result
+	proof_deadline=Time.get_ticks_msec()+15000
+	started=Time.get_ticks_usec()
+	var proof: Dictionary=terminal.validate_physical_integrity_cancellable(_continue_proof)
+	result.terminalValidationPerformed=true
+	result["terminalElapsedUsec"]=Time.get_ticks_usec()-started
+	if not _typed("terminal-physical.bin",proof): result.reason="terminal_write_failed"; return result
+	if proof.get("cancelled",false) or proof.get("checkedPartCount",0)!=terminal.parts.size(): result.reason="terminal_proof_incomplete"; return result
+	var final_checks: Dictionary={}
+	for row: Dictionary in proof.checks:
+		if final_checks.has(row.partId): result.reason="duplicate_terminal_check"; return result
+		final_checks[row.partId]=row
+	var regressed: Array=[]
+	for id: String in checks:
+		if checks[id].passed and not final_checks.get(id,{}).get("passed",false): regressed.append(id)
+	var required: Array=[TARGET,TARGET+"_bearing"]
+	for id: String in prepared.get("courseIds",[]):
+		if not required.has(id): required.append(id)
+	var target_checks: Dictionary={}
+	var target_passed := true
+	for id: String in required:
+		target_checks[id]=final_checks.get(id,{})
+		target_passed=target_passed and final_checks.get(id,{}).get("passed",false)
+	result["targetChecks"]=target_checks
+	result["regressedPreviouslyPassingIds"]=regressed
+	result["terminalViolationCount"]=proof.violations.size()
+	result.accepted=target_passed and regressed.is_empty()
+	result.reason="" if result.accepted else "terminal_target_or_preservation_failed"
+	return result
 
 func _packed_source(raw: Dictionary) -> Dictionary:
 	var layout: Dictionary=raw.recipe.urbanPoc

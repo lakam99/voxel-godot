@@ -512,6 +512,37 @@ func _proven_elevated_seat_contract() -> void:
 	_check("proven:failed_seat_not_authorized", not Threshold._proof_seats(original, original, failed).records.has("raised_roadbed"))
 	_cases.append({"id": "proven_elevated_seat", "ready": result.get("ready"), "contact": contact,
 		"failure": result.get("detail", {}), "validationEvents": result.get("validationEvents", [])})
+	# A proven roadbed can underlap the requested post footprint. The new post
+	# must fit that SAME highest seat before ordinary all-source admission.
+	var narrow = Copy.copy_blueprint(original)
+	var narrow_seat = narrow.find_part("raised_roadbed")
+	narrow_seat.size.z=1.0
+	narrow_seat.position.z=-0.25
+	var narrow_bytes := var_to_bytes(narrow.snapshot())
+	var narrow_result := Completion._complete_thresholds(narrow,[fixture.record],[])
+	_check("housing_fit:complete_real_proof", narrow_result.get("ready",false) and narrow_result.get("globalPhysicalValidations")==2)
+	_check("housing_fit:original_geometry_immutable", narrow_bytes==var_to_bytes(narrow.snapshot()))
+	if narrow_result.get("ready",false):
+		var fitted_part := Threshold.Part.new(_part(narrow_result.afterSnapshot,"seated_house_door_threshold_bearing"))
+		var original_threshold = narrow.find_part("seated_house_door_threshold")
+		var fitted_contact: Dictionary=narrow_result.details[0].contact
+		_check("housing_fit:highest_seat_and_exact_top", fitted_contact.seatId=="raised_roadbed" and fitted_contact.contactMode=="housed_overlap" and fitted_contact.exactTopContact)
+		_check("housing_fit:actual_footprint_narrowed", fitted_part.size.z<original_threshold.size.z and fitted_part.size.z>0.02)
+		_check("housing_fit:unchanged_housing_validator", Threshold.Housing.validate(fitted_part,narrow_seat,fitted_part.recipe.physicalRequiredSeatFacts[0]).ready)
+		var repeated_narrow := Completion._complete_thresholds(narrow,[fixture.record],[])
+		_check("housing_fit:deterministic_repeat", var_to_bytes(_stable_stage(narrow_result))==var_to_bytes(_stable_stage(repeated_narrow)))
+		var proof_rows: Dictionary=Threshold._physical(narrow).checks
+		var seat_records: Dictionary=Threshold._proof_seats(narrow.snapshot(),narrow.snapshot(),proof_rows).records
+		seat_records.raised_roadbed=var_to_bytes({"stale":true})
+		_check("housing_fit:stale_seat_rejected", not Threshold._admit(narrow,fitted_part,[],fitted_contact.housing,seat_records).ready)
+	var blockage := AABB(Vector3(root.position.x-2.0,3.0,-2.0),Vector3(4.0,0.05,4.0))
+	var reserved := Completion._complete_thresholds(narrow,[fixture.record],[{"id":"fit_reserved","bounds":blockage}])
+	_check("housing_fit:reservation_still_rejects", not reserved.get("ready",false) and not reserved.has("afterSnapshot") and reserved.get("acceptedIdsBeforeFailure")==[])
+	var blocked_narrow = Copy.copy_blueprint(narrow.snapshot())
+	blocked_narrow.add_part({"id":"fit_nonseat_blocker","kind":"decor","position":blockage.get_center(),"size":blockage.size,"collision":false,"physicalIntent":"visual_detail"})
+	var rejected_narrow := Completion._complete_thresholds(blocked_narrow,[fixture.record],[])
+	_check("housing_fit:nonseat_still_rejects", not rejected_narrow.get("ready",false) and not rejected_narrow.has("afterSnapshot") and rejected_narrow.get("acceptedIdsBeforeFailure")==[])
+	_cases.append({"id":"housing_footprint_completion","ready":narrow_result.get("ready"),"detail":narrow_result.get("detail",{}),"contact":narrow_result.details[0].contact if narrow_result.get("ready",false) else {}})
 
 
 func _seated_completion_contract() -> void:

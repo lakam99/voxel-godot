@@ -8,6 +8,7 @@ extends RefCounted
 const Seats = preload("res://scripts/buildings/GabledRoofFrameBuilder.gd")
 const Splitter = preload("res://scripts/buildings/ThresholdBearingCourseSplitter.gd")
 const Housing = preload("res://scripts/buildings/ThresholdBearingHousingRecipe.gd")
+const Footprints = preload("res://scripts/buildings/ThresholdBearingFootprintFitter.gd")
 const MAX_SOURCE_PARTS := 10000
 const PATCH_INSET := 0.05
 
@@ -69,7 +70,14 @@ static func prepare(source, threshold, center: Vector3, size: Vector3, max_cours
 			# retry another construction after collision admission has rejected it.
 			if not subdivided.ready and subdivided.get("split", {}).get("reason") == "no_exact_threshold_courses" \
 					and proven_seats.has(selected.id) and not source.is_grounded_structural_root(selected_part):
-				return Housing.prepare(selected_part, threshold_bottom, center, size)
+				var housed := Housing.prepare(selected_part, threshold_bottom, center, size)
+				if housed.get("reason","") != "threshold_housing_footprint_outside_seat": return housed
+				# The highest proven seat stays fixed. Complete its construction
+				# footprint before any Part/admission attempt; never retry a
+				# different seat or bypass an occupied volume after rejection.
+				var footprint := Footprints.fit_seat_footprint(center,size,selected_part.position,selected_part.size,Housing.INSET)
+				if not footprint.ready: return footprint
+				return Housing.prepare(selected_part,threshold_bottom,footprint.position,footprint.size)
 			return subdivided
 		return _fail("unrepresentable_threshold_seated_bearing", {"seatId": selected.id,
 			"seatPlane": seat_plane, "thresholdBottom": threshold_bottom,

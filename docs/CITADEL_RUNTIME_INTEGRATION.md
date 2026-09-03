@@ -106,6 +106,18 @@ after the qualified before/after attribution. The doorway defect remains open;
 no headed retry or successful spawning is approved.
 See `CITADEL_STREET_ROW_PACKING_2026-09-03.md`.
 
+The next focused repair fits the new threshold support inside that same highest
+proven seat before unchanged ordinary collision/reservation admission. Existing
+geometry, vertical joint rules and validators are unchanged. New footprint
+controls481/481, completion169/169, existing1130/1130 and bearing498/498 pass.
+The complete current candidate recipe now passes in233.256s, with142 furnishings
+present and a separate4562-part physical proof reporting zero violations.
+`candidate-recipe-05` exited naturally with zero owned processes and748 unchanged
+source hashes. Source readiness is proven, not full Site admission or visible
+in-game spawning. See `CITADEL_THRESHOLD_FOOTPRINT_2026-09-03.md`; the next step is
+a separately critic-approved teleport-assisted headed check, without source
+injection, bypasses, navigation changes or raised deadlines.
+
 ### Prior checkpoint history
 
 The scene job and owning service now support balanced shared-door callbacks.

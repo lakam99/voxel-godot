@@ -5,8 +5,44 @@ extends RefCounted
 ## The caller must still construct representable boxes and admit every candidate
 ## against the complete source and reservation set, not just the fitting bounds.
 const Boxes = preload("res://scripts/buildings/ReplacementBoxOccupancy.gd")
+const ConstructionMath = preload("res://scripts/buildings/ConstructionSeamMath.gd")
 const MAX_CANDIDATES := 64
 const MAX_BOUNDS := 4096
+
+## A housed column must fit its selected seat, not merely overlap a small
+## contact patch. Clip only the new column's XZ domain; no source/seat edits,
+## seat selection, Y construction, rooted proof or collision admission here.
+static func fit_seat_footprint(center: Vector3, size: Vector3, seat_center: Vector3, seat_size: Vector3, inset: float) -> Dictionary:
+	if not is_finite(inset) or inset < 0.0:
+		return _fail("invalid_threshold_seat_footprint")
+	for box in [[center,size],[seat_center,seat_size]]:
+		for axis in range(3):
+			if not is_finite(float(box[0][axis])) or not is_finite(float(box[1][axis])) \
+					or absf(float(box[0][axis])) > 10000.0 or float(box[1][axis]) < 0.02 or float(box[1][axis]) > 10000.0:
+				return _fail("invalid_threshold_seat_footprint")
+	var fitted_center := center
+	var fitted_size := size
+	for axis in [0,2]:
+		var original_low := float(center[axis])-float(size[axis])*0.5
+		var original_high := float(center[axis])+float(size[axis])*0.5
+		var seat_low := float(seat_center[axis])-float(seat_size[axis])*0.5+inset
+		var seat_high := float(seat_center[axis])+float(seat_size[axis])*0.5-inset
+		if original_low > seat_low and original_high < seat_high: continue
+		var low := maxf(original_low,seat_low)
+		var high := minf(original_high,seat_high)
+		if low >= high: return _fail("no_threshold_seat_footprint")
+		fitted_center[axis]=(low+high)*0.5
+		fitted_size[axis]=minf(float(size[axis]),2.0*minf(float(fitted_center[axis])-low,high-float(fitted_center[axis])))
+		var contained := false
+		for attempt in range(4):
+			var stored_low := float(fitted_center[axis])-float(fitted_size[axis])*0.5
+			var stored_high := float(fitted_center[axis])+float(fitted_size[axis])*0.5
+			if fitted_size[axis] >= 0.02 and stored_low >= original_low and stored_high <= original_high and stored_low > seat_low and stored_high < seat_high:
+				contained=true
+				break
+			fitted_size[axis]=-ConstructionMath.next_float32_up(-float(fitted_size[axis]))
+		if not contained: return _fail("unrepresentable_threshold_seat_footprint")
+	return {"ready":true,"position":fitted_center,"size":fitted_size,"changed":fitted_center!=center or fitted_size!=size}
 
 static func derive(domain: Array, door_bounds: Array) -> Dictionary:
 	if not Boxes.valid(domain) or door_bounds.size() > MAX_BOUNDS:
