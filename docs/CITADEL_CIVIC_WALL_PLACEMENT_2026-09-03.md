@@ -236,3 +236,56 @@ Command:
 Artifacts: `candidate-recipe-09/report.json`, `progress.json`, `timings.json`,
 `input.bin`, `caller-blueprint.bin`, `failure.bin`, `source-hash-audit.json`,
 and `watchdog.json`. No screenshots or gameplay claims apply to this capture.
+
+## Cheap exact preparation replay
+
+`CitadelCivicInfillReplayDiagnostic.gd` restores the typed failed caller,
+reconstructs the unchanged Composer environment and calls ordinary civic
+preparation without rebuilding the compound. It separately produces the real
+standalone East design, resolves domain and ordered named obstacles through
+the production helpers, and passes those exported inputs directly to the
+unchanged placement solver. Both paths must reproduce08's exact failure.
+The direct result is byte-identical to the civic call's failure detail.
+
+```powershell
+$env:CITADEL_CIVIC_REPLAY_INPUT=Join-Path $PWD 'artifacts/citadel-runtime-integration/candidate-recipe-09'
+try {
+    ./tools/run-building-contract.ps1 -Contract CitadelCivicInfillReplayDiagnostic.gd -OutputDirectory artifacts/citadel-runtime-integration/civic-infill-replay-02 -ReportEnvironment CITADEL_CIVIC_REPLAY_REPORT -TimeoutSeconds 45
+} finally { Remove-Item Env:CITADEL_CIVIC_REPLAY_INPUT }
+```
+
+Replay01 passed29 diagnostic checks in1.574427s; expanded replay02 passed35
+in2.203100s, including direct-input equivalence. Both exited naturally0 with
+clean engine logs, unchanged sources and owned zero. Recipe success remains
+false. Capture binds384 production script hashes; the fixture also compares
+all script hashes before/after. The416 relevant rows are an inventory only:
+both solvers receive all3,729 obstacles in their original order.
+
+Reports and typed inputs are under `civic-infill-replay-02`: `report.json`,
+`replay-inputs.bin`, `replay-inputs.json`, `relevant-obstacles.json`, and
+`watchdog.json`. No new geometry, source injection, live collision, successful
+recipe, rendering or gameplay is proved. This reproduces the failing placement
+without the157-203s compound rebuild, so further diagnosis can be inexpensive.
+
+Independent critic analysis confirms retained `castle_inhabited_terrace_block`
+geometry is sufficient to block the whole East domain, not merely exhaust the
+search budget. Eight actual records suffice: `castle_terrace_block_00_right_00`,
+`00_right_05`, and `01_right_00/02/03/05/06/11` with the same full prefix.
+The critic's independent double-precision open-forbidden-rectangle sweep
+examined19 critical-X endpoint/midpoint cases for this subset, including domain
+boundary points, and found no gap. This is exported-geometry evidence, not
+engine or represented-coordinate proof. Broader selection counts differed
+between the two analyses; the shared eight-record sufficient obstruction is
+the supported conclusion, not equality of those filters.
+
+The owning producer `CastleCompoundBlueprintBuilder.add_citadel_terraces`
+carves the original residence/access footprints. Composer retires those
+residences and rooms, but retains their dependent terrace masses before
+introducing the ground-level replacement residences. The next bounded recipe
+repair must reconcile those masses with explicit replacement-house/access
+footprints through existing Castle geometry production. Preserve elevations,
+unrelated terraces, surviving support dependencies and keep-entry exclusions;
+do not fill old cuts blindly, merely omit blockers, or raise the work budget.
+Require actual deterministic rebuilt geometry, unchanged unrelated records,
+remaining-obstacle clearance and terminal physical proof before full-source
+acceptance. No terrace mutation or headed approval follows from this diagnosis.
