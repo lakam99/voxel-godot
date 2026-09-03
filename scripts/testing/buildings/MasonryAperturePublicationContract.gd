@@ -22,6 +22,7 @@ func _run() -> void:
 	var small: Dictionary = _complete("small_budget", 25)
 	var large: Dictionary = _complete("large_budget_drain", 4000)
 	_checks["budget_independent_artifact"] = small.ready and large.ready and small.signature == large.signature
+	_owned_incremental_begin(small.signature)
 	for budget: int in [0, -1, 4001]:
 		var b = _fixture()
 		var publisher = _publisher(b)
@@ -72,6 +73,38 @@ func _fixture():
 		"openings": [{"id": KEY + "_opening_000", "input": input, "fullVolume": AABB(Vector3(-0.2, -0.5, -0.375), Vector3(0.4, 1, 0.75))}]}
 	b.recipe.facadeApertures[KEY] = Declaration.seal(record, b.parts)
 	return b
+
+func _owned_incremental_begin(expected: PackedByteArray) -> void:
+	_checks["owned_incremental_controls_complete"]=false
+	for budget: int in [1,2500,4000]:
+		var b=_fixture()
+		var publisher=_publisher(b)
+		var session=Session.new()
+		var before:=var_to_bytes(b.snapshot())
+		var begun: bool=session.begin_incremental(b,publisher)
+		var label: String="owned_incremental_"+str(budget)
+		_checks[label+"_queued_without_requests"]=begun and session._requests.is_empty() and session._begin_stage=="inventory"
+		var ready: bool=_drain(session,publisher,b.parts,budget,label)
+		var artifacts: Array=[]
+		for part in b.parts: artifacts.append(session.artifact(part))
+		_checks[label+"_exact_compatibility_artifacts"]=ready and var_to_bytes(_canonical(artifacts))==expected
+		_checks[label+"_source_unchanged"]=before==var_to_bytes(b.snapshot())
+	for mode: String in ["membership","context","captured_geometry"]:
+		var b=_fixture()
+		var publisher=_publisher(b)
+		var session=Session.new()
+		session.begin_incremental(b,publisher)
+		var retained: Array=b.parts.duplicate()
+		if mode=="membership": b.parts.pop_back()
+		elif mode=="context": publisher.source_blueprint_id+="_changed"
+		else:
+			while session._begin_stage!="done": session._advance_begin()
+			b.parts[0].position+=Vector3.ONE
+		for i in range(4096):
+			if session.state!="pending_budget": break
+			session.advance(publisher,2500)
+		_checks["owned_incremental_"+mode+"_rejects"]=session.state=="failed" and _hidden(session,retained)
+	_checks["owned_incremental_controls_complete"]=true
 
 func _publisher(b):
 	var publisher = Publisher.new()

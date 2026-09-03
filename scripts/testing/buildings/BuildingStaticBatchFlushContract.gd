@@ -452,4 +452,43 @@ func original_submission_parity() -> void:
 		check(str(collecting)+"_paving_old_new_submission",not expected.is_empty() and var_to_bytes(expected)==var_to_bytes(actual))
 		old_parent.free(); new_parent.free()
 		old.published_nodes=[]; current.published_nodes=[]
+	masonry_submission_parity(original)
 	check("old_new_submission_completed",true)
+
+func masonry_submission_parity(original: GDScript) -> void:
+	check("masonry_submission_controls_completed",false)
+	for collecting: bool in [false,true]:
+		for kind: String in ["wall","foundation"]:
+			var old_parent:=Node3D.new(); root.add_child(old_parent)
+			var new_parent:=Node3D.new(); root.add_child(new_parent)
+			var old=original.new()
+			var current:=RecordingPublisher.new()
+			old.source_blueprint_id="masonry-submission"; current.source_blueprint_id="masonry-submission"
+			old.static_visual_collecting=collecting; current.static_visual_collecting=collecting
+			var frame:=Transform3D(Basis(Vector3.UP,0.4),Vector3(10,3,-8))
+			old.static_visual_part_transform=frame; current.static_visual_part_transform=frame
+			var part:=Part.new({"id":"front_masonry","kind":kind,"material":"stone_foundation","size":Vector3(5,3,0.4),"position":Vector3(-5,1,9),"recipe":{"topSurfaceMaterial":"cobblestone"}})
+			old.publish_brick_wall(part,old_parent)
+			current.resumable_scene_publication=true
+			current.publish_brick_wall(part,new_parent)
+			var turns:=0
+			while current._pending_masonry.state not in ["ready","failed"] and turns<10000:
+				current._pending_masonry.advance(current,1)
+				turns+=1
+			var label:=str(collecting)+"_"+kind
+			check(label+"_masonry_pending_complete",current._pending_masonry.state=="ready" and turns>1)
+			check(label+"_masonry_cpu_submissions_exact",var_to_bytes(masonry_facts(old,old_parent))==var_to_bytes(masonry_facts(current,new_parent)))
+			old_parent.free(); new_parent.free()
+			old.published_nodes=[]; current.published_nodes=[]
+	check("masonry_submission_controls_completed",true)
+
+func masonry_facts(publisher, parent: Node3D) -> Dictionary:
+	var facts: Dictionary={"materials":publisher.material_cache.keys(),"repairs":publisher.masonry_repair_clusters,"batches":[],"nodes":[]}
+	for group in publisher.static_visual_batches.values():
+		facts.batches.append([publisher.material_cache.find_key(group.material),group.transforms,group.customData])
+	for node: Node3D in parent.get_children():
+		if node is MultiMeshInstance3D:
+			facts.nodes.append([node.name,node.transform,publisher.material_cache.find_key(node.material_override),node.multimesh.configuration,node.multimesh.submissions])
+		elif node is MeshInstance3D:
+			facts.nodes.append([node.name,node.transform,publisher.material_cache.find_key(node.material_override)])
+	return facts

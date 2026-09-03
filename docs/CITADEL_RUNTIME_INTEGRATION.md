@@ -68,6 +68,19 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Incremental masonry and immutable prepared history now pass the actual-source
+construction checks (65/65), with the same available scene facts and clean owned
+shutdown. See `CITADEL_INCREMENTAL_MASONRY_PUBLICATION_2026-09-02.md`. Wall
+descriptor work is sliced (measured maximum 2.673 ms), and repeated full-history
+encoding is removed on the prepared path without weakening mutable validation.
+Overall construction is 32.330 s versus the preceding 21.134 s synchronous-wall
+baseline: this is still a throughput regression, not a performance pass. Roof,
+aperture and final-validation stalls remain. The next chunk should move exact
+CPU descriptor work into the existing preparation worker, then complete ordinary
+activation and real-game acceptance. The independent critic approved this
+focused checkpoint and commit; no budget pass, headed approval or successful
+ordinary-world spawn is claimed.
+
 Prepared immutable metadata now removes repeated full-prefix copying from real
 scene construction. Final headless construction passes 62 checks in 21.134 s
 versus 49.994 s at the incremental baseline, with identical available scene

@@ -48,6 +48,10 @@ var _max_atomic_usec := 0
 var _max_slice_usec := 0
 var _overruns := 0
 var _phase_metrics: Dictionary = {}
+var _advance_calls := 0
+var _advance_cpu_usec := 0
+var _between_advance_usec := 0
+var _last_advance_end_usec := 0
 
 
 ## Ownership transfer only: no publisher/resource/node construction or holder
@@ -106,6 +110,8 @@ func advance(budget_usec: int = 2500) -> Dictionary:
 	if _phase in ["idle", "ready", "retired", "consumed"]: return status()
 	_advancing = true
 	var started := Time.get_ticks_usec()
+	if _last_advance_end_usec>0: _between_advance_usec+=started-_last_advance_end_usec
+	_advance_calls+=1
 	var slice_phases: Dictionary = {}
 	var units := 0
 	while units == 0 or Time.get_ticks_usec() - started < budget_usec:
@@ -124,6 +130,8 @@ func advance(budget_usec: int = 2500) -> Dictionary:
 		var metric: Dictionary = _phase_metrics[phase]
 		metric.maxSliceUsec = maxi(int(metric.maxSliceUsec), int(slice_phases[phase]))
 	_advancing = false
+	_last_advance_end_usec=Time.get_ticks_usec()
+	_advance_cpu_usec+=_last_advance_end_usec-started
 	return status()
 
 
@@ -174,6 +182,9 @@ func status() -> Dictionary:
 		"counts":status_count(),
 		"freedNodes":_freed_nodes, "maxAtomicUsec":_max_atomic_usec,
 		"maxSliceUsec":_max_slice_usec, "overruns":_overruns,
+		"advanceCalls":_advance_calls,"advanceCpuUsec":_advance_cpu_usec,
+		# Includes caller work, result snapshots and frame waits; not pure sleep.
+		"betweenAdvanceUsec":_between_advance_usec,
 		"phaseMetrics":_phase_metrics.duplicate(true)}
 
 

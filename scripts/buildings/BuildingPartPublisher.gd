@@ -13,6 +13,8 @@ const PublicationPreparation := preload("res://scripts/buildings/BuildingPublica
 const StaticBatchFlush := preload("res://scripts/buildings/BuildingStaticBatchFlush.gd")
 const MeshBatchUpload := preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
 const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublication.gd")
+const MasonryPublication := preload("res://scripts/buildings/BuildingMasonryPublication.gd")
+const MasonryDescriptor := preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const SettledCobbleGeometryScript := preload("res://scripts/buildings/SettledCobbleGeometry.gd")
@@ -22,7 +24,7 @@ const MasonryAperturePublicationScript := preload("res://scripts/buildings/Mason
 const MAX_JOINTED_FINISHES := 4
 const MAX_JOINTED_FEET := 16
 const INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT := 12000
-const MONUMENTAL_MASONRY_INSTANCE_BUDGET := 2400
+const MONUMENTAL_MASONRY_INSTANCE_BUDGET := MasonryDescriptor.MONUMENTAL_MASONRY_INSTANCE_BUDGET
 # Temporary user-authorized bypass on the visuals branch (2026-08-30).
 # Keep actual failures in reports; rendering does not certify structural safety.
 const PHYSICAL_INTEGRITY_REQUIRED_FOR_PUBLICATION := false
@@ -77,6 +79,7 @@ var _prepared_static_bindings: Dictionary = {}
 var resumable_scene_publication := false
 var _finish_validated := false
 var _pending_paving
+var _pending_masonry
 var _pending_part_index := -1
 var _scene_blueprint
 var _scene_parent: WeakRef
@@ -84,6 +87,7 @@ var _paving_history_snapshot
 var _paving_history_source
 var _paving_history_source_bytes := PackedByteArray()
 var _completed_paving: Array = []
+var _prepared_history
 
 
 func _init() -> void:
@@ -157,6 +161,7 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 	diagnostic_preparation_usec = source.preparationUsec
 	_prepared_static_records=source.get("staticRecords",{})
 	_prepared_static_bindings=source.get("staticRecordBindings",{})
+	_prepared_history=source.get("preparedHistory")
 	var started := Time.get_ticks_usec()
 	var ready := _begin_scene_publication(source.blueprint, options, parent)
 	scene_preparation_usec = Time.get_ticks_usec() - started
@@ -179,7 +184,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 		"pavingBlueprint":_paving_blueprint, "pavingParts":_paving_source_parts,
 		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
 		"pavingHistoryBinding":_paving_history_binding, "pavingTreatments":paving_treatments,
-		"masonry":_masonry_preparation, "surfaceHistory":surface_history,
+		"masonry":_masonry_preparation, "surfaceHistory":surface_history,"preparedHistory":_prepared_history,
 		"progressCallback":incremental_progress_callback}
 	physical_integrity = {}
 	raised_route_coverage = {}
@@ -194,6 +199,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	_paving_history_binding = PackedByteArray()
 	paving_treatments = []
 	_masonry_preparation = null
+	_prepared_history=null
 	surface_history = SurfaceHistoryFieldScript.new()
 	incremental_progress_callback = Callable()
 	_paving_prepared = false
@@ -216,7 +222,12 @@ func _begin_scene_publication(blueprint, options: Dictionary, parent: Node3D) ->
 	source_blueprint_id = canonical_source_blueprint_id(blueprint)
 	paving_treatments = blueprint.recipe.get("pavingTreatments", []) as Array
 	var stage_started := Time.get_ticks_usec()
-	surface_history.configure(blueprint.recipe, blueprint.parts)
+	if _prepared_history!=null:
+		if not _prepared_history is PublicationPreparation.PreparedHistory or not _prepared_history.matches(_prepared_history.history,source_blueprint_id):
+			return _paving_reject("invalid_prepared_history")
+		surface_history=_prepared_history.history
+	else:
+		surface_history.configure(blueprint.recipe, blueprint.parts)
 	_record_publication_stage("history",Time.get_ticks_usec()-stage_started)
 	stage_started = Time.get_ticks_usec()
 	var paving_ready := _prepare_paving_publication(blueprint)
@@ -236,18 +247,20 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 	if not _scene_owner_matches(blueprint,parent):
 		_paving_reject("scene_publication_owner_mismatch")
 		return start_index
-	if _pending_paving!=null:
-		if start_index!=_pending_part_index or start_index>=blueprint.parts.size() or blueprint.parts[start_index]!=_pending_paving.source_part():
+	var pending_job = _pending_paving if _pending_paving!=null else _pending_masonry
+	if pending_job!=null:
+		if start_index!=_pending_part_index or start_index>=blueprint.parts.size() or blueprint.parts[start_index]!=pending_job.source_part():
 			_paving_reject("pending_part_cursor_mismatch")
 			return start_index
-		var pending: Dictionary = _pending_paving.advance(self,budget_usec)
+		var pending: Dictionary = pending_job.advance(self,budget_usec)
 		if pending.status=="failed":
 			_paving_reject(String(pending.reason))
 			return start_index
 		if pending.status!="ready": return start_index
-		_publication_retirement.append(_pending_paving)
-		_completed_paving.append({"job":_pending_paving,"index":start_index})
+		_publication_retirement.append(pending_job)
+		if _pending_paving!=null: _completed_paving.append({"job":_pending_paving,"index":start_index})
 		_pending_paving=null
+		_pending_masonry=null
 		_pending_part_index=-1
 		incremental_published_parts+=1
 		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT: _begin_static_flush(parent,true)
@@ -274,7 +287,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 			continue
 		publish_part(part, parent)
 		if _publication_failed(): return part_index - 1
-		if _pending_paving!=null:
+		if _pending_paving!=null or _pending_masonry!=null:
 			_pending_part_index=part_index-1
 			return _pending_part_index
 		incremental_published_parts += 1
@@ -304,7 +317,7 @@ func finish_scene_publication(blueprint, parent: Node3D, budget_usec := 2500) ->
 	if not _scene_owner_matches(blueprint,parent):
 		_paving_reject("scene_publication_owner_mismatch")
 		return publication_status()
-	if _pending_paving!=null: return {"status":"pending_budget","reason":"part_publication_pending","complete":false}
+	if _pending_paving!=null or _pending_masonry!=null: return {"status":"pending_budget","reason":"part_publication_pending","complete":false}
 	if not _finish_validated:
 		if not _paving_session_valid(blueprint): return publication_status()
 		if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return publication_status()
@@ -340,13 +353,14 @@ func publication_status() -> Dictionary:
 	if reason.is_empty() and _masonry_preparation != null: reason = _masonry_preparation.reason
 	if reason.is_empty() and _masonry_preparation == null: reason = "scene_publication_not_started"
 	var state := "failed" if not reason.is_empty() else ("pending_budget" if _masonry_preparation.state == "pending_budget" else "ready")
-	if state=="ready" and (_pending_paving!=null or _static_flush!=null): state="pending_budget"
+	if state=="ready" and (_pending_paving!=null or _pending_masonry!=null or _static_flush!=null): state="pending_budget"
 	return {"status":state,"reason":reason,"complete":_scene_finalized and state=="ready",
 		"publishedPartCount":incremental_published_parts,"totalParts":incremental_total_parts,
 		"collisionPartCount":collision_count,"visualBatchCount":visual_batch_count}
 
 
 func clear_published() -> void:
+	_prepared_history=null
 	_paving_history_snapshot=null
 	_paving_history_source=null
 	_paving_history_source_bytes=PackedByteArray()
@@ -354,6 +368,7 @@ func clear_published() -> void:
 	_scene_blueprint=null
 	_scene_parent=null
 	_pending_paving=null
+	_pending_masonry=null
 	_pending_part_index=-1
 	_static_flush = null
 	_publication_retirement = []
@@ -391,7 +406,8 @@ func clear_published() -> void:
 	# publisher's alias; never erase retained source treatment declarations.
 	paving_treatments = []
 	incremental_progress_callback = Callable()
-	surface_history.configure({})
+	# Prepared history containers are immutable. Detach, never clear aliases.
+	surface_history=SurfaceHistoryFieldScript.new()
 	masonry_repair_clusters.clear()
 	physical_integrity.clear()
 	raised_route_coverage.clear()
@@ -465,7 +481,8 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 	if bool(part.recipe.get("visual", true)):
 		publish_visual(part, body)
 	if bool(part.recipe.get("practicalLight", false)):
-		publish_practical_light(part, body)
+		if _pending_masonry!=null: _pending_masonry.defer_practical_light=true
+		else: publish_practical_light(part, body)
 	if String(part.kind) == "door":
 		add_door_interaction_proxy(body, part)
 	var elapsed := Time.get_ticks_usec() - started
@@ -507,7 +524,8 @@ func publish_static_part(part, parent: Node3D) -> void:
 		static_visual_part_transform = Transform3D(Basis.from_euler(part.rotation), part.position)
 		publish_visual(part, parent)
 		if bool(part.recipe.get("practicalLight", false)):
-			publish_practical_light(part, parent)
+			if _pending_masonry!=null: _pending_masonry.defer_practical_light=true
+			else: publish_practical_light(part, parent)
 		static_visual_collecting = false
 		static_visual_part_transform = Transform3D.IDENTITY
 	elif bool(part.recipe.get("practicalLight", false)):
@@ -690,29 +708,18 @@ func publish_aged_timber_beam(part, parent: Node3D) -> void:
 
 func publish_brick_wall(part, parent: Node3D) -> void:
 	if not _masonry_part_valid(part): return
-	var artifact: Dictionary = _masonry_preparation.artifact(part) if _masonry_preparation != null else {}
-	var geometry: Dictionary = artifact.geometry if not artifact.is_empty() else describe_masonry(part)
-	var size: Vector3 = part.size
-	var bed_material := material_for_id("mortar", variation_for(part) - 0.035)
-	add_box_visual(parent, geometry.mortarSize, Vector3.ZERO, bed_material, "MasonryBed")
-	var top_surface_material := String(part.recipe.get("topSurfaceMaterial", ""))
-	if String(part.kind) == "foundation" and not top_surface_material.is_empty():
-		add_box_visual(parent, Vector3(maxf(0.08, size.x - 0.05), 0.028, maxf(0.08, size.z - 0.05)), Vector3(0.0, size.y * 0.5 + 0.014, 0.0), material_for_id(top_surface_material, variation_for(part) - 0.025), "FoundationTopSurface")
-	var repair_profile: Dictionary = geometry.repairProfile
-	if not repair_profile.is_empty():
-		masonry_repair_clusters.append({"partId": String(part.id), "face": int(repair_profile.get("face", -1)), "centerY": float(repair_profile.get("centerY", 0.5)), "centerAlong": float(repair_profile.get("centerAlong", 0.5)), "radiusY": float(repair_profile.get("radiusY", 0.0)), "radiusAlong": float(repair_profile.get("radiusAlong", 0.0))})
-	var surface_material := material_for_id(geometry.surfaceMaterialId, masonry_family_variation(part))
-	if artifact.is_empty(): add_box_batch(parent, geometry.regularTransforms, surface_material, "BrickCourses", geometry.regularCustomData)
-	else: _publish_masonry_group(parent, artifact, "regular", surface_material, "BrickCourses")
-	if not geometry.repairTransforms.is_empty():
-		var repair_material := masonry_repair_material_for(part, geometry.surfaceMaterialId)
-		if artifact.is_empty(): add_box_batch(parent, geometry.repairTransforms, repair_material, "MasonryRepairCourses", geometry.repairCustomData)
-		else: _publish_masonry_group(parent, artifact, "repair", repair_material, "MasonryRepairCourses")
+	var artifact: Dictionary = _masonry_preparation.artifact(part) if _masonry_preparation!=null else {}
+	var publication:=MasonryPublication.new(part,parent,static_visual_part_transform,static_visual_collecting,source_blueprint_id,artifact,not resumable_scene_publication)
+	if resumable_scene_publication:
+		_pending_masonry=publication
+		return
+	while publication.state not in ["ready","failed"]: publication.advance(self)
+	if publication.state=="failed": _paving_reject(publication.reason)
 
 
 func prepare_masonry_apertures(blueprint) -> bool:
 	_masonry_preparation = MasonryAperturePublicationScript.new()
-	return _masonry_preparation.begin(blueprint, self)
+	return _masonry_preparation.begin_incremental(blueprint,self) if resumable_scene_publication else _masonry_preparation.begin(blueprint, self)
 
 
 func _publication_failed() -> bool:
@@ -752,55 +759,7 @@ func _publish_masonry_group(parent: Node3D, artifact: Dictionary, group: String,
 
 
 func describe_masonry(part) -> Dictionary:
-	# One descriptor path for actual publication and recipe aperture construction.
-	# Keep the existing course arithmetic, instance order and custom data exact.
-	var size: Vector3 = part.size
-	var transforms: Array[Transform3D] = []
-	var repair_flags: Array[bool] = []
-	var material_id := String(part.material_id)
-	var is_monumental_geometry := String(part.id).begins_with("castle_")
-	var uses_aged_castle_stone := is_monumental_geometry and material_id == "stone_foundation"
-	var is_rubble_foundation := material_id == "stone_foundation" and not is_monumental_geometry
-	var unit_length := 1.18 if is_monumental_geometry else (0.88 if is_rubble_foundation else 0.68)
-	var unit_height := 0.52 if is_monumental_geometry else (0.38 if is_rubble_foundation else 0.285)
-	if is_monumental_geometry:
-		var estimated_instances := 2.0 * (size.x + size.z) * size.y / maxf(unit_length * unit_height, 0.001)
-		if estimated_instances > float(MONUMENTAL_MASONRY_INSTANCE_BUDGET):
-			var density_scale := sqrt(estimated_instances / float(MONUMENTAL_MASONRY_INSTANCE_BUDGET))
-			unit_length *= density_scale
-			unit_height *= density_scale
-	var joint_width := 0.018 if is_monumental_geometry else (0.030 if is_rubble_foundation else 0.022)
-	var face_depth := 0.105 if is_monumental_geometry else (0.11 if is_rubble_foundation else 0.075)
-	# Mortar is published by the same part record, behind the physical brick
-	# instances. Its thin axis is inset on both faces, so it cannot z-fight with
-	# a brick surface while course gaps remain a material fact rather than a
-	# texture.
-	var mortar_size := MasonryWallGeometryScript.bed_size(size)
-	var masonry_phase := float(posmod(String(part.id).hash(), 1009)) / 1009.0
-	var repair_profile := masonry_repair_profile(part)
-	append_brick_face_transforms(transforms, repair_flags, size, true, -1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 0)
-	append_brick_face_transforms(transforms, repair_flags, size, true, 1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 1)
-	append_brick_face_transforms(transforms, repair_flags, size, false, -1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 2)
-	append_brick_face_transforms(transforms, repair_flags, size, false, 1.0, unit_length, unit_height, joint_width, face_depth, masonry_phase, repair_profile, 3)
-	var regular_transforms: Array[Transform3D] = []
-	var repair_transforms: Array[Transform3D] = []
-	for index in range(transforms.size()):
-		var transform := transforms[index]
-		if repair_flags[index]:
-			repair_transforms.append(transform)
-		else:
-			regular_transforms.append(transform)
-	var surface_material_id := "aged_castle_stone" if uses_aged_castle_stone else material_id
-	var regular_custom_data := build_masonry_custom_data(regular_transforms, part)
-	var repair_custom_data: Array[Color] = []
-	if not repair_transforms.is_empty():
-		var repair_custom_flags: Array[bool] = []
-		repair_custom_flags.resize(repair_transforms.size())
-		repair_custom_flags.fill(true)
-		repair_custom_data = build_masonry_custom_data(repair_transforms, part, repair_custom_flags, repair_profile)
-	return {"mortarSize": mortar_size, "regularTransforms": regular_transforms, "repairTransforms": repair_transforms,
-		"regularCustomData": regular_custom_data, "repairCustomData": repair_custom_data,
-		"surfaceMaterialId": surface_material_id, "repairProfile": repair_profile}
+	return MasonryDescriptor.describe_source(part,surface_history,source_blueprint_id)
 
 
 func masonry_brick_solids(part, geometry: Dictionary) -> Array:
@@ -1018,28 +977,7 @@ func paving_treatment_strength(world_position: Vector3) -> float:
 
 
 func build_masonry_custom_data(transforms: Array[Transform3D], part, repair_flags: Array[bool] = [], repair_profile: Dictionary = {}) -> Array[Color]:
-	var result: Array[Color] = []
-	var min_y := INF
-	var max_y := -INF
-	var max_abs_x := 0.001
-	var max_abs_z := 0.001
-	for transform in transforms:
-		min_y = minf(min_y, transform.origin.y)
-		max_y = maxf(max_y, transform.origin.y)
-		max_abs_x = maxf(max_abs_x, absf(transform.origin.x))
-		max_abs_z = maxf(max_abs_z, absf(transform.origin.z))
-	var height_range := maxf(0.001, max_y - min_y)
-	var part_phase := float(posmod(String(part.id).hash(), 997)) / 997.0
-	for index in range(transforms.size()):
-		var origin := transforms[index].origin
-		var height := clampf((origin.y - min_y) / height_range, 0.0, 1.0)
-		var edge_proximity := maxf(absf(origin.x) / max_abs_x, absf(origin.z) / max_abs_z)
-		var edge_exposure := smoothstep(0.72, 0.98, edge_proximity)
-		var top_shelter := smoothstep(0.82, 1.0, height)
-		var stable_piece := fposmod(sin(origin.x * 12.9898 + origin.y * 78.233 + origin.z * 37.719 + float(index) * 0.173 + part_phase * 11.0) * 43758.5453, 1.0)
-		var repair_cluster := repair_flags.size() == transforms.size() and repair_flags[index]
-		result.append(history_custom_data(part.position + origin))
-	return result
+	return MasonryDescriptor.build_masonry_custom_data(transforms,part,surface_history,repair_flags,repair_profile)
 
 
 func build_facade_custom_data(transforms: Array[Transform3D], part) -> Array[Color]:
@@ -1060,16 +998,7 @@ func build_facade_custom_data(transforms: Array[Transform3D], part) -> Array[Col
 
 
 func history_custom_data(world_position: Vector3) -> Color:
-	var conditions := surface_history.conditions_at(world_position)
-	var wear_contact := surface_history.wear_contact_at(world_position)
-	var route_use := float(wear_contact.get("influence", 0.0))
-	var route_lateral := float(wear_contact.get("lateral", 1.0))
-	return Color(
-		clampf(float(conditions.get("runoff", 0.0)), 0.0, 1.0),
-		pack_route_history(route_use, route_lateral),
-		clampf(float(conditions.get("rootDisturbance", 0.0)), 0.0, 1.0),
-		clampf(float(conditions.get("canopyDeposit", 0.0)), 0.0, 1.0)
-	)
+	return MasonryDescriptor.history_custom_data(world_position,surface_history)
 
 
 func pack_route_history(influence: float, lateral: float) -> float:
@@ -1077,131 +1006,23 @@ func pack_route_history(influence: float, lateral: float) -> float:
 
 
 func append_brick_face_transforms(transforms: Array[Transform3D], repair_flags: Array[bool], size: Vector3, axis_x: bool, face_sign: float, unit_length: float, unit_height: float, joint_width: float, face_depth: float, masonry_phase: float, repair_profile: Dictionary, face_index: int) -> void:
-	var length := size.x if axis_x else size.z
-	var row := 0
-	var consumed_height := 0.0
-	while consumed_height < size.y - 0.001:
-		var course_noise := fposmod(sin(float(row + 1) * 19.193 + masonry_phase * 71.713) * 15731.743, 1.0)
-		var monumental := unit_height > 0.40
-		var actual_height := minf(size.y - consumed_height, unit_height * lerpf(0.78 if monumental else 0.84, 1.18 if monumental else 1.14, course_noise))
-		var offset := unit_length * (0.46 + (course_noise - 0.5) * 0.13) if row % 2 == 1 else unit_length * (course_noise - 0.5) * (0.08 if monumental else 0.18)
-		var cursor := -length * 0.5 - offset
-		var column := 0
-		while cursor < length * 0.5 - 0.04:
-			var face_seed := (1.0 if axis_x else 17.0) + masonry_phase * 113.0
-			face_seed += 31.0 if face_sign > 0.0 else 0.0
-			var piece_noise := fposmod(sin(float(row + 1) * 12.9898 + float(column + 1) * 78.233 + face_seed) * 43758.5453, 1.0)
-			var second_noise := fposmod(sin(float(row + 1) * 39.3467 + float(column + 1) * 11.135 + face_seed) * 24634.6345, 1.0)
-			var nominal_length := unit_length * lerpf(0.60 if monumental else 0.82, 1.42 if monumental else 1.16, piece_noise)
-			var piece_start := maxf(cursor, -length * 0.5)
-			var piece_end := minf(cursor + nominal_length, length * 0.5)
-			if piece_end - piece_start < 0.12:
-				cursor += nominal_length
-				column += 1
-				continue
-			var along := (piece_start + piece_end) * 0.5
-			var normalized_y := (consumed_height + actual_height * 0.5) / maxf(size.y, 0.001)
-			var normalized_along := along / maxf(length, 0.001) + 0.5
-			var repair_cluster := masonry_repair_cluster_matches(repair_profile, face_index, normalized_y, normalized_along, row)
-			var repair_perimeter := repair_cluster and (not masonry_repair_cluster_matches(repair_profile, face_index, normalized_y, normalized_along - 0.075, row) or not masonry_repair_cluster_matches(repair_profile, face_index, normalized_y, normalized_along + 0.075, row) or not masonry_repair_cluster_matches(repair_profile, face_index, normalized_y - 0.065, normalized_along, row - 1) or not masonry_repair_cluster_matches(repair_profile, face_index, normalized_y + 0.065, normalized_along, row + 1))
-			var replacement := piece_noise > (0.79 if monumental else 0.84) and second_noise < 0.58
-			var chip_factor := lerpf(0.80 if monumental else 0.84, 0.955 if monumental else 0.97, second_noise) if piece_noise > (0.87 if monumental else 0.90) else 1.0
-			var resolved_length := maxf(0.08, piece_end - piece_start - joint_width) * chip_factor
-			var resolved_height := maxf(0.04, (actual_height - joint_width * 0.72) * lerpf(0.90 if monumental else 0.86, 1.0, second_noise) * (0.90 if replacement else 1.0))
-			var resolved_depth := face_depth * lerpf(0.84 if monumental else 0.72, 1.14 if monumental else 1.18, piece_noise) * (1.14 if replacement else 1.0)
-			if repair_cluster:
-				resolved_length *= lerpf(0.965, 1.0, second_noise)
-				resolved_height *= lerpf(0.955, 1.0, piece_noise)
-				resolved_depth *= lerpf(0.92, 1.06, second_noise)
-				if repair_perimeter:
-					resolved_length *= lerpf(0.955, 0.985, second_noise)
-					resolved_height *= lerpf(0.955, 0.985, piece_noise)
-					resolved_depth *= lerpf(0.90, 1.02, piece_noise)
-			var brick_size := Vector3(resolved_length, resolved_height, resolved_depth) if axis_x else Vector3(resolved_depth, resolved_height, resolved_length)
-			var along_jitter := (second_noise - 0.5) * (0.010 if monumental else 0.018)
-			if chip_factor < 0.99:
-				along_jitter += (unit_length - resolved_length) * (0.04 if second_noise > 0.5 else -0.04)
-			var course_jitter := (piece_noise - 0.5) * (0.002 if monumental else 0.012)
-			var resolved_y := -size.y * 0.5 + consumed_height + actual_height * 0.5 + course_jitter
-			var face_displacement := (second_noise - 0.5) * (0.032 if monumental else 0.026)
-			var face_position := face_sign * ((size.z if axis_x else size.x) * 0.5 + resolved_depth * 0.18 + face_displacement)
-			var position := Vector3(along + along_jitter, resolved_y, face_position) if axis_x else Vector3(face_position, resolved_y, along + along_jitter)
-			var settlement_angle := (second_noise - 0.5) * deg_to_rad(1.15 if monumental else 1.15)
-			var settlement_basis := Basis(Vector3.FORWARD if axis_x else Vector3.RIGHT, settlement_angle).scaled(brick_size)
-			transforms.append(Transform3D(settlement_basis, position))
-			repair_flags.append(repair_cluster)
-			cursor += nominal_length
-			column += 1
-		consumed_height += actual_height
-		row += 1
+	MasonryDescriptor.append_brick_face_transforms(transforms,repair_flags,size,axis_x,face_sign,unit_length,unit_height,joint_width,face_depth,masonry_phase,repair_profile,face_index)
 
 
 func masonry_repair_profile(part) -> Dictionary:
-	var largest_span := maxf(part.size.x, maxf(part.size.y, part.size.z))
-	if String(part.kind) not in ["wall", "foundation"] or largest_span < 2.60 or part.size.y < 1.35:
-		return {}
-	var phase := float(posmod((source_blueprint_id + ":repair:" + String(part.id)).hash(), 4093)) / 4093.0
-	var exterior_front := String(part.id).contains("front") or String(part.semantic).contains("facade")
-	if phase < 0.34 and not exterior_front:
-		return {}
-	var runoff: float = float(surface_history.conditions_at(part.position + Vector3(0.0, part.size.y * 0.18, 0.0)).get("runoff", 0.0))
-	return {"face": 0 if exterior_front else int(floor(phase * 17.0)) % 4, "centerY": lerpf(0.30, 0.68, fposmod(phase * 5.17, 1.0)) * (1.0 - runoff * 0.22), "centerAlong": lerpf(0.28, 0.72, fposmod(phase * 9.31, 1.0)), "radiusY": lerpf(0.075, 0.125, fposmod(phase * 13.73, 1.0)), "radiusAlong": lerpf(0.065, 0.115, fposmod(phase * 19.37, 1.0)), "edgePhase": phase}
+	return MasonryDescriptor.masonry_repair_profile(part,surface_history,source_blueprint_id)
 
 
 func masonry_repair_cluster_at(part, origin: Vector3, repair_profile: Dictionary) -> bool:
-	if repair_profile.is_empty():
-		return false
-	var face_index := 0
-	var along: float = origin.x
-	var length: float = part.size.x
-	if absf(origin.x) > absf(origin.z):
-		face_index = 2 if origin.x < 0.0 else 3
-		along = origin.z
-		length = part.size.z
-	else:
-		face_index = 0 if origin.z < 0.0 else 1
-	var normalized_y := origin.y / maxf(part.size.y, 0.001) + 0.5
-	var normalized_along := along / maxf(length, 0.001) + 0.5
-	return masonry_repair_cluster_matches(repair_profile, face_index, normalized_y, normalized_along)
+	return MasonryDescriptor.masonry_repair_cluster_at(part,origin,repair_profile)
 
 
 func masonry_repair_cluster_matches(repair_profile: Dictionary, face_index: int, normalized_y: float, normalized_along: float, course_index := -1) -> bool:
-	if repair_profile.is_empty() or int(repair_profile.get("face", -1)) != face_index:
-		return false
-	var radius_y := float(repair_profile.get("radiusY", 0.0))
-	var vertical_ratio := absf(normalized_y - float(repair_profile.get("centerY", 0.5))) / maxf(radius_y, 0.001)
-	if vertical_ratio > 1.0:
-		return false
-	var phase := float(repair_profile.get("edgePhase", 0.0))
-	var resolved_course := course_index if course_index >= 0 else floori(normalized_y * 17.0)
-	var row_noise := fposmod(sin(float(resolved_course + 1) * 19.193 + phase * 71.713) * 15731.743, 1.0)
-	var center_along := float(repair_profile.get("centerAlong", 0.5)) + (row_noise - 0.5) * float(repair_profile.get("radiusAlong", 0.0)) * 1.35
-	var taper := 0.46 + (1.0 - vertical_ratio) * 0.34 + (row_noise - 0.5) * 0.30
-	var row_radius := maxf(0.045, float(repair_profile.get("radiusAlong", 0.0)) * taper)
-	return absf(normalized_along - center_along) <= row_radius
+	return MasonryDescriptor.masonry_repair_cluster_matches(repair_profile,face_index,normalized_y,normalized_along,course_index)
 
 
 func masonry_repair_patch_blend(part, origin: Vector3, repair_profile: Dictionary, stone_phase: float) -> float:
-	if repair_profile.is_empty():
-		return 0.70
-	var face_index := 0
-	var along: float = origin.x
-	var length: float = part.size.x
-	if absf(origin.x) > absf(origin.z):
-		face_index = 2 if origin.x < 0.0 else 3
-		along = origin.z
-		length = part.size.z
-	else:
-		face_index = 0 if origin.z < 0.0 else 1
-	if face_index != int(repair_profile.get("face", -1)):
-		return 0.70
-	var normalized_y := origin.y / maxf(part.size.y, 0.001) + 0.5
-	var normalized_along := along / maxf(length, 0.001) + 0.5
-	var vertical_ratio := absf(normalized_y - float(repair_profile.get("centerY", 0.5))) / maxf(float(repair_profile.get("radiusY", 0.0)), 0.001)
-	var horizontal_ratio := absf(normalized_along - float(repair_profile.get("centerAlong", 0.5))) / maxf(float(repair_profile.get("radiusAlong", 0.0)), 0.001)
-	var boundary := clampf(maxf(vertical_ratio, horizontal_ratio), 0.0, 1.0)
-	var boundary_blend := smoothstep(0.48, 1.0, boundary)
-	return clampf(0.96 - boundary_blend * 0.70 + (stone_phase - 0.5) * 0.18, 0.12, 1.0)
+	return MasonryDescriptor.masonry_repair_patch_blend(part,origin,repair_profile,stone_phase)
 
 
 func publish_board_floor(part, parent: Node3D) -> void:
@@ -1676,6 +1497,7 @@ func validate_static_flush_source() -> bool:
 
 
 func prepare_paving_history_snapshot():
+	if _prepared_history!=null: return surface_history
 	if _paving_history_snapshot!=null: return _paving_history_snapshot
 	# Once per exclusively owned publication session, never once per stone or
 	# slice. Standalone edits to public history invalidate at publication commits;
@@ -1704,6 +1526,11 @@ static func _freeze_publication_value(value: Variant) -> void:
 
 
 func validate_paving_history_source() -> bool:
+	if _prepared_history!=null:
+		var started:=Time.get_ticks_usec()
+		var valid: bool=_prepared_history.matches(surface_history,source_blueprint_id)
+		_record_publication_stage("prepared_history_identity_validation",Time.get_ticks_usec()-started)
+		return true if valid else _paving_reject("stale_prepared_history")
 	if _paving_history_snapshot==null: return true
 	var started:=Time.get_ticks_usec()
 	var valid: bool = surface_history==_paving_history_source and _paving_history_source_bytes==_paving_history_identity()

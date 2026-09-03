@@ -8,6 +8,23 @@ const Plan = preload("res://scripts/buildings/FurnishingPlan.gd")
 const Worker = preload("res://scripts/buildings/BuildingPublicationWorker.gd")
 const Fixtures = preload("res://scripts/testing/buildings/BuildingPublicationWorkerContract.gd")
 
+class InvalidatingMasonryPublisher extends "res://scripts/buildings/BuildingPartPublisher.gd":
+	var hook := "collect"
+	var mutation := false
+	var fired := false
+	var light_calls := 0
+	func invalidate() -> void:
+		fired=true
+		if mutation: _pending_masonry.source_part().size.x+=0.25
+		else: _paving_reject("synthetic_hook_rejection")
+	func collect_static_visual_transform(transform: Transform3D, material: Material, custom_data := Color(0.5,0.5,0.5,1.0)) -> void:
+		super.collect_static_visual_transform(transform,material,custom_data)
+		if not fired and hook=="collect" and _pending_masonry!=null and _pending_masonry.state=="collect": invalidate()
+	func publish_practical_light(part, target: Node3D) -> void:
+		light_calls+=1
+		super.publish_practical_light(part,target)
+		if not fired and hook=="light": invalidate()
+
 class SyntheticTrees extends RefCounted:
 	var published := 0
 	var retired := 0
@@ -130,8 +147,18 @@ func inject_synthetic_flush_threshold(job) -> void:
 		"transforms":transforms, "customData":custom}
 	job._building.static_visual_transform_count = transforms.size()
 
+func pending_masonry_holder() -> Preparation.PreparedSource:
+	var prepared:=pending_holder(false)
+	prepared._payload.blueprint.parts[0]=Blueprint.BuildingPartScript.new({"id":"pending-masonry","kind":"wall","material":"stone_foundation","size":Vector3(6,8,0.4),"recipe":{"practicalLight":true}})
+	return prepared
+
 func pending_target_reached(job, target: String) -> bool:
 	if job._building == null: return false
+	if target.begins_with("masonry_"):
+		var masonry=job._building._pending_masonry
+		if masonry==null: return false
+		if target=="masonry_geometry": return masonry.state=="geometry" and masonry._cursor!=null
+		return masonry.state=="collect" and masonry._batch_index>0 and masonry._batch_index<masonry._transforms.size()
 	if target == "static_flush":
 		var flush = job._building._static_flush
 		return flush != null and flush.state == "instances" \
@@ -169,6 +196,9 @@ func pending_progress(job) -> Dictionary:
 		result.flushState = publisher._static_flush.state
 		result.flushUnits = publisher._static_flush.units
 		result.flushCursor = publisher._static_flush._instance_index
+	if publisher._pending_masonry!=null:
+		result.masonryState=publisher._pending_masonry.state
+		result.masonryCollect=publisher._pending_masonry._batch_index
 	return result
 
 func watch_pending_resources(job) -> Dictionary:
@@ -187,12 +217,15 @@ func watch_pending_resources(job) -> Dictionary:
 	if publisher._static_flush != null:
 		watched.flush = weakref(publisher._static_flush)
 		if publisher._static_flush._mesh != null: watched.pendingMultiMesh = weakref(publisher._static_flush._mesh)
+	if publisher._pending_masonry!=null:
+		watched.masonry=weakref(publisher._pending_masonry)
+		if publisher._pending_masonry._cursor!=null: watched.geometry=weakref(publisher._pending_masonry._cursor)
 	return watched
 
 func pending_cancellation_case(target: String) -> void:
 	var trees := SyntheticTrees.new()
 	var job = Job.new()
-	start(job, trees, pending_holder(target != "static_flush"))
+	start(job, trees, pending_masonry_holder() if target.begins_with("masonry_") else pending_holder(target != "static_flush"))
 	job.advance(1) # Establish real publishers; begin itself consumed no part.
 	if target == "static_flush": inject_synthetic_flush_threshold(job)
 	for index in range(10000):
@@ -204,7 +237,7 @@ func pending_cancellation_case(target: String) -> void:
 		job.cancel()
 		await drain(job, target + "_setup_failed")
 		return
-	var part_id := "flush-trigger" if target == "static_flush" else "pending-paving"
+	var part_id := "pending-masonry" if target.begins_with("masonry_") else ("flush-trigger" if target == "static_flush" else "pending-paving")
 	var expected_cursor := 1 if target == "static_flush" else 0
 	check(target + "_one_initial_collider", collision_count_for(job, part_id) == 1 and job._building.collision_count == 1)
 	check(target + "_next_part_not_submitted", collision_count_for(job, "after-pending") == 0 and job.status().buildingCursor == expected_cursor)
@@ -214,7 +247,7 @@ func pending_cancellation_case(target: String) -> void:
 	check(target + "_retries_do_not_duplicate_collision", collision_count_for(job, part_id) == 1 and job._building.collision_count == 1 and job._building.published_part_count == 1)
 	check(target + "_cursor_stays_pending", pending_target_reached(job, target) and job.status().buildingCursor == expected_cursor)
 	var watched := watch_pending_resources(job)
-	if target != "paving_geometry": check(target + "_allocated_resource_under_test", watched.has("pendingMultiMesh"))
+	if target in ["paving_upload","static_flush"]: check(target + "_allocated_resource_under_test", watched.has("pendingMultiMesh"))
 	var before := var_to_bytes(pending_progress(job))
 	job.cancel()
 	check(target + "_cancel_immediate", job.status().status == "cancelled" and not job.status().sceneReady and not job.status().gameplayReady)
@@ -260,6 +293,109 @@ func pending_completion_control() -> void:
 	job.cancel()
 	await drain(job, "pending_success")
 	check("pending_success_tree_retirement", trees.retired == 2 and trees.retired_ids.values() == [1, 1])
+
+func masonry_completion_control() -> void:
+	var trees:=SyntheticTrees.new()
+	var job=Job.new()
+	start(job,trees,pending_masonry_holder())
+	var pending_seen:=false
+	for index in range(10000):
+		job.advance(2500)
+		if job._building!=null and job._building._pending_masonry!=null: pending_seen=true
+		if job.status().status in ["ready","failed"]: break
+	check("masonry_success_pending_and_complete",pending_seen and job.status().sceneReady)
+	check("masonry_success_exact_cursor",job.status().buildingCursor==2 and job._building.incremental_published_parts==2)
+	check("masonry_success_single_collision",collision_count_for(job,"pending-masonry")==1 and job._building.collision_count==2)
+	check("masonry_success_deferred_light_once",job.own_node_root().find_children("*","OmniLight3D",true,false).size()==1)
+	job.cancel()
+	await drain(job,"masonry_success")
+
+func masonry_hook_controls() -> void:
+	# Synthetic fault injection through real publisher hooks. The cursor below
+	# is the publisher's acceptance result, not a claim of live-world readiness.
+	for hook: String in ["collect","light"]:
+		for mutation: bool in [false,true]:
+			var publisher:=InvalidatingMasonryPublisher.new()
+			publisher.hook=hook; publisher.mutation=mutation
+			var target:=Node3D.new()
+			parent.add_child(target)
+			var result: Dictionary=publisher.begin_prepared_publication(pending_masonry_holder(),target,Fixtures.BINDING,{"batchStaticParts":true,"resumableScenePublication":true})
+			var cursor:=0
+			for index in range(10000):
+				var preparation: Dictionary=publisher.advance_scene_preparation(2500)
+				if preparation.status=="ready": break
+				if preparation.status=="failed": break
+			for index in range(10000):
+				cursor=publisher.publish_part_batch(result.blueprint,target,cursor,1,2500)
+				if publisher._publication_failed() or cursor>0: break
+			var label:="masonry_hook_"+hook+("_mutation" if mutation else "_reject")
+			check(label+"_fired",publisher.fired)
+			check(label+"_failed_without_acceptance",publisher._publication_failed() and cursor==0 and publisher.incremental_published_parts==0 and publisher._pending_masonry.state=="failed")
+			check(label+"_light_boundary",publisher.light_calls==(1 if hook=="light" else 0))
+			check(label+"_no_following_part",publisher.published_part_count==1 and publisher.collision_count==1)
+			var lights:=target.find_children("*","OmniLight3D",true,false)
+			check(label+"_created_light_owned",lights.size()==(1 if hook=="light" else 0))
+			var references: Array[WeakRef]=[]
+			for light: Node in lights: references.append(weakref(light))
+			lights=[]
+			target.free()
+			var gone:=true
+			for reference: WeakRef in references: gone=gone and reference.get_ref()==null
+			check(label+"_light_cleanup",gone)
+			publisher=null
+
+func prepared_history_holder() -> Preparation.PreparedSource:
+	var prepared:=pending_masonry_holder()
+	var result: Dictionary=Preparation._compile_history(prepared._payload.blueprint)
+	prepared._payload.preparedHistory=result.preparedHistory
+	return prepared
+
+func prepared_history_lifecycle_controls() -> void:
+	for change: String in ["none","object","routes","trees","events","cells"]:
+		var trees:=SyntheticTrees.new()
+		var job=Job.new()
+		start(job,trees,prepared_history_holder())
+		job.advance(1)
+		var publisher=job._building
+		var history=publisher.surface_history
+		var certificate: WeakRef=weakref(publisher._prepared_history)
+		var retained_history: WeakRef=weakref(history)
+		check("prepared_history_"+change+"_adopted",publisher._prepared_history!=null and publisher.validate_paving_history_source() and history.route_corridors.is_read_only())
+		match change:
+			"object": publisher.surface_history=publisher.SurfaceHistoryFieldScript.new()
+			"routes": history.route_corridors=history.route_corridors.duplicate(true)
+			"trees": history.tree_placements=history.tree_placements.duplicate(true)
+			"events": history.history_events=history.history_events.duplicate(true)
+			"cells": history.history_event_cells=history.history_event_cells.duplicate(true)
+		if change!="none":
+			check("prepared_history_"+change+"_rejects",not publisher.validate_paving_history_source())
+			job.advance(2500)
+			check("prepared_history_"+change+"_no_ready",job.status().status=="failed" and not job.status().sceneReady and job.status().buildingCursor==0)
+		else: job.cancel()
+		history=null; publisher=null
+		await drain(job,"prepared_history_"+change)
+		check("prepared_history_"+change+"_released",certificate.get_ref()==null and retained_history.get_ref()==null)
+	var prepared:=prepared_history_holder()
+	var certificate: WeakRef=weakref(prepared._payload.preparedHistory)
+	prepared._payload.blueprint.id="changed-after-history-preparation"
+	var publisher:=InvalidatingMasonryPublisher.new()
+	var target:=Node3D.new()
+	parent.add_child(target)
+	var result: Dictionary=publisher.begin_prepared_publication(prepared,target,Fixtures.BINDING)
+	check("prepared_history_failed_begin_detached",not result.ready and publisher._prepared_history==null and result.retirementPayload.scenePreparation.preparedHistory!=null)
+	worker.retire_external_payload(result.retirementPayload)
+	result={}; prepared=null
+	var deadline:=Time.get_ticks_msec()+5000
+	while worker.poll().busy and Time.get_ticks_msec()<deadline: await process_frame
+	check("prepared_history_failed_begin_released",certificate.get_ref()==null)
+	publisher.clear_published()
+	check("prepared_history_clear_mutable_replacement",not publisher.surface_history.route_corridors.is_read_only() and not publisher.surface_history.history_events.is_read_only())
+	result=publisher.begin_prepared_publication(prepared_history_holder(),target,Fixtures.BINDING)
+	check("prepared_history_clear_fixture_adopted",result.ready and publisher._prepared_history!=null)
+	certificate=weakref(publisher._prepared_history)
+	publisher.clear_published()
+	check("prepared_history_successful_clear_released",certificate.get_ref()==null and publisher._prepared_history==null and not publisher.surface_history.history_events.is_read_only())
+	target.free()
 
 func _run() -> void:
 	parent = Node3D.new()
@@ -398,9 +534,12 @@ func _run() -> void:
 			if job.status().status == "failed": break
 		check("bad_tree_state_" + state, job.status().status == "failed" and not job.status().sceneReady)
 		await drain(job, "bad_tree_" + state)
-	for target: String in ["paving_geometry", "paving_upload", "static_flush"]:
+	for target: String in ["paving_geometry", "paving_upload", "static_flush","masonry_geometry","masonry_collect"]:
 		await pending_cancellation_case(target)
 	await pending_completion_control()
+	await masonry_completion_control()
+	masonry_hook_controls()
+	await prepared_history_lifecycle_controls()
 	worker.request_shutdown()
 	var deadline := Time.get_ticks_msec() + 5000
 	while not worker.poll().shutdownComplete and Time.get_ticks_msec() < deadline: await process_frame

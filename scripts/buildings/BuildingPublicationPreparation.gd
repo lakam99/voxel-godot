@@ -5,6 +5,7 @@ class_name BuildingPublicationPreparation
 ## source snapshots; no Nodes, rendering resources or scene publication here.
 const Source = preload("res://scripts/buildings/BuildingPublicationSource.gd")
 const Castle = preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
+const History = preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const METADATA_MAX_DEPTH := 128
 
 class Continuation extends RefCounted:
@@ -28,17 +29,38 @@ class PreparedSource extends RefCounted:
 		_payload = {}
 		return result
 
+class PreparedHistory extends RefCounted:
+	# Only the compiler constructs this certificate, after isolating and freezing
+	# every container. Retain it with the publisher until worker retirement.
+	var history
+	var _identity: Dictionary = {}
+	func _init(field, source_id: String) -> void:
+		history = field
+		_identity = {"history":field, "sourceId":source_id,
+			"routes":field.route_corridors, "trees":field.tree_placements,
+			"events":field.history_events, "cells":field.history_event_cells}
+		_identity.make_read_only()
+	func matches(field, source_id: String) -> bool:
+		# No scans, encoding, equality of containers, or caller-recipe ownership.
+		return field != null and field == _identity.history and history == field \
+			and source_id == _identity.sourceId \
+			and is_same(field.route_corridors, _identity.routes) \
+			and is_same(field.tree_placements, _identity.trees) \
+			and is_same(field.history_events, _identity.events) \
+			and is_same(field.history_event_cells, _identity.cells)
+
 class MetadataGraph extends RefCounted:
 	# Only isolated Array/Dictionary copies are frozen. Never freeze a caller's
 	# recipe, trust packed-array COW, or retain Objects through typed containers.
 	var guard: Continuation
 	var eligible := true
 	var visits := 0
+	var walk_stage := "publication_metadata_walk"
 	func walk(value: Variant, ancestors: Array, copy: bool, depth := 0) -> Variant:
 		visits += 1
 		var kind := typeof(value)
 		if visits % 128 == 0 or kind == TYPE_ARRAY or kind == TYPE_DICTIONARY:
-			if not guard.advance("publication_metadata_walk"): return null
+			if not guard.advance(walk_stage): return null
 		if kind <= TYPE_NODE_PATH: return value
 		if kind != TYPE_ARRAY and kind != TYPE_DICTIONARY:
 			eligible = false
@@ -100,6 +122,8 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 	if not diagnostics.ready: return _failed(diagnostics.reason)
 	var metadata := _compile_static_records(restored.blueprint, guard.advance)
 	if not metadata.ready: return _failed(metadata.reason)
+	var history_result := _compile_history(restored.blueprint, guard.advance)
+	if not history_result.ready: return _failed(history_result.reason)
 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
 	var prepared := PreparedSource.new()
 	prepared._binding = source_binding
@@ -108,8 +132,54 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		"preparationUsec":diagnostics.preparationUsec, "routeUsec":diagnostics.routeUsec,
 		"physicalUsec":diagnostics.physicalUsec, "workerThreadId":OS.get_thread_caller_id(),
 		"staticRecords":metadata.staticRecords, "staticRecordBindings":metadata.staticRecordBindings,
-		"metadataPreparationUsec":metadata.metadataPreparationUsec}
+		"metadataPreparationUsec":metadata.metadataPreparationUsec,
+		"preparedHistory":history_result.preparedHistory,
+		"historyPreparationUsec":history_result.historyPreparationUsec}
 	return {"ready":true, "reason":"", "prepared":prepared}
+
+## Optional optimization only: unsupported input stays on mutable compatibility.
+## Configure uses the original history algorithm, then replaces ALL four roots
+## with isolated copies. In particular, never freeze configure's recipe alias.
+static func _compile_history(blueprint, continuation: Callable = Callable()) -> Dictionary:
+	var started := Time.get_ticks_usec()
+	var guard := Continuation.new()
+	guard.callback = continuation
+	if not guard.advance("publication_history_started"): return _failed("cancelled")
+	if blueprint == null: return _failed("missing_blueprint")
+	var result := {"ready":true, "reason":"", "preparedHistory":null, "historyPreparationUsec":0}
+	var graph := MetadataGraph.new()
+	graph.guard = guard
+	graph.walk_stage = "publication_history_walk"
+	# Preflight before configure's tree duplicate(true): cycles/Objects/packed
+	# values must not enter that operation. Conservative omission is intentional.
+	graph.walk(blueprint.recipe, [], false)
+	if guard.cancelled: return _failed("cancelled")
+	var shape_valid: bool = blueprint.recipe is Dictionary
+	if shape_valid:
+		shape_valid = blueprint.recipe.get("routeCorridors", blueprint.recipe.get("pavingTreatments", [])) is Array \
+			and blueprint.recipe.get("landscapeTrees", []) is Array
+		if shape_valid and blueprint.recipe.get("landscapeTrees", []).is_empty():
+			var urban: Variant = blueprint.recipe.get("urbanPoc", {})
+			shape_valid = urban is Dictionary and urban.get("treePlacements", []) is Array
+	if graph.eligible and shape_valid:
+		if not guard.advance("publication_history_configure"): return _failed("cancelled")
+		var field := History.new()
+		# Atomic legacy configure runs on the owned worker, never the frame thread.
+		field.configure(blueprint.recipe, blueprint.parts)
+		if not guard.advance("publication_history_configured"): return _failed("cancelled")
+		var frozen: Variant = graph.walk([field.route_corridors, field.tree_placements,
+			field.history_events, field.history_event_cells], [], true)
+		if guard.cancelled: return _failed("cancelled")
+		if graph.eligible:
+			field.route_corridors = frozen[0]
+			field.tree_placements = frozen[1]
+			field.history_events = frozen[2]
+			field.history_event_cells = frozen[3]
+			var source_id := String(blueprint.recipe.get("sourceBlueprintId", blueprint.id))
+			result.preparedHistory = PreparedHistory.new(field, source_id)
+	if not guard.advance("publication_history_completed"): return _failed("cancelled")
+	result.historyPreparationUsec = Time.get_ticks_usec() - started
+	return result
 
 ## Post-diagnostic snapshots only. Unsupported graphs are absent from BOTH maps
 ## so the publisher retains its ordinary unfrozen fallback. Exact bindings are

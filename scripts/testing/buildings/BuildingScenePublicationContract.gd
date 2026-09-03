@@ -111,6 +111,8 @@ func actual_publication() -> void:
 	var job_script = load("res://scripts/buildings/BuildingScenePublicationJob.gd")
 	var job = job_script.new()
 	metrics.metadataPreparationUsec=completed.result.prepared._payload.get("metadataPreparationUsec",0)
+	metrics.historyPreparationUsec=completed.result.prepared._payload.get("historyPreparationUsec",0)
+	check("actual_immutable_history_prepared",completed.result.prepared._payload.get("preparedHistory")!=null)
 	var begin: Dictionary = job.begin(completed.result.prepared,profile,binding,parent,main.make_tree_from_runtime_request)
 	completed = {}; profile = {}
 	check("actual_begin_queued_without_nodes",begin.status=="pending_budget" and parent.get_child_count()==0)
@@ -129,6 +131,8 @@ func actual_publication() -> void:
 	metrics.sceneElapsedUsec = Time.get_ticks_usec()-scene_started
 	metrics.publication = status
 	metrics.publisherStages = job._building.publication_timing() if job._building!=null else {}
+	check("actual_history_uses_identity_guards",metrics.publisherStages.get("prepared_history_identity_validation",{}).get("calls",0)>0 and metrics.publisherStages.get("paving_history_boundary_validation",{}).get("calls",0)==0)
+	check("actual_advance_accounting",status.advanceCalls>0 and status.advanceCpuUsec>0 and status.betweenAdvanceUsec>=0)
 	metrics.retainedMetadata=measure_retained_metadata(job._building)
 	metrics.metadataCache=job._building._static_record_cache_stats.duplicate() if job._building!=null else {}
 	metrics.metadataCache["currentRecords"]=job._building._static_record_cache.size() if job._building!=null else 0
