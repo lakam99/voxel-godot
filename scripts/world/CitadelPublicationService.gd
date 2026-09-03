@@ -31,6 +31,9 @@ var _tree_receiver: WeakRef
 var _tree_method: StringName
 var _tree_retire_receiver: WeakRef
 var _tree_retire_method: StringName
+var _require_tree_retirement_ack := false
+var _construction_guard_receiver: WeakRef
+var _construction_guard_method: StringName
 var _door_lifecycle_configured := false
 var _door_receiver: WeakRef
 var _door_method: StringName
@@ -54,16 +57,18 @@ var _worker_polled_configuration := -1
 ## Bind only after the owner can balance its ordinary scene/tree lifecycle.
 ## No strong owner/callback cycles; reject capturing/bound custom callables.
 ## A new root cannot inherit old nodes or lose their cleanup receiver.
-func configure_scene_publication(parent: Node3D, tree_publish: Callable, tree_retire: Callable) -> bool:
+func configure_scene_publication(parent: Node3D, tree_publish: Callable, tree_retire: Callable, require_tree_retirement_ack := false) -> bool:
 	if _closing or not SceneJob._valid_parent(parent): return false
 	if not _ordinary_callback(tree_publish) or not _ordinary_callback(tree_retire): return false
 	var same: bool = _scene_parent!=null and _scene_parent.get_ref()==parent \
 		and _tree_receiver!=null and _tree_receiver.get_ref()==tree_publish.get_object() and _tree_method==tree_publish.get_method() \
 		and _tree_retire_receiver!=null and _tree_retire_receiver.get_ref()==tree_retire.get_object() and _tree_retire_method==tree_retire.get_method()
+	same = same and _require_tree_retirement_ack == require_tree_retirement_ack
 	if not same and (not _scenes.is_empty() or _has_scene_retirements()): return false
 	_scene_parent=weakref(parent)
 	_tree_receiver=weakref(tree_publish.get_object()); _tree_method=tree_publish.get_method()
 	_tree_retire_receiver=weakref(tree_retire.get_object()); _tree_retire_method=tree_retire.get_method()
+	_require_tree_retirement_ack=require_tree_retirement_ack
 	return true
 
 ## Optional only for existing construction diagnostics. The ordinary runtime
@@ -86,6 +91,24 @@ func configure_door_publication(register_callback: Callable, unregister_callback
 
 func _ordinary_callback(callback: Callable) -> bool:
 	return callback.is_valid() and not callback.is_custom() and callback.get_object()!=self
+
+func configure_construction_guard(callback: Callable) -> bool:
+	if _closing or not _ordinary_callback(callback): return false
+	var same: bool = _construction_guard_receiver != null and _construction_guard_receiver.get_ref() == callback.get_object() and _construction_guard_method == callback.get_method()
+	if not same and (not _scenes.is_empty() or _has_scene_retirements()): return false
+	_construction_guard_receiver=weakref(callback.get_object())
+	_construction_guard_method=callback.get_method()
+	return true
+
+func _construction_allowed(source: Dictionary) -> bool:
+	if _construction_guard_receiver == null: return not _require_tree_retirement_ack
+	var receiver = _construction_guard_receiver.get_ref()
+	if not is_instance_valid(receiver): return false
+	var callback := Callable(receiver,_construction_guard_method)
+	if not callback.is_valid(): return false
+	var configuration := _configuration_serial
+	var allowed: Variant = callback.call(source.reservationCells)
+	return allowed == true and configuration == _configuration_serial and not _closing and not _world_reset_pending
 
 func _door_callbacks_ready() -> bool:
 	return _door_lifecycle_configured \
@@ -349,13 +372,15 @@ func _prune_invalid_scenes() -> void:
 
 func _start_scene(region: Vector2i, source: Dictionary) -> bool:
 	if not _scene_callbacks_ready() or _scenes.has(region) or _region_retiring(region): return false
+	if not _construction_allowed(source): return false
+	if not _prepared.has(region) or _scenes.has(region) or _region_retiring(region) or not _scene_callbacks_ready(): return false
 	var prepared: Dictionary=_prepared[region]
 	# Bind against a fresh non-enqueuing lookup immediately before consumption.
 	var current: Dictionary=_admission.source_state(region)
 	if current.get("binding",{})!=prepared.binding or source.binding!=prepared.binding or not _current_binding(prepared.binding): return false
 	var parent: Node3D=_scene_parent.get_ref() as Node3D
 	var job=SceneJob.new()
-	if not job.set_tree_retire_callback(Callable(_tree_retire_receiver.get_ref(),_tree_retire_method)): return false
+	if not job.set_tree_retire_callback(Callable(_tree_retire_receiver.get_ref(),_tree_retire_method),_require_tree_retirement_ack): return false
 	if _door_lifecycle_configured and not job.set_door_callbacks(Callable(_door_receiver.get_ref(),_door_method),Callable(_door_retire_receiver.get_ref(),_door_retire_method)): return false
 	var result: Dictionary=job.begin(prepared.prepared,prepared.profile,prepared.binding,parent,Callable(_tree_receiver.get_ref(),_tree_method))
 	if result.get("status")!="pending_budget":
@@ -393,14 +418,23 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 			for region: Vector2i in _prepared.keys():
 				if ready.has(region) and not _region_retiring(region) and not _failures.has(region):
 					progressed=_start_scene(region,ready[region])
-					break
-			if not progressed:
+					if progressed or configuration!=_configuration_serial or _closing: break
+			if not progressed and configuration==_configuration_serial and not _closing:
 				var regions: Array=_scenes.keys()
 				for offset in range(regions.size()):
 					var index:=(_scene_cursor+offset)%regions.size()
 					var region: Vector2i=regions[index]
+					if not _scenes.has(region): continue
 					var entry: Dictionary=_scenes[region]
 					if entry.phase!="publishing" or not ready.has(region): continue
+					var phase: String = entry.job.status_count().phase
+					if not _construction_allowed(ready[region]):
+						if configuration!=_configuration_serial or _closing: break
+						continue
+					# Guard callbacks are external owners too: recapture no mutable
+					# job from a generation/entry cancelled during the callback.
+					if not is_same(_scenes.get(region),entry) or entry.phase!="publishing" or entry.job.status_count().phase!=phase: continue
+					if _admission.source_state(region).get("binding",{}) != entry.binding or not _scene_callbacks_ready(): continue
 					_scene_cursor=(index+1)%regions.size()
 					var result: Dictionary=entry.job.advance(remaining)
 					if not is_same(_scenes.get(region),entry):
@@ -417,7 +451,12 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					progressed=true
 					break
 			_prefer_retirement=true
-		if not progressed: break
+		if not progressed:
+			if not _retiring_scenes.is_empty():
+				_prefer_retirement=true
+				units+=1
+				continue
+			break
 		units+=1
 		_scene_max_step_usec=maxi(_scene_max_step_usec,Time.get_ticks_usec()-work_started)
 
@@ -440,3 +479,35 @@ func scene_state(region: Vector2i) -> Dictionary:
 
 func scene_root(region: Vector2i) -> Node3D:
 	return _scenes[region].job.own_node_root() if _scenes.has(region) else null
+
+## Readiness only, consumed by ordinary collision/loading gates. It never moves
+## a player, invents geometry, publishes routes or upgrades diagnostic callbacks.
+func physical_publication_state(bounds: Rect2i) -> Dictionary:
+	if _admission == null: return {"status":"failed", "reason":"landmark_source_missing"}
+	var source_ready: Dictionary = _admission.request_bounds(bounds)
+	if source_ready.get("status") != "ready": return source_ready
+	if _world_reset_pending or _closing: return {"status":"pending", "reason":"landmark_world_reset_pending"}
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end - Vector2i.ONE)
+	var required := false
+	var scene_ids: Array[int] = []
+	for z in range(low.y, high.y + 1):
+		for x in range(low.x, high.x + 1):
+			var region := Vector2i(x,z)
+			var source: Dictionary = _admission.source_state(region)
+			if source.get("status") not in ["ready", "prepared"]: continue
+			if not source.reservationCells.intersects(bounds): continue
+			required = true
+			var state := scene_state(region)
+			if state.status == "failed": return {"status":"failed", "reason":state.reason}
+			if not _door_callbacks_ready() or not _require_tree_retirement_ack or not _scene_callbacks_ready():
+				return {"status":"pending", "reason":"landmark_runtime_owners_pending"}
+			if state.status != "scene_ready" or state.get("binding",{}) != source.binding:
+				return {"status":"pending", "reason":"landmark_structures_pending"}
+			var site := scene_root(region)
+			var parent: Node3D = _scene_parent.get_ref() as Node3D
+			if not is_instance_valid(site) or site.is_queued_for_deletion() or not site.is_inside_tree() \
+					or site.get_parent() != parent or not site.global_transform.is_equal_approx(Transform3D(Basis.IDENTITY,_scenes[region].profile.origin)):
+				return {"status":"failed", "reason":"landmark_scene_owner_lost"}
+			scene_ids.append(site.get_instance_id())
+	return {"status":"ready", "reason":"landmark_physical_publication_complete", "required":required, "sceneInstanceIds":scene_ids}

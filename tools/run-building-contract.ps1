@@ -76,7 +76,7 @@ try {
   if($watcherFailed -or $watcherErrors.Count -or (Test-Path -LiteralPath ($stop+'.watcher-error.txt'))){throw "$phase error watcher failed"}
   if(Select-String -LiteralPath $stdout,$stderr -Pattern 'SCRIPT ERROR:|ERROR:|WARNING:|leaked|resources still in use' -Quiet){throw "$phase emitted engine errors/warnings"}
  }
- if(-not (Test-Path -LiteralPath (Join-Path $run 'report.json'))){throw 'No completed report.'}
+ if(-not (Test-Path -LiteralPath (Join-Path $run 'report.json') -PathType Leaf)){throw 'No completed report file. Check whether this fixture requires -OutputIsDirectory.'}
  [pscustomobject]@{reportPath=(Join-Path $run 'report.json');ownedZero=$true;engineLogsClean=$true}|ConvertTo-Json -Compress
 } finally {
  foreach($key in $previous.Keys){[Environment]::SetEnvironmentVariable($key,$previous[$key],'Process')}

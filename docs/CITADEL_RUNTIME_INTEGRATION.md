@@ -73,8 +73,15 @@ pre-reset scene drain are now critic-approved. Exact door cleanup passes 135/135
 reset controls 68/68 and unchanged lifecycle controls 267/267. Seven NPC suites
 preserve the recorded baseline, including byte-identical stderr; known failures
 remain deferred, not green. See `CITADEL_RUNTIME_RETIREMENT_2026-09-02.md`.
-The ordinary runtime binding is the next integration step. No headed activation,
-full-world performance or successful in-game spawning is claimed yet.
+Ordinary runtime binding is implemented and independently critic-approved:
+actual-source replay27/27 with unchanged render records, native Player/collision
+gate64/64, callback/tree retirement controls122/305 and reset/lifecycle68/267.
+The real startup deadline rejects scene churn at120.01s; no timeout was raised.
+See `CITADEL_ORDINARY_RUNTIME_BINDING_2026-09-03.md`. A ~20.6ms finalization step
+still fails the strict budget. The critic permits a bounded ordinary headed
+diagnostic after focused checkpoint and process-tooling approval; it is not a
+performance waiver. No headed activation, full-world performance or successful
+in-game spawning is claimed yet.
 
 ### Prior checkpoint history
 

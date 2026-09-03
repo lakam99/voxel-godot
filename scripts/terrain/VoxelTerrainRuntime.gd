@@ -1124,6 +1124,11 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		site_traversal_waiting = true
 		_site_wait_message("Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
 		return {"passed":false,"reason":source.reason,"siteAdmission":source}
+	var structures: Dictionary = main.structure_system.citadel_physical_publication_state(Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2))
+	if structures.status != "ready":
+		site_traversal_waiting = true
+		_site_wait_message("Preparing landmark buildings…" if structures.status == "pending" else "Landmark loading failed: %s" % structures.reason)
+		return {"passed":false,"reason":structures.reason,"structurePublication":structures}
 	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
 	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
 	var proofs: Array = []

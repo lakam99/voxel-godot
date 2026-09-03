@@ -25,6 +25,11 @@ var _tree_receiver: WeakRef
 var _tree_method: StringName
 var _tree_retire_receiver: WeakRef
 var _tree_retire_method: StringName
+var _tree_retire_requires_acknowledgement := false
+var _tree_retirement_claims: Dictionary = {}
+var _tree_claim_order: Array[int] = []
+var _tree_claim_cursor := 0
+var _cancel_revision := 0
 var _registered_tree_ids: Dictionary = {}
 var _retiring_tree_instance := 0
 var _door_receiver: WeakRef
@@ -80,7 +85,8 @@ func begin(prepared, profile: Dictionary, binding: Dictionary, parent: Node3D, t
 	_binding.make_read_only()
 	_cpu = {"prepared":prepared, "profile":profile, "binding":_binding,
 		"nodeMetadata":[], "treeBodies":_tree_bodies, "treeIds":_tree_ids,
-		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen}
+		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen,
+		"treeRetirementClaims":_tree_retirement_claims, "treeClaimOrder":_tree_claim_order}
 	_parent = weakref(parent)
 	_tree_receiver = weakref(tree_callback.get_object())
 	_tree_method = tree_callback.get_method()
@@ -91,9 +97,15 @@ func begin(prepared, profile: Dictionary, binding: Dictionary, parent: Node3D, t
 ## Optional ordinary object method: callback(prop_id: String, body: StaticBody3D).
 ## Owner balances its existing tree-created hook here, BEFORE body.free(). It
 ## must not harvest, record durable removal, or free the node/subtree itself.
-func set_tree_retire_callback(callback: Callable) -> bool:
+## Required mode accepts only {status:unregistered|absent, objectId:prop:<id>}.
+## A recovery callback must reach the SAME registry; absence in a new registry
+## is not proof. Once required, acknowledgement cannot be downgraded to void.
+func set_tree_retire_callback(callback: Callable, require_acknowledgement := false) -> bool:
 	if _phase in ["detach_publishers", "retired", "consumed"]: return false
+	if _advancing and (_tree_retire_requires_acknowledgement or require_acknowledgement): return false
+	if _tree_retire_requires_acknowledgement and not require_acknowledgement: return false
 	if not callback.is_valid() or callback.is_custom() or callback.get_object() == self: return false
+	_tree_retire_requires_acknowledgement = require_acknowledgement
 	_tree_retire_receiver = weakref(callback.get_object())
 	_tree_retire_method = callback.get_method()
 	_cleanup_reason = ""
@@ -173,6 +185,7 @@ func advance(budget_usec: int = 2500) -> Dictionary:
 func cancel() -> void:
 	if _phase in ["idle", "retired", "consumed"]: return
 	_cancelled = true
+	_cancel_revision += 1
 	# Stop a roof helper already inside an external publication callback; retain
 	# its allocations for the existing owned retirement path.
 	if _building!=null and _building._pending_roof!=null: _building._pending_roof.cancel()
@@ -199,6 +212,8 @@ func take_retirement_payload() -> Dictionary:
 	_tree_visual_seen = []
 	_tree_ids = {}
 	_registered_tree_ids = {}
+	_tree_retirement_claims = {}
+	_tree_claim_order = []
 	_binding = {}
 	_phase = "consumed"
 	return result
@@ -395,6 +410,8 @@ func _register_tree() -> bool:
 		var registered_body: Variant = result.get("body")
 		if registered_body is StaticBody3D and is_instance_valid(registered_body) and _root.is_ancestor_of(registered_body):
 			_registered_tree_ids[registered_body.get_instance_id()] = prop_id
+			if not _tree_retirement_claims.has(registered_body.get_instance_id()): _tree_claim_order.append(registered_body.get_instance_id())
+			_tree_retirement_claims[registered_body.get_instance_id()] = {"body":weakref(registered_body), "propId":prop_id}
 	# A callback may cancel the job. Never restore its phase or call another one.
 	if _cancelled or _phase == "teardown": return false
 	if not result is Dictionary: return _fail("invalid_tree_callback_result")
@@ -462,6 +479,8 @@ func _tree_body_valid(body: Node) -> bool:
 
 func _teardown_step() -> bool:
 	if not is_instance_valid(_root):
+		if _tree_retire_requires_acknowledgement and not _tree_retirement_claims.is_empty():
+			return _retire_unvisited_tree_claim()
 		if not _door_claims.is_empty():
 			_cleanup_reason = "door_retirement_root_lost"
 			return false
@@ -498,8 +517,13 @@ func _teardown_step() -> bool:
 		_cleanup_reason = ""
 		return true
 	if _registered_tree_ids.has(instance_id) and _retiring_tree_instance != instance_id:
+		if _tree_retire_requires_acknowledgement and (not _tree_retirement_claims.has(instance_id) \
+				or _tree_retirement_claims[instance_id].body.get_ref() != node \
+				or _tree_retirement_claims[instance_id].propId != _registered_tree_ids[instance_id] or not _door_body_valid(node)):
+			_cleanup_reason = "tree_retirement_owner_lost"
+			return false
 		var receiver: Object = _tree_retire_receiver.get_ref() if _tree_retire_receiver != null else null
-		if _tree_retire_receiver != null:
+		if _tree_retire_receiver != null or _tree_retire_requires_acknowledgement:
 			if not is_instance_valid(receiver):
 				_cleanup_reason = "tree_retire_callback_lost"
 				return false
@@ -507,7 +531,22 @@ func _teardown_step() -> bool:
 			if not callback.is_valid():
 				_cleanup_reason = "tree_retire_callback_lost"
 				return false
-			callback.call(_registered_tree_ids[instance_id], node)
+			var cancellation_before := _cancel_revision
+			var prop_id: String = _registered_tree_ids[instance_id]
+			var result: Variant = callback.call(prop_id, node)
+			if _tree_retire_requires_acknowledgement:
+				if not is_instance_valid(node) or not _door_body_valid(node) or node.get_parent() != next:
+					_cleanup_reason = "tree_retirement_owner_lost"
+					return false
+				if _cancel_revision != cancellation_before or _phase != "teardown":
+					_cleanup_reason = "tree_retirement_reentered"
+					return false
+				if not result is Dictionary or result.get("status") not in ["unregistered", "absent"] \
+						or result.get("objectId") != "prop:" + prop_id:
+					_cleanup_reason = "tree_retirement_not_acknowledged"
+					return false
+				_tree_retirement_claims.erase(instance_id)
+				_cleanup_reason = ""
 		_retiring_tree_instance = instance_id
 		return true # Callback is its own measured atomic operation, before free.
 	if node.get_child_count(true) > 0:
@@ -516,6 +555,8 @@ func _teardown_step() -> bool:
 	if node == _root and not _door_claims.is_empty():
 		_cleanup_reason = "door_retirement_claims_unresolved"
 		return false
+	if node == _root and _tree_retire_requires_acknowledgement and not _tree_retirement_claims.is_empty():
+		return _retire_unvisited_tree_claim()
 	# These exact publisher metadata containers can dwarf the scene node itself.
 	# Keep their last CPU references for retirement rather than freeing on main.
 	for key: StringName in [&"building_part_record", &"building_part_records", &"furnishing_part_record"]:
@@ -531,7 +572,50 @@ func _teardown_step() -> bool:
 	return true
 
 
+## One ordered claim per unit, only after normal node traversal (or root loss).
+## A missing body is NOT success. The runtime owner may acknowledge null only
+## from durable removal authority with no live same-ID replacement registration.
+func _retire_unvisited_tree_claim() -> bool:
+	if _tree_claim_cursor >= _tree_claim_order.size():
+		_cleanup_reason = "tree_retirement_claims_unresolved"
+		return false
+	var id: int = _tree_claim_order[_tree_claim_cursor]
+	if not _tree_retirement_claims.has(id):
+		_tree_claim_cursor += 1
+		return true
+	var claim: Dictionary = _tree_retirement_claims[id]
+	if is_instance_valid(claim.body.get_ref()):
+		_cleanup_reason = "tree_retirement_owner_lost"
+		return false
+	var receiver: Object = _tree_retire_receiver.get_ref() if _tree_retire_receiver != null else null
+	var callback := Callable(receiver, _tree_retire_method) if is_instance_valid(receiver) else Callable()
+	if not callback.is_valid():
+		_cleanup_reason = "tree_retire_callback_lost"
+		return false
+	var cancellation_before := _cancel_revision
+	var root_before: int = _root.get_instance_id() if is_instance_valid(_root) else 0
+	var root_parent: Node = _root.get_parent() if root_before != 0 else null
+	var result: Variant = callback.call(claim.propId, null)
+	if (root_before != 0 and (not is_instance_valid(_root) or _root.get_instance_id() != root_before or _root.get_parent() != root_parent)) \
+			or (root_before == 0 and is_instance_valid(_root)):
+		_cleanup_reason = "tree_retirement_owner_lost"
+		return false
+	if cancellation_before != _cancel_revision or _phase != "teardown":
+		_cleanup_reason = "tree_retirement_reentered"
+		return false
+	if not result is Dictionary or result.get("status") not in ["unregistered", "absent"] or result.get("objectId") != "prop:" + String(claim.propId):
+		_cleanup_reason = "tree_retirement_not_acknowledged"
+		return false
+	_tree_retirement_claims.erase(id)
+	_tree_claim_cursor += 1
+	_cleanup_reason = ""
+	return true
+
+
 func _detach_step() -> bool:
+	if _tree_retire_requires_acknowledgement and not _tree_retirement_claims.is_empty():
+		_cleanup_reason = "tree_retirement_claims_unresolved"
+		return false
 	if not _door_claims.is_empty():
 		_cleanup_reason = "door_retirement_claims_unresolved"
 		return false

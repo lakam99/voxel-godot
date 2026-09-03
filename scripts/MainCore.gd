@@ -7,6 +7,7 @@ signal startup_loading_failed(message)
 const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
+const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
@@ -848,8 +849,31 @@ func wait_for_initial_player_collision_publication() -> Dictionary:
         return StartupReadinessResultScript.failed("missing_player_collision_proof_authority")
     var started_usec := Time.get_ticks_usec()
     var footprint_radius := 0.35
+    var acknowledged_scene_ids: Array = []
     while true:
         var proof: Dictionary = runtime.call(proof_method, player.global_position, footprint_radius)
+        if bool(proof.get("passed", false)) and structure_system != null:
+            var center := Vector2i(floori(player.global_position.x / CELL), floori(player.global_position.z / CELL))
+            var radius := ceili(footprint_radius / CELL) + 2
+            var publication: Dictionary = structure_system.citadel_physical_publication_state(Rect2i(center - Vector2i.ONE * radius, Vector2i.ONE * (radius * 2 + 1)))
+            proof["structurePublication"] = publication
+            if publication.status == "failed":
+                return StartupReadinessResultScript.failed("player_landmark_publication_failed", {}, [], {"proof":proof})
+            if publication.status != "ready":
+                proof["passed"] = false
+                proof["reason"] = publication.reason
+            elif publication.get("required",false):
+                if publication.sceneInstanceIds != acknowledged_scene_ids:
+                    if float(Time.get_ticks_usec() - started_usec) / 1000000.0 >= INITIAL_READINESS_TIMEOUT_SECONDS:
+                        return StartupReadinessResultScript.failed("player_collision_publication_timeout", {}, [], {"timeoutSeconds":INITIAL_READINESS_TIMEOUT_SECONDS,"lastProof":proof})
+                    await get_tree().physics_frame
+                    await startup_loading_yield("Checking landmark collision at player spawn")
+                    acknowledged_scene_ids = publication.sceneInstanceIds.duplicate()
+                    continue
+                var clearance: Dictionary = GeneratedStructurePlayerClearanceScript.inspect(player)
+                proof["playerCapsuleClearance"] = clearance
+                if not clearance.passed:
+                    return StartupReadinessResultScript.failed("player_landmark_capsule_not_clear", {}, [], {"proof":proof})
         if bool(proof.get("passed", false)):
             player.set_meta("startup_terrain_collision_proof", proof)
             return StartupReadinessResultScript.ready({}, {
@@ -857,7 +881,7 @@ func wait_for_initial_player_collision_publication() -> Dictionary:
                 "proofMethod": proof_method,
                 "proof": proof
             })
-        await startup_loading_yield("Loading terrain collision at player spawn", "terrain_collision", "pending", {
+        await startup_loading_yield("Loading buildings at player spawn" if proof.has("structurePublication") else "Loading terrain collision at player spawn", "terrain_collision", "pending", {
             "playerCollisionPassed": false,
             "proofMethod": proof_method,
             "proofReason": String(proof.get("reason", "pending"))

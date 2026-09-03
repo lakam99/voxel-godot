@@ -7,6 +7,7 @@ const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManif
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const CitadelTerrainAdmissionScript := preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const CitadelPublicationServiceScript := preload("res://scripts/world/CitadelPublicationService.gd")
+const GeneratedStructureRuntimeBindingsScript := preload("res://scripts/world/GeneratedStructureRuntimeBindings.gd")
 
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
@@ -39,6 +40,7 @@ var private_interior_records := {}
 var private_interior_revision := 0
 var citadel_terrain_admission = CitadelTerrainAdmissionScript.new()
 var citadel_publication = CitadelPublicationServiceScript.new()
+var citadel_runtime_bindings
 
 func setup(main_node) -> void:
     main = main_node
@@ -51,6 +53,25 @@ func configure_citadel_terrain_admission() -> void:
         "spawnChance": float(main.STRUCTURE_SPAWN_CHANCE)
     })
     citadel_publication.configure(citadel_terrain_admission)
+    bind_citadel_runtime()
+
+func bind_citadel_runtime() -> bool:
+    if citadel_runtime_bindings != null and citadel_runtime_bindings.available(): return true
+    if citadel_publication.requires_scene_retirement(): return false
+    var bindings = GeneratedStructureRuntimeBindingsScript.new()
+    if not bindings.configure(main): return false
+    if not citadel_publication.configure_construction_guard(bindings.construction_allowed): return false
+    if not citadel_publication.configure_door_publication(bindings.register_door, bindings.retire_door): return false
+    if not citadel_publication.configure_scene_publication(main, bindings.publish_tree, bindings.retire_tree, true): return false
+    citadel_runtime_bindings = bindings
+    return true
+
+func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
+    var result: Dictionary = citadel_publication.physical_publication_state(bounds)
+    if result.get("status") == "ready" and result.get("required", false) \
+        and (citadel_runtime_bindings == null or not citadel_runtime_bindings.available()):
+        return {"status":"pending", "reason":"landmark_runtime_owners_pending"}
+    return result
 
 func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
     return citadel_publication.advance(observer_bounds,allow_dispatch)

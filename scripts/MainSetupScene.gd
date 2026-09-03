@@ -294,6 +294,8 @@ func setup_npc_system() -> void:
     npc_system.name = "NPCs"
     add_child(npc_system)
     npc_system.setup(self, hostile_system)
+    if structure_system != null:
+        structure_system.bind_citadel_runtime()
 
 func setup_player_projectiles() -> void:
     player_projectiles = PlayerProjectileSystemScript.new()

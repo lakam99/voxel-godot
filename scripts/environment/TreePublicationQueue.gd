@@ -204,6 +204,7 @@ var worst_publication_frame := {
 func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 	if body == null or not is_instance_valid(body) or request.is_empty():
 		return false
+	if bool(body.get_meta("tree_publication_cancelled", false)): return false
 	var prepared_request := request.duplicate(true)
 	prepared_request["renderLodTier"] = selected_lod_tier(prepared_request)
 	var recipe_key := publication_service.recipe_cache_key(prepared_request)
@@ -252,6 +253,20 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 	if not task.has("lodSourceRecipe"):
 		body.set_meta("tree_visual_state", "queued")
 	return true
+
+## Cancel this exact scene instance without harvesting it or waiting for recipe
+## workers on the gameplay thread. All queued/LOD/proxy consumers resolve the
+## same instance flag; a fresh same-ID tree remains independently publishable.
+func cancel_body_publication(body: StaticBody3D) -> Dictionary:
+	if not is_instance_valid(body): return {"status":"failed", "reason":"invalid_tree"}
+	body.set_meta("tree_publication_cancelled", true)
+	return {"status":"cancelled", "bodyInstanceId":body.get_instance_id()}
+
+func _publication_body(record: Dictionary) -> StaticBody3D:
+	var reference: WeakRef = record.get("body") as WeakRef
+	var body: StaticBody3D = reference.get_ref() as StaticBody3D if reference != null else null
+	if is_instance_valid(body) and not bool(body.get_meta("tree_publication_cancelled", false)): return body
+	return null
 
 func set_viewer(node: Node3D) -> void:
 	viewer = weakref(node) if node != null and is_instance_valid(node) else null
@@ -412,11 +427,11 @@ func refresh_collision_visibility_proxies() -> void:
 	for task in active:
 		if remaining <= 0:
 			return
-		var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+		var body: StaticBody3D = _publication_body(task)
 		if body != null and ensure_collision_visible_representation(body, task.get("request", {}), "proximity_guard"):
 			remaining -= 1
 	if not staged_publication_task.is_empty() and remaining > 0:
-		var staged_body: StaticBody3D = (staged_publication_task.get("body") as WeakRef).get_ref() as StaticBody3D
+		var staged_body: StaticBody3D = _publication_body(staged_publication_task)
 		if staged_body != null and ensure_collision_visible_representation(staged_body, staged_publication_task.get("request", {}), "proximity_guard"):
 			remaining -= 1
 	if remaining <= 0:
@@ -442,7 +457,7 @@ func refresh_collision_visibility_proxies() -> void:
 						var task: Dictionary = pending_tasks.get(int(entry), {}) if bucket_kind == "pending" else (completed[int(entry)] if int(entry) >= 0 and int(entry) < completed.size() else {})
 						if task.is_empty():
 							continue
-						var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+						var body: StaticBody3D = _publication_body(task)
 						if body != null and ensure_collision_visible_representation(body, task.get("request", {}), "proximity_guard"):
 							remaining -= 1
 
@@ -472,7 +487,7 @@ func refresh_published_lods() -> void:
 		lod_recheck_cursor = posmod(lod_recheck_cursor, published_lod_records.size())
 		var record_index := lod_recheck_cursor
 		var record: Dictionary = published_lod_records[record_index]
-		var body: StaticBody3D = (record.get("body") as WeakRef).get_ref() as StaticBody3D
+		var body: StaticBody3D = _publication_body(record)
 		if body == null or not is_instance_valid(body) or not is_instance_valid(body.get_parent()):
 			remove_published_render_stats(int(record.get("bodyInstanceId", 0)))
 			published_lod_records.remove_at(lod_recheck_cursor)
@@ -506,7 +521,7 @@ func remember_published_lod(body: StaticBody3D, request: Dictionary) -> void:
 	}
 	for index in range(published_lod_records.size()):
 		var existing: Dictionary = published_lod_records[index]
-		var existing_body: StaticBody3D = (existing.get("body") as WeakRef).get_ref() as StaticBody3D
+		var existing_body: StaticBody3D = _publication_body(existing)
 		if existing_body == body:
 			published_lod_records[index] = record
 			return
@@ -580,7 +595,7 @@ func start_pending_workers() -> void:
 		var task: Dictionary = take_highest_priority_pending_task()
 		if task.is_empty():
 			break
-		var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+		var body: StaticBody3D = _publication_body(task)
 		if body == null or not is_instance_valid(body):
 			cancelled_count += 1
 			continue
@@ -800,7 +815,7 @@ func collect_completed_workers() -> void:
 				lod_recipe_derivation_completed_count += 1
 			enqueue_completed_task(task)
 		else:
-			var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+			var body: StaticBody3D = _publication_body(task)
 			if body != null and is_instance_valid(body):
 				body.set_meta("tree_visual_state", "failed")
 			failed_count += 1
@@ -946,7 +961,7 @@ func publish_completed_recipes() -> void:
 		if task.is_empty():
 			break
 		var validation_started_usec := Time.get_ticks_usec()
-		var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+		var body: StaticBody3D = _publication_body(task)
 		var validation_elapsed_usec := Time.get_ticks_usec() - validation_started_usec
 		record_publication_validation(validation_elapsed_usec)
 		if body == null or not is_instance_valid(body) or not is_instance_valid(body.get_parent()):
@@ -1024,7 +1039,7 @@ func publish_completed_recipes() -> void:
 
 func enqueue_completed_task(task: Dictionary) -> void:
 	if not task.has("publicationPosition"):
-		var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+		var body: StaticBody3D = _publication_body(task)
 		if body != null and is_instance_valid(body):
 			task["publicationPosition"] = body.global_position
 	var index := completed.size()
@@ -1171,7 +1186,7 @@ func completed_bucket_key(task: Dictionary) -> Vector2i:
 	var cached_position = task.get("publicationPosition", null)
 	if cached_position is Vector3:
 		return completed_bucket_key_for_cell(completed_priority_cell(cached_position as Vector3))
-	var body: StaticBody3D = (task.get("body") as WeakRef).get_ref() as StaticBody3D
+	var body: StaticBody3D = _publication_body(task)
 	if body != null and is_instance_valid(body):
 		return completed_bucket_key_for_cell(completed_priority_cell(body.global_position))
 	var request: Dictionary = task.get("request", {})
