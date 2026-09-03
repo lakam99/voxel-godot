@@ -24,6 +24,7 @@ const FacadeBearingRecipeScript := preload("res://scripts/buildings/FacadeOpenin
 const FacadeApertureDeclarationScript := preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
 const StreetHouseStructuralManifestScript := preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const StructuralCompletionRecipeScript := preload("res://scripts/buildings/CitadelStructuralCompletionRecipe.gd")
+const BuntingManifest := preload("res://scripts/buildings/CitadelBuntingAssemblyManifest.gd")
 const RetainedBearingRecipeScript := preload("res://scripts/buildings/RetainedSurfaceBearingRecipe.gd")
 const DoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 
@@ -272,7 +273,9 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_dressing_started"): return null
 	add_dressing_clusters(blueprint, front_z, keep_front_z, foundation_height, variation)
 	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_bunting_started"): return null
-	add_bunting_lines(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout)
+	if not add_bunting_lines(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout):
+		handoff["reason"] = "citadel_bunting_declaration_failed"
+		return null
 	var selected_tree_sites := select_open_paving_tree_sites(blueprint, seed, landscape_continuation)
 	if landscape_cancel.stopped:
 		handoff["reason"] = "cancelled"
@@ -288,6 +291,8 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		# Preserve declarations emitted after the earlier recipe copy was made.
 		recipe["facadeApertures"] = blueprint.recipe.get("facadeApertures", {}).duplicate(true)
 		recipe[StreetHouseStructuralManifestScript.KEY] = blueprint.recipe.get(StreetHouseStructuralManifestScript.KEY, {}).duplicate(true)
+		recipe[BuntingManifest.KEY] = blueprint.recipe.get(BuntingManifest.KEY, []).duplicate(true)
+		recipe["citadelMarketHousePair"] = blueprint.recipe.get("citadelMarketHousePair", {}).duplicate(true)
 		blueprint.set_recipe(recipe)
 	if not _emit_compose_diagnostic(diagnostic_callback, "perimeter_dressing_bunting_trees_completed"):
 		return null
@@ -1165,6 +1170,10 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 				return {"ready": false, "reason": "street_house_opening_layout_failed"}
 	var plaza_z := centers[2]
 	var market_y := elevations[2]
+	# The same row selected for the market owns its opposing house association.
+	# Bunting consumers receive these producer IDs, never infer a seed/position.
+	blueprint.recipe["citadelMarketHousePair"] = {"leftHouseId":"urban_row_%02d_left"%2,
+		"rightHouseId":"urban_row_%02d_right"%2,"plazaPartId":"urban_market_plaza"}
 	add_grounded_foundation(blueprint, "urban_market_plaza_retaining", Vector3(lane_centers[2], 0.0, plaza_z), 18.0, segment_depth * 0.82, market_y + 0.24, prepared_variation - 0.05, "citadel_market_plaza_retaining")
 	add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
 	add_street_climb(blueprint, float(lane_centers[2]), centers[1] + row_depths[1] * 0.48, centers[2] - row_depths[2] * 0.46, prepared_base_y, market_terrace_rise, prepared_variation)
@@ -1551,7 +1560,8 @@ static func _civic_infill_environment(source, grammar: Dictionary, front_z: floa
 	if not perimeter_ready: return {"ready":false,"reason":"perimeter_house_opening_layout_failed"}
 	add_civic_service_yard(preview,Vector3(37.0,base_y,keep_front_z-8.5),variation)
 	add_dressing_clusters(preview,front_z,keep_front_z,base_y,variation)
-	add_bunting_lines(preview,front_z,keep_front_z,base_y,variation,layout)
+	if not add_bunting_lines(preview,front_z,keep_front_z,base_y,variation,layout):
+		return {"ready":false,"reason":"citadel_bunting_declaration_failed"}
 	return {"ready":true,"blueprint":preview}
 
 static func _add_civic_house(blueprint, house: Dictionary, base_y: float, variation: float) -> bool:
@@ -1757,7 +1767,7 @@ static func add_dressing_clusters(blueprint, front_z: float, keep_front_z: float
 		add_part(blueprint, "urban_street_banner_%02d" % banner_index, "sign", "painted_decor", Vector3(banner_x, base_y + 5.4, banner_z), Vector3(0.12, 2.3, 1.0), {"collision": false, "variation": variation + float(banner_index) * 0.01, "semantic": "citadel_street_banner"})
 
 
-static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> void:
+static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> bool:
 	var market_lane_x := float(urban_layout.get("marketLaneX", MARKET_LANE_X))
 	var market_terrace_rise := float(urban_layout.get("marketTerraceRise", MARKET_TERRACE_RISE))
 	var lines := [
@@ -1766,13 +1776,18 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 		{"start": 3.0, "end": 20.0, "z": keep_front_z - 9.0, "y": base_y + market_terrace_rise * 2.0 + 5.4}
 	]
 	var cloth_materials: Array[String] = ["wool_rust", "linen", "wool_moss"]
+	var assemblies: Array = []
 	for line_index in range(lines.size()):
 		var line: Dictionary = lines[line_index] as Dictionary
 		var start_x := float(line.get("start", 0.0))
 		var end_x := float(line.get("end", 0.0))
 		var line_y := float(line.get("y", base_y + 5.5))
 		var line_z := float(line.get("z", front_z))
-		add_part(blueprint, "urban_bunting_rope_%02d" % line_index, "beam", "ironwork", Vector3((start_x + end_x) * 0.5, line_y + 0.33, line_z), Vector3(end_x - start_x, 0.035, 0.035), {"collision": false, "variation": variation, "semantic": "citadel_bunting_rope"})
+		var rope_id := "urban_bunting_rope_%02d" % line_index
+		add_part(blueprint, rope_id, "beam", "ironwork", Vector3((start_x + end_x) * 0.5, line_y + 0.33, line_z), Vector3(end_x - start_x, 0.035, 0.035), {"collision": false, "variation": variation, "semantic": "citadel_bunting_rope"})
+		if line_index == 1:
+			blueprint.parts.back().recipe["buntingMarketOwners"] = blueprint.recipe.get("citadelMarketHousePair",{}).duplicate(true)
+		var members: Array = []
 		var pennant_count := 9 if line_index == 0 else 13
 		for pennant_index in range(pennant_count):
 			var ratio := (float(pennant_index) + 0.5) / float(pennant_count)
@@ -1780,6 +1795,9 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 			var sag := sin(ratio * PI) * 0.28
 			var material := cloth_materials[(line_index + pennant_index) % cloth_materials.size()]
 			add_part(blueprint, "urban_bunting_%02d_%02d" % [line_index, pennant_index], "pennant", material, Vector3(pennant_x, line_y - sag, line_z), Vector3(maxf(0.38, (end_x - start_x) / float(pennant_count) * 0.56), 0.68, 0.055), {"rotation": Vector3(0.0, 0.0, deg_to_rad(-8.0 if pennant_index % 2 == 0 else 8.0)), "collision": false, "variation": variation + float(pennant_index) * 0.006, "semantic": "citadel_bunting"})
+			members.append(blueprint.parts.back().id)
+		assemblies.append({"ropeId":rope_id,"pennantIds":members})
+	return BuntingManifest.declare(blueprint,assemblies).ready
 
 
 static func add_traffic_wear(blueprint, prefix: String, center: Vector3, span: Vector2, heading: float, variation: float, semantic: String) -> void:

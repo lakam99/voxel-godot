@@ -13,6 +13,9 @@ const Thresholds = preload("res://scripts/buildings/CitadelThresholdBearingRecip
 const DoorGeometry = preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const MAX_STAGE_ATTEMPTS := 256
 const FailureEvidence = preload("res://scripts/buildings/CitadelPhysicalFailureEvidence.gd")
+const BuntingManifest = preload("res://scripts/buildings/CitadelBuntingAssemblyManifest.gd")
+const BuntingAnchors = preload("res://scripts/buildings/CitadelBuntingAnchorRecipe.gd")
+const BuntingDomain = preload("res://scripts/buildings/CitadelMarketBuntingDomain.gd")
 
 static func prepare(blueprint, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	# Execution control is deliberately separate from serializable source policy.
@@ -27,6 +30,8 @@ static func prepare(blueprint, policy: Dictionary, continuation: Callable = Call
 	# The post-facade prepare_later path repeats this validation against its own
 	# immutable working copy.
 	var manifest := Manifest.read(blueprint)
+	var bunting_manifest := _bunting_manifest(blueprint)
+	if not bunting_manifest.ready: return _fail("bunting_manifest_invalid",{"detail":bunting_manifest})
 	if not manifest.ready:
 		if frozen != var_to_bytes(blueprint.snapshot()) or frozen_policy != var_to_bytes(policy):
 			return _fail("structural_completion_failure_mutated_input")
@@ -51,6 +56,8 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 	var source_bytes := var_to_bytes(blueprint.snapshot())
 	var policy_bytes := var_to_bytes(policy)
 	var working = Copy.copy_blueprint(blueprint.snapshot())
+	var bunting_manifest := _bunting_manifest(working)
+	if not bunting_manifest.ready: return _fail("bunting_manifest_invalid",{"detail":bunting_manifest})
 	var manifest := Manifest.read(working)
 	if not manifest.ready:
 		if source_bytes != var_to_bytes(blueprint.snapshot()) or policy_bytes != var_to_bytes(policy): return _fail("later_completion_failure_mutated_input")
@@ -73,6 +80,11 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 	var bracket_retry := _complete_brackets(working, manifest.records, "bracket_retry", continuation)
 	if not bracket_retry.ready: return bracket_retry
 	stages.append(bracket_retry)
+	var bunting := _complete_bunting(working, protected.bounds, continuation)
+	if not bunting.ready: return bunting
+	working = Copy.copy_blueprint(bunting.afterSnapshot)
+	bunting.erase("afterSnapshot")
+	stages.append(bunting)
 	# Threshold completion is last because it adds collision-backed support columns.
 	# Its terminal proof is the ordinary terminal proof; never validate a third time.
 	var threshold := _complete_thresholds(working, manifest.records, policy.protectedObstacles, continuation)
@@ -90,11 +102,88 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 	# proposing another relocation here is a rejection, never a final-state pass.
 	var verified_signs := _verify_final_signs(final.proof, manifest.records, protected.bounds, continuation)
 	if not verified_signs.ready: return verified_signs
+	var verified_bunting := _verify_final_bunting(final.proof,bunting,continuation)
+	if not verified_bunting.ready: return verified_bunting
+	bunting["terminalVerification"] = verified_bunting
 	Copy.clear_caches(working)
 	if source_bytes != var_to_bytes(blueprint.snapshot()) or policy_bytes != var_to_bytes(policy): return _fail("later_completion_mutated_input")
 	if not _continue(continuation, "structural_later_completed"): return _fail("cancelled")
 	return {"ready": true, "afterSnapshot": working.snapshot(), "stages": stages,
 		"finalFailureCount": 0, "scope": "Private source completion only; caller has not committed or published it."}
+
+static func _bunting_manifest(source) -> Dictionary:
+	if not source.recipe.has(BuntingManifest.KEY) and not source.parts.any(func(part):return part.semantic in [BuntingManifest.ROPE_SEMANTIC,BuntingManifest.PENNANT_SEMANTIC]):
+		return {"ready":true,"records":[]}
+	return BuntingManifest.read(source)
+
+static func _complete_bunting(source, protected: Array, continuation: Callable = Callable()) -> Dictionary:
+	var frozen := var_to_bytes(source.snapshot())
+	var inputs := var_to_bytes(protected)
+	if not _continue(continuation,"bunting_completion_started"): return _fail("cancelled")
+	if frozen!=var_to_bytes(source.snapshot()) or inputs!=var_to_bytes(protected): return _fail("bunting_completion_inputs_changed")
+	var declaration := _bunting_manifest(source)
+	if not declaration.ready: return _fail("bunting_manifest_invalid",{"detail":declaration})
+	var selected: Array = []
+	var bounds: Array = protected.duplicate(true)
+	if not declaration.records.is_empty():
+		var current := _physical(source,continuation)
+		if not current.ready: return current
+		if frozen!=current.sourceBytes or frozen!=var_to_bytes(source.snapshot()): return _fail("bunting_selection_source_changed")
+		var checks: Dictionary = {}
+		for row: Dictionary in current.report.checks:
+			if checks.has(row.partId): return _fail("duplicate_bunting_source_check")
+			checks[row.partId]=row.passed
+		for assembly: Dictionary in declaration.records:
+			var members: Array = [assembly.ropeId]; members.append_array(assembly.pennantIds)
+			var failed := false
+			for id: String in members:
+				if not checks.has(id): return _fail("missing_bunting_source_check")
+				failed=failed or not checks[id]
+			if not failed: continue
+			var record: Dictionary = assembly.duplicate(true)
+			var owners: Variant = Manifest.find_part(source,assembly.ropeId).recipe.get("buntingMarketOwners")
+			if owners!=null:
+				if not owners is Dictionary or owners.size()!=3: return _fail("invalid_bunting_market_owners")
+				for key: String in ["leftHouseId","rightHouseId","plazaPartId"]:
+					if not owners.get(key) is String: return _fail("invalid_bunting_market_owners")
+				var domain: Dictionary = BuntingDomain.build(source,owners.leftHouseId,owners.rightHouseId,owners.plazaPartId)
+				if not domain.ready: return _fail("bunting_market_domain_failed",{"detail":domain})
+				record["placementDomain"]=domain.domain
+				for room_bounds: AABB in domain.protectedRooms:
+					if not bounds.has(room_bounds): bounds.append(room_bounds)
+			selected.append(record)
+	var snapshot: Dictionary = source.snapshot()
+	var details := {}
+	if not selected.is_empty():
+		var proposal := BuntingAnchors.prepare(source,selected,bounds,continuation)
+		if proposal.get("reason","")=="cancelled": return _fail("cancelled")
+		if not proposal.ready: return _fail("bunting_completion_failed",{"detail":proposal})
+		if proposal.sourceBytes!=frozen or var_to_bytes(source.snapshot())!=frozen: return _fail("bunting_proposal_source_changed")
+		var owned: Dictionary = {}
+		for record: Dictionary in selected:
+			owned[record.ropeId]=true
+			for id: String in record.pennantIds: owned[id]=true
+		var replacements: Dictionary = {}
+		for record: Dictionary in proposal.changes:
+			if not owned.has(record.id) or replacements.has(record.id): return _fail("foreign_bunting_replacement")
+			replacements[record.id]=record
+		# Replace only existing owned records. All other geometry, passing
+		# assemblies, rooms, furniture policy and recipe metadata stay byte-exact.
+		for index in range(snapshot.parts.size()):
+			var id: String=snapshot.parts[index].id
+			if replacements.has(id): snapshot.parts[index]=replacements[id].duplicate(true); replacements.erase(id)
+		if not replacements.is_empty(): return _fail("missing_bunting_replacement")
+		details=proposal.duplicate(true); details.erase("changes"); details.erase("sourceBytes")
+	if not _continue(continuation,"bunting_completion_completed"): return _fail("cancelled")
+	if frozen!=var_to_bytes(source.snapshot()) or inputs!=var_to_bytes(protected): return _fail("bunting_completion_inputs_changed")
+	return {"ready":true,"kind":"bunting","afterSnapshot":snapshot,"assemblies":selected,
+		"protectedBounds":bounds,"sourceSha256":_sha256(frozen),"details":details}
+
+static func _verify_final_bunting(proof, stage: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	var verified := BuntingAnchors.verify_stored(proof,stage.assemblies,stage.protectedBounds,continuation)
+	if verified.get("reason","")=="cancelled": return _fail("cancelled")
+	if not verified.ready:return _fail("terminal_bunting_invalid",{"detail":verified})
+	return verified
 
 static func _complete_thresholds(source, records: Array, obstacles: Array, continuation: Callable = Callable()) -> Dictionary:
 	if not _continue(continuation, "threshold_started"): return _fail("cancelled")
