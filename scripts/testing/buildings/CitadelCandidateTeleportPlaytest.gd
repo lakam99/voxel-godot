@@ -21,6 +21,7 @@ var main
 var player: CharacterBody3D
 var output := ""
 var requested_seed := "atlas-30895044"
+var requested_region := ""
 var started := 0
 var deadline := 0
 var startup_ready := false
@@ -58,6 +59,9 @@ func _run() -> void:
 	output = OS.get_environment("CITADEL_CANDIDATE_TELEPORT_OUTPUT")
 	var selected := OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SEED").strip_edges()
 	if not selected.is_empty(): requested_seed = selected
+	requested_region = OS.get_environment("CITADEL_CANDIDATE_TELEPORT_REGION")
+	if not valid_region_request(requested_region):
+		printerr("Invalid diagnostic candidate region"); quit(2); return
 	var limit := int(OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SECONDS"))
 	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 600:
 		printerr("Missing/invalid owned runner output or deadline"); quit(2); return
@@ -102,7 +106,7 @@ func _run() -> void:
 	search = _nearest_candidate(original_position)
 	candidate = search.get("selected",{})
 	if candidate.is_empty():
-		await _finish("absent","no_candidate_in_bounded_ring"); return
+		await _finish("absent","no_candidate_in_bounded_ring" if requested_region.is_empty() else "requested_candidate_not_in_bounded_field"); return
 	region = candidate.region
 	declared = Admission.declared_influence(candidate)
 	if not _place_outside(declared,"declared_influence_exterior"):
@@ -212,7 +216,28 @@ func _nearest_candidate(position: Vector3) -> Dictionary:
 	found.sort_custom(func(a: Dictionary,b: Dictionary)->bool:
 		return a.distanceWorld < b.distanceWorld or a.distanceWorld == b.distanceWorld and String(a.candidate.siteId) < String(b.candidate.siteId))
 	return {"originRegion":origin,"ringRadius":SEARCH_RING,"regionsExamined":(SEARCH_RING*2+1)*(SEARCH_RING*2+1),"candidates":found,
-		"selected":found[0].candidate if not found.is_empty() else {},"nearestWithinSearchOnly":true,"acceptedSiteNotGuaranteed":true}
+		"selected":select_candidate(found,requested_region),"nearestWithinSearchOnly":requested_region.is_empty(),
+		"requestedRegion":requested_region,"selectionMode":"nearest" if requested_region.is_empty() else "explicit_bounded_field_region","acceptedSiteNotGuaranteed":true}
+
+static func valid_region_request(request: String) -> bool:
+	if request.is_empty(): return true
+	var fields := request.split(",")
+	if fields.size()!=2: return false
+	for field: String in fields:
+		if field.is_empty() or field.length()>8 or not field.is_valid_int() or str(int(field))!=field: return false
+		if int(field)<Field.MIN_REGION_COORD or int(field)>Field.MAX_REGION_COORD: return false
+	return true
+
+## Test-only selection among the already enumerated production candidates.
+## Never creates a candidate, retries an absent site, or certifies eligibility.
+static func select_candidate(found: Array[Dictionary], request: String) -> Dictionary:
+	if not valid_region_request(request) or found.is_empty(): return {}
+	if request.is_empty(): return found[0].candidate
+	var fields := request.split(",")
+	var selected_region := Vector2i(int(fields[0]),int(fields[1]))
+	for row: Dictionary in found:
+		if row.candidate.region==selected_region: return row.candidate
+	return {}
 
 func _place_outside(bounds: Rect2i,label: String) -> bool:
 	if placements.size() >= MAX_SETUP_WRITES or bounds.size.x <= 0 or bounds.size.y <= 0: return false

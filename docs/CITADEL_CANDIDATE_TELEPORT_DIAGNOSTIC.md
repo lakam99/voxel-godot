@@ -113,3 +113,82 @@ production-derived center biome, exact site key, scale `1.25` and recipe seed
 `1747969299`, retaining the nested `structuralCompletionFailure.detail`.
 This isolates facade completion without walking, changing navigation, or
 spending another headed run on a known source failure.
+
+### Second headed run: complete recipe, legitimate ocean exclusion
+
+After the complete public recipe and independent physical proof passed
+(`candidate-recipe-05`), the critic approved one retry on unchanged fixture
+hashes. Branch `codex/citadel-visuals-clean`, clean HEAD `8b2c877`.
+
+```powershell
+.\tools\run-citadel-candidate-teleport-playtest.ps1 -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-02 -Seed atlas-30895044 -TimeoutSeconds 600
+```
+
+Ordinary startup completed and one exterior setup placement occurred at about
+37 seconds. Source composition progressed past both repaired failures. The
+subsequent full-envelope production survey returned `absent` with reason
+`excluded_biome:ocean` at 295.114 seconds. The candidate center was plains, but
+that did not certify the complete geometry/apron footprint. No site was admitted,
+no second placement occurred, and no scene was constructed.
+
+The test stopped on that result: natural exit 1, no timeout, no forced cleanup,
+empty engine-error/warning inventory, clean owned cleanup and zero remaining
+Godot processes. All 814 launch hashes remained unchanged. Read `report.json`,
+`progress.json`, `verification.json`, engine logs, watchdog and capture records
+under the run directory. The three inspected images show the starter-house
+view and dark rainy exterior, not a citadel. The critic accepted this as a
+legitimate exclusion checkpoint, explicitly not spawning success.
+
+### Explicit diagnostic candidate selection
+
+An optional `-CandidateRegion 'x,z'` selects one of the same bounded production
+field candidates instead of the nearest. Canonical coordinates are validated;
+missing/out-of-ring candidates stop without fallback. Both requested region
+and selection mode are recorded. There is still one selected candidate, at most
+two exterior setup placements, no source injection and no automatic headed
+candidate-search loop. Ocean, town and full-site admission rules are unchanged.
+
+`candidate-selection-02` passes 23 pure fixture-selection checks with natural
+exit 0, clean logs and owned zero. The preceding `candidate-selection-01` records
+a fixed test-report parse error; its owned process also reached zero. These
+checks do not instantiate Main or establish site eligibility.
+
+A separate sparse production-biome/town scout may inform the region choice.
+Its sampled conservative envelope is a heuristic, not a complete survey or a
+promise that the actual source, furniture, terrain or collision will pass.
+
+`candidate-scout-01` inspected 81 lattice points for each of eight production
+candidates in 25 regions, with exact forward/reverse query-order replay in fresh
+contexts. It missed the known ocean exclusion at `(0,-1)`, empirically confirming
+that sparse screening cannot prove eligibility. This report predates the optional
+dense-square code and is not evidence for that later code.
+
+`candidate-scout-02` repeats those controls and uses the ordinary public
+`CitadelSiteSurvey` to scan every column of a caller-defined 257x257 square at
+region `(-1,0)`, center `(-796,659)`, recipe seed `541151883`. All 66,049 columns
+were surveyed: 65,968 forest and 81 beach, no town/excluded-biome refusal. Dense
+elapsed7.786606s; maximum whole advance3.381ms. It uses existing survey budgets
+and remains below the262,144-column limit. Both runs have clean logs, natural
+exit0 and owned zero. Neither screen binds the actual recipe footprint, tests
+other structure conflicts or certifies rendering, collision or performance.
+
+Reproduce with a fresh output directory and restore the process-scoped variable:
+
+```powershell
+$previousDenseRegion = $env:CITADEL_CANDIDATE_SCOUT_DENSE_REGION
+try {
+  $env:CITADEL_CANDIDATE_SCOUT_DENSE_REGION = '-1,0'
+  ./tools/run-building-contract.ps1 -Contract CitadelCandidateScoutDiagnostic.gd -OutputDirectory artifacts/citadel-runtime-integration/candidate-scout-repeat -ReportEnvironment CITADEL_CANDIDATE_SCOUT_OUTPUT -TimeoutSeconds 45
+} finally {
+  $env:CITADEL_CANDIDATE_SCOUT_DENSE_REGION = $previousDenseRegion
+}
+```
+
+The next selected diagnostic region is `(-1,0)`, not a production placement
+override. Its recipe and full Site preparation still need ordinary execution.
+No new headed launch follows solely from this source-screen result.
+
+After reviewing the final six-file harness/scout/evidence scope, the critic
+approved its focused commit and one 600-second `candidate-teleport-03` discovery
+run with `-CandidateRegion '-1,0'`. Production code is unchanged from `8b2c877`.
+Spawn/NPC acceptance and performance budgets are not waived.

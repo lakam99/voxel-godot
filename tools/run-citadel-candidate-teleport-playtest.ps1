@@ -2,6 +2,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
     [string]$Seed='atlas-30895044',
+    [string]$CandidateRegion='',
     [ValidateRange(90,600)][int]$TimeoutSeconds=600
 )
 # Headed, teleport-assisted diagnostic. No user saves, source fixtures, automatic
@@ -14,6 +15,13 @@ $artifactRoot=Join-Path $project 'artifacts/citadel-runtime-integration'
 if((Split-Path $run -Parent) -ine $artifactRoot -or (Split-Path $run -Leaf) -notlike 'candidate-teleport-*'){throw 'Use a fresh candidate-teleport-* directory directly under artifacts/citadel-runtime-integration.'}
 if(Test-Path -LiteralPath $run){throw 'Fresh output required; prior evidence is never overwritten.'}
 if([string]::IsNullOrWhiteSpace($Seed) -or $Seed.Length -gt 128){throw 'A nonempty seed of at most 128 characters is required.'}
+if($CandidateRegion -ne ''){
+    if($CandidateRegion -notmatch '^-?(0|[1-9][0-9]{0,6}),-?(0|[1-9][0-9]{0,6})$'){throw 'CandidateRegion must be canonical x,z integers.'}
+    foreach($coordinate in $CandidateRegion.Split(',')){
+        $value=[int]$coordinate
+        if([string]$value -cne $coordinate -or $value -lt -1048576 -or $value -gt 1048575){throw 'CandidateRegion is outside the supported field.'}
+    }
+}
 # Do not inherit any project test, fast-boot, fake source, save, or performance
 # environment mode. The sole seed override lives visibly in the fixture class.
 $inherited=@(Get-ChildItem Env: | Where-Object { $_.Name -like 'VOXEL_*' -and -not [string]::IsNullOrEmpty($_.Value) })
@@ -28,14 +36,15 @@ $files=@($files | Sort-Object -Unique)
 $hashes=[ordered]@{}
 foreach($file in $files){$hashes[$file]=(Get-FileHash -LiteralPath (Join-Path $project $file) -Algorithm SHA256).Hash.ToLowerInvariant()}
 $arguments=@($script,'--resolution','1280x720','--windowed')
-@{schema='citadel-candidate-teleport-launch/v1';projectPath=$project;head=(& git -C $project rev-parse HEAD);seed=$Seed;
+@{schema='citadel-candidate-teleport-launch/v1';projectPath=$project;head=(& git -C $project rev-parse HEAD);seed=$Seed;requestedRegion=$CandidateRegion;
     timeoutSeconds=$TimeoutSeconds;internalDeadlineSeconds=$TimeoutSeconds-45;headed=$true;scene=$script;arguments=$arguments;
     sourceHashes=$hashes;recordedUtc=[DateTime]::UtcNow.ToString('o');
     evidenceLevel='headed teleport-assisted diagnostic; not continuous travel or NPC acceptance';
     fixtureChanges=@('seed-selector-only Main subclass','two counted exterior setup teleports','physics held only for setup clearance','isolated ordinary user data')} |
     ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $run 'launch.json') -Encoding utf8
 $values=@{APPDATA=(Join-Path $run 'userdata');LOCALAPPDATA=(Join-Path $run 'userdata');
-    CITADEL_CANDIDATE_TELEPORT_OUTPUT=$run;CITADEL_CANDIDATE_TELEPORT_SEED=$Seed;CITADEL_CANDIDATE_TELEPORT_SECONDS=[string]$TimeoutSeconds}
+    CITADEL_CANDIDATE_TELEPORT_OUTPUT=$run;CITADEL_CANDIDATE_TELEPORT_SEED=$Seed;CITADEL_CANDIDATE_TELEPORT_SECONDS=[string]$TimeoutSeconds;
+    CITADEL_CANDIDATE_TELEPORT_REGION=$CandidateRegion}
 $previous=@{}
 $stdout=Join-Path $run 'stdout.log'; $stderr=Join-Path $run 'stderr.log'; $stop=Join-Path $run 'stop-request.txt'
 $summary=Join-Path $run 'watchdog.json'

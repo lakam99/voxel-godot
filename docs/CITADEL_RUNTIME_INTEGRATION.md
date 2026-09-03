@@ -118,6 +118,14 @@ in-game spawning. See `CITADEL_THRESHOLD_FOOTPRINT_2026-09-03.md`; the next step
 a separately critic-approved teleport-assisted headed check, without source
 injection, bypasses, navigation changes or raised deadlines.
 
+That approved headed retry (`candidate-teleport-02`, HEAD `8b2c877`) completed
+source composition but correctly rejected the full site as `excluded_biome:ocean`
+at295.114s. Natural exit1, no engine errors, no forced cleanup, zero owned
+processes,814 unchanged hashes. No scene or visible citadel was produced. The
+critic accepts this as legitimate exclusion evidence, not a spawn pass. The
+diagnostic is being extended with explicit bounded candidate selection and a
+separate sparse production-biome/town screen; production eligibility is unchanged.
+
 ### Prior checkpoint history
 
 The scene job and owning service now support balanced shared-door callbacks.
