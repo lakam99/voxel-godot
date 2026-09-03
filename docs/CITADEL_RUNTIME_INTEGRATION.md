@@ -83,6 +83,17 @@ diagnostic after focused checkpoint and process-tooling approval; it is not a
 performance waiver. No headed activation, full-world performance or successful
 in-game spawning is claimed yet.
 
+The ordinary Main-menu/New-Game diagnostic completed startup (see
+`CITADEL_ORDINARY_MAIN_DIAGNOSTIC_2026-09-03.md`). The user then explicitly
+requested teleport-assisted candidate inspection. The critic-approved
+`candidate-teleport-01` run reached the nearest candidate's ordinary source
+preparation, which failed at facade structural completion for recipe seed
+`1747969299`, world `atlas-30895044`, region `(0,-1)`. The failure closed the
+owned test immediately; the watchdog proves zero remaining owned processes.
+No citadel scene was constructed. See `CITADEL_CANDIDATE_TELEPORT_DIAGNOSTIC.md`
+for the command, inspected captures and exact evidence boundaries. The next
+source investigation is this recipe failure, not a longer walk or timeout.
+
 ### Prior checkpoint history
 
 The scene job and owning service now support balanced shared-door callbacks.

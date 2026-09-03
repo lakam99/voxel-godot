@@ -1,0 +1,530 @@
+extends SceneTree
+## Headed teleport-assisted diagnostic, never continuous-travel/NPC acceptance.
+## Two bounded setup placements are supported; all generated content is ordinary.
+const MainScene = preload("res://scenes/Main.tscn")
+const Field = preload("res://scripts/world/CitadelSiteField.gd")
+const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
+const Gate = preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
+const Clearance = preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
+const SEARCH_RING := 2
+const VIEW_CELLS := 112
+const MAX_SETUP_WRITES := 2
+
+class SeededMain extends "res://scripts/Main.gd":
+	# The title UI has no seed entry. Only seed selection is fixture-owned:
+	# actual New Game, tutorial, systems, terrain and observer startup are inherited.
+	var diagnostic_seed := "atlas-30895044"
+	func random_world_seed(_exclude_seed := "") -> String:
+		return diagnostic_seed
+
+var main
+var player: CharacterBody3D
+var output := ""
+var requested_seed := "atlas-30895044"
+var started := 0
+var deadline := 0
+var startup_ready := false
+var startup_failure := ""
+var phase := "initializing"
+var candidate: Dictionary = {}
+var region := Vector2i.ZERO
+var declared := Rect2i()
+var reservation := Rect2i()
+var search: Dictionary = {}
+var placements: Array[Dictionary] = []
+var captures: Array[Dictionary] = []
+var timeline: Array[Dictionary] = []
+var timeline_dropped := 0
+var startup_messages: Array[Dictionary] = []
+var startup_message_index: Dictionary = {}
+var startup_message_count := 0
+var startup_message_overflow := 0
+var checks: Dictionary = {}
+var evidence: Dictionary = {}
+var next_progress := 0
+var last_observation: Dictionary = {}
+var source_binding: Dictionary = {}
+var source_signature := ""
+var original_position := Vector3.ZERO
+var finished := false
+var last_timeline_state := ""
+var evidence_error: Dictionary = {}
+var accepted_owners: Dictionary = {} # Weak identity pins, never scene ownership.
+
+func _initialize() -> void:
+	call_deferred("_run")
+
+func _run() -> void:
+	output = OS.get_environment("CITADEL_CANDIDATE_TELEPORT_OUTPUT")
+	var selected := OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SEED").strip_edges()
+	if not selected.is_empty(): requested_seed = selected
+	var limit := int(OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SECONDS"))
+	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 600:
+		printerr("Missing/invalid owned runner output or deadline"); quit(2); return
+	started = Time.get_ticks_msec()
+	deadline = started + (limit-45)*1000 # Reserve owned watchdog time for ordinary shutdown.
+	if DisplayServer.get_name() == "headless":
+		await _finish("failed", "headed_renderer_required"); return
+	root.size = Vector2i(1280,720)
+	main = MainScene.instantiate() as Node3D
+	main.set_script(SeededMain)
+	evidence.seedSelection = {"mechanism":"fixture-only script replacement with subclass overriding random_world_seed",
+		"originalScript":"res://scripts/Main.gd","inheritedStartupMode":"new_game","requestedSeed":requested_seed,
+		"excludeSeedDeliberatelyIgnored":true,"voxelTestSeedEnvironmentUsed":false,"globalRngSeedOverride":false,
+		"notEquivalentToExistingTestSeedMode":"VOXEL_TEST_SEED also seeds the global RNG; deterministic sequence additionally requires a test/performance token. Neither mechanism is enabled here."}
+	main.set("diagnostic_seed",requested_seed)
+	main.set("deferred_startup_boot",true)
+	main.set("startup_mode","new_game")
+	main.connect("startup_loading_completed",_startup_completed)
+	main.connect("startup_loading_failed",_startup_failed)
+	main.connect("startup_loading_step",_startup_step)
+	root.add_child(main)
+	current_scene = main
+	phase = "ordinary_new_game_startup"
+	while not startup_ready and startup_failure.is_empty() and _within_deadline():
+		await _frame()
+	checks.startup_completed = startup_ready and startup_failure.is_empty()
+	if not checks.startup_completed:
+		await _finish("failed",startup_failure if not startup_failure.is_empty() else "startup_timeout"); return
+	checks.exact_seed = String(main.get("seed_text")) == requested_seed
+	var domains: Dictionary = main.get("startup_readiness_domains")
+	checks.startup_gameplay_domain_ready = domains.get("gameplay",{}).get("status") == "ready"
+	evidence.startupReadiness = domains.duplicate(true)
+	player = main.get("player") as CharacterBody3D
+	if not checks.exact_seed or not checks.startup_gameplay_domain_ready or not is_instance_valid(player):
+		await _finish("failed","startup_identity_or_readiness_mismatch"); return
+	checks.runtime_owners_available = main.structure_system.citadel_runtime_bindings != null and main.structure_system.citadel_runtime_bindings.available()
+	if not checks.runtime_owners_available:
+		await _finish("failed","ordinary_runtime_owners_missing"); return
+	original_position = player.global_position
+	if not await _capture("preteleport"):
+		await _finish("failed","preteleport_capture_failed"); return
+	search = _nearest_candidate(original_position)
+	candidate = search.get("selected",{})
+	if candidate.is_empty():
+		await _finish("absent","no_candidate_in_bounded_ring"); return
+	region = candidate.region
+	declared = Admission.declared_influence(candidate)
+	if not _place_outside(declared,"declared_influence_exterior"):
+		await _finish("failed","initial_staging_invalid"); return
+	if not await _capture("pending"):
+		await _finish("failed","pending_capture_failed"); return
+	phase = "ordinary_source_discovery"
+	while _within_deadline():
+		await _frame()
+		var source := _source_summary()
+		if source.get("status") in ["failed","absent"]:
+			await _finish(String(source.status),String(source.get("reason","source_rejected"))); return
+		if source.get("status") in ["ready","prepared"]:
+			reservation = source.reservationCells
+			source_binding = source.binding.duplicate()
+			source_signature = source.sourceSignature
+			break
+	if reservation.size.x <= 0 or reservation.size.y <= 0:
+		await _finish("timeout","ordinary_source_not_accepted"); return
+	if not _pin_accepted_owners():
+		await _finish("failed","accepted_source_owners_missing"); return
+	checks.accepted_reservation_within_declared = declared.encloses(reservation)
+	checks.initial_capsule_outside_accepted_reservation = _outside(reservation)
+	if not checks.accepted_reservation_within_declared or not checks.initial_capsule_outside_accepted_reservation:
+		await _finish("failed","accepted_reservation_boundary_mismatch"); return
+	# No long scripted walk or source prewarm. The second explicitly reported
+	# setup placement is derived ONLY from the now accepted production manifest.
+	if not _place_outside(reservation,"accepted_reservation_exterior"):
+		await _finish("failed","accepted_staging_invalid"); return
+	if not await _capture("pending_publication"):
+		await _finish("failed","publication_capture_failed"); return
+	phase = "native_collision_and_capsule_clearance"
+	var clear_frames := 0
+	var clearance: Dictionary = {}
+	var mesh: Dictionary = {}
+	var support: Dictionary = {}
+	var clearance_failure := ""
+	while _within_deadline():
+		await physics_frame
+		await _frame()
+		# Rejection/identity checks precede the successful-clearance exit. A stale
+		# collision observation cannot authorize physics against another source.
+		var identity := _accepted_current()
+		if not identity.passed:
+			clearance_failure=String(identity.reason)
+			clear_frames=0
+			break
+		var runtime = main.get("voxel_terrain_runtime")
+		mesh = runtime.collision_mesh_ready_for_body_position(player.global_position,_capsule_radius())
+		support = runtime.collision_proof_for_world_position(player.global_position,_capsule_radius())
+		clearance = Clearance.inspect(player)
+		var valid: bool = runtime.generation_context_current() and mesh.get("passed",false) and support.get("passed",false) and clearance.get("passed",false) and _outside(reservation)
+		clear_frames = clear_frames+1 if valid else 0
+		if clear_frames >= 2: break
+	evidence.setupClearance = {"freshPhysicsFrames":clear_frames,"mesh":mesh,"support":support,"capsule":clearance}
+	checks.setup_clearance_before_resume = clear_frames >= 2
+	if not checks.setup_clearance_before_resume:
+		await _finish("failed",clearance_failure if not clearance_failure.is_empty() else "staging_collision_or_capsule_clearance_unresolved"); return
+	var resume_identity := _accepted_current()
+	evidence.beforePhysicsResume = resume_identity
+	checks.accepted_identity_before_resume = resume_identity.passed and _outside(reservation)
+	if not checks.accepted_identity_before_resume:
+		await _finish("failed",String(resume_identity.reason) if not resume_identity.passed else "capsule_not_outside_before_resume"); return
+	player.set_physics_process(true)
+	evidence.physicsResumedMsec = _elapsed()
+	phase = "ordinary_scene_publication"
+	while _within_deadline():
+		await _frame()
+		if not _outside(reservation):
+			await _finish("failed","player_entered_reservation_before_scene_ready"); return
+		var observed := _observe()
+		var scene: Dictionary = observed.get("scene",{})
+		var source: Dictionary = observed.get("source",{})
+		if source.get("status") in ["failed","absent"]:
+			await _finish(String(source.status),String(source.get("reason","source_rejected"))); return
+		if scene.get("status") == "failed":
+			await _finish("failed",String(scene.get("reason","publication_failed"))); return
+		if scene.get("status") == "scene_ready":
+			checks.scene_source_binding_matches = scene.get("binding",{}) == source_binding and source.get("binding",{}) == source_binding and source.get("sourceSignature") == source_signature
+			break
+	if not checks.get("scene_source_binding_matches",false):
+		await _finish("timeout","ordinary_scene_not_ready_from_manifest_exterior"); return
+	phase = "ready_scene_observation"
+	await physics_frame
+	await _frame()
+	evidence.sceneAudit = await _audit_scene()
+	checks.scene_audit = evidence.sceneAudit.get("passed",false)
+	checks.camera_facing_candidate = await _look_toward_candidate()
+	if not checks.camera_facing_candidate:
+		await _finish("failed","ordinary_mouse_look_did_not_face_candidate"); return
+	if not await _capture("ready"):
+		await _finish("failed","ready_capture_failed"); return
+	checks.ready_capture_still_owned = main.structure_system.citadel_runtime_bindings.available() and main.structure_system.citadel_publication.scene_state(region).get("binding",{}) == source_binding and main.structure_system.citadel_publication.scene_state(region).get("status") == "scene_ready"
+	await _finish("scene_ready" if checks.scene_audit else "failed","" if checks.scene_audit else "scene_observation_failed")
+
+func _nearest_candidate(position: Vector3) -> Dictionary:
+	var cell := Vector2i(floori(position.x/float(main.CELL)),floori(position.z/float(main.CELL)))
+	var origin := Field.region_for_cell(cell)
+	var found: Array[Dictionary] = []
+	for z in range(origin.y-SEARCH_RING,origin.y+SEARCH_RING+1):
+		for x in range(origin.x-SEARCH_RING,origin.x+SEARCH_RING+1):
+			var value := Field.candidate_for_region(requested_seed,Vector2i(x,z))
+			if value.is_empty(): continue
+			var center: Vector2i = value.centerCell
+			var distance := Vector2(center.x*float(main.CELL)-position.x,center.y*float(main.CELL)-position.z).length()
+			found.append({"candidate":value,"distanceWorld":distance})
+	found.sort_custom(func(a: Dictionary,b: Dictionary)->bool:
+		return a.distanceWorld < b.distanceWorld or a.distanceWorld == b.distanceWorld and String(a.candidate.siteId) < String(b.candidate.siteId))
+	return {"originRegion":origin,"ringRadius":SEARCH_RING,"regionsExamined":(SEARCH_RING*2+1)*(SEARCH_RING*2+1),"candidates":found,
+		"selected":found[0].candidate if not found.is_empty() else {},"nearestWithinSearchOnly":true,"acceptedSiteNotGuaranteed":true}
+
+func _place_outside(bounds: Rect2i,label: String) -> bool:
+	if placements.size() >= MAX_SETUP_WRITES or bounds.size.x <= 0 or bounds.size.y <= 0: return false
+	var collider := player.get_node_or_null("PlayerCollider") as CollisionShape3D
+	if collider == null or collider.disabled or not collider.shape is CapsuleShape3D: return false
+	var capsule: CapsuleShape3D = collider.shape
+	if not collider.global_basis.y.is_equal_approx(Vector3.UP): return false
+	var cell_size := float(main.CELL)
+	var radius := _capsule_radius()
+	var margin := ceili(radius/cell_size)+3
+	var old_cell := Vector2i(floori(player.global_position.x/cell_size),floori(player.global_position.z/cell_size))
+	var clamped := Vector2i(clampi(old_cell.x,bounds.position.x,bounds.end.x-1),clampi(old_cell.y,bounds.position.y,bounds.end.y-1))
+	var choices: Array[Vector2i] = [Vector2i(bounds.position.x-margin,clamped.y),Vector2i(bounds.end.x+margin,clamped.y),Vector2i(clamped.x,bounds.position.y-margin),Vector2i(clamped.x,bounds.end.y+margin)]
+	choices.sort_custom(func(a: Vector2i,b: Vector2i)->bool:
+		return a.distance_squared_to(old_cell)<b.distance_squared_to(old_cell) or a.distance_squared_to(old_cell)==b.distance_squared_to(old_cell) and (a.x<b.x or a.x==b.x and a.y<b.y))
+	var target := choices[0]
+	var bare_view := Rect2i(target-Vector2i.ONE*VIEW_CELLS,Vector2i.ONE*(VIEW_CELLS*2+1))
+	if bounds.has_point(target) or not bare_view.intersects(bounds): return false
+	# Use current production generation over the capsule's real horizontal extent.
+	# No terrain chunk creation, Source call, injected profile or guessed Y.
+	var surface := -INF
+	var radius_cells := ceili(radius/cell_size)
+	for z in range(target.y-radius_cells,target.y+radius_cells+1):
+		for x in range(target.x-radius_cells,target.x+radius_cells+1):
+			surface = maxf(surface,float(main.surface_y_at_cell(Vector3i(x,0,z))))
+	var bottom_offset := collider.global_position.y-player.global_position.y-capsule.height*0.5
+	var destination := Vector3(target.x*cell_size,surface-bottom_offset+capsule.radius*0.25,target.y*cell_size)
+	if not destination.is_finite(): return false
+	if placements.size()==1:
+		var identity := _accepted_current()
+		evidence.beforeSecondPlacement = identity
+		checks.accepted_identity_before_second_placement = identity.passed and bounds==reservation
+		if not checks.accepted_identity_before_second_placement: return false
+	player.set_physics_process(false)
+	var before := player.global_transform
+	var placed := before
+	placed.origin = destination
+	player.global_transform = placed # The ONLY fixture player transform-write site.
+	player.velocity = Vector3.ZERO # Setup only; no ongoing motion correction.
+	placements.append({"index":placements.size()+1,"label":label,"elapsedMsec":_elapsed(),"from":before.origin,"to":destination,
+		"cell":target,"excludedBounds":bounds,"ordinary112CellView":bare_view,"productionSurfaceY":surface,"capsuleBottomOffset":bottom_offset,
+		"capsuleRadius":radius,"capsuleHeight":capsule.height,"physicsFrozen":true})
+	return _outside(bounds)
+
+func _capsule_radius() -> float:
+	var collider := player.get_node("PlayerCollider") as CollisionShape3D
+	var capsule: CapsuleShape3D = collider.shape
+	return capsule.radius*maxf(collider.global_basis.x.length(),collider.global_basis.z.length())
+
+func _outside(bounds: Rect2i) -> bool:
+	# Independently prove geometry; construction_allowed has a loading exemption
+	# for disabled physics and therefore cannot certify diagnostic staging alone.
+	if not is_instance_valid(player) or not player.is_inside_tree() or bounds.size.x<=0 or bounds.size.y<=0: return false
+	var collider := player.get_node_or_null("PlayerCollider") as CollisionShape3D
+	if collider==null or collider.disabled or not collider.shape is CapsuleShape3D: return false
+	var capsule: CapsuleShape3D = collider.shape
+	var center := collider.global_position
+	var basis := collider.global_basis
+	var cell_size := float(main.CELL)
+	if not center.is_finite() or not basis.x.is_finite() or not basis.y.is_finite() or not basis.z.is_finite() or not is_finite(cell_size) or cell_size<=0.0: return false
+	if basis.y.length_squared()<=0.0 or not is_zero_approx(basis.y.x) or not is_zero_approx(basis.y.z): return false
+	var radius_x := capsule.radius*Vector2(basis.x.x,basis.z.x).length()
+	var radius_z := capsule.radius*Vector2(basis.x.z,basis.z.z).length()
+	if not is_finite(radius_x) or not is_finite(radius_z) or radius_x<=0.0 or radius_z<=0.0: return false
+	var low := Vector2i(floori((center.x-radius_x)/cell_size),floori((center.z-radius_z)/cell_size))
+	var high := Vector2i(ceili((center.x+radius_x)/cell_size)+1,ceili((center.z+radius_z)/cell_size)+1)
+	if bounds.intersects(Rect2i(low,high-low)): return false
+	var bindings = main.structure_system.citadel_runtime_bindings
+	return bindings!=null and bindings.available() and bindings.construction_allowed(bounds)
+
+func _owner_objects() -> Dictionary:
+	if not is_instance_valid(main) or main.get("structure_system")==null or not is_instance_valid(main.get("npc_system")): return {}
+	var structures = main.structure_system
+	var autonomy = main.npc_system.autonomy_system
+	if not is_instance_valid(autonomy): return {}
+	var values := {"main":main,"player":main.player,"structures":structures,"admission":structures.citadel_terrain_admission,
+		"store":structures.citadel_terrain_admission.profile_store,"service":structures.citadel_publication,
+		"bindings":structures.citadel_runtime_bindings,"npc":main.npc_system,"autonomy":autonomy,
+		"smart":autonomy.smart_objects,"portals":autonomy.door_portals,"trees":main.tree_publication_queue,
+		"runtime":main.get("voxel_terrain_runtime")}
+	for value in values.values():
+		if not is_instance_valid(value): return {}
+	return values
+
+func _pin_accepted_owners() -> bool:
+	var owners := _owner_objects()
+	if owners.is_empty(): return false
+	var ids := {}
+	for key: String in owners:
+		accepted_owners[key]=weakref(owners[key])
+		ids[key]=owners[key].get_instance_id()
+	evidence.acceptedIdentity={"binding":source_binding.duplicate(),"sourceSignature":source_signature,"reservationCells":reservation,"ownerInstanceIds":ids}
+	return true
+
+func _accepted_current() -> Dictionary:
+	var owners := _owner_objects()
+	if accepted_owners.is_empty() or owners.size()!=accepted_owners.size(): return {"passed":false,"reason":"accepted_owner_missing"}
+	for key: String in accepted_owners:
+		if not is_same(accepted_owners[key].get_ref(),owners.get(key)): return {"passed":false,"reason":"accepted_owner_replaced:"+key}
+	var source := _source_summary()
+	if source.get("status") not in ["ready","prepared"]: return {"passed":false,"reason":String(source.get("reason","accepted_source_unavailable"))}
+	if source.get("binding",{})!=source_binding or source.get("sourceSignature")!=source_signature or source.get("reservationCells")!=reservation:
+		return {"passed":false,"reason":"accepted_source_identity_changed"}
+	var admitted: Dictionary = owners.admission.stats()
+	var publication: Dictionary = owners.service.stats()
+	var generation := int(source_binding.get("generation",-1))
+	if generation<0 or int(admitted.get("generation",-2))!=generation or int(publication.get("generation",-2))!=generation \
+			or String(main.seed_text)!=requested_seed or admitted.get("worldSeed")!=requested_seed or publication.get("worldSeed")!=requested_seed \
+			or not owners.runtime.generation_context_current() or not owners.bindings.available() or publication.get("worldResetPending",true):
+		return {"passed":false,"reason":"accepted_generation_or_runtime_owner_changed"}
+	var scene: Dictionary = owners.service.scene_state(region)
+	if scene.get("status")=="failed": return {"passed":false,"reason":String(scene.get("reason","publication_failed"))}
+	return {"passed":true,"reason":"accepted_source_and_owners_current","generation":generation,"sourceSignature":source_signature,"reservationCells":reservation}
+
+func _source_summary() -> Dictionary:
+	# source_state is explicitly non-enqueuing. Never retain/copy its source payload.
+	var value: Dictionary = main.structure_system.citadel_terrain_admission.source_state(region)
+	var result := {}
+	for key: String in ["status","reason","binding","sourceSignature","reservationCells"]:
+		if value.has(key): result[key] = value[key]
+	return result
+
+func _observe() -> Dictionary:
+	if not is_instance_valid(main) or main.get("structure_system") == null: return {}
+	var structures = main.structure_system
+	var admission_stats: Dictionary = structures.citadel_terrain_admission.stats()
+	var service_stats: Dictionary = structures.citadel_publication.stats()
+	var value := {"source":_source_summary() if not candidate.is_empty() else {},
+		"scene":structures.citadel_publication.scene_state(region) if not candidate.is_empty() else {},
+		"admission":admission_stats,"publication":service_stats,
+		"ownersAvailable":structures.citadel_runtime_bindings != null and structures.citadel_runtime_bindings.available()}
+	if is_instance_valid(player): value.playerPosition = player.global_position; value.playerPhysics = player.is_physics_processing()
+	return value
+
+func _audit_scene() -> Dictionary:
+	var service = main.structure_system.citadel_publication
+	var site: Node3D = service.scene_root(region)
+	var result := {"passed":false,"nodeCount":0,"meshes":0,"multiMeshes":0,"instances":0,"collisionShapes":0,"furnitureBodies":0,"trees":0,"doors":0,"badBindings":[],"physicsProbes":[]}
+	if not is_instance_valid(site) or site.get_parent()!=main: return result
+	var expected_origin := Vector3.INF
+	for profile: Dictionary in main.structure_system.citadel_terrain_admission.profile_store.snapshot():
+		if profile.get("siteId") == candidate.siteId and profile.get("sourceSignature") == source_signature: expected_origin = profile.origin
+	result.rootInstanceId = site.get_instance_id()
+	result.rootPosition = site.global_position
+	result.sourceOrigin = expected_origin
+	result.rootMatchesProfile = expected_origin.is_finite() and site.global_transform.is_equal_approx(Transform3D(Basis.IDENTITY,expected_origin))
+	var autonomy = main.npc_system.autonomy_system
+	var portals = autonomy.door_portals
+	var smart = autonomy.smart_objects
+	var stack: Array[Node] = [site]
+	while not stack.is_empty() and _within_deadline() and result.nodeCount < 100000:
+		for unit in range(128):
+			if stack.is_empty(): break
+			var node: Node = stack.pop_back()
+			if not is_instance_valid(node): result.badBindings.append("node_disappeared"); continue
+			result.nodeCount += 1
+			for child: Node in node.get_children(): stack.append(child)
+			if node is MeshInstance3D and node.mesh != null: result.meshes += 1
+			if node is MultiMeshInstance3D and node.multimesh != null:
+				result.multiMeshes += 1; result.instances += node.multimesh.instance_count
+			if node is CollisionShape3D and node.shape != null and not node.disabled:
+				result.collisionShapes += 1
+				if result.physicsProbes.size()<8 and node.get_parent() is StaticBody3D:
+					var query := PhysicsShapeQueryParameters3D.new()
+					query.shape = node.shape; query.transform = node.global_transform
+					query.collision_mask = node.get_parent().collision_layer
+					var hits := site.get_world_3d().direct_space_state.intersect_shape(query,64)
+					var found := false
+					for hit: Dictionary in hits:
+						if hit.get("collider") == node.get_parent(): found = true
+					result.physicsProbes.append({"bodyId":node.get_parent().get_instance_id(),"registeredInPhysics":found})
+			if node is StaticBody3D and node.has_meta("furnishing_part_record"): result.furnitureBodies += 1
+			if node is StaticBody3D and node.has_meta("tree_visual_state"):
+				result.trees += 1
+				var prop_id := String(node.get_meta("prop_id",""))
+				var registered = smart.registrations.get("prop:"+prop_id)
+				if node.get_meta("tree_visual_state")!="published" or node.get_node_or_null("GeneratedTreeVisual")==null or registered==null or registered.node!=node:
+					result.badBindings.append("tree:"+prop_id)
+			if node is StaticBody3D and node.has_meta("door_portal_id"):
+				result.doors += 1
+				var portal_id := String(node.get_meta("door_portal_id"))
+				var portal = portals.portal_for_door(node)
+				var registered = smart.registrations.get(portal_id)
+				if portals.door_to_portal.get(node.get_instance_id())!=portal_id or portal==null or not portal.leaf_nodes.has(node) or registered==null or registered.kind!="door" or not portal.leaf_nodes.has(registered.node):
+					result.badBindings.append("door:"+portal_id)
+		await _frame()
+	result.ownersAvailable = main.structure_system.citadel_runtime_bindings.available()
+	result.sourceStillMatches = _source_summary().get("binding",{})==source_binding and service.scene_state(region).get("binding",{})==source_binding and service.scene_state(region).status=="scene_ready"
+	result.capsule = Clearance.inspect(player)
+	result.passed = stack.is_empty() and result.rootMatchesProfile and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
+	return result
+
+func _look_toward_candidate() -> bool:
+	# Camera adjustment uses the ordinary viewport mouse-look consumer. No camera
+	# transform write, detached observer, clock/light override or OS input automation.
+	var attempts := 0
+	var initial_error := _candidate_yaw_error()
+	for attempt in range(12):
+		var error := _candidate_yaw_error()
+		if absf(error)<0.03: break
+		var sensitivity := float(player.get("mouse_sensitivity"))
+		if sensitivity<=0.0: break
+		var motion := InputEventMouseMotion.new()
+		motion.relative = Vector2(clampf(-error/sensitivity,-600,600),0)
+		root.push_input(motion)
+		attempts += 1
+		await _frame()
+	var final_error := _candidate_yaw_error()
+	var passed := is_finite(final_error) and absf(final_error)<0.03
+	evidence.cameraLook = {"passed":passed,"inputEvents":attempts,"initialYawErrorRadians":initial_error,"finalYawErrorRadians":final_error,
+		"toleranceRadians":0.03,"ordinaryMouseGuardAccepts":main.should_accept_mouse_look(),"guardBypassed":false}
+	return passed
+
+func _candidate_yaw_error() -> float:
+	var target := Vector3(candidate.centerCell.x*float(main.CELL),player.global_position.y,candidate.centerCell.y*float(main.CELL))
+	var direction := target-player.global_position
+	return wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
+
+func _startup_completed() -> void: startup_ready = true
+func _startup_failed(message: String) -> void: startup_failure = message
+func _startup_step(message: String) -> void:
+	# Startup can repeat collision waits every frame. Aggregate exact messages
+	# separately; never spend source/publication transition slots on this stream.
+	startup_message_count += 1
+	if startup_message_index.has(message):
+		var index: int = startup_message_index[message]
+		startup_messages[index].count += 1
+		startup_messages[index].lastElapsedMsec = _elapsed()
+		return
+	if startup_messages.size()>=128:
+		startup_message_overflow += 1
+		return
+	startup_message_index[message]=startup_messages.size()
+	startup_messages.append({"message":message,"count":1,"firstElapsedMsec":_elapsed(),"lastElapsedMsec":_elapsed()})
+
+func _append_timeline(entry: Dictionary) -> void:
+	if timeline.size()>=256:
+		timeline.pop_front()
+		timeline_dropped += 1
+	timeline.append(entry)
+
+func _within_deadline() -> bool: return evidence_error.is_empty() and Time.get_ticks_msec()<deadline
+func _elapsed() -> int: return Time.get_ticks_msec()-started
+
+func _frame() -> void:
+	await process_frame
+	if Time.get_ticks_msec()>=next_progress:
+		next_progress = Time.get_ticks_msec()+1000
+		last_observation = _observe()
+		var state_key := phase+":"+String(last_observation.get("source",{}).get("status",""))+":"+String(last_observation.get("scene",{}).get("status",""))
+		if state_key!=last_timeline_state:
+			last_timeline_state=state_key
+			_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"source":last_observation.get("source",{}),"scene":last_observation.get("scene",{})})
+		_write("progress.json",{"elapsedMsec":_elapsed(),"phase":phase,"placementCount":placements.size(),"observation":last_observation})
+
+func _capture(label: String) -> bool:
+	if DisplayServer.get_name()=="headless":
+		captures.append({"label":label,"saved":false,"reason":"headless_capture_skipped","elapsedMsec":_elapsed()})
+		return false # Headless servers need not ever emit frame_post_draw.
+	await process_frame
+	await RenderingServer.frame_post_draw
+	var image := root.get_texture().get_image()
+	var path := output.path_join(label+".png")
+	var code := ERR_UNAVAILABLE
+	if image!=null and not image.is_empty(): code=image.save_png(path)
+	captures.append({"label":label,"path":path,"saved":code==OK,"error":code,"elapsedMsec":_elapsed(),
+		"playerPosition":player.global_position if is_instance_valid(player) else Vector3.ZERO,"camera":"ordinary_player_viewport","inspectionRequired":true})
+	if code!=OK: _evidence_failure(label+".png",code)
+	return code==OK
+
+func _write(name: String,value: Dictionary) -> bool:
+	var file := FileAccess.open(output.path_join(name),FileAccess.WRITE)
+	if file==null:
+		_evidence_failure(name,FileAccess.get_open_error()); return false
+	file.store_string(JSON.stringify(value,"\t")); file.flush()
+	var error := file.get_error()
+	file.close()
+	if error!=OK: _evidence_failure(name,error)
+	return error==OK
+
+func _evidence_failure(name: String,error: int) -> void:
+	if not evidence_error.is_empty(): return
+	evidence_error={"passed":false,"reason":"evidence_write_failed","file":name,"error":error,"phase":phase,"elapsedMsec":_elapsed()}
+	# Best effort independent failure receipt, never recursively call _write.
+	# If the entire directory/storage is unavailable the engine log + watchdog
+	# remain authoritative: immediate ERROR stops the owned job, never a pass.
+	var fallback := FileAccess.open(output.path_join("evidence-failure.json"),FileAccess.WRITE)
+	if fallback!=null:
+		fallback.store_string(JSON.stringify(evidence_error)); fallback.flush(); fallback.close()
+	push_error("Citadel diagnostic evidence failure: "+JSON.stringify(evidence_error))
+
+func _finish(outcome: String,reason: String) -> void:
+	if finished: return
+	finished = true
+	phase = "terminal_"+outcome
+	_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"outcome":outcome,"reason":reason})
+	if outcome!="scene_ready" and evidence_error.is_empty(): await _capture("failed")
+	checks.evidence_writes_succeeded=evidence_error.is_empty()
+	checks.all_captures_saved = not captures.is_empty() and captures.all(func(c):return c.saved)
+	checks.setup_write_limit = placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES
+	var passed := outcome=="scene_ready" and not checks.values().has(false)
+	var report_written := _write("report.json",{"schema":"citadel-candidate-teleport-playtest/v1","passed":passed,"outcome":outcome,"reason":reason,"checks":checks,"evidenceWriteFailure":evidence_error,
+		"seed":requested_seed,"actualSeed":main.get("seed_text") if is_instance_valid(main) else "","elapsedMsec":_elapsed(),"engine":Engine.get_version_info(),
+		"originalPlayerPosition":original_position,"search":search,"candidate":candidate,"declaredInfluence":declared,"acceptedReservation":reservation,
+		"setupPlacements":placements,"captures":captures,"timeline":timeline,"timelineDropped":timeline_dropped,
+		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},
+		"evidence":evidence,"finalObservation":_observe(),
+		"evidenceLevel":"headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
+		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events only after scene readiness","isolated ordinary save directory"],
+		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
+		"shutdown":"ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})
+	passed=passed and report_written
+	print("CITADEL CANDIDATE TELEPORT outcome=",outcome," reason=",reason," placements=",placements.size()," passed=",passed)
+	if is_instance_valid(main): main.request_graceful_quit(0 if passed else 1)
+	else: quit(1)
