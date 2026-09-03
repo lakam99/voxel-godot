@@ -3,11 +3,13 @@ param(
     [Parameter(Mandatory=$true)][string]$LiveOwnershipPath,
     [Parameter(Mandatory=$true)][string]$RunId,
     [Parameter(Mandatory=$true)][string]$ProjectPath,
-    [ValidateSet('Inspect','Focus','Capture','Click','Key')][string]$Action='Inspect',
+    [ValidateSet('Inspect','Focus','Capture','Click','Key','MouseLook')][string]$Action='Inspect',
     [long]$WindowHandle=0,
     [string]$CapturePath,
     [int]$X=-1,
     [int]$Y=-1,
+    [ValidateRange(-1000,1000)][int]$Dx=0,
+    [ValidateRange(-1000,1000)][int]$Dy=0,
     [ValidateSet('Left','Right')][string]$Button='Left',
     [string]$Key,
     [ValidateRange(1,2000)][int]$HoldMilliseconds=80,
@@ -137,6 +139,11 @@ public static class OwnedGameWindowNativeV1 {
         if (width<=1 || height<=1) throw new InvalidOperationException("Invalid virtual desktop");
         Send(new INPUT {type=0,data=new INPUTUNION {mi=new MOUSEINPUT {dx=(int)Math.Round((x-left)*65535.0/(width-1)),dy=(int)Math.Round((y-top)*65535.0/(height-1)),dwFlags=0x0001|0x8000|0x4000}}});
     }
+    public static void RelativeMouseMove(int dx,int dy) {
+        if (dx < -1000 || dx > 1000 || dy < -1000 || dy > 1000)
+            throw new ArgumentOutOfRangeException("Relative mouse delta exceeds 1000");
+        Send(new INPUT {type=0,data=new INPUTUNION {mi=new MOUSEINPUT {dx=dx,dy=dy,dwFlags=0x0001}}});
+    }
     public static void MouseButton(bool right,bool up) {
         Send(new INPUT {type=0,data=new INPUTUNION {mi=new MOUSEINPUT {dwFlags=right?(up?0x0010u:0x0008u):(up?0x0004u:0x0002u)}}});
     }
@@ -196,7 +203,7 @@ function Confirm-StableWindow($Original) {
     return $current
 }
 
-if ($Action -in @('Click','Key') -and ($WindowHandle -le 0 -or $ExpectedClientWidth -lt 64 -or $ExpectedClientHeight -lt 64)) {
+if ($Action -in @('Click','Key','MouseLook') -and ($WindowHandle -le 0 -or $ExpectedClientWidth -lt 64 -or $ExpectedClientHeight -lt 64)) {
     throw 'Input requires the inspected HWND and expected client width/height.'
 }
 if ($Action -eq 'Capture' -and [string]::IsNullOrWhiteSpace($CapturePath)) { throw 'CapturePath is required.' }
@@ -210,6 +217,8 @@ if ($Action -eq 'Key') {
 $dpiPrevious=[OwnedGameWindowNativeV1]::SetThreadDpiAwarenessContext([IntPtr](-4))
 if ($dpiPrevious -eq [IntPtr]::Zero) { throw 'Unable to use physical-pixel DPI coordinates.' }
 $started=[datetime]::UtcNow
+$relativeMoveSent=$false
+$relativeMoveAttempted=$false
 try {
     $live=Read-Ownership
     if ($WindowHandle -eq 0) {
@@ -222,6 +231,17 @@ try {
     if ($Action -eq 'Focus') {
         if (-not [OwnedGameWindowNativeV1]::SetForegroundWindow([IntPtr]$WindowHandle)) { throw 'Windows refused foreground focus.' }
         $info=Confirm-Window $WindowHandle $true
+    }
+    if ($Action -eq 'MouseLook') {
+        if ($info.Width -ne $ExpectedClientWidth -or $info.Height -ne $ExpectedClientHeight) { throw 'Client size differs from inspected input coordinates.' }
+        [OwnedGameWindowNativeV1]::VerifyUnobscured($info)
+        [OwnedGameWindowNativeV1]::AssertInputsReleased(0)
+        $null=Confirm-StableWindow $info
+        $relativeMoveAttempted=$true
+        [OwnedGameWindowNativeV1]::RelativeMouseMove($Dx,$Dy)
+        $relativeMoveSent=$true
+        $null=Confirm-StableWindow $info
+        [OwnedGameWindowNativeV1]::VerifyUnobscured($info)
     }
     if ($Action -in @('Click','Key')) {
         if ($info.Width -ne $ExpectedClientWidth -or $info.Height -ne $ExpectedClientHeight) { throw 'Client size differs from inspected input coordinates.' }
@@ -279,7 +299,13 @@ try {
             if ($null -ne $bitmap) { $bitmap.Dispose() }
         }
     }
-    [ordered]@{schema='owned-game-window-action/v1';runId=$RunId;action=$Action;status='completed';startedUtc=$started.ToString('o');completedUtc=[datetime]::UtcNow.ToString('o');ownershipSequence=$lastSequence;window=$info;capturePath=$savedCapture;key=$Key;button=$Button;clientX=$X;clientY=$Y;requestedHoldMilliseconds=$HoldMilliseconds} | ConvertTo-Json -Depth 5 -Compress
+    [ordered]@{schema='owned-game-window-action/v1';runId=$RunId;action=$Action;status='completed';startedUtc=$started.ToString('o');completedUtc=[datetime]::UtcNow.ToString('o');ownershipSequence=$lastSequence;window=$info;capturePath=$savedCapture;key=$Key;button=$Button;clientX=$X;clientY=$Y;relativeDx=$Dx;relativeDy=$Dy;requestedHoldMilliseconds=$HoldMilliseconds} | ConvertTo-Json -Depth 5 -Compress
+} catch {
+    if ($Action -eq 'MouseLook') {
+        # A post-check failure cannot undo input. Never retry or reverse it.
+        [ordered]@{schema='owned-game-window-action/v1';runId=$RunId;action=$Action;status='failed';relativeDx=$Dx;relativeDy=$Dy;inputAttempted=$relativeMoveAttempted;inputSent=$relativeMoveSent;automaticRetrySafe=$false;reason=$_.Exception.Message} | ConvertTo-Json -Compress | Write-Output
+    }
+    throw
 } finally {
     if ([OwnedGameWindowNativeV1]::SetThreadDpiAwarenessContext($dpiPrevious) -eq [IntPtr]::Zero) { throw 'DPI context restoration failed.' }
 }
