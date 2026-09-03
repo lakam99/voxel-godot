@@ -159,23 +159,50 @@ static func compositions_overlap(a: Dictionary, b: Dictionary, clearance: float)
 static func composition_overlaps_obstacles(composition: Dictionary, obstacle_parts: Array, clearance: float) -> bool:
 	if not _valid_composition_shape(composition):
 		return true
+	for obstacle_value in obstacle_parts:
+		if _validated_composition_overlaps_obstacle(composition, obstacle_value, clearance):
+			return true
+	return false
+
+
+## One candidate-local proof, not a persistent cache. Exact per-obstacle results
+## retain their input order so callers can preserve all rejection provenance.
+## The callback receives no aliases to the private descriptors. Input mutation
+## or cancellation discards the entire batch, never returning partial results.
+static func composition_obstacle_overlap_indices(composition: Dictionary, obstacle_parts: Array, clearance: float, continuation: Callable = Callable()) -> Dictionary:
+	var composition_bytes := var_to_bytes(composition)
+	var obstacle_bytes := var_to_bytes(obstacle_parts)
+	var private_composition := composition.duplicate(true)
+	var private_obstacles := obstacle_parts.duplicate(true)
+	var valid := _valid_composition_shape(private_composition)
+	var overlaps: Array[int] = []
+	for index in range(private_obstacles.size()):
+		if continuation.is_valid() and continuation.call()!=true:
+			return {"status":"cancelled"}
+		if not valid or _validated_composition_overlaps_obstacle(private_composition, private_obstacles[index], clearance):
+			overlaps.append(index)
+	if composition_bytes!=var_to_bytes(composition) or obstacle_bytes!=var_to_bytes(obstacle_parts):
+		return {"status":"cancelled"}
+	return {"status":"ready", "overlapIndices":overlaps, "comparisons":private_obstacles.size()}
+
+
+static func _validated_composition_overlaps_obstacle(composition: Dictionary, obstacle_value: Variant, clearance: float) -> bool:
+	if not obstacle_value is Dictionary or not _valid_exact_part_descriptor(obstacle_value as Dictionary):
+		return true
 	var corridor: Dictionary = composition.get("doorCorridor", {}) as Dictionary
 	var aggregate: Dictionary = composition.get("aggregateFootprint", {}) as Dictionary
 	var aggregate_center: Vector3 = aggregate.get("center", Vector3.ZERO) as Vector3
 	var aggregate_width := float(aggregate.get("width", 0.0))
 	var aggregate_depth := float(aggregate.get("depth", 0.0))
-	for obstacle_value in obstacle_parts:
-		if not obstacle_value is Dictionary or not _valid_exact_part_descriptor(obstacle_value as Dictionary):
+	var obstacle: Dictionary = obstacle_value as Dictionary
+	var obstacle_footprint := _part_footprint(obstacle)
+	if not footprint_overlaps(aggregate_center, aggregate_width, aggregate_depth, obstacle_footprint.get("center", Vector3.ZERO) as Vector3, float(obstacle_footprint.get("width", 0.0)), float(obstacle_footprint.get("depth", 0.0)), clearance):
+		return false
+	if not corridor.is_empty() and _parts_overlap(corridor, obstacle, clearance):
+		return true
+	for part_value in composition.get("collisionParts", []) as Array:
+		if _parts_overlap(part_value as Dictionary, obstacle, clearance):
 			return true
-		var obstacle: Dictionary = obstacle_value as Dictionary
-		var obstacle_footprint := _part_footprint(obstacle)
-		if not footprint_overlaps(aggregate_center, aggregate_width, aggregate_depth, obstacle_footprint.get("center", Vector3.ZERO) as Vector3, float(obstacle_footprint.get("width", 0.0)), float(obstacle_footprint.get("depth", 0.0)), clearance):
-			continue
-		if not corridor.is_empty() and _parts_overlap(corridor, obstacle, clearance):
-			return true
-		for part_value in composition.get("collisionParts", []) as Array:
-			if _parts_overlap(part_value as Dictionary, obstacle, clearance):
-				return true
 	return false
 
 

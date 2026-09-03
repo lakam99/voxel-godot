@@ -534,11 +534,14 @@ static func _validate_exact_constraints(intent: Dictionary, composition: Diction
 		telemetry["exactStreetComparisons"] = int(telemetry.get("exactStreetComparisons", 0)) + 1
 		if _footprints_overlap(aggregate as Dictionary, street, float(settings.get("fixedClearance", DEFAULT_FIXED_CLEARANCE))):
 			rejections.append(_rejection("street_overlap", "exact_revalidation", identity, pair_index, side, {"streetId": street.get("id", "")}))
-	for structure_index in range(structure_parts.size()):
-		if not _continue_placement(continuation, "compound_placement_structure_proof"): return _cancelled()
+	var before_structure := func() -> bool:
+		if not _continue_placement(continuation, "compound_placement_structure_proof"): return false
 		telemetry["exactStructureComparisons"] = int(telemetry.get("exactStructureComparisons", 0)) + 1
-		if CastleResidencePlacementGeometryScript.composition_overlaps_obstacles(composition, [structure_parts[structure_index]], float(settings.get("fixedClearance", DEFAULT_FIXED_CLEARANCE))):
-			rejections.append(_rejection("structure_overlap", "exact_revalidation", identity, pair_index, side, {"structurePartId": _part_id(structure_parts[structure_index]), "structureIndex": structure_index}))
+		return true
+	var structure_proof := CastleResidencePlacementGeometryScript.composition_obstacle_overlap_indices(composition, structure_parts, float(settings.get("fixedClearance", DEFAULT_FIXED_CLEARANCE)), before_structure)
+	if structure_proof.status!="ready": return _cancelled()
+	for structure_index: int in structure_proof.overlapIndices:
+		rejections.append(_rejection("structure_overlap", "exact_revalidation", identity, pair_index, side, {"structurePartId": _part_id(structure_parts[structure_index]), "structureIndex": structure_index}))
 	for prior_index in range(prior_compositions.size()):
 		if not _continue_placement(continuation, "compound_placement_prior_proof"): return _cancelled()
 		telemetry["exactPriorComparisons"] = int(telemetry.get("exactPriorComparisons", 0)) + 1
