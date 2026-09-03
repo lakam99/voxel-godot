@@ -11,6 +11,7 @@ const STREET_WINDOW_WIDTH := 1.16
 const DEFAULT_LANE_CENTERS := [0.0, 1.8, MARKET_LANE_X, 12.0]
 const DEFAULT_ROW_WIDTH_BIASES := [0.0, 0.0, 0.0, 0.0]
 const RowDepthPacking := preload("res://scripts/buildings/StreetRowDepthPacking.gd")
+const CivicInfill := preload("res://scripts/buildings/CivicHouseInfillRecipe.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
@@ -221,11 +222,16 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		return null
 	add_civic_landmark(blueprint, Vector3(-14.0, 0.0, keep_front_z - 4.0), foundation_height + 2.0, variation)
 	add_terraced_edge(blueprint, Vector3(17.5, 0.0, keep_front_z - 9.0), foundation_height, variation)
-	var civic_quarter := add_civic_quarter(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout)
+	var infill_environment := _civic_infill_environment(blueprint,grammar,front_z,keep_front_z,foundation_height,variation,urban_layout,diagnostic_callback)
+	if not infill_environment.ready:
+		handoff["reason"]=infill_environment.reason
+		return null
+	var civic_quarter := add_civic_quarter(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout,infill_environment.blueprint,diagnostic_callback)
 	if not bool(civic_quarter.get("ready", false)):
 		handoff["reason"] = "citadel_civic_quarter_failed"
 		handoff["civicQuarterFailure"] = civic_quarter
 		return null
+	handoff["civicInfill"]=civic_quarter.get("infill",{})
 	var civic_commons := add_civic_commons(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout)
 	if not civic_commons.get("ready", false):
 		handoff["reason"] = "citadel_civic_commons_failed"
@@ -400,6 +406,12 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "perimeter_bearing_completed"):
 		return null
+	var civic_clearance := CivicInfill.validate_composed(blueprint,civic_quarter.infill,furniture,foundation_height,diagnostic_callback)
+	if not civic_clearance.ready:
+		handoff["reason"]="citadel_final_civic_clearance_failed"
+		handoff["civicClearanceFailure"]=civic_clearance
+		return null
+	handoff["civicClearance"]=civic_clearance
 	handoff["furnishingPlan"] = furniture
 	handoff["interiorProgram"] = prepared_furnishings.interiorProgram
 	handoff["furnishingPreservation"] = {"ready": true, "furnitureBytesExact": furniture_bytes_exact,
@@ -1128,7 +1140,11 @@ static func add_lane_edge_age(blueprint, prefix: String, lane_x: float, row_z: f
 	return
 
 
-static func add_street_house(blueprint, prefix: String, center: Vector3, width: float, depth: float, wall_height: float, street_side: float, ground_y: float, material: String, variation: float) -> void:
+static func street_house_roof_rise(design_center: Vector3) -> float:
+	return 3.2 + fmod(absf(design_center.x + design_center.z), 1.6)
+
+
+static func add_street_house(blueprint, prefix: String, center: Vector3, width: float, depth: float, wall_height: float, street_side: float, ground_y: float, material: String, variation: float, sampled_roof_rise: float = -1.0) -> void:
 	var sampled_base_height := minf(2.1, wall_height * 0.27)
 	var upper_width := width + STREET_UPPER_EXTRA
 	var upper_center_x := center.x + street_side * STREET_UPPER_SHIFT
@@ -1241,7 +1257,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	if household_phase > 0.26 and household_phase < 0.86:
 		add_part(blueprint, "%s_masonry_repair" % prefix, "decor", "limewash_repair", Vector3(facade_x + street_side * 0.052, ground_y + 2.05 + household_phase * 1.25, center.z + lerpf(depth * 0.28, -depth * 0.24, household_phase)), Vector3(0.09, 1.05 + household_phase * 0.55, 1.18 + (1.0 - household_phase) * 0.72), {"collision": false, "variation": variation - 0.05, "semantic": "citadel_masonry_repair"})
 	add_part(blueprint, "%s_eave" % prefix, "beam", "timber_beam", Vector3(facade_x + street_side * 0.22, ground_y + wall_height, center.z), Vector3(0.34, 0.30, depth + 0.54), {"collision": false, "variation": variation, "semantic": "citadel_urban_eave"})
-	var roof_rise := 3.2 + fmod(absf(center.x + center.z), 1.6)
+	var roof_rise := street_house_roof_rise(center) if sampled_roof_rise < 0.0 else sampled_roof_rise
 	var slope_length := sqrt(pow(upper_width * 0.5 + 0.70, 2.0) + roof_rise * roof_rise)
 	var roof_angle := atan2(roof_rise, upper_width * 0.5 + 0.70)
 	var roof_y := ground_y + wall_height + roof_rise * 0.5
@@ -1480,7 +1496,39 @@ static func civic_commons_layout(front_z: float, keep_front_z: float, base_y: fl
 	return {"ready": true, "rowGeometry": row_geometry, "hub": hub, "benchCenter": bench_center, "localBenchOffset": local_bench_offset, "approachAxis": approach_axis, "sideAxis": side_axis, "members": members, "footprint": footprint, "rowTwoFoundationSouthZ": row_two_foundation_south_z, "backNorthExtent": back_north_extent, "clearance": 0.50}
 
 
-static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> Dictionary:
+static func _civic_infill_environment(source, grammar: Dictionary, front_z: float, keep_front_z: float, base_y: float, variation: float, layout: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	# These independent producers are replayed only into a private planning
+	# source. Actual publication order stays unchanged. Trees, roof frames and
+	# furnishings are dependent and still run once after resolved house placement.
+	var preview = FacadeBearingRecipeScript.copy_blueprint(source.snapshot())
+	if not _emit_compose_diagnostic(continuation,"civic_infill_preview"): return {"ready":false,"reason":"cancelled"}
+	var commons := add_civic_commons(preview,front_z,keep_front_z,base_y,variation,layout)
+	if not commons.ready: return commons
+	var stopped := {"value":false}
+	var callback := func(stage: String) -> bool:
+		if stopped.value: return false
+		stopped.value=not _emit_compose_diagnostic(continuation,stage)
+		return not stopped.value
+	add_perimeter_neighborhoods(preview,grammar,keep_front_z,base_y,variation,callback)
+	if stopped.value: return {"ready":false,"reason":"cancelled"}
+	add_civic_service_yard(preview,Vector3(37.0,base_y,keep_front_z-8.5),variation)
+	add_dressing_clusters(preview,front_z,keep_front_z,base_y,variation)
+	add_bunting_lines(preview,front_z,keep_front_z,base_y,variation,layout)
+	return {"ready":true,"blueprint":preview}
+
+static func _add_civic_house(blueprint, house: Dictionary, base_y: float, variation: float) -> void:
+	if blueprint.parts.is_empty(): reset_street_house_structural_manifest(blueprint)
+	add_street_house(blueprint,String(house.id),house.center,float(house.width),float(house.depth),float(house.height),-1.0,base_y,String(house.material),variation+float(String(house.id).hash()%17)*0.003,float(house.get("roofRise",-1.0)))
+
+static func civic_house_specs(keep_front_z: float) -> Array:
+	var houses := [
+		{"id": "urban_civic_house_east", "center": Vector3(43.0, 0.0, keep_front_z - 2.5), "width": 10.2, "depth": 12.0, "height": 9.3, "material": "painted_brick_ochre"},
+		{"id": "urban_civic_house_wall", "center": Vector3(56.0, 0.0, keep_front_z - 14.0), "width": 8.8, "depth": 10.4, "height": 7.2, "material": "painted_brick_sage"}
+	]
+	for house: Dictionary in houses: house["roofRise"]=street_house_roof_rise(house.center)
+	return houses
+
+static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary, infill_environment = null, continuation: Callable = Callable()) -> Dictionary:
 	if not is_finite(variation):
 		return {"ready": false, "reason": "invalid_civic_quarter_variation"}
 	var commons_layout := civic_commons_layout(front_z, keep_front_z, base_y, urban_layout)
@@ -1496,18 +1544,30 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	var paving_center_z := (paving_north_z + paving_south_z) * 0.5
 	if not is_finite(paving_depth) or not is_finite(paving_center_z) or paving_depth <= 0.0:
 		return {"ready": false, "reason": "invalid_civic_quarter_paving_geometry"}
+	var houses := civic_house_specs(keep_front_z)
+	var infill: Dictionary={"ready":true,"scope":"standalone civic producer; no enclosure supplied"}
+	# Sample the design once at its seeded recipe position. Placement must not
+	# reshape the roof/chimney by feeding a relocated world pose back into it.
+	if infill_environment!=null:
+		var source_before := var_to_bytes(blueprint.snapshot())
+		var paving_size := Vector3(48.0,0.08,paving_depth)
+		var paving_preview = CivicInfill.Part.new({"position":Vector3(43.0,base_y+0.18,paving_center_z),"size":paving_size})
+		var paving_bounds: AABB=blueprint.transformed_part_bounds(paving_preview)
+		var producer := func(target, spec: Dictionary): _add_civic_house(target,spec,base_y,variation)
+		infill=CivicInfill.prepare_with_terrace_reconciliation(infill_environment,houses,producer,Rect2(Vector2(paving_bounds.position.x,paving_bounds.position.z),Vector2(paving_bounds.size.x,paving_bounds.size.z)),base_y,continuation)
+		if not infill.ready: return infill
+		if source_before!=var_to_bytes(blueprint.snapshot()): return {"ready":false,"reason":"civic_source_changed_during_terrace_preparation"}
+		var terrace_commit := CivicInfill.Terraces.commit(blueprint,infill.terraceOriginals,infill.terraceReplacements)
+		if not terrace_commit.ready: return terrace_commit
+		houses=infill.specs
 	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, base_y + 0.18, paving_center_z), Vector3(48.0, 0.08, paving_depth), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
-	var houses := [
-		{"id": "urban_civic_house_east", "center": Vector3(43.0, 0.0, keep_front_z - 2.5), "width": 10.2, "depth": 12.0, "height": 9.3, "material": "painted_brick_ochre"},
-		{"id": "urban_civic_house_wall", "center": Vector3(56.0, 0.0, keep_front_z - 14.0), "width": 8.8, "depth": 10.4, "height": 7.2, "material": "painted_brick_sage"}
-	]
 	for house_value in houses:
 		var house: Dictionary = house_value as Dictionary
-		add_street_house(blueprint, String(house.get("id", "urban_civic_house")), house.get("center", Vector3.ZERO) as Vector3, float(house.get("width", 8.0)), float(house.get("depth", 9.0)), float(house.get("height", 7.0)), -1.0, base_y, String(house.get("material", "painted_brick_cream")), variation + float(String(house.get("id", "house")).hash() % 17) * 0.003)
+		_add_civic_house(blueprint,house,base_y,variation)
 	for route_index in range(3):
 		var route_z := keep_front_z - 13.5 + float(route_index) * 5.2
 		add_traffic_wear(blueprint, "urban_civic_quarter_route_%02d" % route_index, Vector3(37.8, base_y + 0.232, route_z), Vector2(27.0, 1.84), 0.0, variation - 0.04 + float(route_index) * 0.011, "citadel_civic_route_wear")
-	return {"ready": true, "commonsLayout": commons_layout, "pavingNorthZ": paving_north_z, "pavingSouthZ": paving_south_z, "pavingDepth": paving_depth, "pavingCenterZ": paving_center_z, "pavingMargin": paving_margin}
+	return {"ready": true, "commonsLayout": commons_layout, "pavingNorthZ": paving_north_z, "pavingSouthZ": paving_south_z, "pavingDepth": paving_depth, "pavingCenterZ": paving_center_z, "pavingMargin": paving_margin,"infill":infill}
 
 
 static func add_civic_commons(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> Dictionary:

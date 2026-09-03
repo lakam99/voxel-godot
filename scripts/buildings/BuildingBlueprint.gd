@@ -25,6 +25,7 @@ var _validation_neighbors: Dictionary = {}
 
 const PHYSICAL_SUPPORT_GRID_CELL := 4.0
 const PHYSICAL_CONTACT_MARGIN := 0.05
+const STRUCTURAL_SUPPORT_MAX_GAP := 0.26
 const STAIR_HOUSED_JOINT_INSET := 0.005
 const STAIR_MIN_HOUSED_EMBEDMENT := 0.12
 const STAIR_MIN_HOUSED_VERTICAL_OVERLAP := 0.04
@@ -393,7 +394,7 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 				return {"id": String(candidate.id), "surface": point, "gap": 0.0, "contact": "embedded"}
 			var candidate_surface := part_transform(candidate) * Vector3(local_point.x, candidate.size.y * 0.5, local_point.z)
 			var gap := point.y - candidate_surface.y
-			if gap < -0.14 or gap > 0.26 or gap >= best_gap:
+			if gap < -0.14 or gap > STRUCTURAL_SUPPORT_MAX_GAP or gap >= best_gap:
 				continue
 			best_gap = gap
 			best = {"id": String(candidate.id), "surface": candidate_surface, "gap": gap}

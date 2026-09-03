@@ -2572,7 +2572,7 @@ static func courtyard_residence_structural_exclusions(residences: Array[Dictiona
 	return exclusions
 
 
-static func subtract_courtyard_egress_corridors(initial: Rect2, corridors: Array[Dictionary]) -> Array[Rect2]:
+static func subtract_courtyard_egress_corridors(initial: Rect2, corridors: Array[Dictionary], preserve_construction_planes := false) -> Array[Rect2]:
 	var result: Array[Rect2] = [initial]
 	for corridor_value in corridors:
 		var corridor: Dictionary = corridor_value as Dictionary
@@ -2583,13 +2583,24 @@ static func subtract_courtyard_egress_corridors(initial: Rect2, corridors: Array
 		for rect_value in result:
 			var rect: Rect2 = rect_value as Rect2
 			var overlap := rect.intersection(hole)
-			if overlap.size.x <= 0.0001 or overlap.size.y <= 0.0001:
+			# Existing callers retain their historical Rect2 intersection result.
+			# Replacement-solid carving must keep the supplied cut planes exactly:
+			# rebuilding an intersection width can round its far edge a second time.
+			var overlap_min_x := maxf(rect.position.x,hole.position.x) if preserve_construction_planes else float(overlap.position.x)
+			var overlap_max_x := minf(rect.end.x,hole.end.x) if preserve_construction_planes else float(overlap.end.x)
+			var overlap_min_z := maxf(rect.position.y,hole.position.y) if preserve_construction_planes else float(overlap.position.y)
+			var overlap_max_z := minf(rect.end.y,hole.end.y) if preserve_construction_planes else float(overlap.end.y)
+			var minimum_overlap := 0.0 if preserve_construction_planes else 0.0001
+			var empty_overlap: bool = overlap_max_x-overlap_min_x <= minimum_overlap or overlap_max_z-overlap_min_z <= minimum_overlap
+			if not preserve_construction_planes: empty_overlap=overlap.size.x<=0.0001 or overlap.size.y<=0.0001
+			if empty_overlap:
 				remaining.append(rect)
 				continue
-			append_positive_rect(remaining, Rect2(rect.position.x, rect.position.y, overlap.position.x - rect.position.x, rect.size.y))
-			append_positive_rect(remaining, Rect2(overlap.end.x, rect.position.y, rect.end.x - overlap.end.x, rect.size.y))
-			append_positive_rect(remaining, Rect2(overlap.position.x, rect.position.y, overlap.size.x, overlap.position.y - rect.position.y))
-			append_positive_rect(remaining, Rect2(overlap.position.x, overlap.end.y, overlap.size.x, rect.end.y - overlap.end.y))
+			append_positive_rect(remaining, Rect2(rect.position.x, rect.position.y, overlap_min_x - rect.position.x, rect.size.y))
+			append_positive_rect(remaining, Rect2(overlap_max_x, rect.position.y, rect.end.x - overlap_max_x, rect.size.y))
+			var overlap_width := overlap_max_x-overlap_min_x if preserve_construction_planes else float(overlap.size.x)
+			append_positive_rect(remaining, Rect2(overlap_min_x, rect.position.y, overlap_width, overlap_min_z - rect.position.y))
+			append_positive_rect(remaining, Rect2(overlap_min_x, overlap_max_z, overlap_width, rect.end.y - overlap_max_z))
 		result = remaining
 	return result
 
