@@ -4,6 +4,7 @@ extends RefCounted
 const Aperture = preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
 const Cuts = preload("res://scripts/buildings/MasonryApertureGeometry.gd")
 const Part = preload("res://scripts/buildings/BuildingPart.gd")
+const PartBinding = preload("res://scripts/buildings/BuildingPartBinding.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const Descriptor = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const MAX_PARTS := 512
@@ -247,7 +248,7 @@ func _validate_all(publisher) -> bool:
 	var current: Dictionary = _by_id
 	var validated: Dictionary = {}
 	for request in _requests:
-		if current.get(request.part.id) != request.part or var_to_bytes(request.part.snapshot()) != request.source: return _fail("stale_masonry_source")
+		if current.get(request.part.id) != request.part or PartBinding.encode(request.part) != request.source: return _fail("stale_masonry_source")
 		if not validated.has(request.key):
 			if not _blueprint.recipe.get("facadeApertures") is Dictionary: return _fail("stale_aperture_geometry")
 			var record: Variant = _blueprint.recipe.facadeApertures.get(request.key)
@@ -279,7 +280,7 @@ func _same_validated_geometry(key: String) -> bool:
 func _request_valid(request: Dictionary) -> bool:
 	if not accepts_source_member(request.part): return false
 	if not _blueprint.parts.has(request.part) or not _blueprint.recipe.get("facadeApertures") is Dictionary: return _fail("stale_masonry_source")
-	if var_to_bytes(request.part.snapshot()) != request.source or var_to_bytes(_blueprint.recipe.facadeApertures.get(request.key)) != request.record:
+	if PartBinding.encode(request.part) != request.source or var_to_bytes(_blueprint.recipe.facadeApertures.get(request.key)) != request.record:
 		return _fail("stale_masonry_source")
 	return true
 

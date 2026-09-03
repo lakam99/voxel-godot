@@ -68,6 +68,15 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Repeated aperture/paving bindings now avoid deep-copying recipes solely for
+comparison, preserving the exact-script raw snapshot format and mutable guards.
+Oracle controls pass 103/103; scene-job controls 376/376; unchanged aperture,
+paving and flush controls 185/185, 139/139 and 131/131. The actual replay passes
+24/24 with unchanged available scene facts. Service maximum is 17.731 ms versus
+24.972 ms; strict budgets still fail. See `CITADEL_PART_BINDING_2026-09-02.md`.
+The independent critic approved this focused binding optimization on final
+evidence. No activation, performance-budget or headed approval is claimed.
+
 The existing publication service now owns construction, retained scenes and
 retirement through the existing scene job. Synthetic lifecycle controls pass
 267/267; accepted-source service construction/departure passes 24/24 with the

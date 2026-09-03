@@ -315,6 +315,47 @@ func pending_completion_control() -> void:
 	await drain(job, "pending_success")
 	check("pending_success_tree_retirement", trees.retired == 2 and trees.retired_ids.values() == [1, 1])
 
+func paving_binding_mutation_controls() -> void:
+	# Real mutable paving source: reject changes both during geometry publication
+	# and after paving completed but before the final metadata commit.
+	for phase: String in ["pending", "final"]:
+		for change: String in ["value", "type", "order"]:
+			var prepared := pending_holder(true)
+			prepared._payload.blueprint.parts[0].size=Vector3(3,0.12,3)
+			prepared._payload.blueprint.parts[0].recipe["bindingFixture"]={"one":1,"two":2}
+			var trees:=SyntheticTrees.new()
+			var job:=Job.new()
+			start(job,trees,prepared)
+			prepared=null
+			var reached:=false
+			for index in range(10000):
+				job.advance(1)
+				reached=job._building!=null and (job._building._pending_paving!=null if phase=="pending" else job.status().phase=="building_finish")
+				if reached or job.status().status in ["ready","failed"]: break
+			var label:="paving_binding_"+phase+"_"+change
+			check(label+"_boundary_reached",reached)
+			if reached:
+				var body=job._building.static_collision_body
+				var had_metadata: bool=body.has_meta("building_part_records")
+				var previous: Variant=body.get_meta("building_part_records") if had_metadata else null
+				var part=job._blueprint.parts[0]
+				match change:
+					"value": part.recipe.bindingFixture.one=3
+					"type": part.recipe.bindingFixture.one=1.0
+					"order":
+						part.recipe.bindingFixture.erase("one")
+						part.recipe.bindingFixture.one=1
+				for index in range(10000):
+					job.advance(1)
+					if job.status().status in ["ready","failed"]: break
+				check(label+"_rejected",job.status().status=="failed" and not job.status().sceneReady)
+				check(label+"_binding_guard",job._building._paving_failure==("stale_paving_part" if phase=="pending" else "stale_completed_paving_source"))
+				check(label+"_metadata_not_replaced",body.has_meta("building_part_records")==had_metadata and (not had_metadata or is_same(previous,body.get_meta("building_part_records"))))
+				check(label+"_no_furniture_or_trees",job._furniture==null and trees.calls==0)
+				body=null; part=null; previous=null
+			job.cancel()
+			await drain(job,label)
+
 func masonry_completion_control() -> void:
 	var trees:=SyntheticTrees.new()
 	var job=Job.new()
@@ -684,6 +725,7 @@ func _run() -> void:
 	for target: String in ["paving_geometry", "paving_upload", "static_flush","masonry_geometry","masonry_collect","roof_tiles","roof_collect"]:
 		await pending_cancellation_case(target)
 	await pending_completion_control()
+	await paving_binding_mutation_controls()
 	await masonry_completion_control()
 	await roof_lifecycle_controls()
 	masonry_hook_controls()

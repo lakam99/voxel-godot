@@ -4,6 +4,7 @@ extends RefCounted
 const Geometry=preload("res://scripts/buildings/SettledCobbleGeometry.gd")
 const Upload=preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
 const Part=preload("res://scripts/buildings/BuildingPart.gd")
+const PartBinding=preload("res://scripts/buildings/BuildingPartBinding.gd")
 var state: String = "geometry_begin"
 var reason: String = ""
 var _part
@@ -29,7 +30,7 @@ func _init(part, parent: Node3D, frame: Transform3D, collecting: bool, source_id
 func source_part(): return _part
 
 func source_valid(publisher) -> bool:
-	return publisher.source_blueprint_id==_source_id and var_to_bytes(_part.snapshot())==_part_binding
+	return publisher.source_blueprint_id==_source_id and PartBinding.encode(_part)==_part_binding
 
 func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 	if budget_usec<1 or budget_usec>4000: return {"status":"failed","reason":"invalid_slice_budget"}

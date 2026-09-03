@@ -39,7 +39,7 @@ func source_hashes() -> Dictionary:
 		"scripts/buildings/BuildingPartPublisher.gd","scripts/buildings/FurnishingPublisher.gd",
 		"scripts/buildings/BuildingPublicationPreparation.gd","scripts/buildings/BuildingPublicationWorker.gd",
 		"scripts/buildings/BuildingRoofPublication.gd","scripts/buildings/BuildingMasonryPublication.gd",
-		"scripts/buildings/BuildingPavingPublication.gd","scripts/buildings/BuildingStaticBatchFlush.gd",
+		"scripts/buildings/BuildingPavingPublication.gd","scripts/buildings/BuildingPartBinding.gd","scripts/buildings/BuildingStaticBatchFlush.gd",
 		"scripts/buildings/BuildingMeshBatchUpload.gd","scripts/buildings/MasonryAperturePublication.gd",
 		"scripts/MainPlaytestTools.gd","scripts/environment/TreePublicationQueue.gd",
 		"scripts/testing/buildings/BuildingScenePublicationContract.gd",
