@@ -496,9 +496,31 @@ func _standalone_records(frozen: Dictionary, grammar: Dictionary, front: float, 
 			for key: Variant in expected[i]:
 				if not actual[i].has(key) or var_to_bytes(expected[i][key]) != var_to_bytes(actual[i][key]): fields.append(key)
 			mismatches.append({"index": i, "expectedId": expected[i].id, "actualId": actual[i].id, "fields": fields})
-	_check("standalone_all_civic_records_typed_exact", var_to_bytes(expected) == var_to_bytes(actual))
+	# The corrected street span moves the commons; its paving already derives
+	# from that actual footprint. Keep the archive intact and authorize only
+	# the independently rebuilt paving position/depth, not other design changes.
+	var expected_current: Array=expected.duplicate(true)
+	var commons = Copy.copy_blueprint(initial)
+	var commons_start: int=commons.parts.size()
+	var commons_receipt: Dictionary=Urban.add_civic_commons(commons,front,keep_front,0.62,variation,layout)
+	var commons_parts: Array=commons.parts.slice(commons_start)
+	var measured := AABB()
+	for i in range(commons_parts.size()):
+		var bounds: AABB=commons.transformed_part_bounds(commons_parts[i])
+		measured=bounds if i==0 else measured.merge(bounds)
+	var north := keep_front+8.0
+	var south := minf(keep_front-24.0,measured.position.z-0.25)
+	var expected_pavings := 0
+	for record: Dictionary in expected_current:
+		if record.id!="urban_civic_quarter_paving": continue
+		expected_pavings+=1
+		record.position=Vector3(43.0,0.62+0.18,(north+south)*0.5)
+		record.size=Vector3(48.0,0.08,north-south)
+	_check("standalone_paving_derived_from_actual_commons",commons_receipt.ready and commons_parts.size()==14 and expected_pavings==1)
+	_check("standalone_civic_exact_except_recipe_derived_paving",var_to_bytes(expected_current)==var_to_bytes(actual))
 	_check("standalone_all_rooms_typed_exact", var_to_bytes(frozen.blueprint.rooms) == var_to_bytes(standalone.rooms))
-	evidence.standaloneCompatibility = {"expectedCount": expected.size(), "actualCount": actual.size(), "mismatches": mismatches, "archiveSha256": BASELINE_SHA}
+	evidence.standaloneCompatibility = {"expectedCount": expected.size(), "actualCount": actual.size(), "mismatches": mismatches, "archiveSha256": BASELINE_SHA,
+		"archiveWholeRecordEqualityObservation":var_to_bytes(expected)==var_to_bytes(actual),"measuredCommonsBounds":measured,"derivedPavingNorth":north,"derivedPavingSouth":south}
 
 func _guard_snapshot(source, furniture: Variant = null) -> PackedByteArray:
 	var parts: Array = source.parts.map(func(part): return null if part == null else part.snapshot())

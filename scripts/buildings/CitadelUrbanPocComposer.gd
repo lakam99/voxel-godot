@@ -202,7 +202,11 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	var keep_center_z := courtyard_depth * float((grammar.get("keepOffset", {}) as Dictionary).get("z", 0.14))
 	var keep_front_z := keep_center_z - keep_depth * 0.5
 	var front_z := -courtyard_depth * 0.5
-	var urban_layout := sample_urban_layout(seed, grammar, front_z, keep_front_z, foundation_height)
+	var street_rear_z := street_rear_boundary(blueprint,keep_front_z)
+	if not is_finite(street_rear_z):
+		handoff["reason"]="invalid_street_keep_boundary"
+		return null
+	var urban_layout := sample_urban_layout(seed, grammar, front_z, keep_front_z, foundation_height,street_rear_z)
 	recipe["urbanPoc"] = urban_layout
 	recipe["pavingTreatments"] = paving_treatments(urban_layout, front_z, keep_front_z)
 	blueprint.set_recipe(recipe)
@@ -842,7 +846,22 @@ static func perimeter_site_support_top(blueprint, site: Vector3, fallback_y: flo
 	return result
 
 
-static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, keep_front_z: float, foundation_height: float) -> Dictionary:
+static func street_rear_boundary(source, keep_front_z: float) -> float:
+	# Retained keep geometry includes the entrance landing and projecting towers,
+	# not just the hall's nominal front. Reserve it before any urban row exists.
+	if not source is CivicInfill.Blueprint or not is_finite(keep_front_z): return NAN
+	var rear := keep_front_z-5.0
+	var found_keep := false
+	for part in source.parts:
+		if part==null or not part.collision_enabled or not String(part.id).begins_with("castle_keep_"): continue
+		var bounds: AABB=source.transformed_part_bounds(part)
+		if not bounds.position.is_finite() or not bounds.size.is_finite() or bounds.size.x<=0.0 or bounds.size.y<=0.0 or bounds.size.z<=0.0: return NAN
+		found_keep=true
+		rear=minf(rear,bounds.position.z-CivicInfill.CLEARANCE)
+	return rear if found_keep else NAN
+
+
+static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, keep_front_z: float, foundation_height: float, street_rear_z: float = INF) -> Dictionary:
 	var market_lane_x := lerpf(17.5, 25.0, stable_unit(seed, "market-lane"))
 	var market_terrace_rise := lerpf(1.45, 2.15, stable_unit(seed, "market-rise"))
 	var lane_centers: Array[float] = [
@@ -870,7 +889,9 @@ static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, 
 		var base_offset: Vector3 = stall.get("base", Vector3.ZERO) as Vector3
 		var offset := base_offset + Vector3(lerpf(-0.58, 0.58, stable_unit(seed, "stall-x-%d" % stall_index)), 0.0, lerpf(-0.42, 0.42, stable_unit(seed, "stall-z-%d" % stall_index)))
 		market_stalls.append({"offset": offset, "side": stall.get("side", 1.0), "depth": stall.get("depth", 1.0), "variation": lerpf(-0.035, 0.035, stable_unit(seed, "stall-material-%d" % stall_index))})
-	var usable_depth := maxf(42.0, keep_front_z - front_z - 5.0)
+	# Reserve the existing keep approach without expanding a short courtyard.
+	var rear_z := minf(keep_front_z-5.0,street_rear_z)
+	var usable_depth := rear_z-front_z
 	var market_z := front_z + usable_depth * 0.655
 	var market_tree_y := foundation_height + market_terrace_rise + 0.345
 	var courtyard_width := float(grammar.get("courtyardWidth", 104.0))
@@ -895,6 +916,7 @@ static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, 
 		"treePlacements": tree_placements,
 		"frontZ": front_z,
 		"keepFrontZ": keep_front_z,
+		"streetRearZ": rear_z,
 		"captureRoute": ["outer_approach", "gate_threshold", "inner_lane", "market_release", "civic_overview"]
 	}
 
@@ -951,7 +973,11 @@ static func street_row_geometry(front_z: float, keep_front_z: float, urban_layou
 	if not center_phases_value is Array or (center_phases_value as Array).size() != 4:
 		return {"ready": false, "reason": "invalid_row_center_phases"}
 	var center_phases: Array = center_phases_value as Array
-	var usable_depth := maxf(42.0, keep_front_z - front_z - 5.0)
+	# House minimum dimensions are enforced below, not by extending into the keep.
+	var rear_value: Variant=urban_layout.get("streetRearZ",keep_front_z-5.0)
+	if not (rear_value is int or rear_value is float) or not is_finite(float(rear_value)):
+		return {"ready":false,"reason":"invalid_street_rear_boundary"}
+	var usable_depth := minf(keep_front_z-5.0,float(rear_value))-front_z
 	var segment_depth := usable_depth / 4.0
 	if not is_finite(usable_depth) or not is_finite(segment_depth) or segment_depth <= 0.0:
 		return {"ready": false, "reason": "invalid_street_segment_depth"}

@@ -397,13 +397,15 @@ func dictionary_preserves_existing_records(before: Dictionary, after: Dictionary
 func audit_independently_clear_street_legacy_parity() -> Dictionary:
 	# Explicit synthetic spacing, not a searched seed or the packer's own
 	# changed-row verdict. Prove clearance on legacy-produced structural boxes.
+	# Longitudinal space must also be sufficient for the historical 42m floor.
+	var spacious_front := -60.0
 	var layout := complete_fixture_urban_layout()
 	layout["rowCenterPhases"] = [0.50, 1.65, 2.80, 3.95]
 	var current = Blueprint.new("clear_street_current", 1, "test")
 	var legacy = Blueprint.new("clear_street_legacy", 1, "test")
 	current.set_recipe({"facadeApertures": {}})
 	legacy.set_recipe({"facadeApertures": {}})
-	add_legacy_street_sequence(legacy, FRONT_Z, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
+	add_legacy_street_sequence(legacy, spacious_front, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
 	var structural: Array = legacy.parts.filter(func(part):
 		var id := String(part.id)
 		return id.begins_with("urban_row_") and (id.ends_with("_foundation") or id.contains("_upper_shell_") or id.contains("_stone_shell_")))
@@ -420,12 +422,12 @@ func audit_independently_clear_street_legacy_parity() -> Dictionary:
 			var bb: AABB = world_bounds(b)
 			if minf(ab.end.x, bb.end.x) > maxf(ab.position.x, bb.position.x) and minf(ab.end.z, bb.end.z) > maxf(ab.position.z, bb.position.z):
 				overlaps.append("%s:%s" % [a.id, b.id])
-	var outcome: Dictionary = Composer.add_street_sequence(current, FRONT_Z, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
+	var outcome: Dictionary = Composer.add_street_sequence(current, spacious_front, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
 	var legacy_signature := blueprint_content_signature(legacy)
 	var current_signature := blueprint_content_signature(current)
 	var clear: bool = axis_aligned and structural.size() == 56 and overlaps.is_empty()
 	return {"passed": clear and bool(outcome.get("ready", false)) and current_signature == legacy_signature,
-		"evidenceLevel": "synthetic_explicit_spacing_actual_recipe_boxes", "layout": layout,
+		"evidenceLevel": "synthetic_explicit_spacing_actual_recipe_boxes", "layout": layout,"frontZ":spacious_front,"keepFrontZ":KEEP_FRONT_Z,
 		"legacyStructuralCount": structural.size(), "legacyStructuralAxisAligned": axis_aligned,
 		"legacyStructuralOverlapIds": overlaps, "independentlyClear": clear,
 		"currentReady": outcome.get("ready", false), "legacySignature": legacy_signature,
