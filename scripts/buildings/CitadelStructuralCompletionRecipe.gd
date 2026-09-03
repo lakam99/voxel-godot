@@ -307,28 +307,61 @@ static func _verify_final_signs(proof, records: Array, protected: Array, continu
 	return {"ready":true}
 
 static func _complete_party_walls(working, records: Array, continuation: Callable = Callable()) -> Dictionary:
+	var expected_source := var_to_bytes(working.snapshot())
 	if not _continue(continuation, "party_walls_started"): return _fail("cancelled")
-	var physical := _physical(working, continuation)
-	if not physical.ready: return physical
+	if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
+	var context: Variant=null
+	var context_builds := 0
+	var context_reuses := 0
+	var context_invalidations := 0
+	var independent_validations := 0
+	var geometric_rejections := 0
 	var accepted: Array = []
 	var pending: Array = []
 	var attempts := 0
 	for record: Dictionary in records:
 		for key: String in record.facadeDeclarationKeys:
 			if not _continue(continuation, "party_wall_item:" + key): return _fail("cancelled")
+			if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
+			if context==null:
+				var prepared := PartyWalls.prepare_context(working,continuation)
+				if not prepared.ready: return prepared
+				if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
+				context=prepared.context
+				context_builds+=1
+			var binding := PartyWalls._context_valid(working,context)
+			if not binding.ready: return binding
 			var declaration: Dictionary = working.recipe.facadeApertures[key]
-			if not declaration.partIds.any(func(id): return physical.failedIds.has(id)): continue
+			var failed_ids: Array=Copy.failed_ids(context.report)
+			if not declaration.partIds.any(func(id): return failed_ids.has(id)): continue
 			attempts += 1
 			if attempts > MAX_STAGE_ATTEMPTS: return _fail("party_wall_attempt_limit")
-			var result := PartyWalls.apply(working, key)
+			context_reuses+=1
+			var before_independent: int=context.independent_validations
+			var before_geometric: int=context.geometric_rejections
+			var result := PartyWalls.apply(working, key,context,continuation)
+			independent_validations+=context.independent_validations-before_independent
+			geometric_rejections+=context.geometric_rejections-before_geometric
+			if result.get("reason")=="cancelled": return result
+			if result.ready:
+				# Any accepted declaration changes the source. Rebuild before another
+				# failed-ID decision or plan; never reuse pre-mutation support facts.
+				context=null
+				context_invalidations+=1
+				expected_source=var_to_bytes(working.snapshot())
 			if not _continue(continuation, "party_wall_item_completed:" + key): return _fail("cancelled")
+			if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
+			if context!=null:
+				binding=PartyWalls._context_valid(working,context)
+				if not binding.ready: return binding
 			if result.ready:
 				accepted.append({"declarationKey": key, "targetIds": result.targetIds})
 			elif result.reason in ["no_failed_bottom_cohort", "no_finite_rooted_party_wall", "party_wall_without_independently_passing_root"]:
 				pending.append({"declarationKey": key, "reason": result.reason, "detail": result})
 			else:
 				return _fail("party_wall_completion_failed", {"declarationKey": key, "detail": result})
-	return {"ready": true, "kind": "party_wall", "accepted": accepted, "pending": pending, "attempts": attempts}
+	return {"ready": true, "kind": "party_wall", "accepted": accepted, "pending": pending, "attempts": attempts,
+		"sourceProofBuilds":context_builds,"sourceProofReuses":context_reuses,"sourceProofInvalidations":context_invalidations,"independentProofs":independent_validations,"geometricRejections":geometric_rejections}
 
 static func _physical(source, continuation: Callable = Callable()) -> Dictionary:
 	if not _continue(continuation, "structural_physical_started"): return _fail("cancelled")
