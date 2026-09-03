@@ -68,6 +68,21 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The existing publication service now owns construction, retained scenes and
+retirement through the existing scene job. Synthetic lifecycle controls pass
+267/267; accepted-source service construction/departure passes 24/24 with the
+same available scene record; final unchanged preparation regression passes
+69/69. See `CITADEL_SERVICE_SCENE_OWNERSHIP_2026-09-02.md`. Production has no
+configured scene owner yet: scene construction remains explicitly pending until full
+shared-door lifecycle and player-safe publication are implemented. Protected
+door cleanup permission is still unanswered. Service construction is not
+ordinary-play activation. The critic's two initial rejects (paused publishing-root
+damage and worker-disposal reservation lifetime) are repaired with new targeted
+controls. Existing 24.972 ms maximum service work exceeds the
+budget; no headed/performance/spawn acceptance is claimed. The independent critic
+approved the focused ownership commit on final source-bound evidence, not
+ordinary-play activation or performance.
+
 Roof publication now uses the same exact-output resumable helper for ordinary
 construction and the compatibility drain. The actual source passes 70/70 with
 all 68 roofs completed once and byte-identical available scene facts. Roof
