@@ -192,3 +192,42 @@ After reviewing the final six-file harness/scout/evidence scope, the critic
 approved its focused commit and one 600-second `candidate-teleport-03` discovery
 run with `-CandidateRegion '-1,0'`. Production code is unchanged from `8b2c877`.
 Spawn/NPC acceptance and performance budgets are not waived.
+
+### Third headed run: fresh candidate facade failure, immediate owned stop
+
+Clean HEAD `20dffac`, same world seed, explicit region `(-1,0)` and recipe seed
+`541151883`; critic-approved command:
+
+```powershell
+.\tools\run-citadel-candidate-teleport-playtest.ps1 -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-03 -Seed atlas-30895044 -CandidateRegion '-1,0' -TimeoutSeconds 600
+```
+
+Ordinary New Game completed, and one counted exterior setup teleport reached
+the selected candidate. The last progress snapshot at225.547s records ordinary
+source discovery and worker stage `opening_head_house_completed:urban_civic_house_east`,
+713,713 checkpoints and188.594s worker elapsed. The subsequent engine error was
+`Citadel structural completion failed: facade_completion_failed`, with the
+ordinary Composer -> Recipe -> Site -> source-queue call stack.
+
+The error watcher immediately stopped its owned Windows job. Watchdog126,
+forced cleanup true, timeout false, authoritative owned-zero true. There are no
+remaining Godot processes. Source hashes stayed unchanged. `cleanupPassed=false`
+correctly means forced termination is not a clean natural-exit pass, not that a
+process remains alive.
+
+`report.json` and a terminal failure capture were not written before that stop.
+This absence is an evidence limitation, not a success. Retained evidence is
+`launch.json`, `progress.json`, stdout/stderr, stop request, watchdog and
+`verification.json`. The two inspected images (`preteleport.png`, `pending.png`)
+show the starter-house view and dark staging exterior; no citadel is visible.
+No source admission, second teleport, scene publication or gameplay pass occurred.
+
+This candidate's underlying facade defect is not yet classified. The shared
+outer failure name does not establish that it is the earlier row-overlap defect.
+Next work is an exact headless public-recipe replay for this seed/region, retaining
+the nested structural failure before any further headed request. Do not weaken
+site/structural gates, inject a previously accepted source or raise deadlines.
+
+The independent critic approved this two-document failure-evidence checkpoint,
+including the missing terminal artifacts and unclassified underlying cause.
+No gameplay acceptance or further headed retry approval was granted.

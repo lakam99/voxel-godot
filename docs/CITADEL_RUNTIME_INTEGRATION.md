@@ -126,6 +126,15 @@ critic accepts this as legitimate exclusion evidence, not a spawn pass. The
 diagnostic is being extended with explicit bounded candidate selection and a
 separate sparse production-biome/town screen; production eligibility is unchanged.
 
+The explicit-selector/scout checkpoint is committed as `20dffac`. Region(-1,0)
+passed a complete66,049-column caller-square survey, but the approved headed03
+run then exposed `facade_completion_failed` in its different recipe541151883.
+The error watcher immediately stopped the owned job; zero processes remained.
+There is no terminal report or admitted source. This underlying defect remains
+unclassified; no additional headed retry is approved. Exact headless replay with
+nested failure capture is next. The structural fix at `8b2c877` and its complete
+original-candidate source proof remain committed; no spawning acceptance is claimed.
+
 ### Prior checkpoint history
 
 The scene job and owning service now support balanced shared-door callbacks.
