@@ -6,7 +6,114 @@ extends RefCounted
 const LIMIT := 10000.0
 const MAX_OBSTACLES := 10000
 const MAX_ENDPOINT_STEPS := 4
+const MAX_COLUMN_ENDPOINTS := 2*MAX_OBSTACLES+3
+const MAX_COLUMN_WORK := 16000000
 const ConstructionMath = preload("res://scripts/buildings/ConstructionSeamMath.gd")
+
+## Finite source-endpoint columns, nearest X then lower X; each column uses fit.
+## Not a globally complete search or a minimum two-dimensional-distance solver.
+## Conservative work charges include repeated fixed-X scans/sorts: exhaustion
+## is explicit, never a sampled/subset no-fit. All source records remain values.
+static func fit_columns(moving: AABB, allowed: Rect2, obstacles: Array, clearance: float, continuation: Callable = Callable()) -> Dictionary:
+	if not _valid_box(moving) or not _valid_rect(allowed) or not is_finite(clearance) or clearance<0.0 or clearance>LIMIT or obstacles.size()>MAX_OBSTACLES:
+		return _fail("invalid_boundary_infill_input")
+	var source := obstacles.duplicate()
+	var stopped := {"value":false}
+	var proceed := func()->bool:
+		if stopped.value: return false
+		stopped.value=not _continue(continuation)
+		return not stopped.value
+	if not proceed.call(): return _fail("cancelled")
+	for value: Variant in source:
+		if not value is AABB or not _valid_box(value): return _fail("invalid_boundary_infill_obstacle")
+		if not proceed.call(): return _fail("cancelled")
+	var low := float(allowed.position.x)
+	var high := minf(float(allowed.end.x),low+float(allowed.size.x))-float(moving.size.x)
+	var z_high := minf(float(allowed.end.y),float(allowed.position.y)+float(allowed.size.y))
+	if low>high or float(allowed.position.y)+float(moving.size.z)>z_high:
+		return _fail("moving_bounds_exceed_domain")
+	# Every original was validated above. Only this repeated-solver input is
+	# pruned; the independent terminal scan below still uses ALL original boxes.
+	# Positive-volume intersection with the complete allowed domain is necessary
+	# for collision at any accepted pose. Clearance expands XZ only, never Y.
+	var relevant: Array = []
+	var x_high := minf(float(allowed.end.x),low+float(allowed.size.x))
+	for obstacle: AABB in source:
+		if not proceed.call(): return _fail("cancelled")
+		if not _axis_overlap(moving,obstacle,1,0.0): continue
+		if float(obstacle.position.x)-clearance>=x_high or _upper(obstacle,0)+clearance<=low: continue
+		if float(obstacle.position.z)-clearance>=z_high or _upper(obstacle,2)+clearance<=float(allowed.position.y): continue
+		relevant.append(obstacle)
+	var endpoints: Array[Dictionary] = [
+		{"x":clampf(float(moving.position.x),low,high),"direction":0.0},
+		{"x":low,"direction":1.0},{"x":high,"direction":-1.0,"upper":minf(float(allowed.end.x),low+float(allowed.size.x))}]
+	for obstacle: AABB in relevant:
+		if not proceed.call(): return _fail("cancelled")
+		endpoints.append({"x":float(obstacle.position.x)-float(moving.size.x)-clearance,"direction":-1.0,"upper":float(obstacle.position.x)-clearance})
+		endpoints.append({"x":_upper(obstacle,0)+clearance,"direction":1.0})
+		if endpoints.size()>MAX_COLUMN_ENDPOINTS: return _fail("column_endpoint_limit_exceeded")
+	var candidates: Array[Dictionary] = []
+	for endpoint: Dictionary in endpoints:
+		if not proceed.call(): return _fail("cancelled")
+		if endpoint.x<low or endpoint.x>high: continue
+		var delta := float(Vector3(endpoint.x-float(moving.position.x),0,0).x)
+		var column := AABB(moving.position+Vector3(delta,0,0),moving.size)
+		for attempt in range(MAX_ENDPOINT_STEPS):
+			if _column_endpoint_valid(column,allowed,endpoint): break
+			if not proceed.call(): return _fail("cancelled")
+			var direction: float = endpoint.direction
+			if direction==0.0: direction=1.0 if float(column.position.x)<low else -1.0
+			delta=_next_translation(float(moving.position.x),float(column.position.x),delta,direction)
+			column=AABB(moving.position+Vector3(delta,0,0),moving.size)
+		if not _column_endpoint_valid(column,allowed,endpoint): continue
+		candidates.append({"bounds":column,"delta":delta,"distance":absf(float(column.position.x)-float(moving.position.x))})
+	# Explicit tie order also makes duplicate represented columns independent
+	# of obstacle enumeration when distinct deltas round onto the same position.
+	candidates.sort_custom(func(a: Dictionary,b: Dictionary)->bool:
+		if a.distance!=b.distance: return a.distance<b.distance
+		if a.bounds.position.x!=b.bounds.position.x: return a.bounds.position.x<b.bounds.position.x
+		return a.delta<b.delta)
+	if not proceed.call(): return _fail("cancelled")
+	var seen := {}
+	var tested := 0
+	var tested_columns := 0
+	var work := source.size()*16+endpoints.size()*(32+int(ceil(log(float(endpoints.size()+1))/log(2.0))))
+	var fit_charge := 128+relevant.size()*(64+8*int(ceil(log(float(2*relevant.size()+4))/log(2.0))))
+	for candidate: Dictionary in candidates:
+		if not proceed.call(): return _fail("cancelled",tested)
+		var column: AABB = candidate.bounds
+		if seen.has(column.position.x): continue
+		seen[column.position.x]=true
+		if work+fit_charge>MAX_COLUMN_WORK:
+			return {"ready":false,"reason":"column_work_limit_exceeded","testedCandidates":tested,"testedColumns":tested_columns,"workUpperBound":work,"nextColumnWork":fit_charge,"sourceObstacleCount":source.size(),"relevantObstacleCount":relevant.size()}
+		work+=fit_charge
+		tested_columns+=1
+		var result := fit(column,allowed,relevant,clearance,proceed)
+		tested+=int(result.get("testedCandidates",0))
+		if stopped.value: return _fail("cancelled",tested)
+		if not result.ready: continue
+		# Never compose two rounded X moves. A column was already represented
+		# from the ORIGINAL origin; fixed-X fit must leave that column intact.
+		if result.translation.x!=0.0: return _fail("represented_column_changed",tested)
+		var total := Vector3(candidate.delta,0,result.translation.z)
+		var placed := AABB(moving.position+total,moving.size)
+		if placed!=result.placedBounds or not _in_domain(placed,allowed): return _fail("represented_column_result_invalid",tested)
+		for obstacle: AABB in source:
+			if not proceed.call(): return _fail("cancelled",tested)
+			if _axis_overlap(placed,obstacle,0,clearance) and _axis_overlap(placed,obstacle,1,0.0) and _axis_overlap(placed,obstacle,2,clearance):
+				return _fail("represented_column_result_blocked",tested)
+		if not proceed.call(): return _fail("cancelled",tested)
+		return {"ready":true,"translation":total,"placedBounds":placed,"testedCandidates":tested,"testedColumns":tested_columns,
+			"columnEndpoints":endpoints.size(),"workUpperBound":work,"sourceObstacleCount":source.size(),"relevantObstacleCount":relevant.size(),"searchScope":"finite_geometry_columns_nearest_x_then_lower_x_not_global_optimum"}
+	return {"ready":false,"reason":"no_clear_endpoint_column","testedCandidates":tested,"testedColumns":tested_columns,"workUpperBound":work,"sourceObstacleCount":source.size(),"relevantObstacleCount":relevant.size()}
+
+static func _column_endpoint_valid(column: AABB,allowed: Rect2,endpoint: Dictionary) -> bool:
+	if float(column.position.x)<float(allowed.position.x) or _upper(column,0)>minf(float(allowed.end.x),float(allowed.position.x)+float(allowed.size.x)): return false
+	# The lower obstacle endpoint constrains its represented UPPER face, not
+	# just its origin; the upper endpoint constrains the represented lower face.
+	if endpoint.direction<0.0: return _upper(column,0)<=float(endpoint.upper)
+	if endpoint.direction>0.0: return float(column.position.x)>=float(endpoint.x)
+	return true
 
 static func fit(moving: AABB, allowed: Rect2, obstacles: Array, clearance: float, continuation: Callable = Callable()) -> Dictionary:
 	if not _valid_box(moving) or not _valid_rect(allowed) or not is_finite(clearance) or clearance<0.0 or clearance>LIMIT or obstacles.size()>MAX_OBSTACLES:
