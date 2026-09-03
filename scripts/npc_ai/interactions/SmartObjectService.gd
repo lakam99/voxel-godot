@@ -74,6 +74,39 @@ func register_door(door: Node, metadata := {}) -> String:
 		_connect_registration_lifecycle(registrations[portal_id])
 	return portal_id
 
+## Streaming owner calls before freeing the leaf. Do not recreate a grouped
+## registration: its reservations and logical metadata belong to the survivor.
+func unregister_door(door: Node) -> Dictionary:
+	if door_portals == null:
+		return {"status":"failed","reason":"missing_door_service","portalRemoved":false}
+	var result: Dictionary = door_portals.unregister_door(door)
+	if result.get("status") != "unregistered": return result
+	var portal_id := String(result.portalId)
+	_disconnect_door_lifecycle(portal_id, door)
+	var registration = registrations.get(portal_id)
+	if registration == null or registration.kind != "door": return result
+	if bool(result.portalRemoved):
+		_disconnect_door_lifecycle(portal_id, registration.node)
+		mark_registration_unbound(registration, "door_streamed_out")
+		registrations.erase(portal_id)
+		last_release_by_object.erase(portal_id)
+	else:
+		var portal = door_portals.portals[portal_id]
+		if not is_instance_valid(registration.node) or not portal.leaf_nodes.has(registration.node):
+			_disconnect_door_lifecycle(portal_id, registration.node)
+			registration.node = portal.leaf_nodes[0]
+			registration.revision = _next_revision()
+			query_cache.clear()
+			# Prior unbinding may already have released reservations. Rebinding is
+			# not authority to resurrect them or clear stale/depleted policy flags.
+			_connect_registration_lifecycle(registration)
+	return result
+
+func _disconnect_door_lifecycle(portal_id: String, node) -> void:
+	if not is_instance_valid(node) or not node is Node: return
+	var callback := Callable(self, "_on_registered_node_tree_exiting").bind(portal_id, int(node.get_instance_id()))
+	if node.tree_exiting.is_connected(callback): node.tree_exiting.disconnect(callback)
+
 func register_object(object_id: String, kind: String, node: Node = null, metadata := {}) -> String:
 	if object_id == "":
 		object_id = object_id_for_node(node)

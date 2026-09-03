@@ -68,13 +68,22 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The shared interaction registry now has a matching unregister wrapper. It keeps
+grouped-door reservations, reconnects the surviving representative's exit handler,
+and prevents an old leaf's callback from invalidating a same-ID replacement.
+Final synthetic controls pass 116/116; seven NPC suites retain baseline results,
+with the critic classifying three additional known route error stacks as timing
+variation. See `CITADEL_SMART_DOOR_UNREGISTRATION_2026-09-02.md`. The independent
+critic approved the focused commit; scene door/tree hooks and player-safe
+activation remain next.
+
 The user explicitly approved narrowly scoped shared-door cleanup. New per-leaf
 unregistration preserves grouped survivors and retires only the final portal's
 transient traversal/traffic state. Synthetic controls pass 83/83 and six NPC
 suite results/error logs match the recorded baseline. See
 `CITADEL_DOOR_UNREGISTRATION_2026-09-02.md`. The independent critic approved
 the focused API commit. This API boundary is not yet wired
-into scene teardown; smart-object representation, balanced publication hooks
+into scene teardown; balanced publication hooks
 and player-safe activation remain open. No headed or ordinary-spawn acceptance
 is claimed.
 
