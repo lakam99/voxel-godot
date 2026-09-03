@@ -1,7 +1,16 @@
 [CmdletBinding()]
-param([Parameter(Mandatory=$true)][string]$OutputDirectory,[switch]$CaptureBlueprint,[switch]$ExpectReady)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[switch]$CaptureBlueprint,[switch]$ExpectReady,[switch]$CaptureFailure,
+ [string]$Seed='atlas-30895044',[string]$CandidateRegion='0,-1',[ValidateRange(0,2147483647)][int]$ExpectedRecipeSeed=1747969299)
 $ErrorActionPreference='Stop'
 if($CaptureBlueprint -and $ExpectReady){throw 'ExpectReady requires public Recipe entry; cannot combine with CaptureBlueprint.'}
+if($CaptureFailure -and ($ExpectReady -or $CaptureBlueprint)){throw 'CaptureFailure requires only public failure replay.'}
+if([string]::IsNullOrWhiteSpace($Seed) -or $Seed.Length -gt 128){throw 'Invalid diagnostic seed.'}
+if($CandidateRegion -notmatch '^-?(0|[1-9][0-9]{0,6}),-?(0|[1-9][0-9]{0,6})$'){throw 'Invalid diagnostic region.'}
+$regionCoordinates=@($CandidateRegion.Split(',') | ForEach-Object {
+ $coordinate=[int]$_
+ if([string]$coordinate -cne $_ -or $coordinate -lt -1048576 -or $coordinate -gt 1048575){throw 'Invalid diagnostic region.'}
+ $coordinate
+})
 $project=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $run=[IO.Path]::GetFullPath((Join-Path $project $OutputDirectory))
 if((Split-Path $run -Parent) -ine (Join-Path $project 'artifacts/citadel-runtime-integration') -or (Split-Path $run -Leaf) -notlike 'candidate-recipe-*'){throw 'Use fresh candidate-recipe-* artifacts.'}
@@ -9,19 +18,23 @@ if(Test-Path -LiteralPath $run){throw 'Fresh output required.'}
 New-Item -ItemType Directory -Path $run,(Join-Path $run 'userdata') | Out-Null
 $expected='ERROR: Citadel structural completion failed: facade_completion_failed'
 if($ExpectReady){$expected=''}
-$runSeconds=if($ExpectReady){540}else{180}
-$sourceSeconds=if($ExpectReady){450}else{150}
+$runSeconds=if($ExpectReady -or $CaptureFailure){540}else{180}
+$sourceSeconds=if($ExpectReady -or $CaptureFailure){450}else{150}
 $proofSeconds=if($ExpectReady){60}else{0}
 $script='res://scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd'
 $files=@(& git -C $project ls-files --cached --others --exclude-standard -- 'scripts/*.gd' 'scripts/**/*.gd')
 $files+=@('scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd','tools/run-citadel-candidate-recipe-diagnostic.ps1','tools/run-godot-scene-watchdog.ps1')
 $hashes=[ordered]@{}
 foreach($file in @($files|Sort-Object -Unique)){$hashes[$file]=(Get-FileHash (Join-Path $project $file)).Hash.ToLowerInvariant()}
-@{schema='candidate-recipe-diagnostic-launch/v1';sourceHashes=$hashes;head=(& git -C $project rev-parse HEAD);seed='atlas-30895044';region=@(0,-1);recipeSeed=1747969299;expectedError=$expected;runTimeoutSeconds=$runSeconds;sourcePreparationDeadlineSeconds=$sourceSeconds;independentPhysicalDeadlineSeconds=$proofSeconds;parseTimeoutSeconds=15;cleanupCeilingPerPhaseSeconds=15;maximumOwnedPhasesSeconds=($runSeconds+49);budgetScope='ExpectReady source clock includes setup/survey and Recipe; independent validator has a fresh 60s deadline only after successful in-time Recipe. Export/report bounded by overall watchdog. No production or headed timeout changes.';script=$script}|ConvertTo-Json -Depth 4|Set-Content (Join-Path $run 'launch.json') -Encoding utf8
+@{schema='candidate-recipe-diagnostic-launch/v1';sourceHashes=$hashes;head=(& git -C $project rev-parse HEAD);seed=$Seed;region=$regionCoordinates;recipeSeed=$ExpectedRecipeSeed;expectedError=$expected;runTimeoutSeconds=$runSeconds;sourcePreparationDeadlineSeconds=$sourceSeconds;independentPhysicalDeadlineSeconds=$proofSeconds;parseTimeoutSeconds=15;cleanupCeilingPerPhaseSeconds=15;maximumOwnedPhasesSeconds=($runSeconds+49);budgetScope='Source clock includes setup/survey and Recipe. CaptureFailure uses the existing 450s source ceiling solely to retain an inventoried failure; it is never recipe success. ExpectReady alone runs independent proof with a fresh 60s deadline after successful in-time Recipe. Export/report bounded by overall watchdog. No production or headed timeout changes.';script=$script}|ConvertTo-Json -Depth 4|Set-Content (Join-Path $run 'launch.json') -Encoding utf8
 $values=@{APPDATA=(Join-Path $run 'userdata');LOCALAPPDATA=(Join-Path $run 'userdata');CITADEL_CANDIDATE_RECIPE_OUTPUT=$run}
 $values['CITADEL_CANDIDATE_CAPTURE_BLUEPRINT']=if($CaptureBlueprint){'1'}else{'0'}
 $values['CITADEL_CANDIDATE_EXPECT_READY']=if($ExpectReady){'1'}else{'0'}
-@{captureBlueprint=[bool]$CaptureBlueprint;expectReady=[bool]$ExpectReady;sequence=if($CaptureBlueprint){'diagnostic old-equivalent Builder -> Urban.compose_prepared; not public Recipe or success'}else{'public CitadelRecipePreparation.prepare'}}|ConvertTo-Json|Set-Content (Join-Path $run 'variant.json') -Encoding utf8
+$values['CITADEL_CANDIDATE_CAPTURE_FAILURE']=if($CaptureFailure){'1'}else{'0'}
+$values['CITADEL_CANDIDATE_RECIPE_SEED']=$Seed
+$values['CITADEL_CANDIDATE_RECIPE_REGION']=$CandidateRegion
+$values['CITADEL_CANDIDATE_RECIPE_EXPECTED']=[string]$ExpectedRecipeSeed
+@{captureBlueprint=[bool]$CaptureBlueprint;expectReady=[bool]$ExpectReady;captureFailure=[bool]$CaptureFailure;sequence=if($CaptureBlueprint){'diagnostic old-equivalent Builder -> Urban.compose_prepared; not public Recipe or success'}else{'public CitadelRecipePreparation.prepare'}}|ConvertTo-Json|Set-Content (Join-Path $run 'variant.json') -Encoding utf8
 $previous=@{}
 try {
  foreach($key in $values.Keys){$previous[$key]=[Environment]::GetEnvironmentVariable($key,'Process');[Environment]::SetEnvironmentVariable($key,$values[$key],'Process')}
@@ -33,6 +46,9 @@ try {
    param($outPath,$errPath,$stopPath,$allowedLine)
    try {
     while($true){
+     # Logs are reread from the start: count once per complete scan, not once
+     # per poll. Even an inventoried header may occur only once across logs.
+     $allowedCount=0
      foreach($path in @($outPath,$errPath)){
       if(-not (Test-Path -LiteralPath $path)){continue}
       $stream=$null;$reader=$null
@@ -40,7 +56,12 @@ try {
        $stream=[IO.FileStream]::new($path,[IO.FileMode]::Open,[IO.FileAccess]::Read,([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete));$reader=[IO.StreamReader]::new($stream)
        while(-not $reader.EndOfStream){
         $line=$reader.ReadLine()
-        if($line -match 'SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:' -and $line.Trim() -cne $allowedLine){[IO.File]::WriteAllText($stopPath,$line);return}
+        if($line -match 'SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:'){
+         if($allowedLine -ne '' -and $line.Trim() -ceq $allowedLine){
+          $allowedCount++
+          if($allowedCount -gt 1){[IO.File]::WriteAllText($stopPath,'Repeated inventoried engine error: '+$line);return}
+         }else{[IO.File]::WriteAllText($stopPath,$line);return}
+        }
        }
       } finally {if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}}
      }

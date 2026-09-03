@@ -12,6 +12,9 @@ const Tutorial = preload("res://scripts/TutorialSystem.gd")
 const SEED := "atlas-30895044"
 const REGION := Vector2i(0,-1)
 const EXPECTED_RECIPE := 1747969299
+var world_seed := SEED
+var candidate_region := REGION
+var expected_recipe := EXPECTED_RECIPE
 
 class Progress extends RefCounted:
 	const MAX_AGGREGATES := 256
@@ -93,6 +96,7 @@ class Progress extends RefCounted:
 var output := ""
 var state := Progress.new()
 var expect_ready := false
+var capture_failure := false
 
 func _initialize() -> void: call_deferred("_run")
 
@@ -100,8 +104,27 @@ func _run() -> void:
 	output=OS.get_environment("CITADEL_CANDIDATE_RECIPE_OUTPUT")
 	if output.is_empty() or not output.is_absolute_path(): push_error("Missing diagnostic output"); quit(2); return
 	expect_ready=OS.get_environment("CITADEL_CANDIDATE_EXPECT_READY")=="1"
+	capture_failure=OS.get_environment("CITADEL_CANDIDATE_CAPTURE_FAILURE")=="1"
+	if capture_failure and (expect_ready or OS.get_environment("CITADEL_CANDIDATE_CAPTURE_BLUEPRINT")=="1"):
+		push_error("CaptureFailure requires only public failure replay"); quit(2); return
+	var selected_seed := OS.get_environment("CITADEL_CANDIDATE_RECIPE_SEED")
+	var selected_region := OS.get_environment("CITADEL_CANDIDATE_RECIPE_REGION")
+	var selected_recipe := OS.get_environment("CITADEL_CANDIDATE_RECIPE_EXPECTED")
+	if not selected_seed.is_empty(): world_seed=selected_seed
+	if world_seed.length()>128: push_error("Invalid diagnostic seed"); quit(2); return
+	if not selected_region.is_empty():
+		var axes := selected_region.split(",")
+		if axes.size()!=2: push_error("Invalid diagnostic region"); quit(2); return
+		for axis: String in axes:
+			if not axis.is_valid_int() or str(int(axis))!=axis or int(axis)<Field.MIN_REGION_COORD or int(axis)>Field.MAX_REGION_COORD:
+				push_error("Invalid diagnostic region"); quit(2); return
+		candidate_region=Vector2i(int(axes[0]),int(axes[1]))
+	if not selected_recipe.is_empty():
+		if not selected_recipe.is_valid_int() or str(int(selected_recipe))!=selected_recipe or int(selected_recipe)<0 or int(selected_recipe)>2147483647:
+			push_error("Invalid expected recipe seed"); quit(2); return
+		expected_recipe=int(selected_recipe)
 	if expect_ready and OS.get_environment("CITADEL_CANDIDATE_CAPTURE_BLUEPRINT")=="1": push_error("ExpectReady requires public Recipe entry"); quit(2); return
-	state.started=Time.get_ticks_msec(); state.deadline=state.started+(450000 if expect_ready else 150000)
+	state.started=Time.get_ticks_msec(); state.deadline=state.started+(450000 if expect_ready or capture_failure else 150000)
 	state.begin_phase("source_preparation")
 	var worker := Thread.new()
 	if worker.start(_work)!=OK: push_error("Diagnostic worker start failed"); quit(2); return
@@ -117,13 +140,14 @@ func _run() -> void:
 	_write_json("timings.json",timing)
 	var expected: bool=receipt.get("reason")=="citadel_structural_completion_failed" and receipt.get("structuralReason")=="facade_completion_failed" and receipt.get("artifactsWritten",false)
 	var recipe_passed: bool=receipt.get("recipePassed",false)
-	var verified: bool=(recipe_passed and receipt.get("physicalPassed",false) and receipt.get("artifactsWritten",false) and receipt.get("contextUnchanged",false) and not timing.cancelled) if expect_ready else expected
+	var verified: bool=(recipe_passed and receipt.get("physicalPassed",false) and receipt.get("artifactsWritten",false) and receipt.get("contextUnchanged",false) and not timing.cancelled) if expect_ready else expected and not timing.cancelled and receipt.get("contextUnchanged",false)
 	var report := {"schema":"citadel-candidate-recipe-diagnostic/v1","passed":false,"diagnosticCompleted":true,"expectedFailureReproduced":expected,
-		"worldSeed":SEED,"region":REGION,"recipeSeed":EXPECTED_RECIPE,"receipt":receipt,"progress":state.snapshot(),
+		"worldSeed":world_seed,"region":candidate_region,"recipeSeed":expected_recipe,"receipt":receipt,"progress":state.snapshot(),
 		"evidenceLevel":"source-only failing real candidate replay; no site acceptance, terrain publication, rendering or gameplay",
 		"expectedEngineError":"ERROR: Citadel structural completion failed: facade_completion_failed",
 		"artifactFormat":"input.bin and failure.bin are FileAccess.store_var(..., false); full failure.json is human-readable, binary preserves types"}
 	report["phaseElapsedUsec"]=timing.phaseElapsedUsec
+	report["captureFailure"]=capture_failure
 	if expect_ready:
 		report.merge({"passed":verified,"recipePassed":recipe_passed,"expectReady":true,
 			"evidenceLevel":"public Recipe source-only replay plus full physical-integrity validation; no site, live physics, furniture-validation, rendering or gameplay acceptance",
@@ -133,13 +157,13 @@ func _run() -> void:
 	quit(0 if verified else 1) # Failure reproduction exit zero is NOT a recipe pass.
 
 func _work() -> Dictionary:
-	var candidate := Field.candidate_for_region(SEED,REGION)
-	if candidate.is_empty() or candidate.recipeSeed!=EXPECTED_RECIPE: return {"reason":"candidate_identity_mismatch"}
+	var candidate := Field.candidate_for_region(world_seed,candidate_region)
+	if candidate.is_empty() or candidate.recipeSeed!=expected_recipe: return {"reason":"candidate_identity_mismatch"}
 	state.checkpoint("center_biome_survey")
 	# Reconstruct the ordinary deterministic tutorial override from its owning
 	# constants and WGS, not an artifact seed/biome guess or a Main scene boot.
 	var context := Context.new()
-	context.seed_text=SEED; context.seed_hash=context.hash_string(SEED); context.setup_noise()
+	context.seed_text=world_seed; context.seed_hash=context.hash_string(world_seed); context.setup_noise()
 	var world := World.new()
 	world.setup(context); context.set_generator(world)
 	var tutorial_region: Vector2i=Tutorial.TUTORIAL_TOWN_REGION
@@ -148,13 +172,13 @@ func _work() -> Dictionary:
 	var towns := {tutorial_region:town}
 	var survey := Survey.new()
 	var center: Vector2i=candidate.centerCell
-	var surveyed := survey.begin(SEED,REGION,Rect2i(center,Vector2i.ONE),towns)
+	var surveyed := survey.begin(world_seed,candidate_region,Rect2i(center,Vector2i.ONE),towns)
 	while surveyed.status=="pending_budget":
 		if not state.checkpoint("center_biome_survey"): return {"reason":"cancelled"}
 		surveyed=survey.advance()
 	if surveyed.status!="surveyed" or surveyed.biomeCounts.size()!=1: return {"reason":"center_survey_not_eligible","survey":surveyed}
 	var recipe_context := {"biome":String(surveyed.biomeCounts.keys()[0]),"siteKey":candidate.siteId,"citadelScale":Site.SCALE}
-	var input := {"worldSeed":SEED,"candidate":candidate,"context":recipe_context,"centerSurvey":surveyed,"townOverrides":towns,
+	var input := {"worldSeed":world_seed,"candidate":candidate,"context":recipe_context,"centerSurvey":surveyed,"townOverrides":towns,
 		"scope":"exact recipe input from ordinary center survey; no full-envelope survey or runtime source injection"}
 	if not _write_typed("input.bin",input): return {"reason":"input_write_failed"}
 	_write_json("input.json",input)
@@ -190,7 +214,7 @@ func _work() -> Dictionary:
 		result=Recipe.prepare(candidate.recipeSeed,recipe_context,state.checkpoint)
 	var recipe_elapsed_usec := Time.get_ticks_usec()-recipe_started_usec
 	var source_within_deadline := true
-	if expect_ready: source_within_deadline=state.begin_phase("source_export",-1)
+	if expect_ready or capture_failure: source_within_deadline=state.begin_phase("source_export",-1)
 	if expect_ready and result.get("ready",false)==true:
 		var source: Dictionary=result.duplicate(false)
 		var blueprint = result.get("blueprint")

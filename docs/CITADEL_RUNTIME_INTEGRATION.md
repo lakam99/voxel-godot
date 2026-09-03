@@ -135,6 +135,15 @@ unclassified; no additional headed retry is approved. Exact headless replay with
 nested failure capture is next. The structural fix at `8b2c877` and its complete
 original-candidate source proof remain committed; no spawning acceptance is claimed.
 
+Exact headless capture06 now identifies the second failure: all nine opening-head
+connection placements for `urban_civic_house_wall` overlap the outer right curtain
+wall by about0.400m on the reported greatest-gap axis. The source failed after
+176.100s; the diagnostic retained full nested evidence and exited naturally with
+owned zero. Civic-house X is fixed while wall X varies with courtyard width.
+The next owning step is geometry-derived house placement before dependent rooms,
+doors and furniture, not weakened connection admission. See
+`CITADEL_CIVIC_WALL_PLACEMENT_2026-09-03.md`; actual displacement remains to be proven.
+
 ### Prior checkpoint history
 
 The scene job and owning service now support balanced shared-door callbacks.
