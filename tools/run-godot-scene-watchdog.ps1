@@ -10,6 +10,7 @@ param(
     [string]$StderrPath,
     [string]$SummaryPath,
     [string]$StopRequestPath,
+    [string]$LiveOwnershipPath,
     [switch]$Headless,
     [Parameter(ValueFromRemainingArguments = $true)][string[]]$SceneArguments = @()
 )
@@ -127,6 +128,8 @@ public static class VoxelGodotWatchdogNativeV2
     [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool IsProcessInJob(IntPtr p, IntPtr j, [MarshalAs(UnmanagedType.Bool)] out bool r);
     [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetProcessTimes(IntPtr p, out long creation, out long exit, out long kernel, out long user);
+    [DllImport("kernel32.dll", SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
     static extern bool CloseHandle(IntPtr h);
 
     static Win32Exception Error(string operation) {
@@ -224,6 +227,12 @@ public static class VoxelGodotWatchdogNativeV2
     public static void ResumePrimaryThread(IntPtr thread) {
         if (ResumeThread(thread) == 0xFFFFFFFF) throw Error("ResumeThread");
     }
+    public static long ProcessCreationFileTime(IntPtr process) {
+        long creation, exit, kernel, user;
+        if (!GetProcessTimes(process, out creation, out exit, out kernel, out user)) throw Error("GetProcessTimes");
+        return creation;
+    }
+    public static ulong LiveTickCount() { return GetTickCount64(); }
     public static bool WaitForProcess(IntPtr process, uint milliseconds) {
         uint r = WaitForSingleObject(process, milliseconds);
         if (r == WAIT_OBJECT_0) return true; if (r == WAIT_TIMEOUT) return false;
@@ -459,6 +468,55 @@ $membershipUncertaintyResolvedByZeroProof=$false; $jobCloseAttempted=$false
 $finalMembershipKnown=$false; $finalJobMemberPids=@(); $overallExitCode=127
 $terminalCleanupStopwatch=$null; $terminalCleanupExpired=$false
 
+$resolvedLiveOwnershipPath=$null; $liveOwnershipCreated=$false; $liveOwnershipSequence=0
+$liveOwnershipLastTick=[uint64]0; $liveOwnershipError=$null; $liveWatchdogCreation=$null
+
+function Publish-LiveOwnership([string]$State) {
+    if ($null -eq $script:resolvedLiveOwnershipPath) { return }
+    $observedTick=[VoxelGodotWatchdogNativeV2]::LiveTickCount()
+    $observedUtc=[datetime]::UtcNow.ToString('o')
+    $rows=@(); $captured=@()
+    try {
+        if ($State -eq 'running') {
+            # Handles are rechecked against the exact Job Object, never ancestry.
+            $captured=@([VoxelGodotWatchdogNativeV2]::CaptureStableJobMembers($script:jobHandle,3,10))
+            $rows=@($captured | ForEach-Object {
+                [ordered]@{pid=$_.ProcessId; creationFileTime=[string][VoxelGodotWatchdogNativeV2]::ProcessCreationFileTime($_.ProcessHandle)}
+            })
+        }
+        $script:liveOwnershipSequence++
+        $snapshot=[ordered]@{
+            schema='godot-live-ownership/v1'; runId=$runId; state=$State
+            observedAtUtc=$observedUtc; observedTickMilliseconds=[string]$observedTick
+            sequence=$script:liveOwnershipSequence; maximumAgeMilliseconds=1000
+            projectPath=$resolvedProjectPath; godotExe=$resolvedGodotExe
+            watchdogPid=$PID; watchdogCreationFileTime=$script:liveWatchdogCreation
+            rootPid=$rootPid; members=$rows; authority='Windows Job Object membership'
+        }
+        $json=$snapshot | ConvertTo-Json -Depth 6 -Compress
+        if (-not $script:liveOwnershipCreated) {
+            Write-AtomicJsonNoOverwrite $script:resolvedLiveOwnershipPath $json
+            $script:liveOwnershipCreated=$true
+        } else {
+            $previous=[IO.File]::ReadAllText($script:resolvedLiveOwnershipPath) | ConvertFrom-Json
+            if ($previous.runId -cne $runId) { throw 'Live ownership path changed owner.' }
+            $temporary=$script:resolvedLiveOwnershipPath+'.'+[guid]::NewGuid().ToString('N')+'.tmp'
+            try {
+                Write-AtomicJsonNoOverwrite $temporary $json
+                [IO.File]::Replace($temporary,$script:resolvedLiveOwnershipPath,[NullString]::Value)
+            } finally {
+                if ([IO.File]::Exists($temporary)) { [IO.File]::Delete($temporary) }
+            }
+        }
+        $script:liveOwnershipLastTick=$observedTick
+    } catch {
+        $script:liveOwnershipError=$_.Exception.Message
+        throw
+    } finally {
+        foreach ($member in $captured) { Close-WatchdogHandle $member.ProcessHandle 'live membership handle' }
+    }
+}
+
 function Assert-NoStopRequest {
     if ($null -eq $script:resolvedStopRequestPath) { return }
     if (-not $script:stopRequested -and
@@ -586,6 +644,14 @@ try {
         $resolvedStopRequestPath=Resolve-UniqueOutputPath $StopRequestPath 'StopRequestPath'
         if (-not $paths.Add($resolvedStopRequestPath)) { throw 'StopRequestPath must be distinct from output files.' }
     }
+    if (-not [string]::IsNullOrWhiteSpace($LiveOwnershipPath)) {
+        $resolvedLiveOwnershipPath=Resolve-UniqueOutputPath $LiveOwnershipPath 'LiveOwnershipPath'
+        if (-not $paths.Add($resolvedLiveOwnershipPath)) { throw 'LiveOwnershipPath must be distinct from all other outputs.' }
+        $currentProcess=[Diagnostics.Process]::GetCurrentProcess()
+        try { $liveWatchdogCreation=[string][VoxelGodotWatchdogNativeV2]::ProcessCreationFileTime($currentProcess.Handle) }
+        finally { $currentProcess.Dispose() }
+        Publish-LiveOwnership 'starting'
+    }
     $preexistingGodotProcesses=Get-PreexistingGodotEvidence
     $arguments=[Collections.Generic.List[string]]::new(); $arguments.Add($resolvedGodotExe)
     if ($Headless) { $arguments.Add('--headless') }; $arguments.Add('--path'); $arguments.Add($resolvedProjectPath); $arguments.Add($Scene)
@@ -606,12 +672,16 @@ try {
     if ($initial.ProcessIds.Count -ne 1 -or $initial.ProcessIds[0] -ne $rootPid) { throw "Assigned job did not contain exactly suspended root $rootPid." }
     [VoxelGodotWatchdogNativeV2]::ResumePrimaryThread($threadHandle); $resumed=$true
     try {
-        if ($null -eq $resolvedStopRequestPath) {
+        if ($null -eq $resolvedStopRequestPath -and $null -eq $resolvedLiveOwnershipPath) {
             $rootExited=[VoxelGodotWatchdogNativeV2]::WaitForProcess($processHandle,[uint32]($TimeoutSeconds*1000))
         } else {
             $executionWatch=[Diagnostics.Stopwatch]::StartNew()
             while (-not $rootExited) {
                 Assert-NoStopRequest
+                if ($null -ne $resolvedLiveOwnershipPath -and
+                    ([VoxelGodotWatchdogNativeV2]::LiveTickCount()-$liveOwnershipLastTick -ge 250)) {
+                    Publish-LiveOwnership 'running'
+                }
                 $remaining=[int64]$TimeoutSeconds*1000-$executionWatch.ElapsedMilliseconds
                 if ($remaining -le 0) { break }
                 $rootExited=[VoxelGodotWatchdogNativeV2]::WaitForProcess($processHandle,[uint32][math]::Min(250,$remaining))
@@ -635,6 +705,13 @@ try {
 } catch { $fatalException=$_.Exception.Message }
 finally {
     $terminalCleanupStopwatch=[Diagnostics.Stopwatch]::StartNew()
+    if ($liveOwnershipCreated) {
+        try { Publish-LiveOwnership 'stopping' }
+        catch {
+            $monitoringException="Live ownership invalidation failed: $($_.Exception.Message)"
+            $cleanupErrors.Add($monitoringException)
+        }
+    }
     $nativeCreateReachedProcess=[bool][VoxelGodotWatchdogNativeV2]::LastCreateReachedProcess
     $launchedProcessRequiresZeroProof=$processCreated -or $nativeCreateReachedProcess
     if ($jobHandle -ne [IntPtr]::Zero) {
@@ -808,6 +885,11 @@ finally {
             'Closing the kill-on-close job handle is the final backstop after explicit cleanup attempts.'
         )
     }
+        if ($null -ne $resolvedLiveOwnershipPath) {
+            $summary['liveOwnershipPath']=$resolvedLiveOwnershipPath
+            $summary['liveOwnershipError']=$liveOwnershipError
+            $summary['liveOwnershipSequence']=$liveOwnershipSequence
+        }
         $summaryJson=$summary|ConvertTo-Json -Depth 12 -Compress
         if ([string]::IsNullOrWhiteSpace($resolvedSummaryPath)) { throw 'SummaryPath could not be resolved.' }
         Write-AtomicJsonNoOverwrite $resolvedSummaryPath $summaryJson
