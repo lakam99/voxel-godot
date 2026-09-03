@@ -3344,6 +3344,14 @@ func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
         autonomy_system.notify_chunk_loaded(chunk_key)
         flush_navigation_change_bus()
 
+func notify_navigation_prop_unloaded(prop_id: String, prop: Node) -> Dictionary:
+    if autonomy_system == null:
+        return {"status":"failed", "reason":"missing_autonomy_owner"}
+    var result: Dictionary = autonomy_system.notify_prop_unloaded(prop_id, prop)
+    if result.get("status") in ["unregistered", "absent"]:
+        navigation_change_flush_pending = true
+    return result
+
 func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
         autonomy_system.notify_chunk_unloaded(chunk_key)
@@ -3368,6 +3376,14 @@ func notify_navigation_structure_metadata_changed(structure_id: String, bounds: 
     if autonomy_system:
         autonomy_system.notify_structure_metadata_changed(structure_id, bounds, metadata)
         flush_navigation_change_bus()
+
+func notify_navigation_door_unregistered(door: Node) -> Dictionary:
+    if autonomy_system == null:
+        return {"status":"failed", "reason":"missing_autonomy_owner"}
+    var result: Dictionary = autonomy_system.notify_door_unregistered(door)
+    if result.get("status") == "unregistered":
+        navigation_change_flush_pending = true
+    return result
 
 func notify_navigation_semantic_changed(semantic_id: String, bounds: AABB, metadata := {}) -> void:
     if autonomy_system:

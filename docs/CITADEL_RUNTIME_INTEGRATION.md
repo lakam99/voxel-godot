@@ -68,6 +68,16 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Shared navigation door retirement, non-destructive tree unbinding and the
+pre-reset scene drain are now critic-approved. Exact door cleanup passes 135/135,
+reset controls 68/68 and unchanged lifecycle controls 267/267. Seven NPC suites
+preserve the recorded baseline, including byte-identical stderr; known failures
+remain deferred, not green. See `CITADEL_RUNTIME_RETIREMENT_2026-09-02.md`.
+The ordinary runtime binding is the next integration step. No headed activation,
+full-world performance or successful in-game spawning is claimed yet.
+
+### Prior checkpoint history
+
 The scene job and owning service now support balanced shared-door callbacks.
 An accepted-source replay registers all twenty real citadel door bodies once
 and unregisters them before deleting collision children. The available scene
@@ -77,8 +87,10 @@ Actual controls pass 27/27; new scene-door faults 414/414, callback binding/rese
 `CITADEL_SCENE_DOOR_LIFECYCLE_2026-09-02.md`. The independent critic approved
 the focused lifecycle-hook commit on final evidence.
 Ordinary Main binding still awaits exact navigation door-state cleanup and
-non-destructive tree unbinding plus player-safe publication. Additional narrow
-navigation-state cleanup permission has been requested, not assumed. Overall
+non-destructive tree unbinding plus player-safe publication. The user has now
+explicitly approved necessary spawn-integration work without repeated permission
+requests, preserving routing/movement behavior and existing gameplay. Cleanup
+and ordinary-owner integration are in progress, not blocked on approval. Overall
 service maximum 22.544 ms still fails the budget; no headed/spawn acceptance.
 
 The shared interaction registry now has a matching unregister wrapper. It keeps

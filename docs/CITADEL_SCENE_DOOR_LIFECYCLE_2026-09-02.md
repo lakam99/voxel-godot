@@ -128,8 +128,10 @@ All seven exit naturally (route 1, others 0), owned zero, no forced cleanup.
 The independent critic approved the focused seven-file lifecycle-hook commit
 after reviewing final source hashes, reset/shutdown faults, actual scene parity,
 process cleanup, baseline NPC results and both documents. Navigation door-state retirement
-needs its own exact owner hookup; explicit additional permission was requested
-and remains unanswered. No NavmeshWorldService change is included here. Ordinary
+needs its own exact owner hookup. The user subsequently approved necessary
+spawn-integration work without repeated permission requests, preserving routing
+and movement behavior. No NavmeshWorldService change was included in this
+checkpoint; that cleanup is now in progress. Ordinary
 tree resource/navigation unbinding must preserve durable harvest state, and
 Main binding must enforce player-safe publication. Normal New Game/Continue,
 physical approach/gate traversal, save/re-entry, visuals and runtime performance

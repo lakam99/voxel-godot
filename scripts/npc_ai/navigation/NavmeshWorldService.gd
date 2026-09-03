@@ -46,6 +46,10 @@ var last_rebuild_usec := 0
 var door_link_records_by_region := {}
 var door_link_records_by_portal := {}
 var door_portal_states := {}
+## Bounded by retained descriptors, including unloaded/empty regions. These
+## indexes also locate links if one installed-link index needs retirement repair.
+var _door_descriptor_regions_by_portal := {}
+var _door_descriptor_portals_by_region := {}
 var installed_door_link_count := 0
 var door_link_state_revision := 0
 var door_link_install_failure_count := 0
@@ -73,6 +77,8 @@ func clear() -> void:
 	door_link_records_by_region.clear()
 	door_link_records_by_portal.clear()
 	door_portal_states.clear()
+	_door_descriptor_regions_by_portal.clear()
+	_door_descriptor_portals_by_region.clear()
 	actor_path_records.clear()
 	endpoint_query_cache.clear()
 	endpoint_query_cache_order.clear()
@@ -139,6 +145,7 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	if region_rids_by_region.has(region_id):
 		_release_region(region_id)
 	descriptors_by_region[region_id] = descriptor
+	_index_descriptor_doors(region_id, descriptor)
 	_clear_dirty_region(region_id)
 	var loaded := bool(descriptor.get("loaded"))
 	var install_result := _install_region(region_id, descriptor) if loaded else { "status": "unloaded", "regionId": region_id }
@@ -161,6 +168,7 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	}
 
 func unregister_chunk(region_id: String) -> Dictionary:
+	_unindex_descriptor_doors(region_id)
 	if not descriptors_by_region.has(region_id):
 		_release_region(region_id)
 		_clear_dirty_region(region_id)
@@ -275,6 +283,129 @@ func set_door_portal_state(portal_or_id, state_value := "", metadata := {}) -> D
 		"doorLinkStateRevision": door_link_state_revision,
 		"dynamicRevision": dynamic_revision
 	}
+
+## Retire only this portal's installed links and live-state overlay. Call after
+## its final shared leaf is unregistered; grouped survivors still own the ID.
+## Retained descriptors become service-owned shallow copies without this door;
+## dirty rebuilds cannot resurrect it. Geometry and caller descriptors are not
+## mutated. External callers must still remove/invalidate their original source
+## before submitting another snapshot: no historical tombstone is retained here.
+func forget_door_portal(portal_id: String) -> Dictionary:
+	var started := Time.get_ticks_usec()
+	if portal_id == "":
+		return { "status": "rejected", "reason": "missing_portal_id", "elapsedUsec": Time.get_ticks_usec() - started }
+	var state_removed: bool = door_portal_states.erase(portal_id)
+	var found := state_removed
+	var released_rids := {}
+	var affected_regions: Array[String] = []
+	for region_id: String in _door_descriptor_regions_by_portal.get(portal_id, {}):
+		affected_regions.append(region_id)
+	# The descriptor index includes uninstalled records. Union it with installed
+	# portal owners instead of scanning every region for each departing door.
+	var portal_records: Array = door_link_records_by_portal.get(portal_id, [])
+	var kept_portal_records: Array = []
+	for value in portal_records:
+		if not value is Dictionary or String(value.get("portalId", "")) != portal_id:
+			kept_portal_records.append(value)
+			continue
+		found = true
+		var link_rid: RID = value.get("rid", RID())
+		if link_rid.is_valid(): released_rids[link_rid] = true
+		var region_id := String(value.get("regionId", ""))
+		if region_id != "" and not affected_regions.has(region_id): affected_regions.append(region_id)
+	if door_link_records_by_portal.has(portal_id) and kept_portal_records.is_empty():
+		door_link_records_by_portal.erase(portal_id)
+		found = true
+	elif kept_portal_records.size() != portal_records.size():
+		door_link_records_by_portal[portal_id] = kept_portal_records
+	var filtered_descriptors := 0
+	for region_key: String in affected_regions:
+		if _filter_descriptor_door(region_key, portal_id):
+			found = true
+			filtered_descriptors += 1
+		var records: Array = door_link_records_by_region.get(region_key, [])
+		var kept: Array = []
+		for value in records:
+			if not value is Dictionary or String(value.get("portalId", "")) != portal_id:
+				kept.append(value)
+				continue
+			found = true
+			var link_rid: RID = value.get("rid", RID())
+			if link_rid.is_valid(): released_rids[link_rid] = true
+		if kept.size() == records.size(): continue
+		if kept.is_empty(): door_link_records_by_region.erase(region_key)
+		else: door_link_records_by_region[region_key] = kept
+	for link_rid: RID in released_rids:
+		NavigationServer3D.free_rid(link_rid)
+		_mark_navigation_map_dirty()
+	installed_door_link_count = maxi(0, installed_door_link_count - released_rids.size())
+	if found:
+		door_link_state_revision += 1
+		dynamic_revision += 1
+	affected_regions.sort()
+	return {
+		"status": "forgotten" if found else "absent", "portalId": portal_id,
+		"stateRemoved": state_removed, "removedLinks": released_rids.size(),
+		"filteredDescriptors": filtered_descriptors,
+		"affectedRegions": affected_regions, "installedDoorLinkCount": installed_door_link_count,
+		"doorLinkStateRevision": door_link_state_revision, "dynamicRevision": dynamic_revision,
+		"elapsedUsec": Time.get_ticks_usec() - started
+	}
+
+func _unindex_descriptor_doors(region_id: String) -> void:
+	for portal_id: String in _door_descriptor_portals_by_region.get(region_id, {}):
+		var regions: Dictionary = _door_descriptor_regions_by_portal.get(portal_id, {})
+		regions.erase(region_id)
+		if regions.is_empty(): _door_descriptor_regions_by_portal.erase(portal_id)
+	_door_descriptor_portals_by_region.erase(region_id)
+
+func _index_descriptor_doors(region_id: String, descriptor) -> void:
+	_unindex_descriptor_doors(region_id)
+	var ids := {}
+	for value in _descriptor_array(descriptor, "door_portals"):
+		if not value is Dictionary: continue
+		var portal_id := String(value.get("id", value.get("portalId", "")))
+		if portal_id != "": ids[portal_id] = true
+	for value in _descriptor_array(descriptor, "door_links"):
+		if not value is Dictionary: continue
+		var portal_id := String(value.get("portalId", value.get("portal_id", "")))
+		if portal_id != "": ids[portal_id] = true
+	if ids.is_empty(): return
+	_door_descriptor_portals_by_region[region_id] = ids
+	for portal_id: String in ids:
+		if not _door_descriptor_regions_by_portal.has(portal_id):
+			_door_descriptor_regions_by_portal[portal_id] = {}
+		_door_descriptor_regions_by_portal[portal_id][region_id] = true
+
+func _filter_descriptor_door(region_id: String, portal_id: String) -> bool:
+	var descriptor = descriptors_by_region.get(region_id)
+	if descriptor == null: return false
+	var portals: Array[Dictionary] = []
+	var links: Array[Dictionary] = []
+	var removed := false
+	for value: Dictionary in _descriptor_array(descriptor, "door_portals"):
+		if String(value.get("id", value.get("portalId", ""))) == portal_id: removed = true
+		else: portals.append(value)
+	for value: Dictionary in _descriptor_array(descriptor, "door_links"):
+		if String(value.get("portalId", value.get("portal_id", ""))) == portal_id: removed = true
+		else: links.append(value)
+	if not removed: return false
+	# NavigationBakeDescriptor's ordinary data schema; retain all geometry arrays
+	# by identity. Only the descriptor shell and its two door arrays are new.
+	var filtered = NavigationBakeDescriptorScript.new()
+	for property: String in ["region_id", "tile_key", "bounds", "revision", "loaded", "metadata", "walkable_surfaces", "blockers", "semantic_anchors"]:
+		filtered.set(property, descriptor.get(property))
+	filtered.door_portals = portals
+	filtered.door_links = links
+	descriptors_by_region[region_id] = filtered
+	_index_descriptor_doors(region_id, filtered)
+	# Invalidate the old source signature without walking unrelated geometry.
+	# Ordinary registration computes its signature again; a fresh same-ID source
+	# must never hit a cached signature belonging to the removed door set.
+	var metrics: Dictionary = region_metrics_by_region.get(region_id, {})
+	metrics.erase("signature")
+	region_metrics_by_region[region_id] = metrics
+	return true
 
 func closest_walkable(position: Vector3, max_distance := INF) -> Dictionary:
 	var server_result := _closest_walkable_from_server(position, max_distance)
@@ -1478,6 +1609,11 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 			continue
 		var portal: Dictionary = portal_by_id.get(portal_id, {})
 		var base_metadata := _merged_link_metadata(portal, link_spec, door_portal_states.get(portal_id, {}))
+		# A live grouped survivor overlay overrides the old representative stored
+		# in a descriptor. Validate only AFTER that ordinary precedence is applied.
+		if not _door_reference_available(base_metadata):
+			failures += 1
+			continue
 		var start_position := _door_link_position(link_spec, portal, ["start", "startPosition", "fromPosition", "entrance"], Vector3.ZERO)
 		var end_position := _door_link_position(link_spec, portal, ["end", "endPosition", "toPosition", "exit"], Vector3.ZERO)
 		if start_position == end_position:
@@ -1521,6 +1657,11 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 	installed_door_link_count += installed
 	door_link_install_failure_count += failures
 	return { "status": "installed", "installed": installed, "failed": failures }
+
+func _door_reference_available(metadata: Dictionary) -> bool:
+	if not metadata.has("door"): return true # Ordinary value-only tile snapshots.
+	var door = metadata.get("door")
+	return is_instance_valid(door) and door is Node and not door.is_queued_for_deletion()
 
 func _descriptor_array(descriptor, property_name: String) -> Array:
 	if descriptor == null:

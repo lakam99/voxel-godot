@@ -454,6 +454,19 @@ func notify_object_removed(object_id: String, node_or_reason = null, reason := "
 		return
 	mark_registration_removed(registration, removal_reason)
 
+## Streaming removes a binding, not the durable resource. An old scene cannot
+## unbind a newer instance which happens to use the same deterministic ID.
+func notify_object_unloaded(object_id: String, node: Node) -> Dictionary:
+	if object_id == "" or not is_instance_valid(node):
+		return {"status":"failed", "reason":"invalid_object_binding"}
+	var registration = registrations.get(object_id)
+	if registration == null or registration.node == null:
+		return {"status":"absent", "objectId":object_id}
+	if not is_same(registration.node, node):
+		return {"status":"failed", "reason":"object_binding_mismatch", "objectId":object_id}
+	mark_registration_unbound(registration, "object_streamed_out")
+	return {"status":"unregistered", "objectId":object_id}
+
 func object_available(object_id: String, actor_id := "") -> Dictionary:
 	var registration = registrations.get(object_id)
 	if registration == null:

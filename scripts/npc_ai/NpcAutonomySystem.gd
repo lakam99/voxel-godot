@@ -66,6 +66,8 @@ var recovery_policy
 var plan_executor
 var simulation_lod
 var route_authority_v2
+var _pending_prop_unloads: Dictionary = {}
+var _pending_door_unloads: Dictionary = {}
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -643,6 +645,41 @@ func notify_chunk_loaded(chunk_key: Vector2i) -> void:
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED, object_id, _bounds_for_chunk(chunk_key), [NavigationChangeBusScript.tile_key_for_chunk(chunk_key)])
 	telemetry.increment(&"change_chunk_loaded")
 
+func notify_prop_unloaded(prop_id: String, prop: Node) -> Dictionary:
+	if smart_objects == null or not is_instance_valid(prop):
+		return {"status":"failed", "reason":"missing_prop_owner"}
+	var result: Dictionary = smart_objects.notify_object_unloaded("prop:%s" % prop_id, prop)
+	if result.get("status") in ["unregistered", "absent"]:
+		# Static snapshots discover props in the scene tree. Notify only when
+		# the owner actually removes this instance, not during child-by-child
+		# teardown while the same intact body is still discoverable.
+		var bounds := AABB()
+		if prop is Node3D:
+			bounds = AABB((prop as Node3D).global_position - Vector3.ONE * NpcConstantsScript.CELL_SIZE * 0.5, Vector3.ONE * NpcConstantsScript.CELL_SIZE)
+		var instance_id := prop.get_instance_id()
+		if _pending_prop_unloads.has(instance_id): return result
+		_pending_prop_unloads[instance_id] = {"propId":prop_id, "bounds":bounds, "registry":weakref(smart_objects)}
+		var callback := Callable(self, "_on_streamed_prop_exiting").bind(instance_id)
+		if prop.is_inside_tree():
+			prop.tree_exiting.connect(callback, CONNECT_ONE_SHOT)
+		else:
+			_on_streamed_prop_exiting(instance_id)
+	return result
+
+func _on_streamed_prop_exiting(instance_id: int) -> void:
+	if not _pending_prop_unloads.has(instance_id): return
+	var pending: Dictionary = _pending_prop_unloads[instance_id]
+	_pending_prop_unloads.erase(instance_id)
+	var registry: WeakRef = pending.registry
+	var prop_id: String = pending.propId
+	var bounds: AABB = pending.bounds
+	# A world reset or same-ID replacement must not inherit an old exit event.
+	if registry.get_ref() == null or not is_same(registry.get_ref(), smart_objects): return
+	var registration = smart_objects.registrations.get("prop:%s" % prop_id)
+	if registration != null and is_instance_valid(registration.node) and registration.node.get_instance_id() != instance_id: return
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_PROP_REMOVED, "prop:%s" % prop_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	telemetry.increment(&"change_prop_removed")
+
 func notify_chunk_unloaded(chunk_key: Vector2i) -> void:
 	var object_id := "chunk:%d,%d" % [chunk_key.x, chunk_key.y]
 	var tile_key := NavigationChangeBusScript.tile_key_for_chunk(chunk_key)
@@ -686,6 +723,47 @@ func notify_door_registered(door: Node) -> void:
 			bounds = AABB(position - Vector3.ONE * 0.5, Vector3.ONE)
 	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED, object_id, bounds, [tile_key])
 	telemetry.increment(&"change_door_registered")
+
+func notify_door_unregistered(door: Node) -> Dictionary:
+	if smart_objects == null or not is_instance_valid(door):
+		return {"status":"failed", "reason":"missing_door_owner"}
+	var instance_id := door.get_instance_id()
+	if not _pending_door_unloads.has(instance_id):
+		var receipt: Dictionary = smart_objects.unregister_door(door)
+		if receipt.get("status") != "unregistered": return receipt
+		_pending_door_unloads[instance_id] = {"receipt":receipt, "registry":weakref(smart_objects), "navigation":weakref(navmesh_world) if navmesh_world != null else null}
+	var pending: Dictionary = _pending_door_unloads[instance_id]
+	if not is_same(pending.registry.get_ref(), smart_objects):
+		return {"status":"failed", "reason":"door_retirement_registry_changed"}
+	var result: Dictionary = pending.receipt
+	var portal_id := String(result.portalId)
+	if bool(result.portalRemoved):
+		# A partial failure retains its exact original portal identity. Never
+		# erase a replacement registered under that ID while a retry was pending.
+		if door_portals.portals.has(portal_id):
+			return {"status":"failed", "reason":"door_retirement_portal_replaced"}
+		if pending.navigation != null:
+			var navigation = pending.navigation.get_ref()
+			if navigation == null or not is_same(navigation, navmesh_world):
+				return {"status":"failed", "reason":"door_retirement_navigation_changed"}
+			var retired: Dictionary = navigation.forget_door_portal(portal_id)
+			if retired.get("status") not in ["forgotten", "absent"]:
+				return {"status":"pending_budget", "reason":"door_navigation_retirement_pending", "portalId":portal_id}
+			result["navigationRetirement"] = retired
+	else:
+		var portal = door_portals.portals.get(portal_id)
+		if portal != null and not portal.leaf_nodes.is_empty():
+			_publish_door_portal_to_navmesh(portal.leaf_nodes[0])
+	# Use ordinary structural invalidation, not a door-state toggle: the leaf's
+	# collision is leaving the world. The streaming owner frees it after this ack.
+	var bounds := AABB()
+	if door.has_meta("cell"):
+		bounds = _bounds_for_cell(door.get_meta("cell"))
+	elif door is Node3D:
+		bounds = AABB((door as Node3D).global_position - Vector3.ONE * 0.5, Vector3.ONE)
+	notify_structure_metadata_changed(portal_id, bounds, {"reason":"door_streamed_out"})
+	_pending_door_unloads.erase(instance_id)
+	return result
 
 func register_door(door: Node, metadata := {}) -> String:
 	if smart_objects == null:

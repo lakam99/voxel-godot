@@ -1992,6 +1992,11 @@ func try_load_world(show_message := false) -> bool:
     return loaded
 
 func start_new_game(show_message := true) -> bool:
+    # This compatibility entry point cannot yield. Live generated scenes must
+    # use the staged entry point so cleanup precedes seed/save/registry changes.
+    if structure_system != null and structure_system.citadel_publication.requires_scene_retirement():
+        if show_message: update_hud("Use the game menu to start a new world while landmarks are loaded")
+        return false
     playtest_progress("new_game_start")
     var previous_seed := seed_text
     if save_system:
@@ -2043,6 +2048,9 @@ func start_new_game_staged(show_message := true) -> bool:
         player.set_physics_process(false)
         player.velocity = Vector3.ZERO
     await startup_loading_yield("Starting new game")
+    if not await retire_generated_scenes_before_world_reset():
+        await stop_startup_loading(StartupReadinessResultScript.failed("generated_scene_retirement_failed"))
+        return false
     var previous_seed := seed_text
     if save_system:
         playtest_progress("new_game_staged_delete_save")
@@ -2159,9 +2167,22 @@ func _graceful_quit_deferred(exit_code: int) -> void:
             await wait_for_async_save_before_quit()
         else:
             save_system.save(seed_text, snapshot)
-    await wait_for_npc_navigation_before_quit()
     await wait_for_terrain_workers_before_quit()
+    # Streamed structures retire their shared door/resource bindings while the
+    # NPC registry still exists. Only then release the navigation owner/map.
+    await wait_for_npc_navigation_before_quit()
     get_tree().quit(exit_code)
+
+func retire_generated_scenes_before_world_reset() -> bool:
+    if structure_system == null: return true
+    var publication = structure_system.citadel_publication
+    publication.begin_world_reset()
+    var deadline := Time.get_ticks_msec() + 30000
+    while not publication.world_reset_ready():
+        if Time.get_ticks_msec() >= deadline: return false
+        # startup_loading_yield already advances this queue once per frame.
+        await startup_loading_yield("Clearing previous landmarks")
+    return true
 
 func wait_for_async_save_before_quit() -> void:
     if save_system == null or not save_system.has_method("has_async_save_pending"):

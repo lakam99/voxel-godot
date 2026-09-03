@@ -47,6 +47,9 @@ var _scene_completed_count := 0
 var _scene_max_step_usec := 0
 var _advancing := false
 var _configuration_serial := 0
+var _world_reset_pending := false
+var _world_reset_release_requested := false
+var _worker_polled_configuration := -1
 
 ## Bind only after the owner can balance its ordinary scene/tree lifecycle.
 ## No strong owner/callback cycles; reject capturing/bound custom callables.
@@ -98,6 +101,10 @@ func _scene_callbacks_ready() -> bool:
 
 func configure(admission) -> void:
 	_configuration_serial+=1
+	# Configuration changes terrain identity, not permission to replace old
+	# gameplay owners. Only an explicit post-registry-reset completion opens it.
+	_world_reset_release_requested=false
+	_worker_polled_configuration=-1
 	_worker.reset()
 	_retire_all_scenes()
 	_retire_all()
@@ -117,6 +124,7 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 	if _admission != null and int(_admission.stats().generation) != _generation:
 		configure(_admission)
 	var configuration:=_configuration_serial
+	allow_dispatch = allow_dispatch and not _world_reset_pending
 	# Draining is independent of native/current-generation readiness. Retired
 	# payloads were relinquished by prior calls before the worker starts disposal.
 	if _submitted_scene_disposals.is_empty() and not _retired.is_empty() and _worker.retire_external_payload(_retired):
@@ -129,6 +137,7 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 		_prune_unwanted(ready)
 	_prune_invalid_scenes()
 	_last_worker_status = _worker.poll()
+	_worker_polled_configuration = _configuration_serial
 	# The exclusively owned external batch has been accepted; idle with no
 	# pending retirement proves its worker disposal/join completed, not merely
 	# that scene nodes disappeared. Failed thread starts retain pending claims.
@@ -143,6 +152,9 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 			_worker.cancel(int(_inflight.token))
 			_inflight = {}
 	_pump_scenes(ready,allow_dispatch and not _closing,started,budget_usec)
+	if _world_reset_release_requested and world_reset_ready():
+		_world_reset_pending = false
+		_world_reset_release_requested = false
 	if allow_dispatch and not _closing and configuration==_configuration_serial and _retired.is_empty() and _inflight.is_empty():
 		_dispatch(ready,observer_bounds.get_center())
 	_max_advance_usec = maxi(_max_advance_usec,Time.get_ticks_usec()-started)
@@ -253,6 +265,25 @@ func _retire_all() -> void:
 	if not _prepared.is_empty(): _retire(_prepared)
 	_prepared = {}
 
+## Drain old scene callbacks before the ordinary owner replaces NPC registries.
+## Configuration alone never opens the fence; the owner explicitly completes
+## it after replacing its registries, with a fresh worker poll required too.
+func begin_world_reset() -> void:
+	if _closing or _world_reset_pending: return
+	configure(_admission)
+	_world_reset_pending = true
+
+func complete_world_reset() -> void:
+	if _world_reset_pending: _world_reset_release_requested = true
+
+func requires_scene_retirement() -> bool:
+	return not _scenes.is_empty() or _has_scene_retirements()
+
+func world_reset_ready() -> bool:
+	return _world_reset_pending and not requires_scene_retirement() and _retired.is_empty() \
+		and _worker_polled_configuration == _configuration_serial \
+		and not bool(_last_worker_status.get("busy",true)) and not bool(_last_worker_status.get("retirementPending",true))
+
 func request_shutdown() -> void:
 	_closing = true
 	_retire_all_scenes()
@@ -266,6 +297,7 @@ func stats() -> Dictionary:
 	for entry in _scenes.values():
 		if entry.phase=="scene_ready": constructed+=1
 	return {"generation":_generation,"worldSeed":_seed,"desiredSites":_desired.size(),
+		"worldResetPending":_world_reset_pending,"worldResetReady":world_reset_ready(),
 		"preparedSites":_prepared.size(),"pendingRetirements":_retired.size(),
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
 		"dispatchCount":_dispatch_count,"acceptedCount":_accepted_count,"maxAdvanceUsec":_max_advance_usec,

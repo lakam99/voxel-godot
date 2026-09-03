@@ -3,6 +3,9 @@
 const FIRST_STORY_QUEST_ID := "story.gloam_hart.storm"
 
 func reset_runtime_world_state(reload_world := true) -> void:
+    if structure_system != null and structure_system.citadel_publication.requires_scene_retirement():
+        push_error("Generated scenes must finish retirement before resetting world registries")
+        return
     playtest_progress("reset_runtime_start")
     if world_edit_followup_queue != null and world_edit_followup_queue.has_method("reset"):
         world_edit_followup_queue.reset()
@@ -31,6 +34,7 @@ func reset_runtime_world_state(reload_world := true) -> void:
     clear_all_blocks()
     if structure_system and structure_system.has_method("reset"):
         structure_system.reset()
+        structure_system.citadel_publication.complete_world_reset()
     if story_director and story_director.has_method("reset"):
         story_director.reset()
     if story_world_overlay_system and story_world_overlay_system.has_method("reset"):
