@@ -62,6 +62,36 @@ func add_leaf(door: Node) -> void:
 	_update_orientation_from_door(door)
 	rebuild_geometry()
 
+## The caller unregisters a live leaf before freeing it. Keep grouped survivors'
+## logical state and actor ownership; only their physical membership changes.
+func remove_leaf(door: Node) -> bool:
+	if not is_instance_valid(door) or not leaf_nodes.has(door): return false
+	var survivors: Array[Node] = []
+	var cells: Array[Vector3i] = []
+	var ids: Array[String] = []
+	for leaf in leaf_nodes:
+		if not is_instance_valid(leaf) or leaf == door: continue
+		survivors.append(leaf)
+		cells.append(leaf.get_meta("cell", Vector3i.ZERO))
+		ids.append(String(leaf.name))
+	leaf_nodes=survivors
+	leaf_cells=cells
+	leaf_ids=ids
+	approach_slots={}
+	rebuild_geometry()
+	return true
+
+## Retired portal references must not continue granting holds/crossings. This
+## is streaming ownership removal, not destruction of a durable world door.
+func retire_unloaded() -> void:
+	unloaded=true
+	state=NpcEnumsScript.DOOR_STATE_UNLOADED
+	state_revision+=1
+	open_holds.clear()
+	queued_actors.clear()
+	active_crossing.clear()
+	approach_slots.clear()
+
 func rebuild_geometry() -> void:
 	if leaf_nodes.is_empty():
 		threshold_bounds = AABB()

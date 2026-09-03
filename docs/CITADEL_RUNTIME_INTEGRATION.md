@@ -68,6 +68,16 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The user explicitly approved narrowly scoped shared-door cleanup. New per-leaf
+unregistration preserves grouped survivors and retires only the final portal's
+transient traversal/traffic state. Synthetic controls pass 83/83 and six NPC
+suite results/error logs match the recorded baseline. See
+`CITADEL_DOOR_UNREGISTRATION_2026-09-02.md`. The independent critic approved
+the focused API commit. This API boundary is not yet wired
+into scene teardown; smart-object representation, balanced publication hooks
+and player-safe activation remain open. No headed or ordinary-spawn acceptance
+is claimed.
+
 Repeated aperture/paving bindings now avoid deep-copying recipes solely for
 comparison, preserving the exact-script raw snapshot format and mutable guards.
 Oracle controls pass 103/103; scene-job controls 376/376; unchanged aperture,
@@ -84,7 +94,7 @@ same available scene record; final unchanged preparation regression passes
 69/69. See `CITADEL_SERVICE_SCENE_OWNERSHIP_2026-09-02.md`. Production has no
 configured scene owner yet: scene construction remains explicitly pending until full
 shared-door lifecycle and player-safe publication are implemented. Protected
-door cleanup permission is still unanswered. Service construction is not
+door cleanup permission has now been granted for the narrow API above. Service construction is not
 ordinary-play activation. The critic's two initial rejects (paused publishing-root
 damage and worker-disposal reservation lifetime) are repaired with new targeted
 controls. Existing 24.972 ms maximum service work exceeds the

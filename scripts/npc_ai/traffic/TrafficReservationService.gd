@@ -224,6 +224,44 @@ func release_resource_prefix(prefix: String, reason := "resource_removed") -> in
 func destroy_portal(portal_id: String) -> int:
 	return release_resource_prefix("portal:%s" % portal_id, "portal_destroyed")
 
+## Streaming cleanup is exact-resource scoped. Do not cancel an actor: it may
+## still own other portals, movement steps or interaction reservations.
+func release_portal(portal_id: String) -> int:
+	if portal_id.is_empty(): return 0
+	var base := "portal:%s" % portal_id
+	var resources := [base+":threshold",base+":edge:x+",base+":edge:x-",base+":edge:z+",base+":edge:z-"]
+	var released := 0
+	var affected_groups := {}
+	for resource_id: String in resources:
+		var ids: Array = reservations_by_resource.get(resource_id, []).duplicate()
+		for reservation_id in ids:
+			var reservation=reservations_by_id.get(reservation_id)
+			if reservation!=null: affected_groups[String(reservation.get("group_id"))]=true
+			if _release_reservation(String(reservation_id), "portal_unloaded"): released+=1
+		for queued in queues_by_resource.get(resource_id,{}).values():
+			affected_groups[String(queued.get("groupId",""))]=true
+		queues_by_resource.erase(resource_id)
+	var remaining_queued_groups := {}
+	for queue in queues_by_resource.values():
+		for queued in queue.values(): remaining_queued_groups[String(queued.get("groupId",""))]=true
+	# The current request records its exact originating portal. A newer request
+	# elsewhere (even for the same actor) must keep its wait graph and policy data.
+	for actor_id in owner_requests.keys():
+		var request: Dictionary=owner_requests[actor_id]
+		var group_id:=String(request.get("groupId",""))
+		var from_portal: bool=request.get("kind")=="portal" and request.get("metadata",{}).get("portalId")==portal_id
+		# Direct resource callers may have no portal metadata. Exact removed
+		# group ownership is also sufficient, but not while that group owns work
+		# elsewhere. Never infer ownership from an actor or group-name prefix.
+		if not from_portal and (group_id.is_empty() or not affected_groups.has(group_id)): continue
+		if reservations_by_group.has(group_id) or remaining_queued_groups.has(group_id): continue
+		owner_requests.erase(actor_id)
+		wait_graph.clear_waiter(String(actor_id))
+		cycle_resolution_by_owner.erase(actor_id)
+	metrics["released"]=int(metrics.get("released",0))+released
+	_record("portal_unloaded",{"portalId":portal_id,"released":released})
+	return released
+
 func actor_removed(owner_id: String) -> int:
 	return release_owner(owner_id, "actor_removed")
 

@@ -61,6 +61,44 @@ func register_door(door: Node, metadata := {}) -> String:
 	door.set_meta("door_state_revision", portal.state_revision)
 	return portal_id
 
+## Unregister before the streaming owner frees a leaf. Registry identity is the
+## authority: copied/spoofed metadata cannot remove another registered door.
+func unregister_door(door: Node) -> Dictionary:
+	if not is_instance_valid(door):
+		return {"status":"failed","reason":"invalid_door","portalRemoved":false}
+	var instance_id := door.get_instance_id()
+	if not door_to_portal.has(instance_id):
+		return {"status":"absent","reason":"not_registered","portalRemoved":false}
+	var portal_id := String(door_to_portal[instance_id])
+	var portal=portals.get(portal_id)
+	if portal==null or not portal.remove_leaf(door):
+		return {"status":"failed","reason":"door_membership_mismatch","portalRemoved":false}
+	var live_ids := {}
+	for leaf in portal.leaf_nodes: live_ids[leaf.get_instance_id()]=true
+	# Also discard indexed peers already freed by an external owner. Their former
+	# instance IDs are available only in this registry, never inferred from metadata.
+	for id in door_to_portal.keys():
+		if door_to_portal[id]==portal_id and not live_ids.has(id): door_to_portal.erase(id)
+	var removed: bool=portal.leaf_nodes.is_empty()
+	if removed:
+		# Keep the portal resolvable until its existing owners release transient
+		# crossing/traffic state. These operations issue no world-destruction event.
+		if is_instance_valid(owner):
+			var traversal=owner.get("door_traversal")
+			if traversal!=null: traversal.release_portal(portal_id)
+			var traffic=owner.get("traffic_reservations")
+			if traffic!=null: traffic.release_portal(portal_id)
+		scheduled_closes.erase(portal_id)
+		portal.retire_unloaded()
+		var controller=controllers.get(portal_id)
+		if controller!=null:
+			controller.state_changed_callback=Callable()
+			controller.portal=null
+		controllers.erase(portal_id)
+		portals.erase(portal_id)
+	_record_lifecycle_note("unregister_door",portal_id,{"portalRemoved":removed,"remainingLeaves":portal.leaf_nodes.size()})
+	return {"status":"unregistered","reason":"","portalId":portal_id,"portalRemoved":removed,"remainingLeaves":portal.leaf_nodes.size()}
+
 func request_interaction(interaction_request, actors: Array = []):
 	var portal_id := resolve_portal_id(interaction_request.get("object_node"), String(interaction_request.get("object_id")))
 	if portal_id == "":

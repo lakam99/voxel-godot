@@ -134,6 +134,23 @@ func release_actor(actor_or_id, schedule_close := true) -> void:
 			door_portals.release_actor(portal_id, actor_id, schedule_close)
 			metrics["released"] = int(metrics.get("released", 0)) + 1
 
+## The shared door owner calls this when the final leaf is unregistered. Keep
+## every other crossing for the actor and do not schedule a close on a dead door.
+## Traffic ownership is retired separately by TrafficReservationService.
+func release_portal(portal_id: String) -> int:
+	if portal_id.is_empty(): return 0
+	var released := 0
+	for key in active_crossings.keys():
+		var active: Dictionary=active_crossings[key]
+		if String(active.get("portalId",""))!=portal_id: continue
+		active_crossings.erase(key)
+		if door_portals!=null:
+			var portal=door_portals.portals.get(portal_id)
+			if portal!=null: portal.release(String(active.get("actorId","")))
+		released+=1
+	metrics["released"]=int(metrics.get("released",0))+released
+	return released
+
 func cancel_actor(actor_or_id) -> void:
 	var actor_id := ""
 	if actor_or_id is Node:
