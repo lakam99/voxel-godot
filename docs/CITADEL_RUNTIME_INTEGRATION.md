@@ -68,6 +68,19 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+Roof publication now uses the same exact-output resumable helper for ordinary
+construction and the compatibility drain. The actual source passes 70/70 with
+all 68 roofs completed once and byte-identical available scene facts. Roof
+units peak at 0.493 ms, versus the prior 17.851 ms whole-roof operation. See
+`CITADEL_INCREMENTAL_ROOF_PUBLICATION_2026-09-02.md`. Scene time increases from
+22.484 s to 24.189 s; finish still peaks at 26.137 ms. This is a bounded-roof
+checkpoint, not a throughput or overall budget pass. Final mutable source
+validation remains intact; new timings identify aperture and completed-paving
+checks as its dominant work. The independent critic approved this focused commit
+and classified the NPC log delta as accepted baseline timing variation. Ordinary
+activation, physical access, shared-door cleanup and headed acceptance remain
+unfinished; no performance or headed approval is claimed.
+
 The shared preparation worker now supplies all 1,450 masonry descriptors to
 ordinary wall publication and aperture preparation. Final actual construction
 passes 68/68 with byte-identical available scene facts and clean owned shutdown.

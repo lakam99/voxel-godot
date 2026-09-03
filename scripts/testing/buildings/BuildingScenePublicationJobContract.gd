@@ -25,6 +25,14 @@ class InvalidatingMasonryPublisher extends "res://scripts/buildings/BuildingPart
 		super.publish_practical_light(part,target)
 		if not fired and hook=="light": invalidate()
 
+class RoofCancellationPublisher extends "res://scripts/buildings/BuildingPartPublisher.gd":
+	var cancellation_target: WeakRef
+	var collect_calls := 0
+	func collect_static_visual_transform(transform: Transform3D, material: Material, custom_data := Color(0.5,0.5,0.5,1.0)) -> void:
+		super.collect_static_visual_transform(transform,material,custom_data)
+		collect_calls+=1
+		if cancellation_target!=null: cancellation_target.get_ref().cancel()
+
 class SyntheticTrees extends RefCounted:
 	var published := 0
 	var retired := 0
@@ -152,8 +160,17 @@ func pending_masonry_holder() -> Preparation.PreparedSource:
 	prepared._payload.blueprint.parts[0]=Blueprint.BuildingPartScript.new({"id":"pending-masonry","kind":"wall","material":"stone_foundation","size":Vector3(6,8,0.4),"recipe":{"practicalLight":true}})
 	return prepared
 
+func pending_roof_holder() -> Preparation.PreparedSource:
+	var prepared:=pending_holder(false)
+	prepared._payload.blueprint.parts[0]=Blueprint.BuildingPartScript.new({"id":"pending-roof","kind":"roof","material":"roof_slate","size":Vector3(18,0.15,14),"recipe":{"practicalLight":true}})
+	return prepared
+
 func pending_target_reached(job, target: String) -> bool:
 	if job._building == null: return false
+	if target.begins_with("roof_"):
+		var roof=job._building._pending_roof
+		if roof==null: return false
+		return roof.state==("tiles" if target=="roof_tiles" else "collect")
 	if target.begins_with("masonry_"):
 		var masonry=job._building._pending_masonry
 		if masonry==null: return false
@@ -220,12 +237,13 @@ func watch_pending_resources(job) -> Dictionary:
 	if publisher._pending_masonry!=null:
 		watched.masonry=weakref(publisher._pending_masonry)
 		if publisher._pending_masonry._cursor!=null: watched.geometry=weakref(publisher._pending_masonry._cursor)
+	if publisher._pending_roof!=null: watched.roof=weakref(publisher._pending_roof)
 	return watched
 
 func pending_cancellation_case(target: String) -> void:
 	var trees := SyntheticTrees.new()
 	var job = Job.new()
-	start(job, trees, pending_masonry_holder() if target.begins_with("masonry_") else pending_holder(target != "static_flush"))
+	start(job, trees, pending_roof_holder() if target.begins_with("roof_") else (pending_masonry_holder() if target.begins_with("masonry_") else pending_holder(target != "static_flush")))
 	job.advance(1) # Establish real publishers; begin itself consumed no part.
 	if target == "static_flush": inject_synthetic_flush_threshold(job)
 	for index in range(10000):
@@ -237,10 +255,13 @@ func pending_cancellation_case(target: String) -> void:
 		job.cancel()
 		await drain(job, target + "_setup_failed")
 		return
-	var part_id := "pending-masonry" if target.begins_with("masonry_") else ("flush-trigger" if target == "static_flush" else "pending-paving")
+	var part_id := "pending-roof" if target.begins_with("roof_") else ("pending-masonry" if target.begins_with("masonry_") else ("flush-trigger" if target == "static_flush" else "pending-paving"))
 	var expected_cursor := 1 if target == "static_flush" else 0
 	check(target + "_one_initial_collider", collision_count_for(job, part_id) == 1 and job._building.collision_count == 1)
 	check(target + "_next_part_not_submitted", collision_count_for(job, "after-pending") == 0 and job.status().buildingCursor == expected_cursor)
+	if target.begins_with("roof_"):
+		var finish: Dictionary=job._building.finish_scene_publication(job._blueprint,job.own_node_root(),1)
+		check(target+"_finish_waits",finish.status=="pending_budget" and not finish.complete)
 	# Retry the same pending cursor several times: neither collision creation nor
 	# source submission is repeated while geometry/upload/flush makes progress.
 	for index in range(6): job.advance(1)
@@ -309,6 +330,61 @@ func masonry_completion_control() -> void:
 	check("masonry_success_deferred_light_once",job.own_node_root().find_children("*","OmniLight3D",true,false).size()==1)
 	job.cancel()
 	await drain(job,"masonry_success")
+
+func roof_reentrant_job_cancellation() -> void:
+	# Synthetic ownership setup, real helper -> collection hook -> Job.cancel.
+	# Proves the same call stops; it is not ordinary-world activation evidence.
+	var publisher:=RoofCancellationPublisher.new()
+	var job=Job.new()
+	job._phase="building"
+	job._building=publisher
+	publisher.cancellation_target=weakref(job)
+	publisher.source_blueprint_id="roof-cancellation"
+	var part=Blueprint.BuildingPartScript.new({"id":"pending-roof","kind":"roof","material":"roof_slate","size":Vector3(8,0.15,6)})
+	var helper=publisher.RoofPublication.new(part,parent,Transform3D.IDENTITY,true,publisher.source_blueprint_id)
+	publisher._pending_roof=helper
+	for index in range(10000):
+		helper.advance(publisher,2500)
+		if publisher.collect_calls>0: break
+	check("roof_reentrant_job_cancelled",job.status().status=="cancelled" and job.status().phase=="teardown")
+	check("roof_reentrant_one_submission",publisher.collect_calls==1)
+	helper.advance(publisher,4000)
+	check("roof_reentrant_no_later_submission",publisher.collect_calls==1 and helper.state=="failed")
+	publisher.clear_published()
+	job._building=null
+
+func roof_lifecycle_controls() -> void:
+	roof_reentrant_job_cancellation()
+	var trees:=SyntheticTrees.new()
+	var job=Job.new()
+	start(job,trees,pending_roof_holder())
+	var pending_seen:=false
+	for index in range(10000):
+		job.advance(2500)
+		if job._building!=null and job._building._pending_roof!=null: pending_seen=true
+		if job.status().status in ["ready","failed"]: break
+	check("roof_success_pending_and_complete",pending_seen and job.status().sceneReady)
+	check("roof_success_exact_cursor",job.status().buildingCursor==2 and job._building.incremental_published_parts==2)
+	check("roof_success_single_collision",collision_count_for(job,"pending-roof")==1 and job._building.collision_count==2)
+	check("roof_success_deferred_light_once",job.own_node_root().find_children("*","OmniLight3D",true,false).size()==1)
+	check("roof_success_trees_after_building",trees.calls==2)
+	job.cancel()
+	await drain(job,"roof_success")
+	for mode: String in ["mutation","replacement","cursor"]:
+		trees=SyntheticTrees.new()
+		job=Job.new()
+		start(job,trees,pending_roof_holder())
+		for index in range(1000):
+			job.advance(1)
+			if pending_target_reached(job,"roof_tiles"): break
+		check("roof_"+mode+"_pending_reached",pending_target_reached(job,"roof_tiles"))
+		if mode=="mutation": job._blueprint.parts[0].size.x+=0.1
+		elif mode=="replacement": job._blueprint.parts[0]=Blueprint.BuildingPartScript.new(job._blueprint.parts[0].snapshot())
+		else: job._building_cursor=1
+		job.advance(1)
+		check("roof_"+mode+"_failed_not_ready",job.status().status=="failed" and not job.status().sceneReady and trees.calls==0)
+		check("roof_"+mode+"_no_second_collision",job._building.collision_count==1)
+		await drain(job,"roof_"+mode)
 
 func masonry_hook_controls() -> void:
 	# Synthetic fault injection through real publisher hooks. The cursor below
@@ -605,10 +681,11 @@ func _run() -> void:
 			if job.status().status == "failed": break
 		check("bad_tree_state_" + state, job.status().status == "failed" and not job.status().sceneReady)
 		await drain(job, "bad_tree_" + state)
-	for target: String in ["paving_geometry", "paving_upload", "static_flush","masonry_geometry","masonry_collect"]:
+	for target: String in ["paving_geometry", "paving_upload", "static_flush","masonry_geometry","masonry_collect","roof_tiles","roof_collect"]:
 		await pending_cancellation_case(target)
 	await pending_completion_control()
 	await masonry_completion_control()
+	await roof_lifecycle_controls()
 	masonry_hook_controls()
 	await prepared_history_lifecycle_controls()
 	await prepared_masonry_controls()

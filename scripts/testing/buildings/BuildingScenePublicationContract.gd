@@ -142,6 +142,12 @@ func actual_publication() -> void:
 	check("actual_advance_accounting",status.advanceCalls>0 and status.advanceCpuUsec>0 and status.betweenAdvanceUsec>=0)
 	check("actual_no_main_masonry_descriptor",metrics.publisherStages.get("masonry_publish_geometry",{}).get("calls",0)==0 and job._building._masonry_preparation.metrics.maxDescriptorUsec==0)
 	check("actual_prepared_masonry_consumed",metrics.publisherStages.get("prepared_masonry_lookup",{}).get("calls",0)==metrics.preparedMasonryCount)
+	var roof_count := 0
+	for part in job._blueprint.parts:
+		if part!=null and String(part.kind)=="roof" and bool(part.recipe.get("visual",true)): roof_count+=1
+	metrics.roofCount=roof_count
+	check("actual_roofs_use_resumable_publication",roof_count>0 and metrics.publisherStages.get("roof_publish_setup",{}).get("calls",0)==roof_count and metrics.publisherStages.get("roof_publish_tiles",{}).get("calls",0)>roof_count)
+	check("actual_roofs_complete_exactly_once",metrics.publisherStages.get("roof_publish_eave",{}).get("calls",0)==roof_count and metrics.publisherStages.get("roof_publish_ridge",{}).get("calls",0)==roof_count and metrics.publisherStages.get("roof_publish_finish",{}).get("calls",0)==roof_count)
 	metrics.retainedMetadata=measure_retained_metadata(job._building)
 	metrics.metadataCache=job._building._static_record_cache_stats.duplicate() if job._building!=null else {}
 	metrics.metadataCache["currentRecords"]=job._building._static_record_cache.size() if job._building!=null else 0

@@ -139,6 +139,9 @@ func advance(budget_usec: int = 2500) -> Dictionary:
 func cancel() -> void:
 	if _phase in ["idle", "retired", "consumed"]: return
 	_cancelled = true
+	# Stop a roof helper already inside an external publication callback; retain
+	# its allocations for the existing owned retirement path.
+	if _building!=null and _building._pending_roof!=null: _building._pending_roof.cancel()
 	if _reason.is_empty(): _reason = "cancelled"
 	_tree_receiver = null
 	_tree_method = &""

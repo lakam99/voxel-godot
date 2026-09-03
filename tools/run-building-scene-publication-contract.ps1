@@ -9,6 +9,7 @@ New-Item -ItemType Directory -Path $run,(Join-Path $run 'userdata') | Out-Null
 $files=@('scripts/buildings/BuildingPartPublisher.gd','scripts/buildings/FurnishingPublisher.gd','scripts/buildings/BuildingPublicationPreparation.gd','scripts/buildings/BuildingPublicationWorker.gd','scripts/MainPlaytestTools.gd','scripts/environment/TreePublicationQueue.gd','scripts/testing/buildings/BuildingScenePublicationContract.gd','tools/run-building-scene-publication-contract.ps1')
 $files+=@('scripts/buildings/BuildingStaticBatchFlush.gd','scripts/buildings/BuildingMeshBatchUpload.gd','scripts/buildings/BuildingPavingPublication.gd','scripts/buildings/SettledCobbleGeometry.gd')
 $files+=@('scripts/buildings/BuildingMasonryPublication.gd','scripts/buildings/MasonryDescriptorGeometry.gd','scripts/buildings/MasonryAperturePublication.gd')
+$files+='scripts/buildings/BuildingRoofPublication.gd'
 if($Phase -eq 'actual'){$files+='scripts/buildings/BuildingScenePublicationJob.gd'}
 $hashes=[ordered]@{}
 foreach($file in $files){$hashes[$file]=(Get-FileHash -LiteralPath (Join-Path $project $file)).Hash.ToLowerInvariant()}

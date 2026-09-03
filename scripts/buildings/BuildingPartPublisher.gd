@@ -14,6 +14,7 @@ const StaticBatchFlush := preload("res://scripts/buildings/BuildingStaticBatchFl
 const MeshBatchUpload := preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
 const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublication.gd")
 const MasonryPublication := preload("res://scripts/buildings/BuildingMasonryPublication.gd")
+const RoofPublication := preload("res://scripts/buildings/BuildingRoofPublication.gd")
 const MasonryDescriptor := preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
@@ -80,6 +81,7 @@ var resumable_scene_publication := false
 var _finish_validated := false
 var _pending_paving
 var _pending_masonry
+var _pending_roof
 var _pending_part_index := -1
 var _scene_blueprint
 var _scene_parent: WeakRef
@@ -256,7 +258,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 	if not _scene_owner_matches(blueprint,parent):
 		_paving_reject("scene_publication_owner_mismatch")
 		return start_index
-	var pending_job = _pending_paving if _pending_paving!=null else _pending_masonry
+	var pending_job = _pending_paving if _pending_paving!=null else (_pending_masonry if _pending_masonry!=null else _pending_roof)
 	if pending_job!=null:
 		if start_index!=_pending_part_index or start_index>=blueprint.parts.size() or blueprint.parts[start_index]!=pending_job.source_part():
 			_paving_reject("pending_part_cursor_mismatch")
@@ -270,6 +272,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 		if _pending_paving!=null: _completed_paving.append({"job":_pending_paving,"index":start_index})
 		_pending_paving=null
 		_pending_masonry=null
+		_pending_roof=null
 		_pending_part_index=-1
 		incremental_published_parts+=1
 		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT: _begin_static_flush(parent,true)
@@ -296,7 +299,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 			continue
 		publish_part(part, parent)
 		if _publication_failed(): return part_index - 1
-		if _pending_paving!=null or _pending_masonry!=null:
+		if _pending_paving!=null or _pending_masonry!=null or _pending_roof!=null:
 			_pending_part_index=part_index-1
 			return _pending_part_index
 		incremental_published_parts += 1
@@ -326,7 +329,7 @@ func finish_scene_publication(blueprint, parent: Node3D, budget_usec := 2500) ->
 	if not _scene_owner_matches(blueprint,parent):
 		_paving_reject("scene_publication_owner_mismatch")
 		return publication_status()
-	if _pending_paving!=null or _pending_masonry!=null: return {"status":"pending_budget","reason":"part_publication_pending","complete":false}
+	if _pending_paving!=null or _pending_masonry!=null or _pending_roof!=null: return {"status":"pending_budget","reason":"part_publication_pending","complete":false}
 	if not _finish_validated:
 		if not _paving_session_valid(blueprint): return publication_status()
 		if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return publication_status()
@@ -362,13 +365,14 @@ func publication_status() -> Dictionary:
 	if reason.is_empty() and _masonry_preparation != null: reason = _masonry_preparation.reason
 	if reason.is_empty() and _masonry_preparation == null: reason = "scene_publication_not_started"
 	var state := "failed" if not reason.is_empty() else ("pending_budget" if _masonry_preparation.state == "pending_budget" else "ready")
-	if state=="ready" and (_pending_paving!=null or _pending_masonry!=null or _static_flush!=null): state="pending_budget"
+	if state=="ready" and (_pending_paving!=null or _pending_masonry!=null or _pending_roof!=null or _static_flush!=null): state="pending_budget"
 	return {"status":state,"reason":reason,"complete":_scene_finalized and state=="ready",
 		"publishedPartCount":incremental_published_parts,"totalParts":incremental_total_parts,
 		"collisionPartCount":collision_count,"visualBatchCount":visual_batch_count}
 
 
 func clear_published() -> void:
+	if _pending_roof!=null: _pending_roof.cancel()
 	_prepared_history=null
 	_prepared_masonry=null
 	_prepared_masonry_identity=null
@@ -380,6 +384,7 @@ func clear_published() -> void:
 	_scene_parent=null
 	_pending_paving=null
 	_pending_masonry=null
+	_pending_roof=null
 	_pending_part_index=-1
 	_static_flush = null
 	_publication_retirement = []
@@ -493,6 +498,7 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
 		publish_visual(part, body)
 	if bool(part.recipe.get("practicalLight", false)):
 		if _pending_masonry!=null: _pending_masonry.defer_practical_light=true
+		elif _pending_roof!=null: _pending_roof.defer_practical_light=true
 		else: publish_practical_light(part, body)
 	if String(part.kind) == "door":
 		add_door_interaction_proxy(body, part)
@@ -536,6 +542,7 @@ func publish_static_part(part, parent: Node3D) -> void:
 		publish_visual(part, parent)
 		if bool(part.recipe.get("practicalLight", false)):
 			if _pending_masonry!=null: _pending_masonry.defer_practical_light=true
+			elif _pending_roof!=null: _pending_roof.defer_practical_light=true
 			else: publish_practical_light(part, parent)
 		static_visual_collecting = false
 		static_visual_part_transform = Transform3D.IDENTITY
@@ -1067,50 +1074,16 @@ func publish_board_floor(part, parent: Node3D) -> void:
 
 
 func publish_roof_shingles(part, parent: Node3D) -> void:
-	var size: Vector3 = part.size
-	var is_monumental := String(part.id).begins_with("castle_") or String(part.semantic).contains("civic")
-	var course_run := 0.46 if is_monumental else 0.54
-	var tile_span := 0.56 if is_monumental else 0.68
-	var course_count := maxi(1, ceili(size.x / course_run))
-	var tile_count := maxi(1, ceili(size.z / tile_span))
-	var roof_phase := float(posmod((source_blueprint_id + ":roof:" + String(part.id)).hash(), 4093)) / 4093.0
-	var left_slope := String(part.id).ends_with("_left") or String(part.id).contains("roof_left")
-	var eave_sign := -1.0 if left_slope else 1.0
-	var eave_x := eave_sign * size.x * 0.5
-	var ridge_x := -eave_x
-	var transforms: Array[Transform3D] = []
-	var weathered_transforms: Array[Transform3D] = []
-	for course_index in range(course_count):
-		var course_t := (float(course_index) + 0.5) / float(course_count)
-		var course_width := size.x / float(course_count)
-		var row_offset := tile_span * 0.5 if course_index % 2 == 1 else 0.0
-		row_offset += (fposmod(sin(float(course_index + 1) * 19.193 + roof_phase * 71.713) * 15731.743, 1.0) - 0.5) * tile_span * 0.18
-		for tile_index in range(tile_count + 2):
-			var slot_width := size.z / float(tile_count)
-			var z := -size.z * 0.5 + slot_width * (float(tile_index) + 0.5) - row_offset
-			var tile_start := maxf(-size.z * 0.5, z - slot_width * 0.5)
-			var tile_end := minf(size.z * 0.5, z + slot_width * 0.5)
-			if tile_end - tile_start < 0.08:
-				continue
-			z = (tile_start + tile_end) * 0.5
-			var piece_noise := fposmod(sin(float(course_index + 1) * 41.17 + float(tile_index + 1) * 13.71 + roof_phase * 29.17) * 31991.37, 1.0)
-			var secondary_noise := fposmod(sin(float(course_index + 1) * 11.73 + float(tile_index + 1) * 57.19 + roof_phase * 83.11) * 23171.31, 1.0)
-			var x := lerpf(eave_x, ridge_x, course_t)
-			var tile_size := Vector3(maxf(0.08, course_width * lerpf(1.04, 1.18, piece_noise)), size.y * lerpf(0.92, 1.16, secondary_noise), maxf(0.08, (tile_end - tile_start - 0.026) * lerpf(0.84, 1.0, piece_noise)))
-			var tile_lift := (1.0 - course_t) * size.y * 0.52 + (piece_noise - 0.5) * 0.018
-			var transform := Transform3D(Basis(Vector3.FORWARD, (secondary_noise - 0.5) * deg_to_rad(1.7)).scaled(tile_size), Vector3(x, tile_lift, z))
-			var exposure := surface_history.history_for(part, part.position + transform.origin, course_t, piece_noise)
-			if exposure > 0.58 and piece_noise > 0.78:
-				weathered_transforms.append(transform)
-			else:
-				transforms.append(transform)
-	var roof_material := material_for(part)
-	add_box_batch(parent, transforms, roof_material, "RoofCourses", build_facade_custom_data(transforms, part))
-	if not weathered_transforms.is_empty():
-		add_box_batch(parent, weathered_transforms, material_for_id("roof_slate_weathered", variation_for(part) - 0.025), "RoofReplacementCourses", build_facade_custom_data(weathered_transforms, part))
-	var cap_material := material_for_id("roof_slate_cap", variation_for(part) - 0.015)
-	add_box_visual(parent, Vector3(0.18, maxf(0.10, size.y * 0.72), size.z + 0.14), Vector3(eave_x, size.y * 0.18, 0.0), cap_material, "RoofEaveCourse")
-	add_box_visual(parent, Vector3(0.24, maxf(0.11, size.y * 0.82), size.z + 0.18), Vector3(ridge_x, size.y * 0.44, 0.0), cap_material, "RoofRidgeCap")
+	var job=RoofPublication.new(part,parent,static_visual_part_transform,static_visual_collecting,source_blueprint_id,not resumable_scene_publication)
+	if resumable_scene_publication:
+		_pending_roof=job
+		return
+	while true:
+		var result: Dictionary=job.advance(self,2500)
+		if result.status=="failed":
+			_paving_reject(String(result.reason))
+			return
+		if result.status=="ready": return
 
 
 func publish_door_boards(part, parent: Node3D) -> void:
@@ -1518,11 +1491,19 @@ func _scene_owner_matches(blueprint, parent: Node3D) -> bool:
 
 func validate_static_flush_source() -> bool:
 	if _publication_failed(): return false
+	var started := Time.get_ticks_usec()
 	if _scene_blueprint!=null and not _paving_session_valid(_scene_blueprint): return false
+	_record_publication_stage("flush_validate_paving_session",Time.get_ticks_usec()-started)
+	started=Time.get_ticks_usec()
 	if _masonry_preparation!=null and not _masonry_preparation._validate_all(self): return false
+	_record_publication_stage("flush_validate_apertures",Time.get_ticks_usec()-started)
+	started=Time.get_ticks_usec()
 	if not validate_paving_history_source(): return false
+	_record_publication_stage("flush_validate_history",Time.get_ticks_usec()-started)
+	started=Time.get_ticks_usec()
 	for completed in _completed_paving:
 		if _scene_blueprint==null or completed.index>=_scene_blueprint.parts.size() or _scene_blueprint.parts[completed.index]!=completed.job.source_part() or not completed.job.source_valid(self): return _paving_reject("stale_completed_paving_source")
+	_record_publication_stage("flush_validate_completed_paving",Time.get_ticks_usec()-started)
 	return true
 
 
