@@ -538,6 +538,19 @@ func _guard_receipt(label: String, result: Dictionary, expected_reason: String) 
 	evidence[label] = result
 
 func _prepare_guards(environment, specs: Array, producer: Callable, domain: Rect2) -> void:
+	for rejected_call in [1,2]:
+		var calls := {"count":0}
+		var rejecting_producer := func(target, spec: Dictionary) -> bool:
+			calls.count+=1
+			producer.call(target,spec)
+			return calls.count!=rejected_call
+		var before := _guard_snapshot(environment)
+		var inputs_before := var_to_bytes(specs)
+		var denied := Infill.prepare(environment,specs,rejecting_producer,domain,0.62,_budget)
+		var label := "producer_failure_%d" % rejected_call
+		_check(label+"_propagates",not denied.get("ready",true) and denied.get("reason")=="civic_house_producer_failed" and denied.get("phase")==("preview" if rejected_call==1 else "rebuild"))
+		_check(label+"_no_further_calls",calls.count==rejected_call)
+		_check(label+"_source_and_specs_immutable",before==_guard_snapshot(environment) and inputs_before==var_to_bytes(specs))
 	for mutation: String in ["empty_specs", "duplicate_specs", "missing_roof_rise", "nan_roof_rise", "infinite_roof_rise", "low_roof_rise", "high_roof_rise", "wrong_roof_rise_type", "null_part", "malformed_foreign_room"]:
 		var changed = Copy.copy_blueprint(environment.snapshot())
 		var inputs: Array = specs.duplicate(true)

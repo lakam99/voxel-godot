@@ -6,8 +6,9 @@ const MARKET_TERRACE_RISE := 1.8
 const STREET_FOUNDATION_EXTRA := 0.28
 const STREET_UPPER_EXTRA := 0.62
 const STREET_UPPER_SHIFT := 0.31
-const STREET_ROOM_INSET := 0.34
-const STREET_WINDOW_WIDTH := 1.16
+const StreetOpeningLayout := preload("res://scripts/buildings/StreetHouseOpeningLayout.gd")
+const STREET_ROOM_INSET := StreetOpeningLayout.ROOM_INSET
+const STREET_WINDOW_WIDTH := StreetOpeningLayout.WINDOW_WIDTH
 const DEFAULT_LANE_CENTERS := [0.0, 1.8, MARKET_LANE_X, 12.0]
 const DEFAULT_ROW_WIDTH_BIASES := [0.0, 0.0, 0.0, 0.0]
 const RowDepthPacking := preload("res://scripts/buildings/StreetRowDepthPacking.gd")
@@ -23,7 +24,6 @@ const FacadeBearingRecipeScript := preload("res://scripts/buildings/FacadeOpenin
 const FacadeApertureDeclarationScript := preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
 const StreetHouseStructuralManifestScript := preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const StructuralCompletionRecipeScript := preload("res://scripts/buildings/CitadelStructuralCompletionRecipe.gd")
-const LowerFacadeBearingRecipeScript := preload("res://scripts/buildings/LowerFacadeBearingRecipe.gd")
 const RetainedBearingRecipeScript := preload("res://scripts/buildings/RetainedSurfaceBearingRecipe.gd")
 const DoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 
@@ -255,9 +255,12 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 			var permitted: bool = diagnostic_callback.call(stage) == true
 			landscape_cancel.stopped = not permitted
 			return permitted
-	add_perimeter_neighborhoods(blueprint, grammar, keep_front_z, foundation_height, variation, landscape_continuation)
+	var perimeter_ready := add_perimeter_neighborhoods(blueprint, grammar, keep_front_z, foundation_height, variation, landscape_continuation)
 	if landscape_cancel.stopped:
 		handoff["reason"] = "cancelled"
+		return null
+	if not perimeter_ready:
+		handoff["reason"] = "perimeter_house_opening_layout_failed"
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "landscape_manifest_started"): return null
 	var structural_manifest := StreetHouseStructuralManifestScript.read(blueprint)
@@ -803,7 +806,7 @@ static func tree_paving_sample_is_open(blueprint, point: Vector3) -> bool:
 	return true
 
 
-static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_front_z: float, base_y: float, variation: float, continuation: Callable = Callable()) -> void:
+static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_front_z: float, base_y: float, variation: float, continuation: Callable = Callable()) -> bool:
 	var courtyard_width := float(grammar.get("courtyardWidth", 104.0))
 	var courtyard_depth := float(grammar.get("courtyardDepth", 96.0))
 	var side_x: float = courtyard_width * 0.5 - 7.3
@@ -813,7 +816,7 @@ static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_fro
 	var materials: Array[String] = ["painted_brick_ochre", "painted_brick_sage", "painted_brick_rose", "painted_brick_cream"]
 	for side in [-1.0, 1.0]:
 		for row_index in range(row_count):
-			if not _emit_compose_diagnostic(continuation, "landscape_perimeter_house"): return
+			if not _emit_compose_diagnostic(continuation, "landscape_perimeter_house"): return false
 			var ratio := float(row_index) / float(maxi(1, row_count - 1))
 			var center_z: float = lerpf(start_z, end_z, ratio) + side * float(row_index % 2) * 0.55
 			var width: float = 6.5 + float((row_index + int(side) + 4) % 3) * 0.42
@@ -822,9 +825,10 @@ static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_fro
 			var material := materials[(row_index + (2 if side > 0.0 else 0)) % materials.size()]
 			var alley_x: float = side * (side_x - width * 0.5 - 1.15)
 			var local_base_y := perimeter_site_support_top(blueprint, Vector3(alley_x, base_y, center_z), base_y)
-			add_street_house(blueprint, "urban_perimeter_%s_%02d" % ["east" if side > 0.0 else "west", row_index], Vector3(side * side_x, 0.0, center_z), width, depth, height, -side, local_base_y, material, variation + side * 0.018 + float(row_index) * 0.011)
+			if not add_street_house(blueprint, "urban_perimeter_%s_%02d" % ["east" if side > 0.0 else "west", row_index], Vector3(side * side_x, 0.0, center_z), width, depth, height, -side, local_base_y, material, variation + side * 0.018 + float(row_index) * 0.011): return false
 			var alley_id := "urban_perimeter_alley_%d_%02d" % [int(side), row_index]
 			add_part(blueprint, alley_id, "foundation", "worn_cobble", Vector3(alley_x, local_base_y + 0.16, center_z), Vector3(2.1, 0.10, depth * 0.82), {"collision": false, "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley", "pavingFamily": "lane_cobbles", "pavingRegion": alley_id, "pavingHeading": "z"})
+	return true
 
 
 static func perimeter_site_support_top(blueprint, site: Vector3, fallback_y: float) -> float:
@@ -999,22 +1003,27 @@ static func street_row_geometry(front_z: float, keep_front_z: float, urban_layou
 	# solid house envelopes and do not force the dense roofline apart.
 	var lanes: Variant = urban_layout.get("laneCenters", DEFAULT_LANE_CENTERS)
 	var biases: Variant = urban_layout.get("rowWidthBiases", DEFAULT_ROW_WIDTH_BIASES)
-	if not lanes is Array or lanes.size() != 4 or not biases is Array or biases.size() != 4:
+	var bonuses: Variant = urban_layout.get("rowStoreyBonuses", [0,0,0,0])
+	if not lanes is Array or lanes.size() != 4 or not biases is Array or biases.size() != 4 or not bonuses is Array or bonuses.size()!=4:
 		return {"ready": false, "reason": "invalid_row_packing_inputs"}
 	var rows: Array = []
 	for index in range(centers.size()):
+		if not bonuses[index] is int or bonuses[index]<0 or bonuses[index]>4:
+			return {"ready": false, "reason": "invalid_row_storey_bonus", "rowIndex": index}
 		for value in [lanes[index], biases[index]]:
 			if not (value is int or value is float) or not is_finite(float(value)):
 				return {"ready": false, "reason": "invalid_row_packing_number", "rowIndex": index}
 		var envelopes: Array = []
+		var minimum_depth := 0.0
 		for side in [-1, 1]:
+			minimum_depth=maxf(minimum_depth,StreetOpeningLayout.minimum_depth(_street_row_house_height(index,side,bonuses[index])))
 			var width := _street_row_house_width(index, side, float(biases[index]))
 			if width <= STREET_ROOM_INSET * 2.0:
 				return {"ready": false, "reason": "invalid_row_house_width", "rowIndex": index}
 			var center_x := _street_row_house_x(index, side, float(lanes[index]), width)
 			envelopes.append_array(_street_house_packing_sections(center_x, width, float(-side)))
 		rows.append({"id": str(index), "centerZ": centers[index], "depth": row_depths[index],
-			"minimumDepth": 4.0 * (STREET_WINDOW_WIDTH * 0.5 + STREET_ROOM_INSET), "envelopes": envelopes})
+			"minimumDepth": minimum_depth, "envelopes": envelopes})
 	var packing := RowDepthPacking.fit(rows)
 	if not packing.get("ready", false):
 		return {"ready": false, "reason": "street_row_packing_failed", "detail": packing}
@@ -1022,6 +1031,9 @@ static func street_row_geometry(front_z: float, keep_front_z: float, urban_layou
 	return {"ready": true, "usableDepth": usable_depth, "segmentDepth": segment_depth, "centers": centers, "rowDepths": row_depths,
 		"structuralPacking": packing}
 
+
+static func _street_row_house_height(index: int, side: int, bonus: int) -> float:
+	return 3.1 * float(2 + ((index + (1 if side > 0 else 0)) % 2) + bonus)
 
 static func _street_row_house_width(index: int, side: int, bias: float) -> float:
 	return 7.4 + float((index + side + 5) % 3) * 0.9 + bias
@@ -1146,11 +1158,11 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 		var row_depth := float(row_depths[row_index])
 		for side in [-1, 1]:
 			var width := _street_row_house_width(row_index, side, float(row_width_biases[row_index]))
-			var storeys := 2 + ((row_index + (1 if side > 0 else 0)) % 2) + int(row_storey_bonuses[row_index])
-			var wall_height := 3.1 * float(storeys)
+			var wall_height := _street_row_house_height(row_index, side, int(row_storey_bonuses[row_index]))
 			var center_x := _street_row_house_x(row_index, side, lane_x, width)
 			var material := palette[(row_index * 2 + (1 if side > 0 else 0)) % palette.size()]
-			add_street_house(blueprint, "urban_row_%02d_%s" % [row_index, "right" if side > 0 else "left"], Vector3(center_x, 0.0, row_z), width, row_depth, wall_height, float(-side), elevations[row_index], material, prepared_variation + float(row_index) * 0.012)
+			if not add_street_house(blueprint, "urban_row_%02d_%s" % [row_index, "right" if side > 0 else "left"], Vector3(center_x, 0.0, row_z), width, row_depth, wall_height, float(-side), elevations[row_index], material, prepared_variation + float(row_index) * 0.012):
+				return {"ready": false, "reason": "street_house_opening_layout_failed"}
 	var plaza_z := centers[2]
 	var market_y := elevations[2]
 	add_grounded_foundation(blueprint, "urban_market_plaza_retaining", Vector3(lane_centers[2], 0.0, plaza_z), 18.0, segment_depth * 0.82, market_y + 0.24, prepared_variation - 0.05, "citadel_market_plaza_retaining")
@@ -1170,8 +1182,10 @@ static func street_house_roof_rise(design_center: Vector3) -> float:
 	return 3.2 + fmod(absf(design_center.x + design_center.z), 1.6)
 
 
-static func add_street_house(blueprint, prefix: String, center: Vector3, width: float, depth: float, wall_height: float, street_side: float, ground_y: float, material: String, variation: float, sampled_roof_rise: float = -1.0) -> void:
-	var sampled_base_height := minf(2.1, wall_height * 0.27)
+static func add_street_house(blueprint, prefix: String, center: Vector3, width: float, depth: float, wall_height: float, street_side: float, ground_y: float, material: String, variation: float, sampled_roof_rise: float = -1.0) -> bool:
+	var opening_layout := StreetOpeningLayout.prepare(depth, wall_height)
+	if not opening_layout.ready: return false
+	var window_offset: float = opening_layout.windowOffset
 	var upper_width := width + STREET_UPPER_EXTRA
 	var upper_center_x := center.x + street_side * STREET_UPPER_SHIFT
 	var facade_x := upper_center_x + street_side * (upper_width * 0.5 + 0.14)
@@ -1183,11 +1197,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	# bearing recipe. This derives the proportion from shared construction limits:
 	# a 7.6 cm sliver is raised to the sill, while a valid 34.6 cm terrace course
 	# remains unchanged and may use its ordinary support or party-wall contract.
-	var first_upper_window_bottom := 2.75 - 1.46 * 0.5
-	var base_height := sampled_base_height
-	var thin_course_height := first_upper_window_bottom - sampled_base_height
-	if thin_course_height > 0.0 and thin_course_height < LowerFacadeBearingRecipeScript.HEIGHT:
-		base_height = minf(wall_height - LowerFacadeBearingRecipeScript.HEIGHT, first_upper_window_bottom)
+	var base_height := StreetOpeningLayout.stone_base_height(wall_height)
 	var room_id := "%s_interior" % prefix
 	var interior_inward := Vector3(-street_side, 0.0, 0.0)
 	var room_facade_x := upper_center_x + street_side * (upper_width * 0.5 - 0.34)
@@ -1198,21 +1208,21 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		"bounds": AABB(Vector3(upper_center_x - upper_width * 0.5 + STREET_ROOM_INSET, ground_y + 0.18, center.z - depth * 0.5 + STREET_ROOM_INSET), Vector3(upper_width - STREET_ROOM_INSET * 2.0, wall_height - 0.22, depth - STREET_ROOM_INSET * 2.0)),
 		"wallMountInset": 0.30,
 		"citadelUrbanRoom": true,
-		"accesses": [{"id": "%s_entry" % prefix, "kind": "exterior_door", "position": Vector3(facade_x - street_side * 0.84, ground_y + 0.72, center.z), "size": Vector3(1.86, 2.18, 1.86)}]
+		"accesses": [{"id": "%s_entry" % prefix, "kind": "exterior_door", "position": Vector3(facade_x - street_side * 0.84, ground_y + 0.72, center.z), "size": Vector3(StreetOpeningLayout.ACCESS_WIDTH, 2.18, StreetOpeningLayout.ACCESS_WIDTH)}]
 	})
 	add_part(blueprint, "%s_interior_floor" % prefix, "floor", "timber_board", Vector3(upper_center_x - street_side * 0.16, ground_y + 0.11, center.z), Vector3(maxf(0.8, upper_width - 0.74), 0.20, maxf(0.8, depth - 0.74)), {"variation": variation - 0.015, "semantic": "citadel_urban_interior_floor", "physicalIntent": "walkable_surface"})
 	var floor_count := maxi(2, roundi(wall_height / 3.1))
-	var upper_openings: Array[Dictionary] = [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": 1.48}]
+	var upper_openings: Array[Dictionary] = [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": StreetOpeningLayout.DOOR_WIDTH}]
 	for floor_index in range(1, floor_count):
 		var opening_y := ground_y + float(floor_index) * 2.75
 		for window_index in [-1, 1]:
-			upper_openings.append({"centerY": opening_y, "height": 1.46, "centerZ": center.z + float(window_index) * minf(depth * 0.25, 2.2), "width": STREET_WINDOW_WIDTH})
-	add_recessed_facade_mass(blueprint, "%s_stone" % prefix, center.x, center.z, width, depth, ground_y, ground_y + base_height, street_side, "stone_foundation", variation, [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": 1.48}], "citadel_urban_stone_base")
+			upper_openings.append({"centerY": opening_y, "height": 1.46, "centerZ": center.z + float(window_index) * window_offset, "width": STREET_WINDOW_WIDTH})
+	add_recessed_facade_mass(blueprint, "%s_stone" % prefix, center.x, center.z, width, depth, ground_y, ground_y + base_height, street_side, "stone_foundation", variation, [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": StreetOpeningLayout.DOOR_WIDTH}], "citadel_urban_stone_base")
 	add_recessed_facade_mass(blueprint, "%s_upper" % prefix, upper_center_x, center.z, upper_width, depth, ground_y + base_height, ground_y + wall_height, street_side, material, variation, upper_openings, "citadel_urban_facade")
 	for floor_index in range(1, floor_count):
 		var floor_y := ground_y + float(floor_index) * 2.75
 		for window_index in [-1, 1]:
-			var window_z := center.z + float(window_index) * minf(depth * 0.25, 2.2)
+			var window_z := center.z + float(window_index) * window_offset
 			var window_phase := posmod(prefix.hash() + floor_index * 17 + window_index * 31, 5)
 			var window_material := "window_warm_glass" if window_phase in [0, 1, 3] else "window_glass"
 			add_part(blueprint, "%s_window_%02d_%d" % [prefix, floor_index, window_index], "window", window_material, Vector3(facade_x, floor_y, window_z), Vector3(0.10, 1.18, 0.88), {"collision": false, "variation": variation, "semantic": "citadel_urban_window", "roomId": room_id, "interiorInwardDirection": interior_inward, "interiorWallOffset": window_wall_offset})
@@ -1231,7 +1241,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 				var gable_window_material := "window_warm_glass" if posmod(prefix.hash() + int(gable_sign * 7.0) + int(window_sign * 13.0), 4) != 0 else "window_glass"
 				add_part(blueprint, "%s_gable_recess_%d_%d" % [prefix, int(gable_sign), int(window_sign)], "decor", "window_recess", Vector3(upper_center_x + window_sign * upper_width * 0.22, ground_y + minf(5.05, wall_height * 0.58), gable_z + gable_sign * 0.015), Vector3(0.88, 1.14, 0.10), {"collision": false, "variation": variation, "semantic": "citadel_urban_gable_blind_recess"})
 	add_part(blueprint, "%s_door_recess" % prefix, "decor", "window_recess", Vector3(facade_x - street_side * 0.18, ground_y + 1.30, center.z), Vector3(0.12, 2.66, 1.56), {"collision": false, "variation": variation - 0.03, "semantic": "citadel_urban_door_reveal"})
-	add_part(blueprint, "%s_door" % prefix, "door", "painted_door", Vector3(facade_x - street_side * 0.10, ground_y + 1.25, center.z), Vector3(0.14, 2.5, 1.25), {"collision": true, "variation": variation, "semantic": "citadel_urban_door", "roomId": room_id})
+	add_part(blueprint, "%s_door" % prefix, "door", "painted_door", Vector3(facade_x - street_side * 0.10, ground_y + 1.25, center.z), StreetOpeningLayout.DOOR_SIZE, {"collision": true, "variation": variation, "semantic": "citadel_urban_door", "roomId": room_id})
 	add_part(blueprint, "%s_door_lintel" % prefix, "beam", "timber_beam", Vector3(upper_facade_x + street_side * 0.03, ground_y + 2.64, center.z), Vector3(0.24, 0.22, 1.82), {"collision": false, "variation": variation - 0.015, "semantic": "citadel_urban_door_joinery"})
 	add_part(blueprint, "%s_door_hood" % prefix, "decor", "roof_shingle", Vector3(facade_x + street_side * 0.58, ground_y + 2.84, center.z), Vector3(1.28, 0.16, 2.08), {"rotation": Vector3(0.0, 0.0, street_side * deg_to_rad(-12.0)), "collision": false, "variation": variation - 0.025, "semantic": "citadel_urban_door_hood"})
 	for bracket_z in [-0.66, 0.66]:
@@ -1257,7 +1267,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		var sign_z := center.z + lerpf(-0.72, 0.88, household_phase)
 		add_part(blueprint, "%s_sign_arm" % prefix, "beam", "timber_beam", Vector3(facade_x + street_side * 0.38, ground_y + 2.70, sign_z), Vector3(0.12, 0.12, 1.05), {"collision": false, "variation": variation, "semantic": "citadel_household_sign"})
 		add_part(blueprint, "%s_hanging_sign" % prefix, "sign", "painted_decor", Vector3(facade_x + street_side * 0.40, ground_y + 2.28, sign_z + 0.42), Vector3(0.12, 0.72, 0.62), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_sign"})
-	var window_box_z := center.z - minf(depth * 0.25, 2.2)
+	var window_box_z := center.z - window_offset
 	add_part(blueprint, "%s_window_box" % prefix, "crate", "timber_board", Vector3(facade_x + street_side * 0.16, ground_y + 2.18, window_box_z), Vector3(0.36, 0.28, 1.14), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_window_box"})
 	if household_phase > 0.30:
 		add_part(blueprint, "%s_household_tool_rack" % prefix, "tool_rack", "ironwork", Vector3(facade_x + street_side * 0.24, ground_y + 1.78, center.z - lerpf(1.65, 2.30, household_phase)), Vector3(0.20, 1.28, 1.12), {"rotation": Vector3(0.0, street_side * PI * 0.5, 0.0), "collision": false, "variation": variation, "semantic": "citadel_household_tools"})
@@ -1308,6 +1318,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	})
 	if not declaration.ready:
 		push_error("Citadel street-house declaration failed for %s: %s" % [prefix, String(declaration.get("reason", "unknown"))])
+	return declaration.ready
 
 
 static func add_recessed_facade_mass(blueprint, prefix: String, center_x: float, center_z: float, width: float, depth: float, bottom_y: float, top_y: float, street_side: float, material: String, variation: float, openings: Array[Dictionary], semantic: String) -> void:
@@ -1535,16 +1546,17 @@ static func _civic_infill_environment(source, grammar: Dictionary, front_z: floa
 		if stopped.value: return false
 		stopped.value=not _emit_compose_diagnostic(continuation,stage)
 		return not stopped.value
-	add_perimeter_neighborhoods(preview,grammar,keep_front_z,base_y,variation,callback)
+	var perimeter_ready := add_perimeter_neighborhoods(preview,grammar,keep_front_z,base_y,variation,callback)
 	if stopped.value: return {"ready":false,"reason":"cancelled"}
+	if not perimeter_ready: return {"ready":false,"reason":"perimeter_house_opening_layout_failed"}
 	add_civic_service_yard(preview,Vector3(37.0,base_y,keep_front_z-8.5),variation)
 	add_dressing_clusters(preview,front_z,keep_front_z,base_y,variation)
 	add_bunting_lines(preview,front_z,keep_front_z,base_y,variation,layout)
 	return {"ready":true,"blueprint":preview}
 
-static func _add_civic_house(blueprint, house: Dictionary, base_y: float, variation: float) -> void:
+static func _add_civic_house(blueprint, house: Dictionary, base_y: float, variation: float) -> bool:
 	if blueprint.parts.is_empty(): reset_street_house_structural_manifest(blueprint)
-	add_street_house(blueprint,String(house.id),house.center,float(house.width),float(house.depth),float(house.height),-1.0,base_y,String(house.material),variation+float(String(house.id).hash()%17)*0.003,float(house.get("roofRise",-1.0)))
+	return add_street_house(blueprint,String(house.id),house.center,float(house.width),float(house.depth),float(house.height),-1.0,base_y,String(house.material),variation+float(String(house.id).hash()%17)*0.003,float(house.get("roofRise",-1.0)))
 
 static func civic_house_specs(keep_front_z: float) -> Array:
 	var houses := [
@@ -1571,6 +1583,9 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	if not is_finite(paving_depth) or not is_finite(paving_center_z) or paving_depth <= 0.0:
 		return {"ready": false, "reason": "invalid_civic_quarter_paving_geometry"}
 	var houses := civic_house_specs(keep_front_z)
+	for house: Dictionary in houses:
+		if not StreetOpeningLayout.prepare(float(house.depth),float(house.height)).ready:
+			return {"ready": false, "reason": "civic_house_opening_layout_failed"}
 	var infill: Dictionary={"ready":true,"scope":"standalone civic producer; no enclosure supplied"}
 	# Sample the design once at its seeded recipe position. Placement must not
 	# reshape the roof/chimney by feeding a relocated world pose back into it.
@@ -1579,7 +1594,7 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 		var paving_size := Vector3(48.0,0.08,paving_depth)
 		var paving_preview = CivicInfill.Part.new({"position":Vector3(43.0,base_y+0.18,paving_center_z),"size":paving_size})
 		var paving_bounds: AABB=blueprint.transformed_part_bounds(paving_preview)
-		var producer := func(target, spec: Dictionary): _add_civic_house(target,spec,base_y,variation)
+		var producer := func(target, spec: Dictionary): return _add_civic_house(target,spec,base_y,variation)
 		infill=CivicInfill.prepare_with_terrace_reconciliation(infill_environment,houses,producer,Rect2(Vector2(paving_bounds.position.x,paving_bounds.position.z),Vector2(paving_bounds.size.x,paving_bounds.size.z)),base_y,continuation)
 		if not infill.ready: return infill
 		if source_before!=var_to_bytes(blueprint.snapshot()): return {"ready":false,"reason":"civic_source_changed_during_terrace_preparation"}
@@ -1589,7 +1604,8 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, base_y + 0.18, paving_center_z), Vector3(48.0, 0.08, paving_depth), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
 	for house_value in houses:
 		var house: Dictionary = house_value as Dictionary
-		_add_civic_house(blueprint,house,base_y,variation)
+		if not _add_civic_house(blueprint,house,base_y,variation):
+			return {"ready": false, "reason": "civic_house_opening_layout_failed"}
 	for route_index in range(3):
 		var route_z := keep_front_z - 13.5 + float(route_index) * 5.2
 		add_traffic_wear(blueprint, "urban_civic_quarter_route_%02d" % route_index, Vector3(37.8, base_y + 0.232, route_z), Vector2(27.0, 1.84), 0.0, variation - 0.04 + float(route_index) * 0.011, "citadel_civic_route_wear")

@@ -10,11 +10,12 @@ const Door = preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const Completion = preload("res://scripts/buildings/DeterministicRecipeCompletion.gd")
-const HEIGHT := 0.24
+const Dimensions = preload("res://scripts/buildings/ConstructionBearingDimensions.gd")
+const HEIGHT := Dimensions.LOWER_BEARING_HEIGHT
 const MAX_PARTS := 10000
 const MAX_VOLUMES := 4096
 const MAX_SEATS := 32
-const HALF := Vector3(0.07, 0.04, 0.07)
+const HALF := Dimensions.LOWER_CORBEL_SOCKET_HALF
 const MAX_BATCH_PANELS := 4
 const MAX_COMPLETION_BATCHES := 128
 
@@ -427,7 +428,7 @@ static func _independent_masonry_records(source) -> Dictionary:
 static func _shorten_body(original, panel, obstacles: Array, volumes: Array) -> Dictionary:
 	if obstacles.size() + volumes.size() > MAX_PARTS + MAX_VOLUMES: return _fail("body_fit_work_limit")
 	var bounds: Array = Connection._bounds(original)
-	var patch_half := Vector2(minf(0.06, panel.size.x * 0.5 - 0.06), minf(0.06, panel.size.z * 0.5 - 0.06))
+	var patch_half := Dimensions.gravity_patch_half(panel.size)
 	if patch_half.x <= 0.0 or patch_half.y <= 0.0: return _fail("panel_too_narrow_for_gravity_patch")
 	var patch_low: float = float(panel.position.z) - float(patch_half.y)
 	var patch_high: float = float(panel.position.z) + float(patch_half.y)
@@ -520,7 +521,7 @@ static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: 
 	body.recipe["physicalRequiredSeatFacts"] = facts
 	var changed := Part.new(panel.snapshot())
 	Copy.Frame._clean_derived(changed)
-	var half_patch := Vector2(minf(0.06, panel.size.x * 0.5 - 0.06), minf(0.06, panel.size.z * 0.5 - 0.06))
+	var half_patch := Dimensions.gravity_patch_half(panel.size)
 	if half_patch.x <= 0.0 or half_patch.y <= 0.0: return _fail("panel_too_narrow_for_gravity_patch")
 	changed.recipe["physicalRequiredSeatPartIds"] = [body.id]
 	changed.recipe["physicalRequiredSeatFacts"] = [{"seatId": body.id, "loadDirection": "world_down", "seatFace": "max_y",

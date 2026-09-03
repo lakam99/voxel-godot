@@ -55,7 +55,8 @@ static func prepare(environment, specs: Array, producer: Callable, paving: Rect2
 	for spec: Dictionary in specs:
 		if not _continue(continuation): return _fail("cancelled")
 		var original = Blueprint.new("civic-infill-preview",environment.seed,"masonry")
-		producer.call(original,spec)
+		var produced: Variant = producer.call(original,spec)
+		if produced is bool and not produced: return {"ready":false,"reason":"civic_house_producer_failed","house":spec.id,"phase":"preview"}
 		var geometry := _house_geometry(original)
 		if not geometry.ready: return geometry
 		var fitted := Placement.fit_columns(geometry.bounds,domain.bounds,obstacles,CLEARANCE,func(): return _continue(continuation))
@@ -63,7 +64,8 @@ static func prepare(environment, specs: Array, producer: Callable, paving: Rect2
 		var moved: Dictionary=spec.duplicate(true)
 		moved.center=spec.center+fitted.translation
 		var rebuilt = Blueprint.new("civic-infill-rebuilt",environment.seed,"masonry")
-		producer.call(rebuilt,moved)
+		produced = producer.call(rebuilt,moved)
+		if produced is bool and not produced: return {"ready":false,"reason":"civic_house_producer_failed","house":spec.id,"phase":"rebuild"}
 		var actual := _house_geometry(rebuilt)
 		if not actual.ready: return actual
 		# Rebuilding changes stored rounding and coordinate-derived IDs. Validate
