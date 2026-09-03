@@ -94,6 +94,18 @@ No citadel scene was constructed. See `CITADEL_CANDIDATE_TELEPORT_DIAGNOSTIC.md`
 for the command, inspected captures and exact evidence boundaries. The next
 source investigation is this recipe failure, not a longer walk or timeout.
 
+The source investigation found overlapping generated street rows. A bounded
+recipe-level depth packer now clears the actual foundations/shells while keeping
+clear rows and all door/threshold records unchanged. Focused checks pass
+123/123 (packing), 12/12 (actual producer), and 23/23 (civic geometry). The complete
+replay passes the original facade stage but fails at a doorway bearing footprint
+after 203.994 seconds; no ready source or headed retry is claimed. A seven-second
+historical-source proof reproduces that threshold defect without the packing
+change. The independent critic approved the focused packing/diagnostic commit
+after the qualified before/after attribution. The doorway defect remains open;
+no headed retry or successful spawning is approved.
+See `CITADEL_STREET_ROW_PACKING_2026-09-03.md`.
+
 ### Prior checkpoint history
 
 The scene job and owning service now support balanced shared-door callbacks.

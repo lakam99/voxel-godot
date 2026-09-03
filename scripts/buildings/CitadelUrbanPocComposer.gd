@@ -3,6 +3,14 @@ class_name CitadelUrbanPocComposer
 
 const MARKET_LANE_X := 22.0
 const MARKET_TERRACE_RISE := 1.8
+const STREET_FOUNDATION_EXTRA := 0.28
+const STREET_UPPER_EXTRA := 0.62
+const STREET_UPPER_SHIFT := 0.31
+const STREET_ROOM_INSET := 0.34
+const STREET_WINDOW_WIDTH := 1.16
+const DEFAULT_LANE_CENTERS := [0.0, 1.8, MARKET_LANE_X, 12.0]
+const DEFAULT_ROW_WIDTH_BIASES := [0.0, 0.0, 0.0, 0.0]
+const RowDepthPacking := preload("res://scripts/buildings/StreetRowDepthPacking.gd")
 const TreeSpawnServiceScript := preload("res://scripts/environment/TreeSpawnService.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
 const BiomeEnvironmentCatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
@@ -947,7 +955,64 @@ static func street_row_geometry(front_z: float, keep_front_z: float, urban_layou
 			return {"ready": false, "reason": "invalid_street_row_geometry", "rowIndex": row_index}
 		centers.append(center_z)
 		row_depths.append(row_depth)
-	return {"ready": true, "usableDepth": usable_depth, "segmentDepth": segment_depth, "centers": centers, "rowDepths": row_depths}
+	# Jitter changes centre separation, not the size of the houses. Bind their
+	# depths to the represented structural footprint before any house, aperture,
+	# room, furniture or civic-edge consumer is generated. Roof overhangs are not
+	# solid house envelopes and do not force the dense roofline apart.
+	var lanes: Variant = urban_layout.get("laneCenters", DEFAULT_LANE_CENTERS)
+	var biases: Variant = urban_layout.get("rowWidthBiases", DEFAULT_ROW_WIDTH_BIASES)
+	if not lanes is Array or lanes.size() != 4 or not biases is Array or biases.size() != 4:
+		return {"ready": false, "reason": "invalid_row_packing_inputs"}
+	var rows: Array = []
+	for index in range(centers.size()):
+		for value in [lanes[index], biases[index]]:
+			if not (value is int or value is float) or not is_finite(float(value)):
+				return {"ready": false, "reason": "invalid_row_packing_number", "rowIndex": index}
+		var envelopes: Array = []
+		for side in [-1, 1]:
+			var width := _street_row_house_width(index, side, float(biases[index]))
+			if width <= STREET_ROOM_INSET * 2.0:
+				return {"ready": false, "reason": "invalid_row_house_width", "rowIndex": index}
+			var center_x := _street_row_house_x(index, side, float(lanes[index]), width)
+			envelopes.append_array(_street_house_packing_sections(center_x, width, float(-side)))
+		rows.append({"id": str(index), "centerZ": centers[index], "depth": row_depths[index],
+			"minimumDepth": 4.0 * (STREET_WINDOW_WIDTH * 0.5 + STREET_ROOM_INSET), "envelopes": envelopes})
+	var packing := RowDepthPacking.fit(rows)
+	if not packing.get("ready", false):
+		return {"ready": false, "reason": "street_row_packing_failed", "detail": packing}
+	for index in range(row_depths.size()): row_depths[index] = float(packing.rowDepths[str(index)])
+	return {"ready": true, "usableDepth": usable_depth, "segmentDepth": segment_depth, "centers": centers, "rowDepths": row_depths,
+		"structuralPacking": packing}
+
+
+static func _street_row_house_width(index: int, side: int, bias: float) -> float:
+	return 7.4 + float((index + side + 5) % 3) * 0.9 + bias
+
+
+static func _street_row_house_x(index: int, side: int, lane_x: float, width: float) -> float:
+	var lane_width := 5.8 if index != 2 else 16.0
+	return lane_x + float(side) * (lane_width * 0.5 + width * 0.5)
+
+
+static func _street_house_packing_sections(center_x: float, width: float, street_side: float) -> Array:
+	# Match the stored Vector3 construction used by add_street_house and
+	# add_recessed_facade_mass. These are conservative XZ structural sections,
+	# not renderer bounds or a new collision authority. Foundations overhang in
+	# Z; shell walls stay within the nominal depth. Existing clear rows are kept.
+	var stored_center := Vector3(center_x, 0.0, 0.0).x
+	var upper_width := width + STREET_UPPER_EXTRA
+	var upper_center := stored_center + street_side * STREET_UPPER_SHIFT
+	var thickness := minf(0.30, minf(0.72, upper_width * 0.16) * 0.48)
+	var result: Array = []
+	for section in [
+		[stored_center, width + STREET_FOUNDATION_EXTRA, STREET_FOUNDATION_EXTRA * 0.5, 0.0],
+		[upper_center, maxf(0.42, upper_width - thickness * 2.0), 0.0, thickness],
+		[upper_center - street_side * (upper_width * 0.5 - thickness * 0.5), thickness, 0.0, 0.0],
+		[upper_center + street_side * (upper_width * 0.5 - thickness * 0.5), thickness, 0.0, 0.0]]:
+		var represented := Vector2(float(section[0]), float(section[1]))
+		result.append({"minimumX": float(represented.x) - float(represented.y) * 0.5,
+			"maximumX": float(represented.x) + float(represented.y) * 0.5, "zOverhang": float(section[2]), "boundaryThickness": float(section[3])})
+	return result
 
 
 static func street_sequence_input(front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> Dictionary:
@@ -957,8 +1022,8 @@ static func street_sequence_input(front_z: float, keep_front_z: float, base_y: f
 	if not is_finite(base_y) or not is_finite(variation):
 		return {"ready": false, "reason": "invalid_street_sequence_scalar"}
 	var array_specs := [
-		{"key": "laneCenters", "default": [0.0, 1.8, MARKET_LANE_X, 12.0], "integer": false},
-		{"key": "rowWidthBiases", "default": [0.0, 0.0, 0.0, 0.0], "integer": false},
+		{"key": "laneCenters", "default": DEFAULT_LANE_CENTERS, "integer": false},
+		{"key": "rowWidthBiases", "default": DEFAULT_ROW_WIDTH_BIASES, "integer": false},
 		{"key": "rowStoreyBonuses", "default": [0, 0, 0, 0], "integer": true}
 	]
 	var normalized_arrays: Dictionary = {}
@@ -1041,12 +1106,11 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 		var row_z := float(centers[row_index])
 		var lane_x := float(lane_centers[row_index])
 		var row_depth := float(row_depths[row_index])
-		var lane_width := 5.8 if row_index != 2 else 16.0
 		for side in [-1, 1]:
-			var width := 7.4 + float((row_index + side + 5) % 3) * 0.9 + float(row_width_biases[row_index])
+			var width := _street_row_house_width(row_index, side, float(row_width_biases[row_index]))
 			var storeys := 2 + ((row_index + (1 if side > 0 else 0)) % 2) + int(row_storey_bonuses[row_index])
 			var wall_height := 3.1 * float(storeys)
-			var center_x := lane_x + float(side) * (lane_width * 0.5 + width * 0.5)
+			var center_x := _street_row_house_x(row_index, side, lane_x, width)
 			var material := palette[(row_index * 2 + (1 if side > 0 else 0)) % palette.size()]
 			add_street_house(blueprint, "urban_row_%02d_%s" % [row_index, "right" if side > 0 else "left"], Vector3(center_x, 0.0, row_z), width, row_depth, wall_height, float(-side), elevations[row_index], material, prepared_variation + float(row_index) * 0.012)
 	var plaza_z := centers[2]
@@ -1066,8 +1130,8 @@ static func add_lane_edge_age(blueprint, prefix: String, lane_x: float, row_z: f
 
 static func add_street_house(blueprint, prefix: String, center: Vector3, width: float, depth: float, wall_height: float, street_side: float, ground_y: float, material: String, variation: float) -> void:
 	var sampled_base_height := minf(2.1, wall_height * 0.27)
-	var upper_width := width + 0.62
-	var upper_center_x := center.x + street_side * 0.31
+	var upper_width := width + STREET_UPPER_EXTRA
+	var upper_center_x := center.x + street_side * STREET_UPPER_SHIFT
 	var facade_x := upper_center_x + street_side * (upper_width * 0.5 + 0.14)
 	# The partitioned wall thickness extends inward from this plane. The older
 	# facade_x is a presentation offset, not a mounting surface for upper trim.
@@ -1086,10 +1150,10 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	var interior_inward := Vector3(-street_side, 0.0, 0.0)
 	var room_facade_x := upper_center_x + street_side * (upper_width * 0.5 - 0.34)
 	var window_wall_offset := absf(facade_x - room_facade_x)
-	add_grounded_foundation(blueprint, "%s_foundation" % prefix, center, width + 0.28, depth + 0.28, ground_y, variation - 0.02, "citadel_urban_house_foundation")
+	add_grounded_foundation(blueprint, "%s_foundation" % prefix, center, width + STREET_FOUNDATION_EXTRA, depth + STREET_FOUNDATION_EXTRA, ground_y, variation - 0.02, "citadel_urban_house_foundation")
 	blueprint.rooms.append({
 		"id": room_id,
-		"bounds": AABB(Vector3(upper_center_x - upper_width * 0.5 + 0.34, ground_y + 0.18, center.z - depth * 0.5 + 0.34), Vector3(upper_width - 0.68, wall_height - 0.22, depth - 0.68)),
+		"bounds": AABB(Vector3(upper_center_x - upper_width * 0.5 + STREET_ROOM_INSET, ground_y + 0.18, center.z - depth * 0.5 + STREET_ROOM_INSET), Vector3(upper_width - STREET_ROOM_INSET * 2.0, wall_height - 0.22, depth - STREET_ROOM_INSET * 2.0)),
 		"wallMountInset": 0.30,
 		"citadelUrbanRoom": true,
 		"accesses": [{"id": "%s_entry" % prefix, "kind": "exterior_door", "position": Vector3(facade_x - street_side * 0.84, ground_y + 0.72, center.z), "size": Vector3(1.86, 2.18, 1.86)}]
@@ -1100,7 +1164,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	for floor_index in range(1, floor_count):
 		var opening_y := ground_y + float(floor_index) * 2.75
 		for window_index in [-1, 1]:
-			upper_openings.append({"centerY": opening_y, "height": 1.46, "centerZ": center.z + float(window_index) * minf(depth * 0.25, 2.2), "width": 1.16})
+			upper_openings.append({"centerY": opening_y, "height": 1.46, "centerZ": center.z + float(window_index) * minf(depth * 0.25, 2.2), "width": STREET_WINDOW_WIDTH})
 	add_recessed_facade_mass(blueprint, "%s_stone" % prefix, center.x, center.z, width, depth, ground_y, ground_y + base_height, street_side, "stone_foundation", variation, [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": 1.48}], "citadel_urban_stone_base")
 	add_recessed_facade_mass(blueprint, "%s_upper" % prefix, upper_center_x, center.z, upper_width, depth, ground_y + base_height, ground_y + wall_height, street_side, material, variation, upper_openings, "citadel_urban_facade")
 	for floor_index in range(1, floor_count):
@@ -1371,7 +1435,7 @@ static func civic_commons_layout(front_z: float, keep_front_z: float, base_y: fl
 	var back_north_extent := back_center_shift.z + back_world_half_z
 	var row_centers: Array = row_geometry.centers as Array
 	var row_depths: Array = row_geometry.rowDepths as Array
-	var row_two_foundation_south_z := float(row_centers[2]) - (float(row_depths[2]) + 0.28) * 0.5
+	var row_two_foundation_south_z := float(row_centers[2]) - (float(row_depths[2]) + STREET_FOUNDATION_EXTRA) * 0.5
 	var bench_center_z := row_two_foundation_south_z - 0.50 - back_north_extent
 	if not is_finite(back_north_extent) or back_north_extent <= 0.0 or not is_finite(bench_center_z):
 		return {"ready": false, "reason": "invalid_civic_commons_clearance_geometry"}
