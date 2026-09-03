@@ -350,6 +350,77 @@ func prepared_history_holder() -> Preparation.PreparedSource:
 	prepared._payload.preparedHistory=result.preparedHistory
 	return prepared
 
+func prepared_masonry_holder(unsupported := false) -> Preparation.PreparedSource:
+	var prepared:=prepared_history_holder()
+	if unsupported: prepared._payload.blueprint.parts[0].recipe["unsupportedExtra"]=PackedInt32Array([1,2])
+	var result: Dictionary=Preparation._compile_masonry(prepared._payload.blueprint,prepared._payload.preparedHistory)
+	prepared._payload.preparedMasonry=result.preparedMasonry
+	return prepared
+
+func prepared_masonry_observation(job) -> Dictionary:
+	# Keep the test's publisher/descriptor aliases inside this synchronous helper
+	# so neither can survive across the worker-retirement await in the caller.
+	var publisher=job._building
+	var pending=publisher._pending_masonry
+	return {"certificate":weakref(publisher._prepared_masonry),"publisher":weakref(publisher),
+		"borrowed":pending!=null and pending._cursor==null and pending._geometry.is_read_only()}
+
+func prepared_masonry_controls() -> void:
+	for mode: String in ["part_size","part_id","part_replace","missing_entry","history_replace","artifact_drop"]:
+		var job=Job.new()
+		var trees:=SyntheticTrees.new()
+		start(job,trees,prepared_masonry_holder())
+		job.advance(1)
+		var publisher=job._building
+		var source_part=job._blueprint.parts[0]
+		match mode:
+			"part_size": source_part.size.x+=0.5
+			"part_id": source_part.id+="-changed"
+			"part_replace": job._blueprint.parts[0]=Blueprint.BuildingPartScript.new(source_part.snapshot())
+			"missing_entry":
+				var snapshot: Dictionary=source_part.snapshot()
+				snapshot.id="new-unprepared-wall"
+				job._blueprint.parts[0]=Blueprint.BuildingPartScript.new(snapshot)
+			"history_replace": publisher._prepared_history=Preparation._compile_history(job._blueprint).preparedHistory
+			"artifact_drop": publisher._prepared_masonry=null
+		job.advance(2500)
+		check("prepared_masonry_"+mode+"_fails",job.status().status=="failed" and not job.status().sceneReady)
+		check("prepared_masonry_"+mode+"_before_collision",job.status().buildingCursor==0 and publisher.published_part_count==0 and publisher.collision_count==0 and publisher._pending_masonry==null)
+		publisher=null; source_part=null
+		await drain(job,"prepared_masonry_"+mode)
+	for unsupported: bool in [false,true]:
+		var job=Job.new()
+		var trees:=SyntheticTrees.new()
+		start(job,trees,prepared_masonry_holder(unsupported))
+		var seen:=false
+		var borrowed:=false
+		var observed: Dictionary={}
+		for index in range(10000):
+			job.advance(1)
+			if pending_target_reached(job,"masonry_collect"):
+				seen=true
+				observed=prepared_masonry_observation(job)
+				borrowed=observed.borrowed
+				break
+			if job.status().status in ["ready","failed"]: break
+		var label:="prepared_masonry_"+("unsupported" if unsupported else "compiled")
+		check(label+"_pending",seen and job.status().buildingCursor==0)
+		check(label+"_correct_algorithm_path",not borrowed if unsupported else borrowed)
+		job.cancel()
+		await drain(job,label)
+		check(label+"_released",not observed.is_empty() and observed.certificate.get_ref()==null and observed.publisher.get_ref()==null)
+	var job=Job.new()
+	var trees:=SyntheticTrees.new()
+	start(job,trees,prepared_masonry_holder())
+	for index in range(10000):
+		job.advance(2500)
+		if job.status().status in ["ready","failed"]: break
+	check("prepared_masonry_complete",job.status().sceneReady and job.status().buildingCursor==2)
+	check("prepared_masonry_no_main_descriptor",not job._building.publication_timing().has("masonry_publish_geometry") and job._building.publication_timing().get("prepared_masonry_lookup",{}).get("calls",0)==1)
+	check("prepared_masonry_complete_collision_light",job._building.collision_count==2 and job.own_node_root().find_children("*","OmniLight3D",true,false).size()==1)
+	job.cancel()
+	await drain(job,"prepared_masonry_success")
+
 func prepared_history_lifecycle_controls() -> void:
 	for change: String in ["none","object","routes","trees","events","cells"]:
 		var trees:=SyntheticTrees.new()
@@ -540,6 +611,7 @@ func _run() -> void:
 	await masonry_completion_control()
 	masonry_hook_controls()
 	await prepared_history_lifecycle_controls()
+	await prepared_masonry_controls()
 	worker.request_shutdown()
 	var deadline := Time.get_ticks_msec() + 5000
 	while not worker.poll().shutdownComplete and Time.get_ticks_msec() < deadline: await process_frame

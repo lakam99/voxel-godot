@@ -7,6 +7,7 @@ const Publisher = preload("res://scripts/buildings/BuildingPartPublisher.gd")
 const Declaration = preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
 const Session = preload("res://scripts/buildings/MasonryAperturePublication.gd")
 const Preparation = preload("res://scripts/testing/buildings/CitadelOpeningHeadVisualPreparation.gd")
+const WorkerPreparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const KEY := "synthetic_front"
 const MAX_TURNS := 4096
 var _checks: Dictionary = {}
@@ -22,6 +23,8 @@ func _run() -> void:
 	var small: Dictionary = _complete("small_budget", 25)
 	var large: Dictionary = _complete("large_budget_drain", 4000)
 	_checks["budget_independent_artifact"] = small.ready and large.ready and small.signature == large.signature
+	var prepared: Dictionary=_complete("prepared_worker_descriptors",25,true)
+	_checks["prepared_descriptor_artifact_exact"]=prepared.ready and prepared.signature==small.signature
 	_owned_incremental_begin(small.signature)
 	for budget: int in [0, -1, 4001]:
 		var b = _fixture()
@@ -129,9 +132,14 @@ func _drain(session, publisher, parts: Array, budget: int, label: String) -> boo
 	_checks[label + ":no_artifact_until_all_ready"] = hidden
 	return session.state == "ready"
 
-func _complete(label: String, budget: int) -> Dictionary:
+func _complete(label: String, budget: int, prepared_descriptors := false) -> Dictionary:
 	var b = _fixture()
 	var publisher = _publisher(b)
+	if prepared_descriptors:
+		publisher._prepared_history=WorkerPreparation._compile_history(b).preparedHistory
+		publisher.surface_history=publisher._prepared_history.history
+		publisher._prepared_masonry=WorkerPreparation._compile_masonry(b,publisher._prepared_history).preparedMasonry
+		publisher._prepared_masonry_identity=publisher._prepared_masonry
 	var before: PackedByteArray = var_to_bytes(b.snapshot())
 	var context: PackedByteArray = Session.context_binding(publisher)
 	var by_id: Dictionary = {}
@@ -150,9 +158,12 @@ func _complete(label: String, budget: int) -> Dictionary:
 			var artifact: Dictionary = session.artifact(part)
 			all_ready = all_ready and not artifact.is_empty() and not artifact.entries.is_empty()
 			artifacts.append(artifact)
+			if prepared_descriptors:
+				_checks[label+":borrowed_geometry:"+String(part.id)]=is_same(artifact.geometry,publisher._prepared_masonry.geometry_for(part))
 	_checks[label + ":all_ready_with_bricks"] = all_ready and session.metrics.parts == 2 and session.metrics.bricks > 0
 	_checks[label + ":one_unit_read_all_bricks_reuse"] = all_ready and session.metrics.get("unitBoxArrayReadCount") == 1 and session.metrics.get("unitBoxTemplateHits") == session.metrics.bricks
 	_checks[label + ":caller_and_context_immutable"] = before == var_to_bytes(b.snapshot()) and context == Session.context_binding(publisher)
+	if prepared_descriptors: _checks[label+":no_main_descriptor"]=session.metrics.maxDescriptorUsec==0
 	_runs.append({"name": label, "state": session.state, "reason": session.reason, "metrics": session.metrics.duplicate()})
 	return {"ready": all_ready, "signature": var_to_bytes(_canonical(artifacts))}
 

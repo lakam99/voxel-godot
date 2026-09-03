@@ -88,6 +88,8 @@ var _paving_history_source
 var _paving_history_source_bytes := PackedByteArray()
 var _completed_paving: Array = []
 var _prepared_history
+var _prepared_masonry
+var _prepared_masonry_identity
 
 
 func _init() -> void:
@@ -162,6 +164,8 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 	_prepared_static_records=source.get("staticRecords",{})
 	_prepared_static_bindings=source.get("staticRecordBindings",{})
 	_prepared_history=source.get("preparedHistory")
+	_prepared_masonry=source.get("preparedMasonry")
+	_prepared_masonry_identity=_prepared_masonry
 	var started := Time.get_ticks_usec()
 	var ready := _begin_scene_publication(source.blueprint, options, parent)
 	scene_preparation_usec = Time.get_ticks_usec() - started
@@ -184,7 +188,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 		"pavingBlueprint":_paving_blueprint, "pavingParts":_paving_source_parts,
 		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
 		"pavingHistoryBinding":_paving_history_binding, "pavingTreatments":paving_treatments,
-		"masonry":_masonry_preparation, "surfaceHistory":surface_history,"preparedHistory":_prepared_history,
+		"masonry":_masonry_preparation, "surfaceHistory":surface_history,"preparedHistory":_prepared_history,"preparedMasonry":_prepared_masonry,"preparedMasonryIdentity":_prepared_masonry_identity,
 		"progressCallback":incremental_progress_callback}
 	physical_integrity = {}
 	raised_route_coverage = {}
@@ -200,6 +204,8 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	paving_treatments = []
 	_masonry_preparation = null
 	_prepared_history=null
+	_prepared_masonry=null
+	_prepared_masonry_identity=null
 	surface_history = SurfaceHistoryFieldScript.new()
 	incremental_progress_callback = Callable()
 	_paving_prepared = false
@@ -228,6 +234,9 @@ func _begin_scene_publication(blueprint, options: Dictionary, parent: Node3D) ->
 		surface_history=_prepared_history.history
 	else:
 		surface_history.configure(blueprint.recipe, blueprint.parts)
+	if _prepared_masonry!=null:
+		if not _prepared_masonry is PublicationPreparation.PreparedMasonry or not _prepared_masonry.matches_history(_prepared_history,surface_history,source_blueprint_id):
+			return _paving_reject("invalid_prepared_masonry")
 	_record_publication_stage("history",Time.get_ticks_usec()-stage_started)
 	stage_started = Time.get_ticks_usec()
 	var paving_ready := _prepare_paving_publication(blueprint)
@@ -361,6 +370,8 @@ func publication_status() -> Dictionary:
 
 func clear_published() -> void:
 	_prepared_history=null
+	_prepared_masonry=null
+	_prepared_masonry_identity=null
 	_paving_history_snapshot=null
 	_paving_history_source=null
 	_paving_history_source_bytes=PackedByteArray()
@@ -728,6 +739,7 @@ func _publication_failed() -> bool:
 
 func _masonry_part_valid(part) -> bool:
 	if _publication_failed(): return false
+	if not _prepared_masonry_part_valid(part): return false
 	if _masonry_preparation != null and _masonry_preparation.state == "pending_budget": return false
 	if _masonry_preparation != null and not _masonry_preparation.validate_unit_source(self): return false
 	if _masonry_preparation != null and not _masonry_preparation.accepts_source_member(part): return false
@@ -737,6 +749,24 @@ func _masonry_part_valid(part) -> bool:
 		_masonry_preparation = MasonryAperturePublicationScript.new()
 		return _masonry_preparation._fail("unprepared_direct_masonry_publication")
 	return _masonry_preparation.ready_for(part, self)
+
+func _prepared_masonry_part_valid(part) -> bool:
+	if _prepared_masonry!=_prepared_masonry_identity:
+		return _paving_reject("replaced_prepared_masonry")
+	if _prepared_masonry==null: return true
+	if not _prepared_masonry.matches_history(_prepared_history,surface_history,source_blueprint_id):
+		return _paving_reject("stale_prepared_masonry_history")
+	if _prepared_masonry.has_part(part) and not _prepared_masonry.validate_part(part):
+		return _paving_reject("stale_prepared_masonry_part")
+	return true
+
+func prepared_masonry_geometry(part) -> Dictionary:
+	var started:=Time.get_ticks_usec()
+	if not _prepared_masonry_part_valid(part): return {}
+	if _prepared_masonry==null: return {}
+	var geometry: Dictionary=_prepared_masonry.geometry_for(part)
+	_record_publication_stage("prepared_masonry_lookup",Time.get_ticks_usec()-started)
+	return geometry
 
 
 func _publish_masonry_group(parent: Node3D, artifact: Dictionary, group: String, material: Material, label: String) -> void:

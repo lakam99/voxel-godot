@@ -141,10 +141,8 @@ func advance(publisher, budget_usec: int = 2500) -> String:
 		elif _descriptor_cursor!=null:
 			var result: Dictionary=_descriptor_cursor.advance(maxi(1,budget_usec-int(Time.get_ticks_usec()-started)))
 			if result.status=="ready":
-				_current={"geometry":_descriptor_cursor.take_result(),"entries":[],"preparedMeshes":{},"provenance":[]}
+				_begin_solids(_descriptor_cursor.take_result())
 				_descriptor_cursor=null
-				_building_solids=true; _solids_group=0; _solids_index=0; _solids=[]
-				_solids_frame=Transform3D(Basis.from_euler(_descriptor_part.rotation),_descriptor_part.position)
 			elif result.status!="pending_budget": _fail("masonry_descriptor:"+String(result.get("reason",result.status)))
 			metrics.maxDescriptorUsec=maxi(metrics.maxDescriptorUsec,Time.get_ticks_usec()-unit_started)
 		elif _building_solids:
@@ -159,7 +157,11 @@ func advance(publisher, budget_usec: int = 2500) -> String:
 				metrics.maxUnitUsec = maxi(metrics.maxUnitUsec, declaration_usec)
 				continue
 			_descriptor_part=Part.new(request.snapshot)
-			_descriptor_cursor=Descriptor.begin_source(_descriptor_part,publisher.surface_history,publisher.source_blueprint_id)
+			var prepared: Dictionary=publisher.prepared_masonry_geometry(request.part)
+			if publisher._publication_failed():
+				_fail("stale_prepared_masonry"); break
+			if not prepared.is_empty(): _begin_solids(prepared)
+			else: _descriptor_cursor=Descriptor.begin_source(_descriptor_part,publisher.surface_history,publisher.source_blueprint_id)
 		elif _brick_cursor < _solids.size():
 			var request: Dictionary = _requests[_part_cursor]
 			var result := Cuts.prepare([_solids[_brick_cursor]], request.volumes, publisher.unit_box, metrics, _unit_snapshot)
@@ -190,6 +192,11 @@ func advance(publisher, budget_usec: int = 2500) -> String:
 	if elapsed > budget_usec: metrics.sliceOverruns += 1
 	metrics.preparationUsec += elapsed
 	return state
+
+func _begin_solids(geometry: Dictionary) -> void:
+	_current={"geometry":geometry,"entries":[],"preparedMeshes":{},"provenance":[]}
+	_building_solids=true; _solids_group=0; _solids_index=0; _solids=[]
+	_solids_frame=Transform3D(Basis.from_euler(_descriptor_part.rotation),_descriptor_part.position)
 
 func _advance_solids(publisher) -> void:
 	if _solids_group==2:

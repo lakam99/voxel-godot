@@ -89,12 +89,14 @@ func actual_publication() -> void:
 	source = {}
 	check("actual_preparation_queued",receipt.status=="queued")
 	progress("background_preparation")
+	var background_started:=Time.get_ticks_usec()
 	var deadline := Time.get_ticks_msec()+60000
 	var preparation: Dictionary = worker.poll()
 	while preparation.completedToken==0 and Time.get_ticks_msec()<deadline:
 		await process_frame
 		preparation = worker.poll()
 	var completed: Dictionary = worker.take_result(receipt.token,binding)
+	metrics.backgroundPreparationElapsedUsec=Time.get_ticks_usec()-background_started
 	check("actual_preparation_ready",completed.get("result",{}).get("ready",false))
 	if not checks.actual_preparation_ready:
 		worker.request_shutdown()
@@ -112,6 +114,11 @@ func actual_publication() -> void:
 	var job = job_script.new()
 	metrics.metadataPreparationUsec=completed.result.prepared._payload.get("metadataPreparationUsec",0)
 	metrics.historyPreparationUsec=completed.result.prepared._payload.get("historyPreparationUsec",0)
+	metrics.masonryPreparationUsec=completed.result.prepared._payload.get("masonryPreparationUsec",0)
+	var prepared_masonry=completed.result.prepared._payload.get("preparedMasonry")
+	metrics.preparedMasonryCount=prepared_masonry.count() if prepared_masonry!=null else 0
+	check("actual_masonry_descriptors_prepared",metrics.preparedMasonryCount==1450)
+	prepared_masonry=null
 	check("actual_immutable_history_prepared",completed.result.prepared._payload.get("preparedHistory")!=null)
 	var begin: Dictionary = job.begin(completed.result.prepared,profile,binding,parent,main.make_tree_from_runtime_request)
 	completed = {}; profile = {}
@@ -133,6 +140,8 @@ func actual_publication() -> void:
 	metrics.publisherStages = job._building.publication_timing() if job._building!=null else {}
 	check("actual_history_uses_identity_guards",metrics.publisherStages.get("prepared_history_identity_validation",{}).get("calls",0)>0 and metrics.publisherStages.get("paving_history_boundary_validation",{}).get("calls",0)==0)
 	check("actual_advance_accounting",status.advanceCalls>0 and status.advanceCpuUsec>0 and status.betweenAdvanceUsec>=0)
+	check("actual_no_main_masonry_descriptor",metrics.publisherStages.get("masonry_publish_geometry",{}).get("calls",0)==0 and job._building._masonry_preparation.metrics.maxDescriptorUsec==0)
+	check("actual_prepared_masonry_consumed",metrics.publisherStages.get("prepared_masonry_lookup",{}).get("calls",0)==metrics.preparedMasonryCount)
 	metrics.retainedMetadata=measure_retained_metadata(job._building)
 	metrics.metadataCache=job._building._static_record_cache_stats.duplicate() if job._building!=null else {}
 	metrics.metadataCache["currentRecords"]=job._building._static_record_cache.size() if job._building!=null else 0

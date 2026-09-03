@@ -88,8 +88,13 @@ func _step(publisher, parent: Node3D, budget_usec: int) -> void:
 	match state:
 		"geometry_begin":
 			if _artifact.is_empty():
-				_cursor=Geometry.begin_source(_copy,publisher.prepare_paving_history_snapshot(),_source_id)
-				state="geometry"
+				_geometry=publisher.prepared_masonry_geometry(_part)
+				if publisher._publication_failed():
+					state="failed"; reason="stale_prepared_masonry"; return
+				if not _geometry.is_empty(): state="bed"
+				else:
+					_cursor=Geometry.begin_source(_copy,publisher.prepare_paving_history_snapshot(),_source_id)
+					state="geometry"
 			else:
 				_geometry=_artifact.geometry
 				state="bed"

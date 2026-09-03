@@ -68,6 +68,18 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The shared preparation worker now supplies all 1,450 masonry descriptors to
+ordinary wall publication and aperture preparation. Final actual construction
+passes 68/68 with byte-identical available scene facts and clean owned shutdown.
+See `CITADEL_WORKER_MASONRY_PREPARATION_2026-09-02.md`. Scene time falls from
+32.330 s to 22.484 s and outer calls from 4,682 to 3,254. Background preparation
+takes 24.803 s, including 5.355 s of masonry work moved off-frame. Construction
+still trails the earlier 21.134 s synchronous baseline; roof, aperture and final
+validation overruns remain. Next are those remaining operations and ordinary
+activation, not further descriptor tuning. The independent critic approved this
+focused checkpoint and commit; no performance, headed or ordinary-spawn approval
+is claimed.
+
 Incremental masonry and immutable prepared history now pass the actual-source
 construction checks (65/65), with the same available scene facts and clean owned
 shutdown. See `CITADEL_INCREMENTAL_MASONRY_PUBLICATION_2026-09-02.md`. Wall
