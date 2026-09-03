@@ -31,6 +31,11 @@ var _tree_receiver: WeakRef
 var _tree_method: StringName
 var _tree_retire_receiver: WeakRef
 var _tree_retire_method: StringName
+var _door_lifecycle_configured := false
+var _door_receiver: WeakRef
+var _door_method: StringName
+var _door_retire_receiver: WeakRef
+var _door_retire_method: StringName
 var _scenes: Dictionary = {}
 var _retiring_scenes: Array = []
 var _pending_scene_disposals: Dictionary = {}
@@ -58,14 +63,38 @@ func configure_scene_publication(parent: Node3D, tree_publish: Callable, tree_re
 	_tree_retire_receiver=weakref(tree_retire.get_object()); _tree_retire_method=tree_retire.get_method()
 	return true
 
+## Optional only for existing construction diagnostics. The ordinary runtime
+## owner must bind this balanced pair before enabling scene publication.
+## Once opted in, receiver loss is not permission to fall back to diagnostics.
+## Jobs capture their own weak pair; neither paused nor retiring owners may
+## inherit a replacement, even after their root nodes have disappeared.
+func configure_door_publication(register_callback: Callable, unregister_callback: Callable) -> bool:
+	if _closing: return false
+	if not _ordinary_callback(register_callback) or not _ordinary_callback(unregister_callback): return false
+	var same: bool = _door_lifecycle_configured \
+		and _door_receiver!=null and is_same(_door_receiver.get_ref(),register_callback.get_object()) and _door_method==register_callback.get_method() \
+		and _door_retire_receiver!=null and is_same(_door_retire_receiver.get_ref(),unregister_callback.get_object()) and _door_retire_method==unregister_callback.get_method()
+	if same: return true
+	if not _scenes.is_empty() or _has_scene_retirements(): return false
+	_door_receiver=weakref(register_callback.get_object()); _door_method=register_callback.get_method()
+	_door_retire_receiver=weakref(unregister_callback.get_object()); _door_retire_method=unregister_callback.get_method()
+	_door_lifecycle_configured=true
+	return true
+
 func _ordinary_callback(callback: Callable) -> bool:
 	return callback.is_valid() and not callback.is_custom() and callback.get_object()!=self
+
+func _door_callbacks_ready() -> bool:
+	return _door_lifecycle_configured \
+		and _door_receiver!=null and is_instance_valid(_door_receiver.get_ref()) and Callable(_door_receiver.get_ref(),_door_method).is_valid() \
+		and _door_retire_receiver!=null and is_instance_valid(_door_retire_receiver.get_ref()) and Callable(_door_retire_receiver.get_ref(),_door_retire_method).is_valid()
 
 func _scene_callbacks_ready() -> bool:
 	var parent: Node3D=_scene_parent.get_ref() as Node3D if _scene_parent!=null else null
 	return is_instance_valid(parent) and parent.is_inside_tree() and not parent.is_queued_for_deletion() \
 		and _tree_receiver!=null and is_instance_valid(_tree_receiver.get_ref()) and Callable(_tree_receiver.get_ref(),_tree_method).is_valid() \
-		and _tree_retire_receiver!=null and is_instance_valid(_tree_retire_receiver.get_ref()) and Callable(_tree_retire_receiver.get_ref(),_tree_retire_method).is_valid()
+		and _tree_retire_receiver!=null and is_instance_valid(_tree_retire_receiver.get_ref()) and Callable(_tree_retire_receiver.get_ref(),_tree_retire_method).is_valid() \
+		and (not _door_lifecycle_configured or _door_callbacks_ready())
 
 func configure(admission) -> void:
 	_configuration_serial+=1
@@ -241,6 +270,7 @@ func stats() -> Dictionary:
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
 		"dispatchCount":_dispatch_count,"acceptedCount":_accepted_count,"maxAdvanceUsec":_max_advance_usec,
 		"publicationReady":false,"worker":_last_worker_status,
+		"doorLifecycleConfigured":_door_lifecycle_configured,"doorLifecycleAvailable":_door_callbacks_ready(),
 		"constructionStatus":"available" if _scene_callbacks_ready() else "pending",
 		"constructionReason":"" if _scene_callbacks_ready() else "scene_lifecycle_capability_missing",
 		"publishingScenes":_scenes.size()-constructed,"constructedScenes":constructed,
@@ -294,6 +324,7 @@ func _start_scene(region: Vector2i, source: Dictionary) -> bool:
 	var parent: Node3D=_scene_parent.get_ref() as Node3D
 	var job=SceneJob.new()
 	if not job.set_tree_retire_callback(Callable(_tree_retire_receiver.get_ref(),_tree_retire_method)): return false
+	if _door_lifecycle_configured and not job.set_door_callbacks(Callable(_door_receiver.get_ref(),_door_method),Callable(_door_retire_receiver.get_ref(),_door_retire_method)): return false
 	var result: Dictionary=job.begin(prepared.prepared,prepared.profile,prepared.binding,parent,Callable(_tree_receiver.get_ref(),_tree_method))
 	if result.get("status")!="pending_budget":
 		_failures[region]={"binding":prepared.binding,"reason":String(result.get("reason","scene_begin_failed"))}

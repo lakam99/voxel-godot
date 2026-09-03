@@ -27,6 +27,14 @@ var _tree_retire_receiver: WeakRef
 var _tree_retire_method: StringName
 var _registered_tree_ids: Dictionary = {}
 var _retiring_tree_instance := 0
+var _door_receiver: WeakRef
+var _door_method: StringName
+var _door_retire_receiver: WeakRef
+var _door_retire_method: StringName
+var _door_cursor := 0
+var _door_claims: Dictionary = {}
+var _door_registered_ids: Dictionary = {}
+var _doors_retired := 0
 var _root: Node3D
 var _cleanup_node: Node
 var _building
@@ -96,12 +104,38 @@ func own_node_root() -> Node3D:
 	return _root if is_instance_valid(_root) else null
 
 
+## Optional for construction-only diagnostics; an ordinary owner must bind both.
+## register(body) acknowledges {status:registered, portalId:<exact source ID>}.
+## pending_budget may retry only with sideEffects:false. retire(body) returns
+## the shared unregister receipt; only unregistered/absent authorizes freeing.
+func set_door_callbacks(register_callback: Callable, retire_callback: Callable) -> bool:
+	if _phase != "idle": return false
+	for callback in [register_callback, retire_callback]:
+		if not callback.is_valid() or callback.is_custom() or callback.get_object() == self: return false
+	_door_receiver = weakref(register_callback.get_object())
+	_door_method = register_callback.get_method()
+	_door_retire_receiver = weakref(retire_callback.get_object())
+	_door_retire_method = retire_callback.get_method()
+	return true
+
+
+## Repair a lost cleanup receiver without resuming registration or changing
+## claimed leaf identities. The replacement still must acknowledge each leaf.
+func set_door_retire_callback(callback: Callable) -> bool:
+	if _phase != "teardown" or not callback.is_valid() or callback.is_custom() or callback.get_object() == self: return false
+	_door_retire_receiver = weakref(callback.get_object())
+	_door_retire_method = callback.get_method()
+	_cleanup_reason = ""
+	return true
+
+
 func status_count() -> Dictionary:
 	return {"phase":_phase, "buildingParts":_building_cursor,
 		"buildingTotal":_blueprint.parts.size() if _blueprint != null else 0,
 		"furnitureParts":_furniture_cursor, "furnitureTotal":_plan.parts.size() if _plan != null else 0,
 		"treesRegistered":_registered_tree_ids.size(), "treesSkipped":_trees_skipped,
-		"treesTotal":_trees.size(), "treeVisualsComplete":_visuals_complete, "freedNodes":_freed_nodes}
+		"treesTotal":_trees.size(), "treeVisualsComplete":_visuals_complete, "freedNodes":_freed_nodes,
+		"doorsRegistered":_door_registered_ids.size(), "doorClaims":_door_claims.size(), "doorsRetired":_doors_retired}
 
 
 func advance(budget_usec: int = 2500) -> Dictionary:
@@ -179,6 +213,7 @@ func status() -> Dictionary:
 	elif not _reason.is_empty(): state = "failed"
 	return {"status":state, "reason":_reason, "cleanupReason":_cleanup_reason, "phase":_phase, "binding":_binding,
 		"sceneReady":_phase == "ready", "gameplayReady":false,
+		"doorLifecycleConfigured":_door_retire_receiver != null,
 		"retirementReady":_phase == "retired", "buildingCursor":_building_cursor,
 		"furnitureCursor":_furniture_cursor, "treeCursor":_tree_cursor,
 		"treeVisualsComplete":_visuals_complete, "treeVisualsRequired":_tree_bodies.size(),
@@ -257,7 +292,9 @@ func _step(remaining_usec: int) -> bool:
 			if _cancelled: return false
 			if result.get("status")=="pending_budget": return true
 			if not bool(result.get("complete", false)): return _fail(String(result.get("reason", "building_incomplete")))
-			_phase = "furniture_begin"
+			_phase = "door_registration" if _door_receiver != null else "furniture_begin"
+		"door_registration":
+			return _register_door()
 		"furniture_begin":
 			_furniture = FurniturePublisher.new()
 			_cpu["furniturePublisher"] = _furniture
@@ -283,6 +320,48 @@ func _step(remaining_usec: int) -> bool:
 		"tree_visuals":
 			return _check_tree_visual()
 	return true
+
+
+func _register_door() -> bool:
+	if _door_cursor >= _building.published_nodes.size():
+		_phase = "furniture_begin"
+		return true
+	var body = _building.published_nodes[_door_cursor]
+	if not is_instance_valid(body): return _fail("published_door_scan_node_lost")
+	if String(body.get_meta("building_part_kind", "")) != "door":
+		_door_cursor += 1
+		return true
+	if not body is StaticBody3D or not _door_body_valid(body): return _fail("invalid_published_door")
+	var id: int = body.get_instance_id()
+	if _door_registered_ids.has(id):
+		_door_cursor += 1
+		return true
+	var portal_id := String(body.get_meta("door_portal_id", ""))
+	if portal_id.is_empty(): return _fail("missing_published_door_id")
+	if _door_claims.has(id) and _door_claims[id].portalId != portal_id: return _fail("published_door_id_changed")
+	var receiver: Object = _door_receiver.get_ref() if _door_receiver != null else null
+	if not is_instance_valid(receiver): return _fail("door_callback_lost")
+	var callback := Callable(receiver, _door_method)
+	if not callback.is_valid(): return _fail("door_callback_lost")
+	# Claim before external code: side effects followed by failure/cancellation
+	# must still take the same acknowledged cleanup path.
+	_door_claims[id] = {"body":weakref(body), "portalId":portal_id}
+	var result: Variant = callback.call(body)
+	if _cancelled or _phase != "door_registration": return false
+	if not _door_body_valid(body) or String(body.get_meta("door_portal_id", "")) != portal_id: return _fail("registered_door_owner_changed")
+	if not result is Dictionary: return _fail("invalid_door_registration_ack")
+	if result.get("status") == "pending_budget" and result.get("sideEffects") == false: return false
+	if result.get("status") != "registered" or result.get("portalId") != portal_id: return _fail("door_registration_failed")
+	_door_registered_ids[id] = true
+	_door_cursor += 1
+	return true
+
+
+func _door_body_valid(body) -> bool:
+	var parent: Node3D = _parent.get_ref() as Node3D if _parent != null else null
+	return _valid_parent(parent) and is_instance_valid(_root) and not _root.is_queued_for_deletion() \
+		and _root.get_parent() == parent and _root.global_transform.is_equal_approx(Transform3D(Basis.IDENTITY, _cpu.profile.origin)) \
+		and is_instance_valid(body) and not body.is_queued_for_deletion() and body.is_inside_tree() and _root.is_ancestor_of(body)
 
 
 func _register_tree() -> bool:
@@ -383,17 +462,41 @@ func _tree_body_valid(body: Node) -> bool:
 
 func _teardown_step() -> bool:
 	if not is_instance_valid(_root):
+		if not _door_claims.is_empty():
+			_cleanup_reason = "door_retirement_root_lost"
+			return false
 		_root = null
 		_cleanup_node = null
 		_phase = "detach_publishers"
 		return true
 	if not is_instance_valid(_cleanup_node): _cleanup_node = _root
-	if _cleanup_node.get_child_count(true) > 0:
-		_cleanup_node = _cleanup_node.get_child(_cleanup_node.get_child_count(true) - 1, true)
-		return true
 	var node := _cleanup_node
 	var next := node.get_parent()
 	var instance_id := node.get_instance_id()
+	# Registry cleanup needs intact geometry, not an already stripped body.
+	if _door_claims.has(instance_id):
+		var receiver: Object = _door_retire_receiver.get_ref() if _door_retire_receiver != null else null
+		if not is_instance_valid(receiver):
+			_cleanup_reason = "door_retire_callback_lost"
+			return false
+		var callback := Callable(receiver, _door_retire_method)
+		if not callback.is_valid():
+			_cleanup_reason = "door_retire_callback_lost"
+			return false
+		var result: Variant = callback.call(node)
+		# The callback may fail after removing a registration; a subsequent
+		# authoritative absent receipt is safe. Never infer success from no error.
+		if not is_instance_valid(node) or not is_instance_valid(_root) or node.get_parent() != next or not _root.is_ancestor_of(node):
+			_cleanup_reason = "door_retirement_owner_lost"
+			return false
+		if not result is Dictionary or not result.get("status") in ["unregistered", "absent"] \
+				or (result.get("status") == "unregistered" and result.get("portalId") != _door_claims[instance_id].portalId):
+			_cleanup_reason = "door_retirement_not_acknowledged"
+			return false
+		_door_claims.erase(instance_id)
+		_doors_retired += 1
+		_cleanup_reason = ""
+		return true
 	if _registered_tree_ids.has(instance_id) and _retiring_tree_instance != instance_id:
 		var receiver: Object = _tree_retire_receiver.get_ref() if _tree_retire_receiver != null else null
 		if _tree_retire_receiver != null:
@@ -407,6 +510,12 @@ func _teardown_step() -> bool:
 			callback.call(_registered_tree_ids[instance_id], node)
 		_retiring_tree_instance = instance_id
 		return true # Callback is its own measured atomic operation, before free.
+	if node.get_child_count(true) > 0:
+		_cleanup_node = node.get_child(node.get_child_count(true) - 1, true)
+		return true
+	if node == _root and not _door_claims.is_empty():
+		_cleanup_reason = "door_retirement_claims_unresolved"
+		return false
 	# These exact publisher metadata containers can dwarf the scene node itself.
 	# Keep their last CPU references for retirement rather than freeing on main.
 	for key: StringName in [&"building_part_record", &"building_part_records", &"furnishing_part_record"]:
@@ -423,6 +532,9 @@ func _teardown_step() -> bool:
 
 
 func _detach_step() -> bool:
+	if not _door_claims.is_empty():
+		_cleanup_reason = "door_retirement_claims_unresolved"
+		return false
 	# All nodes are already gone. Drain dangling Node slots incrementally; retain
 	# every CPU/resource field on the publishers, with no bulk clear_published().
 	if _building != null and not _building.published_nodes.is_empty():
@@ -439,6 +551,8 @@ func _detach_step() -> bool:
 	_tree_method = &""
 	_tree_retire_receiver = null
 	_tree_retire_method = &""
+	_door_receiver = null
+	_door_retire_receiver = null
 	_phase = "retired"
 	return true
 

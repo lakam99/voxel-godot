@@ -1,6 +1,7 @@
 extends "res://scripts/testing/buildings/BuildingScenePublicationContract.gd"
 ## Accepted historical source, real Admission/service/jobs/publishers/tree queue.
-## Player-free host: no Main boot, gameplay door capability, or spawn acceptance.
+## Player-free host: real shared door registries, but no Main boot, navigation
+## door-state publication, player interaction or spawn acceptance.
 const Structures = preload("res://scripts/StructureSystem.gd")
 const SiteQueue = preload("res://scripts/world/CitadelSiteBuildQueue.gd")
 const SiteField = preload("res://scripts/world/CitadelSiteField.gd")
@@ -8,8 +9,30 @@ const REGION := Vector2i(1,-3)
 const SEED := "atlas-1492"
 
 class ServiceHost extends MainFixture:
+	const Doors = preload("res://scripts/npc_ai/interactions/DoorPortalService.gd")
+	const Smart = preload("res://scripts/npc_ai/interactions/SmartObjectService.gd")
+	var portals = Doors.new()
+	var smart = Smart.new()
+	var registered_doors: Dictionary = {}
+	var retired_doors: Dictionary = {}
+	var doors_intact_at_retirement := true
 	var retired_trees: Dictionary = {}
 	var retired_before_free := true
+	func _init() -> void:
+		portals.setup(null)
+		smart.setup(null, portals)
+	func register_scene_door(body: StaticBody3D) -> Dictionary:
+		var id: String = smart.register_door(body)
+		registered_doors[id] = int(registered_doors.get(id,0))+1
+		return {"status":"registered", "portalId":id}
+	func retire_scene_door(body: StaticBody3D) -> Dictionary:
+		doors_intact_at_retirement = doors_intact_at_retirement and body.is_inside_tree() and body.get_child_count()>0 \
+			and not body.find_children("*", "CollisionShape3D", true, false).is_empty()
+		var receipt: Dictionary = smart.unregister_door(body)
+		if receipt.get("status")=="unregistered":
+			var id := String(receipt.portalId)
+			retired_doors[id] = int(retired_doors.get(id,0))+1
+		return receipt
 	func retire_tree(id: String, body: StaticBody3D) -> void:
 		# No NPC registry is configured in this player-free fixture. This observer
 		# proves the owning service calls retirement before freeing each real tree.
@@ -35,6 +58,9 @@ func inspect_constructed(service) -> Dictionary:
 func source_hashes() -> Dictionary:
 	var result := {}
 	for path: String in ["scripts/world/CitadelPublicationService.gd","scripts/world/CitadelTerrainAdmission.gd",
+		"scripts/npc_ai/interactions/DoorPortalService.gd","scripts/npc_ai/interactions/DoorPortal.gd",
+		"scripts/npc_ai/interactions/SmartObjectService.gd","scripts/npc_ai/interactions/SmartObjectRegistration.gd",
+		"scripts/npc_ai/interactions/DoorController.gd",
 		"scripts/StructureSystem.gd","scripts/buildings/BuildingScenePublicationJob.gd",
 		"scripts/buildings/BuildingPartPublisher.gd","scripts/buildings/FurnishingPublisher.gd",
 		"scripts/buildings/BuildingPublicationPreparation.gd","scripts/buildings/BuildingPublicationWorker.gd",
@@ -76,6 +102,7 @@ func _run() -> void:
 	source={}
 	check("service_admitted_real_source",admission.source_state(REGION).get("status")=="ready")
 	check("service_unconfigured_capability_pending",service.stats().constructionStatus=="pending" and not service.stats().publicationReady)
+	check("service_shared_door_callbacks_bound",service.configure_door_publication(main.register_scene_door,main.retire_scene_door))
 	check("service_player_free_host_bound",service.configure_scene_publication(parent,main.make_tree_from_runtime_request,main.retire_tree))
 	var bounds:=Rect2i(SiteField.candidate_for_region(SEED,REGION).centerCell,Vector2i.ONE)
 	var started:=Time.get_ticks_usec()
@@ -105,6 +132,9 @@ func _run() -> void:
 		await physics_frame; await process_frame
 		await physics_frame; await process_frame
 		watched=inspect_constructed(service)
+		check("service_exact_shared_door_registration",main.registered_doors.size()==metrics.sceneAudit.doors \
+			and main.registered_doors.size()==20 and main.registered_doors.values().all(func(count): return count==1) \
+			and main.portals.portals.size()==20 and main.portals.door_to_portal.size()==20 and main.smart.registrations.size()==20)
 	progress("service_departure")
 	main.structure_system.advance_citadel_publication(Rect2i(),true)
 	deadline=Time.get_ticks_msec()+30000
@@ -114,6 +144,10 @@ func _run() -> void:
 		await main.startup_loading_yield("Contract: retiring constructed landmark")
 	check("service_departure_nodes_gone",parent.get_child_count()==0 and service.stats().retiringScenes==0)
 	check("service_balanced_tree_retirement",main.retired_before_free and main.retired_trees.size()==4 and main.retired_trees.values()==[1,1,1,1])
+	check("service_balanced_shared_door_retirement",main.doors_intact_at_retirement and main.retired_doors==main.registered_doors \
+		and main.portals.portals.is_empty() and main.portals.controllers.is_empty() and main.portals.door_to_portal.is_empty() \
+		and main.smart.registrations.is_empty())
+	metrics.sharedDoors={"registered":main.registered_doors.duplicate(),"retired":main.retired_doors.duplicate(),"intactAtRetirement":main.doors_intact_at_retirement}
 	for key: String in watched: check("service_retired_"+key,watched[key].get_ref()==null)
 	await main.wait_for_terrain_workers_before_quit()
 	check("service_shutdown_drained",service.stats().shutdownComplete and admission.stats().shutdownComplete)
@@ -127,13 +161,15 @@ func _run() -> void:
 		check("service_tree_queue_drained",metrics.treeQueue.pending==0 and metrics.treeQueue.activeWorkers==0 and metrics.treeQueue.completed==0)
 	main.structure_system.main=null
 	main.structure_system=null
+	main.smart.clear()
+	main.smart.door_portals=null
 	main.free()
 	await process_frame
 	check("service_source_hashes_unchanged",hashes==source_hashes())
 	var report: Dictionary={"passed":not checks.values().has(false),"complete":true,"checks":checks,"metrics":metrics,
 		"seed":SEED,"sourceSha256":SHA,"sourceHashes":hashes,
 		"evidenceLevel":"accepted_source_service_construction_and_retirement_with_actual_publishers_and_shared_tree_queue",
-		"doesNotProve":"No fresh generation, player-safe production admission, real doors/navigation, Main/New Game, save/Continue, headed/GPU or whole-frame budget acceptance."}
+		"doesNotProve":"No fresh generation, player-safe production admission, navigation door-state publication, physical player/NPC door interaction, Main/New Game, save/Continue, headed/GPU or whole-frame budget acceptance."}
 	var file:=FileAccess.open(output.path_join("report.json"),FileAccess.WRITE)
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("SERVICE SCENE COMPLETE ",checks.size()," passed=",report.passed)

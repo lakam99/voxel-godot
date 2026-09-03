@@ -68,6 +68,19 @@ explicit until separately resolved; do not silently turn it into a passed gate.
 
 ## Current work
 
+The scene job and owning service now support balanced shared-door callbacks.
+An accepted-source replay registers all twenty real citadel door bodies once
+and unregisters them before deleting collision children. The available scene
+record is unchanged (3179 collision parts, 210 furnishings, four shared trees).
+Actual controls pass 27/27; new scene-door faults 414/414, callback binding/reset
+138/138, unchanged scene-job 376/376 and service lifecycle 267/267. See
+`CITADEL_SCENE_DOOR_LIFECYCLE_2026-09-02.md`. The independent critic approved
+the focused lifecycle-hook commit on final evidence.
+Ordinary Main binding still awaits exact navigation door-state cleanup and
+non-destructive tree unbinding plus player-safe publication. Additional narrow
+navigation-state cleanup permission has been requested, not assumed. Overall
+service maximum 22.544 ms still fails the budget; no headed/spawn acceptance.
+
 The shared interaction registry now has a matching unregister wrapper. It keeps
 grouped-door reservations, reconnects the surviving representative's exit handler,
 and prevents an old leaf's callback from invalidating a same-ID replacement.
