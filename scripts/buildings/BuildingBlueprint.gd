@@ -373,22 +373,26 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 	for required_id_value in target.recipe.get("physicalRequiredSupportPartIds", []) as Array:
 		required_ids[String(required_id_value)] = true
 	var candidates := structural_candidates_near(point)
-	for preferred_pass in [true, false]:
+	var target_bottom: float = target.position.y - target.size.y * 0.5
+	var target_top: float = target.position.y + target.size.y * 0.5
+	var allow_enclosing := bool(target.recipe.get("allowEnclosingStructuralSupport", false))
+	var excluded_id := String(target.recipe.get("physicalSupportsPartId", ""))
+	# An empty preferred set cannot select anything in the first pass. Keep the
+	# original candidate order and both passes whenever preferences exist.
+	for preferred_pass in ([false] if required_ids.is_empty() else [true, false]):
 		for candidate in candidates:
-			if candidate == null or candidate == target or not is_structural_support_candidate(candidate):
+			if candidate == null or candidate == target:
 				continue
 			if required_ids.has(String(candidate.id)) != preferred_pass:
 				continue
-			if String(candidate.id) == String(target.recipe.get("physicalSupportsPartId", "")):
+			if String(candidate.id) == excluded_id or not is_structural_support_candidate(candidate):
 				continue
 			var local_point := part_inverse_transform(candidate) * point
 			if absf(local_point.x) > candidate.size.x * 0.5 + PHYSICAL_CONTACT_MARGIN or absf(local_point.z) > candidate.size.z * 0.5 + PHYSICAL_CONTACT_MARGIN:
 				continue
 			var candidate_bottom: float = candidate.position.y - candidate.size.y * 0.5
 			var candidate_top: float = candidate.position.y + candidate.size.y * 0.5
-			var target_bottom: float = target.position.y - target.size.y * 0.5
-			var target_top: float = target.position.y + target.size.y * 0.5
-			var candidate_encloses_target: bool = bool(target.recipe.get("allowEnclosingStructuralSupport", false)) and candidate_bottom <= target_bottom + 0.04 and candidate_top >= target_top - 0.04 and candidate.size.y >= target.size.y + 0.30
+			var candidate_encloses_target: bool = allow_enclosing and candidate_bottom <= target_bottom + 0.04 and candidate_top >= target_top - 0.04 and candidate.size.y >= target.size.y + 0.30
 			var candidate_is_lower: bool = candidate.position.y < target.position.y - 0.05 or candidate_encloses_target or bool(candidate.recipe.get("physicalRoot", false))
 			if candidate_is_lower and local_point.y >= -candidate.size.y * 0.5 - 0.08 and local_point.y <= candidate.size.y * 0.5 + 0.10:
 				return {"id": String(candidate.id), "surface": point, "gap": 0.0, "contact": "embedded"}

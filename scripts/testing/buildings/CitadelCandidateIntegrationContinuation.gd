@@ -5,6 +5,7 @@ extends SceneTree
 const Diagnostic = preload("res://scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd")
 const Restore = preload("res://scripts/buildings/BuildingPublicationSource.gd")
 const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
+const Worker = preload("res://scripts/buildings/BuildingPublicationWorker.gd")
 const Manifest = preload("res://scripts/buildings/BuildingSiteManifestBuilder.gd")
 const Site = preload("res://scripts/world/CitadelSitePreparation.gd")
 const Queue = preload("res://scripts/world/CitadelSiteBuildQueue.gd")
@@ -21,6 +22,11 @@ var input_path := INPUT
 var input_sha := INPUT_SHA
 var checks: Dictionary={}
 var evidence: Dictionary={}
+var worker_state = Worker.RunState.new()
+
+func _publication_checkpoint(stage: String) -> bool:
+	if not state.checkpoint(stage): worker_state.cancel()
+	return worker_state.advance(stage)
 
 func _initialize() -> void: call_deferred("_run")
 
@@ -117,7 +123,9 @@ func _work() -> Dictionary:
 	evidence.bindingScope="Production candidate/source key; isolated service generation token, not runtime admission."
 	evidence.binding=binding
 	if not state.begin_phase("publication_preparation",60000):return _fail("cancelled")
-	var prepared := Preparation.prepare_source(source.blueprint,furniture,binding,state.checkpoint)
+	worker_state.begin_work()
+	var prepared := Preparation.prepare_source(source.blueprint,furniture,binding,_publication_checkpoint)
+	evidence.workerCallback=worker_state.snapshot()
 	checks.publication_prepared=prepared.ready
 	if not prepared.ready:return prepared
 	var payload: Dictionary=prepared.prepared.take(binding)
