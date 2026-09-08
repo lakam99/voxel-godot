@@ -89,7 +89,63 @@ func _run() -> void:
 	_batch_counterexamples()
 	_stored_pose_containment_cases()
 	_reconstructed_endpoint_helper_case()
+	_terminal_support_eligibility_cases()
 	_finish(started, "contract_complete")
+
+
+func _terminal_support_eligibility_cases() -> void:
+	var fixture := _fixture("terminal_support_eligibility")
+	var b = fixture.blueprint
+	b.recipe["castleGrammar"] = {"courtyardWidth": 80.0, "courtyardDepth": 80.0}
+	for center in [0.0, 18.0]:
+		var id := "near" if center == 0.0 else "far"
+		var paving = _part(b, id, "foundation", Vector3(center, 1.07, 0), Vector3(14, 0.14, 14))
+		paving.material_id = "cobblestone"
+		paving.semantic = "castle_courtyard_paving"
+		# The nearer slab has a real rooted chain but misses its rightmost
+		# coverage samples. The farther slab has full grounded support.
+		_part(b, id + "_root", "foundation", Vector3(center - (0.5 if center == 0.0 else 0.0), 0.5, 0), Vector3(13 if center == 0.0 else 14, 1, 14))
+	var before := _digest(b.snapshot())
+	var reservations: Array[Rect2] = []
+	var ordinary: Dictionary = Urban.plan_courtyard_household(b, fixture.members, Vector3.FORWARD, reservations)
+	var terminal: Dictionary = Urban.plan_terminal_shop_household(b, fixture.members, Vector3.FORWARD, reservations)
+	_rows.append({"id": "terminal_requires_complete_support_without_changing_market_policy", "passed": ordinary.get("ready", false) and ordinary.get("supportId") == "near" and terminal.get("ready", false) and terminal.get("supportId") == "far" and before == _digest(b.snapshot()), "ordinary": ordinary, "terminal": terminal})
+	var repeated: Dictionary = Urban.plan_terminal_shop_household(b, fixture.members, Vector3.FORWARD, reservations)
+	_rows.append({"id": "terminal_support_search_deterministic", "passed": var_to_bytes(_stored_pose_decision(terminal)) == var_to_bytes(_stored_pose_decision(repeated))})
+	for reason in ["cancelled", "support_context_limit", "unsupported_foundation_contract"]:
+		var reject := func(_id: String) -> Dictionary: return {"ready": false, "reason": reason}
+		var result: Dictionary = Urban.plan_household_on_paving(b, fixture.members, Vector3.FORWARD, reservations, 40, 3, reject)
+		_rows.append({"id": "eligibility_propagates_" + reason, "passed": not result.get("ready", true) and result.get("reason") == "paving_support_proof_failed" and result.get("proof", {}).get("reason") == reason and before == _digest(b.snapshot())})
+	reservations.append(Rect2(10, -10, 16, 20))
+	var blocked: Dictionary = Urban.plan_terminal_shop_household(b, fixture.members, Vector3.FORWARD, reservations)
+	_rows.append({"id": "eligible_support_does_not_override_reserved_space", "passed": not blocked.get("ready", true) and before == _digest(b.snapshot()), "result": blocked})
+	var excessive := _fixture("terminal_proof_limit")
+	excessive.blueprint.recipe["castleGrammar"] = {"courtyardWidth": 80.0, "courtyardDepth": 80.0}
+	for index in range(Urban.MAX_TERMINAL_SUPPORT_PROOFS + 1):
+		_paving(excessive, "support_%d" % index, Vector2.ZERO, Vector2(14, 14))
+		excessive.blueprint.find_part("support_%d" % index).semantic = "castle_courtyard_paving"
+	var frozen := _digest(excessive.blueprint.snapshot())
+	var limited: Dictionary = Urban.plan_terminal_shop_household(excessive.blueprint, excessive.members, Vector3.FORWARD, [])
+	_rows.append({"id": "terminal_actual_proof_limit_discards_earlier_eligible_surfaces", "passed": not limited.get("ready", true) and limited.get("proof", {}).get("reason") == "terminal_support_proof_limit" and frozen == _digest(excessive.blueprint.snapshot()), "result": limited})
+	for index in range(1024):
+		_part(excessive.blueprint, "extra_%d" % index, "decor", Vector3(50, 5, 50), Vector3.ONE, false)
+	frozen = _digest(excessive.blueprint.snapshot())
+	limited = Urban.plan_terminal_shop_household(excessive.blueprint, excessive.members, Vector3.FORWARD, [])
+	var completed := int(limited.get("proof", {}).get("completedProofs", -1))
+	var cost: int = excessive.blueprint.parts.size() * Urban.TerminalSupport.MAX_SUPPORT_CONTEXT
+	_rows.append({"id": "terminal_aggregate_work_reserved_before_next_proof", "passed": not limited.get("ready", true) and limited.get("proof", {}).get("reason") == "terminal_support_work_limit" and completed * cost <= Urban.MAX_TERMINAL_SUPPORT_RECORD_VISITS and (completed + 1) * cost > Urban.MAX_TERMINAL_SUPPORT_RECORD_VISITS and frozen == _digest(excessive.blueprint.snapshot()), "result": limited})
+	for mode in ["empty_id", "excessive_bounds"]:
+		var invalid := _fixture("terminal_invalid_" + mode)
+		invalid.blueprint.recipe["castleGrammar"] = {"courtyardWidth": 80.0, "courtyardDepth": 80.0}
+		_paving(invalid, "surface", Vector2.ZERO, Vector2(14, 14))
+		var surface = invalid.blueprint.find_part("surface")
+		surface.semantic = "castle_courtyard_paving"
+		if mode == "empty_id": surface.id = ""
+		else: surface.size = Vector3(3000000, 1, 14)
+		frozen = _digest(invalid.blueprint.snapshot())
+		var result: Dictionary = Urban.plan_terminal_shop_household(invalid.blueprint, invalid.members, Vector3.FORWARD, [])
+		var expected := "invalid_terminal_support_source" if mode == "empty_id" else "invalid_terminal_support_bounds"
+		_rows.append({"id": "terminal_preproof_rejects_" + mode, "passed": not result.get("ready", true) and result.get("reason") == expected and not result.has("proof") and frozen == _digest(invalid.blueprint.snapshot()), "result": result})
 
 func _batch_counterexamples() -> void:
 	var fixture := _fixture("batch")

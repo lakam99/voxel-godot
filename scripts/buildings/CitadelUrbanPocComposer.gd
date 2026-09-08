@@ -27,9 +27,12 @@ const StructuralCompletionRecipeScript := preload("res://scripts/buildings/Citad
 const BuntingManifest := preload("res://scripts/buildings/CitadelBuntingAssemblyManifest.gd")
 const RetainedBearingRecipeScript := preload("res://scripts/buildings/RetainedSurfaceBearingRecipe.gd")
 const DoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
+const TerminalSupport := preload("res://scripts/buildings/TerminalShopElevationRecipe.gd")
+const MAX_TERMINAL_SUPPORT_PROOFS := 128
+const MAX_TERMINAL_SUPPORT_RECORD_VISITS := 16000000
 
 
-static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector3, additional_reservations: Array[Rect2] = [], search_radius: float = 25.0, approach_width: float = 1.8) -> Dictionary:
+static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector3, additional_reservations: Array[Rect2] = [], search_radius: float = 25.0, approach_width: float = 1.8, support_eligibility: Callable = Callable()) -> Dictionary:
 	# Recipe adapter: derive eligible surfaces and fixed ecology reservations.
 	# This does not move parts and is not yet invoked by compose().
 	if blueprint == null or blueprint.parts.size() > RigidHouseholdLayoutRecipeScript.MAX_PARTS or member_ids.size() > RigidHouseholdLayoutRecipeScript.MAX_COLLECTION or not _layout_radius_valid(approach_width):
@@ -65,6 +68,14 @@ static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector
 		var rect := Rect2(Vector2(part.position.x - part.size.x * 0.5, part.position.z - part.size.z * 0.5), Vector2(part.size.x, part.size.z)).grow(-0.1)
 		if rect.size.x < minimum_span or rect.size.y < minimum_span or center.distance_to(center.clamp(rect.position, rect.end)) > radius:
 			continue
+		if support_eligibility.is_valid():
+			var proof: Dictionary = support_eligibility.call(part.id)
+			if not proof.get("ready", false):
+				# Only a completed negative coverage proof is ordinary ineligibility.
+				# Invalid input and exhausted proof limits must remain failures.
+				if proof.get("reason") == "incomplete_rooted_support_coverage":
+					continue
+				return {"ready": false, "reason": "paving_support_proof_failed", "supportId": part.id, "proof": proof}
 		paving_ids.append(part.id)
 	var reservations: Array[Rect2] = []
 	reservations.append_array(additional_reservations)
@@ -124,8 +135,30 @@ static func plan_terminal_shop_household(blueprint, member_ids: Array, front: Ve
 		var bounds: AABB = blueprint.transformed_part_bounds(part)
 		minimum = minf(minimum, bounds.position[axis])
 		maximum = maxf(maximum, bounds.end[axis])
+	var records: Dictionary = {}
+	for part in blueprint.parts:
+		if part == null or not RigidHouseholdLayoutRecipeScript._valid_part(part) or String(part.id).is_empty() or records.has(part.id):
+			return {"ready": false, "reason": "invalid_terminal_support_source"}
+		var bounds: AABB = blueprint.transformed_part_bounds(part)
+		if not TerminalSupport._bounded(bounds):
+			return {"ready": false, "reason": "invalid_terminal_support_bounds", "partId": part.id}
+		records[part.id] = {"part": part, "bounds": bounds, "footprint": Rect2(Vector2(bounds.position.x, bounds.position.z), Vector2(bounds.size.x, bounds.size.z))}
+	# Prove eligibility before the ordered placement search. Rejected paving
+	# stays in the full source as geometry/obstacles. The selected, transformed
+	# row is independently revalidated by CitadelShopRecipe before binding.
+	var proof_count := [0]
+	var eligibility := func(id: String) -> Dictionary:
+		if proof_count[0] >= MAX_TERMINAL_SUPPORT_PROOFS:
+			return {"ready": false, "reason": "terminal_support_proof_limit", "completedProofs": proof_count[0]}
+		# Each closure can scan the complete record map for every context
+		# member. Charge that conservative bound, including rejected surfaces,
+		# before starting the next proof; per-closure grid/closure guards remain.
+		if (proof_count[0] + 1) * records.size() * TerminalSupport.MAX_SUPPORT_CONTEXT > MAX_TERMINAL_SUPPORT_RECORD_VISITS:
+			return {"ready": false, "reason": "terminal_support_work_limit", "completedProofs": proof_count[0]}
+		proof_count[0] += 1
+		return TerminalSupport._support_closure(blueprint, records, seen, id)
 	return plan_household_on_paving(blueprint, member_ids, front, reservations,
-		maxf(float(grammar.courtyardWidth), float(grammar.courtyardDepth)) * 0.5, maximum - minimum)
+		maxf(float(grammar.courtyardWidth), float(grammar.courtyardDepth)) * 0.5, maximum - minimum, eligibility)
 
 
 static func _layout_radius_valid(value: Variant) -> bool:
