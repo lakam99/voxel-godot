@@ -66,8 +66,8 @@ Before world-generation implementation begins:
 At minimum, use the established NPC regression commands relevant to the change, including:
 
 ```powershell
-.\tools\npc\run-npc-contract-tests.ps1 -TimeMode Both
-.\tools\npc\run-all-npc-tests.ps1 -TimeMode Both
+node tools/npc/run-npc-contract-tests.mjs -TimeMode Both
+node tools/npc/run-all-npc-tests.mjs -TimeMode Both
 ```
 
 Use the applicable live runner as well, such as the real tutorial playthrough or town job/home visual playtests, when the affected generated-world behavior is exercised there.

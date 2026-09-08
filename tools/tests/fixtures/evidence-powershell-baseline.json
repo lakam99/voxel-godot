@@ -1,0 +1,2439 @@
+{
+  "schemaVersion": 1,
+  "provenance": {
+    "baselineCommit": "e09cc95b6211ecfb7de1fcf9902406b0cb176a5d",
+    "oracle": "Windows PowerShell 5.1, original scripts before Node migration",
+    "capturedUtc": "2026-09-08T14:24:48.270Z",
+    "scripts": [
+      {
+        "path": "tools/assert-test-evidence-report.ps1",
+        "sha256": "5325f8b69b1de92518eead464f1b0822e039d5e70a60fa1c19bb591842e80852",
+        "gitBlob": "31df9d2e7c8ecf2ddbc744fe8ca27d319cfa598a"
+      },
+      {
+        "path": "tools/test-evidence-registry-self-test.ps1",
+        "sha256": "3cb9ad12e58ec1791670cf04ab3b0b4c63092fd56af1d75e2feb442ee4986691",
+        "gitBlob": "0df928fe04fb70aac42dab8d9a929a445dd79db6"
+      }
+    ],
+    "normalization": "Remove stampedUtc; replace sandbox root with <WORK_DIR> and path separators with forward slashes.",
+    "scope": "Static evidence-validator contracts and four synthetic self-test controls; not live gameplay acceptance."
+  },
+  "cases": [
+    {
+      "name": "unclaimed unit",
+      "report": {},
+      "options": {
+        "evidenceLevel": "unit"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "unclaimed contract",
+      "report": {},
+      "options": {
+        "evidenceLevel": "contract"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "evidenceLevel": "contract",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "contract",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "contract",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "unclaimed synthetic",
+      "report": {},
+      "options": {
+        "evidenceLevel": "synthetic"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "evidenceLevel": "synthetic",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "synthetic",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "synthetic",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "unclaimed static_audit",
+      "report": {},
+      "options": {
+        "evidenceLevel": "static_audit"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "evidenceLevel": "static_audit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "static_audit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "static_audit",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "unclaimed integration",
+      "report": {},
+      "options": {
+        "evidenceLevel": "integration"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "evidenceLevel": "integration",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "integration",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "integration",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "unclaimed scene-load-smoke",
+      "report": {},
+      "options": {
+        "evidenceLevel": "scene-load-smoke"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "evidenceLevel": "scene-load-smoke",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "scene-load-smoke",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "scene-load-smoke",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "default unit preserves gameplay failure",
+      "report": {
+        "passed": false,
+        "failureCount": 3
+      },
+      "options": {},
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "passed": false,
+        "failureCount": 3,
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "valid acceptance",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "synthetic scalar claim cannot masquerade as acceptance",
+      "report": {
+        "acceptanceClaims": "fake_live"
+      },
+      "options": {
+        "evidenceLevel": "synthetic"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "evidenceLevel": "synthetic",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "synthetic",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report acceptanceClaims 'fake_live' do not match registry acceptanceClaims ''"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "mismatched evidence level",
+      "report": {
+        "evidenceLevel": "acceptance_visual"
+      },
+      "options": {},
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report evidenceLevel 'acceptance_visual' does not match registry evidenceLevel 'unit'"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "wrong registry claims",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": [
+          "other"
+        ]
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report acceptanceClaims 'other' do not match registry acceptanceClaims 'real_behavior'"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "nonvisual claims forbidden",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        }
+      },
+      "options": {
+        "acceptanceClaims": "claim"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [
+          "claim"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "acceptanceClaims are only allowed for acceptance_visual runners"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "missing guard with claims",
+      "report": {
+        "forbiddenCallSelfScan": null,
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": null,
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "acceptance report must include forbiddenCallSelfScan.status == passed"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "failed guard",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "failed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "failed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "acceptance report must include forbiddenCallSelfScan.status == passed"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "explicit scan without claims",
+      "report": {},
+      "options": {
+        "requireForbiddenCallSelfScan": true
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "acceptance report must include forbiddenCallSelfScan.status == passed"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "explicit scan passes",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        }
+      },
+      "options": {
+        "requireForbiddenCallSelfScan": true
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "acceptance needs claims",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "acceptance_visual runner must declare at least one acceptance claim"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "acceptance needs declared screenshots",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "visual-evidence runner must declare required screenshots"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "missing screenshot",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "missing.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "missing.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "required screenshot missing: <WORK_DIR>/screens [literal]/missing.png"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "absolute screenshot without directory",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "$ABSOLUTE",
+        "screenshotDir": ""
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "<WORK_DIR>/screens [literal]/spawn.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "missing captures",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "visual-evidence report must include captures or visualCaptures"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "missing timeline",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "visual-evidence report must include timeline proof"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "integration visual without claims",
+      "report": {
+        "forbiddenCallSelfScan": null,
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "integration",
+        "acceptanceClaims": "",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]",
+        "requireVisualProof": true
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": null,
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "integration",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "integration",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "integration",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "explicit visual requires all proof",
+      "report": {},
+      "options": {
+        "evidenceLevel": "integration",
+        "requireVisualProof": true
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "evidenceLevel": "integration",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "integration",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "visual-evidence runner must declare required screenshots",
+            "visual-evidence report must include captures or visualCaptures",
+            "visual-evidence report must include timeline proof"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "case insensitive levels guard and reordered claims",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "PASSED"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "ACCEPTANCE_VISUAL",
+        "acceptanceClaims": "B;A"
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "a;b",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "PASSED"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "b"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "b"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "semicolon arrays null entries and empty segments",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": [
+          null,
+          "b;;a;",
+          ""
+        ]
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "a;b",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "b"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "b"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "duplicate claims are significant",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": [
+          "a",
+          "a"
+        ]
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "a",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report acceptanceClaims 'a,a' do not match registry acceptanceClaims 'a'"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "matching duplicate claims pass",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": [
+          "a",
+          "a"
+        ]
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "a;a",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "a"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "a"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "boolean and numeric scalar claims are stringified",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": [
+          false,
+          0
+        ]
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "False;0",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "False",
+          "0"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "False",
+          "0"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "commas are not delimiters",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": "a,b"
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "a;b",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "b"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report acceptanceClaims 'a,b' do not match registry acceptanceClaims 'a,b'"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "whitespace is significant",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": "a; b"
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "a;b",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "a",
+          "b"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report acceptanceClaims 'a, b' do not match registry acceptanceClaims 'a,b'"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "empty report claims allow registry stamp",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "acceptanceClaims": []
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          {
+            "saved": true
+          }
+        ],
+        "timeline": [
+          {
+            "event": "door_open"
+          }
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "scalar false and zero are proof values",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": false,
+        "timeline": 0,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": false,
+        "timeline": 0,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "empty string is a nonnull proof value",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": "",
+        "timeline": "",
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": "",
+        "timeline": "",
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "null proof fields do not count",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "visual-evidence report must include captures or visualCaptures",
+            "visual-evidence report must include timeline proof"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "singleton null proof arrays do not count",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          null
+        ],
+        "timeline": [
+          null
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          null
+        ],
+        "timeline": [
+          null
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "visual-evidence report must include captures or visualCaptures",
+            "visual-evidence report must include timeline proof"
+          ]
+        }
+      },
+      "summary": null
+    },
+    {
+      "name": "multi-element arrays retain original count semantics",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          null,
+          null
+        ],
+        "timeline": [
+          null,
+          null
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": [
+          null,
+          null
+        ],
+        "timeline": [
+          null,
+          null
+        ],
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "alternate proof field timelineTail",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "visualCaptures": {
+          "saved": true
+        },
+        "timelineTail": {
+          "event": "proof"
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "visualCaptures": {
+          "saved": true
+        },
+        "timelineTail": {
+          "event": "proof"
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "alternate proof field miraTimeline",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "visualCaptures": {
+          "saved": true
+        },
+        "miraTimeline": {
+          "event": "proof"
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "visualCaptures": {
+          "saved": true
+        },
+        "miraTimeline": {
+          "event": "proof"
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "alternate proof field doorStateTimeline",
+      "report": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "visualCaptures": {
+          "saved": true
+        },
+        "doorStateTimeline": {
+          "event": "proof"
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "spawn.png;door.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "forbiddenCallSelfScan": {
+          "status": "passed"
+        },
+        "captures": null,
+        "timeline": null,
+        "payload": {
+          "preserved": [
+            "do not replace gameplay fields"
+          ]
+        },
+        "visualCaptures": {
+          "saved": true
+        },
+        "doorStateTimeline": {
+          "event": "proof"
+        },
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "spawn.png",
+            "door.png"
+          ],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "case insensitive report property access",
+      "report": {
+        "EvidenceLevel": "unit",
+        "AcceptanceClaims": [],
+        "TestIntegrity": {
+          "stale": true
+        },
+        "FORBIDDENCALLSELFSCAN": {
+          "STATUS": "PASSED"
+        }
+      },
+      "options": {
+        "requireForbiddenCallSelfScan": true
+      },
+      "passed": true,
+      "exitCode": 0,
+      "stampedReport": {
+        "FORBIDDENCALLSELFSCAN": {
+          "STATUS": "PASSED"
+        },
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "unit",
+          "liveGameplayAcceptance": false,
+          "requiredScreenshots": [],
+          "validationStatus": "passed",
+          "validationErrors": []
+        }
+      },
+      "summary": {
+        "runnerId": "fixture",
+        "reportPath": "<WORK_DIR>/report.json",
+        "evidenceLevel": "unit",
+        "acceptanceClaims": [],
+        "status": "passed"
+      }
+    },
+    {
+      "name": "all errors retained and old stamp replaced",
+      "report": {
+        "evidenceLevel": "synthetic",
+        "acceptanceClaims": "wrong",
+        "testIntegrity": {
+          "validationStatus": "passed"
+        }
+      },
+      "options": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": "real_behavior",
+        "requiredScreenshots": "missing.png",
+        "screenshotDir": "screens [literal]"
+      },
+      "passed": false,
+      "exitCode": 1,
+      "stampedReport": {
+        "evidenceLevel": "acceptance_visual",
+        "acceptanceClaims": [
+          "real_behavior"
+        ],
+        "testIntegrity": {
+          "registryId": "fixture",
+          "registryPath": "<WORK_DIR>/registry.json",
+          "evidenceLevel": "acceptance_visual",
+          "liveGameplayAcceptance": true,
+          "requiredScreenshots": [
+            "missing.png"
+          ],
+          "validationStatus": "failed",
+          "validationErrors": [
+            "report evidenceLevel 'synthetic' does not match registry evidenceLevel 'acceptance_visual'",
+            "report acceptanceClaims 'wrong' do not match registry acceptanceClaims 'real_behavior'",
+            "acceptance report must include forbiddenCallSelfScan.status == passed",
+            "required screenshot missing: <WORK_DIR>/screens [literal]/missing.png",
+            "visual-evidence report must include captures or visualCaptures",
+            "visual-evidence report must include timeline proof"
+          ]
+        }
+      },
+      "summary": null
+    }
+  ],
+  "relativeScreenshotWithoutDirectory": {
+    "exitCode": 1,
+    "stamped": false
+  },
+  "selfTest": {
+    "schemaVersion": 1,
+    "testId": "test_evidence_registry_self_test",
+    "finished": true,
+    "passed": true,
+    "failureCount": 0,
+    "resultCount": 4,
+    "results": [
+      {
+        "name": "synthetic_report_claiming_acceptance_fails",
+        "passed": true,
+        "details": "exitCode=1"
+      },
+      {
+        "name": "acceptance_report_with_guard_screenshots_and_timeline_passes",
+        "passed": true,
+        "details": "exitCode=0"
+      },
+      {
+        "name": "integration_visual_report_without_acceptance_claims_passes",
+        "passed": true,
+        "details": "exitCode=0"
+      },
+      {
+        "name": "acceptance_report_with_failed_guard_fails",
+        "passed": true,
+        "details": "exitCode=1"
+      }
+    ],
+    "evidenceLevel": "static_audit",
+    "acceptanceClaims": [],
+    "testIntegrity": {
+      "registryId": "test_evidence_registry_self_test",
+      "registryPath": "<WORK_DIR>/tools/test-runner-registry.json",
+      "evidenceLevel": "static_audit",
+      "liveGameplayAcceptance": false,
+      "requiredScreenshots": [],
+      "validationStatus": "passed",
+      "validationErrors": []
+    }
+  }
+}

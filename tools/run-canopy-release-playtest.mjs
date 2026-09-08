@@ -1,4 +1,5 @@
 #!/usr/bin/env node
-import { runToolMain } from './lib/voxel-tool-runtime.mjs';
+import { runLegacyWorkflow } from './lib/legacy-workflow-ports.mjs';
 
-await runToolMain('run-canopy-release-playtest');
+try { await runLegacyWorkflow('run-canopy-release-playtest', process.argv.slice(2)); }
+catch (error) { console.error(error.message); process.exitCode = 1; }

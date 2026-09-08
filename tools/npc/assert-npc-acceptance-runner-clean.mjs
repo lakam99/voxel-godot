@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runToolMain } from '../lib/voxel-tool-runtime.mjs';
+import { runAcceptanceRunnerAudit } from '../lib/npc-source-audit.mjs';
 
-await runToolMain('npc/assert-npc-acceptance-runner-clean');
+await runAcceptanceRunnerAudit();

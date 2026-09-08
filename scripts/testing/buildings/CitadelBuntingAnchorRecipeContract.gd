@@ -286,7 +286,7 @@ func _continue(stage: String) -> bool:
 
 func _hashes() -> Dictionary:
 	var result: Dictionary = {}
-	var pending: Array[String] = [get_script().resource_path,"res://project.godot","res://tools/run-building-contract.ps1"]
+	var pending: Array[String] = [get_script().resource_path,"res://project.godot","res://tools/run-building-contract.mjs"]
 	var regex := RegEx.create_from_string('["\'](res://[^"\'\\r\\n]+)["\']')
 	while not pending.is_empty():
 		var path: String = pending.pop_back()

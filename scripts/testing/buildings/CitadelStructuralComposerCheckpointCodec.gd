@@ -19,7 +19,22 @@ const MAX_STRING_BYTES := 1024 * 1024
 const MAX_DIAGNOSTIC_PATH_BYTES := 1024
 const MAX_DIAGNOSTIC_SEGMENT_BYTES := 192
 const MAX_EXACT_JSON_INTEGER := 9007199254740991
-const WRAPPER_PATH := "res://tools/run-citadel-structural-composer-two-phase-contract.ps1"
+# The former all-in-one wrapper fingerprint now covers its complete Node/native
+# implementation. These bytes are part of the checkpoint payload and core hash.
+const RUNNER_SOURCE_PATHS := [
+	"res://tools/run-citadel-structural-composer-two-phase-contract.mjs",
+	"res://tools/lib/building-runner.mjs",
+	"res://tools/lib/building-special.mjs",
+	"res://tools/lib/building-special-sources.mjs",
+	"res://tools/lib/building-source-bindings.mjs",
+	"res://tools/lib/building-help.mjs",
+	"res://tools/run-godot-scene-watchdog.mjs",
+	"res://tools/lib/owned-process.mjs",
+	"res://tools/lib/owned-native-host.mjs",
+	"res://tools/lib/owned-live-clock.mjs",
+	"res://tools/native/OwnedProcessHost.cs",
+	"res://tools/native/OwnedProcessNative.cs",
+]
 const FRAME_MAGIC := "CSCPCP01"
 const FRAME_HEADER_BYTES := 84
 const CHECKPOINT_KEYS := ["schema", "revision", "runId", "seed", "phaseACore", "phaseACoreSha256", "payload", "payloadSha256"]
@@ -57,7 +72,8 @@ static func _source_fingerprint_once() -> Dictionary:
 	if not _collect_gdscript_paths("res://scripts", paths):
 		return _fail("source_enumeration_failed")
 	paths.append("res://project.godot")
-	paths.append(WRAPPER_PATH)
+	for runner_path in RUNNER_SOURCE_PATHS:
+		paths.append(runner_path)
 	paths.sort()
 	if paths.size() > MAX_SOURCE_FILES:
 		return _fail("source_file_limit")
@@ -119,7 +135,25 @@ static func engine_identity() -> Dictionary:
 	return identity
 
 
+static func runner_sources_complete(fingerprint: Dictionary) -> bool:
+	if not fingerprint.get("entries") is Array:
+		return false
+	var seen: Dictionary = {}
+	for row in fingerprint.entries:
+		if not row is Array or row.size() != 3 or not row[0] is String or not row[2] is String \
+				or not _exact_nonnegative_integer_equal(row[1], row[1], MAX_SOURCE_BYTES) \
+				or not _is_lower_hex_sha256(row[2]) or seen.has(row[0]):
+			return false
+		seen[row[0]] = true
+	for runner_path in RUNNER_SOURCE_PATHS:
+		if not seen.has(String(runner_path).trim_prefix("res://")):
+			return false
+	return true
+
+
 static func fingerprints_equal(first: Dictionary, second: Dictionary) -> bool:
+	if not runner_sources_complete(first) or not runner_sources_complete(second):
+		return false
 	var keys := ["ready", "entries", "fileCount", "totalBytes", "sha256"]
 	if not _has_exact_keys(first, keys) or not _has_exact_keys(second, keys) \
 			or typeof(first.ready) != TYPE_BOOL or not first.ready or typeof(second.ready) != TYPE_BOOL or not second.ready \
@@ -297,6 +331,8 @@ static func validate_payload(payload: Variant, expected_seed := -1) -> Dictionar
 			or not body.get("sectionHashes") is Dictionary or not body.get("counts") is Dictionary \
 			or not body.get("sourceFingerprint") is Dictionary or not body.get("engineIdentity") is Dictionary:
 		return _fail("checkpoint_payload_collection_missing", {"reconstructed": false})
+	if not runner_sources_complete(body.sourceFingerprint):
+		return _fail("checkpoint_runner_source_inventory_missing", {"reconstructed": false})
 	var blueprint: Dictionary = body.blueprintSnapshot
 	var furnishing: Dictionary = body.furnishingSnapshot
 	var reservations: Array = body.furnishingReservations

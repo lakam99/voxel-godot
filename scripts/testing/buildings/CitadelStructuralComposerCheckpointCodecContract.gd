@@ -31,6 +31,27 @@ func _run() -> void:
 		nonhex_fingerprint.entries[0][2] = "z".repeat(64)
 	_check("fingerprint_row_nonhex_sha_rejected", not _fingerprint_manifest_complete(nonhex_fingerprint))
 	var checkpoint := _fixture_checkpoint(fingerprint, engine)
+	var missing_runner_sources_rejected := true
+	var changed_runner_sources_rejected := true
+	for runner_path in Codec.RUNNER_SOURCE_PATHS:
+		var relative := String(runner_path).trim_prefix("res://")
+		var omitted := fingerprint.duplicate(true)
+		var changed := fingerprint.duplicate(true)
+		for index in range((omitted.entries as Array).size()):
+			if omitted.entries[index][0] == relative:
+				omitted.entries.remove_at(index)
+				break
+		_rehash_fingerprint(omitted)
+		missing_runner_sources_rejected = missing_runner_sources_rejected \
+			and not Codec.runner_sources_complete(omitted) and not _fingerprint_manifest_complete(omitted) \
+			and not Codec.fingerprints_equal(omitted, omitted) and _rebound_fingerprint_rejected(checkpoint, omitted)
+		for row in changed.entries:
+			if row[0] == relative:
+				row[2] = "0".repeat(64) if row[2] != "0".repeat(64) else "1".repeat(64)
+		_rehash_fingerprint(changed)
+		changed_runner_sources_rejected = changed_runner_sources_rejected and not Codec.fingerprints_equal(changed, fingerprint)
+	_check("every_runner_helper_required_even_after_payload_and_core_rebinding", missing_runner_sources_rejected)
+	_check("every_runner_helper_hash_change_invalidates_current_source_identity", changed_runner_sources_rejected)
 	var encoded := Codec.encode_payload(checkpoint)
 	var decoded := Codec.decode_payload(encoded.get("bytes", PackedByteArray()), String(encoded.get("sha256", "")), 208159) if encoded.ready else {"ready": false}
 	var reencoded := Codec.encode_payload(decoded.payload) if decoded.ready else {"ready": false}
@@ -201,9 +222,11 @@ func _fixture_checkpoint(fingerprint: Dictionary, engine: Dictionary) -> Diction
 
 
 func _fingerprint_manifest_complete(fingerprint: Dictionary) -> bool:
+	if not Codec.runner_sources_complete(fingerprint):
+		return false
 	if not fingerprint.get("entries") is Array or int(fingerprint.get("fileCount", -1)) != (fingerprint.entries as Array).size():
 		return false
-	var required := ["project.godot", "tools/run-citadel-structural-composer-two-phase-contract.ps1",
+	var required := ["project.godot", "tools/run-citadel-structural-composer-two-phase-contract.mjs",
 		"scripts/testing/buildings/CitadelStructuralComposerCheckpointCodec.gd",
 		"scripts/testing/buildings/CitadelStructuralComposerCheckpointCodecContract.gd",
 		"scripts/testing/buildings/CitadelStructuralCompletionComposerPhaseAContract.gd",
@@ -225,6 +248,23 @@ func _fingerprint_manifest_complete(fingerprint: Dictionary) -> bool:
 		if not seen.has(path.to_lower()):
 			return false
 	return int(fingerprint.get("totalBytes", -1)) == total and not String(fingerprint.get("sha256", "")).is_empty()
+
+
+func _rehash_fingerprint(fingerprint: Dictionary) -> void:
+	var total := 0
+	for row in fingerprint.entries:
+		total += int(row[1])
+	fingerprint.fileCount = fingerprint.entries.size()
+	fingerprint.totalBytes = total
+	fingerprint.sha256 = Codec.hash_variant(["citadel-source-fingerprint/v1", fingerprint.entries, fingerprint.fileCount, total])
+
+
+func _rebound_fingerprint_rejected(checkpoint: Dictionary, fingerprint: Dictionary) -> bool:
+	var value := checkpoint.duplicate(true)
+	value.payload.sourceFingerprint = fingerprint.duplicate(true)
+	value.phaseACore.sourceFingerprintSha256 = fingerprint.sha256
+	_rebind(value)
+	return not Codec.validate_payload(value, 208159).ready
 
 
 func _is_lower_hex_sha256(value: String) -> bool:

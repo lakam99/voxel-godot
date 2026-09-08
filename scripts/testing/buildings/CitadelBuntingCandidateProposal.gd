@@ -67,7 +67,7 @@ func _continue(stage: String) -> bool:
 	last_stage=stage
 	return Time.get_ticks_msec()<deadline
 func _hashes() -> Dictionary:
-	var paths: Array[String]=[get_script().resource_path,"res://project.godot","res://tools/run-building-contract.ps1"]
+	var paths: Array[String]=[get_script().resource_path,"res://project.godot","res://tools/run-building-contract.mjs"]
 	var hashes: Dictionary={}
 	var regex := RegEx.create_from_string('["\'](res://[^"\'\\r\\n]+)["\']')
 	while not paths.is_empty():

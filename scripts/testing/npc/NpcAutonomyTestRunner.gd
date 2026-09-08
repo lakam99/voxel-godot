@@ -1187,7 +1187,7 @@ func test_existing_save_defaults_baseline(mode: String) -> Dictionary:
 	)
 
 func test_existing_npc_navigation_runner_callable(_mode: String) -> Dictionary:
-	var tool_exists := FileAccess.file_exists("res://tools/run-npc-navigation-tests.ps1")
+	var tool_exists := FileAccess.file_exists("res://tools/run-npc-navigation-tests.mjs")
 	var scene_exists := FileAccess.file_exists("res://scenes/NpcNavigationTest.tscn")
 	var script_exists := FileAccess.file_exists("res://scripts/NpcNavigationTestRunner.gd")
 	var passed := tool_exists and scene_exists and script_exists
@@ -3554,14 +3554,14 @@ func test_navmesh_no_scene_visual_mesh_scan(_mode: String) -> Dictionary:
 	return outcome(passed, "getTree=%d meshInstance=%d parse=%d" % [service_text.find("get_tree("), service_text.find("MeshInstance3D"), service_text.find("parse_source_geometry_data")], ["navmesh_service_uses_explicit_descriptors", "navmesh_descriptor_owns_deterministic_signature"], {})
 
 func test_navmesh_live_legacy_audit_passes(_mode: String) -> Dictionary:
-	var audit_text := read_text("res://tools/npc/audit-npc-navmesh-backend.ps1")
+	var audit_text := read_text("res://tools/lib/npc-source-audit.mjs")
 	var planner_text := read_text("res://scripts/npc_ai/routing/HierarchicalRoutePlanner.gd")
 	var route_adapter_text := read_text("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 	var coordinator_text := read_text("res://scripts/npc_ai/routing/NpcNavigationCoordinator.gd")
 	var passed := (
 		audit_text.find("LocalAStarPlannerScript") >= 0
 		and audit_text.find("HierarchicalRoutePlannerScript") >= 0
-		and audit_text.find("LiveRuntimeFiles") >= 0
+		and audit_text.find("liveRuntimeFiles") >= 0
 		and planner_text.find("LocalAStarPlannerScript") >= 0
 		and route_adapter_text.find("HierarchicalRoutePlannerScript") < 0
 		and route_adapter_text.find("LocalAStarPlannerScript") < 0

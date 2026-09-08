@@ -224,6 +224,11 @@ BiomeRegionField -> BiomeEnvironmentCatalog -> TreeEcologySampler
 
 ## Test Commands
 
+All executable tool entry points are Node.js (`node tools/<runner>.mjs`). Do
+not add PowerShell runners or wrappers. Windows Job Object and window APIs
+use the small native helpers under `tools/native/`, compiled directly by Node;
+they must not shell out to PowerShell. See `docs/NODE_RUNNER_MIGRATION_2026-09-08.md`.
+
 Use the bundled Godot console executable paths already encoded in the tool scripts.
 
 Functional playtest:
