@@ -232,7 +232,17 @@ func _movement_key(key: Key, pressed: bool) -> void:
 	Input.parse_input_event(event)
 
 func _release_approach_keys() -> void:
-	for key: Key in [KEY_W,KEY_A,KEY_SHIFT]: _movement_key(key,false)
+	for key: Key in [KEY_W,KEY_A,KEY_D,KEY_SPACE,KEY_SHIFT]: _movement_key(key,false)
+
+func _approach_motion_snapshot() -> Dictionary:
+	var contacts: Array=[]
+	for index in range(mini(player.get_slide_collision_count(),8)):
+		var contact: KinematicCollision3D=player.get_slide_collision(index)
+		var collider=contact.get_collider()
+		contacts.append({"path":String(collider.get_path()) if collider is Node else str(collider),"position":contact.get_position(),"normal":contact.get_normal()})
+	return {"velocity":player.velocity,"onFloor":player.is_on_floor(),"terrainGrounded":player.get("terrain_grounded"),
+		"terrainHold":player.get_meta("terrain_collision_hold",false),"terrainProof":player.get("last_terrain_collision_proof"),
+		"groundY":main.ground_y_near_position(player.global_position),"contacts":contacts}
 
 func _approach_scene() -> Dictionary:
 	phase="ordinary_input_approach"
@@ -240,6 +250,8 @@ func _approach_scene() -> Dictionary:
 	var until := mini(deadline-10000,begun+45000)
 	var next_sample := begun
 	var strafe_until := 0
+	var jump_until := 0
+	var recovery_count := 0
 	var previous := player.global_position
 	var start_position := previous
 	var samples: Array=[]
@@ -260,15 +272,20 @@ func _approach_scene() -> Dictionary:
 		if distance<=8.0:
 			reached=true; reason="close_exterior_reached"; break
 		var now := Time.get_ticks_msec()
+		_movement_key(KEY_SPACE,now<jump_until)
+		_movement_key(KEY_W,now>=strafe_until)
+		_movement_key(KEY_A,now<strafe_until and recovery_count%4==2)
+		_movement_key(KEY_D,now<strafe_until and recovery_count%4==0)
 		if now<next_sample: continue
 		next_sample=now+1000
 		var identity := _accepted_current()
 		if not identity.passed: reason=String(identity.reason); break
 		if now-begun>1000 and position.distance_to(previous)<0.30 and now>=strafe_until:
-			strafe_until=now+2000
-		_movement_key(KEY_A,now<strafe_until)
+			recovery_count+=1
+			if recovery_count%2==1: jump_until=now+250
+			else: strafe_until=now+1500
 		samples.append({"elapsedMsec":now-begun,"position":position,"distanceToVisualBounds":distance,"sprinting":player.get("is_sprinting"),"ordinaryWPressed":Input.is_key_pressed(KEY_W),"strafe":now<strafe_until,
-			"performance":main.runtime_perf_monitor.summary()})
+			"recoveryCount":recovery_count,"motion":_approach_motion_snapshot(),"performance":main.runtime_perf_monitor.summary()})
 		previous=position
 		if not await _look_toward_candidate(): reason="approach_mouse_look_failed"; break
 	_release_approach_keys()
@@ -280,7 +297,7 @@ func _approach_scene() -> Dictionary:
 	evidence.closeVisibility=_inspect_visibility()
 	return {"reached":reached and identity.passed and capsule.passed,"reason":reason if identity.passed and capsule.passed else "approach_identity_or_capsule_failed",
 		"elapsedMsec":Time.get_ticks_msec()-begun,"from":start_position,"to":player.global_position,"distanceToVisualBounds":distance,"samples":samples,"capsule":capsule,"identity":identity,
-		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_A) and not Input.is_key_pressed(KEY_SHIFT),
+		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_A) and not Input.is_key_pressed(KEY_D) and not Input.is_key_pressed(KEY_SPACE) and not Input.is_key_pressed(KEY_SHIFT),
 		"scope":"Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance."}
 
 func _nearest_candidate(position: Vector3) -> Dictionary:
