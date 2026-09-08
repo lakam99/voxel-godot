@@ -2496,7 +2496,7 @@ static func add_courtyard_foundation_and_paving(blueprint, residences: Array[Dic
 		var rect: Rect2 = foundation_rects[index] as Rect2
 		if rect.size.x <= 0.04 or rect.size.y <= 0.04:
 			continue
-		add_part(blueprint, "castle_compound_foundation_segment_%02d" % index, "foundation", "stone_foundation", Vector3(rect.get_center().x, foundation_height * 0.5, rect.get_center().y), Vector3(rect.size.x, foundation_height, rect.size.y), {"variation": variation, "semantic": "castle_courtyard_foundation", "navigationRole": "structural_mass", "egressCarved": true, "physicalRoot": true})
+		add_part(blueprint, "castle_compound_foundation_segment_%02d" % index, "foundation", "stone_foundation", Vector3(rect.get_center().x, foundation_height * 0.5, rect.get_center().y), Vector3(rect.size.x, foundation_height, rect.size.y), {"variation": variation, "semantic": "castle_courtyard_foundation", "navigationRole": "structural_mass", "egressCarved": true, "physicalRoot": true, "courtyardSupport": {"version":1,"producer":"castle_courtyard_foundation_and_paving","role":"shared_foundation"}})
 	var paving_exclusions := courtyard_residence_egress_corridors(residences, foundation_height, 0.0)
 	paving_exclusions.append_array(reserved_walkways)
 	var paving_bounds := Rect2(-courtyard_width * 0.5 + 0.41, -courtyard_depth * 0.5 + 0.41, courtyard_width - 0.82, courtyard_depth - 0.82)

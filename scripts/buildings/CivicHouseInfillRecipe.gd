@@ -11,6 +11,7 @@ const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const Furnishing = preload("res://scripts/buildings/FurnishingPart.gd")
 const FurnishingPlan = preload("res://scripts/buildings/FurnishingPlan.gd")
 const Terraces = preload("res://scripts/buildings/ResidentialTerraceCarvingRecipe.gd")
+const Support = preload("res://scripts/buildings/CivicCourtyardSupport.gd")
 const CLEARANCE := 0.25
 const MAX_PARTS := 10000
 
@@ -52,6 +53,7 @@ static func prepare(environment, specs: Array, producer: Callable, paving: Rect2
 	var obstacles: Array=collected.boxes
 	var resolved: Array=[]
 	var receipts: Array=[]
+	var support_receipts: Dictionary={}
 	for spec: Dictionary in specs:
 		if not _continue(continuation): return _fail("cancelled")
 		var original = Blueprint.new("civic-infill-preview",environment.seed,"masonry")
@@ -75,10 +77,13 @@ static func prepare(environment, specs: Array, producer: Callable, paving: Rect2
 			return {"ready":false,"reason":"civic_infill_rebuilt_bounds_rejected","house":spec.id,"detail":proof,
 				"plannedBounds":fitted.placedBounds,"actualBounds":actual.bounds,"rebuiltCenter":moved.center}
 		resolved.append(moved)
+		var support := Support.bind(environment,rebuilt,spec.id,actual.bounds,ground_y,continuation)
+		if not support.ready: return support
+		support_receipts[spec.id]=support.receipt
 		receipts.append({"id":spec.id,"originalCenter":spec.center,"center":moved.center,"translation":moved.center-spec.center,
 			"originalBounds":geometry.bounds,"actualBounds":actual.bounds,"partCount":rebuilt.parts.size(),"testedCandidates":fitted.get("testedCandidates",0)})
 		obstacles.append(actual.bounds)
-	return {"ready":true,"specs":resolved,"receipts":receipts,"domain":domain.bounds,"paving":paving,"clearance":CLEARANCE,"obstacleCount":collected.boxes.size()}
+	return {"ready":true,"specs":resolved,"receipts":receipts,"supportReceipts":support_receipts,"domain":domain.bounds,"paving":paving,"clearance":CLEARANCE,"obstacleCount":collected.boxes.size()}
 
 static func validate_composed(source, plan: Dictionary, furniture, ground_y: float, continuation: Callable = Callable()) -> Dictionary:
 	# Sufficient external-clearance proof of the actual terminal composition.
@@ -98,6 +103,7 @@ static func validate_composed(source, plan: Dictionary, furniture, ground_y: flo
 	if domain.bounds!=plan.get("domain"): return _fail("civic_enclosure_changed")
 	var membership := Membership.street_house_memberships(source)
 	if not membership.ready: return membership
+	if not plan.get("supportReceipts") is Dictionary or plan.supportReceipts.size()!=plan.specs.size(): return _fail("invalid_courtyard_support_receipts")
 	if furniture.parts.size()>MAX_PARTS or furniture.protected_access_reservations.size()>MAX_PARTS: return _fail("civic_furnishing_limit")
 	var checked: Array=[]
 	for spec: Dictionary in plan.specs:
@@ -120,7 +126,10 @@ static func validate_composed(source, plan: Dictionary, furniture, ground_y: flo
 		var geometry := _house_geometry(own)
 		if not geometry.ready: return geometry
 		var envelope: AABB=geometry.bounds
-		var collected := _obstacles(other,ground_y)
+		var foundation = own.parts.filter(func(part):return part.id==house.foundationId)[0]
+		var support := Support.resolve(source,house,foundation,plan.supportReceipts.get(spec.id),ground_y,continuation)
+		if not support.ready: return support
+		var collected := _obstacles(other,ground_y,support.authorized)
 		if not collected.ready: return collected
 		var obstacles: Array=collected.boxes
 		for room: Dictionary in other.rooms:
@@ -138,13 +147,58 @@ static func validate_composed(source, plan: Dictionary, furniture, ground_y: flo
 			if furnishing.room_id==house.roomId: envelope=envelope.merge(occupied.bounds)
 			else: obstacles.append(occupied.bounds)
 		var proof := Placement.fit(envelope,domain.bounds,obstacles,CLEARANCE,func(): return _continue(continuation))
+		if proof.get("reason","")=="cancelled":return _fail("cancelled")
 		if not proof.ready or proof.translation!=Vector3.ZERO:
-			return {"ready":false,"reason":"composed_civic_clearance_failed","house":spec.id,"bounds":envelope,"detail":proof}
+			var evidence := _clearance_failure_evidence(source,house,furniture,envelope,ground_y,continuation,support.authorized)
+			if evidence.get("cancelled",false):return _fail("cancelled")
+			return {"ready":false,"reason":"composed_civic_clearance_failed","house":spec.id,"bounds":envelope,"detail":proof,"blockingEvidence":evidence}
 		var trees := _tree_clearance(source,envelope,continuation)
 		if not trees.ready: return trees
 		checked.append({"house":spec.id,"partCount":own.parts.size(),"bounds":envelope,"obstacleCount":obstacles.size(),"treeCount":trees.count})
 	return {"ready":true,"houses":checked,"elapsedUsec":Time.get_ticks_usec()-started,
 		"scope":"terminal civic external envelopes, furniture, access and tree footprints; not same-house interior or global structure validation"}
+
+## Failure-only observations at the tested stored pose. This never alters
+## obstacle membership, placement, clearance or an acceptance decision.
+static func _clearance_failure_evidence(source, house: Dictionary, furniture, envelope: AABB, ground_y: float, continuation: Callable, authorized: Variant = null) -> Dictionary:
+	var result := {"rows":[],"count":0,"counts":{},"truncated":false,"limit":32,
+		"scope":"Stored-pose positive overlaps under the existing XZ clearance rule; not a proof that no alternative placement exists."}
+	for part in source.parts:
+		if not _continue(continuation):return {"cancelled":true}
+		if house.memberIds.has(part.id) or _accepted_underlay(part,ground_y,authorized):continue
+		var bounds: AABB=source.transformed_part_bounds(part)
+		if _clearance_overlap(envelope,bounds):_append_clearance_evidence(result,{"kind":"part","id":part.id,"bounds":bounds},part)
+	for room: Dictionary in source.rooms:
+		if not _continue(continuation):return {"cancelled":true}
+		if room.id==house.roomId:continue
+		if room.get("role","")!="courtyard" and room.get("bounds") is AABB and _clearance_overlap(envelope,room.bounds):
+			_append_clearance_evidence(result,{"kind":"room","id":room.id,"bounds":room.bounds})
+		for access: Dictionary in room.get("accesses",[]):
+			var bounds := Interior.access_reservation(access)
+			if _clearance_overlap(envelope,bounds):_append_clearance_evidence(result,{"kind":"access","id":access.get("id",""),"roomId":room.id,"bounds":bounds})
+		for bounds: AABB in Interior.circulation_reservations([room]):
+			if _clearance_overlap(envelope,bounds):_append_clearance_evidence(result,{"kind":"circulation","id":room.id,"bounds":bounds})
+	for index in range(furniture.protected_access_reservations.size()):
+		if not _continue(continuation):return {"cancelled":true}
+		var bounds: AABB=furniture.protected_access_reservations[index]
+		if _clearance_overlap(envelope,bounds):_append_clearance_evidence(result,{"kind":"plan_access","id":str(index),"bounds":bounds})
+	for part in furniture.parts:
+		if not _continue(continuation):return {"cancelled":true}
+		if part.room_id==house.roomId:continue
+		var bounds: AABB=Frame.furnishing_bounds(part.snapshot()).bounds
+		if _clearance_overlap(envelope,bounds):_append_clearance_evidence(result,{"kind":"furnishing","id":part.id,"roomId":part.room_id,"bounds":bounds})
+	return result
+
+static func _clearance_overlap(a: AABB,b: AABB) -> bool:
+	return Placement._axis_overlap(a,b,0,CLEARANCE) and Placement._axis_overlap(a,b,1,0.0) and Placement._axis_overlap(a,b,2,CLEARANCE)
+
+static func _append_clearance_evidence(result: Dictionary,row: Dictionary, part = null) -> void:
+	result.count+=1
+	result.counts[row.kind]=int(result.counts.get(row.kind,0))+1
+	if result.rows.size()<result.limit:
+		if part!=null:row["part"]=part.snapshot()
+		result.rows.append(row)
+	else:result.truncated=true
 
 static func _tree_clearance(source, envelope: AABB, continuation: Callable) -> Dictionary:
 	var urban: Variant=source.recipe.get("urbanPoc",{})
@@ -210,11 +264,11 @@ static func _house_geometry(source) -> Dictionary:
 			bounds=bounds.merge(box)
 	return {"ready":true,"bounds":bounds}
 
-static func _obstacles(source, ground_y: float) -> Dictionary:
+static func _obstacles(source, ground_y: float, authorized: Variant = null) -> Dictionary:
 	if not _valid_source(source): return _fail("invalid_civic_obstacle_source")
 	var boxes: Array=[]
 	for part in source.parts:
-		if compatible_underlay(part,ground_y): continue
+		if _accepted_underlay(part,ground_y,authorized): continue
 		var box: AABB=source.transformed_part_bounds(part)
 		if not Placement._valid_box(box): return _fail("invalid_civic_obstacle")
 		boxes.append(box)
@@ -224,18 +278,22 @@ static func _obstacles(source, ground_y: float) -> Dictionary:
 	if boxes.size()>Placement.MAX_OBSTACLES: return _fail("civic_obstacle_limit")
 	return {"ready":true,"boxes":boxes}
 
+static func _accepted_underlay(part, ground_y: float, authorized: Variant) -> bool:
+	if authorized is Dictionary and part.semantic=="castle_courtyard_foundation":
+		return authorized.has(part.id)
+	return compatible_underlay(part,ground_y)
+
 static func compatible_underlay(part, ground_y: float) -> bool:
 	if not part is Part or not is_finite(ground_y) or ground_y<=0.0: return false
 	if part.kind!="foundation" or part.rotation!=Vector3.ZERO: return false
 	# Exact producer-owned base layers only. Raised beds, unrelated foundations,
 	# and noncolliding decorative structures remain obstacles.
-	var carved_root: bool = _indexed_id(part.id,"castle_compound_foundation_segment_") and part.recipe.get("egressCarved",false)==true and part.recipe.get("navigationRole")=="structural_mass"
 	var carved_paving: bool = _indexed_id(part.id,"castle_compound_paving_segment_") and part.recipe.get("egressCarved",false)==true and part.recipe.get("navigationRole")=="walkable_support" and part.recipe.get("pavingRegion")=="citadel_courtyard" and part.recipe.get("pavingHeading")=="x"
 	# The production castle carves its ground around egress/entry corridors and
 	# emits indexed segments. Their identity and geometry come from the same
 	# add_courtyard_foundation_and_paving producer, not a broad decor exemption.
-	if (part.id=="castle_courtyard_foundation" or carved_root) and part.semantic=="castle_courtyard_foundation" and part.recipe.get("physicalRoot",false)==true and part.collision_enabled and part.material_id=="stone_foundation":
-		return part.position.y==Vector3(0,ground_y*0.5,0).y and part.size.y==Vector3(0,ground_y,0).y
+	if Support.declared(part,ground_y):
+		return true
 	if (part.id=="castle_courtyard_paving" or carved_paving) and part.semantic=="castle_courtyard_paving" and part.recipe.get("pavingFamily","")=="courtyard_setts" and part.collision_enabled and part.material_id=="cobblestone":
 		return part.position.y==Vector3(0,ground_y+0.07,0).y and part.size.y==Vector3(0,0.14,0).y
 	if part.id=="urban_civic_quarter_paving" and part.semantic=="citadel_civic_quarter_paving" and part.recipe.get("pavingFamily","")=="civic_setts" and not part.collision_enabled:

@@ -364,6 +364,7 @@ func _exercise() -> void:
 	var full_count := callback_count
 	_check("feasible_resolved_specs_unchanged", repeat.get("ready", false) and repeat.receipts.all(func(row): return row.translation == Vector3.ZERO))
 	_check("feasible_specs_typed_exact", repeat.get("ready", false) and var_to_bytes(repeat.specs) == var_to_bytes(infill.specs))
+	_check("repeated_support_receipts_exact",repeat.get("ready",false) and var_to_bytes(repeat.supportReceipts)==var_to_bytes(infill.supportReceipts))
 	var missing = Copy.copy_blueprint(environment.snapshot())
 	missing.parts = missing.parts.filter(func(part): return part.semantic != "castle_curtain_wall")
 	var no_wall: Dictionary = Infill.prepare(missing, infill.specs, producer, domain, 0.62, _budget)
@@ -572,6 +573,98 @@ func _prepare_guards(environment, specs: Array, producer: Callable, domain: Rect
 		_guard_receipt(label, denied, "invalid_civic_infill_input")
 		_check(label + "_immutable", before == _guard_snapshot(changed) and input_before == var_to_bytes(inputs))
 
+func _support_guards(source, plan: Dictionary, furniture) -> void:
+	var frozen := var_to_bytes([source.snapshot(),plan])
+	var cleaned = Copy.copy_blueprint(source.snapshot())
+	Copy.clear_caches(cleaned)
+	_check("support_survives_actual_cache_sanitation",Infill.validate_composed(cleaned,plan,furniture,0.62,_budget).get("ready",false))
+	var owners: Array=plan.supportReceipts.keys()
+	owners.sort()
+	var owner: String=owners[0]
+	var receipt: Dictionary=plan.supportReceipts[owner]
+	_check("support_actual_nonempty_receipt",not receipt.supports.is_empty())
+	if receipt.supports.is_empty():return
+	var membership: Dictionary=Copy.street_house_memberships(cleaned)
+	var house: Dictionary=membership.houses.filter(func(row):return row.prefix==owner)[0]
+	var foundation=_part(cleaned,house.foundationId)
+	var cancellation: Dictionary=Infill.Support.resolve(cleaned,house,foundation,receipt,0.62,func(_stage:String):return false)
+	_check("support_resolution_cancellation",cancellation.get("reason")=="cancelled" and not cancellation.has("authorized"))
+	var reversed=Copy.copy_blueprint(cleaned.snapshot())
+	reversed.parts.reverse()
+	var ordered_resolution: Dictionary=Infill.Support.resolve(cleaned,house,foundation,receipt,0.62,_budget)
+	var reversed_resolution: Dictionary=Infill.Support.resolve(reversed,house,_part(reversed,house.foundationId),receipt,0.62,_budget)
+	_check("support_source_order_independent",var_to_bytes(ordered_resolution)==var_to_bytes(reversed_resolution))
+	var support_id: String=receipt.supports[0].id
+	var mixed=Copy.copy_blueprint(cleaned.snapshot())
+	var foreign_spec: Dictionary=plan.specs[0].duplicate(true)
+	foreign_spec.id="castle_compound"
+	foreign_spec.center=Vector3(200,0,200)
+	var produced: bool=Urban._add_civic_house(mixed,foreign_spec,0.62,0.0)
+	var foreign_result: Dictionary=Infill.Support.resolve(mixed,house,_part(mixed,house.foundationId),receipt,0.62,_budget)
+	_check("support_foreign_house_membership_rejected",produced and foreign_result.get("reason")=="mixed_courtyard_support_ownership")
+	for mutation: String in ["noncanonical_id","missing_egress","wrong_role"]:
+		var inconsistent=Copy.copy_blueprint(cleaned.snapshot())
+		var target=_part(inconsistent,support_id)
+		var altered: Dictionary=receipt.duplicate(true)
+		match mutation:
+			"noncanonical_id":
+				target.id+="_foreign"
+				altered.supports[0].id=target.id
+				altered.supports.sort_custom(func(a,b):return a.id<b.id)
+			"missing_egress":target.recipe.erase("egressCarved")
+			"wrong_role":target.recipe.navigationRole="walkable_support"
+		_check("support_"+mutation+"_recognition_consistent",not Infill.compatible_underlay(target,0.62) and not Infill.Support.declared(target,0.62))
+		_check("support_"+mutation+"_terminal_rejected",Infill.Support.resolve(inconsistent,house,_part(inconsistent,house.foundationId),altered,0.62,_budget).get("ready")==false)
+	for mutation: String in ["missing_declaration","malformed_declaration","wrong_producer","moved_support","changed_extent","raised_support","changed_thickness","rotated_support","wrong_material","no_collision","missing_support","duplicate_support","substituted_support","foreign_owner","mixed_owner","extra_owners","missing_receipts","wrong_room","wrong_door","wrong_foundation","moved_house","unbound_foreign_part","undeclared_foreign_part"]:
+		var trial=Copy.copy_blueprint(cleaned.snapshot())
+		var inputs: Dictionary=plan.duplicate(true)
+		var record: Dictionary=inputs.supportReceipts[owner]
+		var part=_part(trial,support_id)
+		match mutation:
+			"missing_declaration": part.recipe.erase(Infill.Support.KEY);part.recipe["physicalRoot"]=true
+			"malformed_declaration": part.recipe[Infill.Support.KEY]=true
+			"wrong_producer": part.recipe[Infill.Support.KEY].producer="foreign_foundation_producer"
+			"moved_support": part.position.x+=0.01
+			"changed_extent": part.size.x+=0.01
+			"raised_support": part.position.y+=0.01
+			"changed_thickness": part.size.y+=0.01
+			"rotated_support": part.rotation.y=0.01
+			"wrong_material": part.material_id="cobblestone"
+			"no_collision": part.collision_enabled=false
+			"missing_support": trial.parts.erase(part)
+			"duplicate_support": record.supports.append(record.supports[0].duplicate(true))
+			"substituted_support": record.supports[0].id="foreign_support"
+			"foreign_owner": record.prefix=owners[1]
+			"mixed_owner": record.foundationId=plan.supportReceipts[owners[1]].foundationId
+			"extra_owners": record.owners=[owner,owners[1]]
+			"missing_receipts": inputs.erase("supportReceipts")
+			"wrong_room": record.roomId="foreign_room"
+			"wrong_door": record.doorId="foreign_door"
+			"wrong_foundation": record.foundationId="foreign_foundation"
+			"moved_house": _part(trial,record.foundationId).position.x+=0.01
+			"unbound_foreign_part","undeclared_foreign_part":
+				var clone: Dictionary=part.snapshot()
+				clone.id="synthetic_unbound_support"
+				var added=trial.add_part(clone)
+				if mutation=="undeclared_foreign_part":added.recipe.erase(Infill.Support.KEY)
+		var before := var_to_bytes([trial.snapshot(),inputs])
+		var denied: Dictionary=Infill.validate_composed(trial,inputs,furniture,0.62,_budget)
+		_check("support_"+mutation+"_rejected",not denied.get("ready",true))
+		_check("support_"+mutation+"_immutable",before==var_to_bytes([trial.snapshot(),inputs]))
+	var support_rects: Array[Rect2]=[Rect2(0,0,4,10),Rect2(6,0,4,10)]
+	_check("support_union_gap_rejected",Infill.Support.covers(Rect2(0,0,10,10),support_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
+	support_rects.append(Rect2(0,0,4,10))
+	_check("support_duplicate_area_cannot_fill_gap",Infill.Support.covers(Rect2(0,0,10,10),support_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
+	support_rects.append(Rect2(4,0,2,10))
+	_check("support_complete_union_accepted",Infill.Support.covers(Rect2(0,0,10,10),support_rects,_budget).get("ready",false))
+	_check("support_coverage_cancellation",Infill.Support.covers(Rect2(0,0,10,10),support_rects,func(_stage:String):return false).get("reason")=="cancelled")
+	var repeated: Dictionary=plan.supportReceipts.duplicate(true)
+	_check("support_receipts_ordered",repeated.values().all(func(row):
+		var ids: Array=row.supports.map(func(record):return record.id)
+		var ordered: Array=ids.duplicate();ordered.sort()
+		return ids==ordered))
+	_check("support_baseline_immutable",frozen==var_to_bytes([source.snapshot(),plan]))
+
 func _terminal_guards(source, plan: Dictionary, furniture) -> void:
 	var reasons := {"wrong_furnishing_container": "invalid_composed_civic_input", "null_furnishing": "invalid_civic_furnishing",
 		"null_part": "invalid_composed_civic_input", "malformed_foreign_room": "invalid_composed_civic_input",
@@ -762,6 +855,7 @@ func _terminal(source, plan: Dictionary, grammar: Dictionary, front: float, keep
 	# whose rejection might merely repeat the pre-existing positive failure.
 	if not result.get("ready", false): return
 	_terminal_guards(terminal, plan, furniture)
+	_support_guards(terminal,plan,furniture)
 	_check("terminal_both_houses_checked", result.houses.size() == 2)
 	for row: Dictionary in result.houses:
 		_check(String(row.house) + "_terminal_frame_members_retained", row.partCount > int(evidence[String(row.house)].geometry.partCount))
