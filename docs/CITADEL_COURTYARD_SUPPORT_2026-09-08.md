@@ -88,7 +88,42 @@ validation remains the production authority. No generated geometry changed.
 
 The grounded-base correction received a new critic PASS, independently confirming
 support06's 266 checks, underlay-diagnostic05's 40 checks and both clean owned exits.
-After its focused commit, run exactly one fresh Candidate 19 diagnostic at the unchanged
-budgets. Source/integration readiness and explicit critic GO must precede headed
-candidate testing. Actual Main.tscn spawning, terrain, collision, structure,
-trees, doors, furniture and screenshots remain unverified by this change.
+The correction was committed as 1c206e5.
+
+## Candidate 19 and fresh integration evidence
+
+`node tools/run-citadel-candidate-recipe-diagnostic.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-recipe-19 -Seed atlas-30895044 -CandidateRegion '-1,0' -ExpectedRecipeSeed 541151883 -ExpectReady`
+passed at unchanged 540/450/60-second watchdog/source/independent-proof budgets.
+Source preparation took 291.631 seconds; independent physical validation took
+9.249 seconds and checked all 4,486 parts with zero violations. The source retains
+154 furniture parts. Dedicated furniture validation was not performed by this
+diagnostic. Source SHA256:
+`53942402985c5282b28f7e7a3e4f4f020e801292837485ebdee419ea9cd27059`.
+The report, verification and source-hash audit agree: natural exit 0, clean logs,
+no timeout or forced cleanup, authoritative owned zero and unchanged sources.
+
+Eight fresh integration contracts also passed. For each row, run
+`node tools/run-citadel-<contract>-contract.mjs -OutputDirectory artifacts/citadel-runtime-integration/<directory>`.
+Evidence is each directory's report.json and watchdog.json.
+
+| Contract | Directory | Checks | Scope |
+|---|---|---:|---|
+| site-selection | candidate19-site-selection-01 | 120 | Source/service; fixed and fresh random seeds |
+| site-build-queue | candidate19-site-build-queue-01 | 206 | Synthetic threaded queue |
+| terrain-admission | terrain-admission-candidate19-01 | 124 | Synthetic service and owned worker |
+| publication-service | publication-service-candidate19-01 | 69 | Historical source, direct service and synthetic lifecycle |
+| terrain-bootstrap | terrain-bootstrap-candidate19-01 | 28 | Synthetic MainCore orchestration |
+| native-admission | native-admission-candidate19-01 | 64 | Installed native backend, synthetic input |
+| profile-snapshot | profile-snapshot-candidate19-01 | 27 | Historical profile, real WGS/context/native buffer service |
+| town-inputs | town-inputs-candidate19-01 | 52 | Synthetic startup dependencies, actual reservation/admission context |
+
+All 690 checks passed; all eight watchdogs report natural exit 0, no forced cleanup
+or timeout, and authoritative owned zero. Site selection used fresh seed
+`atlas-site-53d84b9668a7419fac85968742c106c9`, its density-secondary derivative,
+and fixed atlas-1492. An initial terrain-admission command used a rejected output
+directory prefix and launched no engine; the corrected command is recorded above.
+
+None of these contracts proves current candidate rendering or live gameplay.
+Explicit critic GO must precede headed candidate testing. Actual Main.tscn
+spawning, terrain, collision, structure, trees, doors, furniture and screenshots
+remain unverified by these source/service results.
