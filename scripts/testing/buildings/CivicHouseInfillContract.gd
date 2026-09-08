@@ -13,6 +13,7 @@ const Interior = preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 const FurniturePlan = preload("res://scripts/buildings/FurnishingPlan.gd")
 const FurniturePart = preload("res://scripts/buildings/FurnishingPart.gd")
 const Boundary = preload("res://scripts/buildings/BoundaryInfillPlacement.gd")
+const Coverage = preload("res://scripts/testing/buildings/CourtyardSupportCoverageProbe.gd")
 const BASELINE := "res://artifacts/citadel-runtime-integration/candidate-civic-wall-03/subset-541151883.bin"
 const BASELINE_SHA := "ff54c31dadef2b5d50fa2b0a4b01f22d549744525a94724e129d802140c3edf3"
 const SEED := 541151883
@@ -594,6 +595,32 @@ func _support_guards(source, plan: Dictionary, furniture) -> void:
 	var ordered_resolution: Dictionary=Infill.Support.resolve(cleaned,house,foundation,receipt,0.62,_budget)
 	var reversed_resolution: Dictionary=Infill.Support.resolve(reversed,house,_part(reversed,house.foundationId),receipt,0.62,_budget)
 	_check("support_source_order_independent",var_to_bytes(ordered_resolution)==var_to_bytes(reversed_resolution))
+	# Actual courtyard producer with an edge through an ordinary house's own
+	# ground-reaching slab. Source-only fixture, not a live placement claim.
+	var partial = Blueprint.new("partial-courtyard-contract",SEED,"masonry")
+	var residences: Array[Dictionary]=[]
+	Castle.add_courtyard_foundation_and_paving(partial,residences,foundation.position.x*2.0,200.0,0.62,0.0)
+	var own = Blueprint.new("grounded-house-contract",SEED,"masonry")
+	own.parts=cleaned.parts.filter(func(part):return house.memberIds.has(part.id))
+	own.rooms=cleaned.rooms.filter(func(room):return room.id==house.roomId)
+	var envelope: AABB=Infill._house_geometry(own).bounds
+	var partial_rects: Array[Rect2]=[]
+	for part in partial.parts:
+		if part.semantic=="castle_courtyard_foundation":partial_rects.append(Infill.Support._xz(partial.transformed_part_bounds(part)))
+	_check("partial_courtyard_does_not_cover_whole_house",Coverage.covers(Infill.Support._xz(cleaned.transformed_part_bounds(foundation)),partial_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
+	var partial_bound: Dictionary=Infill.Support.bind(partial,own,owner,envelope,0.62,_budget)
+	_check("grounded_house_can_share_partial_courtyard",partial_bound.get("ready",false) and not partial_bound.get("receipt",{}).get("supports",[]).is_empty())
+	for mutation: String in ["elevated","tilted","no_collision","wrong_thickness"]:
+		var changed_own=Copy.copy_blueprint(own.snapshot())
+		var changed_foundation=_part(changed_own,house.foundationId)
+		changed_foundation.recipe["physicalRoot"]=true
+		match mutation:
+			"elevated":changed_foundation.position.y+=0.62
+			"tilted":changed_foundation.rotation.x=0.01
+			"no_collision":changed_foundation.collision_enabled=false
+			"wrong_thickness":changed_foundation.size.y+=0.01
+		var rejected_binding: Dictionary=Infill.Support.bind(partial,changed_own,owner,Infill._house_geometry(changed_own).bounds,0.62,_budget)
+		_check("shared_base_"+mutation+"_cannot_mint_receipt",rejected_binding.get("reason")=="civic_shared_base_requires_grounded_house")
 	var support_id: String=receipt.supports[0].id
 	var mixed=Copy.copy_blueprint(cleaned.snapshot())
 	var foreign_spec: Dictionary=plan.specs[0].duplicate(true)
@@ -652,12 +679,12 @@ func _support_guards(source, plan: Dictionary, furniture) -> void:
 		_check("support_"+mutation+"_rejected",not denied.get("ready",true))
 		_check("support_"+mutation+"_immutable",before==var_to_bytes([trial.snapshot(),inputs]))
 	var support_rects: Array[Rect2]=[Rect2(0,0,4,10),Rect2(6,0,4,10)]
-	_check("support_union_gap_rejected",Infill.Support.covers(Rect2(0,0,10,10),support_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
+	_check("probe_union_gap_observed",Coverage.covers(Rect2(0,0,10,10),support_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
 	support_rects.append(Rect2(0,0,4,10))
-	_check("support_duplicate_area_cannot_fill_gap",Infill.Support.covers(Rect2(0,0,10,10),support_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
+	_check("probe_duplicate_area_cannot_fill_gap",Coverage.covers(Rect2(0,0,10,10),support_rects,_budget).get("reason")=="courtyard_support_coverage_gap")
 	support_rects.append(Rect2(4,0,2,10))
-	_check("support_complete_union_accepted",Infill.Support.covers(Rect2(0,0,10,10),support_rects,_budget).get("ready",false))
-	_check("support_coverage_cancellation",Infill.Support.covers(Rect2(0,0,10,10),support_rects,func(_stage:String):return false).get("reason")=="cancelled")
+	_check("probe_complete_union_observed",Coverage.covers(Rect2(0,0,10,10),support_rects,_budget).get("ready",false))
+	_check("probe_coverage_cancellation",Coverage.covers(Rect2(0,0,10,10),support_rects,func(_stage:String):return false).get("reason")=="cancelled")
 	var repeated: Dictionary=plan.supportReceipts.duplicate(true)
 	_check("support_receipts_ordered",repeated.values().all(func(row):
 		var ids: Array=row.supports.map(func(record):return record.id)

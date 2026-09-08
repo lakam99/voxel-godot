@@ -3,6 +3,7 @@ extends SceneTree
 ## Pinned source/cached-fact diagnosis only; not full recipe or gameplay proof.
 const Copy = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.gd")
 const Civic = preload("res://scripts/buildings/CivicHouseInfillRecipe.gd")
+const Coverage = preload("res://scripts/testing/buildings/CourtyardSupportCoverageProbe.gd")
 const INPUT := "res://artifacts/citadel-runtime-integration/facade-input-capture-03/input.bin"
 const INPUT_SHA := "1935cc9ecab553c91c453f2a8ac715e90062fc363a244d880b153a5af9d66f2c"
 const FAILURE := "res://artifacts/citadel-runtime-integration/candidate-recipe-17/failure.bin"
@@ -49,10 +50,24 @@ func _run() -> void:
 		area += overlap.get_area()
 		rows.append({"id":row.id,"overlap":overlap,"before":before.snapshot(),"after":after.snapshot()})
 	checks.footprint_area_covered = absf(area-footprint.get_area())<0.001
-	var union_coverage := Civic.Support.covers(footprint,support_rects,Callable())
+	var union_coverage := Coverage.covers(footprint,support_rects,Callable())
 	checks.exact_support_union_covered=union_coverage.get("ready",false)
+	var memberships := Copy.street_house_memberships(source)
+	var house_coverage: Array=[]
+	var all_supports: Array[Rect2]=[]
+	for part in source.parts:
+		if part.semantic=="castle_courtyard_foundation":
+			all_supports.append(Civic.Support._xz(source.transformed_part_bounds(part)))
+	checks.archived_memberships_valid=memberships.ready
+	if memberships.ready:
+		for house: Dictionary in memberships.houses:
+			if house.prefix not in ["urban_civic_house_east","urban_civic_house_wall"]:continue
+			var foundation=source.parts.filter(func(part):return part.id==house.foundationId)[0]
+			var bounds: AABB=source.transformed_part_bounds(foundation)
+			house_coverage.append({"house":house.prefix,"foundation":foundation.snapshot(),"bounds":bounds,"groundedByAuthority":source.is_grounded_structural_root(foundation),"coverage":Coverage.covers(Civic.Support._xz(bounds),all_supports,Callable())})
+	checks.both_archived_house_footprints_observed=house_coverage.size()==2
 	checks.source_immutable = frozen==var_to_bytes(source.snapshot())
-	var report := {"passed":checks.values().all(func(value):return value==true),"checks":checks,"rows":rows,"house":evidence.house,"envelope":envelope,"overlapAreaSum":area,"footprintArea":footprint.get_area(),"unionCoverage":union_coverage,"scope":"Frozen pre-structural source and actual cache sanitation reproduce recorded terminal foundation records. No remedy, complete recipe, publication, visuals or gameplay acceptance."}
+	var report := {"passed":checks.values().all(func(value):return value==true),"checks":checks,"rows":rows,"house":evidence.house,"envelope":envelope,"overlapAreaSum":area,"footprintArea":footprint.get_area(),"unionCoverage":union_coverage,"houseCoverage":house_coverage,"scope":"Frozen pre-structural source and actual cache sanitation reproduce recorded terminal foundation records. No remedy, complete recipe, publication, visuals or gameplay acceptance."}
 	var file := FileAccess.open(output,FileAccess.WRITE)
 	if file==null:quit(2);return
 	file.store_string(JSON.stringify(report,"  ",true,true))

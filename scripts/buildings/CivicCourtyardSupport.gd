@@ -7,7 +7,6 @@ const Membership = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.g
 const KEY := "courtyardSupport"
 const DECLARATION := {"version":1,"producer":"castle_courtyard_foundation_and_paving","role":"shared_foundation"}
 const MAX_PARTS := 10000
-const MAX_FRAGMENTS := 4096
 
 static func declared(part, ground_y: float) -> bool:
 	if not part is Part or not is_finite(ground_y) or ground_y<=0.0: return false
@@ -44,6 +43,11 @@ static func resolve(source, house: Dictionary, foundation, receipt: Variant, gro
 	for key: String in ["prefix","roomId","doorId","foundationId"]:
 		if receipt.get(key)!=house.get(key): return _fail("foreign_courtyard_support_owner")
 	if receipt.get("foundation")!=geometry(foundation): return _fail("changed_courtyard_supported_foundation")
+	# These slabs overlap the house's own ground-reaching foundation; they are
+	# not bearings below an elevated house. Courtyard egress cuts need not be
+	# filled by a second slab where the house already supplies its own base.
+	if foundation.kind!="foundation" or not foundation.collision_enabled or foundation.rotation!=Vector3.ZERO or foundation.position.y!=Vector3(0,ground_y*0.5,0).y or foundation.size.y!=Vector3(0,ground_y,0).y or not source.is_grounded_structural_root(foundation):
+		return _fail("civic_shared_base_requires_grounded_house")
 	var membership := Membership.street_house_memberships(source)
 	if not membership.ready: return membership
 	var house_members: Dictionary={}
@@ -55,7 +59,6 @@ static func resolve(source, house: Dictionary, foundation, receipt: Variant, gro
 		if by_id.has(part.id): return _fail("duplicate_courtyard_support_source")
 		by_id[part.id]=part
 	var authorized: Dictionary={}
-	var rectangles: Array[Rect2]=[]
 	var previous := ""
 	for record: Variant in receipt.supports:
 		if not _continue(continuation): return _fail("cancelled")
@@ -65,30 +68,7 @@ static func resolve(source, house: Dictionary, foundation, receipt: Variant, gro
 		if not declared(part,ground_y) or geometry(part)!=record: return _fail("changed_courtyard_support_member")
 		if house.memberIds.has(part.id) or house_members.has(part.id): return _fail("mixed_courtyard_support_ownership")
 		authorized[part.id]=true
-		rectangles.append(_xz(source.transformed_part_bounds(part)))
-	if not rectangles.is_empty():
-		var coverage := covers(_xz(source.transformed_part_bounds(foundation)),rectangles,continuation)
-		if not coverage.ready: return coverage
 	return {"ready":true,"authorized":authorized}
-
-static func covers(footprint: Rect2, rectangles: Array[Rect2], continuation: Callable) -> Dictionary:
-	# Subtract each actual support rectangle. A bounding box or area sum would
-	# accept holes and double-count overlapping slabs.
-	var remaining: Array[Rect2]=[footprint]
-	for support: Rect2 in rectangles:
-		var next: Array[Rect2]=[]
-		for region: Rect2 in remaining:
-			if not _continue(continuation): return _fail("cancelled")
-			var cut := region.intersection(support)
-			if not cut.has_area():
-				next.append(region)
-			else:
-				for fragment: Rect2 in [Rect2(region.position,Vector2(cut.position.x-region.position.x,region.size.y)),Rect2(Vector2(cut.end.x,region.position.y),Vector2(region.end.x-cut.end.x,region.size.y)),Rect2(Vector2(cut.position.x,region.position.y),Vector2(cut.size.x,cut.position.y-region.position.y)),Rect2(Vector2(cut.position.x,cut.end.y),Vector2(cut.size.x,region.end.y-cut.end.y))]:
-					if fragment.has_area(): next.append(fragment)
-			if next.size()>MAX_FRAGMENTS: return _fail("courtyard_support_coverage_limit")
-		remaining=next
-		if remaining.is_empty(): return {"ready":true}
-	return _fail("courtyard_support_coverage_gap")
 
 static func geometry(part) -> Dictionary:
 	return {"id":part.id,"kind":part.kind,"semantic":part.semantic,"material":part.material_id,"collision":part.collision_enabled,"position":part.position,"rotation":part.rotation,"size":part.size}
