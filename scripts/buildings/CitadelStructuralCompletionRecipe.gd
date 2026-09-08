@@ -16,6 +16,7 @@ const FailureEvidence = preload("res://scripts/buildings/CitadelPhysicalFailureE
 const BuntingManifest = preload("res://scripts/buildings/CitadelBuntingAssemblyManifest.gd")
 const BuntingAnchors = preload("res://scripts/buildings/CitadelBuntingAnchorRecipe.gd")
 const BuntingDomain = preload("res://scripts/buildings/CitadelMarketBuntingDomain.gd")
+const ExteriorBunting = preload("res://scripts/buildings/CitadelExteriorBuntingDomain.gd")
 
 static func prepare(blueprint, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	# Execution control is deliberately separate from serializable source policy.
@@ -114,7 +115,16 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 static func _bunting_manifest(source) -> Dictionary:
 	if not source.recipe.has(BuntingManifest.KEY) and not source.parts.any(func(part):return part.semantic in [BuntingManifest.ROPE_SEMANTIC,BuntingManifest.PENNANT_SEMANTIC]):
 		return {"ready":true,"records":[]}
-	return BuntingManifest.read(source)
+	var declaration := BuntingManifest.read(source)
+	if not declaration.ready: return declaration
+	for assembly: Dictionary in declaration.records:
+		var rope = Manifest.find_part(source, assembly.ropeId)
+		if (assembly.get("mounting") == "exterior") != rope.recipe.has(ExteriorBunting.OWNERS): return _fail("missing_or_undeclared_exterior_bunting_owners")
+		if rope.recipe.has(ExteriorBunting.OWNERS):
+			if rope.recipe.has("buntingMarketOwners"): return _fail("contradictory_bunting_owners")
+			var exterior := ExteriorBunting.build(source, rope.recipe[ExteriorBunting.OWNERS])
+			if not exterior.ready: return exterior
+	return declaration
 
 static func _complete_bunting(source, protected: Array, continuation: Callable = Callable()) -> Dictionary:
 	var frozen := var_to_bytes(source.snapshot())
@@ -124,6 +134,7 @@ static func _complete_bunting(source, protected: Array, continuation: Callable =
 	var declaration := _bunting_manifest(source)
 	if not declaration.ready: return _fail("bunting_manifest_invalid",{"detail":declaration})
 	var selected: Array = []
+	var preserve_geometry := {}
 	var bounds: Array = protected.duplicate(true)
 	if not declaration.records.is_empty():
 		var current := _physical(source,continuation)
@@ -139,8 +150,18 @@ static func _complete_bunting(source, protected: Array, continuation: Callable =
 			for id: String in members:
 				if not checks.has(id): return _fail("missing_bunting_source_check")
 				failed=failed or not checks[id]
-			if not failed: continue
+			var rope = Manifest.find_part(source, assembly.ropeId)
+			var has_exterior: bool = rope.recipe.has(ExteriorBunting.OWNERS)
+			if not failed and not has_exterior: continue
 			var record: Dictionary = assembly.duplicate(true)
+			if has_exterior:
+				var exterior := ExteriorBunting.build(source, rope.recipe[ExteriorBunting.OWNERS])
+				if not exterior.ready: return exterior
+				record["placementDomain"] = exterior.domain
+				for room_bounds: AABB in exterior.protectedRooms:
+					if not bounds.has(room_bounds): bounds.append(room_bounds)
+				if not failed:
+					for id: String in members: preserve_geometry[id] = Manifest.find_part(source, id).snapshot()
 			var owners: Variant = Manifest.find_part(source,assembly.ropeId).recipe.get("buntingMarketOwners")
 			if owners!=null:
 				if not owners is Dictionary or owners.size()!=3: return _fail("invalid_bunting_market_owners")
@@ -166,6 +187,9 @@ static func _complete_bunting(source, protected: Array, continuation: Callable =
 		var replacements: Dictionary = {}
 		for record: Dictionary in proposal.changes:
 			if not owned.has(record.id) or replacements.has(record.id): return _fail("foreign_bunting_replacement")
+			if preserve_geometry.has(record.id):
+				for key: String in ["position", "size", "rotation"]:
+					if record[key] != preserve_geometry[record.id][key]: return _fail("passing_exterior_bunting_requires_relocation")
 			replacements[record.id]=record
 		# Replace only existing owned records. All other geometry, passing
 		# assemblies, rooms, furniture policy and recipe metadata stay byte-exact.

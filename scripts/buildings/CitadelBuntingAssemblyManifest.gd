@@ -45,8 +45,9 @@ static func _validate(source, collection: Variant) -> Dictionary:
 	var covered: Dictionary = {}
 	var pennant_count := 0
 	for record: Variant in collection:
-		if not record is Dictionary or record.size() != 2 or not record.has("ropeId") or not record.has("pennantIds"):
+		if not record is Dictionary or record.size() not in [2, 3] or not record.has("ropeId") or not record.has("pennantIds"):
 			return _fail("invalid_bunting_manifest_record")
+		if record.size() == 3 and record.get("mounting") != "exterior": return _fail("invalid_bunting_mounting_contract")
 		if not _valid_id(record.ropeId) or not record.pennantIds is Array or record.pennantIds.is_empty() or record.pennantIds.size() > MAX_PENNANTS:
 			return _fail("invalid_bunting_manifest_members")
 		if not expected.has(record.ropeId) or expected[record.ropeId] != ROPE_SEMANTIC:

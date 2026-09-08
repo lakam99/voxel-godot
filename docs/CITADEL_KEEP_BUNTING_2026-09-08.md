@@ -139,3 +139,91 @@ published by the owning structure producers, consumed generically and tested
 for stale/foreign/swapped ownership, impossible geometry and clearance failure
 before another full candidate run. No production placement or headed change
 has been made.
+
+## Production ownership implementation
+
+The builder now records exact geometry receipts on its two forecourt pavilions;
+the civic landmark producer records its own receipt. The composer resolves the
+actual owner IDs and courtyard ID and declares exterior mounting independently
+in the third assembly's membership record. Deleting the rope's owners payload
+therefore fails validation rather than restoring the unbound path.
+
+`CitadelExteriorBuntingDomain.gd` recognizes pavilion side/geometry against the
+existing hashed forecourt layout and recognizes the landmark and courtyard
+against their compound-grammar producer contracts. Receipts bind ID, kind,
+semantic, position, size, rotation and collision, excluding mutable physical
+caches. They do not authorize rootedness. The helper derives an opposing-face
+domain, retains captured protection and adds non-courtyard rooms.
+
+Structural completion validates associations before physical selection and
+includes every associated assembly in terminal verification. Already-passing
+associated geometry may receive anchor facts but may not be relocated. The
+anchor search, rooting, socket, pennant clearance and terminal proof remain
+unchanged. No NPC/navigation or tree implementation is modified.
+
+Verification commands (each output directory is fresh under
+`artifacts/citadel-runtime-integration/`):
+
+```text
+node tools/run-building-contract.mjs -Contract CitadelExteriorBuntingDomainContract.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-domain-04 -ReportEnvironment CITADEL_ORDERED_OPENING_REPORT -TimeoutSeconds 60
+node tools/run-building-contract.mjs -Contract CitadelExteriorBuntingRecognitionDiagnostic.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-recognition-03 -ReportEnvironment CITADEL_ORDERED_OPENING_REPORT -TimeoutSeconds 30
+node tools/run-citadel-structural-policy-capture.mjs -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-producer-capture-02
+node tools/run-building-contract.mjs -Contract CitadelExteriorBuntingIntegrationContract.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-integration-01 -ReportEnvironment CITADEL_ORDERED_OPENING_REPORT -TimeoutSeconds 120
+node tools/run-building-contract.mjs -Contract CitadelBuntingAnchorRecipeContract.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-anchor-regression-01 -ReportEnvironment CITADEL_BUNTING_ANCHOR_REPORT -TimeoutSeconds 60
+node tools/run-building-contract.mjs -Contract CitadelBuntingAssemblyManifestContract.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-manifest-regression-01 -ReportEnvironment CITADEL_BUNTING_MANIFEST_REPORT -TimeoutSeconds 60
+node tools/run-building-contract.mjs -Contract CitadelMarketBuntingDomainContract.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-market-regression-01 -ReportEnvironment CITADEL_MARKET_BUNTING_DOMAIN_REPORT -TimeoutSeconds 60
+node tools/run-building-contract.mjs -Contract CitadelExteriorBuntingCompletionContract.gd -OutputDirectory artifacts/citadel-runtime-integration/exterior-bunting-completion-02 -ReportEnvironment CITADEL_ORDERED_OPENING_REPORT -TimeoutSeconds 60
+```
+
+All listed runs passed with clean engine logs, natural exit 0 and authoritative
+owned zero. Evidence levels and counts:
+
+- Domain04: 83 synthetic checks for strict receipt/producer recognition,
+  numeric-side types, foreign/stale/duplicate ownership, exact rejection
+  branches, immutability, ordering and cache sanitation.
+- Recognition03: three diagnostic checks; all actual frozen pavilion,
+  landmark, courtyard and layout-hash predicates are true. Receipt stamping
+  here is synthetic and does not prove producer emission.
+- Producer capture02: eight checks, 43.387 seconds, 4,440 parts and 178
+  furniture parts. Actual builder/composer emission, intentionally cancelled
+  before structural completion. Full source and file-inventory audits pass.
+  Input SHA-256:
+  `c9054b1aac1bbd08f77a41fd6f70480650dc7a82f2d73aa083eeffc483192e83`.
+- Integration01: 16 checks, 54.304 seconds. Removing exactly three mount
+  receipts, one rope owners field and one manifest marker restores byte-exact
+  old pre-structural blueprint and furnishing policy. Only these identified
+  fields are transferred to the frozen late source after exact geometry
+  comparison. Actual structural bunting completion, selected 14-member
+  physical proof and stored clearance pass. Nonselected records and all
+  protected volumes remain intact; repeated completion is byte-exact and
+  deleting owners from a passing assembly rejects before physical selection.
+  This is a hybrid offline contract, not current whole-candidate acceptance.
+- Existing anchor/manifest/market suites: 91/83/83 checks. They retain forged
+  root-cache, crowded-pennant, protected-volume, roof, cancellation and
+  membership negative coverage.
+- Completion02: ten synthetic checks. Explicit physical roots establish a
+  passing assembly; an independently successful alternative placement proves
+  that production refuses relocation rather than merely lacking a solution.
+  The caller remains unchanged. A union of 4,096 input protections and an
+  interior room is rejected without truncation or caller/input mutation.
+
+Earlier failures are retained. Producer capture01 naturally exited 1 after
+9.273 seconds with no engine error or forced cleanup and unchanged sources.
+Recognition01/02 isolated a numeric-type mistake: the real layout uses float
+sides, while the first predicate used integer Array membership. The fix uses
+the builder's finite float-side handling. Domain03 assertions passed but its
+test serialized NaN and emitted an engine warning; it is rejected evidence.
+Domain04 rejects bounded nonfinite descriptors before JSON hashing and avoids
+warning-producing fixture serialization.
+
+Completion01 naturally exited 1 with owned zero because its initial synthetic
+domain produced no fitted candidate. Its non-exact X interval can round inward
+at the right face; Completion02 explicitly uses an exactly represented
+15-unit fixture gap and verifies both endpoint planes. This isolates the
+preservation/overflow branches; it does not resolve general domain-rounding
+behavior or justify widening production geometry.
+
+Full current-source construction, independent physical proof, actual terrain
+admission, publication preparation and critic-approved headed inspection are
+still required. No broad gameplay playtest or headed run has been performed
+for this change yet.

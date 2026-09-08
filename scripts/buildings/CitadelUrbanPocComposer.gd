@@ -25,6 +25,7 @@ const FacadeApertureDeclarationScript := preload("res://scripts/buildings/Facade
 const StreetHouseStructuralManifestScript := preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const StructuralCompletionRecipeScript := preload("res://scripts/buildings/CitadelStructuralCompletionRecipe.gd")
 const BuntingManifest := preload("res://scripts/buildings/CitadelBuntingAssemblyManifest.gd")
+const ExteriorBunting := preload("res://scripts/buildings/CitadelExteriorBuntingDomain.gd")
 const RetainedBearingRecipeScript := preload("res://scripts/buildings/RetainedSurfaceBearingRecipe.gd")
 const DoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const TerminalSupport := preload("res://scripts/buildings/TerminalShopElevationRecipe.gd")
@@ -1777,6 +1778,7 @@ static func add_civic_landmark(blueprint, center: Vector3, base_y: float, variat
 	var height := 17.0
 	add_grounded_foundation(blueprint, "urban_civic_tower_foundation", center, width + 0.36, depth + 0.36, base_y, variation - 0.025, "citadel_civic_landmark_foundation")
 	add_part(blueprint, "urban_civic_tower", "wall", "painted_brick_cream", Vector3(center.x, base_y + height * 0.5, center.z), Vector3(width, height, depth), {"variation": variation, "semantic": "citadel_civic_landmark"})
+	ExteriorBunting.declare(blueprint.parts.back(), "landmark", 0)
 	for level in [4.2, 8.0, 11.8]:
 		add_part(blueprint, "urban_civic_recess_%d" % int(level * 10.0), "decor", "window_recess", Vector3(center.x + width * 0.5 + 0.04, base_y + level, center.z), Vector3(0.10, 1.45, 1.05), {"collision": false, "variation": variation, "semantic": "citadel_civic_blind_recess"})
 	add_civic_roof_section(blueprint, center, width, depth, base_y + height, variation)
@@ -1840,6 +1842,8 @@ static func add_dressing_clusters(blueprint, front_z: float, keep_front_z: float
 
 
 static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> bool:
+	var exterior := ExteriorBunting.association(blueprint)
+	if not exterior.ready: return false
 	var market_lane_x := float(urban_layout.get("marketLaneX", MARKET_LANE_X))
 	var market_terrace_rise := float(urban_layout.get("marketTerraceRise", MARKET_TERRACE_RISE))
 	var lines := [
@@ -1859,6 +1863,8 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 		add_part(blueprint, rope_id, "beam", "ironwork", Vector3((start_x + end_x) * 0.5, line_y + 0.33, line_z), Vector3(end_x - start_x, 0.035, 0.035), {"collision": false, "variation": variation, "semantic": "citadel_bunting_rope"})
 		if line_index == 1:
 			blueprint.parts.back().recipe["buntingMarketOwners"] = blueprint.recipe.get("citadelMarketHousePair",{}).duplicate(true)
+		if line_index == 2:
+			blueprint.parts.back().recipe[ExteriorBunting.OWNERS] = exterior.owners.duplicate(true)
 		var members: Array = []
 		var pennant_count := 9 if line_index == 0 else 13
 		for pennant_index in range(pennant_count):
@@ -1868,7 +1874,9 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 			var material := cloth_materials[(line_index + pennant_index) % cloth_materials.size()]
 			add_part(blueprint, "urban_bunting_%02d_%02d" % [line_index, pennant_index], "pennant", material, Vector3(pennant_x, line_y - sag, line_z), Vector3(maxf(0.38, (end_x - start_x) / float(pennant_count) * 0.56), 0.68, 0.055), {"rotation": Vector3(0.0, 0.0, deg_to_rad(-8.0 if pennant_index % 2 == 0 else 8.0)), "collision": false, "variation": variation + float(pennant_index) * 0.006, "semantic": "citadel_bunting"})
 			members.append(blueprint.parts.back().id)
-		assemblies.append({"ropeId":rope_id,"pennantIds":members})
+		var assembly := {"ropeId":rope_id,"pennantIds":members}
+		if line_index == 2: assembly["mounting"] = "exterior"
+		assemblies.append(assembly)
 	return BuntingManifest.declare(blueprint,assemblies).ready
 
 
