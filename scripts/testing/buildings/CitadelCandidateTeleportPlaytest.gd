@@ -222,7 +222,52 @@ func _run() -> void:
 			await _finish("failed","close_capture_failed"); return
 		if not checks.close_approach:
 			await _finish("failed",String(evidence.approach.get("reason","approach_blocked"))); return
+		evidence.inspectionViews=await _capture_inspection_views()
+		checks.inspection_views=evidence.inspectionViews.passed
+		if not checks.inspection_views:
+			await _finish("failed","inspection_capture_failed"); return
 	await _finish("scene_ready" if checks.scene_audit else "failed","" if checks.scene_audit else "scene_observation_failed")
+
+func _capture_inspection_views() -> Dictionary:
+	# Render the existing live world from explicitly diagnostic cameras. This does
+	# not move the player, publish geometry, change lighting or prove traversal.
+	phase="diagnostic_visual_inspection"
+	var bounds: AABB=evidence.sceneAudit.visualBounds
+	var center := bounds.get_center()
+	var radius := maxf(bounds.size.x,bounds.size.z)*0.85
+	var views: Array=[]
+	for side in range(4):
+		var direction := Vector3(sin(float(side)*PI*0.5+PI*0.25),0.0,cos(float(side)*PI*0.5+PI*0.25))
+		views.append({"label":"overview_%d"%side,"position":center+direction*radius+Vector3.UP*bounds.size.y,"target":center})
+	views.append({"label":"courtyard_overview","position":center+Vector3(0,bounds.size.y*1.6,bounds.size.z*0.12),"target":center})
+	for sample: Dictionary in evidence.sceneAudit.furnitureSamples.slice(0,2):
+		var body := main.get_node_or_null(NodePath(sample.path)) as Node3D
+		if body==null: return {"passed":false,"reason":"furniture_sample_disappeared"}
+		var record: Dictionary=body.get_meta("furnishing_part_record")
+		var size: Vector3=record.occupiedSize
+		views.append({"label":"furniture_%d"%views.size(),"position":body.to_global(Vector3(0,size.y+0.8,maxf(size.x,size.z)+1.0)),
+			"target":body.to_global(Vector3(0,size.y*0.5,0)),"furniture":sample})
+	var observer := Camera3D.new()
+	observer.name="DiagnosticCitadelInspectionCamera"
+	observer.fov=72.0
+	observer.far=player.camera.far
+	observer.cull_mask=player.camera.cull_mask
+	main.add_child(observer)
+	observer.make_current()
+	var passed := true
+	for view: Dictionary in views:
+		if not _within_deadline(): passed=false; break
+		observer.global_position=view.position
+		observer.look_at(view.target)
+		await _frame()
+		await _frame()
+		if not await _capture(view.label,"diagnostic_inspection_camera"): passed=false; break
+	player.camera.make_current()
+	observer.queue_free()
+	await _frame()
+	var identity := _accepted_current()
+	return {"passed":passed and identity.passed and root.get_camera_3d()==player.camera,"views":views,"identity":identity,
+		"scope":"Diagnostic camera views of unchanged production scene; no player placement, movement, interaction or navigation acceptance."}
 
 func _movement_key(key: Key, pressed: bool) -> void:
 	var event := InputEventKey.new()
@@ -508,6 +553,7 @@ func _audit_scene() -> Dictionary:
 	result.visualBounds=AABB()
 	result.visibleGeometry=0
 	result.visualSamples=[]
+	result.furnitureSamples=[]
 	var have_bounds := false
 	result.rootPosition = site.global_position
 	result.sourceOrigin = expected_origin
@@ -546,7 +592,11 @@ func _audit_scene() -> Dictionary:
 					for hit: Dictionary in hits:
 						if hit.get("collider") == node.get_parent(): found = true
 					result.physicsProbes.append({"bodyId":node.get_parent().get_instance_id(),"registeredInPhysics":found})
-			if node is StaticBody3D and node.has_meta("furnishing_part_record"): result.furnitureBodies += 1
+			if node is StaticBody3D and node.has_meta("furnishing_part_record"):
+				result.furnitureBodies += 1
+				var archetype := String(node.get_meta("furnishing_archetype",""))
+				if result.furnitureSamples.size()<2 and not result.furnitureSamples.any(func(sample):return sample.archetype==archetype):
+					result.furnitureSamples.append({"path":String(main.get_path_to(node)),"archetype":archetype,"id":String(node.get_meta("furnishing_part_id",""))})
 			if node is StaticBody3D and node.has_meta("tree_visual_state"):
 				result.trees += 1
 				var prop_id := String(node.get_meta("prop_id",""))
@@ -663,7 +713,7 @@ func _frame() -> void:
 			_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"source":last_observation.get("source",{}),"scene":last_observation.get("scene",{})})
 		_write("progress.json",{"elapsedMsec":_elapsed(),"phase":phase,"placementCount":placements.size(),"observation":last_observation})
 
-func _capture(label: String) -> bool:
+func _capture(label: String, camera_kind := "ordinary_player_viewport") -> bool:
 	if DisplayServer.get_name()=="headless":
 		captures.append({"label":label,"saved":false,"reason":"headless_capture_skipped","elapsedMsec":_elapsed()})
 		return false # Headless servers need not ever emit frame_post_draw.
@@ -674,7 +724,8 @@ func _capture(label: String) -> bool:
 	var code := ERR_UNAVAILABLE
 	if image!=null and not image.is_empty(): code=image.save_png(path)
 	captures.append({"label":label,"path":path,"saved":code==OK,"error":code,"elapsedMsec":_elapsed(),
-		"playerPosition":player.global_position if is_instance_valid(player) else Vector3.ZERO,"camera":"ordinary_player_viewport","inspectionRequired":true})
+		"playerPosition":player.global_position if is_instance_valid(player) else Vector3.ZERO,"camera":camera_kind,
+		"cameraTransform":root.get_camera_3d().global_transform if root.get_camera_3d()!=null else Transform3D.IDENTITY,"inspectionRequired":true})
 	if code!=OK: _evidence_failure(label+".png",code)
 	return code==OK
 
@@ -721,7 +772,7 @@ func _finish(outcome: String,reason: String) -> void:
 		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},
 		"evidence":evidence,"finalObservation":_observe(),
 		"evidenceLevel":"headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
-		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events only after scene readiness","bounded ordinary W/Shift approach with short A sidesteps after scene readiness","isolated ordinary save directory"],
+		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","bounded ordinary W/Shift approach with brief jumps and lateral recovery","labelled diagnostic inspection cameras after player approach","isolated ordinary save directory"],
 		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
 		"shutdown":"ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})
 	passed=passed and report_written
