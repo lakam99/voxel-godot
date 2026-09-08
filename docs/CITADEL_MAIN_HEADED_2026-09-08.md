@@ -136,3 +136,19 @@ At `b2b281a`, all 21 checks passed in 393.439s. Approach: 13.029s, 7.895m from a
 Critic inspected `ready.png` and `close.png`: scoped PASS for production spawn and ordinary-input exterior approach. Close view shows continuous wall/battlements but masonry is poorly readable in shadow and a foreground rock obscures part of the base. It does not prove a hole, floating wall or terrain seam defect. Courtyard/roofline/furniture visuals remain uninspected. Sampled approach game-loop max 9.077ms, p95 at most 6.35ms; excludes complete rendering/physics-frame acceptance.
 
 The next visual batch adds labelled diagnostic-camera views of the same constructed Main scene after the player approach: four exterior quarters, courtyard overview and two recipe-furniture samples. Camera positions derive from observed geometry bounds/actual furniture bodies. They do not move the player, change generated geometry or clock/weather settings, or prove access/interaction. Main may update camera-dependent environment effects from the diagnostic observer position. The ordinary camera is restored before completion. Keep these images distinct from the player captures and assess obscured views honestly. Existing selection/parse contract passed 23 checks (`teleport-inspection-01`), Node runner tests passed 15; critic PASS and GO for headed12 at unchanged budgets.
+
+### candidate-teleport-23-12: production spawn visual sign-off
+
+Command, from this worktree:
+
+```text
+node tools/run-citadel-candidate-teleport-playtest.mjs -Seed atlas-3376622889 -CandidateRegion '-2,-2' -SkipTutorial -ForceDaytime -ForceClearWeather -StartupTimeoutSeconds 120 -TimeoutSeconds 600 -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-23-12
+```
+
+At `d7ff171`, all 22 checks passed in 391.487s (startup 18.079s). The production-generated source retained signature `0cfd1e3c8a49292b82073f983c835dad6046035f6ba8860bbb2c54b77d35fc8d`. The ordinary approach reached 7.975m from actual bounds in 12.963s. Both setup placements, source/owner identity, native scene collision observations and player clearance passed. All captures saved; the ordinary player camera was restored. `verification.json`: natural exit 0, no engine errors/warnings, no changed frozen sources, no forced cleanup, authoritative owned zero.
+
+Inspected `ready.png`, `close.png`, all four `overview_*.png`, `courtyard_overview.png`, `furniture_5.png` and `furniture_6.png`. The diagnostic views show the keep, surrounding houses, varied roofline, paved courtyard, continuous curtain walls and towers. Furniture samples show recipe-produced candle/plant window decoration. The read-only critic returned **PASS for the scoped production-spawn objective on this candidate**, supported by the ordinary player approach. No independently demonstrated missing major structure, broken roof assembly or floating building blocks that result. This completes the handoff's production-spawn milestone; no unchanged full rerun is warranted.
+
+Remaining limitations are explicit: haze/dark shading flatten visual detail; full perimeter ground contact is only partially visible; detached cameras expose terrain outside the stationary player's streamed area, which does not establish a live terrain hole. Window ornaments do not establish furnished-room quality. Interior access, furniture interaction, door/NPC activation, broad seed coverage and full performance acceptance are not claimed. NPC/navigation remains deferred as required by the handoff.
+
+Approach samples report game-loop max 8.093ms, p95 at most 6.296ms and no recorded spike reason. Cumulative section maxima include chunk 9.388ms, wildlife 7.623ms and external autosave write 6.267ms; these cover different observation windows and are not additive. Renderer/complete physics-frame performance is not established. Multi-minute generation remains a measured limitation, not concealed by the startup-only clock.
