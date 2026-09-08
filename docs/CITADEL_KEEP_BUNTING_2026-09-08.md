@@ -110,3 +110,32 @@ No production bunting geometry, acceptance rule, ownership or placement has
 changed. The next step is to verify the shared exterior relationship and test
 the complete unchanged assembly against independently rooted sockets and all
 actual protected geometry on the frozen stage source.
+
+## Exploratory frozen-source proposal
+
+```text
+node tools/run-building-contract.mjs -Contract CitadelKeepBuntingProposalDiagnostic.gd -OutputDirectory artifacts/citadel-runtime-integration/candidate22-keep-bunting-proposal-01 -ReportEnvironment CITADEL_ORDERED_OPENING_REPORT -TimeoutSeconds 120
+```
+
+Read-only review approved one trial. All 12 checks passed in 26.834 seconds,
+with clean engine logs, natural exit 0 and authoritative owned zero. The trial
+uses the captured tower/pavilion IDs as explicitly diagnostic setup, derives
+the common face envelope, verifies courtyard XZ containment, retains every
+captured protected volume and adds all non-courtyard room bounds.
+
+Actual anchor preparation tested four candidates with 58,036 clearance
+comparisons and proposed endpoints `(-9.823,9.619762,-10.9584)` and
+`(13.741,9.619762,-10.9584)`. Both sockets are independently rooted. All 14
+selected assembly members passed physical validation after applying the
+proposal privately. Stored-placement verification passed with 50,658 further
+comparisons. The original 13 pennants retain their sizes, material, rotation,
+collision setting, semantics and IDs; their positions spread along the new
+rope span. Other source geometry is not changed by the proposal.
+
+The full physical validator ran, but this diagnostic accepts only the selected
+14 members; it does not certify the whole source. The trial does not establish
+a production owner relationship or reusable placement domain. Those must be
+published by the owning structure producers, consumed generically and tested
+for stale/foreign/swapped ownership, impossible geometry and clearance failure
+before another full candidate run. No production placement or headed change
+has been made.
