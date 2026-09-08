@@ -89,3 +89,36 @@ Harsh read-only review returned PASS after the input and aggregate-work guards
 were added. It independently verified layout04 and replay03 and approved a
 focused commit followed by exactly one Candidate 21 source run for the same
 seed/region/recipe, at unchanged 540/450/60-second budgets. This is not headed GO.
+
+## Candidate 21: next honest gate
+
+The behavior was committed as `6559488`. Command:
+
+`node tools/run-citadel-candidate-recipe-diagnostic.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-recipe-21 -Seed atlas-3376622889 -CandidateRegion '-2,-2' -ExpectedRecipeSeed 1393179273 -ExpectReady`
+
+Shop preparation advanced. Source preparation failed after 62.390 seconds at
+`citadel_structural_completion_failed -> facade_completion_failed ->
+opening_head_completion_failed -> trimmed_panel_blocks_aperture`, house
+`urban_row_03_left`. Independent physical proof was not reached. The error
+watcher stopped the run: functional exit 1, forced cleanup, overall exit 126,
+no timeout and authoritative owned zero. Every recorded source hash remained
+unchanged. Input SHA256:
+`bbf8e2e3ece371e6fb0f7447563bfe89438d3dc47ba44206b3c632354f6c565e`;
+failure SHA256:
+`f494841a1155ba601c2498ee08608802c185871d5651ac3435a22126d7ccb300`.
+
+This is progress past the terminal gate, not a complete source or spawning pass.
+Do not rerun unchanged: inspect the exact trimmed-panel/aperture geometry first.
+
+The focused `CitadelOpeningHeadFailureCapture.gd` run in
+`candidate21-opening-capture-01` passed eight diagnostic checks with clean natural
+exit 0 and owned zero. It cancels the actual composer before structural work,
+then invokes the failed house directly with an explicitly synthetic empty
+furnishing policy. It reproduces the same geometry failure before furnishing
+checks; it is not recipe acceptance. Capture took 43.788 seconds and the direct
+house replay 0.123 seconds. Captured source SHA256:
+`29b6b34ba6b4d8e0b5a7d3d2b6005ad4d601b95e33c90e3bd5f31f934a8775cc`.
+The exact offending part is `urban_row_03_left_upper_facade_010`; its upper face
+overlaps the opening above it by approximately one float32 step. Determine
+whether that overlap originates in the original panel or retained-panel
+construction before fixing geometry. Clearance tolerance remains unchanged.
