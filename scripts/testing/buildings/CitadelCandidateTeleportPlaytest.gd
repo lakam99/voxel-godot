@@ -209,6 +209,7 @@ func _run() -> void:
 	evidence.sceneAudit = await _audit_scene()
 	checks.scene_audit = evidence.sceneAudit.get("passed",false)
 	checks.camera_facing_candidate = await _look_toward_candidate()
+	evidence.visibility = _inspect_visibility()
 	if not checks.camera_facing_candidate:
 		await _finish("failed","ordinary_mouse_look_did_not_face_candidate"); return
 	if not await _capture("ready"):
@@ -264,19 +265,21 @@ func _place_outside(bounds: Rect2i,label: String) -> bool:
 	var margin := ceili(radius/cell_size)+3
 	var old_cell := Vector2i(floori(player.global_position.x/cell_size),floori(player.global_position.z/cell_size))
 	var clamped := Vector2i(clampi(old_cell.x,bounds.position.x,bounds.end.x-1),clampi(old_cell.y,bounds.position.y,bounds.end.y-1))
+	if label=="accepted_reservation_exterior": clamped=bounds.position+bounds.size/2
 	var choices: Array[Vector2i] = [Vector2i(bounds.position.x-margin,clamped.y),Vector2i(bounds.end.x+margin,clamped.y),Vector2i(clamped.x,bounds.position.y-margin),Vector2i(clamped.x,bounds.end.y+margin)]
+	var heights: Dictionary={}
+	if label=="accepted_reservation_exterior":
+		for choice: Vector2i in choices: heights[choice]=_staging_surface(choice,ceili(radius/cell_size))
 	choices.sort_custom(func(a: Vector2i,b: Vector2i)->bool:
+		if not heights.is_empty() and heights[a]!=heights[b]: return heights[a]>heights[b]
 		return a.distance_squared_to(old_cell)<b.distance_squared_to(old_cell) or a.distance_squared_to(old_cell)==b.distance_squared_to(old_cell) and (a.x<b.x or a.x==b.x and a.y<b.y))
 	var target := choices[0]
 	var bare_view := Rect2i(target-Vector2i.ONE*VIEW_CELLS,Vector2i.ONE*(VIEW_CELLS*2+1))
 	if bounds.has_point(target) or not bare_view.intersects(bounds): return false
 	# Use current production generation over the capsule's real horizontal extent.
 	# No terrain chunk creation, Source call, injected profile or guessed Y.
-	var surface := -INF
 	var radius_cells := ceili(radius/cell_size)
-	for z in range(target.y-radius_cells,target.y+radius_cells+1):
-		for x in range(target.x-radius_cells,target.x+radius_cells+1):
-			surface = maxf(surface,float(main.surface_y_at_cell(Vector3i(x,0,z))))
+	var surface := _staging_surface(target,radius_cells)
 	var bottom_offset := collider.global_position.y-player.global_position.y-capsule.height*0.5
 	var destination := Vector3(target.x*cell_size,surface-bottom_offset+capsule.radius*0.25,target.y*cell_size)
 	if not destination.is_finite(): return false
@@ -293,8 +296,16 @@ func _place_outside(bounds: Rect2i,label: String) -> bool:
 	player.velocity = Vector3.ZERO # Setup only; no ongoing motion correction.
 	placements.append({"index":placements.size()+1,"label":label,"elapsedMsec":_elapsed(),"from":before.origin,"to":destination,
 		"cell":target,"excludedBounds":bounds,"ordinary112CellView":bare_view,"productionSurfaceY":surface,"capsuleBottomOffset":bottom_offset,
-		"capsuleRadius":radius,"capsuleHeight":capsule.height,"physicsFrozen":true})
+		"capsuleRadius":radius,"capsuleHeight":capsule.height,"physicsFrozen":true,
+		"viewpointPolicy":"highest ordinary-ground side midpoint" if not heights.is_empty() else "nearest exterior","candidateGroundHeights":heights})
 	return _outside(bounds)
+
+func _staging_surface(cell: Vector2i, radius_cells: int) -> float:
+	var surface := -INF
+	for z in range(cell.y-radius_cells,cell.y+radius_cells+1):
+		for x in range(cell.x-radius_cells,cell.x+radius_cells+1):
+			surface=maxf(surface,float(main.surface_y_at_cell(Vector3i(x,0,z))))
+	return surface
 
 func _capsule_radius() -> float:
 	var collider := player.get_node("PlayerCollider") as CollisionShape3D
@@ -410,6 +421,11 @@ func _audit_scene() -> Dictionary:
 	for profile: Dictionary in main.structure_system.citadel_terrain_admission.profile_store.snapshot():
 		if profile.get("siteId") == candidate.siteId and profile.get("sourceSignature") == source_signature: expected_origin = profile.origin
 	result.rootInstanceId = site.get_instance_id()
+	result.rootVisible=site.is_visible_in_tree()
+	result.visualBounds=AABB()
+	result.visibleGeometry=0
+	result.visualSamples=[]
+	var have_bounds := false
 	result.rootPosition = site.global_position
 	result.sourceOrigin = expected_origin
 	result.rootMatchesProfile = expected_origin.is_finite() and site.global_transform.is_equal_approx(Transform3D(Basis.IDENTITY,expected_origin))
@@ -427,6 +443,15 @@ func _audit_scene() -> Dictionary:
 			if node is MeshInstance3D and node.mesh != null: result.meshes += 1
 			if node is MultiMeshInstance3D and node.multimesh != null:
 				result.multiMeshes += 1; result.instances += node.multimesh.instance_count
+			if node is MeshInstance3D and node.mesh!=null or node is MultiMeshInstance3D and node.multimesh!=null:
+				var geometry := node as GeometryInstance3D
+				var bounds: AABB=geometry.global_transform*geometry.get_aabb()
+				if bounds.position.is_finite() and bounds.size.is_finite() and bounds.size.length_squared()>0.0:
+					result.visualBounds=result.visualBounds.merge(bounds) if have_bounds else bounds
+					have_bounds=true
+				if geometry.is_visible_in_tree(): result.visibleGeometry+=1
+				if result.visualSamples.size()<12:
+					result.visualSamples.append({"path":str(site.get_path_to(geometry)),"visible":geometry.is_visible_in_tree(),"layers":geometry.layers,"rangeBegin":geometry.visibility_range_begin,"rangeEnd":geometry.visibility_range_end,"bounds":bounds})
 			if node is CollisionShape3D and node.shape != null and not node.disabled:
 				result.collisionShapes += 1
 				if result.physicsProbes.size()<8 and node.get_parent() is StaticBody3D:
@@ -456,7 +481,7 @@ func _audit_scene() -> Dictionary:
 	result.ownersAvailable = main.structure_system.citadel_runtime_bindings.available() and _tree_owner_current() and (result.trees==0 or accepted_owners.has("trees"))
 	result.sourceStillMatches = _source_summary().get("binding",{})==source_binding and service.scene_state(region).get("binding",{})==source_binding and service.scene_state(region).status=="scene_ready"
 	result.capsule = Clearance.inspect(player)
-	result.passed = stack.is_empty() and result.rootMatchesProfile and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
+	result.passed = stack.is_empty() and result.rootMatchesProfile and result.rootVisible and result.visibleGeometry>0 and have_bounds and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
 	return result
 
 func _look_toward_candidate() -> bool:
@@ -466,24 +491,55 @@ func _look_toward_candidate() -> bool:
 	var initial_error := _candidate_yaw_error()
 	for attempt in range(12):
 		var error := _candidate_yaw_error()
-		if absf(error)<0.03: break
+		var pitch_error := _candidate_pitch_error()
+		if absf(error)<0.03 and absf(pitch_error)<0.03: break
 		var sensitivity := float(player.get("mouse_sensitivity"))
 		if sensitivity<=0.0: break
 		var motion := InputEventMouseMotion.new()
-		motion.relative = Vector2(clampf(-error/sensitivity,-600,600),0)
+		motion.relative = Vector2(clampf(-error/sensitivity,-600,600),clampf(-pitch_error/sensitivity,-600,600)*( -1.0 if bool(player.get("invert_y")) else 1.0))
 		root.push_input(motion)
 		attempts += 1
 		await _frame()
 	var final_error := _candidate_yaw_error()
-	var passed := is_finite(final_error) and absf(final_error)<0.03
+	var final_pitch := _candidate_pitch_error()
+	var passed := is_finite(final_error) and absf(final_error)<0.03 and is_finite(final_pitch) and absf(final_pitch)<0.03
 	evidence.cameraLook = {"passed":passed,"inputEvents":attempts,"initialYawErrorRadians":initial_error,"finalYawErrorRadians":final_error,
+		"finalPitchErrorRadians":final_pitch,"target":_inspection_target(),
 		"toleranceRadians":0.03,"ordinaryMouseGuardAccepts":main.should_accept_mouse_look(),"guardBypassed":false}
 	return passed
 
 func _candidate_yaw_error() -> float:
-	var target := Vector3(candidate.centerCell.x*float(main.CELL),player.global_position.y,candidate.centerCell.y*float(main.CELL))
+	var target := _inspection_target()
 	var direction := target-player.global_position
 	return wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
+
+func _inspection_target() -> Vector3:
+	var bounds: AABB=evidence.get("sceneAudit",{}).get("visualBounds",AABB())
+	return bounds.get_center() if bounds.size.length_squared()>0.0 else Vector3(candidate.centerCell.x*float(main.CELL),player.global_position.y,candidate.centerCell.y*float(main.CELL))
+
+func _candidate_pitch_error() -> float:
+	var camera: Camera3D=player.get_node("Camera3D")
+	var direction := _inspection_target()-camera.global_position
+	return atan2(direction.y,Vector2(direction.x,direction.z).length())-float(player.get("pitch"))
+
+func _inspect_visibility() -> Dictionary:
+	var camera := root.get_camera_3d()
+	var site: Node3D=main.structure_system.citadel_publication.scene_root(region)
+	if camera==null or site==null: return {"available":false}
+	var bounds: AABB=evidence.sceneAudit.visualBounds
+	var points: Array[Vector3]=[bounds.get_center()]
+	for index in range(8): points.append(bounds.get_endpoint(index))
+	var samples: Array=[]
+	for target: Vector3 in points:
+		var query := PhysicsRayQueryParameters3D.create(camera.global_position,target,player.collision_mask,[player.get_rid()])
+		var hit := site.get_world_3d().direct_space_state.intersect_ray(query)
+		var collider: Node=hit.get("collider")
+		samples.append({"target":target,"inFrustum":camera.is_position_in_frustum(target),"screen":camera.unproject_position(target),
+			"hit":hit.get("position"),"hitPath":str(collider.get_path()) if is_instance_valid(collider) else "","hitCitadel":is_instance_valid(collider) and (collider==site or site.is_ancestor_of(collider)),
+			"terrainSurfaceY":main.surface_y_at_position(target)})
+	return {"available":true,"activeCamera":str(camera.get_path()),"isPlayerCamera":camera==player.get_node("Camera3D"),"transform":camera.global_transform,
+		"projection":camera.get_camera_projection(),"cullMask":camera.cull_mask,"near":camera.near,"far":camera.far,"rootVisible":site.is_visible_in_tree(),"bounds":bounds,"samples":samples,
+		"scope":"Frustum, visibility and collision-ray observations only; screenshot inspection remains required."}
 
 func _startup_completed() -> void: startup_ready = true
 func _startup_failed(message: String) -> void: startup_failure = message
