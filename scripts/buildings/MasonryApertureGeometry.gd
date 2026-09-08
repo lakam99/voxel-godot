@@ -95,18 +95,37 @@ static func _centered_construction(solids: Array, apertures: Array[AABB]) -> Dic
 	for index in range(solids.size()):
 		var source: Dictionary = solids[index]
 		var origin: Vector3 = source.transform.origin
-		var centered: Dictionary = source.duplicate(true)
-		centered.transform.origin = Vector3.ZERO
-		var local_cuts: Array[AABB] = []
+		var relevant: Array[AABB] = []
 		for aperture: AABB in cuts.canonicalApertures:
 			var separated := false
 			for axis in range(3):
 				var half_extent: float = (absf(source.transform.basis.x[axis]) + absf(source.transform.basis.y[axis]) + absf(source.transform.basis.z[axis])) * 0.5
 				separated = separated or float(origin[axis]) + half_extent <= float(aperture.position[axis]) or float(origin[axis]) - half_extent >= float(aperture.end[axis])
 			if separated: continue
+			relevant.append(aperture)
+		# Choose coordinates before clipping. Keep centred axes where subtraction
+		# preserves every plane exactly; leave an unrepresentable axis untranslated.
+		# This changes neither the declared cut nor the original publication frame.
+		for aperture: AABB in relevant:
 			var low := aperture.position - origin
 			var high := aperture.end - origin
 			var translated := AABB(low, high - low)
+			for axis in range(3):
+				if float(low[axis]) != float(aperture.position[axis]) - float(origin[axis]) or float(high[axis]) != float(aperture.end[axis]) - float(origin[axis]) or translated.end[axis] != high[axis]:
+					origin[axis] = 0.0
+		var centered: Dictionary = source.duplicate(true)
+		centered.transform.origin = source.transform.origin - origin
+		for axis in range(3):
+			if float(centered.transform.origin[axis]) != float(source.transform.origin[axis]) - float(origin[axis]):
+				return {"completed": false, "reason": "unrepresentable_construction_origin", "work": work}
+		var local_cuts: Array[AABB] = []
+		for aperture: AABB in relevant:
+			var low := aperture.position - origin
+			var high := aperture.end - origin
+			var size := high - low
+			for axis in range(3):
+				if origin[axis] == 0.0: size[axis] = aperture.size[axis]
+			var translated := AABB(low, size)
 			# Reject a translation that cannot retain the exact declared planes.
 			for axis in range(3):
 				if float(low[axis]) != float(aperture.position[axis]) - float(origin[axis]) or float(high[axis]) != float(aperture.end[axis]) - float(origin[axis]) or translated.end[axis] != high[axis]:

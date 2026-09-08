@@ -137,7 +137,9 @@ func _unrepresentable_endpoints(unit: BoxMesh) -> void:
 		var cuts: Array[AABB] = [cut]
 		var frozen: PackedByteArray = var_to_bytes([solids, cuts])
 		var result: Dictionary = Geometry.prepare(solids, cuts, unit)
-		_checks[name + ":atomic_exact_rejection"] = not result.ready and result.reason == "clipping:unrepresentable_centered_aperture" and not result.has("entries") and not result.has("preparedMeshes")
+		_checks[name + ":exact_frame_ready"] = result.ready
+		_checks[name + ":original_planes_clear"] = result.ready and _clear(result,cuts,unit) and _local_contained(result,unit)
+		_checks[name + ":untranslated_axis_and_original_frame"] = result.ready and result.entries[0].constructionFrameOrigin.x==0.0 and result.entries[0].original.transform==solids[0].transform and result.entries[0].original.localTransform==solids[0].localTransform
 		_checks[name + ":immutable_deterministic"] = frozen == var_to_bytes([solids, cuts]) and _serial(result) == _serial(Geometry.prepare(solids, cuts, unit))
 
 func _enclosed_aperture_requires_cell_proof(unit: BoxMesh) -> void:
