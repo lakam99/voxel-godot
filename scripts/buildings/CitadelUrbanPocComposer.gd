@@ -30,6 +30,8 @@ const DoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometr
 const TerminalSupport := preload("res://scripts/buildings/TerminalShopElevationRecipe.gd")
 const MAX_TERMINAL_SUPPORT_PROOFS := 128
 const MAX_TERMINAL_SUPPORT_RECORD_VISITS := 16000000
+const FacadePartition = preload("res://scripts/buildings/FacadePartitionGeometry.gd")
+const FacadeBlueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 
 
 static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector3, additional_reservations: Array[Rect2] = [], search_radius: float = 25.0, approach_width: float = 1.8, support_eligibility: Callable = Callable()) -> Dictionary:
@@ -1259,8 +1261,10 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		var opening_y := ground_y + float(floor_index) * 2.75
 		for window_index in [-1, 1]:
 			upper_openings.append({"centerY": opening_y, "height": 1.46, "centerZ": center.z + float(window_index) * window_offset, "width": STREET_WINDOW_WIDTH})
-	add_recessed_facade_mass(blueprint, "%s_stone" % prefix, center.x, center.z, width, depth, ground_y, ground_y + base_height, street_side, "stone_foundation", variation, [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": StreetOpeningLayout.DOOR_WIDTH}], "citadel_urban_stone_base")
-	add_recessed_facade_mass(blueprint, "%s_upper" % prefix, upper_center_x, center.z, upper_width, depth, ground_y + base_height, ground_y + wall_height, street_side, material, variation, upper_openings, "citadel_urban_facade")
+	var stone_mass := add_recessed_facade_mass(blueprint, "%s_stone" % prefix, center.x, center.z, width, depth, ground_y, ground_y + base_height, street_side, "stone_foundation", variation, [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": StreetOpeningLayout.DOOR_WIDTH}], "citadel_urban_stone_base")
+	if not stone_mass.ready: return false
+	var upper_mass := add_recessed_facade_mass(blueprint, "%s_upper" % prefix, upper_center_x, center.z, upper_width, depth, ground_y + base_height, ground_y + wall_height, street_side, material, variation, upper_openings, "citadel_urban_facade")
+	if not upper_mass.ready: return false
 	for floor_index in range(1, floor_count):
 		var floor_y := ground_y + float(floor_index) * 2.75
 		for window_index in [-1, 1]:
@@ -1363,7 +1367,8 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	return declaration.ready
 
 
-static func add_recessed_facade_mass(blueprint, prefix: String, center_x: float, center_z: float, width: float, depth: float, bottom_y: float, top_y: float, street_side: float, material: String, variation: float, openings: Array[Dictionary], semantic: String) -> void:
+static func add_recessed_facade_mass(target, prefix: String, center_x: float, center_z: float, width: float, depth: float, bottom_y: float, top_y: float, street_side: float, material: String, variation: float, openings: Array[Dictionary], semantic: String) -> Dictionary:
+	var blueprint = FacadeBlueprint.new(target.id, target.seed, target.style)
 	var recess_depth := minf(0.72, width * 0.16)
 	var facade_thickness := minf(0.30, recess_depth * 0.48)
 	var wall_height := top_y - bottom_y
@@ -1375,11 +1380,17 @@ static func add_recessed_facade_mass(blueprint, prefix: String, center_x: float,
 		var side_z := center_z + gable_side * (depth * 0.5 - facade_thickness * 0.5)
 		add_part(blueprint, "%s_shell_side_%d" % [prefix, int(gable_side)], "wall", material, Vector3(center_x, wall_y, side_z), Vector3(maxf(0.42, width - facade_thickness * 2.0), wall_height, facade_thickness), {"variation": variation + gable_side * 0.008, "semantic": "%s_shell" % semantic})
 	var facade_center_x := center_x + street_side * (width * 0.5 - facade_thickness * 0.5)
-	add_partitioned_street_facade(blueprint, "%s_facade" % prefix, facade_center_x, center_z, depth, bottom_y, top_y, facade_thickness, material, variation, openings, semantic)
+	var result := add_partitioned_street_facade(blueprint, "%s_facade" % prefix, facade_center_x, center_z, depth, bottom_y, top_y, facade_thickness, material, variation, openings, semantic)
+	if not result.ready: return result
+	for part in blueprint.parts: target.add_part(part.snapshot())
+	var declarations: Dictionary = target.recipe.get("facadeApertures", {}).duplicate()
+	declarations.merge(blueprint.recipe.facadeApertures)
+	target.recipe["facadeApertures"] = declarations
+	return result
 
 
-static func add_partitioned_street_facade(blueprint, prefix: String, facade_x: float, center_z: float, depth: float, bottom_y: float, top_y: float, thickness: float, material: String, variation: float, openings: Array[Dictionary], semantic: String) -> void:
-	var part_start: int = blueprint.parts.size()
+static func add_partitioned_street_facade(blueprint, prefix: String, facade_x: float, center_z: float, depth: float, bottom_y: float, top_y: float, thickness: float, material: String, variation: float, openings: Array[Dictionary], semantic: String) -> Dictionary:
+	var staged = FacadeBlueprint.new(blueprint.id, blueprint.seed, blueprint.style)
 	# Emit opening semantics from the same inputs that partition the wall.
 	# Consumers must not rediscover intended windows/doors from floating-point
 	# gaps between emitted masonry cells. This adds no geometry or RNG requests.
@@ -1392,11 +1403,9 @@ static func add_partitioned_street_facade(blueprint, prefix: String, facade_x: f
 		var opening_width := float(opening.get("width", 1.0))
 		declared_openings.append({"id": "%s_opening_%03d" % [prefix, opening_index], "input": opening.duplicate(true),
 			"fullVolume": AABB(Vector3(facade_x - thickness * 0.5, opening_y - opening_height * 0.5, opening_z - opening_width * 0.5), Vector3(thickness, opening_height, opening_width))})
-	var declarations: Dictionary = blueprint.recipe.get("facadeApertures", {})
-	declarations[prefix] = {"producerPrefix": prefix, "semantic": semantic,
+	var declaration := {"producerPrefix": prefix, "semantic": semantic,
 		"wallDomain": AABB(Vector3(facade_x - thickness * 0.5, bottom_y, center_z - depth * 0.5), Vector3(thickness, top_y - bottom_y, depth)),
 		"openings": declared_openings}
-	blueprint.recipe["facadeApertures"] = declarations
 	var z_edges: Array[float] = [center_z - depth * 0.5, center_z + depth * 0.5]
 	var y_edges: Array[float] = [bottom_y, top_y]
 	for opening in openings:
@@ -1430,9 +1439,39 @@ static func add_partitioned_street_facade(blueprint, prefix: String, facade_x: f
 					break
 			if inside_opening:
 				continue
-			add_part(blueprint, "%s_%03d" % [prefix, panel_index], "wall", material, Vector3(facade_x, cell_y, cell_z), Vector3(thickness, cell_top - cell_bottom, cell_far - cell_near), {"variation": variation + float(posmod(panel_index, 5) - 2) * 0.004, "semantic": semantic})
+			var bounds_low_y := cell_bottom
+			var bounds_high_y := cell_top
+			var bounds_low_z := cell_near
+			var bounds_high_z := cell_far
+			for opening_index in range(openings.size()):
+				var opening: Dictionary = openings[opening_index]
+				var volume: AABB = declared_openings[opening_index].fullVolume
+				var opening_y := float(opening.get("centerY", (bottom_y + top_y) * 0.5))
+				var opening_z := float(opening.get("centerZ", center_z))
+				var half_height := float(opening.get("height", 0.0)) * 0.5
+				var half_width := float(opening.get("width", 1.0)) * 0.5
+				# Preserve the existing partition topology, but use the declared
+				# stored aperture faces when an adjacent edge rounds outward.
+				if cell_top <= opening_y - half_height: bounds_high_y = minf(bounds_high_y, volume.position.y)
+				if cell_bottom >= opening_y + half_height: bounds_low_y = maxf(bounds_low_y, volume.end.y)
+				if cell_far <= opening_z - half_width: bounds_high_z = minf(bounds_high_z, volume.position.z)
+				if cell_near >= opening_z + half_width: bounds_low_z = maxf(bounds_low_z, volume.end.z)
+			var vertical := FacadePartition.interval(bounds_low_y, bounds_high_y)
+			var lateral := FacadePartition.interval(bounds_low_z, bounds_high_z)
+			if not vertical.ready or not lateral.ready:
+				return {"ready": false, "reason": "unrepresentable_facade_partition", "panelIndex": panel_index, "vertical": vertical, "lateral": lateral}
+			add_part(staged, "%s_%03d" % [prefix, panel_index], "wall", material, Vector3(facade_x, vertical.center, lateral.center), Vector3(thickness, vertical.size, lateral.size), {"variation": variation + float(posmod(panel_index, 5) - 2) * 0.004, "semantic": semantic})
+			var part = staged.parts.back()
+			var actual: AABB = staged.transformed_part_bounds(part)
+			if part.position.y != vertical.center or part.size.y != vertical.size or part.position.z != lateral.center or part.size.z != lateral.size or actual.position.y < bounds_low_y or actual.end.y > bounds_high_y or actual.position.z < bounds_low_z or actual.end.z > bounds_high_z:
+				return {"ready": false, "reason": "constructed_facade_partition_changed", "panelIndex": panel_index}
 			panel_index += 1
-	declarations[prefix] = FacadeApertureDeclarationScript.seal(declarations[prefix], blueprint.parts.slice(part_start))
+	declaration = FacadeApertureDeclarationScript.seal(declaration, staged.parts)
+	for part in staged.parts: blueprint.add_part(part.snapshot())
+	var declarations: Dictionary = blueprint.recipe.get("facadeApertures", {}).duplicate()
+	declarations[prefix] = declaration
+	blueprint.recipe["facadeApertures"] = declarations
+	return {"ready": true, "partCount": staged.parts.size()}
 
 
 static func add_street_climb(blueprint, center_x: float, from_z: float, to_z: float, base_y: float, rise: float, variation: float) -> void:

@@ -148,7 +148,11 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuati
 		var actual_bounds := AABB(panel.position - panel.size * 0.5, panel.size)
 		if actual_bounds.position.x != original_bounds.position.x or actual_bounds.position.z != original_bounds.position.z or actual_bounds.size.x != original_bounds.size.x or actual_bounds.size.z != original_bounds.size.z or actual_bounds.position.y < bottom or actual_bounds.end.y > original_bounds.end.y: return {"ready": false, "reason": "trim_expands_represented_geometry", "trimConflict": {"id": id, "requestedBottom": bottom, "originalTop": float(original_bounds.end.y), "actualBottom": float(actual_bounds.position.y), "actualTop": float(actual_bounds.end.y)}}
 		for volume in declarations.volumes:
-			if _penetrates(actual_bounds, volume): return _fail("trimmed_panel_blocks_aperture")
+			if _penetrates(actual_bounds, volume):
+				return {"ready": false, "reason": "trimmed_panel_blocks_aperture", "geometryConflict": {
+					"partId": id, "originalPanel": original_panel, "trimmedPanel": panel.snapshot(),
+					"actualBounds": actual_bounds, "protectedVolume": volume,
+					"positiveOverlap": actual_bounds.end.min(volume.end) - actual_bounds.position.max(volume.position)}}
 		trim_geometry.append({"id": id, "before": original_bounds, "after": actual_bounds})
 		Copy.Frame._clean_derived(panel)
 		# Reference the bound declaration; never copy aperture geometry into parts.
