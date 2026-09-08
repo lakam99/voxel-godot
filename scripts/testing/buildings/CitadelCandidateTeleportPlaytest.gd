@@ -24,6 +24,8 @@ var requested_seed := "atlas-30895044"
 var requested_region := ""
 var started := 0
 var deadline := 0
+var startup_elapsed := 0
+var test_started := 0
 var startup_ready := false
 var startup_failure := ""
 var phase := "initializing"
@@ -63,10 +65,11 @@ func _run() -> void:
 	if not valid_region_request(requested_region):
 		printerr("Invalid diagnostic candidate region"); quit(2); return
 	var limit := int(OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SECONDS"))
-	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 600:
+	var startup_limit := int(OS.get_environment("CITADEL_CANDIDATE_STARTUP_SECONDS"))
+	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 600 or startup_limit < 15 or startup_limit > 180:
 		printerr("Missing/invalid owned runner output or deadline"); quit(2); return
 	started = Time.get_ticks_msec()
-	deadline = started + (limit-45)*1000 # Reserve owned watchdog time for ordinary shutdown.
+	deadline = started + startup_limit*1000
 	if DisplayServer.get_name() == "headless":
 		await _finish("failed", "headed_renderer_required"); return
 	root.size = Vector2i(1280,720)
@@ -90,6 +93,16 @@ func _run() -> void:
 	checks.startup_completed = startup_ready and startup_failure.is_empty()
 	if not checks.startup_completed:
 		await _finish("failed",startup_failure if not startup_failure.is_empty() else "startup_timeout"); return
+	startup_elapsed = _elapsed()
+	test_started = Time.get_ticks_msec()
+	deadline = test_started + (limit-45)*1000 # Separate test clock; reserve ordinary shutdown.
+	evidence.launchOptions=main.launch_options.duplicate()
+	checks.tutorial_skip_applied=not main.launch_options.skipTutorial or not bool(main.tutorial_system.started)
+	evidence.launchEnvironment={"clockPhase":main.clock_phase(),"weather":main.weather_system.snapshot()}
+	checks.forced_daytime_applied=not main.launch_options.forceDaytime or is_equal_approx(main.clock_phase(),0.5)
+	checks.forced_clear_weather_applied=not main.launch_options.forceClearWeather or (main.weather_system.kind=="clear" and is_zero_approx(main.weather_system.intensity))
+	if not checks.tutorial_skip_applied or not checks.forced_daytime_applied or not checks.forced_clear_weather_applied:
+		await _finish("failed","launch_options_not_applied"); return
 	checks.exact_seed = String(main.get("seed_text")) == requested_seed
 	var domains: Dictionary = main.get("startup_readiness_domains")
 	checks.startup_gameplay_domain_ready = domains.get("gameplay",{}).get("status") == "ready"
@@ -316,11 +329,24 @@ func _owner_objects() -> Dictionary:
 	var values := {"main":main,"player":main.player,"structures":structures,"admission":structures.citadel_terrain_admission,
 		"store":structures.citadel_terrain_admission.profile_store,"service":structures.citadel_publication,
 		"bindings":structures.citadel_runtime_bindings,"npc":main.npc_system,"autonomy":autonomy,
-		"smart":autonomy.smart_objects,"portals":autonomy.door_portals,"trees":main.tree_publication_queue,
+		"smart":autonomy.smart_objects,"portals":autonomy.door_portals,
 		"runtime":main.get("voxel_terrain_runtime")}
-	for value in values.values():
-		if not is_instance_valid(value): return {}
+	for key: String in values:
+		if not is_instance_valid(values[key]):
+			evidence.missingOwner=key
+			return {}
 	return values
+
+func _tree_owner_current() -> bool:
+	# Main creates this queue lazily when the first procedural tree is submitted.
+	# A treeless startup is valid; once observed, replacement/loss is still fatal.
+	var queue = main.tree_publication_queue
+	if accepted_owners.has("trees"):
+		return is_instance_valid(queue) and is_same(accepted_owners.trees.get_ref(),queue)
+	if is_instance_valid(queue):
+		accepted_owners.trees=weakref(queue)
+		evidence.treeOwner={"instanceId":queue.get_instance_id(),"observedMsec":_elapsed()}
+	return true
 
 func _pin_accepted_owners() -> bool:
 	var owners := _owner_objects()
@@ -330,13 +356,15 @@ func _pin_accepted_owners() -> bool:
 		accepted_owners[key]=weakref(owners[key])
 		ids[key]=owners[key].get_instance_id()
 	evidence.acceptedIdentity={"binding":source_binding.duplicate(),"sourceSignature":source_signature,"reservationCells":reservation,"ownerInstanceIds":ids}
-	return true
+	return _tree_owner_current()
 
 func _accepted_current() -> Dictionary:
 	var owners := _owner_objects()
-	if accepted_owners.is_empty() or owners.size()!=accepted_owners.size(): return {"passed":false,"reason":"accepted_owner_missing"}
+	if accepted_owners.is_empty() or owners.size()!=accepted_owners.size()-(1 if accepted_owners.has("trees") else 0): return {"passed":false,"reason":"accepted_owner_missing"}
 	for key: String in accepted_owners:
+		if key=="trees": continue
 		if not is_same(accepted_owners[key].get_ref(),owners.get(key)): return {"passed":false,"reason":"accepted_owner_replaced:"+key}
+	if not _tree_owner_current(): return {"passed":false,"reason":"accepted_owner_replaced:trees"}
 	var source := _source_summary()
 	if source.get("status") not in ["ready","prepared"]: return {"passed":false,"reason":String(source.get("reason","accepted_source_unavailable"))}
 	if source.get("binding",{})!=source_binding or source.get("sourceSignature")!=source_signature or source.get("reservationCells")!=reservation:
@@ -424,7 +452,7 @@ func _audit_scene() -> Dictionary:
 				if portals.door_to_portal.get(node.get_instance_id())!=portal_id or portal==null or not portal.leaf_nodes.has(node) or registered==null or registered.kind!="door" or not portal.leaf_nodes.has(registered.node):
 					result.badBindings.append("door:"+portal_id)
 		await _frame()
-	result.ownersAvailable = main.structure_system.citadel_runtime_bindings.available()
+	result.ownersAvailable = main.structure_system.citadel_runtime_bindings.available() and _tree_owner_current() and (result.trees==0 or accepted_owners.has("trees"))
 	result.sourceStillMatches = _source_summary().get("binding",{})==source_binding and service.scene_state(region).get("binding",{})==source_binding and service.scene_state(region).status=="scene_ready"
 	result.capsule = Clearance.inspect(player)
 	result.passed = stack.is_empty() and result.rootMatchesProfile and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
@@ -541,6 +569,8 @@ func _finish(outcome: String,reason: String) -> void:
 	var passed := outcome=="scene_ready" and not checks.values().has(false)
 	var report_written := _write("report.json",{"schema":"citadel-candidate-teleport-playtest/v1","passed":passed,"outcome":outcome,"reason":reason,"checks":checks,"evidenceWriteFailure":evidence_error,
 		"seed":requested_seed,"actualSeed":main.get("seed_text") if is_instance_valid(main) else "","elapsedMsec":_elapsed(),"engine":Engine.get_version_info(),
+		"startupElapsedMsec":startup_elapsed if test_started>0 else _elapsed(),"testElapsedMsec":Time.get_ticks_msec()-test_started if test_started>0 else 0,
+		"launchOptions":main.launch_options if is_instance_valid(main) else {},
 		"originalPlayerPosition":original_position,"search":search,"candidate":candidate,"declaredInfluence":declared,"acceptedReservation":reservation,
 		"setupPlacements":placements,"captures":captures,"timeline":timeline,"timelineDropped":timeline_dropped,
 		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},

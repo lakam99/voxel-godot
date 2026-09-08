@@ -118,6 +118,7 @@ export async function runOwnedProcess(options = {}) {
   }
   async function publish(state) {
     if (!s.liveOwnershipPath) return;
+    for (let attempt = 0; ; attempt++) {
     try {
       const observation = state === 'running' ? await rpc('live') : { members: [], tick: await rpc('tick') };
       const snapshot = {
@@ -132,7 +133,19 @@ export async function runOwnedProcess(options = {}) {
       if (liveCreated && JSON.parse(readFileSync(s.liveOwnershipPath, 'utf8')).runId !== runId)
         throw new Error('Live ownership path changed owner.');
       atomicJson(s.liveOwnershipPath, snapshot, liveCreated); liveCreated = true;
-    } catch (e) { s.liveOwnershipError = e.message; throw e; }
+      return;
+    } catch (e) {
+      // Windows readers may briefly deny replacement. Re-observe job membership
+      // and ownership on each bounded retry; never publish a stale receipt or
+      // suppress a persistent monitoring failure.
+      if (liveCreated && e.syscall === 'rename' && ['EPERM', 'EACCES', 'EBUSY'].includes(e.code) && attempt < 3) {
+        await delay(20);
+        if (state === 'running') assertStop();
+        continue;
+      }
+      s.liveOwnershipError = e.message; throw e;
+    }
+    }
   }
   async function closeJob() {
     if (jobClosed) return;

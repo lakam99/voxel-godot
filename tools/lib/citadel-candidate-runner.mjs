@@ -15,8 +15,8 @@ export const errorPattern = /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|r
 export function parseOptions(argv, kind) {
   const names = ['OutputDirectory', ...(kind === 'watcher' ? [] : ['Seed', 'CandidateRegion']),
     ...(kind === 'recipe' ? ['CaptureBlueprint', 'ExpectReady', 'CaptureFailure', 'ExpectedRecipeSeed'] : []),
-    ...(kind === 'teleport' ? ['TimeoutSeconds'] : [])];
-  const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure']);
+    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather'] : [])];
+  const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather']);
   const options = {};
   for (let i = 0; i < argv.length; i++) {
     const match = /^--?([^=:]+)(?:[=:](.*))?$/.exec(argv[i]);
@@ -67,10 +67,15 @@ export function recipeOptions(input) {
   return o;
 }
 export function teleportOptions(input, env) {
-  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, ...input };
+  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, ...input };
   validateSeed(o.seed);
   if (o.candidateRegion !== '') regionCoordinates(o.candidateRegion);
   o.timeoutSeconds = integer(o.timeoutSeconds, 90, 600, 'TimeoutSeconds');
+  o.startupTimeoutSeconds = integer(o.startupTimeoutSeconds, 15, 180, 'StartupTimeoutSeconds');
+  for (const key of ['skipTutorial', 'forceDaytime', 'forceClearWeather']) if (typeof o[key] !== 'boolean') throw new Error('Invalid boolean: ' + key);
+  o.launchOptions = { skipTutorial: o.skipTutorial, forceDaytime: o.forceDaytime, forceClearWeather: o.forceClearWeather };
+  o.gameArguments = Object.entries(o.launchOptions).filter(([, enabled]) => enabled).map(([key]) => '-' + key[0].toUpperCase() + key.slice(1));
+  o.overallTimeoutSeconds = o.startupTimeoutSeconds + o.timeoutSeconds;
   const inherited = Object.keys(env).filter(key => /^VOXEL_/i.test(key) && env[key]);
   if (inherited.length) throw new Error(`Unset inherited VOXEL_* modes before this diagnostic: ${inherited.join(', ')}`);
   return o;

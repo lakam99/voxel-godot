@@ -8,6 +8,7 @@ const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tre
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
+const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
@@ -18,6 +19,7 @@ const AUTOSAVE_ACTIVITY_MAX_DEFER_SECONDS := 30.0
 var seed_text := "atlas-1492"
 var seed_hash := 1
 var startup_mode := "auto"
+var launch_options := GameLaunchOptionsScript.parse(OS.get_cmdline_user_args())
 var deferred_startup_boot := false
 var startup_loading_active := false
 var startup_loading_started_usec := 0
@@ -334,7 +336,7 @@ func _ready() -> void:
         return
     var started_intro_tutorial := false
     playtest_progress("main_load_done")
-    if not loaded and tutorial_system and not skip_synchronous_world_boot:
+    if not loaded and tutorial_system and not skip_synchronous_world_boot and not launch_options.skipTutorial:
         if autosave_enabled:
             apply_world_seed(random_world_seed(seed_text), true)
         started_intro_tutorial = tutorial_system.start_new_world()
@@ -439,7 +441,7 @@ func _run_deferred_startup_boot() -> void:
         "mode": "continue" if loaded else "new_game"
     })
     playtest_progress("main_load_done")
-    if not loaded and tutorial_system and not skip_synchronous_world_boot:
+    if not loaded and tutorial_system and not skip_synchronous_world_boot and not launch_options.skipTutorial:
         if autosave_enabled:
             apply_world_seed(random_world_seed(seed_text), true)
         if not tutorial_system.has_method("start_new_world_staged"):
@@ -2030,13 +2032,16 @@ func start_new_game(show_message := true) -> bool:
     apply_world_seed(random_world_seed(previous_seed), true)
     playtest_progress("new_game_reset_runtime")
     reset_runtime_world_state()
-    var started := false
-    if tutorial_system:
+    var started := bool(launch_options.skipTutorial)
+    if launch_options.skipTutorial:
+        if tutorial_system: tutorial_system.restore({})
+        if player: player.position = find_spawn_position()
+    if tutorial_system and not launch_options.skipTutorial:
         playtest_progress("new_game_start_tutorial")
         started = tutorial_system.start_new_world()
     playtest_progress("new_game_bootstrap_chunks")
     bootstrap_initial_chunks()
-    if tutorial_system:
+    if tutorial_system and not launch_options.skipTutorial:
         playtest_progress("new_game_starting_inventory")
         tutorial_system.configure_starting_inventory()
     playtest_progress("new_game_objectives")
@@ -2085,7 +2090,11 @@ func start_new_game_staged(show_message := true) -> bool:
     reset_runtime_world_state(false)
     await startup_loading_yield("Clearing previous world", "terrain_authority", "pending")
     var tutorial_result := StartupReadinessResultScript.failed("missing_tutorial_system")
-    if tutorial_system:
+    if launch_options.skipTutorial:
+        if tutorial_system: tutorial_system.restore({})
+        if player: player.position = find_spawn_position()
+        tutorial_result = normalized_startup_result(await reinitialize_voxel_terrain_authority_staged(), "terrain_authority_reset_failed")
+    elif tutorial_system:
         playtest_progress("new_game_staged_start_tutorial")
         if not tutorial_system.has_method("start_new_world_staged"):
             await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_startup"))
@@ -2120,7 +2129,7 @@ func start_new_game_staged(show_message := true) -> bool:
     if not startup_result_is_ready(navigation_result):
         await stop_startup_loading(navigation_result, "navigation_not_ready")
         return false
-    if tutorial_system:
+    if tutorial_system and not launch_options.skipTutorial:
         tutorial_system.configure_starting_inventory()
     update_objectives_and_contracts()
     refresh_intro_knock_audio()

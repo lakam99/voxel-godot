@@ -34,6 +34,13 @@ test('recipe modes retain ceilings, expected error policy, and exclusivity', () 
   assert.equal(recipeOptions({ expectedRecipeSeed: '0' }).expectedRecipeSeed, 0);
 });
 test('canonical region field bounds and teleport environment/deadline validation', () => {
+  const flags = parseOptions(['-OutputDirectory','out','-SkipTutorial','-ForceDaytime','-ForceClearWeather','-StartupTimeoutSeconds','45'], 'teleport');
+  const launch = teleportOptions(flags, {});
+  assert.deepEqual(launch.gameArguments, ['-SkipTutorial','-ForceDaytime','-ForceClearWeather']);
+  assert.equal(launch.overallTimeoutSeconds,645);
+  assert.deepEqual(teleportOptions({},{}).gameArguments,[]);
+  assert.throws(()=>teleportOptions({skipTutorial:'false'},{}));
+  for(const startupTimeoutSeconds of [14,181,'no']) assert.throws(()=>teleportOptions({startupTimeoutSeconds},{}));
   assert.deepEqual(regionCoordinates('-1048576,1048575'), [-1048576, 1048575]);
   for (const region of ['-0,0', '00,1', '+1,0', '1, 0', '0,0\n', '1048576,0', '-1048577,0', '', '1.0,0']) assert.throws(() => regionCoordinates(region));
   assert.equal(teleportOptions({}, {}).timeoutSeconds, 600);
@@ -226,7 +233,7 @@ test('mocked teleport orchestration preserves headed args, live ownership and ve
       projectPath: project, env: environment, sourceHashes: async () => ({ 'source.gd': hash }), git: () => 'synthetic-head',
       runOwnedProcess: async options => {
         assert.deepEqual(options.args, ['--path', project, '--script', 'res://scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd', '--resolution', '1280x720', '--windowed']);
-        assert.equal(options.timeoutSeconds, 90); assert.equal(options.liveOwnershipPath, join(run, 'live-ownership.json'));
+        assert.equal(options.timeoutSeconds, 210); assert.equal(options.liveOwnershipPath, join(run, 'live-ownership.json'));
         assert.equal(options.env.CITADEL_CANDIDATE_TELEPORT_SECONDS, '90'); assert.equal(options.env.CITADEL_CANDIDATE_TELEPORT_REGION, '-1,0');
         assert.equal(options.env.CITADEL_CANDIDATE_TELEPORT_SEED, 'Exact-Seed'); assert.equal(options.env.APPDATA, join(run, 'userdata'));
         await writeFile(options.stdoutPath, mode === 'warning' ? 'WARNING: unexpected' : ''); await writeFile(options.stderrPath, '');

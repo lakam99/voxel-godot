@@ -716,7 +716,9 @@ func water_surface_cell_has_natural_water(cell_x: int, cell_z: int) -> bool:
 
 func advance_world_clock(delta: float) -> bool:
     var freeze_intro_night: bool = tutorial_system != null and tutorial_system.has_method("should_freeze_intro_night") and bool(tutorial_system.should_freeze_intro_night())
-    if freeze_intro_night:
+    if launch_options.forceDaytime:
+        time_of_day = fposmod(0.5 - CLOCK_DISPLAY_OFFSET, 1.0)
+    elif freeze_intro_night:
         time_of_day = 0.86
     else:
         time_of_day = fposmod(time_of_day + delta / DAY_LENGTH, 1.0)

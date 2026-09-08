@@ -16,14 +16,14 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   const run = await freshDirectory(project, o.outputDirectory, 'candidate-teleport-');
   await mkdir(join(run, 'userdata'));
   const hashes = await (dependencies.sourceHashes ?? sourceHashes)(project, 'teleport', runner);
-  const args = [script, '--resolution', '1280x720', '--windowed'];
+  const args = [script, '--resolution', '1280x720', '--windowed', ...(o.gameArguments.length ? ['--', ...o.gameArguments] : [])];
   await writeJson(join(run, 'launch.json'), { schema: 'citadel-candidate-teleport-launch/v1', projectPath: project, head: (dependencies.git ?? git)(project, ['rev-parse', 'HEAD']).trim(), seed: o.seed, requestedRegion: o.candidateRegion,
-    timeoutSeconds: o.timeoutSeconds, internalDeadlineSeconds: o.timeoutSeconds - 45, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
+    timeoutSeconds: o.overallTimeoutSeconds, startupTimeoutSeconds: o.startupTimeoutSeconds, testTimeoutSeconds: o.timeoutSeconds, internalDeadlineSeconds: o.timeoutSeconds - 45, launchOptions: o.launchOptions, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
     evidenceLevel: 'headed teleport-assisted diagnostic; not continuous travel or NPC acceptance', fixtureChanges: ['seed-selector-only Main subclass', 'two counted exterior setup teleports', 'physics held only for setup clearance', 'isolated ordinary user data'] });
   const env = { ...inheritedEnv, APPDATA: join(run, 'userdata'), LOCALAPPDATA: join(run, 'userdata'), CITADEL_CANDIDATE_TELEPORT_OUTPUT: run, CITADEL_CANDIDATE_TELEPORT_SEED: o.seed,
-    CITADEL_CANDIDATE_TELEPORT_SECONDS: String(o.timeoutSeconds), CITADEL_CANDIDATE_TELEPORT_REGION: o.candidateRegion };
+    CITADEL_CANDIDATE_TELEPORT_SECONDS: String(o.timeoutSeconds), CITADEL_CANDIDATE_STARTUP_SECONDS: String(o.startupTimeoutSeconds), CITADEL_CANDIDATE_TELEPORT_REGION: o.candidateRegion };
   const runOwnedProcess = dependencies.runOwnedProcess ?? (await import('./run-godot-scene-watchdog.mjs')).runOwnedProcess;
-  const result = await runCandidatePhase({ project, run, kind: 'teleport', env, runOwnedProcess, timeoutSeconds: o.timeoutSeconds, args: ['--path', project, '--script', ...args] });
+  const result = await runCandidatePhase({ project, run, kind: 'teleport', env, runOwnedProcess, timeoutSeconds: o.overallTimeoutSeconds, args: ['--path', project, '--script', ...args] });
   const watch = result.summary;
   const audit = await auditSources(project, hashes);
   const changed = [...audit.changedSources.map(row => row.path), ...audit.readErrors.map(row => row.path)];
@@ -36,6 +36,7 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   if (!ownedPassed(watch)) throw new Error('Diagnostic failed or owned cleanup unresolved; retain report/log/watchdog evidence.');
   if (verification.watcherFailed || result.stopRequested || errors.length || changed.length) throw new Error('Watcher, engine log, or frozen-source verification failed.');
   await validateTeleportReport(report, o.seed);
+  if (o.gameArguments.length && Object.entries(o.launchOptions).some(([key, value]) => report.launchOptions?.[key] !== value)) throw new Error('Game launch options did not match requested options.');
   return { passed: true, outcome: report.outcome, setupPlacements: Array.isArray(report.setupPlacements) ? report.setupPlacements.length : report.setupPlacements == null ? 0 : 1, reportPath, ownedZero: true, visualInspectionRequired: true };
 }
 await cli(import.meta.url, argv => runTeleportPlaytest(parseOptions(argv, 'teleport')));

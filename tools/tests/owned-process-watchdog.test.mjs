@@ -9,6 +9,8 @@ import { pathToFileURL } from 'node:url';
 import { runOwnedProcess } from '../lib/owned-process.mjs';
 import { parseWatchdogArguments } from '../run-godot-scene-watchdog.mjs';
 import { requireOwnedWindowsTick } from '../lib/owned-live-clock.mjs';
+import fs from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 
 const fixture = path.join(import.meta.dirname, 'owned-process-fixture.mjs');
 const root = mkdtempSync(path.join(tmpdir(), 'owned-watchdog-tests-'));
@@ -30,6 +32,34 @@ async function until(predicate, milliseconds = 8000) {
 }
 function readJson(file) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } }
 function zero(s) { assert.equal(s.authoritativeZeroProven, true, JSON.stringify(s)); assert.deepEqual(s.finalJobMemberPids, []); }
+
+test('synthetic live replacement contention retries briefly but persistent failure still terminates', { skip: process.platform !== 'win32' }, async () => {
+  for (const failures of [2, Infinity]) {
+    const o = options('exit', { args: ['-e', 'setTimeout(()=>process.exit(0),500)'],
+      liveOwnershipPath: path.join(root, `retry-${failures}.json`) });
+    const original = fs.renameSync;
+    let injected = 0;
+    fs.renameSync = (from, to) => {
+      if (to === o.liveOwnershipPath && injected < failures) {
+        injected++;
+        throw Object.assign(new Error('Injected Windows replacement contention'), { code: 'EPERM', syscall: 'rename' });
+      }
+      return original(from, to);
+    };
+    syncBuiltinESMExports();
+    let result;
+    try { result = await runOwnedProcess(o); }
+    finally { fs.renameSync = original; syncBuiltinESMExports(); }
+    zero(result);
+    if (failures === 2) {
+      assert.equal(injected, 2); assert.equal(result.overallExitCode, 0);
+      assert.equal(result.liveOwnershipError, null); assert.equal(result.forcedCleanup, false);
+    } else {
+      assert.ok(injected >= 4); assert.notEqual(result.overallExitCode, 0);
+      assert.equal(result.forcedCleanup, true); assert.match(result.liveOwnershipError, /contention/);
+    }
+  }
+});
 
 test('run-specific abort cancels owned tree without needing a writable stop file', { skip: process.platform !== 'win32' }, async()=>{
   const controller=new AbortController();
