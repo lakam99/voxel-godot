@@ -215,7 +215,73 @@ func _run() -> void:
 	if not await _capture("ready"):
 		await _finish("failed","ready_capture_failed"); return
 	checks.ready_capture_still_owned = main.structure_system.citadel_runtime_bindings.available() and main.structure_system.citadel_publication.scene_state(region).get("binding",{}) == source_binding and main.structure_system.citadel_publication.scene_state(region).get("status") == "scene_ready"
+	if checks.scene_audit and checks.ready_capture_still_owned:
+		evidence.approach=await _approach_scene()
+		checks.close_approach=evidence.approach.get("reached",false)
+		if not await _capture("close"):
+			await _finish("failed","close_capture_failed"); return
+		if not checks.close_approach:
+			await _finish("failed",String(evidence.approach.get("reason","approach_blocked"))); return
 	await _finish("scene_ready" if checks.scene_audit else "failed","" if checks.scene_audit else "scene_observation_failed")
+
+func _movement_key(key: Key, pressed: bool) -> void:
+	var event := InputEventKey.new()
+	event.keycode=key
+	event.physical_keycode=key
+	event.pressed=pressed
+	Input.parse_input_event(event)
+
+func _release_approach_keys() -> void:
+	for key: Key in [KEY_W,KEY_A,KEY_SHIFT]: _movement_key(key,false)
+
+func _approach_scene() -> Dictionary:
+	phase="ordinary_input_approach"
+	var begun := Time.get_ticks_msec()
+	var until := mini(deadline-10000,begun+45000)
+	var next_sample := begun
+	var strafe_until := 0
+	var previous := player.global_position
+	var start_position := previous
+	var samples: Array=[]
+	var reason := "approach_time_limit"
+	var reached := false
+	var distance := INF
+	var bounds: AABB=evidence.sceneAudit.visualBounds
+	# These are ordinary key states consumed by PlayerController. No automated
+	# movement property, direct motor call or player transform write during act.
+	if bool(player.get("automated_input")) or not player.is_physics_processing(): return {"reached":false,"reason":"ordinary_player_input_unavailable"}
+	_movement_key(KEY_W,true)
+	_movement_key(KEY_SHIFT,true)
+	while Time.get_ticks_msec()<until and _within_deadline():
+		await physics_frame
+		await _frame()
+		var position: Vector3=player.global_position
+		distance=Vector2(maxf(maxf(bounds.position.x-position.x,position.x-bounds.end.x),0.0),maxf(maxf(bounds.position.z-position.z,position.z-bounds.end.z),0.0)).length()
+		if distance<=8.0:
+			reached=true; reason="close_exterior_reached"; break
+		var now := Time.get_ticks_msec()
+		if now<next_sample: continue
+		next_sample=now+1000
+		var identity := _accepted_current()
+		if not identity.passed: reason=String(identity.reason); break
+		if now-begun>1000 and position.distance_to(previous)<0.30 and now>=strafe_until:
+			strafe_until=now+2000
+		_movement_key(KEY_A,now<strafe_until)
+		samples.append({"elapsedMsec":now-begun,"position":position,"distanceToVisualBounds":distance,"sprinting":player.get("is_sprinting"),"ordinaryWPressed":Input.is_key_pressed(KEY_W),"strafe":now<strafe_until,
+			"performance":main.runtime_perf_monitor.summary()})
+		previous=position
+		if not await _look_toward_candidate(): reason="approach_mouse_look_failed"; break
+	_release_approach_keys()
+	await physics_frame
+	await _frame()
+	await _look_toward_candidate()
+	var identity := _accepted_current()
+	var capsule := Clearance.inspect(player)
+	evidence.closeVisibility=_inspect_visibility()
+	return {"reached":reached and identity.passed and capsule.passed,"reason":reason if identity.passed and capsule.passed else "approach_identity_or_capsule_failed",
+		"elapsedMsec":Time.get_ticks_msec()-begun,"from":start_position,"to":player.global_position,"distanceToVisualBounds":distance,"samples":samples,"capsule":capsule,"identity":identity,
+		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_A) and not Input.is_key_pressed(KEY_SHIFT),
+		"scope":"Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance."}
 
 func _nearest_candidate(position: Vector3) -> Dictionary:
 	var cell := Vector2i(floori(position.x/float(main.CELL)),floori(position.z/float(main.CELL)))
@@ -618,6 +684,7 @@ func _evidence_failure(name: String,error: int) -> void:
 
 func _finish(outcome: String,reason: String) -> void:
 	if finished: return
+	_release_approach_keys()
 	finished = true
 	phase = "terminal_"+outcome
 	_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"outcome":outcome,"reason":reason})
@@ -637,7 +704,7 @@ func _finish(outcome: String,reason: String) -> void:
 		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},
 		"evidence":evidence,"finalObservation":_observe(),
 		"evidenceLevel":"headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
-		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events only after scene readiness","isolated ordinary save directory"],
+		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events only after scene readiness","bounded ordinary W/Shift approach with short A sidesteps after scene readiness","isolated ordinary save directory"],
 		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
 		"shutdown":"ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})
 	passed=passed and report_written
