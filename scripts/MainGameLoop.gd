@@ -45,7 +45,7 @@ func update_sky(delta: float) -> void:
         var biome := biome_at_world(observer)
         var weather_state: Dictionary
         if launch_options.forceClearWeather:
-            weather_system.force_weather("clear", 0.0, 0.0, observer)
+            weather_system.force_weather("clear", 0.0, 0.0, observer, day)
             weather_state = weather_system.snapshot()
         elif freeze_intro_night:
             weather_system.force_weather("rain", 0.88, 0.94, observer)

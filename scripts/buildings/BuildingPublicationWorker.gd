@@ -19,12 +19,18 @@ class RunState extends RefCounted:
 	var max_stage_gap_usec := 0
 	var released_on_thread := -1
 	var input_release_usec := 0
+	var phase := "restore"
+	var phase_started_usec := 0
+	var phase_usec: Dictionary = {}
 	func begin_work() -> void:
 		mutex.lock()
 		started_usec = Time.get_ticks_usec()
 		previous_usec = started_usec
 		max_stage_gap_usec = 0
 		stage_count = 0
+		phase = "restore"
+		phase_started_usec = started_usec
+		phase_usec.clear()
 		mutex.unlock()
 	func cancel() -> void:
 		mutex.lock()
@@ -43,6 +49,20 @@ class RunState extends RefCounted:
 		var now := Time.get_ticks_usec()
 		max_stage_gap_usec = maxi(max_stage_gap_usec, now - previous_usec)
 		previous_usec = now
+		# Six preparation phases only, with no per-part records or snapshots.
+		if next_stage != stage:
+			var next_phase := phase
+			match next_stage:
+				"publication_route_started": next_phase = "route_geometry"
+				"publication_route_completed": next_phase = "physical"
+				"publication_physical_completed": next_phase = "metadata"
+				"publication_history_started": next_phase = "history"
+				"publication_masonry_started": next_phase = "masonry"
+				"publication_preparation_ready": next_phase = "ready"
+			if next_phase != phase:
+				phase_usec[phase] = now - phase_started_usec
+				phase = next_phase
+				phase_started_usec = now
 		stage = next_stage.left(160)
 		stage_count += 1
 		mutex.unlock()
@@ -51,6 +71,8 @@ class RunState extends RefCounted:
 		mutex.lock()
 		var value := {"stage":stage, "stageCount":stage_count, "cancelRequested":cancelled,
 			"elapsedUsec":Time.get_ticks_usec()-started_usec if started_usec > 0 else 0, "maxStageGapUsec":max_stage_gap_usec}
+		value.phaseUsec = phase_usec.duplicate()
+		if started_usec > 0 and phase != "ready": value.phaseUsec[phase] = Time.get_ticks_usec()-phase_started_usec
 		mutex.unlock()
 		return value
 

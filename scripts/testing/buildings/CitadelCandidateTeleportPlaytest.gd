@@ -101,7 +101,8 @@ func _run() -> void:
 	evidence.launchEnvironment={"clockPhase":main.clock_phase(),"weather":main.weather_system.snapshot()}
 	checks.forced_daytime_applied=not main.launch_options.forceDaytime or is_equal_approx(main.clock_phase(),0.5)
 	checks.forced_clear_weather_applied=not main.launch_options.forceClearWeather or (main.weather_system.kind=="clear" and is_zero_approx(main.weather_system.intensity))
-	if not checks.tutorial_skip_applied or not checks.forced_daytime_applied or not checks.forced_clear_weather_applied:
+	checks.no_daytime_stars=not main.launch_options.forceDaytime or not bool(main.weather_system.snapshot().get("starsVisible",false))
+	if not checks.tutorial_skip_applied or not checks.forced_daytime_applied or not checks.forced_clear_weather_applied or not checks.no_daytime_stars:
 		await _finish("failed","launch_options_not_applied"); return
 	checks.exact_seed = String(main.get("seed_text")) == requested_seed
 	var domains: Dictionary = main.get("startup_readiness_domains")
@@ -515,6 +516,8 @@ func _frame() -> void:
 	if Time.get_ticks_msec()>=next_progress:
 		next_progress = Time.get_ticks_msec()+1000
 		last_observation = _observe()
+		if main.runtime_perf_monitor != null:
+			last_observation.runtimePerformance = main.runtime_perf_monitor.summary()
 		var state_key := phase+":"+String(last_observation.get("source",{}).get("status",""))+":"+String(last_observation.get("scene",{}).get("status",""))
 		if state_key!=last_timeline_state:
 			last_timeline_state=state_key
@@ -566,6 +569,8 @@ func _finish(outcome: String,reason: String) -> void:
 	checks.evidence_writes_succeeded=evidence_error.is_empty()
 	checks.all_captures_saved = not captures.is_empty() and captures.all(func(c):return c.saved)
 	checks.setup_write_limit = placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES
+	if is_instance_valid(main) and main.runtime_perf_monitor != null:
+		evidence.runtimePerformance = main.runtime_perf_monitor.summary()
 	var passed := outcome=="scene_ready" and not checks.values().has(false)
 	var report_written := _write("report.json",{"schema":"citadel-candidate-teleport-playtest/v1","passed":passed,"outcome":outcome,"reason":reason,"checks":checks,"evidenceWriteFailure":evidence_error,
 		"seed":requested_seed,"actualSeed":main.get("seed_text") if is_instance_valid(main) else "","elapsedMsec":_elapsed(),"engine":Engine.get_version_info(),
