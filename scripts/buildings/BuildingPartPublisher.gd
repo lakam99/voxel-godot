@@ -1204,6 +1204,20 @@ func add_door_interaction_proxy(door: StaticBody3D, part) -> void:
 	collider.set_meta("building_collision_role", "door_interaction_proxy")
 	area.add_child(collider)
 	door.add_child(area)
+	if String(part.recipe.get("doorPresentation", "")) == "portcullis":
+		# The stationary control targets the same door through the established
+		# interaction_parent contract, including while the grille is raised.
+		# Areas are ray targets only; no extra blocking or navigation geometry.
+		for piece: Dictionary in BuildingDoorGeometryScript.portcullis_closed_primitives(size, Transform3D.IDENTITY):
+			if bool(piece.moving): continue
+			var control_shape := CollisionShape3D.new()
+			control_shape.name="LeverInteraction_"+String(piece.name)
+			var box := BoxShape3D.new()
+			box.size=piece.size
+			control_shape.shape=box
+			control_shape.transform=piece.transform
+			control_shape.set_meta("building_collision_role","door_interaction_proxy")
+			area.add_child(control_shape)
 
 
 func publish_window(part, parent: Node3D) -> void:

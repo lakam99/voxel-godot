@@ -300,7 +300,9 @@ func focused_interaction_prompt() -> String:
         if kind == "npc":
             return "[RMB] Talk to %s" % String(collider.get_meta("npc_name", "Resident"))
     var block := interaction_block_from_collider(collider)
-    if block == null or not block.has_meta("kind") or String(block.get_meta("kind")) != "block":
+    if block == null:
+        return ""
+    if String(block.get_meta("kind", "")) != "block" and not (String(block.get_meta("block_type", "")) == "door" and block.has_meta("door_portal_id")):
         return ""
     var block_type := String(block.get_meta("block_type", ""))
     return focused_block_prompt(block, block_type)
