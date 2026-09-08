@@ -232,14 +232,8 @@ class CustomDataCursor extends RefCounted:
 	var repair_flags: Array[bool]
 	var repair_profile: Dictionary
 	var result: Array[Color] = []
-	var min_y := INF
-	var max_y := -INF
-	var max_abs_x := 0.001
-	var max_abs_z := 0.001
-	var height_range := 0.0
-	var part_phase := 0.0
 	var index := 0
-	var phase := "extrema"
+	var phase := "conditions"
 	var complete := false
 	var cancelled := false
 	var query_position: Vector3
@@ -249,31 +243,11 @@ class CustomDataCursor extends RefCounted:
 		transforms=source; part=source_part; history=surface_history; repair_flags=flags; repair_profile=profile
 	func step() -> void:
 		if complete or cancelled: return
-		if phase == "extrema":
-			if index < transforms.size():
-				var transform := transforms[index]
-				min_y = minf(min_y, transform.origin.y)
-				max_y = maxf(max_y, transform.origin.y)
-				max_abs_x = maxf(max_abs_x, absf(transform.origin.x))
-				max_abs_z = maxf(max_abs_z, absf(transform.origin.z))
-				index += 1
-				return
-			height_range = maxf(0.001, max_y - min_y)
-			part_phase = float(posmod(String(part.id).hash(), 997)) / 997.0
-			index = 0
-			phase = "conditions"
-			return
 		if index >= transforms.size():
 			complete = true
 			return
 		if phase == "conditions":
 			var origin := transforms[index].origin
-			var height := clampf((origin.y - min_y) / height_range, 0.0, 1.0)
-			var edge_proximity := maxf(absf(origin.x) / max_abs_x, absf(origin.z) / max_abs_z)
-			var edge_exposure := smoothstep(0.72, 0.98, edge_proximity)
-			var top_shelter := smoothstep(0.82, 1.0, height)
-			var stable_piece := fposmod(sin(origin.x * 12.9898 + origin.y * 78.233 + origin.z * 37.719 + float(index) * 0.173 + part_phase * 11.0) * 43758.5453, 1.0)
-			var repair_cluster := repair_flags.size() == transforms.size() and repair_flags[index]
 			query_position = part.position + origin
 			var started := Time.get_ticks_usec()
 			conditions = history.conditions_at(query_position)

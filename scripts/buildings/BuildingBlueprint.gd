@@ -516,9 +516,10 @@ func footprint_bottom_samples(part, resolution: int) -> Array[Dictionary]:
 
 
 func is_structural_support_candidate(part) -> bool:
-	if part != null and invalid_gable_part_ids.has(String(part.id)):
+	if part == null or not bool(part.collision_enabled) or invalid_gable_part_ids.has(String(part.id)):
 		return false
-	return part != null and bool(part.collision_enabled) and String(part.physical_intent) in ["structural_root", "structural_mass", "walkable_surface"]
+	var intent := String(part.physical_intent)
+	return intent == "structural_root" or intent == "structural_mass" or intent == "walkable_surface"
 
 
 func part_transform(part) -> Transform3D:
