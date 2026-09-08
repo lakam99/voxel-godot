@@ -50,6 +50,7 @@ var source_binding: Dictionary = {}
 var source_signature := ""
 var original_position := Vector3.ZERO
 var finished := false
+var manual_seconds := 0
 var last_timeline_state := ""
 var evidence_error: Dictionary = {}
 var accepted_owners: Dictionary = {} # Weak identity pins, never scene ownership.
@@ -66,6 +67,9 @@ func _run() -> void:
 		printerr("Invalid diagnostic candidate region"); quit(2); return
 	var limit := int(OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SECONDS"))
 	var startup_limit := int(OS.get_environment("CITADEL_CANDIDATE_STARTUP_SECONDS"))
+	manual_seconds=int(OS.get_environment("CITADEL_CANDIDATE_MANUAL_SECONDS"))
+	if manual_seconds not in [0,1800]:
+		printerr("Invalid manual inspection allowance"); quit(2); return
 	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 600 or startup_limit < 15 or startup_limit > 180:
 		printerr("Missing/invalid owned runner output or deadline"); quit(2); return
 	started = Time.get_ticks_msec()
@@ -215,6 +219,8 @@ func _run() -> void:
 	if not await _capture("ready"):
 		await _finish("failed","ready_capture_failed"); return
 	checks.ready_capture_still_owned = main.structure_system.citadel_runtime_bindings.available() and main.structure_system.citadel_publication.scene_state(region).get("binding",{}) == source_binding and main.structure_system.citadel_publication.scene_state(region).get("status") == "scene_ready"
+	if manual_seconds>0 and checks.scene_audit and checks.ready_capture_still_owned:
+		await _finish("scene_ready",""); return
 	if checks.scene_audit and checks.ready_capture_still_owned:
 		evidence.approach=await _approach_scene()
 		checks.close_approach=evidence.approach.get("reached",false)
@@ -774,8 +780,22 @@ func _finish(outcome: String,reason: String) -> void:
 		"evidenceLevel":"headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
 		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","bounded ordinary W/Shift approach with brief jumps and lateral recovery","labelled diagnostic inspection cameras after player approach","isolated ordinary save directory"],
 		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
-		"shutdown":"ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})
+		"manualInspectionSeconds":manual_seconds,
+		"shutdown":"manual inspection follows readiness; user exit or bounded session expiry" if manual_seconds>0 and passed else "ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})
 	passed=passed and report_written
 	print("CITADEL CANDIDATE TELEPORT outcome=",outcome," reason=",reason," placements=",placements.size()," passed=",passed)
+	if passed and manual_seconds>0:
+		phase="manual_inspection"
+		player.camera.make_current()
+		var ready := {"phase":phase,"ready":true,"manualAcceptance":"not evaluated","durationSeconds":manual_seconds,
+			"playerPosition":player.global_position,"controls":"WASD move, mouse look, Shift sprint, Space jump, right-click use/interact, Esc menu; close game when finished"}
+		if not _write("manual-ready.json",ready):
+			main.request_graceful_quit(1); return
+		_write("progress.json",ready)
+		main.show_action_message("Citadel ready — manual controls enabled (30 minutes)")
+		print("CITADEL MANUAL READY: ordinary controls enabled for ",manual_seconds," seconds; close game when finished")
+		await create_timer(float(manual_seconds)).timeout
+		if is_instance_valid(main): main.request_graceful_quit(0)
+		return
 	if is_instance_valid(main): main.request_graceful_quit(0 if passed else 1)
 	else: quit(1)

@@ -38,6 +38,11 @@ test('canonical region field bounds and teleport environment/deadline validation
   const launch = teleportOptions(flags, {});
   assert.deepEqual(launch.gameArguments, ['-SkipTutorial','-ForceDaytime','-ForceClearWeather']);
   assert.equal(launch.overallTimeoutSeconds,645);
+  const manual = teleportOptions(parseOptions(['-OutputDirectory','out','-ManualInspection'], 'teleport'), {});
+  assert.equal(manual.manualInspectionSeconds,1800);
+  assert.equal(manual.overallTimeoutSeconds,2520);
+  assert.equal(manual.timeoutSeconds,600);
+  assert.throws(()=>teleportOptions({manualInspection:'true'},{}));
   assert.deepEqual(teleportOptions({},{}).gameArguments,[]);
   assert.throws(()=>teleportOptions({skipTutorial:'false'},{}));
   for(const startupTimeoutSeconds of [14,181,'no']) assert.throws(()=>teleportOptions({startupTimeoutSeconds},{}));
