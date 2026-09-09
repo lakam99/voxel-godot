@@ -4,6 +4,23 @@ extends RefCounted
 ## This does not replace collision publication or certify rendered mesh clearance.
 static func measure(first: Transform3D, second: Transform3D) -> Dictionary:
 	if not _valid(first) or not _valid(second): return {"valid": false, "clear": false, "reason": "invalid_box"}
+	# Cardinal boxes have only the three world axes as nondegenerate SAT
+	# directions. Evaluate those directly, retaining the original summation
+	# order and exact face-contact rule instead of constructing 15 axes.
+	if _cardinal(first.basis) and _cardinal(second.basis):
+		var cardinal_gap := -INF
+		for component in range(3):
+			var radius := 0.0
+			for index in range(3):
+				radius += 0.5 * (absf(float(first.basis[index][component])) + absf(float(second.basis[index][component])))
+			cardinal_gap = maxf(cardinal_gap, absf(float(first.origin[component]) - float(second.origin[component])) - radius)
+		var clear := cardinal_gap >= 0.0
+		var magnitude := 1.0
+		for pose: Transform3D in [first, second]:
+			for component in range(3): magnitude = maxf(magnitude, absf(float(pose.origin[component])))
+		var guard := magnitude * 1.0e-10
+		return {"valid": true, "clear": clear, "greatestAxisGap": cardinal_gap, "cardinal": true,
+			"roundingGuard": 0.0, "reason": "" if clear else ("overlap" if cardinal_gap < -guard else "unresolved_contact")}
 	var a := [first.basis.x, first.basis.y, first.basis.z]
 	var b := [second.basis.x, second.basis.y, second.basis.z]
 	var axes: Array = []

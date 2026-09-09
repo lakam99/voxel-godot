@@ -388,7 +388,11 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 				continue
 			if String(candidate.id) == excluded_id or not is_structural_support_candidate(candidate):
 				continue
-			var local_point := part_inverse_transform(candidate) * point
+			# Most generated supports are axis aligned. Preserve the same local
+			# point while avoiding a transform-cache lookup and matrix multiply
+			# for every candidate at every footprint sample.
+			var axis_aligned: bool = candidate.rotation == Vector3.ZERO
+			var local_point: Vector3 = point - candidate.position if axis_aligned else part_inverse_transform(candidate) * point
 			if absf(local_point.x) > candidate.size.x * 0.5 + PHYSICAL_CONTACT_MARGIN or absf(local_point.z) > candidate.size.z * 0.5 + PHYSICAL_CONTACT_MARGIN:
 				continue
 			var candidate_bottom: float = candidate.position.y - candidate.size.y * 0.5
@@ -397,7 +401,8 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 			var candidate_is_lower: bool = candidate.position.y < target.position.y - 0.05 or candidate_encloses_target or bool(candidate.recipe.get("physicalRoot", false))
 			if candidate_is_lower and local_point.y >= -candidate.size.y * 0.5 - 0.08 and local_point.y <= candidate.size.y * 0.5 + 0.10:
 				return {"id": String(candidate.id), "surface": point, "gap": 0.0, "contact": "embedded"}
-			var candidate_surface := part_transform(candidate) * Vector3(local_point.x, candidate.size.y * 0.5, local_point.z)
+			var local_surface := Vector3(local_point.x, candidate.size.y * 0.5, local_point.z)
+			var candidate_surface: Vector3 = local_surface + candidate.position if axis_aligned else part_transform(candidate) * local_surface
 			var gap := point.y - candidate_surface.y
 			if gap < -0.14 or gap > STRUCTURAL_SUPPORT_MAX_GAP or gap >= best_gap:
 				continue
