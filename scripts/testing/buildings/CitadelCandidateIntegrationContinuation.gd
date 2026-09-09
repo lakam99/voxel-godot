@@ -123,8 +123,19 @@ func _work() -> Dictionary:
 	evidence.bindingScope="Production candidate/source key; isolated service generation token, not runtime admission."
 	evidence.binding=binding
 	if not state.begin_phase("publication_preparation",60000):return _fail("cancelled")
+	# Reproduce the immutable source containers consumed by the runtime worker.
+	# This is not a replay of the full queue envelope or its byte-limit admission.
+	var freeze_started := Time.get_ticks_usec()
+	var publication_input := {"blueprint":source.blueprint.duplicate(true),"furnishingPlan":furniture.duplicate(true)}
+	var freeze_state := Queue.RunState.new()
+	var freeze_count := [0]
+	checks.publication_input_frozen=Queue._freeze(publication_input,freeze_state,freeze_count,0)
+	evidence.publicationInputFreeze={"copyAndFreezeUsec":Time.get_ticks_usec()-freeze_started,"values":freeze_count[0],"scope":"Publication input immutability only; not queue admission or live contention."}
+	if not checks.publication_input_frozen:return _fail("publication_input_freeze_failed")
+	checks.publication_input_exact=var_to_bytes(publication_input.blueprint)==var_to_bytes(source.blueprint) and var_to_bytes(publication_input.furnishingPlan)==var_to_bytes(furniture)
+	if not checks.publication_input_exact:return _fail("publication_input_values_changed")
 	worker_state.begin_work()
-	var prepared := Preparation.prepare_source(source.blueprint,furniture,binding,_publication_checkpoint)
+	var prepared := Preparation.prepare_source(publication_input.blueprint,publication_input.furnishingPlan,binding,_publication_checkpoint)
 	evidence.workerCallback=worker_state.snapshot()
 	checks.publication_prepared=prepared.ready
 	if not prepared.ready:return prepared

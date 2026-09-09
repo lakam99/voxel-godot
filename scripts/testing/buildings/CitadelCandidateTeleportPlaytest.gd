@@ -565,6 +565,14 @@ func _audit_scene() -> Dictionary:
 	if publication_entry.get("binding",{}) == source_binding and publication_entry.has("job"):
 		var publication_job = publication_entry.job
 		result["publicationJobMetrics"] = publication_job.status()
+		result["preparationTimings"] = {}
+		var begin_metrics: Dictionary = publication_job._cpu.get("buildingBegin",{})
+		checks.preparation_timing_complete = true
+		for key in ["preparationUsec","routeUsec","physicalUsec","metadataPreparationUsec"]:
+			var value: Variant = begin_metrics.get(key)
+			checks.preparation_timing_complete = checks.preparation_timing_complete and value is int and value>=0
+			result.preparationTimings[key] = value
+		result.preparationTimings["unavailable"] = ["historyPreparationUsec","masonryPreparationUsec"]
 		if publication_job._building != null:
 			result["publicationTiming"] = publication_job._building.publication_timing()
 			if publication_job._building._masonry_preparation != null:
@@ -583,6 +591,20 @@ func _audit_scene() -> Dictionary:
 	var source_parts := {}
 	var seen_collisions := {}
 	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+	# One post-publication source capture for exact offline comparison. No runtime
+	# injection and no timed generation/publication work is bypassed by this file.
+	var source_path := output.path_join("accepted-source.bin")
+	var source_started := Time.get_ticks_usec()
+	var source_file := FileAccess.open(source_path,FileAccess.WRITE)
+	if source_file==null:
+		_evidence_failure("accepted-source.bin",FileAccess.get_open_error())
+	else:
+		source_file.store_var({"binding":source_binding,"blueprint":accepted_source.get("blueprint",{}),"furnishingPlan":accepted_source.get("furnishingPlan",{})},false)
+		source_file.flush()
+		var source_error := source_file.get_error()
+		source_file.close()
+		if source_error!=OK: _evidence_failure("accepted-source.bin",source_error)
+		else: result["sourceCapture"]={"path":source_path,"sha256":FileAccess.get_sha256(source_path),"elapsedUsec":Time.get_ticks_usec()-source_started}
 	for record: Dictionary in accepted_source.get("blueprint",{}).get("parts",[]):
 		if record.get("collision",false): source_parts[record.id]=record
 	var have_bounds := false
