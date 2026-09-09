@@ -19,6 +19,56 @@ const HALF := Dimensions.LOWER_CORBEL_SOCKET_HALF
 const MAX_BATCH_PANELS := 4
 const MAX_COMPLETION_BATCHES := 128
 
+## One private assembly proof. Only unchanged masonry sample records outside
+## the new members' conservative influence are reused. Root reachability,
+## finite joints and all other validation still run on the complete assembly.
+class AssemblyProof extends "res://scripts/buildings/BuildingBlueprint.gd":
+	var reusable: Dictionary = {}
+	var reused_count := 0
+	func validate_once(continuation: Callable = Callable()) -> Dictionary:
+		var result := validate_physical_integrity_cancellable(continuation)
+		reusable.clear()
+		return result
+	func resolved_support_record(target) -> Dictionary:
+		if reusable.has(target):
+			reused_count += 1
+			return reusable[target].duplicate(true)
+		return super.resolved_support_record(target)
+
+static func _assembly_proof(roots, additions: Array, changed):
+	var copied = Copy.copy_blueprint(roots.snapshot())
+	var proof := AssemblyProof.new(copied.id, copied.seed, copied.style)
+	proof.recipe = copied.recipe
+	proof.rooms = copied.rooms
+	proof.parts = copied.parts
+	var original_parts: Array = proof.parts.duplicate()
+	var added: Array = []
+	for record: Dictionary in additions: added.append(proof.add_part(record))
+	added.append(proof.add_part(changed.snapshot()))
+	# The influence bound below is for the current cardinal assembly producer.
+	# Future rotated members use ordinary complete resolution until separately proven.
+	if added.any(func(part): return part.rotation != Vector3.ZERO):
+		Copy.clear_caches(proof)
+		return proof
+	var influence: Array[AABB] = []
+	for part in added: influence.append(proof.transformed_part_bounds(part).grow(0.5))
+	for part in original_parts:
+		if part.physical_intent != "structural_mass" or not part.recipe.has("physicalSupportCoverage"): continue
+		var coverage: Array = part.recipe.physicalSupportCoverage
+		if coverage.size() != 25: continue
+		var unaffected := true
+		for sample: Dictionary in coverage:
+			var point: Vector3 = sample.position
+			for bounds: AABB in influence:
+				if bounds.has_point(point):
+					unaffected = false
+					break
+			if not unaffected: break
+		if unaffected:
+			proof.reusable[part] = {"partIds":part.recipe.physicalSupportPartIds.duplicate(), "coverage":coverage.duplicate(true)}
+	Copy.clear_caches(proof)
+	return proof
+
 ## Production completion for generated facade bottoms. Eligibility is derived
 ## from sealed aperture declarations and structured current root checks; no
 ## seed, fixture ID, test offset, or authored repair list participates.
@@ -527,15 +577,12 @@ static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: 
 	changed.recipe["physicalRequiredSeatFacts"] = [{"seatId": body.id, "loadDirection": "world_down", "seatFace": "max_y",
 		"localPatchCenter": Vector3(0.0, -panel.size.y * 0.5, 0.0), "localPatchHalfExtents": half_patch}]
 	additions.push_front(body.snapshot())
-	var proof = Copy.copy_blueprint(roots.snapshot())
-	for record: Dictionary in additions: proof.add_part(record)
-	proof.add_part(changed.snapshot())
-	Copy.clear_caches(proof)
+	var proof = _assembly_proof(roots, additions, changed)
 	var proof_grid: Dictionary = Copy.validation_grid_work(proof)
 	if not proof_grid.ready:
 		proof_grid["phase"] = "complete_assembly_before_validation"
 		return proof_grid
-	var physical: Dictionary = proof.validate_physical_integrity_cancellable(continuation)
+	var physical: Dictionary = proof.validate_once(continuation)
 	if physical.get("cancelled", false): return _fail("cancelled")
 	var wanted: Array = additions.map(func(record): return record.id)
 	wanted.append(panel.id)
