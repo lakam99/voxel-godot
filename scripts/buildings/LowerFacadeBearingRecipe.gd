@@ -90,7 +90,7 @@ static func prepare_all_bottom_rows(snapshot: Dictionary, policy: Dictionary, co
 	var driven := _run_independent_completion(source, stage_policy, continuation)
 	if not driven.get("ready", false): return driven
 	if not _continue(continuation, "lower_facade_verification_started"): return _fail("cancelled")
-	var verified := _verify_completion(source, driven.state, driven.accepted, continuation)
+	var verified := _verify_completion_reports(source, driven.state, driven.accepted, driven.initialReport, driven.finalReport)
 	if verified.get("reason", "") == "cancelled": return verified
 	if not _continue(continuation, "lower_facade_completed"): return _fail("cancelled")
 	if not verified.ready: return verified
@@ -114,11 +114,18 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 	var rooted: Dictionary = initial.rooted.duplicate(true)
 	var support_graph: Dictionary = initial.supportGraph.duplicate(true)
 	var attempt_count := 0
+	# Private transaction input. Accepted proposals only change one panel's
+	# obligations and append three beams; aperture geometry/protected spaces
+	# remain unchanged. Every new collider enters the ordered obstacle list.
+	var prepared_input: Dictionary = {}
 	for panel_id: String in candidate_ids:
 		if not _continue(continuation, "lower_facade_panel:" + panel_id): return _fail("cancelled")
 		if rooted.has(panel_id): continue
 		attempt_count += 1
-		var proposal := prepare(state, panel_id, policy, continuation)
+		if prepared_input.is_empty():
+			prepared_input = _read(state, panel_id, policy)
+		var input := _select_prepared_panel(prepared_input, panel_id)
+		var proposal := _prepare_input(input, panel_id, policy, continuation)
 		if proposal.get("reason", "") == "cancelled": return proposal
 		var outcome := _completion_outcome(proposal)
 		if not _continue(continuation, "lower_facade_panel_completed:" + panel_id): return _fail("cancelled")
@@ -127,6 +134,8 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 			if not support_delta.ready:
 				return {"ready": false, "reason": "lower_completion_support_delta_failed", "panelId": panel_id, "detail": support_delta}
 			state = outcome.afterState
+			var updated := _advance_prepared_input(prepared_input, state)
+			if not updated.ready: return updated
 			accepted.append(panel_id)
 			rooted[panel_id] = true
 			for id: String in support_delta.rootedTargetIds: rooted[id] = true
@@ -141,6 +150,7 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 	if not _continue(continuation, "lower_facade_remaining_proof_completed"): return _fail("cancelled")
 	if not remaining.ready: return remaining
 	return {"ready": true, "exhausted": true, "state": state, "accepted": accepted, "rejected": rejected,
+		"initialReport":initial.physicalReport, "finalReport":remaining.physicalReport,
 		"remainingCandidateIds": remaining.eligible, "attemptCount": attempt_count,
 		"incrementalSupportProof": "Every accepted member is independently rooted; all exact new ordinary-support edges into existing parts are propagated through the immutable initial support graph."}
 
@@ -259,7 +269,7 @@ static func _current_unsupported_bottom_panels(snapshot: Dictionary, continuatio
 				eligible.append(id)
 	eligible.sort()
 	return {"ready": true, "eligible": eligible, "failureCount": report.violations.size(),
-		"rooted": rooted, "supportGraph": support_graph}
+		"rooted": rooted, "supportGraph": support_graph, "physicalReport":report}
 
 static func _completion_outcome(result: Dictionary) -> Dictionary:
 	if result.get("ready", false):
@@ -325,6 +335,11 @@ static func _verify_completion(source: Dictionary, staged: Dictionary, accepted:
 	if before_report.get("cancelled", false): return _fail("cancelled")
 	var after_report: Dictionary = after.validate_physical_integrity_cancellable(continuation)
 	if after_report.get("cancelled", false): return _fail("cancelled")
+	return _verify_completion_reports(source, staged, accepted, before_report, after_report)
+
+## Reports are produced by the private initial/final discovery passes over
+## these exact states. No state changes occur between final discovery and use.
+static func _verify_completion_reports(source: Dictionary, staged: Dictionary, accepted: Array, before_report: Dictionary, after_report: Dictionary) -> Dictionary:
 	var before_failed: Array = Copy.failed_ids(before_report)
 	var after_failed: Array = Copy.failed_ids(after_report)
 	if after_failed.any(func(id): return not before_failed.has(id)):
@@ -372,6 +387,9 @@ static func prepare_batch(snapshot: Dictionary, panel_ids: Array, policy: Dictio
 
 static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	var input := _read(snapshot, panel_id, policy)
+	return _prepare_input(input, panel_id, policy, continuation)
+
+static func _prepare_input(input: Dictionary, panel_id: String, policy: Dictionary, continuation: Callable) -> Dictionary:
 	if not input.ready: return input
 	var b = input.blueprint
 	var panel = b.find_part(panel_id)
@@ -599,6 +617,38 @@ static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: 
 	for record: Dictionary in additions: after.parts.append(record)
 	return {"ready": true, "afterSnapshot": after, "panelId": panel.id, "panel": changed.snapshot(), "additions": additions,
 		"joints": joints, "checks": checks, "work": work.duplicate(), "proofGridWork": proof_grid, "sourceGeometryUnchanged": true}
+
+static func _select_prepared_panel(input: Dictionary, panel_id: String) -> Dictionary:
+	if not input.get("ready", false): return input
+	var b = input.blueprint
+	if b.parts.size() > MAX_PARTS: return _fail("source_limit")
+	var panel = b.find_part(panel_id)
+	if panel == null: return _fail("missing_panel")
+	if panel.kind != "wall" or panel.semantic != "citadel_urban_facade" or panel.physical_intent not in ["", "structural_mass"] or panel.rotation != Vector3.ZERO or not panel.collision_enabled or not Connection.Materials.is_masonry_material(panel.material_id) or _has_obligation(panel.recipe): return _fail("ineligible_panel")
+	var owner := ""
+	for key: String in b.recipe.facadeApertures:
+		if b.recipe.facadeApertures[key].partIds.has(panel_id): owner = key
+	if owner.is_empty(): return _fail("undeclared_panel")
+	var bottom: float = Connection._bounds(panel)[1]
+	for id: String in b.recipe.facadeApertures[owner].partIds:
+		if Connection._bounds(b.find_part(id))[1] < bottom: return _fail("not_bottom_row")
+	input.declarationKey = owner
+	return input
+
+static func _advance_prepared_input(input: Dictionary, state: Dictionary) -> Dictionary:
+	var previous = input.blueprint
+	if state.parts.size() != previous.parts.size() + 3: return _fail("invalid_prepared_input_delta")
+	var additions: Array = []
+	for i in range(previous.parts.size(), state.parts.size()):
+		var part := Part.new(state.parts[i])
+		if part.kind != "beam": return _fail("invalid_prepared_input_member")
+		additions.append(part)
+	var obstacles := Connection._obstacles(additions)
+	if not obstacles.ready: return obstacles
+	input.obstacles.append_array(obstacles.boxes)
+	input.obstacles.sort_custom(func(a,b):return a.id < b.id)
+	input.blueprint = Copy.copy_blueprint(state)
+	return {"ready":true}
 
 static func _read(snapshot: Dictionary, panel_id: String, policy: Dictionary) -> Dictionary:
 	if not snapshot.get("id") is String or not snapshot.get("seed") is int or not snapshot.get("style") is String or not snapshot.get("recipe") is Dictionary or not snapshot.get("parts") is Array or not snapshot.get("rooms") is Array: return _fail("invalid_snapshot")
