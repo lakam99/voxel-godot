@@ -17,6 +17,7 @@ const BuntingManifest = preload("res://scripts/buildings/CitadelBuntingAssemblyM
 const BuntingAnchors = preload("res://scripts/buildings/CitadelBuntingAnchorRecipe.gd")
 const BuntingDomain = preload("res://scripts/buildings/CitadelMarketBuntingDomain.gd")
 const ExteriorBunting = preload("res://scripts/buildings/CitadelExteriorBuntingDomain.gd")
+const SupportResolutionMemo = preload("res://scripts/buildings/BuildingSupportResolutionMemo.gd")
 
 static func prepare(blueprint, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
 	# Execution control is deliberately separate from serializable source policy.
@@ -66,29 +67,30 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 	var protected := _protected_bounds(working, manifest.records, policy.protectedObstacles)
 	if not protected.ready: return protected
 	var stages: Array = []
-	var chimney := _complete_chimneys(working, manifest.records, policy.protectedObstacles, continuation)
+	var support_identities: Dictionary = {}
+	var chimney := _complete_chimneys(working, manifest.records, policy.protectedObstacles, continuation, support_identities)
 	if not chimney.ready: return chimney
 	stages.append(chimney)
-	var bracket_first := _complete_brackets(working, manifest.records, "bracket_first", continuation)
+	var bracket_first := _complete_brackets(working, manifest.records, "bracket_first", continuation, support_identities)
 	if not bracket_first.ready: return bracket_first
 	stages.append(bracket_first)
-	var sign := _complete_signs(working, manifest.records, protected.bounds, continuation)
+	var sign := _complete_signs(working, manifest.records, protected.bounds, continuation, support_identities)
 	if not sign.ready: return sign
 	stages.append(sign)
 	var party := _complete_party_walls(working, manifest.records, continuation)
 	if not party.ready: return party
 	stages.append(party)
-	var bracket_retry := _complete_brackets(working, manifest.records, "bracket_retry", continuation)
+	var bracket_retry := _complete_brackets(working, manifest.records, "bracket_retry", continuation, support_identities)
 	if not bracket_retry.ready: return bracket_retry
 	stages.append(bracket_retry)
-	var bunting := _complete_bunting(working, protected.bounds, continuation)
+	var bunting := _complete_bunting(working, protected.bounds, continuation, support_identities)
 	if not bunting.ready: return bunting
 	working = Copy.copy_blueprint(bunting.afterSnapshot)
 	bunting.erase("afterSnapshot")
 	stages.append(bunting)
 	# Threshold completion is last because it adds collision-backed support columns.
 	# Its terminal proof is the ordinary terminal proof; never validate a third time.
-	var threshold := _complete_thresholds(working, manifest.records, policy.protectedObstacles, continuation)
+	var threshold := _complete_thresholds(working, manifest.records, policy.protectedObstacles, continuation, support_identities)
 	if not threshold.ready: return threshold
 	working = Copy.copy_blueprint(threshold.afterSnapshot)
 	var final: Dictionary = threshold._terminalProof
@@ -126,7 +128,7 @@ static func _bunting_manifest(source) -> Dictionary:
 			if not exterior.ready: return exterior
 	return declaration
 
-static func _complete_bunting(source, protected: Array, continuation: Callable = Callable()) -> Dictionary:
+static func _complete_bunting(source, protected: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
 	var frozen := var_to_bytes(source.snapshot())
 	var inputs := var_to_bytes(protected)
 	if not _continue(continuation,"bunting_completion_started"): return _fail("cancelled")
@@ -137,7 +139,7 @@ static func _complete_bunting(source, protected: Array, continuation: Callable =
 	var preserve_geometry := {}
 	var bounds: Array = protected.duplicate(true)
 	if not declaration.records.is_empty():
-		var current := _physical(source,continuation)
+		var current := _physical(source,continuation,support_identities)
 		if not current.ready: return current
 		if frozen!=current.sourceBytes or frozen!=var_to_bytes(source.snapshot()): return _fail("bunting_selection_source_changed")
 		var checks: Dictionary = {}
@@ -209,14 +211,14 @@ static func _verify_final_bunting(proof, stage: Dictionary, continuation: Callab
 	if not verified.ready:return _fail("terminal_bunting_invalid",{"detail":verified})
 	return verified
 
-static func _complete_thresholds(source, records: Array, obstacles: Array, continuation: Callable = Callable()) -> Dictionary:
+static func _complete_thresholds(source, records: Array, obstacles: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
 	if not _continue(continuation, "threshold_started"): return _fail("cancelled")
 	var frozen_records := var_to_bytes(records)
 	var frozen_obstacles := var_to_bytes(obstacles)
 	var working = Copy.copy_blueprint(source.snapshot())
 	Copy.clear_caches(working)
 	var proof_source_bytes := var_to_bytes(working.snapshot())
-	var initial := _physical(working, continuation)
+	var initial := _physical(working, continuation, support_identities)
 	if not initial.ready: return initial
 	var validation_events: Array = [{"phase": "initial", "sourceSha256": _sha256(proof_source_bytes)}]
 	# _physical records bytes before its private proof classifies any fresh part.
@@ -255,7 +257,7 @@ static func _complete_thresholds(source, records: Array, obstacles: Array, conti
 		accepted.append(item.id)
 		details.append(_without_snapshot(result))
 	var final_source_bytes := var_to_bytes(working.snapshot())
-	var final := _physical(working, continuation)
+	var final := _physical(working, continuation, support_identities)
 	if final.get("reason", "") == "cancelled": return final
 	if not final.ready:
 		return _threshold_failure("threshold_final_validation_failed", {"detail": final}, accepted, validation_events)
@@ -305,9 +307,9 @@ static func _sha256(bytes: PackedByteArray) -> String:
 	if context.start(HashingContext.HASH_SHA256) != OK or context.update(bytes) != OK: return ""
 	return context.finish().hex_encode()
 
-static func _complete_chimneys(working, records: Array, obstacles: Array, continuation: Callable = Callable()) -> Dictionary:
+static func _complete_chimneys(working, records: Array, obstacles: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
 	if not _continue(continuation, "chimney_started"): return _fail("cancelled")
-	var physical := _physical(working, continuation)
+	var physical := _physical(working, continuation, support_identities)
 	if not physical.ready: return physical
 	var accepted: Array = []
 	var pending: Array = []
@@ -328,9 +330,9 @@ static func _complete_chimneys(working, records: Array, obstacles: Array, contin
 			return _fail("chimney_completion_failed", {"id": chimney.id, "detail": result})
 	return {"ready": true, "kind": "chimney", "acceptedIds": accepted, "pending": pending, "attempts": attempts}
 
-static func _complete_brackets(working, records: Array, kind: String, continuation: Callable = Callable()) -> Dictionary:
+static func _complete_brackets(working, records: Array, kind: String, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
 	if not _continue(continuation, kind + "_started"): return _fail("cancelled")
-	var physical := _physical(working, continuation)
+	var physical := _physical(working, continuation, support_identities)
 	if not physical.ready: return physical
 	var proof = physical.proof
 	var accepted: Array = []
@@ -362,9 +364,9 @@ static func _complete_brackets(working, records: Array, kind: String, continuati
 				return _fail("bracket_completion_failed", {"id": id, "detail": plan})
 	return {"ready": true, "kind": kind, "acceptedIds": accepted, "pending": pending, "attempts": attempts}
 
-static func _complete_signs(working, records: Array, protected: Array, continuation: Callable = Callable()) -> Dictionary:
+static func _complete_signs(working, records: Array, protected: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
 	if not _continue(continuation, "signs_started"): return _fail("cancelled")
-	var physical := _physical(working, continuation)
+	var physical := _physical(working, continuation, support_identities)
 	if not physical.ready: return physical
 	var proof = physical.proof
 	var accepted: Array = []
@@ -476,16 +478,26 @@ static func _complete_party_walls(working, records: Array, continuation: Callabl
 	return {"ready": true, "kind": "party_wall", "accepted": accepted, "pending": pending, "attempts": attempts,
 		"sourceProofBuilds":context_builds,"sourceProofReuses":context_reuses,"sourceProofInvalidations":context_invalidations,"independentProofs":independent_validations,"geometricRejections":geometric_rejections}
 
-static func _physical(source, continuation: Callable = Callable()) -> Dictionary:
-	if not _continue(continuation, "structural_physical_started"): return _fail("cancelled")
+static func _physical(source, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
+	if not _continue(continuation, "structural_physical_started"):
+		support_identities.clear()
+		return _fail("cancelled")
 	var source_bytes := var_to_bytes(source.snapshot())
 	var proof = Copy.copy_blueprint(source.snapshot())
+	var probe := SupportResolutionMemo.new(proof.id,proof.seed,proof.style)
+	probe.recipe = proof.recipe; probe.rooms = proof.rooms; probe.parts = proof.parts
+	probe.identities = support_identities
+	proof = probe
 	Copy.clear_caches(proof)
 	var grid := Copy.validation_grid_work(proof)
 	if not grid.ready: return _fail("completion_validation_work_limit")
 	var report: Dictionary = proof.validate_physical_integrity_cancellable(continuation)
-	if report.get("cancelled", false): return _fail("cancelled")
-	if not _continue(continuation, "structural_physical_completed"): return _fail("cancelled")
+	if report.get("cancelled", false):
+		support_identities.clear()
+		return _fail("cancelled")
+	if not _continue(continuation,"structural_support_identity_summary:"+JSON.stringify(probe.observations)) or not _continue(continuation, "structural_physical_completed"):
+		support_identities.clear()
+		return _fail("cancelled")
 	return {"ready": true, "failedIds": Copy.failed_ids(report), "violations": report.violations,
 		"proof": proof, "report": report, "sourceBytes": source_bytes}
 

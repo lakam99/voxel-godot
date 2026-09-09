@@ -34,6 +34,7 @@ class Progress extends RefCounted:
 	var overflow_callbacks := 0
 	var timed_out_phase := ""
 	var deadline_active := true
+	var support_identity_observations: Array = []
 	func _charge_gap(now: int) -> void:
 		if last_usec<=0 or last_key.is_empty(): return
 		var gap := now-last_usec
@@ -67,6 +68,8 @@ class Progress extends RefCounted:
 		mutex.unlock()
 	func checkpoint(label: String) -> bool:
 		mutex.lock()
+		if label.begins_with("structural_support_identity_summary:") and support_identity_observations.size()<32:
+			support_identity_observations.append(JSON.parse_string(label.trim_prefix("structural_support_identity_summary:")))
 		var now := Time.get_ticks_usec()
 		_charge_gap(now)
 		var key := phase+"/"+label.get_slice(":",0)
@@ -86,6 +89,7 @@ class Progress extends RefCounted:
 		mutex.lock()
 		var value := {"phase":phase,"stage":stage,"callbacks":callbacks,"cancelled":stopped,"maxCallbackGapUsec":max_gap_usec,"elapsedMsec":Time.get_ticks_msec()-started,"timedOutPhase":timed_out_phase}
 		if include_aggregates:
+			value["supportIdentityObservations"]=support_identity_observations.duplicate(true)
 			value["phaseElapsedUsec"]=phase_elapsed.duplicate()
 			value["stageAggregates"]=aggregates.duplicate(true)
 			value["overflowCallbacks"]=overflow_callbacks
