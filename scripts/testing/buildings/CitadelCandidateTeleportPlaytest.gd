@@ -54,6 +54,8 @@ var manual_seconds := 0
 var last_timeline_state := ""
 var evidence_error: Dictionary = {}
 var accepted_owners: Dictionary = {} # Weak identity pins, never scene ownership.
+var worker_samples: Array[Dictionary] = []
+var worker_samples_dropped := 0
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -798,6 +800,13 @@ func _frame() -> void:
 	if Time.get_ticks_msec()>=next_progress:
 		next_progress = Time.get_ticks_msec()+1000
 		last_observation = _observe()
+		# Once per progress tick: actual engine gauges, never summed frame counters.
+		if Engine.has_singleton("VoxelEngine"):
+			var voxel_engine = Engine.get_singleton("VoxelEngine")
+			var sample := {"elapsedMsec":_elapsed(),"phase":phase,"stats":voxel_engine.get_stats()}
+			last_observation["voxelWorkers"] = sample
+			if worker_samples.size()<720: worker_samples.append(sample)
+			else: worker_samples_dropped += 1
 		if main.runtime_perf_monitor != null:
 			last_observation.runtimePerformance = main.runtime_perf_monitor.summary()
 		var state_key := phase+":"+String(last_observation.get("source",{}).get("status",""))+":"+String(last_observation.get("scene",{}).get("status",""))
@@ -862,6 +871,7 @@ func _finish(outcome: String,reason: String) -> void:
 		"launchOptions":main.launch_options if is_instance_valid(main) else {},
 		"originalPlayerPosition":original_position,"search":search,"candidate":candidate,"declaredInfluence":declared,"acceptedReservation":reservation,
 		"setupPlacements":placements,"captures":captures,"timeline":timeline,"timelineDropped":timeline_dropped,
+		"voxelWorkerSamples":worker_samples,"voxelWorkerSamplesDropped":worker_samples_dropped,
 		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},
 		"evidence":evidence,"finalObservation":_observe(),
 		"evidenceLevel":"headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
