@@ -465,6 +465,8 @@ function sceneArgumentOptions(options) {
 
 async function runHeadedTool(toolId, rawArgs) {
   const parsed = parseArguments(rawArgs);
+  if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.seed !== undefined)
+    throw new Error('Normal runtime performance chooses its seed through New Game; omit -Seed.');
   const config = headedTools[toolId];
   if (!config) throw new Error(`No headed configuration registered for ${toolId}`);
   const [scene, reportEnvironment, progressEnvironment, screenshotEnvironment, configuredReport, configuredProgress, configuredScreenshots] = config;
@@ -496,6 +498,11 @@ async function runHeadedTool(toolId, rawArgs) {
   };
   if (screenshotEnvironment) environment[screenshotEnvironment] = screenshotDir;
   if (traceDir) environment.VOXEL_NPC_OBSERVATION_TRACE_DIR = traceDir;
+  // Normal-runtime measurement must use ordinary startup and frame timing.
+  if (toolId === 'run-normal-runtime-performance-pass') {
+    delete environment.VOXEL_PLAYTEST;
+    delete environment.VOXEL_TEST_SEED;
+  }
   if (toolId === 'npc/run-npc-observation-tests') {
     environment.VOXEL_NPC_TEST_SEED = String(parsed.options.seed ?? 'atlas-1492');
     environment.VOXEL_NPC_TEST_RUN_TOKEN = runToken;
@@ -530,7 +537,8 @@ async function runHeadedTool(toolId, rawArgs) {
     if (toolId.endsWith('no-flags')) environment.VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE = '1';
   }
   const godot = await findGodot(parsed.options.godotExe);
-  const godotArguments = ['--fixed-fps', '60', '--path', projectRoot];
+  const godotArguments = toolId === 'run-normal-runtime-performance-pass'
+    ? ['--path', projectRoot] : ['--fixed-fps', '60', '--path', projectRoot];
   if (['npc/run-npc-observation-tests','npc/run-real-tutorial-playthrough'].includes(toolId) && !asBoolean(parsed.options.visible)) godotArguments.unshift('--headless');
   if (scene) godotArguments.push('--scene', scene);
   const forwarded = [...sceneArgumentOptions(parsed.options), ...parsed.passthrough];
