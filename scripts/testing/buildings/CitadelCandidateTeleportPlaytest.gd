@@ -559,6 +559,16 @@ func _audit_scene() -> Dictionary:
 	var site: Node3D = service.scene_root(region)
 	var result := {"passed":false,"nodeCount":0,"meshes":0,"multiMeshes":0,"instances":0,"collisionShapes":0,"furnitureBodies":0,"trees":0,"doors":0,"badBindings":[],"physicsProbes":[]}
 	if not is_instance_valid(site) or site.get_parent()!=main: return result
+	# Retain existing bounded counters once, after publication. These are
+	# observations only and must never participate in scene acceptance.
+	var publication_entry: Dictionary = service._scenes.get(region,{})
+	if publication_entry.get("binding",{}) == source_binding and publication_entry.has("job"):
+		var publication_job = publication_entry.job
+		result["publicationJobMetrics"] = publication_job.status()
+		if publication_job._building != null:
+			result["publicationTiming"] = publication_job._building.publication_timing()
+			if publication_job._building._masonry_preparation != null:
+				result["aperturePreparationMetrics"] = publication_job._building._masonry_preparation.metrics.duplicate(true)
 	var expected_origin := Vector3.INF
 	for profile: Dictionary in main.structure_system.citadel_terrain_admission.profile_store.snapshot():
 		if profile.get("siteId") == candidate.siteId and profile.get("sourceSignature") == source_signature: expected_origin = profile.origin
