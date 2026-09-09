@@ -130,11 +130,11 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 		var outcome := _completion_outcome(proposal)
 		if not _continue(continuation, "lower_facade_panel_completed:" + panel_id): return _fail("cancelled")
 		if outcome.ready:
-			var support_delta := _accepted_change_support_delta(state, outcome.afterState, panel_id)
+			var support_delta := _accepted_change_support_delta(state, outcome.afterState, panel_id, prepared_input.blueprint.parts)
 			if not support_delta.ready:
 				return {"ready": false, "reason": "lower_completion_support_delta_failed", "panelId": panel_id, "detail": support_delta}
 			state = outcome.afterState
-			var updated := _advance_prepared_input(prepared_input, state)
+			var updated := _advance_prepared_input(prepared_input, state, panel_id)
 			if not updated.ready: return updated
 			accepted.append(panel_id)
 			rooted[panel_id] = true
@@ -157,8 +157,11 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 static func _continue(continuation: Callable, stage: String) -> bool:
 	return not continuation.is_valid() or continuation.call(stage) == true
 
-static func _accepted_change_support_delta(before: Dictionary, after: Dictionary, panel_id: String) -> Dictionary:
+static func _accepted_change_support_delta(before: Dictionary, after: Dictionary, panel_id: String, prepared_parts: Array = []) -> Dictionary:
 	if not before.get("parts") is Array or not after.get("parts") is Array or after.parts.size() < before.parts.size(): return _fail("invalid_independence_source")
+	# Only the private completion loop supplies these constructor-validated parts.
+	# Its state and prepared blueprint advance together after each accepted delta.
+	if not prepared_parts.is_empty() and prepared_parts.size()!=before.parts.size(): return _fail("invalid_prepared_part_count")
 	var before_by_id: Dictionary = {}
 	for record: Dictionary in before.parts: before_by_id[record.id] = record
 	var influences: Array = []
@@ -168,9 +171,10 @@ static func _accepted_change_support_delta(before: Dictionary, after: Dictionary
 	var excluded: Dictionary = {panel_id: true}
 	for influence in influences: excluded[influence.id] = true
 	var rooted_targets: Array = []
-	for record: Dictionary in before.parts:
+	for index in range(before.parts.size()):
+		var record: Dictionary = before.parts[index]
 		if excluded.has(record.id): continue
-		var target := Part.new(record)
+		var target = Part.new(record) if prepared_parts.is_empty() else prepared_parts[index]
 		if not target.collision_enabled or _resolved_intent(target) not in ["structural_mass", "structural_root", "walkable_surface"]: continue
 		for influence in influences:
 			if _could_supply_ordinary_support(target, influence):
@@ -651,19 +655,34 @@ static func _select_prepared_panel(input: Dictionary, panel_id: String) -> Dicti
 	input.declarationKey = owner
 	return input
 
-static func _advance_prepared_input(input: Dictionary, state: Dictionary) -> Dictionary:
+static func _advance_prepared_input(input: Dictionary, state: Dictionary, panel_id: String) -> Dictionary:
 	var previous = input.blueprint
 	if state.parts.size() != previous.parts.size() + 3: return _fail("invalid_prepared_input_delta")
-	var additions: Array = []
+	var panel_index := -1
+	for index in range(previous.parts.size()):
+		if previous.parts[index].id == panel_id: panel_index = index
+	if panel_index<0 or state.parts[panel_index].id!=panel_id: return _fail("invalid_prepared_panel_delta")
+	var records: Array = [state.parts[panel_index]]
 	for i in range(previous.parts.size(), state.parts.size()):
-		var part := Part.new(state.parts[i])
-		if part.kind != "beam": return _fail("invalid_prepared_input_member")
-		additions.append(part)
+		records.append(state.parts[i])
+	# Use the same snapshot-copy rules as a full reconstruction, on the four
+	# records produced by _fit. It changes only this panel and appends three beams.
+	var delta = Copy.copy_blueprint({"id":previous.id,"seed":previous.seed,"style":previous.style,"recipe":{},"rooms":[],"parts":records})
+	var additions: Array = delta.parts.slice(1)
+	var ids := {}
+	for part in additions:
+		if part.kind != "beam" or previous.find_part(part.id)!=null or ids.has(part.id): return _fail("invalid_prepared_input_member")
+		ids[part.id] = true
 	var obstacles := Connection._obstacles(additions)
 	if not obstacles.ready: return obstacles
+	# Validate first, then atomically advance the transaction-owned objects.
 	input.obstacles.append_array(obstacles.boxes)
 	input.obstacles.sort_custom(func(a,b):return a.id < b.id)
-	input.blueprint = Copy.copy_blueprint(state)
+	previous.parts[panel_index] = delta.parts[0]
+	previous.physical_parts_by_id[panel_id] = delta.parts[0]
+	for part in additions:
+		previous.parts.append(part)
+		previous.physical_parts_by_id[part.id] = part
 	return {"ready":true}
 
 static func _read(snapshot: Dictionary, panel_id: String, policy: Dictionary) -> Dictionary:
