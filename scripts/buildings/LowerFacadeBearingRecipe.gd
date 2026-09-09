@@ -427,7 +427,12 @@ static func _prepare_input(input: Dictionary, panel_id: String, policy: Dictiona
 		bb = Connection._bounds(body)
 	# This graph excludes every mutable facade/timber record. Batch completion may
 	# reuse it only while its byte-bound masonry source remains exact.
-	var root_context := _root_context_for(b, policy, continuation)
+	# The completion transaction's accepted delta excludes independent masonry:
+	# only facade obligations and new beams change. Its private root proof and
+	# copied geometry therefore remain valid for later panels in this call.
+	if not input.has("independentRoots"):
+		input["independentRoots"] = _root_context_for(b, policy, continuation)
+	var root_context: Dictionary = input.independentRoots
 	if not root_context.ready: return root_context
 	var roots = root_context.roots
 	var rooted: Dictionary = root_context.rooted
@@ -766,10 +771,17 @@ static func _protected(snapshot: Dictionary, policy: Dictionary, parts: Array) -
 	return {"ready": true, "volumes": volumes}
 
 static func _admit(part, obstacles: Array, volumes: Array) -> Dictionary:
-	for obstacle: Dictionary in obstacles:
-		var measured: Dictionary = Connection.Admission.measure(_pose(part), obstacle.pose)
-		if not measured.valid or not measured.clear: return {"ready": false, "reason": "foreign_solid_blocked", "blockingPartId": obstacle.id, "measurement": measured}
+	var pose := _pose(part)
 	var bounds: Array = Connection._bounds(part)
+	var cardinal: bool = part.rotation == Vector3.ZERO and Connection.Admission._valid(pose)
+	for obstacle: Dictionary in obstacles:
+		# _obstacles owns these pose/bounds pairs and validates them before this
+		# private admission path. A world-axis gap above 0.001 exceeds its
+		# maximum rounding guard (0.00001) and is a separating SAT axis of
+		# the cardinal proposed member. Near pairs keep exact rejection evidence.
+		if cardinal and _separated_obstacle_bounds(bounds, obstacle.bounds): continue
+		var measured: Dictionary = Connection.Admission.measure(pose, obstacle.pose)
+		if not measured.valid or not measured.clear: return {"ready": false, "reason": "foreign_solid_blocked", "blockingPartId": obstacle.id, "measurement": measured}
 	for volume: Dictionary in volumes:
 		var box: AABB = volume.bounds
 		var protected_bounds: Array = [float(box.position.x), float(box.position.y), float(box.position.z), float(box.end.x), float(box.end.y), float(box.end.z)]
@@ -778,6 +790,11 @@ static func _admit(part, obstacles: Array, volumes: Array) -> Dictionary:
 				"proposedPartId": part.id, "proposedBounds": bounds, "protectedBounds": protected_bounds,
 				"intersection": Connection.ReplacementOccupancy.intersection(bounds, protected_bounds)}
 	return {"ready": true}
+
+static func _separated_obstacle_bounds(first: Array, second: Array) -> bool:
+	for axis in range(3):
+		if float(first[axis]) - float(second[axis + 3]) > 0.001 or float(second[axis]) - float(first[axis + 3]) > 0.001: return true
+	return false
 
 static func _joint(id: String, axis: String, center: Vector3, half: Vector3) -> Dictionary:
 	return {"seatId": id, "contactMode": "housed_overlap", "localSpanAxis": axis, "localOverlapCenter": center,
