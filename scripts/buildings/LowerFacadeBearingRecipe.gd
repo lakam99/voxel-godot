@@ -200,6 +200,17 @@ static func _resolved_intent(part) -> String:
 static func _could_supply_ordinary_support(target, candidate) -> bool:
 	if not candidate.collision_enabled or _resolved_intent(candidate) not in ["structural_root", "structural_mass", "walkable_surface"]: return false
 	if candidate.id == String(target.recipe.get("physicalSupportsPartId", "")): return false
+	# No sampled footprint point can reach a cardinal member whose horizontal
+	# intervals are separated. The extra 0.05 beyond the contact tolerance is
+	# conservative padding; the original point tests still decide every hit.
+	var target_position: Vector3 = target.position.abs()
+	var candidate_position: Vector3 = candidate.position.abs()
+	var bounded: bool = maxf(target_position.x, maxf(target_position.y, target_position.z)) <= 100000.0 and maxf(candidate_position.x, maxf(candidate_position.y, candidate_position.z)) <= 100000.0 \
+		and maxf(target.size.x, maxf(target.size.y, target.size.z)) <= 10000.0 and maxf(candidate.size.x, maxf(candidate.size.y, candidate.size.z)) <= 10000.0
+	if bounded and target.rotation == Vector3.ZERO and candidate.rotation == Vector3.ZERO:
+		for axis in [0, 2]:
+			if absf(float(target.position[axis]) - float(candidate.position[axis])) > (float(target.size[axis]) + float(candidate.size[axis])) * 0.5 + 0.10:
+				return false
 	var target_pose := Transform3D(Basis.from_euler(target.rotation), target.position)
 	var candidate_pose := Transform3D(Basis.from_euler(candidate.rotation), candidate.position)
 	var inverse := candidate_pose.affine_inverse()

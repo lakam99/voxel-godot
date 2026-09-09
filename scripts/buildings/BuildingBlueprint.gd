@@ -22,6 +22,7 @@ var _validation_transforms: Dictionary = {}
 var _validation_inverses: Dictionary = {}
 var _validation_bounds: Dictionary = {}
 var _validation_neighbors: Dictionary = {}
+var _validation_columns: Dictionary = {}
 
 const PHYSICAL_SUPPORT_GRID_CELL := 4.0
 const PHYSICAL_CONTACT_MARGIN := 0.05
@@ -257,6 +258,7 @@ func resolve_physical_contracts_cancellable(continuation: Callable) -> bool:
 
 func _resolve_physical_contracts(continuation: Callable) -> bool:
 	var cache_owner := _begin_validation_cache()
+	_validation_columns.clear()
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
 	_validation_neighbors.clear()
@@ -324,6 +326,7 @@ static func _continue_validation(continuation: Callable, stage: String) -> bool:
 
 func _cancel_physical_validation(cache_owner: bool) -> Dictionary:
 	_end_validation_cache(cache_owner)
+	_validation_columns.clear()
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
 	invalid_gable_part_ids.clear()
@@ -373,7 +376,7 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 	var required_ids: Dictionary = {}
 	for required_id_value in target.recipe.get("physicalRequiredSupportPartIds", []) as Array:
 		required_ids[String(required_id_value)] = true
-	var candidates := structural_candidates_near(point)
+	var candidates := _support_candidates_in_column(point)
 	var target_bottom: float = target.position.y - target.size.y * 0.5
 	var target_top: float = target.position.y + target.size.y * 0.5
 	var allow_enclosing := bool(target.recipe.get("allowEnclosingStructuralSupport", false))
@@ -409,6 +412,22 @@ func structural_support_at(target, point: Vector3) -> Dictionary:
 			best_gap = gap
 			best = {"id": String(candidate.id), "surface": candidate_surface, "gap": gap}
 	return best
+
+
+func _support_candidates_in_column(point: Vector3) -> Array:
+	if not _validation_cache_active: return structural_candidates_near(point)
+	var key := Vector2(point.x, point.z)
+	if _validation_columns.has(key): return _validation_columns[key]
+	var selected: Array = []
+	for candidate in structural_candidates_near(point):
+		# Rotated membership can depend on Y; retain the original path there.
+		# Cardinal candidates retain original order for each exact XZ column.
+		if candidate.rotation == Vector3.ZERO:
+			var local_point: Vector3 = point - candidate.position
+			if absf(local_point.x) > candidate.size.x * 0.5 + PHYSICAL_CONTACT_MARGIN or absf(local_point.z) > candidate.size.z * 0.5 + PHYSICAL_CONTACT_MARGIN: continue
+		selected.append(candidate)
+	_validation_columns[key] = selected
+	return selected
 
 
 func resolved_attachment_anchor_ids(target) -> Array[String]:
@@ -552,6 +571,7 @@ func _begin_validation_cache() -> bool:
 
 func _end_validation_cache(owner: bool) -> void:
 	if not owner: return
+	_validation_columns.clear()
 	_validation_cache_active = false
 	_validation_transforms.clear()
 	_validation_inverses.clear()
@@ -564,6 +584,7 @@ func index_structural_support_candidates() -> void:
 
 
 func _index_structural_support_candidates(continuation: Callable) -> bool:
+	_validation_columns.clear()
 	_validation_neighbors.clear()
 	var cells_since_checkpoint := 0
 	for part in parts:

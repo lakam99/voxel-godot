@@ -81,7 +81,7 @@ func _compare(label: String, cached, uncached) -> void:
 	checks[label + "_cache_released"] = _clean(cached) and _clean(uncached)
 
 func _clean(b) -> bool:
-	return not b._validation_cache_active and b._validation_transforms.is_empty() and b._validation_inverses.is_empty() and b._validation_bounds.is_empty() and b._validation_neighbors.is_empty()
+	return not b._validation_cache_active and b._validation_transforms.is_empty() and b._validation_inverses.is_empty() and b._validation_bounds.is_empty() and b._validation_neighbors.is_empty() and b._validation_columns.is_empty()
 
 func _neighbor_contract() -> void:
 	var b = _fixture(Blueprint.new())
@@ -95,6 +95,14 @@ func _neighbor_contract() -> void:
 		var actual: Array = b.structural_candidates_near(points[i])
 		checks["neighbor_%d_order_dedup_exact" % i] = actual == expected[i] and b.structural_candidates_near(points[i]) == expected[i]
 	checks["neighbor_cache_reuses_negative_grid_cell"] = b._validation_neighbors.has(Vector2i(-1, -1))
+	var column: Array = b._support_candidates_in_column(Vector3(-4, 0, -4))
+	checks["column_reused_across_height"] = is_same(column, b._support_candidates_in_column(Vector3(-4, 30, -4)))
+	checks["column_preserves_cardinal_root"] = not column.is_empty() and column.has(b.parts[0])
+	var rotated = b.add_part({"id":"rotated_column", "kind":"beam", "position":Vector3(0,2,0), "size":Vector3.ONE, "rotation":Vector3(0.2,0.3,0.4)})
+	b.resolve_physical_contracts()
+	checks["column_preserves_rotated_candidates"] = b._support_candidates_in_column(Vector3(0,50,0)).has(rotated)
+	b._cancel_physical_validation(false)
+	checks["nested_cancellation_clears_columns"] = b._validation_columns.is_empty()
 	var same_id = b.add_part({"id": "root", "position": Vector3(30, 2, 30), "rotation": Vector3(0.1, 0.2, 0.3), "size": Vector3(2, 3, 4)})
 	checks["geometry_keys_are_objects_not_ids"] = b.part_transform(same_id) != b.part_transform(b.parts[0]) and b.transformed_part_bounds(same_id) != b.transformed_part_bounds(b.parts[0])
 	b._end_validation_cache(owner)

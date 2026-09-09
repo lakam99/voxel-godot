@@ -204,7 +204,7 @@ func _fixture(kind: String, blueprint):
 	return blueprint
 
 func _cache_clean(blueprint) -> bool:
-	return not blueprint._validation_cache_active and blueprint._validation_transforms.is_empty() and blueprint._validation_inverses.is_empty() and blueprint._validation_bounds.is_empty() and blueprint._validation_neighbors.is_empty()
+	return not blueprint._validation_cache_active and blueprint._validation_transforms.is_empty() and blueprint._validation_inverses.is_empty() and blueprint._validation_bounds.is_empty() and blueprint._validation_neighbors.is_empty() and blueprint._validation_columns.is_empty()
 
 func _source_hashes() -> Dictionary:
 	var result: Dictionary = {}
