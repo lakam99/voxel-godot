@@ -333,6 +333,14 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 ## Runtime And Loading Rules
 
 - The main menu should defer expensive world loading until `New Game` or `Continue` is selected.
+- Prefer the repository's owned-process watchdog runners for every Godot test,
+  especially headed or long-running tests. A failed, timed-out, or visibly
+  broken run must be stopped promptly; do not leave launched processes running
+  after the result is known.
+- Process cleanup is part of test correctness. Record the functional result
+  separately from cleanup, terminate only the runner-owned process job, and
+  require authoritative zero-member evidence before calling the run terminal.
+  Never kill unrelated pre-existing Godot processes by name or PID ancestry.
 - If loading or exiting takes noticeable time, show a loading/progress state and yield work across frames where possible. A frozen window is a bug even if the eventual result is correct.
 - `startup_loading_completed` means the initial playable world is actually ready. For the tutorial town this includes drained required structure operations, a complete validated town manifest, required home/door records, registered NPC home assignments, authoritative terrain collision, and the initial navigation publication needed by those actors.
 - Do not enter playable tutorial state with partial town records and repair them later from dialogue, interaction, or NPC behavior code. Missing required generated records are a loading failure, not an NPC wait state.
@@ -351,6 +359,15 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - If performance changes touch visual or gameplay systems, run relevant playtests in addition to benchmarks. For tutorial-town, NPC, or navigation-affecting changes, use real visual/playtest runners and inspect screenshots/trace evidence rather than relying only on metadata.
 - Keep performance instrumentation useful and bounded. Add timers/counters for diagnosis, but remove or reduce noisy temporary probes once the spike source is understood.
 - Loading screens, async queues, and budgets must preserve deterministic generation. Do not fix freezes by reordering terrain/town/prop RNG unless the behavior change is intentional and verified.
+- For a multi-minute deterministic generator, first build the smallest pinned
+  replay or failure-only observation that can distinguish competing causes.
+  Make one falsifiable change, run its focused contract, then pay for one full
+  source run. Do not loop the full runner without new evidence or optimize a
+  subsystem that the current evidence has not implicated.
+- Failure instrumentation must be bounded, cancellation-aware, and incapable
+  of changing acceptance. Capture exact producer IDs/categories and source
+  revisions so later work starts at the owning decision rather than repeating
+  broad diagnostics.
 
 ## Key Systems
 
@@ -493,7 +510,9 @@ Use `scripts/story/`, `resources/story/`, `scenes/story/`, and `scenes/story_tes
 
 ## Git Workflow
 
-Current stable branch should be `master` unless the user asks for a feature branch.
+Do not assume the active branch or default branch name. Discover both from Git,
+and confirm that the current worktree is the one named by the task before
+editing or running tests.
 
 Before major work:
 
@@ -505,9 +524,9 @@ git status --short
 For focused feature branches, use clear names such as:
 
 ```text
-story-worldmarks
-visual-overhaul
-npc-pathing
+codex/story-worldmarks
+codex/visual-overhaul
+codex/npc-pathing
 ```
 
 The user has given standing approval to commit completed, verified chunks of
@@ -540,7 +559,8 @@ Visual baseline artifacts under `artifacts/baselines/` may be intentional tracke
 
 ## Verification Standard
 
-For gameplay changes, run `.\tools\run-playtest.mjs` unless the change is documentation-only or the user explicitly says not to.
+For gameplay changes, run `node tools/run-playtest.mjs` unless the change is
+documentation-only or the user explicitly says not to.
 
 For visual changes, run visual captures when feasible and inspect the output. If a visual issue is viewport-dependent, test at least one normal gameplay viewport and one dark/night case.
 
