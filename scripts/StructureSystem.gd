@@ -12,6 +12,7 @@ const GeneratedStructureRuntimeBindingsScript := preload("res://scripts/world/Ge
 const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
 const STREAMING_STRUCTURE_QUEUE_COMPACT_THRESHOLD := 256
+const CITADEL_PUBLICATION_BUDGET_USEC := 4000
 
 var main
 var loot
@@ -74,7 +75,7 @@ func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
     return result
 
 func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
-    return citadel_publication.advance(observer_bounds,allow_dispatch)
+    return citadel_publication.advance(observer_bounds,allow_dispatch,CITADEL_PUBLICATION_BUDGET_USEC)
 
 func reset() -> void:
     configure_citadel_terrain_admission()
