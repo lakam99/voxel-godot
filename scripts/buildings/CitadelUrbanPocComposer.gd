@@ -312,9 +312,13 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	if not add_bunting_lines(blueprint, front_z, keep_front_z, foundation_height, variation, urban_layout):
 		handoff["reason"] = "citadel_bunting_declaration_failed"
 		return null
-	var selected_tree_sites := select_open_paving_tree_sites(blueprint, seed, landscape_continuation)
+	var selection_status := {}
+	var selected_tree_sites := select_open_paving_tree_sites(blueprint, seed, landscape_continuation, selection_status)
 	if landscape_cancel.stopped:
 		handoff["reason"] = "cancelled"
+		return null
+	if selection_status.has("reason"):
+		handoff["reason"] = selection_status.reason
 		return null
 	if not selected_tree_sites.is_empty():
 		var tree_records := build_tree_placement_records(selected_tree_sites, seed, landscape_continuation)
@@ -760,18 +764,18 @@ static func add_seeded_room_life(blueprint, seed: int, variation: float) -> void
 		add_part(blueprint, "%s_lamp" % prefix, "decor", "candle_flame", light_position, Vector3(0.15, 0.25, 0.15), {"collision": false, "variation": variation, "semantic": "interior_practical_light", "roomId": room_id, "roomRole": role, "practicalLight": true, "lightEnergy": 1.38 + phase * 0.48, "lightRange": 4.4 + phase * 1.4})
 
 
-static func select_open_paving_tree_sites(blueprint, seed: int, continuation: Callable = Callable()) -> Array[Vector3]:
+static func select_open_paving_tree_sites(blueprint, seed: int, continuation: Callable = Callable(), selection_status: Dictionary = {}) -> Array[Vector3]:
 	if not _emit_compose_diagnostic(continuation, "landscape_tree_selection_started"): return []
+	var source_bytes := var_to_bytes(blueprint.snapshot())
+	var index = _tree_site_index(blueprint)
 	var candidates: Array[Dictionary] = []
-	for paving_part in blueprint.parts:
-		if not is_primary_tree_paving(paving_part):
-			continue
+	for paving_part: Dictionary in index.paving:
 		var half: Vector3 = paving_part.size * 0.5
 		for factor_x in [-0.78, -0.52, -0.26, 0.0, 0.26, 0.52, 0.78]:
 			for factor_z in [-0.78, -0.52, -0.26, 0.0, 0.26, 0.52, 0.78]:
 				if not _emit_compose_diagnostic(continuation, "landscape_tree_candidate"): return []
 				var position: Vector3 = paving_part.position + Vector3(factor_x * maxf(0.40, half.x - 1.10), half.y + 0.05, factor_z * maxf(0.40, half.z - 1.10))
-				if not tree_site_is_open(blueprint, position) or not tree_site_has_clear_paving_run(blueprint, position):
+				if not index.site_open(position) or not index.clear_run(position):
 					continue
 				var key := "%d:%s:%d,%d" % [seed, String(paving_part.id), int(round(factor_x * 100.0)), int(round(factor_z * 100.0))]
 				candidates.append({"position": position, "score": stable_unit(seed, "tree-open-paving:%s" % key), "id": key})
@@ -795,7 +799,26 @@ static func select_open_paving_tree_sites(blueprint, seed: int, continuation: Ca
 		if result.size() >= 4:
 			break
 	if not _emit_compose_diagnostic(continuation, "landscape_tree_selection_completed"): return []
+	if source_bytes!=var_to_bytes(blueprint.snapshot()):
+		selection_status["reason"]="tree_selection_source_changed"
+		return []
 	return result
+
+static func _tree_site_index(blueprint):
+	var index = preload("res://scripts/buildings/CitadelTreeSiteIndex.gd").new()
+	for part in blueprint.parts:
+		if part==null: continue
+		if is_primary_tree_paving(part): index.paving.append({"id":String(part.id),"position":part.position,"size":part.size})
+		var bounds := AABB(part.position-part.size*0.5,part.size)
+		if _tree_site_blocker(part): index.add_bounds(index.sites,bounds)
+		if _tree_sample_blocker(part): index.add_bounds(index.samples,bounds)
+	return index
+
+static func _tree_site_blocker(part) -> bool:
+	return part!=null and String(part.material_id) not in ["cobblestone","worn_cobble"] and bool(part.recipe.get("visual",true)) and not part.size.y<0.20
+
+static func _tree_sample_blocker(part) -> bool:
+	return part!=null and String(part.kind) not in ["foundation","floor","ground_patch","ramp","stair_tread"] and bool(part.recipe.get("visual",true))
 
 
 static func is_primary_tree_paving(part) -> bool:
@@ -807,9 +830,7 @@ static func is_primary_tree_paving(part) -> bool:
 static func tree_site_is_open(blueprint, position: Vector3) -> bool:
 	var site_bounds := AABB(position - Vector3(1.90, 0.05, 1.90), Vector3(3.80, 8.0, 3.80))
 	for part in blueprint.parts:
-		if part == null or String(part.material_id) in ["cobblestone", "worn_cobble"] or not bool(part.recipe.get("visual", true)):
-			continue
-		if part.size.y < 0.20:
+		if not _tree_site_blocker(part):
 			continue
 		if AABB(part.position - part.size * 0.5, part.size).intersects(site_bounds):
 			return false
@@ -841,7 +862,7 @@ static func primary_paving_surface_at(blueprint, point: Vector3) -> Vector3:
 static func tree_paving_sample_is_open(blueprint, point: Vector3) -> bool:
 	var sample_bounds := AABB(point - Vector3(0.72, 0.02, 0.72), Vector3(1.44, 2.40, 1.44))
 	for part in blueprint.parts:
-		if part == null or String(part.kind) in ["foundation", "floor", "ground_patch", "ramp", "stair_tread"] or not bool(part.recipe.get("visual", true)):
+		if not _tree_sample_blocker(part):
 			continue
 		if AABB(part.position - part.size * 0.5, part.size).intersects(sample_bounds):
 			return false
