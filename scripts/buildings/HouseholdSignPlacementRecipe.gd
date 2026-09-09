@@ -21,7 +21,9 @@ static func propose(source, arm, board, door, declaration_keys: Array, protected
 	if source == null or source.parts.size() > MAX_PARTS or declaration_keys.is_empty() or declaration_keys.size() > Mount.MAX_FACADES or protected.size() > Mount.MAX_PROTECTED:
 		return _fail("missing_or_unbounded_source")
 	for p in [arm, board, door]:
-		if not p is Part or not source.has_finite_positive_bounds(p) or p.rotation != Vector3.ZERO: return _fail("invalid_source_geometry")
+		if not p is Part or not source.has_finite_positive_bounds(p): return _fail("invalid_source_geometry")
+	if arm.rotation != Vector3.ZERO or board.rotation != Vector3.ZERO or door.rotation.x != 0.0 or door.rotation.z != 0.0 or not (door.rotation.y == 0.0 or is_equal_approx(absf(door.rotation.y), PI * 0.5)):
+		return _fail("invalid_source_geometry")
 	if arm.kind != "beam" or board.kind != "sign" or arm.semantic != "citadel_household_sign" or board.semantic != arm.semantic or arm.collision_enabled or board.collision_enabled or door.semantic != "citadel_urban_door" or not door.id.ends_with("_door"):
 		return _fail("invalid_sign_or_house")
 	var prefix: String = door.id.trim_suffix("_door")

@@ -16,6 +16,7 @@ const MAX_RAISED_ROUTE_SURFACE_SEAM := 0.42
 const MAX_RAISED_ROUTE_HANDOFF_HEIGHT_DELTA := 0.08
 const MAX_RAISED_ROUTE_HANDOFF_GAP := 0.01
 const MIN_RAISED_ROUTE_HANDOFF_WIDTH := 1.24
+const STAIR_LANDING_DEPTH := 1.04
 const RAISED_ROUTE_HANDOFF_AGENT_MARGIN := 0.30
 
 
@@ -85,9 +86,9 @@ static func build_keep_poc(seed: int, raw_context: Dictionary = {}):
 	var room_records: Array = [
 		{"id": "castle_keep", "role": "great_hall", "bounds": AABB(Vector3(-keep_width * 0.5, foundation_height, -keep_depth * 0.5), Vector3(keep_width, keep_height, keep_depth)), "wallMountInset": 0.22, "accesses": []}
 	]
-	append_keep_storey_room_records(room_records, Vector3.ZERO, keep_width, keep_depth, foundation_height, floor_height, enclosed_storey_count)
+	if not add_keep(blueprint, Vector3.ZERO, keep_width, keep_depth, keep_height, storey_count, floor_height, foundation_height, variation, fortification_material, palace_grammar): return null
+	append_keep_storey_room_records(room_records, Vector3.ZERO, keep_width, keep_depth, foundation_height, floor_height, enclosed_storey_count, blueprint.parts)
 	blueprint.set_room_records(room_records)
-	add_keep(blueprint, Vector3.ZERO, keep_width, keep_depth, keep_height, storey_count, floor_height, foundation_height, variation, fortification_material, palace_grammar)
 	return blueprint
 
 
@@ -146,7 +147,9 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 	# pavilions from becoming invisible-to-planning geometry as their seeded
 	# proportions change.
 	if not _continue_compound(continuation, diagnostics, "compound_keep_started"): return null
-	add_keep(blueprint, keep_center, keep_width, keep_depth, keep_height, keep_storey_count, keep_floor_height, keep_foundation_height, variation, fortification_material, palace_grammar)
+	if not add_keep(blueprint, keep_center, keep_width, keep_depth, keep_height, keep_storey_count, keep_floor_height, keep_foundation_height, variation, fortification_material, palace_grammar):
+		diagnostics["failureReason"] = "keep_stair_circulation_unavailable"
+		return null
 	if not _continue_compound(continuation, diagnostics, "compound_towers_started"): return null
 	for index in range(tower_specs.size()):
 		if not _continue_compound(continuation, diagnostics, "compound_tower"): return null
@@ -199,7 +202,7 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 		{"id": "castle_courtyard", "role": "courtyard", "bounds": AABB(Vector3(-courtyard_width * 0.5, foundation_height, -courtyard_depth * 0.5), Vector3(courtyard_width, wall_height, courtyard_depth)), "wallMountInset": 0.22, "accesses": []},
 		{"id": "castle_keep", "role": "great_hall", "bounds": AABB(Vector3(keep_center.x - keep_width * 0.5, keep_foundation_height, keep_center.z - keep_depth * 0.5), Vector3(keep_width, keep_height, keep_depth)), "wallMountInset": 0.22, "accesses": []}
 	]
-	append_keep_storey_room_records(room_records, keep_center, keep_width, keep_depth, keep_foundation_height, keep_floor_height, enclosed_keep_storey_count)
+	append_keep_storey_room_records(room_records, keep_center, keep_width, keep_depth, keep_foundation_height, keep_floor_height, enclosed_keep_storey_count, blueprint.parts)
 	append_declared_interior_program_rooms(room_records, blueprint.parts)
 	for building_value in courtyard_buildings:
 		if not _continue_compound(continuation, diagnostics, "compound_residence_room"): return null
@@ -262,13 +265,13 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 	return blueprint
 
 
-static func append_keep_storey_room_records(records: Array, center: Vector3, width: float, depth: float, foundation_height: float, floor_height: float, storey_count: int) -> void:
+static func append_keep_storey_room_records(records: Array, center: Vector3, width: float, depth: float, foundation_height: float, floor_height: float, storey_count: int, parts: Array) -> void:
 	# These are ordinary room records for the occupied keep levels.  The shared
 	# furnishing/layout authority can now see the same vertical circulation that
 	# the construction builder publishes below instead of treating the keep as a
 	# single impossible room spanning every floor.
 	var roles: Array[String] = ["great_hall", "guard_chamber", "armory", "archive", "private_chamber", "watch_chamber", "roof_watch", "roof_watch"]
-	var stairwell := keep_stairwell_layout(center, width, depth)
+	var stairwell := keep_stairwell_layout(center, width, depth, parts)
 	var stair_center: Vector3 = stairwell.get("center", center) as Vector3
 	var stair_width := float(stairwell.get("width", 3.20))
 	var stair_depth := float(stairwell.get("depth", 5.00))
@@ -306,7 +309,7 @@ static func append_declared_interior_program_rooms(records: Array, parts: Array)
 		records.append(room.duplicate(true))
 
 
-static func keep_stairwell_layout(center: Vector3, width: float, depth: float) -> Dictionary:
+static func keep_stairwell_layout(center: Vector3, width: float, depth: float, parts: Array) -> Dictionary:
 	# The stairwell sits in the rear-right quarter of the keep.  It is wide enough
 	# for a true two-flight stair, remains inside the structural walls, and leaves
 	# the entry axis and great hall clear for normal play.
@@ -314,8 +317,24 @@ static func keep_stairwell_layout(center: Vector3, width: float, depth: float) -
 	var stair_depth := clampf(depth * 0.38, 4.80, 6.40)
 	var interior_right := center.x + width * 0.5 - 0.76
 	var interior_back := center.z + depth * 0.5 - 0.76
+	var interior_front := center.z - depth * 0.5 + 0.76
+	var stair_x := interior_right - stair_width * 0.5
+	# The existing palace and rear wings own their geometry. Fit circulation
+	# between their actual collision envelopes, including roof overhangs, before
+	# producing the shared floor openings and room access reservations.
+	for part in parts:
+		if not part.collision_enabled: continue
+		var front_wing: bool = part.id.begins_with("castle_keep_palace_wing")
+		var rear_wing: bool = part.id.begins_with("castle_keep_rear_cross_wing") or part.id.begins_with("castle_keep_rear_service")
+		if not front_wing and not rear_wing: continue
+		var bounds: AABB = Transform3D(Basis.from_euler(part.rotation),part.position) * AABB(-part.size*0.5,part.size)
+		if bounds.end.x < stair_x-stair_width*0.5 or bounds.position.x > stair_x+stair_width*0.5: continue
+		if front_wing: interior_front=maxf(interior_front,bounds.end.z+0.60)
+		if rear_wing: interior_back=minf(interior_back,bounds.position.z-0.60)
+	stair_depth=minf(stair_depth,interior_back-interior_front)
 	return {
-		"center": Vector3(interior_right - stair_width * 0.5, 0.0, interior_back - stair_depth * 0.5),
+		"ready": stair_depth >= 2.14,
+		"center": Vector3(stair_x, 0.0, interior_back - stair_depth * 0.5),
 		"width": stair_width,
 		"depth": stair_depth
 	}
@@ -2996,7 +3015,7 @@ static func add_gatehouse_entry_steps(blueprint, opening_width: float, passage_f
 		add_part(blueprint, "castle_gatehouse_entry_step_%02d" % (step_index + 1), "foundation", "stone_foundation", Vector3(0.0, step_height * 0.5, step_z), Vector3(opening_width + 0.72, step_height, tread_depth + 0.03), {"variation": variation, "semantic": "castle_gatehouse_entry_step"})
 
 
-static func add_keep(blueprint, center: Vector3, width: float, depth: float, height: float, storey_count: int, floor_height: float, foundation_height: float, variation: float, masonry_material: String, palace_grammar: Dictionary = {}) -> void:
+static func add_keep(blueprint, center: Vector3, width: float, depth: float, height: float, storey_count: int, floor_height: float, foundation_height: float, variation: float, masonry_material: String, palace_grammar: Dictionary = {}) -> bool:
 	var palace_material := String(palace_grammar.get("palaceMaterial", "painted_brick_cream"))
 	var enclosed_storey_count := clampi(int(palace_grammar.get("hallStoreys", 4)), 1, storey_count)
 	var hall_height := minf(height, floor_height * float(enclosed_storey_count))
@@ -3029,16 +3048,6 @@ static func add_keep(blueprint, center: Vector3, width: float, depth: float, hei
 		{"id": "right", "position": Vector3(center.x + width * 0.5, wall_y, center.z), "size": Vector3(0.72, hall_height, depth)}
 	]:
 		add_part(blueprint, "castle_keep_%s" % String(spec.get("id", "wall")), "wall", palace_material, spec.get("position", Vector3.ZERO) as Vector3, spec.get("size", Vector3.ONE) as Vector3, {"variation": variation, "semantic": "castle_keep_wall"})
-	var stairwell := keep_stairwell_layout(center, width, depth)
-	var stair_center: Vector3 = stairwell.get("center", center) as Vector3
-	var stair_width := float(stairwell.get("width", 3.20))
-	var stair_depth := float(stairwell.get("depth", 5.00))
-	# Every occupied keep level receives an actual walkable floor with a matching
-	# stairwell void.  A single full floor plane would cap the stairs; a missing
-	# floor would make the upper silhouette a non-playable shell.
-	for storey_index in range(1, enclosed_storey_count):
-		add_keep_storey_floor_with_stairwell(blueprint, storey_index, center, width, depth, stair_center, stair_width, stair_depth, foundation_height, floor_height, variation)
-	add_switchback_stair_flights(blueprint, "castle_keep_stair", stair_center, stair_width, stair_depth, foundation_height + 0.20, floor_height, maxi(1, enclosed_storey_count - 1), "stone_foundation", variation, "castle_keep_stair")
 	var lower_roof_y := foundation_height + hall_height
 	var hall_roof_rise := maxf(3.8, width * float(palace_grammar.get("hallRoofRiseRatio", 0.20)))
 	# The civic core is an actual continuous structural volume around the entry,
@@ -3059,7 +3068,15 @@ static func add_keep(blueprint, center: Vector3, width: float, depth: float, hei
 	add_keep_palace_entry_court(blueprint, center, width, depth, foundation_height, variation, float(civic_entrance.get("portalWidth", door_width + 2.4)), door_width, float(entry_approach["portalFrontZ"]), palace_grammar)
 	add_keep_palace_forecourt_galleries(blueprint, center, width, depth, foundation_height, variation, palace_material, palace_grammar)
 	add_keep_palace_rear_court(blueprint, center, width, depth, hall_height, foundation_height, variation, palace_material, palace_grammar)
+	var stairwell := keep_stairwell_layout(center, width, depth, blueprint.parts)
+	if not stairwell.ready:
+		return false
+	var stair_center: Vector3 = stairwell.center
+	for storey_index in range(1, enclosed_storey_count):
+		add_keep_storey_floor_with_stairwell(blueprint, storey_index, center, width, depth, stair_center, stairwell.width, stairwell.depth, foundation_height, floor_height, variation)
+	add_switchback_stair_flights(blueprint, "castle_keep_stair", stair_center, stairwell.width, stairwell.depth, foundation_height + 0.20, floor_height, maxi(1, enclosed_storey_count - 1), "stone_foundation", variation, "castle_keep_stair")
 	add_part(blueprint, "castle_keep_banner", "sign", "painted_decor", Vector3(center.x, foundation_height + height * 0.64, front_z - 0.42), Vector3(1.46, 2.60, 0.10), {"variation": variation, "collision": false, "semantic": "castle_banner"})
+	return true
 
 
 static func add_keep_civic_core(blueprint, center: Vector3, width: float, depth: float, hall_height: float, foundation_height: float, door_width: float, variation: float, masonry_material: String, palace_grammar: Dictionary) -> Dictionary:
@@ -3581,10 +3598,10 @@ static func add_keep_storey_floor_with_stairwell(blueprint, storey_index: int, c
 	var max_z := center.z + depth * 0.5 - inset
 	# The stairwell and its trim need an actual framing margin on every side;
 	# without it a rear-edge well emits visible supports beyond the keep shell.
-	var hole_min_x := clampf(stair_center.x - stair_width * 0.5 - 0.06, min_x + 0.28, max_x - 1.10)
-	var hole_max_x := clampf(stair_center.x + stair_width * 0.5 + 0.06, hole_min_x + 0.82, max_x - 0.28)
-	var hole_min_z := clampf(stair_center.z - stair_depth * 0.5 - 0.06, min_z + 0.28, max_z - 1.10)
-	var hole_max_z := clampf(stair_center.z + stair_depth * 0.5 + 0.06, hole_min_z + 0.82, max_z - 0.28)
+	var hole_min_x := clampf(stair_center.x - stair_width * 0.5 - 0.12, min_x + 0.28, max_x - 1.10)
+	var hole_max_x := clampf(stair_center.x + stair_width * 0.5 + 0.12, hole_min_x + 0.82, max_x - 0.28)
+	var hole_min_z := clampf(stair_center.z - stair_depth * 0.5 - 0.12, min_z + 0.28, max_z - 1.10)
+	var hole_max_z := clampf(stair_center.z + stair_depth * 0.5 + 0.12, hole_min_z + 0.82, max_z - 0.28)
 	var floor_y := foundation_height + floor_height * float(storey_index) + 0.10
 	var prefix := "castle_keep_storey_%02d" % storey_index
 	var left_ledger_id := "%s_left_shell_ledger" % prefix
@@ -3733,10 +3750,9 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 		var base_pier_center := Vector3(center.x, 0.0, center.z - run * 0.5)
 		var landing_pier_center := Vector3(center.x, 0.0, center.z + run * 0.5)
 		var exit_pier_center := Vector3(center.x, 0.0, center.z - run * 0.5)
-		add_stair_bearing_pier(blueprint, base_pier_id, base_pier_center, level_base_y - 0.27, span_width - 0.18, 0.58, variation, semantic)
-		add_stair_bearing_pier(blueprint, landing_pier_id, landing_pier_center, level_base_y + half_rise - 0.27, span_width - 0.18, 0.58, variation, semantic)
-		add_stair_bearing_pier(blueprint, exit_pier_id, exit_pier_center, level_base_y + rise_per_level - 0.27, span_width - 0.18, 0.58, variation, semantic)
-		add_part(blueprint, base_underframe_id, "beam", material, Vector3(center.x, level_base_y - 0.19, center.z - run * 0.5), Vector3(span_width - 0.18, 0.18, 0.58), {"variation": variation - 0.022, "semantic": "%s_base_underframe" % semantic, "physicalAssemblyRole": "landing_underframe", "physicalRequiredSeatPartIds": [base_pier_id], "physicalRequiredSeatFacts": [{"seatId": base_pier_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -0.09, 0.0), "localPatchHalfExtents": Vector2((span_width - 0.18) * 0.35, 0.10), "seatFace": "max_y"}]})
+		add_stair_landing_frame(blueprint, base_underframe_id, base_pier_id, base_pier_center, level_base_y, span_width - 0.18, material, variation, semantic)
+		add_stair_landing_frame(blueprint, landing_underframe_id, landing_pier_id, landing_pier_center, level_base_y + half_rise, span_width - 0.18, material, variation, semantic)
+		add_stair_landing_frame(blueprint, exit_underframe_id, exit_pier_id, exit_pier_center, level_base_y + rise_per_level, span_width - 0.18, material, variation, semantic)
 		var up_assembly_id := "%s_up_%02d" % [prefix, level]
 		var up_lower_shoe_center := Vector3(left_x, level_base_y - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5)
 		var up_upper_shoe_center := Vector3(left_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5)
@@ -3748,8 +3764,7 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 			add_part(blueprint, "%s_up_tread_%02d_%02d" % [prefix, level, tread_index], "stair_tread", material, Vector3(left_x, up_y, up_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "%s_tread" % semantic, "physicalIntent": "visual_detail"})
 		var landing_y := level_base_y + half_rise
 		var landing_center := Vector3(center.x, landing_y, center.z + run * 0.5)
-		add_part(blueprint, "%s_landing_%02d" % [prefix, level], "floor", material, landing_center, Vector3(span_width - 0.18, 0.20, 0.58), {"variation": variation, "semantic": "%s_landing" % semantic})
-		add_part(blueprint, landing_underframe_id, "beam", material, Vector3(landing_center.x, landing_y - 0.19, landing_center.z), Vector3(span_width - 0.18, 0.18, 0.58), {"variation": variation - 0.022, "semantic": "%s_landing_underframe" % semantic, "physicalAssemblyRole": "landing_underframe", "physicalRequiredSeatPartIds": [landing_pier_id], "physicalRequiredSeatFacts": [{"seatId": landing_pier_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -0.09, 0.0), "localPatchHalfExtents": Vector2((span_width - 0.18) * 0.35, 0.10), "seatFace": "max_y"}]})
+		add_part(blueprint, "%s_landing_%02d" % [prefix, level], "floor", material, landing_center, Vector3(span_width - 0.18, 0.20, STAIR_LANDING_DEPTH), {"variation": variation, "semantic": "%s_landing" % semantic})
 		var return_assembly_id := "%s_return_%02d" % [prefix, level]
 		var return_lower_shoe_center := Vector3(right_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5)
 		var return_upper_shoe_center := Vector3(right_x, level_base_y + rise_per_level - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5)
@@ -3761,17 +3776,26 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 			add_part(blueprint, "%s_return_tread_%02d_%02d" % [prefix, level, tread_index], "stair_tread", material, Vector3(right_x, return_y, return_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "%s_tread" % semantic, "physicalIntent": "visual_detail"})
 		var exit_y := level_base_y + rise_per_level
 		var exit_center := Vector3(center.x, exit_y, center.z - run * 0.5)
-		add_part(blueprint, "%s_exit_%02d" % [prefix, level], "floor", material, exit_center, Vector3(span_width - 0.18, 0.20, 0.58), {"variation": variation, "semantic": "%s_exit" % semantic})
-		add_part(blueprint, exit_underframe_id, "beam", material, Vector3(exit_center.x, exit_y - 0.19, exit_center.z), Vector3(span_width - 0.18, 0.18, 0.58), {"variation": variation - 0.022, "semantic": "%s_exit_underframe" % semantic, "physicalAssemblyRole": "landing_underframe", "physicalRequiredSeatPartIds": [exit_pier_id], "physicalRequiredSeatFacts": [{"seatId": exit_pier_id, "loadDirection": "world_down", "localPatchCenter": Vector3(0.0, -0.09, 0.0), "localPatchHalfExtents": Vector2((span_width - 0.18) * 0.35, 0.10), "seatFace": "max_y"}]})
+		add_part(blueprint, "%s_exit_%02d" % [prefix, level], "floor", material, exit_center, Vector3(span_width - 0.18, 0.20, STAIR_LANDING_DEPTH), {"variation": variation, "semantic": "%s_exit" % semantic})
 		add_stair_carriage_shoe(blueprint, up_lower_shoe_id, up_lower_shoe_center, ramp_width, shoe_thickness, base_underframe_id, up_assembly_id, material, variation, semantic)
 		add_stair_carriage_shoe(blueprint, up_upper_shoe_id, up_upper_shoe_center, ramp_width, shoe_thickness, landing_underframe_id, up_assembly_id, material, variation, semantic)
 		add_stair_carriage_shoe(blueprint, return_lower_shoe_id, return_lower_shoe_center, ramp_width, shoe_thickness, landing_underframe_id, return_assembly_id, material, variation, semantic)
 		add_stair_carriage_shoe(blueprint, return_upper_shoe_id, return_upper_shoe_center, ramp_width, shoe_thickness, exit_underframe_id, return_assembly_id, material, variation, semantic)
 
 
-static func add_stair_bearing_pier(blueprint, part_id: String, center: Vector3, top_y: float, width: float, depth: float, variation: float, semantic: String) -> void:
-	var height := maxf(0.20, top_y)
-	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, height * 0.5, center.z), Vector3(width, height, depth), {"variation": variation - 0.028, "semantic": "%s_stair_bearing_pier" % semantic, "physicalAssemblyRole": "stair_bearing_pier"})
+static func add_stair_landing_frame(blueprint, frame_id: String, pier_prefix: String, center: Vector3, deck_y: float, width: float, material: String, variation: float, semantic: String) -> void:
+	# Edge posts carry the transverse frame without filling the lower-level
+	# landing with a full-width pier. Both real seats are declared explicitly.
+	var height := maxf(0.20, deck_y - 0.28)
+	var seats: Array[String] = []
+	var facts: Array[Dictionary] = []
+	for side in [-1.0, 1.0]:
+		var offset: float = side * width * 0.5
+		var seat_id := "%s_%d" % [pier_prefix, int(side)]
+		seats.append(seat_id)
+		add_part(blueprint, seat_id, "foundation", "stone_foundation", Vector3(center.x + offset, height * 0.5, center.z), Vector3(0.24, height, 0.30), {"variation": variation - 0.028, "semantic": "%s_stair_bearing_pier" % semantic, "physicalAssemblyRole": "stair_bearing_pier"})
+		facts.append({"seatId": seat_id, "loadDirection": "world_down", "localPatchCenter": Vector3(offset, -0.09, 0.0), "localPatchHalfExtents": Vector2(0.06, 0.08), "seatFace": "max_y"})
+	add_part(blueprint, frame_id, "beam", material, Vector3(center.x, deck_y - 0.19, center.z), Vector3(width + 0.24, 0.18, STAIR_LANDING_DEPTH), {"variation": variation - 0.022, "semantic": "%s_underframe" % semantic, "physicalAssemblyRole": "two_post_landing_underframe", "physicalRequiredSeatPartIds": seats, "physicalRequiredSeatFacts": facts})
 
 
 static func add_stair_carriage_shoe(blueprint, part_id: String, center: Vector3, width: float, thickness: float, underframe_id: String, assembly_id: String, material: String, variation: float, semantic: String) -> void:

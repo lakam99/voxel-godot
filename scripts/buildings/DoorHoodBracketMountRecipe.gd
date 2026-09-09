@@ -16,7 +16,7 @@ static func prepare(blueprint, bracket, door, hood, facade_parts: Array) -> Dict
 	var prefix: String = door.id.trim_suffix("_door")
 	if prefix.is_empty() or not bracket.id.begins_with(prefix + "_door_bracket_") or hood.id != prefix + "_door_hood" or bracket.kind != "beam" or bracket.semantic != "citadel_urban_door_joinery" or hood.semantic != "citadel_urban_door_hood":
 		return {"ready": false, "reason": "foreign_source_membership"}
-	if bracket.collision_enabled or bracket.rotation.x != 0.0 or bracket.rotation.y != 0.0 or door.rotation != Vector3.ZERO:
+	if bracket.collision_enabled or bracket.rotation.x != 0.0 or bracket.rotation.y != 0.0 or door.rotation.x != 0.0 or door.rotation.z != 0.0 or not (door.rotation.y == 0.0 or is_equal_approx(absf(door.rotation.y), PI * 0.5)):
 		return {"ready": false, "reason": "unsupported_orientation_or_collision"}
 	var basis := Basis.from_euler(bracket.rotation)
 	var side := signf(-bracket.rotation.z)
@@ -51,7 +51,7 @@ static func prepare(blueprint, bracket, door, hood, facade_parts: Array) -> Dict
 		if rear.y <= bounds.position.y or rear.y >= bounds.end.y: continue
 		var inner_edge: float = bounds.position.z if along > 0.0 else bounds.end.z
 		var separation: float = along * (inner_edge - door.position.z)
-		if separation < door.size.z * 0.5: continue
+		if separation < blueprint.transformed_part_bounds(door).size.z * 0.5: continue
 		if separation < distance:
 			distance = separation
 			selected = panel

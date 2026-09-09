@@ -127,6 +127,7 @@ func _validate_physical_integrity(continuation: Callable) -> Dictionary:
 				var seat_facts_match_declarations := fact_seat_ids.size() == seat_facts.size() and fact_seat_ids.size() == required_seats.size() and required_seats.all(func(seat_id) -> bool: return fact_seat_ids.has(String(seat_id)))
 				var assembly_role := String(part.recipe.get("physicalAssemblyRole", ""))
 				var required_gravity_patch_count := 1 if assembly_role in ["stair_carriage_bearing_block", "landing_underframe", "roof_wall_plate", "roof_king_post"] else 0
+				if assembly_role == "two_post_landing_underframe": required_gravity_patch_count = 2
 				var has_required_gravity_bearing_patches := required_gravity_patch_count == 0 or seat_facts.size() == required_gravity_patch_count and seat_facts.all(func(seat_fact) -> bool:
 					return String((seat_fact as Dictionary).get("loadDirection", "")) == "world_down"
 				)

@@ -212,6 +212,8 @@ func _run() -> void:
 	await _frame()
 	evidence.sceneAudit = await _audit_scene()
 	checks.scene_audit = evidence.sceneAudit.get("passed",false)
+	evidence.structuralClearance = _audit_stair_clearance()
+	checks.structural_clearance = evidence.structuralClearance.passed
 	checks.camera_facing_candidate = await _look_toward_candidate()
 	evidence.visibility = _inspect_visibility()
 	if not checks.camera_facing_candidate:
@@ -246,6 +248,12 @@ func _capture_inspection_views() -> Dictionary:
 		var direction := Vector3(sin(float(side)*PI*0.5+PI*0.25),0.0,cos(float(side)*PI*0.5+PI*0.25))
 		views.append({"label":"overview_%d"%side,"position":center+direction*radius+Vector3.UP*bounds.size.y,"target":center})
 	views.append({"label":"courtyard_overview","position":center+Vector3(0,bounds.size.y*1.6,bounds.size.z*0.12),"target":center})
+	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
+		var pose: Transform3D=sample.transform
+		var local_view := Vector3(0,sample.size.y*0.5+1.6,-1.0)
+		var local_target := Vector3(0,sample.size.y*0.5+0.3,1.5)
+		if sample.kind=="door": local_view=Vector3(0,0.3,-2.0); local_target=Vector3.ZERO
+		views.append({"label":sample.id,"position":pose*local_view,"target":pose*local_target})
 	for sample: Dictionary in evidence.sceneAudit.furnitureSamples.slice(0,2):
 		var body := main.get_node_or_null(NodePath(sample.path)) as Node3D
 		if body==null: return {"passed":false,"reason":"furniture_sample_disappeared"}
@@ -560,6 +568,13 @@ func _audit_scene() -> Dictionary:
 	result.visibleGeometry=0
 	result.visualSamples=[]
 	result.furnitureSamples=[]
+	result.structureSamples=[]
+	result.collisionMismatches=[]
+	var source_parts := {}
+	var seen_collisions := {}
+	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+	for record: Dictionary in accepted_source.get("blueprint",{}).get("parts",[]):
+		if record.get("collision",false): source_parts[record.id]=record
 	var have_bounds := false
 	result.rootPosition = site.global_position
 	result.sourceOrigin = expected_origin
@@ -589,6 +604,17 @@ func _audit_scene() -> Dictionary:
 					result.visualSamples.append({"path":str(site.get_path_to(geometry)),"visible":geometry.is_visible_in_tree(),"layers":geometry.layers,"rangeBegin":geometry.visibility_range_begin,"rangeEnd":geometry.visibility_range_end,"bounds":bounds})
 			if node is CollisionShape3D and node.shape != null and not node.disabled:
 				result.collisionShapes += 1
+				if node.get_meta("building_collision_role","")=="blocking_part" and node.get_parent() is StaticBody3D:
+					var part_id := String(node.get_meta("building_part_id",""))
+					var record: Dictionary=source_parts.get(part_id,{})
+					if record.is_empty() or seen_collisions.has(part_id): result.collisionMismatches.append(part_id)
+					else:
+						var expected: Transform3D=site.global_transform*Transform3D(Basis.from_euler(record.rotation),record.position)
+						if not node.shape is BoxShape3D or node.shape.size!=record.size or not node.global_transform.is_equal_approx(expected): result.collisionMismatches.append(part_id)
+						seen_collisions[part_id]=true
+						var semantic := String(record.get("semantic",""))
+						if semantic in ["castle_keep_stair_exit","castle_keep_stair_landing","castle_gatehouse_wall_stair_exit","castle_gatehouse_wall_stair_landing","citadel_upper_lane"] or part_id in ["urban_row_00_left_door","urban_row_00_right_door","urban_row_03_left_door","urban_row_03_right_door"]:
+							result.structureSamples.append({"id":part_id,"kind":record.kind,"semantic":semantic,"transform":node.global_transform,"size":record.size})
 				if result.physicsProbes.size()<8 and node.get_parent() is StaticBody3D:
 					var query := PhysicsShapeQueryParameters3D.new()
 					query.shape = node.shape; query.transform = node.global_transform
@@ -620,8 +646,37 @@ func _audit_scene() -> Dictionary:
 	result.ownersAvailable = main.structure_system.citadel_runtime_bindings.available() and _tree_owner_current() and (result.trees==0 or accepted_owners.has("trees"))
 	result.sourceStillMatches = _source_summary().get("binding",{})==source_binding and service.scene_state(region).get("binding",{})==source_binding and service.scene_state(region).status=="scene_ready"
 	result.capsule = Clearance.inspect(player)
+	result.sourceCollisionCount=source_parts.size()
+	result.publishedSourceCollisionCount=seen_collisions.size()
 	result.passed = stack.is_empty() and result.rootMatchesProfile and result.rootVisible and result.visibleGeometry>0 and have_bounds and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
+	result.passed = result.passed and result.collisionMismatches.is_empty() and source_parts.size()==seen_collisions.size() and not source_parts.is_empty()
 	return result
+
+func _audit_stair_clearance() -> Dictionary:
+	var observations := []
+	var capsule := CapsuleShape3D.new()
+	capsule.radius=0.42; capsule.height=1.72
+	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
+		if not String(sample.semantic).begins_with("castle_"): continue
+		var pose: Transform3D=sample.transform
+		var lateral: float=(float(sample.size.x)+0.18)*0.20
+		for offset: float in [-lateral,0.0,lateral]:
+			var expected: Vector3=pose*Vector3(offset,sample.size.y*0.5,0)
+			var space: PhysicsDirectSpaceState3D = main.get_world_3d().direct_space_state
+			var support := space.intersect_ray(PhysicsRayQueryParameters3D.create(expected+Vector3.UP*0.24,expected-Vector3.UP*0.24,player.collision_mask,[player.get_rid()]))
+			var blockers := []
+			if support.is_empty(): blockers.append("missing_walkable_support")
+			else:
+				var query := PhysicsShapeQueryParameters3D.new()
+				query.shape=capsule; query.collision_mask=player.collision_mask; query.exclude=[player.get_rid()]
+				var slope_lift: float=capsule.radius*(1.0/maxf(support.normal.y,0.01)-1.0)
+				query.transform=Transform3D(Basis.IDENTITY,support.position+Vector3.UP*(capsule.height*0.5+slope_lift+0.02))
+				for hit: Dictionary in space.intersect_shape(query,32):
+					var collider: CollisionObject3D=hit.collider
+					var owner: Object=collider.shape_owner_get_owner(collider.shape_find_owner(hit.shape))
+					blockers.append(String(owner.get_meta("building_part_id",str(collider.get_path()))) if owner!=null else str(collider.get_path()))
+			observations.append({"id":sample.id,"offset":offset,"expected":expected,"support":support.get("position"),"blockers":blockers,"passed":blockers.is_empty()})
+	return {"passed":not observations.is_empty() and observations.all(func(row):return row.passed),"observations":observations,"scope":"Actual Main scene physics queries with player-sized capsule; no traversal or interaction claim."}
 
 func _look_toward_candidate() -> bool:
 	# Camera adjustment uses the ordinary viewport mouse-look consumer. No camera

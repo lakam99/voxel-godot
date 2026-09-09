@@ -5,7 +5,7 @@ extends RefCounted
 const Bearing = preload("res://scripts/buildings/ConstructionBearingDimensions.gd")
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Door = preload("res://scripts/buildings/BuildingDoorGeometry.gd")
-const DOOR_SIZE := Vector3(0.14, 2.5, 1.25)
+const DOOR_SIZE := Vector3(1.25, 2.5, 0.14)
 const DOOR_WIDTH := 1.48
 const ACCESS_WIDTH := 1.86
 const WINDOW_WIDTH := 1.16
@@ -25,7 +25,7 @@ static func protected_half_span(wall_height: float = 6.2) -> float:
 	var sill_bottom := sill_top - Bearing.LOWER_BEARING_HEIGHT
 	# The existing publisher owns frame and swing geometry. Its frame is wider
 	# than room access; neither can be treated as the other's clearance proxy.
-	var swept := Door.ordinary_sweep_bounds(DOOR_SIZE, Transform3D(Basis.IDENTITY, Vector3(0.0,1.25,0.0)))
+	var swept := Door.ordinary_sweep_bounds(DOOR_SIZE, Transform3D(Basis.from_euler(Vector3(0.0, -PI * 0.5, 0.0)), Vector3(0.0,1.25,0.0)))
 	if swept.is_empty(): return INF
 	for primitive: Dictionary in swept:
 		var bounds: AABB = primitive.bounds

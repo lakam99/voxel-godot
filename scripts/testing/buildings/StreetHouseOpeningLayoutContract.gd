@@ -53,7 +53,8 @@ func _run() -> void:
 			var access: Dictionary = b.rooms[0].accesses[0]
 			checks[prefix+"_access_width_preserved"] = access.size == Vector3(1.86,2.18,1.86)
 			var door = Urban.StreetHouseStructuralManifestScript.find_part(b,"house_door")
-			checks[prefix+"_door_geometry_preserved"] = door != null and door.position.z == center.z and door.size == Vector3(0.14,2.5,1.25)
+			checks[prefix+"_door_closed_footprint_preserved"] = door != null and door.position.z == center.z and b.transformed_part_bounds(door).size.is_equal_approx(Vector3(0.14,2.5,1.25))
+			checks[prefix+"_door_local_width_and_frontage"] = door != null and door.size == Vector3(1.25,2.5,0.14) and is_equal_approx(door.rotation.y, -side * PI * 0.5)
 			var replay = _blueprint()
 			checks[prefix+"_deterministic"] = Urban.add_street_house(replay,"house",center,8.0,depth,6.2,side,0.62,"painted_brick_cream",0.0) and var_to_bytes(b.snapshot()) == var_to_bytes(replay.snapshot())
 			index += 1
