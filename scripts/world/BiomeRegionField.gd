@@ -16,6 +16,13 @@ const MINIMUM_CORE_DIAMETER_METERS := MINIMUM_SITE_SEPARATION_METERS
 const ECOTONE_WIDTH_METERS := 320.0
 const CLIMATE_LATTICE_METERS := 18000.0
 
+# Pure value memoization, owned by this field instance. Mutex protects callers
+# sharing a generator; computation happens outside the lock (climate uses sites).
+const MEMO_LIMIT := 4096
+var _site_memo := {}
+var _climate_memo := {}
+var _memo_mutex := Mutex.new()
+
 func sample(world_seed: String, world_position: Vector2) -> Dictionary:
 	var seed_key := world_seed.strip_edges()
 	if seed_key == "":
@@ -59,6 +66,13 @@ func sample(world_seed: String, world_position: Vector2) -> Dictionary:
 	}
 
 func site_position(world_seed: String, region: Vector2i) -> Vector2:
+	var key := [world_seed, region]
+	_memo_mutex.lock()
+	if _site_memo.has(key):
+		var cached: Vector2 = _site_memo[key]
+		_memo_mutex.unlock()
+		return cached
+	_memo_mutex.unlock()
 	var base := Vector2(
 		(float(region.x) + 0.5) * REGION_SPACING_METERS,
 		(float(region.y) + 0.5) * REGION_SPACING_METERS
@@ -67,16 +81,33 @@ func site_position(world_seed: String, region: Vector2i) -> Vector2:
 		lerpf(-REGION_SITE_JITTER_METERS, REGION_SITE_JITTER_METERS, stable_unit("biome-region-site-x:%s:%d,%d" % [world_seed, region.x, region.y])),
 		lerpf(-REGION_SITE_JITTER_METERS, REGION_SITE_JITTER_METERS, stable_unit("biome-region-site-z:%s:%d,%d" % [world_seed, region.x, region.y]))
 	)
-	return base + jitter
+	var result := base + jitter
+	_memo_mutex.lock()
+	if _site_memo.size() >= MEMO_LIMIT: _site_memo.clear()
+	_site_memo[key] = result
+	_memo_mutex.unlock()
+	return result
 
 func region_id(world_seed: String, region: Vector2i) -> String:
 	return "biome-v%d:%s:%d,%d" % [FIELD_VERSION, world_seed, region.x, region.y]
 
 func climate_channel(world_seed: String, region: Vector2i, channel: String) -> float:
+	var key := [world_seed, region, channel]
+	_memo_mutex.lock()
+	if _climate_memo.has(key):
+		var cached: float = _climate_memo[key]
+		_memo_mutex.unlock()
+		return cached
+	_memo_mutex.unlock()
 	var site := site_position(world_seed, region)
 	var broad := value_noise(world_seed, Vector2(site.x, site.y) / CLIMATE_LATTICE_METERS, "%s-broad" % channel)
 	var regional := stable_unit("biome-region-climate:%s:%s:%d,%d" % [world_seed, channel, region.x, region.y])
-	return clampf(broad * 0.72 + regional * 0.28, 0.0, 1.0)
+	var result := clampf(broad * 0.72 + regional * 0.28, 0.0, 1.0)
+	_memo_mutex.lock()
+	if _climate_memo.size() >= MEMO_LIMIT: _climate_memo.clear()
+	_climate_memo[key] = result
+	_memo_mutex.unlock()
+	return result
 
 func biome_for_climate(temperature: float, moisture: float) -> String:
 	if temperature < 0.19:
