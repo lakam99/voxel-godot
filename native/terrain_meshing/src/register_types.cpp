@@ -1,6 +1,7 @@
 #include "register_types.h"
 
 #include "terrain_meshing_backend.h"
+#include "building_support_kernel.h"
 
 #include <godot_cpp/godot.hpp>
 
@@ -11,6 +12,7 @@ void initialize_terrain_meshing_module(ModuleInitializationLevel p_level) {
 		return;
 	}
 	ClassDB::register_class<TerrainMeshingBackend>();
+	register_building_support_kernel();
 }
 
 void uninitialize_terrain_meshing_module(ModuleInitializationLevel p_level) {

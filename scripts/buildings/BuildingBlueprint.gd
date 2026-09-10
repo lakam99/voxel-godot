@@ -4,6 +4,7 @@ class_name BuildingBlueprint
 const BuildingPartScript := preload("res://scripts/buildings/BuildingPart.gd")
 const GablePurlinFrameValidator := preload("res://scripts/buildings/GablePurlinFrameValidator.gd")
 const MandatoryPhysicalDependencyValidator := preload("res://scripts/buildings/MandatoryPhysicalDependencyValidator.gd")
+const NativeSupportQueries := preload("res://scripts/buildings/BuildingNativeSupportQueries.gd")
 
 var id := ""
 var seed := 0
@@ -24,6 +25,11 @@ var _validation_bounds: Dictionary = {}
 var _validation_neighbors: Dictionary = {}
 var _validation_columns: Dictionary = {}
 var _validation_x_columns: Dictionary = {}
+var _native_support_queries: RefCounted = null
+var _native_support_resolving := false
+var _native_support_decided := false
+var _native_support_failure := ""
+var _native_support_query_count := 0
 
 const PHYSICAL_SUPPORT_GRID_CELL := 4.0
 const PHYSICAL_CONTACT_MARGIN := 0.05
@@ -75,6 +81,7 @@ func validate_physical_integrity_cancellable(continuation: Callable) -> Dictiona
 
 
 func _validate_physical_integrity(continuation: Callable) -> Dictionary:
+	_native_support_failure=""
 	var cache_owner := _begin_validation_cache()
 	if not _continue_validation(continuation, "physical_validation_started"):
 		return _cancel_physical_validation(cache_owner)
@@ -83,6 +90,7 @@ func _validate_physical_integrity(continuation: Callable) -> Dictionary:
 	else:
 		# Keep the legacy virtual entry point for existing subclasses.
 		resolve_physical_contracts()
+		if not _native_support_failure.is_empty(): return _cancel_physical_validation(cache_owner)
 	var checks: Array[Dictionary] = []
 	var violations: Array[String] = []
 	for part in parts:
@@ -253,11 +261,14 @@ func resolve_physical_contracts_cancellable(continuation: Callable) -> bool:
 	if not continuation.is_valid():
 		# Preserve the legacy virtual entry point for empty-continuation callers.
 		resolve_physical_contracts()
-		return true
+		return _native_support_failure.is_empty()
 	return _resolve_physical_contracts(continuation)
 
 
 func _resolve_physical_contracts(continuation: Callable) -> bool:
+	_clear_native_support()
+	_native_support_failure=""
+	_native_support_query_count=0
 	var cache_owner := _begin_validation_cache()
 	_validation_columns.clear()
 	_validation_x_columns.clear()
@@ -302,8 +313,10 @@ func _resolve_physical_contracts(continuation: Callable) -> bool:
 			return false
 	else:
 		index_structural_support_candidates()
+	_native_support_resolving=_validation_cache_active and _native_support_implementation_supported()
 	for part in parts:
 		if not _continue_validation(continuation, "physical_resolve_support"):
+			_clear_native_support()
 			_end_validation_cache(cache_owner)
 			return false
 		if part == null:
@@ -313,11 +326,14 @@ func _resolve_physical_contracts(continuation: Callable) -> bool:
 		match String(part.physical_intent):
 			"structural_mass", "walkable_surface":
 				var support_record := resolved_support_record(part)
+				if not _native_support_failure.is_empty():
+					_clear_native_support(); _end_validation_cache(cache_owner); return false
 				part.recipe["physicalSupportPartIds"] = support_record.get("partIds", [])
 				part.recipe["physicalSupportCoverage"] = support_record.get("coverage", [])
 			"facade_attachment":
 				var anchor_ids := resolved_attachment_anchor_ids(part)
 				part.recipe["physicalAnchorPartIds"] = anchor_ids
+	_clear_native_support()
 	_end_validation_cache(cache_owner)
 	return true
 
@@ -327,6 +343,7 @@ static func _continue_validation(continuation: Callable, stage: String) -> bool:
 
 
 func _cancel_physical_validation(cache_owner: bool) -> Dictionary:
+	_clear_native_support()
 	_end_validation_cache(cache_owner)
 	_validation_columns.clear()
 	_validation_x_columns.clear()
@@ -334,6 +351,8 @@ func _cancel_physical_validation(cache_owner: bool) -> Dictionary:
 	structural_support_grid.clear()
 	invalid_gable_part_ids.clear()
 	_validation_neighbors.clear()
+	if not _native_support_failure.is_empty():
+		return {"passed":false,"cancelled":false,"checkedPartCount":0,"checks":[],"violations":[_native_support_failure]}
 	return {"passed": false, "cancelled": true, "checkedPartCount": 0,
 		"checks": [], "violations": ["physical_validation_cancelled"]}
 
@@ -366,6 +385,7 @@ func resolved_support_record(target) -> Dictionary:
 	for sample_value in samples:
 		var sample: Dictionary = sample_value as Dictionary
 		var support = structural_support_at(target, sample.get("position", Vector3.ZERO) as Vector3)
+		if not _native_support_failure.is_empty(): return {"partIds":[],"coverage":[]}
 		var support_id := String(support.get("id", ""))
 		if not support_id.is_empty() and not part_ids.has(support_id):
 			part_ids.append(support_id)
@@ -374,6 +394,21 @@ func resolved_support_record(target) -> Dictionary:
 
 
 func structural_support_at(target, point: Vector3) -> Dictionary:
+	if _native_support_resolving:
+		if not _native_support_decided:
+			_native_support_decided=true
+			# Missing native support, unsupported parts and custom implementations
+			# retain the ordinary query. A present but broken kernel fails closed.
+			if ClassDB.class_exists("BuildingSupportKernel") and NativeSupportQueries.inputs_supported(self):
+				_native_support_queries=NativeSupportQueries.new()
+				if not _native_support_queries.prepare(self):
+					_native_support_failure=_native_support_queries.failure; return {}
+		if _native_support_queries!=null and _native_support_queries.has_target(target):
+			var origin:=Vector2i(floori(point.x/PHYSICAL_SUPPORT_GRID_CELL),floori(point.z/PHYSICAL_SUPPORT_GRID_CELL))
+			var result:Dictionary=_native_support_queries.query(target,point,origin,self)
+			_native_support_failure=_native_support_queries.failure
+			_native_support_query_count+=1
+			return result
 	var best: Dictionary = {}
 	var best_gap := INF
 	var required_ids: Dictionary = {}
@@ -584,9 +619,18 @@ func _begin_validation_cache() -> bool:
 	_validation_cache_active = true
 	return true
 
+func _native_support_implementation_supported() -> bool:
+	return get_script()==load("res://scripts/buildings/BuildingBlueprint.gd")
+
+func _clear_native_support() -> void:
+	_native_support_queries=null
+	_native_support_resolving=false
+	_native_support_decided=false
+
 
 func _end_validation_cache(owner: bool) -> void:
 	if not owner: return
+	_clear_native_support()
 	_validation_columns.clear()
 	_validation_x_columns.clear()
 	_validation_cache_active = false
@@ -601,6 +645,7 @@ func index_structural_support_candidates() -> void:
 
 
 func _index_structural_support_candidates(continuation: Callable) -> bool:
+	_clear_native_support()
 	_validation_columns.clear()
 	_validation_x_columns.clear()
 	_validation_neighbors.clear()

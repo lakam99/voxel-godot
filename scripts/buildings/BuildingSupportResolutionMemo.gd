@@ -8,6 +8,9 @@ var observed := false
 var resolving := false
 var observations := {"poolRepeated":false,"hits":0,"misses":0,"candidates":0,"identityUsec":0,"resolutionUsec":0}
 
+func _native_support_implementation_supported() -> bool:
+	return get_script()==load("res://scripts/buildings/BuildingSupportResolutionMemo.gd")
+
 func _resolve_physical_contracts(continuation: Callable) -> bool:
 	observed = false
 	resolving = true

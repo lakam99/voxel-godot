@@ -114,9 +114,9 @@ function commandPath(command) {
 }
 
 function sconsInvocation() {
-  for (const command of ['scons', 'scons.exe']) {
+  for (const command of process.platform === 'win32' ? ['scons.exe', 'scons'] : ['scons']) {
     const executable = commandPath(command);
-    if (executable) return { executable, argumentsList: [] };
+    if (executable && !(process.platform === 'win32' && /\.(cmd|bat)$/i.test(executable))) return { executable, argumentsList: [] };
   }
   for (const command of process.platform === 'win32' ? ['python', 'python3'] : ['python3', 'python']) {
     const executable = commandPath(command);
@@ -781,13 +781,19 @@ async function runStaticTool(toolId, rawArgs) {
     if (platform === 'macos' && architecture !== 'universal') throw new Error('macOS terrain meshing builds must use --architecture universal so the GDExtension runs on both Apple Silicon and Intel Macs.');
     const nativeDirectory = join(projectRoot, 'native/terrain_meshing');
     const godotCppDirectory = join(nativeDirectory, 'godot-cpp');
+    const godotCppRevision = (await readFile(join(nativeDirectory, 'godot-cpp-revision.txt'), 'utf8')).trim();
+    if (!/^[0-9a-f]{40}$/.test(godotCppRevision)) throw new Error('Invalid pinned godot-cpp revision.');
     if (asBoolean(parsed.options.fetchGodotCpp) && !(await exists(godotCppDirectory))) {
-      const clone = await runProcess('git', ['clone', '--depth', '1', '--branch', String(parsed.options.godotCppBranch ?? '4.5'), 'https://github.com/godotengine/godot-cpp.git', godotCppDirectory]);
+      const clone = await runProcess('git', ['clone', '--depth', '1', '--branch', String(parsed.options.godotCppBranch ?? '4.6'), 'https://github.com/godotengine/godot-cpp.git', godotCppDirectory]);
       if (clone.code !== 0) throw new Error('Failed to fetch godot-cpp bindings. Pass --godot-cpp-branch with a valid Godot compatibility branch.');
+      const fetch = await runProcess('git', ['fetch', '--depth', '1', 'origin', godotCppRevision], { cwd: godotCppDirectory });
+      if (fetch.code !== 0) throw new Error('Failed to fetch the pinned godot-cpp revision.');
+      const checkout = await runProcess('git', ['checkout', '--detach', godotCppRevision], { cwd: godotCppDirectory });
+      if (checkout.code !== 0) throw new Error('Failed to select the pinned godot-cpp revision.');
     }
     const scons = sconsInvocation();
     if (!scons) throw new Error('Missing SCons. Install it with Homebrew or Python before building the terrain meshing GDExtension.');
-    const build = await runProcess(scons.executable, [...scons.argumentsList, `platform=${platform}`, `target=${target}`, `arch=${architecture}`, `api_version=${parsed.options.apiVersion ?? '4.5'}`, `custom_tools=${join(nativeDirectory, 'scons_tools')}`], { cwd: nativeDirectory });
+    const build = await runProcess(scons.executable, [...scons.argumentsList, `platform=${platform}`, `target=${target}`, `arch=${architecture}`, `api_version=${parsed.options.apiVersion ?? '4.6'}`, `custom_tools=${join(nativeDirectory, 'scons_tools')}`], { cwd: nativeDirectory });
     if (build.code !== 0) throw new Error(`SCons failed while building the terrain meshing GDExtension (exit code ${build.code}).`);
     const outputDirectory = join(projectRoot, 'addons/terrain_meshing_backend/bin');
     await ensureDirectory(outputDirectory);

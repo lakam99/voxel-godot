@@ -6,8 +6,9 @@ This directory is intentionally separate from `res://addons` until it is built. 
 
 Build/install flow:
 
-```powershell
-.\tools\build-native-terrain-meshing.ps1 -FetchGodotCpp
+```text
+node tools/build-native-terrain-meshing.mjs --fetch-godot-cpp --target template_debug --api-version 4.6
+node tools/build-native-terrain-meshing.mjs --target template_release --api-version 4.6
 ```
 
 The build requires:
@@ -15,6 +16,10 @@ The build requires:
 - a C++ compiler supported by Godot's `godot-cpp` SCons toolchain;
 - Python with `scons`;
 - `godot-cpp` checked out under `native/terrain_meshing/godot-cpp`.
+
+The bindings revision is pinned in `godot-cpp-revision.txt`. Use a clean dependency checkout, Godot 4.6 API and single-precision engine builds. Record dependency status and effective build flags when validating new binaries. Debug and release libraries must both be rebuilt after native source changes.
+
+The extension also registers `BuildingSupportKernel`, a private accelerator for ordered physical-support queries. It consumes the blueprint's classified geometry and candidate order; the blueprint remains the validation authority. Only owned resolution passes on supported blueprint implementations use it. Missing extensions, custom implementations and extreme numerical inputs retain the GDScript path. Protocol or index corruption fails explicitly. The kernel alone uses strict floating-point compilation (`/fp:strict` on MSVC, `-ffp-contract=off` otherwise) and rejects incompatible engine precision.
 
 After a successful build, the script copies the compiled library and generated `.gdextension` file to:
 
