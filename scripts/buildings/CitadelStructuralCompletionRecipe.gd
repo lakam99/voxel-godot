@@ -426,6 +426,7 @@ static func _complete_party_walls(working, records: Array, continuation: Callabl
 	if not _continue(continuation, "party_walls_started"): return _fail("cancelled")
 	if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
 	var context: Variant=null
+	var context_failed_ids: Array=[]
 	var context_builds := 0
 	var context_reuses := 0
 	var context_invalidations := 0
@@ -444,11 +445,15 @@ static func _complete_party_walls(working, records: Array, continuation: Callabl
 				if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
 				context=prepared.context
 				context_builds+=1
+				var initial_binding := PartyWalls._context_valid(working,context)
+				if not initial_binding.ready: return initial_binding
+				# The context and this copied ID list never escape the operation.
+				# No-op decisions consume only these IDs; callbacks receive neither.
+				context_failed_ids=Copy.failed_ids(context.report)
+			var declaration: Dictionary = working.recipe.facadeApertures[key]
+			if not declaration.partIds.any(func(id): return context_failed_ids.has(id)): continue
 			var binding := PartyWalls._context_valid(working,context)
 			if not binding.ready: return binding
-			var declaration: Dictionary = working.recipe.facadeApertures[key]
-			var failed_ids: Array=Copy.failed_ids(context.report)
-			if not declaration.partIds.any(func(id): return failed_ids.has(id)): continue
 			attempts += 1
 			if attempts > MAX_STAGE_ATTEMPTS: return _fail("party_wall_attempt_limit")
 			context_reuses+=1
@@ -462,6 +467,7 @@ static func _complete_party_walls(working, records: Array, continuation: Callabl
 				# Any accepted declaration changes the source. Rebuild before another
 				# failed-ID decision or plan; never reuse pre-mutation support facts.
 				context=null
+				context_failed_ids=[]
 				context_invalidations+=1
 				expected_source=var_to_bytes(working.snapshot())
 			if not _continue(continuation, "party_wall_item_completed:" + key): return _fail("cancelled")
