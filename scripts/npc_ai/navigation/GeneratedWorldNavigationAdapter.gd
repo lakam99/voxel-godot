@@ -244,7 +244,8 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
 # helper that only updates blocked/doors/paths; that reintroduces planner/probe
 # disagreement and makes NPCs accept routes into walls or reject valid routes.
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
-    var cache_key := "%s|%s" % [tile_key, navmesh_tile_source_key_for_tile(tile_key)]
+    var source_key := navmesh_tile_source_key_for_tile(tile_key)
+    var cache_key := "%s|%s" % [tile_key, source_key]
     if navmesh_tile_snapshot_cache.has(cache_key):
         var cached_snapshot: Dictionary = navmesh_tile_snapshot_cache[cache_key]
         return cached_snapshot
@@ -263,6 +264,7 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key)
     var result: Dictionary = {
         "tileKey": tile_key,
+        "sourceKey": source_key,
         "regionId": "region:chunk:%s" % tile_key,
         "sourceRevision": static_snapshot_revision,
         "topologyRevision": static_snapshot_revision,

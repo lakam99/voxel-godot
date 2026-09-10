@@ -977,10 +977,14 @@ func prime_initial_navigation_snapshot_staged() -> Dictionary:
         return StartupReadinessResultScript.failed("initial_navigation_snapshot_empty", {}, [], {
             "registeredNpcCount": entries.size()
         })
+    var tile_wait_started_usec := Time.get_ticks_usec()
     var tile_result := normalized_startup_result(
         await prime_initial_navigation_tiles_staged(navigation_world, entries),
         "invalid_navigation_tile_readiness_result"
     )
+    while tile_result.get("status") == "pending" and float(Time.get_ticks_usec()-tile_wait_started_usec)/1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+        await startup_loading_yield("Waiting for current navigation revisions", "navigation_tiles", "pending", tile_result.get("metrics", {}))
+        tile_result = normalized_startup_result(await prime_initial_navigation_tiles_staged(navigation_world, entries), "invalid_navigation_tile_readiness_result")
     if not startup_result_is_ready(tile_result):
         return tile_result
     var map_result := normalized_startup_result(
@@ -1030,14 +1034,30 @@ func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: St
         var sync_started_usec := Time.get_ticks_usec()
         navmesh_world.call("sync_navigation_map_if_dirty")
         sync_ms = float(Time.get_ticks_usec() - sync_started_usec) / 1000.0
-    var status := String(result.get("status", ""))
+    var source_key := String(snapshot.get("sourceKey", ""))
+    if source_key == "" or not navigation_world.has_method("navmesh_tile_source_key_for_tile") or not navmesh_world.has_method("tile_publication_readiness"):
+        return { "ok": false, "status": "failed", "reason": "navigation_publication_receipt_missing" }
+    var current_source_key := String(navigation_world.call("navmesh_tile_source_key_for_tile", tile_key))
+    var receipt: Dictionary = navmesh_world.call("tile_publication_readiness", tile_key, current_source_key)
+    var status := String(receipt.get("status", "pending"))
     return {
-        "ok": bool(result.get("installed", false)) or status in ["installed", "updated", "registered"],
+        "ok": status == "ready" and bool(receipt.get("completeSurfaceCoverage", false)) and source_key == current_source_key,
         "status": status,
+        "reason": String(receipt.get("reason", "")),
+        "receipt": navigation_publication_observation(receipt),
+        "registration": {"status": result.get("status", ""), "installed": result.get("installed", false)},
         "snapshotMs": snapshot_ms,
         "registerMs": register_ms,
         "syncMs": sync_ms
     }
+
+func navigation_publication_observation(receipt: Dictionary) -> Dictionary:
+    # Canonical descriptor bindings remain at the owner. Keep loading telemetry
+    # compact instead of copying full geometry signatures into every step.
+    var observation := receipt.duplicate(false)
+    observation["signature"] = String(receipt.get("signature", "")).sha256_text()
+    observation["signatureEncoding"] = "sha256_of_descriptor_stable_signature"
+    return observation
 
 func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> Dictionary:
     if not NpcConstantsScript.NPC_NAV_ENABLE_STARTUP_TILE_PRIMING:
@@ -1068,6 +1088,7 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
         })
     var published := 0
     var tile_timings: Array[Dictionary] = []
+    var publication_started_usec := Time.get_ticks_usec()
     for tile_key_value in keys:
         if published >= INITIAL_NAVMESH_PRIME_TILE_LIMIT:
             break
@@ -1078,6 +1099,9 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
             "tileKey": tile_key
         })
         var publish_result: Dictionary = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
+        while String(publish_result.get("status", "")) == "pending" and float(Time.get_ticks_usec()-publication_started_usec)/1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+            await startup_loading_yield("Waiting for navigation publication", "navigation_tiles", "pending", {"tileKey": tile_key, "publication": publish_result})
+            publish_result = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
         tile_timings.append({
             "tileKey": tile_key,
             "snapshotMs": float(publish_result.get("snapshotMs", 0.0)),
@@ -1101,11 +1125,20 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
                 "tileStatus": tile_status
             })
         published += 1
+    var publication_receipts: Array[Dictionary] = []
+    for tile_key_value in keys.slice(0, total):
+        var tile_key := String(tile_key_value)
+        var current_key := String(navigation_world.call("navmesh_tile_source_key_for_tile", tile_key))
+        var receipt: Dictionary = navmesh_world.call("tile_publication_readiness", tile_key, current_key)
+        if receipt.get("status") != "ready" or not bool(receipt.get("completeSurfaceCoverage", false)):
+            return StartupReadinessResultScript.pending("startup_navigation_revision_changed", {}, [tile_key], {"publication": navigation_publication_observation(receipt)})
+        publication_receipts.append(navigation_publication_observation(receipt))
     var metrics := {
         "publishedTileCount": published,
         "requiredTileCount": total,
         "tileKeys": keys.slice(0, total),
-        "tileTimings": tile_timings
+        "tileTimings": tile_timings,
+        "publicationReceipts": publication_receipts
     }
     await startup_loading_yield("NPC route tiles ready", "navigation_tiles", "ready", metrics)
     return StartupReadinessResultScript.ready({}, metrics)

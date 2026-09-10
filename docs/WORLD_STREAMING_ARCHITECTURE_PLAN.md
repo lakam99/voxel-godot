@@ -5,7 +5,9 @@ codex/world-streaming-architecture, in the existing citadel-visuals worktree.
 
 ## Acceptance contract
 
-- Cold New Game/Continue: playable nearby world within 90 seconds of visible input.
+- Measure fresh world creation, cached Continue and exploration separately. The
+  original 90-second cold target is provisional following the user's timing
+  clarification; no replacement threshold has been chosen.
 - Required area: 64m horizontal radius, expanded for structural support, crossings
   and scenario dependencies. Tutorial retains complete town/actor readiness.
 - 60 FPS at 1920x1080 on the RTX 5060 Ti, including ordinary sprint traversal.
@@ -79,7 +81,7 @@ gate/door/stair/region movement and NPC navigation acknowledgement; real menu Ne
 Game/Continue, save/reload/dig/build/harvest; day/night and LOD/occlusion visuals.
 
 Final load samples: three cold known-citadel-seed runs plus one each of two fresh
-seeds, all <=90s. Run broad playtest and affected navigation/lifecycle suites at
+seeds, reporting each against the provisional 90s target. Run broad playtest and affected navigation/lifecycle suites at
 each production cutover. Baseline failures stay explicitly attributed; regressions
 block promotion. Teleports are diagnostic setup, not continuous-travel acceptance.
 Commit verified milestones, remove superseded production paths after cutover,
@@ -125,11 +127,18 @@ retain one world authority, preserve save format v2 and durable deltas.
   provisional; measure cold creation, cached Continue and exploration separately.
   No replacement threshold has been chosen. Preserve the playable-radius and
   traversal requirements regardless of startup target.
-- Next: add exact navigation publication acknowledgements and regional dependency
-  closure, while addressing measured publication validation costs and submission
-  fragmentation before reintroducing spatial subdivision, then regional
-  dependency closure with real revision-matched navigation acknowledgements.
-  The owner inventory and broad reference replay are in that report. The spatial
+- Exact navigation installation receipts now bind source revisions to emitted
+  surfaces and installed owner resources. Staged startup consumes them for its
+  existing NPC tile set. This is not 64m regional readiness or crossing/movement
+  acceptance. Service lifecycle 33 checks, startup 9 checks and nav-world 84 cases
+  pass; broad replay remains 161/163 with the same recorded baseline failures
+  and forced cleanup. Real menu New Game took 33.227s; the 75-second traversal still failed
+  pacing (post-draw p99 51.1ms). See WORLD_STREAMING_NAVIGATION_RECEIPTS_2026-09-10.md.
+- Next: retained regional dependency closure, initially keeping whole required
+  structures gated, then partial structure checkpoints. Address measured
+  publication validation costs and submission fragmentation before reintroducing
+  spatial subdivision.
+  The earlier spatial experiment report contains its owner inventory and broad reference replay. The spatial
   candidate additionally stopped on an engine RID error that did not recur in
   the reference replay; that failure remains unresolved and blocks its reuse.
   Keep the cooperative budget and use initial-location startup measurements.

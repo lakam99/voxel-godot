@@ -24,6 +24,9 @@ var region_states := {}
 var region_rids_by_region := {}
 var region_ids_by_rid := {}
 var region_metrics_by_region := {}
+## Private value-only installation receipts; never a route or topology authority.
+## Each receipt expires with its exact region installation.
+var _tile_publication_receipts := {}
 var topology_revision := 0
 var dynamic_revision := 0
 var registered_region_count := 0
@@ -56,6 +59,7 @@ var door_link_install_failure_count := 0
 var actor_path_records := {}
 var navigation_map_dirty_serial := 0
 var navigation_map_synced_serial := 0
+var _publication_synced_serial := 0
 var navigation_map_last_iteration_id := -1
 var reusable_path_query_parameters := NavigationPathQueryParameters3D.new()
 var endpoint_query_cache := {}
@@ -72,6 +76,7 @@ func clear() -> void:
 	descriptors_by_region.clear()
 	region_states.clear()
 	region_metrics_by_region.clear()
+	_tile_publication_receipts.clear()
 	dirty_regions_by_region.clear()
 	dirty_region_queue.clear()
 	door_link_records_by_region.clear()
@@ -99,6 +104,7 @@ func clear() -> void:
 	slowest_path_query.clear()
 	navigation_map_dirty_serial = 0
 	navigation_map_synced_serial = 0
+	_publication_synced_serial = 0
 	navigation_map_last_iteration_id = -1
 	install_duration_samples_usec.clear()
 	path_query_duration_samples_usec.clear()
@@ -118,7 +124,7 @@ func clear() -> void:
 	navigation_map = RID()
 	owns_navigation_map = false
 
-func register_chunk_descriptor(descriptor) -> Dictionary:
+func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 	if descriptor == null:
 		return { "status": "rejected", "reason": "missing_descriptor" }
 	var region_id := String(descriptor.get("region_id"))
@@ -130,7 +136,8 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 		and descriptors_by_region.has(region_id) \
 		and region_rids_by_region.has(region_id) \
 		and not dirty_regions_by_region.has(region_id) \
-		and String(existing_metrics.get("signature", "")) == signature:
+		and String(existing_metrics.get("signature", "")) == signature \
+		and String(_tile_publication_receipts.get(region_id, {}).get("sourceKey", "")) == source_key:
 		return {
 			"status": String(region_states.get(region_id, "installed")),
 			"regionId": region_id,
@@ -148,7 +155,18 @@ func register_chunk_descriptor(descriptor) -> Dictionary:
 	_index_descriptor_doors(region_id, descriptor)
 	_clear_dirty_region(region_id)
 	var loaded := bool(descriptor.get("loaded"))
+	_tile_publication_receipts.erase(region_id)
 	var install_result := _install_region(region_id, descriptor) if loaded else { "status": "unloaded", "regionId": region_id }
+	# Bind only a receipt produced by this fresh installation. Virtual installers
+	# which do not emit an actual receipt remain unacknowledged.
+	if String(install_result.get("status", "")) == "installed":
+		var fresh: Dictionary = _tile_publication_receipts.get(region_id, {})
+		if not fresh.is_empty() and fresh.descriptorId == descriptor.get_instance_id() \
+				and fresh.regionRid == region_rids_by_region.get(region_id, RID()):
+			var bound := fresh.duplicate()
+			bound.sourceKey = source_key
+			bound.make_read_only()
+			_tile_publication_receipts[region_id] = bound
 	if signature != "":
 		install_result["signature"] = signature
 		var metrics: Dictionary = region_metrics_by_region.get(region_id, {})
@@ -184,7 +202,7 @@ func unregister_chunk(region_id: String) -> Dictionary:
 
 func register_tile_snapshot(snapshot: Dictionary) -> Dictionary:
 	var descriptor = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
-	return register_chunk_descriptor(descriptor)
+	return register_chunk_descriptor(descriptor, String(snapshot.get("sourceKey", "")))
 
 func register_semantic_descriptor(kind: String, region_id: String, bounds: AABB, metadata := {}) -> Dictionary:
 	if region_id == "":
@@ -755,6 +773,142 @@ func tile_region_status(tile_key: String) -> Dictionary:
 		"installStatus": String(metrics.get("status", ""))
 	}
 
+
+## Exact publication acknowledgement only. It does not certify endpoint/seam
+## clearance, connected routes, door traversability or live actor movement.
+func tile_publication_readiness(tile_key: String, expected_source_key: String, required_surface_ids: Array = [], required_link_ids: Array = []) -> Dictionary:
+	var result := {"status":"pending", "reason":"tile_not_registered", "sourceKey":"",
+		"signature":"", "sourceRevision":-1, "installationSerial":0,
+		"completeSurfaceCoverage":false, "missingDeclaredSurfaceIds":[],
+		"tileKey":tile_key, "missingSurfaceIds":[], "missingLinkIds":[],
+		"limitation":"Installation/ownership acknowledgement only; no endpoint, seam, clearance or traversability certification."}
+	if tile_key.is_empty() or expected_source_key.is_empty():
+		return _publication_result(result, "failed", "invalid_publication_request")
+	var region_id := ""
+	for key in descriptors_by_region:
+		var candidate = descriptors_by_region[key]
+		if candidate != null and String(candidate.get("tile_key")) == tile_key:
+			if not region_id.is_empty(): return _publication_result(result, "failed", "ambiguous_tile_owner")
+			region_id = String(key)
+	if region_id.is_empty(): return result
+	var descriptor = descriptors_by_region[region_id]
+	var receipt: Dictionary = _tile_publication_receipts.get(region_id, {})
+	for field: String in ["sourceKey","signature","sourceRevision","installationSerial","completeSurfaceCoverage","missingDeclaredSurfaceIds"]:
+		if receipt.has(field): result[field] = receipt[field]
+	if not bool(descriptor.get("loaded")): return _publication_result(result, "pending", "tile_unloaded")
+	if dirty_regions_by_region.has(region_id): return _publication_result(result, "pending", "tile_dirty")
+	if receipt.is_empty(): return _publication_result(result, "pending", "tile_not_installed")
+	if String(receipt.sourceKey) != expected_source_key:
+		return _publication_result(result, "pending", "source_key_mismatch")
+	if descriptor.get_instance_id() != receipt.descriptorId or int(descriptor.get("revision")) != int(receipt.sourceRevision) \
+			or not descriptor.has_method("stable_signature") or String(descriptor.stable_signature()) != String(receipt.signature):
+		return _publication_result(result, "failed", "installed_descriptor_changed")
+	if String(receipt.signature).is_empty(): return _publication_result(result, "failed", "missing_descriptor_signature")
+	if not backend_config.use_navmesh(): return _publication_result(result, "failed", "navmesh_backend_disabled")
+	# Queued server commands are not lost resources. Require an actual explicit
+	# sync before consulting installed membership, including after replacement.
+	if _publication_synced_serial < int(receipt.installationSerial) \
+			or navigation_map_synced_serial != navigation_map_dirty_serial:
+		return _publication_result(result, "pending", "installation_sync_pending")
+	# RID.is_valid only tests the handle, not whether the server still owns it.
+	# Check server membership before making RID-specific calls.
+	if navigation_map != receipt.mapRid or not NavigationServer3D.get_maps().has(navigation_map):
+		return _publication_result(result, "failed", "installed_map_lost")
+	if not NavigationServer3D.map_is_active(navigation_map):
+		return _publication_result(result, "pending", "navigation_map_inactive")
+	var region_rid: RID = receipt.regionRid
+	if region_rids_by_region.get(region_id, RID()) != region_rid \
+			or not NavigationServer3D.map_get_regions(navigation_map).has(region_rid):
+		return _publication_result(result, "failed", "installed_region_lost")
+	if not NavigationServer3D.region_get_enabled(region_rid):
+		return _publication_result(result, "pending", "installed_region_disabled")
+	if NavigationServer3D.region_get_transform(region_rid) != Transform3D.IDENTITY:
+		return _publication_result(result, "failed", "installed_region_transform_changed")
+	if int(receipt.polygonCount) <= 0 or receipt.surfaces.is_empty():
+		return _publication_result(result, "failed", "installed_surface_geometry_missing")
+	for value in required_surface_ids:
+		if not value is String or String(value).is_empty():
+			return _publication_result(result, "failed", "invalid_required_surface_id")
+		if not receipt.surfaces.has(value): result.missingSurfaceIds.append(value)
+	if not result.missingSurfaceIds.is_empty():
+		return _publication_result(result, "failed", "required_surfaces_missing")
+	var live_links: Array = NavigationServer3D.map_get_links(navigation_map)
+	for value in required_link_ids:
+		if not value is String or String(value).is_empty():
+			return _publication_result(result, "failed", "invalid_required_link_id")
+		var link: Dictionary = receipt.links.get(value, {})
+		if link.is_empty() or not live_links.has(link.rid):
+			result.missingLinkIds.append(value)
+			continue
+		if NavigationServer3D.link_get_start_position(link.rid) != link.start \
+				or NavigationServer3D.link_get_end_position(link.rid) != link.end:
+			return _publication_result(result, "failed", "installed_link_geometry_changed")
+	if not result.missingLinkIds.is_empty():
+		return _publication_result(result, "failed", "required_links_missing")
+	# A positive map iteration alone can describe an older installation.
+	# Only the existing explicit sync path advances this acknowledgement serial.
+	if _navigation_map_iteration_id() <= 0 \
+			or NavigationServer3D.region_get_iteration_id(region_rid) <= 0:
+		return _publication_result(result, "pending", "installation_sync_pending")
+	return _publication_result(result, "ready", "tile_publication_complete")
+
+static func _publication_result(result: Dictionary, status: String, reason: String) -> Dictionary:
+	result.status = status
+	result.reason = reason
+	return result
+
+static func _record_surface_polygon(ownership: Dictionary, surface_id: String, polygon_index: int) -> void:
+	if surface_id.is_empty(): return
+	# Duplicate source IDs are ambiguous even if they happen to share a polygon.
+	ownership[surface_id] = -1 if ownership.has(surface_id) else polygon_index
+
+func _record_tile_publication(region_id: String, descriptor, source_key: String, region_rid: RID, mesh: NavigationMesh, surface_polygons: Dictionary) -> void:
+	var surfaces: Dictionary = {}
+	var valid_polygons: Dictionary = {}
+	var vertices := mesh.get_vertices()
+	for surface_id in surface_polygons:
+		var index := int(surface_polygons[surface_id])
+		if index < 0 or index >= mesh.get_polygon_count(): continue
+		if not valid_polygons.has(index):
+			var polygon := mesh.get_polygon(index)
+			var valid := polygon.size() >= 3
+			for vertex_index in polygon:
+				if vertex_index < 0 or vertex_index >= vertices.size() or not vertices[vertex_index].is_finite(): valid = false
+			var area := Vector3.ZERO
+			if valid:
+				for i in range(1, polygon.size()-1):
+					area += (vertices[polygon[i]]-vertices[polygon[0]]).cross(vertices[polygon[i+1]]-vertices[polygon[0]])
+			valid_polygons[index] = valid and area.is_finite() and area.length_squared() > 0.0
+		if valid_polygons[index]: surfaces[surface_id] = index
+	var missing_declared: Array[String] = []
+	for value in _descriptor_array(descriptor, "walkable_surfaces"):
+		if not value is Dictionary or not bool(value.get("walkable", true)): continue
+		var id := String(value.get("id", ""))
+		if (id.is_empty() or not surfaces.has(id)) and not missing_declared.has(id):
+			missing_declared.append(id)
+	missing_declared.make_read_only()
+	var links: Dictionary = {}
+	var duplicate_links: Dictionary = {}
+	for value in door_link_records_by_region.get(region_id, []):
+		var record: Dictionary = value
+		var id := String(record.get("linkId", ""))
+		if id.is_empty(): continue
+		if links.has(id) or duplicate_links.has(id):
+			links.erase(id); duplicate_links[id] = true; continue
+		var link := {"rid":record.rid,"start":record.start,"end":record.end}
+		link.make_read_only()
+		links[id] = link
+	surfaces.make_read_only()
+	links.make_read_only()
+	var receipt := {"sourceKey":source_key,
+		"signature":String(descriptor.stable_signature()) if descriptor.has_method("stable_signature") else "",
+		"sourceRevision":int(descriptor.get("revision")), "descriptorId":descriptor.get_instance_id(),
+		"installationSerial":navigation_map_dirty_serial, "regionRid":region_rid, "mapRid":navigation_map,
+		"completeSurfaceCoverage":missing_declared.is_empty(), "missingDeclaredSurfaceIds":missing_declared,
+		"polygonCount":mesh.get_polygon_count(), "surfaces":surfaces, "links":links}
+	receipt.make_read_only()
+	_tile_publication_receipts[region_id] = receipt
+
 func sync_navigation_map_if_dirty() -> bool:
 	return _sync_navigation_map_if_dirty()
 
@@ -883,7 +1037,9 @@ func _ensure_navigation_map() -> void:
 
 func _install_region(region_id: String, descriptor) -> Dictionary:
 	var started := Time.get_ticks_usec()
-	var navigation_mesh = _build_navigation_mesh(descriptor)
+	_tile_publication_receipts.erase(region_id)
+	var surface_polygons: Dictionary = {}
+	var navigation_mesh = _build_navigation_mesh(descriptor, surface_polygons)
 	var polygon_count := int(navigation_mesh.get_polygon_count()) if navigation_mesh != null and navigation_mesh.has_method("get_polygon_count") else 0
 	var vertex_count := int(navigation_mesh.get_vertices().size()) if navigation_mesh != null and navigation_mesh.has_method("get_vertices") else 0
 	if polygon_count <= 0:
@@ -912,9 +1068,10 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		"doorLinks": link_metrics
 	}
 	region_metrics_by_region[region_id] = metrics
+	_record_tile_publication(region_id, descriptor, "", region_rid, navigation_mesh, surface_polygons)
 	return metrics.duplicate(true)
 
-func _build_navigation_mesh(descriptor):
+func _build_navigation_mesh(descriptor, surface_polygons: Dictionary = {}):
 	var navigation_mesh := NavigationMesh.new()
 	var vertices := PackedVector3Array()
 	var vertex_indices := {}
@@ -922,7 +1079,7 @@ func _build_navigation_mesh(descriptor):
 	var surfaces: Array = descriptor.get("walkable_surfaces")
 	var sorted_surfaces: Array = surfaces.duplicate()
 	sorted_surfaces.sort_custom(func(a, b): return String(a.get("id", "")) < String(b.get("id", "")))
-	for polygon_points in _navigation_mesh_polygons_for_surfaces(sorted_surfaces):
+	for polygon_points in _navigation_mesh_polygons_for_surfaces(sorted_surfaces, surface_polygons):
 		if polygon_points.size() < 3:
 			continue
 		var indices := PackedInt32Array()
@@ -947,7 +1104,7 @@ func _navigation_mesh_vertex_key(point: Vector3) -> String:
 		roundi(point.z * 1000.0)
 	]
 
-func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array) -> Array:
+func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array, surface_polygons: Dictionary = {}) -> Array:
 	var result := []
 	var layers := {}
 	for surface_value in sorted_surfaces:
@@ -959,6 +1116,7 @@ func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array) -> Array:
 		if not _surface_mergeable_for_mesh(surface):
 			var polygon := _surface_polygon(surface)
 			if polygon.size() >= 3:
+				_record_surface_polygon(surface_polygons, String(surface.get("id", "")), result.size())
 				result.append(polygon)
 			continue
 		var cell: Vector3i = surface.get("cell")
@@ -967,15 +1125,20 @@ func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array) -> Array:
 		if not layers.has(layer_key):
 			layers[layer_key] = {
 				"cells": {},
+				"owners": {},
 				"y": center.y
 			}
 		var layer: Dictionary = layers[layer_key]
 		var grid: Dictionary = layer.get("cells", {})
 		grid[Vector2i(cell.x, cell.z)] = true
+		var owners: Dictionary = layer.owners
+		var cell_key := Vector2i(cell.x, cell.z)
+		if not owners.has(cell_key): owners[cell_key] = []
+		owners[cell_key].append(String(surface.get("id", "")))
 	for layer_key in layers.keys():
 		var layer: Dictionary = layers[layer_key]
 		var grid: Dictionary = layer.get("cells", {})
-		result.append_array(_merged_grid_polygons(grid, float(layer.get("y", 0.0))))
+		result.append_array(_merged_grid_polygons(grid, float(layer.get("y", 0.0)), layer.owners, surface_polygons, result.size()))
 	return result
 
 func _surface_mergeable_for_mesh(surface: Dictionary) -> bool:
@@ -989,7 +1152,7 @@ func _surface_mergeable_for_mesh(surface: Dictionary) -> bool:
 	var size: Vector3 = surface.get("size", Vector3(CELL, 0.05, CELL))
 	return absf(size.x - CELL) <= CELL * 0.05 and absf(size.z - CELL) <= CELL * 0.05
 
-func _merged_grid_polygons(grid: Dictionary, y: float) -> Array:
+func _merged_grid_polygons(grid: Dictionary, y: float, owners: Dictionary = {}, surface_polygons: Dictionary = {}, polygon_offset := 0) -> Array:
 	var result := []
 	var keys: Array = grid.keys()
 	keys.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
@@ -1020,6 +1183,8 @@ func _merged_grid_polygons(grid: Dictionary, y: float) -> Array:
 		for z in range(start.y, end_z + 1):
 			for x in range(start.x, end_x + 1):
 				visited[Vector2i(x, z)] = true
+				for surface_id in owners.get(Vector2i(x, z), []):
+					_record_surface_polygon(surface_polygons, String(surface_id), polygon_offset + result.size())
 		var min_x := float(start.x) * CELL - CELL * 0.5
 		var max_x := float(end_x) * CELL + CELL * 0.5
 		var min_z := float(start.y) * CELL - CELL * 0.5
@@ -1053,6 +1218,7 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 	]
 
 func _release_region(region_id: String) -> void:
+	_tile_publication_receipts.erase(region_id)
 	_release_door_links_for_region(region_id)
 	if not region_rids_by_region.has(region_id):
 		return
@@ -1725,6 +1891,7 @@ func _sync_navigation_map_if_dirty() -> bool:
 		return false
 	if navigation_map.is_valid() and NavigationServer3D.has_method("map_force_update"):
 		NavigationServer3D.call("map_force_update", navigation_map)
+		_publication_synced_serial = navigation_map_dirty_serial
 	navigation_map_last_iteration_id = _navigation_map_iteration_id()
 	navigation_map_synced_serial = navigation_map_dirty_serial
 	return true

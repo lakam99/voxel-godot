@@ -979,6 +979,9 @@ func test_npc_motor_trims_reinstalled_route_prefix_to_current_cell(_mode: String
 
 func test_npc_navworld_live_tile_snapshot_includes_collision_records(_mode: String) -> Dictionary:
 	var main := FakeGeneratedWorldMain.new()
+	# The real adapter reads global transforms. This synthetic fixture must own
+	# attached nodes; its existing free() below removes the entire fixture.
+	add_child(main)
 	var wall_cell := Vector2i(1, 0)
 	var door_cell := Vector2i(3, 0)
 	var wall := live_nav_block(wall_cell, "woodBlock")

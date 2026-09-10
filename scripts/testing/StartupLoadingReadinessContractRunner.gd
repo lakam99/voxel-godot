@@ -5,6 +5,17 @@ const MainCoreScript := preload("res://scripts/MainCore.gd")
 const TitleMenuScript := preload("res://scripts/TitleMenu.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
+const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
+
+class SyntheticTileWorld extends RefCounted:
+	var stale_snapshot := false
+	func navmesh_tile_source_key_for_tile(_key: String) -> String: return "current-source"
+	func build_navmesh_tile_snapshot(key: String) -> Dictionary:
+		return {"tileKey":key,"sourceKey":"stale-source" if stale_snapshot else "current-source","sourceRevision":1,
+			"surfaces":[{"cell":Vector3i.ZERO,"worldPosition":Vector3.ZERO}]}
+
+class SyntheticTileDelegate extends RefCounted:
+	var navmesh_world
 
 class FakeStructureSystem:
 	extends RefCounted
@@ -72,8 +83,28 @@ func run() -> void:
 	test_continue_restore_defers_world_setup()
 	test_gameplay_physics_gate_rejects_enabled_npc()
 	test_loading_completion_requires_all_readiness_domains()
+	await test_startup_requires_revision_matched_navigation()
 	await test_forced_manifest_failure_keeps_gameplay_disabled_and_visible()
 	finish()
+
+func test_startup_requires_revision_matched_navigation() -> void:
+	# Synthetic source, real NavigationServer install/sync and production startup
+	# consumer. Proves the receipt gate, not generated topology or NPC movement.
+	var main = MainCoreScript.new()
+	var world := SyntheticTileWorld.new()
+	var delegate := SyntheticTileDelegate.new()
+	delegate.navmesh_world = NavmeshWorldServiceScript.new()
+	var ready: Dictionary = main.publish_startup_navmesh_tile(world,delegate,"0,0")
+	for frame in 60:
+		if ready.get("status") != "pending": break
+		await physics_frame
+		ready=main.publish_startup_navmesh_tile(world,delegate,"0,0")
+	add_result("startup_navigation_requires_installed_revision",ready.get("ok",false) and ready.get("receipt",{}).get("status")=="ready",ready)
+	world.stale_snapshot=true
+	var stale: Dictionary = main.publish_startup_navmesh_tile(world,delegate,"0,0")
+	add_result("startup_navigation_rejects_stale_registered_source",not stale.get("ok",true),stale)
+	delegate.navmesh_world.clear()
+	main.free()
 
 func test_scenario_requirements_are_semantic() -> void:
 	var tutorial = TutorialSystemScript.new()
