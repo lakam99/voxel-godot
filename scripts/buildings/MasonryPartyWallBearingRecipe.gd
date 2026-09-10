@@ -8,6 +8,7 @@ const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const Aperture = preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
 const Copy = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
+const SupportMemo = preload("res://scripts/buildings/BuildingSupportResolutionMemo.gd")
 const MAX_PARTS := 8192
 const MAX_DECLARATION_PARTS := 512
 const JOINT_INSET := 0.006
@@ -31,6 +32,15 @@ class ProofContext extends RefCounted:
 	var geometric_rejections := 0
 
 static func prepare_context(source, continuation: Callable = Callable()) -> Dictionary:
+	return _prepare_context(source,continuation,null)
+
+## Composer-private optimization; public contexts never retain the shared store.
+static func _prepare_context_with_support_memo(source, continuation: Callable, identities: Dictionary) -> Dictionary:
+	var result := _prepare_context(source,continuation,identities)
+	if not result.ready: identities.clear()
+	return result
+
+static func _prepare_context(source, continuation: Callable, identities: Variant) -> Dictionary:
 	if not source is Blueprint or source.parts.size()>MAX_PARTS: return _fail("invalid_or_unbounded_source")
 	var seen: Dictionary={}
 	for part in source.parts:
@@ -42,10 +52,16 @@ static func prepare_context(source, continuation: Callable = Callable()) -> Dict
 	if not _continue(continuation,"party_wall_proof_started"): return _fail("cancelled")
 	if context.source_bytes!=var_to_bytes(source.snapshot()): return _fail("stale_party_wall_source_proof")
 	context.proof=Copy.copy_blueprint(source.snapshot())
+	if identities != null:
+		var memo := SupportMemo.new(context.proof.id,context.proof.seed,context.proof.style)
+		memo.recipe=context.proof.recipe; memo.rooms=context.proof.rooms; memo.parts=context.proof.parts
+		memo.identities=identities
+		context.proof=memo
 	Copy.clear_caches(context.proof)
 	var grid := Copy.validation_grid_work(context.proof)
 	if not grid.ready: return grid
 	context.report=context.proof.validate_physical_integrity_cancellable(continuation)
+	if identities != null: context.proof.identities={}
 	if context.report.get("cancelled",false): return _fail("cancelled")
 	if not _continue(continuation,"party_wall_proof_completed"): return _fail("cancelled")
 	if context.source_bytes!=var_to_bytes(source.snapshot()): return _fail("stale_party_wall_source_proof")

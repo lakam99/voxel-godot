@@ -57,6 +57,40 @@ func _source():
 func _assemblies() -> Array:
 	return [{"ropeId":"line","pennantIds":["flag_0","flag_1","flag_2"]}]
 
+func _warm_support(source, identities: Dictionary) -> void:
+	var copy=Copy.copy_blueprint(source.snapshot())
+	var proof=Recipe.SupportMemo.new(copy.id,copy.seed,copy.style)
+	proof.recipe=copy.recipe; proof.rooms=copy.rooms; proof.parts=copy.parts; proof.identities=identities
+	proof.validate_physical_integrity()
+
+func _support_memo_controls(source, assemblies: Array, expected: Dictionary) -> void:
+	var identities:Dictionary={}
+	_warm_support(source,identities)
+	var before:=var_to_bytes(source.snapshot())
+	var shared:=Recipe._prepare_with_support_memo(source,assemblies,[],Callable(),identities)
+	checks["support_memo_complete_proposal_parity"]=var_to_bytes(shared)==var_to_bytes(expected) and var_to_bytes(source.snapshot())==before
+	var run:=Recipe.Run.new(); run._support_identities=identities
+	var counts:Dictionary={}
+	run.continuation=func(label):counts[label]=int(counts.get(label,0))+1;return true
+	var internal:=Recipe._prepare(source.snapshot(),assemblies,[],run)
+	checks["support_memo_hits_full_validation_retained"]=internal.ready and run._support_observations.hits>0 and counts.get("physical_validation_started")==1 and counts.get("physical_validation_completed")==1
+	for mode in ["moved_root","removed_root","dressing_root"]:
+		var changed=Copy.copy_blueprint(source.snapshot())
+		if mode=="moved_root": changed.parts[0].position.x+=20
+		else: changed.parts=changed.parts.filter(func(part):return part.id!="root_-1")
+		if mode=="dressing_root":
+			for part in changed.parts:
+				if part.id=="line":part.recipe["physicalRoot"]=true
+				if part.id=="wall_-1":part.recipe["physicalRequiredSeatPartIds"]=["line"]
+		_warm_support(source,identities)
+		var cold:=Recipe.prepare(changed,assemblies,[])
+		var warm:=Recipe._prepare_with_support_memo(changed,assemblies,[],Callable(),identities)
+		checks["support_memo_independent_rejection_"+mode]=not cold.ready and var_to_bytes(cold)==var_to_bytes(warm)
+	for stage in ["bunting_proof_started","physical_resolve_support","bunting_proof_completed"]:
+		_warm_support(source,identities)
+		var cancelled:=Recipe._prepare_with_support_memo(source,assemblies,[],func(label):return label!=stage,identities)
+		checks["support_memo_cancel_"+stage]=cancelled.get("reason")=="cancelled" and identities.is_empty()
+
 func _apply(source, changes: Array):
 	var snapshot: Dictionary = source.snapshot()
 	var replacements: Dictionary = {}
@@ -81,6 +115,7 @@ func _exercise() -> void:
 	checks["deterministic_repeat"] = var_to_bytes(result) == var_to_bytes(repeated)
 	var default_result: Dictionary = Recipe.prepare(source,assemblies,[])
 	checks["default_callback_exact"] = var_to_bytes(result) == var_to_bytes(default_result)
+	_support_memo_controls(source,assemblies,default_result)
 	var reversed = Copy.copy_blueprint(source.snapshot())
 	reversed.parts.reverse()
 	var reordered: Dictionary = Recipe.prepare(reversed,assemblies,[],_continue)

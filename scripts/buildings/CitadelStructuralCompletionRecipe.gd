@@ -77,7 +77,7 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 	var sign := _complete_signs(working, manifest.records, protected.bounds, continuation, support_identities)
 	if not sign.ready: return sign
 	stages.append(sign)
-	var party := _complete_party_walls(working, manifest.records, continuation)
+	var party := _complete_party_walls(working, manifest.records, continuation, support_identities)
 	if not party.ready: return party
 	stages.append(party)
 	var bracket_retry := _complete_brackets(working, manifest.records, "bracket_retry", continuation, support_identities)
@@ -129,6 +129,11 @@ static func _bunting_manifest(source) -> Dictionary:
 	return declaration
 
 static func _complete_bunting(source, protected: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
+	var result := _complete_bunting_impl(source,protected,continuation,support_identities)
+	if not result.get("ready",false): support_identities.clear()
+	return result
+
+static func _complete_bunting_impl(source, protected: Array, continuation: Callable, support_identities: Dictionary) -> Dictionary:
 	var frozen := var_to_bytes(source.snapshot())
 	var inputs := var_to_bytes(protected)
 	if not _continue(continuation,"bunting_completion_started"): return _fail("cancelled")
@@ -178,7 +183,7 @@ static func _complete_bunting(source, protected: Array, continuation: Callable =
 	var snapshot: Dictionary = source.snapshot()
 	var details := {}
 	if not selected.is_empty():
-		var proposal := BuntingAnchors.prepare(source,selected,bounds,continuation)
+		var proposal := BuntingAnchors._prepare_with_support_memo(source,selected,bounds,continuation,support_identities)
 		if proposal.get("reason","")=="cancelled": return _fail("cancelled")
 		if not proposal.ready: return _fail("bunting_completion_failed",{"detail":proposal})
 		if proposal.sourceBytes!=frozen or var_to_bytes(source.snapshot())!=frozen: return _fail("bunting_proposal_source_changed")
@@ -421,7 +426,12 @@ static func _verify_final_signs(proof, records: Array, protected: Array, continu
 			return _fail("final_sign_source_invalid", {"id":sign.armId,"detail":result})
 	return {"ready":true}
 
-static func _complete_party_walls(working, records: Array, continuation: Callable = Callable()) -> Dictionary:
+static func _complete_party_walls(working, records: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
+	var result := _complete_party_walls_impl(working,records,continuation,support_identities)
+	if not result.get("ready",false): support_identities.clear()
+	return result
+
+static func _complete_party_walls_impl(working, records: Array, continuation: Callable, support_identities: Dictionary) -> Dictionary:
 	var expected_source := var_to_bytes(working.snapshot())
 	if not _continue(continuation, "party_walls_started"): return _fail("cancelled")
 	if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
@@ -440,7 +450,7 @@ static func _complete_party_walls(working, records: Array, continuation: Callabl
 			if not _continue(continuation, "party_wall_item:" + key): return _fail("cancelled")
 			if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
 			if context==null:
-				var prepared := PartyWalls.prepare_context(working,continuation)
+				var prepared := PartyWalls._prepare_context_with_support_memo(working,continuation,support_identities)
 				if not prepared.ready: return prepared
 				if expected_source!=var_to_bytes(working.snapshot()): return _fail("party_wall_source_changed_during_completion")
 				context=prepared.context

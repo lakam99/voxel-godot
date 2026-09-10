@@ -67,6 +67,7 @@ func _exercise() -> void:
 	evidence["actualPlan"]=cached
 	if not checks.actual_successful_party_wall_plan: return
 	checks["exact_floating_bottom_target"]=plain.targetIds==[lower.id]
+	_support_memo_controls(source,plain)
 	_geometric_controls(source,key,plain,seats,roots)
 	_noop(source,"missing-declaration","missing_declaration","missing_facade_declaration")
 	var applied = Copy.copy_blueprint(source.snapshot())
@@ -96,6 +97,37 @@ func _exercise() -> void:
 	_integration(source,key)
 	_cancellation_controls(source,key,context)
 	checks["source_still_immutable"]=initial==var_to_bytes(source.snapshot())
+
+func _warm_support(source, identities: Dictionary) -> void:
+	var copy=Copy.copy_blueprint(source.snapshot())
+	var proof=Recipe.SupportMemo.new(copy.id,copy.seed,copy.style)
+	proof.recipe=copy.recipe; proof.rooms=copy.rooms; proof.parts=copy.parts; proof.identities=identities
+	proof.validate_physical_integrity()
+
+func _support_memo_controls(source, plan: Dictionary) -> void:
+	var identities:Dictionary={}
+	_warm_support(source,identities)
+	var fresh:=Recipe.prepare_context(source)
+	var shared:=Recipe._prepare_context_with_support_memo(source,Callable(),identities)
+	checks["support_memo_complete_report_snapshot_parity"]=fresh.ready and shared.ready and var_to_bytes(fresh.context.report)==var_to_bytes(shared.context.report) and var_to_bytes(fresh.context.proof.snapshot())==var_to_bytes(shared.context.proof.snapshot())
+	if not shared.ready:return
+	checks["support_memo_hits_and_public_default_fresh"]=shared.context.proof.observations.hits>0 and fresh.context.proof.get_script()==Recipe.Blueprint
+	checks["support_memo_context_detached"]=shared.context.proof.identities.is_empty() and not is_same(shared.context.proof.identities,identities)
+	shared.context.proof.parts[0].recipe["tampered"]=true
+	checks["support_memo_context_tamper_rejected"]=not Recipe._context_valid(source,shared.context).ready
+	for mode in ["accepted_plan","moved_root"]:
+		var changed=Copy.copy_blueprint(source.snapshot())
+		if mode=="accepted_plan": Recipe.apply_plan(changed,plan)
+		else: changed.parts[0].position.x+=20
+		_warm_support(source,identities)
+		var cold:=Recipe.prepare_context(changed)
+		var warm:=Recipe._prepare_context_with_support_memo(changed,Callable(),identities)
+		checks["support_memo_changed_proof_"+mode]=cold.ready and warm.ready and var_to_bytes(cold.context.report)==var_to_bytes(warm.context.report) and var_to_bytes(cold.context.proof.snapshot())==var_to_bytes(warm.context.proof.snapshot())
+		if mode=="moved_root":checks["support_memo_pool_change_misses"]=warm.ready and not warm.context.proof.observations.poolRepeated and warm.context.proof.observations.misses>0
+	for stage in ["party_wall_proof_started","physical_resolve_support","party_wall_proof_completed"]:
+		_warm_support(source,identities)
+		var result:=Recipe._prepare_context_with_support_memo(source,func(label):return label!=stage,identities)
+		checks["support_memo_cancel_"+stage]=result.get("reason")=="cancelled" and identities.is_empty()
 
 func _geometric_controls(source, key: String, positive: Dictionary, seats: Dictionary, roots: Dictionary) -> void:
 	checks["frozen_original_sha"]=FileAccess.file_exists(ORIGINAL) and FileAccess.get_sha256(ORIGINAL)==ORIGINAL_SHA

@@ -6,6 +6,7 @@ const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const Copy = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.gd")
 const Admission = preload("res://scripts/buildings/ConstructionBoxAdmission.gd")
+const SupportMemo = preload("res://scripts/buildings/BuildingSupportResolutionMemo.gd")
 const MAX_PARTS := 10000
 const MAX_ASSEMBLIES := 16
 const MAX_PENNANTS := 128
@@ -17,12 +18,15 @@ const SOCKET_INSET := Blueprint.STAIR_HOUSED_JOINT_INSET + 0.001
 
 class Run:
 	var continuation: Callable
+	var _support_identities: Variant = null
+	var _support_observations: Dictionary = {}
 	var cancelled := false
 	var comparisons := 0
 	var pairs := 0
 	func step(stage: String) -> bool:
 		if cancelled: return false
 		cancelled = continuation.is_valid() and continuation.call(stage) != true
+		if cancelled and _support_identities != null: _support_identities.clear()
 		return not cancelled
 
 ## assemblies: [{ropeId:String, pennantIds:Array[String]}], producer supplied.
@@ -30,6 +34,16 @@ class Run:
 ## ready result changes is an ordered Array of complete replacement snapshots;
 ## sourceBytes binds the unmodified caller snapshot, for the caller's commit.
 static func prepare(source, assemblies: Array, protected_volumes: Array, continuation: Callable = Callable()) -> Dictionary:
+	return _prepare_internal(source,assemblies,protected_volumes,continuation,null)
+
+## Only the owning completion transaction supplies this store. Public proposals
+## stay fresh, and no store or proof object escapes in the returned proposal.
+static func _prepare_with_support_memo(source, assemblies: Array, protected_volumes: Array, continuation: Callable, identities: Dictionary) -> Dictionary:
+	var result := _prepare_internal(source,assemblies,protected_volumes,continuation,identities)
+	if not result.get("ready",false): identities.clear()
+	return result
+
+static func _prepare_internal(source, assemblies: Array, protected_volumes: Array, continuation: Callable, identities: Variant) -> Dictionary:
 	if not _valid_source(source) or assemblies.size() > MAX_ASSEMBLIES or protected_volumes.size() > MAX_PROTECTED:
 		return _fail("invalid_bunting_source")
 	var snapshot: Dictionary = source.snapshot()
@@ -39,6 +53,7 @@ static func prepare(source, assemblies: Array, protected_volumes: Array, continu
 	var private_protected: Array = protected_volumes.duplicate(true)
 	var run := Run.new()
 	run.continuation = continuation
+	run._support_identities = identities
 	var result: Dictionary = _prepare(snapshot,private_assemblies,private_protected,run)
 	if run.cancelled: return _fail("cancelled")
 	if not _valid_source(source) or source_bytes != var_to_bytes(source.snapshot()) or input_bytes != var_to_bytes([assemblies,protected_volumes]):
@@ -111,11 +126,19 @@ static func _prepare(snapshot: Dictionary, assemblies: Array, protected: Array, 
 	# metadata therefore cannot establish either mounting building's rootedness.
 	var proof = Copy.copy_blueprint(snapshot)
 	proof.parts = proof.parts.filter(func(part) -> bool: return not owned.has(part.id))
+	if run._support_identities != null:
+		var memo := SupportMemo.new(proof.id,proof.seed,proof.style)
+		memo.recipe=proof.recipe; memo.rooms=proof.rooms; memo.parts=proof.parts
+		memo.identities=run._support_identities
+		proof=memo
 	Copy.clear_caches(proof)
 	var grid: Dictionary = Copy.validation_grid_work(proof)
 	if not grid.get("ready",false): return _fail("bunting_proof_grid_limit",grid)
 	if not run.step("bunting_proof_started"): return _fail("cancelled")
 	var report: Dictionary = proof.validate_physical_integrity_cancellable(run.step)
+	if run._support_identities != null:
+		run._support_observations=proof.observations.duplicate(true)
+		proof.identities={}
 	if report.get("cancelled",false) or not run.step("bunting_proof_completed"): return _fail("cancelled")
 	var passed: Dictionary = {}
 	for check: Dictionary in report.get("checks",[]):
