@@ -108,6 +108,13 @@ retain one world authority, preserve save format v2 and durable deltas.
   benefit. Production grouping remains f780e2c. Preserve the complete experiment
   and comparison in WORLD_STREAMING_SPATIAL_GROUPING_EXPERIMENT_2026-09-10.md.
   The existing headed runner now records settled overview/courtyard/door phases.
+- Worker-owned masonry records now carry write revisions and deeply frozen
+  recipes. Authoring inputs remain mutable. In the production diagnostic,
+  prepared lookup fell from 637ms to 15ms and total publication CPU from 12.79s
+  to 11.74s with exact source/instance/collider parity. Current startup was
+  82.543s; scene-ready capture was 127.030s. This is one sample, not the 64m/90s
+  contract, and publication still exceeds the 4ms cooperative budget. Evidence
+  and regression outcomes: WORLD_STREAMING_OWNED_RECORDS_2026-09-10.md.
 - Next: address measured publication validation/geometry costs and submission
   fragmentation before reintroducing spatial subdivision, then regional
   dependency closure with real revision-matched navigation acknowledgements.

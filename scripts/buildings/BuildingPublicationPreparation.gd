@@ -9,6 +9,7 @@ const History = preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const MasonryGeometry = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const MasonryPacket = preload("res://scripts/buildings/BuildingMasonryRenderPacket.gd")
+const PartRecord = preload("res://scripts/buildings/BuildingPart.gd")
 const METADATA_MAX_DEPTH := 128
 
 class Continuation extends RefCounted:
@@ -96,6 +97,10 @@ class PreparedMasonry extends RefCounted:
 		return MasonrySelection.selected(part)
 	func validate_part(part) -> bool:
 		if part == null or not _entries.has(part) or not matches_history(_history, _history.history, _source_id): return false
+		var entry: Dictionary = _entries[part]
+		if entry.sealedRevision >= 0:
+			return part.get_script()==PartRecord and part._publication_sealed \
+				and part._publication_revision==entry.sealedRevision and is_same(part.recipe,entry.sealedRecipe)
 		# A caller can introduce cycles/Objects after preparation. Reject before
 		# snapshot() deep-copies; do not feed unsupported graphs to the encoder.
 		var graph := MetadataGraph.new()
@@ -187,7 +192,7 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 	if not metadata.ready: return _failed(metadata.reason)
 	var history_result := _compile_history(restored.blueprint, guard.advance)
 	if not history_result.ready: return _failed(history_result.reason)
-	var masonry := _compile_masonry(restored.blueprint, history_result.preparedHistory, guard.advance)
+	var masonry := _compile_masonry(restored.blueprint, history_result.preparedHistory, guard.advance, true)
 	if not masonry.ready: return _failed(masonry.reason)
 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
 	var prepared := PreparedSource.new()
@@ -205,7 +210,7 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 
 ## Same visible wall/foundation dispatch as the publisher, including tagged
 ## aperture walls. No cuts, Nodes, Resources, uploads or geometry alternatives.
-static func _compile_masonry(blueprint, prepared_history: PreparedHistory, continuation: Callable = Callable()) -> Dictionary:
+static func _compile_masonry(blueprint, prepared_history: PreparedHistory, continuation: Callable = Callable(), seal_owned_parts := false) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	var guard := Continuation.new()
 	guard.callback = continuation
@@ -254,7 +259,22 @@ static func _compile_masonry(blueprint, prepared_history: PreparedHistory, conti
 			if not graph.eligible: return _failed("unsupported_masonry_descriptor")
 			var packet = MasonryPacket.compile(part,geometry,source_id,guard.advance)
 			if guard.cancelled: return _failed("cancelled")
-			var entry := {"id":id, "part":part, "binding":binding, "geometry":geometry,"packet":packet}
+			var sealed_revision := -1
+			var sealed_recipe: Dictionary = {}
+			if seal_owned_parts:
+				if part.get_script()!=PartRecord: return _failed("unsupported_owned_part")
+				sealed_recipe = graph.walk(snapshot.recipe,[],true)
+				if guard.cancelled: return _failed("cancelled")
+				if not graph.eligible: return _failed("unsupported_owned_recipe")
+				# Validate after callbacks and before replacing any owned recipe.
+				graph.walk(part.recipe,[],false)
+				if guard.cancelled: return _failed("cancelled")
+				if not graph.eligible: return _failed("stale_prepared_masonry_part")
+				if static_record_binding(part.snapshot())!=binding: return _failed("stale_prepared_masonry_part")
+				sealed_revision = part.seal_for_publication(sealed_recipe)
+				if sealed_revision<0: return _failed("already_sealed_owned_part")
+			var entry := {"id":id, "part":part, "binding":binding, "geometry":geometry,"packet":packet,
+				"sealedRevision":sealed_revision,"sealedRecipe":sealed_recipe}
 			entry.make_read_only()
 			entries[part] = entry
 			if not guard.advance("publication_masonry_record"): return _failed("cancelled")

@@ -79,6 +79,7 @@ static func run_worker() -> Dictionary:
 		"cancel_completed":false,"pipeline_completed":false,"retirement_completed":false}
 	var report := {"checks":checks,"evidenceLevel":"synthetic CPU/service; no Nodes/GPU/live acceptance",
 		"workerThreadId":OS.get_thread_caller_id()}
+	owned_revision_controls(checks)
 	var b = fixture()
 	var before := encoded(b.snapshot())
 	var history: Dictionary = Preparation._compile_history(b)
@@ -244,6 +245,45 @@ static func run_worker() -> Dictionary:
 	checks.retirement_completed = true
 	report["masonryPreparationUsec"]=result.masonryPreparationUsec
 	return report
+
+static func owned_revision_controls(checks: Dictionary) -> void:
+	var b := Blueprint.new("owned-records",81)
+	var fields := ["id","kind","material_id","position","rotation","size","collision_enabled","semantic","physical_intent","recipe"]
+	for field: String in fields:
+		b.add_part({"id":field,"kind":"wall","material":"fired_brick","size":Vector3(1,1,0.2),
+			"recipe":{"physicalIntent":"structural_mass","nested":{"samples":[1,2]}}})
+	# Production inputs already include resolved physical contracts; compare that
+	# authoritative snapshot, not an unfinished authoring fixture.
+	b.resolve_physical_contracts()
+	var before := encoded(b.snapshot())
+	var plan := Plan.new("owned-furniture",81,b.id)
+	var furniture: Dictionary=plan.snapshot()
+	furniture.accessReservations=plan.access_reservations_snapshot()
+	var result: Dictionary=Preparation.prepare_source(b.snapshot(),furniture,BINDING)
+	checks.owned_pipeline_ready=result.ready
+	if not result.ready: return
+	var payload: Dictionary=result.prepared.take(BINDING)
+	var artifact=payload.preparedMasonry
+	checks.owned_roundtrip_exact=encoded(payload.blueprint.snapshot())==before
+	checks.authoring_input_remains_mutable=encoded(b.snapshot())==before and not b.parts[0].recipe.is_read_only()
+	for i in fields.size():
+		var field: String=fields[i]
+		var part=payload.blueprint.parts[i]
+		var label := "owned_"+field
+		checks[label+"_initial_receipt"]=artifact.validate_part(part) and part._publication_sealed and all_frozen(part.recipe)
+		var saved: Variant=part.get(field)
+		var revision: int=part._publication_revision
+		match field:
+			"position","rotation","size": part.set(field,saved+Vector3.ONE)
+			"collision_enabled": part.set(field,not saved)
+			"recipe":
+				part.recipe=part.recipe.duplicate(true)
+				part.recipe.nested.samples[0]=9
+			_: part.set(field,String(saved)+"_changed")
+		checks[label+"_changed_rejected"]=part._publication_revision>revision and not artifact.validate_part(part) and artifact.geometry_for(part).is_empty() and artifact.packet_for(part)==null
+		part.set(field,saved)
+		checks[label+"_restoration_stays_stale"]=not artifact.validate_part(part)
+	checks.owned_pipeline_one_shot=result.prepared.take(BINDING).is_empty()
 
 func _initialize() -> void: call_deferred("run")
 
