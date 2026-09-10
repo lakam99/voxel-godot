@@ -1,0 +1,509 @@
+diff --git a/scripts/buildings/BuildingPartPublisher.gd b/scripts/buildings/BuildingPartPublisher.gd
+index 9a248c7..cda8d97 100644
+--- a/scripts/buildings/BuildingPartPublisher.gd
++++ b/scripts/buildings/BuildingPartPublisher.gd
+@@ -47,6 +47,13 @@ var batch_static_parts := false
+ var static_collision_body: StaticBody3D
+ var static_part_records: Dictionary = {}
+ var static_visual_batches: Dictionary = {}
++const SpatialGroups = preload("res://scripts/buildings/BuildingSpatialGroups.gd")
++var static_visual_owner_cell := Vector2i.ZERO
++var static_visual_owner_part := ""
++var _spatial_completion: Dictionary = {}
++var _spatial_frame := Transform3D.IDENTITY
++var _spatial_completion_cursor := 0
++var _spatial_force_flush := false
+ var static_visual_collecting := false
+ var static_visual_part_transform := Transform3D.IDENTITY
+ var static_visual_transform_count := 0
+@@ -170,6 +177,7 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
+ 	_prepared_history=source.get("preparedHistory")
+ 	_prepared_masonry=source.get("preparedMasonry")
+ 	_prepared_masonry_identity=_prepared_masonry
++	_spatial_completion=source.get("spatialCompletion",{})
+ 	var started := Time.get_ticks_usec()
+ 	var ready := _begin_scene_publication(source.blueprint, options, parent)
+ 	scene_preparation_usec = Time.get_ticks_usec() - started
+@@ -189,7 +197,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
+ 	# begin creates no scene nodes. Transfer its CPU/resource state without
+ 	# clearing aliased containers or retaining the failed blueprint in publisher.
+ 	var state := {"physicalIntegrity":physical_integrity, "raisedRouteCoverage":raised_route_coverage,
+-		"sceneBlueprint":_scene_blueprint,
++		"sceneBlueprint":_scene_blueprint,"spatialCompletion":_spatial_completion,
+ 		"staticRecords":_prepared_static_records,"staticRecordBindings":_prepared_static_bindings,
+ 		"pavingBlueprint":_paving_blueprint, "pavingParts":_paving_source_parts,
+ 		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
+@@ -200,6 +208,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
+ 	raised_route_coverage = {}
+ 	_scene_blueprint=null
+ 	_scene_parent=null
++	_spatial_completion={}
+ 	_prepared_static_records={}
+ 	_prepared_static_bindings={}
+ 	_paving_blueprint = null
+@@ -226,6 +235,11 @@ func _begin_scene_publication(blueprint, options: Dictionary, parent: Node3D) ->
+ 		push_error("Building publication blocked by invalid physical recipe: %s" % JSON.stringify(physical_integrity.get("violations", [])))
+ 		return false
+ 	configure_publication_options(options)
++	_spatial_frame=SpatialGroups.world_frame(parent)
++	if _spatial_completion.is_empty():
++		_spatial_completion=SpatialGroups.completion_index(blueprint,_spatial_frame)
++	elif _spatial_completion.frame!=_spatial_frame:
++		return _paving_reject("stale_spatial_publication_frame")
+ 	_scene_blueprint=blueprint
+ 	_scene_parent=weakref(parent)
+ 	incremental_total_parts = blueprint.parts.size()
+@@ -416,6 +430,12 @@ func clear_published() -> void:
+ 	static_collision_body = null
+ 	static_part_records.clear()
+ 	static_visual_batches.clear()
++	_spatial_completion={}
++	_spatial_frame=Transform3D.IDENTITY
++	_spatial_completion_cursor=0
++	_spatial_force_flush=false
++	static_visual_owner_cell = Vector2i.ZERO
++	static_visual_owner_part = ""
+ 	static_visual_collecting = false
+ 	static_visual_part_transform = Transform3D.IDENTITY
+ 	static_visual_transform_count = 0
+@@ -516,6 +536,9 @@ func publish_part(part, parent: Node3D) -> StaticBody3D:
+ func publish_static_part(part, parent: Node3D) -> void:
+ 	if not _paving_part_valid(part): return
+ 	if not _masonry_part_valid(part): return
++	# Keep this owner through the part's resumable masonry/paving/roof work.
++	static_visual_owner_cell = SpatialGroups.owner_cell(SpatialGroups.world_frame(parent) * part.position)
++	static_visual_owner_part = String(part.id)
+ 	# Static construction records remain the source of visual and collision facts;
+ 	# this only composes their publication under shared scene nodes. Doors keep
+ 	# their individual bodies because DoorPortalService owns their interaction and
+@@ -1480,13 +1503,15 @@ func add_box_visual(parent: Node3D, size: Vector3, position: Vector3, material:
+ func collect_static_visual_transform(transform: Transform3D, material: Material, custom_data := Color(0.5, 0.5, 0.5, 1.0)) -> void:
+ 	if material == null:
+ 		return
+-	var key := str(material.get_instance_id())
++	var key := SpatialGroups.key(static_visual_owner_cell,material)
+ 	var group: Dictionary = static_visual_batches.get(key, {}) if static_visual_batches.get(key, {}) is Dictionary else {}
+ 	if group.is_empty():
+-		group = {"material": material, "transforms": [], "customData": []}
++		group = SpatialGroups.create_group(static_visual_owner_cell,material)
+ 	var transforms: Array = group.get("transforms", []) as Array
+ 	var custom_data_values: Array = group.get("customData", []) as Array
++	SpatialGroups.include(group,static_visual_owner_part,transforms.size(),1,transform*AABB(Vector3(-0.5,-0.5,-0.5),Vector3.ONE))
+ 	transforms.append(transform)
++	_spatial_force_flush = _spatial_force_flush or transforms.size()>=INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT
+ 	custom_data_values.append(custom_data)
+ 	static_visual_transform_count += 1
+ 	group["transforms"] = transforms
+@@ -1495,12 +1520,14 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
+ 
+ func collect_prepared_static_visual_segment(segment, material: Material) -> void:
+ 	if material==null or segment.instanceCount==0: return
+-	var key := str(material.get_instance_id())
++	var key := SpatialGroups.key(static_visual_owner_cell,material)
+ 	var group: Dictionary = static_visual_batches.get(key,{})
+-	if group.is_empty(): group={"material":material,"transforms":[],"customData":[]}
++	if group.is_empty(): group=SpatialGroups.create_group(static_visual_owner_cell,material)
++	SpatialGroups.include(group,static_visual_owner_part,group.transforms.size(),segment.instanceCount,segment.bounds)
+ 	if not group.has("preparedSegments"): group.preparedSegments={}
+ 	group.preparedSegments[group.transforms.size()] = segment
+ 	group.transforms.append_array(segment.transforms)
++	_spatial_force_flush = _spatial_force_flush or group.transforms.size()>=INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT
+ 	group.customData.append_array(segment.customData)
+ 	static_visual_transform_count += segment.instanceCount
+ 	static_visual_batches[key] = group
+@@ -1514,9 +1541,25 @@ func flush_static_batches(parent: Node3D) -> void:
+ 
+ func _begin_static_flush(parent: Node3D, notify_progress: bool) -> void:
+ 	if _static_flush!=null or static_visual_batches.is_empty() or parent==null: return
++	if notify_progress and resumable_scene_publication and not _spatial_completion.is_empty():
++		var completions: Array = _spatial_completion.completions
++		if not _spatial_force_flush and static_visual_transform_count<SpatialGroups.MAX_DEFERRED_INSTANCES and _spatial_completion_cursor<completions.size() and int(completions[_spatial_completion_cursor])>=incremental_published_parts:
++			return
++		while _spatial_completion_cursor<completions.size() and int(completions[_spatial_completion_cursor])<incremental_published_parts:
++			_spatial_completion_cursor+=1
++	var selected: Dictionary = {}
++	for key in static_visual_batches:
++		var group: Dictionary = static_visual_batches[key]
++		# Completion comes from the source's last part in this cell, not camera
++		# visibility. Retain partial groups so later flushes do not fragment them.
++		var complete: bool = not notify_progress or not resumable_scene_publication or _spatial_completion.is_empty() or int(_spatial_completion.last.get(group.ownerCell,incremental_total_parts))<incremental_published_parts
++		if complete or group.transforms.size()>=INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT or static_visual_transform_count>=SpatialGroups.MAX_DEFERRED_INSTANCES:
++			selected[key]=group
++	if selected.is_empty(): return
++	_spatial_force_flush=false
+ 	_static_flush = StaticBatchFlush.new()
+ 	_static_flush_notify = notify_progress
+-	_static_flush.begin(static_visual_batches,static_part_records,parent)
++	_static_flush.begin(selected,static_part_records,parent)
+ 
+ 
+ func has_pending_static_flush() -> bool:
+@@ -1524,7 +1567,7 @@ func has_pending_static_flush() -> bool:
+ 
+ 
+ func _scene_owner_matches(blueprint, parent: Node3D) -> bool:
+-	return blueprint==_scene_blueprint and _scene_parent!=null and _scene_parent.get_ref()==parent
++	return blueprint==_scene_blueprint and _scene_parent!=null and _scene_parent.get_ref()==parent and SpatialGroups.world_frame(parent)==_spatial_frame
+ 
+ 
+ func validate_static_flush_source() -> bool:
+@@ -1593,6 +1636,9 @@ func advance_static_flush(parent: Node3D, budget_usec := 2500) -> Dictionary:
+ 	if _static_flush._parent.get_ref()!=parent:
+ 		_paving_reject("static_flush_parent_mismatch")
+ 		return {"status":"failed","reason":"static_flush_parent_mismatch"}
++	if _scene_blueprint!=null and SpatialGroups.world_frame(parent)!=_spatial_frame:
++		_paving_reject("static_flush_frame_mismatch")
++		return {"status":"failed","reason":"static_flush_frame_mismatch"}
+ 	var result: Dictionary = _static_flush.advance(self,budget_usec)
+ 	if result.status=="failed": _paving_reject(String(result.reason))
+ 	if result.status in ["ready","failed"]:
+diff --git a/scripts/buildings/BuildingPublicationPreparation.gd b/scripts/buildings/BuildingPublicationPreparation.gd
+index 2b61098..8fbe903 100644
+--- a/scripts/buildings/BuildingPublicationPreparation.gd
++++ b/scripts/buildings/BuildingPublicationPreparation.gd
+@@ -172,7 +172,7 @@ static func valid_binding(binding: Dictionary) -> bool:
+ 		and binding.get("sourceKey") is String and not binding.sourceKey.is_empty() \
+ 		and binding.get("generation") is int and binding.generation > 0
+ 
+-static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable()) -> Dictionary:
++static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable(), world_frame: Variant = null) -> Dictionary:
+ 	if not valid_binding(binding): return _failed("invalid_publication_binding")
+ 	# Freeze identity before invoking any caller callback or expensive work.
+ 	var source_binding := binding.duplicate()
+@@ -189,6 +189,10 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
+ 	if not history_result.ready: return _failed(history_result.reason)
+ 	var masonry := _compile_masonry(restored.blueprint, history_result.preparedHistory, guard.advance)
+ 	if not masonry.ready: return _failed(masonry.reason)
++	var spatial: Dictionary = {}
++	if world_frame is Transform3D:
++		spatial = preload("res://scripts/buildings/BuildingSpatialGroups.gd").completion_index(restored.blueprint,world_frame,guard.advance)
++		if spatial.is_empty(): return _failed("cancelled")
+ 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
+ 	var prepared := PreparedSource.new()
+ 	prepared._binding = source_binding
+@@ -199,6 +203,7 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
+ 		"staticRecords":metadata.staticRecords, "staticRecordBindings":metadata.staticRecordBindings,
+ 		"metadataPreparationUsec":metadata.metadataPreparationUsec,
+ 		"preparedHistory":history_result.preparedHistory,
++		"spatialCompletion":spatial,
+ 		"historyPreparationUsec":history_result.historyPreparationUsec,
+ 		"preparedMasonry":masonry.preparedMasonry, "masonryPreparationUsec":masonry.masonryPreparationUsec}
+ 	return {"ready":true, "reason":"", "prepared":prepared}
+diff --git a/scripts/buildings/BuildingPublicationWorker.gd b/scripts/buildings/BuildingPublicationWorker.gd
+index b513842..c4205c4 100644
+--- a/scripts/buildings/BuildingPublicationWorker.gd
++++ b/scripts/buildings/BuildingPublicationWorker.gd
+@@ -251,7 +251,7 @@ func _start_thread(work: Callable) -> int:
+ 	return _thread.start(work)
+ 
+ func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable) -> Dictionary:
+-	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation)
++	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation,Transform3D(Basis.IDENTITY,source.profile.origin))
+ 
+ func _run(state: RunState) -> Dictionary:
+ 	state.begin_work() # Queue residence and failed-start retries are not run time.
+diff --git a/scripts/buildings/BuildingSpatialGroups.gd b/scripts/buildings/BuildingSpatialGroups.gd
+new file mode 100644
+index 0000000..ec8e37a
+--- /dev/null
++++ b/scripts/buildings/BuildingSpatialGroups.gd
+@@ -0,0 +1,43 @@
++extends RefCounted
++## Presentation indexing only. Crossing source parts keep one physical owner.
++const TERRAIN_CELLS := 32
++const CELL_METRES := 43.2
++const MAX_DEFERRED_INSTANCES := 262144
++
++static func world_frame(parent: Node3D) -> Transform3D:
++	# Detached diagnostic roots have only their local coordinate frame.
++	return parent.global_transform if parent.is_inside_tree() else parent.transform
++
++static func completion_index(blueprint, frame: Transform3D, continuation: Callable = Callable()) -> Dictionary:
++	var last: Dictionary = {}
++	for i in blueprint.parts.size():
++		if i%128==0 and continuation.is_valid() and continuation.call("publication_spatial_index")!=true: return {}
++		var part = blueprint.parts[i]
++		if part!=null and String(part.kind)!="door":
++			last[owner_cell(frame*part.position)] = i
++	last.make_read_only()
++	var completions: Array = last.values()
++	completions.sort()
++	completions.make_read_only()
++	var result := {"frame":frame,"last":last,"completions":completions}
++	result.make_read_only()
++	return result
++
++static func owner_cell(world_position: Vector3) -> Vector2i:
++	return Vector2i(floori(world_position.x/CELL_METRES),floori(world_position.z/CELL_METRES))
++
++static func key(cell: Vector2i, material: Material) -> String:
++	return "%d,%d:box:%d" % [cell.x,cell.y,material.get_instance_id()]
++
++static func create_group(cell: Vector2i, material: Material) -> Dictionary:
++	return {"ownerCell":cell,"material":material,"transforms":[],"customData":[],
++		"sourceSpans":[],"bounds":AABB(),"hasBounds":false}
++
++static func include(group: Dictionary, part_id: String, first: int, count: int, bounds: AABB) -> void:
++	group.bounds = group.bounds.merge(bounds) if group.hasBounds else bounds
++	group.hasBounds = true
++	var spans: Array = group.sourceSpans
++	if not spans.is_empty() and spans[-1].partId==part_id and spans[-1].first+spans[-1].count==first:
++		spans[-1].count += count
++	else:
++		spans.append({"partId":part_id,"first":first,"count":count})
+diff --git a/scripts/buildings/BuildingStaticBatchFlush.gd b/scripts/buildings/BuildingStaticBatchFlush.gd
+index 9de60b3..3d71e5e 100644
+--- a/scripts/buildings/BuildingStaticBatchFlush.gd
++++ b/scripts/buildings/BuildingStaticBatchFlush.gd
+@@ -38,6 +38,7 @@ var _custom: Array = []
+ var _material: Material
+ var _parent: WeakRef
+ var _segments: Dictionary = {}
++var _spatial_group: Dictionary = {}
+ var _buffer := PackedFloat32Array()
+ var _retired_buffers: Array = []
+ 
+@@ -82,6 +83,7 @@ func _step(publisher) -> void:
+ 				state = "metadata_begin"
+ 				return
+ 			var group: Dictionary = _groups[_keys[_group_index]]
++			_spatial_group = group
+ 			_transforms = group.transforms
+ 			_custom = group.customData
+ 			_segments = group.get("preparedSegments",{})
+@@ -96,6 +98,7 @@ func _step(publisher) -> void:
+ 			_mesh.instance_count = _transforms.size()
+ 			publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
+ 			_mesh.mesh = publisher.unit_box
++			if group.get("hasBounds",false): _mesh.custom_aabb = group.bounds
+ 			_instance_index = 0
+ 			state = "instances"
+ 		"instances":
+@@ -117,6 +120,13 @@ func _step(publisher) -> void:
+ 			instance.multimesh = _mesh
+ 			instance.material_override = _material
+ 			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
++			var spans: Array = _spatial_group.get("sourceSpans",[])
++			for span: Dictionary in spans: span.make_read_only()
++			spans.make_read_only()
++			instance.set_meta("building_spatial_cell",_spatial_group.get("ownerCell",Vector2i.ZERO))
++			instance.set_meta("building_source_blueprint",publisher.source_blueprint_id)
++			instance.set_meta("building_instance_sources",spans)
++			instance.set_meta("building_detail_tier","near")
+ 			parent.add_child(instance)
+ 			publisher.published_nodes.append(instance)
+ 			publisher.visual_batch_count += 1
+@@ -246,8 +256,9 @@ func _step(publisher) -> void:
+ 			publisher._static_record_cache_stats.preparedHits+=_prepared_hits
+ 			publisher._static_record_cache_stats.copiedEncodedBytes+=_copied_encoded_bytes
+ 			publisher._static_record_cache_stats.unsupportedCopies+=_unsupported_copies
+-			publisher.static_visual_batches = {}
+-			publisher.static_visual_transform_count = 0
++			for key in _groups:
++				publisher.static_visual_transform_count -= _groups[key].transforms.size()
++				publisher.static_visual_batches.erase(key)
+ 			publisher.incremental_static_flush_count += 1
+ 			state = "ready"
+ 
+diff --git a/scripts/testing/buildings/BuildingScenePublicationJobContract.gd b/scripts/testing/buildings/BuildingScenePublicationJobContract.gd
+index af8641f..b4c32e3 100644
+--- a/scripts/testing/buildings/BuildingScenePublicationJobContract.gd
++++ b/scripts/testing/buildings/BuildingScenePublicationJobContract.gd
+@@ -152,8 +152,11 @@ func inject_synthetic_flush_threshold(job) -> void:
+ 	custom.fill(Color(0.5, 0.5, 0.5, 1.0))
+ 	job._building.static_visual_batches["synthetic-threshold"] = {
+ 		"material":job._building.material_for_id("timber_beam", 0.0),
+-		"transforms":transforms, "customData":custom}
++		"transforms":transforms, "customData":custom,"ownerCell":Vector2i.ZERO,
++		"sourceSpans":[{"partId":"synthetic-threshold","first":0,"count":transforms.size()}],
++		"bounds":AABB(Vector3(-0.5,-0.5,-0.5),Vector3.ONE),"hasBounds":true}
+ 	job._building.static_visual_transform_count = transforms.size()
++	job._building._spatial_force_flush = true # The production collector sets this at the same threshold.
+ 
+ func pending_masonry_holder() -> Preparation.PreparedSource:
+ 	var prepared:=pending_holder(false)
+diff --git a/scripts/testing/buildings/BuildingStaticBatchFlushContract.gd b/scripts/testing/buildings/BuildingStaticBatchFlushContract.gd
+index 1b7cb69..ebca105 100644
+--- a/scripts/testing/buildings/BuildingStaticBatchFlushContract.gd
++++ b/scripts/testing/buildings/BuildingStaticBatchFlushContract.gd
+@@ -457,8 +457,108 @@ func original_submission_parity() -> void:
+ 		old.published_nodes=[]; current.published_nodes=[]
+ 	masonry_submission_parity(original)
+ 	prepared_packet_submission_parity(original)
++	spatial_submission_parity(original)
++	spatial_partial_flush()
+ 	check("old_new_submission_completed",true)
+ 
++func spatial_submission_parity(original: GDScript) -> void:
++	var parent := Node3D.new(); root.add_child(parent)
++	parent.position = Vector3(-4500,0,-3590)
++	parent.rotation.y = 0.3
++	var old_parent := Node3D.new(); root.add_child(old_parent)
++	old_parent.transform = parent.transform
++	var old = original.new()
++	var current := RecordingPublisher.new()
++	old.source_blueprint_id="spatial"; current.source_blueprint_id="spatial"
++	var expected: Dictionary = {}
++	var owners: Dictionary = {}
++	for index in 3:
++		var part := Part.new({"id":"beam_"+str(index),"kind":"beam","material":"wood",
++			"position":Vector3(-50+index*60,2,0),"size":Vector3(100,0.4,0.4),"rotation":Vector3(0,0.2,0)})
++		var before: Dictionary = {}
++		for key in old.static_visual_batches: before[key]=old.static_visual_batches[key].transforms.size()
++		old.publish_static_part(part,old_parent)
++		current.publish_static_part(part,parent)
++		var position: Vector3 = parent.global_transform*part.position
++		owners[part.id] = Vector2i(floori(position.x/43.2),floori(position.z/43.2))
++		expected[part.id] = []
++		for key in old.static_visual_batches:
++			var group: Dictionary = old.static_visual_batches[key]
++			for i in range(before.get(key,0),group.transforms.size()):
++				expected[part.id].append([group.transforms[i],group.customData[i],old.material_cache.find_key(group.material)])
++	var group_cells: Dictionary = {}
++	for group in current.static_visual_batches.values(): group_cells[group.ownerCell]=true
++	check("spatial_separate_world_cells",group_cells.size()==3)
++	current._begin_static_flush(parent,false)
++	while current.has_pending_static_flush(): current.advance_static_flush(parent,2500)
++	var actual: Dictionary = {}
++	var ownership := true
++	var bounds_exact := true
++	var spans_frozen := true
++	for node in current.published_nodes:
++		if not node is MultiMeshInstance3D: continue
++		var spans: Array = node.get_meta("building_instance_sources")
++		spans_frozen = spans_frozen and spans.is_read_only()
++		var covered := 0
++		for span: Dictionary in spans:
++			spans_frozen = spans_frozen and span.is_read_only()
++			ownership = ownership and node.get_meta("building_spatial_cell")==owners.get(span.partId) and span.first==covered
++			if not actual.has(span.partId): actual[span.partId]=[]
++			for i in range(span.first,span.first+span.count):
++				var pose: Transform3D = node.multimesh.submissions[i*2][2]
++				actual[span.partId].append([pose,node.multimesh.submissions[i*2+1][2],current.material_cache.find_key(node.material_override)])
++				bounds_exact = bounds_exact and node.multimesh.custom_aabb.grow(0.0001).encloses(pose*AABB(Vector3(-0.5,-0.5,-0.5),Vector3.ONE))
++			covered += span.count
++		ownership = ownership and covered==node.multimesh.instance_count
++	check("spatial_crossing_parts_single_owner",ownership and actual.size()==3)
++	check("spatial_complete_instance_source_spans",spans_frozen and ownership)
++	check("spatial_bounds_cover_cross_cell_geometry",bounds_exact)
++	var exact := actual.size()==expected.size()
++	for id in expected: exact = exact and var_to_bytes(actual.get(id,[]))==var_to_bytes(expected[id])
++	check("spatial_original_geometry_material_custom_exact",exact)
++	check("spatial_collision_not_duplicated",current.collision_count==3 and current.static_collision_body.get_child_count()==3)
++	parent.free(); old_parent.free()
++	current.published_nodes=[]; current.static_collision_body=null
++	old.published_nodes=[]; old.static_collision_body=null
++
++func spatial_partial_flush() -> void:
++	var parent := Node3D.new(); root.add_child(parent)
++	var publisher := RecordingPublisher.new()
++	publisher.resumable_scene_publication=true
++	var blueprint := Blueprint.new("spatial-partial",2)
++	for x in [0.0,100.0,2.0]:
++		blueprint.add_part({"id":"part_"+str(blueprint.parts.size()),"kind":"beam","material":"wood",
++			"position":Vector3(x,0,0),"size":Vector3(1,0.3,0.3)})
++	publisher._spatial_completion=Publisher.SpatialGroups.completion_index(blueprint,Transform3D.IDENTITY)
++	publisher.incremental_total_parts=3
++	publisher.publish_static_part(blueprint.parts[0],parent)
++	publisher.incremental_published_parts=1
++	publisher._begin_static_flush(parent,true)
++	check("spatial_pending_cell_retains_demand",not publisher.has_pending_static_flush() and not publisher.static_visual_batches.is_empty())
++	publisher.publish_static_part(blueprint.parts[1],parent)
++	publisher.incremental_published_parts=2
++	publisher._begin_static_flush(parent,true)
++	while publisher.has_pending_static_flush(): publisher.advance_static_flush(parent,2500)
++	check("spatial_flush_preserves_unfinished_cell",publisher.static_visual_transform_count==1 and publisher.static_visual_batches.size()==1)
++	publisher.publish_static_part(blueprint.parts[2],parent)
++	publisher.incremental_published_parts=3
++	publisher._begin_static_flush(parent,true)
++	while publisher.has_pending_static_flush(): publisher.advance_static_flush(parent,2500)
++	var batches := 0
++	var spans := 0
++	for node in publisher.published_nodes:
++		if node is MultiMeshInstance3D:
++			batches+=1
++			spans+=node.get_meta("building_instance_sources").size()
++	check("spatial_completed_cell_coalesces_across_parts",batches==2 and spans==3 and publisher.static_visual_batches.is_empty() and publisher.static_visual_transform_count==0)
++	publisher._scene_blueprint=blueprint; publisher._scene_parent=weakref(parent)
++	publisher.collect_static_visual_transform(Transform3D.IDENTITY,publisher.material_for_id("wood",0.0))
++	publisher._begin_static_flush(parent,false)
++	parent.position.x=1.0
++	var moved: Dictionary = publisher.advance_static_flush(parent,2500)
++	check("spatial_moved_parent_rejected_before_flush",moved.status=="failed" and moved.reason=="static_flush_frame_mismatch" and publisher._static_flush.units==0)
++	parent.free(); publisher.published_nodes=[]; publisher.static_collision_body=null
++
+ func masonry_submission_parity(original: GDScript) -> void:
+ 	check("masonry_submission_controls_completed",false)
+ 	for collecting: bool in [false,true]:
+diff --git a/scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd b/scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd
+index e90d030..5303d94 100644
+--- a/scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd
++++ b/scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd
+@@ -310,10 +310,16 @@ func _capture_inspection_views() -> Dictionary:
+ 	var passed := true
+ 	for view: Dictionary in views:
+ 		if not _within_deadline(): passed=false; break
++		phase="diagnostic_visual_inspection"
+ 		observer.global_position=view.position
+ 		observer.look_at(view.target)
+ 		await _frame()
+ 		await _frame()
++		if view.label in ["overview_0","courtyard_overview","urban_row_00_left_door"]:
++			phase="fixed_view:"+String(view.label)
++			var view_until := Time.get_ticks_msec()+2000
++			while Time.get_ticks_msec()<view_until and _within_deadline(): await _frame()
++		phase="diagnostic_visual_inspection"
+ 		if not await _capture(view.label,"diagnostic_inspection_camera"): passed=false; break
+ 	player.camera.make_current()
+ 	observer.queue_free()
+@@ -629,6 +635,9 @@ func _audit_scene() -> Dictionary:
+ 	result.structureSamples=[]
+ 	result.collisionMismatches=[]
+ 	var source_parts := {}
++	var all_source_parts := {}
++	var spatial_cells := {}
++	result.spatialGroups = {"groups":0,"instances":0,"cells":0,"errors":[]}
+ 	var seen_collisions := {}
+ 	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+ 	# One post-publication source capture for exact offline comparison. No runtime
+@@ -646,6 +655,7 @@ func _audit_scene() -> Dictionary:
+ 		if source_error!=OK: _evidence_failure("accepted-source.bin",source_error)
+ 		else: result["sourceCapture"]={"path":source_path,"sha256":FileAccess.get_sha256(source_path),"elapsedUsec":Time.get_ticks_usec()-source_started}
+ 	for record: Dictionary in accepted_source.get("blueprint",{}).get("parts",[]):
++		all_source_parts[record.id]=record
+ 		if record.get("collision",false): source_parts[record.id]=record
+ 	var have_bounds := false
+ 	result.rootPosition = site.global_position
+@@ -665,6 +675,21 @@ func _audit_scene() -> Dictionary:
+ 			if node is MeshInstance3D and node.mesh != null: result.meshes += 1
+ 			if node is MultiMeshInstance3D and node.multimesh != null:
+ 				result.multiMeshes += 1; result.instances += node.multimesh.instance_count
++				if node.has_meta("building_spatial_cell"):
++					var cell: Vector2i = node.get_meta("building_spatial_cell",Vector2i(999999,999999))
++					spatial_cells[cell]=true
++					result.spatialGroups.groups+=1
++					var covered := 0
++					for span: Dictionary in node.get_meta("building_instance_sources",[]):
++						var record: Dictionary = all_source_parts.get(span.partId,{})
++						if record.is_empty() or span.first!=covered or span.count<=0:
++							result.spatialGroups.errors.append(String(node.name)); continue
++						var position: Vector3 = site.global_transform*record.position
++						if cell!=Vector2i(floori(position.x/43.2),floori(position.z/43.2)):
++							result.spatialGroups.errors.append(span.partId)
++						covered+=span.count
++					if covered!=node.multimesh.instance_count: result.spatialGroups.errors.append(String(node.name))
++					result.spatialGroups.instances+=covered
+ 			if node is MeshInstance3D and node.mesh!=null or node is MultiMeshInstance3D and node.multimesh!=null:
+ 				var geometry := node as GeometryInstance3D
+ 				var bounds: AABB=geometry.global_transform*geometry.get_aabb()
+@@ -720,8 +745,10 @@ func _audit_scene() -> Dictionary:
+ 	result.capsule = Clearance.inspect(player)
+ 	result.sourceCollisionCount=source_parts.size()
+ 	result.publishedSourceCollisionCount=seen_collisions.size()
++	result.spatialGroups.cells=spatial_cells.size()
+ 	result.passed = stack.is_empty() and result.rootMatchesProfile and result.rootVisible and result.visibleGeometry>0 and have_bounds and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
+ 	result.passed = result.passed and result.collisionMismatches.is_empty() and source_parts.size()==seen_collisions.size() and not source_parts.is_empty()
++	result.passed = result.passed and result.spatialGroups.groups>0 and result.spatialGroups.errors.is_empty()
+ 	return result
+ 
+ func _audit_stair_clearance() -> Dictionary:

@@ -103,6 +103,15 @@ retain one world authority, preserve save format v2 and durable deltas.
   83.373s current startup readiness, 134.274s full scene-ready. This is not the
   new 64m readiness contract or flag-free menu acceptance. Evidence, limits and
   attributed broad/NPC failures: WORLD_STREAMING_PACKETS_AND_INITIAL_SPAWN_2026-09-10.md.
-- Next: finish spatial owner/cell grouping and worker preparation of remaining
-  geometry families, then regional dependency closure. Keep production checks
-  and the cooperative budget; use initial-location runs for startup measurement.
+- Spatial owner/cell grouping was implemented and measured at matching cameras,
+  but not promoted: extra submissions did not consistently pay for their culling
+  benefit. Production grouping remains f780e2c. Preserve the complete experiment
+  and comparison in WORLD_STREAMING_SPATIAL_GROUPING_EXPERIMENT_2026-09-10.md.
+  The existing headed runner now records settled overview/courtyard/door phases.
+- Next: address measured publication validation/geometry costs and submission
+  fragmentation before reintroducing spatial subdivision, then regional
+  dependency closure with real revision-matched navigation acknowledgements.
+  The owner inventory and broad reference replay are in that report. The spatial
+  candidate additionally stopped on an engine RID error that did not recur in
+  the reference replay; that failure remains unresolved and blocks its reuse.
+  Keep the cooperative budget and use initial-location startup measurements.

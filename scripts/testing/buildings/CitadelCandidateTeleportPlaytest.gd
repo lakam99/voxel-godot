@@ -310,10 +310,16 @@ func _capture_inspection_views() -> Dictionary:
 	var passed := true
 	for view: Dictionary in views:
 		if not _within_deadline(): passed=false; break
+		phase="diagnostic_visual_inspection"
 		observer.global_position=view.position
 		observer.look_at(view.target)
 		await _frame()
 		await _frame()
+		if view.label in ["overview_0","courtyard_overview","urban_row_00_left_door"]:
+			phase="fixed_view:"+String(view.label)
+			var view_until := Time.get_ticks_msec()+2000
+			while Time.get_ticks_msec()<view_until and _within_deadline(): await _frame()
+		phase="diagnostic_visual_inspection"
 		if not await _capture(view.label,"diagnostic_inspection_camera"): passed=false; break
 	player.camera.make_current()
 	observer.queue_free()
