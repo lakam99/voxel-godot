@@ -52,6 +52,20 @@ func _run() -> void:
 	reverse_islands.reverse()
 	_checks["removed_both_orders_exact"] = var_to_bytes(Occupancy.removed(islands, stripes)) == var_to_bytes(Occupancy.removed(reverse_islands, reversed))
 	_invalid_controls(unit)
+	# Preserve scalar types and signed-zero encoding at the public boundary.
+	var edge_boxes: Array = [[-100000, -0.0, 0, 100000.0, 1, 1.0],
+		[0, 0.0, -0.0, 1, 1.0, 1], [1.0, 0, 0, 2, 1, 1],
+		[-100000.0, -1, -1, -99999, 0.0, 0], [99999, 0, 0, 100000, 1, 1]]
+	for a in edge_boxes:
+		for b in edge_boxes:
+			var expected: Array = []
+			for axis in range(3): expected.append(maxf(a[axis], b[axis]))
+			for axis in range(3): expected.append(minf(a[axis + 3], b[axis + 3]))
+			if not Occupancy.valid(expected): expected = []
+			_checks["endpoint_encoding_%d_%d" % [edge_boxes.find(a), edge_boxes.find(b)]] = var_to_bytes(Occupancy.intersection(a,b)) == var_to_bytes(expected)
+	var work := {"steps": Occupancy.MAX_WORK - 1}
+	var limited := Occupancy._difference([unit], [[2,0,0,3,1,1],[3,0,0,4,1,1]], work)
+	_checks["exact_work_boundary"] = limited.get("reason") == "work_limit" and work.steps == Occupancy.MAX_WORK
 	_checks["declared_cell_cap"] = Occupancy.MAX_CELLS == 4096
 	var too_many: Array = []
 	for index in range(4097): too_many.append(unit.duplicate())

@@ -36,10 +36,18 @@ static func valid(box: Variant) -> bool:
 
 static func intersection(first: Array, second: Array) -> Array:
 	if not valid(first) or not valid(second): return []
+	return _intersection_validated(first, second)
+
+# Internal subtraction starts with validated boxes. Min/max and strict splits
+# preserve finite, bounded endpoints; do not revalidate every unchanged pair.
+static func _intersection_validated(first: Array, second: Array) -> Array:
 	var result: Array = []
-	for axis in range(3): result.append(maxf(first[axis], second[axis]))
+	for axis in range(3):
+		var low := maxf(first[axis], second[axis])
+		if low >= minf(first[axis + 3], second[axis + 3]): return []
+		result.append(low)
 	for axis in range(3): result.append(minf(first[axis + 3], second[axis + 3]))
-	return result if valid(result) else []
+	return result
 
 static func _valid_list(boxes: Array) -> bool:
 	return boxes.size() <= MAX_CELLS and boxes.all(func(box): return valid(box))
@@ -59,7 +67,7 @@ static func _difference(regions: Array, solids: Array, work: Dictionary) -> Dict
 		for cell: Array in cells:
 			if work.steps >= MAX_WORK: return _fail("work_limit")
 			work.steps += 1
-			var overlap := intersection(cell, solid)
+			var overlap := _intersection_validated(cell, solid)
 			if overlap.is_empty():
 				next.append(cell)
 			else:
