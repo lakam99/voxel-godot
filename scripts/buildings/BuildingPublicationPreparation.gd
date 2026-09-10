@@ -8,6 +8,7 @@ const Castle = preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.g
 const History = preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const MasonryGeometry = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
+const MasonryPacket = preload("res://scripts/buildings/BuildingMasonryRenderPacket.gd")
 const METADATA_MAX_DEPTH := 128
 
 class Continuation extends RefCounted:
@@ -106,6 +107,8 @@ class PreparedMasonry extends RefCounted:
 		return graph.eligible and RecordBinding.encode(snapshot) == _entries[part].binding
 	func geometry_for(part) -> Dictionary:
 		return _entries[part].geometry if validate_part(part) else {}
+	func packet_for(part):
+		return _entries[part].packet if validate_part(part) else null
 	func count() -> int:
 		return _entries.size()
 
@@ -249,7 +252,9 @@ static func _compile_masonry(blueprint, prepared_history: PreparedHistory, conti
 			var geometry: Variant = graph.walk(cursor.take_result(), [], true)
 			if guard.cancelled: return _failed("cancelled")
 			if not graph.eligible: return _failed("unsupported_masonry_descriptor")
-			var entry := {"id":id, "part":part, "binding":binding, "geometry":geometry}
+			var packet = MasonryPacket.compile(part,geometry,source_id,guard.advance)
+			if guard.cancelled: return _failed("cancelled")
+			var entry := {"id":id, "part":part, "binding":binding, "geometry":geometry,"packet":packet}
 			entry.make_read_only()
 			entries[part] = entry
 			if not guard.advance("publication_masonry_record"): return _failed("cancelled")

@@ -12,17 +12,29 @@ const VIEW_CELLS := 112
 const MAX_SETUP_WRITES := 2
 
 class SeededMain extends "res://scripts/Main.gd":
-	# The title UI has no seed entry. Only seed selection is fixture-owned:
+	# The title UI has no seed entry. Seed and optional initial cell are fixture-owned:
 	# actual New Game, tutorial, systems, terrain and observer startup are inherited.
 	var diagnostic_seed := "atlas-30895044"
+	var diagnostic_spawn_cell := ""
+	var diagnostic_spawn_evidence: Dictionary = {}
 	func random_world_seed(_exclude_seed := "") -> String:
 		return diagnostic_seed
+	func find_spawn_position() -> Vector3:
+		if diagnostic_spawn_cell.is_empty(): return super.find_spawn_position()
+		var coordinates := diagnostic_spawn_cell.split(",")
+		var cell := Vector3i(int(coordinates[0]),0,int(coordinates[1]))
+		var position := Vector3(cell.x*CELL,surface_y_at_cell(cell)+5.0,cell.z*CELL)
+		diagnostic_spawn_evidence = {"requestedCell":diagnostic_spawn_cell,"position":position,
+			"beforePlayerAttachment":not player.is_inside_tree(),"beforeTerrainRuntime":voxel_terrain_runtime==null,
+			"selectionMsec":Time.get_ticks_msec(),"heightPolicy":"ordinary authoritative surface plus standard five-metre spawn offset"}
+		return position
 
 var main
 var player: CharacterBody3D
 var output := ""
 var requested_seed := "atlas-30895044"
 var requested_region := ""
+var spawn_cell := ""
 var started := 0
 var deadline := 0
 var startup_elapsed := 0
@@ -70,6 +82,9 @@ func _run() -> void:
 	var selected := OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SEED").strip_edges()
 	if not selected.is_empty(): requested_seed = selected
 	requested_region = OS.get_environment("CITADEL_CANDIDATE_TELEPORT_REGION")
+	spawn_cell = OS.get_environment("CITADEL_CANDIDATE_SPAWN_CELL")
+	if not spawn_cell.is_empty() and (not valid_region_request(spawn_cell) or requested_region.is_empty()):
+		printerr("Invalid initial spawn request"); quit(2); return
 	if not valid_region_request(requested_region):
 		printerr("Invalid diagnostic candidate region"); quit(2); return
 	var limit := int(OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SECONDS"))
@@ -99,6 +114,7 @@ func _run() -> void:
 		"excludeSeedDeliberatelyIgnored":true,"voxelTestSeedEnvironmentUsed":false,"globalRngSeedOverride":false,
 		"notEquivalentToExistingTestSeedMode":"VOXEL_TEST_SEED also seeds the global RNG; deterministic sequence additionally requires a test/performance token. Neither mechanism is enabled here."}
 	main.set("diagnostic_seed",requested_seed)
+	main.set("diagnostic_spawn_cell",spawn_cell)
 	main.set("deferred_startup_boot",true)
 	main.set("startup_mode","new_game")
 	main.connect("startup_loading_completed",_startup_completed)
@@ -134,7 +150,15 @@ func _run() -> void:
 	if not checks.runtime_owners_available:
 		await _finish("failed","ordinary_runtime_owners_missing"); return
 	original_position = player.global_position
-	if not await _capture("preteleport"):
+	if not spawn_cell.is_empty():
+		evidence.initialSpawn = main.diagnostic_spawn_evidence.duplicate(true)
+		checks.initial_spawn_selected_before_attachment = evidence.initialSpawn.get("beforePlayerAttachment",false) and evidence.initialSpawn.get("beforeTerrainRuntime",false)
+		checks.initial_spawn_tutorial_disabled = main.launch_options.skipTutorial
+		var selected_position: Vector3 = evidence.initialSpawn.get("position",Vector3.INF)
+		checks.initial_spawn_horizontal_position_preserved = Vector2(original_position.x,original_position.z).distance_to(Vector2(selected_position.x,selected_position.z))<0.1
+		if not checks.initial_spawn_selected_before_attachment or not checks.initial_spawn_tutorial_disabled or not checks.initial_spawn_horizontal_position_preserved:
+			await _finish("failed","initial_spawn_contract_failed"); return
+	if not await _capture("preteleport" if spawn_cell.is_empty() else "initial_spawn_ready"):
 		await _finish("failed","preteleport_capture_failed"); return
 	search = _nearest_candidate(original_position)
 	candidate = search.get("selected",{})
@@ -142,7 +166,7 @@ func _run() -> void:
 		await _finish("absent","no_candidate_in_bounded_ring" if requested_region.is_empty() else "requested_candidate_not_in_bounded_field"); return
 	region = candidate.region
 	declared = Admission.declared_influence(candidate)
-	if not _place_outside(declared,"declared_influence_exterior"):
+	if spawn_cell.is_empty() and not _place_outside(declared,"declared_influence_exterior"):
 		await _finish("failed","initial_staging_invalid"); return
 	if not await _capture("pending"):
 		await _finish("failed","pending_capture_failed"); return
@@ -167,7 +191,7 @@ func _run() -> void:
 		await _finish("failed","accepted_reservation_boundary_mismatch"); return
 	# No long scripted walk or source prewarm. The second explicitly reported
 	# setup placement is derived ONLY from the now accepted production manifest.
-	if not _place_outside(reservation,"accepted_reservation_exterior"):
+	if spawn_cell.is_empty() and not _place_outside(reservation,"accepted_reservation_exterior"):
 		await _finish("failed","accepted_staging_invalid"); return
 	if not await _capture("pending_publication"):
 		await _finish("failed","publication_capture_failed"); return
@@ -372,7 +396,7 @@ func _approach_scene() -> Dictionary:
 	return {"reached":reached and identity.passed and capsule.passed,"reason":reason if identity.passed and capsule.passed else "approach_identity_or_capsule_failed",
 		"elapsedMsec":Time.get_ticks_msec()-begun,"from":start_position,"to":player.global_position,"distanceToVisualBounds":distance,"samples":samples,"capsule":capsule,"identity":identity,
 		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_A) and not Input.is_key_pressed(KEY_D) and not Input.is_key_pressed(KEY_SPACE) and not Input.is_key_pressed(KEY_SHIFT),
-		"scope":"Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance."}
+		"scope":"Ordinary key-input approach from initial spawn; not interior/furniture interaction or NPC acceptance." if not spawn_cell.is_empty() else "Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance."}
 
 func _nearest_candidate(position: Vector3) -> Dictionary:
 	var cell := Vector2i(floori(position.x/float(main.CELL)),floori(position.z/float(main.CELL)))
@@ -412,6 +436,7 @@ static func select_candidate(found: Array[Dictionary], request: String) -> Dicti
 	return {}
 
 func _place_outside(bounds: Rect2i,label: String) -> bool:
+	if not spawn_cell.is_empty(): return false # Initial-location mode forbids all fixture transform writes.
 	if placements.size() >= MAX_SETUP_WRITES or bounds.size.x <= 0 or bounds.size.y <= 0: return false
 	var collider := player.get_node_or_null("PlayerCollider") as CollisionShape3D
 	if collider == null or collider.disabled or not collider.shape is CapsuleShape3D: return false
@@ -583,11 +608,11 @@ func _audit_scene() -> Dictionary:
 		result["preparationTimings"] = {}
 		var begin_metrics: Dictionary = publication_job._cpu.get("buildingBegin",{})
 		checks.preparation_timing_complete = true
-		for key in ["preparationUsec","routeUsec","physicalUsec","metadataPreparationUsec"]:
+		for key in ["preparationUsec","routeUsec","physicalUsec","metadataPreparationUsec","historyPreparationUsec","masonryPreparationUsec"]:
 			var value: Variant = begin_metrics.get(key)
 			checks.preparation_timing_complete = checks.preparation_timing_complete and value is int and value>=0
 			result.preparationTimings[key] = value
-		result.preparationTimings["unavailable"] = ["historyPreparationUsec","masonryPreparationUsec"]
+		result.preparationTimings["unavailable"] = []
 		if publication_job._building != null:
 			result["publicationTiming"] = publication_job._building.publication_timing()
 			if publication_job._building._masonry_preparation != null:
@@ -871,12 +896,14 @@ func _finish(outcome: String,reason: String) -> void:
 	if finished: return
 	_release_approach_keys()
 	finished = true
+	if not spawn_cell.is_empty() and is_instance_valid(main):
+		evidence.initialSpawn = main.diagnostic_spawn_evidence.duplicate(true)
 	phase = "terminal_"+outcome
 	_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"outcome":outcome,"reason":reason})
 	if outcome!="scene_ready" and evidence_error.is_empty(): await _capture("failed")
 	checks.evidence_writes_succeeded=evidence_error.is_empty()
 	checks.all_captures_saved = not captures.is_empty() and captures.all(func(c):return c.saved)
-	checks.setup_write_limit = placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES
+	checks.setup_write_limit = placements.is_empty() if not spawn_cell.is_empty() else (placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES)
 	if is_instance_valid(main) and main.runtime_perf_monitor != null:
 		evidence.runtimePerformance = main.runtime_perf_monitor.summary()
 	if is_instance_valid(render_observation):
@@ -887,13 +914,14 @@ func _finish(outcome: String,reason: String) -> void:
 		"seed":requested_seed,"actualSeed":main.get("seed_text") if is_instance_valid(main) else "","elapsedMsec":_elapsed(),"engine":Engine.get_version_info(),
 		"startupElapsedMsec":startup_elapsed if test_started>0 else _elapsed(),"testElapsedMsec":Time.get_ticks_msec()-test_started if test_started>0 else 0,
 		"launchOptions":main.launch_options if is_instance_valid(main) else {},
+		"placementMode":"initial_spawn" if not spawn_cell.is_empty() else "teleport","initialSpawn":evidence.get("initialSpawn",{}),
 		"originalPlayerPosition":original_position,"search":search,"candidate":candidate,"declaredInfluence":declared,"acceptedReservation":reservation,
 		"setupPlacements":placements,"captures":captures,"timeline":timeline,"timelineDropped":timeline_dropped,
 		"voxelWorkerSamples":worker_samples,"voxelWorkerSamplesDropped":worker_samples_dropped,
 		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},
 		"evidence":evidence,"finalObservation":_observe(),
-		"evidenceLevel":"headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
-		"fixtureChanges":["Main random_world_seed override only, explicit reproducible seed","up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","bounded ordinary W/Shift approach with brief jumps and lateral recovery","labelled diagnostic inspection cameras after player approach","isolated ordinary save directory"],
+		"evidenceLevel":"headed initial-location New Game diagnostic; title UI bypassed; ordinary observer admission and service publication" if not spawn_cell.is_empty() else "headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
+		"fixtureChanges":["Main seed and optional initial spawn selection before attachment; no generated artifact prewarm","zero setup teleports; production startup physics readiness" if not spawn_cell.is_empty() else "up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","bounded ordinary W/Shift approach with brief jumps and lateral recovery","labelled diagnostic inspection cameras after player approach","isolated ordinary save directory"],
 		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
 		"manualInspectionSeconds":manual_seconds,
 		"shutdown":"manual inspection follows readiness; user exit or bounded session expiry" if manual_seconds>0 and passed else "ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})

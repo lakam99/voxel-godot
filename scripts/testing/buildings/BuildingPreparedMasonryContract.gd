@@ -102,6 +102,22 @@ static func run_worker() -> Dictionary:
 			and geometry.regularCustomData.get_typed_builtin()==TYPE_COLOR
 		checks[part.id+"_part_valid"] = artifact.has_part(part) and artifact.validate_part(part)
 		checks[part.id+"_binding_exact"] = artifact._entries[part].binding == encoded(part.snapshot()).hex_encode()
+		var packet = artifact.packet_for(part)
+		if part.recipe.has("masonryApertureSource"):
+			checks[part.id+"_uncut_packet_excluded"] = packet==null
+		else:
+			checks[part.id+"_packet_frame"] = packet!=null and packet.frame==Transform3D(Basis.from_euler(part.rotation),part.position)
+			var valid: bool = packet!=null and all_frozen(packet)
+			if packet!=null:
+				for group in packet.groups.values():
+					valid=valid and group.is_read_only() and group.request.is_read_only() and group.segments.is_read_only()
+					for segment in group.segments:
+						valid=valid and segment.instanceCount>0 and segment.instanceCount<=256 and segment.transforms.is_read_only() and segment.customData.is_read_only() and segment.buffer.is_read_only()
+						var bytes := PackedFloat32Array(segment.buffer)
+						var saved: PackedFloat32Array=bytes.duplicate()
+						bytes.fill(-999.0)
+						valid=valid and PackedFloat32Array(segment.buffer)==saved and saved.size()==segment.instanceCount*16
+			checks[part.id+"_packet_storage_owned_bounded"] = valid
 	checks.inputs_exact = encoded(b.snapshot()) == before
 	checks.inputs_mutable = not b.recipe.is_read_only() and not b.parts[8].recipe.is_read_only()
 	checks.parity_completed = true
@@ -180,7 +196,7 @@ static func run_worker() -> Dictionary:
 	checks.compile_wrong_history_rejected = wrong == {"ready":false,"reason":"stale_prepared_history"}
 	checks.unsupported_completed = true
 	for stage: String in ["publication_masonry_started","publication_masonry_part","publication_masonry_walk","publication_masonry_cursor",
-		"publication_masonry_freeze","publication_masonry_record","publication_masonry_validate","publication_masonry_completed"]:
+		"publication_masonry_freeze","publication_masonry_packet","publication_masonry_record","publication_masonry_validate","publication_masonry_completed"]:
 		var reject := Reject.new()
 		reject.target=stage
 		var cancelled: Dictionary = Preparation._compile_masonry(b,history.preparedHistory,reject.advance)

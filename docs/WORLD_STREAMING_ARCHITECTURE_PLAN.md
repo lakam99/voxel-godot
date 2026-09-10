@@ -92,7 +92,17 @@ retain one world authority, preserve save format v2 and durable deltas.
   explicit 1080p runner options, actual stretched-window size verification, and
   corrected ordinary-menu fixture input/cleanup. Baseline evidence and limits:
   `WORLD_STREAMING_MEASUREMENTS_2026-09-10.md`. Full citadel readiness remains
-  152.814s; measured ordinary traversal fails the new pacing contract. Five-minute
+  152.814s in the teleport diagnostic; measured ordinary traversal fails the new pacing contract. Five-minute
   coverage, unloading and final cold-cache acceptance remain outstanding.
-- Next cutover: worker-prepared final masonry packets and bounded static upload;
-  preserve current geometry, physical output, material order and readiness.
+- First phase-2 portion implemented: worker-prepared immutable masonry segments
+  and one-buffer static batch uploads, preserving completed-part boundaries,
+  geometry/collision/material order and lifecycle. Exact headed source/count
+  parity passed; total publication time did not materially improve.
+- Initial-location diagnostic now selects the player position before attachment
+  and terrain streaming, with zero subsequent teleports. Known candidate sample:
+  83.373s current startup readiness, 134.274s full scene-ready. This is not the
+  new 64m readiness contract or flag-free menu acceptance. Evidence, limits and
+  attributed broad/NPC failures: WORLD_STREAMING_PACKETS_AND_INITIAL_SPAWN_2026-09-10.md.
+- Next: finish spatial owner/cell grouping and worker preparation of remaining
+  geometry families, then regional dependency closure. Keep production checks
+  and the cooperative budget; use initial-location runs for startup measurement.

@@ -1,5 +1,6 @@
 extends RefCounted
 const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
+const InstanceBuffer = preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
 ## One existing static-batch boundary, prepared in small main-thread units.
 ## No Node references survive a call. The owner pauses part publication until
 ## ready, and retains retired containers until its existing worker disposal.
@@ -36,6 +37,9 @@ var _transforms: Array = []
 var _custom: Array = []
 var _material: Material
 var _parent: WeakRef
+var _segments: Dictionary = {}
+var _buffer := PackedFloat32Array()
+var _retired_buffers: Array = []
 
 func begin(groups: Dictionary, records: Dictionary, parent: Node3D) -> void:
 	if state != "idle": return
@@ -57,7 +61,7 @@ func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 		_step(publisher)
 		var elapsed := Time.get_ticks_usec()-atomic_started
 		max_atomic_usec = maxi(max_atomic_usec, elapsed)
-		publisher._record_publication_stage("static_flush_"+stage,elapsed)
+		publisher._record_publication_stage("static_flush_"+stage,elapsed,str(_transforms.size()) if stage in ["group","upload"] else "")
 		count += 1
 		units += 1
 	max_slice_usec = maxi(max_slice_usec, Time.get_ticks_usec()-started)
@@ -80,6 +84,8 @@ func _step(publisher) -> void:
 			var group: Dictionary = _groups[_keys[_group_index]]
 			_transforms = group.transforms
 			_custom = group.customData
+			_segments = group.get("preparedSegments",{})
+			_buffer = PackedFloat32Array()
 			_material = group.material
 			if _transforms.is_empty():
 				_group_index += 1
@@ -88,13 +94,23 @@ func _step(publisher) -> void:
 			_mesh.transform_format = MultiMesh.TRANSFORM_3D
 			_mesh.use_custom_data = true
 			_mesh.instance_count = _transforms.size()
+			publisher.static_batch_peak_instances = maxi(publisher.static_batch_peak_instances,_transforms.size())
 			_mesh.mesh = publisher.unit_box
 			_instance_index = 0
 			state = "instances"
 		"instances":
-			publisher.submit_mesh_batch_instance(_mesh,_instance_index,_transforms[_instance_index],_custom[_instance_index])
-			_instance_index += 1
-			if _instance_index == _transforms.size(): state = "attach"
+			if _segments.has(_instance_index):
+				var segment = _segments[_instance_index]
+				_buffer.append_array(PackedFloat32Array(segment.buffer))
+				_instance_index += segment.instanceCount
+			else:
+				_buffer.append_array(InstanceBuffer.encode(_transforms[_instance_index],_custom[_instance_index]))
+				_instance_index += 1
+			if _instance_index == _transforms.size(): state = "upload"
+		"upload":
+			publisher.submit_mesh_batch_buffer(_mesh,_buffer)
+			_retired_buffers.append(_buffer) # Released with this flush on the owning retirement worker.
+			state = "attach"
 		"attach":
 			var instance := MultiMeshInstance3D.new()
 			instance.name = "ConstructionStaticVisualBatch"

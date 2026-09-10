@@ -16,6 +16,7 @@ const PavingPublication := preload("res://scripts/buildings/BuildingPavingPublic
 const MasonryPublication := preload("res://scripts/buildings/BuildingMasonryPublication.gd")
 const RoofPublication := preload("res://scripts/buildings/BuildingRoofPublication.gd")
 const MasonryDescriptor := preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
+const MasonryMaterialRequest := preload("res://scripts/buildings/BuildingMasonryMaterialRequest.gd")
 const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGoodsGeometry.gd")
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const SettledCobbleGeometryScript := preload("res://scripts/buildings/SettledCobbleGeometry.gd")
@@ -49,6 +50,7 @@ var static_visual_batches: Dictionary = {}
 var static_visual_collecting := false
 var static_visual_part_transform := Transform3D.IDENTITY
 var static_visual_transform_count := 0
+var static_batch_peak_instances := 0
 var incremental_progress_callback: Callable
 var incremental_total_parts := 0
 var incremental_published_parts := 0
@@ -178,7 +180,9 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 		return {"ready":false, "reason":"scene_preparation_failed", "retirementPayload":source}
 	return {"ready":true, "reason":"", "blueprint":source.blueprint, "furnishingPlan":source.furnishingPlan,
 		"preparationUsec":source.preparationUsec, "routeUsec":source.routeUsec, "physicalUsec":source.physicalUsec,
-		"metadataPreparationUsec":source.get("metadataPreparationUsec",0)}
+		"metadataPreparationUsec":source.get("metadataPreparationUsec",0),
+		"historyPreparationUsec":source.get("historyPreparationUsec",0),
+		"masonryPreparationUsec":source.get("masonryPreparationUsec",0)}
 
 
 func _detach_preparation_for_retirement() -> Dictionary:
@@ -415,6 +419,7 @@ func clear_published() -> void:
 	static_visual_collecting = false
 	static_visual_part_transform = Transform3D.IDENTITY
 	static_visual_transform_count = 0
+	static_batch_peak_instances = 0
 	incremental_total_parts = 0
 	incremental_published_parts = 0
 	incremental_static_flush_count = 0
@@ -774,6 +779,10 @@ func prepared_masonry_geometry(part) -> Dictionary:
 	var geometry: Dictionary=_prepared_masonry.geometry_for(part)
 	_record_publication_stage("prepared_masonry_lookup",Time.get_ticks_usec()-started)
 	return geometry
+
+func prepared_masonry_packet(part):
+	if not _prepared_masonry_part_valid(part) or _prepared_masonry==null: return null
+	return _prepared_masonry.packet_for(part)
 
 
 func _publish_masonry_group(parent: Node3D, artifact: Dictionary, group: String, material: Material, label: String) -> void:
@@ -1419,6 +1428,9 @@ func submit_mesh_batch_instance(mesh: MultiMesh, index: int, transform: Transfor
 	mesh.set_instance_transform(index,transform)
 	mesh.set_instance_custom_data(index,custom)
 
+func submit_mesh_batch_buffer(mesh: MultiMesh, buffer: PackedFloat32Array) -> void:
+	mesh.buffer = buffer
+
 
 func add_mesh_batch(parent: Node3D, mesh: Mesh, transforms: Array, material: Material, node_name: String, custom_data_override: Array = []) -> MultiMeshInstance3D:
 	if transforms.is_empty() or mesh == null:
@@ -1479,6 +1491,18 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
 	static_visual_transform_count += 1
 	group["transforms"] = transforms
 	group["customData"] = custom_data_values
+	static_visual_batches[key] = group
+
+func collect_prepared_static_visual_segment(segment, material: Material) -> void:
+	if material==null or segment.instanceCount==0: return
+	var key := str(material.get_instance_id())
+	var group: Dictionary = static_visual_batches.get(key,{})
+	if group.is_empty(): group={"material":material,"transforms":[],"customData":[]}
+	if not group.has("preparedSegments"): group.preparedSegments={}
+	group.preparedSegments[group.transforms.size()] = segment
+	group.transforms.append_array(segment.transforms)
+	group.customData.append_array(segment.customData)
+	static_visual_transform_count += segment.instanceCount
 	static_visual_batches[key] = group
 
 
@@ -1621,12 +1645,7 @@ func variation_for(part) -> float:
 
 
 func masonry_family_variation(part) -> float:
-	var tokens := String(part.id).split("_", false)
-	var family_token_count := mini(4, tokens.size())
-	var family_key := "_".join(tokens.slice(0, family_token_count))
-	var family_index := posmod((source_blueprint_id + ":" + family_key).hash(), 5)
-	var family_offsets := [-0.042, -0.021, 0.0, 0.018, 0.039]
-	return variation_for(part) + float(family_offsets[family_index])
+	return MasonryMaterialRequest.family_variation(part,source_blueprint_id,variation_for(part))
 
 
 func masonry_event_weathering(part, transform: Transform3D, index: int) -> bool:
@@ -1689,21 +1708,17 @@ func material_for_id(material_id: String, variation := 0.0) -> Material:
 
 
 func masonry_repair_material_for(part, host_material_id: String) -> Material:
-	var host_variation := masonry_family_variation(part)
-	var key := "masonry_repair:%s:%0.3f" % [host_material_id, host_variation]
+	return resolve_masonry_material(MasonryMaterialRequest.repair(part,host_material_id,source_blueprint_id,masonry_family_variation(part)))
+
+func resolve_masonry_material(request: Dictionary) -> Material:
+	var key: String = request.key
 	if material_cache.has(key):
 		return material_cache[key] as Material
-	var repair_material := ConstructionMaterialCatalogScript.create_material("repair_stone", host_variation + 0.035) as ShaderMaterial
-	var host_definition := ConstructionMaterialCatalogScript.definition_for(host_material_id)
-	var tint := clampf(host_variation, -0.12, 0.12)
-	var host_base: Color = host_definition.get("base", Color.WHITE) as Color
-	var host_accent: Color = host_definition.get("accent", Color.WHITE) as Color
-	repair_material.set_shader_parameter("repair_strength", 1.0)
-	repair_material.set_shader_parameter("repair_phase", float(posmod((source_blueprint_id + ":repair:" + String(part.id)).hash(), 4093)) / 4093.0)
-	repair_material.set_shader_parameter("repair_host_base", host_base.lightened(maxf(0.0, tint)).darkened(maxf(0.0, -tint)))
-	repair_material.set_shader_parameter("repair_host_accent", host_accent.lightened(maxf(0.0, tint * 0.7)).darkened(maxf(0.0, -tint * 0.7)))
-	material_cache[key] = repair_material
-	return repair_material
+	var material := ConstructionMaterialCatalogScript.create_material(request.materialId,request.variation)
+	for parameter in request.parameters:
+		(material as ShaderMaterial).set_shader_parameter(parameter,request.parameters[parameter])
+	material_cache[key] = material
+	return material
 
 
 func summary() -> Dictionary:
@@ -1713,6 +1728,7 @@ func summary() -> Dictionary:
 		"collisionPartCount": collision_count,
 		"visualBatchCount": visual_batch_count,
 		"batchedStaticParts": batch_static_parts,
+		"staticBatchPeakInstances": static_batch_peak_instances,
 		"staticRecordCount": static_part_records.size(),
 		"masonryRepairClusterCount": masonry_repair_clusters.size(),
 		"masonryRepairClusters": masonry_repair_clusters.duplicate(true),

@@ -17,6 +17,9 @@ var _collecting: bool
 var _compatibility: bool
 var _cursor
 var _geometry: Dictionary = {}
+var _packet
+var _packet_segments: Array = []
+var _packet_index := 0
 var _artifact: Dictionary = {}
 var _group := 0
 var _entry := 0
@@ -89,6 +92,10 @@ func _step(publisher, parent: Node3D, budget_usec: int) -> void:
 		"geometry_begin":
 			if _artifact.is_empty():
 				_geometry=publisher.prepared_masonry_geometry(_part)
+				if _collecting and not _compatibility:
+					_packet=publisher.prepared_masonry_packet(_part)
+					if _packet!=null and _packet.frame!=_frame:
+						state="failed"; reason="stale_masonry_packet_frame"; return
 				if publisher._publication_failed():
 					state="failed"; reason="stale_prepared_masonry"; return
 				if not _geometry.is_empty(): state="bed"
@@ -107,13 +114,21 @@ func _step(publisher, parent: Node3D, budget_usec: int) -> void:
 		"bed":
 			if not publisher.validate_paving_history_source():
 				state="failed"; reason="stale_masonry_history"; return
-			publisher.add_box_visual(parent,_geometry.mortarSize,Vector3.ZERO,publisher.material_for_id("mortar",publisher.variation_for(_part)-0.035),"MasonryBed")
+			if _packet!=null:
+				var group: Dictionary = _packet.groups.bed
+				publisher.collect_prepared_static_visual_segment(group.segments[0],publisher.material_for_id("mortar",publisher.variation_for(_part)-0.035))
+			else:
+				publisher.add_box_visual(parent,_geometry.mortarSize,Vector3.ZERO,publisher.material_for_id("mortar",publisher.variation_for(_part)-0.035),"MasonryBed")
 			state="top"
 		"top":
 			var top:=String(_part.recipe.get("topSurfaceMaterial",""))
 			var size: Vector3 = _part.size
 			if String(_part.kind)=="foundation" and not top.is_empty():
-				publisher.add_box_visual(parent,Vector3(maxf(0.08,size.x-0.05),0.028,maxf(0.08,size.z-0.05)),Vector3(0.0,size.y*0.5+0.014,0.0),publisher.material_for_id(top,publisher.variation_for(_part)-0.025),"FoundationTopSurface")
+				if _packet!=null:
+					var group: Dictionary = _packet.groups.top
+					publisher.collect_prepared_static_visual_segment(group.segments[0],publisher.material_for_id(top,publisher.variation_for(_part)-0.025))
+				else:
+					publisher.add_box_visual(parent,Vector3(maxf(0.08,size.x-0.05),0.028,maxf(0.08,size.z-0.05)),Vector3(0.0,size.y*0.5+0.014,0.0),publisher.material_for_id(top,publisher.variation_for(_part)-0.025),"FoundationTopSurface")
 			var profile: Dictionary = _geometry.repairProfile
 			if not profile.is_empty():
 				publisher.masonry_repair_clusters.append({"partId":String(_part.id),"face":int(profile.get("face",-1)),"centerY":float(profile.get("centerY",0.5)),"centerAlong":float(profile.get("centerAlong",0.5)),"radiusY":float(profile.get("radiusY",0.0)),"radiusAlong":float(profile.get("radiusAlong",0.0))})
@@ -121,6 +136,12 @@ func _step(publisher, parent: Node3D, budget_usec: int) -> void:
 		"group":
 			if _group==2 or (_group==1 and _geometry.repairTransforms.is_empty()):
 				state="finish"; return
+			if _packet!=null:
+				var group: Dictionary = _packet.groups.regular if _group==0 else _packet.groups.repair
+				# Preserve virtual material hooks and their first-request order.
+				_material=publisher.material_for_id(_geometry.surfaceMaterialId,publisher.masonry_family_variation(_part)) if _group==0 else publisher.masonry_repair_material_for(_part,_geometry.surfaceMaterialId)
+				_packet_segments=group.segments; _packet_index=0; state="packet_collect"
+				return
 			_material=publisher.material_for_id(_geometry.surfaceMaterialId,publisher.masonry_family_variation(_part)) if _group==0 else publisher.masonry_repair_material_for(_part,_geometry.surfaceMaterialId)
 			_label="BrickCourses" if _group==0 else "MasonryRepairCourses"
 			if _artifact.is_empty():
@@ -163,6 +184,11 @@ func _step(publisher, parent: Node3D, budget_usec: int) -> void:
 			publisher.collect_static_visual_transform(_frame*_transforms[_batch_index],_material,_custom[_batch_index])
 			_batch_index+=1
 			if _batch_index==_transforms.size(): _end_batch()
+		"packet_collect":
+			if _packet_index>=_packet_segments.size():
+				state="next_group"; return
+			publisher.collect_prepared_static_visual_segment(_packet_segments[_packet_index],_material)
+			_packet_index+=1
 		"upload":
 			var result: Dictionary = _upload.advance(publisher,budget_usec)
 			if result.status=="ready": _end_batch()

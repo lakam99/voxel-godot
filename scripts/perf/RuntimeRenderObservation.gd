@@ -95,8 +95,10 @@ func _after_draw() -> void:
 			"renderGpu":Distribution.new(), "frameSetupCpu":Distribution.new(),
 			"drawCallsMax":0, "primitivesMax":0, "shadowDrawCallsMax":0,
 			"shadowPrimitivesMax":0, "renderSamples":0, "gpuUnavailableSamples":0,
+			"staticMemoryMaxBytes":0,
 			"firstUsec":now, "lastUsec":now}
 	var bucket: Dictionary = _phases[label]
+	bucket.staticMemoryMaxBytes = maxi(bucket.staticMemoryMaxBytes,int(Performance.get_monitor(Performance.MEMORY_STATIC)))
 	bucket.lastUsec = now
 	if _last_draw_usec > 0:
 		var interval_ms := float(now - _last_draw_usec) / 1000.0
@@ -133,6 +135,7 @@ func summary() -> Dictionary:
 			"drawCallsMax":bucket.drawCallsMax, "primitivesMax":bucket.primitivesMax,
 			"shadowDrawCallsMax":bucket.shadowDrawCallsMax, "shadowPrimitivesMax":bucket.shadowPrimitivesMax,
 			"renderSamples":bucket.renderSamples, "gpuUnavailableSamples":bucket.gpuUnavailableSamples,
+			"staticMemoryMaxBytes":bucket.staticMemoryMaxBytes if bucket.staticMemoryMaxBytes>0 else null,
 			"observedSpanMs":float(bucket.lastUsec-bucket.firstUsec)/1000.0}
 	return {"schema":"runtime_render_observation/v1", "available":_available,
 		"initialViewportSize":[_size.x,_size.y], "viewportSize":[_observed_size.x,_observed_size.y],

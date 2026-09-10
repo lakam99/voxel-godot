@@ -34,6 +34,10 @@ test('recipe modes retain ceilings, expected error policy, and exclusivity', () 
   assert.equal(recipeOptions({ expectedRecipeSeed: '0' }).expectedRecipeSeed, 0);
 });
 test('canonical region field bounds and teleport environment/deadline validation', () => {
+  const spawn = teleportOptions(parseOptions(['-OutputDirectory','out','-SpawnCell','-3334,-2666','-CandidateRegion','-2,-2','-SkipTutorial'], 'teleport'), {});
+  assert.equal(spawn.spawnCell, '-3334,-2666');
+  assert.deepEqual(spawn.gameArguments, ['-SkipTutorial']);
+  for (const input of [{ spawnCell: '1,2' }, { spawnCell: '1,2', skipTutorial: true }, { spawnCell: '1,2', candidateRegion: '0,0' }, { spawnCell: '1.5,2', skipTutorial: true, candidateRegion: '0,0' }]) assert.throws(() => teleportOptions(input, {}));
   assert.equal(teleportOptions({}, {}).resolution, '1280x720');
   assert.equal(teleportOptions(parseOptions(['-OutputDirectory','out','-Resolution','1920x1080'], 'teleport'), {}).resolution, '1920x1080');
   for (const resolution of ['0x0', '1920x0', '1280x720 --headless', null]) assert.throws(() => teleportOptions({ resolution }, {}));

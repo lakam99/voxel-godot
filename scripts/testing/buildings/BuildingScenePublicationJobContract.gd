@@ -175,6 +175,7 @@ func pending_target_reached(job, target: String) -> bool:
 		var masonry=job._building._pending_masonry
 		if masonry==null: return false
 		if target=="masonry_geometry": return masonry.state=="geometry" and masonry._cursor!=null
+		if target=="masonry_packet_collect": return masonry.state=="packet_collect" and masonry._packet_index>0 and masonry._packet_index<masonry._packet_segments.size()
 		return masonry.state=="collect" and masonry._batch_index>0 and masonry._batch_index<masonry._transforms.size()
 	if target == "static_flush":
 		var flush = job._building._static_flush
@@ -480,7 +481,8 @@ func prepared_masonry_observation(job) -> Dictionary:
 	var publisher=job._building
 	var pending=publisher._pending_masonry
 	return {"certificate":weakref(publisher._prepared_masonry),"publisher":weakref(publisher),
-		"borrowed":pending!=null and pending._cursor==null and pending._geometry.is_read_only()}
+		"borrowed":pending!=null and pending._cursor==null and pending._geometry.is_read_only(),
+		"packetSealed":pending!=null and pending._packet!=null and pending._packet.is_read_only()}
 
 func prepared_masonry_controls() -> void:
 	for mode: String in ["part_size","part_id","part_replace","missing_entry","history_replace","artifact_drop"]:
@@ -514,7 +516,7 @@ func prepared_masonry_controls() -> void:
 		var observed: Dictionary={}
 		for index in range(10000):
 			job.advance(1)
-			if pending_target_reached(job,"masonry_collect"):
+			if pending_target_reached(job,"masonry_collect" if unsupported else "masonry_packet_collect"):
 				seen=true
 				observed=prepared_masonry_observation(job)
 				borrowed=observed.borrowed
@@ -526,6 +528,7 @@ func prepared_masonry_controls() -> void:
 		job.cancel()
 		await drain(job,label)
 		check(label+"_released",not observed.is_empty() and observed.certificate.get_ref()==null and observed.publisher.get_ref()==null)
+		check(label+"_packet_sealed",unsupported or observed.get("packetSealed",false))
 	var job=Job.new()
 	var trees:=SyntheticTrees.new()
 	start(job,trees,prepared_masonry_holder())

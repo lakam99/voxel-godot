@@ -15,7 +15,7 @@ export const errorPattern = /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|r
 export function parseOptions(argv, kind) {
   const names = ['OutputDirectory', ...(kind === 'watcher' ? [] : ['Seed', 'CandidateRegion']),
     ...(kind === 'recipe' ? ['CaptureBlueprint', 'ExpectReady', 'CaptureFailure', 'ExpectedRecipeSeed'] : []),
-    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'Resolution'] : [])];
+    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'Resolution', 'SpawnCell'] : [])];
   const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection']);
   const options = {};
   for (let i = 0; i < argv.length; i++) {
@@ -71,6 +71,11 @@ export function teleportOptions(input, env) {
   if (!['1280x720', '1920x1080'].includes(o.resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
   validateSeed(o.seed);
   if (o.candidateRegion !== '') regionCoordinates(o.candidateRegion);
+  o.spawnCell ??= '';
+  if (o.spawnCell !== '') {
+    regionCoordinates(o.spawnCell);
+    if (!o.skipTutorial || !o.candidateRegion) throw new Error('SpawnCell requires SkipTutorial and an explicit CandidateRegion; tutorial scenario placement must not override the initial location.');
+  }
   o.timeoutSeconds = integer(o.timeoutSeconds, 90, 600, 'TimeoutSeconds');
   o.startupTimeoutSeconds = integer(o.startupTimeoutSeconds, 15, 180, 'StartupTimeoutSeconds');
   for (const key of ['skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection']) if (typeof o[key] !== 'boolean') throw new Error('Invalid boolean: ' + key);

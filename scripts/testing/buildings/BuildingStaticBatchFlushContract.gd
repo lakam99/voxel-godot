@@ -23,6 +23,8 @@ class RecordingPublisher extends Publisher:
 	func create_mesh_batch() -> MultiMesh: return Recorder.new()
 	func submit_mesh_batch_instance(mesh: MultiMesh, index: int, transform: Transform3D, custom: Color) -> void:
 		(mesh as Recorder).record_submission(index,transform,custom)
+	func submit_mesh_batch_buffer(mesh: MultiMesh, buffer: PackedFloat32Array) -> void:
+		(mesh as Recorder).record_buffer(buffer)
 var checks: Dictionary = {}
 var metrics: Dictionary = {}
 func _initialize() -> void: call_deferred("run")
@@ -69,7 +71,8 @@ func run() -> void:
 		if exact:
 			for i in range(321):
 				exact=exact and submitted[i*2]==["transform",i,expected_transforms[i]] and submitted[i*2+1]==["custom",i,expected_custom[i]]
-		check(str(budget)+"_cpu_setter_submissions_exact",exact)
+		check(str(budget)+"_decoded_cpu_submissions_exact",exact)
+		check(str(budget)+"_single_buffer_upload",instance.multimesh.buffer_submissions==1)
 		check(str(budget)+"_configuration_exact",instance.multimesh.configuration.slice(0,4)==[MultiMesh.TRANSFORM_3D,true,false,321])
 		check(str(budget)+"_boundary_retired",publisher.static_visual_batches.is_empty() and publisher.static_visual_transform_count==0 and publisher.incremental_static_flush_count==1)
 		check(str(budget)+"_owned_retirement",not publisher._publication_retirement.is_empty())
@@ -453,6 +456,7 @@ func original_submission_parity() -> void:
 		old_parent.free(); new_parent.free()
 		old.published_nodes=[]; current.published_nodes=[]
 	masonry_submission_parity(original)
+	prepared_packet_submission_parity(original)
 	check("old_new_submission_completed",true)
 
 func masonry_submission_parity(original: GDScript) -> void:
@@ -492,3 +496,60 @@ func masonry_facts(publisher, parent: Node3D) -> Dictionary:
 		elif node is MeshInstance3D:
 			facts.nodes.append([node.name,node.transform,publisher.material_cache.find_key(node.material_override)])
 	return facts
+
+func prepared_packet_submission_parity(original: GDScript) -> void:
+	var blueprint := Blueprint.new("packet-parity",17)
+	for index in 2:
+		blueprint.add_part({"id":"front_masonry_shared_family_"+str(index),"kind":"foundation" if index==0 else "wall",
+			"material":"stone_foundation","size":Vector3(7.1,3.2,0.4),"position":Vector3(-7+index*10,2,9),
+			"rotation":Vector3(0.12,0.37,-0.06),"recipe":{"topSurfaceMaterial":"cobblestone"}})
+	var history: Dictionary = Preparation._compile_history(blueprint)
+	var prepared: Dictionary = Preparation._compile_masonry(blueprint,history.preparedHistory)
+	check("packet_fixture_prepared",prepared.ready and prepared.preparedMasonry!=null)
+	var old_parent:=Node3D.new(); root.add_child(old_parent)
+	var new_parent:=Node3D.new(); root.add_child(new_parent)
+	var old=original.new()
+	var current:=RecordingPublisher.new()
+	for publisher in [old,current]:
+		publisher.source_blueprint_id=blueprint.id
+		publisher.surface_history=history.preparedHistory.history
+		publisher.static_visual_collecting=true
+	current._prepared_history=history.preparedHistory
+	current._prepared_masonry=prepared.preparedMasonry
+	current._prepared_masonry_identity=prepared.preparedMasonry
+	current.resumable_scene_publication=true
+	for part in blueprint.parts:
+		old.static_visual_part_transform=blueprint.part_transform(part)
+		current.static_visual_part_transform=blueprint.part_transform(part)
+		old.publish_brick_wall(part,old_parent)
+		current.publish_brick_wall(part,new_parent)
+		var turns:=0
+		while current._pending_masonry.state not in ["ready","failed"] and turns<10000:
+			current._pending_masonry.advance(current,1)
+			turns+=1
+		check(part.id+"_packet_used",current._pending_masonry._packet!=null and current._pending_masonry.state=="ready")
+	check("packet_ordered_geometry_exact",var_to_bytes(masonry_facts(old,old_parent))==var_to_bytes(masonry_facts(current,new_parent)))
+	var materials_exact: bool=old.material_cache.keys()==current.material_cache.keys()
+	for key in old.material_cache:
+		for parameter in ["repair_strength","repair_phase","repair_host_base","repair_host_accent"]:
+			materials_exact=materials_exact and old.material_cache[key].get_shader_parameter(parameter)==current.material_cache[key].get_shader_parameter(parameter)
+	check("packet_material_first_request_exact",materials_exact)
+	# Interleave a non-packet instance in an existing material group, then upload.
+	var material: Material=current.material_cache.values()[0]
+	current.collect_static_visual_transform(Transform3D.IDENTITY,material,Color(0.1,0.2,0.3,0.4))
+	var expected: Array=[]
+	var keys: Array=current.static_visual_batches.keys(); keys.sort()
+	for key in keys:
+		var group: Dictionary=current.static_visual_batches[key]
+		for index in group.transforms.size():
+			expected.append([group.transforms[index],group.customData[index]])
+	current._begin_static_flush(new_parent,false)
+	while current.has_pending_static_flush(): current.advance_static_flush(new_parent,2500)
+	var actual: Array=[]
+	for node in current.published_nodes:
+		if node is MultiMeshInstance3D:
+			for index in node.multimesh.instance_count:
+				actual.append([node.multimesh.submissions[index*2][2],node.multimesh.submissions[index*2+1][2]])
+	check("mixed_packet_buffer_decodes_exact",var_to_bytes(actual)==var_to_bytes(expected))
+	old_parent.free(); new_parent.free()
+	old.published_nodes=[]; current.published_nodes=[]
