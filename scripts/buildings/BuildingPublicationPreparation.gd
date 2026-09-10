@@ -9,6 +9,9 @@ const History = preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const MasonryGeometry = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const MasonryPacket = preload("res://scripts/buildings/BuildingMasonryRenderPacket.gd")
+const CobbleGeometry = preload("res://scripts/buildings/SettledCobbleGeometry.gd")
+const RoofGeometry = preload("res://scripts/buildings/BuildingRoofGeometry.gd")
+const SurfacePacket = preload("res://scripts/buildings/BuildingSurfaceRenderPacket.gd")
 const PartRecord = preload("res://scripts/buildings/BuildingPart.gd")
 const METADATA_MAX_DEPTH := 128
 
@@ -67,7 +70,15 @@ class MasonrySelection extends RefCounted:
 		return kind in ["wall", "foundation"] and Materials.is_masonry_material(String(part.material_id)) \
 			and not (kind == "foundation" and Materials.is_cobble_material(String(part.material_id)))
 
-class PreparedMasonry extends RefCounted:
+class GeometrySelection extends RefCounted:
+	static func selected(part, family: String) -> bool:
+		if family=="masonry": return MasonrySelection.selected(part)
+		if part==null or not bool(part.recipe.get("visual",true)): return false
+		if family=="paving":
+			return String(part.kind)=="foundation" and Materials.is_cobble_material(String(part.material_id)) and not part.recipe.has("pavingFootingJoints")
+		return family=="roof" and String(part.kind)=="roof"
+
+class PreparedGeometry extends RefCounted:
 	# Object keys deliberately retain source parts through worker retirement and
 	# recognize a changed ID. Geometry/entry/maps are otherwise deeply readonly.
 	var _entries: Dictionary
@@ -76,7 +87,9 @@ class PreparedMasonry extends RefCounted:
 	var _omitted_ids: Dictionary = {}
 	var _history: PreparedHistory
 	var _source_id: String
-	func _init(entries: Dictionary, history_artifact: PreparedHistory, source_id: String, omitted: Dictionary) -> void:
+	var family: String
+	func _init(entries: Dictionary, history_artifact: PreparedHistory, source_id: String, omitted: Dictionary, geometry_family := "masonry") -> void:
+		family = geometry_family
 		_entries = entries
 		_history = history_artifact
 		_source_id = source_id
@@ -94,7 +107,7 @@ class PreparedMasonry extends RefCounted:
 		if _omitted.has(part): return String(part.id) != _omitted[part]
 		if _omitted_ids.has(String(part.id)): return true
 		# A newly inserted eligible object is missing, not an intentional fallback.
-		return MasonrySelection.selected(part)
+		return GeometrySelection.selected(part,family)
 	func validate_part(part) -> bool:
 		if part == null or not _entries.has(part) or not matches_history(_history, _history.history, _source_id): return false
 		var entry: Dictionary = _entries[part]
@@ -194,6 +207,15 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 	if not history_result.ready: return _failed(history_result.reason)
 	var masonry := _compile_masonry(restored.blueprint, history_result.preparedHistory, guard.advance, true)
 	if not masonry.ready: return _failed(masonry.reason)
+	var surfaces: Dictionary = {}
+	var surface_timings: Dictionary = {}
+	for family: String in ["paving","roof"]:
+		var compiled := _compile_geometry(restored.blueprint,history_result.preparedHistory,guard.advance,true,family)
+		if not compiled.ready: return _failed(compiled.reason)
+		surfaces[family]=compiled.artifact
+		surface_timings[family]=compiled.preparationUsec
+	surfaces.make_read_only()
+	surface_timings.make_read_only()
 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
 	var prepared := PreparedSource.new()
 	prepared._binding = source_binding
@@ -205,17 +227,23 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		"metadataPreparationUsec":metadata.metadataPreparationUsec,
 		"preparedHistory":history_result.preparedHistory,
 		"historyPreparationUsec":history_result.historyPreparationUsec,
-		"preparedMasonry":masonry.preparedMasonry, "masonryPreparationUsec":masonry.masonryPreparationUsec}
+		"preparedMasonry":masonry.preparedMasonry, "masonryPreparationUsec":masonry.masonryPreparationUsec,
+		"preparedSurfaces":surfaces,"surfacePreparationUsec":surface_timings}
 	return {"ready":true, "reason":"", "prepared":prepared}
 
 ## Same visible wall/foundation dispatch as the publisher, including tagged
 ## aperture walls. No cuts, Nodes, Resources, uploads or geometry alternatives.
 static func _compile_masonry(blueprint, prepared_history: PreparedHistory, continuation: Callable = Callable(), seal_owned_parts := false) -> Dictionary:
+	var result := _compile_geometry(blueprint,prepared_history,continuation,seal_owned_parts,"masonry")
+	if not result.ready: return result
+	return {"ready":true,"reason":"","preparedMasonry":result.artifact,"masonryPreparationUsec":result.preparationUsec}
+
+static func _compile_geometry(blueprint, prepared_history: PreparedHistory, continuation: Callable = Callable(), seal_owned_parts := false, family := "masonry") -> Dictionary:
 	var started := Time.get_ticks_usec()
 	var guard := Continuation.new()
 	guard.callback = continuation
-	if not guard.advance("publication_masonry_started"): return _failed("cancelled")
-	var result := {"ready":true, "reason":"", "preparedMasonry":null, "masonryPreparationUsec":0}
+	if not guard.advance("publication_"+family+"_started"): return _failed("cancelled")
+	var result := {"ready":true, "reason":"", "artifact":null, "preparationUsec":0}
 	if prepared_history != null:
 		if blueprint == null: return _failed("missing_blueprint")
 		var source_id := String(blueprint.recipe.get("sourceBlueprintId", blueprint.id))
@@ -224,14 +252,14 @@ static func _compile_masonry(blueprint, prepared_history: PreparedHistory, conti
 		var omitted: Dictionary = {}
 		var seen: Dictionary = {}
 		for part in blueprint.parts:
-			if not guard.advance("publication_masonry_part"): return _failed("cancelled")
-			if not _masonry_selected(part): continue
+			if not guard.advance("publication_"+family+"_part"): return _failed("cancelled")
+			if not geometry_selected(part,family): continue
 			var id := String(part.id)
-			if seen.has(id): return _failed("duplicate_masonry_part_id")
+			if seen.has(id): return _failed("duplicate_"+family+"_part_id")
 			seen[id] = true # Unsupported selected records still reserve their ID.
 			var graph := MetadataGraph.new()
 			graph.guard = guard
-			graph.walk_stage = "publication_masonry_walk"
+			graph.walk_stage = "publication_"+family+"_walk"
 			graph.walk(part.recipe, [], false)
 			if guard.cancelled: return _failed("cancelled")
 			if not graph.eligible:
@@ -244,20 +272,20 @@ static func _compile_masonry(blueprint, prepared_history: PreparedHistory, conti
 				omitted[part] = id
 				continue
 			var binding := static_record_binding(snapshot)
-			if binding.is_empty(): return _failed("masonry_record_encoding_failed")
-			var cursor = MasonryGeometry.begin_source(part, prepared_history.history, source_id)
+			if binding.is_empty(): return _failed(family+"_record_encoding_failed")
+			var cursor = _geometry_cursor(part,prepared_history.history,source_id,family)
 			while true:
-				if not guard.advance("publication_masonry_cursor"):
+				if not guard.advance("publication_"+family+"_cursor"):
 					cursor.cancel()
 					return _failed("cancelled")
 				var progress: Dictionary = cursor.advance(2500)
 				if progress.status == "ready": break
-				if progress.status != "pending_budget": return _failed("masonry_descriptor_failed")
-			if not guard.advance("publication_masonry_freeze"): return _failed("cancelled")
+				if progress.status != "pending_budget": return _failed(family+"_descriptor_failed")
+			if not guard.advance("publication_"+family+"_freeze"): return _failed("cancelled")
 			var geometry: Variant = graph.walk(cursor.take_result(), [], true)
 			if guard.cancelled: return _failed("cancelled")
-			if not graph.eligible: return _failed("unsupported_masonry_descriptor")
-			var packet = MasonryPacket.compile(part,geometry,source_id,guard.advance)
+			if not graph.eligible: return _failed("unsupported_"+family+"_descriptor")
+			var packet = MasonryPacket.compile(part,geometry,source_id,guard.advance) if family=="masonry" else SurfacePacket.compile(part,geometry,family,guard.advance)
 			if guard.cancelled: return _failed("cancelled")
 			var sealed_revision := -1
 			var sealed_recipe: Dictionary = {}
@@ -269,28 +297,37 @@ static func _compile_masonry(blueprint, prepared_history: PreparedHistory, conti
 				# Validate after callbacks and before replacing any owned recipe.
 				graph.walk(part.recipe,[],false)
 				if guard.cancelled: return _failed("cancelled")
-				if not graph.eligible: return _failed("stale_prepared_masonry_part")
-				if static_record_binding(part.snapshot())!=binding: return _failed("stale_prepared_masonry_part")
+				if not graph.eligible: return _failed("stale_prepared_"+family+"_part")
+				if static_record_binding(part.snapshot())!=binding: return _failed("stale_prepared_"+family+"_part")
 				sealed_revision = part.seal_for_publication(sealed_recipe)
 				if sealed_revision<0: return _failed("already_sealed_owned_part")
 			var entry := {"id":id, "part":part, "binding":binding, "geometry":geometry,"packet":packet,
 				"sealedRevision":sealed_revision,"sealedRecipe":sealed_recipe}
 			entry.make_read_only()
 			entries[part] = entry
-			if not guard.advance("publication_masonry_record"): return _failed("cancelled")
+			if not guard.advance("publication_"+family+"_record"): return _failed("cancelled")
 		entries.make_read_only()
 		omitted.make_read_only()
-		var artifact := PreparedMasonry.new(entries, prepared_history, source_id, omitted)
+		var artifact := PreparedGeometry.new(entries, prepared_history, source_id, omitted, family)
 		# Callbacks may reject or change earlier inputs. Never commit partial/stale
 		# descriptors; validation remains worker work and independently cancellable.
 		for part in entries:
-			if not guard.advance("publication_masonry_validate"): return _failed("cancelled")
-			if not artifact.validate_part(part): return _failed("stale_prepared_masonry_part")
+			if not guard.advance("publication_"+family+"_validate"): return _failed("cancelled")
+			if not artifact.validate_part(part): return _failed("stale_prepared_"+family+"_part")
 		if not artifact.matches_history(prepared_history, prepared_history.history, source_id): return _failed("stale_prepared_history")
-		result.preparedMasonry = artifact
-	if not guard.advance("publication_masonry_completed"): return _failed("cancelled")
-	result.masonryPreparationUsec = Time.get_ticks_usec() - started
+		result.artifact = artifact
+	if not guard.advance("publication_"+family+"_completed"): return _failed("cancelled")
+	result.preparationUsec = Time.get_ticks_usec() - started
 	return result
+
+static func geometry_selected(part, family: String) -> bool:
+	return GeometrySelection.selected(part,family)
+
+static func _geometry_cursor(part, history, source_id: String, family: String):
+	if family=="masonry": return MasonryGeometry.begin_source(part,history,source_id)
+	if family=="roof": return RoofGeometry.begin_source(part,history,source_id)
+	# Match the existing paving publisher's authoring-normalized private copy.
+	return CobbleGeometry.begin_source(PartRecord.new(part.snapshot()),history,source_id)
 
 static func _masonry_selected(part) -> bool:
 	return MasonrySelection.selected(part)

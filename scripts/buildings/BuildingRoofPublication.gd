@@ -3,7 +3,7 @@ extends RefCounted
 ## Cancel invalidates only: retain arrays and Resources for worker retirement.
 const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
-const Descriptor = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
+const Geometry = preload("res://scripts/buildings/BuildingRoofGeometry.gd")
 const Upload = preload("res://scripts/buildings/BuildingMeshBatchUpload.gd")
 var state := "setup"
 var reason := ""
@@ -33,24 +33,14 @@ var _uploads: Array = []
 var _material: Material
 var _cap_material: Material
 var _label := ""
-var _size: Vector3
-var _course_count := 0
-var _tile_count := 0
-var _tile_span := 0.0
-var _roof_phase := 0.0
-var _eave_x := 0.0
-var _ridge_x := 0.0
-var _course := 0
-var _tile := 0
-var _course_t := 0.0
-var _course_width := 0.0
-var _row_offset := 0.0
+var _geometry: Dictionary = {}
+var _cursor
+var _packet
+var _packet_segments: Array = []
+var _packet_index := 0
+var _prepared := false
 var _group := 0
 var _index := 0
-var _min_y := INF
-var _max_y := -INF
-var _height_range := 0.0
-var _seed_phase := 0.0
 
 func _init(part, parent: Node3D, frame: Transform3D, collecting: bool, source_id: String, compatibility := false) -> void:
 	_part=part; _parent=weakref(parent) if parent!=null else null
@@ -65,7 +55,6 @@ func _init(part, parent: Node3D, frame: Transform3D, collecting: bool, source_id
 	_copy.position=snapshot.position; _copy.rotation=snapshot.rotation; _copy.size=snapshot.size
 	_copy.collision_enabled=snapshot.collision; _copy.semantic=snapshot.semantic
 	_copy.physical_intent=snapshot.physicalIntent
-	_size=_copy.size
 
 static func _acyclic(value: Variant, ancestors: Array, depth := 0) -> bool:
 	if not (value is Array or value is Dictionary): return true
@@ -87,11 +76,14 @@ static func _acyclic(value: Variant, ancestors: Array, depth := 0) -> bool:
 func source_part(): return _part
 
 func source_valid(publisher) -> bool:
+	if _prepared:
+		return publisher.source_blueprint_id==_source_id and publisher._prepared_surface_part_valid(_part,"roof")
 	return _part!=null and publisher.source_blueprint_id==_source_id and not _binding.is_empty() \
 		and _acyclic(_part.recipe,[]) and Preparation.static_record_binding(_part.snapshot())==_binding
 
 func cancel() -> void:
 	_cancelled=true
+	if _cursor!=null: _cursor.cancel()
 	_fail("cancelled")
 
 func _fail(value: String) -> bool:
@@ -157,41 +149,34 @@ func _step(publisher, parent: Node3D) -> void:
 			# the existing private immutable history snapshot (no new copier).
 			_history=_history_owner if _compatibility else publisher.prepare_paving_history_snapshot()
 			if not _after_external(publisher): return
-			var monumental:=String(_copy.id).begins_with("castle_") or String(_copy.semantic).contains("civic")
-			var course_run:=0.46 if monumental else 0.54
-			_tile_span=0.56 if monumental else 0.68
-			_course_count=maxi(1,ceili(_size.x/course_run)); _tile_count=maxi(1,ceili(_size.z/_tile_span))
-			_roof_phase=float(posmod((_source_id+":roof:"+String(_copy.id)).hash(),4093))/4093.0
-			var left:=String(_copy.id).ends_with("_left") or String(_copy.id).contains("roof_left")
-			var sign: float=-1.0 if left else 1.0
-			_eave_x=sign*_size.x*0.5; _ridge_x=-_eave_x
-			state="course"
-		"course":
-			if _course==_course_count: state="group"; return
-			_course_t=(float(_course)+0.5)/float(_course_count)
-			_course_width=_size.x/float(_course_count)
-			_row_offset=_tile_span*0.5 if _course%2==1 else 0.0
-			_row_offset+=(fposmod(sin(float(_course+1)*19.193+_roof_phase*71.713)*15731.743,1.0)-0.5)*_tile_span*0.18
-			_tile=0; state="tiles"
-		"tiles":
-			if _tile==_tile_count+2: _course+=1; state="course"; return
-			var slot_width:=_size.z/float(_tile_count)
-			var z: float=-_size.z*0.5+slot_width*(float(_tile)+0.5)-_row_offset
-			var tile_start:=maxf(-_size.z*0.5,z-slot_width*0.5)
-			var tile_end:=minf(_size.z*0.5,z+slot_width*0.5)
-			if tile_end-tile_start<0.08: _tile+=1; return
-			z=(tile_start+tile_end)*0.5
-			var piece_noise:=fposmod(sin(float(_course+1)*41.17+float(_tile+1)*13.71+_roof_phase*29.17)*31991.37,1.0)
-			var secondary_noise:=fposmod(sin(float(_course+1)*11.73+float(_tile+1)*57.19+_roof_phase*83.11)*23171.31,1.0)
-			var x:=lerpf(_eave_x,_ridge_x,_course_t)
-			var tile_size:=Vector3(maxf(0.08,_course_width*lerpf(1.04,1.18,piece_noise)),_size.y*lerpf(0.92,1.16,secondary_noise),maxf(0.08,(tile_end-tile_start-0.026)*lerpf(0.84,1.0,piece_noise)))
-			var tile_lift: float=(1.0-_course_t)*_size.y*0.52+(piece_noise-0.5)*0.018
-			var transform:=Transform3D(Basis(Vector3.FORWARD,(secondary_noise-0.5)*deg_to_rad(1.7)).scaled(tile_size),Vector3(x,tile_lift,z))
-			var exposure: float=_history.history_for(_part if _compatibility else _copy,_copy.position+transform.origin,_course_t,piece_noise)
+			if not _compatibility:
+				if not publisher._prepared_surface_part_valid(_part,"roof"):
+					_fail("stale_prepared_roof"); return
+				_geometry=publisher.prepared_surface_geometry(_part,"roof")
+				if not _after_external(publisher): return
+				if not _geometry.is_empty():
+					_prepared=true
+					if _collecting:
+						_packet=publisher.prepared_surface_packet(_part,"roof")
+						if not _after_external(publisher): return
+						if _packet!=null and _packet.frame!=_frame:
+							_fail("stale_roof_packet_frame"); return
+			if not _geometry.is_empty():
+				_accept_geometry()
+			else:
+				# Compatibility passes the original record to virtual history and
+				# defers custom hooks until after each material request.
+				_cursor=Geometry.begin_source(_copy,_history,_source_id,_compatibility)
+				if _compatibility: _cursor._history_part=_part
+				state="geometry"
+		"geometry":
+			# One shared arithmetic unit preserves immediate external cancellation.
+			_cursor._step()
 			if not _after_external(publisher): return
-			if exposure>0.58 and piece_noise>0.78: _weathered_transforms.append(transform)
-			else: _transforms.append(transform)
-			_tile+=1
+			if _cursor.state=="failed": _fail(_cursor.reason); return
+			if _cursor.state=="ready":
+				_geometry=_cursor.take_result()
+				_accept_geometry()
 		"group":
 			if _group==2 or (_group==1 and _weathered_transforms.is_empty()): state="cap_material"; return
 			_active=_transforms if _group==0 else _weathered_transforms
@@ -202,28 +187,16 @@ func _step(publisher, parent: Node3D) -> void:
 				if not _after_external(publisher): return
 				_material=publisher.material_for_id("roof_slate_weathered",variation-0.025)
 			if not _after_external(publisher): return
-			_custom=[]; _custom_groups.append(_custom)
-			_index=0; _min_y=INF; _max_y=-INF
-			state="compat_custom" if _compatibility else "extrema"
+			_index=0
+			if _compatibility:
+				state="compat_custom"
+			else:
+				_custom=_geometry.regularCustomData if _group==0 else _geometry.weatheredCustomData
+				state="batch"
 		"compat_custom":
 			_custom=publisher.build_facade_custom_data(_active,_part)
 			_custom_groups.append(_custom)
 			if _after_external(publisher): state="batch"
-		"extrema":
-			if _index<_active.size():
-				_min_y=minf(_min_y,_active[_index].origin.y); _max_y=maxf(_max_y,_active[_index].origin.y); _index+=1
-			else:
-				_height_range=maxf(0.001,_max_y-_min_y)
-				_seed_phase=float(posmod(String(_copy.id).hash(),4093))/4093.0
-				_index=0; state="custom"
-		"custom":
-			if _index==_active.size(): state="batch"; return
-			var origin:=_active[_index].origin
-			var height:=clampf((origin.y-_min_y)/_height_range,0.0,1.0)
-			var stable:=fposmod(sin(origin.x*17.13+origin.y*43.77+origin.z*11.91+_seed_phase*97.0)*31757.13,1.0)
-			var custom: Color=Descriptor.history_custom_data(_copy.position+origin,_history)
-			if not _after_external(publisher): return
-			_custom.append(custom); _index+=1
 		"batch":
 			if not _validate(publisher,parent): return
 			_index=0
@@ -231,7 +204,11 @@ func _step(publisher, parent: Node3D) -> void:
 				publisher.add_box_batch(parent,_active,_material,_label,_custom)
 				if _after_external(publisher): _group+=1; state="group"
 			elif _active.is_empty(): _group+=1; state="group"
-			elif _collecting: state="collect"
+			elif _collecting:
+				if _packet!=null:
+					_packet_segments=(_packet.groups.regular if _group==0 else _packet.groups.weathered).segments
+					_packet_index=0; state="packet_collect"
+				else: state="collect"
 			else:
 				_upload=Upload.new(publisher.unit_box,_active,_custom,_material,_label,parent,_frame,false)
 				_uploads.append(_upload); state="upload"
@@ -240,6 +217,11 @@ func _step(publisher, parent: Node3D) -> void:
 			if not _after_external(publisher): return
 			_index+=1
 			if _index==_active.size(): _group+=1; state="group"
+		"packet_collect":
+			if _packet_index>=_packet_segments.size(): _group+=1; state="group"; return
+			publisher.collect_prepared_static_visual_segment(_packet_segments[_packet_index],_material)
+			if not _after_external(publisher): return
+			_packet_index+=1
 		"upload":
 			# Reuse exactly ONE existing upload unit so a reentrant cancellation
 			# cannot be followed by another submission inside a nested budget loop.
@@ -259,11 +241,17 @@ func _step(publisher, parent: Node3D) -> void:
 			if _after_external(publisher): state="eave"
 		"eave":
 			if not _validate(publisher,parent): return
-			publisher.add_box_visual(parent,Vector3(0.18,maxf(0.10,_size.y*0.72),_size.z+0.14),Vector3(_eave_x,_size.y*0.18,0.0),_cap_material,"RoofEaveCourse")
+			if _packet!=null:
+				publisher.collect_prepared_static_visual_segment(_packet.groups.eave.segments[0],_cap_material)
+			else:
+				publisher.add_box_visual(parent,_geometry.eave.size,_geometry.eave.position,_cap_material,"RoofEaveCourse")
 			if _after_external(publisher): state="ridge"
 		"ridge":
 			if not _validate(publisher,parent): return
-			publisher.add_box_visual(parent,Vector3(0.24,maxf(0.11,_size.y*0.82),_size.z+0.18),Vector3(_ridge_x,_size.y*0.44,0.0),_cap_material,"RoofRidgeCap")
+			if _packet!=null:
+				publisher.collect_prepared_static_visual_segment(_packet.groups.ridge.segments[0],_cap_material)
+			else:
+				publisher.add_box_visual(parent,_geometry.ridge.size,_geometry.ridge.position,_cap_material,"RoofRidgeCap")
 			if _after_external(publisher): state="finish"
 		"finish":
 			if not _validate(publisher,parent): return
@@ -271,3 +259,9 @@ func _step(publisher, parent: Node3D) -> void:
 				publisher.publish_practical_light(_part,parent)
 				if not _validate(publisher,parent): return
 			if _after_external(publisher): state="ready"
+
+
+func _accept_geometry() -> void:
+	_transforms=_geometry.regularTransforms
+	_weathered_transforms=_geometry.weatheredTransforms
+	state="group"

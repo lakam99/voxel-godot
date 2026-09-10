@@ -115,6 +115,7 @@ func actual_publication() -> void:
 	metrics.metadataPreparationUsec=completed.result.prepared._payload.get("metadataPreparationUsec",0)
 	metrics.historyPreparationUsec=completed.result.prepared._payload.get("historyPreparationUsec",0)
 	metrics.masonryPreparationUsec=completed.result.prepared._payload.get("masonryPreparationUsec",0)
+	metrics.surfacePreparationUsec=completed.result.prepared._payload.get("surfacePreparationUsec",{})
 	var prepared_masonry=completed.result.prepared._payload.get("preparedMasonry")
 	metrics.preparedMasonryCount=prepared_masonry.count() if prepared_masonry!=null else 0
 	check("actual_masonry_descriptors_prepared",metrics.preparedMasonryCount==1450)

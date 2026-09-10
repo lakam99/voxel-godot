@@ -115,7 +115,18 @@ retain one world authority, preserve save format v2 and durable deltas.
   82.543s; scene-ready capture was 127.030s. This is one sample, not the 64m/90s
   contract, and publication still exceeds the 4ms cooperative budget. Evidence
   and regression outcomes: WORLD_STREAMING_OWNED_RECORDS_2026-09-10.md.
-- Next: address measured publication validation/geometry costs and submission
+- Paving and roof geometry/final buffers now prepare on the existing worker.
+  Shared paving batches retain all instances/colliders and reduce MultiMeshes
+  from 1548 to 1477. Headed initial-spawn sample: 80.048s current startup,
+  122.318s scene-ready; neither proves regional gameplay readiness. Broad replay
+  161/163 with recorded asset/headless-capture failures. See
+  WORLD_STREAMING_SURFACE_WORKERS_2026-09-10.md for commands, costs and limitations.
+- The user's New Game/Continue timing distinction makes the cold 90s target
+  provisional; measure cold creation, cached Continue and exploration separately.
+  No replacement threshold has been chosen. Preserve the playable-radius and
+  traversal requirements regardless of startup target.
+- Next: add exact navigation publication acknowledgements and regional dependency
+  closure, while addressing measured publication validation costs and submission
   fragmentation before reintroducing spatial subdivision, then regional
   dependency closure with real revision-matched navigation acknowledgements.
   The owner inventory and broad reference replay are in that report. The spatial

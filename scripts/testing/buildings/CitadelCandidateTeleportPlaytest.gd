@@ -618,6 +618,11 @@ func _audit_scene() -> Dictionary:
 			var value: Variant = begin_metrics.get(key)
 			checks.preparation_timing_complete = checks.preparation_timing_complete and value is int and value>=0
 			result.preparationTimings[key] = value
+		var surfaces: Dictionary=begin_metrics.get("surfacePreparationUsec",{})
+		for family: String in ["paving","roof"]:
+			var value: Variant=surfaces.get(family)
+			checks.preparation_timing_complete=checks.preparation_timing_complete and value is int and value>=0
+			result.preparationTimings[family+"PreparationUsec"]=value
 		result.preparationTimings["unavailable"] = []
 		if publication_job._building != null:
 			result["publicationTiming"] = publication_job._building.publication_timing()

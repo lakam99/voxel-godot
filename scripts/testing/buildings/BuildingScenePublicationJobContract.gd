@@ -170,7 +170,10 @@ func pending_target_reached(job, target: String) -> bool:
 	if target.begins_with("roof_"):
 		var roof=job._building._pending_roof
 		if roof==null: return false
-		return roof.state==("tiles" if target=="roof_tiles" else "collect")
+		if target=="roof_tiles":
+			return roof.state=="geometry" and roof._cursor!=null and roof._cursor.state=="tiles" \
+				and roof._cursor._transforms.size()+roof._cursor._weathered_transforms.size()>0
+		return roof.state=="collect" and roof._index>0 and roof._index<roof._active.size()
 	if target.begins_with("masonry_"):
 		var masonry=job._building._pending_masonry
 		if masonry==null: return false
@@ -217,6 +220,13 @@ func pending_progress(job) -> Dictionary:
 	if publisher._pending_masonry!=null:
 		result.masonryState=publisher._pending_masonry.state
 		result.masonryCollect=publisher._pending_masonry._batch_index
+	if publisher._pending_roof!=null:
+		var roof=publisher._pending_roof
+		# cancel() intentionally changes helper states; only submission/progress
+		# counters must remain unchanged while teardown retires its allocations.
+		result.roofCollect=roof._index
+		if roof._cursor!=null:
+			result.roofGeometryCount=roof._cursor._transforms.size()+roof._cursor._weathered_transforms.size()
 	return result
 
 func watch_pending_resources(job) -> Dictionary:
@@ -238,7 +248,9 @@ func watch_pending_resources(job) -> Dictionary:
 	if publisher._pending_masonry!=null:
 		watched.masonry=weakref(publisher._pending_masonry)
 		if publisher._pending_masonry._cursor!=null: watched.geometry=weakref(publisher._pending_masonry._cursor)
-	if publisher._pending_roof!=null: watched.roof=weakref(publisher._pending_roof)
+	if publisher._pending_roof!=null:
+		watched.roof=weakref(publisher._pending_roof)
+		if publisher._pending_roof._cursor!=null: watched.roofGeometry=weakref(publisher._pending_roof._cursor)
 	return watched
 
 func pending_cancellation_case(target: String) -> void:

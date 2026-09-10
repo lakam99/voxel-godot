@@ -80,6 +80,7 @@ static func run_worker() -> Dictionary:
 	var report := {"checks":checks,"evidenceLevel":"synthetic CPU/service; no Nodes/GPU/live acceptance",
 		"workerThreadId":OS.get_thread_caller_id()}
 	owned_revision_controls(checks)
+	surface_controls(checks)
 	var b = fixture()
 	var before := encoded(b.snapshot())
 	var history: Dictionary = Preparation._compile_history(b)
@@ -284,6 +285,56 @@ static func owned_revision_controls(checks: Dictionary) -> void:
 		part.set(field,saved)
 		checks[label+"_restoration_stays_stale"]=not artifact.validate_part(part)
 	checks.owned_pipeline_one_shot=result.prepared.take(BINDING).is_empty()
+
+static func surface_controls(checks: Dictionary) -> void:
+	for family: String in ["paving","roof"]:
+		checks[family+"_controls_completed"]=false
+		var b:=Blueprint.new("surface-"+family,73,"castle")
+		b.recipe={"sourceBlueprintId":"surface-"+family}
+		var part=b.add_part({"id":family+"_left","kind":"foundation" if family=="paving" else "roof",
+			"material":"cobblestone" if family=="paving" else "roof_slate","size":Vector3(18,0.2,14),
+			"position":Vector3(-43.2,3,11),"rotation":Vector3(0.12,0.7,0.21),"collision":false,
+			"recipe":{"variation":0.037,"nested":{"samples":[1,2,3]}}})
+		var before:=encoded(b.snapshot())
+		var history:=Preparation._compile_history(b)
+		var cursor=Preparation._geometry_cursor(part,history.preparedHistory.history,b.id,family)
+		while cursor.advance(4000).status=="pending_budget": pass
+		var expected: Dictionary=cursor.take_result()
+		var result:=Preparation._compile_geometry(b,history.preparedHistory,Callable(),true,family)
+		checks[family+"_compiler_ready"]=result.ready and result.artifact!=null
+		if not checks[family+"_compiler_ready"]: continue
+		var artifact=result.artifact
+		checks[family+"_exact_geometry"]=encoded(artifact.geometry_for(part))==encoded(expected)
+		checks[family+"_source_unchanged"]=encoded(b.snapshot())==before
+		checks[family+"_sealed"]=part._publication_sealed and all_frozen(part.recipe) and artifact.validate_part(part)
+		var packet=artifact.packet_for(part)
+		var valid: bool=packet!=null and all_frozen(packet) and packet.frame==Transform3D(Basis.from_euler(part.rotation),part.position)
+		var groups: Dictionary={"regular":[expected.regularTransforms,expected.regularCustomData]}
+		if family=="paving": groups.worn=[expected.wornTransforms,expected.wornCustomData]
+		else: groups.weathered=[expected.weatheredTransforms,expected.weatheredCustomData]
+		for name: String in groups:
+			var index:=0
+			for segment in packet.groups[name].segments:
+				valid=valid and segment.instanceCount>0 and segment.instanceCount<=256 and segment.buffer.size()==segment.instanceCount*16
+				for i in segment.instanceCount:
+					valid=valid and segment.transforms[i]==packet.frame*groups[name][0][index] and segment.customData[i]==groups[name][1][index]
+					index+=1
+			valid=valid and index==groups[name][0].size()
+		checks[family+"_exact_bounded_packets"]=valid
+		var replacement:=Part.new(part.snapshot())
+		checks[family+"_replacement_rejected"]=artifact.has_part(replacement) and not artifact.validate_part(replacement)
+		part.position+=Vector3.ONE
+		checks[family+"_stale_rejected"]=not artifact.validate_part(part) and artifact.geometry_for(part).is_empty() and artifact.packet_for(part)==null
+		for phase: String in ["started","cursor","freeze","packet","record","validate","completed"]:
+			var fresh:=Blueprint.new(b.id,73,"castle")
+			fresh.recipe=b.recipe.duplicate(true)
+			fresh.add_part(replacement.snapshot())
+			var fresh_history:=Preparation._compile_history(fresh)
+			var reject:=Reject.new()
+			reject.target="publication_"+family+"_"+phase
+			var rejected:=Preparation._compile_geometry(fresh,fresh_history.preparedHistory,reject.advance,false,family)
+			checks[family+"_cancel_"+phase]=not rejected.ready and rejected.reason=="cancelled" and reject.rejected and reject.after_false==0
+		checks[family+"_controls_completed"]=true
 
 func _initialize() -> void: call_deferred("run")
 

@@ -11,11 +11,11 @@ static func encode(transform: Transform3D, custom: Color) -> PackedFloat32Array:
 		transform.basis.x.z, transform.basis.y.z, transform.basis.z.z, transform.origin.z,
 		custom.r, custom.g, custom.b, custom.a])
 
-static func compile(transforms: Array, custom: Array, frame: Transform3D, continuation: Callable) -> Array:
+static func compile(transforms: Array, custom: Array, frame: Transform3D, continuation: Callable, stage := "publication_masonry_packet") -> Array:
 	var segments: Array = []
 	var cursor := 0
 	while cursor < transforms.size():
-		if continuation.is_valid() and continuation.call("publication_masonry_packet") != true: return []
+		if continuation.is_valid() and continuation.call(stage) != true: return []
 		var final_transforms: Array[Transform3D] = []
 		var final_custom: Array[Color] = []
 		# Packed arrays cannot be frozen in Godot. Seal float32-rounded values in

@@ -1,9 +1,12 @@
 extends SceneTree
 ## Synthetic direct-publication contracts; no live gameplay or GPU acceptance.
 const Roof = preload("res://scripts/buildings/BuildingRoofPublication.gd")
+const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const History = preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const Descriptor = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
+const Geometry = preload("res://scripts/buildings/BuildingRoofGeometry.gd")
+const Buffer = preload("res://scripts/buildings/BuildingInstanceBuffer.gd")
 const Worker = preload("res://scripts/buildings/BuildingPublicationWorker.gd")
 const BASELINE_COMMIT := "8ba83443bb9e5483c097907df24c7c54db1daa56"
 const BASELINE_BLOB := "4ace02cdd674f9b35324f5d2cd3b11a571eca0e2"
@@ -39,6 +42,13 @@ class Collector extends RefCounted:
 		surface_history.configure({"routeCorridors":[{"center":Vector3.ZERO,"span":Vector2(8,3)}]})
 		history_binding=var_to_bytes(surface_history.route_corridors)
 	func _publication_failed() -> bool: return failure
+	func _prepared_surface_part_valid(_part, _kind: String) -> bool: return true
+	func prepared_surface_geometry(_part, _kind: String) -> Dictionary: return {}
+	func prepared_surface_packet(_part, _kind: String): return null
+	func collect_prepared_static_visual_segment(segment: Dictionary, material: Material) -> void:
+		for index in segment.instanceCount:
+			append_instance(segment.transforms[index],material,segment.customData[index])
+		hook("packet")
 	func prepare_paving_history_snapshot(): return surface_history # Explicit synthetic history.
 	func validate_paving_history_source() -> bool:
 		return history_binding==var_to_bytes(surface_history.route_corridors)
@@ -159,6 +169,15 @@ class Publisher extends FrozenOracle:
 		custom_calls+=1
 		return super.build_facade_custom_data(transforms,part)
 
+class PreparedPublisher extends Publisher:
+	var geometry: Dictionary = {}
+	var packet
+	var source_binding := ""
+	func _prepared_surface_part_valid(part, kind: String) -> bool:
+		return kind=="roof" and Preparation.static_record_binding(part.snapshot())==source_binding
+	func prepared_surface_geometry(_part, _kind: String) -> Dictionary: return geometry
+	func prepared_surface_packet(_part, _kind: String): return packet
+
 var checks: Dictionary = {}
 
 func check(label: String, value: bool) -> void:
@@ -239,10 +258,10 @@ func cancellation_case(phase: String, collecting: bool) -> void:
 	var job := Roof.new(part,parent,Transform3D.IDENTITY,collecting,publisher.source_blueprint_id)
 	publisher.target=weakref(job)
 	for index in 50000:
-		if job.state==phase: break
+		if observed_phase(job)==phase: break
 		job.advance(publisher,1)
 		if job.state in ["failed","ready"]: break
-	check(phase+"_cancel_reached",job.state==phase)
+	check(phase+"_cancel_reached",observed_phase(job)==phase)
 	var before := encoded(publisher.records)
 	job.cancel()
 	for index in 3: job.advance(publisher,4000)
@@ -250,6 +269,86 @@ func cancellation_case(phase: String, collecting: bool) -> void:
 	check(phase+"_cancel_no_submissions",before==encoded(publisher.records))
 	check(phase+"_cancel_retains_payload",job.source_part()==part and job._copy!=null)
 	parent.free()
+
+# Arithmetic phases moved into the shared cursor; retain the same cancellation
+# points rather than dropping tile/extrema/custom cancellation coverage.
+func observed_phase(job) -> String:
+	return job._cursor.state if job.state=="geometry" and job._cursor!=null else job.state
+
+func cursor_and_prepared_case() -> void:
+	var part = Part.new({"id":"castle_shared_roof_left","kind":"roof","material":"roof_slate",
+		"position":Vector3(-4,2,7),"rotation":Vector3(0.1,0.4,0.3),"size":Vector3(4,0.2,5)})
+	var publisher := PreparedPublisher.new()
+	var cursor = Geometry.begin_source(part,publisher.surface_history,publisher.source_blueprint_id)
+	check("cursor_budget_zero",cursor.advance(0).reason=="invalid_slice_budget" and cursor.state=="setup")
+	check("cursor_budget_high",cursor.advance(4001).reason=="invalid_slice_budget" and cursor.state=="setup")
+	check("cursor_take_pending_empty",cursor.take_result().is_empty())
+	for index in 50000:
+		if cursor.state in ["ready","failed"]: break
+		cursor.advance(1)
+	check("cursor_ready",cursor.state=="ready")
+	if cursor.state!="ready": return
+	publisher.geometry=cursor.take_result()
+	check("cursor_take_once",cursor.take_result().is_empty())
+	publisher.source_binding=Preparation.static_record_binding(part.snapshot())
+	var frame := Transform3D(Basis.from_euler(part.rotation),part.position)
+	var groups: Dictionary = {}
+	for name: String in ["regular","weathered"]:
+		groups[name]={"segments":Buffer.compile(publisher.geometry[name+"Transforms"],publisher.geometry[name+"CustomData"],frame,Callable())}
+	for name: String in ["eave","ridge"]:
+		var cap: Dictionary=publisher.geometry[name]
+		groups[name]={"segments":Buffer.compile([Transform3D(Basis(Vector3.UP,0.0).scaled(cap.size),cap.position)],[Color(0.5,0.5,0.5,1.0)],frame,Callable())}
+	publisher.packet={"frame":frame,"groups":groups}
+	var parent := Node3D.new()
+	var oracle := Publisher.new()
+	oracle.static_visual_collecting=true; oracle.static_visual_part_transform=frame
+	oracle.publish_roof_shingles(part,parent)
+	var saved_packet = publisher.packet
+	publisher.packet=null
+	var geometry_job := Roof.new(part,parent,frame,true,publisher.source_blueprint_id)
+	publisher.target=weakref(geometry_job)
+	for index in 50000:
+		if geometry_job.state in ["ready","failed"]: break
+		geometry_job.advance(publisher,1)
+	check("prepared_geometry_exact_oracle",geometry_job.state=="ready" and geometry_job._cursor==null and encoded(oracle.records)==encoded(publisher.records))
+	publisher.packet=saved_packet; publisher.records=[]
+	var expected: Array = []
+	for record: Array in oracle.records:
+		if record[0]=="instance": expected.append(record)
+		else:
+			expected.append(["instance",frame*Transform3D(Basis(Vector3.UP,0.0).scaled(record[2]),record[3]),record[4],Color(0.5,0.5,0.5,1.0)])
+	var job := Roof.new(part,parent,frame,true,publisher.source_blueprint_id)
+	publisher.target=weakref(job)
+	for index in 50000:
+		if job.state in ["ready","failed"]: break
+		job.advance(publisher,1)
+	check("prepared_packet_ready",job.state=="ready" and job._cursor==null and job._prepared)
+	check("prepared_packet_exact_oracle",encoded(expected)==encoded(publisher.records))
+	check("prepared_packet_no_compat_hooks",publisher.custom_calls==0 and publisher.batch_calls==0)
+	var cancelled := Roof.new(part,parent,frame,true,publisher.source_blueprint_id)
+	publisher.records=[]; publisher.cancel_hook="packet"; publisher.target=weakref(cancelled)
+	for index in 50000:
+		if cancelled.state in ["ready","failed"]: break
+		cancelled.advance(publisher,4000)
+	var before := encoded(publisher.records)
+	cancelled.advance(publisher,4000)
+	check("prepared_packet_cancel_terminal",cancelled.state=="failed" and cancelled.reason=="cancelled" and publisher.after_cancel==0 and before==encoded(publisher.records))
+	publisher.cancel_hook=""; publisher.cancelled=false
+	var stale := Roof.new(part,parent,frame,true,publisher.source_blueprint_id)
+	publisher.target=weakref(stale); publisher.records=[]
+	stale.advance(publisher,1)
+	part.recipe["changed"]=true
+	stale.advance(publisher,4000)
+	check("prepared_source_stale_rejected",stale.state=="failed" and publisher.records.is_empty())
+	part.recipe.erase("changed")
+	var wrong := Roof.new(part,parent,Transform3D.IDENTITY,true,publisher.source_blueprint_id)
+	publisher.target=weakref(wrong); publisher.records=[]
+	wrong.advance(publisher,4000)
+	check("prepared_frame_stale_rejected",wrong.reason=="stale_roof_packet_frame" and publisher.records.is_empty())
+	parent.free()
+	var stopped = Geometry.begin_source(part,publisher.surface_history,publisher.source_blueprint_id)
+	stopped.advance(1); stopped.cancel()
+	check("cursor_cancel_terminal",stopped.advance(4000).reason=="cancelled" and stopped.take_result().is_empty())
 
 func guard_case(mode: String) -> void:
 	var parent := Node3D.new()
@@ -313,6 +412,7 @@ func run() -> void:
 	if output.is_empty(): quit(2); return
 	var started := Time.get_ticks_msec()
 	if verify_oracle():
+		cursor_and_prepared_case()
 		for values: Dictionary in [
 			{"id":"ordinary_left","kind":"roof","material":"roof_slate","size":Vector3(4,0.2,3)},
 			{"id":"ordinary_right","kind":"roof","material":"roof_slate","size":Vector3(3,0.2,4),"exposure":0.0},
@@ -360,4 +460,3 @@ func run() -> void:
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("ROOF CONTRACT ",passed,"/",checks.size())
 	quit(0 if report.passed else 1)
-

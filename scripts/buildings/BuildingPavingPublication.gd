@@ -19,6 +19,11 @@ var _geometry: Dictionary = {}
 var _upload
 var _uploads: Array = []
 var _group := 0
+var _prepared := false
+var _packet
+var _segments: Array = []
+var _segment_index := 0
+var _material: Material
 
 func _init(part, parent: Node3D, frame: Transform3D, collecting: bool, source_id: String) -> void:
 	_part=part; _parent=weakref(parent); _frame=frame; _collecting=collecting
@@ -30,6 +35,8 @@ func _init(part, parent: Node3D, frame: Transform3D, collecting: bool, source_id
 func source_part(): return _part
 
 func source_valid(publisher) -> bool:
+	if _prepared:
+		return publisher.source_blueprint_id==_source_id and publisher._prepared_surface_part_valid(_part,"paving")
 	return publisher.source_blueprint_id==_source_id and PartBinding.encode(_part)==_part_binding
 
 func advance(publisher, budget_usec: int = 2500) -> Dictionary:
@@ -44,8 +51,18 @@ func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 	var stage:=state
 	match state:
 		"geometry_begin":
-			_cursor=Geometry.begin_source(_part_copy,publisher.prepare_paving_history_snapshot(),_source_id)
-			state="geometry"
+			_geometry=publisher.prepared_surface_geometry(_part,"paving")
+			if publisher._publication_failed():
+				state="failed"; reason="stale_prepared_paving"
+			elif not _geometry.is_empty():
+				_prepared=true
+				if _collecting: _packet=publisher.prepared_surface_packet(_part,"paving")
+				if _packet!=null and _packet.frame!=_frame:
+					state="failed"; reason="stale_paving_packet_frame"
+				else: state="bed"
+			else:
+				_cursor=Geometry.begin_source(_part_copy,publisher.prepare_paving_history_snapshot(),_source_id)
+				state="geometry"
 		"geometry":
 			var result: Dictionary = _cursor.advance(budget_usec)
 			if result.status=="ready":
@@ -62,7 +79,11 @@ func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 			var saved_frame: Transform3D = publisher.static_visual_part_transform
 			publisher.static_visual_collecting=_collecting
 			publisher.static_visual_part_transform=_frame
-			publisher.add_box_visual(parent,bed.size,bed.position,publisher.material_for_id(bed.materialId,publisher.variation_for(_part)-0.025),"CobbleJointBed")
+			var material: Material=publisher.material_for_id(bed.materialId,publisher.variation_for(_part)-0.025)
+			if _packet!=null:
+				publisher.collect_prepared_static_visual_segment(_packet.groups.bed.segments[0],material)
+			else:
+				publisher.add_box_visual(parent,bed.size,bed.position,material,"CobbleJointBed")
 			publisher.static_visual_collecting=saved_collecting
 			publisher.static_visual_part_transform=saved_frame
 			state="group"
@@ -78,9 +99,20 @@ func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 					var custom: Array = _geometry.regularCustomData if _group==0 else _geometry.wornCustomData
 					var material: Material = publisher.material_for(_part) if _group==0 else publisher.material_for_id("worn_cobble",publisher.variation_for(_part)-0.016)
 					var label: String = "SettledCobbleStones" if _group==0 else "WornSettledCobbleStones"
-					_upload=Upload.new(publisher.unit_box,transforms,custom,material,label,parent,_frame,_collecting)
-					_uploads.append(_upload)
-					state="upload"
+					if _packet!=null:
+						_material=material
+						_segments=(_packet.groups.regular if _group==0 else _packet.groups.worn).segments
+						_segment_index=0; state="packet_collect"
+					else:
+						_upload=Upload.new(publisher.unit_box,transforms,custom,material,label,parent,_frame,_collecting)
+						_uploads.append(_upload)
+						state="upload"
+		"packet_collect":
+			if _segment_index>=_segments.size():
+				_group+=1; state="group"
+			else:
+				publisher.collect_prepared_static_visual_segment(_segments[_segment_index],_material)
+				_segment_index+=1
 		"upload":
 			var result: Dictionary = _upload.advance(publisher,budget_usec)
 			if result.status=="ready":
@@ -88,5 +120,7 @@ func advance(publisher, budget_usec: int = 2500) -> Dictionary:
 				state="group"
 			elif result.status=="failed":
 				state="failed"; reason=String(result.reason)
+	if publisher._publication_failed():
+		state="failed"; reason="paving_publisher_failed"
 	publisher._record_publication_stage("paving_publish_"+stage,Time.get_ticks_usec()-started)
 	return {"status":state if state in ["ready","failed"] else "pending_budget","reason":reason}

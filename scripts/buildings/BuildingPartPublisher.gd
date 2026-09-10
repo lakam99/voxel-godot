@@ -94,6 +94,8 @@ var _completed_paving: Array = []
 var _prepared_history
 var _prepared_masonry
 var _prepared_masonry_identity
+var _prepared_surfaces: Dictionary = {}
+var _prepared_surfaces_identity: Dictionary = _prepared_surfaces
 
 
 func _init() -> void:
@@ -170,6 +172,8 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 	_prepared_history=source.get("preparedHistory")
 	_prepared_masonry=source.get("preparedMasonry")
 	_prepared_masonry_identity=_prepared_masonry
+	_prepared_surfaces=source.get("preparedSurfaces",{})
+	_prepared_surfaces_identity=_prepared_surfaces
 	var started := Time.get_ticks_usec()
 	var ready := _begin_scene_publication(source.blueprint, options, parent)
 	scene_preparation_usec = Time.get_ticks_usec() - started
@@ -182,7 +186,8 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 		"preparationUsec":source.preparationUsec, "routeUsec":source.routeUsec, "physicalUsec":source.physicalUsec,
 		"metadataPreparationUsec":source.get("metadataPreparationUsec",0),
 		"historyPreparationUsec":source.get("historyPreparationUsec",0),
-		"masonryPreparationUsec":source.get("masonryPreparationUsec",0)}
+		"masonryPreparationUsec":source.get("masonryPreparationUsec",0),
+		"surfacePreparationUsec":source.get("surfacePreparationUsec",{})}
 
 
 func _detach_preparation_for_retirement() -> Dictionary:
@@ -195,6 +200,7 @@ func _detach_preparation_for_retirement() -> Dictionary:
 		"pavingArtifacts":_paving_artifacts, "pavingBinding":_paving_binding,
 		"pavingHistoryBinding":_paving_history_binding, "pavingTreatments":paving_treatments,
 		"masonry":_masonry_preparation, "surfaceHistory":surface_history,"preparedHistory":_prepared_history,"preparedMasonry":_prepared_masonry,"preparedMasonryIdentity":_prepared_masonry_identity,
+		"preparedSurfaces":_prepared_surfaces,"preparedSurfacesIdentity":_prepared_surfaces_identity,
 		"progressCallback":incremental_progress_callback}
 	physical_integrity = {}
 	raised_route_coverage = {}
@@ -212,6 +218,8 @@ func _detach_preparation_for_retirement() -> Dictionary:
 	_prepared_history=null
 	_prepared_masonry=null
 	_prepared_masonry_identity=null
+	_prepared_surfaces={}
+	_prepared_surfaces_identity=_prepared_surfaces
 	surface_history = SurfaceHistoryFieldScript.new()
 	incremental_progress_callback = Callable()
 	_paving_prepared = false
@@ -241,8 +249,12 @@ func _begin_scene_publication(blueprint, options: Dictionary, parent: Node3D) ->
 	else:
 		surface_history.configure(blueprint.recipe, blueprint.parts)
 	if _prepared_masonry!=null:
-		if not _prepared_masonry is PublicationPreparation.PreparedMasonry or not _prepared_masonry.matches_history(_prepared_history,surface_history,source_blueprint_id):
+		if not _prepared_masonry is PublicationPreparation.PreparedGeometry or _prepared_masonry.family!="masonry" or not _prepared_masonry.matches_history(_prepared_history,surface_history,source_blueprint_id):
 			return _paving_reject("invalid_prepared_masonry")
+	for family: String in _prepared_surfaces:
+		var artifact=_prepared_surfaces[family]
+		if artifact!=null and (not artifact is PublicationPreparation.PreparedGeometry or artifact.family!=family or not artifact.matches_history(_prepared_history,surface_history,source_blueprint_id)):
+			return _paving_reject("invalid_prepared_"+family)
 	_record_publication_stage("history",Time.get_ticks_usec()-stage_started)
 	stage_started = Time.get_ticks_usec()
 	var paving_ready := _prepare_paving_publication(blueprint)
@@ -380,6 +392,8 @@ func clear_published() -> void:
 	_prepared_history=null
 	_prepared_masonry=null
 	_prepared_masonry_identity=null
+	_prepared_surfaces={}
+	_prepared_surfaces_identity=_prepared_surfaces
 	_paving_history_snapshot=null
 	_paving_history_source=null
 	_paving_history_source_bytes=PackedByteArray()
@@ -572,6 +586,8 @@ func static_collision_batch(parent: Node3D) -> StaticBody3D:
 
 
 func publish_visual(part, parent: Node3D) -> void:
+	for family: String in _prepared_surfaces:
+		if not _prepared_surface_part_valid(part,family): return
 	if not _paving_part_valid(part): return
 	if not _masonry_part_valid(part): return
 	match String(part.kind):
@@ -784,6 +800,27 @@ func prepared_masonry_packet(part):
 	if not _prepared_masonry_part_valid(part) or _prepared_masonry==null: return null
 	return _prepared_masonry.packet_for(part)
 
+
+func _prepared_surface_part_valid(part, family: String) -> bool:
+	if not is_same(_prepared_surfaces,_prepared_surfaces_identity):
+		return _paving_reject("replaced_prepared_surfaces")
+	var artifact=_prepared_surfaces.get(family)
+	if artifact==null: return true
+	if not artifact.matches_history(_prepared_history,surface_history,source_blueprint_id):
+		return _paving_reject("stale_prepared_"+family+"_history")
+	if artifact.has_part(part) and not artifact.validate_part(part):
+		return _paving_reject("stale_prepared_"+family+"_part")
+	return true
+
+func prepared_surface_geometry(part, family: String) -> Dictionary:
+	if not _prepared_surface_part_valid(part,family): return {}
+	var artifact=_prepared_surfaces.get(family)
+	return artifact.geometry_for(part) if artifact!=null else {}
+
+func prepared_surface_packet(part, family: String):
+	if not _prepared_surface_part_valid(part,family): return null
+	var artifact=_prepared_surfaces.get(family)
+	return artifact.packet_for(part) if artifact!=null else null
 
 func _publish_masonry_group(parent: Node3D, artifact: Dictionary, group: String, material: Material, label: String) -> void:
 	var transforms: Array = []
