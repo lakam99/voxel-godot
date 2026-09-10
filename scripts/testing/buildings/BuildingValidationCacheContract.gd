@@ -52,6 +52,7 @@ func _run() -> void:
 		checks[stage + "_direct_resolve_exact_clean"] = var_to_bytes(cached.snapshot()) == var_to_bytes(uncached.snapshot()) and _clean(cached)
 		_compare(stage + "_repeat", cached, uncached)
 	_neighbor_contract()
+	_column_contract()
 	var passed := checks.values().all(func(value): return value == true)
 	var report := {"passed": passed, "checks": checks, "scope": "synthetic_same_proofs_cache_on_off_not_independent_old_script_or_full_source_acceptance"}
 	var encoded := JSON.stringify(report, "\t")
@@ -81,7 +82,7 @@ func _compare(label: String, cached, uncached) -> void:
 	checks[label + "_cache_released"] = _clean(cached) and _clean(uncached)
 
 func _clean(b) -> bool:
-	return not b._validation_cache_active and b._validation_transforms.is_empty() and b._validation_inverses.is_empty() and b._validation_bounds.is_empty() and b._validation_neighbors.is_empty() and b._validation_columns.is_empty()
+	return not b._validation_cache_active and b._validation_transforms.is_empty() and b._validation_inverses.is_empty() and b._validation_bounds.is_empty() and b._validation_neighbors.is_empty() and b._validation_columns.is_empty() and b._validation_x_columns.is_empty()
 
 func _neighbor_contract() -> void:
 	var b = _fixture(Blueprint.new())
@@ -102,8 +103,45 @@ func _neighbor_contract() -> void:
 	b.resolve_physical_contracts()
 	checks["column_preserves_rotated_candidates"] = b._support_candidates_in_column(Vector3(0,50,0)).has(rotated)
 	b._cancel_physical_validation(false)
-	checks["nested_cancellation_clears_columns"] = b._validation_columns.is_empty()
+	checks["nested_cancellation_clears_columns"] = b._validation_columns.is_empty() and b._validation_x_columns.is_empty()
 	var same_id = b.add_part({"id": "root", "position": Vector3(30, 2, 30), "rotation": Vector3(0.1, 0.2, 0.3), "size": Vector3(2, 3, 4)})
 	checks["geometry_keys_are_objects_not_ids"] = b.part_transform(same_id) != b.part_transform(b.parts[0]) and b.transformed_part_bounds(same_id) != b.transformed_part_bounds(b.parts[0])
 	b._end_validation_cache(owner)
 	checks["explicit_owner_releases_every_cache"] = _clean(b)
+
+func _column_contract() -> void:
+	var b = Blueprint.new()
+	for offset in [0.0, -100000.0, 100000.0]:
+		b.add_part({"id":"cardinal_%s"%offset,"kind":"wall","position":Vector3(offset,2,0),"size":Vector3(1,4,12)})
+		b.add_part({"id":"rotated_%s"%offset,"kind":"beam","position":Vector3(offset,2,0),"rotation":Vector3(0.2,0.3,0.1),"size":Vector3(1,4,12)})
+	var owner: bool=b._begin_validation_cache()
+	b.resolve_physical_contracts()
+	for phase in range(3):
+		var exact:=true
+		for offset in [0.0,-100000.0,100000.0]:
+			for x in [-0.55001,-0.55,-0.54999,0.0,0.54999,0.55,0.55001]:
+				for z in [-4.00001,-4.0,-0.1,0.0,3.99999,4.0,6.05,6.05001]:
+					for y in [-3.0,0.0,30.0]:
+						var point:=Vector3(offset+x,y,z)
+						var expected:Array=[]
+						for candidate in b.structural_candidates_near(point):
+							if candidate.rotation==Vector3.ZERO:
+								var local_point:Vector3=point-candidate.position
+								if absf(local_point.x)>candidate.size.x*0.5+b.PHYSICAL_CONTACT_MARGIN or absf(local_point.z)>candidate.size.z*0.5+b.PHYSICAL_CONTACT_MARGIN: continue
+							expected.append(candidate)
+						exact=exact and b._support_candidates_in_column(point)==expected
+		checks["factored_columns_exact_phase_%d"%phase]=exact
+		b.parts[0].position.x+=2
+		if phase==1: b.parts.remove_at(1)
+		b.structural_support_grid.clear()
+		b.index_structural_support_candidates()
+		checks["reindex_clears_both_column_caches_%d"%phase]=b._validation_columns.is_empty() and b._validation_x_columns.is_empty()
+	for stage in ["physical_resolve_schema","physical_resolve_support"]:
+		b._support_candidates_in_column(Vector3.ZERO)
+		var result:Dictionary=b.validate_physical_integrity_cancellable(func(label):return label!=stage)
+		checks["nested_cancel_clears_columns_"+stage]=result.get("cancelled",false) and b._validation_cache_active and b._validation_columns.is_empty() and b._validation_x_columns.is_empty()
+		b.resolve_physical_contracts()
+	b._end_validation_cache(owner)
+	b.parts[0].position.x+=7
+	b.resolve_physical_contracts()
+	checks["inactive_columns_use_fresh_neighbors"]=b._support_candidates_in_column(Vector3.ZERO)==b.structural_candidates_near(Vector3.ZERO) and _clean(b)

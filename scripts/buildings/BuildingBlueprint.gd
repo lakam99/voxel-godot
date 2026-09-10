@@ -23,6 +23,7 @@ var _validation_inverses: Dictionary = {}
 var _validation_bounds: Dictionary = {}
 var _validation_neighbors: Dictionary = {}
 var _validation_columns: Dictionary = {}
+var _validation_x_columns: Dictionary = {}
 
 const PHYSICAL_SUPPORT_GRID_CELL := 4.0
 const PHYSICAL_CONTACT_MARGIN := 0.05
@@ -259,6 +260,7 @@ func resolve_physical_contracts_cancellable(continuation: Callable) -> bool:
 func _resolve_physical_contracts(continuation: Callable) -> bool:
 	var cache_owner := _begin_validation_cache()
 	_validation_columns.clear()
+	_validation_x_columns.clear()
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
 	_validation_neighbors.clear()
@@ -327,6 +329,7 @@ static func _continue_validation(continuation: Callable, stage: String) -> bool:
 func _cancel_physical_validation(cache_owner: bool) -> Dictionary:
 	_end_validation_cache(cache_owner)
 	_validation_columns.clear()
+	_validation_x_columns.clear()
 	physical_parts_by_id.clear()
 	structural_support_grid.clear()
 	invalid_gable_part_ids.clear()
@@ -418,13 +421,26 @@ func _support_candidates_in_column(point: Vector3) -> Array:
 	if not _validation_cache_active: return structural_candidates_near(point)
 	var key := Vector2(point.x, point.z)
 	if _validation_columns.has(key): return _validation_columns[key]
+	# Neighbor order is fixed within one grid origin. Reuse its exact-X filter
+	# for samples at other Z positions; rotated supports stay in both passes.
+	var origin := Vector2i(floori(point.x / PHYSICAL_SUPPORT_GRID_CELL), floori(point.z / PHYSICAL_SUPPORT_GRID_CELL))
+	if not _validation_x_columns.has(origin): _validation_x_columns[origin] = {}
+	var columns: Dictionary = _validation_x_columns[origin]
+	if not columns.has(point.x):
+		var matching_x: Array = []
+		for candidate in structural_candidates_near(point):
+			if candidate.rotation == Vector3.ZERO:
+				var local_point: Vector3 = point - candidate.position
+				if absf(local_point.x) > candidate.size.x * 0.5 + PHYSICAL_CONTACT_MARGIN: continue
+			matching_x.append(candidate)
+		columns[point.x] = matching_x
 	var selected: Array = []
-	for candidate in structural_candidates_near(point):
+	for candidate in columns[point.x]:
 		# Rotated membership can depend on Y; retain the original path there.
 		# Cardinal candidates retain original order for each exact XZ column.
 		if candidate.rotation == Vector3.ZERO:
 			var local_point: Vector3 = point - candidate.position
-			if absf(local_point.x) > candidate.size.x * 0.5 + PHYSICAL_CONTACT_MARGIN or absf(local_point.z) > candidate.size.z * 0.5 + PHYSICAL_CONTACT_MARGIN: continue
+			if absf(local_point.z) > candidate.size.z * 0.5 + PHYSICAL_CONTACT_MARGIN: continue
 		selected.append(candidate)
 	_validation_columns[key] = selected
 	return selected
@@ -572,6 +588,7 @@ func _begin_validation_cache() -> bool:
 func _end_validation_cache(owner: bool) -> void:
 	if not owner: return
 	_validation_columns.clear()
+	_validation_x_columns.clear()
 	_validation_cache_active = false
 	_validation_transforms.clear()
 	_validation_inverses.clear()
@@ -585,6 +602,7 @@ func index_structural_support_candidates() -> void:
 
 func _index_structural_support_candidates(continuation: Callable) -> bool:
 	_validation_columns.clear()
+	_validation_x_columns.clear()
 	_validation_neighbors.clear()
 	var cells_since_checkpoint := 0
 	for part in parts:
