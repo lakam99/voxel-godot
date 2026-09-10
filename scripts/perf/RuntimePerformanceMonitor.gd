@@ -88,6 +88,7 @@ func summary() -> Dictionary:
     for sample in frame_samples:
         values.append(float((sample as Dictionary).get("ms", 0.0)))
     return {
+        "frameMetricScope": "Main game script _process callback only; excludes rendering, physics and other nodes. Not total frame latency.",
         "frameMs": last_frame_ms,
         "frameP50Ms": _percentile(values, 0.50),
         "frameP95Ms": _percentile(values, 0.95),

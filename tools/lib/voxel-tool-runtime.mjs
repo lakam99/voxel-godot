@@ -539,6 +539,13 @@ async function runHeadedTool(toolId, rawArgs) {
   const godot = await findGodot(parsed.options.godotExe);
   const godotArguments = toolId === 'run-normal-runtime-performance-pass'
     ? ['--path', projectRoot] : ['--fixed-fps', '60', '--path', projectRoot];
+  if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.resolution !== undefined) {
+    const resolution = String(parsed.options.resolution);
+    if (!['1280x720', '1920x1080'].includes(resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
+    godotArguments.push('--resolution', resolution);
+    godotArguments.push('--windowed');
+    environment.VOXEL_NORMAL_RUNTIME_PERF_RESOLUTION = resolution;
+  }
   if (['npc/run-npc-observation-tests','npc/run-real-tutorial-playthrough'].includes(toolId) && !asBoolean(parsed.options.visible)) godotArguments.unshift('--headless');
   if (scene) godotArguments.push('--scene', scene);
   const forwarded = [...sceneArgumentOptions(parsed.options), ...parsed.passthrough];

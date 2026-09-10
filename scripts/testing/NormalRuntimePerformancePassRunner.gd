@@ -3,6 +3,7 @@ extends Node
 const MENU_SCENE := preload("res://scenes/MainMenu.tscn")
 const RuntimePerformanceObservationRunnerScript := preload("res://scripts/testing/RuntimePerformanceObservationRunner.gd")
 const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
+const RenderObservationScript := preload("res://scripts/perf/RuntimeRenderObservation.gd")
 
 const SAMPLE_EVERY_FRAMES := 6
 const DEFAULT_DURATION_SECONDS := 75.0
@@ -60,9 +61,20 @@ var samples := []
 var metrics_helper = RuntimePerformanceObservationRunnerScript.new()
 var measurement_start_physics_frame := -1
 var playtest_survival_policy := {}
+var render_observation
 
 func _ready() -> void:
     configure_from_environment()
+    var resolution := OS.get_environment("VOXEL_NORMAL_RUNTIME_PERF_RESOLUTION")
+    if not resolution.is_empty():
+        if resolution not in ["1280x720", "1920x1080"]:
+            get_tree().quit(2)
+            return
+        var dimensions := resolution.split("x")
+        get_tree().root.size = Vector2i(int(dimensions[0]), int(dimensions[1]))
+    render_observation = RenderObservationScript.new()
+    add_child(render_observation)
+    render_observation.start(get_viewport())
     write_progress("start")
     call_deferred("run")
 
@@ -403,6 +415,10 @@ func launch_main_via_menu_new_game_input() -> bool:
     dispatch_menu_mouse_button(button.get_global_rect().get_center(), MOUSE_BUTTON_LEFT, true)
     dispatch_menu_mouse_button(button.get_global_rect().get_center(), MOUSE_BUTTON_LEFT, false)
     write_progress("main_menu_new_game_button_input")
+    await get_tree().process_frame
+    if not bool(menu.get("launching")) and menu.get("active_main") == null:
+        startup_loading_failure = "Main Menu New Game input was not accepted"
+        return false
     var max_frames := ceili(140.0 * float(Engine.physics_ticks_per_second))
     for frame in range(max_frames):
         await get_tree().process_frame
@@ -467,7 +483,8 @@ func dispatch_menu_mouse_button(position: Vector2, button_index: int, pressed: b
     event.pressed = pressed
     event.position = position
     event.global_position = position
-    get_viewport().push_input(event)
+    # Button rectangles are in logical viewport coordinates, including stretch.
+    get_viewport().push_input(event, true)
 
 func normal_runtime_environment_failure() -> String:
     if not [SCENARIO_SPRINT_TRAVERSAL, SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION, SCENARIO_WORLD_EDIT_LATENCY].has(scenario):
@@ -656,6 +673,7 @@ func stop_player_automation() -> void:
     player_body.velocity = Vector3.ZERO
 
 func reset_runtime_performance_monitor() -> void:
+    if is_instance_valid(render_observation): render_observation.phase = scenario
     if main == null:
         return
     var monitor = main.get("runtime_perf_monitor")
@@ -847,6 +865,7 @@ func write_progress(label: String) -> void:
     file.close()
 
 func write_report(report: Dictionary) -> void:
+    if is_instance_valid(render_observation): report["renderObservation"] = render_observation.summary()
     DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
     var file := FileAccess.open(report_path, FileAccess.WRITE)
     if file == null:
@@ -857,18 +876,17 @@ func write_report(report: Dictionary) -> void:
 
 func finish(code: int) -> void:
     finished = true
+    if is_instance_valid(render_observation): render_observation.stop()
     call_deferred("_quit_deferred", code)
 
 func _quit_deferred(code: int) -> void:
+    # This service-style helper is an unparented Node, so tree teardown cannot
+    # release it. The real game's existing quit path owns world/worker cleanup.
+    if is_instance_valid(metrics_helper): metrics_helper.free()
+    metrics_helper = null
     if main != null and is_instance_valid(main):
-        main.set_process(false)
-        main.set_physics_process(false)
-        if main.has_method("set_registered_npc_physics_enabled"):
-            main.call("set_registered_npc_physics_enabled", false)
-        if main.has_method("wait_for_terrain_workers_before_quit"):
-            await main.call("wait_for_terrain_workers_before_quit")
-        main.queue_free()
-        await get_tree().process_frame
+        main.request_graceful_quit(code)
+        return
     get_tree().quit(code)
 
 func elapsed_ms(start_usec: int) -> float:

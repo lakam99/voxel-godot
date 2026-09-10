@@ -15,7 +15,7 @@ export const errorPattern = /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|r
 export function parseOptions(argv, kind) {
   const names = ['OutputDirectory', ...(kind === 'watcher' ? [] : ['Seed', 'CandidateRegion']),
     ...(kind === 'recipe' ? ['CaptureBlueprint', 'ExpectReady', 'CaptureFailure', 'ExpectedRecipeSeed'] : []),
-    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection'] : [])];
+    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'Resolution'] : [])];
   const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection']);
   const options = {};
   for (let i = 0; i < argv.length; i++) {
@@ -67,7 +67,8 @@ export function recipeOptions(input) {
   return o;
 }
 export function teleportOptions(input, env) {
-  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, ...input };
+  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, resolution: '1280x720', ...input };
+  if (!['1280x720', '1920x1080'].includes(o.resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
   validateSeed(o.seed);
   if (o.candidateRegion !== '') regionCoordinates(o.candidateRegion);
   o.timeoutSeconds = integer(o.timeoutSeconds, 90, 600, 'TimeoutSeconds');
@@ -103,7 +104,7 @@ export async function sourceHashes(project, kind, runner) {
   const patterns = kind === 'recipe' ? ['--cached', '--others', '--exclude-standard', '--', 'scripts/*.gd', 'scripts/**/*.gd'] : ['--', '*.gd', '*.tscn', 'project.godot'];
   const files = git(project, ['ls-files', '-z', ...patterns]).split('\0').filter(Boolean);
   files.push(`scripts/testing/buildings/CitadelCandidate${kind === 'recipe' ? 'RecipeDiagnostic' : 'TeleportPlaytest'}.gd`, runner, watchdogSource, ...watchdogDependencies, helperSource);
-  if (kind === 'teleport') files.push('addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll');
+  if (kind === 'teleport') files.push('addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll', 'scripts/perf/RuntimeRenderObservation.gd');
   const hashes = {};
   for (const file of [...new Set(files)].sort()) hashes[file] = await sha256(join(project, file));
   return hashes;

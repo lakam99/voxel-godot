@@ -34,6 +34,9 @@ test('recipe modes retain ceilings, expected error policy, and exclusivity', () 
   assert.equal(recipeOptions({ expectedRecipeSeed: '0' }).expectedRecipeSeed, 0);
 });
 test('canonical region field bounds and teleport environment/deadline validation', () => {
+  assert.equal(teleportOptions({}, {}).resolution, '1280x720');
+  assert.equal(teleportOptions(parseOptions(['-OutputDirectory','out','-Resolution','1920x1080'], 'teleport'), {}).resolution, '1920x1080');
+  for (const resolution of ['0x0', '1920x0', '1280x720 --headless', null]) assert.throws(() => teleportOptions({ resolution }, {}));
   const flags = parseOptions(['-OutputDirectory','out','-SkipTutorial','-ForceDaytime','-ForceClearWeather','-StartupTimeoutSeconds','45'], 'teleport');
   const launch = teleportOptions(flags, {});
   assert.deepEqual(launch.gameArguments, ['-SkipTutorial','-ForceDaytime','-ForceClearWeather']);
@@ -143,7 +146,7 @@ test('hash inventories preserve recipe untracked scripts and teleport tracked sc
   execFileSync('git', ['init', dir], { windowsHide: true, stdio: 'ignore' });
   const recipe = 'tools/run-citadel-candidate-recipe-diagnostic.mjs', teleport = 'tools/run-citadel-candidate-teleport-playtest.mjs';
   const files = [recipe, teleport, helperSource, watchdogSource,
-    'scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd', 'scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd', 'addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll', 'scripts/tracked.gd', 'scenes/tracked.tscn', 'project.godot', ...watchdogDependencies];
+    'scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd', 'scripts/testing/buildings/CitadelCandidateTeleportPlaytest.gd', 'scripts/perf/RuntimeRenderObservation.gd', 'addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll', 'scripts/tracked.gd', 'scenes/tracked.tscn', 'project.godot', ...watchdogDependencies];
   for (const path of files) { await mkdir(join(dir, path, '..'), { recursive: true }); await writeFile(join(dir, path), path); }
   execFileSync('git', ['-C', dir, 'add', '.'], { windowsHide: true });
   await writeFile(join(dir, 'scripts/untracked.gd'), 'untracked');

@@ -6,6 +6,7 @@ const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const Gate = preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
 const Clearance = preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
+const RenderObservation = preload("res://scripts/perf/RuntimeRenderObservation.gd")
 const SEARCH_RING := 2
 const VIEW_CELLS := 112
 const MAX_SETUP_WRITES := 2
@@ -28,7 +29,11 @@ var startup_elapsed := 0
 var test_started := 0
 var startup_ready := false
 var startup_failure := ""
-var phase := "initializing"
+var render_observation
+var phase := "initializing":
+	set(value):
+		phase = value
+		if is_instance_valid(render_observation): render_observation.phase = value
 var candidate: Dictionary = {}
 var region := Vector2i.ZERO
 var declared := Rect2i()
@@ -78,7 +83,15 @@ func _run() -> void:
 	deadline = started + startup_limit*1000
 	if DisplayServer.get_name() == "headless":
 		await _finish("failed", "headed_renderer_required"); return
-	root.size = Vector2i(1280,720)
+	var resolution := OS.get_environment("CITADEL_CANDIDATE_RESOLUTION")
+	if resolution.is_empty(): resolution = "1280x720"
+	if resolution not in ["1280x720", "1920x1080"]:
+		printerr("Invalid diagnostic resolution"); quit(2); return
+	var dimensions := resolution.split("x")
+	root.size = Vector2i(int(dimensions[0]),int(dimensions[1]))
+	render_observation = RenderObservation.new()
+	root.add_child(render_observation)
+	checks.render_observation_started = render_observation.start(root)
 	main = MainScene.instantiate() as Node3D
 	main.set_script(SeededMain)
 	evidence.seedSelection = {"mechanism":"fixture-only script replacement with subclass overriding random_world_seed",
@@ -819,12 +832,14 @@ func _capture(label: String, camera_kind := "ordinary_player_viewport") -> bool:
 	if DisplayServer.get_name()=="headless":
 		captures.append({"label":label,"saved":false,"reason":"headless_capture_skipped","elapsedMsec":_elapsed()})
 		return false # Headless servers need not ever emit frame_post_draw.
+	if is_instance_valid(render_observation): render_observation.phase = "capture:"+label
 	await process_frame
 	await RenderingServer.frame_post_draw
 	var image := root.get_texture().get_image()
 	var path := output.path_join(label+".png")
 	var code := ERR_UNAVAILABLE
 	if image!=null and not image.is_empty(): code=image.save_png(path)
+	if is_instance_valid(render_observation): render_observation.phase = phase
 	captures.append({"label":label,"path":path,"saved":code==OK,"error":code,"elapsedMsec":_elapsed(),
 		"playerPosition":player.global_position if is_instance_valid(player) else Vector3.ZERO,"camera":camera_kind,
 		"cameraTransform":root.get_camera_3d().global_transform if root.get_camera_3d()!=null else Transform3D.IDENTITY,"inspectionRequired":true})
@@ -864,6 +879,9 @@ func _finish(outcome: String,reason: String) -> void:
 	checks.setup_write_limit = placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES
 	if is_instance_valid(main) and main.runtime_perf_monitor != null:
 		evidence.runtimePerformance = main.runtime_perf_monitor.summary()
+	if is_instance_valid(render_observation):
+		evidence.renderObservation = render_observation.summary()
+		render_observation.stop()
 	var passed := outcome=="scene_ready" and not checks.values().has(false)
 	var report_written := _write("report.json",{"schema":"citadel-candidate-teleport-playtest/v1","passed":passed,"outcome":outcome,"reason":reason,"checks":checks,"evidenceWriteFailure":evidence_error,
 		"seed":requested_seed,"actualSeed":main.get("seed_text") if is_instance_valid(main) else "","elapsedMsec":_elapsed(),"engine":Engine.get_version_info(),

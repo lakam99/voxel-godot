@@ -16,12 +16,12 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   const run = await freshDirectory(project, o.outputDirectory, 'candidate-teleport-');
   await mkdir(join(run, 'userdata'));
   const hashes = await (dependencies.sourceHashes ?? sourceHashes)(project, 'teleport', runner);
-  const args = [script, '--resolution', '1280x720', '--windowed', ...(o.gameArguments.length ? ['--', ...o.gameArguments] : [])];
+  const args = [script, '--resolution', o.resolution, '--windowed', ...(o.gameArguments.length ? ['--', ...o.gameArguments] : [])];
   await writeJson(join(run, 'launch.json'), { schema: 'citadel-candidate-teleport-launch/v1', projectPath: project, head: (dependencies.git ?? git)(project, ['rev-parse', 'HEAD']).trim(), seed: o.seed, requestedRegion: o.candidateRegion,
-    timeoutSeconds: o.overallTimeoutSeconds, startupTimeoutSeconds: o.startupTimeoutSeconds, testTimeoutSeconds: o.timeoutSeconds, manualInspectionSeconds: o.manualInspectionSeconds, internalDeadlineSeconds: o.timeoutSeconds - 45, launchOptions: o.launchOptions, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
+    timeoutSeconds: o.overallTimeoutSeconds, startupTimeoutSeconds: o.startupTimeoutSeconds, testTimeoutSeconds: o.timeoutSeconds, manualInspectionSeconds: o.manualInspectionSeconds, internalDeadlineSeconds: o.timeoutSeconds - 45, launchOptions: o.launchOptions, resolution: o.resolution, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
     evidenceLevel: 'headed teleport-assisted diagnostic; not continuous travel or NPC acceptance', fixtureChanges: ['seed-selector-only Main subclass', 'two counted exterior setup teleports', 'physics held only for setup clearance', 'isolated ordinary user data', 'labelled diagnostic camera views after ordinary player approach'] });
   const env = { ...inheritedEnv, APPDATA: join(run, 'userdata'), LOCALAPPDATA: join(run, 'userdata'), CITADEL_CANDIDATE_TELEPORT_OUTPUT: run, CITADEL_CANDIDATE_TELEPORT_SEED: o.seed,
-    CITADEL_CANDIDATE_TELEPORT_SECONDS: String(o.timeoutSeconds), CITADEL_CANDIDATE_STARTUP_SECONDS: String(o.startupTimeoutSeconds), CITADEL_CANDIDATE_MANUAL_SECONDS: String(o.manualInspectionSeconds), CITADEL_CANDIDATE_TELEPORT_REGION: o.candidateRegion };
+    CITADEL_CANDIDATE_TELEPORT_SECONDS: String(o.timeoutSeconds), CITADEL_CANDIDATE_STARTUP_SECONDS: String(o.startupTimeoutSeconds), CITADEL_CANDIDATE_MANUAL_SECONDS: String(o.manualInspectionSeconds), CITADEL_CANDIDATE_TELEPORT_REGION: o.candidateRegion, CITADEL_CANDIDATE_RESOLUTION: o.resolution };
   const runOwnedProcess = dependencies.runOwnedProcess ?? (await import('./run-godot-scene-watchdog.mjs')).runOwnedProcess;
   const result = await runCandidatePhase({ project, run, kind: 'teleport', env, runOwnedProcess, timeoutSeconds: o.overallTimeoutSeconds, args: ['--path', project, '--script', ...args] });
   const watch = result.summary;
