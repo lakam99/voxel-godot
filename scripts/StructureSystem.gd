@@ -77,6 +77,9 @@ func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
 func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
     return citadel_publication.advance(observer_bounds,allow_dispatch,CITADEL_PUBLICATION_BUDGET_USEC)
 
+func navigation_tile_sources(tile: Vector2i) -> Dictionary:
+    return citadel_publication.navigation_tile_sources(tile)
+
 func reset() -> void:
     configure_citadel_terrain_admission()
     generated_towns.clear()

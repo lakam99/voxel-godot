@@ -4,6 +4,7 @@ class_name GeneratedWorldNavigationAdapter
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
+const BuildingClearanceScript := preload("res://scripts/buildings/layout/BuildingLayoutClearance.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -52,6 +53,7 @@ var nav_static_rebuild_count := 0
 var nav_dynamic_update_count := 0
 var dynamic_occupant_cache_frame_key := ""
 var dynamic_occupant_cache := {}
+var building_clearance = BuildingClearanceScript.new()
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -209,7 +211,24 @@ func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if not navmesh_tile_door_revision_by_key.has(tile_key):
         navmesh_tile_door_revision_by_key[tile_key] = door_state_revision
     var tile_door_revision := int(navmesh_tile_door_revision_by_key.get(tile_key, door_state_revision))
-    return "%d:%d:%d" % [tile_revision, tile_semantic_revision, tile_door_revision]
+    var key := "%d:%d:%d" % [tile_revision, tile_semantic_revision, tile_door_revision]
+    var structures := building_navigation_sources(tile_key)
+    if structures.get("status")!="ready": return key+"|structure:"+String(structures.get("reason","pending"))
+    for source: Dictionary in structures.get("sources",[]):
+        key += "|%s:%d" % [source.binding.sourceKey,int(source.binding.generation)]
+    return key
+
+func building_navigation_sources(tile_key: String) -> Dictionary:
+    var structures = main.get("structure_system") if is_instance_valid(main) else null
+    if not is_instance_valid(structures) or not structures.has_method("navigation_tile_sources"):
+        return {"status":"ready","sources":[]}
+    var result: Dictionary = structures.navigation_tile_sources(_parse_tile_key(tile_key))
+    if result.get("status")!="ready": return result
+    for source: Dictionary in result.get("sources",[]):
+        var missing: Array = source.get("tile",{}).get("unresolvedCrossings",[])
+        if not missing.is_empty():
+            return {"status":"failed","reason":"source_crossings_unresolved","missingCrossings":missing,"binding":source.binding}
+    return result
 
 func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3, allow_outside := false, moving_home := false, margin_cells := ROUTE_NAVMESH_MARGIN_CELLS) -> Array[String]:
     var start_cell := world_cell(start)
@@ -244,6 +263,8 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
 # helper that only updates blocked/doors/paths; that reintroduces planner/probe
 # disagreement and makes NPCs accept routes into walls or reject valid routes.
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
+    var building_sources := building_navigation_sources(tile_key)
+    if building_sources.get("status")!="ready": return {}
     var source_key := navmesh_tile_source_key_for_tile(tile_key)
     var cache_key := "%s|%s" % [tile_key, source_key]
     if navmesh_tile_snapshot_cache.has(cache_key):
@@ -259,9 +280,25 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
         for x in range(min_x, min_x + NAV_TILE_CELL_SIZE):
             var cell := Vector2i(x, z)
             var surface := _navmesh_surface_for_cell(snapshot, cell)
-            if not surface.is_empty():
+            if not surface.is_empty() and not _building_blocks_terrain_surface(surface.worldPosition,building_sources):
                 surfaces.append(surface)
-    var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key)
+    var source_sites: Array[String] = []
+    for source: Dictionary in building_sources.get("sources",[]): source_sites.append(String(source.binding.siteId))
+    var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key, source_sites)
+    var building_surfaces: Array[Dictionary] = []
+    var crossing_links: Array[Dictionary] = []
+    var live_records := {}
+    for source: Dictionary in building_sources.get("sources",[]):
+        var source_tile: Dictionary = source.get("tile",{})
+        for surface: Dictionary in source_tile.get("surfaces",[]):
+            var cell := world_cell(surface.worldPosition)
+            if not live_records.has(cell): live_records[cell] = _transition_collision_records(snapshot,"staticCollisionByCell",cell,cell)
+            var center := Vector2(surface.worldPosition.x,surface.worldPosition.z)
+            var half := Vector2(surface.size.x,surface.size.z)*0.5
+            if building_clearance._building_support_navigation_blocker_from_records(live_records[cell],surface,surface.worldPosition.y,center-half,center+half,BuildingClearanceScript.BUILDING_SUPPORT_NAV_CLEARANCE,[],true).is_empty():
+                building_surfaces.append(surface)
+        crossing_links.append_array(source_tile.get("crossingLinks",[]))
+        if not _apply_building_door_geometry(door_summary,source,tile_key): return {}
     var result: Dictionary = {
         "tileKey": tile_key,
         "sourceKey": source_key,
@@ -282,8 +319,31 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
         "doorPortals": door_summary.get("doorPortals", []),
         "doorLinks": door_summary.get("doorLinks", [])
     }
+    result["buildingSurfaces"] = building_surfaces
+    result["crossingLinks"] = crossing_links
     _store_navmesh_tile_snapshot_cache(cache_key, result)
     return result
+
+func _building_blocks_terrain_surface(position: Vector3, sources: Dictionary) -> bool:
+    var center := Vector2(position.x,position.z)
+    for source: Dictionary in sources.get("sources",[]):
+        var records: Array = source.get("tile",{}).get("collisionRecords",[])
+        if not building_clearance._building_support_navigation_blocker_from_records(records,{"sourcePartId":"terrain"},position.y,
+            center-Vector2.ONE*CELL*0.5,center+Vector2.ONE*CELL*0.5).is_empty(): return true
+    return false
+
+func _apply_building_door_geometry(summary: Dictionary, source: Dictionary, tile_key: String) -> bool:
+    # The publication owner supplies the exact registered leaf, even when its
+    # body and certified interior support occupy different navigation tiles.
+    for fact: Dictionary in source.get("tile",{}).get("doors",[]):
+        var reference: WeakRef = source.get("doorBodies",{}).get(String(fact.sourcePartId))
+        var body = reference.get_ref() if reference != null else null
+        if not is_instance_valid(body) or body.is_queued_for_deletion() or not body.is_inside_tree(): return false
+        if String(body.get_meta("door_building_id",""))!=String(source.binding.siteId): return false
+        var cell := world_cell(body.global_position)
+        var axis := "x" if absf(fact.outward.x)>absf(fact.outward.z) else "z"
+        _append_navmesh_door(summary,body,cell,tile_key,axis,fact.exterior,fact.interior)
+    return true
 
 func collision_snapshot_for_bounds(entry: Dictionary, bounds: Dictionary, allow_outside := false, moving_home := false) -> Dictionary:
     var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
@@ -716,6 +776,7 @@ func _box_collision_record(body: Node3D, collider: CollisionShape3D, box: BoxSha
         max_z = maxf(max_z, world_corner.z)
     if min_x == INF or min_z == INF:
         return {}
+    var volume := transform * AABB(-half,box.size)
     return {
         "id": "%s:%s:%s:%d" % ["door" if is_door else "static", cell_key(cell), String(body.name), collider_index],
         "cell": cell,
@@ -726,6 +787,8 @@ func _box_collision_record(body: Node3D, collider: CollisionShape3D, box: BoxSha
         "maxX": max_x,
         "minZ": min_z,
         "maxZ": max_z,
+        "minY":volume.position.y,
+        "maxY":volume.end.y,
         "inflation": TRANSITION_COLLISION_INFLATION
     }
 
@@ -742,6 +805,8 @@ func _fallback_collision_record(body: Node3D, cell: Vector2i, block_type: String
         "maxX": center.x + radius,
         "minZ": center.z - radius,
         "maxZ": center.z + radius,
+        "minY":center.y,
+        "maxY":INF,
         "inflation": TRANSITION_COLLISION_INFLATION
     }
 
@@ -1691,7 +1756,7 @@ func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictiona
     }
     return surface
 
-func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> Dictionary:
+func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String, source_sites: Array[String] = []) -> Dictionary:
     var portals: Array[Dictionary] = []
     var links: Array[Dictionary] = []
     var doors: Dictionary = snapshot.get("doors", {})
@@ -1706,6 +1771,7 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
         var door := door_at(snapshot, cell)
         if door == null:
             continue
+        if source_sites.has(String(door.get_meta("door_building_id",""))): continue
         var portal_id := _door_portal_id(door, cell)
         if portal_id == "":
             continue
@@ -1715,7 +1781,14 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
         var exit_cell := cell + step
         var entrance := cell_position(entrance_cell)
         var exit := cell_position(exit_cell)
-        portals.append({
+        _append_navmesh_door({"doorPortals":portals,"doorLinks":links},door,cell,tile_key,axis,entrance,exit)
+    return { "doorPortals": portals, "doorLinks": links }
+
+func _append_navmesh_door(summary: Dictionary, door: Node, cell: Vector2i, tile_key: String, axis: String, entrance: Vector3, exit: Vector3) -> void:
+        var portal_id := _door_portal_id(door,cell)
+        var entrance_cell := world_cell(entrance)
+        var exit_cell := world_cell(exit)
+        summary.doorPortals.append({
             "id": portal_id,
             "entrance": entrance,
             "exit": exit,
@@ -1729,7 +1802,7 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
             "crossingAxis": axis,
             "cell": cell
         })
-        links.append({
+        summary.doorLinks.append({
             "id": "door-link:%s:%s" % [portal_id, tile_key],
             "from": _nav_span_key(tile_key, entrance_cell),
             "to": _nav_span_key(tile_key, exit_cell),
@@ -1745,7 +1818,6 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String) -> D
             "travelCost": 1.0,
             "cell": cell
         })
-    return { "doorPortals": portals, "doorLinks": links }
 
 func _door_portal_id(door: Node, cell: Vector2i) -> String:
     if door == null:

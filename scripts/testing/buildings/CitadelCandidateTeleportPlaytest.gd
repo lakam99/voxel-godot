@@ -273,7 +273,64 @@ func _run() -> void:
 		checks.inspection_views=evidence.inspectionViews.passed
 		if not checks.inspection_views:
 			await _finish("failed","inspection_capture_failed"); return
+		evidence.navigationPublication = await _audit_navigation_publication()
+		checks.navigation_publication = evidence.navigationPublication.passed
 	await _finish("scene_ready" if checks.scene_audit else "failed","" if checks.scene_audit else "scene_observation_failed")
+
+func _audit_navigation_publication() -> Dictionary:
+	# Direct publication diagnostic in the actual Main scene. This proves source
+	# delivery and server installation, never route execution or NPC traversal.
+	phase = "diagnostic_navigation_publication"
+	var adapter = main.npc_system.pathing.navigation_world
+	var nav = main.npc_system.autonomy_system.navmesh_world
+	var job = main.structure_system.citadel_publication._scenes[region].job
+	var packet = job._cpu.buildingBegin.spatialDependencies
+	var keys: Array = packet.navigation_tiles.tiles.keys()
+	keys.sort()
+	var result := {"passed":true,"evidenceLevel":"live_scene_publication_diagnostic","tiles":[],
+		"doesNotProve":"NPC movement, connected routes, ordinary traversal, regional loading or frame pacing"}
+	for key: String in keys:
+		if not _within_deadline(): result.passed=false; result["reason"]="navigation_diagnostic_deadline"; break
+		var snapshot: Dictionary = adapter.build_navmesh_tile_snapshot(key)
+		if snapshot.is_empty():
+			result.tiles.append({"tileKey":key,"status":"pending","source":adapter.building_navigation_sources(key)})
+			result.passed=false
+			continue
+		var saved := {}
+		for field: String in ["tileKey","sourceKey","sourceRevision","surfaces","buildingSurfaces","crossingLinks","doorPortals","doorLinks"]:
+			saved[field]=snapshot.get(field)
+		var file := FileAccess.open(output+"/navigation-tile-"+key+".bin",FileAccess.WRITE)
+		if file==null: result.passed=false; result["reason"]="navigation_snapshot_write_failed"; break
+		file.store_var(saved,false)
+		file.close()
+		var surfaces: Array = []
+		var links: Array = []
+		var descriptor = nav.NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
+		for fact: Dictionary in descriptor.walkable_surfaces: surfaces.append(String(fact.id))
+		for fact: Dictionary in snapshot.get("crossingLinks",[])+snapshot.get("doorLinks",[]): links.append(String(fact.id))
+		var installed: Dictionary = nav.register_chunk_descriptor(descriptor,String(snapshot.sourceKey))
+		nav.sync_navigation_map_if_dirty()
+		await physics_frame
+		await _frame()
+		var receipt: Dictionary = nav.tile_publication_readiness(key,String(snapshot.sourceKey),surfaces,links)
+		var sync_deadline := Time.get_ticks_msec()+3000
+		while receipt.status=="pending" and receipt.reason=="installation_sync_pending" and Time.get_ticks_msec()<sync_deadline:
+			await physics_frame
+			await _frame()
+			nav.sync_navigation_map_if_dirty()
+			receipt=nav.tile_publication_readiness(key,String(snapshot.sourceKey),surfaces,links)
+		# Signatures contain the complete source geometry; the saved binary is
+		# that evidence. Keep the live JSON progress bounded to receipt summaries.
+		installed.erase("signature")
+		if installed.get("install") is Dictionary: installed.install.erase("signature")
+		receipt.erase("signature")
+		result.tiles.append({"tileKey":key,"install":installed,"receipt":receipt,"surfaceCount":surfaces.size(),"linkCount":links.size()})
+		if receipt.status!="ready": result.passed=false
+		var report := FileAccess.open(output+"/navigation-publication.json",FileAccess.WRITE)
+		if report==null: result.passed=false; result["reason"]="navigation_report_write_failed"; break
+		report.store_string(JSON.stringify(result,"\t"))
+		report.close()
+	return result
 
 func _capture_inspection_views() -> Dictionary:
 	# Render the existing live world from explicitly diagnostic cameras. This does

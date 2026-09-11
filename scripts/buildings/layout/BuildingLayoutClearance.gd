@@ -155,14 +155,14 @@ func _building_navigation_link_blocker(snapshot: Dictionary, support: Dictionary
     return _building_support_navigation_blocker_for_footprint(snapshot, support, minf(start.y, end.y), minimum, maximum, clearance, additional_allowed_source_parts)
 
 
-func _building_support_navigation_blocker_for_footprint(snapshot: Dictionary, support: Dictionary, sample_y: float, minimum_corner: Vector2, maximum_corner: Vector2, clearance := BUILDING_SUPPORT_NAV_CLEARANCE, additional_allowed_source_parts := []) -> Dictionary:
+func _building_support_navigation_blocker_for_footprint(snapshot: Dictionary, support: Dictionary, sample_y: float, minimum_corner: Vector2, maximum_corner: Vector2, clearance := BUILDING_SUPPORT_NAV_CLEARANCE, additional_allowed_source_parts := [], full_rectangle := false) -> Dictionary:
     var minimum_cell := world_cell(Vector3(minimum_corner.x, sample_y, minimum_corner.y))
     var maximum_cell := world_cell(Vector3(maximum_corner.x, sample_y, maximum_corner.y))
     var records := _transition_collision_records(snapshot, "staticCollisionByCell", minimum_cell, maximum_cell)
-    return _building_support_navigation_blocker_from_records(records, support, sample_y, minimum_corner, maximum_corner, clearance, additional_allowed_source_parts)
+    return _building_support_navigation_blocker_from_records(records, support, sample_y, minimum_corner, maximum_corner, clearance, additional_allowed_source_parts, full_rectangle)
 
 
-func _building_support_navigation_blocker_from_records(records: Array, support: Dictionary, sample_y: float, minimum_corner: Vector2, maximum_corner: Vector2, clearance := BUILDING_SUPPORT_NAV_CLEARANCE, additional_allowed_source_parts := []) -> Dictionary:
+func _building_support_navigation_blocker_from_records(records: Array, support: Dictionary, sample_y: float, minimum_corner: Vector2, maximum_corner: Vector2, clearance := BUILDING_SUPPORT_NAV_CLEARANCE, additional_allowed_source_parts := [], full_rectangle := false) -> Dictionary:
     var support_part_id := String(support.get("sourceCollisionPartId", support.get("sourcePartId", "")))
     var allowed_source_parts := {support_part_id: true}
     if additional_allowed_source_parts is Array:
@@ -184,10 +184,24 @@ func _building_support_navigation_blocker_from_records(records: Array, support: 
             or minimum_corner.y >= float(record.get("maxZ", -INF)) + clearance - 0.0001:
             continue
         var footprint: Array = record.get("footprint", []) if record.get("footprint", []) is Array else []
-        if not footprint.is_empty() and not _footprint_intersects_segment(minimum_corner, maximum_corner, footprint, clearance):
-            continue
+        if not footprint.is_empty():
+            var intersects := _footprint_intersects_rectangle(minimum_corner, maximum_corner, footprint, clearance) if full_rectangle else _footprint_intersects_segment(minimum_corner, maximum_corner, footprint, clearance)
+            if not intersects: continue
         return record
     return {}
+
+
+func _footprint_intersects_rectangle(low: Vector2, high: Vector2, footprint: Array, clearance: float) -> bool:
+    # Publication certifies the entire surface, not just a diagonal through it.
+    # Segment callers retain their existing predicate and route semantics.
+    var corners := [low, Vector2(low.x, high.y), high, Vector2(high.x, low.y)]
+    for index in range(4):
+        if _footprint_intersects_segment(corners[index], corners[(index + 1) % 4], footprint, clearance):
+            return true
+    for point: Vector3 in footprint:
+        if point.x >= low.x and point.x <= high.x and point.z >= low.y and point.z <= high.y:
+            return true
+    return false
 
 
 func _footprint_intersects_segment(first: Vector2, second: Vector2, footprint: Array, clearance: float) -> bool:

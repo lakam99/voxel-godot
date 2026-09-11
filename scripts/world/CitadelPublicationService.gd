@@ -560,6 +560,27 @@ func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
 			sites.append(requirements)
 	return {"status":"described","sites":sites,"publicationAcknowledged":false}
 
+func navigation_tile_sources(tile_key: Vector2i) -> Dictionary:
+	var bounds := Rect2i(tile_key*16,Vector2i.ONE*16)
+	if _admission==null: return {"status":"pending","reason":"structure_navigation_owner_missing","sources":[]}
+	if _world_reset_pending or _closing: return {"status":"pending","reason":"structure_world_reset_pending","sources":[]}
+	var admitted: Dictionary = _admission.request_bounds(bounds)
+	if admitted.get("status")!="ready": return {"status":"pending","reason":"structure_navigation_source_pending","sources":[]}
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
+	var sources: Array = []
+	for z in range(low.y,high.y+1):
+		for x in range(low.x,high.x+1):
+			var region := Vector2i(x,z)
+			var source: Dictionary = _admission.source_state(region)
+			if source.get("status") not in ["ready","prepared"] or not source.reservationCells.intersects(bounds): continue
+			if _world_reset_pending or _closing or not _scenes.has(region):
+				return {"status":"pending","reason":"structure_navigation_scene_pending","sources":[]}
+			var artifact: Dictionary = _scenes[region].job.navigation_tile_artifact("%d,%d" % [tile_key.x,tile_key.y],source.binding)
+			if artifact.get("status")!="ready": return artifact
+			sources.append(artifact)
+	return {"status":"ready","sources":sources}
+
 ## Readiness only, consumed by ordinary collision/loading gates. It never moves
 ## a player, invents geometry, publishes routes or upgrades diagnostic callbacks.
 func physical_publication_state(bounds: Rect2i) -> Dictionary:

@@ -1120,6 +1120,7 @@ func _navigation_mesh_vertex_key(point: Vector3) -> String:
 func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array, surface_polygons: Dictionary = {}) -> Array:
 	var result := []
 	var layers := {}
+	var source_rectangles := {}
 	for surface_value in sorted_surfaces:
 		if not (surface_value is Dictionary):
 			continue
@@ -1128,6 +1129,12 @@ func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array, surface_poly
 			continue
 		if not _surface_mergeable_for_mesh(surface):
 			var polygon := _surface_polygon(surface)
+			var rectangle := _source_rectangle(surface,polygon)
+			if not rectangle.is_empty():
+				var owner := String(surface.get("geometryGroupId",surface.supportId))
+				if not source_rectangles.has(owner): source_rectangles[owner]=[]
+				source_rectangles[owner].append(rectangle)
+				continue
 			if polygon.size() >= 3:
 				_record_surface_polygon(surface_polygons, String(surface.get("id", "")), result.size())
 				result.append(polygon)
@@ -1148,11 +1155,72 @@ func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array, surface_poly
 		var cell_key := Vector2i(cell.x, cell.z)
 		if not owners.has(cell_key): owners[cell_key] = []
 		owners[cell_key].append(String(surface.get("id", "")))
+	for owner: String in source_rectangles:
+		# These are exact unions of touching rectangles from one source owner.
+		# Removing internal sampling edges changes neither coverage nor ownership.
+		var rectangles := _merge_source_rectangles(source_rectangles[owner],0)
+		rectangles = _merge_source_rectangles(rectangles,1)
+		for rectangle: Dictionary in rectangles:
+			for id: String in rectangle.owners: _record_surface_polygon(surface_polygons,id,result.size())
+			result.append(rectangle.points)
 	for layer_key in layers.keys():
 		var layer: Dictionary = layers[layer_key]
 		var grid: Dictionary = layer.get("cells", {})
 		result.append_array(_merged_grid_polygons(grid, float(layer.get("y", 0.0)), layer.owners, surface_polygons, result.size()))
 	return result
+
+func _source_rectangle(surface: Dictionary, polygon: Array) -> Dictionary:
+	if String(surface.get("supportId","")).is_empty() or polygon.size()!=4: return {}
+	var low := Vector2(polygon[0].x,polygon[0].z)
+	var high := low
+	var corners := {}
+	for point: Vector3 in polygon:
+		var xz := Vector2(point.x,point.z)
+		low=low.min(xz); high=high.max(xz)
+		corners[xz]=point
+	if corners.size()!=4 or low.x>=high.x or low.y>=high.y: return {}
+	var points: Array = []
+	for corner in [low,Vector2(low.x,high.y),high,Vector2(high.x,low.y)]:
+		if not corners.has(corner): return {}
+		points.append(corners[corner])
+	for index in range(polygon.size()):
+		var first: Vector3 = polygon[index]
+		var next: Vector3 = polygon[(index+1)%polygon.size()]
+		if first.x!=next.x and first.z!=next.z: return {}
+	# Flat rectangles and single-axis grades can merge along their level axis
+	# without changing any height or removing a change of slope.
+	if not (points[0].y==points[3].y and points[1].y==points[2].y) \
+			and not (points[0].y==points[1].y and points[3].y==points[2].y): return {}
+	return {"low":low,"high":high,"y":points[0].y,"points":points,"owners":[String(surface.get("id",""))]}
+
+func _merge_source_rectangles(rectangles: Array, axis: int) -> Array:
+	var other := 1-axis
+	rectangles.sort_custom(func(a: Dictionary,b: Dictionary):
+		if a.y!=b.y: return a.y<b.y
+		if a.low[other]!=b.low[other]: return a.low[other]<b.low[other]
+		if a.high[other]!=b.high[other]: return a.high[other]<b.high[other]
+		return a.low[axis]<b.low[axis])
+	var result: Array = []
+	for rectangle: Dictionary in rectangles:
+		if not result.is_empty():
+			var previous: Dictionary = result[-1]
+			if previous.y==rectangle.y and previous.low[other]==rectangle.low[other] \
+					and previous.high[other]==rectangle.high[other] and previous.high[axis]==rectangle.low[axis] \
+					and _rectangles_share_level_axis(previous.points,rectangle.points,axis):
+				previous.high[axis]=rectangle.high[axis]
+				previous.points[2]=rectangle.points[2]
+				previous.points[3 if axis==0 else 1]=rectangle.points[3 if axis==0 else 1]
+				previous.owners.append_array(rectangle.owners)
+				continue
+		result.append(rectangle)
+	return result
+
+func _rectangles_share_level_axis(first: Array, second: Array, axis: int) -> bool:
+	var end := 3 if axis==0 else 1
+	var across := 1 if axis==0 else 3
+	return first[0].y==first[end].y and first[across].y==first[2].y \
+		and second[0].y==second[end].y and second[across].y==second[2].y \
+		and first[0].y==second[0].y and first[across].y==second[across].y
 
 func _surface_mergeable_for_mesh(surface: Dictionary) -> bool:
 	if surface.has("polygon"):

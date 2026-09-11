@@ -785,8 +785,21 @@ func spatial_dependency_ownership() -> void:
 	var stale := Fixtures.BINDING.duplicate()
 	stale.generation+=1
 	check("spatial_stale_generation_pending",job.source_dependency_requirements(bounds,stale).status=="pending")
+	check("navigation_unpublished_pending",job.navigation_tile_artifact("0,0",Fixtures.BINDING).status=="pending")
+	for i in range(1000):
+		job.advance(4000)
+		if job.status().sceneReady: break
+	check("navigation_live_owner_ready",job.navigation_tile_artifact("0,0",Fixtures.BINDING).status=="ready")
+	check("navigation_stale_binding_pending",job.navigation_tile_artifact("0,0",stale).status=="pending")
+	var other := Node3D.new()
+	root.add_child(other)
+	job.own_node_root().reparent(other,true)
+	check("navigation_same_transform_wrong_parent_rejected",job.navigation_tile_artifact("0,0",Fixtures.BINDING).status=="pending")
+	job.own_node_root().reparent(parent,true)
+	other.free()
 	job.cancel()
 	check("spatial_cancel_revokes_description",job.source_dependency_requirements(bounds,Fixtures.BINDING).status=="pending")
+	check("navigation_cancel_revokes_receipt",job.navigation_tile_artifact("0,0",Fixtures.BINDING).status=="pending")
 	prepared=null
 	await drain(job,"spatial_dependency")
 	check("spatial_packet_released_with_owner",packet_owner.get_ref()==null)

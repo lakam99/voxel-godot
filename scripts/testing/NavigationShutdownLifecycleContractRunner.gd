@@ -4,6 +4,7 @@ const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
+const BuildingClearanceScript := preload("res://scripts/buildings/layout/BuildingLayoutClearance.gd")
 
 const REGION_COUNT := 17
 const LINK_COUNT := 16
@@ -56,8 +57,62 @@ func run() -> void:
 	await verify_clear_flushes_before_map_release()
 	await verify_autonomy_reset_keeps_navmesh_owner()
 	await verify_tile_publication_receipts()
+	verify_source_rectangle_coverage()
+	verify_publication_rectangle_clearance()
 	write_report()
 	quit(0 if failures() == 0 else 1)
+
+func verify_source_rectangle_coverage() -> void:
+	# Synthetic geometry/ownership contract, not a live traversal claim.
+	var service = NavmeshWorldServiceScript.new()
+	var surfaces: Array = []
+	for spec in [[0,0,0,"a"],[1,0,0,"a"],[0,1,0,"a"],[0,0,2,"a"],[2,0,0,"b"]]:
+		var x: float=spec[0]; var z: float=spec[1]; var y: float=spec[2]
+		surfaces.append({"id":"cell-%d" % surfaces.size(),"supportId":spec[3],"walkable":true,
+			"polygon":[Vector3(x,y,z),Vector3(x,y,z+1),Vector3(x+1,y,z+1),Vector3(x+1,y,z)]})
+	var before := var_to_bytes(surfaces)
+	var ownership := {}
+	var polygons: Array = service._navigation_mesh_polygons_for_surfaces(surfaces,ownership)
+	add_result("source_rectangle_merge_retains_every_identity",ownership.size()==5 and polygons.size()==4,{"owners":ownership,"polygonCount":polygons.size()})
+	add_result("source_rectangle_merge_preserves_input",before==var_to_bytes(surfaces),{})
+	var area := 0.0
+	var covers_hole := false
+	for polygon: Array in polygons:
+		var bounds := AABB(polygon[0],Vector3.ZERO)
+		for point: Vector3 in polygon: bounds=bounds.expand(point)
+		area+=bounds.size.x*bounds.size.z
+		if polygon[0].y==0 and Rect2(Vector2(bounds.position.x,bounds.position.z),Vector2(bounds.size.x,bounds.size.z)).has_point(Vector2(1.5,1.5)): covers_hole=true
+	add_result("source_rectangle_union_preserves_area_and_holes",area==5.0 and not covers_hole,{"area":area,"coversHole":covers_hole})
+	add_result("source_rectangle_height_and_owner_separation",ownership["cell-0"]!=ownership["cell-3"] and ownership["cell-1"]!=ownership["cell-4"],{})
+	var bowtie: Array = surfaces[0].polygon.duplicate()
+	var point: Vector3 = bowtie[1]; bowtie[1]=bowtie[2]; bowtie[2]=point
+	add_result("source_rectangle_invalid_order_not_reinterpreted",service._source_rectangle(surfaces[0],bowtie).is_empty(),{})
+	var slope: Array = surfaces[0].polygon.duplicate()
+	slope[1].y=1.0
+	add_result("source_rectangle_nonplanar_not_reinterpreted",service._source_rectangle(surfaces[0],slope).is_empty(),{})
+	var grade: Array = []
+	for x: float in [0.0,1.0]:
+		grade.append({"id":"grade-%d" % int(x),"supportId":"grade","polygon":[Vector3(x,0,0),Vector3(x,1,1),Vector3(x+1,1,1),Vector3(x+1,0,0)]})
+	var grade_owners := {}
+	var merged: Array = service._navigation_mesh_polygons_for_surfaces(grade,grade_owners)
+	add_result("source_rectangle_grade_cross_sections_preserved",merged.size()==1 and merged[0]==[Vector3(0,0,0),Vector3(0,1,1),Vector3(2,1,1),Vector3(2,0,0)] and grade_owners.size()==2,{})
+	var adjacent: Array = [surfaces[0].duplicate(true),surfaces[1].duplicate(true)]
+	adjacent[0].supportId="part-left"; adjacent[1].supportId="part-right"
+	for item: Dictionary in adjacent: item.geometryGroupId="same-revision-bound-building"
+	var adjacent_owners := {}
+	var combined: Array = service._navigation_mesh_polygons_for_surfaces(adjacent,adjacent_owners)
+	add_result("source_rectangle_declared_group_keeps_part_identities",combined.size()==1 and adjacent_owners.size()==2 and adjacent[0].supportId=="part-left" and adjacent[1].supportId=="part-right",{})
+
+func verify_publication_rectangle_clearance() -> void:
+	# Synthetic shape contract. A corner blocker misses the diagonal but not
+	# the full published area; a contained blocker need not touch its perimeter.
+	var clearance = BuildingClearanceScript.new()
+	var corner := [Vector3(0.9,0,-0.1),Vector3(0.9,0,0.1),Vector3(1.1,0,0.1),Vector3(1.1,0,-0.1)]
+	add_result("publication_rectangle_rejects_off_diagonal_corner",clearance._footprint_intersects_rectangle(Vector2.ZERO,Vector2.ONE,corner,0.0),{})
+	add_result("publication_rectangle_preserves_segment_predicate",not clearance._footprint_intersects_segment(Vector2.ZERO,Vector2.ONE,corner,0.0),{})
+	var enclosed := [Vector3(0.1,0,0.6),Vector3(0.1,0,0.8),Vector3(0.3,0,0.8),Vector3(0.3,0,0.6)]
+	add_result("publication_rectangle_rejects_contained_blocker",clearance._footprint_intersects_rectangle(Vector2.ZERO,Vector2.ONE,enclosed,0.0),{})
+	add_result("publication_rectangle_preserves_clear_separation",not clearance._footprint_intersects_rectangle(Vector2(3,3),Vector2(4,4),corner,0.52),{})
 
 func verify_autonomy_reset_keeps_navmesh_owner() -> void:
 	var baseline_maps := navigation_map_ids()

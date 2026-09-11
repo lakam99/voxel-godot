@@ -256,6 +256,33 @@ func source_dependency_requirements(bounds: Rect2i, expected_binding: Dictionary
 	# holder is retired by the existing one-shot CPU/resource retirement path.
 	return packet.requirements(bounds)
 
+func navigation_tile_artifact(tile_key: String, expected_binding: Dictionary) -> Dictionary:
+	if _cancelled or not _reason.is_empty() or expected_binding!=_binding:
+		return {"status":"pending","reason":"structure_navigation_owner_unavailable"}
+	if _phase!="ready": return {"status":"pending","reason":"structure_collision_publication_pending"}
+	var packet = _cpu.get("buildingBegin",{}).get("spatialDependencies")
+	if packet==null or packet.binding!=_binding or packet.origin!=_cpu.profile.origin:
+		return {"status":"failed","reason":"structure_navigation_source_mismatch"}
+	var parent: Node3D = _parent.get_ref() as Node3D if _parent != null else null
+	if not _valid_parent(parent) or not is_instance_valid(_root) or _root.is_queued_for_deletion() \
+			or _root.get_parent()!=parent or not _root.is_inside_tree() or not _root.global_transform.is_equal_approx(Transform3D(Basis.IDENTITY,packet.origin)):
+		return {"status":"pending","reason":"structure_navigation_scene_owner_lost"}
+	var tile: Dictionary = packet.navigation_tiles.tiles.get(tile_key,{})
+	var door_bodies := {}
+	for fact: Dictionary in tile.get("doors",[]):
+		for id in _door_registered_ids:
+			var claim: Dictionary = _door_claims.get(id,{})
+			var body = claim.body.get_ref() if claim.has("body") else null
+			if not _door_body_valid(body): return {"status":"pending","reason":"structure_navigation_door_owner_lost"}
+			if String(body.get_meta("building_part_id","")) == String(fact.sourcePartId):
+				if String(body.get_meta("door_portal_id","")) != String(claim.portalId):
+					return {"status":"failed","reason":"structure_navigation_door_identity_changed"}
+				door_bodies[String(fact.sourcePartId)] = claim.body
+				break
+		if not door_bodies.has(String(fact.sourcePartId)):
+			return {"status":"pending","reason":"structure_navigation_door_registration_pending"}
+	return {"status":"ready","binding":_binding,"tile":tile,"doorBodies":door_bodies}
+
 
 func _step(remaining_usec: int) -> bool:
 	if _phase == "teardown": return _teardown_step()

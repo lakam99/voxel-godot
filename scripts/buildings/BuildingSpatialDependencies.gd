@@ -5,6 +5,7 @@ class_name BuildingSpatialDependencies
 ## acknowledgement that geometry, collision or navigation has been published.
 const Navigation = preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 const FurnitureNavigation = preload("res://scripts/buildings/FurnishingNavigationManifestBuilder.gd")
+const NavigationTiles = preload("res://scripts/buildings/BuildingNavigationTilePreparation.gd")
 const CELL := 1.35
 const OWNER_SIZE := CELL * 32.0
 const MAX_PART_CELLS := 256
@@ -18,6 +19,7 @@ var parts: Dictionary = {}
 var cells: Dictionary = {}
 var navigation: Dictionary = {}
 var furnishing_navigation: Dictionary = {}
+var navigation_tiles: Dictionary = {}
 var preparation_usec := 0
 
 static func compile(blueprint, plan, source_binding: Dictionary, world_origin: Vector3, continuation: Callable):
@@ -26,6 +28,7 @@ static func compile(blueprint, plan, source_binding: Dictionary, world_origin: V
 	var packet = load("res://scripts/buildings/BuildingSpatialDependencies.gd").new()
 	packet.binding = source_binding.duplicate()
 	packet.origin = world_origin
+	var solids: Array[Dictionary] = []
 	for part in blueprint.parts:
 		if not _continue(continuation, "publication_spatial_part"): return null
 		var dependencies: Array[String] = []
@@ -35,6 +38,8 @@ static func compile(blueprint, plan, source_binding: Dictionary, world_origin: V
 				if not dependencies.has(key): dependencies.append(key)
 		var transform := Transform3D(Basis.from_euler(part.rotation), world_origin + part.position)
 		var bounds := transform * AABB(-part.size * 0.5, part.size)
+		if part.collision_enabled and part.kind!="door":
+			solids.append(Navigation._static_collision_fact(blueprint.id,part,transform,bounds))
 		if not packet._add_part("building:" + part.id, part.id, "building", bounds, transform.origin, dependencies, bool(part.recipe.get("physicalRoot", false))): return null
 	for part in plan.parts:
 		if not _continue(continuation, "publication_spatial_furniture"): return null
@@ -46,11 +51,13 @@ static func compile(blueprint, plan, source_binding: Dictionary, world_origin: V
 	packet.navigation = Navigation.build(blueprint, Transform3D(Basis.IDENTITY, world_origin))
 	if not _continue(continuation, "publication_navigation_furnishing"): return null
 	packet.furnishing_navigation = FurnitureNavigation.build(plan, Transform3D(Basis.IDENTITY, world_origin))
+	packet.navigation_tiles = NavigationTiles.compile(packet.navigation,packet.furnishing_navigation,continuation,solids)
+	if not packet.navigation_tiles.get("ready",false): return null
 	for key in packet.parts:
 		packet.parts[key].dependencies.sort()
 	for key in packet.cells:
 		packet.cells[key].sort()
-	for value in [packet.binding, packet.parts, packet.cells, packet.navigation, packet.furnishing_navigation]:
+	for value in [packet.binding, packet.parts, packet.cells, packet.navigation, packet.furnishing_navigation,packet.navigation_tiles]:
 		if not _freeze(value, continuation): return null
 	packet.preparation_usec = Time.get_ticks_usec() - started
 	return packet if _continue(continuation, "publication_spatial_ready") else null
@@ -140,7 +147,10 @@ func requirements(bounds: Rect2i) -> Dictionary:
 func summary() -> Dictionary:
 	return {"partCount":parts.size(),"consumerCellCount":cells.size(),"supportCount":navigation.get("supportCount",0),
 		"doorCount":navigation.get("doorCount",0),"verticalLinkCount":navigation.get("verticalLinkCount",0),
-		"supportSeamLinkCount":navigation.get("supportSeamLinkCount",0),"preparationUsec":preparation_usec}
+		"supportSeamLinkCount":navigation.get("supportSeamLinkCount",0),"preparationUsec":preparation_usec,
+		"navigationTiles":navigation_tiles.get("tiles",{}).size(),"navigationSamples":navigation_tiles.get("sampleCount",0),
+		"navigationSurfaces":navigation_tiles.get("surfaceCount",0),"navigationPreparationUsec":navigation_tiles.get("preparationUsec",0),
+		"unresolvedNavigationCrossings":navigation_tiles.get("unresolvedCrossingIds",[])}
 
 static func _intersects(bounds: AABB, query: Rect2) -> bool:
 	return query.intersects(Rect2(Vector2(bounds.position.x,bounds.position.z),Vector2(bounds.size.x,bounds.size.z)),true)
