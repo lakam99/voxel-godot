@@ -139,6 +139,8 @@ func real_empty() -> void:
 	var taken: Dictionary = job.take_result(receipt.token,BINDING)
 	check("real_prepared_consumed",taken.status=="consumed" and taken.result.ready and taken.result.prepared is Preparation.PreparedSource)
 	check("result_retains_same_frozen_profile",is_same(taken.result.profile,frozen_profile) and taken.result.profile.is_read_only() and taken.result.profile.supportMask.is_read_only())
+	check("worker_spatial_origin_matches_profile",taken.result.prepared._payload.spatialDependencies.origin==frozen_profile.origin)
+	check("worker_spatial_binding_matches_source",taken.result.prepared._payload.spatialDependencies.binding==BINDING)
 	frozen_profile={}
 	check("take_one_shot",job.take_result(receipt.token,BINDING).status=="stale_token")
 	job.request_shutdown()

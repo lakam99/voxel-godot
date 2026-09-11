@@ -13,6 +13,7 @@ const CobbleGeometry = preload("res://scripts/buildings/SettledCobbleGeometry.gd
 const RoofGeometry = preload("res://scripts/buildings/BuildingRoofGeometry.gd")
 const SurfacePacket = preload("res://scripts/buildings/BuildingSurfaceRenderPacket.gd")
 const PartRecord = preload("res://scripts/buildings/BuildingPart.gd")
+const SpatialDependencies = preload("res://scripts/buildings/BuildingSpatialDependencies.gd")
 const METADATA_MAX_DEPTH := 128
 
 class Continuation extends RefCounted:
@@ -190,7 +191,7 @@ static func valid_binding(binding: Dictionary) -> bool:
 		and binding.get("sourceKey") is String and not binding.sourceKey.is_empty() \
 		and binding.get("generation") is int and binding.generation > 0
 
-static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable(), world_origin := Vector3.ZERO) -> Dictionary:
 	if not valid_binding(binding): return _failed("invalid_publication_binding")
 	# Freeze identity before invoking any caller callback or expensive work.
 	var source_binding := binding.duplicate()
@@ -216,6 +217,8 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		surface_timings[family]=compiled.preparationUsec
 	surfaces.make_read_only()
 	surface_timings.make_read_only()
+	var spatial = SpatialDependencies.compile(restored.blueprint, restored.furnishingPlan, source_binding, world_origin, guard.advance)
+	if spatial == null: return _failed("cancelled" if guard.cancelled else "spatial_dependency_compilation_failed")
 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
 	var prepared := PreparedSource.new()
 	prepared._binding = source_binding
@@ -228,7 +231,8 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		"preparedHistory":history_result.preparedHistory,
 		"historyPreparationUsec":history_result.historyPreparationUsec,
 		"preparedMasonry":masonry.preparedMasonry, "masonryPreparationUsec":masonry.masonryPreparationUsec,
-		"preparedSurfaces":surfaces,"surfacePreparationUsec":surface_timings}
+		"preparedSurfaces":surfaces,"surfacePreparationUsec":surface_timings,
+		"spatialDependencies":spatial}
 	return {"ready":true, "reason":"", "prepared":prepared}
 
 ## Same visible wall/foundation dispatch as the publisher, including tagged

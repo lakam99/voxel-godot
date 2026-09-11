@@ -488,7 +488,8 @@ func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3
 
 func update_voxel_authority_chunks(force: bool) -> void:
     var center := world_to_chunk(player.position.x, player.position.z)
-    var needed := {}
+    update_streaming_region_demand()
+    var needed: Dictionary = world_streaming.retained_gameplay_chunks() if streaming_active else {}
     for dz in range(-render_distance, render_distance + 1):
         for dx in range(-render_distance, render_distance + 1):
             var chunk_key := Vector2i(center.x + dx, center.y + dz)
@@ -499,12 +500,15 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 create_chunk(chunk_key.x, chunk_key.y)
             else:
                 queue_chunk_load(chunk_key)
+    for chunk_key: Vector2i in needed:
+        if not chunks.has(chunk_key): queue_chunk_load(chunk_key)
     if not force:
         process_pending_chunk_loads(center)
     for key_value in chunks.keys():
         var key: Vector2i = key_value
         if needed.has(key):
             continue
+        voxel_terrain_runtime.release_gameplay_chunk(key)
         chunks[key].queue_free()
         chunks.erase(key)
     prune_stale_pending_chunk_loads(needed)

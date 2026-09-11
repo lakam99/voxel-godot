@@ -49,7 +49,7 @@ class RunState extends RefCounted:
 		var now := Time.get_ticks_usec()
 		max_stage_gap_usec = maxi(max_stage_gap_usec, now - previous_usec)
 		previous_usec = now
-		# Six preparation phases only, with no per-part records or snapshots.
+			# Aggregate preparation phases, with no per-part records or snapshots.
 		if next_stage != stage:
 			var next_phase := phase
 			match next_stage:
@@ -58,6 +58,8 @@ class RunState extends RefCounted:
 				"publication_physical_completed": next_phase = "metadata"
 				"publication_history_started": next_phase = "history"
 				"publication_masonry_started": next_phase = "masonry"
+				"publication_spatial_part": next_phase = "spatial_dependencies"
+				"publication_navigation_manifest": next_phase = "navigation_manifest"
 				"publication_preparation_ready": next_phase = "ready"
 			if next_phase != phase:
 				phase_usec[phase] = now - phase_started_usec
@@ -251,7 +253,7 @@ func _start_thread(work: Callable) -> int:
 	return _thread.start(work)
 
 func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable) -> Dictionary:
-	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation)
+	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation, source.profile.origin)
 
 func _run(state: RunState) -> Dictionary:
 	state.begin_work() # Queue residence and failed-start retries are not run time.

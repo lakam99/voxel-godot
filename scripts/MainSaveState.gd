@@ -7,6 +7,7 @@ func reset_runtime_world_state(reload_world := true) -> void:
         push_error("Generated scenes must finish retirement before resetting world registries")
         return
     playtest_progress("reset_runtime_start")
+    reset_streaming_region_demand()
     if world_edit_followup_queue != null and world_edit_followup_queue.has_method("reset"):
         world_edit_followup_queue.reset()
     world_elapsed = 0.0

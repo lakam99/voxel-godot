@@ -439,6 +439,7 @@ func launch_main_via_menu_new_game_input() -> bool:
         startup_loading_failure = "Main Menu New Game input was not accepted"
         return false
     var max_frames := ceili(140.0 * float(Engine.physics_ticks_per_second))
+    var loading_captured := false
     for frame in range(max_frames):
         await get_tree().process_frame
         if first_loading_frame_usec <= 0 and bool(menu.get("launching")):
@@ -449,6 +450,9 @@ func launch_main_via_menu_new_game_input() -> bool:
         if active_main is Node:
             main = active_main
             connect_main_loading_signals()
+            if not loading_captured and screenshot_path != "":
+                loading_captured = true
+                await capture_screenshot(screenshot_path.get_base_dir().path_join("loading_screen.png"))
         if startup_loading_failure != "":
             return false
         if startup_loading_completed:
@@ -456,6 +460,9 @@ func launch_main_via_menu_new_game_input() -> bool:
             var gameplay_readiness: Dictionary = readiness_domains.get("gameplay", {}) if readiness_domains is Dictionary else {}
             if String(gameplay_readiness.get("status", "")) != "ready":
                 startup_loading_failure = "Main Menu New Game completed without gameplay readiness"
+                return false
+            if DisplayServer.get_name() != "headless" and not readiness_domains.get("terrain_presentation",{}).get("metrics",{}).get("presentationVerified",false):
+                startup_loading_failure = "Main Menu released loading before terrain presentation"
                 return false
             new_game_input_to_gameplay_ready_ms = float(gameplay_ready_usec - new_game_input_started_usec) / 1000.0
             var first_gameplay_started_usec := Time.get_ticks_usec()

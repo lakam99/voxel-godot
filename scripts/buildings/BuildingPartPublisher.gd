@@ -187,7 +187,8 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 		"metadataPreparationUsec":source.get("metadataPreparationUsec",0),
 		"historyPreparationUsec":source.get("historyPreparationUsec",0),
 		"masonryPreparationUsec":source.get("masonryPreparationUsec",0),
-		"surfacePreparationUsec":source.get("surfacePreparationUsec",{})}
+		"surfacePreparationUsec":source.get("surfacePreparationUsec",{}),
+		"spatialDependencies":source.get("spatialDependencies")}
 
 
 func _detach_preparation_for_retirement() -> Dictionary:

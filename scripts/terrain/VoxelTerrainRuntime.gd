@@ -12,6 +12,9 @@ const GAME_CHUNK_SIZE := 28
 const TERRAIN_COLLISION_LAYER := 2
 const FINAL_VIEW_DISTANCE := 112
 const STARTUP_VIEW_DISTANCE := 80
+const RETAINED_VIEW_DISTANCE := STARTUP_VIEW_DISTANCE
+const RETAINED_ACTIVATION_INTERVAL_SECONDS := 0.5
+const RETAINED_MAX_PENDING_NATIVE_TASKS := 8
 const VIEW_DISTANCE_EXPANSION_STEP := 16
 const VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS := 2.0
 const STARTUP_VERTICAL_MIN_CELL := -16
@@ -54,6 +57,123 @@ var startup_auxiliary_cleanup_requested := false
 var startup_auxiliary_cleanup_frames_remaining := 0
 var startup_auxiliary_viewers_created := 0
 var site_gate
+var retained_gameplay_chunks: Dictionary = {}
+var retained_chunk_viewers: Dictionary = {}
+var retained_viewer_groups: Dictionary = {}
+var retained_viewer_attached_frame: Dictionary = {}
+var retained_activation_elapsed := 0.0
+var retained_activation_reason := ""
+var retained_last_pending_tasks := 0
+var startup_required_gameplay_chunks: Array = []
+
+func set_retained_gameplay_chunks(keys: Dictionary) -> void:
+	if keys == retained_gameplay_chunks: return
+	retained_gameplay_chunks = keys.duplicate()
+	var groups := {}
+	for key: Vector2i in keys:
+		var group := Vector2i(floori(float(key.x)/2.0), floori(float(key.y)/2.0))
+		if not groups.has(group): groups[group] = []
+		groups[group].append(key)
+	retained_viewer_groups = groups
+	for group in retained_chunk_viewers.keys():
+		if groups.has(group): continue
+		var old: VoxelViewer = retained_chunk_viewers[group]
+		if site_gate != null: site_gate.remove_viewer(old)
+		old.queue_free()
+		retained_chunk_viewers.erase(group)
+		retained_viewer_attached_frame.erase(group)
+	# Pending groups remain here until capacity/admission permits activation.
+	# Repeated identical demand must not reset their retry interval.
+
+func clear_retained_gameplay_chunks() -> void:
+	set_retained_gameplay_chunks({})
+	retained_viewer_groups.clear()
+	retained_viewer_attached_frame.clear()
+	retained_activation_elapsed = 0.0
+	retained_activation_reason = ""
+	retained_last_pending_tasks = 0
+	startup_required_gameplay_chunks.clear()
+
+func advance_retained_viewers(delta: float) -> void:
+	retained_activation_elapsed += maxf(0.0,delta)
+	if retained_activation_elapsed < RETAINED_ACTIVATION_INTERVAL_SECONDS: return
+	retained_activation_elapsed = 0.0
+	if terrain == null or main == null or site_gate == null or not generation_context_current(): return
+	if bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active")):
+		retained_activation_reason = "startup_required_coverage"
+		return
+	if not view_distance_expansion_requested and not gameplay_chunks_published(startup_required_gameplay_chunks):
+		retained_activation_reason = "startup_required_coverage"
+		return
+	var player_value = main.get("player")
+	if not player_value is Node3D or not is_instance_valid(player_value): return
+	var player_position: Vector3 = player_value.global_position
+	var player_chunk := Vector2i(floori(player_position.x/(GAME_CHUNK_SIZE*CELL)),floori(player_position.z/(GAME_CHUNK_SIZE*CELL)))
+	for z in range(-1,2):
+		for x in range(-1,2):
+			var key := player_chunk+Vector2i(x,z)
+			if desired_gameplay_chunks.has(key) and not published_gameplay_chunks.has(key) \
+					and is_instance_valid(viewer) and viewer.is_inside_tree() and _viewer_covers_chunk_at(viewer,key,viewer.global_position):
+				retained_activation_reason = "player_collision_coverage"
+				return
+	retained_last_pending_tasks = voxel_engine_pending_task_count()
+	if retained_last_pending_tasks > RETAINED_MAX_PENDING_NATIVE_TASKS:
+		retained_activation_reason = "native_task_backpressure"
+		return
+	var groups: Array = retained_viewer_groups.keys()
+	groups.sort_custom(func(a: Vector2i,b: Vector2i):
+		var ac := (Vector2(a*2)+Vector2.ONE)*float(GAME_CHUNK_SIZE)*CELL
+		var bc := (Vector2(b*2)+Vector2.ONE)*float(GAME_CHUNK_SIZE)*CELL
+		var observer := Vector2(player_position.x,player_position.z)
+		var ad := ac.distance_squared_to(observer)
+		var bd := bc.distance_squared_to(observer)
+		return ad<bd or ad==bd and (a.x<b.x or a.x==b.x and a.y<b.y))
+	retained_activation_reason = "covered"
+	var world = main.get("world_generation_system")
+	for group: Vector2i in groups:
+		if retained_chunk_viewers.has(group): continue
+		var center := (Vector2(group*2)+Vector2.ONE)*float(GAME_CHUNK_SIZE)*CELL
+		var position := Vector3(center.x,0.0,center.y)
+		position.y = float(world.surface_y_at(position))
+		# Do not put a deferred viewer into SiteGate's automatic retry list:
+		# admission completing later must not bypass this activation budget.
+		var admission: Dictionary = site_gate.request_cells(SITE_GATE_SCRIPT.footprint(position,RETAINED_VIEW_DISTANCE))
+		if admission.get("status") != "ready":
+			retained_activation_reason = "site_admission_pending"
+			return
+		var auxiliary := VoxelViewer.new()
+		auxiliary.name = "RetainedRegion_%d_%d" % [group.x,group.y]
+		auxiliary.requires_visuals = true
+		auxiliary.requires_collisions = true
+		if not site_gate.request_viewer(auxiliary,position,RETAINED_VIEW_DISTANCE):
+			site_gate.remove_viewer(auxiliary)
+			auxiliary.queue_free()
+			retained_activation_reason = "site_admission_pending"
+			return
+		retained_chunk_viewers[group] = auxiliary
+		retained_viewer_attached_frame[group] = Engine.get_physics_frames()
+		retained_activation_reason = "activated_one_group"
+		return
+
+func region_publication_readiness(bounds: Rect2i) -> Dictionary:
+	const Regions := preload("res://scripts/world/WorldStreamingCoordinator.gd")
+	var revision := "%s:%d" % [configured_seed,last_volume_revision]
+	if not authority_ready or not generation_context_current():
+		return {"status":"pending","reason":"terrain_generation_pending","missingChunks":[],"sourceRevision":revision}
+	var volume = volume_service()
+	# Reject both edits not yet collected and collected edits awaiting native
+	# publication. Cached chunk keys alone do not acknowledge the new volume.
+	if volume == null or int(volume.get("revision")) != last_volume_revision or not pending_edit_sections.is_empty():
+		return {"status":"pending","reason":"terrain_edits_pending","missingChunks":[],"sourceRevision":revision}
+	var keys: Array = Regions.chunks_for_bounds(bounds)
+	if keys.is_empty():
+		return {"status":"failed","reason":"invalid_terrain_region_bounds","missingChunks":[],"sourceRevision":revision}
+	var missing: Array[Vector2i] = []
+	for key: Vector2i in keys:
+		if not published_gameplay_chunks.has(key) or pending_gameplay_chunks.has(key): missing.append(key)
+	return {"status":"ready" if missing.is_empty() else "pending",
+		"reason":"" if missing.is_empty() else "terrain_publication_pending",
+		"missingChunks":missing, "sourceRevision":revision}
 var site_traversal_waiting := false
 var last_site_wait_message_usec := 0
 
@@ -132,6 +252,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var terrain_instance_id := terrain.get_instance_id()
 	var previous_mesh_blocks := published_mesh_blocks.size()
 	var previous_gameplay_chunks := published_gameplay_chunks.size()
+	clear_retained_gameplay_chunks()
 	var invalidated_chunks := invalidate_gameplay_publication()
 	if site_gate != null: site_gate.stop()
 	clear_startup_auxiliary_viewers()
@@ -347,6 +468,7 @@ func apply_startup_vertical_bounds() -> void:
 
 func configure_startup_collision_bounds(chunk_keys: Array) -> void:
 	clear_startup_auxiliary_viewers()
+	startup_required_gameplay_chunks = chunk_keys.duplicate()
 	if terrain == null or main == null or chunk_keys.is_empty():
 		return
 	var world_generation = main.get("world_generation_system")
@@ -391,6 +513,7 @@ func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) ->
 			site_gate.request_viewer(auxiliary,spec.get("position",Vector3.ZERO),auxiliary.view_distance)
 			startup_auxiliary_viewers.append({
 				"viewer": auxiliary,
+				"attachedFrame": Engine.get_physics_frames(),
 				"chunks": (spec.get("chunks", []) as Array).duplicate()
 			})
 			startup_auxiliary_viewers_created += 1
@@ -446,6 +569,54 @@ func primary_viewer_covers_component(component: Array) -> bool:
 		if viewer_xz.distance_to(center) + half_chunk_diagonal > available_distance:
 			return false
 	return true
+
+func _viewer_covers_chunk_at(native_viewer: VoxelViewer, chunk_key: Vector2i, position: Vector3) -> bool:
+	if not is_instance_valid(native_viewer) or not native_viewer.is_inside_tree() or native_viewer.is_queued_for_deletion(): return false
+	if not native_viewer.requires_collisions or not native_viewer.requires_visuals: return false
+	var center := (Vector2(chunk_key)+Vector2.ONE*0.5)*float(GAME_CHUNK_SIZE)*CELL
+	var distance := Vector2(position.x,position.z).distance_to(center)
+	return distance+float(GAME_CHUNK_SIZE)*CELL*sqrt(2.0)*0.5 <= float(native_viewer.view_distance)-CELL*4.0
+
+func _retained_viewer_covers_chunk(chunk_key: Vector2i) -> bool:
+	var group := Vector2i(floori(float(chunk_key.x)/2.0),floori(float(chunk_key.y)/2.0))
+	var auxiliary: VoxelViewer = retained_chunk_viewers.get(group)
+	if not is_instance_valid(auxiliary): return false
+	if Engine.get_physics_frames()-int(retained_viewer_attached_frame.get(group,Engine.get_physics_frames())) < 2: return false
+	return _viewer_covers_chunk_at(auxiliary,chunk_key,auxiliary.global_position)
+
+func _preserve_retained_primary_coverage(next_position: Vector3) -> bool:
+	if not is_instance_valid(viewer) or not viewer.is_inside_tree(): return true
+	var old_position := viewer.global_position
+	if next_position == old_position: return true
+	var held: Array = []
+	var needs_handoff := false
+	for key: Vector2i in retained_gameplay_chunks:
+		if not published_gameplay_chunks.has(key) or not _viewer_covers_chunk_at(viewer,key,old_position): continue
+		held.append(key)
+		if _viewer_covers_chunk_at(viewer,key,next_position) or _retained_viewer_covers_chunk(key): continue
+		var covered := false
+		for record: Dictionary in startup_auxiliary_viewers:
+			var auxiliary: VoxelViewer = record.get("viewer")
+			if not is_instance_valid(auxiliary) or not auxiliary.is_inside_tree(): continue
+			if not _viewer_covers_chunk_at(auxiliary,key,auxiliary.global_position): continue
+			# Keep the old primary footprint until its equivalent owner has
+			# participated in two physics frames. No new terrain area is requested.
+			if Engine.get_physics_frames()-int(record.get("attachedFrame",Engine.get_physics_frames())) < 2: return false
+			covered = true
+			break
+		if not covered: needs_handoff = true
+	if not needs_handoff: return true
+	var bridge := VoxelViewer.new()
+	bridge.name = "RetainedPrimaryHandoff"
+	bridge.requires_visuals = true
+	bridge.requires_collisions = true
+	if not site_gate.request_viewer(bridge,old_position,viewer.view_distance):
+		site_gate.remove_viewer(bridge)
+		bridge.queue_free()
+		return false
+	startup_auxiliary_viewers.append({"viewer":bridge,"chunks":held,"attachedFrame":Engine.get_physics_frames(),"primaryHandoff":true})
+	startup_auxiliary_cleanup_requested = true
+	return false
 
 
 func auxiliary_viewer_specs_for_component(component: Array, world_generation) -> Array[Dictionary]:
@@ -517,7 +688,35 @@ func prune_startup_auxiliary_viewers() -> void:
 	if startup_auxiliary_cleanup_frames_remaining > 0:
 		startup_auxiliary_cleanup_frames_remaining -= 1
 		return
-	clear_startup_auxiliary_viewers()
+	# Retire only after an admitted, attached replacement holds every still
+	# demanded chunk. A timer alone cannot transfer native loading ownership.
+	for index in range(startup_auxiliary_viewers.size()-1,-1,-1):
+		var record: Dictionary = startup_auxiliary_viewers[index]
+		var holder: VoxelViewer = record.get("viewer")
+		# A freshly cloned footprint must survive until the primary actually
+		# moves; otherwise pruning would destroy the pending handoff each frame.
+		if record.get("primaryHandoff",false) and not retained_gameplay_chunks.is_empty() \
+				and is_instance_valid(holder) and holder.is_inside_tree() and is_instance_valid(viewer) and viewer.is_inside_tree() \
+				and holder.global_position == viewer.global_position: continue
+		var covered := true
+		for key: Vector2i in record.get("chunks",[]):
+			if not retained_gameplay_chunks.has(key) and not desired_gameplay_chunks.has(key): continue
+			if not published_gameplay_chunks.has(key):
+				covered = false
+				break
+			if is_instance_valid(viewer) and viewer.is_inside_tree() and _viewer_covers_chunk_at(viewer,key,viewer.global_position): continue
+			if _retained_viewer_covers_chunk(key): continue
+			covered = false
+			break
+		if not covered: continue
+		var auxiliary: VoxelViewer = record.get("viewer")
+		if is_instance_valid(auxiliary):
+			auxiliary.requires_visuals = false
+			auxiliary.requires_collisions = false
+			if site_gate != null: site_gate.remove_viewer(auxiliary)
+			auxiliary.queue_free()
+		startup_auxiliary_viewers.remove_at(index)
+	if startup_auxiliary_viewers.is_empty(): startup_auxiliary_cleanup_requested = false
 
 
 func startup_auxiliary_viewer_diagnostics() -> Array:
@@ -575,6 +774,7 @@ func _process(delta: float) -> void:
 		if site_gate != null: site_gate.advance()
 		update_viewer_position()
 		update_viewer_distance(delta)
+		advance_retained_viewers(delta)
 		prune_startup_auxiliary_viewers()
 		collect_volume_edit_changes()
 		process_pending_edit_sections()
@@ -585,12 +785,14 @@ func _physics_process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	clear_retained_gameplay_chunks()
 	if site_gate != null: site_gate.stop()
 	if viewer != null and is_instance_valid(viewer) and viewer.get_parent() != self:
 		viewer.queue_free()
 
 func begin_shutdown() -> void:
 	authority_ready = false
+	clear_retained_gameplay_chunks()
 	if site_gate != null: site_gate.stop()
 	set_process(false)
 	set_physics_process(false)
@@ -636,6 +838,7 @@ func update_viewer_distance(delta: float) -> void:
 		return
 	view_distance_expansion_elapsed = 0.0
 	var next_distance := mini(FINAL_VIEW_DISTANCE,int(viewer.view_distance)+VIEW_DISTANCE_EXPANSION_STEP)
+	if voxel_engine_pending_task_count() > RETAINED_MAX_PENDING_NATIVE_TASKS: return
 	if site_gate.request_viewer(viewer,viewer.global_position,next_distance):
 		expand_vertical_bounds_step()
 
@@ -664,6 +867,7 @@ func update_viewer_position() -> void:
 		return
 	var player_value = main.get("player")
 	if player_value is Node3D and is_instance_valid(player_value):
+		if not _preserve_retained_primary_coverage((player_value as Node3D).global_position): return
 		site_gate.request_viewer(viewer,(player_value as Node3D).global_position,viewer.view_distance)
 
 func required_classes_available() -> bool:
@@ -681,6 +885,14 @@ func on_mesh_block_exited(block_position: Vector3i) -> void:
 
 func stats() -> Dictionary:
 	return {
+		"retainedGameplayChunks":retained_gameplay_chunks.size(),
+		"retainedRegionViewers":retained_chunk_viewers.size(),
+		"retainedQueuedViewerGroups":retained_viewer_groups.size()-retained_chunk_viewers.size(),
+		"retainedActivationReason":retained_activation_reason,
+		"retainedLastPendingNativeTasks":retained_last_pending_tasks,
+		"retainedActivationTaskLimit":RETAINED_MAX_PENDING_NATIVE_TASKS,
+		"retainedActivationIntervalSeconds":RETAINED_ACTIVATION_INTERVAL_SECONDS,
+		"retainedViewDistance":RETAINED_VIEW_DISTANCE,
 		"citadelAdmission":main.structure_system.citadel_terrain_admission.stats() if main != null and main.structure_system != null else {},
 		"siteAdmissionFailure":site_gate.failure_reason() if site_gate != null else "",
 		"ready": authority_ready,
@@ -835,6 +1047,7 @@ func request_gameplay_chunk_republication(chunk_key: Vector2i) -> void:
 	queue_pending_gameplay_chunk(chunk_key)
 
 func release_gameplay_chunk(chunk_key: Vector2i) -> void:
+	if retained_gameplay_chunks.has(chunk_key): return
 	desired_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunk_order.erase(chunk_key)
@@ -1086,6 +1299,48 @@ func collision_mesh_ready_for_world_position(world_position: Vector3, footprint_
 		"expectedY": expected_y
 	}
 
+
+func spawn_presentation_state(world_position: Vector3) -> Dictionary:
+	if not authority_ready or terrain == null or not terrain.is_visible_in_tree():
+		return {"ready":false,"reason":"terrain_visual_owner_pending"}
+	if viewer == null or not viewer.requires_visuals or get_viewport().get_camera_3d() == null:
+		return {"ready":false,"reason":"terrain_visual_view_pending"}
+	var key := Vector2i(floori(world_position.x/(GAME_CHUNK_SIZE*CELL)),floori(world_position.z/(GAME_CHUNK_SIZE*CELL)))
+	if not published_gameplay_chunks.has(key) or pending_gameplay_chunks.has(key) or not pending_edit_sections.is_empty():
+		return {"ready":false,"reason":"spawn_chunk_publication_pending","chunk":key}
+	var proof := collision_mesh_ready_for_body_position(world_position,0.42)
+	return {"ready":bool(proof.get("passed",false)),"reason":"spawn_mesh_publication","chunk":key,
+		"seed":configured_seed,"volumeRevision":last_volume_revision,"mesh":proof}
+
+func wait_for_spawn_presentation(world_position: Vector3, timeout_seconds: float) -> Dictionary:
+	# Existing startup gates already require nearby chunk meshes and physics.
+	# Keep the loading UI and movement lock until a frame using those resources
+	# has been drawn. Headless contracts cannot certify visual presentation.
+	if DisplayServer.get_name() == "headless":
+		return STARTUP_READINESS_RESULT_SCRIPT.ready({}, {"presentationVerified":false,"reason":"headless_presentation_excluded"})
+	var started := Time.get_ticks_msec()
+	var drawn := [false]
+	var on_draw := func(): drawn[0] = true
+	var armed_state := {}
+	while float(Time.get_ticks_msec()-started)/1000.0 < timeout_seconds:
+		var state := spawn_presentation_state(world_position)
+		if state.get("ready",false):
+			if drawn[0] and state == armed_state:
+				var metrics := {"presentationVerified":true,"elapsedMs":Time.get_ticks_msec()-started,"terrain":state}
+				await main.startup_loading_yield("Nearby terrain displayed", "terrain_presentation", "ready", metrics)
+				return STARTUP_READINESS_RESULT_SCRIPT.ready({},metrics)
+			if armed_state != state:
+				if RenderingServer.frame_post_draw.is_connected(on_draw): RenderingServer.frame_post_draw.disconnect(on_draw)
+				drawn[0] = false
+				armed_state = state
+				RenderingServer.frame_post_draw.connect(on_draw,CONNECT_ONE_SHOT)
+		else:
+			if RenderingServer.frame_post_draw.is_connected(on_draw): RenderingServer.frame_post_draw.disconnect(on_draw)
+			drawn[0] = false
+			armed_state = {}
+		await main.startup_loading_yield("Drawing nearby terrain", "terrain_presentation", "pending",state)
+	if RenderingServer.frame_post_draw.is_connected(on_draw): RenderingServer.frame_post_draw.disconnect(on_draw)
+	return STARTUP_READINESS_RESULT_SCRIPT.failed("terrain_presentation_timeout",{},[],{"terrain":spawn_presentation_state(world_position)})
 
 func collision_mesh_ready_for_body_position(world_position: Vector3, footprint_radius := 0.0) -> Dictionary:
 	if terrain == null:

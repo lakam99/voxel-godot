@@ -78,6 +78,7 @@ func run() -> void:
 		report_path = ProjectSettings.globalize_path("res://artifacts/tutorial-town/startup-loading-readiness-contract.json")
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	test_scenario_requirements_are_semantic()
+	test_regional_demand_contract()
 	test_missing_manifest_doors_are_structured_failure()
 	test_missing_npc_registration_is_structured_failure()
 	test_continue_restore_defers_world_setup()
@@ -86,6 +87,47 @@ func run() -> void:
 	await test_startup_requires_revision_matched_navigation()
 	await test_forced_manifest_failure_keeps_gameplay_disabled_and_visible()
 	finish()
+
+func test_regional_demand_contract() -> void:
+	const Regions := preload("res://scripts/world/WorldStreamingCoordinator.gd")
+	var regions := Regions.new()
+	regions.configure("contract-seed")
+	var bounds := Regions.playable_bounds(Vector3(-0.25,0.0,-0.25))
+	var keys := Regions.chunks_for_bounds(bounds)
+	add_result("regional_64m_negative_grid_coverage",keys.has(Vector2i(-2,-2)) and keys.has(Vector2i(1,1)) and keys.size() == 16,{"bounds":bounds,"chunks":keys})
+	var first := regions.request_region(bounds,0,"player")
+	var second := regions.request_region(bounds,1,"actor")
+	var held := regions.retained_gameplay_chunks()
+	regions.release_region(first)
+	regions.advance(Time.get_ticks_msec()+Regions.RELEASE_HYSTERESIS_MS+1)
+	add_result("regional_overlapping_owner_retains_demand",first > 0 and second > 0 and regions.retained_gameplay_chunks() == held,{"count":held.size()})
+	var state := regions.region_readiness(bounds)
+	add_result("regional_missing_owner_cannot_report_ready",state.status == "pending" and state.missing.size() == 3,state)
+	regions.release_region(second)
+	add_result("regional_release_hysteresis",not regions.retained_gameplay_chunks().is_empty(),{})
+	regions.advance(Time.get_ticks_msec()+Regions.RELEASE_HYSTERESIS_MS+1)
+	add_result("regional_release_drains",regions.retained_gameplay_chunks().is_empty(),{})
+	regions.configure("next-seed")
+	var next := regions.request_region(bounds,0,"new player")
+	regions.release_region(first)
+	regions.advance(Time.get_ticks_msec()+Regions.RELEASE_HYSTERESIS_MS+1)
+	add_result("regional_stale_release_cannot_touch_new_world",next > second and not regions.retained_gameplay_chunks().is_empty(),{})
+	var before := regions.retained_gameplay_chunks()
+	var rejected := regions.request_region(Rect2i(Vector2i(10000,10000),Vector2i(512,512)),0,"oversized resident request")
+	add_result("regional_capacity_rejects_without_dropping_demand",rejected == 0 and regions.last_rejection == "region_resident_capacity" and before == regions.retained_gameplay_chunks(),{})
+	const TerrainRuntime := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
+	var runtime := TerrainRuntime.new()
+	var chunk := Vector2i(-1,0)
+	# Synthetic bookkeeping only: no claim that this dictionary is terrain proof.
+	runtime.retained_gameplay_chunks[chunk] = true
+	runtime.desired_gameplay_chunks[chunk] = true
+	runtime.published_gameplay_chunks[chunk] = {"synthetic":true}
+	runtime.release_gameplay_chunk(chunk)
+	add_result("regional_terrain_release_respects_retained_owner",runtime.published_gameplay_chunks.has(chunk),{})
+	runtime.retained_gameplay_chunks.clear()
+	runtime.release_gameplay_chunk(chunk)
+	add_result("regional_terrain_release_invalidates_publication",not runtime.desired_gameplay_chunks.has(chunk) and not runtime.published_gameplay_chunks.has(chunk),{})
+	runtime.free()
 
 func test_startup_requires_revision_matched_navigation() -> void:
 	# Synthetic source, real NavigationServer install/sync and production startup
@@ -222,9 +264,11 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 	var tutorial_ready_index := main_source.find("if not startup_result_is_ready(tutorial_result):")
 	var gameplay_ready_index := main_source.find("if not startup_result_is_ready(physics_gate_result):")
 	var loading_release_index := main_source.find("startup_loading_active = false", gameplay_ready_index)
+	var presentation_index := main_source.find("await wait_for_initial_terrain_presentation()", gameplay_ready_index)
 	var new_game_start := main_source.find("func start_new_game")
 	var new_game_tutorial_ready := main_source.find("if not startup_result_is_ready(tutorial_result):", new_game_start)
 	var new_game_release := main_source.find("runtime_loading_active = false", new_game_start)
+	var new_game_presentation := main_source.find("await wait_for_initial_terrain_presentation()", new_game_start)
 	var tutorial_domains_present := tutorial_source.find("ensure_town_manifest_ready_staged") >= 0 \
 		and tutorial_source.find("tutorial_manifest_door_readiness") >= 0 \
 		and tutorial_source.find("tutorial_npc_registration_readiness") >= 0 \
@@ -234,8 +278,10 @@ func test_loading_completion_requires_all_readiness_domains() -> void:
 		and tutorial_ready_index >= 0 and tutorial_ready_index < completion_index \
 		and gameplay_ready_index >= 0 and gameplay_ready_index < completion_index \
 		and loading_release_index > gameplay_ready_index and loading_release_index < completion_index \
+		and presentation_index > gameplay_ready_index and presentation_index < loading_release_index \
 		and new_game_tutorial_ready > new_game_start \
 		and new_game_release > new_game_tutorial_ready \
+		and new_game_presentation > new_game_start and new_game_presentation < new_game_release \
 		and tutorial_domains_present
 	add_result("loading_completion_is_guarded_by_manifest_door_registration_order_and_physics_readiness", passed, {
 		"completionIndex": completion_index,

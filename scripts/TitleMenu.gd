@@ -97,6 +97,7 @@ func _process(delta: float) -> void:
 func build_menu() -> void:
     ui_layer = CanvasLayer.new()
     ui_layer.name = "MainMenuLayer"
+    ui_layer.layer = 10 # Keep the loading screen above the newly created HUD.
     add_child(ui_layer)
 
     var root := Control.new()

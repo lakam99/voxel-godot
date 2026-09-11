@@ -9,6 +9,7 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
+const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
@@ -27,6 +28,12 @@ var startup_loading_last_step_usec := 0
 var startup_loading_timeline: Array[Dictionary] = []
 var startup_readiness_domains := {}
 var startup_loading_failure_result := {}
+var world_streaming = WorldStreamingCoordinatorScript.new()
+var streaming_requests: Dictionary = {}
+var streaming_request_bounds: Dictionary = {}
+var streaming_applied_revision := -1
+var streaming_active := false
+var streaming_demand_error := ""
 var startup_loading_max_step := {}
 var runtime_loading_active := false
 var post_startup_trace_frames := 0
@@ -526,6 +533,10 @@ func _run_deferred_startup_boot() -> void:
         if not startup_result_is_ready(physics_gate_result):
             await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
             return
+        var presentation_result := await wait_for_initial_terrain_presentation()
+        if not startup_result_is_ready(presentation_result):
+            await stop_startup_loading(presentation_result, "terrain_presentation_not_ready")
+            return
         await startup_loading_yield(
             "Gameplay prerequisites ready",
             "gameplay",
@@ -729,6 +740,19 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     var site_runtime = get("voxel_terrain_runtime")
     if site_runtime == null:
         return StartupReadinessResultScript.failed("missing_voxel_terrain_for_site_admission")
+    world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system})
+    streaming_requests.clear()
+    streaming_request_bounds.clear()
+    streaming_applied_revision = -1
+    streaming_active = true
+    if not retain_streaming_region("player", WorldStreamingCoordinatorScript.playable_bounds(player.global_position), 0):
+        return StartupReadinessResultScript.failed(streaming_demand_error)
+    # Keep existing scenario requirements in addition to the nearby player area.
+    for key in urgent_keys:
+        if not retain_streaming_region("startup:%s" % key, Rect2i(key*CHUNK_SIZE,Vector2i.ONE*CHUNK_SIZE), 1):
+            return StartupReadinessResultScript.failed(streaming_demand_error)
+    if not apply_streaming_region_demand():
+        return StartupReadinessResultScript.failed(streaming_demand_error)
     var site_admission_result: Dictionary = await site_runtime.wait_for_site_admission(urgent_keys)
     if not startup_result_is_ready(site_admission_result):
         return site_admission_result
@@ -777,6 +801,8 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
 func initial_gameplay_chunk_keys(urgent_radius := 1) -> Array[Vector2i]:
     var unique := {}
     if player != null:
+        for key in WorldStreamingCoordinatorScript.chunks_for_bounds(WorldStreamingCoordinatorScript.playable_bounds(player.position)):
+            unique[key] = true
         var player_center := world_to_chunk(player.position.x, player.position.z)
         for dz in range(-urgent_radius, urgent_radius + 1):
             for dx in range(-urgent_radius, urgent_radius + 1):
@@ -806,6 +832,80 @@ func initial_gameplay_chunk_keys(urgent_radius := 1) -> Array[Vector2i]:
         return a.x < b.x if a.x != b.x else a.y < b.y
     )
     return result
+
+func retain_streaming_region(owner: String, bounds: Rect2i, priority: int) -> bool:
+    if streaming_request_bounds.get(owner) == bounds: return true
+    var request_id: int = world_streaming.request_region(bounds,priority,owner)
+    if request_id == 0:
+        streaming_demand_error = world_streaming.last_rejection
+        return false # Existing request stays owned; the next update retries.
+    if streaming_requests.has(owner): world_streaming.release_region(streaming_requests[owner])
+    streaming_requests[owner] = request_id
+    streaming_request_bounds[owner] = bounds
+    streaming_demand_error = ""
+    return true
+
+func apply_streaming_region_demand() -> bool:
+    world_streaming.advance()
+    if streaming_applied_revision == world_streaming.revision(): return true
+    var runtime = get("voxel_terrain_runtime")
+    if structure_system == null or runtime == null: return false
+    if not structure_system.citadel_publication.set_retained_region_bounds(world_streaming.retained_cell_bounds()):
+        streaming_demand_error = "structure_region_demand_rejected"
+        return false
+    runtime.set_retained_gameplay_chunks(world_streaming.retained_gameplay_chunks())
+    streaming_applied_revision = world_streaming.revision()
+    return true
+
+func update_streaming_region_demand() -> void:
+    if not streaming_active or player == null: return
+    # Quantized updates plus the extra 43.2m retention ring cover reversals
+    # without rebuilding demand on every movement frame.
+    var cell := Vector2i(floori(player.global_position.x/(CELL*32.0)),floori(player.global_position.z/(CELL*32.0)))
+    var anchor := Vector3((float(cell.x)+0.5)*CELL*32.0,player.global_position.y,(float(cell.y)+0.5)*CELL*32.0)
+    retain_streaming_region("player",WorldStreamingCoordinatorScript.playable_bounds(anchor),0)
+    var active_owners := {"player":true}
+    var movement := Vector3(player.velocity.x,0.0,player.velocity.z)
+    var facing := -player.global_basis.z
+    facing.y = 0.0
+    facing = facing.normalized()
+    var speed := maxf(movement.length(),PlayerController.WALK_SPEED)
+    var forecast := player.global_position + movement*8.0 + facing*speed*2.0
+    if movement.length_squared() < 0.1: forecast = player.global_position + facing*speed*10.0
+    var forecast_cell := Vector2i(floori(forecast.x/(CELL*32.0)),floori(forecast.z/(CELL*32.0)))*32
+    active_owners["predicted_traversal"] = true
+    retain_streaming_region("predicted_traversal",Rect2i(forecast_cell,Vector2i.ONE*32),2)
+    for entry in registered_npc_entries():
+        var body = entry.get("body") if entry is Dictionary else null
+        if not is_instance_valid(body) or not body.is_inside_tree(): continue
+        var key := "actor:%d" % body.get_instance_id()
+        active_owners[key] = true
+        var chunk := world_to_chunk(body.global_position.x,body.global_position.z)
+        retain_streaming_region(key,Rect2i(chunk*CHUNK_SIZE,Vector2i.ONE*CHUNK_SIZE),1)
+    for owner in streaming_requests.keys():
+        if active_owners.has(owner): continue
+        world_streaming.release_region(streaming_requests[owner])
+        streaming_requests.erase(owner)
+        streaming_request_bounds.erase(owner)
+    apply_streaming_region_demand()
+
+func reset_streaming_region_demand() -> void:
+    streaming_active = false
+    world_streaming.configure("")
+    streaming_requests.clear()
+    streaming_request_bounds.clear()
+    streaming_applied_revision = -1
+    var runtime = get("voxel_terrain_runtime")
+    if runtime != null: runtime.clear_retained_gameplay_chunks()
+
+func wait_for_initial_terrain_presentation() -> Dictionary:
+    var runtime = get("voxel_terrain_runtime")
+    if not is_instance_valid(runtime) or player == null:
+        return StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
+    return normalized_startup_result(
+        await runtime.wait_for_spawn_presentation(player.global_position, INITIAL_READINESS_TIMEOUT_SECONDS),
+        "invalid_terrain_presentation_result"
+    )
 
 func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
@@ -2181,6 +2281,10 @@ func start_new_game_staged(show_message := true) -> bool:
     if not startup_result_is_ready(physics_gate_result):
         await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
         return false
+    var presentation_result := await wait_for_initial_terrain_presentation()
+    if not startup_result_is_ready(presentation_result):
+        await stop_startup_loading(presentation_result, "terrain_presentation_not_ready")
+        return false
     var gameplay_metrics: Dictionary = physics_gate_result.get("metrics", {}).duplicate(true)
     gameplay_metrics["tutorial"] = tutorial_result.get("metrics", {})
     gameplay_metrics["terrain"] = terrain_result.get("metrics", {})
@@ -2240,6 +2344,7 @@ func _graceful_quit_deferred(exit_code: int) -> void:
     get_tree().quit(exit_code)
 
 func retire_generated_scenes_before_world_reset() -> bool:
+    reset_streaming_region_demand()
     if structure_system == null: return true
     var publication = structure_system.citadel_publication
     publication.begin_world_reset()
@@ -2276,6 +2381,7 @@ func wait_for_npc_navigation_before_quit() -> void:
         await startup_loading_yield("Stopping NPC navigation")
 
 func wait_for_terrain_workers_before_quit() -> void:
+    reset_streaming_region_demand()
     if structure_system != null:
         var admission = structure_system.citadel_terrain_admission
         var publication = structure_system.citadel_publication

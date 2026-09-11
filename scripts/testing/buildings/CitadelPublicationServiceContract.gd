@@ -6,6 +6,7 @@ const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const Queue = preload("res://scripts/world/CitadelSiteBuildQueue.gd")
 const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Worker = preload("res://scripts/buildings/BuildingPublicationWorker.gd")
+const Service = preload("res://scripts/world/CitadelPublicationService.gd")
 const WorkerControls = preload("res://scripts/testing/buildings/BuildingPublicationWorkerContract.gd")
 const Runtime = preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 const INPUT := "res://artifacts/citadel-runtime-integration/actual-site-source-05/result.bin"
@@ -39,9 +40,29 @@ class QuietRuntime extends Runtime:
 
 class ObservedAdmission extends Admission:
 	var source_requests := 0
+	var source_reads := 0
+	func source_state(region: Vector2i) -> Dictionary:
+		source_reads += 1
+		return super.source_state(region)
 	func request_source(region: Vector2i, priority := true) -> Dictionary:
 		source_requests += 1
 		return super.request_source(region,priority)
+
+class DispatchProbe extends Worker:
+	var calls := 0
+	func dispatch(_source: Dictionary, _binding: Dictionary) -> Dictionary:
+		calls += 1
+		return {"status":"busy"} # Synthetic capacity observation; no worker launch.
+
+class RetirementProbe extends RefCounted:
+	var cancellations := 0
+	func cancel() -> void: cancellations += 1
+
+class ReleaseGuard extends RefCounted:
+	var service
+	func permits(_bounds: Rect2i) -> bool:
+		service.set_retained_region_bounds([])
+		return true
 
 class GatedWorker extends Worker:
 	var gate := Semaphore.new()
@@ -167,6 +188,10 @@ func actual_source() -> void:
 		entry = {}
 		for i in range(4): s.advance_citadel_publication(bounds(),true)
 		check("evicted_active_and_prepared_no_rebuild",a.source_requests==0 and a._requests.is_empty() and service.stats().dispatchCount==1)
+		check("retained_actual_set",service.set_retained_region_bounds([bounds()]))
+		s.advance_citadel_publication(Rect2i(),true)
+		check("retained_evicted_prepared_survives_observer_departure",service._prepared.has(REGION) and a.source_requests==0 and held.get_ref()!=null)
+		check("retained_actual_release",service.set_retained_region_bounds([]))
 		s.advance_citadel_publication(Rect2i(),true)
 		var deadline := Time.get_ticks_msec()+5000
 		while held.get_ref()!=null and Time.get_ticks_msec()<deadline:
@@ -198,6 +223,11 @@ func controlled_lifecycle() -> void:
 	s.advance_citadel_publication(bounds(),true)
 	s.advance_citadel_publication(bounds(),true)
 	await wait_entered(job,"departure_worker_entered")
+	check("retained_inflight_set",service.set_retained_region_bounds([bounds()]))
+	var retained_token: int = service._inflight.token
+	s.advance_citadel_publication(bounds(other),true)
+	check("retained_inflight_survives_other_observer",service._inflight.get("token")==retained_token and service._desired.has(REGION) and service._desired.has(other))
+	service.set_retained_region_bounds([])
 	s.advance_citadel_publication(bounds(other),true)
 	job.gated = false
 	job.gate.post()
@@ -308,7 +338,88 @@ func paused_and_failure() -> void:
 		check(unavailable+"_no_completed_timeout",not service._failures.has(REGION) if unavailable=="paused" else true)
 		await close(value,unavailable)
 
+func retained_demand() -> void:
+	var value := owner()
+	var a = value.structure_system.citadel_terrain_admission
+	var service = value.structure_system.citadel_publication
+	var regions: Array[Vector2i] = []
+	for z in range(-6,7):
+		for x in range(-6,7):
+			var region := Vector2i(x,z)
+			if not Field.candidate_for_region(SEED,region).is_empty(): regions.append(region)
+	check("retained_fixture_enough_candidates",regions.size()>17)
+	if regions.size()<=17:
+		await close(value,"retained_short_fixture")
+		return
+	var first: Vector2i = regions.front()
+	var last: Vector2i = regions.back()
+	inject(a,first,tiny(first)); inject(a,last,tiny(last))
+	var input: Array[Rect2i] = [bounds(first),bounds(last),bounds(first)]
+	check("retained_disjoint_accepted",service.set_retained_region_bounds(input))
+	input.clear()
+	a.source_reads = 0
+	var ready: Dictionary = service._refresh_demand(bounds(first))
+	check("retained_disjoint_not_enclosed_and_deduplicated",ready.size()==2 and ready.has(first) and ready.has(last) and service._desired.size()==2 and a.source_reads==2)
+	check("retained_input_array_owned",service.stats().retainedBounds==3)
+	var prior: Array[Rect2i] = service._retained_region_bounds.duplicate()
+	var too_many: Array[Rect2i] = []
+	for i in range(65): too_many.append(bounds(first))
+	check("retained_count_reject_atomic",not service.set_retained_region_bounds(too_many) and service._retained_region_bounds==prior)
+	for invalid: Rect2i in [Rect2i(),Rect2i(Vector2i.ZERO,Vector2i(-1,1)),Rect2i(Vector2i.ZERO,Vector2i(Field.REGION_CELLS*17,1)),Rect2i(Vector2i(1000001,0),Vector2i.ONE),Rect2i(Vector2i(2147483640,0),Vector2i(100,1))]:
+		check("retained_invalid_atomic_%s" % str(invalid),not service.set_retained_region_bounds([bounds(first),invalid]) and service._retained_region_bounds==prior)
+	var full: Array[Rect2i] = []
+	for i in range(64): full.append(Rect2i(Vector2i.ZERO,Vector2i(Field.REGION_CELLS*4,Field.REGION_CELLS*4)))
+	check("retained_exact_limits_accepted",service.set_retained_region_bounds(full))
+	service.set_retained_region_bounds(prior)
+	ready = service._refresh_demand(Rect2i(Vector2i.ZERO,Vector2i(Field.REGION_CELLS*17,1)))
+	check("retained_oversized_observer_preserves_both",ready.has(first) and ready.has(last) and service.stats().observerBoundsRejected)
+	service.set_retained_region_bounds([])
+	ready = service._refresh_demand(Rect2i(Vector2i.ZERO,Vector2i(Field.REGION_CELLS*17,1)))
+	check("oversized_observer_retains_last_valid_sample",ready.size()==1 and ready.has(first))
+	ready = service._refresh_demand(Rect2i())
+	check("retained_empty_and_empty_observer_release",ready.is_empty() and service._desired.is_empty() and not service.stats().observerBoundsRejected)
+	# Synthetic ready scene: exercise actual pruning and balanced single cancel,
+	# without claiming node construction or actor-safe coordinator release.
+	service.set_retained_region_bounds([bounds(last)])
+	ready = service._refresh_demand(Rect2i())
+	var probe := RetirementProbe.new()
+	service._scenes[last] = {"region":last,"binding":ready[last].binding,"phase":"scene_ready","job":probe}
+	service._prune_unwanted(ready)
+	check("retained_ready_scene_not_observer_pruned",service._scenes.has(last) and probe.cancellations==0)
+	service.set_retained_region_bounds([])
+	service._prune_unwanted(service._refresh_demand(Rect2i()))
+	service._prune_unwanted({})
+	check("retained_release_cancels_once",service._scenes.is_empty() and service._retiring_scenes.size()==1 and probe.cancellations==1)
+	service._retiring_scenes.clear() # Only the synthetic job above, no resources.
+	# Capacity limits residency, never the complete desired/ready maps.
+	var dispatch_probe := DispatchProbe.new()
+	service._worker = dispatch_probe
+	var requests: Array[Rect2i] = []
+	for i in range(17):
+		var region: Vector2i = regions[i]
+		if region!=first and region!=last: inject(a,region,tiny(region))
+		requests.append(bounds(region))
+	service.set_retained_region_bounds(requests)
+	ready = service._refresh_demand(Rect2i())
+	for i in range(Service.MAX_REGIONS): service._prepared[regions[i]] = {"binding":ready[regions[i]].binding}
+	service._dispatch(ready,Vector2i.ZERO)
+	check("retained_capacity_keeps_all_demand",dispatch_probe.calls==0 and service._resident_region_count()==16 and service._desired.size()==17 and ready.size()==17)
+	service._prepared.erase(regions[0])
+	service._dispatch(ready,Vector2i.ZERO)
+	check("retained_capacity_retries_after_slot_release",dispatch_probe.calls==1 and service._desired.size()==17)
+	service._prepared.clear() # Synthetic registry entries, no prepared payloads.
+	var guard := ReleaseGuard.new()
+	guard.service = service
+	check("retained_release_guard_bound",service.configure_construction_guard(guard.permits))
+	check("retained_callback_release_rejects_stale_construction",not service._construction_allowed(ready[regions[16]]) and service.stats().retainedBounds==0)
+	check("retained_unchanged_empty_demand_no_spurious_revision",service._construction_allowed(ready[regions[16]]))
+	service.set_retained_region_bounds([bounds(last)])
+	service.configure(a)
+	check("retained_configure_clears",service.stats().retainedBounds==0 and service._refresh_demand(Rect2i()).is_empty())
+	await close(value,"retained")
+
 func _run() -> void:
+	await retained_demand()
 	await actual_source()
 	await controlled_lifecycle()
 	await runtime_dispatch()

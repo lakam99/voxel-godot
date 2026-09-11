@@ -604,6 +604,7 @@ func _run() -> void:
 	parent = Node3D.new()
 	parent.position = Vector3(3, 0, 5)
 	root.add_child(parent)
+	await spatial_dependency_ownership()
 	var trees := SyntheticTrees.new()
 	var job = Job.new()
 	var prepared := holder()
@@ -764,3 +765,28 @@ func _run() -> void:
 		file.store_string(JSON.stringify(report, "\t"))
 	print("SCENE_JOB_CONTRACT checks=", checks.size(), " failures=", failures.size())
 	quit(0 if failures.is_empty() else 1)
+
+func spatial_dependency_ownership() -> void:
+	var prepared := holder()
+	prepared._payload.spatialDependencies = Preparation.SpatialDependencies.compile(prepared._payload.blueprint,
+		prepared._payload.furnishingPlan,Fixtures.BINDING,frozen_profile().origin,Callable())
+	var packet_owner: WeakRef = weakref(prepared._payload.spatialDependencies)
+	var job := Job.new()
+	var trees := SyntheticTrees.new()
+	start(job,trees,prepared)
+	var bounds := Rect2i(6,13,3,3)
+	check("spatial_unconsumed_pending",job.source_dependency_requirements(bounds,Fixtures.BINDING).status=="pending")
+	for i in range(100):
+		job.advance(1)
+		if job._cpu.has("buildingBegin"): break
+	var described: Dictionary = job.source_dependency_requirements(bounds,Fixtures.BINDING)
+	check("spatial_live_source_described",described.get("status")=="described" and described.get("partIds",[]).has("building:tiny-post"))
+	check("spatial_not_publication_receipt",not described.get("publicationAcknowledged",true))
+	var stale := Fixtures.BINDING.duplicate()
+	stale.generation+=1
+	check("spatial_stale_generation_pending",job.source_dependency_requirements(bounds,stale).status=="pending")
+	job.cancel()
+	check("spatial_cancel_revokes_description",job.source_dependency_requirements(bounds,Fixtures.BINDING).status=="pending")
+	prepared=null
+	await drain(job,"spatial_dependency")
+	check("spatial_packet_released_with_owner",packet_owner.get_ref()==null)

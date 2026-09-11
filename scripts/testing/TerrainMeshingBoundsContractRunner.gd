@@ -65,16 +65,40 @@ class FakeMain:
 var results: Array[Dictionary] = []
 var report_path := ""
 
+class PayloadWorld extends RefCounted:
+	func begin_section_payload_for_meshing_chunk(x: int, z: int, size: int, low: int, high: int, step: int) -> Dictionary:
+		return {"startX":x,"startZ":z,"chunkSize":size,"minY":low,"maxY":high,"stepCells":step}
+
+class PayloadOwner extends Node:
+	const CHUNK_SIZE := 28
+	var world_generation_system = PayloadWorld.new()
+	var terrain_detail_queries := 0
+	func underground_volume_mesh_step_for_chunk(_x: int, _z: int) -> int:
+		terrain_detail_queries += 1
+		return 4
+
 func _init() -> void:
 	call_deferred("run")
 
 func run() -> void:
 	report_path = OS.get_environment("VOXEL_TERRAIN_MESH_BOUNDS_REPORT").strip_edges()
+	test_fluid_only_avoids_terrain_detail_scan()
 	test_generated_surface_bounds_enclose_exact_projection()
 	test_incremental_bounds_match_direct_authority()
 	test_mesh_edits_expand_authoritative_bounds()
 	test_retired_payload_cleanup_is_bounded()
 	finish()
+
+func test_fluid_only_avoids_terrain_detail_scan() -> void:
+	var owner := PayloadOwner.new()
+	var service := TerrainMeshingServiceScript.new()
+	service.main = owner
+	var bounds := {"minY":-4,"maxY":18}
+	var fluid: Dictionary = service.begin_section_payload_for_chunk(2,-1,bounds,true)
+	var no_terrain_query := owner.terrain_detail_queries == 0
+	var terrain: Dictionary = service.begin_section_payload_for_chunk(2,-1,bounds,false)
+	add_result("synthetic_fluid_only_skips_terrain_lod_scan",no_terrain_query and fluid.stepCells == 1 and terrain.stepCells == 4 and owner.terrain_detail_queries == 1,"Exact fluid job keeps source bounds while ordinary terrain keeps its detail policy")
+	owner.free()
 
 func test_generated_surface_bounds_enclose_exact_projection() -> void:
 	var samples: Array[Dictionary] = []

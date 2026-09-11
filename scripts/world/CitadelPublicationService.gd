@@ -9,6 +9,7 @@ const SceneJob = preload("res://scripts/buildings/BuildingScenePublicationJob.gd
 const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const MAX_REGIONS := 16
+const MAX_RETAINED_BOUNDS := 64
 const PREPARATION_TIMEOUT_USEC := 60000000
 
 var _admission
@@ -17,6 +18,10 @@ var _generation := 0
 var _seed := ""
 var _closing := false
 var _desired: Dictionary = {}
+var _retained_region_bounds: Array[Rect2i] = []
+var _observer_region_bounds := Rect2i()
+var _observer_bounds_rejected := false
+var _demand_revision := 0
 var _prepared: Dictionary = {}
 var _retired: Dictionary = {}
 var _inflight: Dictionary = {}
@@ -107,8 +112,9 @@ func _construction_allowed(source: Dictionary) -> bool:
 	var callback := Callable(receiver,_construction_guard_method)
 	if not callback.is_valid(): return false
 	var configuration := _configuration_serial
+	var demand_revision := _demand_revision
 	var allowed: Variant = callback.call(source.reservationCells)
-	return allowed == true and configuration == _configuration_serial and not _closing and not _world_reset_pending
+	return allowed == true and configuration == _configuration_serial and demand_revision == _demand_revision and not _closing and not _world_reset_pending
 
 func _door_callbacks_ready() -> bool:
 	return _door_lifecycle_configured \
@@ -132,12 +138,36 @@ func configure(admission) -> void:
 	_retire_all_scenes()
 	_retire_all()
 	_desired = {}
+	_retained_region_bounds = []
+	_observer_region_bounds = Rect2i()
+	_observer_bounds_rejected = false
+	_demand_revision += 1
 	_inflight = {}
 	_failures = {}
 	_admission = admission
 	var state: Dictionary = admission.stats()
 	_generation = int(state.generation)
 	_seed = String(state.worldSeed)
+
+## The coordinator owns tokens, priorities and release hysteresis. Replacement
+## is atomic and privately copied; this service owns only publication demand.
+func set_retained_region_bounds(bounds: Array) -> bool:
+	if _closing or bounds.size() > MAX_RETAINED_BOUNDS: return false
+	var owned: Array[Rect2i] = []
+	for rectangle in bounds:
+		if not rectangle is Rect2i or not _bounded_region_rectangle(rectangle): return false
+		owned.append(rectangle)
+	if bounds == _retained_region_bounds: return true
+	_retained_region_bounds = owned
+	_demand_revision += 1
+	return true
+
+static func _bounded_region_rectangle(bounds: Rect2i) -> bool:
+	# Use Admission's cell domain before computing end (Vector2i can overflow).
+	if not Admission._valid_bounds(bounds): return false
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end - Vector2i.ONE)
+	return (high.x-low.x+1)*(high.y-low.y+1) <= MAX_REGIONS
 
 func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget_usec := 2500) -> Dictionary:
 	if budget_usec<1 or budget_usec>4000: return {"status":"rejected","reason":"invalid_slice_budget"}
@@ -147,6 +177,7 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 	if _admission != null and int(_admission.stats().generation) != _generation:
 		configure(_admission)
 	var configuration:=_configuration_serial
+	var demand_revision := _demand_revision
 	allow_dispatch = allow_dispatch and not _world_reset_pending
 	# Draining is independent of native/current-generation readiness. Retired
 	# payloads were relinquished by prior calls before the worker starts disposal.
@@ -178,7 +209,7 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 	if _world_reset_release_requested and world_reset_ready():
 		_world_reset_pending = false
 		_world_reset_release_requested = false
-	if allow_dispatch and not _closing and configuration==_configuration_serial and _retired.is_empty() and _inflight.is_empty():
+	if allow_dispatch and not _closing and configuration==_configuration_serial and demand_revision==_demand_revision and _retired.is_empty() and _inflight.is_empty():
 		_dispatch(ready,observer_bounds.get_center())
 	_max_advance_usec = maxi(_max_advance_usec,Time.get_ticks_usec()-started)
 	_advancing=false
@@ -187,31 +218,43 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 func _refresh_demand(bounds: Rect2i) -> Dictionary:
 	var desired := {}
 	var ready := {}
-	if bounds.size.x <= 0 or bounds.size.y <= 0:
-		_desired = desired
-		return ready
-	var low := Field.region_for_cell(bounds.position)
-	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
-	if (high.x-low.x+1)*(high.y-low.y+1) > MAX_REGIONS:
-		_desired = desired
-		return ready
-	for z in range(low.y,high.y+1):
-		for x in range(low.x,high.x+1):
-			var region := Vector2i(x,z)
-			var candidate: Dictionary = Field.candidate_for_region(_seed,region)
-			if candidate.is_empty() or not Admission.declared_influence(candidate).intersects(bounds): continue
-			var source: Dictionary = _admission.source_state(region)
-			if source.get("status") in ["ready","prepared"]:
-				# Refine conservative discovery against the actual accepted footprint.
-				if not source.reservationCells.intersects(bounds): continue
-				if not _current_binding(source.binding): continue
-				ready[region] = source
-				if source.status == "prepared" and not _prepared.has(region) and not _scenes.has(region) and not _region_retiring(region) and not _failures.has(region) \
-						and (_inflight.is_empty() or _inflight.region != region):
-					# Only a NEW approach without either source or prepared ownership
-					# requests deterministic reconstruction after cache eviction.
-					_admission.request_source(region,true)
-			desired[region] = true
+	_observer_bounds_rejected = bounds != Rect2i() and not _bounded_region_rectangle(bounds)
+	# Rejected samples are not departure. Empty explicitly releases the observer.
+	if not _observer_bounds_rejected: _observer_region_bounds = bounds
+	var rectangles: Array[Rect2i] = _retained_region_bounds.duplicate()
+	if _observer_region_bounds != Rect2i(): rectangles.append(_observer_region_bounds)
+	# At most 65*16 visits. Never enclose disjoint rectangles or truncate demand
+	# to the resident/dispatch cap: queued sources still participate in pruning.
+	var region_bounds := {}
+	for rectangle: Rect2i in rectangles:
+		var low := Field.region_for_cell(rectangle.position)
+		var high := Field.region_for_cell(rectangle.end-Vector2i.ONE)
+		for z in range(low.y,high.y+1):
+			for x in range(low.x,high.x+1):
+				var region := Vector2i(x,z)
+				if not region_bounds.has(region): region_bounds[region] = []
+				if not region_bounds[region].has(rectangle): region_bounds[region].append(rectangle)
+	for region: Vector2i in region_bounds:
+		var candidate: Dictionary = Field.candidate_for_region(_seed,region)
+		if candidate.is_empty(): continue
+		var influence: Rect2i = Admission.declared_influence(candidate)
+		var matching: Array[Rect2i] = []
+		for rectangle: Rect2i in region_bounds[region]:
+			if influence.intersects(rectangle): matching.append(rectangle)
+		if matching.is_empty(): continue
+		var source: Dictionary = _admission.source_state(region)
+		if source.get("status") in ["ready","prepared"]:
+			var intersects := false
+			for rectangle: Rect2i in matching:
+				if source.reservationCells.intersects(rectangle):
+					intersects = true
+					break
+			if not intersects or not _current_binding(source.binding): continue
+			ready[region] = source
+			if source.status == "prepared" and not _prepared.has(region) and not _scenes.has(region) and not _region_retiring(region) and not _failures.has(region) \
+					and (_inflight.is_empty() or _inflight.region != region):
+				_admission.request_source(region,true)
+		desired[region] = true
 	_desired = desired
 	return ready
 
@@ -263,6 +306,7 @@ func _collect(ready: Dictionary, allow_accept: bool) -> void:
 	_inflight = {}
 
 func _dispatch(ready: Dictionary, observer: Vector2i) -> void:
+	if _resident_region_count() >= MAX_REGIONS: return
 	var regions: Array = ready.keys()
 	regions.sort_custom(func(a,b):
 		var ac: Vector2i = ready[a].reservationCells.get_center()
@@ -279,6 +323,16 @@ func _dispatch(ready: Dictionary, observer: Vector2i) -> void:
 			_dispatch_count += 1
 		# Busy/start failure is retryable. The demand is never removed here.
 		return
+
+func _resident_region_count() -> int:
+	var regions := {}
+	for region: Vector2i in _prepared: regions[region] = true
+	for region: Vector2i in _scenes: regions[region] = true
+	if not _inflight.is_empty(): regions[_inflight.region] = true
+	for entry: Dictionary in _retiring_scenes: regions[entry.region] = true
+	for region: Vector2i in _pending_scene_disposals.values(): regions[region] = true
+	for region: Vector2i in _submitted_scene_disposals.values(): regions[region] = true
+	return regions.size()
 
 func _retire(value: Dictionary) -> void:
 	_retirement_serial += 1
@@ -309,6 +363,9 @@ func world_reset_ready() -> bool:
 
 func request_shutdown() -> void:
 	_closing = true
+	_retained_region_bounds = []
+	_observer_region_bounds = Rect2i()
+	_demand_revision += 1
 	_retire_all_scenes()
 	_desired = {}
 	_inflight = {}
@@ -320,6 +377,8 @@ func stats() -> Dictionary:
 	for entry in _scenes.values():
 		if entry.phase=="scene_ready": constructed+=1
 	return {"generation":_generation,"worldSeed":_seed,"desiredSites":_desired.size(),
+		"retainedBounds":_retained_region_bounds.size(),"observerBoundsRejected":_observer_bounds_rejected,
+		"residentSites":_resident_region_count(),"residentLimit":MAX_REGIONS,
 		"worldResetPending":_world_reset_pending,"worldResetReady":world_reset_ready(),
 		"preparedSites":_prepared.size(),"pendingRetirements":_retired.size(),
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
@@ -397,8 +456,9 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 	# multiplication. Job.advance itself packs cheap work into its remaining slice.
 	var units := 0
 	var configuration:=_configuration_serial
+	var demand_revision := _demand_revision
 	while units==0 or Time.get_ticks_usec()-started<budget_usec:
-		if _closing or configuration!=_configuration_serial: allow_build=false
+		if _closing or configuration!=_configuration_serial or demand_revision!=_demand_revision: allow_build=false
 		var work_started:=Time.get_ticks_usec()
 		var remaining:=maxi(1,budget_usec-int(work_started-started))
 		var progressed:=false
@@ -418,8 +478,8 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 			for region: Vector2i in _prepared.keys():
 				if ready.has(region) and not _region_retiring(region) and not _failures.has(region):
 					progressed=_start_scene(region,ready[region])
-					if progressed or configuration!=_configuration_serial or _closing: break
-			if not progressed and configuration==_configuration_serial and not _closing:
+					if progressed or configuration!=_configuration_serial or demand_revision!=_demand_revision or _closing: break
+			if not progressed and configuration==_configuration_serial and demand_revision==_demand_revision and not _closing:
 				var regions: Array=_scenes.keys()
 				for offset in range(regions.size()):
 					var index:=(_scene_cursor+offset)%regions.size()
@@ -429,7 +489,7 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					if entry.phase!="publishing" or not ready.has(region): continue
 					var phase: String = entry.job.status_count().phase
 					if not _construction_allowed(ready[region]):
-						if configuration!=_configuration_serial or _closing: break
+						if configuration!=_configuration_serial or demand_revision!=_demand_revision or _closing: break
 						continue
 					# Guard callbacks are external owners too: recapture no mutable
 					# job from a generation/entry cancelled during the callback.
@@ -479,6 +539,26 @@ func scene_state(region: Vector2i) -> Dictionary:
 
 func scene_root(region: Vector2i) -> Node3D:
 	return _scenes[region].job.own_node_root() if _scenes.has(region) else null
+
+func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
+	if _admission == null or not _bounded_region_rectangle(bounds):
+		return {"status":"failed","reason":"invalid_structure_dependency_request"}
+	var admitted: Dictionary = _admission.request_bounds(bounds)
+	if admitted.get("status") != "ready": return admitted
+	if _world_reset_pending or _closing: return {"status":"pending","reason":"structure_world_reset_pending"}
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
+	var sites: Array[Dictionary] = []
+	for z in range(low.y,high.y+1):
+		for x in range(low.x,high.x+1):
+			var region := Vector2i(x,z)
+			var source: Dictionary = _admission.source_state(region)
+			if source.get("status") not in ["ready","prepared"] or not source.reservationCells.intersects(bounds): continue
+			if not _scenes.has(region): return {"status":"pending","reason":"structure_dependency_source_pending"}
+			var requirements: Dictionary = _scenes[region].job.source_dependency_requirements(bounds,source.binding)
+			if requirements.get("status") != "described": return requirements
+			sites.append(requirements)
+	return {"status":"described","sites":sites,"publicationAcknowledged":false}
 
 ## Readiness only, consumed by ordinary collision/loading gates. It never moves
 ## a player, invents geometry, publishes routes or upgrades diagnostic callbacks.

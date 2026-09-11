@@ -587,14 +587,18 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		if not bool(bounds_advanced.get("complete", false)):
 			return result
 		var bounds: Dictionary = bounds_advanced.get("bounds", {}) if bounds_advanced.get("bounds", {}) is Dictionary else {}
-		terrain_state = begin_section_payload_for_chunk(key.x, key.y, bounds)
+		var terrain_state_started_usec := Time.get_ticks_usec()
+		terrain_state = begin_section_payload_for_chunk(key.x, key.y, bounds, fluid_only)
+		result["terrainPayloadStateBeginMs"] = elapsed_ms(terrain_state_started_usec)
 		if terrain_state.is_empty():
 			async_payload_job = {}
 			result["dropped"] = 1
 			result["dropReason"] = "terrain_bounds_invalid"
 			return result
 		async_payload_job["terrainState"] = terrain_state
+		var fluid_state_started_usec := Time.get_ticks_usec()
 		var initialized_fluid_state := begin_exact_fluid_payload_for_chunk(terrain_state)
+		result["fluidPayloadStateBeginMs"] = elapsed_ms(fluid_state_started_usec)
 		if initialized_fluid_state.is_empty():
 			async_payload_job = {}
 			result["dropped"] = 1
@@ -740,7 +744,7 @@ func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
 	result["began"] = true
 	return result
 
-func begin_section_payload_for_chunk(cx: int, cz: int, bounds: Dictionary = {}) -> Dictionary:
+func begin_section_payload_for_chunk(cx: int, cz: int, bounds: Dictionary = {}, fluid_only := false) -> Dictionary:
 	if main == null or main.get("world_generation_system") == null:
 		return {}
 	var world_generation = main.get("world_generation_system")
@@ -755,7 +759,9 @@ func begin_section_payload_for_chunk(cx: int, cz: int, bounds: Dictionary = {}) 
 	if max_y <= min_y:
 		return {}
 	var step := 1
-	if main.has_method("underground_volume_mesh_step_for_chunk"):
+	# Native terrain owns the terrain mesh. Exact-fluid jobs have no terrain
+	# LOD to choose and must not scan the diagnostic terrain mesher's town edges.
+	if not fluid_only and main.has_method("underground_volume_mesh_step_for_chunk"):
 		step = maxi(1, int(main.call("underground_volume_mesh_step_for_chunk", start_x, start_z)))
 	return world_generation.call("begin_section_payload_for_meshing_chunk", start_x, start_z, size, min_y, max_y, step)
 

@@ -227,6 +227,7 @@ func status() -> Dictionary:
 	elif _cancelled: state = "cancelled"
 	elif not _reason.is_empty(): state = "failed"
 	return {"status":state, "reason":_reason, "cleanupReason":_cleanup_reason, "phase":_phase, "binding":_binding,
+		"spatialDependencies":_spatial_dependency_summary(),
 		"sceneReady":_phase == "ready", "gameplayReady":false,
 		"doorLifecycleConfigured":_door_retire_receiver != null,
 		"retirementReady":_phase == "retired", "buildingCursor":_building_cursor,
@@ -239,6 +240,21 @@ func status() -> Dictionary:
 		# Includes caller work, result snapshots and frame waits; not pure sleep.
 		"betweenAdvanceUsec":_between_advance_usec,
 		"phaseMetrics":_phase_metrics.duplicate(true)}
+
+func _spatial_dependency_summary() -> Dictionary:
+	var packet = _cpu.get("buildingBegin",{}).get("spatialDependencies")
+	return packet.summary() if packet != null else {}
+
+func source_dependency_requirements(bounds: Rect2i, expected_binding: Dictionary) -> Dictionary:
+	if _cancelled or not _reason.is_empty() or _phase in ["idle", "retired", "consumed"] or expected_binding != _binding:
+		return {"status":"pending","reason":"structure_source_owner_unavailable"}
+	var packet = _cpu.get("buildingBegin",{}).get("spatialDependencies")
+	if packet == null: return {"status":"pending","reason":"structure_source_dependencies_pending"}
+	if packet.binding != _binding or packet.origin != _cpu.profile.origin:
+		return {"status":"failed","reason":"structure_dependency_binding_mismatch"}
+	# This is the obligation set, never scene/navigation readiness. The same
+	# holder is retired by the existing one-shot CPU/resource retirement path.
+	return packet.requirements(bounds)
 
 
 func _step(remaining_usec: int) -> bool:

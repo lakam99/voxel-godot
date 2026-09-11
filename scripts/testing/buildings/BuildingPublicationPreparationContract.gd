@@ -8,6 +8,7 @@ const Publisher = preload("res://scripts/buildings/BuildingPartPublisher.gd")
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Plan = preload("res://scripts/buildings/FurnishingPlan.gd")
 const Assembly = preload("res://scripts/buildings/PavingFootingAssemblyRecipe.gd")
+const Spatial = preload("res://scripts/buildings/BuildingSpatialDependencies.gd")
 const INPUT := "res://artifacts/citadel-runtime-integration/actual-site-source-05/result.bin"
 const SHA := "7a188cb480f3ed0332b0c568e86f18c061a265dd70a7bc3372ac7cbfd76144bf"
 const HISTORY := "res://artifacts/citadel-runtime-integration/publication-preflight-02/blueprint-mutation.bin"
@@ -153,6 +154,10 @@ static func _prepare() -> Dictionary:
 	var expected_furniture: Dictionary = fixture.furnishingPlan.duplicate(); expected_furniture.erase("accessReservations")
 	c.furniture_exact = var_to_bytes(payload.furnishingPlan.snapshot())==var_to_bytes(expected_furniture)
 	c.reservations_exact = payload.furnishingPlan.access_reservations_snapshot()==fixture.furnishingPlan.accessReservations
+	c.spatial_all_source_parts_owned = payload.spatialDependencies.parts.size()==payload.blueprint.parts.size()+payload.furnishingPlan.parts.size()
+	c.spatial_source_binding_exact = payload.spatialDependencies.binding==BINDING
+	c.spatial_containers_read_only = payload.spatialDependencies.parts.is_read_only() and payload.spatialDependencies.navigation.is_read_only()
+	_spatial_controls(c)
 	var synthetic := _synthetic_controls(c)
 	var cancellation_hits := [0]
 	var cancel_started := Time.get_ticks_usec()
@@ -164,7 +169,33 @@ static func _prepare() -> Dictionary:
 	c.fixture_hash_unchanged = FileAccess.get_sha256(INPUT)==SHA
 	return {"ready":true,"prepared":prepared.prepared,"failurePrepared":synthetic.prepared,"checks":c,"reportBytes":old_reports,"snapshotBytes":old_snapshot,
 		"threadId":OS.get_thread_caller_id(),"metrics":{"maxCallbackGapUsec":maximum_gap[0],"stages":stages,
-		"syntheticCancellationStages":synthetic.stageCount,"actualCancellationTotalUsec":cancellation_total}}
+		"syntheticCancellationStages":synthetic.stageCount,"actualCancellationTotalUsec":cancellation_total,
+		"spatialDependencies":payload.spatialDependencies.summary()}}
+
+static func _spatial_controls(c: Dictionary) -> void:
+	# Synthetic source closure, not physical support or gameplay acceptance.
+	var blueprint := Blueprint.new("synthetic_spatial", 3, "timber")
+	blueprint.add_part({"id":"crossing", "kind":"beam", "position":Vector3(0,4,0), "size":Vector3(4,1,2),
+		"recipe":{"physicalRequiredSupportPartIds":["remote_root"]}})
+	blueprint.add_part({"id":"remote_root", "kind":"beam", "position":Vector3(-90,0,0), "size":Vector3.ONE,
+		"recipe":{"physicalRoot":true, "physicalAnchorPartIds":["crossing", "absent"]}})
+	var plan := Plan.new("synthetic_furniture",3,blueprint.id)
+	var before := var_to_bytes(blueprint.snapshot())
+	var packet = Spatial.compile(blueprint,plan,BINDING,Vector3.ZERO,Callable())
+	c.spatial_synthetic_compiled = packet != null
+	if packet == null: return
+	c.spatial_single_owner_cross_boundary = packet.parts["building:crossing"].ownerCell==Vector2i.ZERO \
+		and packet.cells[Vector2i(-1,-1)].has("building:crossing") and packet.cells[Vector2i.ZERO].has("building:crossing")
+	c.spatial_negative_owner = packet.parts["building:remote_root"].ownerCell==Vector2i(-3,0)
+	var demand: Dictionary = packet.requirements(Rect2i(0,0,1,1))
+	c.spatial_support_closure_reaches_remote_root = demand.partIds.has("building:remote_root") and demand.terrainRootBounds.size()==1
+	c.spatial_cycle_terminates_and_missing_explicit = demand.partIds.size()==3 and demand.missingSourceIds==["building:absent"]
+	c.spatial_description_never_acknowledges_publication = demand.status=="described" and not demand.publicationAcknowledged
+	c.spatial_nested_containers_read_only = packet.parts["building:crossing"].is_read_only() \
+		and packet.parts["building:crossing"].dependencies.is_read_only() and packet.cells[Vector2i.ZERO].is_read_only()
+	c.spatial_source_unchanged = before==var_to_bytes(blueprint.snapshot())
+	c.spatial_cancel_discards_artifact = Spatial.compile(blueprint,plan,BINDING,Vector3.ZERO,func(stage): return stage!="publication_navigation_manifest")==null
+	c.spatial_invalid_query_failed = packet.requirements(Rect2i()).status=="failed"
 
 static func _synthetic_controls(c: Dictionary) -> Dictionary:
 	var b := VirtualBlueprint.new("synthetic",3,"timber")
