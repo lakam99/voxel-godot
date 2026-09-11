@@ -2979,10 +2979,20 @@ static func add_gatehouse_stair_bay(blueprint, center_x: float, span: float, cen
 	# Rotate the complete assembly, including its seats and bearing piers.
 	var stair_origin := Vector3(center_x, 0.0, center_z)
 	var stair_basis := Basis(Vector3.UP, PI)
+	var entry_floor: BuildingPart = null
 	for part_index in range(stair_start, blueprint.parts.size()):
 		var part = blueprint.parts[part_index]
 		part.position = stair_origin + stair_basis * (part.position - stair_origin)
 		part.rotation = (stair_basis * Basis.from_euler(part.rotation)).get_euler()
+		if part.id == "castle_gatehouse_wall_stair_base_landing": entry_floor = part
+	# Carry the finished entrance plane through the threshold. Dropping to the
+	# lower passage paving beside the carriage shoe leaves a foot-level snag.
+	var entry_min_z: float = entry_floor.position.z - entry_floor.size.z * 0.5
+	var entry_max_z := rear_z + shell_thickness * 0.5
+	entry_floor.position.z = (entry_min_z + entry_max_z) * 0.5
+	entry_floor.size.z = entry_max_z - entry_min_z
+	var fill_height := foundation_height + 0.10
+	add_part(blueprint, "castle_gatehouse_wall_stair_entry_underfill", "foundation", "stone_foundation", Vector3(center_x, fill_height * 0.5, entry_floor.position.z), Vector3(entry_floor.size.x, fill_height, entry_floor.size.z), {"variation": variation, "semantic": "castle_gatehouse_stair_entry_underfill", "navigationRole": "structural_mass"})
 
 
 static func add_gatehouse_roof_deck_with_stair_hatch(blueprint, width: float, depth: float, height: float, foundation_height: float, center_z: float, stair_center_x: float, stair_span: float, variation: float) -> void:
@@ -3016,13 +3026,23 @@ static func add_gatehouse_entry_steps(blueprint, opening_width: float, passage_f
 	# The gate is a real player/NPC entry, not a decorative opening raised above
 	# terrain. These shared construction parts make the exterior ground meet the
 	# published courtyard floor through climbable, collision-backed stone steps.
-	var step_count := 3
+	add_grounded_entry_approach(blueprint, "castle_gatehouse_entry", 0.0, exterior_gate_z, -1.0, opening_width + 0.72, passage_floor_top, variation)
+
+
+static func add_grounded_entry_approach(blueprint, prefix: String, center_x: float, threshold_z: float, outward: float, width: float, floor_top: float, variation: float) -> void:
+	# A flat landing carries a standing actor clear of the leaf before the
+	# descent. Each subsequent tread is a rooted solid, never a floating plate.
+	var landing_depth := 2.6
+	var step_count := maxi(1, ceili(floor_top / 0.28))
 	var tread_depth := 0.54
 	for step_index in range(step_count):
 		var progress := float(step_index + 1) / float(step_count)
-		var step_height := passage_floor_top * progress
-		var step_z := exterior_gate_z - tread_depth * (float(step_count - step_index) - 0.5)
-		add_part(blueprint, "castle_gatehouse_entry_step_%02d" % (step_index + 1), "foundation", "stone_foundation", Vector3(0.0, step_height * 0.5, step_z), Vector3(opening_width + 0.72, step_height, tread_depth + 0.03), {"variation": variation, "semantic": "castle_gatehouse_entry_step", "navigationRole": "walkable_support"})
+		var step_height := floor_top * progress
+		var is_landing := step_index == step_count - 1
+		var depth := landing_depth if is_landing else tread_depth
+		var distance := landing_depth * 0.5 if is_landing else landing_depth + tread_depth * (float(step_count - step_index - 1) - 0.5)
+		var step_z := threshold_z + outward * distance
+		add_part(blueprint, "%s_step_%02d" % [prefix, step_index + 1], "foundation", "stone_foundation", Vector3(center_x, step_height * 0.5, step_z), Vector3(width, step_height, depth + 0.03), {"variation": variation, "semantic": "%s_step" % prefix, "navigationRole": "walkable_support"})
 
 
 static func add_keep(blueprint, center: Vector3, width: float, depth: float, height: float, storey_count: int, floor_height: float, foundation_height: float, variation: float, masonry_material: String, palace_grammar: Dictionary = {}) -> bool:
@@ -3525,9 +3545,13 @@ static func add_keep_palace_rear_court(blueprint, center: Vector3, width: float,
 	for side in [-1.0, 1.0]:
 		var cross_height := hall_height * float(palace_grammar.get("rearCrossWingHeightRatio", 0.54)) * (1.10 if side == dominant_side else 0.90)
 		var cross_center := Vector3(center.x + side * width * 0.30, 0.0, rear_z + cross_depth * 0.30)
-		add_part(blueprint, "castle_keep_rear_cross_wing_%d" % int(side), "wall", masonry_material, Vector3(cross_center.x, foundation_height + cross_height * 0.5, cross_center.z), Vector3(cross_width, cross_height, cross_depth), {"variation": variation + side * 0.012, "semantic": "castle_keep_rear_cross_wing"})
 		var cross_wing_id := "castle_keep_rear_cross_wing_%d" % int(side)
-		add_keep_gabled_roof(blueprint, "castle_keep_rear_cross_wing_roof_%d" % int(side), cross_center, cross_width, cross_depth, foundation_height + cross_height, maxf(2.4, cross_width * 0.34), variation + side * 0.012, [cross_wing_id, cross_wing_id])
+		var roof_bearers: Array = [cross_wing_id, cross_wing_id]
+		if side == dominant_side:
+			roof_bearers = add_keep_rear_entry_shell(blueprint, cross_wing_id, cross_center, cross_width, cross_depth, cross_height, foundation_height, variation, masonry_material)
+		else:
+			add_part(blueprint, cross_wing_id, "wall", masonry_material, Vector3(cross_center.x, foundation_height + cross_height * 0.5, cross_center.z), Vector3(cross_width, cross_height, cross_depth), {"variation": variation + side * 0.012, "semantic": "castle_keep_rear_cross_wing"})
+		add_keep_gabled_roof(blueprint, "castle_keep_rear_cross_wing_roof_%d" % int(side), cross_center, cross_width, cross_depth, foundation_height + cross_height, maxf(2.4, cross_width * 0.34), variation + side * 0.012, roof_bearers)
 		var rear_face_z := cross_center.z + cross_depth * 0.5 + 0.39
 		for level in range(2):
 			for bay in range(3):
@@ -3536,10 +3560,32 @@ static func add_keep_palace_rear_court(blueprint, center: Vector3, width: float,
 					continue
 				add_part(blueprint, "castle_keep_rear_cross_recess_%d_%d_%d" % [int(side), level, bay], "decor", "window_recess", Vector3(window_x, foundation_height + 2.15 + float(level) * 3.15, rear_face_z), Vector3(1.06, 1.58, 0.14), {"collision": false, "variation": variation, "semantic": "castle_keep_rear_cross_blind_recess"})
 		if side == dominant_side:
-			add_part(blueprint, "castle_keep_rear_secondary_door", "door", "painted_door", Vector3(cross_center.x, foundation_height + 1.36, rear_face_z + 0.04), Vector3(1.42, 2.72, 0.18), {"variation": variation - 0.02, "semantic": "castle_keep_secondary_entry"})
+			add_part(blueprint, "castle_keep_rear_secondary_door", "door", "painted_door", Vector3(cross_center.x, foundation_height + 1.36, rear_face_z - 0.09), Vector3(1.42, 2.72, 0.18), {"rotation": Vector3(0.0, PI, 0.0), "variation": variation - 0.02, "semantic": "castle_keep_secondary_entry"})
 			for jamb_side in [-1.0, 1.0]:
-				add_part(blueprint, "castle_keep_rear_secondary_jamb_%d" % int(jamb_side), "wall", masonry_material, Vector3(cross_center.x + jamb_side * 0.94, foundation_height + 1.36, rear_face_z - 0.28), Vector3(0.36, 2.72, 0.42), {"collision": false, "variation": variation - 0.018 + jamb_side * 0.004, "semantic": "castle_keep_secondary_entry_jamb", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": [cross_wing_id], "physicalRequiredAnchorFacts": [{"anchorId": cross_wing_id, "contactMode": "attachment_socket", "localMountCenter": Vector3(0.0, 0.0, -0.17), "localMountHalfExtents": Vector3(0.025, 0.025, 0.018)}]})
-			add_part(blueprint, "castle_keep_rear_secondary_lintel", "beam", "stone_foundation", Vector3(cross_center.x, foundation_height + 3.02, rear_face_z - 0.26), Vector3(2.38, 0.44, 0.42), {"collision": false, "variation": variation - 0.02, "semantic": "castle_keep_secondary_entry", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": [cross_wing_id], "physicalRequiredAnchorFacts": [{"anchorId": cross_wing_id, "contactMode": "attachment_socket", "localMountCenter": Vector3(0.0, 0.0, -0.17), "localMountHalfExtents": Vector3(0.025, 0.025, 0.018)}]})
+				var anchor_id := "%s_rear_%d" % [cross_wing_id, int(jamb_side)]
+				add_part(blueprint, "castle_keep_rear_secondary_jamb_%d" % int(jamb_side), "wall", masonry_material, Vector3(cross_center.x + jamb_side * 0.94, foundation_height + 1.36, rear_face_z - 0.28), Vector3(0.36, 2.72, 0.42), {"collision": false, "variation": variation - 0.018 + jamb_side * 0.004, "semantic": "castle_keep_secondary_entry_jamb", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": [anchor_id], "physicalRequiredAnchorFacts": [{"anchorId": anchor_id, "contactMode": "attachment_socket", "localMountCenter": Vector3(0.0, 0.0, -0.17), "localMountHalfExtents": Vector3(0.025, 0.025, 0.018)}]})
+			var header_id := cross_wing_id + "_rear_header"
+			add_part(blueprint, "castle_keep_rear_secondary_lintel", "beam", "stone_foundation", Vector3(cross_center.x, foundation_height + 3.02, rear_face_z - 0.26), Vector3(2.38, 0.44, 0.42), {"collision": false, "variation": variation - 0.02, "semantic": "castle_keep_secondary_entry", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": [header_id], "physicalRequiredAnchorFacts": [{"anchorId": header_id, "contactMode": "attachment_socket", "localMountCenter": Vector3(0.0, 0.0, -0.17), "localMountHalfExtents": Vector3(0.025, 0.025, 0.018)}]})
+			add_grounded_entry_approach(blueprint, "castle_keep_rear_approach", cross_center.x, rear_face_z - 0.39, 1.0, 2.6, foundation_height + 0.20, variation)
+
+
+static func add_keep_rear_entry_shell(blueprint, prefix: String, center: Vector3, width: float, depth: float, height: float, base_y: float, variation: float, material: String) -> Array:
+	var wall := 0.62
+	var rear_z := center.z + depth * 0.5
+	var doorway_width := 1.60
+	var door_height := 2.72
+	add_part(blueprint, prefix + "_foundation", "foundation", "stone_foundation", Vector3(center.x, base_y * 0.5, center.z), Vector3(width, base_y, depth), {"variation": variation, "semantic": "castle_keep_rear_foundation"})
+	add_part(blueprint, prefix + "_floor", "floor", "stone_foundation", Vector3(center.x, base_y + 0.10, center.z), Vector3(width - wall, 0.20, depth), {"variation": variation, "semantic": "castle_keep_rear_floor"})
+	var bearers: Array = []
+	for side in [-1.0, 1.0]:
+		var id := prefix if side < 0.0 else prefix + "_right_wall"
+		bearers.append(id)
+		add_part(blueprint, id, "wall", material, Vector3(center.x + side * (width - wall) * 0.5, base_y + height * 0.5, center.z), Vector3(wall, height, depth), {"variation": variation, "semantic": "castle_keep_rear_cross_wing"})
+		var panel_width := (width - doorway_width) * 0.5
+		add_part(blueprint, "%s_rear_%d" % [prefix, int(side)], "wall", material, Vector3(center.x + side * (doorway_width + panel_width) * 0.5, base_y + height * 0.5, rear_z - wall * 0.5), Vector3(panel_width, height, wall), {"variation": variation, "semantic": "castle_keep_rear_entry_wall"})
+	add_part(blueprint, prefix + "_front_wall", "wall", material, Vector3(center.x, base_y + height * 0.5, center.z - (depth - wall) * 0.5), Vector3(width, height, wall), {"variation": variation, "semantic": "castle_keep_rear_cross_wing"})
+	add_part(blueprint, prefix + "_rear_header", "wall", material, Vector3(center.x, base_y + door_height + (height - door_height) * 0.5, rear_z - wall * 0.5), Vector3(doorway_width, height - door_height, wall), {"variation": variation, "semantic": "castle_keep_rear_entry_header"})
+	return bearers
 
 
 static func add_keep_palace_window_rhythm(blueprint, center: Vector3, width: float, depth: float, hall_height: float, foundation_height: float, variation: float, palace_grammar: Dictionary) -> void:

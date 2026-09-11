@@ -36,6 +36,18 @@ func _run() -> void:
 			if not link.get("endpointCertification", {}).get("resolved", false): unresolved.append(link)
 		checks[spec.id+"_source_crossing_endpoints_clear"] = not navigation.verticalLinks.is_empty() and unresolved.is_empty()
 		evidence[spec.id+"_unresolved_crossings"] = unresolved
+		for support: Dictionary in navigation.supports:
+			if not String(support.sourcePartId).ends_with("_base_landing"): continue
+			var requested: Vector3 = support.worldPosition + Vector3(0, 0, 0.116)
+			var staging := Navigation._nearest_safe_door_staging_position(requested, Vector3.BACK, support)
+			checks[spec.id+"_narrow_landing_staging"] = staging.get("resolved", false) and absf(staging.position.z - support.worldPosition.z) < 0.0002
+			evidence[spec.id+"_landing_staging"] = staging
+			# Synthetic obstacle controls on the actual producer's landing.
+			var obstruction: Array[Dictionary] = [{"bounds": AABB(support.worldPosition + Vector3(0.7, 0, -1.0), Vector3(0.2, 2.0, 2.0))}]
+			var avoided := Navigation._nearest_safe_door_staging_position(support.worldPosition + Vector3(0.8, 0, 0), Vector3.RIGHT, support, obstruction)
+			checks[spec.id+"_staging_avoids_obstacle"] = avoided.get("resolved", false) and avoided.position.x < support.worldPosition.x + 0.18
+			obstruction[0].bounds = AABB(support.worldPosition - Vector3(5.0, 0, 5.0), Vector3(10.0, 2.0, 10.0))
+			checks[spec.id+"_covered_staging_rejected"] = not Navigation._nearest_safe_door_staging_position(support.worldPosition, Vector3.RIGHT, support, obstruction).get("resolved", false)
 		var world := Node3D.new()
 		root.add_child(world)
 		var pub := Publisher.new()

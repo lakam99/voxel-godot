@@ -12,6 +12,7 @@ const Furnishing = preload("res://scripts/buildings/FurnishingPart.gd")
 const FurnishingPlan = preload("res://scripts/buildings/FurnishingPlan.gd")
 const Terraces = preload("res://scripts/buildings/ResidentialTerraceCarvingRecipe.gd")
 const Support = preload("res://scripts/buildings/CivicCourtyardSupport.gd")
+const Navigation = preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 const CLEARANCE := 0.25
 const MAX_PARTS := 10000
 
@@ -257,6 +258,8 @@ static func _house_geometry(source) -> Dictionary:
 		if not Placement._valid_box(box): return _fail("invalid_civic_house_bounds")
 		bounds=box if first else bounds.merge(box)
 		first=false
+		if part.kind == "door":
+			bounds = bounds.merge(Navigation.door_staging_reservation(part, source.part_transform(part)))
 	for room: Dictionary in source.rooms:
 		for access: Dictionary in room.get("accesses",[]):
 			var box := Interior.access_reservation(access)

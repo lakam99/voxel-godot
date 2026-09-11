@@ -289,10 +289,17 @@ func _capture_inspection_views() -> Dictionary:
 	views.append({"label":"courtyard_overview","position":center+Vector3(0,bounds.size.y*1.6,bounds.size.z*0.12),"target":center})
 	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
 		var pose: Transform3D=sample.transform
-		var local_view := Vector3(0,sample.size.y*0.5+1.6,-1.0)
+		var local_view := Vector3(0,sample.size.y*0.5+1.6,0.0)
 		var local_target := Vector3(0,sample.size.y*0.5+0.3,1.5)
 		if sample.kind=="door": local_view=Vector3(0,0.3,-2.0); local_target=Vector3.ZERO
-		views.append({"label":sample.id,"position":pose*local_view,"target":pose*local_target})
+		var view_position := pose*local_view
+		if sample.kind=="door":
+			# A narrow street can put the nominal camera inside the opposite wall.
+			# Clamp only the observer against actual live collision, not the player.
+			var start := pose*Vector3(0,0.3,-0.3)
+			var hit: Dictionary = main.get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(start,view_position,player.collision_mask,[player.get_rid()]))
+			if not hit.is_empty(): view_position=hit.position+(start-view_position).normalized()*0.20
+		views.append({"label":sample.id,"position":view_position,"target":pose*local_target})
 	for sample: Dictionary in evidence.sceneAudit.furnitureSamples.slice(0,2):
 		var body := main.get_node_or_null(NodePath(sample.path)) as Node3D
 		if body==null: return {"passed":false,"reason":"furniture_sample_disappeared"}
@@ -696,7 +703,7 @@ func _audit_scene() -> Dictionary:
 						if not node.shape is BoxShape3D or node.shape.size!=record.size or not node.global_transform.is_equal_approx(expected): result.collisionMismatches.append(part_id)
 						seen_collisions[part_id]=true
 						var semantic := String(record.get("semantic",""))
-						if semantic in ["castle_keep_stair_exit","castle_keep_stair_landing","castle_gatehouse_wall_stair_exit","castle_gatehouse_wall_stair_landing","citadel_upper_lane"] or part_id in ["urban_row_00_left_door","urban_row_00_right_door","urban_row_03_left_door","urban_row_03_right_door"]:
+						if semantic in ["castle_keep_stair_exit","castle_keep_stair_landing","castle_gatehouse_wall_stair_exit","castle_gatehouse_wall_stair_landing","citadel_upper_lane"] or part_id in ["urban_row_00_left_door","urban_row_00_right_door","urban_row_03_left_door","urban_row_03_right_door","castle_gatehouse_wall_stair_door","castle_gatehouse_portcullis","castle_keep_rear_secondary_door","urban_civic_house_wall_door"]:
 							result.structureSamples.append({"id":part_id,"kind":record.kind,"semantic":semantic,"transform":node.global_transform,"size":record.size})
 				if result.physicsProbes.size()<8 and node.get_parent() is StaticBody3D:
 					var query := PhysicsShapeQueryParameters3D.new()
@@ -740,7 +747,9 @@ func _audit_stair_clearance() -> Dictionary:
 	var capsule := CapsuleShape3D.new()
 	capsule.radius=0.42; capsule.height=1.72
 	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
-		if not String(sample.semantic).begins_with("castle_"): continue
+		# Door inspection views are not standing surfaces. Preserve every stair
+		# landing probe when adding other source parts to the capture inventory.
+		if sample.kind != "floor" or not String(sample.semantic).begins_with("castle_"): continue
 		var pose: Transform3D=sample.transform
 		var lateral: float=(float(sample.size.x)+0.18)*0.20
 		for offset: float in [-lateral,0.0,lateral]:

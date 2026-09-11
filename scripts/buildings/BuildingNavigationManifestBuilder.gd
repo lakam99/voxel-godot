@@ -8,14 +8,13 @@ class_name BuildingNavigationManifestBuilder
 const NpcConstantsScript := preload("res://scripts/buildings/layout/BuildingLayoutConstants.gd")
 const BuildingNavigationTransitionCertifierScript := preload("res://scripts/buildings/BuildingNavigationTransitionCertifier.gd")
 
-const SCHEMA_VERSION := 8
+const SCHEMA_VERSION := 9
 const CELL := NpcConstantsScript.CELL_SIZE
 const MIN_WALKABLE_NORMAL_Y := 0.68
 const DOOR_PORTAL_CLEARANCE := NpcConstantsScript.DEFAULT_NPC_RADIUS + 0.24
 const DOOR_PORTAL_SUPPORT_INSET := CELL * 0.18
 const DOOR_PORTAL_MIN_STAGING_DISTANCE := CELL * 1.10
 const DOOR_PORTAL_STAGING_CLEARANCE := NpcConstantsScript.DEFAULT_NPC_RADIUS + NpcConstantsScript.DEFAULT_PERSONAL_SPACE_MARGIN
-const DOOR_PORTAL_STAGING_STEP := CELL * 0.08
 const DOOR_PORTAL_STAGING_MAX_ADJUSTMENT := CELL * 0.90
 const DOOR_PORTAL_MAX_SUPPORT_HEIGHT_DELTA := CELL * 0.82
 const SUPPORT_SEAM_MIN_NORMAL_Y := 0.985
@@ -880,8 +879,8 @@ static func _resolve_door_portal_supports(door_fact: Dictionary, supports: Array
 	exterior += outward * DOOR_PORTAL_SUPPORT_INSET
 	var floor_y := minf(interior.y, exterior.y)
 	var interior_owner_prefix := _door_interior_support_owner_prefix(String(door_fact.get("sourcePartId", "")))
-	var interior_resolution := _door_staging_resolution(supports, static_collision_parts, interior, floor_y, outward, interior_owner_prefix)
-	var exterior_resolution := _door_staging_resolution(supports, static_collision_parts, exterior, floor_y, outward)
+	var interior_resolution := _door_staging_resolution(supports, static_collision_parts, interior, floor_y, outward, interior_owner_prefix, door_fact.position)
+	var exterior_resolution := _door_staging_resolution(supports, static_collision_parts, exterior, floor_y, outward, "", door_fact.position)
 	var interior_support: Dictionary = interior_resolution.get("support", {}) as Dictionary
 	var exterior_support: Dictionary = exterior_resolution.get("support", {}) as Dictionary
 	if not bool(interior_resolution.get("resolved", false)) or not bool(exterior_resolution.get("resolved", false)):
@@ -954,7 +953,7 @@ static func _door_interior_support_owner_prefix(source_part_id: String) -> Strin
 	return source_part_id.left(delimiter + 2) if delimiter >= 0 else ""
 
 
-static func _door_staging_resolution(supports: Array[Dictionary], static_collision_parts: Array[Dictionary], requested_position: Vector3, floor_y: float, crossing_axis: Vector3, source_part_prefix := "") -> Dictionary:
+static func _door_staging_resolution(supports: Array[Dictionary], static_collision_parts: Array[Dictionary], requested_position: Vector3, floor_y: float, crossing_axis: Vector3, source_part_prefix := "", door_position := Vector3.INF) -> Dictionary:
 	var direction := crossing_axis
 	direction.y = 0.0
 	if direction.length_squared() <= 0.0001:
@@ -996,7 +995,7 @@ static func _door_staging_resolution(supports: Array[Dictionary], static_collisi
 				"adjustment": INF
 			})
 			continue
-		var staging := _nearest_safe_door_staging_position(requested_position, direction, support)
+		var staging := _nearest_safe_door_staging_position(requested_position, direction, support, static_collision_parts, door_position)
 		var candidate: Dictionary = {
 			"supportId": support_id,
 			"supportSurfaceY": support_y,
@@ -1008,6 +1007,9 @@ static func _door_staging_resolution(supports: Array[Dictionary], static_collisi
 			"edgeClearance": float(staging.get("edgeClearance", -1.0)),
 			"adjustment": float(staging.get("adjustment", INF))
 		}
+		if not (staging.get("blocker", {}) as Dictionary).is_empty():
+			candidate["blocker"] = staging.blocker
+			if first_collision_blocker.is_empty(): first_collision_blocker = staging.blocker
 		if bool(staging.get("resolved", false)):
 			var position: Vector3 = staging.get("position", requested_position) as Vector3
 			position.y = _support_surface_y(support, position) + 0.04
@@ -1140,29 +1142,71 @@ static func _support_footprint_area(support: Dictionary) -> float:
 	return absf(signed_area) * 0.5
 
 
-static func _nearest_safe_door_staging_position(requested_position: Vector3, direction: Vector3, support: Dictionary) -> Dictionary:
-	var step_count := ceili(DOOR_PORTAL_STAGING_MAX_ADJUSTMENT / DOOR_PORTAL_STAGING_STEP)
-	for step_index in range(step_count + 1):
-		var offsets: Array[float] = []
-		if step_index == 0:
-			offsets.append(0.0)
-		else:
-			offsets.append(-float(step_index) * DOOR_PORTAL_STAGING_STEP)
-			offsets.append(float(step_index) * DOOR_PORTAL_STAGING_STEP)
-		for offset in offsets:
-			var candidate := requested_position + direction * offset
-			var clearance := _support_edge_clearance(candidate, support)
-			if not bool(clearance.get("inside", false)):
-				continue
-			if float(clearance.get("distance", 0.0)) + 0.0001 < DOOR_PORTAL_STAGING_CLEARANCE:
-				continue
-			return {
-				"resolved": true,
-				"position": candidate,
-				"adjustment": absf(offset),
-				"edgeClearance": float(clearance.get("distance", 0.0)),
-				"reason": ""
-			}
+static func _nearest_safe_door_staging_position(requested_position: Vector3, direction: Vector3, support: Dictionary, static_collision_parts: Array[Dictionary] = [], door_position := Vector3.INF) -> Dictionary:
+	# Every source support is a convex box top. Clip the permitted movement
+	# interval against its inset edges; a fixed step skips valid narrow landings.
+	var polygon: Array = support.get("polygon", [])
+	var low := -DOOR_PORTAL_STAGING_MAX_ADJUSTMENT
+	var high := DOOR_PORTAL_STAGING_MAX_ADJUSTMENT
+	var center := Vector2.ZERO
+	for point: Vector3 in polygon: center += Vector2(point.x, point.z)
+	if polygon.size() >= 3:
+		center /= float(polygon.size())
+		for index in range(polygon.size()):
+			var start: Vector3 = polygon[index]
+			var end: Vector3 = polygon[(index + 1) % polygon.size()]
+			var edge := Vector2(end.x - start.x, end.z - start.z)
+			if edge.length_squared() <= 0.00000001: low = INF; break
+			var inward := Vector2(-edge.y, edge.x).normalized()
+			var anchor := Vector2(start.x, start.z)
+			if inward.dot(center - anchor) < 0.0: inward = -inward
+			var distance := inward.dot(Vector2(requested_position.x, requested_position.z) - anchor)
+			var rate := inward.dot(Vector2(direction.x, direction.z))
+			if absf(rate) < 0.000001:
+				if distance + 0.0001 < DOOR_PORTAL_STAGING_CLEARANCE: low = INF; break
+			elif rate > 0.0:
+				low = maxf(low, (DOOR_PORTAL_STAGING_CLEARANCE - distance) / rate)
+			else:
+				high = minf(high, (DOOR_PORTAL_STAGING_CLEARANCE - distance) / rate)
+		if low <= high + 0.0002:
+			# Match the existing final edge tolerance for stored Vector3 rounding.
+			var offset := (low + high) * 0.5 if low > high else clampf(0.0, low, high)
+			var offsets: Array[float] = [offset]
+			if low <= high:
+				offsets.append(low)
+				offsets.append(high)
+				# Candidate changes come from actual obstacle boundaries, not a
+				# search lattice. Final footprint and headroom checks remain exact.
+				var first := requested_position + direction * low
+				var last := requested_position + direction * high
+				var radius := DOOR_PORTAL_STAGING_CLEARANCE
+				for fact: Dictionary in static_collision_parts:
+					var bounds: AABB = fact.get("bounds", AABB())
+					if bounds.end.x < minf(first.x, last.x) - radius or bounds.position.x > maxf(first.x, last.x) + radius: continue
+					if bounds.end.z < minf(first.z, last.z) - radius or bounds.position.z > maxf(first.z, last.z) + radius: continue
+					for axis: int in [0, 2]:
+						if absf(direction[axis]) < 0.000001: continue
+						for edge: float in [bounds.position[axis] - radius - 0.001, bounds.end[axis] + radius + 0.001]:
+							var boundary := (edge - requested_position[axis]) / direction[axis]
+							if boundary >= low and boundary <= high: offsets.append(boundary)
+				offsets.sort_custom(func(a: float, b: float): return absf(a) < absf(b) if not is_equal_approx(absf(a), absf(b)) else a < b)
+			var first_blocker := {}
+			for candidate_offset: float in offsets:
+				var candidate := requested_position + direction * candidate_offset
+				var clearance := _support_edge_clearance(candidate, support)
+				if not bool(clearance.get("inside", false)) or float(clearance.get("distance", 0.0)) + 0.0001 < DOOR_PORTAL_STAGING_CLEARANCE: continue
+				candidate.y = _support_surface_y(support, candidate) + 0.04
+				var blocker := _static_collision_blocking_npc_clearance(candidate, static_collision_parts)
+				if blocker.is_empty() and door_position.is_finite():
+					var threshold := Vector3(door_position.x, candidate.y, door_position.z)
+					blocker = _support_seam_link_blocker(threshold, candidate, static_collision_parts)
+				if not blocker.is_empty():
+					if first_blocker.is_empty(): first_blocker = blocker
+					continue
+				return {"resolved": true, "position": candidate, "adjustment": absf(candidate_offset),
+					"edgeClearance": float(clearance.distance), "reason": ""}
+			if not first_blocker.is_empty():
+				return {"resolved": false, "reason": "endpoint_embedded_in_static_collision", "blocker": first_blocker}
 	var requested_clearance := _support_edge_clearance(requested_position, support)
 	return {
 		"resolved": false,
@@ -1170,6 +1214,19 @@ static func _nearest_safe_door_staging_position(requested_position: Vector3, dir
 		"adjustment": INF,
 		"edgeClearance": float(requested_clearance.get("distance", -1.0))
 	}
+
+
+static func door_staging_reservation(part, source_transform: Transform3D) -> AABB:
+	var bounds := _box_bounds(source_transform, part.size)
+	var fact := _door_fact("", part, source_transform, bounds)
+	var outward: Vector3 = fact.outward
+	var inside: Vector3 = fact.interior - outward * DOOR_PORTAL_SUPPORT_INSET
+	var outside: Vector3 = fact.exterior + outward * DOOR_PORTAL_SUPPORT_INSET
+	var radius := DOOR_PORTAL_STAGING_CLEARANCE
+	var result := AABB(inside, Vector3.ZERO).expand(outside)
+	result.position -= Vector3(radius, 0.0, radius)
+	result.size += Vector3(radius * 2.0, NpcConstantsScript.DEFAULT_NPC_STANDING_HEIGHT, radius * 2.0)
+	return result
 
 
 static func _support_edge_clearance(position: Vector3, support: Dictionary) -> Dictionary:
