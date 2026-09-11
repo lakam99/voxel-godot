@@ -48,6 +48,7 @@ var rebuild_count := 0
 var last_rebuild_usec := 0
 var door_link_records_by_region := {}
 var door_link_records_by_portal := {}
+var crossing_link_records_by_region := {}
 var door_portal_states := {}
 ## Bounded by retained descriptors, including unloaded/empty regions. These
 ## indexes also locate links if one installed-link index needs retirement repair.
@@ -81,6 +82,7 @@ func clear() -> void:
 	dirty_region_queue.clear()
 	door_link_records_by_region.clear()
 	door_link_records_by_portal.clear()
+	crossing_link_records_by_region.clear()
 	door_portal_states.clear()
 	_door_descriptor_regions_by_portal.clear()
 	_door_descriptor_portals_by_region.clear()
@@ -130,6 +132,9 @@ func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 	var region_id := String(descriptor.get("region_id"))
 	if region_id == "":
 		return { "status": "rejected", "reason": "missing_region_id" }
+	var crossing_error := _crossing_descriptor_error(descriptor)
+	if not crossing_error.is_empty():
+		return {"status":"rejected","reason":crossing_error}
 	var signature: String = String(descriptor.stable_signature()) if descriptor.has_method("stable_signature") else ""
 	var existing_metrics: Dictionary = region_metrics_by_region.get(region_id, {})
 	if signature != "" \
@@ -411,7 +416,7 @@ func _filter_descriptor_door(region_id: String, portal_id: String) -> bool:
 	# NavigationBakeDescriptor's ordinary data schema; retain all geometry arrays
 	# by identity. Only the descriptor shell and its two door arrays are new.
 	var filtered = NavigationBakeDescriptorScript.new()
-	for property: String in ["region_id", "tile_key", "bounds", "revision", "loaded", "metadata", "walkable_surfaces", "blockers", "semantic_anchors"]:
+	for property: String in ["region_id", "tile_key", "bounds", "revision", "loaded", "metadata", "walkable_surfaces", "blockers", "semantic_anchors", "crossing_links"]:
 		filtered.set(property, descriptor.get(property))
 	filtered.door_portals = portals
 	filtered.door_links = links
@@ -843,6 +848,9 @@ func tile_publication_readiness(tile_key: String, expected_source_key: String, r
 		if NavigationServer3D.link_get_start_position(link.rid) != link.start \
 				or NavigationServer3D.link_get_end_position(link.rid) != link.end:
 			return _publication_result(result, "failed", "installed_link_geometry_changed")
+		if link.get("physicalCrossing",false) and (not NavigationServer3D.link_get_enabled(link.rid) \
+				or NavigationServer3D.link_is_bidirectional(link.rid) != bool(link.bidirectional)):
+			return _publication_result(result,"failed","installed_crossing_state_changed")
 	if not result.missingLinkIds.is_empty():
 		return _publication_result(result, "failed", "required_links_missing")
 	# A positive map iteration alone can describe an older installation.
@@ -889,13 +897,16 @@ func _record_tile_publication(region_id: String, descriptor, source_key: String,
 	missing_declared.make_read_only()
 	var links: Dictionary = {}
 	var duplicate_links: Dictionary = {}
-	for value in door_link_records_by_region.get(region_id, []):
+	for value in door_link_records_by_region.get(region_id, []) + crossing_link_records_by_region.get(region_id, []):
 		var record: Dictionary = value
 		var id := String(record.get("linkId", ""))
 		if id.is_empty(): continue
 		if links.has(id) or duplicate_links.has(id):
 			links.erase(id); duplicate_links[id] = true; continue
 		var link := {"rid":record.rid,"start":record.start,"end":record.end}
+		if record.get("physicalCrossing",false):
+			link["physicalCrossing"] = true
+			link["bidirectional"] = record.bidirectional
 		link.make_read_only()
 		links[id] = link
 	surfaces.make_read_only()
@@ -1056,6 +1067,7 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	region_rids_by_region[region_id] = region_rid
 	region_ids_by_rid[region_rid] = region_id
 	var link_metrics := _install_door_links_for_region(region_id, descriptor)
+	var crossing_metrics := _install_crossing_links_for_region(region_id, descriptor)
 	last_install_usec = Time.get_ticks_usec() - started
 	_record_timing_sample(install_duration_samples_usec, last_install_usec)
 	installed_region_count += 1
@@ -1065,7 +1077,8 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		"polygonCount": polygon_count,
 		"vertexCount": vertex_count,
 		"durationUsec": last_install_usec,
-		"doorLinks": link_metrics
+		"doorLinks": link_metrics,
+		"crossingLinks": crossing_metrics
 	}
 	region_metrics_by_region[region_id] = metrics
 	_record_tile_publication(region_id, descriptor, "", region_rid, navigation_mesh, surface_polygons)
@@ -1220,6 +1233,10 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 func _release_region(region_id: String) -> void:
 	_tile_publication_receipts.erase(region_id)
 	_release_door_links_for_region(region_id)
+	for record in crossing_link_records_by_region.get(region_id,[]):
+		NavigationServer3D.free_rid(record.rid)
+		_mark_navigation_map_dirty()
+	crossing_link_records_by_region.erase(region_id)
 	if not region_rids_by_region.has(region_id):
 		return
 	var region_rid: RID = region_rids_by_region[region_id]
@@ -1729,6 +1746,44 @@ func _route_query_failure(status: String, reason: String, start: Vector3, target
 		for key in (details as Dictionary).keys():
 			result[key] = (details as Dictionary)[key]
 	return result
+
+func _crossing_descriptor_error(descriptor) -> String:
+	var ids := {}
+	for crossing in _descriptor_array(descriptor,"crossing_links"):
+		if not crossing is Dictionary: return "invalid_physical_crossing"
+		var id := String(crossing.get("id",""))
+		var start = crossing.get("start")
+		var end = crossing.get("end")
+		if id.is_empty() or ids.has(id) or not start is Vector3 or not end is Vector3:
+			return "invalid_physical_crossing_identity"
+		if not start.is_finite() or not end.is_finite() or start.is_equal_approx(end):
+			return "invalid_physical_crossing_geometry"
+		if String(crossing.get("ownerTileKey","")) != String(descriptor.get("tile_key")):
+			return "physical_crossing_owner_mismatch"
+		if String(crossing.get("kind","")) not in ["stair_ramp","support_seam","interior_passage","porch"]:
+			return "invalid_physical_crossing_kind"
+		if crossing.has("portalId") or crossing.has("actionId") or crossing.has("door"):
+			return "physical_crossing_contains_door_action"
+		ids[id] = true
+	return ""
+
+func _install_crossing_links_for_region(region_id: String, descriptor) -> Dictionary:
+	var records: Array[Dictionary] = []
+	for crossing in _descriptor_array(descriptor,"crossing_links"):
+		var rid := NavigationServer3D.link_create()
+		NavigationServer3D.link_set_map(rid,navigation_map)
+		NavigationServer3D.link_set_start_position(rid,crossing.start)
+		NavigationServer3D.link_set_end_position(rid,crossing.end)
+		var bidirectional := bool(crossing.get("bidirectional",true))
+		NavigationServer3D.link_set_bidirectional(rid,bidirectional)
+		NavigationServer3D.link_set_navigation_layers(rid,1)
+		NavigationServer3D.link_set_enter_cost(rid,0.0)
+		NavigationServer3D.link_set_travel_cost(rid,1.0)
+		NavigationServer3D.link_set_enabled(rid,true)
+		records.append({"rid":rid,"linkId":crossing.id,"start":crossing.start,"end":crossing.end,
+			"physicalCrossing":true,"bidirectional":bidirectional})
+	if not records.is_empty(): crossing_link_records_by_region[region_id] = records
+	return {"installed":records.size()}
 
 func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary:
 	var door_portals: Array = _descriptor_array(descriptor, "door_portals")

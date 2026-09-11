@@ -307,7 +307,7 @@ func run() -> void:
 				return
 			write_progress("%s:%s" % [String(test_case.get("id", "")), mode])
 			var case_start := Time.get_unix_time_from_system()
-			var outcome: Dictionary = test_case["callable"].call(mode)
+			var outcome: Dictionary = await test_case["callable"].call(mode)
 			var duration := Time.get_unix_time_from_system() - case_start
 			add_result(
 				String(test_case.get("id", "")),
@@ -684,6 +684,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navmesh_service_installs_navigation_region", "test_navmesh_service_installs_navigation_region"],
 		["npc_navmesh_chunk_unload_cleans_region", "test_navmesh_chunk_unload_cleans_region"],
 		["npc_navmesh_door_portal_installs_nav_link", "test_navmesh_door_portal_installs_nav_link"],
+		["npc_navmesh_physical_crossing_publication", "test_navmesh_physical_crossing_publication"],
 		["npc_navmesh_route_through_door_link_emits_action", "test_navmesh_route_through_door_link_emits_action"],
 		["npc_navmesh_actor_path_status", "test_navmesh_actor_path_status"],
 		["npc_navmesh_door_state_toggles_nav_link", "test_navmesh_door_state_toggles_nav_link"],
@@ -3359,7 +3360,15 @@ func test_navmesh_tile_snapshot_descriptor_deterministic(_mode: String) -> Dicti
 	var second = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
 	var summary: Dictionary = first.to_summary()
 	var passed: bool = first.stable_signature() == second.stable_signature() and String(first.get("region_id")) == "region:chunk:2,-1" and summary.get("walkableSurfaces", []).size() == 2 and summary.get("blockers", []).size() == 1 and summary.get("doorPortals", []).size() == 1 and summary.get("doorLinks", []).size() == 1
-	return outcome(passed, "signature=%s summary=%s" % [first.stable_signature(), JSON.stringify(summary)], ["tile_snapshot_descriptor_deterministic", "tile_snapshot_keeps_blockers", "tile_snapshot_keeps_door_portals", "tile_snapshot_keeps_door_links"], { "summary": summary })
+	var polygon: Array[Vector3] = [Vector3(44,8,-22),Vector3(44,9,-20),Vector3(45,9,-20),Vector3(45,8,-22)]
+	snapshot["buildingSurfaces"] = [{"id":"sloped_source","polygon":polygon,"sourcePartId":"ramp"}]
+	snapshot["crossingLinks"] = [{"id":"physical_source","start":polygon[0],"end":polygon[1],"kind":"stair_ramp","ownerTileKey":"2,-1"}]
+	var spatial = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
+	var spatial_again = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
+	var spatial_parity: bool = spatial.walkable_surfaces.back().polygon==polygon \
+		and spatial.bounds.end.y==9.0 and spatial.crossing_links==snapshot.crossingLinks \
+		and spatial.stable_signature()==spatial_again.stable_signature() and first.stable_signature()!=spatial.stable_signature()
+	return outcome(passed and spatial_parity, "signature=%s summary=%s" % [first.stable_signature(), JSON.stringify(summary)], ["tile_snapshot_descriptor_deterministic", "tile_snapshot_keeps_blockers", "tile_snapshot_keeps_door_portals", "tile_snapshot_keeps_door_links","spatial_source_polygon_bounds_and_identity_preserved"], { "summary": summary,"spatialParity":spatial_parity })
 
 func test_navmesh_descriptor_keeps_door_links(_mode: String) -> Dictionary:
 	var first = NavigationBakeDescriptorScript.create("region:chunk:links", "links", AABB(Vector3.ZERO, Vector3(6, 2, 6)))
@@ -3431,6 +3440,53 @@ func test_navmesh_route_through_door_link_emits_action(_mode: String) -> Diction
 	service.clear()
 	var passed: bool = bool(route.get("ok", false)) and not door_action.is_empty() and String(door_action.get("kind", "")) == "door" and bool(door_action.get("requiresSmartObject", false)) and bool(door_action.get("navLink", false)) and int(stats.get("pathQueryFailureCount", 0)) == 0
 	return outcome(passed, "route=%s action=%s stats=%s" % [JSON.stringify(route), JSON.stringify(door_action), JSON.stringify(stats)], ["navmesh_query_uses_door_link", "door_link_route_emits_smart_object_action"], { "route": route, "action": door_action, "stats": stats })
+
+func test_navmesh_physical_crossing_publication(_mode: String) -> Dictionary:
+	# Synthetic platform geometry, actual NavigationServer registration/query.
+	# This does not prove generated stairs or collision-backed NPC movement.
+	var service = NavmeshWorldServiceScript.new()
+	service.setup(NavigationBackendConfigScript.from_value("navmesh","test"))
+	var descriptor = NavigationBakeDescriptorScript.create("region:chunk:0,0","0,0")
+	var start := Vector3.ZERO
+	var end := Vector3(0,2,6)
+	descriptor.add_walkable_surface("lower",start,Vector3(2,0.05,2))
+	descriptor.add_walkable_surface("upper",end,Vector3(2,0.05,2))
+	descriptor.add_crossing_link("stair",start,end,{"kind":"stair_ramp","ownerTileKey":"0,0"})
+	var installed: Dictionary = service.register_chunk_descriptor(descriptor,"source:1")
+	service.sync_navigation_map_if_dirty()
+	# The fixed-FPS runner can advance many physics frames before an asynchronous
+	# server iteration finishes. Wait for actual endpoint owners, with a deadline.
+	var sync_deadline := Time.get_ticks_msec()+2000
+	while Time.get_ticks_msec()<sync_deadline:
+		if NavigationServer3D.map_get_iteration_id(service.navigation_map)>0 \
+			and NavigationServer3D.map_get_closest_point_owner(service.navigation_map,start).is_valid() \
+			and NavigationServer3D.map_get_closest_point_owner(service.navigation_map,end).is_valid(): break
+		await get_tree().process_frame
+	var receipt: Dictionary = service.tile_publication_readiness("0,0","source:1",["lower","upper"],["stair"])
+	var route: Dictionary = service.query_route(start,end,{"maxSnapDistance":1.0})
+	var no_door_authority: bool = service.door_link_records_by_portal.is_empty() and route.get("actions",{}).is_empty()
+	var record: Dictionary = service.crossing_link_records_by_region.get("region:chunk:0,0",[{}])[0]
+	var rid: RID = record.get("rid",RID())
+	NavigationServer3D.link_set_enabled(rid,false)
+	service._mark_navigation_map_dirty()
+	service.sync_navigation_map_if_dirty()
+	var disabled: Dictionary = service.tile_publication_readiness("0,0","source:1",[],["stair"])
+	NavigationServer3D.link_set_enabled(rid,true)
+	service._mark_navigation_map_dirty()
+	service.sync_navigation_map_if_dirty()
+	var invalid = NavigationBakeDescriptorScript.create("region:chunk:0,0","0,0")
+	invalid.add_crossing_link("stair",start,end,{"kind":"stair_ramp","ownerTileKey":"1,0"})
+	var rejected: Dictionary = service.register_chunk_descriptor(invalid,"source:2")
+	var retained: Dictionary = service.tile_publication_readiness("0,0","source:1",[],["stair"])
+	service.unregister_chunk("region:chunk:0,0")
+	service.sync_navigation_map_if_dirty()
+	var retired: bool = not NavigationServer3D.map_get_links(service.navigation_map).has(rid) and service.crossing_link_records_by_region.is_empty()
+	service.clear()
+	var passed: bool = installed.get("installed",false) and receipt.status=="ready" and route.get("ok",false) \
+		and no_door_authority and disabled.reason=="installed_crossing_state_changed" \
+		and rejected.reason=="physical_crossing_owner_mismatch" and retained.status=="ready" and retired
+	return outcome(passed,"physical crossing registration, query, revocation and retirement",["physical_crossings_are_not_doors","crossing_receipt_checks_actual_server","invalid_replacement_preserves_owner"],
+		{"receipt":receipt,"route":route,"disabled":disabled,"rejected":rejected,"retained":retained,"retired":retired})
 
 func test_navmesh_actor_path_status(_mode: String) -> Dictionary:
 	var service = NavmeshWorldServiceScript.new()
