@@ -19,6 +19,8 @@ var _source_count := 0
 var _source_order: Array = []
 var _requests: Array = []
 var _by_id: Dictionary = {}
+var _source_indices: Dictionary = {}
+var _request_by_part: Dictionary = {}
 var _marked: Dictionary = {}
 var _declarations: Dictionary = {}
 var _artifacts: Dictionary = {}
@@ -82,6 +84,7 @@ func _advance_begin() -> void:
 		if part==null or part.id.is_empty() or _by_id.has(part.id):
 			_fail("invalid_source_ids"); return
 		_by_id[part.id]=part
+		_source_indices[part]=_begin_cursor-1
 		if part.recipe.has("masonryApertureSource"): _begin_marked.append(part)
 	elif _begin_stage=="requests":
 		if _begin_cursor==_begin_marked.size():
@@ -113,6 +116,7 @@ func _prepare_request(part) -> bool:
 	var snapshot: Dictionary=part.snapshot()
 	_requests.append({"part":part,"snapshot":snapshot,"source":var_to_bytes(snapshot),
 		"key":key,"record":_declarations[key].record,"volumes":_declarations[key].volumes})
+	_request_by_part[part]=_requests.back()
 	_marked[part.id]=part
 	return true
 
@@ -222,8 +226,7 @@ func ready_for(part, publisher) -> bool:
 	if state != "ready": return _fail("masonry_not_prepared")
 	if not validate_unit_source(publisher): return false
 	if not _context_matches(publisher): return _fail("stale_masonry_context")
-	var matches := _requests.filter(func(request): return request.part == part)
-	if matches.size() != 1 or not _artifacts.has(part.id): return _fail("unprepared_masonry_part")
+	if not _request_by_part.has(part) or not _artifacts.has(part.id): return _fail("unprepared_masonry_part")
 	return validate_publication_binding(part)
 
 func owns(part) -> bool:
@@ -231,8 +234,17 @@ func owns(part) -> bool:
 
 func accepts_source_member(part) -> bool:
 	if _requests.is_empty(): return true
-	if _blueprint.parts.size() != _source_count or _by_id.get(part.id) != part or not _blueprint.parts.has(part): return _fail("stale_source_membership")
+	if not _source_member_matches(part): return _fail("stale_source_membership")
 	return true
+
+func _source_member_matches(part) -> bool:
+	# Bind each object to its original slot, rather than scanning every source
+	# part for every aperture peer. Replacement, reordering and renamed objects
+	# still invalidate the receipt; geometry validation remains separate.
+	var index: int = _source_indices.get(part, -1)
+	return part != null and _blueprint.parts.size() == _source_count \
+		and index >= 0 and index < _blueprint.parts.size() \
+		and _blueprint.parts[index] == part and _by_id.get(part.id) == part
 
 func artifact(part) -> Dictionary:
 	return _artifacts.get(part.id, {}) if state == "ready" else {}
@@ -279,21 +291,19 @@ func _same_validated_geometry(key: String) -> bool:
 
 func _request_valid(request: Dictionary) -> bool:
 	if not accepts_source_member(request.part): return false
-	if not _blueprint.parts.has(request.part) or not _blueprint.recipe.get("facadeApertures") is Dictionary: return _fail("stale_masonry_source")
+	if not _blueprint.recipe.get("facadeApertures") is Dictionary: return _fail("stale_masonry_source")
 	if PartBinding.encode(request.part) != request.source or var_to_bytes(_blueprint.recipe.facadeApertures.get(request.key)) != request.record:
 		return _fail("stale_masonry_source")
 	return true
 
 func validate_publication_binding(part) -> bool:
-	var matches := _requests.filter(func(request): return request.part == part)
-	if matches.size() != 1 or not _request_valid(matches[0]): return _fail("stale_masonry_source")
-	var record: Dictionary = _blueprint.recipe.facadeApertures[matches[0].key]
-	var current: Dictionary = {}
+	var request: Dictionary = _request_by_part.get(part, {})
+	if request.is_empty() or not _request_valid(request): return _fail("stale_masonry_source")
+	var record: Dictionary = _blueprint.recipe.facadeApertures[request.key]
 	for id in record.partIds:
 		var peer: Variant = _by_id.get(id)
-		if peer == null or peer.id != id or not _blueprint.parts.has(peer): return _fail("stale_aperture_peer")
-		current[id] = peer
-	if not _same_validated_geometry(matches[0].key): return _fail("stale_aperture_geometry")
+		if peer == null or peer.id != id or not _source_member_matches(peer): return _fail("stale_aperture_peer")
+	if not _same_validated_geometry(request.key): return _fail("stale_aperture_geometry")
 	return true
 
 func unit_source_pending_matches(publisher) -> bool:

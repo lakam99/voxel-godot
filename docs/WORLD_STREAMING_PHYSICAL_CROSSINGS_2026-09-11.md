@@ -44,9 +44,10 @@ town/NPC broad checks, structure checks and interaction checks passed. The known
 `character_asset_pack_ready` failure remains (40 assets / 11 families). Two further
 failures, `generated_environment_prop_visuals` and
 `generated_environment_prop_authority_and_static_fallback`, report procedural trees
-still building at the fixture's 720-frame limit. Their baseline attribution is
-unresolved; they block full-candidate promotion. Do not relabel this run green or
-increase the fixture deadline without determining the production cause. The report
+still building at the fixture's 720-frame limit. The independent baseline run below
+reproduces both failures exactly. They are not new regressions in this candidate,
+but remain unresolved production/fixture readiness findings. Do not relabel this
+run green or increase the fixture deadline without determining the cause. The report
 records the requested seed above, but the broad fixture's own debug trace also
 reports atlas-1492; it does not establish fresh-seed ordinary gameplay acceptance.
 The final viewport capture was inspected. This broad fixture is integration
@@ -123,3 +124,64 @@ costs; retain source revisions and retryable demands; then verify genuine region
 acknowledgements and real NPC/player crossings. Whole-scene readiness currently
 still gates access to these artifacts. Continue's headed presentation verification,
 five-minute traversal and full cold/warm acceptance campaign remain outstanding.
+
+## Independent broad baseline and measured aperture publication improvement
+
+Detached reference checkout: `../voxel-biome-world-godot-streaming-reference-20260911`,
+unchanged `d6314ed`. Copied `.godot` and the two extension binary directories from
+the implementation checkout for runtime dependencies. This is a warm dependency
+cache reference, not cold-load acceptance. Command run there:
+
+```text
+node tools/run-playtest.mjs -Visible -Seed atlas-338921745 -ReportPath artifacts/citadel-runtime-integration/regional-crossings-baseline-broad-01/report.json -ProgressPath artifacts/citadel-runtime-integration/regional-crossings-baseline-broad-01/progress.txt -ScreenshotPath artifacts/citadel-runtime-integration/regional-crossings-baseline-broad-01/playtest.png -TimeoutSeconds 600
+```
+
+Result: 160/163, precisely the same three failures and details as the candidate.
+Natural exit 1, clean engine logs, owned zero proven by
+`artifacts/node-tools/process-runs/godot-tOQayS/watchdog.json` in that checkout.
+Inspected the final viewport: terrain and Mira dialogue are visible, with partial
+tree presentation. This attributes the failures; it does not accept tree quality.
+
+The candidate snapshot measured repeated linear source membership scans in aperture
+guards: each guard scanned thousands of parts for every declaration peer. The
+session now binds each object to its original source-array index and indexes its
+request by object identity. Membership, replacement, rename and order remain
+checked; exact source/declaration/peer geometry validation remains in place.
+No generation, rendering geometry, collision or route behavior is changed.
+
+```text
+node tools/run-building-contract.mjs -Contract MasonryAperturePublicationContract.gd -ReportEnvironment VOXEL_MASONRY_PUBLICATION_REPORT -OutputDirectory artifacts/citadel-runtime-integration/aperture-indexed-membership-01 -TimeoutSeconds 120
+node tools/run-citadel-candidate-teleport-playtest.mjs -Seed atlas-3376622889 -CandidateRegion "-2,-2" -SpawnCell "-3334,-2666" -SkipTutorial -ForceDaytime -ForceClearWeather -Resolution 1920x1080 -StartupTimeoutSeconds 180 -TimeoutSeconds 600 -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-indexed-membership-01
+```
+
+All 185 existing aperture session contract checks pass, with clean logs and owned
+cleanup. The complete headed diagnostic exits naturally with `scene_ready`, clean
+logs, unchanged launch-frozen sources and zero owned processes. Accepted source
+SHA-256 remains `dbe543f28dfe876f28ae8611d7e869f07975f69e09067b2fe5c88d56e3e4b042`.
+Both runs have 241,573 instances, 1,477 MultiMeshes, 739 meshes, 3,280 colliders,
+20 doors, 178 furniture bodies and four trees, with no source-binding or collision
+mismatches in the existing scene audit. These counts are not a full visual parity
+proof. Inspected initial spawn, courtyard and gatehouse stair-exit captures:
+terrain is continuous on release, courtyard geometry is present, and the stair-exit
+view remains obstructed. No stair-access or whole-site gameplay acceptance claimed.
+
+One paired headed observation (not a cold/warm acceptance campaign):
+
+| Measurement | Before | Indexed membership |
+| --- | ---: | ---: |
+| Aperture guard total CPU | 4.585s | 0.253s |
+| Aperture guard maximum | 11.490ms | 1.072ms |
+| Scene advance total CPU | 11.200s | 4.037s |
+| Part publication maximum | 22.863ms | 1.828ms |
+| Initial playable startup | 85.545s | 85.733s |
+| Complete diagnostic including captures | 165.221s | 145.747s |
+
+Guard calls decrease from 3,597 to 2,961 as fewer slices need resuming. The shorter
+diagnostic includes scheduling and capture variation; do not treat its entire
+19.474s difference as isolated CPU savings. The short input approach has 812 frame
+intervals, p99 18.4ms, max 20.023ms and none over 33ms. It does not substitute for
+five-minute ordinary traversal. Largest remaining scene atomic work is 26.439ms:
+unit-box array capture alone takes 21.571ms; final aperture checks and static
+metadata commit also exceed the 4ms budget. The broad suite was compared before
+this membership-only optimization; its subsequent verification consists of the
+existing aperture suite and the full headed production diagnostic above.
