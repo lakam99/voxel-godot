@@ -3724,9 +3724,16 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 	# express the staircase, while continuous hidden stringers provide smooth
 	# collision all the way between landings.  It is shared here so the keep and
 	# gatehouse do not grow competing vertical-movement implementations.
-	var run := maxf(1.42, span_depth - 0.72)
+	# Leave head/shoulder clearance at the turn beneath the enclosing floor
+	# trim and roof hatch. The full landing still carries each housed ramp end.
+	var run := maxf(1.42, span_depth - 1.08)
 	var half_rise := rise_per_level * 0.5
 	var angle := atan2(half_rise, run)
+	# The return flight's lower end projects farther into the half-level turn
+	# than its upper end projects onto the exit: its top plane is 0.14m above
+	# the housed contact plane. Centre that asymmetric envelope in the opening
+	# instead of steepening both flights to make room beneath the rear trim.
+	center.z -= 0.14 * sin(angle)
 	var ramp_width := clampf(span_width * 0.30, 0.70, 1.10)
 	var lateral_offset := minf(span_width * 0.20, maxf(0.34, span_width * 0.5 - ramp_width * 0.60))
 	var left_x := center.x - lateral_offset
@@ -3753,11 +3760,18 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 		add_stair_landing_frame(blueprint, base_underframe_id, base_pier_id, base_pier_center, level_base_y, span_width - 0.18, material, variation, semantic)
 		add_stair_landing_frame(blueprint, landing_underframe_id, landing_pier_id, landing_pier_center, level_base_y + half_rise, span_width - 0.18, material, variation, semantic)
 		add_stair_landing_frame(blueprint, exit_underframe_id, exit_pier_id, exit_pier_center, level_base_y + rise_per_level, span_width - 0.18, material, variation, semantic)
+		if level == 0:
+			# The first flight needs the same finished walking surface as later
+			# exits; otherwise its bearing shoe protrudes above the surrounding floor.
+			add_part(blueprint, "%s_base_landing" % prefix, "floor", material, Vector3(center.x, level_base_y, center.z - run * 0.5), Vector3(span_width - 0.18, 0.20, STAIR_LANDING_DEPTH), {"variation": variation, "semantic": "%s_landing" % semantic})
 		var up_assembly_id := "%s_up_%02d" % [prefix, level]
 		var up_lower_shoe_center := Vector3(left_x, level_base_y - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5)
 		var up_upper_shoe_center := Vector3(left_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5)
 		var up_geometry := stair_housed_geometry(up_lower_shoe_center, up_upper_shoe_center, 0.18)
 		add_part(blueprint, "%s_up_carriage_%02d" % [prefix, level], "ramp", material, up_geometry.get("center", Vector3.ZERO) as Vector3, Vector3(ramp_width, 0.18, float(up_geometry.get("length", run))), {"rotation": up_geometry.get("rotation", Vector3.ZERO) as Vector3, "variation": variation - 0.025, "semantic": "%s_visible_stair_carriage" % semantic, "physicalIntent": "structural_mass", "physicalAssemblyRole": "stair_sloped_span", "physicalStairAssemblyId": up_assembly_id, "physicalRequiredAssemblyBearingBlockIds": [up_lower_shoe_id, up_upper_shoe_id], "physicalRequiredSeatPartIds": [up_lower_shoe_id, up_upper_shoe_id], "physicalRequiredSeatFacts": [stair_housed_joint_fact(up_lower_shoe_id, -1.0, up_geometry), stair_housed_joint_fact(up_upper_shoe_id, 1.0, up_geometry)]})
+		var up_carriage = blueprint.parts.back()
+		up_carriage.recipe.navigationStartSupportPartId = "%s_base_landing" % prefix if level == 0 else "%s_exit_%02d" % [prefix, level - 1]
+		up_carriage.recipe.navigationEndSupportPartId = "%s_landing_%02d" % [prefix, level]
 		for tread_index in range(tread_count):
 			var up_z := center.z - run * 0.5 + tread_run * (float(tread_index) + 0.5)
 			var up_y := level_base_y + tread_rise * float(tread_index + 1) - 0.055
@@ -3770,6 +3784,9 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 		var return_upper_shoe_center := Vector3(right_x, level_base_y + rise_per_level - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5)
 		var return_geometry := stair_housed_geometry(return_lower_shoe_center, return_upper_shoe_center, 0.18)
 		add_part(blueprint, "%s_return_carriage_%02d" % [prefix, level], "ramp", material, return_geometry.get("center", Vector3.ZERO) as Vector3, Vector3(ramp_width, 0.18, float(return_geometry.get("length", run))), {"rotation": return_geometry.get("rotation", Vector3.ZERO) as Vector3, "variation": variation - 0.025, "semantic": "%s_visible_stair_carriage" % semantic, "physicalIntent": "structural_mass", "physicalAssemblyRole": "stair_sloped_span", "physicalStairAssemblyId": return_assembly_id, "physicalRequiredAssemblyBearingBlockIds": [return_lower_shoe_id, return_upper_shoe_id], "physicalRequiredSeatPartIds": [return_lower_shoe_id, return_upper_shoe_id], "physicalRequiredSeatFacts": [stair_housed_joint_fact(return_lower_shoe_id, -1.0, return_geometry), stair_housed_joint_fact(return_upper_shoe_id, 1.0, return_geometry)]})
+		var return_carriage = blueprint.parts.back()
+		return_carriage.recipe.navigationStartSupportPartId = "%s_landing_%02d" % [prefix, level]
+		return_carriage.recipe.navigationEndSupportPartId = "%s_exit_%02d" % [prefix, level]
 		for tread_index in range(tread_count):
 			var return_z := center.z + run * 0.5 - tread_run * (float(tread_index) + 0.5)
 			var return_y := level_base_y + half_rise + tread_rise * float(tread_index + 1) - 0.055
@@ -3790,12 +3807,12 @@ static func add_stair_landing_frame(blueprint, frame_id: String, pier_prefix: St
 	var seats: Array[String] = []
 	var facts: Array[Dictionary] = []
 	for side in [-1.0, 1.0]:
-		var offset: float = side * width * 0.5
+		var offset: float = side * (width * 0.5 + 0.06)
 		var seat_id := "%s_%d" % [pier_prefix, int(side)]
 		seats.append(seat_id)
 		add_part(blueprint, seat_id, "foundation", "stone_foundation", Vector3(center.x + offset, height * 0.5, center.z), Vector3(0.24, height, 0.30), {"variation": variation - 0.028, "semantic": "%s_stair_bearing_pier" % semantic, "physicalAssemblyRole": "stair_bearing_pier"})
 		facts.append({"seatId": seat_id, "loadDirection": "world_down", "localPatchCenter": Vector3(offset, -0.09, 0.0), "localPatchHalfExtents": Vector2(0.06, 0.08), "seatFace": "max_y"})
-	add_part(blueprint, frame_id, "beam", material, Vector3(center.x, deck_y - 0.19, center.z), Vector3(width + 0.24, 0.18, STAIR_LANDING_DEPTH), {"variation": variation - 0.022, "semantic": "%s_underframe" % semantic, "physicalAssemblyRole": "two_post_landing_underframe", "physicalRequiredSeatPartIds": seats, "physicalRequiredSeatFacts": facts})
+	add_part(blueprint, frame_id, "beam", material, Vector3(center.x, deck_y - 0.19, center.z), Vector3(width + 0.36, 0.18, STAIR_LANDING_DEPTH), {"variation": variation - 0.022, "semantic": "%s_underframe" % semantic, "physicalAssemblyRole": "two_post_landing_underframe", "physicalRequiredSeatPartIds": seats, "physicalRequiredSeatFacts": facts})
 
 
 static func add_stair_carriage_shoe(blueprint, part_id: String, center: Vector3, width: float, thickness: float, underframe_id: String, assembly_id: String, material: String, variation: float, semantic: String) -> void:

@@ -4,6 +4,7 @@ const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Castle = preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const Publisher = preload("res://scripts/buildings/BuildingPartPublisher.gd")
 const Urban = preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
+const Navigation = preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 var checks := {}
 var evidence := {}
 func _initialize() -> void: call_deferred("_run")
@@ -29,6 +30,12 @@ func _run() -> void:
 			var physical: Dictionary = b.validate_physical_integrity()
 			checks[spec.id+"_physical"] = physical.passed
 			evidence[spec.id+"_physical_failures"] = physical.get("violations",[])
+		var navigation: Dictionary = Navigation.build(b, Transform3D.IDENTITY)
+		var unresolved: Array = []
+		for link in navigation.verticalLinks:
+			if not link.get("endpointCertification", {}).get("resolved", false): unresolved.append(link)
+		checks[spec.id+"_source_crossing_endpoints_clear"] = not navigation.verticalLinks.is_empty() and unresolved.is_empty()
+		evidence[spec.id+"_unresolved_crossings"] = unresolved
 		var world := Node3D.new()
 		root.add_child(world)
 		var pub := Publisher.new()
