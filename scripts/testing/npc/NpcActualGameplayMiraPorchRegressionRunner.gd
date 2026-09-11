@@ -1368,26 +1368,12 @@ func finish() -> void:
     save_report(true)
     mark_progress("finished passed=%s failures=%d" % [str(passed), failure_reasons.size()])
     await wait_process_frames(2)
-    await shutdown_main_before_quit()
-    get_tree().quit(0 if passed else 1)
-
-func shutdown_main_before_quit() -> void:
-    # Headed Main-based fixtures must retire the voxel and terrain workers before
-    # SceneTree shutdown.  Calling quit() directly leaves VoxelTools tasks and
-    # resources alive at process exit, which both leaks test resources and makes
-    # a completed visual report look cleaner than the process lifecycle was.
-    # This mirrors the normal-runtime performance fixture's teardown without
-    # changing gameplay, routing, or the report's acceptance conditions.
-    if main == null or not is_instance_valid(main):
+    # Use the same retirement sequence as an ordinary menu exit. Terrain-only
+    # teardown misses navigation/resource owners and can leave work alive.
+    if is_instance_valid(main) and main.has_method("request_graceful_quit"):
+        main.call("request_graceful_quit", 0 if passed else 1)
         return
-    main.set_process(false)
-    main.set_physics_process(false)
-    if main.has_method("set_registered_npc_physics_enabled"):
-        main.call("set_registered_npc_physics_enabled", false)
-    if main.has_method("wait_for_terrain_workers_before_quit"):
-        await main.call("wait_for_terrain_workers_before_quit")
-    main.queue_free()
-    await get_tree().process_frame
+    get_tree().quit(0 if passed else 1)
 
 func save_report(done: bool) -> void:
     report_data["finished"] = done
