@@ -54,6 +54,11 @@ Random seed `atlas-85319906`, actual menu New Game, ordinary startup settings:
 current source receipts and complete declared surface coverage. The observer
 then travelled 717.622m in 75 seconds, eight turns, 25 observed jumps and zero
 terrain collision hold frames. Its existing godmode applies after startup.
+Subsequent source inspection on 2026-09-11 found that this observer also moved
+the player to a preselected lane after startup. The menu/startup timing remains
+valid, but traversal is relocation-based stress evidence, not uninterrupted
+ordinary traversal from the loaded spawn. The retained-region work removes that
+fixture relocation; do not promote the older run as normal traversal acceptance.
 The inspected capture is a dark rainy Plains view; it is not daylight geometry
 or citadel verification. Output target was 1920x1080 (logical UI 1280x720).
 

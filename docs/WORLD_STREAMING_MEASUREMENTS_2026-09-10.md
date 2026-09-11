@@ -6,6 +6,34 @@ navigation and rendering output are unchanged in this measurement milestone.
 
 ## Observation contract
 
+September 11 correction: normal-menu startup timers remain valid, but the former
+normal traversal observer relocated the player to a selected lane after loading.
+Those historical movement samples are relocation-driven stress observations,
+not ordinary traversal acceptance. The observer now starts at the actual spawn,
+opens the generated starter door through the real interaction ray/input path,
+walks outside through player physics and measures travel from there. It requires
+a 64m excursion and four visited chunks as well as accumulated travel, preventing
+indoor pacing from passing. Terrain holds are failures, with bounded diagnostic
+samples. Screenshot work is classified separately and retained in overall cadence.
+
+Validation on the pending retained-region candidate (`e859367` plus working-tree
+changes): `artifacts/citadel-runtime-integration/retained-region-normal-04/`,
+random seed `atlas-98803426`, 1920x1080, 75 seconds. Actual New Game readiness
+39.445s; real door opening/exit; 535.626m travel, 130.622m maximum spawn distance,
+15 chunks, zero setup relocations and zero terrain holds. House-exit and final
+forest images inspected. Natural exit 1, clean logs/cleanup and zero owned
+processes (`godot-vbv7Ry`). **Performance fails**: post-draw p99 70.9ms / max
+262.896ms; Main-script max 29.082ms. This verifies the corrected observation path,
+not five-minute performance, complete regional readiness, daytime visuals or
+cold-cache acceptance. The preceding new door fixture failure (`normal-03`) was
+a child-collider/owning-door comparison error; it changed no production door code.
+
+The user's loading clarification is reflected in the architecture plan: 90
+seconds is provisional, with fresh creation, saved Continue and traversal
+reported separately. A fresh process alone is not proof of empty generated
+caches. Save v2 retains durable changes; current native terrain attaches its
+generator on reload, so a Minecraft-like saved-world speedup is not yet proven.
+
 `RuntimeRenderObservation` is an opt-in, composed playtest observer. It records
 bounded histograms of frame-post-draw cadence, root-viewport render CPU/GPU time,
 frame setup CPU, visible/shadow draw and primitive counts, and callback overhead.

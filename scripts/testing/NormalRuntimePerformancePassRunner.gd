@@ -10,7 +10,6 @@ const DEFAULT_DURATION_SECONDS := 75.0
 const DEFAULT_WARMUP_FRAMES := 120
 const SEGMENT_SECONDS := 8.0
 const SEGMENT_PAUSE_SECONDS := 0.65
-const SEGMENT_LANE_CHECK_CELLS := 48
 const JUMP_INTERVAL_FRAMES := 150
 const MIN_RUNTIME_TRAVEL_DISTANCE := 45.0
 const MAX_ALLOWED_BELOW_COLLISION := 1.35
@@ -41,6 +40,10 @@ var startup_loading_completed := false
 var startup_loading_failure := ""
 var startup_loading_steps: Array[Dictionary] = []
 var measurement_start := Vector3.INF
+var traversal_spawn := Vector3.INF
+var traversal_entry := {}
+var traversal_chunks := {}
+var maximum_spawn_distance := 0.0
 var measurement_end := Vector3.INF
 var last_travel_position := Vector3.INF
 var accumulated_travel_distance := 0.0
@@ -55,6 +58,8 @@ var maximum_below_collision := 0.0
 var collision_surface_samples := 0
 var terrain_collision_hold_frames := 0
 var terrain_collision_hold_reasons := {}
+var terrain_hold_samples: Array[Dictionary] = []
+var last_hold_sample_msec := -1000
 var last_segment_index := -1
 var segment_visit_counts := {}
 var samples := []
@@ -156,6 +161,14 @@ func run_normal_runtime_scenario() -> Dictionary:
         return await run_world_edit_latency_scenario()
     if not configure_player_for_runtime_traversal():
         return failed_result("player could not be configured for normal runtime traversal")
+    if screenshot_path != "":
+        await capture_screenshot(screenshot_path.get_base_dir().path_join("startup_spawn.png"))
+    if not await leave_starter_house():
+        if screenshot_path != "":
+            await capture_screenshot()
+        var failure := failed_result("traversal setup could not leave the starter house through the real door")
+        failure["traversalEntry"] = traversal_entry
+        return failure
     await warmup()
     reset_runtime_performance_monitor()
     measurement_start = player_position()
@@ -172,6 +185,8 @@ func run_normal_runtime_scenario() -> Dictionary:
     collision_surface_samples = 0
     terrain_collision_hold_frames = 0
     terrain_collision_hold_reasons.clear()
+    terrain_hold_samples.clear()
+    last_hold_sample_msec = -1000
     last_segment_index = -1
     segment_visit_counts.clear()
     samples.clear()
@@ -201,12 +216,16 @@ func run_normal_runtime_scenario() -> Dictionary:
         failures.append("no performance samples captured")
     if float(metrics.get("playerTravelDistance", 0.0)) < MIN_RUNTIME_TRAVEL_DISTANCE:
         failures.append("normal runtime traversal did not move far enough to exercise streaming")
+    if maximum_spawn_distance < 64.0 or traversal_chunks.size() < 4:
+        failures.append("traversal did not leave the initial 64m area and visit at least four gameplay chunks")
     if int(metrics.get("directionChanges", 0)) < 3:
         failures.append("normal runtime traversal did not change directions enough")
     if int(metrics.get("collisionSurfaceSamples", 0)) <= 0:
         failures.append("normal runtime traversal captured no voxel collision-surface samples")
     elif float(metrics.get("maximumBelowVoxelCollision", 0.0)) > MAX_ALLOWED_BELOW_COLLISION:
         failures.append("player moved %.3f below the VoxelTerrain collision surface" % float(metrics.get("maximumBelowVoxelCollision", 0.0)))
+    if terrain_collision_hold_frames > 0:
+        failures.append("terrain streaming interrupted traversal for %d observed frames" % terrain_collision_hold_frames)
     var passed := failures.is_empty()
     flush_async_save()
     return {
@@ -505,63 +524,102 @@ func configure_player_for_runtime_traversal() -> bool:
     var player_body := main.get("player") as CharacterBody3D
     if player_body == null:
         return false
-    var start_cell := find_runtime_start_cell()
-    var start_y := float(main.call("surface_y_at_cell", Vector3i(start_cell.x, 0, start_cell.y))) + 0.10
-    player_body.global_position = Vector3(float(start_cell.x) * 1.35, start_y, float(start_cell.y) * 1.35)
-    player_body.velocity = Vector3.ZERO
-    player_body.rotation.y = -PI * 0.5
-    player_body.set("terrain_grounded", true)
+    # Observe the area New Game actually loaded. Relocating to a preselected
+    # lane can move hundreds of metres beyond that area and invalidate timing.
+    traversal_spawn = player_body.global_position
     player_body.set("automated_input", true)
-    player_body.set("automated_sprint", true)
-    player_body.set("automated_move", runtime_movement_segments()[0].get("direction", Vector3.RIGHT))
+    player_body.set("automated_sprint", false)
+    player_body.set("automated_move", Vector3.ZERO)
     player_body.set("automated_jump", false)
     if main.has_method("update_chunks"):
         main.call("update_chunks", false)
     return true
 
-func find_runtime_start_cell() -> Vector2i:
-    var player_body := main.get("player") as Node3D
-    var origin := player_body.global_position if player_body != null else Vector3.ZERO
-    var origin_cell := Vector2i(int(main.call("world_to_cell", origin.x)), int(main.call("world_to_cell", origin.z)))
-    var offsets: Array[Vector2i] = [
-        Vector2i(32, 12),
-        Vector2i(64, -18),
-        Vector2i(96, 24),
-        Vector2i(128, -32),
-        Vector2i(160, 48),
-        Vector2i(192, -64)
-    ]
-    for offset in offsets:
-        var candidate := origin_cell + offset
-        if runtime_route_pattern_ok(candidate):
-            return candidate
-    return origin_cell + offsets[0]
+func leave_starter_house() -> bool:
+    # The scenario provides the generated door location. Movement still uses
+    # the player motor, and opening/acknowledgement use ordinary viewport input.
+    var tutorial = main.get("tutorial_system")
+    var player_body := main.get("player") as CharacterBody3D
+    if tutorial == null or player_body == null:
+        traversal_entry = {"reason": "missing_spawn_context"}
+        return false
+    var start_cell: Vector2i = tutorial.get("start_cell")
+    var expected := Vector3(float(start_cell.x) * 1.35, traversal_spawn.y, float(start_cell.y - 3) * 1.35)
+    var door: Node3D = null
+    for value in main.get("blocks").values():
+        if value is Node3D and is_instance_valid(value) and String(value.get_meta("block_type", "")) == "door":
+            var offset: Vector3 = value.global_position - expected
+            if Vector2(offset.x, offset.z).length() < 0.7:
+                door = value
+                break
+    if door == null:
+        traversal_entry = {"reason": "generated_starter_door_missing", "expected": vec3(expected)}
+        return false
+    traversal_entry = {"door": vec3(door.global_position), "spawn": vec3(traversal_spawn), "opened": false, "exited": false}
+    write_progress("traversal_entry_approach")
+    if not await walk_player_to(door.global_position + Vector3(0, 0, 2.0), 0.3):
+        traversal_entry["reason"] = "door_approach_blocked"
+        return false
+    var camera := player_body.get("camera") as Camera3D
+    main.call("set_game_mouse_mode", Input.MOUSE_MODE_CAPTURED)
+    var hit := {}
+    for _frame in range(120):
+        var direction := (door.global_position + Vector3(0, 0.65, 0) - camera.global_position).normalized()
+        var yaw_delta := wrapf(atan2(-direction.x, -direction.z) - player_body.global_rotation.y, -PI, PI)
+        var pitch_delta := atan2(direction.y, Vector2(direction.x, direction.z).length()) - float(player_body.get("pitch"))
+        var motion := InputEventMouseMotion.new()
+        motion.relative = Vector2(-yaw_delta, -pitch_delta) * 0.12 / maxf(0.0001, float(player_body.get("mouse_sensitivity")))
+        if bool(player_body.get("invert_y")):
+            motion.relative.y = -motion.relative.y
+        get_viewport().push_input(motion)
+        await get_tree().physics_frame
+        hit = main.call("focused_interaction_hit")
+        if main.call("interaction_block_from_collider", hit.get("collider")) == door:
+            break
+    if main.call("interaction_block_from_collider", hit.get("collider")) != door:
+        traversal_entry["reason"] = "door_not_in_real_interaction_ray"
+        return false
+    for pressed in [true, false]:
+        var click := InputEventMouseButton.new()
+        click.button_index = MOUSE_BUTTON_RIGHT
+        click.pressed = pressed
+        click.position = get_viewport().get_visible_rect().size * 0.5
+        click.global_position = click.position
+        get_viewport().push_input(click)
+    for _frame in range(24):
+        await get_tree().physics_frame
+    traversal_entry["opened"] = bool(door.get_meta("open", false))
+    if not bool(traversal_entry["opened"]):
+        traversal_entry["reason"] = "door_did_not_open_after_input"
+        return false
+    var hud = main.get("hud")
+    if hud != null and hud.call("is_dialogue_open"):
+        for pressed in [true, false]:
+            var key := InputEventKey.new()
+            key.keycode = KEY_ESCAPE
+            key.pressed = pressed
+            get_viewport().push_input(key)
+        await get_tree().physics_frame
+    write_progress("traversal_entry_crossing")
+    traversal_entry["exited"] = await walk_player_to(door.global_position - Vector3(0, 0, 3.0), 0.4)
+    traversal_entry["outsidePosition"] = vec3(player_position())
+    if screenshot_path != "":
+        await capture_screenshot(screenshot_path.get_base_dir().path_join("starter_house_exit.png"))
+    return bool(traversal_entry["exited"])
 
-func runtime_route_pattern_ok(start_cell: Vector2i) -> bool:
-    var cursor := start_cell
-    for segment in runtime_movement_segments():
-        var cell_direction: Vector2i = segment.get("cellDirection", Vector2i.ZERO)
-        if cell_direction == Vector2i.ZERO:
-            continue
-        if not runtime_lane_ok(cursor, cell_direction):
-            return false
-        cursor += cell_direction * SEGMENT_LANE_CHECK_CELLS
-    return true
-
-func runtime_lane_ok(start_cell: Vector2i, cell_direction: Vector2i) -> bool:
-    var previous_height := INF
-    for step in range(SEGMENT_LANE_CHECK_CELLS):
-        var cell := start_cell + cell_direction * step
-        var height := float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y)))
-        if height < 1.35 * 3.0 or height > 96.0:
-            return false
-        var biome := String(main.call("surface_biome_at_cell", Vector3i(cell.x, 0, cell.y)))
-        if biome in ["ocean", "beach", "town"]:
-            return false
-        if previous_height != INF and absf(height - previous_height) > 1.35 * 1.25:
-            return false
-        previous_height = height
-    return true
+func walk_player_to(target: Vector3, stop_distance: float) -> bool:
+    var player_body := main.get("player") as CharacterBody3D
+    var started := Time.get_ticks_msec()
+    while Time.get_ticks_msec() - started < 10000:
+        var offset := target - player_body.global_position
+        offset.y = 0.0
+        if offset.length() <= stop_distance:
+            player_body.set("automated_move", Vector3.ZERO)
+            return true
+        player_body.set("automated_move", offset.normalized())
+        await get_tree().physics_frame
+    player_body.set("automated_move", Vector3.ZERO)
+    return false
 
 func warmup() -> void:
     write_progress("warmup:%d" % warmup_frames)
@@ -621,6 +679,8 @@ func observe_player_travel() -> void:
     var current := player_position()
     if current == Vector3.INF:
         return
+    traversal_chunks[Vector2i(floori(current.x / (28.0 * 1.35)), floori(current.z / (28.0 * 1.35)))] = true
+    maximum_spawn_distance = maxf(maximum_spawn_distance, Vector2(current.x-traversal_spawn.x, current.z-traversal_spawn.z).length())
     if last_travel_position != Vector3.INF:
         var delta := current - last_travel_position
         delta.y = 0.0
@@ -634,6 +694,14 @@ func observe_player_travel() -> void:
             terrain_collision_hold_frames += 1
             var hold_reason := String(player_body.get_meta("terrain_collision_hold_reason", "unknown"))
             terrain_collision_hold_reasons[hold_reason] = int(terrain_collision_hold_reasons.get(hold_reason, 0)) + 1
+            if terrain_hold_samples.size() < 32 and Time.get_ticks_msec()-last_hold_sample_msec >= 1000:
+                last_hold_sample_msec = Time.get_ticks_msec()
+                var runtime = main.get("voxel_terrain_runtime")
+                terrain_hold_samples.append({"processMsec":last_hold_sample_msec,"position":vec3(current),
+                    "proof":player_body.get("last_terrain_collision_proof").duplicate(true),
+                    "nativeTasks":runtime.voxel_engine_task_stats() if runtime != null else {},
+                    "terrain":runtime.stats() if runtime != null else {},
+                    "demandError":main.get("streaming_demand_error")})
         observe_voxel_collision_clearance(player_body, current)
     if main != null and main.has_method("surface_y_at_position"):
         var surface_y := float(main.call("surface_y_at_position", current))
@@ -702,6 +770,11 @@ func flush_async_save() -> void:
 
 func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["launchPath"] = "MainMenu.tscn -> visible New Game button viewport input -> startup_loading_completed"
+    metrics["traversalSetupPosition"] = vec3(traversal_spawn) if traversal_spawn != Vector3.INF else []
+    metrics["traversalSetupRelocations"] = 0
+    metrics["traversalEntry"] = traversal_entry.duplicate(true)
+    metrics["traversalChunkCount"] = traversal_chunks.size()
+    metrics["maximumSpawnDistance"] = maximum_spawn_distance
     metrics["menuToNewGameInputMs"] = menu_to_new_game_input_ms
     metrics["newGameInputToFirstLoadingFrameMs"] = new_game_input_to_first_loading_frame_ms
     metrics["newGameInputToGameplayReadyMs"] = new_game_input_to_gameplay_ready_ms
@@ -724,6 +797,7 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["collisionSurfaceSamples"] = collision_surface_samples
     metrics["terrainCollisionHoldFrames"] = terrain_collision_hold_frames
     metrics["terrainCollisionHoldReasons"] = terrain_collision_hold_reasons.duplicate(true)
+    metrics["terrainCollisionHoldSamples"] = terrain_hold_samples.duplicate(true)
     metrics["segmentVisitCounts"] = segment_visit_counts.duplicate(true)
     metrics["routineRouteV2PlanningProfiles"] = routine_v2_planning_profiles(measurement_start_physics_frame)
     if measurement_start == Vector3.INF or measurement_end == Vector3.INF:
@@ -812,13 +886,20 @@ func runtime_movement_segment_labels() -> Array[String]:
         labels.append(String(segment.get("label", "")))
     return labels
 
-func capture_screenshot() -> void:
+func capture_screenshot(destination := "") -> void:
     if DisplayServer.get_name() == "headless":
         return
+    var previous_phase := String(render_observation.phase)
+    render_observation.phase = "screenshot_capture"
     await RenderingServer.frame_post_draw
-    DirAccess.make_dir_recursive_absolute(screenshot_path.get_base_dir())
+    var target := destination if destination != "" else screenshot_path
+    DirAccess.make_dir_recursive_absolute(target.get_base_dir())
     var image := get_viewport().get_texture().get_image()
-    image.save_png(screenshot_path)
+    image.save_png(target)
+    # Retain capture/readback cost in its own phase and overall cadence, without
+    # calling this synchronous observer work a gameplay streaming stall.
+    await RenderingServer.frame_post_draw
+    render_observation.phase = previous_phase
 
 func player_position() -> Vector3:
     var player_body := main.get("player") as Node3D if main != null else null
