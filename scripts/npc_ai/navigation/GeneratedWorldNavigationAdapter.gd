@@ -264,7 +264,9 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
 # disagreement and makes NPCs accept routes into walls or reject valid routes.
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     var building_sources := building_navigation_sources(tile_key)
-    if building_sources.get("status")!="ready": return {}
+    if building_sources.get("status")!="ready":
+        return {"tileKey":tile_key,"publicationStatus":String(building_sources.get("status","pending")),
+            "reason":String(building_sources.get("reason","structure_source_pending"))}
     var source_key := navmesh_tile_source_key_for_tile(tile_key)
     var cache_key := "%s|%s" % [tile_key, source_key]
     if navmesh_tile_snapshot_cache.has(cache_key):
@@ -298,8 +300,10 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
             if building_clearance._building_support_navigation_blocker_from_records(live_records[cell],surface,surface.worldPosition.y,center-half,center+half,BuildingClearanceScript.BUILDING_SUPPORT_NAV_CLEARANCE,[],true).is_empty():
                 building_surfaces.append(surface)
         crossing_links.append_array(source_tile.get("crossingLinks",[]))
-        if not _apply_building_door_geometry(door_summary,source,tile_key): return {}
+        if not _apply_building_door_geometry(door_summary,source,tile_key):
+            return {"tileKey":tile_key,"publicationStatus":"pending","reason":"structure_door_owner_pending"}
     var result: Dictionary = {
+        "publicationStatus": "ready",
         "tileKey": tile_key,
         "sourceKey": source_key,
         "regionId": "region:chunk:%s" % tile_key,

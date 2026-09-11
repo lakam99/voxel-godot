@@ -1043,12 +1043,46 @@ func process_navmesh_dirty_regions(max_jobs := 1) -> Array:
 	return navmesh_world.process_dirty_regions(max_jobs)
 
 func request_navigation_tile(snapshot: Dictionary, priority := 0, profile = null) -> Dictionary:
-	var result: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+	var tile_key := String(snapshot.get("tileKey", ""))
+	var publication_snapshot := snapshot
+	var has_geometry := snapshot.get("surfaces") is Array or snapshot.get("buildingSurfaces") is Array
+	if not bool(snapshot.get("unloaded", false)) and not has_geometry and String(snapshot.get("publicationStatus", "ready")) == "ready":
+		if tile_key == "":
+			return {"status":"rejected","reason":"missing_tile_key","queued":false}
+		# LOD prefetch runs in the actor loop. Preserve its metadata demand for
+		# the retained tile service, but let the budgeted publication queue resolve
+		# authoritative geometry instead of generating or installing it here.
+		var demand: Dictionary = navigation_world.request_tile(snapshot, priority, profile) if navigation_world != null else {}
+		return {"status":"pending","reason":"publication_queued","tileKey":tile_key,"queued":_queue_navigation_tile_demand(tile_key, priority),"navigationWorld":demand}
+	if publication_snapshot.is_empty() or String(publication_snapshot.get("publicationStatus", "ready")) != "ready":
+		return {"status":publication_snapshot.get("publicationStatus", "pending"),"reason":publication_snapshot.get("reason", "source_pending"),"tileKey":tile_key,"queued":_queue_navigation_tile_demand(tile_key, priority)}
+	if not bool(publication_snapshot.get("unloaded", false)) and not (publication_snapshot.get("surfaces") is Array or publication_snapshot.get("buildingSurfaces") is Array):
+		return {"status":"pending","reason":"missing_snapshot_geometry","tileKey":tile_key,"queued":_queue_navigation_tile_demand(tile_key, priority)}
+	var result: Dictionary = navigation_world.request_tile(publication_snapshot, priority, profile) if navigation_world != null else {}
 	if navmesh_world != null and navigation_backend_config != null and navigation_backend_config.use_navmesh():
-		navmesh_world.register_tile_snapshot(snapshot)
+		var publication: Dictionary = navmesh_world.register_tile_snapshot(publication_snapshot)
+		if not (String(publication.get("status", "")) == "installed" and bool(publication.get("installed", false))) and String(publication.get("status", "")) != "empty":
+			publication["queued"] = _queue_navigation_tile_demand(tile_key, priority)
+			return publication
 	if navigation_world != null:
 		telemetry.observe_navigation_stats(navigation_world.stats())
 	return result
+
+func _queue_navigation_tile_demand(tile_key: String, priority: int) -> bool:
+	# Use the existing publication queue: it retries against the same generated
+	# source owner, including when preparation or installation is asynchronous.
+	if tile_key == "" or npc_system == null:
+		return false
+	var pathing = npc_system.get("pathing")
+	if pathing == null:
+		return false
+	if pathing.has_method("ensure_ready"):
+		pathing.ensure_ready()
+	var authority = pathing.get("route_planner")
+	var publisher = authority.get("delegate") if authority != null else null
+	if publisher == null or not publisher.has_method("queue_navmesh_tile_publish"):
+		return false
+	return bool(publisher.queue_navmesh_tile_publish(tile_key, priority > 0))
 
 func _publish_door_portal_to_navmesh(door: Node, extra := {}) -> void:
 	if not _navmesh_backend_active() or navmesh_world == null or door_portals == null:

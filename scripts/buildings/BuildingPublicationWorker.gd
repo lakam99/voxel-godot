@@ -126,12 +126,8 @@ func dispatch(source: Dictionary, binding: Dictionary) -> Dictionary:
 		return _rejected("busy", "publication_worker_busy")
 	# Admission owns full recursive freezing/validation. These constant-work
 	# checks reject mutable envelopes without scanning/hashing source on main.
-	if not source.is_read_only() or source.get("status") != "prepared" \
-			or not source.get("blueprint") is Dictionary or not source.get("furnishingPlan") is Dictionary \
-			or not source.get("profile") is Dictionary:
-		return _rejected("failed", "invalid_publication_source")
-	if not source.blueprint.is_read_only() or not source.furnishingPlan.is_read_only() or not source.profile.is_read_only():
-		return _rejected("failed", "mutable_publication_source")
+	var source_error := _source_validation_failure(source)
+	if not source_error.is_empty(): return _rejected("failed", source_error)
 	_state = RunState.new()
 	_state.source = source
 	_state.binding = captured
@@ -251,6 +247,15 @@ func request_shutdown() -> void:
 
 func _start_thread(work: Callable) -> int:
 	return _thread.start(work)
+
+func _source_validation_failure(source: Dictionary) -> String:
+	if not source.is_read_only() or source.get("status") != "prepared" \
+			or not source.get("blueprint") is Dictionary or not source.get("furnishingPlan") is Dictionary \
+			or not source.get("profile") is Dictionary:
+		return "invalid_publication_source"
+	if not source.blueprint.is_read_only() or not source.furnishingPlan.is_read_only() or not source.profile.is_read_only():
+		return "mutable_publication_source"
+	return ""
 
 func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable) -> Dictionary:
 	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation, source.profile.origin)

@@ -200,11 +200,118 @@ warnings were reported. The baseline checkout remains unchanged at `d6314ed`.
 
 ## Next architectural cutover
 
+### Shared geometry preparation and pending-publication work in progress
+
+The next implementation batch extracts the existing vertex, polygon and source
+ownership compilation into `NavigationMeshPreparation`. Both ordinary service
+installation and the worker use this single geometry implementation. The new
+`NavigationPublicationWorker` reuses `BuildingPublicationWorker` ownership,
+cancellation, stale-token and off-thread retirement machinery. Its prepared
+descriptor preserves the ordinary canonical signature and sealed field identity;
+live door state continues to use the existing service overlay.
+
+This is not yet a runtime asynchronous cutover: the production tile producer has
+not been connected to this worker, and upload segmentation and retained old
+installations still need implementation. Do not infer reduced gameplay stalls
+from a worker contract.
+
+Current verification:
+
+- `regional-async-building-worker-01`: 64/64 existing worker lifecycle checks,
+  clean engine, natural exit 0, cleanup passed and owned zero.
+- `regional-async-all-replay-01`: all 42 actual `regional-nav-owner-03` saved
+  production tiles install with complete receipts, 163,974 surfaces, clean engine,
+  natural exit 0 and owned zero. This is service replay, not live movement.
+- `regional-async-baseline-replay-01`: the exact `regional-owner-recompiled-03`
+  input used by the prior committed replay; all 42 tiles and 164,088 surfaces
+  pass. Per-tile surface, link, polygon and vertex counts match
+  `regional-owner-all-replay-02` without differences. Both replay commands use the
+  existing artifact `replay-all-tiles.gd` via the Node building-contract runner,
+  `NAV_EDGE_INPUT` selecting the stated source directory and
+  `NAV_TILE_REPLAY_REPORT` selecting the report.
+- `regional-worker-contract-03.json`: 70/72 synthetic/service checks; worker
+  preparation, canonical signature, geometry, real revision acknowledgement and
+  off-thread retirement pass. The two failures reproduce discarded rejected
+  installations and their missing retries. They are focused fixtures for the
+  pending-publication fix, not newly observed headed gameplay failures.
+- `regional-worker-contract-demand-01.json`: the completed fix passes 72/72.
+  Unavailable sources and rejected installs retain demand; metadata-only LOD
+  requests queue authoritative preparation rather than installing an empty tile
+  or doing unbudgeted source construction in the actor loop. Retry rounds span
+  time-limited calls. Production consumers cache only installation success or
+  explicit authoritative empty output.
+- `regional-async-nav-01`: existing navigation-world suite, Both time modes,
+  86/86 passed. `regional-async-streaming-save-01` stopped on synthetic fixture
+  engine errors (`make_entry` reads global transforms before scene attachment;
+  placement reads a missing World3D). Its partial 36-check report has no assertion
+  failures and is not a passing suite. The clean `d6314ed` reference run at
+  `regional-async-baseline-streaming-save-01` reproduces all 36 result statuses
+  and byte-identical stderr. Both owned watchdogs (`godot-CCJURm` current,
+  `godot-HVZCRK` baseline) forcibly stop after the engine errors and report
+  authoritative zero owned processes, but `cleanupPassed=false`. This is an
+  unchanged synthetic-fixture failure, not live streaming/save acceptance.
+
+The frozen candidate's headed initial-location run
+`candidate-teleport-regional-async-01` passes all 29 checks, including live
+navigation installation. Command:
+
+```text
+node tools/run-citadel-candidate-teleport-playtest.mjs -Seed atlas-3376622889 -CandidateRegion "-2,-2" -SpawnCell "-3334,-2666" -SkipTutorial -ForceDaytime -ForceClearWeather -Resolution 1920x1080 -StartupTimeoutSeconds 180 -TimeoutSeconds 600 -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-regional-async-01
+```
+
+Startup took 88.444s and the diagnostic completed at 192.456s using existing
+dependencies, with zero setup placements. Inspected `initial_spawn_ready.png`:
+nearby terrain is continuously drawn at release. `ready.png` shows the citadel
+and trees published afterward; the gatehouse stair landing and home-door captures
+retain their physical-looking surfaces and opening. Close views remain too dark.
+Also inspected courtyard, overview and furniture captures: roof/street layout and
+window-side furniture remain present. The elevated overview still exposes a
+sharp terrain-render boundary beside the site; this is unresolved presentation
+evidence, not proof that terrain volume is absent there.
+Scene audit retains 3,312 colliders, 20 doors, 178 furniture bodies, 243,227 visual
+instances, 739 meshes and 1,531 MultiMeshes. The process exits naturally with code
+0, clean engine logs, cleanup passed and owned zero. This diagnostic still does
+not certify ordinary NPC citadel crossings or sustained streaming performance.
+
+Post-draw frame intervals in the short ordinary input approach have p99 21.3ms
+and maximum 32.075ms. Scene publication still reaches 81.501ms, and startup
+2,702.019ms. The script-only monitor reports maximum 9.932ms and no last spike;
+its narrower scope must not conceal the render-observer stalls. These results
+do not meet whole-run streaming acceptance and do not establish a performance
+improvement from the pending worker integration.
+
+Final broad regression command:
+
+```text
+node tools/run-playtest.mjs -Visible -Seed atlas-648215039 -ReportPath artifacts/citadel-runtime-integration/regional-async-broad-01/report.json -ProgressPath artifacts/citadel-runtime-integration/regional-async-broad-01/progress.txt -ScreenshotPath artifacts/citadel-runtime-integration/regional-async-broad-01/playtest.png -TimeoutSeconds 600
+```
+
+Result: 158/163. All 163 pass/fail results and all five failure details exactly
+match `regional-owner-broad-01`, whose same-seed comparison to clean `d6314ed`
+is recorded above. Watchdog `godot-n80OxM` reports natural exit 1, clean logs,
+cleanup passed and authoritative zero owned processes. No new assertion failure.
+
+The independent subagent also ran the existing real main-menu regression once:
+
+```text
+node tools/npc/run-tutorial-save-continue-playtest.mjs --visible --timeout-seconds 360 --stale-progress-seconds 90
+```
+
+`artifacts/npc/node-production-runs/save-continue-0mAkmk/report.json` passes both
+headed stages for random seed `atlas-75056485`; no gameplay-affecting flags and
+the forbidden-call guard passes. New Game saves the acknowledged knock and generic
+go-home intent. Continue restores it; its live trace and inspected first/final
+screenshots show the NPC approach, open her home door, enter strict home and close
+the door. Watchdogs `godot-bB48HB` and `godot-fD61OC` exit naturally with code 0,
+clean logs, cleanup passed and authoritative zero owned processes. This is
+tutorial/save/door regression evidence, not NPC citadel-crossing acceptance.
+This run overlapped the broad fixture, so neither concurrent run's timings count
+as load or frame-performance acceptance. No test processes remain owned.
+
 Whole-site publication still gates tile source delivery. Regional owner
-acknowledgements, retained pending navigation requests and bounded worker-prepared
-mesh/identity publication are unfinished. In particular, a pending adapter source
-currently returns an empty snapshot; its consumer must retain demand rather than
-cache an empty ready result. Read-only inspection also flags live collision bounds:
+acknowledgements and bounded worker-prepared mesh/identity publication are
+unfinished. Pending demand retention is implemented and production regression is
+recorded above. Read-only inspection also flags live collision bounds:
 fallback records start at the body origin vertically, while pitched box XZ bounds
 use the center plane. These need authoritative-volume treatment before claiming
 regional physical completeness. Route search, motor and traffic remain unchanged.

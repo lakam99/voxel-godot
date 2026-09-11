@@ -5,6 +5,8 @@ const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
+const NavigationMeshPreparationScript := preload("res://scripts/npc_ai/navigation/NavigationMeshPreparation.gd")
+const PreparedNavigationDescriptorScript := preload("res://scripts/npc_ai/navigation/PreparedNavigationDescriptor.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -129,6 +131,8 @@ func clear() -> void:
 func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 	if descriptor == null:
 		return { "status": "rejected", "reason": "missing_descriptor" }
+	if descriptor is PreparedNavigationDescriptorScript and not descriptor.preparation_valid():
+		return {"status":"rejected","reason":"prepared_navigation_source_changed"}
 	var region_id := String(descriptor.get("region_id"))
 	if region_id == "":
 		return { "status": "rejected", "reason": "missing_region_id" }
@@ -206,6 +210,13 @@ func unregister_chunk(region_id: String) -> Dictionary:
 	return { "status": "unregistered", "regionId": region_id, "topologyRevision": topology_revision }
 
 func register_tile_snapshot(snapshot: Dictionary) -> Dictionary:
+	if String(snapshot.get("publicationStatus", "ready")) != "ready":
+		return {"status":snapshot.get("publicationStatus", "pending"),"reason":snapshot.get("reason", "source_pending"),"installed":false}
+	# A demand containing only a tile key is not an authoritative empty tile.
+	# Reject it before descriptor replacement can retire the installed geometry.
+	if not bool(snapshot.get("unloaded", false)) and not snapshot.get("surfaces") is Array \
+			and not snapshot.get("buildingSurfaces") is Array:
+		return {"status":"rejected","reason":"missing_tile_surface_source","installed":false}
 	var descriptor = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
 	return register_chunk_descriptor(descriptor, String(snapshot.get("sourceKey", "")))
 
@@ -1051,6 +1062,8 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	_tile_publication_receipts.erase(region_id)
 	var surface_polygons: Dictionary = {}
 	var navigation_mesh = _build_navigation_mesh(descriptor, surface_polygons)
+	if navigation_mesh == null:
+		return {"status":"failed","regionId":region_id,"reason":"invalid_navigation_preparation"}
 	var polygon_count := int(navigation_mesh.get_polygon_count()) if navigation_mesh != null and navigation_mesh.has_method("get_polygon_count") else 0
 	var vertex_count := int(navigation_mesh.get_vertices().size()) if navigation_mesh != null and navigation_mesh.has_method("get_vertices") else 0
 	if polygon_count <= 0:
@@ -1086,217 +1099,23 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 
 func _build_navigation_mesh(descriptor, surface_polygons: Dictionary = {}):
 	var navigation_mesh := NavigationMesh.new()
-	var vertices := PackedVector3Array()
-	var vertex_indices := {}
-	var polygons: Array[PackedInt32Array] = []
 	var surfaces: Array = descriptor.get("walkable_surfaces")
-	var sorted_surfaces: Array = surfaces.duplicate()
-	sorted_surfaces.sort_custom(func(a, b): return String(a.get("id", "")) < String(b.get("id", "")))
-	for polygon_points in _navigation_mesh_polygons_for_surfaces(sorted_surfaces, surface_polygons):
-		if polygon_points.size() < 3:
-			continue
-		var indices := PackedInt32Array()
-		for point in polygon_points:
-			var vertex_key := _navigation_mesh_vertex_key(point)
-			if vertex_indices.has(vertex_key):
-				indices.append(int(vertex_indices[vertex_key]))
-			else:
-				vertex_indices[vertex_key] = vertices.size()
-				indices.append(vertices.size())
-				vertices.append(point)
-		polygons.append(indices)
-	navigation_mesh.set_vertices(vertices)
-	for polygon in polygons:
+	var packet: Dictionary = descriptor.prepared_geometry() if descriptor is PreparedNavigationDescriptorScript else NavigationMeshPreparationScript.new().compile(surfaces)
+	if packet.is_empty(): return null
+	surface_polygons.merge(packet.surfacePolygons)
+	navigation_mesh.set_vertices(packet.vertices)
+	for polygon in packet.polygons:
 		navigation_mesh.add_polygon(polygon)
 	return navigation_mesh
 
 func _navigation_mesh_vertex_key(point: Vector3) -> String:
-	return "%d:%d:%d" % [
-		roundi(point.x * 1000.0),
-		roundi(point.y * 1000.0),
-		roundi(point.z * 1000.0)
-	]
+	return NavigationMeshPreparationScript.new()._navigation_mesh_vertex_key(point)
 
 func _navigation_mesh_polygons_for_surfaces(sorted_surfaces: Array, surface_polygons: Dictionary = {}) -> Array:
-	var result := []
-	var layers := {}
-	var source_rectangles := {}
-	for surface_value in sorted_surfaces:
-		if not (surface_value is Dictionary):
-			continue
-		var surface: Dictionary = surface_value
-		if not bool(surface.get("walkable", true)):
-			continue
-		if not _surface_mergeable_for_mesh(surface):
-			var polygon := _surface_polygon(surface)
-			var rectangle := _source_rectangle(surface,polygon)
-			if not rectangle.is_empty():
-				var owner := String(surface.get("geometryGroupId",surface.supportId))
-				if not source_rectangles.has(owner): source_rectangles[owner]=[]
-				source_rectangles[owner].append(rectangle)
-				continue
-			if polygon.size() >= 3:
-				_record_surface_polygon(surface_polygons, String(surface.get("id", "")), result.size())
-				result.append(polygon)
-			continue
-		var cell: Vector3i = surface.get("cell")
-		var center: Vector3 = surface.get("center", Vector3(float(cell.x) * CELL, float(cell.y) * CELL, float(cell.z) * CELL))
-		var layer_key := "%d:%d" % [cell.y, roundi(center.y * 100.0)]
-		if not layers.has(layer_key):
-			layers[layer_key] = {
-				"cells": {},
-				"owners": {},
-				"y": center.y
-			}
-		var layer: Dictionary = layers[layer_key]
-		var grid: Dictionary = layer.get("cells", {})
-		grid[Vector2i(cell.x, cell.z)] = true
-		var owners: Dictionary = layer.owners
-		var cell_key := Vector2i(cell.x, cell.z)
-		if not owners.has(cell_key): owners[cell_key] = []
-		owners[cell_key].append(String(surface.get("id", "")))
-	for owner: String in source_rectangles:
-		# These are exact unions of touching rectangles from one source owner.
-		# Removing internal sampling edges changes neither coverage nor ownership.
-		var rectangles := _merge_source_rectangles(source_rectangles[owner],0)
-		rectangles = _merge_source_rectangles(rectangles,1)
-		for rectangle: Dictionary in rectangles:
-			for id: String in rectangle.owners: _record_surface_polygon(surface_polygons,id,result.size())
-			result.append(rectangle.points)
-	for layer_key in layers.keys():
-		var layer: Dictionary = layers[layer_key]
-		var grid: Dictionary = layer.get("cells", {})
-		result.append_array(_merged_grid_polygons(grid, float(layer.get("y", 0.0)), layer.owners, surface_polygons, result.size()))
-	return result
+	return NavigationMeshPreparationScript.new()._navigation_mesh_polygons_for_surfaces(sorted_surfaces, surface_polygons)
 
 func _source_rectangle(surface: Dictionary, polygon: Array) -> Dictionary:
-	if String(surface.get("supportId","")).is_empty() or polygon.size()!=4: return {}
-	var low := Vector2(polygon[0].x,polygon[0].z)
-	var high := low
-	var corners := {}
-	for point: Vector3 in polygon:
-		var xz := Vector2(point.x,point.z)
-		low=low.min(xz); high=high.max(xz)
-		corners[xz]=point
-	if corners.size()!=4 or low.x>=high.x or low.y>=high.y: return {}
-	var points: Array = []
-	for corner in [low,Vector2(low.x,high.y),high,Vector2(high.x,low.y)]:
-		if not corners.has(corner): return {}
-		points.append(corners[corner])
-	for index in range(polygon.size()):
-		var first: Vector3 = polygon[index]
-		var next: Vector3 = polygon[(index+1)%polygon.size()]
-		if first.x!=next.x and first.z!=next.z: return {}
-	# Flat rectangles and single-axis grades can merge along their level axis
-	# without changing any height or removing a change of slope.
-	if not (points[0].y==points[3].y and points[1].y==points[2].y) \
-			and not (points[0].y==points[1].y and points[3].y==points[2].y): return {}
-	return {"low":low,"high":high,"y":points[0].y,"points":points,"owners":[String(surface.get("id",""))]}
-
-func _merge_source_rectangles(rectangles: Array, axis: int) -> Array:
-	var other := 1-axis
-	rectangles.sort_custom(func(a: Dictionary,b: Dictionary):
-		if a.y!=b.y: return a.y<b.y
-		if a.low[other]!=b.low[other]: return a.low[other]<b.low[other]
-		if a.high[other]!=b.high[other]: return a.high[other]<b.high[other]
-		return a.low[axis]<b.low[axis])
-	var result: Array = []
-	for rectangle: Dictionary in rectangles:
-		if not result.is_empty():
-			var previous: Dictionary = result[-1]
-			if previous.y==rectangle.y and previous.low[other]==rectangle.low[other] \
-					and previous.high[other]==rectangle.high[other] and previous.high[axis]==rectangle.low[axis] \
-					and _rectangles_share_level_axis(previous.points,rectangle.points,axis):
-				previous.high[axis]=rectangle.high[axis]
-				previous.points[2]=rectangle.points[2]
-				previous.points[3 if axis==0 else 1]=rectangle.points[3 if axis==0 else 1]
-				previous.owners.append_array(rectangle.owners)
-				continue
-		result.append(rectangle)
-	return result
-
-func _rectangles_share_level_axis(first: Array, second: Array, axis: int) -> bool:
-	var end := 3 if axis==0 else 1
-	var across := 1 if axis==0 else 3
-	return first[0].y==first[end].y and first[across].y==first[2].y \
-		and second[0].y==second[end].y and second[across].y==second[2].y \
-		and first[0].y==second[0].y and first[across].y==second[across].y
-
-func _surface_mergeable_for_mesh(surface: Dictionary) -> bool:
-	if surface.has("polygon"):
-		var polygon_value = surface.get("polygon", [])
-		if polygon_value is Array and polygon_value.size() >= 3:
-			return false
-	var cell_value = surface.get("cell")
-	if not (cell_value is Vector3i):
-		return false
-	var size: Vector3 = surface.get("size", Vector3(CELL, 0.05, CELL))
-	return absf(size.x - CELL) <= CELL * 0.05 and absf(size.z - CELL) <= CELL * 0.05
-
-func _merged_grid_polygons(grid: Dictionary, y: float, owners: Dictionary = {}, surface_polygons: Dictionary = {}, polygon_offset := 0) -> Array:
-	var result := []
-	var keys: Array = grid.keys()
-	keys.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		if a.y == b.y:
-			return a.x < b.x
-		return a.y < b.y
-	)
-	var visited := {}
-	for key_value in keys:
-		if not (key_value is Vector2i):
-			continue
-		var start: Vector2i = key_value
-		if visited.has(start):
-			continue
-		var end_x := start.x
-		while grid.has(Vector2i(end_x + 1, start.y)) and not visited.has(Vector2i(end_x + 1, start.y)):
-			end_x += 1
-		var end_z := start.y
-		var can_extend := true
-		while can_extend:
-			var next_z := end_z + 1
-			for x in range(start.x, end_x + 1):
-				if not grid.has(Vector2i(x, next_z)) or visited.has(Vector2i(x, next_z)):
-					can_extend = false
-					break
-			if can_extend:
-				end_z = next_z
-		for z in range(start.y, end_z + 1):
-			for x in range(start.x, end_x + 1):
-				visited[Vector2i(x, z)] = true
-				for surface_id in owners.get(Vector2i(x, z), []):
-					_record_surface_polygon(surface_polygons, String(surface_id), polygon_offset + result.size())
-		var min_x := float(start.x) * CELL - CELL * 0.5
-		var max_x := float(end_x) * CELL + CELL * 0.5
-		var min_z := float(start.y) * CELL - CELL * 0.5
-		var max_z := float(end_z) * CELL + CELL * 0.5
-		result.append([
-			Vector3(min_x, y, min_z),
-			Vector3(min_x, y, max_z),
-			Vector3(max_x, y, max_z),
-			Vector3(max_x, y, min_z)
-		])
-	return result
-
-func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
-	var polygon_value = surface.get("polygon", [])
-	if polygon_value is Array and polygon_value.size() >= 3:
-		var polygon: Array[Vector3] = []
-		for point in polygon_value:
-			if point is Vector3:
-				polygon.append(point)
-		if polygon.size() >= 3:
-			return polygon
-	var center: Vector3 = surface.get("center", Vector3.ZERO)
-	var size: Vector3 = surface.get("size", Vector3.ONE)
-	var half_x := maxf(size.x, 0.01) * 0.5
-	var half_z := maxf(size.z, 0.01) * 0.5
-	return [
-		Vector3(center.x - half_x, center.y, center.z - half_z),
-		Vector3(center.x - half_x, center.y, center.z + half_z),
-		Vector3(center.x + half_x, center.y, center.z + half_z),
-		Vector3(center.x + half_x, center.y, center.z - half_z)
-	]
+	return NavigationMeshPreparationScript.new()._source_rectangle(surface, polygon)
 
 func _release_region(region_id: String) -> void:
 	_tile_publication_receipts.erase(region_id)
