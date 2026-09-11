@@ -2972,7 +2972,17 @@ static func add_gatehouse_stair_bay(blueprint, center_x: float, span: float, cen
 	add_part(blueprint, "castle_gatehouse_stair_bay_rear_header", "wall", masonry_material, Vector3(center_x, foundation_height + door_height + rear_header_height * 0.5, rear_z), Vector3(door_width, rear_header_height, shell_thickness), {"variation": variation, "semantic": "castle_gatehouse_stair_bay_rear_header"})
 	add_part(blueprint, "castle_gatehouse_wall_stair_door", "door", "painted_door", Vector3(center_x, foundation_height + door_height * 0.5, rear_z + shell_thickness * 0.68), Vector3(door_width - 0.14, door_height, 0.16), {"rotation": Vector3(0.0, PI, 0.0), "variation": variation - 0.03, "semantic": "castle_gatehouse_wall_stair_entry"})
 	var climb_segments := clampi(ceili(height / 3.55), 2, 5)
+	var stair_start: int = blueprint.parts.size()
 	add_switchback_stair_flights(blueprint, "castle_gatehouse_wall_stair", Vector3(center_x, 0.0, center_z), span - shell_thickness * 2.0 - 0.08, depth - shell_thickness * 2.0 - 0.12, foundation_height + 0.20, height / float(climb_segments), climb_segments, "stone_foundation", variation, "castle_gatehouse_wall_stair")
+	# The courtyard door is at +Z. Face the first full-height landing toward
+	# that entrance; the half-level turn cannot provide standing headroom.
+	# Rotate the complete assembly, including its seats and bearing piers.
+	var stair_origin := Vector3(center_x, 0.0, center_z)
+	var stair_basis := Basis(Vector3.UP, PI)
+	for part_index in range(stair_start, blueprint.parts.size()):
+		var part = blueprint.parts[part_index]
+		part.position = stair_origin + stair_basis * (part.position - stair_origin)
+		part.rotation = (stair_basis * Basis.from_euler(part.rotation)).get_euler()
 
 
 static func add_gatehouse_roof_deck_with_stair_hatch(blueprint, width: float, depth: float, height: float, foundation_height: float, center_z: float, stair_center_x: float, stair_span: float, variation: float) -> void:
@@ -2999,7 +3009,7 @@ static func add_gatehouse_roof_deck_with_stair_hatch(blueprint, width: float, de
 static func add_gatehouse_roof_panel(blueprint, part_id: String, min_x: float, max_x: float, min_z: float, max_z: float, y: float, variation: float) -> void:
 	if max_x - min_x <= 0.08 or max_z - min_z <= 0.08:
 		return
-	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3((min_x + max_x) * 0.5, y, (min_z + max_z) * 0.5), Vector3(max_x - min_x, 0.24, max_z - min_z), {"variation": variation, "semantic": "castle_gatehouse_roof"})
+	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3((min_x + max_x) * 0.5, y, (min_z + max_z) * 0.5), Vector3(max_x - min_x, 0.24, max_z - min_z), {"variation": variation, "semantic": "castle_gatehouse_roof", "navigationRole": "walkable_support"})
 
 
 static func add_gatehouse_entry_steps(blueprint, opening_width: float, passage_floor_top: float, exterior_gate_z: float, variation: float) -> void:
@@ -3012,7 +3022,7 @@ static func add_gatehouse_entry_steps(blueprint, opening_width: float, passage_f
 		var progress := float(step_index + 1) / float(step_count)
 		var step_height := passage_floor_top * progress
 		var step_z := exterior_gate_z - tread_depth * (float(step_count - step_index) - 0.5)
-		add_part(blueprint, "castle_gatehouse_entry_step_%02d" % (step_index + 1), "foundation", "stone_foundation", Vector3(0.0, step_height * 0.5, step_z), Vector3(opening_width + 0.72, step_height, tread_depth + 0.03), {"variation": variation, "semantic": "castle_gatehouse_entry_step"})
+		add_part(blueprint, "castle_gatehouse_entry_step_%02d" % (step_index + 1), "foundation", "stone_foundation", Vector3(0.0, step_height * 0.5, step_z), Vector3(opening_width + 0.72, step_height, tread_depth + 0.03), {"variation": variation, "semantic": "castle_gatehouse_entry_step", "navigationRole": "walkable_support"})
 
 
 static func add_keep(blueprint, center: Vector3, width: float, depth: float, height: float, storey_count: int, floor_height: float, foundation_height: float, variation: float, masonry_material: String, palace_grammar: Dictionary = {}) -> bool:

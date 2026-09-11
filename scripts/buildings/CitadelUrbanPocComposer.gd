@@ -487,7 +487,7 @@ static func append_perimeter_alley_outer_bearing(blueprint) -> Dictionary:
 	var added_ids: Array[String] = []
 	for finish in finishes:
 		var side := signf(finish.position.x)
-		if is_zero_approx(side) or finish.collision_enabled or finish.size.x < 1.20 or finish.size.z < 1.20:
+		if is_zero_approx(side) or not finish.collision_enabled or finish.size.x < 1.20 or finish.size.z < 1.20:
 			return {"ready": false, "reason": "invalid_perimeter_alley_finish", "finishId": String(finish.id)}
 		var strip_width := minf(0.50, finish.size.x * 0.25)
 		var local_center := Vector3(side * (finish.size.x * 0.5 - strip_width * 0.5), -finish.size.y * 0.5 - 0.05, 0.0)
@@ -890,7 +890,7 @@ static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_fro
 			var local_base_y := perimeter_site_support_top(blueprint, Vector3(alley_x, base_y, center_z), base_y)
 			if not add_street_house(blueprint, "urban_perimeter_%s_%02d" % ["east" if side > 0.0 else "west", row_index], Vector3(side * side_x, 0.0, center_z), width, depth, height, -side, local_base_y, material, variation + side * 0.018 + float(row_index) * 0.011): return false
 			var alley_id := "urban_perimeter_alley_%d_%02d" % [int(side), row_index]
-			add_part(blueprint, alley_id, "foundation", "worn_cobble", Vector3(alley_x, local_base_y + 0.16, center_z), Vector3(2.1, 0.10, depth * 0.82), {"collision": false, "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley", "pavingFamily": "lane_cobbles", "pavingRegion": alley_id, "pavingHeading": "z"})
+			add_part(blueprint, alley_id, "foundation", "worn_cobble", Vector3(alley_x, local_base_y + 0.16, center_z), Vector3(2.1, 0.10, depth * 0.82), {"collision": true, "navigationRole": "walkable_support", "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley", "pavingFamily": "lane_cobbles", "pavingRegion": alley_id, "pavingHeading": "z"})
 	return true
 
 
@@ -1233,7 +1233,7 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 	blueprint.recipe["citadelMarketHousePair"] = {"leftHouseId":"urban_row_%02d_left"%2,
 		"rightHouseId":"urban_row_%02d_right"%2,"plazaPartId":"urban_market_plaza"}
 	add_grounded_foundation(blueprint, "urban_market_plaza_retaining", Vector3(lane_centers[2], 0.0, plaza_z), 18.0, segment_depth * 0.82, market_y + 0.24, prepared_variation - 0.05, "citadel_market_plaza_retaining")
-	add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
+	add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"navigationRole": "walkable_support", "variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
 	add_street_climb(blueprint, float(lane_centers[2]), centers[1] + row_depths[1] * 0.48, centers[2] - row_depths[2] * 0.46, prepared_base_y, market_terrace_rise, prepared_variation)
 	add_street_climb(blueprint, float(lane_centers[3]), centers[2] + row_depths[2] * 0.48, centers[3] - row_depths[3] * 0.46, market_y, market_terrace_rise, prepared_variation)
 	# Raised houses need a raised street as well. Carry the upper flight onto a
@@ -1243,6 +1243,7 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 	var upper_lane_start := upper_from_z + upper_step_run * 8.0
 	var upper_lane_end := centers[3] + row_depths[3] * 0.5
 	add_grounded_foundation(blueprint, "urban_upper_lane", Vector3(float(lane_centers[3]), 0.0, (upper_lane_start + upper_lane_end) * 0.5), 6.4, upper_lane_end - upper_lane_start, elevations[3], prepared_variation, "citadel_upper_lane")
+	blueprint.parts.back().recipe.navigationRole = "walkable_support"
 	add_market_stalls(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z), prepared_variation, prepared.marketStalls as Array)
 	add_terminal_shop_row(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z + segment_depth * 0.34), prepared_variation)
 	return {"ready": true, "rowGeometry": row_geometry}
