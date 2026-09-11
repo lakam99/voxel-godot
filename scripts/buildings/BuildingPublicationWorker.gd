@@ -245,6 +245,10 @@ func request_shutdown() -> void:
 	_closing = true
 	reset()
 
+func has_pending_work() -> bool:
+	return _thread != null or _state != null or not _active.is_empty() \
+		or not _completed.is_empty() or not _retired.is_empty() or _retirement != null
+
 func _start_thread(work: Callable) -> int:
 	return _thread.start(work)
 

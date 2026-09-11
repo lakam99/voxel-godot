@@ -7,6 +7,7 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const NavigationMeshPreparationScript := preload("res://scripts/npc_ai/navigation/NavigationMeshPreparation.gd")
 const PreparedNavigationDescriptorScript := preload("res://scripts/npc_ai/navigation/PreparedNavigationDescriptor.gd")
+const NavigationPublicationQueueScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationQueue.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -67,6 +68,15 @@ var navigation_map_last_iteration_id := -1
 var reusable_path_query_parameters := NavigationPathQueryParameters3D.new()
 var endpoint_query_cache := {}
 var endpoint_query_cache_order: Array[String] = []
+var _publication_queue = NavigationPublicationQueueScript.new()
+var _publication_owner: WeakRef
+var _publication_source_key := ""
+var _publication_world_seed := ""
+var _staged_descriptor
+var _staged_mesh: NavigationMesh
+var _staged_binding := {}
+var _publication_bindings := {}
+var _publication_resetting := false
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -74,8 +84,13 @@ func setup(config = null) -> void:
 		_ensure_navigation_map()
 
 func clear() -> void:
+	_publication_queue.cancel()
+	_publication_owner = null
+	_publication_bindings.clear()
 	for region_id in region_rids_by_region.keys():
 		_release_region(String(region_id))
+	for descriptor in descriptors_by_region.values():
+		_retire_prepared_descriptor(descriptor)
 	descriptors_by_region.clear()
 	region_states.clear()
 	region_metrics_by_region.clear()
@@ -129,6 +144,7 @@ func clear() -> void:
 	owns_navigation_map = false
 
 func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
+	if _publication_resetting: return {"status":"pending","installed":false,"reason":"navigation_world_reset"}
 	if descriptor == null:
 		return { "status": "rejected", "reason": "missing_descriptor" }
 	if descriptor is PreparedNavigationDescriptorScript and not descriptor.preparation_valid():
@@ -146,7 +162,8 @@ func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 		and region_rids_by_region.has(region_id) \
 		and not dirty_regions_by_region.has(region_id) \
 		and String(existing_metrics.get("signature", "")) == signature \
-		and String(_tile_publication_receipts.get(region_id, {}).get("sourceKey", "")) == source_key:
+		and String(_tile_publication_receipts.get(region_id, {}).get("sourceKey", "")) == source_key \
+		and (descriptor != _staged_descriptor or _publication_bindings.get(region_id,{}) == _staged_binding):
 		return {
 			"status": String(region_states.get(region_id, "installed")),
 			"regionId": region_id,
@@ -158,14 +175,26 @@ func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 			"signature": signature
 		}
 	_ensure_navigation_map()
-	if region_rids_by_region.has(region_id):
-		_release_region(region_id)
+	var previous_descriptor = descriptors_by_region.get(region_id)
+	var previous_receipt: Dictionary = _tile_publication_receipts.get(region_id,{})
 	descriptors_by_region[region_id] = descriptor
 	_index_descriptor_doors(region_id, descriptor)
-	_clear_dirty_region(region_id)
 	var loaded := bool(descriptor.get("loaded"))
+	if not loaded: _release_region(region_id)
 	_tile_publication_receipts.erase(region_id)
 	var install_result := _install_region(region_id, descriptor) if loaded else { "status": "unloaded", "regionId": region_id }
+	if String(install_result.get("status", "")) == "failed":
+		if previous_descriptor != null:
+			descriptors_by_region[region_id] = previous_descriptor
+			_index_descriptor_doors(region_id, previous_descriptor)
+		else:
+			descriptors_by_region.erase(region_id)
+			_unindex_descriptor_doors(region_id)
+		if not previous_receipt.is_empty(): _tile_publication_receipts[region_id] = previous_receipt
+		return {"status":"failed","installed":false,"reason":install_result.get("reason","installation_failed")}
+	_clear_dirty_region(region_id)
+	_publication_bindings.erase(region_id)
+	if previous_descriptor != descriptor: _retire_prepared_descriptor(previous_descriptor)
 	# Bind only a receipt produced by this fresh installation. Virtual installers
 	# which do not emit an actual receipt remain unacknowledged.
 	if String(install_result.get("status", "")) == "installed":
@@ -195,12 +224,18 @@ func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 	}
 
 func unregister_chunk(region_id: String) -> Dictionary:
+	_publication_bindings.erase(region_id)
+	var active: Dictionary = _publication_queue.stats().binding
+	if not active.is_empty() and NavigationBakeDescriptorScript.chunk_region_id(String(active.siteId)) == region_id:
+		_publication_queue.cancel()
+		_publication_owner = null
 	_unindex_descriptor_doors(region_id)
 	if not descriptors_by_region.has(region_id):
 		_release_region(region_id)
 		_clear_dirty_region(region_id)
 		return { "status": "missing", "regionId": region_id, "topologyRevision": topology_revision }
 	_release_region(region_id)
+	_retire_prepared_descriptor(descriptors_by_region.get(region_id))
 	descriptors_by_region.erase(region_id)
 	region_states[region_id] = "unregistered"
 	region_metrics_by_region.erase(region_id)
@@ -217,8 +252,92 @@ func register_tile_snapshot(snapshot: Dictionary) -> Dictionary:
 	if not bool(snapshot.get("unloaded", false)) and not snapshot.get("surfaces") is Array \
 			and not snapshot.get("buildingSurfaces") is Array:
 		return {"status":"rejected","reason":"missing_tile_surface_source","installed":false}
+	if snapshot.has("publicationSource"):
+		return _request_prepared_tile(snapshot)
 	var descriptor = NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
 	return register_chunk_descriptor(descriptor, String(snapshot.get("sourceKey", "")))
+
+func _request_prepared_tile(snapshot: Dictionary) -> Dictionary:
+	if _publication_resetting: return {"status":"pending","installed":false,"reason":"navigation_world_reset"}
+	var source: Dictionary = snapshot.get("publicationSource", {})
+	var tile_key := String(snapshot.get("tileKey", ""))
+	var source_key := String(snapshot.get("sourceKey", ""))
+	var owner_ref = snapshot.get("publicationOwner")
+	var owner = owner_ref.get_ref() if owner_ref is WeakRef else null
+	if source.get("status") != "prepared" or owner == null or source_key.is_empty() or tile_key.is_empty():
+		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
+	var world_seed := String(source.get("profile", {}).get("worldSeed", ""))
+	if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+		return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
+	var binding := {"siteId":tile_key,"sourceKey":world_seed+"|"+source_key,
+		"generation":maxi(1,int(source.snapshot.get("sourceRevision",1)))}
+	var region_id := String(source.snapshot.get("regionId",NavigationBakeDescriptorScript.chunk_region_id(tile_key)))
+	var receipt: Dictionary = _tile_publication_receipts.get(region_id,{})
+	var existing = descriptors_by_region.get(region_id)
+	if existing is PreparedNavigationDescriptorScript and existing.preparation_valid() \
+			and receipt.get("sourceKey") == source_key and not dirty_regions_by_region.has(region_id) \
+			and region_rids_by_region.has(region_id) and _publication_bindings.get(region_id,{}) == binding:
+		return {"status":"installed","installed":true,"cached":true,"regionId":region_id,"tileKey":tile_key}
+	advance_publication()
+	var requested: Dictionary = _publication_queue.request(source,binding)
+	if _publication_queue.stats().binding == binding:
+		_publication_owner = owner_ref
+		_publication_source_key = source_key
+		_publication_world_seed = world_seed
+	if requested.status != "ready":
+		return {"status":requested.status,"reason":requested.get("reason","navigation_preparation_pending"),"installed":false}
+	var ready: Dictionary = _publication_queue.take_ready(binding)
+	if ready.is_empty(): return {"status":"pending","reason":"navigation_preparation_pending","installed":false}
+	_staged_descriptor = ready.descriptor
+	_staged_mesh = ready.mesh
+	_staged_binding = ready.binding
+	var result := register_chunk_descriptor(_staged_descriptor,source_key)
+	if result.get("installed",false) or result.get("status") == "empty":
+		_publication_bindings[region_id] = ready.binding
+	if not result.get("installed",false) and result.get("status") != "empty":
+		_retire_prepared_descriptor(_staged_descriptor)
+	_staged_descriptor = null; _staged_mesh = null; _staged_binding = {}
+	_publication_owner = null
+	return result
+
+func _source_owner_matches(owner, tile_key: String, source_key: String, world_seed: String) -> bool:
+	return is_instance_valid(owner) and is_instance_valid(owner.get("main")) \
+		and String(owner.main.get("seed_text")) == world_seed \
+		and String(owner.navmesh_tile_source_key_for_tile(tile_key)) == source_key
+
+func advance_publication(budget_usec := 4000) -> Dictionary:
+	if _publication_queue.advanced_this_frame(): return _publication_queue.stats()
+	var binding: Dictionary = _publication_queue.stats().binding
+	if not binding.is_empty():
+		var owner = _publication_owner.get_ref() if _publication_owner != null else null
+		if not _source_owner_matches(owner,String(binding.siteId),_publication_source_key,_publication_world_seed):
+			_publication_queue.cancel()
+			_publication_owner = null
+	return _publication_queue.advance(budget_usec)
+
+func request_publication_shutdown() -> void:
+	_publication_owner = null
+	_publication_queue.request_shutdown()
+	# Detach service-owned descriptors before waiting: their final references
+	# must retire on the worker before the autonomy owner itself is released.
+	clear()
+
+func begin_publication_reset() -> void:
+	_publication_resetting = true
+	clear()
+
+func finish_publication_reset() -> bool:
+	if _publication_queue.stats().busy: return false
+	_publication_resetting = false
+	return true
+
+func finish_publication_for_owner_exit() -> void:
+	request_publication_shutdown()
+	_publication_queue.finish_shutdown_for_owner_exit()
+
+func _retire_prepared_descriptor(descriptor) -> void:
+	if descriptor is PreparedNavigationDescriptorScript:
+		_publication_queue.retire({"descriptor":descriptor})
 
 func register_semantic_descriptor(kind: String, region_id: String, bounds: AABB, metadata := {}) -> Dictionary:
 	if region_id == "":
@@ -249,6 +368,7 @@ func apply_navigation_events(events: Array) -> Array[Dictionary]:
 
 func process_dirty_regions(max_jobs := 1, max_usec := 4000) -> Array[Dictionary]:
 	var started := Time.get_ticks_usec()
+	advance_publication(max_usec)
 	var results: Array[Dictionary] = []
 	var jobs := maxi(0, max_jobs)
 	for region_id_value in dirty_region_queue.duplicate():
@@ -265,6 +385,11 @@ func process_dirty_regions(max_jobs := 1, max_usec := 4000) -> Array[Dictionary]
 			results.append({ "status": "missing", "regionId": region_id, "dirty": dirty_record })
 			continue
 		var descriptor = descriptors_by_region[region_id]
+		# A prepared source revision is immutable. Retain its installed geometry
+		# while ordinary demand obtains a fresh authoritative source revision.
+		if descriptor is PreparedNavigationDescriptorScript or _publication_bindings.has(region_id):
+			dirty_region_queue.append(region_id)
+			continue
 		if descriptor == null:
 			dirty_regions_by_region.erase(region_id)
 			region_states[region_id] = "missing"
@@ -432,6 +557,7 @@ func _filter_descriptor_door(region_id: String, portal_id: String) -> bool:
 	filtered.door_portals = portals
 	filtered.door_links = links
 	descriptors_by_region[region_id] = filtered
+	_retire_prepared_descriptor(descriptor)
 	_index_descriptor_doors(region_id, filtered)
 	# Invalidate the old source signature without walking unrelated geometry.
 	# Ordinary registration computes its signature again; a fresh same-ID source
@@ -882,30 +1008,18 @@ static func _record_surface_polygon(ownership: Dictionary, surface_id: String, p
 	ownership[surface_id] = -1 if ownership.has(surface_id) else polygon_index
 
 func _record_tile_publication(region_id: String, descriptor, source_key: String, region_rid: RID, mesh: NavigationMesh, surface_polygons: Dictionary) -> void:
-	var surfaces: Dictionary = {}
-	var valid_polygons: Dictionary = {}
-	var vertices := mesh.get_vertices()
-	for surface_id in surface_polygons:
-		var index := int(surface_polygons[surface_id])
-		if index < 0 or index >= mesh.get_polygon_count(): continue
-		if not valid_polygons.has(index):
-			var polygon := mesh.get_polygon(index)
-			var valid := polygon.size() >= 3
-			for vertex_index in polygon:
-				if vertex_index < 0 or vertex_index >= vertices.size() or not vertices[vertex_index].is_finite(): valid = false
-			var area := Vector3.ZERO
-			if valid:
-				for i in range(1, polygon.size()-1):
-					area += (vertices[polygon[i]]-vertices[polygon[0]]).cross(vertices[polygon[i+1]]-vertices[polygon[0]])
-			valid_polygons[index] = valid and area.is_finite() and area.length_squared() > 0.0
-		if valid_polygons[index]: surfaces[surface_id] = index
-	var missing_declared: Array[String] = []
-	for value in _descriptor_array(descriptor, "walkable_surfaces"):
-		if not value is Dictionary or not bool(value.get("walkable", true)): continue
-		var id := String(value.get("id", ""))
-		if (id.is_empty() or not surfaces.has(id)) and not missing_declared.has(id):
-			missing_declared.append(id)
-	missing_declared.make_read_only()
+	var proof: Dictionary
+	if descriptor is PreparedNavigationDescriptorScript and descriptor == _staged_descriptor and mesh == _staged_mesh:
+		# The queue read back every uploaded polygon and the vertex buffer before
+		# returning this exact resource. Reuse its sealed source-to-polygon proof;
+		# do not rescan thousands of source identities during main-thread attach.
+		proof = descriptor.prepared_geometry()
+	else:
+		var polygons: Array[PackedInt32Array] = []
+		for index in mesh.get_polygon_count(): polygons.append(mesh.get_polygon(index))
+		proof = NavigationMeshPreparationScript.validate_ownership(mesh.get_vertices(),polygons,surface_polygons,_descriptor_array(descriptor,"walkable_surfaces"))
+	var surfaces: Dictionary = proof.validSurfacePolygons
+	var missing_declared: Array[String] = proof.missingDeclaredSurfaceIds
 	var links: Dictionary = {}
 	var duplicate_links: Dictionary = {}
 	for value in door_link_records_by_region.get(region_id, []) + crossing_link_records_by_region.get(region_id, []):
@@ -979,6 +1093,7 @@ func stats() -> Dictionary:
 		"maxPathQueryUsec": max_path_query_usec,
 		"pathQueryP95Usec": _percentile_usec(path_query_duration_samples_usec, 0.95),
 		"slowestPathQuery": slowest_path_query.duplicate(true)
+		,"publication":_publication_queue.stats()
 	}
 
 func revision() -> String:
@@ -1060,10 +1175,12 @@ func _ensure_navigation_map() -> void:
 func _install_region(region_id: String, descriptor) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	_tile_publication_receipts.erase(region_id)
-	var surface_polygons: Dictionary = {}
-	var navigation_mesh = _build_navigation_mesh(descriptor, surface_polygons)
+	var surface_polygons: Dictionary = descriptor.prepared_geometry().get("surfacePolygons",{}) if descriptor is PreparedNavigationDescriptorScript else {}
+	var navigation_mesh = _staged_mesh if descriptor == _staged_descriptor and _staged_mesh != null else _build_navigation_mesh(descriptor, surface_polygons)
 	if navigation_mesh == null:
 		return {"status":"failed","regionId":region_id,"reason":"invalid_navigation_preparation"}
+	# Resource construction/upload completed before retiring the old installation.
+	_release_region(region_id)
 	var polygon_count := int(navigation_mesh.get_polygon_count()) if navigation_mesh != null and navigation_mesh.has_method("get_polygon_count") else 0
 	var vertex_count := int(navigation_mesh.get_vertices().size()) if navigation_mesh != null and navigation_mesh.has_method("get_vertices") else 0
 	if polygon_count <= 0:
@@ -1102,7 +1219,7 @@ func _build_navigation_mesh(descriptor, surface_polygons: Dictionary = {}):
 	var surfaces: Array = descriptor.get("walkable_surfaces")
 	var packet: Dictionary = descriptor.prepared_geometry() if descriptor is PreparedNavigationDescriptorScript else NavigationMeshPreparationScript.new().compile(surfaces)
 	if packet.is_empty(): return null
-	surface_polygons.merge(packet.surfacePolygons)
+	if not is_same(surface_polygons,packet.surfacePolygons): surface_polygons.merge(packet.surfacePolygons)
 	navigation_mesh.set_vertices(packet.vertices)
 	for polygon in packet.polygons:
 		navigation_mesh.add_polygon(polygon)

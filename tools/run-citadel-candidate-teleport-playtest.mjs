@@ -20,14 +20,15 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   const args = [script, '--resolution', o.resolution, '--windowed', ...(o.gameArguments.length ? ['--', ...o.gameArguments] : [])];
   await writeJson(join(run, 'launch.json'), { schema: 'citadel-candidate-teleport-launch/v1', projectPath: project, head: (dependencies.git ?? git)(project, ['rev-parse', 'HEAD']).trim(), seed: o.seed, requestedRegion: o.candidateRegion,
     timeoutSeconds: o.overallTimeoutSeconds, startupTimeoutSeconds: o.startupTimeoutSeconds, testTimeoutSeconds: o.timeoutSeconds, manualInspectionSeconds: o.manualInspectionSeconds, internalDeadlineSeconds: o.timeoutSeconds - 45, launchOptions: o.launchOptions, resolution: o.resolution, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
-    spawnCell: o.spawnCell, placementMode: initialSpawn ? 'initial_spawn' : 'teleport',
+    spawnCell: o.spawnCell, placementMode: initialSpawn ? 'initial_spawn' : 'teleport', captureNavigationRejections: o.captureNavigationRejections,
     evidenceLevel: initialSpawn ? 'headed initial-location New Game diagnostic; bypasses title UI; not ordinary menu or NPC acceptance' : 'headed teleport-assisted diagnostic; not continuous travel or NPC acceptance',
     fixtureChanges: [initialSpawn ? 'seed and initial spawn selection before player attachment and terrain streaming; no generated artifact prewarm' : 'seed-selector-only Main subclass',
       initialSpawn ? 'zero setup teleports; ordinary startup owns physics readiness' : 'two counted exterior setup teleports; physics held only for setup clearance',
       'isolated ordinary user data', 'labelled diagnostic camera views after ordinary player approach'] });
   const env = { ...inheritedEnv, APPDATA: join(run, 'userdata'), LOCALAPPDATA: join(run, 'userdata'), CITADEL_CANDIDATE_TELEPORT_OUTPUT: run, CITADEL_CANDIDATE_TELEPORT_SEED: o.seed,
     CITADEL_CANDIDATE_TELEPORT_SECONDS: String(o.timeoutSeconds), CITADEL_CANDIDATE_STARTUP_SECONDS: String(o.startupTimeoutSeconds), CITADEL_CANDIDATE_MANUAL_SECONDS: String(o.manualInspectionSeconds), CITADEL_CANDIDATE_TELEPORT_REGION: o.candidateRegion, CITADEL_CANDIDATE_RESOLUTION: o.resolution,
-    CITADEL_CANDIDATE_SPAWN_CELL: o.spawnCell };
+    CITADEL_CANDIDATE_SPAWN_CELL: o.spawnCell,
+    VOXEL_NAVIGATION_REJECTION_DIAGNOSTICS: o.captureNavigationRejections ? '1' : '' };
   const runOwnedProcess = dependencies.runOwnedProcess ?? (await import('./run-godot-scene-watchdog.mjs')).runOwnedProcess;
   const result = await runCandidatePhase({ project, run, kind: 'teleport', env, runOwnedProcess, timeoutSeconds: o.overallTimeoutSeconds, args: ['--path', project, '--script', ...args] });
   const watch = result.summary;
@@ -42,6 +43,7 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   if (!ownedPassed(watch)) throw new Error('Diagnostic failed or owned cleanup unresolved; retain report/log/watchdog evidence.');
   if (verification.watcherFailed || result.stopRequested || errors.length || changed.length) throw new Error('Watcher, engine log, or frozen-source verification failed.');
   await validateTeleportReport(report, o.seed);
+  if (o.captureNavigationRejections && report.evidence?.navigationPublication?.rejectionDiagnosticsEnabled !== true) throw new Error('Navigation rejection diagnostics were requested but not recorded.');
   if (initialSpawn && (report.placementMode !== 'initial_spawn' || report.setupPlacements?.length !== 0 || report.initialSpawn?.requestedCell !== o.spawnCell || report.checks?.initial_spawn_selected_before_attachment !== true)) throw new Error('Initial spawn evidence mismatch.');
   if (o.gameArguments.length && Object.entries(o.launchOptions).some(([key, value]) => report.launchOptions?.[key] !== value)) throw new Error('Game launch options did not match requested options.');
   return { passed: true, outcome: report.outcome, setupPlacements: Array.isArray(report.setupPlacements) ? report.setupPlacements.length : report.setupPlacements == null ? 0 : 1, reportPath, ownedZero: true, visualInspectionRequired: true };

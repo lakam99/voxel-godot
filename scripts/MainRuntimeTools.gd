@@ -1852,6 +1852,10 @@ func clear_chunk_asset_cache() -> void:
         terrain_meshing_service.clear_jobs(false)
 
 func _exit_tree() -> void:
+    if is_instance_valid(npc_system):
+        var autonomy = npc_system.get("autonomy_system")
+        var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
+        if navigation != null: navigation.finish_publication_for_owner_exit()
     if terrain_meshing_service != null and terrain_meshing_service.has_method("clear_jobs"):
         terrain_meshing_service.clear_jobs(true)
 

@@ -60,6 +60,11 @@ test('canonical region field bounds and teleport environment/deadline validation
   for (const timeoutSeconds of [89, 601, 90.5, 'x']) assert.throws(() => teleportOptions({ timeoutSeconds }, {}));
   assert.throws(() => teleportOptions({}, { VOXEL_FAST_BOOT: '0' }), /Unset inherited/);
   assert.throws(() => teleportOptions({}, { voxel_test: '1' }), /Unset inherited/);
+  const diagnostic = teleportOptions(parseOptions(['-OutputDirectory','out','-CaptureNavigationRejections'], 'teleport'), {});
+  assert.equal(diagnostic.captureNavigationRejections, true);
+  assert.deepEqual(diagnostic.gameArguments, []);
+  assert.throws(() => teleportOptions({captureNavigationRejections:true}, {VOXEL_NAVIGATION_REJECTION_DIAGNOSTICS:'1'}), /Unset inherited/);
+  assert.throws(() => teleportOptions({captureNavigationRejections:'true'}, {}), /Invalid boolean/);
 });
 test('fresh direct artifact directories never overwrite evidence or allow traversal', async t => {
   const project = await temporary(t);
@@ -145,7 +150,7 @@ test('source SHA256 audit records changed and missing sources without losing rem
   assert.deepEqual(audit.changedSources.map(row => row.path), ['changed']); assert.deepEqual(audit.readErrors.map(row => row.path), ['missing']);
   assert.equal(audit.finalSourceHashes.same, hash);
 });
-test('hash inventories preserve recipe untracked scripts and teleport tracked scenes plus explicit native/runner sources', async t => {
+test('hash inventories include untracked scripts and teleport scenes plus explicit native/runner sources', async t => {
   const dir = await temporary(t);
   execFileSync('git', ['init', dir], { windowsHide: true, stdio: 'ignore' });
   const recipe = 'tools/run-citadel-candidate-recipe-diagnostic.mjs', teleport = 'tools/run-citadel-candidate-teleport-playtest.mjs';
@@ -155,7 +160,7 @@ test('hash inventories preserve recipe untracked scripts and teleport tracked sc
   execFileSync('git', ['-C', dir, 'add', '.'], { windowsHide: true });
   await writeFile(join(dir, 'scripts/untracked.gd'), 'untracked');
   const a = await sourceHashes(dir, 'recipe', recipe), b = await sourceHashes(dir, 'teleport', teleport);
-  assert.ok(a['scripts/untracked.gd']); assert.equal(b['scripts/untracked.gd'], undefined);
+  assert.ok(a['scripts/untracked.gd']); assert.ok(b['scripts/untracked.gd']);
   assert.ok(b['scenes/tracked.tscn']); assert.ok(b['project.godot']); assert.ok(b['addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll']);
   assert.ok(a[recipe]); assert.ok(b[teleport]);
   for (const hashes of [a, b]) {

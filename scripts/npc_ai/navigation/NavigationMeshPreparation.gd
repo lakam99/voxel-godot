@@ -32,8 +32,35 @@ func compile(surfaces: Array, continuation: Callable = Callable()) -> Dictionary
 	polygons.make_read_only()
 	var packet := {"vertices":vertices,"polygons":polygons,"surfacePolygons":ownership,
 		"preparationUsec":Time.get_ticks_usec()-started,"threadId":OS.get_thread_caller_id()}
+	packet.merge(validate_ownership(vertices,polygons,ownership,surfaces))
+	if not _continue("navigation_ownership_ready"): return {}
+	packet.preparationUsec = Time.get_ticks_usec()-started
 	packet.make_read_only()
 	return packet
+
+static func validate_ownership(vertices: PackedVector3Array, polygons: Array, ownership: Dictionary, declared: Array) -> Dictionary:
+	var valid_polygons := {}
+	for index in polygons.size():
+		var polygon: PackedInt32Array = polygons[index]
+		var valid := polygon.size() >= 3
+		for vertex_index in polygon:
+			if vertex_index < 0 or vertex_index >= vertices.size() or not vertices[vertex_index].is_finite(): valid = false
+		var area := Vector3.ZERO
+		if valid:
+			for i in range(1,polygon.size()-1):
+				area += (vertices[polygon[i]]-vertices[polygon[0]]).cross(vertices[polygon[i+1]]-vertices[polygon[0]])
+		valid_polygons[index] = valid and area.is_finite() and area.length_squared() > 0.0
+	var surfaces := {}
+	for id in ownership:
+		var index := int(ownership[id])
+		if valid_polygons.get(index,false): surfaces[id] = index
+	var missing: Array[String] = []
+	for value in declared:
+		if not value is Dictionary or not bool(value.get("walkable",true)): continue
+		var id := String(value.get("id",""))
+		if (id.is_empty() or not surfaces.has(id)) and not missing.has(id): missing.append(id)
+	surfaces.make_read_only(); missing.make_read_only()
+	return {"validSurfacePolygons":surfaces,"missingDeclaredSurfaceIds":missing}
 
 func _continue(stage: String) -> bool:
 	return not _continuation.is_valid() or _continuation.call(stage)==true
@@ -238,4 +265,3 @@ func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 		Vector3(center.x + half_x, center.y, center.z + half_z),
 		Vector3(center.x + half_x, center.y, center.z - half_z)
 	]
-

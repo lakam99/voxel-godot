@@ -142,3 +142,18 @@ retain one world authority, preserve save format v2 and durable deltas.
   candidate additionally stopped on an engine RID error that did not recur in
   the reference replay; that failure remains unresolved and blocks its reuse.
   Keep the cooperative budget and use initial-location startup measurements.
+- Runtime navigation compilation now uses the existing owned worker lifecycle,
+  retaining old regions during bounded polygon upload and rejecting stale/other-
+  seed installations. The existing lifecycle fixture passes 111 checks and the
+  nav-world suite passes 86. The headed candidate exercises worker preparation
+  for all 42 tiles with current installation receipts. Captured source comparisons
+  exposed infinite live prop bounds; finite collider-derived bounds restore all
+  1,752 proved false vertical rejections. Evidence and regression results belong in
+  WORLD_STREAMING_NAVIGATION_PUBLICATION_2026-09-11.md. This is an installation
+  cutover, not completed regional traversal readiness.
+- Next regional composition must include terrain support roots and declared
+  crossing obligations before consuming actual installation receipts. Preserve
+  full required structure completion initially, including ordinary/tutorial-town
+  readiness. Structure and navigation providers, their production gate consumer,
+  door endpoint/support acknowledgement and later partial checkpoints remain
+  unfinished. A scene-ready citadel still reports gameplayReady=false.

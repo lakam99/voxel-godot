@@ -132,6 +132,7 @@ func _physics_process(delta: float) -> void:
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
+		if navmesh_world != null: navmesh_world.finish_publication_for_owner_exit()
 		_clear_navmesh_world()
 
 func clear() -> void:
@@ -174,6 +175,7 @@ func shutdown_for_process_exit() -> void:
 	# clear() deliberately reconstructs services for an in-session world reset.
 	# Process exit has the opposite contract: release the navigation map and all
 	# service references without allocating a fresh routing graph.
+	if navmesh_world != null: navmesh_world.finish_publication_for_owner_exit()
 	contexts_by_instance_id.clear()
 	contexts_by_stable_id.clear()
 	blackboards_by_stable_id.clear()

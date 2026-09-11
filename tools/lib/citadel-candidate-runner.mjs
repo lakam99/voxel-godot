@@ -15,8 +15,8 @@ export const errorPattern = /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|r
 export function parseOptions(argv, kind) {
   const names = ['OutputDirectory', ...(kind === 'watcher' ? [] : ['Seed', 'CandidateRegion']),
     ...(kind === 'recipe' ? ['CaptureBlueprint', 'ExpectReady', 'CaptureFailure', 'ExpectedRecipeSeed'] : []),
-    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'Resolution', 'SpawnCell'] : [])];
-  const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection']);
+    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'Resolution', 'SpawnCell', 'CaptureNavigationRejections'] : [])];
+  const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'captureNavigationRejections']);
   const options = {};
   for (let i = 0; i < argv.length; i++) {
     const match = /^--?([^=:]+)(?:[=:](.*))?$/.exec(argv[i]);
@@ -67,7 +67,7 @@ export function recipeOptions(input) {
   return o;
 }
 export function teleportOptions(input, env) {
-  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, resolution: '1280x720', ...input };
+  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, captureNavigationRejections: false, resolution: '1280x720', ...input };
   if (!['1280x720', '1920x1080'].includes(o.resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
   validateSeed(o.seed);
   if (o.candidateRegion !== '') regionCoordinates(o.candidateRegion);
@@ -78,7 +78,7 @@ export function teleportOptions(input, env) {
   }
   o.timeoutSeconds = integer(o.timeoutSeconds, 90, 600, 'TimeoutSeconds');
   o.startupTimeoutSeconds = integer(o.startupTimeoutSeconds, 15, 180, 'StartupTimeoutSeconds');
-  for (const key of ['skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection']) if (typeof o[key] !== 'boolean') throw new Error('Invalid boolean: ' + key);
+  for (const key of ['skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'captureNavigationRejections']) if (typeof o[key] !== 'boolean') throw new Error('Invalid boolean: ' + key);
   o.launchOptions = { skipTutorial: o.skipTutorial, forceDaytime: o.forceDaytime, forceClearWeather: o.forceClearWeather };
   o.gameArguments = Object.entries(o.launchOptions).filter(([, enabled]) => enabled).map(([key]) => '-' + key[0].toUpperCase() + key.slice(1));
   o.manualInspectionSeconds = o.manualInspection ? 1800 : 0;
@@ -106,7 +106,7 @@ export const readJson = async path => JSON.parse((await readFile(path, 'utf8')).
 export const sha256 = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 export function git(project, args) { return execFileSync('git', ['-C', project, ...args], { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 }); }
 export async function sourceHashes(project, kind, runner) {
-  const patterns = kind === 'recipe' ? ['--cached', '--others', '--exclude-standard', '--', 'scripts/*.gd', 'scripts/**/*.gd'] : ['--', '*.gd', '*.tscn', 'project.godot'];
+  const patterns = kind === 'recipe' ? ['--cached', '--others', '--exclude-standard', '--', 'scripts/*.gd', 'scripts/**/*.gd'] : ['--cached', '--others', '--exclude-standard', '--', '*.gd', '*.tscn', 'project.godot'];
   const files = git(project, ['ls-files', '-z', ...patterns]).split('\0').filter(Boolean);
   files.push(`scripts/testing/buildings/CitadelCandidate${kind === 'recipe' ? 'RecipeDiagnostic' : 'TeleportPlaytest'}.gd`, runner, watchdogSource, ...watchdogDependencies, helperSource);
   if (kind === 'teleport') files.push('addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll', 'scripts/perf/RuntimeRenderObservation.gd');

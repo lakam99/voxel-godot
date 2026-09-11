@@ -5,6 +5,7 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
 const BuildingClearanceScript := preload("res://scripts/buildings/layout/BuildingLayoutClearance.gd")
+const NavigationPublicationSourceScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationSource.gd")
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -30,6 +31,8 @@ var cached_props := {}
 var cached_prop_clearance := {}
 var cached_prop_cell_by_object_id := {}
 var cached_prop_collision_records_by_object_id := {}
+# Failed sources have unknown extent: block publication, never invent geometry.
+var collision_source_errors := {}
 var cached_static_collision_records: Array[Dictionary] = []
 var cached_static_collision_by_cell := {}
 var cached_door_collision_records: Array[Dictionary] = []
@@ -54,6 +57,8 @@ var nav_dynamic_update_count := 0
 var dynamic_occupant_cache_frame_key := ""
 var dynamic_occupant_cache := {}
 var building_clearance = BuildingClearanceScript.new()
+# Opt-in evidence only. Retention is bounded by the existing tile snapshot cache.
+var navigation_rejection_diagnostics_enabled := OS.get_environment("VOXEL_NAVIGATION_REJECTION_DIAGNOSTICS") == "1"
 
 func setup(system_node, main_node) -> void:
     system = system_node
@@ -263,26 +268,49 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
 # helper that only updates blocked/doors/paths; that reintroduces planner/probe
 # disagreement and makes NPCs accept routes into walls or reject valid routes.
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
+    var world_seed = main.get("seed_text") if is_instance_valid(main) else null
+    if not world_seed is String or world_seed.strip_edges().is_empty():
+        var failed_source := NavigationPublicationSourceScript.new().capture({"worldSeed":world_seed})
+        return {"tileKey":tile_key,"publicationStatus":"failed","reason":failed_source.reason,
+            "publicationSource":failed_source}
     var building_sources := building_navigation_sources(tile_key)
     if building_sources.get("status")!="ready":
         return {"tileKey":tile_key,"publicationStatus":String(building_sources.get("status","pending")),
             "reason":String(building_sources.get("reason","structure_source_pending"))}
+    # Refresh only invalidated sources; failed shapes are retryable before cache hits.
+    if cached_revision != str(static_snapshot_revision):
+        build_snapshot({}, true, true)
+    _retry_collision_sources()
+    var collision_failure := _collision_publication_failure(tile_key)
+    if not collision_failure.is_empty(): return collision_failure
     var source_key := navmesh_tile_source_key_for_tile(tile_key)
-    var cache_key := "%s|%s" % [tile_key, source_key]
+    # Keep routing's source key intact while isolating captured worker inputs
+    # across worlds. The tile prefix still supports tile-scoped invalidation.
+    var cache_key := "%s|%s" % [tile_key, JSON.stringify([world_seed, source_key])]
     if navmesh_tile_snapshot_cache.has(cache_key):
         var cached_snapshot: Dictionary = navmesh_tile_snapshot_cache[cache_key]
         return cached_snapshot
     var snapshot: Dictionary = _snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
+    collision_failure = _collision_publication_failure(tile_key)
+    if not collision_failure.is_empty(): return collision_failure
     var tile := _parse_tile_key(tile_key)
     var min_x := tile.x * NAV_TILE_CELL_SIZE
     var min_z := tile.y * NAV_TILE_CELL_SIZE
     var surfaces: Array[Dictionary] = []
     var semantic_regions: Array[Dictionary] = []
+    var diagnostics := {}
+    if navigation_rejection_diagnostics_enabled:
+        diagnostics = {"schema":"navigation-live-rejections/v1","tileKey":tile_key,"sourceKey":source_key,
+            "worldSeed":world_seed,"sourceRevision":static_snapshot_revision,"semanticRevision":semantic_revision,
+            "physicsFrame":Engine.get_physics_frames(),"processFrame":Engine.get_process_frames(),
+            "rawBuildingSurfaceCount":0,"acceptedBuildingSurfaceCount":0,"rejectedBuildingSurfaceCount":0,
+            "rawTerrainCellCount":NAV_TILE_CELL_SIZE*NAV_TILE_CELL_SIZE,"acceptedTerrainSurfaceCount":0,
+            "rejectedTerrainCellCount":0,"terrainRejectionReasons":{},"sourceBindings":[],"blockers":{},"recordUsec":0}
     for z in range(min_z, min_z + NAV_TILE_CELL_SIZE):
         for x in range(min_x, min_x + NAV_TILE_CELL_SIZE):
             var cell := Vector2i(x, z)
-            var surface := _navmesh_surface_for_cell(snapshot, cell)
-            if not surface.is_empty() and not _building_blocks_terrain_surface(surface.worldPosition,building_sources):
+            var surface := _navmesh_surface_for_cell(snapshot, cell, diagnostics)
+            if not surface.is_empty() and not _building_blocks_terrain_surface(surface.worldPosition,building_sources,diagnostics,cell):
                 surfaces.append(surface)
     var source_sites: Array[String] = []
     for source: Dictionary in building_sources.get("sources",[]): source_sites.append(String(source.binding.siteId))
@@ -292,18 +320,25 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     var live_records := {}
     for source: Dictionary in building_sources.get("sources",[]):
         var source_tile: Dictionary = source.get("tile",{})
+        if not diagnostics.is_empty():
+            diagnostics.rawBuildingSurfaceCount += source_tile.get("surfaces",[]).size()
+            diagnostics.sourceBindings.append(source.binding)
         for surface: Dictionary in source_tile.get("surfaces",[]):
             var cell := world_cell(surface.worldPosition)
             if not live_records.has(cell): live_records[cell] = _transition_collision_records(snapshot,"staticCollisionByCell",cell,cell)
             var center := Vector2(surface.worldPosition.x,surface.worldPosition.z)
             var half := Vector2(surface.size.x,surface.size.z)*0.5
-            if building_clearance._building_support_navigation_blocker_from_records(live_records[cell],surface,surface.worldPosition.y,center-half,center+half,BuildingClearanceScript.BUILDING_SUPPORT_NAV_CLEARANCE,[],true).is_empty():
+            var rejecting_record: Dictionary = building_clearance._building_support_navigation_blocker_from_records(live_records[cell],surface,surface.worldPosition.y,center-half,center+half,BuildingClearanceScript.BUILDING_SUPPORT_NAV_CLEARANCE,[],true)
+            if rejecting_record.is_empty():
                 building_surfaces.append(surface)
+            elif not diagnostics.is_empty():
+                _record_navigation_rejection(diagnostics,"building",String(surface.id),"live_collision_clearance",rejecting_record,String(surface.get("sourcePartId","")))
         crossing_links.append_array(source_tile.get("crossingLinks",[]))
         if not _apply_building_door_geometry(door_summary,source,tile_key):
             return {"tileKey":tile_key,"publicationStatus":"pending","reason":"structure_door_owner_pending"}
     var result: Dictionary = {
         "publicationStatus": "ready",
+        "worldSeed": world_seed,
         "tileKey": tile_key,
         "sourceKey": source_key,
         "regionId": "region:chunk:%s" % tile_key,
@@ -325,16 +360,107 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
     }
     result["buildingSurfaces"] = building_surfaces
     result["crossingLinks"] = crossing_links
+    var factory := NavigationPublicationSourceScript.new()
+    # These are new lists containing only facts from the validated, recursively
+    # sealed building artifact. Preserve the source leaves instead of cloning or
+    # recursively revalidating thousands of already prepared polygons here.
+    factory.seal_prepared_fact_list(building_surfaces)
+    factory.seal_prepared_fact_list(crossing_links)
+    result["publicationSource"] = factory.capture(result)
+    # Main-thread lifecycle validation only; never part of the worker envelope.
+    result["publicationOwner"] = weakref(self)
+    if not diagnostics.is_empty():
+        diagnostics.acceptedBuildingSurfaceCount = building_surfaces.size()
+        diagnostics.acceptedTerrainSurfaceCount = surfaces.size()
+        # Source capture uses a strict whitelist; this value-only evidence stays
+        # outside the worker envelope along with the main-thread owner handle.
+        result["publicationDiagnostics"] = diagnostics
+    if result.publicationSource.status != "prepared":
+        result["publicationStatus"] = "failed"
+        result["reason"] = result.publicationSource.reason
+        return result
     _store_navmesh_tile_snapshot_cache(cache_key, result)
     return result
 
-func _building_blocks_terrain_surface(position: Vector3, sources: Dictionary) -> bool:
+func _building_blocks_terrain_surface(position: Vector3, sources: Dictionary, diagnostics: Dictionary = {}, cell := INVALID_CELL) -> bool:
     var center := Vector2(position.x,position.z)
     for source: Dictionary in sources.get("sources",[]):
         var records: Array = source.get("tile",{}).get("collisionRecords",[])
-        if not building_clearance._building_support_navigation_blocker_from_records(records,{"sourcePartId":"terrain"},position.y,
-            center-Vector2.ONE*CELL*0.5,center+Vector2.ONE*CELL*0.5).is_empty(): return true
+        var rejecting_record: Dictionary = building_clearance._building_support_navigation_blocker_from_records(records,{"sourcePartId":"terrain"},position.y,
+            center-Vector2.ONE*CELL*0.5,center+Vector2.ONE*CELL*0.5)
+        if not rejecting_record.is_empty():
+            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"building_manifest_clearance",rejecting_record)
+            return true
     return false
+
+func _record_navigation_rejection(diagnostics: Dictionary, domain: String, source_id: String, reason: String, record: Dictionary = {}, source_part_id := "") -> void:
+    if diagnostics.is_empty(): return
+    var started := Time.get_ticks_usec()
+    var record_id := String(record.get("id",""))
+    var node = record.get("node")
+    # Registry-only terrain rejection has no collision record. Keep that fact
+    # explicit; never invent collider bounds or run another collision query.
+    var group_key := reason+"|"+record_id
+    if record_id.is_empty() and is_instance_valid(node): group_key += "|node:"+str(node.get_instance_id())
+    if not diagnostics.blockers.has(group_key):
+        diagnostics.blockers[group_key] = {"reason":reason,"record":_navigation_rejection_record_values(record),
+            "buildingSurfaceIdsByPart":{},"terrainCells":[]}
+    var group: Dictionary = diagnostics.blockers[group_key]
+    if domain == "building":
+        if not group.buildingSurfaceIdsByPart.has(source_part_id): group.buildingSurfaceIdsByPart[source_part_id] = []
+        group.buildingSurfaceIdsByPart[source_part_id].append(source_id)
+        diagnostics.rejectedBuildingSurfaceCount += 1
+    else:
+        group.terrainCells.append(source_id)
+        diagnostics.rejectedTerrainCellCount += 1
+        diagnostics.terrainRejectionReasons[reason] = int(diagnostics.terrainRejectionReasons.get(reason,0))+1
+    diagnostics.recordUsec += Time.get_ticks_usec()-started
+
+func _navigation_rejection_record_values(record: Dictionary) -> Dictionary:
+    var result := {}
+    # Scalar/vector metadata includes the actual ID, cell, sourcePartId, source
+    # kind, bounds, inflation and door flag. Never copy live object references.
+    for key in record:
+        if key is String and typeof(record[key]) <= TYPE_NODE_PATH: result[key] = record[key]
+    if record.get("footprint") is Array:
+        var footprint: Array[Vector3] = []
+        for point in record.footprint:
+            if point is Vector3: footprint.append(point)
+        result["footprint"] = footprint
+    var node = record.get("node")
+    if is_instance_valid(node) and node is Node:
+        var owner := {"instanceId":node.get_instance_id(),"name":String(node.name),"class":node.get_class(),
+            "insideTree":node.is_inside_tree(),"queuedForDeletion":node.is_queued_for_deletion(),"metadata":{}}
+        if node.is_inside_tree(): owner["path"] = String(node.get_path())
+        if node is Node3D: owner["position"] = node.global_position if node.is_inside_tree() else node.position
+        for key: String in ["kind","block_type","cell","building_id","building_part_id","building_source_blueprint_id",
+                "furnishing_part_id","furnishing_plan_id","door_building_id","prop_id","prop_kind","prop","source_part_id","sourcePartId",
+                "tree_recipe_signature","tree_visual_state","tree_render_lod_tier","tree_publication_cancelled","tree_collision_ready_usec"]:
+            if node.has_meta(key) and typeof(node.get_meta(key)) <= TYPE_NODE_PATH: owner.metadata[key] = node.get_meta(key)
+        if node is CollisionObject3D:
+            owner["collisionLayer"] = node.collision_layer
+            owner["collisionMask"] = node.collision_mask
+            owner["enabledShapes"] = []
+            # Only direct CollisionShape3D children belong to this body. Read
+            # once per rejecting record, without a physics query or mutation.
+            for child in node.get_children():
+                if not child is CollisionShape3D or child.disabled or child.shape == null: continue
+                var shape: Shape3D = child.shape
+                var shape_evidence := {"name":String(child.name),"type":shape.get_class(),
+                    "localTransform":child.transform,"insideTree":child.is_inside_tree()}
+                if child.is_inside_tree(): shape_evidence["globalTransform"] = child.global_transform
+                if shape is WorldBoundaryShape3D:
+                    shape_evidence["plane"] = shape.plane
+                    shape_evidence["boundsStatus"] = "unbounded_plane"
+                else:
+                    var debug_mesh: ArrayMesh = shape.get_debug_mesh()
+                    if debug_mesh != null:
+                        shape_evidence["localShapeBounds"] = debug_mesh.get_aabb()
+                        shape_evidence["boundsSource"] = "shape_debug_mesh"
+                    else: shape_evidence["boundsStatus"] = "unavailable"
+                owner.enabledShapes.append(shape_evidence)
+        result["nodeEvidence"] = owner
+    return result
 
 func _apply_building_door_geometry(summary: Dictionary, source: Dictionary, tile_key: String) -> bool:
     # The publication owner supplies the exact registered leaf, even when its
@@ -511,8 +637,6 @@ func _collision_records_outside_tile(records_value, tile_key: String) -> Array:
 
 func _append_collision_records(records: Array, body: Node, cell: Vector2i, block_type: String, is_door: bool) -> void:
     var body_records := _collision_records_for_body(body, cell, block_type, is_door)
-    if body_records.is_empty() and body is Node3D:
-        body_records.append(_fallback_collision_record(body as Node3D, cell, block_type, is_door))
     for record in body_records:
         records.append(record)
 
@@ -659,6 +783,7 @@ func _event_changes_semantic_state(kinds: Array) -> bool:
     return false
 
 func rebuild_static_cells() -> int:
+    collision_source_errors.clear()
     cached_blocked = {}
     cached_doors = {}
     cached_paths = {}
@@ -713,14 +838,8 @@ func block_world_cell(body: Node) -> Vector2i:
     return INVALID_CELL
 
 func _add_collision_records(body: Node, cell: Vector2i, block_type: String, is_door: bool) -> void:
-    var records := []
+    var records := _collision_records_for_body(body, cell, block_type, is_door)
     var prop_object_id := _prop_object_id(body) if block_type == "prop" else ""
-    if block_type == "prop" and body is Node3D:
-        records.append(_fallback_collision_record(body as Node3D, cell, block_type, is_door))
-    else:
-        records = _collision_records_for_body(body, cell, block_type, is_door)
-        if records.is_empty() and body is Node3D:
-            records.append(_fallback_collision_record(body as Node3D, cell, block_type, is_door))
     var prop_records: Array[Dictionary] = []
     for record in records:
         if is_door:
@@ -735,84 +854,112 @@ func _add_collision_records(body: Node, cell: Vector2i, block_type: String, is_d
         cached_prop_collision_records_by_object_id[prop_object_id] = prop_records
 
 func _collision_records_for_body(body: Node, cell: Vector2i, block_type: String, is_door: bool) -> Array[Dictionary]:
-    var result: Array[Dictionary] = []
-    var body3d := body as Node3D
-    if body3d == null:
-        return result
+    var publication := _collect_collision_records(body, cell, block_type, is_door)
+    var key := str(body.get_instance_id())
+    if publication.status != "ready":
+        collision_source_errors[key] = {"owner":weakref(body), "cell":cell,
+            "blockType":block_type, "isDoor":is_door, "objectId":_prop_object_id(body),
+            "error":publication.error}
+        _clear_navmesh_tile_snapshot_cache()
+        return []
+    collision_source_errors.erase(key)
+    return publication.records
+
+func _collect_collision_records(body: Node, cell: Vector2i, block_type: String, is_door: bool) -> Dictionary:
+    var records: Array[Dictionary] = []
+    if not body is Node3D or not body.is_inside_tree():
+        return {"status":"failed", "error":{"reason":"navigation_collision_owner_not_live"}}
     var stack: Array[Node] = [body]
-    var collider_index := 0
+    var box_index := 0
     while not stack.is_empty():
         var node := stack.pop_back() as Node
-        if node == null:
-            continue
         var collider := node as CollisionShape3D
-        if collider != null and not collider.disabled and collider.shape is BoxShape3D:
-            var box := collider.shape as BoxShape3D
-            var record := _box_collision_record(body3d, collider, box, cell, block_type, is_door, collider_index)
-            if not record.is_empty():
-                result.append(record)
-                collider_index += 1
-        for child in node.get_children():
-            stack.append(child)
-    return result
+        if collider != null and not collider.disabled:
+            var compiled := _finite_collision_bounds(collider)
+            if compiled.status != "ready":
+                return {"status":"failed", "error":{"reason":compiled.reason,
+                    "body":String(body.name), "objectId":_prop_object_id(body),
+                    "colliderPath":String(body.get_path_to(collider)),
+                    "shapeClass":collider.shape.get_class() if collider.shape != null else "null"}}
+            # Existing box ordinals stay unchanged if another shape is present.
+            var suffix := str(box_index) if collider.shape is BoxShape3D else "shape:"+String(body.get_path_to(collider))
+            if collider.shape is BoxShape3D: box_index += 1
+            records.append(_finite_collision_record(body, cell, block_type, is_door, suffix, compiled.bounds))
+        for child in node.get_children(): stack.append(child)
+    if block_type == "prop" and not records.is_empty():
+        var bounds := _collision_record_bounds(records[0])
+        for index in range(1, records.size()): bounds = bounds.merge(_collision_record_bounds(records[index]))
+        # Preserve the existing opaque prop ID and one aggregate record.
+        records.assign([_finite_collision_record(body, cell, block_type, is_door, "fallback", bounds)])
+    return {"status":"ready", "records":records}
 
-func _box_collision_record(body: Node3D, collider: CollisionShape3D, box: BoxShape3D, cell: Vector2i, block_type: String, is_door: bool, collider_index: int) -> Dictionary:
-    var body_transform := body.global_transform if body.is_inside_tree() else body.transform
-    var transform: Transform3D = collider.global_transform if collider.is_inside_tree() else body_transform * collider.transform
-    if collider.get_parent() == body:
-        transform = body_transform * collider.transform
-    var half := box.size * 0.5
-    var corners := [
-        Vector3(-half.x, 0.0, -half.z),
-        Vector3(half.x, 0.0, -half.z),
-        Vector3(half.x, 0.0, half.z),
-        Vector3(-half.x, 0.0, half.z)
-    ]
-    var min_x := INF
-    var max_x := -INF
-    var min_z := INF
-    var max_z := -INF
-    for corner in corners:
-        var world_corner: Vector3 = transform * corner
-        min_x = minf(min_x, world_corner.x)
-        max_x = maxf(max_x, world_corner.x)
-        min_z = minf(min_z, world_corner.z)
-        max_z = maxf(max_z, world_corner.z)
-    if min_x == INF or min_z == INF:
-        return {}
-    var volume := transform * AABB(-half,box.size)
-    return {
-        "id": "%s:%s:%s:%d" % ["door" if is_door else "static", cell_key(cell), String(body.name), collider_index],
-        "cell": cell,
-        "blockType": block_type,
-        "node": body,
-        "isDoor": is_door,
-        "minX": min_x,
-        "maxX": max_x,
-        "minZ": min_z,
-        "maxZ": max_z,
-        "minY":volume.position.y,
-        "maxY":volume.end.y,
-        "inflation": TRANSITION_COLLISION_INFLATION
-    }
+func _finite_collision_bounds(collider: CollisionShape3D) -> Dictionary:
+    var shape := collider.shape
+    if shape == null: return {"status":"failed", "reason":"missing_navigation_collision_shape"}
+    if not (shape is BoxShape3D or shape is SphereShape3D or shape is CylinderShape3D or shape is CapsuleShape3D):
+        return {"status":"failed", "reason":"unsupported_navigation_collision_shape"}
+    var transform := collider.global_transform
+    if not transform.is_finite() or is_zero_approx(transform.basis.determinant()):
+        return {"status":"failed", "reason":"invalid_navigation_collision_transform"}
+    var half := Vector3.ZERO
+    var radius := 0.0
+    var half_height := 0.0
+    if shape is BoxShape3D:
+        half = shape.size * 0.5
+        if not half.is_finite() or half.x <= 0.0 or half.y <= 0.0 or half.z <= 0.0:
+            return {"status":"failed", "reason":"invalid_navigation_collision_dimensions"}
+    else:
+        radius = shape.radius
+        if shape is CylinderShape3D or shape is CapsuleShape3D: half_height = shape.height * 0.5
+        if not is_finite(radius) or radius <= 0.0 or not is_finite(half_height) \
+            or ((shape is CylinderShape3D or shape is CapsuleShape3D) and half_height <= 0.0) \
+            or (shape is CapsuleShape3D and half_height < radius):
+            return {"status":"failed", "reason":"invalid_navigation_collision_dimensions"}
+    var extent := Vector3.ZERO
+    for axis in range(3):
+        var row := Vector3(transform.basis.x[axis], transform.basis.y[axis], transform.basis.z[axis])
+        if shape is BoxShape3D: extent[axis] = row.abs().dot(half)
+        elif shape is SphereShape3D: extent[axis] = radius * row.length()
+        elif shape is CylinderShape3D: extent[axis] = radius * Vector2(row.x,row.z).length() + half_height * absf(row.y)
+        else: extent[axis] = radius * row.length() + (half_height-radius) * absf(row.y)
+    var bounds := AABB(transform.origin-extent, extent*2.0)
+    if not bounds.position.is_finite() or not bounds.end.is_finite():
+        return {"status":"failed", "reason":"invalid_navigation_collision_bounds"}
+    return {"status":"ready", "bounds":bounds}
 
-func _fallback_collision_record(body: Node3D, cell: Vector2i, block_type: String, is_door: bool) -> Dictionary:
-    var radius := PROP_CLEARANCE_RADIUS if block_type == "prop" else CELL * 0.48
-    var center := body.global_position
-    return {
-        "id": "%s:%s:%s:fallback" % ["door" if is_door else "static", cell_key(cell), String(body.name)],
-        "cell": cell,
-        "blockType": block_type,
-        "node": body,
-        "isDoor": is_door,
-        "minX": center.x - radius,
-        "maxX": center.x + radius,
-        "minZ": center.z - radius,
-        "maxZ": center.z + radius,
-        "minY":center.y,
-        "maxY":INF,
-        "inflation": TRANSITION_COLLISION_INFLATION
-    }
+func _finite_collision_record(body: Node3D, cell: Vector2i, block_type: String, is_door: bool, suffix: String, bounds: AABB) -> Dictionary:
+    return {"id":"%s:%s:%s:%s" % ["door" if is_door else "static",cell_key(cell),String(body.name),suffix],
+        "cell":cell, "blockType":block_type, "node":body, "isDoor":is_door,
+        "minX":bounds.position.x, "maxX":bounds.end.x,
+        "minY":bounds.position.y, "maxY":bounds.end.y,
+        "minZ":bounds.position.z, "maxZ":bounds.end.z,
+        "inflation":TRANSITION_COLLISION_INFLATION}
+
+func _collision_record_bounds(record: Dictionary) -> AABB:
+    var minimum := Vector3(record.minX,record.minY,record.minZ)
+    return AABB(minimum,Vector3(record.maxX,record.maxY,record.maxZ)-minimum)
+
+func _collision_publication_failure(tile_key: String) -> Dictionary:
+    if collision_source_errors.is_empty(): return {}
+    # No finite bound exists for an unsupported source. Do not guess tile extent.
+    return {"tileKey":tile_key, "publicationStatus":"failed",
+        "reason":"navigation_collision_source_invalid", "sourceRevision":static_snapshot_revision,
+        "sourceErrorCount":collision_source_errors.size(),
+        "collisionError":collision_source_errors.values()[0].error.duplicate(true)}
+
+func _retry_collision_sources() -> void:
+    var recovered := false
+    for entry: Dictionary in collision_source_errors.values():
+        var body = entry.owner.get_ref()
+        if body == null or not body.is_inside_tree():
+            recovered = true
+            continue
+        var publication := _collect_collision_records(body,entry.cell,entry.blockType,entry.isDoor)
+        if publication.status == "ready": recovered = true
+    if recovered:
+        # Recovery must rebuild the same source, not merely clear the error/cache.
+        invalidate()
+        build_snapshot({},true,true)
 
 func _index_collision_record(index: Dictionary, record: Dictionary) -> void:
     var inflation := float(record.get("inflation", TRANSITION_COLLISION_INFLATION))
@@ -862,6 +1009,8 @@ func _add_cached_prop_object(object_id: String) -> bool:
     return true
 
 func _remove_cached_prop_object(object_id: String) -> bool:
+    for key in collision_source_errors.keys():
+        if collision_source_errors[key].objectId == object_id: collision_source_errors.erase(key)
     var removed := false
     if cached_prop_cell_by_object_id.has(object_id):
         var prop_cell: Vector2i = cached_prop_cell_by_object_id.get(object_id, INVALID_CELL)
@@ -1720,23 +1869,34 @@ func candidate_cells_near(entry: Dictionary, target_cell: Vector2i, allow_outsid
     )
     return result
 
-func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i) -> Dictionary:
+func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i, diagnostics: Dictionary = {}) -> Dictionary:
     if main == null:
+        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"missing_main")
         return {}
     if height_for_cell(cell) < main.WATER_LEVEL + 0.45:
+        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"below_water_clearance")
         return {}
     var door := door_at(snapshot, cell)
     if door != null:
         var door_state := String(door.get_meta("door_state", NpcEnumsScript.DOOR_STATE_CLOSED))
         if bool(door.get_meta("locked", false)) or bool(door.get_meta("jammed", false)) or bool(door.get_meta("destroyed", false)) or bool(door.get_meta("unloaded", false)):
+            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"door_flags",{"node":door})
             return {}
         if door_state in [String(NpcEnumsScript.DOOR_STATE_LOCKED), String(NpcEnumsScript.DOOR_STATE_JAMMED), String(NpcEnumsScript.DOOR_STATE_DESTROYED), String(NpcEnumsScript.DOOR_STATE_UNLOADED)]:
+            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"door_state",{"node":door,"state":door_state})
             return {}
-    if static_blocker(snapshot, cell) != null:
+    var blocking_node = static_blocker(snapshot, cell)
+    if blocking_node != null:
+        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"static_cell_blocker",{"node":blocking_node})
         return {}
-    if door == null and not static_collision_blocker(snapshot, cell).is_empty():
-        return {}
-    if prop_clearance_blocker(snapshot, cell) != null:
+    if door == null:
+        var blocking_record := static_collision_blocker(snapshot, cell)
+        if not blocking_record.is_empty():
+            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"static_collision",blocking_record)
+            return {}
+    var blocking_prop = prop_clearance_blocker(snapshot, cell)
+    if blocking_prop != null:
+        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"prop_clearance",{"node":blocking_prop})
         return {}
     var position := cell_position(cell)
     var span_y := floori(position.y / CELL)

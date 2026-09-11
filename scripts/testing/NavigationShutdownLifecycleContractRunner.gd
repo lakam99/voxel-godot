@@ -7,6 +7,16 @@ const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem
 const BuildingClearanceScript := preload("res://scripts/buildings/layout/BuildingLayoutClearance.gd")
 const RoutePublicationAdapter := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 const NavigationPublicationWorkerScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationWorker.gd")
+const NavigationPublicationSourceScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationSource.gd")
+const FiniteBoundsAdapter := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
+
+class SyntheticPublicationWorld extends RefCounted:
+	var seed_text := "async-contract-seed-a"
+
+class SyntheticPublicationOwner extends RefCounted:
+	var main = SyntheticPublicationWorld.new()
+	var source_key := "async-contract-source:1"
+	func navmesh_tile_source_key_for_tile(_tile: String) -> String: return source_key
 
 class PendingSourceFixture extends RefCounted:
 	var ready := false
@@ -77,8 +87,11 @@ func run() -> void:
 	await verify_tile_publication_receipts()
 	verify_source_rectangle_coverage()
 	verify_publication_rectangle_clearance()
+	await verify_finite_live_collision_bounds()
 	await verify_pending_source_retention()
 	await verify_navigation_worker_parity_and_ownership()
+	await verify_async_navigation_service_lifecycle()
+	await verify_prepared_navigation_portal_filter_retirement()
 	write_report()
 	quit(0 if failures() == 0 else 1)
 
@@ -133,6 +146,154 @@ func verify_publication_rectangle_clearance() -> void:
 	var enclosed := [Vector3(0.1,0,0.6),Vector3(0.1,0,0.8),Vector3(0.3,0,0.8),Vector3(0.3,0,0.6)]
 	add_result("publication_rectangle_rejects_contained_blocker",clearance._footprint_intersects_rectangle(Vector2.ZERO,Vector2.ONE,enclosed,0.0),{})
 	add_result("publication_rectangle_preserves_clear_separation",not clearance._footprint_intersects_rectangle(Vector2(3,3),Vector2(4,4),corner,0.52),{})
+
+class SyntheticFiniteBoundsWorld extends Node3D:
+	var seed_text := "synthetic-finite-live-collider-bounds"
+	var WATER_LEVEL := -1000.0
+	var blocks := {}
+	var prop_root: Node3D
+	var structure_system = null
+	var runtime_perf_monitor = null
+	var world_generation_system = null
+	var player = null
+	func surface_y_at_cell(_cell) -> float: return 0.0
+
+class SyntheticFiniteBoundsAdapter extends FiniteBoundsAdapter:
+	# Only the smart-object lookup is synthetic; scan/event/record/index/source
+	# publication are the actual adapter code under test.
+	var fixture_props := {}
+	func _registered_prop_node(object_id: String) -> Node3D:
+		return fixture_props.get(object_id)
+
+func finite_fixture_body(parent: Node3D, shape: Shape3D, id: String) -> StaticBody3D:
+	var body := StaticBody3D.new()
+	body.name = "FiniteBounds_"+id
+	body.set_meta("kind","prop")
+	body.set_meta("material","tree")
+	body.set_meta("prop_id",id)
+	var collider := CollisionShape3D.new()
+	collider.name = "Collider"
+	collider.shape = shape
+	body.add_child(collider)
+	parent.add_child(body)
+	return body
+
+func verify_finite_live_collision_bounds() -> void:
+	# Bounded synthetic collider/publication evidence, not gameplay acceptance.
+	var world := SyntheticFiniteBoundsWorld.new()
+	world.prop_root = Node3D.new()
+	world.add_child(world.prop_root)
+	get_root().add_child(world)
+	var adapter := SyntheticFiniteBoundsAdapter.new()
+	adapter.setup(null,world)
+	var box := BoxShape3D.new()
+	box.size = Vector3(2,6,4)
+	var sphere := SphereShape3D.new()
+	sphere.radius = 2.0
+	var cylinder := CylinderShape3D.new()
+	cylinder.radius = 0.5
+	cylinder.height = 4.0
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = 0.5
+	capsule.height = 4.0
+	var shapes: Array[Shape3D] = [box,sphere,cylinder,capsule]
+	var expected: Array[Vector3] = [Vector3(1,3,2),Vector3(2,2,2),Vector3(0.5,2,0.5),Vector3(0.5,2,0.5)]
+	for index in range(shapes.size()):
+		var id := "primitive-%d" % index
+		var body := finite_fixture_body(world.prop_root,shapes[index],id)
+		body.position = Vector3(6,10,-3)
+		var collider := body.get_node("Collider") as CollisionShape3D
+		collider.position = Vector3(1,2,3)
+		var result: Dictionary = adapter._collect_collision_records(body,Vector2i(4,-2),"prop",false)
+		var records: Array = result.get("records",[])
+		var bounds: AABB = adapter._collision_record_bounds(records[0]) if records.size()==1 else AABB()
+		add_result("finite_bounds_primitive_%d" % index,result.get("status")=="ready" and records.size()==1
+			and bounds.position.is_equal_approx(Vector3(7,12,0)-expected[index])
+			and bounds.size.is_equal_approx(expected[index]*2.0),{"bounds":bounds})
+		# 90 degree rotation distinguishes axial height from radius for both
+		# cylinder and capsule, and catches the old box centre-plane omission.
+		collider.rotation.z = PI*0.5
+		result = adapter._collect_collision_records(body,Vector2i(4,-2),"prop",false)
+		records = result.get("records",[])
+		bounds = adapter._collision_record_bounds(records[0]) if records.size()==1 else AABB()
+		var rotated_extent := Vector3(expected[index].y,expected[index].x,expected[index].z)
+		add_result("finite_bounds_rotated_%d" % index,bounds.position.is_equal_approx(Vector3(7,12,0)-rotated_extent)
+			and bounds.size.is_equal_approx(rotated_extent*2.0),{"bounds":bounds})
+		world.prop_root.remove_child(body)
+		body.free()
+	var trunk := CylinderShape3D.new()
+	trunk.radius=0.5; trunk.height=2.0
+	var prop := finite_fixture_body(world.prop_root,trunk,"retry-prop")
+	(prop.get_node("Collider") as CollisionShape3D).position.y=1.0
+	adapter.fixture_props["prop:retry-prop"]=prop
+	adapter.build_snapshot({},true,true)
+	var initial: Array = adapter.cached_static_collision_records.duplicate(true)
+	var old_id := String(initial[0].id) if initial.size()==1 else ""
+	adapter._remove_cached_prop_object("prop:retry-prop")
+	var removed_clean := adapter.cached_static_collision_records.is_empty() and adapter.cached_static_collision_by_cell.is_empty()
+	adapter.apply_navigation_events([{"tileKey":"0,0","revision":10,
+		"changeKinds":["prop_created"],"objectIds":["prop:retry-prop"]}])
+	var incremental: Array = adapter.cached_static_collision_records
+	var same_records: bool = incremental.size()==1 and initial.size()==1 and incremental[0]==initial[0]
+	add_result("finite_bounds_initial_incremental_identity_and_removal",removed_clean and same_records
+		and old_id=="static:0,0:FiniteBounds_retry-prop:fallback",{})
+	var clearance := BuildingClearanceScript.new()
+	var support := {"sourcePartId":"synthetic-floor"}
+	var low := Vector2(-0.1,-0.1)
+	var high := Vector2(0.1,0.1)
+	var at_trunk := clearance._building_support_navigation_blocker_from_records(incremental,support,0.0,low,high,0.0,[],true)
+	var above_trunk := clearance._building_support_navigation_blocker_from_records(incremental,support,3.0,low,high,0.0,[],true)
+	add_result("finite_bounds_actual_overlap_blocks_above_trunk_clear",not at_trunk.is_empty() and above_trunk.is_empty(),{})
+	add_result("finite_bounds_probe_xz_predicates_preserved",adapter._point_inside_collision_record(Vector3(0,20,0),incremental[0])
+		and adapter._segment_intersects_collision_record(Vector3(-2,20,0),Vector3(2,20,0),incremental[0]),{})
+	var second := CollisionShape3D.new()
+	second.shape=trunk
+	second.position=Vector3(4,1,0)
+	prop.add_child(second)
+	var compound: Dictionary=adapter._collect_collision_records(prop,Vector2i.ZERO,"prop",false)
+	var compound_bounds: AABB=adapter._collision_record_bounds(compound.records[0])
+	second.disabled=true
+	var disabled: Dictionary=adapter._collect_collision_records(prop,Vector2i.ZERO,"prop",false)
+	add_result("finite_bounds_compound_union_disabled_and_identity",compound.records.size()==1 and compound.records[0].id==old_id
+		and compound_bounds.position.is_equal_approx(Vector3(-0.5,0,-0.5))
+		and compound_bounds.size.is_equal_approx(Vector3(5,2,1))
+		and adapter._collision_record_bounds(disabled.records[0]).size.is_equal_approx(Vector3(1,2,1)),{})
+	second.free()
+	var collider := prop.get_node("Collider") as CollisionShape3D
+	var unsupported := ConvexPolygonShape3D.new()
+	unsupported.points=PackedVector3Array([Vector3.ZERO,Vector3.RIGHT,Vector3.UP,Vector3.BACK])
+	collider.shape=unsupported
+	adapter.apply_navigation_events([{"tileKey":"0,0","revision":11,
+		"changeKinds":["prop_created"],"objectIds":["prop:retry-prop"]}])
+	var rejected: Dictionary=adapter.build_navmesh_tile_snapshot("0,0")
+	add_result("finite_bounds_unsupported_source_failed_not_empty_success",rejected.get("publicationStatus")=="failed"
+		and rejected.get("collisionError",{}).get("reason")=="unsupported_navigation_collision_shape"
+		and not rejected.has("surfaces") and adapter.navmesh_tile_snapshot_cache.is_empty(),rejected)
+	# Same retained request, corrected source; recovery must republish actual
+	# finite records, advance revision, and never cache the prior error as empty.
+	var failed_revision := adapter.static_snapshot_revision
+	collider.shape=trunk
+	var recovered: Dictionary=adapter.build_navmesh_tile_snapshot("0,0")
+	add_result("finite_bounds_source_correction_retry",recovered.get("publicationStatus")=="ready"
+		and adapter.collision_source_errors.is_empty() and adapter.static_snapshot_revision>failed_revision
+		and adapter.cached_static_collision_records.size()==1
+		and is_equal_approx(adapter.cached_static_collision_records[0].maxY,2.0),{"status":recovered.get("publicationStatus")})
+	collider.shape=null
+	var missing: Dictionary=adapter._collect_collision_records(prop,Vector2i.ZERO,"prop",false)
+	add_result("finite_bounds_missing_shape_explicit",missing.get("error",{}).get("reason")=="missing_navigation_collision_shape",missing)
+	collider.shape=unsupported
+	adapter._collision_records_for_body(prop,Vector2i.ZERO,"prop",false)
+	adapter._remove_cached_prop_object("prop:retry-prop")
+	adapter.fixture_props.clear()
+	prop.free()
+	adapter.invalidate()
+	var after_removal: Dictionary=adapter.build_navmesh_tile_snapshot("0,0")
+	add_result("finite_bounds_failed_owner_removed_retry",after_removal.get("publicationStatus")=="ready"
+		and adapter.collision_source_errors.is_empty() and adapter.cached_static_collision_records.is_empty(),{})
+	adapter.main=null
+	world.free()
+	await process_frame
+
 
 func verify_pending_source_retention() -> void:
 	# Synthetic source producer with the real publication queue and service.
@@ -298,6 +459,11 @@ func verify_navigation_worker_parity_and_ownership() -> void:
 	service.clear()
 	await physics_frame
 	add_result("navigation_worker_service_clear_releases_all_rids",navigation_map_ids()==baseline_maps and service.descriptors_by_region.is_empty() and service._tile_publication_receipts.is_empty(),{"baselineMaps":baseline_maps,"finalMaps":navigation_map_ids(),"descriptors":service.descriptors_by_region.size(),"receipts":service._tile_publication_receipts.size()})
+	# clear() now transfers its prepared-descriptor reference to the service's
+	# retirement worker. Drain that owner before testing our final external alias.
+	service.request_publication_shutdown()
+	var service_shutdown := await wait_for_service_publication(service,true)
+	add_result("navigation_worker_service_owned_retirement_drained",service_shutdown.get("shutdownComplete",false),service_shutdown)
 	var retirement := {"descriptor":prepared,"workerResult":result}
 	var accepted := worker.retire_external_payload(retirement)
 	add_result("navigation_worker_accepts_detached_descriptor_retirement",accepted,{})
@@ -307,6 +473,225 @@ func verify_navigation_worker_parity_and_ownership() -> void:
 	worker.request_shutdown()
 	state = await wait_for_navigation_worker(worker,true)
 	add_result("navigation_worker_shutdown_joins_and_retires_off_main",accepted and state.shutdownComplete and not state.busy and not state.workerRunning and not state.retirementPending and int(state.lastRetirementThreadId)>0 and int(state.lastRetirementThreadId)!=main_thread and prepared_weak.get_ref()==null,state)
+
+func async_navigation_snapshot(owner, revision: int, include_filter_portal := false) -> Dictionary:
+	# Synthetic separated source parts force three or more upload segments.
+	# The real capture factory, worker, upload queue and service remain unmocked.
+	var snapshot := {"tileKey":"async-contract","sourceKey":owner.source_key,
+		"worldSeed":owner.main.seed_text,"sourceRevision":revision,"surfaces":[],"buildingSurfaces":[]}
+	for index in 257:
+		var x := float(index % 17)*2.0
+		var z := floorf(float(index)/17.0)*2.0
+		var y := float(revision)*0.25
+		snapshot.buildingSurfaces.append({"id":"async-part-%d" % index,"supportId":"async-support-%d" % index,
+			"walkable":true,"polygon":[Vector3(x,y,z),Vector3(x,y,z+1),Vector3(x+1,y,z+1),Vector3(x+1,y,z)]})
+	if include_filter_portal:
+		var height := float(revision)*0.25
+		snapshot["doorPortals"] = [{"id":"async-filter-door","entrance":Vector3(0.5,height,0.5),"exit":Vector3(2.5,height,0.5)}]
+		snapshot["doorLinks"] = [{"id":"async-filter-link","portalId":"async-filter-door","from":"async-part-0","to":"async-part-1"}]
+	snapshot["publicationSource"] = NavigationPublicationSourceScript.new().capture(snapshot)
+	snapshot["publicationOwner"] = weakref(owner)
+	return snapshot
+
+func wait_for_service_publication(service, shutdown := false) -> Dictionary:
+	var deadline := Time.get_ticks_msec()+5000
+	var state: Dictionary = {}
+	while Time.get_ticks_msec()<deadline:
+		await process_frame
+		state = service.advance_publication()
+		var worker_state: Dictionary = state.get("worker",{})
+		if shutdown:
+			if state.get("shutdownComplete",false): return state
+		elif not state.get("busy",true):
+			return state
+	return state
+
+func wait_for_service_prepared_without_upload(service, snapshot: Dictionary) -> Dictionary:
+	# A zero upload budget holds a real completed packet at a deterministic
+	# cancellation point. This is scheduling/ownership evidence, not performance.
+	var deadline := Time.get_ticks_msec()+5000
+	var state: Dictionary = {}
+	while Time.get_ticks_msec()<deadline:
+		await process_frame
+		state = service.advance_publication(0)
+		if state.get("reason")=="navigation_upload_pending" or state.get("status")=="failed": return state
+		# A previous installed packet may still be retiring. Retain and retry
+		# demand exactly as a real caller must when the one owned slot is busy.
+		service.register_tile_snapshot(snapshot)
+	return state
+
+func drive_async_navigation_install(service, snapshot: Dictionary, prior_rid := RID()) -> Dictionary:
+	var deadline := Time.get_ticks_msec()+5000
+	var result := {"installed":false}
+	var previous_upload := 0
+	var partial_frames := 0
+	var max_segment := 0
+	var repeated_frame_stable := true
+	var previous_region_preserved := true
+	var region := NavigationBakeDescriptorScript.chunk_region_id(String(snapshot.tileKey))
+	while Time.get_ticks_msec()<deadline:
+		await process_frame
+		var state: Dictionary = service.advance_publication()
+		var upload := int(state.get("uploadPolygon",0))
+		max_segment = maxi(max_segment,upload-previous_upload)
+		previous_upload = upload
+		if upload>0 and upload<257: partial_frames += 1
+		var repeated: Dictionary = service.advance_publication()
+		repeated_frame_stable = repeated_frame_stable and repeated.get("uploadPolygon")==state.get("uploadPolygon") and repeated.get("preparedCount")==state.get("preparedCount")
+		if prior_rid.is_valid(): previous_region_preserved = previous_region_preserved and service.region_rids_by_region.get(region,RID())==prior_rid
+		result = service.register_tile_snapshot(snapshot)
+		if result.get("installed",false) or result.get("status") in ["failed","rejected"]: break
+	return {"installed":result.get("installed",false),"status":result.get("status","timeout"),"reason":result.get("reason",""),
+		"partialFrames":partial_frames,"maxSegment":max_segment,"repeatedFrameStable":repeated_frame_stable,"previousRegionPreserved":previous_region_preserved}
+
+func async_navigation_receipt(service, snapshot: Dictionary) -> Dictionary:
+	service.sync_navigation_map_if_dirty()
+	await wait_for_installed_navigation(service)
+	return service.tile_publication_readiness(String(snapshot.tileKey),String(snapshot.sourceKey))
+
+func verify_async_navigation_service_lifecycle() -> void:
+	# Synthetic lifecycle contract only; no generated-world, NPC traversal or
+	# frame-pacing acceptance. Every installed region uses the real server.
+	await physics_frame
+	await process_frame
+	var baseline_maps := navigation_map_ids()
+	var owner = SyntheticPublicationOwner.new()
+	var snapshot := async_navigation_snapshot(owner,1)
+	var service = NavmeshWorldServiceScript.new()
+	service.setup()
+	var service_id: int = service.get_instance_id()
+	var region := NavigationBakeDescriptorScript.chunk_region_id(String(snapshot.tileKey))
+	var requested: Dictionary = service.register_tile_snapshot(snapshot)
+	add_result("async_navigation_request_uses_frozen_source_and_defers_install",snapshot.publicationSource.status=="prepared" and snapshot.publicationSource.is_read_only() and requested.get("status")=="pending" and not requested.get("installed",false) and not service.region_rids_by_region.has(region),{"status":requested.get("status"),"reason":requested.get("reason")})
+	var install := await drive_async_navigation_install(service,snapshot)
+	add_result("async_navigation_upload_is_segmented_once_per_frame",install.installed and install.partialFrames>=2 and install.maxSegment<=128 and install.repeatedFrameStable,install)
+	var first := await async_navigation_receipt(service,snapshot)
+	var installed_descriptor = service.descriptors_by_region.get(region)
+	var compile_thread := int(installed_descriptor.prepared_geometry().get("threadId",-1)) if installed_descriptor!=null else -1
+	add_result("async_navigation_worker_install_has_revision_matched_ack",first.get("status")=="ready" and first.get("sourceRevision")==1 and first.get("completeSurfaceCoverage",false) and compile_thread>0 and compile_thread!=OS.get_thread_caller_id(),{"status":first.get("status"),"reason":first.get("reason"),"compileThread":compile_thread})
+	installed_descriptor = null
+	var old_rid: RID = service.region_rids_by_region.get(region,RID())
+	owner.source_key = "async-contract-source:2"
+	snapshot = async_navigation_snapshot(owner,2)
+	requested = service.register_tile_snapshot(snapshot)
+	add_result("async_navigation_replacement_retains_old_region_while_pending",requested.get("status")=="pending" and old_rid.is_valid() and service.region_rids_by_region.get(region,RID())==old_rid,{"status":requested.get("status")})
+	install = await drive_async_navigation_install(service,snapshot,old_rid)
+	var replacement := await async_navigation_receipt(service,snapshot)
+	add_result("async_navigation_replacement_swaps_after_complete_upload",install.installed and install.previousRegionPreserved and replacement.get("status")=="ready" and replacement.get("sourceRevision")==2 and int(replacement.get("installationSerial",0))>int(first.get("installationSerial",0)) and service.region_rids_by_region.get(region,RID())!=old_rid,install)
+	old_rid = service.region_rids_by_region.get(region,RID())
+	owner.source_key = "async-contract-source:3"
+	snapshot = async_navigation_snapshot(owner,3)
+	service.register_tile_snapshot(snapshot)
+	var held := await wait_for_service_prepared_without_upload(service,snapshot)
+	add_result("async_navigation_cancellation_fixture_holds_real_prepared_packet",held.get("reason")=="navigation_upload_pending" and held.get("uploadPolygon")==0,held)
+	owner.source_key = "async-contract-source:4"
+	var idle := await wait_for_service_publication(service)
+	requested = service.register_tile_snapshot(snapshot)
+	add_result("async_navigation_stale_source_cancelled_without_old_region_loss",idle.get("binding",{}).is_empty() and not idle.get("worker",{}).get("busy",true) and requested.get("reason")=="navigation_source_owner_changed" and service.region_rids_by_region.get(region,RID())==old_rid and service.tile_publication_readiness(String(snapshot.tileKey),String(snapshot.sourceKey)).get("status")!="ready",{"status":requested.get("status"),"reason":requested.get("reason")})
+	snapshot = async_navigation_snapshot(owner,4)
+	service.register_tile_snapshot(snapshot)
+	install = await drive_async_navigation_install(service,snapshot,old_rid)
+	var current := await async_navigation_receipt(service,snapshot)
+	add_result("async_navigation_retry_after_stale_source_installs_current_revision",install.installed and current.get("status")=="ready" and current.get("sourceRevision")==4,install)
+	old_rid = service.region_rids_by_region.get(region,RID())
+	owner.source_key = "async-contract-source:5"
+	snapshot = async_navigation_snapshot(owner,5)
+	service.register_tile_snapshot(snapshot)
+	held = await wait_for_service_prepared_without_upload(service,snapshot)
+	var owner_weak: WeakRef = weakref(owner)
+	owner = null
+	idle = await wait_for_service_publication(service)
+	add_result("async_navigation_lost_weak_owner_cancels_prepared_packet",held.get("reason")=="navigation_upload_pending" and owner_weak.get_ref()==null and idle.get("binding",{}).is_empty() and not idle.get("worker",{}).get("busy",true) and service.region_rids_by_region.get(region,RID())==old_rid and service.tile_publication_readiness(String(snapshot.tileKey),String(snapshot.sourceKey)).get("status")!="ready",{"binding":idle.get("binding"),"workerBusy":idle.get("worker",{}).get("busy")})
+	owner = SyntheticPublicationOwner.new()
+	owner.main.seed_text = "async-contract-seed-b"
+	owner.source_key = "async-contract-source:4"
+	snapshot = async_navigation_snapshot(owner,4)
+	requested = service.register_tile_snapshot(snapshot)
+	add_result("async_navigation_equal_revision_other_seed_not_cached",requested.get("status")=="pending" and not requested.get("cached",false),{"status":requested.get("status")})
+	install = await drive_async_navigation_install(service,snapshot,old_rid)
+	var other_seed := await async_navigation_receipt(service,snapshot)
+	add_result("async_navigation_other_seed_requires_fresh_installation",install.installed and other_seed.get("status")=="ready" and int(other_seed.get("installationSerial",0))>int(current.get("installationSerial",0)) and service.region_rids_by_region.get(region,RID())!=old_rid and String(service._publication_bindings.get(region,{}).get("sourceKey","")).begins_with(owner.main.seed_text+"|"),{"installed":install.installed,"previousSerial":current.get("installationSerial"),"currentSerial":other_seed.get("installationSerial")})
+	owner.source_key = "async-contract-source:6"
+	snapshot = async_navigation_snapshot(owner,6)
+	service.register_tile_snapshot(snapshot)
+	held = await wait_for_service_prepared_without_upload(service,snapshot)
+	service.begin_publication_reset()
+	add_result("async_navigation_reset_cannot_finish_before_retirement",not service.finish_publication_reset() and service.register_tile_snapshot(snapshot).get("status")=="pending" and service.region_rids_by_region.is_empty(),{})
+	idle = await wait_for_service_publication(service)
+	var reset_finished: bool = service.finish_publication_reset()
+	service.setup()
+	owner.source_key = "async-contract-source:7"
+	snapshot = async_navigation_snapshot(owner,7)
+	service.register_tile_snapshot(snapshot)
+	install = await drive_async_navigation_install(service,snapshot)
+	current = await async_navigation_receipt(service,snapshot)
+	add_result("async_navigation_reset_drains_then_reuses_same_service",held.get("reason")=="navigation_upload_pending" and reset_finished and not idle.get("busy",true) and service.get_instance_id()==service_id and install.installed and current.get("status")=="ready" and current.get("sourceRevision")==7,install)
+	var installed_weak: WeakRef = weakref(service.descriptors_by_region.get(region))
+	owner.source_key = "async-contract-source:8"
+	snapshot = async_navigation_snapshot(owner,8)
+	service.register_tile_snapshot(snapshot)
+	held = await wait_for_service_prepared_without_upload(service,snapshot)
+	var pending_weak: WeakRef = weakref(service._publication_queue._descriptor)
+	service.request_publication_shutdown()
+	add_result("async_navigation_shutdown_detaches_both_installed_and_pending",held.get("reason")=="navigation_upload_pending" and service.descriptors_by_region.is_empty() and service.region_rids_by_region.is_empty() and not service._publication_queue.stats().shutdownComplete,{})
+	var shutdown := await wait_for_service_publication(service,true)
+	await physics_frame
+	var worker_state: Dictionary = shutdown.get("worker",{})
+	add_result("async_navigation_shutdown_joins_all_owned_work_and_releases_payloads",shutdown.get("shutdownComplete",false) and not worker_state.get("busy",true) and not worker_state.get("workerRunning",true) and not worker_state.get("retirementPending",true) and service._publication_queue.worker._thread==null and installed_weak!=null and installed_weak.get_ref()==null and pending_weak!=null and pending_weak.get_ref()==null and navigation_map_ids()==baseline_maps and int(worker_state.get("lastRetirementThreadId",-1))>0 and int(worker_state.get("lastRetirementThreadId",-1))!=OS.get_thread_caller_id(),shutdown)
+
+func verify_prepared_navigation_portal_filter_retirement() -> void:
+	# Synthetic service contract: deleting declared portal data is not a live
+	# door interaction. Geometry, worker retirement and server receipts are real.
+	await physics_frame
+	await process_frame
+	var baseline_maps := navigation_map_ids()
+	var owner = SyntheticPublicationOwner.new()
+	var snapshot := async_navigation_snapshot(owner,1,true)
+	var service = NavmeshWorldServiceScript.new()
+	service.setup()
+	var region := NavigationBakeDescriptorScript.chunk_region_id(String(snapshot.tileKey))
+	service.register_tile_snapshot(snapshot)
+	var install := await drive_async_navigation_install(service,snapshot)
+	var first := await async_navigation_receipt(service,snapshot)
+	var door_receipt: Dictionary = service.tile_publication_readiness(String(snapshot.tileKey),String(snapshot.sourceKey),[],["async-filter-link"])
+	add_result("prepared_portal_fixture_installs_real_owned_link",install.installed and door_receipt.get("status")=="ready" and service.door_link_records_by_portal.has("async-filter-door"),{"install":install,"receiptStatus":door_receipt.get("status")})
+	var prepared = service.descriptors_by_region.get(region)
+	if prepared==null:
+		service.request_publication_shutdown()
+		await wait_for_service_publication(service,true)
+		return
+	var prepared_weak: WeakRef = weakref(prepared)
+	var original_signature: String = prepared.stable_signature()
+	var old_rid: RID = service.region_rids_by_region.get(region,RID())
+	var forgotten: Dictionary = service.forget_door_portal("async-filter-door")
+	var shell = service.descriptors_by_region.get(region)
+	add_result("prepared_portal_filter_preserves_geometry_without_mutating_source",shell!=null and shell.get_script()==NavigationBakeDescriptorScript and is_same(shell.walkable_surfaces,prepared.walkable_surfaces) and shell.door_portals.is_empty() and shell.door_links.is_empty() and prepared.stable_signature()==original_signature and prepared.door_portals.size()==1 and int(forgotten.get("removedLinks",0))==1 and not service.door_link_records_by_portal.has("async-filter-door") and service.region_rids_by_region.get(region,RID())==old_rid,{"removedLinks":forgotten.get("removedLinks"),"filteredDescriptors":forgotten.get("filteredDescriptors")})
+	prepared = null
+	var idle := await wait_for_service_publication(service)
+	var retirement_thread := int(idle.get("worker",{}).get("lastRetirementThreadId",-1))
+	add_result("prepared_portal_filter_retires_old_descriptor_on_owned_worker",not idle.get("busy",true) and prepared_weak.get_ref()==null and retirement_thread>0 and retirement_thread!=OS.get_thread_caller_id(),{"retirementThread":retirement_thread,"mainThread":OS.get_thread_caller_id()})
+	service._mark_dirty_region(region,{"tileKey":snapshot.tileKey,"revision":2},"synthetic_portal_removal")
+	var rebuilds: int = service.rebuild_count
+	var rebuilt := false
+	for frame in 3:
+		await process_frame
+		for result: Dictionary in service.process_dirty_regions(1,4000):
+			if result.get("status") in ["rebuilt","installed"]: rebuilt=true
+	var stale: Dictionary = service.tile_publication_readiness(String(snapshot.tileKey),String(snapshot.sourceKey))
+	add_result("prepared_portal_shell_cannot_take_synchronous_dirty_path",not rebuilt and service.rebuild_count==rebuilds and service.dirty_regions_by_region.has(region) and service.region_rids_by_region.get(region,RID())==old_rid and int(service._tile_publication_receipts.get(region,{}).get("installationSerial",0))==int(first.get("installationSerial",0)) and stale.get("status")!="ready",{"rebuilt":rebuilt,"rebuildCountDelta":service.rebuild_count-rebuilds,"oldReceiptStatus":stale.get("status"),"oldReceiptReason":stale.get("reason")})
+	owner.source_key = "async-contract-source:2"
+	snapshot = async_navigation_snapshot(owner,2)
+	var requested: Dictionary = service.register_tile_snapshot(snapshot)
+	add_result("prepared_portal_replacement_requires_fresh_worker_source",requested.get("status")=="pending" and service.region_rids_by_region.get(region,RID())==old_rid,{"status":requested.get("status")})
+	install = await drive_async_navigation_install(service,snapshot,old_rid)
+	var fresh := await async_navigation_receipt(service,snapshot)
+	var replacement = service.descriptors_by_region.get(region)
+	add_result("prepared_portal_fresh_revision_replaces_and_acknowledges",install.installed and install.previousRegionPreserved and fresh.get("status")=="ready" and fresh.get("sourceRevision")==2 and fresh.get("completeSurfaceCoverage",false) and int(fresh.get("installationSerial",0))>int(first.get("installationSerial",0)) and not service.dirty_regions_by_region.has(region) and replacement!=null and replacement.has_method("prepared_geometry") and replacement.door_links.is_empty() and not service.door_link_records_by_portal.has("async-filter-door"),{"install":install,"status":fresh.get("status"),"sourceRevision":fresh.get("sourceRevision")})
+	shell=null; replacement=null
+	service.request_publication_shutdown()
+	var shutdown := await wait_for_service_publication(service,true)
+	await physics_frame
+	add_result("prepared_portal_filter_shutdown_drains_owned_resources",shutdown.get("shutdownComplete",false) and not shutdown.get("busy",true) and service._publication_queue.worker._thread==null and navigation_map_ids()==baseline_maps,shutdown)
 
 func verify_autonomy_reset_keeps_navmesh_owner() -> void:
 	var baseline_maps := navigation_map_ids()

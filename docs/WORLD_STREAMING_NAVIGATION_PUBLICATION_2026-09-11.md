@@ -1,5 +1,13 @@
 # Regional navigation publication candidate
 
+Latest cutover builds from `889d2c1`: runtime worker preparation and segmented
+uploads are connected, with current owner/revision receipts and finite live prop
+collision bounds. The latest headed comparison restores all 1,752 proved false
+vertical rejections; 111 lifecycle and 86 navigation checks pass. See the final
+sections for commands, headed evidence and final gameplay regression results.
+Regional gameplay readiness and sustained performance acceptance remain unfinished.
+Earlier sections preserve the preceding milestone evidence chronologically.
+
 Parent `5fc79d9`, branch `codex/world-streaming-architecture`. This candidate is
 not yet a regional gameplay-readiness cutover. Whole-site scene publication still
 gates its source artifacts, and the streaming coordinator lacks completed
@@ -319,3 +327,191 @@ regional physical completeness. Route search, motor and traffic remain unchanged
 Broad gameplay regression and real movement remain required. The current source
 publication work does not satisfy bounded uploads, regional traversal readiness,
 the cold-load campaign, distance tiers or the five-minute 1080p performance target.
+
+## Runtime worker publication cutover (September 11)
+
+GeneratedWorldNavigationAdapter now captures a value-only immutable source envelope
+from its authoritative tile output. The envelope includes the actual world seed;
+its weak producer reference stays outside worker input. NavigationPublicationQueue
+uses the existing BuildingPublicationWorker lifecycle through its navigation
+specialization. Descriptor expansion, geometry buffers, canonical signatures and
+surface-ownership validation run on that owned worker. NavigationMesh creation,
+buffer readback, segmented polygon uploads and NavigationServer installation remain
+on the main thread. The slot advances once per frame, with the existing 4ms budget
+and at most 128 polygons per segment. The route publication queue retains demand
+while the slot is occupied; there is no second topology or route authority.
+
+Installed geometry stays in place until a complete current replacement is ready.
+Complete seed/source/generation bindings prevent an equal-geometry cache hit from
+reusing another world's installation. Stale revisions and lost weak owners cancel
+pending work. World reset and graceful quit detach and drain owned descriptors;
+direct scene destruction joins the same retirement protocol. Door removal retires
+the old prepared descriptor off-thread and preserves its asynchronous origin when
+the remaining door-data shell awaits fresh authoritative publication.
+
+Focused verification uses the existing runners:
+
+- `regional-runtime-async-lifecycle-03.json`: 95/95 synthetic/service checks,
+  including segmented uploads, current NavigationServer receipts, stale/lost
+  ownership, cross-seed replacement, portal filtering, reusable reset and shutdown.
+  Natural exit 0, clean engine logs, cleanup passed, authoritative zero owned
+  processes (`godot-jUSTn7`). The first runtime lifecycle run exposed a real
+  cross-seed inner-cache defect; the current binding comparison fixes it.
+- `regional-runtime-async-nav-02`: 86/86 navigation checks in both time modes.
+  The first run's four failures came from a synthetic producer lacking its seed
+  and a source-scan guard treating the prepared packet's mesh field as live-scene
+  scanning. The existing fixture now declares its seed and allows only that exact
+  packet assignment; its other scene-scanning prohibitions remain intact.
+
+The headed `candidate-teleport-runtime-async-01` run used the preceding candidate
+command with that fresh output directory. All 28 checks pass; startup took 87.569s
+and the diagnostic completed at 195.086s. It selected the initial spawn before
+attachment, with zero setup placements. All 42 navigation tiles used worker
+preparation and received actual revision-matched installation acknowledgements.
+Natural exit 0, clean engine logs, cleanup passed and authoritative zero owned
+processes. This run preceded the subsequent focused portal-retirement correction;
+that correction does not alter source geometry or visual publication.
+
+Inspected initial terrain, courtyard, overview, gatehouse stair landing, home-door
+and furniture captures. The citadel is visibly present; counts remain 3,312
+colliders, 20 doors, 178 furniture bodies, 243,227 instances, 739 meshes and 1,531
+MultiMeshes. Close-up darkness and the sharp terrain presentation boundary remain
+unresolved. Scene state still explicitly reports `gameplayReady=false` and
+`door_activation_pending`; these captures are not whole-site gameplay acceptance.
+
+The short ordinary-input approach has post-draw p99 19.4ms and maximum 26.743ms.
+Scene-publication maximum is 70.033ms, startup maximum 2,667.589ms. Courtyard fixed
+view has p99 26.1ms, maximum 36.739ms and up to 2,211 draw calls. The script-only
+monitor's maximum is 8.687ms with no last spike; its narrower scope does not
+overrule the actual frame intervals. No cold-cache, five-minute traversal or 4ms
+whole-pipeline performance acceptance is claimed.
+
+Final-code broad command (before adding rejection diagnostics only):
+
+```text
+node tools/run-playtest.mjs -Visible -Seed atlas-648215039 -ReportPath artifacts/citadel-runtime-integration/regional-runtime-async-broad-01/report.json -ProgressPath artifacts/citadel-runtime-integration/regional-runtime-async-broad-01/progress.txt -ScreenshotPath artifacts/citadel-runtime-integration/regional-runtime-async-broad-01/playtest.png -TimeoutSeconds 600
+```
+
+Result: 158/163. All 163 statuses and all five failure details exactly match
+`regional-async-broad-01`. Watchdog `godot-JfkEue`: natural exit 1, clean engine
+logs, cleanup passed and authoritative zero owned processes.
+
+The existing headed New Game/Continue command recorded above passes again in
+`artifacts/npc/node-production-runs/save-continue-kkYEVe/report.json`, random seed
+`atlas-63661055`. No gameplay-affecting flags; forbidden-call guard passed. The
+subagent inspected the real movement trace and captures: home door opened before
+crossing, strict interior arrival and closure. Both stages exit naturally with
+code 0, clean logs, cleanup passed and owned zero (`godot-O81qwa`, `godot-e080ZD`).
+These runs overlapped the broad fixture; their timings are excluded from
+performance acceptance. This proves tutorial/save/door regression, not citadel
+NPC crossings or 64m regional readiness.
+
+The source-parity audit blocks promotion pending investigation. Current headed
+tile inputs contain 157,760 surfaces versus the previous headed run's 164,088:
+6,305 building surfaces and 23 terrain surfaces are removed across 26 tiles.
+Retained geometry, all 77 links, portal records, accepted blueprint/furnishings
+and durable edits match. The change occurs in live filtering before worker
+compilation; complete receipts cannot establish that those rejections are valid.
+The next headed snapshot must capture the actual rejecting collider identities,
+bounds and source revisions. Maximum measured final installation is 270us and
+source sealing 1,528us, but these exclude upload segments and the expensive live
+source/filtering work; they are not a complete before/after timing comparison.
+
+### Rejection provenance and finite live collision bounds
+
+`candidate-teleport-runtime-async-02` adds `-CaptureNavigationRejections` to the
+headed command. The ordinary launcher still rejects inherited VOXEL modes; its
+explicit option sets only the requested observation mode after validation. An
+earlier inherited-mode attempt stopped before launching Godot. The source audit
+now also hashes new untracked scripts. All 15 existing Node runner tests pass
+(`regional-runtime-async-runner-tests-02.log`).
+
+The instrumented run passes with clean logs, unchanged hashed sources, natural
+exit 0, cleanup passed and owned zero. Startup 87.927s, diagnostic 196.626s;
+inspected initial terrain and ready captures. All 42 tiles use worker preparation.
+The production queue records 44 preparations/uploads, maximum advance 143us and
+83 stale discards while live source revisions change. This excludes upstream
+filtering and instrumentation overhead and is not full-pipeline acceptance.
+
+Saved rejection records confirm a real source defect. Compared with the earlier
+headed source, this run excludes 5,356 building surfaces and 22 terrain surfaces.
+Of the building losses, 1,752 are provably false vertical rejections: actual
+enabled collider bounds end below the surface, but the prop record extends to
+infinite height. For example, prop `atlas-3376622889:-3321,-2838:24` has a sphere
+ending at Y=43.27459 yet rejects `urban_market_plaza` at Y=44.46488 in tile
+`-208,-178`. The remaining 3,604 have vertical bounding overlap; this alone does
+not prove a physical intersection. Terrain losses are separately attributed to
+20 static-cell blockers and two prop-clearance exclusions. Evidence:
+`runtime-async-02-rejection-analysis.json`, `runtime-async-02-saved-source-comparison.json`
+and the 42 `navigation-rejections-*.bin` snapshots. Transformed debug-mesh bounds
+are conservative, especially for rotated spheres; do not infer exact contact
+from their overlap.
+
+The adapter now derives finite world bounds from actual enabled Box, Sphere,
+Cylinder and Capsule collision shapes. Initial and incremental publication share
+the collector; box bounds include their full transformed volume. Existing prop
+record identity and aggregate cardinality remain intact. Unsupported/invalid
+sources report structured failure and retain retryable publication rather than
+inventing a column or silently publishing empty geometry. Existing furnishing
+manifests and probe/route algorithms remain unchanged.
+
+`regional-finite-bounds-lifecycle-02.json` passes 111 synthetic/service checks;
+`regional-finite-bounds-nav-world-01/report.json` passes 86 checks in both time
+modes. Watchdogs `godot-VunKsl` and `godot-mNpAOc`: natural exit 0, clean engine
+logs, cleanup passed and owned zero. Lifecycle attempt 01 was a new fixture
+type-inference error, corrected before the passing run. Headed recovery and
+final-code gameplay regression remain required before promotion.
+
+The corrected headed run `candidate-teleport-finite-bounds-01` uses the same
+instrumented command with that fresh output directory. All 28 checks pass;
+startup 88.335s, diagnostic 195.609s, natural exit 0, clean engine logs, unchanged
+hashed sources, cleanup passed and authoritative zero owned processes. Inspected
+its courtyard capture: geometry/layout remain visibly present; previous lighting
+and presentation limitations remain open. All 42 worker-prepared tile receipts
+are current and all 77 links remain present. Queue maximum advance is 152us,
+excluding upstream source work; source revision churn caused 100 stale discards.
+
+Direct saved-evidence comparison resolves the false-rejection defect:
+
+- All 1,752 previously false vertical-rejection surface IDs are restored.
+- Of 186 previously XZ-separated IDs, 158 restore; all 28 remaining cite a
+  different rejecting prop.
+- Of 3,418 possible-overlap IDs, 236 restore and 3,182 remain (2,992 same prop,
+  190 different prop). Bounding overlap is not proof of physical contact.
+- There are 2,177 added and 548 removed building surfaces, with no changes to
+  retained facts. Every new removal has a captured sphere-prop record; none is
+  unexplained. One additional terrain exclusion cites a static-cell prop blocker.
+- Actual seed/candidate, accepted source/binding, blueprint and furnishing plan
+  match exactly. No source geometry was lost during worker compilation.
+
+Evidence: `finite-bounds-01-direct-rejection-comparison.json` and
+`finite-bounds-01-vs-runtime-async-02.json`, produced by the read-only saved-value
+comparison. This establishes publication/source parity and the diagnosed bounds
+repair; it does not certify every physical crossing or whole-site gameplay.
+
+The final-code existing real-menu save/Continue command also passes in
+`artifacts/npc/node-production-runs/save-continue-Nmc9VP/report.json`, random seed
+`atlas-51653816`. The trace and inspected captures show approach with the door
+closed, opening before crossing, strict interior arrival, then closure. Watchdogs
+`godot-h0e9pD` and `godot-Y6YZMY` exit naturally with code 0, clean logs, cleanup
+passed and owned zero. No gameplay-affecting flags; timings are excluded because
+the broad fixture ran concurrently. This is tutorial/save/home regression evidence,
+not citadel crossing or sustained-performance acceptance.
+
+Final broad command:
+
+```text
+node tools/run-playtest.mjs -Visible -Seed atlas-648215039 -ReportPath artifacts/citadel-runtime-integration/regional-finite-bounds-broad-01/report.json -ProgressPath artifacts/citadel-runtime-integration/regional-finite-bounds-broad-01/progress.txt -ScreenshotPath artifacts/citadel-runtime-integration/regional-finite-bounds-broad-01/playtest.png -TimeoutSeconds 600
+```
+
+Result: 158/163. All 163 statuses and all five failure details exactly match
+`regional-runtime-async-broad-01`; no new or worsened assertion failure. Watchdog
+`godot-A9uZP6` exits naturally with code 1, clean engine logs, cleanup passed and
+authoritative zero owned processes. No owned test processes remain.
+
+The runtime navigation publication and finite-bounds repair are verified for this
+milestone. Whole-site scene readiness still does not mean regional gameplay
+readiness: structure/navigation dependency composition, actual crossing acceptance,
+partial publication checkpoints, distance tiers and the full performance campaign
+remain outstanding. Route search, motor, door execution, traffic and save v2 remain
+their existing authorities.

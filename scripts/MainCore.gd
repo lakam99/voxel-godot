@@ -1126,9 +1126,14 @@ func publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key: St
     var snapshot_ms := float(Time.get_ticks_usec() - snapshot_started_usec) / 1000.0
     if snapshot.is_empty():
         return { "ok": false, "reason": "empty_navigation_tile_snapshot", "snapshotMs": snapshot_ms }
+    if String(snapshot.get("publicationStatus", "ready")) != "ready":
+        return {"ok":false,"status":snapshot.get("publicationStatus","pending"),"reason":snapshot.get("reason","navigation_source_pending"),"snapshotMs":snapshot_ms}
     var register_started_usec := Time.get_ticks_usec()
     var result: Dictionary = navmesh_world.call("register_tile_snapshot", snapshot)
     var register_ms := float(Time.get_ticks_usec() - register_started_usec) / 1000.0
+    if String(result.get("status", "")) in ["pending", "failed", "rejected"]:
+        return {"ok":false,"status":"failed" if result.status == "rejected" else result.status,
+            "reason":result.get("reason","navigation_publication_pending"),"snapshotMs":snapshot_ms,"registerMs":register_ms}
     var sync_ms := 0.0
     if navmesh_world.has_method("sync_navigation_map_if_dirty"):
         var sync_started_usec := Time.get_ticks_usec()
@@ -2156,6 +2161,13 @@ func start_new_game(show_message := true) -> bool:
     if structure_system != null and structure_system.citadel_publication.requires_scene_retirement():
         if show_message: update_hud("Use the game menu to start a new world while landmarks are loaded")
         return false
+    var autonomy = npc_system.get("autonomy_system") if is_instance_valid(npc_system) else null
+    var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
+    if navigation != null:
+        var publication: Dictionary = navigation.stats().get("publication",{})
+        if publication.get("busy",false) or int(publication.get("preparedCount",0)) > 0:
+            if show_message: update_hud("Use the game menu to start a new world while navigation is loaded")
+            return false
     playtest_progress("new_game_start")
     var previous_seed := seed_text
     if save_system:
@@ -2345,7 +2357,15 @@ func _graceful_quit_deferred(exit_code: int) -> void:
 
 func retire_generated_scenes_before_world_reset() -> bool:
     reset_streaming_region_demand()
-    if structure_system == null: return true
+    var autonomy = npc_system.get("autonomy_system") if is_instance_valid(npc_system) else null
+    var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
+    if navigation != null:
+        navigation.begin_publication_reset()
+        while true:
+            if not navigation.advance_publication().get("busy",true): break
+            await startup_loading_yield("Clearing previous navigation")
+    if structure_system == null:
+        return navigation == null or navigation.finish_publication_reset()
     var publication = structure_system.citadel_publication
     publication.begin_world_reset()
     var deadline := Time.get_ticks_msec() + 30000
@@ -2353,7 +2373,7 @@ func retire_generated_scenes_before_world_reset() -> bool:
         if Time.get_ticks_msec() >= deadline: return false
         # startup_loading_yield already advances this queue once per frame.
         await startup_loading_yield("Clearing previous landmarks")
-    return true
+    return navigation == null or navigation.finish_publication_reset()
 
 func wait_for_async_save_before_quit() -> void:
     if save_system == null or not save_system.has_method("has_async_save_pending"):
@@ -2370,6 +2390,12 @@ func wait_for_async_save_before_quit() -> void:
 func wait_for_npc_navigation_before_quit() -> void:
     if npc_system == null or not is_instance_valid(npc_system):
         return
+    var autonomy = npc_system.get("autonomy_system")
+    var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
+    if navigation != null:
+        navigation.request_publication_shutdown()
+        while not navigation.advance_publication().get("shutdownComplete", false):
+            await startup_loading_yield("Stopping navigation preparation")
     if npc_system.has_method("shutdown_for_process_exit"):
         npc_system.call("shutdown_for_process_exit")
         # NavigationServer3D retires RIDs on physics frames.  Give it two full

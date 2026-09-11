@@ -236,6 +236,7 @@ class FakeCoordinatorLocomotion:
 
 class FakeGeneratedWorldMain:
 	extends Node
+	var seed_text := "synthetic-nav-world-contract"
 	var WATER_LEVEL := -1000.0
 	var blocks := {}
 
@@ -3602,12 +3603,16 @@ func test_navmesh_closest_walkable_descriptor_point(_mode: String) -> Dictionary
 func test_navmesh_no_scene_visual_mesh_scan(_mode: String) -> Dictionary:
 	var service_text := read_text("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 	var descriptor_text := read_text("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
+	# A resource received from the owned upload queue is explicit descriptor
+	# publication, not a scene MeshInstance scan. Keep every other .mesh access
+	# forbidden; actual packet ownership/upload is covered by lifecycle contracts.
+	var scene_access_text := service_text.replace("_staged_mesh = ready.mesh", "_staged_mesh = PREPARED_PACKET_RESOURCE")
 	var passed := (
 		service_text.find("get_tree(") < 0
 		and service_text.find("find_children") < 0
 		and service_text.find("MeshInstance3D") < 0
 		and service_text.find("parse_source_geometry_data") < 0
-		and service_text.find(".mesh") < 0
+		and scene_access_text.find(".mesh") < 0
 		and descriptor_text.find("stable_signature") >= 0
 	)
 	return outcome(passed, "getTree=%d meshInstance=%d parse=%d" % [service_text.find("get_tree("), service_text.find("MeshInstance3D"), service_text.find("parse_source_geometry_data")], ["navmesh_service_uses_explicit_descriptors", "navmesh_descriptor_owns_deterministic_signature"], {})

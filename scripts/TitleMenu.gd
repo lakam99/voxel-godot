@@ -251,6 +251,15 @@ func _on_quit_pressed() -> void:
 
 func _deferred_quit() -> void:
     await get_tree().process_frame
+    # A failed load leaves its Main child attached after disconnecting menu
+    # signals. Drain that child's owned workers before quitting the tree.
+    for child in get_children():
+        if child.has_method("wait_for_npc_navigation_before_quit"):
+            child.set_process(false)
+            child.set_physics_process(false)
+            child.set_registered_npc_physics_enabled(false)
+            await child.wait_for_terrain_workers_before_quit()
+            await child.wait_for_npc_navigation_before_quit()
     get_tree().quit(0)
 
 func launch_game(mode: String) -> void:

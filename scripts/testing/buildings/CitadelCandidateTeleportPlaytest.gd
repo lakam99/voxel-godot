@@ -278,58 +278,154 @@ func _run() -> void:
 	await _finish("scene_ready" if checks.scene_audit else "failed","" if checks.scene_audit else "scene_observation_failed")
 
 func _audit_navigation_publication() -> Dictionary:
-	# Direct publication diagnostic in the actual Main scene. This proves source
-	# delivery and server installation, never route execution or NPC traversal.
+	# Production async publication diagnostic in the actual Main scene. This
+	# proves worker preparation and owner acknowledgements, not NPC traversal.
 	phase = "diagnostic_navigation_publication"
 	var adapter = main.npc_system.pathing.navigation_world
 	var nav = main.npc_system.autonomy_system.navmesh_world
+	var rejection_diagnostics_enabled: bool = adapter.navigation_rejection_diagnostics_enabled
 	var job = main.structure_system.citadel_publication._scenes[region].job
 	var packet = job._cpu.buildingBegin.spatialDependencies
 	var keys: Array = packet.navigation_tiles.tiles.keys()
 	keys.sort()
 	var result := {"passed":true,"evidenceLevel":"live_scene_publication_diagnostic","tiles":[],
+		"rejectionDiagnosticsEnabled":rejection_diagnostics_enabled,
 		"doesNotProve":"NPC movement, connected routes, ordinary traversal, regional loading or frame pacing"}
 	for key: String in keys:
 		if not _within_deadline(): result.passed=false; result["reason"]="navigation_diagnostic_deadline"; break
-		var snapshot: Dictionary = adapter.build_navmesh_tile_snapshot(key)
-		if snapshot.is_empty():
-			result.tiles.append({"tileKey":key,"status":"pending","source":adapter.building_navigation_sources(key)})
-			result.passed=false
-			continue
-		var saved := {}
-		for field: String in ["tileKey","sourceKey","sourceRevision","surfaces","buildingSurfaces","crossingLinks","doorPortals","doorLinks"]:
-			saved[field]=snapshot.get(field)
-		var file := FileAccess.open(output+"/navigation-tile-"+key+".bin",FileAccess.WRITE)
-		if file==null: result.passed=false; result["reason"]="navigation_snapshot_write_failed"; break
-		file.store_var(saved,false)
-		file.close()
-		var surfaces: Array = []
-		var links: Array = []
-		var descriptor = nav.NavigationBakeDescriptorScript.from_tile_snapshot(snapshot)
-		for fact: Dictionary in descriptor.walkable_surfaces: surfaces.append(String(fact.id))
-		for fact: Dictionary in snapshot.get("crossingLinks",[])+snapshot.get("doorLinks",[]): links.append(String(fact.id))
-		var installed: Dictionary = nav.register_chunk_descriptor(descriptor,String(snapshot.sourceKey))
-		nav.sync_navigation_map_if_dirty()
-		await physics_frame
-		await _frame()
-		var receipt: Dictionary = nav.tile_publication_readiness(key,String(snapshot.sourceKey),surfaces,links)
-		var sync_deadline := Time.get_ticks_msec()+3000
-		while receipt.status=="pending" and receipt.reason=="installation_sync_pending" and Time.get_ticks_msec()<sync_deadline:
+		var begun := Time.get_ticks_msec()
+		var tile_deadline := mini(deadline, begun+30000)
+		var installed: Dictionary = {"status":"pending","installed":false,"reason":"source_pending"}
+		var saved: Dictionary = {}
+		var capture_profile: Dictionary = {}
+		var rejection_diagnostics: Dictionary = {}
+		var attempts := 0
+		while _within_deadline() and Time.get_ticks_msec()<tile_deadline:
+			# Re-read the authoritative producer on every retry: a changed source
+			# must not leave the diagnostic resubmitting a stale captured packet.
+			var snapshot: Dictionary = adapter.build_navmesh_tile_snapshot(key)
+			var source_status := String(snapshot.get("publicationStatus","pending"))
+			if source_status == "ready":
+				var source: Dictionary = snapshot.get("publicationSource",{})
+				if source.get("status") != "prepared":
+					installed={"status":"failed","installed":false,"reason":source.get("reason","missing_prepared_publication_source")}
+					break
+				# This exact whitelist capture excludes live collision snapshots,
+				# publicationOwner/WeakRef and the outer worker envelope.
+				saved=source.snapshot
+				capture_profile=source.profile
+				rejection_diagnostics=snapshot.get("publicationDiagnostics",{})
+				attempts+=1
+				installed=nav.register_tile_snapshot(snapshot)
+				if installed.get("installed",false) or installed.get("status") in ["failed","rejected","empty","unloaded"]:
+					break
+				if installed.get("status") != "pending":
+					installed={"status":"failed","installed":false,"reason":"unexpected_registration_status","returnedStatus":installed.get("status")}
+					break
+			elif source_status == "pending":
+				installed={"status":"pending","installed":false,"reason":snapshot.get("reason","source_pending")}
+			else:
+				installed={"status":"failed","installed":false,"reason":snapshot.get("reason","source_not_ready"),"sourceStatus":source_status}
+				break
+			last_observation["navigationPublication"]={"tileKey":key,"attempts":attempts,
+				"elapsedMsec":Time.get_ticks_msec()-begun,"status":installed.get("status"),"reason":installed.get("reason","")}
+			# Ordinary frames drive the production worker/upload queue. No direct
+			# descriptor construction, worker polling or unbudgeted install bypass.
 			await physics_frame
 			await _frame()
+		if installed.get("status") == "pending":
+			installed={"status":"timeout","installed":false,"reason":"navigation_installation_timeout",
+				"pendingReason":installed.get("reason",""),"deadlineReached":not _within_deadline()}
+		if not saved.is_empty():
+			var file := FileAccess.open(output+"/navigation-tile-"+key+".bin",FileAccess.WRITE)
+			if file==null: result.passed=false; result["reason"]="navigation_snapshot_write_failed"; break
+			file.store_var(saved,false)
+			var write_error := file.get_error()
+			file.close()
+			if write_error!=OK: result.passed=false; result["reason"]="navigation_snapshot_write_failed"; break
+		var rejection_summary := {}
+		if rejection_diagnostics_enabled and not saved.is_empty():
+			var matched := not rejection_diagnostics.is_empty()
+			for field: String in ["tileKey","sourceKey","sourceRevision","semanticRevision","worldSeed"]:
+				matched = matched and rejection_diagnostics.get(field)==saved.get(field)
+			matched = matched and rejection_diagnostics.get("acceptedBuildingSurfaceCount",-1)==saved.get("buildingSurfaces",[]).size() \
+				and rejection_diagnostics.get("acceptedTerrainSurfaceCount",-1)==saved.get("surfaces",[]).size()
+			if not matched: result.passed=false; result["reason"]="navigation_rejection_evidence_identity_mismatch"; break
+			var diagnostic_path := output+"/navigation-rejections-"+key+".bin"
+			var diagnostic_file := FileAccess.open(diagnostic_path,FileAccess.WRITE)
+			if diagnostic_file==null: result.passed=false; result["reason"]="navigation_rejection_evidence_write_failed"; break
+			# Binary preserves INF declared bounds and shape transforms; no live
+			# references or diagnostic data enter the worker source snapshot.
+			diagnostic_file.store_var(rejection_diagnostics,false)
+			var diagnostic_error := diagnostic_file.get_error()
+			diagnostic_file.close()
+			if diagnostic_error!=OK: result.passed=false; result["reason"]="navigation_rejection_evidence_write_failed"; break
+			rejection_summary={"path":diagnostic_path,"blockerGroupCount":rejection_diagnostics.blockers.size()}
+			for field: String in ["rawBuildingSurfaceCount","acceptedBuildingSurfaceCount","rejectedBuildingSurfaceCount",
+					"rawTerrainCellCount","acceptedTerrainSurfaceCount","rejectedTerrainCellCount","terrainRejectionReasons","recordUsec"]:
+				rejection_summary[field]=rejection_diagnostics[field]
+		var surfaces: Array = []
+		var links: Array = []
+		var receipt: Dictionary = {"status":"pending","reason":"installation_not_completed"}
+		var worker_thread := 0
+		if installed.get("installed",false):
+			# Expected IDs derive from the source, never the installed subset.
+			# Preserve the descriptor's terrain ID convention without constructing
+			# another full descriptor on the main thread just to obtain its IDs.
+			var terrain: Array = saved.get("surfaces",[])
+			for index in terrain.size():
+				var fact: Dictionary = terrain[index]
+				if fact.get("blocked",false): continue
+				var cell: Vector3i = fact.get("cell",Vector3i.ZERO)
+				surfaces.append("surface:%s:%d,%d,%d:%d" % [key,cell.x,cell.y,cell.z,int(fact.get("spanIndex",index))])
+			for fact: Dictionary in saved.get("buildingSurfaces",[]): surfaces.append(String(fact.id))
+			for fact: Dictionary in saved.get("crossingLinks",[])+saved.get("doorLinks",[]): links.append(String(fact.id))
+			var descriptor = nav.descriptors_by_region.get(String(saved.regionId))
+			if descriptor!=null and descriptor.has_method("prepared_geometry"):
+				worker_thread=int(descriptor.prepared_geometry().get("threadId",0))
 			nav.sync_navigation_map_if_dirty()
-			receipt=nav.tile_publication_readiness(key,String(snapshot.sourceKey),surfaces,links)
-		# Signatures contain the complete source geometry; the saved binary is
-		# that evidence. Keep the live JSON progress bounded to receipt summaries.
-		installed.erase("signature")
-		if installed.get("install") is Dictionary: installed.install.erase("signature")
+			await physics_frame
+			await _frame()
+			receipt=nav.tile_publication_readiness(key,String(saved.sourceKey),surfaces,links)
+			var sync_deadline := mini(deadline,Time.get_ticks_msec()+3000)
+			while receipt.status=="pending" and receipt.reason=="installation_sync_pending" and _within_deadline() and Time.get_ticks_msec()<sync_deadline:
+				await physics_frame
+				await _frame()
+				nav.sync_navigation_map_if_dirty()
+				receipt=nav.tile_publication_readiness(key,String(saved.sourceKey),surfaces,links)
+		var install_summary := {}
+		for field: String in ["status","reason","installed","cached","regionId","tileKey","returnedStatus","sourceStatus","pendingReason","deadlineReached"]:
+			if installed.has(field): install_summary[field]=installed[field]
+		if installed.get("install") is Dictionary:
+			var metrics := {}
+			for field: String in ["status","polygonCount","vertexCount","durationUsec","doorLinks","crossingLinks"]:
+				if installed.install.has(field): metrics[field]=installed.install[field]
+			install_summary["install"]=metrics
+		# Full source geometry lives in the value-only binary. Keep JSON bounded.
 		receipt.erase("signature")
-		result.tiles.append({"tileKey":key,"install":installed,"receipt":receipt,"surfaceCount":surfaces.size(),"linkCount":links.size()})
-		if receipt.status!="ready": result.passed=false
+		var worker_prepared := worker_thread>0 and worker_thread!=OS.get_thread_caller_id()
+		result.tiles.append({"tileKey":key,"install":install_summary,"receipt":receipt,
+			"surfaceCount":surfaces.size(),"linkCount":links.size(),"registrationAttempts":attempts,
+			"elapsedMsec":Time.get_ticks_msec()-begun,"captureProfile":capture_profile,
+			"workerPrepared":worker_prepared,"preparationThreadId":worker_thread,"rejectionDiagnostics":rejection_summary})
+		if receipt.status!="ready" or not worker_prepared: result.passed=false
 		var report := FileAccess.open(output+"/navigation-publication.json",FileAccess.WRITE)
 		if report==null: result.passed=false; result["reason"]="navigation_report_write_failed"; break
 		report.store_string(JSON.stringify(result,"\t"))
 		report.close()
+	var queue_stats: Dictionary = nav._publication_queue.stats()
+	var queue_summary := {"scope":"Cumulative production queue advance; excludes upstream source filtering and capture","worker":{}}
+	for field: String in ["status","busy","preparedCount","uploadedCount","retiredBatchCount","maxAdvanceUsec","shutdownComplete"]:
+		if queue_stats.has(field): queue_summary[field]=queue_stats[field]
+	for field in queue_stats.get("worker",{}):
+		var value: Variant = queue_stats.worker[field]
+		if value is int or value is float or value is bool: queue_summary.worker[field]=value
+	result["publicationQueue"]=queue_summary
+	var final_report := FileAccess.open(output+"/navigation-publication.json",FileAccess.WRITE)
+	if final_report==null: result.passed=false; result["reason"]="navigation_report_write_failed"
+	else:
+		final_report.store_string(JSON.stringify(result,"\t"))
+		final_report.close()
 	return result
 
 func _capture_inspection_views() -> Dictionary:
