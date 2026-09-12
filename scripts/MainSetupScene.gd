@@ -397,6 +397,7 @@ func setup_tutorial_system() -> void:
 func setup_audio_effects() -> void:
     audio_effects = AudioEffectsSystemScript.new()
     audio_effects.name = "AudioEffects"
+    audio_effects.staged_startup = true
     add_child(audio_effects)
     if audio_effects.has_method("prime_materials"):
         var feedback_colors := [

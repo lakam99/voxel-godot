@@ -360,7 +360,28 @@ func _run_deferred_startup_boot() -> void:
     block_root.name = "Blocks"
     add_child(block_root)
     await startup_loading_yield("Preparing scene", "scene", "pending")
+    if shutdown_requested:
+        apply_startup_loading_failure_state(StartupReadinessResultScript.failed("startup_cancelled"))
+        return
     setup_audio_effects()
+    if not is_instance_valid(audio_effects):
+        apply_startup_loading_failure_state(StartupReadinessResultScript.failed("audio_startup_owner_missing"))
+        return
+    while not audio_effects.startup_preparation_ready():
+        var audio_state: Dictionary = audio_effects.startup_preparation_state()
+        if shutdown_requested or bool(audio_state.get("cancelled", false)):
+            audio_effects.shutdown_audio()
+            apply_startup_loading_failure_state(StartupReadinessResultScript.failed(
+                "startup_cancelled" if shutdown_requested else "audio_startup_cancelled"))
+            return
+        await startup_loading_yield("Preparing audio %d/%d" % [
+            int(audio_state.get("completedJobs", 0)), int(audio_state.get("totalJobs", 0))],
+            "scene", "pending", {"audio": audio_state})
+        if not is_instance_valid(audio_effects):
+            apply_startup_loading_failure_state(StartupReadinessResultScript.failed("audio_startup_owner_missing"))
+            return
+        if not shutdown_requested:
+            audio_effects.advance_startup_preparation()
     setup_break_overlay()
     setup_tutorial_system()
 
