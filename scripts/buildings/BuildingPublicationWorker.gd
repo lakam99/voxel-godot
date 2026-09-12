@@ -22,6 +22,30 @@ class RunState extends RefCounted:
 	var phase := "restore"
 	var phase_started_usec := 0
 	var phase_usec: Dictionary = {}
+	var description
+	var description_profile: Dictionary = {}
+	func publish_description(value) -> bool:
+		mutex.lock()
+		var accepted: bool = not cancelled and description == null and value != null and value.binding == binding
+		if accepted:
+			description = value
+			description_profile = source.profile
+		mutex.unlock()
+		return accepted
+	func take_description() -> Dictionary:
+		mutex.lock()
+		var result := {}
+		if not cancelled and description != null:
+			result = {"description":description,"profile":description_profile}
+			description = null
+			description_profile = {}
+		mutex.unlock()
+		return result
+	func release_description() -> void:
+		mutex.lock()
+		description = null
+		description_profile = {}
+		mutex.unlock()
 	func begin_work() -> void:
 		mutex.lock()
 		started_usec = Time.get_ticks_usec()
@@ -56,10 +80,14 @@ class RunState extends RefCounted:
 				"publication_route_started": next_phase = "route_geometry"
 				"publication_route_completed": next_phase = "physical"
 				"publication_physical_completed": next_phase = "metadata"
+				"publication_metadata_started": next_phase = "metadata"
 				"publication_history_started": next_phase = "history"
 				"publication_masonry_started": next_phase = "masonry"
+				"publication_paving_started": next_phase = "paving"
+				"publication_roof_started": next_phase = "roof"
 				"publication_spatial_part": next_phase = "spatial_dependencies"
 				"publication_navigation_manifest": next_phase = "navigation_manifest"
+				"publication_navigation_dense_started": next_phase = "dense_navigation"
 				"publication_preparation_ready": next_phase = "ready"
 			if next_phase != phase:
 				phase_usec[phase] = now - phase_started_usec
@@ -72,6 +100,7 @@ class RunState extends RefCounted:
 	func snapshot() -> Dictionary:
 		mutex.lock()
 		var value := {"stage":stage, "stageCount":stage_count, "cancelRequested":cancelled,
+			"descriptionAvailable":description != null,
 			"elapsedUsec":Time.get_ticks_usec()-started_usec if started_usec > 0 else 0, "maxStageGapUsec":max_stage_gap_usec}
 		value.phaseUsec = phase_usec.duplicate()
 		if started_usec > 0 and phase != "ready": value.phaseUsec[phase] = Time.get_ticks_usec()-phase_started_usec
@@ -205,6 +234,25 @@ func take_result(token: int, expected_binding: Dictionary) -> Dictionary:
 		return _receipt(_active, "pending")
 	return _rejected("stale_token", "token_or_binding_mismatch")
 
+## Transfer an immutable phase-boundary product while preparation continues.
+## This does not wait/join, copy source geometry or acknowledge publication.
+func take_description(token: int, expected_binding: Dictionary) -> Dictionary:
+	if _active.get("kind") == "preparation" and _active.get("token",0) == token \
+		and _active.epoch == _epoch and _active.binding == expected_binding and not _active.cancelled and not _closing:
+		var result := _state.take_description()
+		if not result.is_empty():
+			_active["descriptionTaken"] = true
+			result.merge(_receipt(_active,"described"))
+			return result
+	if _completed.get("token",0) == token and _completed.get("epoch",0) == _epoch \
+		and _completed.get("binding",{}) == expected_binding and not _completed.get("cancelled",false) \
+		and not _completed.get("descriptionTaken",false) and not _closing:
+		var result: Dictionary = _completed.get("result",{})
+		if result.get("ready",false) and result.get("description") != null:
+			_completed["descriptionTaken"] = true
+			return {"status":"described","token":token,"binding":expected_binding,"description":result.description,"profile":result.profile}
+	return _rejected("pending","description_not_available")
+
 func cancel(token: int) -> bool:
 	if _active.get("kind") == "preparation" and _active.get("token",0) == token and _active.epoch == _epoch:
 		_active.cancelled = true
@@ -261,14 +309,14 @@ func _source_validation_failure(source: Dictionary) -> String:
 		return "mutable_publication_source"
 	return ""
 
-func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable) -> Dictionary:
-	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation, source.profile.origin)
+func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable, description_callback: Callable = Callable()) -> Dictionary:
+	return Preparation.prepare_source(source.blueprint, source.furnishingPlan, binding, continuation, source.profile.origin, description_callback)
 
 func _run(state: RunState) -> Dictionary:
 	state.begin_work() # Queue residence and failed-start retries are not run time.
 	var result := _failed("cancelled")
 	if state.advance("publication_worker_started"):
-		result = _prepare_source(state.source, state.binding, state.advance)
+		result = _prepare_source(state.source, state.binding, state.advance, state.publish_description)
 		if bool(result.get("ready", false)):
 			# Retain only the admitted frozen profile, not the whole input source.
 			# A later Admission cache eviction cannot require another source build.
@@ -279,12 +327,13 @@ func _run(state: RunState) -> Dictionary:
 	var release_started := Time.get_ticks_usec()
 	state.source = {}
 	state.binding = {}
+	state.release_description() # Release unclaimed aliases on the worker.
 	state.input_release_usec = Time.get_ticks_usec()-release_started
 	state.released_on_thread = OS.get_thread_caller_id()
 	return result
 
 func _store_completed(result: Dictionary, owns_worker_payload := true) -> void:
-	_completed = {"token":_active.token, "epoch":_active.epoch, "binding":_active.binding,
+	_completed = {"token":_active.token, "epoch":_active.epoch, "binding":_active.binding,"descriptionTaken":_active.get("descriptionTaken",false),
 		"cancelled":_active.cancelled, "result":result, "ownsWorkerPayload":owns_worker_payload}
 
 func _queue_retirement(payload: Dictionary) -> void:

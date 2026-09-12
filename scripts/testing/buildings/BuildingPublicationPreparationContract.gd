@@ -194,6 +194,19 @@ static func _spatial_controls(c: Dictionary) -> void:
 	c.spatial_nested_containers_read_only = packet.parts["building:crossing"].is_read_only() \
 		and packet.parts["building:crossing"].dependencies.is_read_only() and packet.cells[Vector2i.ZERO].is_read_only()
 	c.spatial_source_unchanged = before==var_to_bytes(blueprint.snapshot())
+	var compact = Spatial.compile_description(blueprint,plan,BINDING,Vector3.ZERO,Callable())
+	c.spatial_compact_has_no_dense_samples = compact!=null and compact.navigation_tiles.is_empty() and compact.navigation_tiles.is_read_only()
+	if compact!=null:
+		c.spatial_compact_same_obligations = var_to_bytes(compact.requirements(Rect2i(0,0,1,1)))==var_to_bytes(demand)
+		var dense = compact.compile_navigation(Callable())
+		c.spatial_dense_is_separate_immutable_product = dense!=null and dense!=compact \
+			and is_same(dense.parts,compact.parts) and is_same(dense.cells,compact.cells) \
+			and is_same(dense.navigation,compact.navigation) and is_same(dense.solid_records,compact.solid_records) \
+			and compact.navigation_tiles.is_empty()
+		if dense!=null:
+			var expected: Dictionary = packet.navigation_tiles.duplicate(false); expected.erase("preparationUsec")
+			var actual: Dictionary = dense.navigation_tiles.duplicate(false); actual.erase("preparationUsec")
+			c.spatial_dense_complete_ordered_values_preserved = var_to_bytes(actual)==var_to_bytes(expected)
 	c.spatial_cancel_discards_artifact = Spatial.compile(blueprint,plan,BINDING,Vector3.ZERO,func(stage): return stage!="publication_navigation_manifest")==null
 	c.spatial_invalid_query_failed = packet.requirements(Rect2i()).status=="failed"
 

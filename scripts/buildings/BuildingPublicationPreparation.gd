@@ -191,7 +191,7 @@ static func valid_binding(binding: Dictionary) -> bool:
 		and binding.get("sourceKey") is String and not binding.sourceKey.is_empty() \
 		and binding.get("generation") is int and binding.generation > 0
 
-static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable(), world_origin := Vector3.ZERO) -> Dictionary:
+static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable(), world_origin := Vector3.ZERO, description_callback: Callable = Callable()) -> Dictionary:
 	if not valid_binding(binding): return _failed("invalid_publication_binding")
 	# Freeze identity before invoking any caller callback or expensive work.
 	var source_binding := binding.duplicate()
@@ -202,6 +202,9 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 	if not restored.ready: return _failed(restored.reason)
 	var diagnostics := evaluate(restored.blueprint, {}, guard.advance)
 	if not diagnostics.ready: return _failed(diagnostics.reason)
+	var description = SpatialDependencies.compile_description(restored.blueprint,restored.furnishingPlan,source_binding,world_origin,guard.advance)
+	if description == null: return _failed("cancelled" if guard.cancelled else "spatial_dependency_compilation_failed")
+	if description_callback.is_valid() and description_callback.call(description) != true: return _failed("cancelled")
 	var metadata := _compile_static_records(restored.blueprint, guard.advance)
 	if not metadata.ready: return _failed(metadata.reason)
 	var history_result := _compile_history(restored.blueprint, guard.advance)
@@ -217,7 +220,7 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		surface_timings[family]=compiled.preparationUsec
 	surfaces.make_read_only()
 	surface_timings.make_read_only()
-	var spatial = SpatialDependencies.compile(restored.blueprint, restored.furnishingPlan, source_binding, world_origin, guard.advance)
+	var spatial = description.compile_navigation(guard.advance)
 	if spatial == null: return _failed("cancelled" if guard.cancelled else "spatial_dependency_compilation_failed")
 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
 	var prepared := PreparedSource.new()
@@ -233,7 +236,7 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		"preparedMasonry":masonry.preparedMasonry, "masonryPreparationUsec":masonry.masonryPreparationUsec,
 		"preparedSurfaces":surfaces,"surfacePreparationUsec":surface_timings,
 		"spatialDependencies":spatial}
-	return {"ready":true, "reason":"", "prepared":prepared}
+	return {"ready":true, "reason":"", "prepared":prepared, "description":description}
 
 ## Same visible wall/foundation dispatch as the publisher, including tagged
 ## aperture walls. No cuts, Nodes, Resources, uploads or geometry alternatives.

@@ -29,7 +29,7 @@ class SyntheticWorker extends Worker:
 	var output_trace := Trace.new()
 	var fail_prepare_count := 0
 	var fail_retire_count := 0
-	func _prepare_source(_source: Dictionary, binding: Dictionary, _continuation: Callable) -> Dictionary:
+	func _prepare_source(_source: Dictionary, binding: Dictionary, _continuation: Callable, _description_callback: Callable = Callable()) -> Dictionary:
 		if gated:
 			entered.post()
 			gate.wait()
@@ -46,6 +46,38 @@ class SyntheticWorker extends Worker:
 			fail_retire_count-=1
 			return ERR_CANT_CREATE
 		return super._start_thread(work)
+
+class DescriptionGateWorker extends Worker:
+	var gate := Semaphore.new()
+	var entered := Semaphore.new()
+	func _prepare_source(input: Dictionary, binding: Dictionary, continuation: Callable, description_callback: Callable = Callable()) -> Dictionary:
+		return super._prepare_source(input,binding,continuation,func(description):
+			var accepted: bool = description_callback.is_valid() and description_callback.call(description) == true
+			if accepted:
+				entered.post()
+				gate.wait()
+			return accepted)
+
+class DescriptionProbe extends RefCounted:
+	var binding: Dictionary
+	var trace: Trace
+	func _init(source_binding: Dictionary, value: Trace) -> void:
+		binding = source_binding
+		trace = value
+	func _notification(what: int) -> void:
+		if what == NOTIFICATION_PREDELETE: trace.record()
+
+class DescriptionProbeWorker extends Worker:
+	# Explicit synthetic lifetime probe, not a valid production source artifact.
+	var gate := Semaphore.new()
+	var entered := Semaphore.new()
+	var trace := Trace.new()
+	func _prepare_source(_input: Dictionary, binding: Dictionary, _continuation: Callable, description_callback: Callable = Callable()) -> Dictionary:
+		var description := DescriptionProbe.new(binding,trace)
+		if not description_callback.call(description): return {"ready":false,"reason":"cancelled"}
+		entered.post()
+		gate.wait()
+		return {"ready":false,"reason":"cancelled"}
 
 var checks: Dictionary = {}
 var metrics: Dictionary = {}
@@ -233,6 +265,85 @@ func failed_starts() -> void:
 	await drain(job,"failed_starts_shutdown",true)
 	check("failed_start_payload_eventually_worker_retired",off_main(trace))
 
+func wait_description_gate(job, label: String) -> void:
+	job.poll()
+	var deadline := Time.get_ticks_msec()+5000
+	var entered: bool = job.entered.try_wait()
+	while not entered and Time.get_ticks_msec()<deadline:
+		await process_frame
+		entered=job.entered.try_wait()
+	check(label+"_description_boundary_entered",entered)
+
+func description_handoff(consume_early: bool, cancel_after: bool) -> void:
+	var label := "description_" + ("early" if consume_early else "late") + ("_cancel" if cancel_after else "_complete")
+	var job := DescriptionGateWorker.new()
+	var input := source()
+	var profile_identity: Dictionary = input.profile
+	var receipt := job.dispatch(input,BINDING)
+	input={}
+	await wait_description_gate(job,label)
+	check(label+"_preparation_still_running",job._thread != null and job._thread.is_alive() and job.poll().completedToken==0)
+	var wrong := BINDING.duplicate(); wrong.sourceKey += ":changed"
+	check(label+"_wrong_binding_rejected",job.take_description(receipt.token,wrong).status=="pending")
+	var early: Dictionary = job.take_description(receipt.token,BINDING) if consume_early else {}
+	if consume_early:
+		check(label+"_delivered",early.get("status")=="described")
+		if early.get("status")=="described":
+			var description = early.description
+			check(label+"_facts_frozen_without_dense",description.parts.is_read_only() and description.cells.is_read_only() \
+				and description.navigation.is_read_only() and description.solid_records.is_read_only() \
+				and description.navigation_tiles.is_read_only() and description.navigation_tiles.is_empty())
+			check(label+"_same_profile",is_same(early.profile,profile_identity))
+			check(label+"_description_not_publication",description.requirements(Rect2i(-1,-1,2,2)).publicationAcknowledged==false)
+			check(label+"_one_transfer_while_active",job.take_description(receipt.token,BINDING).status=="pending")
+			description=null
+	profile_identity={}
+	if cancel_after:
+		check(label+"_cancel_accepted",job.cancel(receipt.token))
+		check(label+"_cancel_rejects_description",job.take_description(receipt.token,BINDING).status=="pending")
+	job.gate.post()
+	if cancel_after:
+		await drain(job,label)
+		check(label+"_no_late_description",job.take_description(receipt.token,BINDING).status=="pending")
+	else:
+		await wait_completed(job,label)
+		var late := job.take_description(receipt.token,BINDING)
+		check(label+"_completed_transfer_policy",late.status==("pending" if consume_early else "described"))
+		if not consume_early:
+			early=late
+			check(label+"_completed_one_transfer",job.take_description(receipt.token,BINDING).status=="pending")
+		late={}
+		var complete := job.take_result(receipt.token,BINDING)
+		check(label+"_normal_result_preserved",complete.get("status")=="consumed" and complete.get("result",{}).get("ready",false))
+		if complete.get("status")=="consumed" and early.get("status")=="described":
+			var dense = complete.result.prepared._payload.spatialDependencies
+			check(label+"_dense_shares_immutable_source",dense!=early.description and is_same(dense.parts,early.description.parts) \
+				and is_same(dense.navigation,early.description.navigation) and is_same(dense.solid_records,early.description.solid_records))
+			check(label+"_dense_did_not_mutate_description",dense.navigation_tiles.get("ready",false) and early.description.navigation_tiles.is_empty())
+			dense=null
+		early["completeResult"]=complete
+		complete={}
+	job.request_shutdown()
+	if not early.is_empty():
+		check(label+"_external_retirement_accepted",job.retire_external_payload(early))
+		early={}
+	await drain(job,label+"_shutdown",true)
+
+func unclaimed_description_retirement(reset_owner: bool) -> void:
+	var label := "unclaimed_description_" + ("reset" if reset_owner else "cancel")
+	var job := DescriptionProbeWorker.new()
+	var receipt := job.dispatch(source(),BINDING)
+	await wait_description_gate(job,label)
+	check(label+"_probe_retained",job.trace.read()==-1)
+	if reset_owner: job.reset()
+	else: check(label+"_cancel_accepted",job.cancel(receipt.token))
+	check(label+"_stale_description_rejected",job.take_description(receipt.token,BINDING).status=="pending")
+	job.gate.post()
+	await drain(job,label)
+	check(label+"_disposed_on_worker",off_main(job.trace))
+	job.request_shutdown()
+	await drain(job,label+"_shutdown",true)
+
 func _run() -> void:
 	await real_empty()
 	await queued_cancel()
@@ -240,6 +351,11 @@ func _run() -> void:
 	await active_cancel()
 	await stale_terminal()
 	await failed_starts()
+	await description_handoff(true,false)
+	await description_handoff(false,false)
+	await description_handoff(true,true)
+	await unclaimed_description_retirement(false)
+	await unclaimed_description_retirement(true)
 	var report := {"schema":"building-publication-worker-contract/v1","complete":true,"passed":not checks.values().has(false),
 		"evidenceLevel":"synthetic_owned_worker_retirement_and_empty_real_preparation","checks":checks,"metrics":metrics,
 		"doesNotProve":"No actual Site build, scene publication, runtime lifecycle, terrain, headed or gameplay acceptance."}

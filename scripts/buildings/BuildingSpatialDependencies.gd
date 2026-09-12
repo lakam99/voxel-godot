@@ -21,15 +21,25 @@ var cells: Dictionary = {}
 var navigation: Dictionary = {}
 var furnishing_navigation: Dictionary = {}
 var navigation_tiles: Dictionary = {}
+var solid_records: Array[Dictionary] = []
 var preparation_usec := 0
 
 static func compile(blueprint, plan, source_binding: Dictionary, world_origin: Vector3, continuation: Callable):
+	var started := Time.get_ticks_usec()
+	var description = compile_description(blueprint,plan,source_binding,world_origin,continuation)
+	if description == null: return null
+	var packet = description.compile_navigation(continuation)
+	if packet != null: packet.preparation_usec = Time.get_ticks_usec() - started
+	return packet
+
+## Complete source obligations without dense sampling or scene acknowledgement.
+## The holder remains immutable when its dense sibling is compiled later.
+static func compile_description(blueprint, plan, source_binding: Dictionary, world_origin: Vector3, continuation: Callable):
 	var started := Time.get_ticks_usec()
 	if not world_origin.is_finite(): return null
 	var packet = load("res://scripts/buildings/BuildingSpatialDependencies.gd").new()
 	packet.binding = source_binding.duplicate()
 	packet.origin = world_origin
-	var solids: Array[Dictionary] = []
 	for part in blueprint.parts:
 		if not _continue(continuation, "publication_spatial_part"): return null
 		var dependencies: Array[String] = []
@@ -40,7 +50,7 @@ static func compile(blueprint, plan, source_binding: Dictionary, world_origin: V
 		var transform := Transform3D(Basis.from_euler(part.rotation), world_origin + part.position)
 		var bounds := transform * AABB(-part.size * 0.5, part.size)
 		if part.collision_enabled and part.kind!="door":
-			solids.append(Navigation._static_collision_fact(blueprint.id,part,transform,bounds))
+			packet.solid_records.append(Navigation._static_collision_fact(blueprint.id,part,transform,bounds))
 		if not packet._add_part("building:" + part.id, part.id, "building", bounds, transform.origin, dependencies, bool(part.recipe.get("physicalRoot", false))): return null
 	for part in plan.parts:
 		if not _continue(continuation, "publication_spatial_furniture"): return null
@@ -52,16 +62,33 @@ static func compile(blueprint, plan, source_binding: Dictionary, world_origin: V
 	packet.navigation = Navigation.build(blueprint, Transform3D(Basis.IDENTITY, world_origin))
 	if not _continue(continuation, "publication_navigation_furnishing"): return null
 	packet.furnishing_navigation = FurnitureNavigation.build(plan, Transform3D(Basis.IDENTITY, world_origin))
-	packet.navigation_tiles = NavigationTiles.compile(packet.navigation,packet.furnishing_navigation,continuation,solids)
-	if not packet.navigation_tiles.get("ready",false): return null
 	for key in packet.parts:
 		packet.parts[key].dependencies.sort()
 	for key in packet.cells:
 		packet.cells[key].sort()
-	for value in [packet.binding, packet.parts, packet.cells, packet.navigation, packet.furnishing_navigation,packet.navigation_tiles]:
+	for value in [packet.binding, packet.parts, packet.cells, packet.navigation, packet.furnishing_navigation,packet.navigation_tiles,packet.solid_records]:
 		if not _freeze(value, continuation): return null
 	packet.preparation_usec = Time.get_ticks_usec() - started
-	return packet if _continue(continuation, "publication_spatial_ready") else null
+	return packet
+
+func compile_navigation(continuation: Callable):
+	if not _continue(continuation,"publication_navigation_dense_started"): return null
+	var navigation_result := NavigationTiles.compile(navigation,furnishing_navigation,continuation,solid_records)
+	if not navigation_result.get("ready",false): return null
+	if not _freeze(navigation_result,continuation): return null
+	# Share only frozen source containers. Dense completion cannot modify the
+	# compact holder already transferred through the worker phase boundary.
+	var packet = get_script().new()
+	packet.binding = binding
+	packet.origin = origin
+	packet.parts = parts
+	packet.cells = cells
+	packet.navigation = navigation
+	packet.furnishing_navigation = furnishing_navigation
+	packet.solid_records = solid_records
+	packet.navigation_tiles = navigation_result
+	packet.preparation_usec = preparation_usec + int(navigation_result.preparationUsec)
+	return packet if _continue(continuation,"publication_spatial_ready") else null
 
 func _add_part(key: String, source_id: String, kind: String, bounds: AABB, anchor: Vector3, dependencies: Array, terrain_root: bool) -> bool:
 	if source_id.is_empty() or parts.has(key) or not bounds.position.is_finite() or not bounds.size.is_finite() or bounds.size.x <= 0 or bounds.size.y <= 0 or bounds.size.z <= 0:

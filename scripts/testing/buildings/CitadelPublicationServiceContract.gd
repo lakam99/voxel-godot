@@ -69,11 +69,11 @@ class GatedWorker extends Worker:
 	var entered := Semaphore.new()
 	var gated := true
 	var synthetic_timeout := false
-	func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable) -> Dictionary:
+	func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable, description_callback: Callable = Callable()) -> Dictionary:
 		if gated:
 			entered.post()
 			gate.wait()
-		return super._prepare_source(source,binding,continuation)
+		return super._prepare_source(source,binding,continuation,description_callback)
 	func poll() -> Dictionary:
 		var result := super.poll()
 		if synthetic_timeout and result.workerKind == "preparation":

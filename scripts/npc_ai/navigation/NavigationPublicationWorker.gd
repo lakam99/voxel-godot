@@ -22,7 +22,7 @@ func _source_validation_failure(source: Dictionary) -> String:
 		return "invalid_navigation_publication_source"
 	return ""
 
-func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable) -> Dictionary:
+func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable, _description_callback: Callable = Callable()) -> Dictionary:
 	var descriptor = Descriptor.from_tile_snapshot(source.snapshot)
 	var prepared := Prepared.new()
 	if not prepared.prepare_from(descriptor,continuation):
