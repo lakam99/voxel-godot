@@ -541,24 +541,80 @@ func scene_root(region: Vector2i) -> Node3D:
 	return _scenes[region].job.own_node_root() if _scenes.has(region) else null
 
 func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
+	var result := {"status":"described","reason":"","dependencyBounds":[],"sourceRevisions":{},
+		"missingSourceIds":[],"unresolvedCrossingIds":[],"requiredCrossings":{},"sites":[],
+		"physicalOwnerAcknowledgements":{},"publicationAcknowledged":false}
 	if _admission == null or not _bounded_region_rectangle(bounds):
-		return {"status":"failed","reason":"invalid_structure_dependency_request"}
+		result.merge({"status":"failed","reason":"invalid_structure_dependency_request"},true)
+		return result
 	var admitted: Dictionary = _admission.request_bounds(bounds)
-	if admitted.get("status") != "ready": return admitted
-	if _world_reset_pending or _closing: return {"status":"pending","reason":"structure_world_reset_pending"}
+	if admitted.get("status") != "ready":
+		result.merge({"status":String(admitted.get("status","pending")),"reason":String(admitted.get("reason","structure_source_pending"))},true)
+		return result
+	if _world_reset_pending or _closing:
+		result.merge({"status":"pending","reason":"structure_world_reset_pending"},true)
+		return result
 	var low := Field.region_for_cell(bounds.position)
 	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
-	var sites: Array[Dictionary] = []
 	for z in range(low.y,high.y+1):
 		for x in range(low.x,high.x+1):
 			var region := Vector2i(x,z)
 			var source: Dictionary = _admission.source_state(region)
 			if source.get("status") not in ["ready","prepared"] or not source.reservationCells.intersects(bounds): continue
-			if not _scenes.has(region): return {"status":"pending","reason":"structure_dependency_source_pending"}
+			var site_id := String(source.binding.siteId)
+			result.sourceRevisions[site_id] = source.binding.duplicate(true)
+			if _failures.has(region):
+				result.status = "failed"; result.reason = String(_failures[region].reason)
+				continue
+			if not _scenes.has(region):
+				if result.status != "failed": result.status = "pending"; result.reason = "structure_dependency_source_pending"
+				continue
+			# Physical publication still requires the complete site at this stage.
+			# Regional demand follows actual local supports/crossings, not every
+			# terrain/navigation tile inside the site's generation reservation.
 			var requirements: Dictionary = _scenes[region].job.source_dependency_requirements(bounds,source.binding)
-			if requirements.get("status") != "described": return requirements
-			sites.append(requirements)
-	return {"status":"described","sites":sites,"publicationAcknowledged":false}
+			result.sites.append(requirements)
+			for dependency: Rect2i in requirements.get("dependencyBounds",[]):
+				if not result.dependencyBounds.has(dependency): result.dependencyBounds.append(dependency)
+			for field: String in ["missingSourceIds","unresolvedCrossingIds"]:
+				for id: String in requirements.get(field,[]):
+					if not result[field].has(id): result[field].append(id)
+			for id: String in requirements.get("requiredCrossings",{}):
+				if result.requiredCrossings.has(id) and result.requiredCrossings[id] != requirements.requiredCrossings[id]:
+					result.missingSourceIds.append(id)
+				else: result.requiredCrossings[id] = requirements.requiredCrossings[id]
+			if requirements.has("physicalOwnerAcknowledgements"):
+				result.physicalOwnerAcknowledgements[site_id] = requirements.physicalOwnerAcknowledgements
+			if requirements.get("status") != "described" and result.status != "failed":
+				result.status = String(requirements.get("status","pending"))
+				result.reason = String(requirements.get("reason","structure_dependency_source_pending"))
+	if not result.missingSourceIds.is_empty() or not result.unresolvedCrossingIds.is_empty():
+		result.status = "failed"; result.reason = "structure_source_dependencies_unresolved"
+	return result
+
+func region_publication_readiness(bounds: Rect2i) -> Dictionary:
+	var result := region_dependency_requirements(bounds)
+	if result.status != "described": return result
+	var physical := physical_publication_state(bounds)
+	result.status = String(physical.get("status","pending"))
+	result.reason = String(physical.get("reason","structure_physical_publication_pending"))
+	result["physicalPublication"] = physical
+	result.publicationAcknowledged = result.status == "ready"
+	result["acknowledgementScope"] = "structures_physical_only"
+	return result
+
+func region_dependency_revision(bounds: Rect2i) -> Array:
+	var revision: Array = [_seed,_generation,_world_reset_pending,_closing]
+	if _admission == null or not _bounded_region_rectangle(bounds): return revision + ["invalid"]
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
+	for z in range(low.y,high.y+1):
+		for x in range(low.x,high.x+1):
+			var region := Vector2i(x,z)
+			var source: Dictionary = _admission.source_state(region)
+			revision.append([region,source.get("status","unrequested"),source.get("binding",{}),
+				_failures.get(region,{}),_scenes[region].job.source_dependency_revision() if _scenes.has(region) else []])
+	return revision
 
 func navigation_tile_sources(tile_key: Vector2i) -> Dictionary:
 	var bounds := Rect2i(tile_key*16,Vector2i.ONE*16)

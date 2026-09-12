@@ -110,7 +110,7 @@ func _unhandled_input(event: InputEvent) -> void:
             update_hud("Story debug dumped to console")
             return
         if event.keycode == KEY_F9:
-            try_load_world(true)
+            await try_load_world_staged(true)
             return
         if event.keycode == KEY_T:
             if utility_system and utility_system.is_open():
@@ -260,8 +260,11 @@ func update_hud(message: String = "", throttled: bool = false) -> void:
     if startup_loading_active:
         startup_loading_step.emit("HUD refresh: done")
 
-func show_action_message(message: String) -> void:
+func show_action_message(message: String, passive := false) -> void:
     if message == "" or hud == null:
+        return
+    if passive:
+        hud.show_notification(message, 1.25, -1)
         return
     hud_message_refresh_count += 1
     last_hud_refresh_message = message

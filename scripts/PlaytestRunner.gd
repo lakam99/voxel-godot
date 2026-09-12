@@ -173,6 +173,10 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("main_instantiated")
+    if not await wait_for_runtime_loading_complete():
+        add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+        finish_playtest()
+        return
     await wait_physics_frames(20)
 
     player = main.get("player") as CharacterBody3D
@@ -1061,6 +1065,28 @@ func test_tutorial_start_system() -> void:
     mark_progress("tutorial_weapon_preps_checked")
 
     var pre_rescue_snapshot: Dictionary = tutorial_system.snapshot()
+    # This service-level rescue exercise recreates the scenario on cleanup.
+    # Preserve physical NPC facts through the same API/order as MainSaveState,
+    # so it does not undo the home arrival already exercised above.
+    var pre_rescue_npc_facts: Array = npc_system.snapshot_job_facts()
+    var required_shelter_ids: Array[String] = []
+    var pre_rescue_actor_instances := {}
+    if not is_instance_valid(npc_root):
+        add_result("tutorial_npc_home_and_guard_behavior", false, "rescue fixture setup: tutorial actor root missing")
+        return
+    for actor in npc_root.get_children():
+        var actor_entry: Dictionary = npc_system.npc_entry_for_actor(actor)
+        var actor_id := String(actor_entry.get("id", ""))
+        if actor_id == "":
+            continue
+        pre_rescue_actor_instances[actor_id] = actor.get_instance_id()
+        if not bool(actor_entry.get("canFight", true)) and not required_shelter_ids.has(actor_id):
+            required_shelter_ids.append(actor_id)
+    required_shelter_ids.sort()
+    if required_shelter_ids.size() != 3 or pre_rescue_actor_instances.size() != npc_root.get_child_count():
+        add_result("tutorial_npc_home_and_guard_behavior", false, "rescue fixture setup: expected three registered tutorial nonfighters; IDs %s, actors %s" % [str(required_shelter_ids), str(pre_rescue_actor_instances)])
+        return
+    var pre_rescue_shelter: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
     hostile_system.clear()
     var final_started: bool = mira != null and bool(tutorial_system.interact_with(mira))
     if final_started:
@@ -1130,8 +1156,39 @@ func test_tutorial_start_system() -> void:
     mark_progress("tutorial_final_rescue_staging_checked")
     hostile_system.clear()
     tutorial_system.clear_rescue_torch()
+    npc_system.restore_job_facts(pre_rescue_npc_facts)
     tutorial_system.restore(pre_rescue_snapshot)
+    var restore_problems: Array[String] = []
+    var restored_actor_positions := {}
+    for fact_value in pre_rescue_npc_facts:
+        var fact: Dictionary = fact_value
+        var actor_id := String(fact.get("id", ""))
+        if not pre_rescue_actor_instances.has(actor_id):
+            continue
+        var restored_entry: Dictionary = npc_system.npc_entry_for_actor(actor_id)
+        var restored_body := restored_entry.get("body") as CharacterBody3D
+        if not is_instance_valid(restored_body) or not restored_body.is_inside_tree() or restored_body.get_parent() != npc_root:
+            restore_problems.append("%s: missing restored tutorial body" % actor_id)
+            continue
+        var saved_position: Array = fact.get("position", [])
+        restored_actor_positions[actor_id] = {
+            "beforeInstance": pre_rescue_actor_instances[actor_id],
+            "afterInstance": restored_body.get_instance_id(),
+            "savedPosition": saved_position,
+            "restoredPosition": restored_body.global_position,
+            "placementReason": restored_body.get_meta("npc_safe_placement_reason", "")
+        }
+        if saved_position.size() != 3 or String(restored_body.get_meta("npc_safe_placement_reason", "")) != "load_restore":
+            restore_problems.append("%s: saved physical placement was not accepted" % actor_id)
+        elif not Vector2(restored_body.global_position.x, restored_body.global_position.z).is_equal_approx(Vector2(float(saved_position[0]), float(saved_position[2]))):
+            restore_problems.append("%s: saved horizontal position was not restored" % actor_id)
+    if pre_rescue_actor_instances.size() != npc_root.get_child_count() or restored_actor_positions.size() != pre_rescue_actor_instances.size():
+        restore_problems.append("tutorial actor identities did not survive fixture restore")
+    if not restore_problems.is_empty():
+        add_result("tutorial_npc_home_and_guard_behavior", false, "rescue fixture restore failed: %s; actors %s" % [str(restore_problems), JSON.stringify(restored_actor_positions)])
+        return
     await wait_gameplay_frames(3)
+    var post_rescue_shelter: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
 
     hostile_system.clear()
     player.global_position = tutorial_original_position
@@ -1196,7 +1253,8 @@ func test_tutorial_start_system() -> void:
     for i in range(1800):
         if i % 30 == 0:
             var stats_now: Dictionary = npc_system.stats()
-            if int(stats_now.get("sheltered", 0)) >= 3 and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
+            var shelter_now: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
+            if bool(shelter_now.get("ready", false)) and int(stats_now.get("guardShots", 0)) > guard_shots_before and int(stats_now.get("useAnimations", 0)) > use_animations_before:
                 break
         if i % 60 == 0:
             mark_progress("tutorial_guard_behavior_%03d" % i)
@@ -1204,16 +1262,18 @@ func test_tutorial_start_system() -> void:
     var npc_stats_after: Dictionary = npc_system.stats()
     var tutorial_npc_count := npc_root.get_child_count() if npc_root else 0
     var all_tutorial_npcs_have_homes := int(npc_stats_after.get("homed", 0)) >= tutorial_npc_count
-    var non_fighters_sheltered := int(npc_stats_after.get("sheltered", 0)) >= 3
+    var shelter_after: Dictionary = tutorial_cohort_shelter_state(npc_system, npc_root, required_shelter_ids)
+    var non_fighters_sheltered := bool(shelter_after.get("ready", false))
     var tutorial_fighters_ready := int(npc_stats_after.get("fighters", 0)) >= 3
     var guards_fired := int(npc_stats_after.get("guardShots", 0)) > guard_shots_before
     var fighters_armed := int(npc_stats_after.get("armed", 0)) >= int(npc_stats_after.get("fighters", 0))
     var weapons_visible := int(npc_stats_after.get("visibleWeapons", 0)) >= int(npc_stats_after.get("fighters", 0))
     var weapon_use_animated := int(npc_stats_after.get("useAnimations", 0)) > use_animations_before
+    var shelter_failure_detail := "" if non_fighters_sheltered else "; cohort before %s afterRestore %s final %s restoredActors %s" % [JSON.stringify(pre_rescue_shelter), JSON.stringify(post_rescue_shelter), JSON.stringify(shelter_after), JSON.stringify(restored_actor_positions)]
     add_result(
         "tutorial_npc_home_and_guard_behavior",
         bool(guard_spawn.get("spawned", false)) and guard_target_configured and all_tutorial_npcs_have_homes and non_fighters_sheltered and tutorial_fighters_ready and guards_fired and fighters_armed and weapons_visible and weapon_use_animated,
-        "spawn %s, target configured %s, npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s" % [
+        "spawn %s, target configured %s, npcs %d, stats %s, shots %d->%d, use %d->%d, routes %s%s" % [
             str(guard_spawn),
             str(guard_target_configured),
             tutorial_npc_count,
@@ -1222,7 +1282,8 @@ func test_tutorial_start_system() -> void:
             int(npc_stats_after.get("guardShots", 0)),
             use_animations_before,
             int(npc_stats_after.get("useAnimations", 0)),
-            npc_shelter_debug(npc_system)
+            npc_shelter_debug(npc_system),
+            shelter_failure_detail
         ]
     )
     hostile_system.clear()
@@ -1348,29 +1409,18 @@ func test_escape_menu_new_game() -> void:
 func wait_for_runtime_loading_complete(max_seconds := 240.0) -> bool:
     if main == null:
         return false
-    var started_usec := Time.get_ticks_usec()
-    var observed_frames := 0
-    while float(Time.get_ticks_usec() - started_usec) / 1000000.0 < max_seconds:
-        var failure_value = main.get("startup_loading_failure_result")
-        if failure_value is Dictionary and not (failure_value as Dictionary).is_empty():
-            mark_progress("escape_menu_new_game_failed_%s" % String((failure_value as Dictionary).get("reason", "unknown")))
-            return false
-        if not bool(main.get("runtime_loading_active")):
-            mark_progress("escape_menu_new_game_loaded")
-            return true
-        if observed_frames % 60 == 0:
-            var timeline_value = main.get("startup_loading_timeline")
-            var latest := {}
-            if timeline_value is Array and not (timeline_value as Array).is_empty() and (timeline_value as Array)[-1] is Dictionary:
-                latest = (timeline_value as Array)[-1]
-            var domain := String(latest.get("domain", "unknown")).replace(" ", "_")
-            var status := String(latest.get("status", "unknown")).replace(" ", "_")
-            var message := String(latest.get("message", "unknown")).replace(" ", "_")
-            mark_progress("escape_menu_new_game_loading_%04d_%s_%s_%s" % [observed_frames, domain, status, message])
-        await wait_physics_frames(1)
-        observed_frames += 1
-    mark_progress("escape_menu_new_game_loading_timeout")
-    return false
+    # Production checks the current gameplay domain for both initial startup
+    # and staged reload; reload does not emit the initial completion signal.
+    var progress_callback := func(message): mark_progress("runtime_loading_%s" % String(message).replace(" ", "_"))
+    main.connect("startup_loading_step", progress_callback)
+    var startup_ready: bool = await main.wait_for_startup_loading_complete(max_seconds)
+    if is_instance_valid(main) and main.is_connected("startup_loading_step", progress_callback):
+        main.disconnect("startup_loading_step", progress_callback)
+    if not startup_ready or finished:
+        mark_progress("runtime_startup_not_ready")
+        return false
+    mark_progress("runtime_loading_complete")
+    return true
 
 func wait_for_chunk_streaming_after_restore(max_frames := 90) -> void:
     if main == null:
@@ -3946,7 +3996,7 @@ func test_save_load_round_trip() -> void:
         blocks.erase(save_cell)
 
     main.set("autosave_enabled", true)
-    var loaded: bool = main.call("try_load_world", false)
+    var loaded: bool = await main.call("try_load_world_staged", false)
     main.set("autosave_enabled", original_autosave_enabled)
     blocks = get_blocks()
     var player_restored := player.global_position.distance_to(saved_position) < 0.05
@@ -4739,6 +4789,38 @@ func test_combat_save_transients() -> void:
     var forward := -player.global_transform.basis.z
     forward.y = 0.0
     forward = forward.normalized() if forward.length_squared() > 0.0001 else Vector3.FORWARD
+    # Chunk presence alone does not prove regional publication or the swept
+    # dodge path ready. Use request_dodge's production proof before starting
+    # any short-lived combat transients, while normal process/physics advance.
+    const DefenseScript := preload("res://scripts/combat/runtime/PlayerDefenseController.gd")
+    var dodge_distance := DefenseScript.DODGE_SPEED * DefenseScript.DODGE_DURATION_SECONDS
+    var readiness_started := Time.get_ticks_msec()
+    var readiness_frames := 0
+    var readiness_failure := "motion_readiness_timeout"
+    var dodge_target := player.global_position - forward * dodge_distance
+    var motion_proof: Dictionary = {}
+    while Time.get_ticks_msec() - readiness_started < 60000:
+        dodge_target = player.global_position - forward * dodge_distance
+        motion_proof = main.terrain_collision_motion_proof(player.global_position, dodge_target, 0.42)
+        if bool(motion_proof.get("passed", false)):
+            break
+        if String(motion_proof.get("siteAdmission", {}).get("status", "")) == "failed" \
+            or String(motion_proof.get("regionalPublication", {}).get("status", "")) == "failed":
+            readiness_failure = "motion_readiness_dependency_failed"
+            break
+        if readiness_frames % 60 == 0:
+            mark_progress("combat_save_transients_readiness_%04d_%s" % [readiness_frames, String(motion_proof.get("reason", "unknown"))])
+        await wait_gameplay_frames(1)
+        if finished:
+            return
+        readiness_frames += 1
+    if not bool(motion_proof.get("passed", false)):
+        add_result("combat_save_transients_readiness", false, JSON.stringify({
+            "reason": readiness_failure, "elapsedMs": Time.get_ticks_msec() - readiness_started,
+            "from": player.global_position, "target": dodge_target, "proof": motion_proof
+        }))
+        return
+    mark_progress("combat_save_transients_readiness_ready")
     var enemy_position := player.global_position + forward * 1.72
     enemy_position.y = player.global_position.y
     var enemy: StaticBody3D = hostile_system.spawn_enemy(enemy_position, "shadow")
@@ -4770,7 +4852,7 @@ func test_combat_save_transients() -> void:
     }
     var snapshot: Dictionary = main.create_save_snapshot()
     var snapshot_is_durable_only := not snapshot.has("combat") and not snapshot.has("projectiles") and not snapshot.has("motions") and not snapshot.has("dodge")
-    var restored := bool(main.apply_save_snapshot(snapshot))
+    var restored := bool(await main.try_load_world_staged(false, snapshot))
     await wait_process_frames(2)
     var post_restore_clear: bool = hostile_motion.active_motion_count() == 0 \
         and not bool(player_motion.is_motion_active()) \
@@ -8534,7 +8616,9 @@ func test_mining_tool_requirements() -> void:
     aim_player_at(Vector3(iron_cell.x * CELL, iron_cell.y * CELL, iron_cell.z * CELL))
     await wait_physics_frames(2)
     main.call("destroy_target")
+    var wrong_iron_diagnostic := {"immediate": mining_requirement_observation(iron_cell)}
     await wait_physics_frames(2)
+    wrong_iron_diagnostic["afterTwoFrames"] = mining_requirement_observation(iron_cell)
     var iron_tool_message: String = hud.notification_label.text if hud.notification_label != null else ""
     var iron_wrong_blocked: bool = blocks.has(iron_cell) and float(main.get("break_progress")) == 0.0 and iron_tool_message.find("Copper Pickaxe") >= 0
 
@@ -8559,14 +8643,31 @@ func test_mining_tool_requirements() -> void:
     add_result(
         "mining_tool_requirements",
         copper_wrong_blocked and copper_mined and iron_wrong_blocked and iron_mined,
-        "copper blocked %s/mined %s, iron blocked %s/mined %s, hud '%s'" % [
+        "copper blocked %s/mined %s, iron blocked %s/mined %s, hud '%s', wrong iron diagnostic %s" % [
             str(copper_wrong_blocked),
             str(copper_mined),
             str(iron_wrong_blocked),
             str(iron_mined),
-            iron_tool_message
+            iron_tool_message,
+            str(wrong_iron_diagnostic)
         ]
     )
+
+func mining_requirement_observation(cell: Vector3i) -> Dictionary:
+    # Two read-only samples around the existing assertion delay. This records
+    # notification replacement without retrying the strike or changing success.
+    var hit: Dictionary = player.view_ray(float(main.monumental_tree_melee_ray_range()))
+    var collider := hit.get("collider") as Node
+    var inventory_system = main.get("inventory_system")
+    var hud = main.get("hud")
+    return {
+        "rayId": collider.get_instance_id() if is_instance_valid(collider) else 0,
+        "rayBlockType": String(collider.get_meta("block_type", "")) if is_instance_valid(collider) else "",
+        "tool": String(inventory_system.active_stack().get("item", "")),
+        "blockExists": get_blocks().has(cell),
+        "progress": float(main.get("break_progress")),
+        "message": hud.notification_label.text if hud.notification_label != null else ""
+    }
 
 func run_synthetic_mining_upgrade_progression_fixture() -> void:
     if not main or not player or not camera:
@@ -8890,6 +8991,7 @@ func save_report(verbose := true) -> void:
     var report: Dictionary = {
         "finished": finished,
         "passed": not failed,
+        "startup_loading_failure_result": main.get("startup_loading_failure_result") if is_instance_valid(main) else {},
         "results": results
     }
     var run_token := OS.get_environment("VOXEL_PLAYTEST_RUN_TOKEN")
@@ -9578,6 +9680,30 @@ func _debug_node_name(value) -> String:
     if value is Object and not is_instance_valid(value):
         return "freed"
     return str(value)
+
+func tutorial_cohort_shelter_state(npc_system, npc_root: Node, required_ids: Array[String]) -> Dictionary:
+    var actors := {}
+    var all_sheltered := required_ids.size() == 3
+    var autonomy = npc_system.get("autonomy_system")
+    for actor_id in required_ids:
+        var entry: Dictionary = npc_system.npc_entry_for_actor(actor_id)
+        var body := entry.get("body") as CharacterBody3D
+        if not is_instance_valid(body) or not body.is_inside_tree() or body.get_parent() != npc_root or bool(entry.get("canFight", true)):
+            actors[actor_id] = {"ready": false, "reason": "required_nonfighter_body_missing_or_changed"}
+            all_sheltered = false
+            continue
+        var strict_inside: bool = autonomy != null and bool(autonomy.is_inside_home_interior(entry, body.global_position))
+        var sheltered: bool = strict_inside and bool(entry.get("insideHome", false)) and bool(body.get_meta("npc_inside_home", false))
+        actors[actor_id] = {
+            "instance": body.get_instance_id(), "position": body.global_position,
+            "ready": sheltered, "strictInside": strict_inside,
+            "routeStatus": entry.get("routeStatus", ""), "routeReason": entry.get("routeReason", ""),
+            "leaseRequest": entry.get("_v2LeaseExecutorRequestId", ""),
+            "leaseWaypoint": entry.get("_v2LeaseExecutorWaypointIndex", -1),
+            "leaseLastMove": entry.get("_v2LeaseExecutorLastMove", 0.0)
+        }
+        all_sheltered = all_sheltered and sheltered
+    return {"ready": all_sheltered, "requiredIds": required_ids, "actors": actors}
 
 func npc_shelter_debug(npc_system) -> String:
     if npc_system == null:

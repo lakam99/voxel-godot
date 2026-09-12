@@ -209,9 +209,10 @@ func apply_save_snapshot(snapshot: Dictionary) -> bool:
         held_item.refresh_active()
     reset_break_progress()
     save_load_progress("reloading chunks")
-    reload_chunks(startup_loading_active)
+    reload_chunks(startup_loading_active or runtime_loading_active)
     save_load_progress("chunks reloaded")
-    refresh_intro_knock_audio()
+    if not startup_loading_active and not runtime_loading_active:
+        refresh_intro_knock_audio()
     return true
 
 func clear_combat_transients_before_restore() -> void:
@@ -231,7 +232,7 @@ func clear_combat_transients_before_restore() -> void:
         npc_system.clear_combat_transients()
 
 func save_load_progress(message: String) -> void:
-    if startup_loading_active:
+    if startup_loading_active or runtime_loading_active:
         startup_loading_step.emit("Loading save: %s" % message)
 
 func ensure_story_handoff_for_completed_tutorial_save() -> void:
@@ -576,8 +577,12 @@ func reload_chunks(defer_rebuild := false) -> void:
     pending_chunk_prop_spawns.clear()
     pending_chunk_terrain_refreshes.clear()
     pending_chunk_collision_refreshes.clear()
+    pending_generated_volume_exposure_scans.clear()
     last_center_chunk = Vector2i(999999, 999999)
-    if player:
+    # A staged load has not rebound native generation inputs yet. Even the
+    # non-forced update initializes terrain and advances publication; defer it
+    # entirely to bootstrap_initial_chunks_staged after snapshot/scenario setup.
+    if player and not (defer_rebuild and (startup_loading_active or runtime_loading_active)):
         playtest_progress("reload_chunks_update")
         update_chunks(not defer_rebuild)
     playtest_progress("reload_chunks_done")

@@ -41,6 +41,7 @@ var door_timeline: Array[Dictionary] = []
 var mira_timeline: Array[Dictionary] = []
 var input_timeline: Array[Dictionary] = []
 var startup_loading_steps: Array[Dictionary] = []
+var startup_loading_completed_observed := false
 var screenshot_dir := ""
 var progress_path := ""
 var report_path := ""
@@ -184,6 +185,7 @@ func enable_night_safe_player_policy(reason: String) -> bool:
     return true
 
 func launch_main_via_menu_input() -> bool:
+    startup_loading_completed_observed = false
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
     var existing_menu := existing_main_menu_parent()
     if existing_menu != null:
@@ -221,10 +223,14 @@ func launch_main_via_menu_input() -> bool:
                 connect_main_loading_diagnostics()
                 mark_progress("main_menu_active_main_observed")
         if main != null and is_instance_valid(main):
-            var loading_active := bool(main.get("startup_loading_active"))
+            var loading_state := startup_loading_state()
+            var loading_active := bool(loading_state["loadingActive"])
+            if not (loading_state["failureResult"] as Dictionary).is_empty():
+                await report_startup_loading_failure("new_game", frame, loading_state)
+                return false
             if frame % 60 == 0:
                 mark_progress("main_menu_waiting_for_main_load active=%s loading=%s" % [str(main != null), str(loading_active)])
-            if not loading_active:
+            if startup_loading_completed_observed and not loading_active:
                 record_phase0_event("startupLoadingComplete", {
                     "framesAfterClick": frame,
                     "startupLoadingStepCount": startup_loading_steps.size()
@@ -232,7 +238,8 @@ func launch_main_via_menu_input() -> bool:
                 report_data["mainMenuLaunch"] = {
                     "clickedViaInput": true,
                     "frames": frame,
-                    "loadingActive": loading_active
+                    "loadingActive": loading_active,
+                    "loadingCompletedSignalObserved": startup_loading_completed_observed
                 }
                 mark_progress("main_menu_new_game_loaded")
                 return true
@@ -252,11 +259,46 @@ func existing_main_menu_parent() -> Node:
     return null
 
 func connect_main_loading_diagnostics() -> void:
-    if main == null or not main.has_signal("startup_loading_step"):
+    if main == null:
         return
     var callback := Callable(self, "_on_main_startup_loading_step")
-    if not main.is_connected("startup_loading_step", callback):
+    if main.has_signal("startup_loading_step") and not main.is_connected("startup_loading_step", callback):
         main.connect("startup_loading_step", callback)
+    var completed_callback := Callable(self, "_on_main_startup_loading_completed")
+    if main.has_signal("startup_loading_completed") and not main.is_connected("startup_loading_completed", completed_callback):
+        main.connect("startup_loading_completed", completed_callback)
+
+func _on_main_startup_loading_completed() -> void:
+    startup_loading_completed_observed = true
+
+func startup_loading_state() -> Dictionary:
+    # In production both completion and failure clear loading_active. Only the
+    # completion signal proves the successful end of deferred menu boot.
+    var failure_result: Dictionary = main.get("startup_loading_failure_result")
+    var state := {
+        "loadingActive": bool(main.get("startup_loading_active")),
+        "loadingCompletedSignalObserved": startup_loading_completed_observed,
+        "failureResult": failure_result.duplicate(true)
+    }
+    report_data["startupLoadingState"] = state
+    report_data["startupLoadingFailureResult"] = failure_result.duplicate(true)
+    return state
+
+func report_startup_loading_failure(mode: String, frame: int, loading_state: Dictionary) -> void:
+    report_data["bootedSeed"] = String(main.get("seed_text"))
+    report_data["mainMenuLaunch"] = {
+        "clickedViaInput": true,
+        "mode": mode,
+        "frames": frame,
+        "loadingActive": loading_state["loadingActive"],
+        "loadingCompletedSignalObserved": startup_loading_completed_observed,
+        "failed": true
+    }
+    add_failure("main_menu_%s_startup_failed" % mode, JSON.stringify(loading_state["failureResult"]))
+    mark_progress("main_menu_%s_load_failed" % mode)
+    # Keep the production menu/failure UI intact for the current-viewport capture.
+    await capture_stage("main_menu_%s_load_failed" % mode, loading_state)
+    save_report(false)
 
 func _on_main_startup_loading_step(message: String) -> void:
     startup_loading_steps.append({
@@ -1173,6 +1215,11 @@ func sample_player(label: String) -> void:
         "velocity": vec3(player.velocity),
         "flatCell": vec2i(flat_cell(player.global_position)),
         "mouseMode": Input.get_mouse_mode(),
+        "physicsEnabled": player.is_physics_processing(),
+        "physicsTicks": player.physics_ticks,
+        "movementWish": vec3(player.last_movement_wish),
+        "terrainHold": bool(player.get_meta("terrain_collision_hold", false)),
+        "terrainHoldReason": String(player.get_meta("terrain_collision_hold_reason", "")),
         "automation": player_automation_state()
     })
     report_data["playerTimeline"] = player_timeline
@@ -1335,6 +1382,8 @@ func wait_process_frames(count: int) -> void:
 
 func add_failure(code: String, details: String) -> void:
     failed = true
+    if is_instance_valid(player):
+        report_data["playerMotionProofAtFailure"] = player.last_terrain_collision_proof.duplicate(true)
     var failure := {
         "code": code,
         "details": details,

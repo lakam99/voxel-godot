@@ -16,6 +16,16 @@ var launching := false
 var saved_seed := ""
 var loading_elapsed := 0.0
 var active_main: Node = null
+var quit_requested := false
+
+func _notification(what: int) -> void:
+    if what != NOTIFICATION_WM_CLOSE_REQUEST or not is_instance_valid(ui_layer):
+        return
+    # Main handles an active world. The menu retains close intent across the
+    # gap where a failed owner is retiring and no replacement exists yet.
+    quit_requested = true
+    if not launching:
+        _on_quit_pressed()
 
 func _ready() -> void:
     Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
@@ -251,15 +261,7 @@ func _on_quit_pressed() -> void:
 
 func _deferred_quit() -> void:
     await get_tree().process_frame
-    # A failed load leaves its Main child attached after disconnecting menu
-    # signals. Drain that child's owned workers before quitting the tree.
-    for child in get_children():
-        if child.has_method("wait_for_npc_navigation_before_quit"):
-            child.set_process(false)
-            child.set_physics_process(false)
-            child.set_registered_npc_physics_enabled(false)
-            await child.wait_for_terrain_workers_before_quit()
-            await child.wait_for_npc_navigation_before_quit()
+    await retire_failed_game_instances()
     get_tree().quit(0)
 
 func launch_game(mode: String) -> void:
@@ -276,6 +278,10 @@ func launch_game(mode: String) -> void:
 
 func _deferred_launch_game(mode: String) -> void:
     await get_tree().process_frame
+    await retire_failed_game_instances()
+    if quit_requested:
+        get_tree().quit(0)
+        return
     var main := MAIN_SCENE.instantiate()
     if main == null:
         status_label.text = "Load failed"
@@ -283,7 +289,6 @@ func _deferred_launch_game(mode: String) -> void:
         launching = false
         refresh_save_state()
         return
-    main.set("deferred_startup_boot", true)
     main.set("startup_mode", mode)
     active_main = main
     if main.has_signal("startup_loading_step"):
@@ -293,6 +298,25 @@ func _deferred_launch_game(mode: String) -> void:
     if main.has_signal("startup_loading_failed"):
         main.connect("startup_loading_failed", Callable(self, "_on_game_loading_failed"))
     add_child(main)
+
+func retire_failed_game_instances() -> void:
+    # A failed boot can still own terrain/navigation workers. Retire that
+    # source before a retry creates another world in this menu.
+    for child in get_children():
+        if not child.has_method("wait_for_terrain_workers_before_quit"):
+            continue
+        var failure = child.get("startup_loading_failure_result")
+        if not (failure is Dictionary) or failure.is_empty():
+            continue
+        child.set("shutdown_requested", true)
+        while bool(child.get("startup_operation_active")) or bool(child.get("runtime_loading_active")):
+            await get_tree().process_frame
+        var audio = child.get("audio_effects")
+        if is_instance_valid(audio): audio.shutdown_audio()
+        await child.wait_for_terrain_workers_before_quit()
+        await child.wait_for_npc_navigation_before_quit()
+        child.queue_free()
+        await get_tree().process_frame
 
 func _on_game_loading_step(message: String) -> void:
     if status_label == null or not is_instance_valid(status_label):
@@ -309,6 +333,9 @@ func _on_game_loading_completed() -> void:
 
 func _on_game_loading_failed(message: String) -> void:
     launching = false
+    if is_instance_valid(active_main):
+        var failed_overlay = active_main.get("startup_overlay")
+        if is_instance_valid(failed_overlay): failed_overlay.hide()
     disconnect_game_loading_signals()
     loading_overlay.visible = false
     new_game_button.disabled = false

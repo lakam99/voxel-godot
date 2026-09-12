@@ -14,6 +14,16 @@ func run() -> void:
         report_path = ProjectSettings.globalize_path("res://artifacts/npc/reports/tutorial-starter-terrain-probe.json")
     main = MAIN_SCENE.instantiate()
     add_child(main)
+    if not await main.wait_for_startup_loading_complete():
+        write_json(report_path, {
+            "schemaVersion": 1,
+            "diagnosticOnly": true,
+            "passed": false,
+            "reason": "startup_loading_not_ready",
+            "startup_loading_failure_result": main.get("startup_loading_failure_result")
+        })
+        main.call("request_graceful_quit", 1)
+        return
     await wait_physics_frames(30)
     var tutorial = main.get("tutorial_system") if main != null else null
     var started := false
@@ -67,7 +77,7 @@ func run() -> void:
         "probes": probe_states(probe_cells)
     }
     write_json(report_path, report)
-    get_tree().quit(0)
+    main.request_graceful_quit(0)
 
 func wait_physics_frames(count: int) -> void:
     for _i in range(maxi(0, count)):

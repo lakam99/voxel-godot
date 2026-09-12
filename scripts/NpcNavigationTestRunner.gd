@@ -5,6 +5,10 @@ func run() -> void:
     main = MAIN_SCENE.instantiate()
     add_child(main)
     mark_progress("npc_nav_main_instantiated")
+    if not await wait_for_runtime_loading_complete():
+        add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+        finish_playtest()
+        return
     if main != null:
         if main.get("tutorial_system") != null:
             var tutorial = main.get("tutorial_system")

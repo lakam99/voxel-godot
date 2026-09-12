@@ -121,7 +121,9 @@ func run() -> void:
     test_concept_first_worldmark_generation_prototypes()
     test_gloam_hart_definition_preserves_first_arc_contract()
     test_duplicate_events_do_not_duplicate_story_effects()
-    await test_main_scene_instantiates()
+    if not await test_main_scene_instantiates():
+        finish()
+        return
     test_phase12_campaign_spine_progression_and_endless_play()
     test_phase13_narrative_text_provider_contracts()
     test_phase14_story_polish_accessibility_debug_authoring()
@@ -408,10 +410,17 @@ func test_duplicate_events_do_not_duplicate_story_effects() -> void:
     generator.queue_free()
     bus.queue_free()
 
-func test_main_scene_instantiates() -> void:
+func test_main_scene_instantiates() -> bool:
     var story_test_mode := OS.get_environment("VOXEL_STORY_PLAYTEST") == "1"
     main = MAIN_SCENE.instantiate()
     add_child(main)
+    var progress_callback := func(message): mark_progress("startup_%s" % String(message).replace(" ", "_"))
+    main.connect("startup_loading_step", progress_callback)
+    var startup_ready: bool = await main.wait_for_startup_loading_complete()
+    main.disconnect("startup_loading_step", progress_callback)
+    if not startup_ready or finished:
+        add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+        return false
     await wait_physics_frames(24)
     var player = main.get("player") as CharacterBody3D
     if player:
@@ -454,6 +463,7 @@ func test_main_scene_instantiates() -> void:
         story_test_mode and main != null and player != null and missing.is_empty(),
         "story mode %s, player %s, missing %s" % [str(story_test_mode), str(player != null), str(missing)]
     )
+    return true
 
 func test_phase14_story_polish_accessibility_debug_authoring() -> void:
     var test := Phase14StoryPolishTestsScript.new()
@@ -2448,7 +2458,10 @@ func finish() -> void:
     finished = true
     mark_progress("finished")
     save_report()
-    get_tree().quit(1 if failed else 0)
+    if is_instance_valid(main):
+        main.call("request_graceful_quit", 1 if failed else 0)
+    else:
+        get_tree().quit(1 if failed else 0)
 
 func save_report() -> void:
     var report_path := OS.get_environment("VOXEL_STORY_PLAYTEST_REPORT")
@@ -2457,6 +2470,7 @@ func save_report() -> void:
     ensure_dir_for_file(report_path)
     var report := {
         "passed": not failed,
+        "startup_loading_failure_result": main.get("startup_loading_failure_result") if is_instance_valid(main) else {},
         "results": results
     }
     var file := FileAccess.open(report_path, FileAccess.WRITE)

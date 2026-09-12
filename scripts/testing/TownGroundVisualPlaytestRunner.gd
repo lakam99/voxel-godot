@@ -79,6 +79,14 @@ func run() -> void:
 		"particleDensity": 0.0
 	})
 	add_child(main)
+	var progress_callback := func(message): write_progress("startup_%s" % String(message).replace(" ", "_"))
+	main.connect("startup_loading_step", progress_callback)
+	var startup_ready: bool = await main.wait_for_startup_loading_complete()
+	main.disconnect("startup_loading_step", progress_callback)
+	if not startup_ready or finished:
+		add_result("startup_loading_complete", false, JSON.stringify({"startup_loading_failure_result": main.get("startup_loading_failure_result")}))
+		finish(1)
+		return
 	await wait_process_frames(3)
 	bind_scene_nodes()
 	if main == null or player == null or camera == null:
@@ -906,7 +914,10 @@ func finish(exit_code: int) -> void:
 	finished = true
 	save_report()
 	write_progress("finish:%d" % exit_code)
-	get_tree().quit(exit_code)
+	if is_instance_valid(main):
+		main.call("request_graceful_quit", exit_code)
+	else:
+		get_tree().quit(exit_code)
 
 func save_report() -> void:
 	var report := {
@@ -931,6 +942,7 @@ func save_report() -> void:
 			"movementAuthority": "collision_backed_player_route_authority_v2"
 		},
 		"failureCount": failure_count(),
+		"startup_loading_failure_result": main.get("startup_loading_failure_result") if is_instance_valid(main) else {},
 		"resultCount": results.size(),
 		"results": results,
 		"captures": captures,

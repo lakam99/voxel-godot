@@ -202,7 +202,7 @@ var worst_publication_frame := {
 }
 
 func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
-	if body == null or not is_instance_valid(body) or request.is_empty():
+	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion() or request.is_empty():
 		return false
 	if bool(body.get_meta("tree_publication_cancelled", false)): return false
 	var prepared_request := request.duplicate(true)
@@ -218,7 +218,7 @@ func enqueue(body: StaticBody3D, request: Dictionary) -> bool:
 		# Tree props are static for the life of this queued visual. Cache the
 		# immutable world position so priority selection never dereferences scene
 		# nodes in its hot loop.
-		"publicationPosition": body.global_position,
+		"publicationPosition": body.global_position if _is_live_node(body) else prepared_request.get("treeWorldPosition", null),
 		"request": prepared_request,
 		"recipeCacheKey": recipe_key,
 		"recipeIdentityKey": recipe_identity_key,
@@ -265,8 +265,18 @@ func cancel_body_publication(body: StaticBody3D) -> Dictionary:
 func _publication_body(record: Dictionary) -> StaticBody3D:
 	var reference: WeakRef = record.get("body") as WeakRef
 	var body: StaticBody3D = reference.get_ref() as StaticBody3D if reference != null else null
-	if is_instance_valid(body) and not bool(body.get_meta("tree_publication_cancelled", false)): return body
+	if is_instance_valid(body) and not body.is_queued_for_deletion() and not bool(body.get_meta("tree_publication_cancelled", false)): return body
 	return null
+
+## Detached bodies still own retryable preparation. Only scene queries and
+## distance-based presentation require live membership; never treat detachment
+## as cancellation of the recipe or its partially assembled visual.
+func _is_live_node(node: Node3D) -> bool:
+	return is_instance_valid(node) and node.is_inside_tree() and not node.is_queued_for_deletion()
+
+func _live_viewer() -> Node3D:
+	var node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	return node if _is_live_node(node) else null
 
 func set_viewer(node: Node3D) -> void:
 	viewer = weakref(node) if node != null and is_instance_valid(node) else null
@@ -307,10 +317,14 @@ func make_viewer_motion_snapshot(position: Vector3, planar_velocity: Vector3, ca
 	}
 
 func refresh_viewer_motion_snapshot() -> void:
+	if viewer != null and _live_viewer() == null:
+		viewer_motion_snapshot.clear()
+		external_viewer_motion_snapshot.clear()
+		return
 	if not external_viewer_motion_snapshot.is_empty() and Time.get_ticks_usec() <= external_viewer_motion_expires_usec:
 		viewer_motion_snapshot = external_viewer_motion_snapshot.duplicate(true)
 	else:
-		var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+		var viewer_node: Node3D = _live_viewer()
 		if viewer_node == null or not is_instance_valid(viewer_node):
 			viewer_motion_snapshot.clear()
 		else:
@@ -318,7 +332,7 @@ func refresh_viewer_motion_snapshot() -> void:
 			var planar_velocity := velocity_value as Vector3 if velocity_value is Vector3 else Vector3.ZERO
 			var camera_forward := -viewer_node.global_transform.basis.z
 			var camera_value = viewer_node.get("camera")
-			if camera_value is Camera3D and is_instance_valid(camera_value as Camera3D):
+			if camera_value is Camera3D and _is_live_node(camera_value as Camera3D):
 				camera_forward = -(camera_value as Camera3D).global_transform.basis.z
 			viewer_motion_snapshot = make_viewer_motion_snapshot(viewer_node.global_position, planar_velocity, camera_forward)
 	if bool(viewer_motion_snapshot.get("confident", false)):
@@ -335,19 +349,21 @@ func viewer_motion_for_position(viewer_position: Vector3) -> Dictionary:
 	return viewer_motion_snapshot
 
 func current_viewer_position() -> Vector3:
+	if viewer != null and _live_viewer() == null:
+		return Vector3.INF
 	var snapshot_position = viewer_motion_snapshot.get("position", null)
 	if snapshot_position is Vector3:
 		return snapshot_position as Vector3
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	return viewer_node.global_position if viewer_node != null and is_instance_valid(viewer_node) else Vector3.INF
 
 func body_is_collision_visible(body: StaticBody3D) -> bool:
-	if body == null or not is_instance_valid(body):
+	if not _is_live_node(body):
 		return false
 	return body.get_node_or_null("GeneratedTreeVisual") != null or body.get_node_or_null("TreeVisibilityProxy") != null
 
 func body_is_collision_visibility_relevant(body: StaticBody3D) -> bool:
-	if body == null or not is_instance_valid(body):
+	if not _is_live_node(body) or bool(body.get_meta("tree_publication_cancelled", false)):
 		return false
 	var viewer_position := current_viewer_position()
 	if viewer_position == Vector3.INF:
@@ -356,7 +372,7 @@ func body_is_collision_visibility_relevant(body: StaticBody3D) -> bool:
 	return horizontal_delta.length_squared() <= COLLISION_VISIBILITY_PROXY_DISTANCE * COLLISION_VISIBILITY_PROXY_DISTANCE
 
 func record_first_collision_visible(body: StaticBody3D, source: String) -> void:
-	if body == null or not is_instance_valid(body) or body.has_meta("tree_first_visual_ready_usec"):
+	if not _is_live_node(body) or body.has_meta("tree_first_visual_ready_usec"):
 		return
 	if not body.has_meta("tree_collision_visibility_relevant_usec"):
 		return
@@ -462,7 +478,7 @@ func refresh_collision_visibility_proxies() -> void:
 							remaining -= 1
 
 func selected_lod_tier(request: Dictionary, current_tier := "") -> String:
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	if viewer_node != null and is_instance_valid(viewer_node):
 		var position_value = request.get("treeWorldPosition", null)
 		if position_value is Vector3:
@@ -477,7 +493,7 @@ func selected_lod_tier(request: Dictionary, current_tier := "") -> String:
 func refresh_published_lods() -> void:
 	if viewer == null or published_lod_records.is_empty():
 		return
-	var viewer_node: Node3D = viewer.get_ref() as Node3D
+	var viewer_node: Node3D = _live_viewer()
 	if viewer_node == null or not is_instance_valid(viewer_node):
 		return
 	var checks := mini(MAX_LOD_REEVALUATIONS_PER_FRAME, published_lod_records.size())
@@ -488,11 +504,13 @@ func refresh_published_lods() -> void:
 		var record_index := lod_recheck_cursor
 		var record: Dictionary = published_lod_records[record_index]
 		var body: StaticBody3D = _publication_body(record)
-		if body == null or not is_instance_valid(body) or not is_instance_valid(body.get_parent()):
+		if body == null or not is_instance_valid(body):
 			remove_published_render_stats(int(record.get("bodyInstanceId", 0)))
 			published_lod_records.remove_at(lod_recheck_cursor)
 			continue
 		lod_recheck_cursor = posmod(record_index + 1, published_lod_records.size())
+		if not _is_live_node(body):
+			continue
 		if bool(record.get("rebuildPending", false)):
 			continue
 		var request: Dictionary = (record.get("request", {}) as Dictionary).duplicate(true)
@@ -534,9 +552,9 @@ func retier_task_for_current_viewer(task: Dictionary, body: StaticBody3D) -> boo
 	var completed_recipe: Dictionary = task.get("recipe", {})
 	if not completed_recipe.is_empty() or task.has("visual"):
 		return false
-	if viewer == null or body == null or not is_instance_valid(body):
+	if viewer == null or not _is_live_node(body):
 		return false
-	var viewer_node: Node3D = viewer.get_ref() as Node3D
+	var viewer_node: Node3D = _live_viewer()
 	if viewer_node == null or not is_instance_valid(viewer_node):
 		return false
 	var request: Dictionary = task.get("request", {})
@@ -664,7 +682,7 @@ func remove_pending_task_from_bucket(sequence: int, task: Dictionary) -> void:
 
 func highest_priority_pending_sequence() -> int:
 	var selection_started_usec := Time.get_ticks_usec()
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	if viewer_node != null and is_instance_valid(viewer_node):
 		var viewer_position := viewer_node.global_position
 		var local_sequence := highest_priority_local_pending_sequence(viewer_position, selection_started_usec)
@@ -821,7 +839,7 @@ func collect_completed_workers() -> void:
 			failed_count += 1
 	active = still_active
 func task_precedes(left: Dictionary, right: Dictionary) -> bool:
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	var viewer_position := viewer_node.global_position if viewer_node != null and is_instance_valid(viewer_node) else Vector3.INF
 	return task_precedes_at(left, right, Time.get_ticks_usec(), viewer_position)
 
@@ -836,7 +854,7 @@ func priority_score_precedes(left: Dictionary, left_score: float, right: Diction
 	return int(left.get("enqueueSequence", 0)) < int(right.get("enqueueSequence", 0))
 
 func effective_priority(task: Dictionary, now_usec: int) -> float:
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	var viewer_position := viewer_node.global_position if viewer_node != null and is_instance_valid(viewer_node) else Vector3.INF
 	return effective_priority_at(task, now_usec, viewer_position)
 
@@ -853,7 +871,7 @@ func live_publication_priority(task: Dictionary) -> float:
 	# or partially assembled off-tree. The request retains its original priority
 	# for deterministic diagnostics; this live value only decides which bounded
 	# renderer slice receives the next frame.
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	var viewer_position := viewer_node.global_position if viewer_node != null and is_instance_valid(viewer_node) else Vector3.INF
 	return live_publication_priority_at(task, viewer_position)
 
@@ -964,7 +982,7 @@ func publish_completed_recipes() -> void:
 		var body: StaticBody3D = _publication_body(task)
 		var validation_elapsed_usec := Time.get_ticks_usec() - validation_started_usec
 		record_publication_validation(validation_elapsed_usec)
-		if body == null or not is_instance_valid(body) or not is_instance_valid(body.get_parent()):
+		if body == null or not is_instance_valid(body):
 			var cancellation_started_usec := Time.get_ticks_usec()
 			release_staged_visual(task)
 			var cancellation_elapsed_usec := Time.get_ticks_usec() - cancellation_started_usec
@@ -1040,8 +1058,8 @@ func publish_completed_recipes() -> void:
 func enqueue_completed_task(task: Dictionary) -> void:
 	if not task.has("publicationPosition"):
 		var body: StaticBody3D = _publication_body(task)
-		if body != null and is_instance_valid(body):
-			task["publicationPosition"] = body.global_position
+		var request: Dictionary = task.get("request", {})
+		task["publicationPosition"] = body.global_position if _is_live_node(body) else request.get("treeWorldPosition", null)
 	var index := completed.size()
 	completed.append(task)
 	completed_count += 1
@@ -1067,7 +1085,7 @@ func promote_higher_priority_completed_task() -> void:
 	if candidate_index < 0:
 		return
 	var candidate: Dictionary = completed[candidate_index]
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	var viewer_position := viewer_node.global_position if viewer_node != null and is_instance_valid(viewer_node) else Vector3.INF
 	if not task_precedes_at(candidate, staged_publication_task, Time.get_ticks_usec(), viewer_position):
 		return
@@ -1081,7 +1099,7 @@ func promote_higher_priority_completed_task() -> void:
 
 func highest_priority_completed_index() -> int:
 	var selection_started_usec := Time.get_ticks_usec()
-	var viewer_node: Node3D = viewer.get_ref() as Node3D if viewer != null else null
+	var viewer_node: Node3D = _live_viewer()
 	if viewer_node != null and is_instance_valid(viewer_node):
 		var viewer_position := viewer_node.global_position
 		var local_index := highest_priority_local_completed_index(viewer_position, selection_started_usec)
@@ -1184,14 +1202,18 @@ func completed_bucket_key_for_cell(cell: Vector2i) -> Vector2i:
 
 func completed_bucket_key(task: Dictionary) -> Vector2i:
 	var cached_position = task.get("publicationPosition", null)
-	if cached_position is Vector3:
+	if cached_position is Vector3 and (cached_position as Vector3).is_finite():
 		return completed_bucket_key_for_cell(completed_priority_cell(cached_position as Vector3))
+	# A task admitted without a world binding stays in the unplaced bucket.
+	# Reattachment must not change its removal key while the entry is indexed.
+	if task.has("publicationPosition"):
+		return COMPLETED_UNPLACED_CELL
 	var body: StaticBody3D = _publication_body(task)
-	if body != null and is_instance_valid(body):
+	if _is_live_node(body):
 		return completed_bucket_key_for_cell(completed_priority_cell(body.global_position))
 	var request: Dictionary = task.get("request", {})
 	var fallback_position = request.get("treeWorldPosition", null)
-	if fallback_position is Vector3:
+	if fallback_position is Vector3 and (fallback_position as Vector3).is_finite():
 		return completed_bucket_key_for_cell(completed_priority_cell(fallback_position as Vector3))
 	return COMPLETED_UNPLACED_CELL
 

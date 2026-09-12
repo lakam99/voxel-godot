@@ -99,7 +99,8 @@ func advance_retained_viewers(delta: float) -> void:
 	if retained_activation_elapsed < RETAINED_ACTIVATION_INTERVAL_SECONDS: return
 	retained_activation_elapsed = 0.0
 	if terrain == null or main == null or site_gate == null or not generation_context_current(): return
-	if bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active")):
+	if (bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active"))) \
+			and (startup_required_gameplay_chunks.is_empty() or not gameplay_chunks_published(startup_required_gameplay_chunks)):
 		retained_activation_reason = "startup_required_coverage"
 		return
 	if not view_distance_expansion_requested and not gameplay_chunks_published(startup_required_gameplay_chunks):
@@ -411,6 +412,8 @@ func wait_for_site_admission(chunk_keys: Array) -> Dictionary:
 	# Source preparation precedes the existing chunk/collision readiness clocks.
 	# Keep the real loading overlay responsive; do not widen their timeouts.
 	while true:
+		if not is_instance_valid(main) or main.get("shutdown_requested") == true:
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("startup_cancelled")
 		var pending := false
 		for chunk_key: Vector2i in chunk_keys:
 			var result := admit_gameplay_chunk(chunk_key)
@@ -1323,6 +1326,9 @@ func wait_for_spawn_presentation(world_position: Vector3, timeout_seconds: float
 	var on_draw := func(): drawn[0] = true
 	var armed_state := {}
 	while float(Time.get_ticks_msec()-started)/1000.0 < timeout_seconds:
+		if not is_instance_valid(main) or main.get("shutdown_requested") == true:
+			if RenderingServer.frame_post_draw.is_connected(on_draw): RenderingServer.frame_post_draw.disconnect(on_draw)
+			return STARTUP_READINESS_RESULT_SCRIPT.failed("startup_cancelled")
 		var state := spawn_presentation_state(world_position)
 		if state.get("ready",false):
 			if drawn[0] and state == armed_state:
@@ -1379,11 +1385,16 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		site_traversal_waiting = true
 		_site_wait_message("Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
 		return {"passed":false,"reason":source.reason,"siteAdmission":source}
-	var structures: Dictionary = main.structure_system.citadel_physical_publication_state(Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2))
-	if structures.status != "ready":
+	var motion_bounds := Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)
+	# Stable navigation-cell queries reuse source closure between physics frames.
+	# Include every tile intersecting the complete swept capsule margin.
+	var region_low := Vector2i(floori(float(motion_bounds.position.x)/16.0),floori(float(motion_bounds.position.y)/16.0))*16
+	var region_high := Vector2i(ceili(float(motion_bounds.end.x)/16.0),ceili(float(motion_bounds.end.y)/16.0))*16
+	var region: Dictionary = main.world_streaming.region_readiness(Rect2i(region_low,region_high-region_low))
+	if region.status != "ready":
 		site_traversal_waiting = true
-		_site_wait_message("Preparing landmark buildings…" if structures.status == "pending" else "Landmark loading failed: %s" % structures.reason)
-		return {"passed":false,"reason":structures.reason,"structurePublication":structures}
+		_site_wait_message("Preparing nearby world…" if region.status == "pending" else "World loading failed: %s" % region.reason)
+		return {"passed":false,"reason":region.reason,"regionalPublication":region}
 	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
 	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
 	var proofs: Array = []
@@ -1426,7 +1437,7 @@ func _site_wait_message(message: String) -> void:
 	var now := Time.get_ticks_usec()
 	if now-last_site_wait_message_usec < 1000000: return
 	last_site_wait_message_usec = now
-	if main != null and main.has_method("show_action_message"): main.show_action_message(message)
+	if main != null and main.has_method("show_action_message"): main.show_action_message(message, true)
 
 func voxel_terrain_collider(value) -> bool:
 	if value == null or not is_instance_valid(value):

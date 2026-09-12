@@ -79,8 +79,20 @@ func run() -> void:
 		main = MAIN_SCENE.instantiate()
 		main.set("render_distance", 1)
 		root.add_child(main)
-		await process_frame
-		await process_frame
+		if not await main.wait_for_startup_loading_complete(240.0, false):
+			write_probe_report({
+				"seed": seed,
+				"realScene": true,
+				"passed": false,
+				"reason": "startup_not_ready",
+				"gameplayAcceptance": false,
+				"startupLoadingFailureResult": main.get("startup_loading_failure_result").duplicate(true) if is_instance_valid(main) else {}
+			})
+			if is_instance_valid(main) and main.is_inside_tree():
+				main.request_graceful_quit(1)
+			else:
+				quit(1)
+			return
 		main.set_process(false)
 		main.set_physics_process(false)
 		world_generation = main.get("world_generation_system")
@@ -102,13 +114,23 @@ func run() -> void:
 		}
 	else:
 		report = probe(seed)
+	if OS.get_environment("VOXEL_UNDERGROUND_AIR_PROBE_REAL_SCENE").strip_edges() == "1":
+		report["startupScope"] = "ordinary_startup_generator_probe"
+		report["gameplayAcceptance"] = false
+	write_probe_report(report)
+	if main is Node and is_instance_valid(main) and main.is_inside_tree():
+		main.request_graceful_quit(0)
+		return
+	quit(0)
+
+func write_probe_report(report: Dictionary) -> void:
 	var report_path := OS.get_environment("VOXEL_UNDERGROUND_AIR_PROBE_REPORT").strip_edges()
 	if report_path != "":
 		var file := FileAccess.open(report_path, FileAccess.WRITE)
 		if file != null:
 			file.store_string(JSON.stringify(report, "\t"))
+			file.close()
 	print(JSON.stringify(report, "\t"))
-	quit(0)
 
 func probe(seed: String) -> Dictionary:
 	var radius := int(OS.get_environment("VOXEL_UNDERGROUND_AIR_PROBE_RADIUS").strip_edges())

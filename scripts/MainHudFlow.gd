@@ -407,10 +407,8 @@ func _on_resume_requested() -> void:
     update_hud("Resumed")
 
 func _on_new_game_requested() -> void:
-    if has_method("start_new_game_staged"):
-        await call("start_new_game_staged", true)
-    else:
-        start_new_game(true)
+    if not await start_new_game_staged(true):
+        return
     if inventory_system:
         inventory_system.clear()
         _sync_inventory_totals()

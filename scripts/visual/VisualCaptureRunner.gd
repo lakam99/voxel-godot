@@ -43,6 +43,11 @@ func run() -> void:
     apply_capture_resolution_override()
     main = MAIN_SCENE.instantiate()
     add_child(main)
+    if not await main.wait_for_startup_loading_complete():
+        failed = true
+        write_metadata()
+        main.call("request_graceful_quit", 1)
+        return
     await wait_frames(1)
     playtest_survival_policy = PlaytestSurvivalPolicyScript.enable_player_god_mode(main, "visual_capture_night_cases")
     if not bool(playtest_survival_policy.get("enabled", false)):
@@ -62,7 +67,7 @@ func run() -> void:
     for case_spec in capture_cases:
         await capture_case(case_spec)
     write_metadata()
-    get_tree().quit(1 if failed else 0)
+    main.request_graceful_quit(1 if failed else 0)
 
 func apply_capture_resolution_override() -> void:
     var resolution_text := OS.get_environment("VOXEL_VISUAL_CAPTURE_RESOLUTION").strip_edges().to_lower()
@@ -734,6 +739,8 @@ func stable_performance_values() -> Dictionary:
 func write_metadata() -> void:
     write_json(path_join(output_dir, "visual-captures.json"), {
         "seed": seed,
+        "passed": not failed,
+        "startup_loading_failure_result": main.get("startup_loading_failure_result") if is_instance_valid(main) else {},
         "playtestSurvivalPolicy": playtest_survival_policy,
         "cases": metadata
     })

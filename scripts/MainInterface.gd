@@ -151,7 +151,7 @@ func unlock_all_crafting_groups_for_tests() -> void: pass
 func _sync_inventory_totals() -> void: pass
 func save_world(show_message := true) -> bool: return false
 func try_load_world(show_message := false) -> bool: return false
-func start_new_game(show_message := true) -> bool: return false
+func try_load_world_staged(show_message := false, snapshot_override: Dictionary = {}) -> bool: return false
 func reset_runtime_world_state(reload_world := true) -> void: pass
 func create_save_snapshot() -> Dictionary: return {}
 func apply_save_snapshot(snapshot: Dictionary) -> bool: return false
@@ -275,7 +275,7 @@ func _unhandled_input(event: InputEvent) -> void: pass
 func select_hotbar_delta(delta: int) -> int: return 0
 func update_hud_frame(delta: float) -> void: pass
 func update_hud(message: String = "", throttled: bool = false) -> void: pass
-func show_action_message(message: String) -> void: pass
+func show_action_message(message: String, passive := false) -> void: pass
 func hud_refresh_stats() -> Dictionary: return {}
 func update_exploration_state(cell: Vector2i, biome: String) -> void: pass
 func discover_landmarks_near(position: Vector3, radius: float = CELL * 8.0) -> int: return 0

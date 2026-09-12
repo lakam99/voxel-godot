@@ -18,6 +18,16 @@ class SyntheticPublicationOwner extends RefCounted:
 	var source_key := "async-contract-source:1"
 	func navmesh_tile_source_key_for_tile(_tile: String) -> String: return source_key
 
+class SyntheticQueuedPublicationOwner extends SyntheticPublicationOwner:
+	var captured := {}
+	var capture_calls: Array[String] = []
+	func build_navmesh_tile_snapshot(key: String) -> Dictionary:
+		capture_calls.append(key)
+		if captured.has(key): return captured[key]
+		var x := int(key.get_slice(",",0))*16
+		return {"tileKey":key,"publicationStatus":"ready","sourceKey":source_key,
+			"surfaces":[{"cell":Vector3i(x,0,0),"spanIndex":0,"worldPosition":Vector3(x*1.35,0,0)}]}
+
 class PendingSourceFixture extends RefCounted:
 	var ready := false
 	func navmesh_tile_source_key_for_tile(_key: String) -> String: return "pending-source-contract:1"
@@ -85,12 +95,15 @@ func run() -> void:
 	await verify_clear_flushes_before_map_release()
 	await verify_autonomy_reset_keeps_navmesh_owner()
 	await verify_tile_publication_receipts()
+	await verify_grouped_door_publication_receipts()
 	verify_source_rectangle_coverage()
 	verify_publication_rectangle_clearance()
 	await verify_finite_live_collision_bounds()
 	await verify_pending_source_retention()
 	await verify_navigation_worker_parity_and_ownership()
 	await verify_async_navigation_service_lifecycle()
+	await verify_owned_publication_queue_progress()
+	await verify_async_navigation_orphaned_recapture()
 	await verify_prepared_navigation_portal_filter_retirement()
 	write_report()
 	quit(0 if failures() == 0 else 1)
@@ -493,6 +506,16 @@ func async_navigation_snapshot(owner, revision: int, include_filter_portal := fa
 	snapshot["publicationOwner"] = weakref(owner)
 	return snapshot
 
+func recapture_async_navigation_snapshot(snapshot: Dictionary, global_revision: int) -> Dictionary:
+	# Synthetic cache eviction/recapture: change only the global observation
+	# counter, preserving the complete local source identity and all geometry.
+	# async_navigation_snapshot(revision) also changes heights, so cannot model it.
+	var recaptured: Dictionary = snapshot.publicationSource.snapshot.duplicate(true)
+	recaptured.sourceRevision = global_revision
+	recaptured["publicationSource"] = NavigationPublicationSourceScript.new().capture(recaptured)
+	recaptured["publicationOwner"] = snapshot.publicationOwner
+	return recaptured
+
 func wait_for_service_publication(service, shutdown := false) -> Dictionary:
 	var deadline := Time.get_ticks_msec()+5000
 	var state: Dictionary = {}
@@ -563,14 +586,29 @@ func verify_async_navigation_service_lifecycle() -> void:
 	var region := NavigationBakeDescriptorScript.chunk_region_id(String(snapshot.tileKey))
 	var requested: Dictionary = service.register_tile_snapshot(snapshot)
 	add_result("async_navigation_request_uses_frozen_source_and_defers_install",snapshot.publicationSource.status=="prepared" and snapshot.publicationSource.is_read_only() and requested.get("status")=="pending" and not requested.get("installed",false) and not service.region_rids_by_region.has(region),{"status":requested.get("status"),"reason":requested.get("reason")})
+	var recapture_held := await wait_for_service_prepared_without_upload(service,snapshot)
+	var original_binding: Dictionary = recapture_held.get("binding",{}).duplicate()
+	var original_epoch: int = service._publication_queue.worker._epoch
+	var original_prepared: WeakRef = weakref(service._publication_queue._descriptor) if service._publication_queue._descriptor!=null else null
+	var recaptured := recapture_async_navigation_snapshot(snapshot,101)
+	add_result("async_navigation_global_recapture_preserves_local_source_and_geometry",recaptured.publicationSource.status=="prepared" and recaptured.sourceRevision!=snapshot.sourceRevision and recaptured.sourceKey==snapshot.sourceKey and recaptured.worldSeed==snapshot.worldSeed and recaptured.buildingSurfaces==snapshot.buildingSurfaces and recaptured.surfaces==snapshot.surfaces,{"originalRevision":snapshot.sourceRevision,"recapturedRevision":recaptured.sourceRevision})
+	requested = service.register_tile_snapshot(recaptured)
+	var after_recapture: Dictionary = service._publication_queue.stats()
+	add_result("async_navigation_global_recapture_preserves_pre_upload_packet",recapture_held.get("reason")=="navigation_upload_pending" and requested.get("status")=="pending" and after_recapture.binding==original_binding and service._publication_queue.worker._epoch==original_epoch and original_prepared!=null and original_prepared.get_ref()!=null and original_prepared.get_ref()==service._publication_queue._descriptor and after_recapture.uploadPolygon==0 and after_recapture.preparedCount==1 and after_recapture.retiredBatchCount==0,{"status":requested.get("status"),"binding":after_recapture.binding,"epoch":service._publication_queue.worker._epoch,"preparedCount":after_recapture.preparedCount})
+	snapshot = recaptured
 	var install := await drive_async_navigation_install(service,snapshot)
 	add_result("async_navigation_upload_is_segmented_once_per_frame",install.installed and install.partialFrames>=2 and install.maxSegment<=128 and install.repeatedFrameStable,install)
+	add_result("async_navigation_global_recapture_installs_original_preparation_once",install.installed and service._publication_queue.stats().preparedCount==1 and service._publication_queue.stats().uploadedCount==1 and service._publication_queue.worker._epoch==original_epoch and original_prepared!=null and original_prepared.get_ref()==service.descriptors_by_region.get(region) and service._publication_bindings.get(region,{})==original_binding,{"installed":install.installed,"preparedCount":service._publication_queue.stats().preparedCount,"uploadedCount":service._publication_queue.stats().uploadedCount})
 	var first := await async_navigation_receipt(service,snapshot)
 	var installed_descriptor = service.descriptors_by_region.get(region)
 	var compile_thread := int(installed_descriptor.prepared_geometry().get("threadId",-1)) if installed_descriptor!=null else -1
 	add_result("async_navigation_worker_install_has_revision_matched_ack",first.get("status")=="ready" and first.get("sourceRevision")==1 and first.get("completeSurfaceCoverage",false) and compile_thread>0 and compile_thread!=OS.get_thread_caller_id(),{"status":first.get("status"),"reason":first.get("reason"),"compileThread":compile_thread})
 	installed_descriptor = null
 	var old_rid: RID = service.region_rids_by_region.get(region,RID())
+	recaptured = recapture_async_navigation_snapshot(snapshot,102)
+	requested = service.register_tile_snapshot(recaptured)
+	var recaptured_receipt := await async_navigation_receipt(service,recaptured)
+	add_result("async_navigation_installed_global_recapture_reuses_exact_installation",requested.get("installed",false) and requested.get("cached",false) and recaptured_receipt.get("status")=="ready" and recaptured_receipt.get("sourceRevision")==1 and recaptured_receipt.get("installationSerial")==first.get("installationSerial") and service.region_rids_by_region.get(region,RID())==old_rid and original_prepared!=null and original_prepared.get_ref()==service.descriptors_by_region.get(region) and service._publication_bindings.get(region,{})==original_binding and service._publication_queue.stats().preparedCount==1 and service._publication_queue.stats().uploadedCount==1 and service._publication_queue.worker._epoch==original_epoch,{"cached":requested.get("cached",false),"status":recaptured_receipt.get("status"),"installationSerial":recaptured_receipt.get("installationSerial")})
 	owner.source_key = "async-contract-source:2"
 	snapshot = async_navigation_snapshot(owner,2)
 	requested = service.register_tile_snapshot(snapshot)
@@ -584,7 +622,13 @@ func verify_async_navigation_service_lifecycle() -> void:
 	service.register_tile_snapshot(snapshot)
 	var held := await wait_for_service_prepared_without_upload(service,snapshot)
 	add_result("async_navigation_cancellation_fixture_holds_real_prepared_packet",held.get("reason")=="navigation_upload_pending" and held.get("uploadPolygon")==0,held)
+	snapshot = recapture_async_navigation_snapshot(snapshot,103)
+	requested = service.register_tile_snapshot(snapshot)
+	add_result("async_navigation_recaptured_local_source_remains_pending_before_change",requested.get("status")=="pending" and service._publication_queue.stats().binding==held.get("binding",{}),{"status":requested.get("status")})
 	owner.source_key = "async-contract-source:4"
+	var same_frame_stale: Dictionary = service.advance_publication(0)
+	add_result("async_navigation_same_frame_advance_rejects_changed_owner_source",same_frame_stale.binding.is_empty()
+		and service.region_rids_by_region.get(region,RID())==old_rid,{})
 	var idle := await wait_for_service_publication(service)
 	requested = service.register_tile_snapshot(snapshot)
 	add_result("async_navigation_stale_source_cancelled_without_old_region_loss",idle.get("binding",{}).is_empty() and not idle.get("worker",{}).get("busy",true) and requested.get("reason")=="navigation_source_owner_changed" and service.region_rids_by_region.get(region,RID())==old_rid and service.tile_publication_readiness(String(snapshot.tileKey),String(snapshot.sourceKey)).get("status")!="ready",{"status":requested.get("status"),"reason":requested.get("reason")})
@@ -638,6 +682,101 @@ func verify_async_navigation_service_lifecycle() -> void:
 	await physics_frame
 	var worker_state: Dictionary = shutdown.get("worker",{})
 	add_result("async_navigation_shutdown_joins_all_owned_work_and_releases_payloads",shutdown.get("shutdownComplete",false) and not worker_state.get("busy",true) and not worker_state.get("workerRunning",true) and not worker_state.get("retirementPending",true) and service._publication_queue.worker._thread==null and installed_weak!=null and installed_weak.get_ref()==null and pending_weak!=null and pending_weak.get_ref()==null and navigation_map_ids()==baseline_maps and int(worker_state.get("lastRetirementThreadId",-1))>0 and int(worker_state.get("lastRetirementThreadId",-1))!=OS.get_thread_caller_id(),shutdown)
+
+func verify_owned_publication_queue_progress() -> void:
+	# Synthetic producer, real shared queue, owned worker and server install.
+	var baseline_maps := navigation_map_ids()
+	var owner := SyntheticQueuedPublicationOwner.new()
+	var snapshot := async_navigation_snapshot(owner,1)
+	owner.captured[snapshot.tileKey] = snapshot
+	var service = NavmeshWorldServiceScript.new()
+	service.setup()
+	service.register_tile_snapshot(snapshot)
+	var held := await wait_for_service_prepared_without_upload(service,snapshot)
+	var publisher := RoutePublicationAdapter.new()
+	publisher.world = owner
+	publisher.navmesh_world = service
+	publisher._enqueue_navmesh_tile_publish("1,0",owner.source_key,true)
+	var processed := publisher._process_queued_navmesh_tile_publishes(1,4000)
+	add_result("owned_publication_pending_slot_does_not_capture_unrelated_tiles",held.reason=="navigation_upload_pending"
+		and processed==0 and owner.capture_calls.is_empty() and publisher.queued_navmesh_tile_keys==["1,0"],{})
+	var state := held
+	for frame in range(60):
+		await process_frame
+		state = service.advance_publication()
+		if state.status=="ready": break
+	processed = publisher._process_queued_navmesh_tile_publishes(1,4000)
+	add_result("owned_publication_missing_caller_retains_other_demand",state.status=="ready" and processed==0
+		and owner.capture_calls.is_empty() and publisher.queued_navmesh_tile_keys==["1,0"],{})
+	publisher._enqueue_navmesh_tile_publish(snapshot.tileKey,owner.source_key,false)
+	processed = publisher._process_queued_navmesh_tile_publishes(1,4000,true)
+	add_result("owned_publication_preserves_foreground_filter",processed==0 and owner.capture_calls.is_empty()
+		and publisher.queued_navmesh_tile_keys.has(snapshot.tileKey) and publisher.queued_navmesh_tile_keys.has("1,0"),{})
+	processed = publisher._process_queued_navmesh_tile_publishes(1,4000)
+	var receipt := await async_navigation_receipt(service,snapshot)
+	add_result("owned_publication_installs_ready_slot_before_unrelated_capture",processed==1
+		and owner.capture_calls==[snapshot.tileKey] and receipt.status=="ready"
+		and publisher.queued_navmesh_tile_keys==["1,0"] and service.active_publication_request().tileKey=="",receipt)
+	await process_frame
+	processed = publisher._process_queued_navmesh_tile_publishes(1,4000)
+	add_result("owned_publication_releases_slot_to_retained_next_tile",processed==1
+		and owner.capture_calls==[snapshot.tileKey,"1,0"] and publisher.queued_navmesh_tile_keys.is_empty(),{})
+	owner.source_key = "async-contract-source:2"
+	snapshot = async_navigation_snapshot(owner,2)
+	owner.captured[snapshot.tileKey] = snapshot
+	service.register_tile_snapshot(snapshot)
+	held = await wait_for_service_prepared_without_upload(service,snapshot)
+	# Explicit synthetic fault injection at the real owned upload boundary.
+	# This checks failure scheduling, not a generated-geometry failure.
+	service._publication_queue._state = "failed"
+	service._publication_queue._reason = "synthetic_upload_failure"
+	publisher._enqueue_navmesh_tile_publish("2,0",owner.source_key,true)
+	publisher._enqueue_navmesh_tile_publish(snapshot.tileKey,owner.source_key,false)
+	publisher._process_queued_navmesh_tile_publishes(1,4000)
+	var failure_reported := false
+	for record: Dictionary in publisher.last_navmesh_tile_queue_debug:
+		if record.get("tile")==snapshot.tileKey and record.get("status")=="failed" and record.get("reason")=="synthetic_upload_failure":
+			failure_reported = true
+	for frame in range(60):
+		if publisher.published_navmesh_tile_keys.get("2,0","")=="2,0|"+owner.source_key: break
+		await process_frame
+		publisher._process_queued_navmesh_tile_publishes(1,4000)
+	add_result("synthetic_failed_owned_slot_reports_failure_and_retains_retry_without_starving_next",held.reason=="navigation_upload_pending"
+		and failure_reported and publisher.queued_navmesh_tile_keys.has(snapshot.tileKey)
+		and publisher.published_navmesh_tile_keys.get(snapshot.tileKey,"")!=snapshot.tileKey+"|"+owner.source_key
+		and publisher.published_navmesh_tile_keys.get("2,0","")=="2,0|"+owner.source_key,{"failureReported":failure_reported})
+	service.request_publication_shutdown()
+	var shutdown := await wait_for_service_publication(service,true)
+	await physics_frame
+	add_result("owned_publication_queue_fixture_drains_resources",shutdown.shutdownComplete
+		and navigation_map_ids()==baseline_maps,shutdown)
+
+func verify_async_navigation_orphaned_recapture() -> void:
+	# Separate same-frame owner-loss contract; keep ordinary advance-driven
+	# lost-owner cancellation coverage in the lifecycle fixture above intact.
+	var baseline_maps := navigation_map_ids()
+	var owner = SyntheticPublicationOwner.new()
+	var snapshot := async_navigation_snapshot(owner,1)
+	var service = NavmeshWorldServiceScript.new()
+	service.setup()
+	service.register_tile_snapshot(snapshot)
+	var held := await wait_for_service_prepared_without_upload(service,snapshot)
+	var orphaned_prepared: WeakRef = weakref(service._publication_queue._descriptor) if service._publication_queue._descriptor!=null else null
+	var orphaned_epoch: int = service._publication_queue.worker._epoch
+	var owner_weak: WeakRef = weakref(owner)
+	owner = null
+	var replacement_owner = SyntheticPublicationOwner.new()
+	var replacement_capture := recapture_async_navigation_snapshot(snapshot,101)
+	replacement_capture.publicationOwner = weakref(replacement_owner)
+	var requested: Dictionary = service.register_tile_snapshot(replacement_capture)
+	add_result("async_navigation_same_frame_replacement_owner_cannot_adopt_orphan",held.get("reason")=="navigation_upload_pending" and owner_weak.get_ref()==null and orphaned_prepared!=null and requested.get("status")=="pending" and not requested.get("installed",false) and service._publication_queue._descriptor==null and service._publication_queue.stats().binding.is_empty() and service._publication_queue.worker._epoch>orphaned_epoch and service.region_rids_by_region.is_empty(),{"status":requested.get("status"),"epoch":service._publication_queue.worker._epoch})
+	var install := await drive_async_navigation_install(service,replacement_capture)
+	var receipt := await async_navigation_receipt(service,replacement_capture)
+	add_result("async_navigation_replacement_owner_retries_with_fresh_preparation",install.installed and receipt.get("status")=="ready" and receipt.get("sourceRevision")==101 and service._publication_queue.stats().preparedCount==2 and orphaned_prepared!=null and orphaned_prepared.get_ref()==null,install)
+	service.request_publication_shutdown()
+	var shutdown := await wait_for_service_publication(service,true)
+	await physics_frame
+	add_result("async_navigation_orphaned_recapture_drains_owned_resources",shutdown.get("shutdownComplete",false) and navigation_map_ids()==baseline_maps,shutdown)
 
 func verify_prepared_navigation_portal_filter_retirement() -> void:
 	# Synthetic service contract: deleting declared portal data is not a live
@@ -884,6 +1023,73 @@ func verify_tile_publication_receipts() -> void:
 	add_result("receipt_clear_resets_sync_acknowledgement", service.tile_publication_readiness(tile,"restart").reason=="installation_sync_pending", {})
 	service.clear()
 	await physics_frame
+
+func verify_grouped_door_publication_receipts() -> void:
+	# Synthetic double-leaf source, real worker/upload/server acknowledgements.
+	# Sharing a portal/routing ID does not make two distinct leaf crossings one.
+	var baseline_maps := navigation_map_ids()
+	var owner := SyntheticPublicationOwner.new()
+	var snapshot := {"worldSeed":owner.main.seed_text,"tileKey":"0,0","sourceKey":owner.source_key,
+		"sourceRevision":1,"surfaces":[{"cell":Vector3i.ZERO},{"cell":Vector3i(1,0,0)}],
+		"doorPortals":[],"doorLinks":[]}
+	var required: Array = []
+	for x in 2:
+		var start := Vector3(x*1.35,0,-1.35)
+		var end := Vector3(x*1.35,0,1.35)
+		var cell := Vector2i(x,0)
+		snapshot.doorPortals.append({"id":"double-door","cell":cell,"entrance":start,"exit":end})
+		var link := {"id":"door-link:double-door:0,0","portalId":"double-door","cell":cell,"start":start,"end":end}
+		snapshot.doorLinks.append(link)
+		required.append(link.duplicate())
+	snapshot["publicationSource"] = NavigationPublicationSourceScript.new().capture(snapshot)
+	snapshot["publicationOwner"] = weakref(owner)
+	var service := NavmeshWorldServiceScript.new()
+	service.setup()
+	var install := await drive_async_navigation_install(service,snapshot)
+	await async_navigation_receipt(service,snapshot)
+	var ready := service.tile_publication_readiness("0,0",owner.source_key,[],required)
+	var receipt: Dictionary = service._tile_publication_receipts.get("region:chunk:0,0",{})
+	add_result("grouped_door_receipt_proves_both_distinct_leaf_sources",install.installed and ready.status=="ready" and receipt.get("doorLinkSources",[]).size()==2,{"install":install,"receipt":ready})
+	var ambiguous := service.tile_publication_readiness("0,0",owner.source_key,[],[required[0].id])
+	add_result("grouped_door_unqualified_routing_id_is_not_leaf_proof",ambiguous.status=="failed" and ambiguous.reason=="required_links_missing",ambiguous)
+	var wrong: Dictionary = required[0].duplicate()
+	wrong.cell = Vector2i(2,0)
+	var changed := service.tile_publication_readiness("0,0",owner.source_key,[],[wrong])
+	add_result("grouped_door_receipt_rejects_wrong_source_cell",changed.status=="failed" and changed.reason=="required_links_missing",changed)
+	wrong = required[0].duplicate()
+	wrong.end = required[1].end
+	changed = service.tile_publication_readiness("0,0",owner.source_key,[],[wrong])
+	add_result("grouped_door_receipt_rejects_mixed_leaf_endpoints",changed.status=="failed" and changed.reason=="required_links_missing",changed)
+	var sources: Array = receipt.get("doorLinkSources",[])
+	if sources.size()==2:
+		var rid := RID()
+		for source: Dictionary in sources:
+			if source.cell == required[1].cell: rid = source.rid
+		NavigationServer3D.link_set_map(rid,RID())
+		service._mark_navigation_map_dirty()
+		service.sync_navigation_map_if_dirty()
+		await wait_for_installed_navigation(service)
+		var missing := service.tile_publication_readiness("0,0",owner.source_key,[],required)
+		add_result("grouped_door_receipt_requires_every_live_leaf_rid",missing.status=="failed" and missing.missingLinkIds==[required[1]],missing)
+		NavigationServer3D.link_set_map(rid,service.navigation_map)
+		service._mark_navigation_map_dirty()
+		service.sync_navigation_map_if_dirty()
+		await wait_for_installed_navigation(service)
+	var duplicate: Dictionary = snapshot.publicationSource.snapshot.duplicate(true)
+	owner.source_key = "double-door-duplicate:2"
+	duplicate.sourceKey = owner.source_key
+	duplicate.sourceRevision = 2
+	duplicate.doorLinks.append(duplicate.doorLinks[0].duplicate())
+	duplicate["publicationSource"] = NavigationPublicationSourceScript.new().capture(duplicate)
+	duplicate["publicationOwner"] = weakref(owner)
+	install = await drive_async_navigation_install(service,duplicate)
+	await async_navigation_receipt(service,duplicate)
+	var repeated := service.tile_publication_readiness("0,0",owner.source_key,[],required)
+	add_result("grouped_door_identical_source_duplicates_remain_ambiguous",install.installed and repeated.status=="failed" and repeated.reason=="required_link_source_ambiguous",repeated)
+	service.request_publication_shutdown()
+	var shutdown := await wait_for_service_publication(service,true)
+	await physics_frame
+	add_result("grouped_door_publication_shutdown_releases_owned_maps",shutdown.get("shutdownComplete",false) and navigation_map_ids()==baseline_maps,shutdown)
 
 func wait_for_installed_navigation(service) -> void:
 	# Registration synchronization may finish after more than one physics frame.

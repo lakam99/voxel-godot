@@ -6,15 +6,18 @@ const ProductionWorld = preload("res://scripts/WorldGenerationSystem.gd")
 const Store = preload("res://scripts/world/GeneratedSiteProfileStore.gd")
 const Player = preload("res://scripts/PlayerController.gd")
 const Survival = preload("res://scripts/SurvivalSystem.gd")
+const PropHost = preload("res://scripts/Main.gd")
+const PropStructures = preload("res://scripts/StructureSystem.gd")
 
 class RuntimeContext extends "res://scripts/terrain/VoxelWorldGenerationContext.gd":
 	var world_generation_system
 	var structure_system
+	var world_streaming
 	var player: Node3D
 	var startup_loading_active := true
 	var runtime_loading_active := true
 	var message_host
-	func show_action_message(message: String) -> void:
+	func show_action_message(message: String, _passive := false) -> void:
 		if message_host != null: message_host.show_action_message(message)
 
 class PlayerHost extends Node:
@@ -24,7 +27,7 @@ class PlayerHost extends Node:
 	var messages: Array = []
 	func terrain_collision_motion_proof(from: Vector3, to: Vector3, radius: float) -> Dictionary:
 		return runtime.collision_proof_for_motion(from,to,radius)
-	func show_action_message(message: String) -> void: messages.append(message)
+	func show_action_message(message: String, _passive := false) -> void: messages.append(message)
 
 class Structures extends RefCounted:
 	var citadel_terrain_admission
@@ -39,6 +42,9 @@ class Structures extends RefCounted:
 		physical_bounds = bounds
 		physical_requests += 1
 		return physical_receipt.duplicate(true)
+	func region_readiness(bounds: Rect2i) -> Dictionary:
+		# Synthetic regional receipt; real terrain/motor proof stays below it.
+		return citadel_physical_publication_state(bounds)
 
 class ObservedRuntime extends Runtime:
 	var flat_fixture := false
@@ -162,6 +168,7 @@ func _contained(origins: Array, areas: Array) -> bool:
 
 func _run() -> void:
 	output = OS.get_environment("CITADEL_NATIVE_ADMISSION_OUTPUT")
+	_natural_prop_admission()
 	var old_position := Vector3(1350.0,0.0,-1350.0)
 	var new_position := Vector3(2700.0,0.0,2700.0)
 	var foreign := _viewer()
@@ -230,6 +237,46 @@ func _run() -> void:
 	print("NATIVE ADMISSION RESULT ",report.passed," checks=",checks.size()," generationCalls=",samples.size())
 	quit(0 if report.passed else 1)
 
+func _natural_prop_admission() -> void:
+	# Contract only: real prop scheduler/exclusion/admission, synthetic prepared
+	# decision for the recorded ore site; no source worker or visual publication.
+	var host = PropHost.new()
+	host.seed_text = "atlas-3376622889"
+	var structures := PropStructures.new()
+	host.structure_system = structures
+	var source = structures.citadel_terrain_admission
+	source.configure(host.seed_text, {}, {"regionCells":host.STRUCTURE_REGION_CELLS,"spawnChance":host.STRUCTURE_SPAWN_CHANCE})
+	source.finalize_town_inputs({})
+	var ore_cell := Vector2i(-3314, -2804)
+	var region := Vector2i(-2, -2)
+	var reservation := Rect2i(-3483, -2963, 299, 293)
+	var chunk := Node3D.new()
+	var key := Vector2i(floori(float(ore_cell.x)/host.CHUNK_SIZE), floori(float(ore_cell.y)/host.CHUNK_SIZE))
+	var state: Dictionary = host.begin_chunk_prop_spawn_state(chunk, key.x, key.y)
+	var reference: Dictionary = host.begin_chunk_prop_spawn_state(chunk, key.x, key.y)
+	var random_states := [state.rng.state, state.detailRng.state, state.undergroundRng.state]
+	check("natural_props_unknown_is_not_permanent_exclusion", not structures.blocks_natural_prop_at_cell(ore_cell.x, ore_cell.y))
+	for retry in range(2):
+		check("natural_props_pending_retry_%d" % retry, not host.process_chunk_prop_spawn_state(state, 1, 1) and state.naturalPropAdmission.status == "pending")
+	check("natural_props_pending_preserves_rng_and_attempts", random_states == [state.rng.state, state.detailRng.state, state.undergroundRng.state] and state.propIndex == 0 and state.detailIndex == 0 and state.phase == "props")
+	host.spawn_chunk_props(chunk, key.x, key.y)
+	check("natural_props_sync_pending_retained", host.pending_chunk_prop_spawns.has(key) and host.pending_chunk_prop_spawns[key].propIndex == 0 and host.pending_chunk_prop_spawns[key].rng.state == reference.rng.state)
+	# The compact admitted decision survives source-cache eviction. Deliberately
+	# leave _sources empty to prove no scene/source residency requirement.
+	source._decisions[region] = {"status":"prepared", "siteId":"synthetic-prop-reservation", "sourceKey":"synthetic-source", "sourceSignature":"synthetic-signature", "reservationCells":reservation}
+	check("natural_props_reservation_rejects_ore", structures.blocks_natural_prop_at_cell(ore_cell.x, ore_cell.y))
+	check("natural_props_outside_reservation_allowed", not structures.blocks_natural_prop_at_cell(reservation.end.x, ore_cell.y))
+	check("natural_props_reservation_respects_structure_margin", structures.blocks_natural_prop_with_separate_margins_at_cell(reservation.end.x, ore_cell.y, 0, 1))
+	host.process_chunk_prop_spawn_state(state, 1, 1)
+	host.process_chunk_prop_spawn_state(reference, 1, 1)
+	check("natural_props_retry_matches_known_first_rng", state.propIndex == 1 and state.rng.state == reference.rng.state and state.detailRng.state == reference.detailRng.state and state.undergroundRng.state == reference.undergroundRng.state and chunk.get_child_count() == 0)
+	# A surveyed absence permits progress too; unknown is never a permanent ban.
+	source._decisions[region] = {"status":"absent"}
+	check("natural_props_absent_admission_ready", source.request_bounds(Rect2i(ore_cell, Vector2i.ONE)).status == "ready" and not structures.blocks_natural_prop_at_cell(ore_cell.x, ore_cell.y))
+	host.pending_chunk_prop_spawns.clear()
+	chunk.free()
+	host.free()
+
 func _runtime_reset() -> void:
 	var context := RuntimeContext.new()
 	context.seed_text = "atlas-1492"
@@ -244,6 +291,7 @@ func _runtime_reset() -> void:
 	admitted.profile_store = Store.new(context.seed_text)
 	structure_owner.citadel_terrain_admission = admitted
 	context.structure_system = structure_owner
+	context.world_streaming = structure_owner
 	var player := Node3D.new()
 	player.position = Vector3(1350,30,-1350)
 	root.add_child(player)
@@ -308,6 +356,7 @@ func _player_containment() -> void:
 	admitted.profile_store = Store.new(context.seed_text)
 	structure_owner.citadel_terrain_admission = admitted
 	context.structure_system = structure_owner
+	context.world_streaming = structure_owner
 	var player = Player.new()
 	player.survival = Survival.new()
 	var start := Vector3(1350,0.05,-1350)
@@ -392,9 +441,9 @@ func _physical_publication_controls(runtime: ObservedRuntime, player, structures
 	await _frames(4)
 	var pending: Dictionary = player.last_terrain_collision_proof.duplicate(true)
 	check("physical_pending_holds_real_player",player.global_position==before and player.velocity==Vector3.ZERO and player.terrain_collision_hold_frames>=hold_before+4)
-	check("physical_pending_preserves_structured_receipt",not pending.get("passed",true) and pending.get("reason")=="synthetic_buildings_pending" and pending.get("structurePublication")==structures.physical_receipt and not pending.has("siteAdmission"))
+	check("physical_pending_preserves_structured_receipt",not pending.get("passed",true) and pending.get("reason")=="synthetic_buildings_pending" and pending.get("regionalPublication")==structures.physical_receipt and not pending.has("siteAdmission"))
 	check("physical_pending_sets_waiting",runtime.site_traversal_waiting and player.get_meta("terrain_collision_hold",false))
-	check("physical_pending_message",host.messages.any(func(value):return String(value).contains("Preparing landmark buildings")))
+	check("physical_pending_message",host.messages.any(func(value):return String(value).contains("Preparing nearby world")))
 	var stamina := float(player.survival.stamina)
 	check("physical_pending_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
 	check("physical_pending_dodge_no_stamina_cost",player.survival.stamina==stamina and not player.player_defense.is_active())
@@ -403,16 +452,19 @@ func _physical_publication_controls(runtime: ObservedRuntime, player, structures
 	# This direct proof tests the public swept-boundary command, not actor motion.
 	var sweep_from := Vector3(1350.25,0.05,-1349.75)
 	var sweep_to := Vector3(1353.25,0.05,-1352.25)
-	var expected_bounds := Rect2i(996,-1006,12,12)
+	var expected_bounds := Rect2i(992,-1008,16,16)
 	var sweep: Dictionary = runtime.collision_proof_for_motion(sweep_from,sweep_to,1.36)
 	var captured_bounds := structures.physical_bounds
-	check("physical_sweep_reaches_publication_gate",sweep.get("structurePublication")==structures.physical_receipt and not sweep.has("siteAdmission"))
-	check("physical_sweep_exact_inclusive_margin",captured_bounds==expected_bounds)
+	check("physical_sweep_reaches_publication_gate",sweep.get("regionalPublication")==structures.physical_receipt and not sweep.has("siteAdmission"))
+	check("physical_sweep_exact_navigation_tile_coverage",captured_bounds==expected_bounds)
 	check("physical_sweep_includes_both_endpoint_margins",captured_bounds.encloses(Rect2i(996,-1004,10,10)) and captured_bounds.encloses(Rect2i(998,-1006,10,10)))
 	runtime.collision_proof_for_motion(sweep_to,sweep_from,1.36)
 	check("physical_sweep_reverse_same_bounds",structures.physical_bounds==expected_bounds)
 	runtime.collision_proof_for_motion(sweep_from,sweep_to,0.42)
-	check("physical_sweep_uses_requested_radius",structures.physical_bounds==Rect2i(997,-1005,10,10))
+	check("physical_sweep_covers_requested_radius",structures.physical_bounds.encloses(Rect2i(997,-1005,10,10)))
+	runtime.collision_proof_for_motion(sweep_from,sweep_to,15.0)
+	check("physical_sweep_larger_radius_expands_regional_coverage",structures.physical_bounds.encloses(expected_bounds)
+		and structures.physical_bounds.size.x>expected_bounds.size.x and structures.physical_bounds.size.y>expected_bounds.size.y)
 	structures.physical_receipt = {"status":"ready","required":true,"siteIds":["synthetic_native_site"]}
 	var deadline := Time.get_ticks_msec()+3000
 	while Time.get_ticks_msec()<deadline and player.global_position.x<before.x+0.1:
@@ -424,8 +476,8 @@ func _physical_publication_controls(runtime: ObservedRuntime, player, structures
 	await _frames(4)
 	var failed: Dictionary = player.last_terrain_collision_proof.duplicate(true)
 	check("physical_failed_holds_real_player",player.global_position==before and player.velocity==Vector3.ZERO)
-	check("physical_failed_preserves_structured_receipt",not failed.get("passed",true) and failed.get("reason")=="synthetic_building_publication_failed" and failed.get("structurePublication")==structures.physical_receipt and not failed.has("siteAdmission"))
-	check("physical_failed_message_preserves_reason",host.messages.any(func(value):return String(value).contains("Landmark loading failed: synthetic_building_publication_failed")))
+	check("physical_failed_preserves_structured_receipt",not failed.get("passed",true) and failed.get("reason")=="synthetic_building_publication_failed" and failed.get("regionalPublication")==structures.physical_receipt and not failed.has("siteAdmission"))
+	check("physical_failed_message_preserves_reason",host.messages.any(func(value):return String(value).contains("World loading failed: synthetic_building_publication_failed")))
 	stamina = float(player.survival.stamina)
 	check("physical_failed_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
 	check("physical_failed_dodge_no_stamina_cost",player.survival.stamina==stamina and not player.player_defense.is_active())

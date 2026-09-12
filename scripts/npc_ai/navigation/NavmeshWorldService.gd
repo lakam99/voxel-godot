@@ -271,13 +271,28 @@ func _request_prepared_tile(snapshot: Dictionary) -> Dictionary:
 		return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
 	var binding := {"siteId":tile_key,"sourceKey":world_seed+"|"+source_key,
 		"generation":maxi(1,int(source.snapshot.get("sourceRevision",1)))}
+	# Recapture after unrelated global changes does not replace a tile source.
+	# Validate the slot owner even if advance_publication already ran this frame;
+	# a new requester must never adopt an orphaned or stale prepared packet.
+	var active_binding: Dictionary = _publication_queue.stats().binding
+	if active_binding.get("siteId") == tile_key:
+		var active_owner = _publication_owner.get_ref() if _publication_owner != null else null
+		if active_owner != owner or not _source_owner_matches(active_owner,tile_key,_publication_source_key,_publication_world_seed):
+			_publication_queue.cancel()
+			_publication_owner = null
+		elif active_binding.get("sourceKey") == binding.sourceKey:
+			binding = active_binding
 	var region_id := String(source.snapshot.get("regionId",NavigationBakeDescriptorScript.chunk_region_id(tile_key)))
 	var receipt: Dictionary = _tile_publication_receipts.get(region_id,{})
 	var existing = descriptors_by_region.get(region_id)
 	if existing is PreparedNavigationDescriptorScript and existing.preparation_valid() \
 			and receipt.get("sourceKey") == source_key and not dirty_regions_by_region.has(region_id) \
-			and region_rids_by_region.has(region_id) and _publication_bindings.get(region_id,{}) == binding:
-		return {"status":"installed","installed":true,"cached":true,"regionId":region_id,"tileKey":tile_key}
+			and region_rids_by_region.has(region_id):
+		var installed_binding: Dictionary = _publication_bindings.get(region_id,{})
+		if installed_binding.get("siteId") == tile_key and installed_binding.get("sourceKey") == binding.sourceKey:
+			binding = installed_binding
+		if installed_binding == binding:
+			return {"status":"installed","installed":true,"cached":true,"regionId":region_id,"tileKey":tile_key}
 	advance_publication()
 	var requested: Dictionary = _publication_queue.request(source,binding)
 	if _publication_queue.stats().binding == binding:
@@ -285,6 +300,12 @@ func _request_prepared_tile(snapshot: Dictionary) -> Dictionary:
 		_publication_source_key = source_key
 		_publication_world_seed = world_seed
 	if requested.status != "ready":
+		if requested.status == "failed" and _publication_queue.stats().binding == binding:
+			# Report the failure to its retained requester, but release the single
+			# slot so unrelated valid demand can still progress. The caller owns
+			# retry/failure state; cancellation does not acknowledge this tile.
+			_publication_queue.cancel()
+			_publication_owner = null
 		return {"status":requested.status,"reason":requested.get("reason","navigation_preparation_pending"),"installed":false}
 	var ready: Dictionary = _publication_queue.take_ready(binding)
 	if ready.is_empty(): return {"status":"pending","reason":"navigation_preparation_pending","installed":false}
@@ -306,14 +327,20 @@ func _source_owner_matches(owner, tile_key: String, source_key: String, world_se
 		and String(owner.navmesh_tile_source_key_for_tile(tile_key)) == source_key
 
 func advance_publication(budget_usec := 4000) -> Dictionary:
-	if _publication_queue.advanced_this_frame(): return _publication_queue.stats()
 	var binding: Dictionary = _publication_queue.stats().binding
 	if not binding.is_empty():
 		var owner = _publication_owner.get_ref() if _publication_owner != null else null
 		if not _source_owner_matches(owner,String(binding.siteId),_publication_source_key,_publication_world_seed):
 			_publication_queue.cancel()
 			_publication_owner = null
+	if _publication_queue.advanced_this_frame(): return _publication_queue.stats()
 	return _publication_queue.advance(budget_usec)
+
+func active_publication_request() -> Dictionary:
+	# Scheduling identity only. The service still validates the live source and
+	# consumes/installs the prepared result through register_tile_snapshot.
+	var state: Dictionary = _publication_queue.stats()
+	return {"tileKey":String(state.binding.get("siteId","")),"status":state.status}
 
 func request_publication_shutdown() -> void:
 	_publication_owner = null
@@ -976,9 +1003,24 @@ func tile_publication_readiness(tile_key: String, expected_source_key: String, r
 		return _publication_result(result, "failed", "required_surfaces_missing")
 	var live_links: Array = NavigationServer3D.map_get_links(navigation_map)
 	for value in required_link_ids:
-		if not value is String or String(value).is_empty():
+		var link: Dictionary = {}
+		if value is Dictionary:
+			# Grouped doors legitimately share a routing ID. A publication caller
+			# must identify the actual leaf, rather than accepting an arbitrary RID.
+			if not _valid_required_door_link(value):
+				return _publication_result(result, "failed", "invalid_required_link_source")
+			for installed: Dictionary in receipt.get("doorLinkSources", []):
+				var matches := true
+				for field: String in ["id", "portalId", "cell", "start", "end"]:
+					if installed.get(field) != value[field]: matches = false; break
+				if not matches: continue
+				if not link.is_empty():
+					return _publication_result(result, "failed", "required_link_source_ambiguous")
+				link = installed
+		elif value is String and not value.is_empty():
+			link = receipt.links.get(value, {})
+		else:
 			return _publication_result(result, "failed", "invalid_required_link_id")
-		var link: Dictionary = receipt.links.get(value, {})
 		if link.is_empty() or not live_links.has(link.rid):
 			result.missingLinkIds.append(value)
 			continue
@@ -1002,6 +1044,12 @@ static func _publication_result(result: Dictionary, status: String, reason: Stri
 	result.reason = reason
 	return result
 
+static func _valid_required_door_link(value: Dictionary) -> bool:
+	return value.get("id") is String and not value.id.is_empty() \
+		and value.get("portalId") is String and not value.portalId.is_empty() \
+		and value.get("cell") is Vector2i and value.get("start") is Vector3 and value.get("end") is Vector3 \
+		and value.start.is_finite() and value.end.is_finite() and value.start != value.end
+
 static func _record_surface_polygon(ownership: Dictionary, surface_id: String, polygon_index: int) -> void:
 	if surface_id.is_empty(): return
 	# Duplicate source IDs are ambiguous even if they happen to share a polygon.
@@ -1022,10 +1070,16 @@ func _record_tile_publication(region_id: String, descriptor, source_key: String,
 	var missing_declared: Array[String] = proof.missingDeclaredSurfaceIds
 	var links: Dictionary = {}
 	var duplicate_links: Dictionary = {}
+	var door_link_sources: Array[Dictionary] = []
 	for value in door_link_records_by_region.get(region_id, []) + crossing_link_records_by_region.get(region_id, []):
 		var record: Dictionary = value
 		var id := String(record.get("linkId", ""))
 		if id.is_empty(): continue
+		if record.get("publicationCell") is Vector2i:
+			var source := {"id":id,"portalId":String(record.get("portalId","")),
+				"cell":record.publicationCell,"start":record.start,"end":record.end,"rid":record.rid}
+			source.make_read_only()
+			door_link_sources.append(source)
 		if links.has(id) or duplicate_links.has(id):
 			links.erase(id); duplicate_links[id] = true; continue
 		var link := {"rid":record.rid,"start":record.start,"end":record.end}
@@ -1036,12 +1090,14 @@ func _record_tile_publication(region_id: String, descriptor, source_key: String,
 		links[id] = link
 	surfaces.make_read_only()
 	links.make_read_only()
+	door_link_sources.make_read_only()
 	var receipt := {"sourceKey":source_key,
 		"signature":String(descriptor.stable_signature()) if descriptor.has_method("stable_signature") else "",
 		"sourceRevision":int(descriptor.get("revision")), "descriptorId":descriptor.get_instance_id(),
 		"installationSerial":navigation_map_dirty_serial, "regionRid":region_rid, "mapRid":navigation_map,
 		"completeSurfaceCoverage":missing_declared.is_empty(), "missingDeclaredSurfaceIds":missing_declared,
-		"polygonCount":mesh.get_polygon_count(), "surfaces":surfaces, "links":links}
+		"polygonCount":mesh.get_polygon_count(), "surfaces":surfaces, "links":links,
+		"doorLinkSources":door_link_sources}
 	receipt.make_read_only()
 	_tile_publication_receipts[region_id] = receipt
 
@@ -1866,6 +1922,8 @@ func _install_door_links_for_region(region_id: String, descriptor) -> Dictionary
 			"regionId": region_id,
 			"portalId": portal_id,
 			"linkId": String(base_metadata.get("id", "door-link:%s" % portal_id)),
+			# Original source cell, not a portal's mutable representative leaf.
+			"publicationCell": link_spec.get("cell"),
 			"start": start_position,
 			"end": end_position,
 			"enabled": enabled,

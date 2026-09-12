@@ -8,6 +8,7 @@ var report_path := ""
 var seed := ""
 var results: Array[Dictionary] = []
 var target_cell := Vector3i.ZERO
+var owned_main: Node3D = null
 
 func _init() -> void:
 	call_deferred("run")
@@ -59,17 +60,13 @@ func run_read_stage() -> void:
 
 func boot_main(mode: String) -> Node3D:
 	var main := MAIN_SCENE.instantiate() as Node3D
+	owned_main = main
 	main.set("startup_mode", mode)
 	root.add_child(main)
-	for _i in range(240):
-		await process_frame
-		if not bool(main.get("startup_loading_active")) and main.get("world_generation_system") != null:
-			break
-	if bool(main.get("startup_loading_active")):
-		main.queue_free()
+	if not await main.wait_for_startup_loading_complete():
+		add_result("startup_loading_complete", false, JSON.stringify({"mode": mode, "startup_loading_failure_result": main.get("startup_loading_failure_result")}))
 		return null
 	if not bool(main.call("ensure_voxel_terrain_authority")):
-		main.queue_free()
 		return null
 	var cell := find_surface_solid_cell(main)
 	var chunk_key: Vector2i = main.call("cell_to_chunk", cell.x, cell.z)
@@ -166,6 +163,7 @@ func finish(stage := "") -> void:
 		"seed": seed,
 		"targetCell": vec3i(target_cell),
 		"passed": passed,
+		"startup_loading_failure_result": owned_main.get("startup_loading_failure_result") if is_instance_valid(owned_main) else {},
 		"results": results
 	}
 	if report_path != "":
@@ -175,7 +173,10 @@ func finish(stage := "") -> void:
 			file.store_string(JSON.stringify(report, "  "))
 			file.close()
 	print(JSON.stringify(report, "  "))
-	quit(0 if passed else 1)
+	if is_instance_valid(owned_main):
+		owned_main.call("request_graceful_quit", 0 if passed else 1)
+	else:
+		quit(0 if passed else 1)
 
 func vec3i(value: Vector3i) -> Dictionary:
 	return {"x": value.x, "y": value.y, "z": value.z}

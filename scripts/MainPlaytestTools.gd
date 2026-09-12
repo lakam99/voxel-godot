@@ -2968,7 +2968,11 @@ func volume_iso_vertex_color(point: Dictionary, normal: Vector3) -> Color:
 func spawn_chunk_props(chunk: Node3D, cx: int, cz: int) -> void:
     var state := begin_chunk_prop_spawn_state(chunk, cx, cz)
     while not process_chunk_prop_spawn_state(state, 28, 999999):
-        pass
+        if state.get("naturalPropAdmission", {}).get("status", "ready") != "ready":
+            # Synchronous callers must yield pending/failed admission to the
+            # same retry queue, retaining the untouched RNG and attempt state.
+            pending_chunk_prop_spawns[Vector2i(cx, cz)] = state
+            return
 
 func begin_chunk_prop_spawn_state(chunk: Node3D, cx: int, cz: int) -> Dictionary:
     var rng := RandomNumberGenerator.new()
@@ -3015,6 +3019,16 @@ func process_chunk_prop_spawn_state(
         return true
     var start_usec := budget_start_usec if budget_start_usec > 0 else Time.get_ticks_usec()
     var phase := String(state.get("phase", "props"))
+    if phase in ["props", "details", "detail_batches"] and structure_system != null:
+        var bounds := Rect2i(Vector2i(
+            int(state.get("startX", int(state.get("cx", 0)) * CHUNK_SIZE)),
+            int(state.get("startZ", int(state.get("cz", 0)) * CHUNK_SIZE))), Vector2i.ONE * CHUNK_SIZE)
+        var admission: Dictionary = structure_system.citadel_terrain_admission.request_bounds(bounds)
+        state["naturalPropAdmission"] = admission
+        if admission.get("status") != "ready":
+            # No random draws, attempt increments, terrain sampling or detail
+            # publication until the source owner has decided this footprint.
+            return false
     if phase == "props":
         var rng := state.get("rng") as RandomNumberGenerator
         if rng == null:

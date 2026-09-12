@@ -115,7 +115,6 @@ func _run() -> void:
 		"notEquivalentToExistingTestSeedMode":"VOXEL_TEST_SEED also seeds the global RNG; deterministic sequence additionally requires a test/performance token. Neither mechanism is enabled here."}
 	main.set("diagnostic_seed",requested_seed)
 	main.set("diagnostic_spawn_cell",spawn_cell)
-	main.set("deferred_startup_boot",true)
 	main.set("startup_mode","new_game")
 	main.connect("startup_loading_completed",_startup_completed)
 	main.connect("startup_loading_failed",_startup_failed)
@@ -757,6 +756,14 @@ func _observe() -> Dictionary:
 		"scene":structures.citadel_publication.scene_state(region) if not candidate.is_empty() else {},
 		"admission":admission_stats,"publication":service_stats,
 		"ownersAvailable":structures.citadel_runtime_bindings != null and structures.citadel_runtime_bindings.available()}
+	# Read bounded existing loading telemetry; never drive readiness from the
+	# observer. Preserve pending domains even when startup never completes.
+	value["initialRegion"] = main.startup_readiness_domains.get("initial_region",{})
+	value["regionalNavigationQueue"] = main.regional_navigation._stats()
+	var navigation_owners: Dictionary = main.regional_navigation._owners(main)
+	if not navigation_owners.is_empty():
+		value["navigationPublicationWorker"] = navigation_owners.nav._publication_queue.stats()
+		value["navigationPublicationAttempts"] = navigation_owners.publisher.last_navmesh_tile_queue_debug.duplicate(true)
 	if is_instance_valid(player): value.playerPosition = player.global_position; value.playerPhysics = player.is_physics_processing()
 	return value
 
@@ -1071,6 +1078,11 @@ func _finish(outcome: String,reason: String) -> void:
 	finished = true
 	if not spawn_cell.is_empty() and is_instance_valid(main):
 		evidence.initialSpawn = main.diagnostic_spawn_evidence.duplicate(true)
+	if is_instance_valid(main):
+		evidence.startupReadiness = main.startup_readiness_domains.duplicate(true)
+		evidence.startupFailure = main.startup_loading_failure_result.duplicate(true)
+		if main.streaming_request_bounds.has("player"):
+			evidence.regionalReadiness = main.world_streaming.region_readiness(main.streaming_request_bounds.player)
 	phase = "terminal_"+outcome
 	_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"outcome":outcome,"reason":reason})
 	if outcome!="scene_ready" and evidence_error.is_empty(): await _capture("failed")

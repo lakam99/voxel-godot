@@ -1592,6 +1592,20 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			if monitor != null:
 				monitor.increment_counter("navmesh_tile_publish_queue_usec_yields")
 			break
+		# Finish the already-owned compiler/upload slot before capturing another
+		# tile. Those captures cannot be admitted while the slot is occupied and
+		# used to delay even a completed result for an entire retry round.
+		var active_publication := ""
+		if navmesh_world.has_method("active_publication_request"):
+			navmesh_world.advance_publication(maxi(1,max_usec-(Time.get_ticks_usec()-started_usec)) if max_usec>0 else 4000)
+			if max_usec>0 and Time.get_ticks_usec()-started_usec>=max_usec: break
+			var active_request: Dictionary = navmesh_world.active_publication_request()
+			active_publication = String(active_request.tileKey)
+			if not active_publication.is_empty():
+				if active_request.status == "pending": break
+				if not queued_navmesh_tile_keys.has(active_publication): break
+				queued_navmesh_tile_keys.erase(active_publication)
+				queued_navmesh_tile_keys.push_front(active_publication)
 		attempts -= 1
 		var tile_key := String(queued_navmesh_tile_keys.pop_front())
 		var requested_source_key := String(queued_navmesh_tile_source_keys.get(tile_key, ""))
@@ -1609,6 +1623,7 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			_restore_queued_navmesh_tile(tile_key, requested_source_key, priority_tile, context)
 			if monitor != null:
 				monitor.increment_counter("navmesh_tile_publish_foreground_queue_exhausted")
+			if not active_publication.is_empty(): break
 			continue
 		deferred_navmesh_tile_keys.erase(tile_key)
 		var source_key := _navmesh_tile_source_key(tile_key)
@@ -1654,6 +1669,7 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			debug_record["status"] = snapshot.get("publicationStatus", "pending")
 			debug_record["reason"] = snapshot.get("reason", "source_pending")
 			_record_navmesh_queue_debug(debug_record)
+			if not active_publication.is_empty(): break
 			continue
 		var publish_start: int = monitor.begin_section("navmesh_tile_publish") if monitor != null else Time.get_ticks_usec()
 		var publish_result: Dictionary = navmesh_world.register_tile_snapshot(snapshot)
@@ -1667,6 +1683,8 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			debug_record["status"] = publish_result.get("status", "pending")
 			debug_record["reason"] = publish_result.get("reason", "installation_pending")
 			_record_navmesh_queue_debug(debug_record)
+			if navmesh_world.has_method("active_publication_request") \
+					and not String(navmesh_world.active_publication_request().tileKey).is_empty(): break
 			continue
 		if monitor != null:
 			monitor.increment_counter("navmesh_route_tiles_published")

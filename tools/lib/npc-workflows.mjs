@@ -1,6 +1,6 @@
-import { mkdir, mkdtemp, stat, rm, readdir } from 'node:fs/promises';
+import { mkdir, mkdtemp, stat, rm, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { parseArguments, asBoolean, projectRoot, resolveProjectPath, findGodot, readJson, writeJson, gitValue, runTool } from './voxel-tool-runtime.mjs';
 import { runGodotProcess } from './godot-process.mjs';
 
@@ -59,6 +59,31 @@ async function guard(runner, output, allow = '') {
   if (failed || report.status !== 'passed') throw new Error('Acceptance runner guard failed.');
   return report;
 }
+async function preserveContinueInput(postAckSave, output) {
+  const files = [];
+  for (const source of [postAckSave.saveSlotPath, postAckSave.activeSeedPath]) {
+    if (!source) throw new Error('New Game report lacks the production save input path.');
+    const bytes = await readFile(source);
+    const path = join(output, `continue-input-${basename(source)}`);
+    await writeFile(path, bytes, { flag: 'wx' });
+    files.push({ source, path, bytes: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex') });
+  }
+  const snapshot = JSON.parse(await readFile(files[0].path, 'utf8'));
+  const activeSeed = (await readFile(files[1].path, 'utf8')).trim();
+  if (snapshot.seed !== postAckSave.seed || activeSeed !== snapshot.seed || snapshot.version !== 2) throw new Error('Pre-Continue input seed/version mismatch.');
+  const evidence = { ok: true, seed: snapshot.seed, capturedBefore: 'Continue process launch, after New Game process exit', capturedAtUtc: new Date().toISOString(), files, savedAtUnix: snapshot.savedAtUnix, npcFacts: snapshot.npcJobFacts };
+  const manifestPath = join(output, 'continue-input-manifest.json');
+  await writeFile(manifestPath, JSON.stringify(evidence, null, 2), { flag: 'wx' });
+  return { ...evidence, manifestPath };
+}
+
+async function verifyContinueInput(evidence) {
+  for (const file of evidence.files) {
+    const bytes = await readFile(file.path);
+    if (bytes.length !== file.bytes || createHash('sha256').update(bytes).digest('hex') !== file.sha256) throw new Error(`Preserved Continue input changed: ${file.path}`);
+  }
+}
+
 export async function runProductionTutorial(argv, saveContinue = false) {
   const { options } = parseArguments(argv);
   if (!asBoolean(options.visible)) throw new Error('Live tutorial acceptance requires --visible.');
@@ -84,6 +109,7 @@ export async function runProductionTutorial(argv, saveContinue = false) {
   const stageReports = [];
   const shots = [];
   let failure;
+  let continueInputSave;
   try {
     for (const stage of saveContinue ? ['save_post_ack','continue_observe'] : ['tutorial']) {
       const stageReport = saveContinue ? join(output,`${stage}-report.json`) : reportPath;
@@ -100,13 +126,21 @@ export async function runProductionTutorial(argv, saveContinue = false) {
       Object.assign(env,{[`${prefix}_REPORT`]:stageReport,[`${prefix}_PROGRESS`]:progress,[`${prefix}_SCREENSHOT_DIR`]:captures,[`${prefix}_RUN_TOKEN`]:token,[`${prefix}_WATCHDOG_SECONDS`]:String(timeout),VOXEL_GIT_BRANCH:gitValue(['branch','--show-current']),VOXEL_GIT_COMMIT:gitValue(['rev-parse','HEAD'])});
       if (saveContinue) Object.assign(env,{VOXEL_SAVE_PATH_OVERRIDE:savePath,VOXEL_TUTORIAL_SAVE_CONTINUE_REAL_BOOT:'1',VOXEL_TUTORIAL_SAVE_CONTINUE_STAGE:stage});
       else Object.assign(env,{VOXEL_REAL_TUTORIAL_REAL_BOOT:'1',VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE:'1',VOXEL_REAL_TUTORIAL_VISUAL_REQUIRED:'1'});
+      delete env.VOXEL_TUTORIAL_CONTINUE_INPUT_MANIFEST;
+      if (stage === 'continue_observe') {
+        continueInputSave = await preserveContinueInput(stageReports[0].report.postAckSave, output);
+        env.VOXEL_TUTORIAL_CONTINUE_INPUT_MANIFEST = continueInputSave.manifestPath;
+      }
       const args = ['--resolution','1280x720','--path',projectRoot];
       stages.push({stage,launchArguments:args,fixedFramePacingOverride:false,requiredUnsetBeforeLaunch:Object.fromEntries(gameplayFlags.map(key=>[key,{value:env[key]??null,unset:!env[key]}]))});
       const execution = await runGodotProcess(executable,args,{env,timeoutSeconds:timeout+90,reportPath:stageReport,expectedRunToken:token,progressPath:progress,staleProgressSeconds:stale,workTimeoutSeconds:timeout});
       const report = await readJson(stageReport);
+      if (stage === 'continue_observe') await verifyContinueInput(continueInputSave);
       Object.assign(report,{forbiddenCallSelfScan:scan,processExitCode:execution.code,processStopReason:execution.code?'failed':'report_finished',wrapperNoFlagsProofPath:proofPath,wrapperNoGameplayAffectingFlags:true,wrapperRealBoot:true,fixedFramePacingOverride:false,scriptErrorScan:{status:execution.code?'failed':'passed'},ownedProcessEvidence:execution.summaryPath});
       await writeJson(stageReport,report);
       if (execution.code || report.finished !== true || report.passed !== true || report.runToken !== token) throw new Error(`${stage} did not pass with matching live evidence.`);
+      if (stage === 'continue_observe' && report.continueLiveApproach?.passed !== true) throw new Error('Continue did not prove the observed approach, door crossing and closure sequence.');
+      if (stage === 'continue_observe' && report.continueLoadingExecution?.passed !== true) throw new Error('Continue did not prove registered NPC execution remained paused during loading.');
       stageReports.push({path:stageReport,report}); shots.push(captures);
     }
     if (!saveContinue) {
@@ -116,11 +150,14 @@ export async function runProductionTutorial(argv, saveContinue = false) {
       if (process.exitCode) throw new Error('Visual evidence validation failed.');
     } else {
       await writeJson(reportPath,{schemaVersion:1,testId:'npc_tutorial_save_continue_playtest',finished:true,passed:true,failureCount:0,resultCount:2,evidenceLevel:'integration',scope:'Two headed production MainMenu processes: New Game, live knock acknowledgement, isolated SaveSystem persistence, Continue and live NPC observation.',actualGameplayDerived:true,fixedFramePacingOverride:false,wrapperNoFlagsProofPath:proofPath,wrapperNoGameplayAffectingFlags:true,wrapperRealBoot:true,forbiddenCallSelfScan:scan,gameplayFlags:{voxelPlaytest:false,voxelTestSeed:'',savePathOverride:savePath,savePathOverridePurpose:'isolated real SaveSystem fixture'},stageReports:{newGameSave:stageReports[0].path,continueObserve:stageReports[1].path},screenshotDirs:shots,results:[{name:'live_new_game_post_ack_save',passed:true,details:stageReports[0].report.postAckSave},{name:'live_continue_generic_home_restore',passed:true,details:{restoredOrder:stageReports[1].report.continuedRestoredOrder,porchClearanceDelay:stageReports[1].report.continuePorchClearanceDelayAfterObservation,strictHome:stageReports[1].report.miraReachedStrictHome}}]});
+      const aggregate = await readJson(reportPath);
+      Object.assign(aggregate, { continueInputSave, continueLiveApproach: stageReports[1].report.continueLiveApproach, continueLoadingExecution: stageReports[1].report.continueLoadingExecution });
+      await writeJson(reportPath, aggregate);
     }
   } catch (error) {
     failure = error;
     const prior = await readJson(reportPath).catch(()=>({evidenceLevel:'integration',forbiddenCallSelfScan:scan}));
-    await writeJson(reportPath,failedWorkflowReport(prior,error.message,saveContinue));
+    await writeJson(reportPath,{...failedWorkflowReport(prior,error.message,saveContinue), ...(continueInputSave ? {continueInputSave,continueObserveReport:join(output,'continue_observe-report.json')} : {})});
   } finally {
     await writeJson(proofPath,{schemaVersion:1,projectPath:projectRoot,visible:true,realBoot:true,fixedFramePacingOverride:false,noGameplayAffectingFlags:true,staticAcceptanceRunnerScan:scan,saveIsolation:saveContinue?{path:savePath,purpose:'isolated real SaveSystem data only'}:null,stages,passed:!failure,processStopReason:failure?failure.message:'report_finished'});
   }

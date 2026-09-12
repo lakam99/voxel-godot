@@ -6,6 +6,7 @@ class_name BuildingSpatialDependencies
 const Navigation = preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 const FurnitureNavigation = preload("res://scripts/buildings/FurnishingNavigationManifestBuilder.gd")
 const NavigationTiles = preload("res://scripts/buildings/BuildingNavigationTilePreparation.gd")
+const NAV_TILE_CELLS := preload("res://scripts/buildings/layout/BuildingLayoutConstants.gd").NAV_TILE_CELL_SIZE
 const CELL := 1.35
 const OWNER_SIZE := CELL * 32.0
 const MAX_PART_CELLS := 256
@@ -87,6 +88,8 @@ func requirements(bounds: Rect2i) -> Dictionary:
 	var missing: Array[String] = []
 	var owners := {}
 	var required_crossings: Array[String] = []
+	var crossing_requirements := {}
+	var dependency_bounds := bounds
 	var unresolved_crossings: Array[String] = []
 	# Include complete edge cells; navigation retains its own existing grid.
 	var minimum := Vector2(bounds.position) * CELL - Vector2.ONE * CELL * 0.5
@@ -107,13 +110,31 @@ func requirements(bounds: Rect2i) -> Dictionary:
 		for crossing in navigation.get(family,[]):
 			if not _intersects(crossing.get("bounds",AABB()),query): continue
 			required_crossings.append(String(crossing.id))
+			var owner_tile := String(crossing.get("ownerTileKey", ""))
+			var tile_keys: Array = crossing.get("tileKeys", []).duplicate()
+			if not owner_tile.is_empty() and not tile_keys.has(owner_tile): tile_keys.append(owner_tile)
+			tile_keys.sort()
+			crossing_requirements[String(crossing.id)] = {
+				"sourceId":String(crossing.id), "kind":family,
+				"sourcePartId":String(crossing.get("sourcePartId", "")),
+				"ownerTileKey":owner_tile, "tileKeys":tile_keys,
+				"requiredLinkIds":[] if family == "doors" else [String(crossing.id)],
+				"binding":binding, "mappingStatus":"pending" if family == "doors" else "described"}
+			if owner_tile.is_empty() and not missing.has(String(crossing.id)): missing.append(String(crossing.id))
+			for tile_key: String in tile_keys:
+				var coordinates := tile_key.split(",")
+				if coordinates.size() != 2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int():
+					if not missing.has(String(crossing.id)): missing.append(String(crossing.id))
+					continue
+				dependency_bounds = dependency_bounds.merge(Rect2i(Vector2i(int(coordinates[0]),int(coordinates[1]))*NAV_TILE_CELLS,
+					Vector2i.ONE*NAV_TILE_CELLS))
 			if family == "doors" and not bool(crossing.get("sourcePortalReady",false)) \
 					or family == "verticalLinks" and not bool(crossing.get("endpointCertification",{}).get("resolved",false)):
 				unresolved_crossings.append(String(crossing.id))
 			var crossing_parts: Array = []
-			for field: String in ["sourcePartId", "sourceCollisionPartId"]:
+			for field: String in ["sourcePartId", "sourceCollisionPartId", "startSupportPartId", "endSupportPartId", "firstSupportPartId", "secondSupportPartId"]:
 				if not String(crossing.get(field,"")).is_empty(): crossing_parts.append("building:"+String(crossing[field]))
-			for field: String in ["supportId", "startSupportId", "endSupportId", "interiorSupportId", "exteriorSupportId"]:
+			for field: String in ["supportId", "startSupportId", "endSupportId", "firstSupportId", "secondSupportId", "interiorSupportId", "exteriorSupportId"]:
 				var id := String(crossing.get(field,""))
 				if id.is_empty(): continue
 				if support_parts.has(id): crossing_parts.append(support_parts[id])
@@ -130,6 +151,7 @@ func requirements(bounds: Rect2i) -> Dictionary:
 			missing.append(key)
 			continue
 		var record: Dictionary = parts[key]
+		dependency_bounds = dependency_bounds.merge(terrain_cells_for_bounds(record.bounds))
 		owners[record.ownerCell] = true
 		if record.terrainRoot: roots.append(record.bounds)
 		for dependency: String in record.dependencies:
@@ -139,10 +161,19 @@ func requirements(bounds: Rect2i) -> Dictionary:
 	queue.sort()
 	required_crossings.sort()
 	missing.sort()
+	unresolved_crossings.sort()
 	return {"status":"described", "binding":binding, "origin":origin, "partIds":queue,
+		"dependencyBounds":[dependency_bounds], "sourceRevisions":{String(binding.get("siteId", "")):binding},
+		"requiredCrossings":crossing_requirements,
 		"ownerCells":owners.keys(), "terrainRootBounds":roots, "crossingIds":required_crossings,
 		"missingSourceIds":missing, "unresolvedCrossingIds":unresolved_crossings,
 		"publicationAcknowledged":false}
+
+static func terrain_cells_for_bounds(world_bounds: AABB) -> Rect2i:
+	# Match the existing cell-centred navigation grid, including boundary cells.
+	var low := Vector2i(floori(world_bounds.position.x/CELL+0.5),floori(world_bounds.position.z/CELL+0.5))
+	var high := Vector2i(floori(world_bounds.end.x/CELL+0.5),floori(world_bounds.end.z/CELL+0.5))
+	return Rect2i(low,high-low+Vector2i.ONE)
 
 func summary() -> Dictionary:
 	return {"partCount":parts.size(),"consumerCellCount":cells.size(),"supportCount":navigation.get("supportCount",0),

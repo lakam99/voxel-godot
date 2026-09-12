@@ -18,6 +18,7 @@ const CARDINAL_DIRECTIONS: Array[Vector3i] = [
 ]
 
 var main: Node3D
+var startup_failure_result: Dictionary = {}
 var world_generation
 var player: CharacterBody3D
 var camera: Camera3D
@@ -81,9 +82,15 @@ func run() -> void:
 		"particleDensity": 0.0
 	})
 	add_child(main)
+	# Explicit diagnostic setup only; this is not playable-world readiness.
+	if not await main.wait_for_startup_loading_complete(240.0, true):
+		if is_instance_valid(main):
+			startup_failure_result = main.get("startup_loading_failure_result").duplicate(true)
+		add_result("vox43_fluid_visual_startup_setup", false, JSON.stringify({"reason": "startup_setup_not_ready", "startupLoadingFailureResult": startup_failure_result, "gameplayAcceptance": false}))
+		finish(1)
+		return
 	main.set_process(false)
 	main.set_physics_process(false)
-	await wait_frames(2)
 	world_generation = main.get("world_generation_system")
 	player = main.get("player") as CharacterBody3D
 	if world_generation == null or not world_generation.has_method("sample_cell"):
@@ -409,6 +416,9 @@ func finish(exit_code: int) -> void:
 		"results": results,
 		"seed": seed,
 		"evidenceLevel": "acceptance_visual",
+		"startupScope": "diagnostic_setup_excluded_from_gameplay",
+		"gameplayAcceptance": false,
+		"startupLoadingFailureResult": startup_failure_result,
 		"acceptanceClaims": ["vox43_generated_underground_fluid_visual"],
 		"requiredScreenshots": REQUIRED_STAGES.map(func(stage): return "%s.png" % stage),
 		"stageRecords": sanitize(stage_records),
@@ -423,6 +433,9 @@ func finish(exit_code: int) -> void:
 		file.close()
 	write_progress("finish:%d" % exit_code)
 	await wait_frames(1)
+	if is_instance_valid(main) and main.is_inside_tree():
+		main.request_graceful_quit(exit_code)
+		return
 	get_tree().quit(exit_code)
 
 func forbidden_call_self_scan() -> Dictionary:

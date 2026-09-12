@@ -248,13 +248,62 @@ func _spatial_dependency_summary() -> Dictionary:
 func source_dependency_requirements(bounds: Rect2i, expected_binding: Dictionary) -> Dictionary:
 	if _cancelled or not _reason.is_empty() or _phase in ["idle", "retired", "consumed"] or expected_binding != _binding:
 		return {"status":"pending","reason":"structure_source_owner_unavailable"}
+	# This cutover retains full-site publication. Pending retries must not walk
+	# the entire immutable part/crossing graph on every loading frame.
+	if _phase != "ready": return {"status":"pending","reason":"structure_collision_publication_pending"}
 	var packet = _cpu.get("buildingBegin",{}).get("spatialDependencies")
 	if packet == null: return {"status":"pending","reason":"structure_source_dependencies_pending"}
 	if packet.binding != _binding or packet.origin != _cpu.profile.origin:
 		return {"status":"failed","reason":"structure_dependency_binding_mismatch"}
 	# This is the obligation set, never scene/navigation readiness. The same
 	# holder is retired by the existing one-shot CPU/resource retirement path.
-	return packet.requirements(bounds)
+	var result: Dictionary = packet.requirements(bounds)
+	if result.get("status") != "described": return result
+	# Resolve declared crossings through the same live owner used by tile source
+	# publication. These are obligations and physical receipts, never nav acks.
+	var artifacts := {}
+	for source_id: String in result.requiredCrossings:
+		var crossing: Dictionary = result.requiredCrossings[source_id]
+		var tile_key := String(crossing.ownerTileKey)
+		if tile_key.is_empty(): continue
+		if not artifacts.has(tile_key): artifacts[tile_key] = navigation_tile_artifact(tile_key,expected_binding)
+		var artifact: Dictionary = artifacts[tile_key]
+		if artifact.get("status") != "ready":
+			if result.status != "failed":
+				result.status = String(artifact.get("status","pending"))
+				result.reason = String(artifact.get("reason","structure_crossing_owner_pending"))
+			continue
+		if crossing.kind == "doors":
+			var body_ref = artifact.doorBodies.get(String(crossing.sourcePartId))
+			var body = body_ref.get_ref() if body_ref is WeakRef else null
+			if not _door_body_valid(body):
+				if result.status != "failed":
+					result.status = "pending"
+					result.reason = "structure_crossing_door_owner_pending"
+				continue
+			var portal_id := String(body.get_meta("door_portal_id",""))
+			crossing["portalId"] = portal_id
+			crossing.requiredLinkIds = ["door-link:%s:%s" % [portal_id,tile_key]]
+			crossing.mappingStatus = "described"
+		else:
+			var found := false
+			for link: Dictionary in artifact.tile.get("crossingLinks",[]):
+				if String(link.get("id","")) == source_id: found = true; break
+			if not found and not result.unresolvedCrossingIds.has(source_id): result.unresolvedCrossingIds.append(source_id)
+	if not result.missingSourceIds.is_empty() or not result.unresolvedCrossingIds.is_empty():
+		result.status = "failed"
+		result.reason = "structure_source_dependencies_unresolved"
+	result["physicalOwnerAcknowledgements"] = {"binding":_binding,"sceneReady":_phase=="ready",
+		"sceneInstanceId":_root.get_instance_id() if is_instance_valid(_root) else 0,
+		"registeredDoorCount":_door_registered_ids.size()}
+	return result
+
+func source_dependency_revision() -> Array:
+	# Cheap cache identity; no manifest traversal or dependency recompilation.
+	return [_binding,_phase,_cancelled,_reason,_door_registered_ids.size(),
+		_root.get_instance_id() if is_instance_valid(_root) and not _root.is_queued_for_deletion() and _root.is_inside_tree() else 0,
+		_root.global_transform if is_instance_valid(_root) and _root.is_inside_tree() else Transform3D.IDENTITY,
+		_root.get_parent().get_instance_id() if is_instance_valid(_root) and _root.get_parent()!=null else 0]
 
 func navigation_tile_artifact(tile_key: String, expected_binding: Dictionary) -> Dictionary:
 	if _cancelled or not _reason.is_empty() or expected_binding!=_binding:

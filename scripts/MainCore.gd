@@ -10,6 +10,8 @@ const StartupReadinessResultScript := preload("res://scripts/world/StartupReadin
 const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
 const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
+const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
+const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
 const INITIAL_NAV_CHANGE_DRAIN_ITERATION_LIMIT := 16
@@ -21,7 +23,9 @@ var seed_text := "atlas-1492"
 var seed_hash := 1
 var startup_mode := "auto"
 var launch_options := GameLaunchOptionsScript.parse(OS.get_cmdline_user_args())
-var deferred_startup_boot := false
+var startup_overlay: CanvasLayer
+var startup_operation_active := false
+var shutdown_requested := false
 var startup_loading_active := false
 var startup_loading_started_usec := 0
 var startup_loading_last_step_usec := 0
@@ -29,10 +33,12 @@ var startup_loading_timeline: Array[Dictionary] = []
 var startup_readiness_domains := {}
 var startup_loading_failure_result := {}
 var world_streaming = WorldStreamingCoordinatorScript.new()
+var regional_navigation = RegionalNavigationPublicationScript.new()
 var streaming_requests: Dictionary = {}
 var streaming_request_bounds: Dictionary = {}
 var streaming_applied_revision := -1
 var streaming_active := false
+var streaming_player_cell := Vector2i(2147483647,2147483647)
 var streaming_demand_error := ""
 var startup_loading_max_step := {}
 var runtime_loading_active := false
@@ -271,103 +277,43 @@ var block_meshes := {}
 func _ready() -> void:
     if get_tree() != null:
         get_tree().auto_accept_quit = false
-    if deferred_startup_boot:
-        startup_loading_active = true
-        set_process(false)
-        set_process_unhandled_input(false)
-        set_physics_process(false)
-        call_deferred("_run_deferred_startup_boot")
-        return
-    playtest_progress("main_ready_start")
-    var requested_startup_mode := startup_mode.strip_edges()
-    if requested_startup_mode == "":
-        requested_startup_mode = "auto"
-    var underground_visual_fast_boot := OS.get_environment("VOXEL_UNDERGROUND_VISUAL_FAST_BOOT").strip_edges() == "1"
-    var digging_visual_fast_boot := OS.get_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT").strip_edges() == "1"
-    var runtime_perf_fast_boot := OS.get_environment("VOXEL_RUNTIME_PERF_FAST_BOOT").strip_edges() == "1"
-    var skip_synchronous_world_boot := underground_visual_fast_boot or digging_visual_fast_boot or runtime_perf_fast_boot
-    setup_save_system()
-    var active_seed := ""
-    if autosave_enabled and save_system and save_system.has_method("active_seed"):
-        active_seed = save_system.active_seed("")
-    var forced_test_seed := test_seed_text()
-    if forced_test_seed != "":
-        seed_text = forced_test_seed
-    elif requested_startup_mode == "new_game":
-        seed_text = random_world_seed(active_seed)
-    elif active_seed != "":
-        seed_text = active_seed
-    apply_world_seed(seed_text, requested_startup_mode == "new_game")
-    playtest_progress("main_noise_done")
-    setup_materials()
-    setup_environment()
-    setup_game_systems()
-    playtest_progress("main_systems_done")
+    startup_loading_active = true
+    set_process(false)
+    set_process_unhandled_input(false)
+    set_physics_process(false)
+    startup_overlay = WorldLoadingOverlayScript.new()
+    startup_overlay.name = "WorldLoading"
+    add_child(startup_overlay)
+    call_deferred("_run_startup_boot")
 
-    chunk_root = Node3D.new()
-    chunk_root.name = "Chunks"
-    add_child(chunk_root)
-    prop_root = Node3D.new()
-    prop_root.name = "Props"
-    add_child(prop_root)
-    block_root = Node3D.new()
-    block_root.name = "Blocks"
-    add_child(block_root)
-    setup_audio_effects()
-    setup_break_overlay()
-    setup_tutorial_system()
+func _run_startup_boot() -> void:
+    startup_operation_active = true
+    await _run_deferred_startup_boot()
+    startup_operation_active = false
 
-    setup_player()
-    setup_hostiles()
-    setup_npc_system()
-    setup_player_projectiles()
-    setup_player_motion_combat()
-    setup_held_item()
-    setup_hud()
-    await prewarm_runtime_visuals_staged()
-    playtest_progress("main_scene_nodes_done")
-    var loaded := false
-    if requested_startup_mode != "new_game":
-        loaded = try_load_world()
-    if requested_startup_mode == "continue" and not loaded:
-        await stop_startup_loading(StartupReadinessResultScript.failed(
-            "continue_save_restore_failed",
-            {},
-            [],
-            {
-                "requestedMode": requested_startup_mode,
-                "activeSeed": active_seed,
-                "selectedSeed": seed_text
-            }
-        ))
-        return
-    var started_intro_tutorial := false
-    playtest_progress("main_load_done")
-    if not loaded and tutorial_system and not skip_synchronous_world_boot and not launch_options.skipTutorial:
-        if autosave_enabled:
-            apply_world_seed(random_world_seed(seed_text), true)
-        started_intro_tutorial = tutorial_system.start_new_world()
-        playtest_progress("main_tutorial_start_done")
-    if not skip_synchronous_world_boot:
-        bootstrap_initial_chunks()
-        drain_initial_navigation_changes()
-        prime_initial_navigation_snapshot()
-        playtest_progress("main_initial_chunks_queued")
-    var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
-    if not skip_synchronous_world_boot:
-        refresh_intro_knock_audio()
-    var ready_message := "Loaded saved world" if loaded else "Godot slice ready"
-    if not loaded and tutorial_system and tutorial_system.last_message != "":
-        ready_message = tutorial_system.last_message
-    if interactive_underground_message != "":
-        ready_message = interactive_underground_message
-    if not skip_synchronous_world_boot:
-        update_hud(ready_message)
-    reset_autosave_dirty_tracking(not loaded and not skip_synchronous_world_boot, "new_world")
+func wait_for_startup_loading_complete(timeout_seconds := 240.0, allow_diagnostic_setup := false) -> bool:
+    # Observe the production lifecycle. Node.ready, a generator, or inactive
+    # loading flags alone cannot establish gameplay readiness after a failure.
+    var deadline := Time.get_ticks_msec() + int(maxf(timeout_seconds, 0.0) * 1000.0)
+    while is_inside_tree() and not is_queued_for_deletion() and not shutdown_requested:
+        if not startup_loading_failure_result.is_empty():
+            return false
+        if not startup_loading_active and not runtime_loading_active:
+            if String(startup_readiness_domains.get("gameplay", {}).get("status", "")) == "ready":
+                return true
+            if allow_diagnostic_setup and String(startup_readiness_domains.get("diagnostic_fast_boot", {}).get("status", "")) == "excluded":
+                return true
+        if Time.get_ticks_msec() >= deadline:
+            return false
+        await get_tree().process_frame
+    return false
 
 func _run_deferred_startup_boot() -> void:
     begin_startup_loading_timeline()
     await startup_loading_yield("Preparing world", "startup", "pending")
+    if shutdown_requested:
+        apply_startup_loading_failure_state(StartupReadinessResultScript.failed("startup_cancelled"))
+        return
     playtest_progress("main_ready_start")
     var requested_startup_mode := startup_mode.strip_edges()
     if requested_startup_mode == "":
@@ -422,6 +368,7 @@ func _run_deferred_startup_boot() -> void:
         player.set_physics_process(false)
     setup_hostiles()
     setup_npc_system()
+    set_registered_npc_physics_enabled(false)
     setup_player_projectiles()
     setup_player_motion_combat()
     setup_held_item()
@@ -463,6 +410,14 @@ func _run_deferred_startup_boot() -> void:
             return
         playtest_progress("main_tutorial_start_done")
     elif loaded and tutorial_system and bool(tutorial_system.get("started")) and not skip_synchronous_world_boot:
+        # Snapshot restoration only restores data and retires chunk presenters.
+        # Bind those saved/scenario inputs before staged town publication.
+        var restore_authority_result := normalized_startup_result(
+            await reinitialize_voxel_terrain_authority_staged(), "terrain_authority_reset_failed"
+        )
+        if not startup_result_is_ready(restore_authority_result):
+            await stop_startup_loading(restore_authority_result)
+            return
         if not tutorial_system.has_method("complete_restore_world_staged"):
             await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_restore"))
             return
@@ -479,6 +434,7 @@ func _run_deferred_startup_boot() -> void:
             "seed": seed_text,
             "tutorial": tutorial_result.get("metrics", {})
         })
+    var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
     if not skip_synchronous_world_boot:
         var terrain_result := normalized_startup_result(
             await bootstrap_initial_chunks_staged(),
@@ -508,7 +464,6 @@ func _run_deferred_startup_boot() -> void:
             "navigation": navigation_result.get("metrics", {})
         })
         playtest_progress("main_initial_chunks_queued")
-    var interactive_underground_message := "" if skip_synchronous_world_boot else apply_interactive_underground_launch_if_requested()
     if not skip_synchronous_world_boot:
         await startup_loading_yield("Preparing intro audio")
         refresh_intro_knock_audio()
@@ -537,21 +492,32 @@ func _run_deferred_startup_boot() -> void:
         if not startup_result_is_ready(presentation_result):
             await stop_startup_loading(presentation_result, "terrain_presentation_not_ready")
             return
+        var region_result := await wait_for_initial_region_readiness()
+        if not startup_result_is_ready(region_result):
+            await stop_startup_loading(region_result, "initial_region_not_ready")
+            return
         await startup_loading_yield(
             "Gameplay prerequisites ready",
             "gameplay",
             "ready",
             physics_gate_result.get("metrics", {})
         )
+    if shutdown_requested:
+        apply_startup_loading_failure_state(StartupReadinessResultScript.failed("startup_cancelled"))
+        return
     startup_loading_active = false
     post_startup_trace_frames = 3
-    set_process(true)
-    set_process_unhandled_input(true)
-    set_physics_process(true)
+    var enable_gameplay := not skip_synchronous_world_boot and not shutdown_requested
+    set_process(enable_gameplay)
+    set_process_unhandled_input(enable_gameplay)
+    set_physics_process(enable_gameplay)
     if player != null:
-        player.set_physics_process(true)
-    set_registered_npc_physics_enabled(true)
-    request_final_voxel_view_distance()
+        player.set_physics_process(enable_gameplay)
+    set_registered_npc_physics_enabled(enable_gameplay)
+    if enable_gameplay:
+        request_final_voxel_view_distance()
+    if startup_overlay != null:
+        startup_overlay.hide()
     startup_loading_completed.emit()
 
 func request_final_voxel_view_distance() -> void:
@@ -572,6 +538,8 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
     # old publication work draining without dispatching against a partial world.
     if structure_system != null:
         structure_system.advance_citadel_publication()
+    if streaming_active:
+        apply_streaming_region_demand()
     var now_usec := Time.get_ticks_usec()
     if startup_loading_started_usec <= 0:
         startup_loading_started_usec = now_usec
@@ -600,11 +568,15 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
         startup_loading_timeline.pop_front()
     startup_loading_last_step_usec = now_usec
     startup_loading_step.emit(message)
+    if startup_overlay != null:
+        startup_overlay.set_message(message)
     if hud != null and hud.has_method("set_loading_message"):
         hud.set_loading_message(message)
     await get_tree().process_frame
 
 func normalized_startup_result(value, fallback_reason: String) -> Dictionary:
+    if shutdown_requested and (startup_loading_active or runtime_loading_active):
+        return StartupReadinessResultScript.failed("startup_cancelled")
     if value is Dictionary:
         var result: Dictionary = value
         if bool(StartupReadinessResultScript.validate(result).get("ok", false)):
@@ -639,6 +611,8 @@ func apply_startup_loading_failure_state(result_value, fallback_reason := "start
         player.set_physics_process(false)
     set_registered_npc_physics_enabled(false)
     startup_loading_failure_result = result.duplicate(true)
+    if startup_overlay != null:
+        startup_overlay.set_message("Load failed: %s" % reason)
     startup_loading_active = false
     runtime_loading_active = false
     startup_loading_failed.emit(reason)
@@ -650,6 +624,12 @@ func registered_npc_entries() -> Array:
     return npc_system.get("npcs")
 
 func set_registered_npc_physics_enabled(enabled: bool) -> void:
+    # Bodies are moved by the shared execution service as well as their own
+    # callbacks. Loading owns both gates; navigation preparation remains
+    # available through the staged publication calls below.
+    var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+    if autonomy is Node and is_instance_valid(autonomy):
+        autonomy.set_physics_process(enabled)
     for entry_value in registered_npc_entries():
         if not (entry_value is Dictionary):
             continue
@@ -658,6 +638,8 @@ func set_registered_npc_physics_enabled(enabled: bool) -> void:
             body.set_physics_process(enabled)
 
 func startup_physics_gate_readiness() -> Dictionary:
+    var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+    var autonomy_enabled: bool = autonomy is Node and is_instance_valid(autonomy) and autonomy.is_physics_processing()
     var enabled_npc_ids: Array[String] = []
     var registered_npc_count := 0
     for entry_value in registered_npc_entries():
@@ -676,6 +658,7 @@ func startup_physics_gate_readiness() -> Dictionary:
         "mainPhysicsEnabled": is_physics_processing(),
         "playerPhysicsEnabled": player != null and player.is_physics_processing(),
         "npcPhysicsEnabled": not enabled_npc_ids.is_empty(),
+        "npcExecutionEnabled": autonomy_enabled,
         "enabledNpcIds": enabled_npc_ids,
         "registeredNpcCount": registered_npc_count,
         "diagnosticFastBoot": false
@@ -686,11 +669,14 @@ func startup_physics_gate_readiness() -> Dictionary:
         or bool(metrics.get("mainInputEnabled", false)) \
         or bool(metrics.get("mainPhysicsEnabled", false)) \
         or bool(metrics.get("playerPhysicsEnabled", false)) \
+        or bool(metrics.get("npcExecutionEnabled", false)) \
         or bool(metrics.get("npcPhysicsEnabled", false)):
         return StartupReadinessResultScript.failed("gameplay_physics_enabled_before_readiness", {}, [], metrics)
     return StartupReadinessResultScript.ready({}, metrics)
 
 func reinitialize_voxel_terrain_authority_staged() -> Dictionary:
+    if shutdown_requested:
+        return StartupReadinessResultScript.failed("startup_cancelled")
     var runtime = get("voxel_terrain_runtime")
     var reset_result := StartupReadinessResultScript.ready({}, {})
     if runtime == null or not is_instance_valid(runtime):
@@ -740,11 +726,15 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     var site_runtime = get("voxel_terrain_runtime")
     if site_runtime == null:
         return StartupReadinessResultScript.failed("missing_voxel_terrain_for_site_admission")
-    world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system})
+    world_streaming.configure("")
+    if not regional_navigation.configure(self):
+        return StartupReadinessResultScript.failed(regional_navigation.last_rejection)
+    world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system, "navigation":regional_navigation})
     streaming_requests.clear()
     streaming_request_bounds.clear()
     streaming_applied_revision = -1
     streaming_active = true
+    streaming_player_cell = Vector2i(floori(player.global_position.x/(CELL*32.0)),floori(player.global_position.z/(CELL*32.0)))
     if not retain_streaming_region("player", WorldStreamingCoordinatorScript.playable_bounds(player.global_position), 0):
         return StartupReadinessResultScript.failed(streaming_demand_error)
     # Keep existing scenario requirements in addition to the nearby player area.
@@ -763,6 +753,7 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     var total := urgent_keys.size()
     var started_usec := Time.get_ticks_usec()
     while count_loaded_chunks(urgent_keys) < total:
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         var loaded := count_loaded_chunks(urgent_keys)
         await startup_loading_yield("Loading terrain %d/%d" % [loaded, total], "terrain_chunks", "pending", {
             "loadedChunkCount": loaded,
@@ -853,7 +844,10 @@ func apply_streaming_region_demand() -> bool:
     if not structure_system.citadel_publication.set_retained_region_bounds(world_streaming.retained_cell_bounds()):
         streaming_demand_error = "structure_region_demand_rejected"
         return false
-    runtime.set_retained_gameplay_chunks(world_streaming.retained_gameplay_chunks())
+    var retained: Dictionary = world_streaming.retained_gameplay_chunks()
+    runtime.set_retained_gameplay_chunks(retained)
+    for key: Vector2i in retained:
+        if not chunks.has(key): queue_chunk_load(key)
     streaming_applied_revision = world_streaming.revision()
     return true
 
@@ -863,7 +857,10 @@ func update_streaming_region_demand() -> void:
     # without rebuilding demand on every movement frame.
     var cell := Vector2i(floori(player.global_position.x/(CELL*32.0)),floori(player.global_position.z/(CELL*32.0)))
     var anchor := Vector3((float(cell.x)+0.5)*CELL*32.0,player.global_position.y,(float(cell.y)+0.5)*CELL*32.0)
-    retain_streaming_region("player",WorldStreamingCoordinatorScript.playable_bounds(anchor),0)
+    if cell != streaming_player_cell:
+        # Cover the player's 64m neighborhood throughout this quantized cell.
+        var bounds := WorldStreamingCoordinatorScript.playable_bounds(anchor).grow(16)
+        if retain_streaming_region("player",bounds,0): streaming_player_cell = cell
     var active_owners := {"player":true}
     var movement := Vector3(player.velocity.x,0.0,player.velocity.z)
     var facing := -player.global_basis.z
@@ -907,6 +904,39 @@ func wait_for_initial_terrain_presentation() -> Dictionary:
         "invalid_terrain_presentation_result"
     )
 
+func wait_for_initial_region_readiness() -> Dictionary:
+    if not streaming_active or not streaming_request_bounds.has("player"):
+        return StartupReadinessResultScript.failed("initial_region_demand_missing")
+    var started := Time.get_ticks_msec()
+    var state: Dictionary = {}
+    while float(Time.get_ticks_msec()-started)/1000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
+        if not apply_streaming_region_demand():
+            return StartupReadinessResultScript.failed(streaming_demand_error)
+        process_pending_chunk_loads(world_to_chunk(player.position.x,player.position.z))
+        if pending_chunk_loads.is_empty():
+            call("process_streaming_structure_work")
+            process_pending_chunk_prop_spawns()
+        state = world_streaming.region_readiness(streaming_request_bounds.player)
+        if state.status == "ready":
+            await startup_loading_yield("Nearby world ready", "initial_region", "ready", state)
+            return StartupReadinessResultScript.ready({}, state)
+        if state.status == "failed":
+            return StartupReadinessResultScript.failed("initial_region_dependency_failed", {}, state.get("missing",[]), state)
+        var progress := {"bounds":state.get("bounds"), "closedBounds":state.get("closedBounds"),
+            "status":state.status, "missing":state.get("missing",[]), "domains":{},
+            "coordinatorMaxAdvanceUsec":world_streaming.max_advance_usec,
+            "navigationQueue":regional_navigation._stats(),
+            "terrainRetainedReason":get("voxel_terrain_runtime").retained_activation_reason}
+        for domain in state.get("domains",{}):
+            var owner: Dictionary = state.domains[domain]
+            progress.domains[domain] = {"status":owner.get("status"),"reason":owner.get("reason"),
+                "missingChunks":owner.get("missingChunks",[]).size(),
+                "missingItems":owner.get("missing",[]).size(),
+                "unresolvedCrossings":owner.get("unresolvedCrossingIds",[]).size()}
+        await startup_loading_yield("Preparing nearby world", "initial_region", "pending", progress)
+    return StartupReadinessResultScript.failed("initial_region_readiness_timeout", {}, state.get("missing",[]), state)
+
 func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -> Dictionary:
     var runtime = get("voxel_terrain_runtime")
     if runtime == null or not is_instance_valid(runtime) or not runtime.has_method("gameplay_chunks_published"):
@@ -915,6 +945,7 @@ func wait_for_initial_voxel_collision_publication(chunk_keys: Array[Vector2i]) -
         runtime.call("configure_startup_collision_bounds", chunk_keys)
     var started_usec := Time.get_ticks_usec()
     while not bool(runtime.call("gameplay_chunks_published", chunk_keys)):
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         var published := int(runtime.call("published_gameplay_chunk_count", chunk_keys))
         await startup_loading_yield("Loading terrain collision %d/%d" % [published, chunk_keys.size()], "terrain_collision", "pending", {
             "publishedChunkCount": published,
@@ -953,6 +984,7 @@ func wait_for_initial_player_collision_publication() -> Dictionary:
     var footprint_radius := 0.35
     var acknowledged_scene_ids: Array = []
     while true:
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         var proof: Dictionary = runtime.call(proof_method, player.global_position, footprint_radius)
         if bool(proof.get("passed", false)) and structure_system != null:
             var center := Vector2i(floori(player.global_position.x / CELL), floori(player.global_position.z / CELL))
@@ -1021,6 +1053,7 @@ func drain_initial_navigation_changes_staged() -> Dictionary:
     var processed_event_count := 0
     var started_usec := Time.get_ticks_usec()
     while true:
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         var pending := int(autonomy.call("pending_navigation_change_count"))
         if pending <= 0:
             var metrics := {
@@ -1083,6 +1116,7 @@ func prime_initial_navigation_snapshot_staged() -> Dictionary:
         "invalid_navigation_tile_readiness_result"
     )
     while tile_result.get("status") == "pending" and float(Time.get_ticks_usec()-tile_wait_started_usec)/1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         await startup_loading_yield("Waiting for current navigation revisions", "navigation_tiles", "pending", tile_result.get("metrics", {}))
         tile_result = normalized_startup_result(await prime_initial_navigation_tiles_staged(navigation_world, entries), "invalid_navigation_tile_readiness_result")
     if not startup_result_is_ready(tile_result):
@@ -1205,6 +1239,7 @@ func prime_initial_navigation_tiles_staged(navigation_world, entries: Array) -> 
         })
         var publish_result: Dictionary = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
         while String(publish_result.get("status", "")) == "pending" and float(Time.get_ticks_usec()-publication_started_usec)/1000000.0 < INITIAL_READINESS_TIMEOUT_SECONDS:
+            if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
             await startup_loading_yield("Waiting for navigation publication", "navigation_tiles", "pending", {"tileKey": tile_key, "publication": publish_result})
             publish_result = publish_startup_navmesh_tile(navigation_world, route_delegate, tile_key)
         tile_timings.append({
@@ -1257,6 +1292,7 @@ func wait_for_initial_navigation_map_readiness() -> Dictionary:
         return StartupReadinessResultScript.failed("missing_navigation_map_readiness_authority")
     var started_usec := Time.get_ticks_usec()
     while true:
+        if shutdown_requested: return StartupReadinessResultScript.failed("startup_cancelled")
         if navmesh_world.has_method("sync_navigation_map_if_dirty"):
             navmesh_world.call("sync_navigation_map_if_dirty")
         var readiness_value = navmesh_world.call("navigation_map_readiness")
@@ -1608,8 +1644,7 @@ func apply_interactive_underground_launch_if_requested() -> String:
     configure_interactive_underground_inventory()
     if OS.get_environment("VOXEL_UNDERGROUND_INTERACTIVE_GOD_MODE").strip_edges() == "1" and survival_system != null and survival_system.has_method("set_test_god_mode"):
         survival_system.call("set_test_god_mode", true, "interactive_underground_playtest")
-    rebuild_chunks_around_cell(Vector2i(sample_cell.x, sample_cell.z))
-    bootstrap_initial_chunks()
+    # Initial demand is captured by the staged bootstrap after this placement.
     if hud != null:
         if hud.has_method("hide_dialogue"):
             hud.hide_dialogue(false)
@@ -2139,6 +2174,10 @@ func save_world(show_message := true) -> bool:
     return ok
 
 func try_load_world(show_message := false) -> bool:
+    # Initial boot restores data synchronously; its caller owns publication.
+    # Runtime callers must await try_load_world_staged instead.
+    if not startup_loading_active or runtime_loading_active or shutdown_requested:
+        return false
     if save_system == null:
         return false
     if not autosave_enabled and not show_message:
@@ -2155,65 +2194,38 @@ func try_load_world(show_message := false) -> bool:
         update_hud("Loaded saved world" if loaded else "Load failed")
     return loaded
 
-func start_new_game(show_message := true) -> bool:
-    # This compatibility entry point cannot yield. Live generated scenes must
-    # use the staged entry point so cleanup precedes seed/save/registry changes.
-    if structure_system != null and structure_system.citadel_publication.requires_scene_retirement():
-        if show_message: update_hud("Use the game menu to start a new world while landmarks are loaded")
+func try_load_world_staged(show_message := false, snapshot_override: Dictionary = {}) -> bool:
+    # The optional in-memory snapshot uses the same runtime cutover as F9.
+    if startup_operation_active or startup_loading_active or runtime_loading_active or shutdown_requested:
         return false
-    var autonomy = npc_system.get("autonomy_system") if is_instance_valid(npc_system) else null
-    var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
-    if navigation != null:
-        var publication: Dictionary = navigation.stats().get("publication",{})
-        if publication.get("busy",false) or int(publication.get("preparedCount",0)) > 0:
-            if show_message: update_hud("Use the game menu to start a new world while navigation is loaded")
-            return false
-    playtest_progress("new_game_start")
-    var previous_seed := seed_text
-    if save_system:
-        playtest_progress("new_game_delete_save")
-        save_system.delete(previous_seed)
-    playtest_progress("new_game_apply_seed")
-    apply_world_seed(random_world_seed(previous_seed), true)
-    playtest_progress("new_game_reset_runtime")
-    reset_runtime_world_state()
-    var started := bool(launch_options.skipTutorial)
-    if launch_options.skipTutorial:
-        if tutorial_system: tutorial_system.restore({})
-        if player: player.position = find_spawn_position()
-    if tutorial_system and not launch_options.skipTutorial:
-        playtest_progress("new_game_start_tutorial")
-        started = tutorial_system.start_new_world()
-    playtest_progress("new_game_bootstrap_chunks")
-    bootstrap_initial_chunks()
-    if tutorial_system and not launch_options.skipTutorial:
-        playtest_progress("new_game_starting_inventory")
-        tutorial_system.configure_starting_inventory()
-    playtest_progress("new_game_objectives")
-    update_objectives_and_contracts()
-    refresh_intro_knock_audio()
-    if hud:
-        hud.set_game_menu_open(false)
-        hud.set_inventory_open(false)
-        hud.set_teleport_open(false)
-        hud.set_settings_open(false)
-        hud.set_playtest_open(false)
-        hud.hide_victory()
-    Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
-    if show_message:
-        update_hud("New game started" if started else "New game reset")
-    reset_autosave_dirty_tracking(true, "new_game")
-    playtest_progress("new_game_done")
-    return started
+    if snapshot_override.is_empty() and (save_system == null or (not autosave_enabled and not show_message)):
+        return false
+    # Keep ownership through failure presentation too: stop_startup_loading
+    # clears loading flags before its final yield, but shutdown must still wait.
+    startup_operation_active = true
+    var previous_processing := quiesce_runtime_world_for_loading("Loading saved world")
+    var loaded := await run_runtime_world_load_staged(show_message, snapshot_override, previous_processing)
+    runtime_loading_active = false
+    startup_operation_active = false
+    return loaded
 
-func start_new_game_staged(show_message := true) -> bool:
-    if runtime_loading_active:
-        return false
+func quiesce_runtime_world_for_loading(message: String) -> Dictionary:
+    var autonomy = npc_system.get("autonomy_system") if npc_system != null else null
+    var previous := {
+        "process": is_processing(), "input": is_processing_unhandled_input(),
+        "physics": is_physics_processing(),
+        "playerPhysics": player != null and player.is_physics_processing(),
+        "npcPhysics": [],
+        "npcExecutionOwner": autonomy,
+        "npcExecutionEnabled": autonomy is Node and is_instance_valid(autonomy) and autonomy.is_physics_processing()
+    }
+    for entry_value in registered_npc_entries():
+        if not (entry_value is Dictionary):
+            continue
+        var body := (entry_value as Dictionary).get("body") as Node
+        if is_instance_valid(body):
+            previous.npcPhysics.append({"body": body, "enabled": body.is_physics_processing()})
     runtime_loading_active = true
-    begin_startup_loading_timeline()
-    playtest_progress("new_game_staged_start")
-    if hud != null and hud.has_method("show_loading_overlay"):
-        hud.show_loading_overlay("Starting new game")
     set_process(false)
     set_process_unhandled_input(false)
     set_physics_process(false)
@@ -2221,6 +2233,117 @@ func start_new_game_staged(show_message := true) -> bool:
     if player != null:
         player.set_physics_process(false)
         player.velocity = Vector3.ZERO
+    if hud != null and hud.has_method("show_loading_overlay"):
+        hud.show_loading_overlay(message)
+    return previous
+
+func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictionary, previous_processing: Dictionary) -> bool:
+    # Paint the loading UI before reading the slot. Poll the existing writer
+    # without joining a live worker inside SaveSystem.load(). No owner has been
+    # replaced yet, so a missing/wrong-seed slot can safely leave play intact.
+    await startup_loading_yield("Reading saved world", "save_restore", "pending")
+    var save_wait_started := Time.get_ticks_msec()
+    while save_system != null and save_system.has_async_save_pending():
+        if shutdown_requested or Time.get_ticks_msec() - save_wait_started >= 30000:
+            await stop_startup_loading(StartupReadinessResultScript.failed("runtime_load_save_drain_cancelled_or_timed_out"))
+            return false
+        save_system.poll_async_save(false)
+        await startup_loading_yield("Waiting for pending save", "save_restore", "pending")
+    if shutdown_requested:
+        await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
+        return false
+    var snapshot: Dictionary = snapshot_override if not snapshot_override.is_empty() else save_system.load(seed_text)
+    if snapshot.is_empty() or String(snapshot.get("seed", seed_text)) != seed_text:
+        if hud != null and hud.has_method("hide_loading_overlay"):
+            hud.hide_loading_overlay()
+        set_process(bool(previous_processing.process))
+        set_process_unhandled_input(bool(previous_processing.input))
+        set_physics_process(bool(previous_processing.physics))
+        if player != null:
+            player.set_physics_process(bool(previous_processing.playerPhysics))
+        for entry: Dictionary in previous_processing.npcPhysics:
+            if is_instance_valid(entry.body): entry.body.set_physics_process(bool(entry.enabled))
+        var autonomy = previous_processing.get("npcExecutionOwner")
+        if autonomy is Node and is_instance_valid(autonomy):
+            autonomy.set_physics_process(bool(previous_processing.get("npcExecutionEnabled", false)))
+        if show_message:
+            update_hud("No save for %s" % seed_text if snapshot.is_empty() else "Load failed: save seed mismatch")
+        return false
+    begin_startup_loading_timeline()
+    playtest_progress("runtime_load_staged_start")
+    await startup_loading_yield("Clearing previous world", "world_reset", "pending")
+    if not await retire_generated_scenes_before_world_reset():
+        await stop_startup_loading(StartupReadinessResultScript.failed("generated_scene_retirement_failed"))
+        return false
+    if shutdown_requested:
+        await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
+        return false
+    # Preserve owner instances (and save format), replace their state. Resetting
+    # StructureSystem advances its admission generation even for the same seed;
+    # native terrain must then rebuild from the restored edits, including edits
+    # removed by loading an older snapshot.
+    reset_runtime_world_state(false)
+    # Removing old light-emitting blocks can write light deltas during reset.
+    # Start the incoming save with a clean volume even when it has no deltas.
+    if world_generation_system != null:
+        world_generation_system.reset_terrain_volume_authority()
+    await startup_loading_yield("Restoring saved state", "save_restore", "pending")
+    if shutdown_requested:
+        await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
+        return false
+    if not apply_save_snapshot(snapshot):
+        await stop_startup_loading(StartupReadinessResultScript.failed("runtime_save_restore_failed"))
+        return false
+    # Tutorial.restore has now restored/reserved scenario inputs but has not
+    # expanded the town. Bind current native inputs before staged scene work.
+    var authority_result := normalized_startup_result(
+        await reinitialize_voxel_terrain_authority_staged(), "terrain_authority_reset_failed"
+    )
+    if not startup_result_is_ready(authority_result):
+        await stop_startup_loading(authority_result)
+        return false
+    var tutorial_result := StartupReadinessResultScript.ready({}, {"mode": "continue", "tutorialActive": false})
+    if tutorial_system and bool(tutorial_system.get("started")):
+        if not tutorial_system.has_method("complete_restore_world_staged"):
+            await stop_startup_loading(StartupReadinessResultScript.failed("missing_staged_tutorial_restore"))
+            return false
+        tutorial_result = normalized_startup_result(
+            await tutorial_system.call("complete_restore_world_staged"), "invalid_staged_tutorial_restore_result"
+        )
+    if not startup_result_is_ready(tutorial_result):
+        await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
+        return false
+    await startup_loading_yield("Saved world restored", "save_restore", "ready", {
+        "seed": seed_text, "tutorial": tutorial_result.get("metrics", {}),
+        "terrainAuthority": authority_result.get("metrics", {})
+    })
+    var publication_result := await prepare_runtime_world_publication_staged()
+    if not startup_result_is_ready(publication_result):
+        await stop_startup_loading(publication_result)
+        return false
+    refresh_intro_knock_audio()
+    if show_message:
+        update_hud("Loaded saved world")
+    var completed := await complete_runtime_world_loading_staged(tutorial_result, publication_result)
+    if completed:
+        reset_autosave_dirty_tracking(false)
+        playtest_progress("runtime_load_staged_done")
+    return completed
+
+
+func start_new_game_staged(show_message := true) -> bool:
+    if startup_operation_active or startup_loading_active or runtime_loading_active or shutdown_requested:
+        return false
+    startup_operation_active = true
+    var started := await run_new_game_staged(show_message)
+    runtime_loading_active = false
+    startup_operation_active = false
+    return started
+
+func run_new_game_staged(show_message: bool) -> bool:
+    quiesce_runtime_world_for_loading("Starting new game")
+    begin_startup_loading_timeline()
+    playtest_progress("new_game_staged_start")
     await startup_loading_yield("Starting new game")
     if not await retire_generated_scenes_before_world_reset():
         await stop_startup_loading(StartupReadinessResultScript.failed("generated_scene_retirement_failed"))
@@ -2253,26 +2376,9 @@ func start_new_game_staged(show_message := true) -> bool:
         return false
     await startup_loading_yield("Reloading terrain")
     reload_chunks(true)
-    var terrain_result := normalized_startup_result(
-        await bootstrap_initial_chunks_staged(),
-        "invalid_terrain_readiness_result"
-    )
-    if not startup_result_is_ready(terrain_result):
-        await stop_startup_loading(terrain_result, "terrain_collision_not_ready")
-        return false
-    var navigation_change_result := normalized_startup_result(
-        await drain_initial_navigation_changes_staged(),
-        "invalid_navigation_change_readiness_result"
-    )
-    if not startup_result_is_ready(navigation_change_result):
-        await stop_startup_loading(navigation_change_result, "navigation_changes_not_ready")
-        return false
-    var navigation_result := normalized_startup_result(
-        await prime_initial_navigation_snapshot_staged(),
-        "invalid_navigation_readiness_result"
-    )
-    if not startup_result_is_ready(navigation_result):
-        await stop_startup_loading(navigation_result, "navigation_not_ready")
+    var publication_result := await prepare_runtime_world_publication_staged()
+    if not startup_result_is_ready(publication_result):
+        await stop_startup_loading(publication_result)
         return false
     if tutorial_system and not launch_options.skipTutorial:
         tutorial_system.configure_starting_inventory()
@@ -2289,7 +2395,35 @@ func start_new_game_staged(show_message := true) -> bool:
     if show_message:
         update_hud("New game started")
     reset_autosave_dirty_tracking(true, "new_game")
-    var physics_gate_result := startup_physics_gate_readiness()
+    var completed := await complete_runtime_world_loading_staged(tutorial_result, publication_result)
+    if completed:
+        playtest_progress("new_game_staged_done")
+    return completed
+
+func prepare_runtime_world_publication_staged() -> Dictionary:
+    var terrain_result := normalized_startup_result(
+        await bootstrap_initial_chunks_staged(), "invalid_terrain_readiness_result"
+    )
+    if not startup_result_is_ready(terrain_result):
+        return terrain_result
+    var navigation_change_result := normalized_startup_result(
+        await drain_initial_navigation_changes_staged(), "invalid_navigation_change_readiness_result"
+    )
+    if not startup_result_is_ready(navigation_change_result):
+        return navigation_change_result
+    var navigation_result := normalized_startup_result(
+        await prime_initial_navigation_snapshot_staged(), "invalid_navigation_readiness_result"
+    )
+    if not startup_result_is_ready(navigation_result):
+        return navigation_result
+    return StartupReadinessResultScript.ready({}, {
+        "terrain": terrain_result.get("metrics", {}),
+        "navigationChanges": navigation_change_result.get("metrics", {}),
+        "navigation": navigation_result.get("metrics", {})
+    })
+
+func complete_runtime_world_loading_staged(tutorial_result: Dictionary, publication_result: Dictionary) -> bool:
+    var physics_gate_result := normalized_startup_result(startup_physics_gate_readiness(), "gameplay_physics_gate_failed")
     if not startup_result_is_ready(physics_gate_result):
         await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
         return false
@@ -2297,29 +2431,40 @@ func start_new_game_staged(show_message := true) -> bool:
     if not startup_result_is_ready(presentation_result):
         await stop_startup_loading(presentation_result, "terrain_presentation_not_ready")
         return false
+    var region_result := await wait_for_initial_region_readiness()
+    if not startup_result_is_ready(region_result):
+        await stop_startup_loading(region_result, "initial_region_not_ready")
+        return false
+    physics_gate_result = normalized_startup_result(startup_physics_gate_readiness(), "gameplay_physics_gate_failed")
+    if not startup_result_is_ready(physics_gate_result):
+        await stop_startup_loading(physics_gate_result, "gameplay_physics_gate_failed")
+        return false
     var gameplay_metrics: Dictionary = physics_gate_result.get("metrics", {}).duplicate(true)
     gameplay_metrics["tutorial"] = tutorial_result.get("metrics", {})
-    gameplay_metrics["terrain"] = terrain_result.get("metrics", {})
-    gameplay_metrics["navigationChanges"] = navigation_change_result.get("metrics", {})
-    gameplay_metrics["navigation"] = navigation_result.get("metrics", {})
+    gameplay_metrics.merge(publication_result.get("metrics", {}), true)
+    gameplay_metrics["presentation"] = presentation_result.get("metrics", {})
+    gameplay_metrics["region"] = region_result.get("metrics", {})
     await startup_loading_yield("Gameplay prerequisites ready", "gameplay", "ready", gameplay_metrics)
+    if shutdown_requested:
+        await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
+        return false
     if hud != null and hud.has_method("hide_loading_overlay"):
         hud.hide_loading_overlay()
     runtime_loading_active = false
-    set_process(true)
-    set_process_unhandled_input(true)
-    set_physics_process(true)
+    set_process(not shutdown_requested)
+    set_process_unhandled_input(not shutdown_requested)
+    set_physics_process(not shutdown_requested)
     if player != null:
-        player.set_physics_process(true)
-    set_registered_npc_physics_enabled(true)
-    request_final_voxel_view_distance()
-    playtest_progress("new_game_staged_done")
-    return true
+        player.set_physics_process(not shutdown_requested)
+    set_registered_npc_physics_enabled(not shutdown_requested)
+    if not shutdown_requested:
+        request_final_voxel_view_distance()
+    return not shutdown_requested
 
 func request_graceful_quit(exit_code := 0) -> void:
-    if runtime_loading_active:
+    if shutdown_requested:
         return
-    runtime_loading_active = true
+    shutdown_requested = true
     if hud != null and hud.has_method("show_loading_overlay"):
         hud.show_loading_overlay("Saving and exiting")
     set_process(false)
@@ -2336,10 +2481,30 @@ func request_graceful_quit(exit_code := 0) -> void:
     call_deferred("_graceful_quit_deferred", exit_code)
 
 func _graceful_quit_deferred(exit_code: int) -> void:
+    # A startup/reset coroutine owns its source registries until it returns.
+    # Drain it before retiring those same owners; never race two lifecycles.
+    while startup_operation_active or runtime_loading_active:
+        await get_tree().process_frame
+    # A cancelled initial load or reset has only partial durable state. Never
+    # replace the last valid save with a snapshot of that unfinished world.
+    var save_ready_world := not startup_loading_active and startup_loading_failure_result.is_empty() \
+        and String(startup_readiness_domains.get("gameplay", {}).get("status", "")) == "ready"
+    runtime_loading_active = true
+    set_process(false)
+    set_process_unhandled_input(false)
+    set_physics_process(false)
+    set_registered_npc_physics_enabled(false)
+    if player != null:
+        player.velocity = Vector3.ZERO
+        player.set_physics_process(false)
+    # Release audio playbacks while the audio server still has frames to drain,
+    # rather than waiting for node destruction during engine shutdown.
+    if is_instance_valid(audio_effects):
+        audio_effects.shutdown_audio()
     await startup_loading_yield("Saving and exiting")
     if save_system != null and save_system.has_method("has_async_save_pending"):
         await wait_for_async_save_before_quit()
-    if autosave_enabled and save_system != null and autosave_dirty:
+    if save_ready_world and autosave_enabled and save_system != null and autosave_dirty:
         await startup_loading_yield("Saving world")
         var snapshot: Dictionary = create_save_snapshot()
         var started := false
@@ -2356,24 +2521,27 @@ func _graceful_quit_deferred(exit_code: int) -> void:
     get_tree().quit(exit_code)
 
 func retire_generated_scenes_before_world_reset() -> bool:
+    if shutdown_requested: return false
     reset_streaming_region_demand()
+    var deadline := Time.get_ticks_msec() + 30000
     var autonomy = npc_system.get("autonomy_system") if is_instance_valid(npc_system) else null
     var navigation = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
     if navigation != null:
         navigation.begin_publication_reset()
         while true:
+            if shutdown_requested or Time.get_ticks_msec() >= deadline: return false
             if not navigation.advance_publication().get("busy",true): break
             await startup_loading_yield("Clearing previous navigation")
     if structure_system == null:
         return navigation == null or navigation.finish_publication_reset()
     var publication = structure_system.citadel_publication
     publication.begin_world_reset()
-    var deadline := Time.get_ticks_msec() + 30000
+    deadline = Time.get_ticks_msec() + 30000
     while not publication.world_reset_ready():
-        if Time.get_ticks_msec() >= deadline: return false
+        if shutdown_requested or Time.get_ticks_msec() >= deadline: return false
         # startup_loading_yield already advances this queue once per frame.
         await startup_loading_yield("Clearing previous landmarks")
-    return navigation == null or navigation.finish_publication_reset()
+    return not shutdown_requested and (navigation == null or navigation.finish_publication_reset())
 
 func wait_for_async_save_before_quit() -> void:
     if save_system == null or not save_system.has_method("has_async_save_pending"):

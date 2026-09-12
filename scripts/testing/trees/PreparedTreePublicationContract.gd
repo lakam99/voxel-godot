@@ -160,7 +160,73 @@ func run_contract() -> void:
     before.free()
     after.free()
     test_prepared(source)
+    test_detached_queue_lifecycle()
     finish()
+
+func test_detached_queue_lifecycle() -> void:
+    # Synthetic lifecycle contract using real queue intake and scene membership.
+    # No workers, automatic processing, or gameplay acceptance in this fixture.
+    var queue = load("res://scripts/environment/TreePublicationQueue.gd").new()
+    get_root().add_child(queue)
+    queue.set_process(false)
+    var viewer := CharacterBody3D.new()
+    get_root().add_child(viewer)
+    queue.set_viewer(viewer)
+    var parent := Node3D.new()
+    var body := StaticBody3D.new()
+    parent.add_child(body)
+    var records: Array = ComposerScript.build_tree_placement_records([Vector3.ZERO], 72819)
+    var request: Dictionary = records[0].treeRequest.duplicate(true)
+    request.treeWorldPosition = Vector3.ZERO
+    request.publicationPriority = 0.0
+    check("detached_queue_intake_retained", queue.enqueue(body, request) and queue.pending_tasks.size() == 1)
+    var task: Dictionary = queue.pending_tasks.values()[0]
+    queue.refresh_collision_visibility_proxies()
+    check("detached_body_not_live_collision_without_cancelling_task", not queue.body_is_collision_visibility_relevant(body) and not queue.body_is_collision_visible(body) and queue._publication_body(task) == body and queue.pending_tasks.size() == 1 and queue.cancelled_count == 0)
+    get_root().add_child(parent)
+    queue.refresh_collision_visibility_proxies()
+    check("reattached_near_body_gets_collision_visibility_proxy", queue.body_is_collision_visibility_relevant(body) and queue.body_is_collision_visible(body) and body.get_node_or_null("TreeVisibilityProxy") != null)
+    queue.remember_published_lod(body, task.request)
+    parent.remove_child(body)
+    queue.refresh_collision_visibility_proxies()
+    queue.refresh_published_lods()
+    check("parentless_detach_retains_lod_and_pending_recipe", queue.published_lod_records.size() == 1 and queue.pending_tasks.size() == 1 and queue._publication_body(task) == body and not queue.body_is_collision_visible(body))
+    check("detached_pending_task_not_retiered", not queue.retier_task_for_current_viewer(task, body))
+    parent.add_child(body)
+    queue.refresh_published_lods()
+    check("reattached_lod_and_visibility_resume_without_duplicate_request", queue.published_lod_records.size() == 1 and queue.pending_tasks.size() == 1 and queue.body_is_collision_visible(body))
+    queue.set_viewer_motion_snapshot(Vector3.ZERO, Vector3.FORWARD, Vector3.FORWARD)
+    get_root().remove_child(viewer)
+    check("detached_viewer_invalidates_cached_live_position", queue.current_viewer_position() == Vector3.INF)
+    queue.refresh_viewer_motion_snapshot()
+    queue.refresh_collision_visibility_proxies()
+    queue.refresh_published_lods()
+    queue.selected_lod_tier(request)
+    queue.effective_priority(task, Time.get_ticks_usec())
+    queue.highest_priority_pending_sequence()
+    check("detached_viewer_queries_preserve_retryable_queue", queue.viewer_motion_snapshot.is_empty() and queue.pending_tasks.size() == 1 and queue.cancelled_count == 0)
+    get_root().add_child(viewer)
+    check("reattached_viewer_resumes_live_queries", queue.current_viewer_position() == viewer.global_position and queue.body_is_collision_visibility_relevant(body))
+    # A preassembled visual isolates publication ownership from recipe workers.
+    # Parentless preparation may finish locally; reattachment makes it visible.
+    var prepared_body := StaticBody3D.new()
+    var visual := Node3D.new()
+    visual.name = "GeneratedTreeVisual"
+    var wood_root := Node3D.new()
+    visual.add_child(wood_root)
+    queue.enqueue_completed_task({"body": weakref(prepared_body), "request": task.request, "recipe": {}, "visual": visual, "woodRoot": wood_root, "renderStage": "commit"})
+    for _attempt in range(4):
+        if not queue.has_completed_tasks():
+            break
+        queue.publish_completed_recipes()
+    check("parentless_prepared_visual_not_discarded", queue.cancelled_count == 0 and prepared_body.get_node_or_null("GeneratedTreeVisual") == visual and not queue.body_is_collision_visible(prepared_body))
+    parent.add_child(prepared_body)
+    check("reattached_prepared_visual_becomes_visible", queue.body_is_collision_visible(prepared_body))
+    queue.cancel_body_publication(body)
+    check("explicit_cancellation_still_invalidates_body", queue._publication_body(task) == null)
+    queue.free()
+    parent.free()
+    viewer.free()
 
 func test_prepared(source: String) -> void:
     var fixture = harness(source, true)
@@ -248,7 +314,7 @@ func finish() -> void:
         passed = passed and bool(result.passed)
     var report := {"passed": passed, "complete": true, "evidenceLevel": "headless_source_service_contract",
         "baselineRevision": BASELINE_REVISION, "sourceRecipeSeed": 72819, "checks": results,
-        "limitations": ["No live hookup, headed gameplay, collision traversal, harvest/save round-trip, NPC navigation or performance acceptance.", "Production functions execute in an extracted harness with overlap-resolution and navigation-notification spies; ordinary baseline is compared against pinned pre-extraction commit 11cf54b.", "Real queue intake is inspected with processing disabled; visual worker completion and screenshots are not tested."]}
+        "limitations": ["No live hookup, headed gameplay, collision traversal, harvest/save round-trip, NPC navigation or performance acceptance.", "Production functions execute in an extracted harness with overlap-resolution and navigation-notification spies; ordinary baseline is compared against pinned pre-extraction commit 11cf54b.", "Queue lifecycle checks use detached/reattached nodes and a synthetic preassembled visual with automatic processing disabled; recipe worker completion and screenshots are not tested."]}
     var path := OS.get_environment("VOXEL_PREPARED_TREE_CONTRACT_REPORT")
     var file := FileAccess.open(path, FileAccess.WRITE)
     if file == null:

@@ -1325,10 +1325,11 @@ func _maybe_capture_scripted_order_stall_trace(actor_id: String, entry: Dictiona
 	entry["_scriptedOrderStallTraceOrderId"] = order_id
 	counters["scriptedOrderStallTraceCaptures"] = int(counters.get("scriptedOrderStallTraceCaptures", 0)) + 1
 	var body := entry.get("body") as Node3D
+	var trace_seed = main.get("seed_text") if main != null else null
 	var trace := {
 		"capturedWallMsec": now_msec,
 		"authorityPhysicsFrame": frame_serial,
-		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"worldSeed": trace_seed if trace_seed is String else "",
 		"actorId": actor_id,
 		"order": _trace_safe_value(order),
 		"submittedPhysicsFrame": int(order.get("submittedPhysicsFrame", -1)),
@@ -1401,10 +1402,11 @@ func _observe_collision_recovery_stall(record: Dictionary, details) -> void:
 	var entry_value = actor_entries.get(actor_id, {})
 	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
 	var body := entry.get("body") as Node3D
+	var trace_seed = main.get("seed_text") if main != null else null
 	var trace := {
 		"capturedWallMsec": now_msec,
 		"authorityPhysicsFrame": frame_serial,
-		"worldSeed": String(main.get("seed_text", "")) if main != null else "",
+		"worldSeed": trace_seed if trace_seed is String else "",
 		"actorId": actor_id,
 		"firstCollisionWallMsec": first_msec,
 		"wallRecoveryMsec": wall_wait_msec,

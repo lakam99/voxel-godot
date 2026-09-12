@@ -22,6 +22,8 @@ var warmup_frames_override := -1
 var elapsed := 0.0
 var finished := false
 var main: Node = null
+var scenario_retirement_active := false
+var pending_exit_code := 0
 var measured_player_start := Vector3.INF
 var measured_player_end := Vector3.INF
 var traversal_direction := SPRINT_TRAVERSAL_DIRECTION
@@ -45,7 +47,6 @@ func _process(delta: float) -> void:
         finish(1)
 
 func configure_from_environment() -> void:
-    OS.set_environment("VOXEL_RUNTIME_PERF_FAST_BOOT", "1")
     scenario = OS.get_environment("VOXEL_RUNTIME_PERF_SCENARIO")
     if scenario == "":
         scenario = "All"
@@ -79,12 +80,16 @@ func run() -> void:
     for scenario_name in scenarios_to_run():
         write_progress("scenario:%s" % scenario_name)
         var result: Dictionary = await run_scenario(scenario_name)
+        if finished:
+            return # Startup failure has already written the report and begun shutdown.
         results.append(result)
         if not bool(result.get("passed", false)):
             failure_count += 1
     var report := {
         "schemaVersion": 1,
         "suite": "runtime_performance_observation",
+        "startupScope": "ordinary_startup_diagnostic_scenarios",
+        "gameplayAcceptance": false,
         "scenario": scenario,
         "seed": seed,
         "runToken": run_token,
@@ -113,12 +118,21 @@ func run_scenario(scenario_name: String) -> Dictionary:
     main = MAIN_SCENE.instantiate()
     write_progress("scenario:%s:add_child" % scenario_name)
     add_child(main)
-    write_progress("scenario:%s:first_process_frame" % scenario_name)
-    await get_tree().process_frame
-    write_progress("scenario:%s:first_physics_frame" % scenario_name)
-    await get_tree().physics_frame
+    write_progress("scenario:%s:ordinary_startup" % scenario_name)
+    var startup_ready: bool = await main.wait_for_startup_loading_complete(240.0, false)
+    if finished:
+        return {}
+    if not startup_ready:
+        var report := make_failure_report("startup_not_ready")
+        report["startupLoadingFailureResult"] = main.get("startup_loading_failure_result").duplicate(true) if is_instance_valid(main) else {}
+        report["failedScenario"] = scenario_name
+        write_report(report)
+        finish(1)
+        return report
     write_progress("scenario:%s:configure" % scenario_name)
     configure_main_for_scenario(scenario_name)
+    # Scenario placement is diagnostic; ordinary demand and motion gates remain active.
+    main.update_streaming_region_demand()
     var playtest_survival_policy: Dictionary = {
         "required": scenario_uses_night(scenario_name),
         "enabled": false,
@@ -140,6 +154,8 @@ func run_scenario(scenario_name: String) -> Dictionary:
         warmup_count = warmup_frames_override
     write_progress("scenario:%s:warmup:%d" % [scenario_name, warmup_count])
     await warmup_frames(warmup_count)
+    if finished:
+        return {}
     write_progress("scenario:%s:prime_navigation" % scenario_name)
     prime_navigation_snapshot()
     write_progress("scenario:%s:measure" % scenario_name)
@@ -155,6 +171,8 @@ func run_scenario(scenario_name: String) -> Dictionary:
         if frame < 8 or frame % 30 == 0:
             write_progress("scenario:%s:measure_frame:%d:await" % [scenario_name, frame])
         await get_tree().process_frame
+        if finished:
+            return {}
         if frame < 8 or frame % 30 == 0:
             write_progress("scenario:%s:measure_frame:%d:sample" % [scenario_name, frame])
         if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
@@ -181,10 +199,28 @@ func run_scenario(scenario_name: String) -> Dictionary:
         int(metrics.get("maxNavmeshInstallP95Usec", 0)),
         int(metrics.get("maxNavmeshPathQueryP95Usec", 0))
     ]
-    if main != null:
+    if is_instance_valid(main):
+        scenario_retirement_active = true
+        write_progress("scenario:%s:retiring" % scenario_name)
+        main.set_process(false)
+        main.set_process_unhandled_input(false)
+        main.set_physics_process(false)
+        main.set_registered_npc_physics_enabled(false)
+        var player_body := main.get("player") as CharacterBody3D
+        if is_instance_valid(player_body):
+            player_body.velocity = Vector3.ZERO
+            player_body.set_physics_process(false)
+        # Reuse production drains without quitting the process between scenarios.
+        await main.wait_for_async_save_before_quit()
+        await main.wait_for_terrain_workers_before_quit()
+        await main.wait_for_npc_navigation_before_quit()
         main.queue_free()
         main = null
         await get_tree().process_frame
+        scenario_retirement_active = false
+        if finished:
+            get_tree().quit(pending_exit_code)
+            return {}
     return {
         "id": "runtime_perf_%s" % scenario_name.to_lower(),
         "scenario": scenario_name,
@@ -1059,6 +1095,8 @@ func make_failure_report(reason: String) -> Dictionary:
     return {
         "schemaVersion": 1,
         "suite": "runtime_performance_observation",
+        "startupScope": "ordinary_startup_diagnostic_scenarios",
+        "gameplayAcceptance": false,
         "scenario": scenario,
         "seed": seed,
         "runToken": run_token,
@@ -1073,6 +1111,14 @@ func make_failure_report(reason: String) -> Dictionary:
     }
 
 func finish(code: int) -> void:
+    if finished:
+        return
     finished = true
+    pending_exit_code = code
     write_progress("finished")
+    if scenario_retirement_active:
+        return # The in-flight owner drains finish before the process exits.
+    if is_instance_valid(main) and main.is_inside_tree():
+        main.request_graceful_quit(code)
+        return
     get_tree().quit(code)

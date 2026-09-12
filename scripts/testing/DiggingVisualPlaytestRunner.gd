@@ -21,6 +21,7 @@ const DIG_VISUAL_PATCH_RADIUS := 4
 const DIG_VISUAL_MIN_DRY_HEIGHT := 4.0
 
 var main: Node3D
+var startup_failure_result: Dictionary = {}
 var player: CharacterBody3D
 var gameplay_camera: Camera3D
 var observer_camera: Camera3D
@@ -96,7 +97,7 @@ func apply_resolution() -> void:
 
 func run() -> void:
 	OS.set_environment("VOXEL_TEST_SEED", seed)
-	OS.set_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT", "1")
+	OS.set_environment("VOXEL_DIGGING_VISUAL_FAST_BOOT", "" if live_process else "1")
 	main = MAIN_SCENE.instantiate()
 	main.set("render_distance", 1)
 	main.set("visual_quality", {
@@ -106,10 +107,15 @@ func run() -> void:
 	})
 	add_child(main)
 	write_progress("main_instantiated")
-	if not live_process:
-		main.set_process(false)
-		main.set_physics_process(false)
-	await wait_process_frames(2)
+	# Live streaming needs ordinary demand; only the frozen visual fixture skips it.
+	if not await main.wait_for_startup_loading_complete(240.0, not live_process):
+		if is_instance_valid(main):
+			startup_failure_result = main.get("startup_loading_failure_result").duplicate(true)
+		add_result("digging_visual_startup_setup", false, JSON.stringify({"reason": "startup_setup_not_ready", "startupLoadingFailureResult": startup_failure_result, "gameplayAcceptance": false}))
+		finish(1)
+		return
+	main.set_process(live_process)
+	main.set_physics_process(live_process)
 	bind_scene_nodes()
 	if main == null or player == null or gameplay_camera == null or world_generation == null or inventory_system == null:
 		add_result("digging_visual_scene_ready", false, "main/player/camera/world_generation/inventory missing")
@@ -123,6 +129,8 @@ func run() -> void:
 	load_test_chunks()
 	setup_inventory()
 	position_player_for_depth(0)
+	if live_process:
+		main.update_streaming_region_demand()
 	await wait_for_surface_collision(420)
 	await flush_terrain_work_after_dig()
 
@@ -432,7 +440,8 @@ func planned_solid_cells(start_cell: Vector3i, count: int) -> Array[Dictionary]:
 	return planned
 
 func load_test_chunks() -> void:
-	clear_loaded_chunks()
+	if not live_process:
+		clear_loaded_chunks()
 	var center_key: Vector2i = main.call("cell_to_chunk", top_cell.x, top_cell.z)
 	for dz in range(-1, 2):
 		for dx in range(-1, 2):
@@ -1150,6 +1159,9 @@ func finish(exit_code: int) -> void:
 	finished = true
 	save_report()
 	write_progress("finish:%d" % exit_code)
+	if is_instance_valid(main) and main.is_inside_tree():
+		main.request_graceful_quit(exit_code)
+		return
 	get_tree().quit(exit_code)
 
 func save_report() -> void:
@@ -1163,6 +1175,9 @@ func save_report() -> void:
 		"passed": all_passed(),
 		"status": "passed" if all_passed() else "failed",
 		"nonHeadlessRequired": true,
+		"startupScope": "ordinary_startup_diagnostic_digging" if live_process else "diagnostic_setup_excluded_from_gameplay",
+		"gameplayAcceptance": false,
+		"startupLoadingFailureResult": startup_failure_result,
 		"evidenceLevel": "acceptance_visual",
 		"acceptanceClaims": [ACCEPTANCE_CLAIM],
 		"requiredScreenshots": capture_names(),
