@@ -549,10 +549,7 @@ func load_pcm_wav(path: String, loop := false) -> AudioStreamWAV:
         cursor += 8 + chunk_size + (chunk_size % 2)
     if data_offset < 0 or data_size <= 0 or sample_rate <= 0 or channels < 1 or channels > 2 or bits_per_sample != 16:
         return null
-    var data := PackedByteArray()
-    data.resize(data_size)
-    for i in range(data_size):
-        data[i] = bytes[data_offset + i]
+    var data := bytes.slice(data_offset, data_offset + data_size)
     var stream := AudioStreamWAV.new()
     stream.format = AudioStreamWAV.FORMAT_16_BITS
     stream.mix_rate = sample_rate
