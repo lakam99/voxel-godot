@@ -2,6 +2,7 @@ extends Node
 ## Opt-in observer owned by a playtest. Never changes generation or gameplay.
 ## Cadence is time between RenderingServer updates, not display presentation.
 const MAX_PHASES := 32
+const MAX_SPIKE_RECORDS := 128
 const BIN_MS := 0.1
 const LAST_BIN := 10000
 
@@ -57,6 +58,11 @@ var _render_configuration_changes := 0
 var _renderer := ""
 var _overall_cadence := Distribution.new()
 var _boundary_cadence := Distribution.new()
+var _started_usec := 0
+var _first_draw_usec := 0
+var _cadence_spikes: Array[Dictionary] = []
+var _cadence_spike_count := 0
+var _worst_cadence_interval: Dictionary = {}
 
 func start(viewport: Viewport) -> bool:
 	if _running or not is_instance_valid(viewport): return false
@@ -65,6 +71,7 @@ func start(viewport: Viewport) -> bool:
 	_renderer = RenderingServer.get_current_rendering_method()
 	_available = DisplayServer.get_name() != "headless"
 	if not _available: return false
+	_started_usec = Time.get_ticks_usec()
 	RenderingServer.viewport_set_measure_render_time(viewport.get_viewport_rid(), true)
 	RenderingServer.frame_post_draw.connect(_after_draw)
 	_running = true
@@ -77,6 +84,7 @@ func _after_draw() -> void:
 		stop()
 		return
 	_draws += 1
+	if _first_draw_usec == 0: _first_draw_usec = now
 	var current_size := Vector2i(viewport.get_visible_rect().size)
 	if _draws > 1 and current_size != _observed_size: _size_changes += 1
 	_observed_size = current_size
@@ -104,6 +112,18 @@ func _after_draw() -> void:
 		var interval_ms := float(now - _last_draw_usec) / 1000.0
 		_overall_cadence.observe(interval_ms)
 		if _last_phase != label: _boundary_cadence.observe(interval_ms)
+		# One bounded timeline plus the worst interval, even after its retention
+		# fills. Use the same monotonic clock as startup events; render timings
+		# remain separate because the GPU sample may describe an earlier frame.
+		var is_worst: bool = interval_ms > float(_worst_cadence_interval.get("durationMs",-1.0))
+		if interval_ms > 33.0: _cadence_spike_count += 1
+		if is_worst or (interval_ms > 33.0 and _cadence_spikes.size() < MAX_SPIKE_RECORDS):
+			var interval := {"startUsec":_last_draw_usec,"endUsec":now,"durationMs":interval_ms,
+				"fromPhase":_last_phase,"toPhase":label,"processFrame":Engine.get_process_frames(),
+				"physicsFrame":Engine.get_physics_frames()}
+			if is_worst: _worst_cadence_interval = interval
+			if interval_ms > 33.0 and _cadence_spikes.size() < MAX_SPIKE_RECORDS:
+				_cadence_spikes.append(interval)
 	# Do not attribute the interval spanning a phase transition to either phase.
 	if _last_draw_usec > 0 and _last_phase == label:
 		bucket.cadence.observe(float(now - _last_draw_usec) / 1000.0)
@@ -144,6 +164,11 @@ func summary() -> Dictionary:
 		"renderConfigurationChanges":_render_configuration_changes,
 		"sizeScope":"Viewport size is logical UI coordinates; renderTargetSize is the window/subviewport output size before scaling_3d_scale.",
 		"overallCadence":_overall_cadence.summary(), "phaseBoundaryCadence":_boundary_cadence.summary(),
+		"startedUsec":_started_usec,"firstDrawUsec":_first_draw_usec,
+		"firstDrawDelayMs":float(_first_draw_usec-_started_usec)/1000.0 if _first_draw_usec>0 else null,
+		"cadenceSpikes":_cadence_spikes.duplicate(true),"worstCadenceInterval":_worst_cadence_interval.duplicate(true),
+		"cadenceSpikeCount":_cadence_spike_count,"unrecordedCadenceSpikes":_cadence_spike_count-_cadence_spikes.size(),
+		"spikeScope":"First 128 intervals over 33ms plus the worst interval independently; absolute monotonic timestamps. First-draw delay is separate from cadence.",
 		"cadenceScope":"Monotonic intervals between frame_post_draw callbacks; not OS presentation timing. Phase-boundary intervals included overall and excluded only from individual phases.",
 		"renderScope":"Last available root-viewport CPU/GPU measurements; GPU results may be delayed. Not frame-aligned with script or cadence samples. Frame setup CPU reported separately.",
 		"percentileResolutionMs":BIN_MS, "percentileOverflowAtMs":LAST_BIN*BIN_MS,
