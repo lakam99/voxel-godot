@@ -125,6 +125,8 @@ individual symptom:
 
 - Preserve user work. Check `git status --short` before editing.
 - Use `apply_patch` for manual edits.
+- Use the existing Node.js runners and shared process helpers for automation.
+  Do not introduce PowerShell runner replacements or a parallel test framework.
 - Keep changes focused. Avoid broad refactors while fixing gameplay bugs.
 - Do not discard, reset, clean, or rewrite branches unless the user explicitly asks.
 - Do not weaken tests to make a change pass.
@@ -167,6 +169,14 @@ individual symptom:
 - Door/home acceptance must prove the visible sequence: approach the door, open it before crossing, enter a strict interior location, clear the threshold, and close the door after clearance. Stats and metadata may support the claim, but they cannot be the only proof.
 - New headed NPC acceptance runners must call `tools/npc/assert-npc-acceptance-runner-clean.mjs` before launching Godot.
 - Every NPC/pathfinding acceptance claim must include the command, report path, screenshots or trace/timeline evidence when visual behavior matters, and a brief statement of what the test does and does not prove.
+- For startup measurements at a particular location, select the initial spawn
+  before attaching the world and starting terrain streaming. A later teleport
+  measures relocation and competing streaming work, not that location's cold boot.
+  An explicit-spawn diagnostic still does not prove ordinary menu/exploration flow.
+- When an API becomes asynchronous, migrate synthetic fixtures to admitted input
+  and accepted output while preserving their substantive assertions. Do not add a
+  synchronous production fallback to satisfy an old immediate-result fixture.
+  Grammar parsing is not Godot compilation, and compilation is not gameplay proof.
 
 ## Important Plans And Docs
 
@@ -329,6 +339,10 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - Smooth terrain rendering must not erase physical density. Block/cell authority is acceptable and often preferred for correctness; smooth the mesh over it rather than replacing volume with thin sheets.
 - Lighting regressions are gameplay-visible. Daylight, skylight, torch/block light, shadows, underground darkness, and translucent/metallic-looking terrain need visual verification when terrain or materials change.
 - When changing terrain generation, chunk meshing, digging, collision, lighting, or underground rules, run relevant visual playtests and inspect screenshots. Metadata-only checks are not enough for leaks, transparency, or material/lighting bugs.
+- Placement height, edited-volume surface projection and the interpolated native
+  collision surface are different contracts. Verify against the authority being
+  tested; do not change generation or widen tolerances merely to match a placement
+  helper. Keep the sampled cells/materials and actual collision hit in the evidence.
 
 ## Runtime And Loading Rules
 
@@ -347,6 +361,42 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - Loading work may be budgeted across frames, but readiness commands and gameplay intents must never be dropped when a budget or dependency is pending. Either keep loading active or retain an explicit retryable request with bounded telemetry.
 - Tutorial playtests can be smoother than normal gameplay because they may stage or constrain the world differently. Use normal runtime performance passes when diagnosing player-reported gameplay hitches.
 - Treat sprinting/running traversal as a streaming stress test. It is the common path that exposes chunk, terrain, prop, NPC, and autosave spikes.
+- Loading and teardown must gate every execution owner, including independent
+  Node physics callbacks; disabling Main or actor bodies alone may leave shared
+  systems advancing. Keep required preparation work runnable through its explicit
+  loading path, and release gameplay only after current dependencies acknowledge.
+
+## Asynchronous Publication And Ownership
+
+- Distinguish source capture, worker preparation, upload/registration and owner
+  acknowledgement. A queued request, completed worker or visible node alone does
+  not establish that collision, interactions and navigation are usable.
+- Worker inputs must be owned value data with complete source identity. Making an
+  outer Dictionary read-only does not freeze nested containers or remove Nodes,
+  WeakRefs, RIDs and Callables. Use the existing producer admission/immutable
+  artifact contracts instead of trusting arbitrary read-only containers.
+- Bind accepted results to the current world/source revision, weak owner and
+  actual installation. Identical geometry from a replacement owner is not proof
+  that an earlier installation is still current. Validate before cache reuse and
+  again after asynchronous completion.
+- Cache eviction must not lose retained demand or force a valid installation to
+  reconstruct its proof. Conversely, a source-key marker cannot excuse a dirty,
+  unloaded or replaced installation. An authoritative empty result also needs
+  explicit acceptance and invalidation; missing data is never empty success.
+- Deduplication must preserve new urgency: existing background demand can become
+  player-safety work. Keep requests retryable under backpressure, and report the
+  concrete pending dependency, owner/source identity and queue stage with bounded
+  telemetry rather than one ambiguous readiness boolean.
+- Regional dependency closure follows actual intersecting supports, crossings
+  and declared scenario requirements. Do not expand every local request to a
+  whole settlement or landmark by convenience, or omit a real dependency merely
+  to release movement sooner. Optional appearance must not add surprise blockers.
+- Retain the old valid representation until its replacement is complete. Transfer
+  all large payload aliases through the existing cancellation/retirement owner;
+  moving construction to a worker while destroying its last large alias on Main
+  can simply move the hitch to cleanup. Shutdown must drain owned workers.
+- Keep temporary copied scripts and alternate fixtures under an ignored artifact
+  directory with `.gdignore`; otherwise Godot can import duplicate class names.
 
 ## Performance Standards
 
@@ -368,6 +418,22 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
   of changing acceptance. Capture exact producer IDs/categories and source
   revisions so later work starts at the owning decision rather than repeating
   broad diagnostics.
+- Measure total frame cadence separately from Main's `_process` duration,
+  rendering CPU/GPU time and worker time. Worker duration is not main-frame CPU
+  cost. Callback-to-callback stage intervals are not exclusive function timings;
+  overlapping phases and maxima from different frames must not be added together.
+- A cooperative budget cannot interrupt one oversized operation. Measure capture,
+  copying/sealing, upload and registration as well as worker computation, and
+  split the measured operation before increasing the budget. Spatial batching
+  must earn its extra draw calls through measured culling benefit.
+- Record initial playable readiness and whole-site completion separately. Compare
+  equivalent readiness contracts, viewport, seed and traversal; report fresh
+  process/empty generated caches separately from warm-cache results. Runner wall
+  time may include setup, inspection, export and shutdown, not just generation.
+- Inspect movement holds, recovery attempts and tail frame times even when a run
+  reaches its destination and all diagnostic checks pass. Batch independent
+  defects found in that snapshot before another full run; do not repeatedly grow
+  tests/reviews while postponing the next production comparison.
 
 ## Key Systems
 
@@ -513,6 +579,10 @@ Use `scripts/story/`, `resources/story/`, `scenes/story/`, and `scenes/story_tes
 Do not assume the active branch or default branch name. Discover both from Git,
 and confirm that the current worktree is the one named by the task before
 editing or running tests.
+Sibling project directories may be different Git worktrees with different
+branches. A branch name alone does not carry another worktree's uncommitted
+changes. At handoff distinguish committed code, working-tree edits and ignored
+evidence, and identify the exact directory the next agent must retain.
 
 Before major work:
 
