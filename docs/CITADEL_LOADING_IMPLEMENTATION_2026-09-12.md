@@ -2,26 +2,30 @@
 
 Controlling plan: [investigation and implementation plan](C:/Users/arkam/.codex/visualizations/2026/09/12/01a09341-209a-75c0-ae6b-63c3dd2c4a0e/CITADEL_LOADING_INVESTIGATION_AND_PLAN_2026-09-11.md).
 
+Current status: implementation is active following the user's explicit authorization and the bounded baseline review. The final baseline collection is **11/17 suites passing**, with six failures preserved below; this is not a green release baseline. The source handoff passes 844 combined focused assertions and complete dense-navigation parity; staged audio passes 96 assertions. The first integrated headed checkpoint **failed the approach time limit**: frame stalls decreased, but startup did not improve and publication holds prevented arrival. Capture remains unpromoted pending reassessment. The PCM copy optimization is committed as `5a63c00`, the deferred handoff as `c59313a`, and opening/lower facade passed 31 typed parity checks. Integrated gameplay and performance acceptance remain outstanding. Earlier sections preserve historical failures and pending states; the terminal results below describe the current checkpoint.
+
 ## Starting state
 
 - Worktree: `voxel-biome-world-godot-citadel-visuals`, branch `codex/world-streaming-architecture`, HEAD `8f9c2cb`.
 - Preserve the twelve existing tracked modifications and untracked `NavigationTileFilter.gd` listed in the September 11 handoff. They are the unpromoted worker integration and fixture migration, not a performance acceptance checkpoint.
 - Known reproduction: world `atlas-3376622889`, region `-2,-2`, recipe `1393179273`, initial cell `-3334,-2666`.
 - Investigation baseline: startup contracts 54/54; lifecycle contracts 144/144. Navigation-world compilation stopped at an inferred boolean in the migrated fixture. No live routing regression was established by that compilation failure.
-- Baseline production remains frozen while the evidence agent repairs only the two explicit assertion types and executes the applicable existing runners.
+- At the start, baseline production was frozen while the evidence agent repaired the two explicit assertion types and executed the applicable existing runners.
 
 ## Work ownership and gates
 
 | Package | Owner | Current state |
 |---|---|---|
-| A: baseline and evidence | evidence agent | Two mechanical fixture type corrections; baseline checks in progress |
-| B: source repetition | generation agent | Read-only transaction/replay design until baseline gate passes |
-| C/D: compact obligations and demanded publication | navigation agent | Read-only interface and dependency design until baseline gate passes |
-| E: bounded capture, demand and acceptance | integrator | Read-only capture, scheduling and source-validity review |
-| F: derived cache and remaining frame work | integrator | Read-only ownership and compatibility review |
+| A: baseline and evidence | evidence agent | Bounded collection complete; six failures preserved; frozen acquisitions complete |
+| B: source repetition | generation agent | Opening/lower transaction changes pass 31 typed parity checks; lower phase has no measured speedup yet |
+| C/D: compact obligations and demanded publication | navigation agent | Deferred handoff committed `c59313a`; focused and dense parity pass; grouped readiness not cut over |
+| E: bounded capture, demand and acceptance | integrator | Retained-capture lifecycle165, nav-world86 and route132 pass; prior headed approach failure remains, candidate unpromoted |
+| F: derived cache and remaining frame work | integrator/evidence agent | PCM copy committed; staged audio96/96 and reduced headed startup spike, individual file steps remain about42ms |
 | G: integrated acceptance | integrator with evidence agent | Pending implementation |
 
 No concurrent performance benchmarks. Freeze source before comparisons. Unexpected results trigger evidence review and a decision before another edit/run cycle. Route search, movement, door execution and traffic stay protected; authorized navigation changes concern publication only.
+
+The next combined candidate batch covers the deferred dense handoff, cooperative local tile capture and staged audio. Capture scans registry inventory cooperatively and copies local collision facts, with conservative invalidation on global static, semantic or door revision changes. Optimal local invalidation and acceptance unification remain outstanding. Exact collision-filter equivalence, private-height-cache isolation, stale source identity and generator/volume absence-to-presence rejection are pending contract verification. Audio now reserves the original procedural and fallback objects before its first yield, then resolves one file per frame through the shared synchronous/staged job sequence; the earlier approximately 44ms atomic file measurement remains a limitation. Its new direct-service and real audio-owner contract will compare all 22 streams to the pinned pre-optimization evidence and exercise staged priming, missing-file fallback identity, cancellation and exit. These candidate descriptions are implementation status, not passing evidence or whole-game acceptance.
 
 ## Design corrections from implementation review
 
@@ -116,3 +120,178 @@ There is no complete existing 2D live-block registry. Cached blocked/door/path c
 A resumable capture must bind owner/main/generator lifetime, seed, tile/structure identities, the static cache epoch, terrain revision and immutable generated-site profile snapshot. Profile admission clears surface caches without incrementing terrain-volume revision; same-seed reset can also return that revision to zero. Tile source keys alone do not prove unchanged neighboring halo records. Recheck identities on resume and final seal, and retire stale work through the existing owner. Cursor-local projected heights must not populate shared unversioned caches after their source changes.
 
 The headed diagnostic now also observes inherited synchronous startup setup calls and bounded stored queue/acceptance facts. It does not request sources, change priority, advance publication or calculate readiness. These facts distinguish absent acceptance, dirty/binding/descriptor/receipt mismatches and pending scheduling without creating a diagnostic navigation authority. These additions await Godot compilation and the frozen headed capture.
+
+## Bounded fixture ownership batch
+
+Motor passed **48/48** after restoring the two synthetic adapter counters. The next aggregate passed its first seven suites, then traffic passed **38/38** assertions but failed the strict exit gate because an inline detached `FakeMain` leaked (`godot-fLq5Uy`). That remained a failed suite. The response was one ownership audit across the remaining fixtures, not a production route change.
+
+The resulting fixture cohort frees pure-height helper Nodes, gives nested fake main/player objects explicit parent ownership, reclaims detached fixture roots after each case, removes one unused simulation-service reference cycle, and attaches transform subjects before global-coordinate access. Existing assertions remain intact. Interaction already tracks its transient Nodes, and observation has no standalone Node allocations; neither needed a blanket change.
+
+All eight affected fixture/observer scripts compile cleanly: `artifacts/citadel-runtime-integration/implementation-baseline-03/cohort-compile-summary.json` contains their owned watchdog paths. The subsequent aggregate passed its first eight suites including traffic, then exposed a threat Node whose helper reads its global position. That same lifecycle omission received one explicit runner attachment. Further automatic fixture repair was stopped: the final aggregate omits `-StopOnFailure` to collect every remaining result in one batch while retaining all child assertion, warning/error and cleanup gates.
+
+```powershell
+node tools/npc/run-all-npc-tests.mjs -TimeMode Both -Seed atlas-1607926605 -ReportPath artifacts/citadel-runtime-integration/implementation-baseline-03/all-npc-04/report.json -TimeoutSeconds 1800
+```
+
+The streaming fixture's required current world-signature artifact was absent. The existing generator was run with its required fixed seed, `node tools/run-world-signature.mjs -Visible -Seed atlas-1492 -TimeoutSeconds 900`. Actual output matched the untouched tracked baseline byte for byte: 423,894 bytes, SHA-256 `a66636ccd20fa67a5b2237fb97698a419eea9783435d04d9d93308dfc8b00044`. Watchdog `godot-IZmit8` records a clean headed exit. The actual output is archived as `implementation-baseline-03/world-signature-atlas-1492.json`; no reference was copied into a generated result.
+
+The render timestamp observer is committed as `bbfcd55`; its new cadence fields await headed measurement. The citadel fixture's synchronous setup spans and stored queue/acceptance sampling passed compilation and independent read-only review: at most 32 setup spans and 256 demand samples of eight tiles, with sampling cost recorded separately. Sampling invokes no source preparation, readiness or queue advancement and retains no geometry.
+
+For any measured character-resource startup fix, [Godot 4.6 background-loading guidance](https://docs.godotengine.org/en/4.6/tutorials/io/background_loading.html) requires checking threaded completion before retrieving a resource, since premature retrieval blocks. Its [thread-safety guidance](https://docs.godotengine.org/en/4.6/tutorials/performance/thread_safe_apis.html) also distinguishes detached scene construction from rendering-node/thread-model constraints and GPU synchronization. Simply moving the current GLTF scene construction to another thread is not an established safe or stall-free fix. Preserve the existing generated assets and exact material/mesh behavior; measure the new setup spans before choosing staged preparation, immutable scene sharing or a validated resource-loading path.
+
+## Collection findings relevant to scope
+
+The final collection reached interaction 45/45, streaming/save 42/42 and soak 26/26 with no assertion failures. Behavior aborted after 78 partial passing results because its synthetic `FakeMain` lacks both seed fields consulted by deterministic goal selection; this is incomplete fixture evidence, not a passing suite. No further automatic repair was made during collection.
+
+The go-home fixture completed 13/13 assertions on `atlas-1607926605`. Its inspected open/closed-door screenshots are very dark, so they do not independently make the complete sequence visually clear. The real tutorial opening run failed before Mira observation, but its recorded movement event identifies the gate: `terrainCollisionHold=true`, `terrainCollisionHoldFrames=120`, `proofReason=regional_dependencies_incomplete`, zero slide collisions, and unchanged player position 1.35m from the next waypoint. The route itself was ready with an eight-sample collision proof. This is direct evidence of the existing in-scope regional loading gate holding the player, not evidence to justify changing NPC routing or movement.
+
+The shared headed wrapper runs the pre-launch acceptance guard, but does not stamp its result into the gameplay report. Consequently completed visual children fail the required `forbiddenCallSelfScan.status == passed` report-integrity gate (missing on go-home, `passed-by-wrapper-before-launch` on the tutorial runner). Separate guard files corroborate that the preflight ran; they do not retroactively make the aggregate pass. Morning-outside and final-rescue each reported 1/1 gameplay assertions, with acceptance still failing this integrity gate. Morning setup stages the scenario and proves only subsequent departures. Preserve these distinctions when the final aggregate completes; no report will be edited into a pass.
+
+## Terminal baseline collection
+
+The final `all-npc-04` command above completed in **844.743 seconds: 17 suites, 11 passes, six failures**. Its [aggregate report](../artifacts/citadel-runtime-integration/implementation-baseline-03/all-npc-04/report.json) retains the exact child commands. Clean synthetic suites comprise contract 84, motor 48, nav-world 86, route 132, repair 34, door 48, avoidance 32, traffic 38, interaction 45, streaming/save 42 and soak 26 assertions: **615 total**. `Both` does not replace the separately listed Transition checks, and the literal registry does not cover every optional release runner.
+
+| Failed suite | Terminal evidence and limit |
+|---|---|
+| behavior | 78 partial assertions, then missing synthetic seed fields caused `String(null)` in deterministic goal selection. Owned error termination, not a pass. |
+| real_tutorial_playthrough | Two failures before door input/Mira observation. Ready collision-backed route was held by `regional_dependencies_incomplete`; acceptance images were never reached. |
+| go_home_visual | 13/13 gameplay assertions and required images; failed guard-result stamping. |
+| real_tutorial_morning_outside | 1/1 staged-morning assertion and images; failed guard-result stamping. |
+| real_tutorial_final_rescue | 1/1 staged-rescue assertion and required images; failed guard-result stamping. Earlier quest completion and player placement are fixture setup, not proved gameplay. |
+| town_job_cycle_visual | Owned timeout at 300 seconds; unfinished 16/16 partial daytime assertions, no completed night/morning evidence, plus guard-result stamping failure. |
+
+The aggregate's 1800-second option limits child Node execution but is not forwarded to the headed child (`aggregate-runner.mjs:13–33`); the shared wrapper supplies a 300-second Godot timeout. This is shorter than the town fixture's unoverridden 430-second default. No extension or replay was made after the final collection.
+
+The [process summary](../artifacts/citadel-runtime-integration/implementation-baseline-03/all-npc-04-process-summary.json) maps all 17 sequential jobs to exact watchdogs. Every job proves zero owned processes. Behavior (`godot-I7xmd6`, overall 126) and town (`godot-0NRqv5`, overall 125) retain forced cleanup and `cleanupPassed=false`; other jobs exited naturally with empty stderr. The [archive manifest](../artifacts/citadel-runtime-integration/implementation-baseline-03/all-npc-after-04/manifest.json) hashes 75 copied files, 47,958,570 bytes. Earlier aggregate attempts and the seven broad failures remain preserved.
+
+Inspected morning and rescue captures also show “Preparing nearby world…”. That text reports the runtime movement-publication gate; it does not by itself prove that startup was skipped. Niko's final rescue image clearly shows an actor inside beside shut door panels; Sera is visible outside at the gate. These static views do not independently prove the entire crossing/clearance sequence. No remaining NPC fixture was repaired or rerun after this collection.
+
+## Frozen headed 13 measurement
+
+```powershell
+node tools/run-citadel-candidate-teleport-playtest.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-loading-baseline-13 -Seed atlas-3376622889 "-CandidateRegion=-2,-2" "-SpawnCell=-3334,-2666" -Resolution 1920x1080 -SkipTutorial -ForceDaytime -ForceClearWeather -CaptureNavigationRejections -StartupTimeoutSeconds 180 -TimeoutSeconds 600
+```
+
+One Godot process ran after correcting two pre-launch shell/output-name checks. The [report](../artifacts/citadel-runtime-integration/candidate-teleport-loading-baseline-13/report.json) and [verification](../artifacts/citadel-runtime-integration/candidate-teleport-loading-baseline-13/verification.json) record natural exit 0, no engine errors/warnings, unchanged frozen sources, successful cleanup and zero owned processes. This is a selected-initial-location diagnostic with tutorial/day/weather controls, not ordinary-menu, uninterrupted exploration or live NPC acceptance.
+
+| Measurement | Result |
+|---|---:|
+| Startup | 130.504 s |
+| Approach | 31.648 s; 16 of 31 sampled states held |
+| Approach total-frame cadence | p99 139.6 ms; max 272.976 ms |
+| Approach rendering GPU | p99 12.5 ms; max 14.018 ms |
+| Scene publication | 1,107 advances; 3.590745 s active CPU; 10.141316 s between advances |
+| Largest scene atomic operation | 30.651 ms, masonry |
+| Spatial preparation | 22.257483 s, including 20.421231 s navigation preparation |
+| Navigation source | 42 tiles; 157,496 samples; 161,814 surfaces |
+
+The **2,766.65 ms** worst cadence interval is timestamped at 6,217,892–8,984,542 microseconds. The inherited audio setup occupies **2,461.28 ms**, at 6,218,020–8,679,300: it starts just 128 microseconds into that interval. This refutes the earlier character-registry hypothesis for this particular stall. Hostile and NPC setup took 18.902 and 29.152 ms; tutorial and HUD took 46.185 and 41.746 ms. No screenshot export overlaps the startup maximum. The observer's own maximum callback was 10.333 ms; its bounded first-128 spike list drops 266 later spikes, while the independent worst interval and histograms remain recorded. Per-phase tables also have bounded capacity; late diagnostic work can fall into `overflow`.
+
+During approach, tile `-209,-171` appears in 18 consecutive one-second demand observations, 140.370–158.020 seconds: absent acceptance, no dirty flag, deferred, queue priority false, regional priority zero. The requested and queued source keys match. Queue age rises from 313 to 919 frames while its position moves 46→43→47…7→17 and workers remain active. This is direct evidence of a retained movement dependency waiting behind other publication work, not a stale accepted descriptor in those samples. All 16 held approach samples report `regional_dependencies_incomplete`, with `navigation_accepted_source_pending` for that tile or the initial `-209,-167` tile.
+
+The exact historical `candidate-teleport-navigation-filter-12` report records startup 132.663 s, approach 32.391 s and 16/31 sampled holds. Both it and headed13 end with `scene_ready` but **`gameplayReady=false`, `door_activation_pending`**. Source signature `b29eabb4fb8e28b3bb0ff53325e69ec2a72d05797280793b130bb49401427752` and source binding remain unchanged. Green diagnostic completion is therefore not completed Citadel gameplay.
+
+Inspected [initial spawn](../artifacts/citadel-runtime-integration/candidate-teleport-loading-baseline-13/initial_spawn_ready.png) and [courtyard](../artifacts/citadel-runtime-integration/candidate-teleport-loading-baseline-13/courtyard_overview.png) show continuous terrain and the expected Citadel, with the nearby-world hold message. The [gatehouse landing view](../artifacts/citadel-runtime-integration/candidate-teleport-loading-baseline-13/castle_gatehouse_wall_stair_landing_00.png) is clipped/occluded by dark geometry and cannot prove a usable landing or traversable route. The total-frame cadence includes gameplay/script/physics waits; GPU timings are a separate, much smaller metric. No steady-state or cold-machine benchmark claim is made.
+
+## Frozen source and navigation acquisitions
+
+All six diagnostic scripts compiled before acquisition; [compile summary](../artifacts/citadel-runtime-integration/implementation-baseline-03/citadel-diagnostics-compile-summary.json) records their watchdogs. The following commands ran sequentially without source edits between them or concurrent Godot work:
+
+```powershell
+node tools/run-citadel-structural-policy-capture.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-structural-policy-baseline-01
+node tools/run-citadel-facade-phase-replay.mjs -CaptureDirectory artifacts/citadel-runtime-integration/candidate-structural-policy-baseline-01 -OutputDirectory artifacts/citadel-runtime-integration/candidate-facade-phase-baseline-01
+node tools/run-citadel-dense-navigation-baseline.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-dense-navigation-baseline-01
+```
+
+Every acquisition passed its checks, owned process cleanup and before/after source inventory audits. Capture intercepted 4,322 parts and 178 furnishings from pinned source32 inputs; captured input SHA-256 is `2aa1de5303ea96fdad744a14e17ee5ac6b6a3bbd57f3698ce5dee11cfd0fadbb`. Facade replay captured seven exact typed input/result/physical-proof artifacts. Its [report](../artifacts/citadel-runtime-integration/candidate-facade-phase-baseline-01/report.json) contains all hashes and 24 passing checks. Opening took 7.482002 s, lower facade 16.095666 s, full facade replay 26.820205 s; independent opening/lower physical checks took 2.380638/2.863598 s. Lower output retained 64 accepted, zero rejected panels. Diagnostic callback intervals and extra validation are not uninstrumented runtime timing.
+
+The [dense oracle](../artifacts/citadel-runtime-integration/candidate-dense-navigation-baseline-01/report.json) passed 24 checks with 42 tiles, 161,814 surfaces, 157,496 samples and zero unresolved crossing IDs. Worker preparation took 29.693383 s, including 17.440379 s navigation work. `navigation-tiles.bin` is 123,624,224 bytes, SHA-256 `402373fe260be85d7977cbc156d1a69a922cdb14795459bae8cbb32718cb1ecc`. Semantic SHA-256 is `b6587259c1524fdcc5e8c5e94ac8d838dc3ca73016da88363edfed9f5120d2c9`; comparison excludes only root preparation time, preserving ordered typed tile contents. This is a source oracle, not live navigation acceptance. The source freeze was explicitly released only after the final inventory audit. Acquisition tooling is committed as `a3aa607`.
+
+## Measured PCM audio copy change
+
+Commit **`5a63c00`** changes only the PCM data copy in `AudioEffectsSystem.load_pcm_wav`: the existing validated/clamped byte range is copied by `PackedByteArray.slice(data_offset, data_offset + data_size)` instead of a GDScript loop over every byte. RIFF parsing, fallback evaluation, stream metadata, random calls, asset paths, playback/priming and ownership are unchanged.
+
+An isolated subclass timed each call to the existing loader through `build_streams`, then hashed every produced stream. Baseline and candidate each ran once in a fresh owned headless process with warm filesystem caches, the same diagnostic seed and unchanged source assets. [Baseline report](../artifacts/citadel-runtime-integration/audio-pcm-baseline-01/report.json), [candidate report](../artifacts/citadel-runtime-integration/audio-pcm-candidate-01/report.json), and [comparison](../artifacts/citadel-runtime-integration/audio-pcm-candidate-01/comparison.json) show:
+
+| Loader work | Before | After |
+|---|---:|---:|
+| Entire `build_streams` | 2,394.381 ms | 140.947 ms |
+| Rain PCM | 331.347 ms | 13.575 ms |
+| Tutorial music PCM | 978.266 ms | 43.635 ms |
+| Second-day music PCM | 1,030.075 ms | 42.977 ms |
+
+All 22 produced stream byte hashes and format/rate/channel/loop properties match exactly, as do all eight WAV source assets, daytime track order, successful-load decisions and the next global RNG draw. The [evidence manifest](../artifacts/citadel-runtime-integration/audio-pcm-parity-evidence-01/manifest.json) binds exact before/after source snapshots and the [diagnostic used](../artifacts/citadel-runtime-integration/audio-pcm-parity-evidence-01/AudioPcmLoaderDiagnostic.gd). Both calls used the existing `runGodotProcess` helper with `--headless --path <project> --script <diagnostic>`, 45-second timeout, and `AUDIO_PCM_DIAGNOSTIC_REPORT` pointing to each fresh report; each was preceded by `--check-only` with the same script. Their `parse.json` and `process.json` records link to natural-exit, zero-owned-process watchdogs. No playback or whole-game improvement is claimed from this direct-service test. The remaining 141 ms total still warrants staged startup work and integrated headed verification.
+
+The first urgency propagation batch compiled `MainCore`, `RegionalNavigationPublication`, `NpcRouteCoordinatorAdapter` and both existing focused fixtures. [Startup](../artifacts/citadel-runtime-integration/loading-urgency-contracts-01/startup.json) passes **54/54** and [lifecycle](../artifacts/citadel-runtime-integration/loading-urgency-contracts-01/lifecycle.json) **147/147**, including three new priority/context/age/sequence checks. These synthetic passes do not replace the failed baseline or integrated performance acceptance. Further changes are collected into coordinated batches, with no automatic repeat of the entire NPC baseline.
+
+## First source transaction parity result
+
+```powershell
+node tools/run-citadel-facade-phase-parity.mjs -BaselineDirectory artifacts/citadel-runtime-integration/candidate-facade-phase-baseline-01 -OutputDirectory artifacts/citadel-runtime-integration/candidate-facade-phase-parity-01
+```
+
+The [typed comparison](../artifacts/citadel-runtime-integration/candidate-facade-phase-parity-01/report.json) passes **31 checks**, including complete opening/lower public output equality, caller/input immutability, exact independent physical proofs and cancellation before commit. Opening took **5.833741 s** against 7.482002 s at baseline; lower took **16.111749 s** against 16.095666 s, which is no meaningful improvement. The new 34.535-second total includes additional cancellation tests and cannot be compared directly with baseline replay total. No production source acceptance or whole-game timing claim follows from this single exact-fixture differential.
+
+[Comparison evidence](../artifacts/citadel-runtime-integration/candidate-facade-phase-parity-01/comparison-evidence.json) records 1,183 unchanged hashed files and 1,171 unchanged inventory entries. The worker exited naturally with code 0 and clean owned-process cleanup at 06:53:07.264 UTC; the source audit completed at 06:53:08.021 UTC. A later edit to the unused capture draft has filesystem timestamp 06:54:58.940 UTC, after that audit window. The successful source gate is preserved as recorded; no restoration, report alteration or replay was used to address the coordination concern. The source freeze was then explicitly released.
+
+## Combined handoff, capture and staged-audio checkpoint
+
+The first combined compile stopped at the derived `NavigationPublicationWorker._prepare_source` signature after its base gained an optional fourth callable. Audio owner and fixture compiled; no assertions ran. [Batch01](../artifacts/citadel-runtime-integration/loading-combined-contracts-01/summary.json) and its archived `runner.mjs` preserve the failure. The navigation owner audited all derived overrides and added only the unused optional argument to the tile worker, preserving its body. The engine-error watchdog proved zero owned processes after termination; that run was not a clean functional exit.
+
+[Batch02](../artifacts/citadel-runtime-integration/loading-combined-contracts-02/compile-summary.json) then compiled all22 owners/fixtures. Its audio report failed44 comparisons because historical JSON numbers decode as floats while the current stream-property dictionaries contain integers. Every failed serialized actual/expected pair is identical; all48 other checks passed. A separate ObjectDB exit warning was also preserved at `artifacts/node-tools/process-runs/godot-iwNrWJ/stderr.log`. Neither the failed report nor the warning was rewritten as passing evidence.
+
+While sources remained unchanged, the independent stages continued once in [Batch03](../artifacts/citadel-runtime-integration/loading-combined-contracts-03/summary.json): startup54, lifecycle152, nav-world86, route132, NPC contracts84, building worker125, building preparation113 and Citadel service98, all passing (**844 assertions**). NPC fixtures used explicit `-TimeMode Both -Seed atlas-1492` and fresh report/progress/trace/screenshot paths. The exact batch driver used the existing Node helpers; all child watchdogs show natural exit0, empty stderr and clean zero-owned-process proof. Before/after source and inventory audits remained unchanged across1172 entries. The new capture checks establish exact unchanged-filter output and duplicate order, private height-cache isolation, and stale world/generator/volume identity rejection; they do not establish live throughput or readiness.
+
+```powershell
+node tools/run-citadel-dense-navigation-baseline.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-dense-navigation-handoff-01
+```
+
+The subsequent [dense comparison](../artifacts/citadel-runtime-integration/candidate-dense-navigation-handoff-01/parity-comparison.json) passes24 acquisition checks and preserves the complete semantic SHA `b6587259c1524fdcc5e8c5e94ac8d838dc3ca73016da88363edfed9f5120d2c9`, all42 ordered tile records, field order and field totals. The123,624,224-byte candidate artifact hashes to `30dd4eb65699c6fd7d85a0a6615fe256c366a79692edf146f0451946e2b021ee`; only root preparation time is excluded from semantic comparison. Preparation32.294716s/navigation19.220793s versus baseline29.693383s/17.440379s is not a speedup claim. The source audit and owned process cleanup pass.
+
+Staged audio is committed as **`9cb0a16`**. The audio fixture correction validates each integer schema field as finite and exactly integral before conversion, preserving all byte hashes, string/boolean types and RNG comparisons. Negative checks reject fractional values, changed hashes, changed byte counts and incorrect boolean types. The one corrected verbose [audio owner contract](../artifacts/citadel-runtime-integration/audio-startup-contract-01/report.json) passes **96/96** with natural exit0, empty stderr, no verbose leak/error/warning lines, clean owned-process cleanup and an unchanged source inventory. The earlier ObjectDB warning did not recur; no production lifecycle repair or explanation for that isolated warning is claimed.
+
+The contract uses production audio players and priming with one asset per advance, plus explicitly synthetic missing-file fixtures for fallback/cancellation. All22 historical stream byte hashes and properties, original global RNG consumption before the first yield, insertion/track order and exact reserved fallback object identities pass. Six cancellation boundaries and tree exit reject resumed work and release playback. Warm direct-service measurements: synchronous build135.111ms; pre-yield object/player reservation36.571ms;14 separate frame steps with largest41.793ms. Priming steps are below0.6ms. This proves the audio owner contract, not audible quality or the full Main startup/exit experience.
+
+## First integrated headed checkpoint: approach failed
+
+```powershell
+node tools/run-citadel-candidate-teleport-playtest.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-loading-checkpoint-01 -Seed atlas-3376622889 "-CandidateRegion=-2,-2" "-SpawnCell=-3334,-2666" -Resolution 1920x1080 -SkipTutorial -ForceDaytime -ForceClearWeather -CaptureNavigationRejections -StartupTimeoutSeconds 180 -TimeoutSeconds 600
+```
+
+The same-seed controlled diagnostic [report](../artifacts/citadel-runtime-integration/candidate-teleport-loading-checkpoint-01/report.json) failed `approach_time_limit`. [Verification](../artifacts/citadel-runtime-integration/candidate-teleport-loading-checkpoint-01/verification.json) records natural exit1, zero engine errors/warnings, unchanged sources, clean cleanup and zero owned processes. No repeat followed this failure. Both runs use fresh isolated userdata; filesystem/driver cache warmth is uncontrolled, and neither is a cold-machine benchmark.
+
+| Observation | Headed13 baseline | Checkpoint01 |
+|---|---:|---:|
+| Startup |130.504s|131.865s|
+| Preparing nearby world message span |43.698s|52.402s|
+| Synchronous audio setup span |2461.280ms|35.818ms|
+| Whole-run worst cadence |2766.650ms|435.485ms|
+| Whole-run p99 cadence |131.5ms|36.7ms|
+| Whole-run intervals over100ms |178|10|
+| Approach p99 / maximum cadence |139.6 /272.976ms|49.7 /173.967ms|
+| Approach elapsed / result |31.648s, reached|45.042s, timeout|
+| Remaining distance to visual bounds |6.81m|29.53m|
+| Sampled approach holds |16/31|30/45|
+
+The new35.818ms audio span measures pre-yield setup/reservation. Full elapsed time from audio setup start to tutorial setup start is250.991ms, including yielded file loading/priming. The new435.485ms worst cadence interval ends108 microseconds before audio setup starts, so it is earlier system/scene setup. Overall cadence distributions have different phase mixes because the failed checkpoint skipped the later inspection-camera captures; the approach-specific metrics are the narrower comparison. Approach GPU p99 is6.9ms and maximum7.346ms, well below total cadence. The targets remain unmet despite the large stall reduction.
+
+Publication lost useful throughput. During45 one-second approach demand samples, the worker was idle in41 (baseline0/31); its prepared counter rose73→116 over44.444s (baseline171→288 over30.960s). Of301 observed pending tile facts,282 carry queue priority, with maximum age1649 frames. These bounded observations are not a complete queue inventory or continuous utilization trace. At170.916s, missing tile `-209,-173` is clean, deferred, prioritized, age1315 and queue position66, with matching requested/regional source and idle worker. At175.978s, missing tile `-208,-172` is clean, nondeferred, prioritized, age1458 and position2, again with matching source and idle worker. Neither has an accepted entry; these samples do not demonstrate a stale-accepted predicate disagreement.
+
+The last five one-second movement observations span4.036s at an identical position, all held by `regional_dependencies_incomplete` / `navigation_accepted_source_pending` for `-208,-172`. Sampling does not prove every intervening physics frame. Scene publication remains `scene_ready`, **`gameplayReady=false`, `door_activation_pending`**, with the same source signature `b29eabb4fb8e28b3bb0ff53325e69ec2a72d05797280793b130bb49401427752` and binding `60d35570a40a438f232245e244ab5e4115883a0ff9bb4444588afabcf09705de`.
+
+Capture step maximum is32.765ms. Recorded live/terrain capture section maxima64.976/158.276ms sum work across slices, not individual-frame duration. Per-tile capture profiles from the later navigation inspection are absent because approach failed first; worker `discardedStale=1` is not a capture-restart count. Current telemetry cannot quantify all cancelled capture CPU work. Scene publication remains roughly unchanged:1134 advances,3.605521s CPU,10.140795s between advances,29.906ms maximum atomic step and819 overruns. The compact descriptor handoff has not removed the full dense42-tile work from the current readiness path.
+
+Inspected [failed exterior view](../artifacts/citadel-runtime-integration/candidate-teleport-loading-checkpoint-01/failed.png) shows continuous terrain and Citadel walls with the persistent nearby-world loading message. It does not show successful entry, usable doors, or complete courtyard/stair routes. The checkpoint is a regression in approach completion and triggers reassessment of capture retention, queue throughput and demanded publication before further source changes or acceptance runs.
+
+## Retained-capture handoff correction: focused verification only
+
+Read-only reassessment identified an ordering defect: sealing a capture immediately queued its retirement before the shared worker could accept the sealed input. Deferred input could then lose its retained owner through queue ordering and cache pressure. The candidate now retains that same capture/input through the actual accepted receipt, detaches live aliases after sealing, and releases the slot on matching acknowledgement, cancellation, stale identity or terminal failure. Foreground arbitration visits an ineligible owned slot once without consuming unrelated demand. This addresses a demonstrated ownership defect; its contribution to the headed39.424-second completion plateau has not been measured in a new live run.
+
+The three unchanged production owners compiled cleanly in [retention01](../artifacts/citadel-runtime-integration/capture-retention-contracts-01/compile-summary.json). That batch stopped on an inferred boolean in the new fixture; its failure remains preserved. After explicit fixture typing, [retention02](../artifacts/citadel-runtime-integration/capture-retention-contracts-02/lifecycle.json) ran164/165: the map-baseline comparison captured a previous fixture's asynchronously retiring map. The correction uses the existing physics/process/physics synchronization before capturing the baseline and preserves exact final-map equality, now recording both ID sets.
+
+Final focused results:
+
+- [Lifecycle165/165](../artifacts/citadel-runtime-integration/capture-retention-contracts-04/lifecycle.json), including eight real adapter/coordinator/worker/NavigationServer handoff checks. Two queued tiles reach actual acknowledgement with the same sealed input retained; wrong-binding, cancellation, stale source, reset and shutdown cases pass. Baseline/final map IDs are both empty.
+- [Nav-world86/86](../artifacts/citadel-runtime-integration/capture-retention-contracts-03/npc-nav-world/report.json) and [route132/132](../artifacts/citadel-runtime-integration/capture-retention-contracts-03/npc-route/report.json), with explicit `-TimeMode Both -Seed atlas-1492` and fresh report/progress/trace/screenshot paths. They ran once and were not repeated after the map-baseline fixture correction.
+
+The existing Node driver dispatched `tools/npc/run-npc-nav-world-tests.mjs` and `tools/npc/run-npc-route-tests.mjs` through `runTool`. Final lifecycle used `runGodotProcess` with `--headless --path <citadel-visuals-project> --script res://scripts/testing/NavigationShutdownLifecycleContractRunner.gd`, timeout120s, and `VOXEL_NAVIGATION_SHUTDOWN_REPORT` set to `capture-retention-contracts-04/lifecycle.json`; its [process record](../artifacts/citadel-runtime-integration/capture-retention-contracts-04/process.json) retains the exact owned launch. All three final processes exited naturally with code0, no engine warnings/errors, clean owned-zero proof and unchanged1172-entry source/inventory audits. No headed repeat followed; the failed integrated report remains unresolved acceptance evidence. Compact/demanded C/D publication, the lower-facade bottleneck, measured cache/upload work and the full final acceptance matrix remain outstanding.
