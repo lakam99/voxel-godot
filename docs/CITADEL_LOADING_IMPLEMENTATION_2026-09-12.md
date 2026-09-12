@@ -59,3 +59,13 @@ Under `MANIFESTO.md` ("If the baseline exposes any pathfinding regression, no im
 - Preserve source-key validation across incremental capture, including structure binding, semantic and door revision. Collision localization must retain original bucket record order and the exact clearance query halo.
 
 No implementation package is promoted yet. The documentation records progress; the two fixture annotations remain with the existing uncommitted fixture migration.
+
+## Authorized baseline repair
+
+On September 12 the user explicitly approved the narrow route-planner guard and resumption. `resolve_start_key` now checks `start_span is Object` before calling `has_method`. Known String keys and the existing nearest-span resolution are unchanged.
+
+The isolated existing `npc_route_profile_large_rejects_narrow_small_accepts` case passes **2/2**, day and night: [report](../artifacts/citadel-runtime-integration/implementation-baseline-02/object-guard/report.json), [watchdog](../artifacts/node-tools/process-runs/godot-DPkm5W/watchdog.json). Natural exit 0, no engine errors/warnings. This verifies the approved guard in the synthetic profile contract, not live route acceptance.
+
+The resumed full route suite passed that case, then aborted on a distinct fixture setup error: detached `Node3D` instances were assigned/read through `global_position`. The engine correctly rejected those world-transform accesses. The partial progress count of 67 is not suite success; its report is empty. [Watchdog](../artifacts/node-tools/process-runs/godot-gW4onf/watchdog.json) records forced cleanup, exit 126, and authoritative zero owned processes.
+
+After inspecting the related setup cohort, the evidence agent is attaching only fixture bodies/geometry that use world transforms to the existing runner before those accesses, preserving assertions and cleanup. Metadata-only detached fixtures need no change. This is a fixture lifecycle correction, with no further production routing change. Full baseline remains pending until the repaired cohort runs cleanly.
