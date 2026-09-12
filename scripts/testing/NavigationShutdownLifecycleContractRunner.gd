@@ -100,6 +100,7 @@ func run() -> void:
 	verify_publication_rectangle_clearance()
 	await verify_finite_live_collision_bounds()
 	await verify_pending_source_retention()
+	verify_retained_priority_promotion()
 	await verify_navigation_worker_parity_and_ownership()
 	await verify_async_navigation_service_lifecycle()
 	await verify_owned_publication_queue_progress()
@@ -309,6 +310,34 @@ func verify_finite_live_collision_bounds() -> void:
 
 
 func verify_pending_source_retention() -> void:
+func verify_retained_priority_promotion() -> void:
+	# Synthetic scheduling contract, not evidence of live movement.
+	var adapter := RoutePublicationAdapter.new()
+	adapter._enqueue_navmesh_tile_publish("0,0", "promotion:1", false,
+		{"actorId":"ordinary-worker", "activeJobRoute":true, "routePriority":180})
+	adapter._enqueue_navmesh_tile_publish("1,0", "background:1", false)
+	adapter.deferred_navmesh_tile_keys["0,0"] = true
+	var original: Dictionary = adapter.queued_navmesh_tile_contexts["0,0"].duplicate(true)
+	var promoted := adapter.promote_queued_navmesh_tile_priority("0,0", "promotion:1")
+	add_result("retained_priority_promotes_without_replacing_route_context", promoted
+		and adapter.queued_navmesh_tile_priority_keys.has("0,0")
+		and adapter.queued_navmesh_tile_contexts["0,0"] == original
+		and adapter.queued_navmesh_tile_keys.front() == "0,0"
+		and not adapter.deferred_navmesh_tile_keys.has("0,0"), {})
+	adapter.deferred_navmesh_tile_keys["0,0"] = true
+	adapter._resort_navmesh_tile_queue()
+	var order := adapter.queued_navmesh_tile_keys.duplicate()
+	adapter.promote_queued_navmesh_tile_priority("0,0", "promotion:1")
+	add_result("repeated_priority_visit_preserves_retry_round_and_age",
+		adapter.deferred_navmesh_tile_keys.has("0,0")
+		and adapter.queued_navmesh_tile_keys == order
+		and adapter.queued_navmesh_tile_contexts["0,0"] == original, {})
+	add_result("priority_promotion_rejects_stale_or_absent_source",
+		not adapter.promote_queued_navmesh_tile_priority("1,0", "stale")
+		and not adapter.promote_queued_navmesh_tile_priority("2,0", "absent")
+		and not adapter.queued_navmesh_tile_priority_keys.has("1,0")
+		and not adapter.queued_navmesh_tile_source_keys.has("2,0"), {})
+
 	# Synthetic source producer with the real publication queue and service.
 	# No actor movement or route acceptance is inferred.
 	var producer := PendingSourceFixture.new()

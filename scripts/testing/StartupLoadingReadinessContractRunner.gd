@@ -90,6 +90,8 @@ class SyntheticCapturedNavigationOwners extends RefCounted:
 		# Deterministic exhausted-slice simulation: refuse any later proof in this
 		# slice. Do not sleep/spin or publish the uncaptured neighbouring source.
 		slice_exhausted = true
+	func promote_queued_navmesh_tile_priority(key: String, expected_source: String) -> bool:
+		return queued_navmesh_tile_source_keys.get(key) == expected_source
 		return 0
 	func _sync_navmesh_after_queued_tile_publish() -> void:
 		calls.append("publisher_sync")

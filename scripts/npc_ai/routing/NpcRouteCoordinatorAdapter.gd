@@ -1771,12 +1771,28 @@ func _navmesh_tile_source_key(tile_key: String) -> String:
 		return String(world.navmesh_tile_source_key())
 	return String(world.revision()) if world != null and world.has_method("revision") else ""
 
+func promote_queued_navmesh_tile_priority(tile_key: String, source_key: String) -> bool:
+	# A retained regional request can become urgent after background admission.
+	# Promotion keeps route context, FIFO identity and age; only the first change
+	# earns an immediate retry. Repeated readiness visits cannot reset fairness.
+	if queued_navmesh_tile_source_keys.get(tile_key, "") != source_key:
+		return false
+	if queued_navmesh_tile_priority_keys.has(tile_key):
+		return true
+	queued_navmesh_tile_priority_keys[tile_key] = true
+	deferred_navmesh_tile_keys.erase(tile_key)
+	_resort_navmesh_tile_queue()
+	return true
+
 func queue_navmesh_tile_publish(tile_key: String, priority := false) -> bool:
 	if tile_key == "" or world == null or navmesh_world == null:
 		return false
 	var source_key := _navmesh_tile_source_key(tile_key)
 	if source_key == "":
 		return false
+	if queued_navmesh_tile_source_keys.get(tile_key, "") == source_key:
+		if priority: promote_queued_navmesh_tile_priority(tile_key, source_key)
+		return true
 	var published_key := "%s|%s" % [tile_key, source_key]
 	if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
 		return false

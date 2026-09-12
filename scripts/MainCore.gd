@@ -36,6 +36,7 @@ var world_streaming = WorldStreamingCoordinatorScript.new()
 var regional_navigation = RegionalNavigationPublicationScript.new()
 var streaming_requests: Dictionary = {}
 var streaming_request_bounds: Dictionary = {}
+var streaming_request_priorities: Dictionary = {}
 var streaming_applied_revision := -1
 var streaming_active := false
 var streaming_player_cell := Vector2i(2147483647,2147483647)
@@ -732,6 +733,7 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     world_streaming.configure(seed_text, {"terrain":site_runtime, "structures":structure_system, "navigation":regional_navigation})
     streaming_requests.clear()
     streaming_request_bounds.clear()
+    streaming_request_priorities.clear()
     streaming_applied_revision = -1
     streaming_active = true
     streaming_player_cell = Vector2i(floori(player.global_position.x/(CELL*32.0)),floori(player.global_position.z/(CELL*32.0)))
@@ -825,7 +827,7 @@ func initial_gameplay_chunk_keys(urgent_radius := 1) -> Array[Vector2i]:
     return result
 
 func retain_streaming_region(owner: String, bounds: Rect2i, priority: int) -> bool:
-    if streaming_request_bounds.get(owner) == bounds: return true
+    if streaming_request_bounds.get(owner) == bounds and streaming_request_priorities.get(owner) == priority: return true
     var request_id: int = world_streaming.request_region(bounds,priority,owner)
     if request_id == 0:
         streaming_demand_error = world_streaming.last_rejection
@@ -833,6 +835,7 @@ func retain_streaming_region(owner: String, bounds: Rect2i, priority: int) -> bo
     if streaming_requests.has(owner): world_streaming.release_region(streaming_requests[owner])
     streaming_requests[owner] = request_id
     streaming_request_bounds[owner] = bounds
+    streaming_request_priorities[owner] = priority
     streaming_demand_error = ""
     return true
 
@@ -884,6 +887,7 @@ func update_streaming_region_demand() -> void:
         world_streaming.release_region(streaming_requests[owner])
         streaming_requests.erase(owner)
         streaming_request_bounds.erase(owner)
+        streaming_request_priorities.erase(owner)
     apply_streaming_region_demand()
 
 func reset_streaming_region_demand() -> void:
@@ -891,6 +895,7 @@ func reset_streaming_region_demand() -> void:
     world_streaming.configure("")
     streaming_requests.clear()
     streaming_request_bounds.clear()
+    streaming_request_priorities.clear()
     streaming_applied_revision = -1
     var runtime = get("voxel_terrain_runtime")
     if runtime != null: runtime.clear_retained_gameplay_chunks()

@@ -239,6 +239,8 @@ func _advance_tile(key: String, deadline: int) -> void:
 		var attempt: Dictionary = publisher.last_navmesh_tile_queue_debug[index]
 		if attempt.get("tile") != key or attempt.get("source") != source_key: continue
 		if attempt.get("status") in ["failed","rejected"]:
+	elif _priority(key)<=1:
+		publisher.promote_queued_navmesh_tile_priority(key,source_key)
 			tile.status = "failed"
 			tile.reason = attempt.get("reason","navigation_publication_rejected")
 			return
