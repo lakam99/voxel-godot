@@ -31,12 +31,14 @@ static func prepare_all_first_rows(b, policy: Dictionary, continuation: Callable
 	for house in membership.houses:
 		if continuation.is_valid() and continuation.call("opening_head_house:" + String(house.prefix)) != true: return _fail("cancelled")
 		if callback.is_valid(): callback.call(house.prefix)
-		var proposal := prepare_first(staged, house.memberIds, policy, continuation)
+		var proposal := _prepare_first(staged, house.memberIds, policy, continuation, true)
 		if proposal.get("reason", "") == "cancelled": return proposal
 		if continuation.is_valid() and continuation.call("opening_head_house_completed:" + String(house.prefix)) != true: return _fail("cancelled")
 		if not proposal.ready:
 			return {"ready": false, "reason": proposal.reason, "failedHouse": house.prefix, "completedHouseCount": proposals.size(), "failureEvidence": proposal}
-		staged = Copy.copy_blueprint(proposal.candidateSnapshot)
+		# This candidate is owned by the batch. A failed house or cancellation
+		# discards it; only the final ordered snapshot crosses the public boundary.
+		staged = proposal.candidateSnapshot
 		trimmed.append_array(proposal.trimmedPanelIds)
 		proposal.erase("candidateSnapshot")
 		proposal["house"] = house.prefix
@@ -45,11 +47,14 @@ static func prepare_all_first_rows(b, policy: Dictionary, continuation: Callable
 	return {"ready": true, "candidateSnapshot": staged.snapshot(), "houseProposals": proposals, "trimmedPanelIds": trimmed}
 
 static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	return _prepare_first(b, producer_ids, policy, continuation, false)
+
+static func _prepare_first(b, producer_ids: Array, policy: Dictionary, continuation: Callable, retain_candidate: bool) -> Dictionary:
 	if b == null or b.parts.size() > 10000 or producer_ids.is_empty() or producer_ids.size() > 512:
 		return _fail("source_limit")
 	if not policy.get("furnitureParts") is Array or not policy.get("reservedVolumes") is Array or not policy.get("requiredHeadroom") is float or not is_finite(policy.requiredHeadroom) or policy.requiredHeadroom <= 0.0:
 		return _fail("invalid_clearance_policy")
-	var source: Dictionary = b.snapshot()
+	var source: Dictionary = {} if retain_candidate else b.snapshot()
 	var by_id: Dictionary = {}
 	for part in b.parts:
 		if part == null or by_id.has(part.id) or not b.has_finite_positive_bounds(part): return _fail("invalid_source")
@@ -119,7 +124,7 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuati
 	var header_bounds := AABB(centre - size * 0.5, size)
 	for volume in declarations.volumes:
 		if _penetrates(header_bounds, volume): return {"ready": false, "reason": "declared_aperture_blocked", "geometryConflict": {"proposedBounds": header_bounds, "protectedVolume": volume, "positiveOverlap": header_bounds.end.min(volume.end) - header_bounds.position.max(volume.position), "overlapY": float(minf(header_bounds.end.y, volume.end.y) - maxf(header_bounds.position.y, volume.position.y))}}
-	var staged = Copy.copy_blueprint(source)
+	var staged = _house_candidate(b, by_id, discovery.panelIds) if retain_candidate else Copy.copy_blueprint(source)
 	var trimmed: Array = []
 	var trim_geometry: Array = []
 	for id in discovery.panelIds:
@@ -214,7 +219,9 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuati
 	var joint_checks: Array = joint_report.checks.filter(func(c): return piece_ids.has(c.partId))
 	if joint_checks.size() != piece_ids.size() or not joint_checks.all(func(c): return c.passed): return _fail("finite_housed_end_joint_failed")
 	var header_check: Array = joint_checks.filter(func(c): return c.partId == header_id)
-	for record: Dictionary in pieces: staged.add_part(record)
+	for record: Dictionary in pieces:
+		var part = staged.add_part(record)
+		if retain_candidate: staged.physical_parts_by_id[part.id] = part
 	for id in trimmed: support.add_part(staged.find_part(id).snapshot())
 	Copy.clear_caches(support)
 	var seated_report: Dictionary = support.validate_physical_integrity_cancellable(continuation)
@@ -225,7 +232,7 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuati
 		var declaration: Dictionary = staged.recipe.facadeApertures[key].duplicate(true)
 		declaration.erase("sourceBinding")
 		staged.recipe.facadeApertures[key] = Aperture.seal(declaration, declaration.partIds.map(func(id): return staged.find_part(id)))
-	return {"ready": true, "candidateSnapshot": staged.snapshot(), "headerId": header_id,
+	return {"ready": true, "candidateSnapshot": staged if retain_candidate else staged.snapshot(), "headerId": header_id,
 		"apertureProof": {"declarationKeys": declarations.declarationKeys, "fullVolumeCount": declarations.volumes.size(), "positiveHeaderIntersections": 0},
 		"constructionSeamChanges": solid_admission.get("seamCells", []),
 		"headConstruction": {"requiredBottom": required_bottom, "actualBottom": float(header_bounds.position.y), "actualTop": float(header_bounds.end.y)},
@@ -234,6 +241,25 @@ static func prepare_first(b, producer_ids: Array, policy: Dictionary, continuati
 		"connectionArrangement": arrangement, "connectionIds": arrangement.connections.map(func(p): return p.id), "endAdmissions": end_admissions, "jointChecks": joint_checks,
 		"independentGableChecks": independent.checks.filter(func(check): return gables.any(func(g): return g.id == check.partId)),
 		"headerCheck": header_check[0], "scope": "Unwired source prototype. No full regression, published material-transition, swept-door, visual or integration acceptance."}
+
+static func _house_candidate(source, by_id: Dictionary, panel_ids: Array):
+	# The batch admitted a complete private copy at entry. Unchanged objects
+	# remain read-only throughout this house; only panels and aperture metadata
+	# are edited. All physical classification runs on separate proof blueprints.
+	var candidate = Blueprint.new(source.id, source.seed, source.style)
+	candidate.recipe = source.recipe.duplicate(true)
+	candidate.rooms = source.rooms
+	candidate.parts = source.parts.duplicate()
+	candidate.physical_parts_by_id = by_id.duplicate()
+	var records: Array = panel_ids.map(func(id): return by_id[id].snapshot())
+	var replacements = Copy.copy_blueprint({"id": source.id, "seed": source.seed, "style": source.style,
+		"recipe": {}, "rooms": [], "parts": records})
+	for index in range(candidate.parts.size()):
+		var id: String = candidate.parts[index].id
+		if replacements.physical_parts_by_id.has(id):
+			candidate.parts[index] = replacements.find_part(id)
+			candidate.physical_parts_by_id[id] = candidate.parts[index]
+	return candidate
 
 static func _trim_aperture_sources(b, by_id: Dictionary, ids: Array, allowed_keys: Array) -> Dictionary:
 	var records: Variant = b.recipe.get("facadeApertures")

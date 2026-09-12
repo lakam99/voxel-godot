@@ -125,17 +125,23 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 		if prepared_input.is_empty():
 			prepared_input = _read(state, panel_id, policy)
 		var input := _select_prepared_panel(prepared_input, panel_id)
-		var proposal := _prepare_input(input, panel_id, policy, continuation)
+		var proposal := _prepare_input(input, panel_id, policy, continuation, false)
 		if proposal.get("reason", "") == "cancelled": return proposal
 		var outcome := _completion_outcome(proposal)
 		if not _continue(continuation, "lower_facade_panel_completed:" + panel_id): return _fail("cancelled")
 		if outcome.ready:
-			var support_delta := _accepted_change_support_delta(state, outcome.afterState, panel_id, prepared_input.blueprint.parts)
+			var delta := _admit_completion_delta(prepared_input, proposal, panel_id)
+			if not delta.ready: return delta
+			var support_delta := _support_targets_for_additions(state.parts, delta.additions, panel_id, prepared_input.blueprint.parts)
 			if not support_delta.ready:
 				return {"ready": false, "reason": "lower_completion_support_delta_failed", "panelId": panel_id, "detail": support_delta}
-			state = outcome.afterState
-			var updated := _advance_prepared_input(prepared_input, state, panel_id)
-			if not updated.ready: return updated
+			# The first accepted proposal crosses the same constructor/snapshot
+			# boundary as _fit. Later proposals replace one record and append three
+			# in order; they cannot change any other admitted object or shell data.
+			if accepted.is_empty(): state = prepared_input.blueprint.snapshot()
+			_commit_prepared_members(prepared_input, delta.panelIndex, delta.panel, delta.additions, delta.obstacles)
+			state.parts[delta.panelIndex] = proposal.panel
+			state.parts.append_array(proposal.additions)
 			accepted.append(panel_id)
 			rooted[panel_id] = true
 			for id: String in support_delta.rootedTargetIds: rooted[id] = true
@@ -168,11 +174,16 @@ static func _accepted_change_support_delta(before: Dictionary, after: Dictionary
 	for record: Dictionary in after.parts:
 		if not before_by_id.has(record.id): influences.append(Part.new(record))
 	if influences.size() != after.parts.size() - before.parts.size(): return _fail("invalid_independence_change_inventory")
+	return _support_targets_for_additions(before.parts, influences, panel_id, prepared_parts)
+
+static func _support_targets_for_additions(records: Array, influences: Array, panel_id: String, prepared_parts: Array = []) -> Dictionary:
+	# Keep the complete target scan: a new beam can acquire ordinary-support
+	# dependants that have no edge in the previous explicit support graph.
 	var excluded: Dictionary = {panel_id: true}
 	for influence in influences: excluded[influence.id] = true
 	var rooted_targets: Array = []
-	for index in range(before.parts.size()):
-		var record: Dictionary = before.parts[index]
+	for index in range(records.size()):
+		var record: Dictionary = records[index]
 		if excluded.has(record.id): continue
 		var target = Part.new(record) if prepared_parts.is_empty() else prepared_parts[index]
 		if not target.collision_enabled or _resolved_intent(target) not in ["structural_mass", "structural_root", "walkable_surface"]: continue
@@ -404,7 +415,7 @@ static func prepare(snapshot: Dictionary, panel_id: String, policy: Dictionary, 
 	var input := _read(snapshot, panel_id, policy)
 	return _prepare_input(input, panel_id, policy, continuation)
 
-static func _prepare_input(input: Dictionary, panel_id: String, policy: Dictionary, continuation: Callable) -> Dictionary:
+static func _prepare_input(input: Dictionary, panel_id: String, policy: Dictionary, continuation: Callable, snapshot_output: bool = true) -> Dictionary:
 	if not input.ready: return input
 	var b = input.blueprint
 	var panel = b.find_part(panel_id)
@@ -455,7 +466,7 @@ static func _prepare_input(input: Dictionary, panel_id: String, policy: Dictiona
 	var attempts: Array = []
 	var work := {"satPairs": 0}
 	for seat in candidates:
-		var trial := _fit(b, roots, panel, body, seat, input, work, continuation)
+		var trial := _fit(b, roots, panel, body, seat, input, work, continuation, snapshot_output)
 		if trial.get("reason", "") == "cancelled": return trial
 		if trial.ready:
 			trial["independentSeatCheck"] = rooted[seat.id]
@@ -558,7 +569,7 @@ static func _shorten_body(original, panel, obstacles: Array, volumes: Array) -> 
 		"testedBounds": occupied.size(), "intersectingBounds": intersecting,
 		"scope": "New sill fit only; two finite rooted connections and all final admissions still required."}
 
-static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: Dictionary, continuation: Callable = Callable(), snapshot_output: bool = true) -> Dictionary:
 	var body := Part.new(original_body.snapshot())
 	var core: Array = Connection._bounds_values(seat.position, Connection.Core.bed_size(seat.size))
 	var bb: Array = Connection._bounds(body)
@@ -631,10 +642,12 @@ static func _fit(b, roots, panel, original_body, seat, input: Dictionary, work: 
 		var part = proof.find_part(id)
 		for fact: Dictionary in part.recipe.physicalRequiredSeatFacts:
 			if not proof.has_rooted_bearer_seat(part, fact): return _fail("required_finite_joint_failed")
-	var after: Dictionary = b.snapshot()
-	for index in range(after.parts.size()):
-		if after.parts[index].id == panel.id: after.parts[index] = changed.snapshot()
-	for record: Dictionary in additions: after.parts.append(record)
+	var after: Dictionary = {}
+	if snapshot_output:
+		after = b.snapshot()
+		for index in range(after.parts.size()):
+			if after.parts[index].id == panel.id: after.parts[index] = changed.snapshot()
+		for record: Dictionary in additions: after.parts.append(record)
 	return {"ready": true, "afterSnapshot": after, "panelId": panel.id, "panel": changed.snapshot(), "additions": additions,
 		"joints": joints, "checks": checks, "work": work.duplicate(), "proofGridWork": proof_grid, "sourceGeometryUnchanged": true}
 
@@ -675,15 +688,41 @@ static func _advance_prepared_input(input: Dictionary, state: Dictionary, panel_
 		ids[part.id] = true
 	var obstacles := Connection._obstacles(additions)
 	if not obstacles.ready: return obstacles
+	_commit_prepared_members(input, panel_index, delta.parts[0], additions, obstacles.boxes)
+	return {"ready":true}
+
+static func _admit_completion_delta(input: Dictionary, proposal: Dictionary, panel_id: String) -> Dictionary:
+	var previous = input.blueprint
+	if not proposal.get("panel") is Dictionary or proposal.panel.get("id") != panel_id \
+			or not proposal.get("additions") is Array or proposal.additions.size() != 3: return _fail("invalid_prepared_input_delta")
+	var panel_index := -1
+	for index in range(previous.parts.size()):
+		if previous.parts[index].id == panel_id: panel_index = index
+	if panel_index < 0: return _fail("invalid_prepared_panel_delta")
+	var records: Array = [proposal.panel]
+	records.append_array(proposal.additions)
+	# Reuse the public snapshot-copy rules on precisely the accepted four records.
+	var delta = Copy.copy_blueprint({"id": previous.id, "seed": previous.seed, "style": previous.style,
+		"recipe": {}, "rooms": [], "parts": records})
+	var additions: Array = delta.parts.slice(1)
+	var ids := {}
+	for part in additions:
+		if part.kind != "beam" or previous.find_part(part.id) != null or ids.has(part.id): return _fail("invalid_prepared_input_member")
+		ids[part.id] = true
+	var obstacles := Connection._obstacles(additions)
+	if not obstacles.ready: return obstacles
+	return {"ready": true, "panelIndex": panel_index, "panel": delta.parts[0], "additions": additions, "obstacles": obstacles.boxes}
+
+static func _commit_prepared_members(input: Dictionary, panel_index: int, panel, additions: Array, obstacles: Array) -> void:
+	var previous = input.blueprint
 	# Validate first, then atomically advance the transaction-owned objects.
-	input.obstacles.append_array(obstacles.boxes)
+	input.obstacles.append_array(obstacles)
 	input.obstacles.sort_custom(func(a,b):return a.id < b.id)
-	previous.parts[panel_index] = delta.parts[0]
-	previous.physical_parts_by_id[panel_id] = delta.parts[0]
+	previous.parts[panel_index] = panel
+	previous.physical_parts_by_id[panel.id] = panel
 	for part in additions:
 		previous.parts.append(part)
 		previous.physical_parts_by_id[part.id] = part
-	return {"ready":true}
 
 static func _read(snapshot: Dictionary, panel_id: String, policy: Dictionary) -> Dictionary:
 	if not snapshot.get("id") is String or not snapshot.get("seed") is int or not snapshot.get("style") is String or not snapshot.get("recipe") is Dictionary or not snapshot.get("parts") is Array or not snapshot.get("rooms") is Array: return _fail("invalid_snapshot")
