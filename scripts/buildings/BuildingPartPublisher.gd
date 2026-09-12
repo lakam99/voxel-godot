@@ -74,6 +74,11 @@ var _scene_finalized := false
 var _publication_stage_metrics: Dictionary = {}
 var _static_flush
 var _static_flush_notify := false
+var _static_metadata_dirty := false
+var _publication_epoch := 0
+var _pending_publication_boundary: Dictionary = {}
+var _last_publication_boundary: Dictionary = {}
+var _source_part_boundaries: Dictionary = {}
 var _publication_retirement: Array = []
 var _static_record_cache: Dictionary = {}
 var _static_record_cache_stats: Dictionary = {"copies":0,"hits":0,"preparedHits":0,"copiedEncodedBytes":0,"unsupportedCopies":0}
@@ -292,6 +297,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 		_pending_roof=null
 		_pending_part_index=-1
 		incremental_published_parts+=1
+		_record_completed_source_part(blueprint.parts[start_index])
 		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT: _begin_static_flush(parent,true)
 		return start_index+1
 	if has_pending_static_flush():
@@ -320,6 +326,7 @@ func publish_part_batch(blueprint, parent: Node3D, start_index: int, max_parts: 
 			_pending_part_index=part_index-1
 			return _pending_part_index
 		incremental_published_parts += 1
+		_record_completed_source_part(part)
 		if batch_static_parts and static_visual_transform_count >= INCREMENTAL_STATIC_BATCH_INSTANCE_LIMIT:
 			if resumable_scene_publication:
 				_begin_static_flush(parent,true)
@@ -352,7 +359,7 @@ func finish_scene_publication(blueprint, parent: Node3D, budget_usec := 2500) ->
 		if _masonry_preparation != null and (_masonry_preparation.state != "ready" or not _masonry_preparation._validate_all(self)): return publication_status()
 		_finish_validated = true
 	if resumable_scene_publication:
-		if _static_flush==null and not static_visual_batches.is_empty(): _begin_static_flush(parent,false)
+		if _static_flush==null: _begin_static_flush(parent,false,true)
 		var result := advance_static_flush(parent,budget_usec)
 		if result.status!="ready": return {"status":result.status,"reason":result.get("reason",""),"complete":false}
 	else:
@@ -406,6 +413,11 @@ func clear_published() -> void:
 	_pending_roof=null
 	_pending_part_index=-1
 	_static_flush = null
+	_static_metadata_dirty = false
+	_publication_epoch = 0
+	_pending_publication_boundary = {}
+	_last_publication_boundary = {}
+	_source_part_boundaries = {}
 	_publication_retirement = []
 	_static_record_cache={}
 	_static_record_cache_stats={"copies":0,"hits":0,"preparedHits":0,"copiedEncodedBytes":0,"unsupportedCopies":0}
@@ -479,6 +491,10 @@ func canonical_source_blueprint_id(blueprint) -> String:
 func publish_part(part, parent: Node3D) -> StaticBody3D:
 	if not _paving_part_valid(part): return null
 	if not _masonry_part_valid(part): return null
+	# Republishing an ID must not leave its previous boundary usable while a
+	# replacement visual/collider is still under construction.
+	var previous_boundary: Dictionary = _source_part_boundaries.get(String(part.id),{})
+	if previous_boundary.get("committed",false): _source_part_boundaries.erase(String(part.id))
 	var started := Time.get_ticks_usec()
 	published_part_count += 1
 	if batch_static_parts and String(part.kind) != "door":
@@ -555,6 +571,7 @@ func publish_static_part(part, parent: Node3D) -> void:
 		collision.rotation = part.rotation
 		collision_body.add_child(collision)
 		static_part_records[String(part.id)] = record
+		_static_metadata_dirty = true
 		collision_count += 1
 	if bool(part.recipe.get("visual", true)):
 		static_visual_collecting = true
@@ -1545,16 +1562,92 @@ func collect_prepared_static_visual_segment(segment, material: Material) -> void
 
 
 func flush_static_batches(parent: Node3D) -> void:
-	if _static_flush==null: _begin_static_flush(parent,false)
+	if _static_flush==null: _begin_static_flush(parent,false,true)
 	while has_pending_static_flush():
 		if advance_static_flush(parent).status=="failed": break
 
 
-func _begin_static_flush(parent: Node3D, notify_progress: bool) -> void:
-	if _static_flush!=null or static_visual_batches.is_empty() or parent==null: return
+func _begin_static_flush(parent: Node3D, notify_progress: bool, explicit_boundary := false) -> void:
+	if _static_flush!=null or parent==null: return
+	if static_visual_batches.is_empty() and not _static_metadata_dirty \
+			and (not explicit_boundary or _pending_publication_boundary.is_empty()): return
+	_ensure_publication_boundary()
+	# Completed direct-node records need no static upload/metadata copy. Their
+	# exact same source validation still precedes the one atomic receipt commit.
+	if static_visual_batches.is_empty() and not _static_metadata_dirty:
+		var boundary: Dictionary = _pending_publication_boundary
+		if not validate_static_flush_source():
+			_paving_reject("stale_static_flush_source")
+		elif not _commit_publication_boundary(boundary):
+			_paving_reject("publication_boundary_owner_changed")
+		return
 	_static_flush = StaticBatchFlush.new()
 	_static_flush_notify = notify_progress
-	_static_flush.begin(static_visual_batches,static_part_records,parent)
+	_static_flush.begin(static_visual_batches,static_part_records,parent,_pending_publication_boundary)
+
+
+## A scene owner requests this boundary after a selected set of source parts.
+## It preserves shared material batches; it does not finalize the whole site.
+## Direct-node parts also need a boundary even when there is no static visual
+## or collision metadata. This receipt covers only completed batch API calls;
+## the owner separately validates live scene, door, tree and source bindings.
+func advance_publication_boundary(parent: Node3D, budget_usec := 2500) -> Dictionary:
+	if budget_usec < 1 or budget_usec > 4000:
+		return {"status":"failed","reason":"invalid_slice_budget","publicationEpoch":_publication_epoch,"committedSourcePartIds":[]}
+	if not is_instance_valid(parent) or parent.is_queued_for_deletion() or not _scene_owner_matches(_scene_blueprint,parent):
+		return {"status":"failed","reason":"scene_publication_owner_mismatch","publicationEpoch":_publication_epoch,"committedSourcePartIds":[]}
+	if _publication_failed(): return _publication_boundary_status("failed",String(publication_status().reason))
+	if _pending_paving!=null or _pending_masonry!=null or _pending_roof!=null \
+			or _masonry_preparation==null or _masonry_preparation.state!="ready":
+		return _publication_boundary_status("pending_budget","part_publication_pending")
+	if _static_flush==null: _begin_static_flush(parent,false,true)
+	if _publication_failed(): return _publication_boundary_status("failed",String(publication_status().reason))
+	var outcome: Dictionary = advance_static_flush(parent,budget_usec)
+	return _publication_boundary_status(String(outcome.status),String(outcome.get("reason","")))
+
+
+func source_part_publication_epoch(part_id: String) -> int:
+	if _publication_failed(): return 0
+	var boundary: Dictionary = _source_part_boundaries.get(part_id,{})
+	return int(boundary.epoch) if boundary.get("committed",false) else 0
+
+
+func _publication_boundary_status(state: String, reason: String) -> Dictionary:
+	return {"status":state,"reason":reason,"publicationEpoch":_publication_epoch,
+		"committedSourcePartIds":_last_publication_boundary.get("sourcePartIds",[])}
+
+
+func _ensure_publication_boundary() -> void:
+	if _pending_publication_boundary.is_empty():
+		_pending_publication_boundary={"epoch":_publication_epoch+1,"sourcePartIds":[],"committed":false}
+
+
+func _record_completed_source_part(part) -> void:
+	_ensure_publication_boundary()
+	var part_id: String = String(part.id)
+	if is_same(_source_part_boundaries.get(part_id),_pending_publication_boundary): return
+	_pending_publication_boundary.sourcePartIds.append(part_id)
+	_source_part_boundaries[part_id]=_pending_publication_boundary
+
+
+## Called only after the flush has committed exact metadata and all visual
+## attachments. One shared token makes the selected source IDs visible at once
+## without copying/updating the entire site's receipt map at every boundary.
+func _publication_boundary_is_current(boundary: Dictionary) -> bool:
+	return is_same(boundary,_pending_publication_boundary) and not boundary.get("committed",false) \
+		and int(boundary.get("epoch",0))==_publication_epoch+1
+
+
+func _commit_publication_boundary(boundary: Dictionary) -> bool:
+	if not _publication_boundary_is_current(boundary): return false
+	boundary.sourcePartIds.make_read_only()
+	boundary.committed=true
+	boundary.make_read_only()
+	_publication_epoch=int(boundary.epoch)
+	_last_publication_boundary=boundary
+	_pending_publication_boundary={}
+	_static_metadata_dirty=false
+	return true
 
 
 func has_pending_static_flush() -> bool:

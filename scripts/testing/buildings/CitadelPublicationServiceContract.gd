@@ -80,6 +80,19 @@ class GatedWorker extends Worker:
 			result.progress.elapsedUsec = 61000000
 		return result
 
+class DescriptionGatedWorker extends Worker:
+	var gate := Semaphore.new()
+	var forward_description: Callable
+	func _prepare_source(source: Dictionary, binding: Dictionary, continuation: Callable, description_callback: Callable = Callable()) -> Dictionary:
+		forward_description = description_callback
+		var result: Dictionary = super._prepare_source(source,binding,continuation,_pause_description)
+		forward_description = Callable()
+		return result
+	func _pause_description(value) -> bool:
+		var accepted: bool = forward_description.call(value) == true
+		gate.wait()
+		return accepted
+
 var checks := {}
 var metrics := {}
 func _initialize() -> void: call_deferred("_run")
@@ -418,7 +431,41 @@ func retained_demand() -> void:
 	check("retained_configure_clears",service.stats().retainedBounds==0 and service._refresh_demand(Rect2i()).is_empty())
 	await close(value,"retained")
 
+func early_description_lifecycle() -> void:
+	# Real worker transfer with a synthetic phase barrier, not gameplay evidence.
+	for cancel_after_transfer: bool in [false,true]:
+		var value: Owner = owner()
+		var service = value.structure_system.citadel_publication
+		var admission = value.structure_system.citadel_terrain_admission
+		inject(admission,REGION,tiny(REGION))
+		var worker := DescriptionGatedWorker.new()
+		service._worker = worker
+		var deadline: int = Time.get_ticks_msec()+10000
+		while service._described.is_empty() and Time.get_ticks_msec()<deadline:
+			value.structure_system.advance_citadel_publication(bounds(),true)
+			await process_frame
+		var prefix: String = "early_description_cancel" if cancel_after_transfer else "early_description_complete"
+		check(prefix+"_arrives_before_final_preparation",service._described.has(REGION) and service.stats().acceptedCount==0 and worker.poll().workerRunning)
+		if service._described.has(REGION):
+			var source: Dictionary = admission.source_state(REGION)
+			var entry: Dictionary = service._described[REGION]
+			check(prefix+"_source_identity",entry.binding==source.binding and entry.description.binding==source.binding and entry.profile.origin==entry.description.origin)
+			var obligations: Dictionary = service._source_description_requirements(REGION,bounds(),source.binding)
+			check(prefix+"_obligations_are_not_receipt",obligations.get("status")=="described" and obligations.get("publicationAcknowledged")==false and not obligations.has("physicalOwnerAcknowledgements"))
+			var serial: int = entry.serial
+			value.structure_system.advance_citadel_publication(bounds(),true)
+			check(prefix+"_transfer_not_duplicated",service._described[REGION].serial==serial)
+		if cancel_after_transfer:
+			service._prune_unwanted({})
+			check(prefix+"_departure_revokes_description",service._described.is_empty() and service._inflight.is_empty())
+		worker.gate.post() # Always release, including a failed assertion/deadline.
+		if not cancel_after_transfer:
+			await wait_prepared(value.structure_system,1,REGION,prefix+"_final_result_accepted")
+			check(prefix+"_description_survives_final_transfer",service._described.has(REGION))
+		await close(value,prefix)
+
 func _run() -> void:
+	await early_description_lifecycle()
 	await retained_demand()
 	await actual_source()
 	await controlled_lifecycle()

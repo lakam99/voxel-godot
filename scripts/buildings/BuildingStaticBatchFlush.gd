@@ -40,13 +40,15 @@ var _parent: WeakRef
 var _segments: Dictionary = {}
 var _buffer := PackedFloat32Array()
 var _retired_buffers: Array = []
+var _publication_boundary: Dictionary = {}
 
-func begin(groups: Dictionary, records: Dictionary, parent: Node3D) -> void:
+func begin(groups: Dictionary, records: Dictionary, parent: Node3D, publication_boundary: Dictionary = {}) -> void:
 	if state != "idle": return
 	if not is_instance_valid(parent):
 		state = "failed"; reason = "static_flush_parent_lost"; return
 	_groups = groups
 	_records = records
+	_publication_boundary = publication_boundary
 	_parent = weakref(parent)
 	state = "keys"
 
@@ -235,6 +237,11 @@ func _step(publisher) -> void:
 			# Rejection leaves the previously published snapshot untouched.
 			if not publisher.validate_static_flush_source():
 				state="failed"; reason="stale_static_flush_source"; return
+			if not _publication_boundary.is_empty() and not publisher._publication_boundary_is_current(_publication_boundary):
+				state="failed"; reason="publication_boundary_owner_changed"; return
+			if not _records.is_empty() and (not is_instance_valid(publisher.static_collision_body) \
+					or publisher.static_collision_body.is_queued_for_deletion() or publisher.static_collision_body.get_parent()!=parent):
+				state="failed"; reason="static_collision_owner_lost"; return
 			if is_instance_valid(publisher.static_collision_body):
 				if publisher.static_collision_body.has_meta("building_part_records"):
 					publisher._publication_retirement.append(publisher.static_collision_body.get_meta("building_part_records"))
@@ -249,6 +256,8 @@ func _step(publisher) -> void:
 			publisher.static_visual_batches = {}
 			publisher.static_visual_transform_count = 0
 			publisher.incremental_static_flush_count += 1
+			if not _publication_boundary.is_empty() and not publisher._commit_publication_boundary(_publication_boundary):
+				state="failed"; reason="publication_boundary_owner_changed"; return
 			state = "ready"
 
 static func _immutable_leaf(value: Variant) -> bool:

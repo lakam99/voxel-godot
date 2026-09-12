@@ -94,6 +94,9 @@ func run() -> void:
 	metadata_selected_controls()
 	metadata_graph_controls()
 	prepared_metadata_controls()
+	publication_boundary_controls()
+	publication_boundary_rejections()
+	publication_boundary_pending_part()
 	original_submission_parity()
 	var report: Dictionary = {"evidence":"synthetic_static_batch_flush","checks":checks,"metrics":metrics,"passed":not checks.values().has(false)}
 	var path:=OS.get_environment("BUILDING_STATIC_FLUSH_REPORT")
@@ -101,6 +104,138 @@ func run() -> void:
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("STATIC FLUSH ",JSON.stringify(report))
 	quit(0 if report.passed else 1)
+
+func drain_publication_boundary(publisher, parent: Node3D, budget: int) -> Dictionary:
+	var outcome: Dictionary = {}
+	for turn: int in range(10000):
+		outcome = publisher.advance_publication_boundary(parent,budget)
+		if outcome.status != "pending_budget": return outcome
+	return {"status":"failed","reason":"synthetic_boundary_limit"}
+
+func publication_boundary_controls() -> void:
+	for budget: int in [1,4000]:
+		var label: String = "boundary_"+str(budget)
+		var parent: Node3D = Node3D.new()
+		root.add_child(parent)
+		var publisher: RecordingPublisher = RecordingPublisher.new()
+		var blueprint: BuildingBlueprint = Blueprint.new("boundary",7,"timber")
+		blueprint.add_part({"id":"support","kind":"post","material":"timber_beam","recipe":{"visual":false}})
+		blueprint.add_part({"id":"visible_a","kind":"post","material":"timber_beam","position":Vector3(2,0,0)})
+		blueprint.add_part({"id":"visible_b","kind":"post","material":"timber_beam","position":Vector3(4,0,0)})
+		blueprint.add_part({"id":"door","kind":"door","material":"timber_board","position":Vector3(6,0,0)})
+		check(label+"_begin",publisher.begin_publication(blueprint,parent,{"batchStaticParts":true,"resumableScenePublication":true}))
+		var next: int = publisher.publish_part_batch(blueprint,parent,0,1,budget)
+		var body: StaticBody3D = publisher.static_collision_body
+		check(label+"_collision_before_receipt",next==1 and is_instance_valid(body) and body.get_child_count()==1 \
+			and not body.has_meta("building_part_records") and publisher.source_part_publication_epoch("support")==0 \
+			and publisher.static_visual_batches.is_empty())
+		var first: Dictionary = drain_publication_boundary(publisher,parent,budget)
+		var first_records: Dictionary = body.get_meta("building_part_records",{})
+		check(label+"_collision_only_metadata_committed",first.status=="ready" and first.publicationEpoch==1 \
+			and first.committedSourcePartIds==["support"] and first_records.keys()==["support"] \
+			and var_to_bytes(first_records.support)==var_to_bytes(blueprint.parts[0].snapshot()) \
+			and publisher.source_part_publication_epoch("support")==1 and publisher.visual_batch_count==0)
+		check(label+"_no_whole_site_completion",not publisher.publication_status().complete \
+			and publisher.source_part_publication_epoch("visible_a")==0 and publisher.source_part_publication_epoch("unknown")==0)
+		next=publisher.publish_part_batch(blueprint,parent,1,2,budget)
+		check(label+"_shared_batch_pending",next==3 and publisher.static_visual_batches.size()==1 \
+			and publisher.source_part_publication_epoch("visible_a")==0 and publisher.source_part_publication_epoch("visible_b")==0 \
+			and publisher.source_part_publication_epoch("support")==1 and is_same(body.get_meta("building_part_records"),first_records))
+		publisher._begin_static_flush(parent,false,true)
+		var receipts_hidden: bool = true
+		for turn: int in range(10000):
+			if publisher._static_flush.state=="commit": break
+			publisher._static_flush._step(publisher)
+			receipts_hidden=receipts_hidden and publisher.source_part_publication_epoch("visible_a")==0 \
+				and publisher.source_part_publication_epoch("visible_b")==0 \
+				and is_same(body.get_meta("building_part_records"),first_records)
+		check(label+"_attached_visual_is_not_receipt",receipts_hidden and publisher._static_flush.state=="commit" and publisher.visual_batch_count==1)
+		var second: Dictionary = drain_publication_boundary(publisher,parent,budget)
+		check(label+"_shared_batch_atomic_receipt",second.status=="ready" and second.publicationEpoch==2 \
+			and second.committedSourcePartIds==["visible_a","visible_b"] and second.committedSourcePartIds.is_read_only() \
+			and publisher.source_part_publication_epoch("visible_a")==2 and publisher.source_part_publication_epoch("visible_b")==2 \
+			and publisher.source_part_publication_epoch("support")==1 and first_records.keys()==["support"] \
+			and body.get_meta("building_part_records").keys()==["support","visible_a","visible_b"] and publisher.visual_batch_count==1)
+		var flushes: int = publisher.incremental_static_flush_count
+		next=publisher.publish_part_batch(blueprint,parent,3,1,budget)
+		check(label+"_direct_door_pending",next==4 and publisher.source_part_publication_epoch("door")==0 \
+			and publisher.static_visual_batches.is_empty() and not publisher.has_pending_static_flush())
+		var third: Dictionary = drain_publication_boundary(publisher,parent,budget)
+		check(label+"_direct_node_receipt_without_static_flush",third.status=="ready" and third.publicationEpoch==3 \
+			and third.committedSourcePartIds==["door"] and publisher.source_part_publication_epoch("door")==3 \
+			and publisher.incremental_static_flush_count==flushes and not publisher.has_pending_static_flush())
+		var repeated: Dictionary = publisher.advance_publication_boundary(parent,budget)
+		check(label+"_idle_boundary_does_not_grow",repeated.status=="ready" and repeated.publicationEpoch==3 \
+			and is_same(repeated.committedSourcePartIds,third.committedSourcePartIds))
+		check(label+"_invalid_budget_does_not_commit",publisher.advance_publication_boundary(parent,0).status=="failed" \
+			and publisher.source_part_publication_epoch("door")==3)
+		var finished: Dictionary = publisher.finish_scene_publication(blueprint,parent,budget)
+		check(label+"_whole_site_finishes_once",finished.complete and publisher._publication_epoch==3)
+		publisher.clear_published()
+		check(label+"_reset_revokes_receipts",publisher.source_part_publication_epoch("support")==0 \
+			and publisher.source_part_publication_epoch("door")==0 and publisher._publication_epoch==0)
+		parent.free()
+
+func publication_boundary_rejections() -> void:
+	for mode: String in ["stale_source","replaced_boundary","lost_collision_owner"]:
+		var parent: Node3D = Node3D.new()
+		root.add_child(parent)
+		var publisher: StalePublisher = StalePublisher.new()
+		var blueprint: BuildingBlueprint = Blueprint.new("rejected_boundary",9,"timber")
+		blueprint.add_part({"id":"support","kind":"post","material":"timber_beam","recipe":{"visual":false}})
+		check(mode+"_boundary_begin",publisher.begin_publication(blueprint,parent,{"batchStaticParts":true,"resumableScenePublication":true}))
+		publisher.publish_part_batch(blueprint,parent,0,1,1)
+		var body: StaticBody3D = publisher.static_collision_body
+		var old: Dictionary = {"previous":{"record":[1,2,3]}}
+		body.set_meta("building_part_records",old)
+		publisher._begin_static_flush(parent,false,true)
+		for turn: int in range(10000):
+			if publisher._static_flush.state=="commit": break
+			publisher._static_flush._step(publisher)
+		if mode=="stale_source": publisher.source_valid=false
+		elif mode=="replaced_boundary": publisher._pending_publication_boundary={}
+		else: body.free()
+		var outcome: Dictionary = publisher.advance_publication_boundary(parent,1)
+		var metadata_unchanged: bool = not is_instance_valid(body) if mode=="lost_collision_owner" else is_same(body.get_meta("building_part_records"),old)
+		check(mode+"_boundary_not_acknowledged",outcome.status=="failed" and publisher.source_part_publication_epoch("support")==0 \
+			and publisher._publication_epoch==0 and metadata_unchanged)
+		parent.free()
+		publisher.published_nodes=[]
+		publisher.static_collision_body=null
+	var parent: Node3D = Node3D.new()
+	root.add_child(parent)
+	var publisher: StalePublisher = StalePublisher.new()
+	var blueprint: BuildingBlueprint = Blueprint.new("direct_rejected_boundary",10,"timber")
+	blueprint.add_part({"id":"door","kind":"door","material":"timber_board"})
+	check("direct_stale_boundary_begin",publisher.begin_publication(blueprint,parent,{"batchStaticParts":true,"resumableScenePublication":true}))
+	publisher.publish_part_batch(blueprint,parent,0,1,1)
+	publisher.source_valid=false
+	var outcome: Dictionary = publisher.advance_publication_boundary(parent,1)
+	check("direct_stale_boundary_not_acknowledged",outcome.status=="failed" and outcome.reason=="stale_static_flush_source" \
+		and publisher.source_part_publication_epoch("door")==0 and publisher._publication_epoch==0 and not publisher.has_pending_static_flush())
+	parent.free()
+	publisher.published_nodes=[]
+
+func publication_boundary_pending_part() -> void:
+	var parent: Node3D = Node3D.new()
+	root.add_child(parent)
+	var publisher: RecordingPublisher = RecordingPublisher.new()
+	var blueprint: BuildingBlueprint = Blueprint.new("pending_boundary",11,"stone")
+	blueprint.add_part({"id":"paving","kind":"foundation","material":"cobblestone","size":Vector3(4,0.12,3)})
+	check("pending_boundary_begin",publisher.begin_publication(blueprint,parent,{"batchStaticParts":true,"resumableScenePublication":true}))
+	var next: int = publisher.publish_part_batch(blueprint,parent,0,1,1)
+	var pending: Dictionary = publisher.advance_publication_boundary(parent,1)
+	check("pending_part_prevents_boundary",next==0 and pending.status=="pending_budget" and pending.reason=="part_publication_pending" \
+		and publisher._pending_paving!=null and not publisher.has_pending_static_flush() and publisher.source_part_publication_epoch("paving")==0)
+	for turn: int in range(10000):
+		if next==1 or publisher.publication_status().status=="failed": break
+		next=publisher.publish_part_batch(blueprint,parent,0,1,4000)
+	var complete: Dictionary = drain_publication_boundary(publisher,parent,4000)
+	check("completed_part_commits_at_boundary",next==1 and complete.status=="ready" \
+		and complete.committedSourcePartIds==["paving"] and publisher.source_part_publication_epoch("paving")>0)
+	parent.free()
+	publisher.published_nodes=[]
+	publisher.static_collision_body=null
 
 func drain_metadata(publisher, parent: Node3D) -> bool:
 	publisher.collect_static_visual_transform(Transform3D.IDENTITY,StandardMaterial3D.new())

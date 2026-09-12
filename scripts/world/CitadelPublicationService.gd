@@ -23,6 +23,8 @@ var _observer_region_bounds := Rect2i()
 var _observer_bounds_rejected := false
 var _demand_revision := 0
 var _prepared: Dictionary = {}
+var _described: Dictionary = {}
+var _description_serial := 0
 var _retired: Dictionary = {}
 var _inflight: Dictionary = {}
 var _failures: Dictionary = {}
@@ -192,6 +194,8 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 	_prune_invalid_scenes()
 	_last_worker_status = _worker.poll()
 	_worker_polled_configuration = _configuration_serial
+	_prune_invalid_descriptions()
+	_collect_description(ready,allow_dispatch and not _closing)
 	# The exclusively owned external batch has been accepted; idle with no
 	# pending retirement proves its worker disposal/join completed, not merely
 	# that scene nodes disappeared. Failed thread starts retain pending claims.
@@ -204,6 +208,7 @@ func advance(observer_bounds: Rect2i = Rect2i(), allow_dispatch := false, budget
 		if int(progress.get("elapsedUsec",0)) > PREPARATION_TIMEOUT_USEC:
 			_failures[_inflight.region] = {"binding":_inflight.binding,"reason":"building_preparation_timeout"}
 			_worker.cancel(int(_inflight.token))
+			_retire_description(_inflight.region)
 			_inflight = {}
 	_pump_scenes(ready,allow_dispatch and not _closing,started,budget_usec)
 	if _world_reset_release_requested and world_reset_ready():
@@ -263,6 +268,9 @@ func _current_binding(binding: Dictionary) -> bool:
 		and String(_admission.stats().worldSeed) == _seed
 
 func _prune_unwanted(ready: Dictionary) -> void:
+	for region: Vector2i in _described.keys():
+		if not ready.has(region) or ready[region].binding != _described[region].binding:
+			_retire_description(region)
 	for region: Vector2i in _scenes.keys():
 		if not ready.has(region) or ready[region].binding != _scenes[region].binding:
 			_retire_scene(region)
@@ -278,6 +286,40 @@ func _prune_unwanted(ready: Dictionary) -> void:
 		_worker.cancel(int(_inflight.token))
 		_inflight = {}
 
+func _retire_description(region: Vector2i) -> void:
+	if not _described.has(region): return
+	_retire(_described[region])
+	_described.erase(region)
+	_description_serial += 1
+
+func _prune_invalid_descriptions() -> void:
+	for region: Vector2i in _described.keys():
+		var entry: Dictionary = _described[region]
+		var current: Dictionary = _admission.source_state(region) if _admission != null else {}
+		if _closing or _world_reset_pending or _failures.has(region) or entry.configuration != _configuration_serial \
+				or current.get("status") not in ["ready","prepared"] or current.get("binding",{}) != entry.binding \
+				or not _current_binding(entry.binding):
+			_retire_description(region)
+
+func _collect_description(ready: Dictionary, allow_accept: bool) -> void:
+	if _inflight.is_empty() or not allow_accept or _world_reset_pending: return
+	var region: Vector2i = _inflight.region
+	if _described.has(region): return
+	var current: Dictionary = _admission.source_state(region)
+	if not ready.has(region) or current.get("status") not in ["ready","prepared"] \
+			or current.get("binding",{}) != _inflight.binding or not _current_binding(_inflight.binding): return
+	var transfer: Dictionary = _worker.take_description(int(_inflight.token),current.binding)
+	if transfer.get("status") != "described": return
+	var profile: Dictionary = transfer.get("profile",{})
+	var description = transfer.get("description")
+	if description == null or description.binding != current.binding or profile.get("siteId") != current.binding.siteId \
+			or profile.get("sourceSignature") != current.sourceSignature or profile.get("origin") != description.origin:
+		_retire(transfer)
+		return
+	_description_serial += 1
+	_described[region] = {"binding":current.binding,"profile":profile,"description":description,
+		"configuration":_configuration_serial,"serial":_description_serial}
+
 func _collect(ready: Dictionary, allow_accept: bool) -> void:
 	if _inflight.is_empty() or not allow_accept: return
 	var token := int(_inflight.token)
@@ -289,6 +331,7 @@ func _collect(ready: Dictionary, allow_accept: bool) -> void:
 	if not ready.has(region) or current.get("status") not in ["ready","prepared"] \
 			or current.binding != _inflight.binding or not _current_binding(current.binding):
 		_worker.cancel(token)
+		_retire_description(region)
 		_inflight = {}
 		return
 	var completion: Dictionary = _worker.take_result(token,current.binding)
@@ -299,6 +342,7 @@ func _collect(ready: Dictionary, allow_accept: bool) -> void:
 		_prepared[region] = {"binding":current.binding.duplicate(),"prepared":result.prepared,"profile":result.profile}
 		_accepted_count += 1
 	else:
+		_retire_description(region)
 		_failures[region] = {"binding":current.binding.duplicate(),"reason":String(result.get("reason","building_preparation_failed"))}
 		if result.get("ready",false):
 			_failures[region].reason = "stale_prepared_profile"
@@ -326,6 +370,7 @@ func _dispatch(ready: Dictionary, observer: Vector2i) -> void:
 
 func _resident_region_count() -> int:
 	var regions := {}
+	for region: Vector2i in _described: regions[region] = true
 	for region: Vector2i in _prepared: regions[region] = true
 	for region: Vector2i in _scenes: regions[region] = true
 	if not _inflight.is_empty(): regions[_inflight.region] = true
@@ -339,6 +384,9 @@ func _retire(value: Dictionary) -> void:
 	_retired[_retirement_serial] = value
 
 func _retire_all() -> void:
+	if not _described.is_empty(): _retire(_described)
+	_described = {}
+	_description_serial += 1
 	if not _prepared.is_empty(): _retire(_prepared)
 	_prepared = {}
 
@@ -380,7 +428,7 @@ func stats() -> Dictionary:
 		"retainedBounds":_retained_region_bounds.size(),"observerBoundsRejected":_observer_bounds_rejected,
 		"residentSites":_resident_region_count(),"residentLimit":MAX_REGIONS,
 		"worldResetPending":_world_reset_pending,"worldResetReady":world_reset_ready(),
-		"preparedSites":_prepared.size(),"pendingRetirements":_retired.size(),
+		"preparedSites":_prepared.size(),"describedSites":_described.size(),"pendingRetirements":_retired.size(),
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
 		"dispatchCount":_dispatch_count,"acceptedCount":_accepted_count,"maxAdvanceUsec":_max_advance_usec,
 		"publicationReady":false,"worker":_last_worker_status,
@@ -540,6 +588,17 @@ func scene_state(region: Vector2i) -> Dictionary:
 func scene_root(region: Vector2i) -> Node3D:
 	return _scenes[region].job.own_node_root() if _scenes.has(region) else null
 
+func _source_description_requirements(region: Vector2i, bounds: Rect2i, binding: Dictionary) -> Dictionary:
+	if _closing or _world_reset_pending or _region_retiring(region) or not _described.has(region):
+		return {"status":"pending","reason":"structure_dependency_source_pending"}
+	var entry: Dictionary = _described[region]
+	if entry.configuration != _configuration_serial or entry.binding != binding or entry.description.binding != binding \
+			or entry.description.origin != entry.profile.origin:
+		return {"status":"pending","reason":"structure_dependency_source_stale"}
+	# No scene receipt is invented at this earlier source boundary. Ordinary
+	# physical/navigation gates still decide whether these obligations are ready.
+	return entry.description.group_requirements(bounds)
+
 func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
 	var result := {"status":"described","reason":"","dependencyBounds":[],"sourceRevisions":{},
 		"missingSourceIds":[],"unresolvedCrossingIds":[],"requiredCrossings":{},"sites":[],
@@ -566,13 +625,11 @@ func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
 			if _failures.has(region):
 				result.status = "failed"; result.reason = String(_failures[region].reason)
 				continue
-			if not _scenes.has(region):
-				if result.status != "failed": result.status = "pending"; result.reason = "structure_dependency_source_pending"
-				continue
-			# Physical publication still requires the complete site at this stage.
-			# Regional demand follows actual local supports/crossings, not every
-			# terrain/navigation tile inside the site's generation reservation.
-			var requirements: Dictionary = _scenes[region].job.source_dependency_requirements(bounds,source.binding)
+			var requirements: Dictionary
+			if _scenes.has(region) and _scenes[region].phase == "scene_ready":
+				requirements = _scenes[region].job.source_dependency_requirements(bounds,source.binding)
+			else:
+				requirements = _source_description_requirements(region,bounds,source.binding)
 			result.sites.append(requirements)
 			for dependency: Rect2i in requirements.get("dependencyBounds",[]):
 				if not result.dependencyBounds.has(dependency): result.dependencyBounds.append(dependency)
@@ -613,7 +670,8 @@ func region_dependency_revision(bounds: Rect2i) -> Array:
 			var region := Vector2i(x,z)
 			var source: Dictionary = _admission.source_state(region)
 			revision.append([region,source.get("status","unrequested"),source.get("binding",{}),
-				_failures.get(region,{}),_scenes[region].job.source_dependency_revision() if _scenes.has(region) else []])
+				_failures.get(region,{}),_described.get(region,{}).get("serial",0),
+				_scenes[region].job.source_dependency_revision() if _scenes.has(region) else []])
 	return revision
 
 func navigation_tile_sources(tile_key: Vector2i) -> Dictionary:
