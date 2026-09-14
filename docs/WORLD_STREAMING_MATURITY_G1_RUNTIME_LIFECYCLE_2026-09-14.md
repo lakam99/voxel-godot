@@ -185,7 +185,7 @@ Seed `atlas-12495529`; normal `MainMenu.tscn` visible New Game path; no
 
 | Scope | Result | Evidence |
 |---|---|---|
-| Project compile smoke | PASS | `artifacts/node-tools/run-project-compile-smoke.json` plus final owned watchdog `artifacts/node-tools/process-runs/godot-kleWQf/watchdog.json` |
+| Project compile smoke | PASS | `artifacts/node-tools/run-project-compile-smoke.json` plus post-commit owned watchdog `artifacts/node-tools/process-runs/godot-gcvkfg/watchdog.json` |
 | G1A native motion admission | 66 checks PASS | `artifacts/citadel-runtime-integration/native-admission-g1a-20260914-02/report.json` |
 | Real voxel collision publication | PASS | `artifacts/world-streaming-maturity/g1/g1a-collision-publication-01.json` |
 | G1B retained demand/manifest | 72 checks PASS | `artifacts/world-streaming-maturity/g1/g1b-retention-manifest-01.json` |
