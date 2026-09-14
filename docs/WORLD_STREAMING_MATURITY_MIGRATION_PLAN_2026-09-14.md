@@ -1,6 +1,6 @@
 # World streaming maturity migration — execution handoff
 
-Date: 2026-09-14. Status: **PLAN ONLY; Gate 0 has not run.**
+Date: 2026-09-14. Status: **GATE 0 COMPLETE; Gate 1 has not run.**
 
 ## 0. Assignment, location, and authority
 
@@ -265,7 +265,7 @@ Each completion entry must record commit, source/binary hashes, exact commands, 
 
 | Gate | Status | Commit / evidence / next action |
 |---|---|---|
-| G0 snapshot + branch | NOT STARTED | Await implementation instruction; inspect current state, snapshot all, switch descendant branch |
+| G0 snapshot + branch | COMPLETE | Snapshot `94d823cdbad8425553c0a76b3f4e4fc5f2d662a3`; switched the same Citadel worktree to descendant branch `codex/world-streaming-maturity-migration`; full inventory, native hashes, known failures, commands and evidence limits in `docs/WORLD_STREAMING_MATURITY_G0_SNAPSHOT_2026-09-14.md`; no tests run; next action is the frozen G1 baseline when implementation continues |
 | G1A movement | NOT STARTED | Isolate local terrain proof; instrument entire physics chain |
 | G1B identity/demand | NOT STARTED | Separate unchanged membership handoff from priority; bound true dirty refresh |
 | G1C transactions | NOT STARTED | Attribute service-unit time; independent retained occupancy waits; bound actual work |
