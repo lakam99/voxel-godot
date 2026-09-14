@@ -665,6 +665,55 @@ completed architecture acceptance. Latest citadel baseline remains headed11:
 130.809s startup,28/28 diagnostic checks,208.482ms worst approach frame and
 178.077ms maximum navigation snapshot preparation.
 
-The ignored `navigation-filter-worker-draft` is a design/prototype only. It
-lacks producer capture, accepted-result integration and regional consumption;
-it must not be applied partially or cited as an implemented performance fix.
+Checkpoint `f9ad747` preserves the loading work before the next unpromoted
+citadel performance experiment. The complete eight-file navigation filter worker
+integration was subsequently applied to the working tree: producer capture,
+filtering on the existing owned worker, accepted-result retention and regional
+consumption are connected. Godot changed-source compilation passed all8 files
+(`godot-STXMgh`). No route-search, motor or door-execution implementation changed.
+
+Headed citadel12, **not a performance promotion**:
+
+```text
+node tools/run-citadel-candidate-teleport-playtest.mjs -Seed atlas-3376622889 -CandidateRegion "-2,-2" -SpawnCell "-3334,-2666" -SkipTutorial -ForceDaytime -ForceClearWeather -CaptureNavigationRejections -Resolution 1920x1080 -StartupTimeoutSeconds 180 -TimeoutSeconds 600 -OutputDirectory artifacts/citadel-runtime-integration/candidate-teleport-navigation-filter-12
+```
+
+The report passes28/28 diagnostic checks with the same citadel source signature
+`b29eabb4fb8e28b3bb0ff53325e69ec2a72d05797280793b130bb49401427752`.
+Verification records natural exit0, clean engine, unchanged frozen sources,
+cleanup passed and zero owned processes. Initial-spawn and courtyard images
+were inspected: solid visible terrain, citadel walls/towers and complete courtyard
+buildings are present. This does not prove all interior collision, NPC traversal,
+five-minute performance, or controlled cold-cache acceptance.
+
+Startup is132.663s versus130.809s in headed11; there is **no demonstrated spawn
+speed improvement**. Landmark preparation occupies3.181-77.984s (about75s),
+terrain starts78.123s and collision is ready88.604s, then nearby readiness occupies
+88.720-132.578s (about44s). These stages overlap other publication work; do not
+add their durations as independent CPU totals or call the185.611s entire runner
+duration generation time.
+
+The ordinary-input approach reaches the exterior but takes32.391s versus11.993s.
+There are16 held motion samples of31 versus0 of12, and10 recovery attempts versus1.
+Most holds await `navigation_accepted_source_pending` for tile-209,-171 with an
+unchanged source key929:0:0 plus the citadel binding. Its requested region remains
+local: this is distinct from the parked whole-town closure defect. Accepted-source
+receipt/queue throughput needs investigation before promotion. Green diagnostic
+completion does not overrule this new traversal regression.
+
+Approach cadence: median16.7ms, p95=128.4ms, p99=154.4ms, max243.911ms;
+95 of1203 samples exceed100ms. Render CPU/GPU maxima are7.159/7.730ms.
+Main navigation snapshot preparation still reaches154.009ms: terrain fact capture
+150.150ms, live-collision capture48.602ms and input sealing12.313ms (individual
+maxima from different calls). Worker filtering reaches85.954ms off-thread. The
+next optimization must address measured citadel source preparation and remaining
+main-thread capture/queue costs, not assume moving filtering alone solved either.
+
+Focused contracts after integration: `navigation-filter-contract-01/report.json`
+84/84, `navigation-filter-door-01/report.json`48/48, and
+`navigation-filter-nav-world-01/report.json`84/86. Both nav-world failures are the
+known synthetic live-tile fixture's immediate-snapshot assumptions; its assertions
+must move to admitted input/accepted output without weakening collision checks.
+Filter-input lifecycle coverage and the remaining affected fixture migrations are
+still pending. No new broad/tutorial run was undertaken in this citadel-focused
+measurement pass; the worker cutover remains uncommitted and unpromoted.

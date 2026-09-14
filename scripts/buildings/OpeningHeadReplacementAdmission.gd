@@ -62,6 +62,10 @@ static func evaluate(before, after, body: Dictionary, replaced_ids: Array, seat_
 		unchanged_solids.append(witness.bounds)
 		witness_ids.append(witness.id)
 	if unchanged_solids.size() > Occupancy.MAX_CELLS: return _fail("world_witness_limit")
+	# Reuse only this evaluation's complete witness list. Invalid witness bounds
+	# remain an error at the original cover call, after changed-source checks;
+	# a replacement with no world-coverage query need not consume the artifact.
+	var prepared_world_solids = Occupancy.prepare_solids(unchanged_solids)
 	var contacts: Array = []
 	var pose := Transform3D(Basis.from_scale(candidate.size), candidate.position)
 	var work: int = removed.work + seams.work
@@ -81,7 +85,7 @@ static func evaluate(before, after, body: Dictionary, replaced_ids: Array, seat_
 	var all_seam_coverage: Array = []
 	var new_world_seams: Array = []
 	for cell: Array in seams.addedSolidCells:
-		var covered := Occupancy.cover(cell, unchanged_solids)
+		var covered := Occupancy.cover_prepared(cell, prepared_world_solids)
 		if not covered.ready: return _fail("whole_seam_coverage_unresolved")
 		work += covered.work
 		if work > MAX_WORK: return _fail("replacement_work_limit")
@@ -106,7 +110,7 @@ static func evaluate(before, after, body: Dictionary, replaced_ids: Array, seat_
 		var proofs: Array = []
 		for cell: Array in prior.uncovered:
 			var declared := Occupancy.cover(cell, seams.addedSolidCells)
-			var world := Occupancy.cover(cell, unchanged_solids)
+			var world := Occupancy.cover_prepared(cell, prepared_world_solids)
 			if not declared.ready or not world.ready: return _fail("seam_coverage_unresolved")
 			work += declared.work + world.work
 			if work > MAX_WORK: return _fail("replacement_work_limit")

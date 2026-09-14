@@ -132,6 +132,58 @@ test('global exclusive-engine gate reads image names, never controls unrelated p
   assertNoGodot('"node.exe","42","Console","1","2 K"\n');
   assert.throws(() => assertNoGodot('"Godot_v4.6_console.exe","99","Console","1","2 K"'));
 });
+test('Windows process gate requires complete names and rejects console or runtime Godot', () => {
+  const inventory = names => ({ schema: 'process-name-inventory/v1', complete: true, count: names.length,
+    processes: names.map((name, pid) => ({ name, pid })) });
+  const response = names => ({ status: 0, signal: null, stdout: JSON.stringify(inventory(names)), stderr: '' });
+  let calls = 0;
+  const run = (executable, args, options) => {
+    calls++;
+    assert.equal(executable, 'powershell.exe');
+    assert.deepEqual(args.slice(0, 4), ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command']);
+    assert.ok(args[4].includes('Get-Process -ErrorAction Stop'));
+    assert.equal(options.windowsHide, true); assert.equal(options.timeout, 10000);
+    assert.equal(options.encoding, 'utf8'); assert.equal(options.maxBuffer, 1024 * 1024);
+    return { ...response(['Idle', 'node', 'powershell']), stdout: '\uFEFF' + JSON.stringify(inventory(['Idle', 'node', 'powershell'])) };
+  };
+  assertNoGodot(undefined, { platform: 'win32', run }); assert.equal(calls, 1);
+  for (const name of ['Godot_v4.6.1-stable_win64_console', 'godot_v4.6.1-stable_win64', 'GODOT']) {
+    assert.throws(() => assertNoGodot(undefined, { platform: 'win32', run: () => response(['node', name]) }), /Another Godot instance/);
+  }
+  assertNoGodot('"node.exe","42"', { platform: 'win32', run: () => { throw new Error('Injected inventory must not spawn a command'); } });
+});
+test('Windows process gate rejects missing, malformed, mistyped and empty inventories', () => {
+  const valid = { schema: 'process-name-inventory/v1', complete: true, count: 1, processes: [{ name: 'node', pid: 42 }] };
+  const response = stdout => ({ status: 0, signal: null, stdout, stderr: '' });
+  const invalid = [null, {}, { ...valid, schema: 'other' }, { ...valid, complete: false }, { ...valid, complete: 'true' },
+    { ...valid, count: 0, processes: [] }, { ...valid, processes: {} }, { ...valid, count: '1' }, { ...valid, count: 2 },
+    ...[null, { name: '', pid: 1 }, { name: '  ', pid: 1 }, { name: 42, pid: 1 }, { name: 'node' },
+      { name: 'node', pid: -1 }, { name: 'node', pid: 1.5 }, { name: 'node', pid: '42' }].map(item => ({ ...valid, processes: [item] })),
+    { ...valid, count: 2, processes: [{ name: 'node', pid: 42 }, { name: 'other', pid: 42 }] }];
+  for (const value of invalid) assert.throws(() => assertNoGodot(undefined, { platform: 'win32', run: () => response(JSON.stringify(value)) }));
+  for (const output of ['', 'Access denied', JSON.stringify(valid) + '\ntruncated', Buffer.from(JSON.stringify(valid))]) {
+    assert.throws(() => assertNoGodot(undefined, { platform: 'win32', run: () => response(output) }));
+  }
+  for (const change of [{ status: 1 }, { status: '0' }, { signal: 'SIGTERM' }, { stderr: 'Access denied' }, { stderr: undefined }, { error: new Error('spawn failed') }]) {
+    assert.throws(() => assertNoGodot(undefined, { platform: 'win32', run: () => ({ ...response(JSON.stringify(valid)), ...change }) }));
+  }
+});
+test('Windows process gate never treats enumeration failure or timeout as no Godot', () => {
+  for (const code of ['EACCES', 'ETIMEDOUT', 'ENOBUFS']) {
+    const failure = Object.assign(new Error(code), { code }); let calls = 0;
+    assert.throws(() => assertNoGodot(undefined, { platform: 'win32', run: () => { calls++; throw failure; } }), error => error === failure);
+    assert.equal(calls, 1, 'No permissive fallback after inventory failure');
+    assert.throws(() => assertNoGodot(undefined, { platform: 'win32', run: () => ({ status: null, signal: null, error: failure, stdout: '', stderr: '' }) }));
+  }
+});
+test('non-Windows process gate preserves plain ps names and rejects Godot', () => {
+  const run = (executable, args, options) => {
+    assert.equal(executable, 'ps'); assert.deepEqual(args, ['-A', '-o', 'comm=']);
+    assert.deepEqual(options, { encoding: 'utf8' }); return 'node\nps\n';
+  };
+  assertNoGodot(undefined, { platform: 'linux', run });
+  assert.throws(() => assertNoGodot(undefined, { platform: 'linux', run: () => 'node\nGodot_v4.6\n' }), /Another Godot instance/);
+});
 test('late warnings, leaks and nonempty stderr invalidate clean booleans', () => {
   checkLogs('Godot Engine\n', '');
   for (const line of ['SCRIPT ERROR: bad', 'Parse Error: bad', 'Compile Error', 'WARNING: bad', 'ObjectDB instances leaked', 'resources still in use']) assert.throws(() => checkLogs(line, ''));

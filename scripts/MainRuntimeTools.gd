@@ -3,12 +3,14 @@ extends "res://scripts/MainDiscoveryFlow.gd"
 const VoxelTerrainRuntimeScript := preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
 
 const STREAMING_CHUNK_CREATES_PER_FRAME := 1
+const STREAMING_CHUNK_RETIREMENTS_PER_FRAME := 1
 const STREAMING_CHUNK_PROP_ATTEMPTS_PER_FRAME := 1
 const STREAMING_CHUNK_DETAIL_ATTEMPTS_PER_FRAME := 3
 const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 1.35
 const STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE := 2
 const STREAMING_TERRAIN_MESH_JOBS_PER_FRAME := 1
 const STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS := 3.25
+const GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC := 6000
 const STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE := 0
 const STREAMING_EXTERIOR_LOD_STEP_CELLS := 14
 const STREAMING_SOLID_PLACEHOLDER_STEP_CELLS := 4
@@ -487,8 +489,27 @@ func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3
     return voxel_terrain_runtime.call("collision_proof_for_motion", from_position, to_position, footprint_radius)
 
 func update_voxel_authority_chunks(force: bool) -> void:
+    var monitor = runtime_perf_monitor
+    var publication_frame_started_usec := Time.get_ticks_usec()
+    # A visible traversal hold is an owned loading phase. Let every retained
+    # publication owner drain with its loading budget while the overlay hides
+    # incomplete terrain/structures; the four gameplay lanes resume only after
+    # the authoritative traversal gate releases that hold.
+    var shared_gameplay_schedule := not force and not startup_loading_active \
+        and not runtime_loading_active and not streaming_loading_overlay_active
+    if shared_gameplay_schedule:
+        gameplay_publication_lane = posmod(gameplay_publication_lane + 1, 4)
+        gameplay_publication_deadline_usec = publication_frame_started_usec + GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC
+    else:
+        gameplay_publication_lane = -1
+        gameplay_publication_deadline_usec = 0
+    npc_navigation_publication_permitted = true
     var center := world_to_chunk(player.position.x, player.position.z)
+    var demand_start: int = monitor.begin_section("streaming_region_demand") if monitor != null else 0
     update_streaming_region_demand()
+    if monitor != null:
+        monitor.end_section("streaming_region_demand", demand_start)
+    var retained_start: int = monitor.begin_section("streaming_retained_chunks") if monitor != null else 0
     var needed: Dictionary = world_streaming.retained_gameplay_chunks() if streaming_active else {}
     for dz in range(-render_distance, render_distance + 1):
         for dx in range(-render_distance, render_distance + 1):
@@ -502,30 +523,67 @@ func update_voxel_authority_chunks(force: bool) -> void:
                 queue_chunk_load(chunk_key)
     for chunk_key: Vector2i in needed:
         if not chunks.has(chunk_key): queue_chunk_load(chunk_key)
+    if monitor != null:
+        monitor.end_section("streaming_retained_chunks", retained_start)
     if not force:
         process_pending_chunk_loads(center)
+    var unload_start: int = monitor.begin_section("streaming_chunk_retirement") if monitor != null else 0
+    var retired_chunks := 0
     for key_value in chunks.keys():
+        if not force and retired_chunks>=STREAMING_CHUNK_RETIREMENTS_PER_FRAME:
+            break
         var key: Vector2i = key_value
         if needed.has(key):
             continue
         voxel_terrain_runtime.release_gameplay_chunk(key)
         chunks[key].queue_free()
         chunks.erase(key)
+        retired_chunks += 1
+    if monitor != null:
+        monitor.end_section("streaming_chunk_retirement", unload_start)
+    var prune_start: int = monitor.begin_section("streaming_request_prune") if monitor != null else 0
     prune_stale_pending_chunk_loads(needed)
     prune_stale_pending_chunk_prop_spawns(needed)
     queue_dirty_terrain_volume_chunk_refreshes()
-    var fluid_refreshes := process_pending_chunk_terrain_refreshes(center)
-    var fluid_assets_applied := apply_completed_terrain_meshing_jobs(center)
-    if fluid_refreshes <= 0 and fluid_assets_applied <= 0:
-        process_pending_terrain_meshing_jobs(center)
-    if not force:
+    if monitor != null:
+        monitor.end_section("streaming_request_prune", prune_start)
+    var publication_start: int = monitor.begin_section("streaming_terrain_publication") if monitor != null else 0
+    var publication_time_available := not shared_gameplay_schedule or (
+        gameplay_publication_lane == 1
+        and Time.get_ticks_usec() < gameplay_publication_deadline_usec
+    )
+    var fluid_refreshes := 0
+    var fluid_assets_applied := 0
+    if publication_time_available:
+        fluid_refreshes = process_pending_chunk_terrain_refreshes(center)
+        fluid_assets_applied = apply_completed_terrain_meshing_jobs(center)
+        if fluid_refreshes <= 0 and fluid_assets_applied <= 0:
+            process_pending_terrain_meshing_jobs(center)
+    elif monitor != null:
+        monitor.increment_counter("gameplay_publication_terrain_deferred")
+    if monitor != null:
+        monitor.end_section("streaming_terrain_publication", publication_start)
+    var deferred_start: int = monitor.begin_section("streaming_deferred_world_work") if monitor != null else 0
+    var deferred_time_available := not shared_gameplay_schedule or (
+        gameplay_publication_lane == 2
+        and Time.get_ticks_usec() < gameplay_publication_deadline_usec
+    )
+    if not force and deferred_time_available:
         if pending_streaming_structure_work_count() > 0 and pending_chunk_loads.is_empty():
             process_streaming_structure_work()
         if pending_chunk_loads.is_empty():
             process_pending_chunk_prop_spawns()
+    elif not force and monitor != null:
+        monitor.increment_counter("gameplay_publication_world_work_deferred")
     elif structure_system != null:
         var center_cell := Vector2i(world_to_cell(player.position.x), world_to_cell(player.position.z))
         structure_system.update_around(center_cell)
+    if monitor != null:
+        monitor.end_section("streaming_deferred_world_work", deferred_start)
+    npc_navigation_publication_permitted = not shared_gameplay_schedule or (
+        gameplay_publication_lane == 3
+        and Time.get_ticks_usec() + 1000 < gameplay_publication_deadline_usec
+    )
     last_center_chunk = center
 
 func process_streaming_structure_work() -> int:

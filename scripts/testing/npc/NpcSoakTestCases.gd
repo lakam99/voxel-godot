@@ -22,6 +22,7 @@ const CELL := NpcConstantsScript.CELL_SIZE
 const REPAIR_ROUTE_ID := "repair:test"
 
 var runner = null
+var transient_nodes: Array[Node] = []
 var route_helper = null
 var repair_helper = null
 
@@ -32,6 +33,7 @@ class FakeMain:
 	func _init() -> void:
 		player = Node3D.new()
 		player.name = "Player"
+		add_child(player)
 
 	func surface_y_at_position(_position: Vector3) -> float:
 		return 0.0
@@ -43,6 +45,7 @@ class FakeNpcSystem:
 
 	func _init() -> void:
 		main = FakeMain.new()
+		add_child(main)
 		placement_service = NpcSafePlacementServiceScript.new()
 		placement_service.setup(self, main)
 
@@ -233,6 +236,7 @@ func test_soak_save_load_cycles(mode: String) -> Dictionary:
 
 func test_soak_spawn_remove_ownership_cleanup(_mode: String) -> Dictionary:
 	var fake := FakeNpcSystem.new()
+	transient_nodes.append(fake)
 	var autonomy := NpcAutonomySystemScript.new()
 	if runner is Node:
 		runner.add_child(autonomy)
@@ -534,6 +538,7 @@ func segment_hits_expanded_box(a: Vector2, b: Vector2, obstacle: Dictionary, rad
 
 func lod_setup() -> Dictionary:
 	var fake := FakeNpcSystem.new()
+	transient_nodes.append(fake)
 	var autonomy := FakeAutonomy.new()
 	var service = NpcSimulationLodServiceScript.new()
 	service.setup(autonomy, fake, fake.main)
@@ -542,6 +547,9 @@ func lod_setup() -> Dictionary:
 func make_lod_entry(id: String, position: Vector3) -> Dictionary:
 	var body := CharacterBody3D.new()
 	body.name = id
+	if runner is Node:
+		runner.add_child(body)
+	transient_nodes.append(body)
 	body.position = position
 	body.global_position = position
 	body.collision_layer = NpcConstantsScript.COLLISION_NPC_BODY
@@ -735,6 +743,11 @@ func max_queue(rows: Array) -> int:
 	return value
 
 func outcome(passed: bool, details: String, assertions: Array, key_state: Dictionary) -> Dictionary:
+	# Keep service stubs detached and reclaim their owned children after the case.
+	for node in transient_nodes:
+		if is_instance_valid(node):
+			node.queue_free()
+	transient_nodes.clear()
 	if runner != null and runner.has_method("outcome"):
 		return runner.call("outcome", passed, details, assertions, key_state)
 	return {

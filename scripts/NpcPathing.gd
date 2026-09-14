@@ -44,10 +44,10 @@ func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
         return { "ok": false, "reason": "missing_coordinator" }
     return coordinator.prebake_town(center_cell, radius_cells)
 
-func begin_frame() -> void:
+func begin_frame(allow_publication := true) -> void:
     ensure_ready()
     if coordinator != null:
-        coordinator.begin_frame()
+        coordinator.begin_frame(allow_publication)
 
 func stats() -> Dictionary:
     ensure_ready()

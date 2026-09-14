@@ -82,13 +82,16 @@ var components_initialized := false
 var component_init_attempted := false
 var component_init_in_progress := false
 var last_spawn_scan_frame := -1
+var last_spawn_scan_revision := -1
 var npc_update_cursor := 0
 var npc_motion_cursor := 0
+var npc_prefetch_cursor := 0
 var npc_update_active := false
 var external_move_budget_physics_frame := -1
 var published_navigation_semantics := {}
 var metadata_key_sanitizer: RegEx = null
 var navigation_change_flush_pending := false
+var navigation_change_process_frame := -1
 
 func performance_monitor():
     return main.get("runtime_perf_monitor") if main != null else null
@@ -194,6 +197,10 @@ func clear() -> void:
     npcs.clear()
     npc_by_id.clear()
     spawned_town_keys.clear()
+    last_spawn_scan_frame = -1
+    last_spawn_scan_revision = -1
+    npc_prefetch_cursor = 0
+    navigation_change_process_frame = -1
     town_population_claims.clear()
     published_navigation_semantics.clear()
     pending_saved_npc_facts.clear()
@@ -936,7 +943,11 @@ func spawn_generic_town_npcs() -> void:
     if main == null or main.structure_system == null or not main.structure_system.has_method("town_home_records_snapshot"):
         return
     var current_frame := Engine.get_process_frames()
-    if last_spawn_scan_frame == current_frame:
+    if main.structure_system.has_method("town_home_records_source_revision"):
+        var source_revision := int(main.structure_system.town_home_records_source_revision())
+        if source_revision == last_spawn_scan_revision: return
+        last_spawn_scan_revision = source_revision
+    elif last_spawn_scan_frame >= 0 and current_frame-last_spawn_scan_frame<30:
         return
     last_spawn_scan_frame = current_frame
     var records_by_town: Dictionary = main.structure_system.town_home_records_snapshot()
@@ -1118,22 +1129,31 @@ func generated_town_guard_cell(record: Dictionary, guard_slot: int, fallback: Ve
 func update_npcs(delta: float, day_factor: float) -> void:
     if main == null:
         return
+    var monitor = performance_monitor()
+    var setup_start: int = monitor.begin_section("npc_update_setup") if monitor != null else 0
     ensure_components()
     spawn_generic_town_npcs()
     if combat != null:
         combat.update_tracers(delta)
-    var monitor = performance_monitor()
+    if monitor != null:
+        monitor.end_section("npc_update_setup", setup_start)
     var door_start: int = monitor.begin_section("door_policy_update") if monitor != null else Time.get_ticks_usec()
     update_door_policies(delta)
     if monitor != null:
         monitor.end_section("door_policy_update", door_start)
     if pathing != null and pathing.has_method("begin_frame"):
-        pathing.begin_frame()
+        var pathing_frame_start: int = monitor.begin_section("npc_pathing_begin_frame") if monitor != null else 0
+        var allow_publication := bool(main.get("npc_navigation_publication_permitted")) \
+            if main != null else true
+        pathing.begin_frame(allow_publication)
+        if monitor != null:
+            monitor.end_section("npc_pathing_begin_frame", pathing_frame_start)
     if autonomy_system != null and autonomy_system.has_method("begin_update_frame"):
         autonomy_system.begin_update_frame()
     var night_factor := clampf((1.0 - day_factor - 0.30) / 0.55, 0.0, 1.0)
     var update_entries := npcs.duplicate()
     var active_entries: Array[Dictionary] = []
+    var lod_start: int = monitor.begin_section("npc_lod_sweep") if monitor != null else 0
     for entry_value in update_entries:
         var entry: Dictionary = entry_value
         var body := entry.get("body") as Node3D
@@ -1149,12 +1169,22 @@ func update_npcs(delta: float, day_factor: float) -> void:
                 "allowStationaryAbstract": true
             })
             lod_state = String(lod_result.get("state", "active"))
-            if autonomy_system.has_method("prefetch_for_entry"):
-                autonomy_system.prefetch_for_entry(entry)
         if lod_state == "abstract":
             continue
         active_entries.append(entry)
+    if monitor != null:
+        monitor.end_section("npc_lod_sweep", lod_start)
     var update_count := active_entries.size()
+    # Prefetch is retained demand, not per-actor movement. Service one actor per
+    # frame so a shared route change cannot make every NPC rescan and requeue its
+    # boundary tiles in the same gameplay frame.
+    if update_count>0 and autonomy_system != null and autonomy_system.has_method("prefetch_for_entry"):
+        var prefetch_start: int = monitor.begin_section("npc_navigation_prefetch") if monitor != null else 0
+        npc_prefetch_cursor = posmod(npc_prefetch_cursor,update_count)
+        autonomy_system.prefetch_for_entry(active_entries[npc_prefetch_cursor])
+        npc_prefetch_cursor = (npc_prefetch_cursor+1)%update_count
+        if monitor != null:
+            monitor.end_section("npc_navigation_prefetch", prefetch_start)
     var budget := update_count
     if update_count > 24:
         budget = 4
@@ -1163,6 +1193,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
     if update_count <= 0:
         return
     var npc_frame_start := Time.get_ticks_usec()
+    var brain_start: int = monitor.begin_section("npc_brain_updates") if monitor != null else 0
     npc_update_cursor = npc_update_cursor % update_count
     npc_update_active = true
     var scanned := 0
@@ -1211,6 +1242,9 @@ func update_npcs(delta: float, day_factor: float) -> void:
         for entry in active_entries:
             if not brain_processed_entries.has(entry):
                 autonomy_system.record_brain_budget_skipped(entry, "budget_cursor")
+    if monitor != null:
+        monitor.end_section("npc_brain_updates", brain_start)
+    var motion_start: int = monitor.begin_section("npc_motion_and_visuals") if monitor != null else 0
     var motion_entries := select_motion_entries(active_entries, delta)
     var motion_frame_start := Time.get_ticks_usec()
     var motion_processed := 0
@@ -1237,6 +1271,8 @@ func update_npcs(delta: float, day_factor: float) -> void:
             autonomy_system.advance_npc_motion(entry, motion_delta, night_factor)
         motion_processed += 1
         update_npc_visual_state(entry, delta)
+    if monitor != null:
+        monitor.end_section("npc_motion_and_visuals", motion_start)
     npc_update_active = false
 
 func npc_elapsed_ms(start_usec: int) -> float:
@@ -2904,15 +2940,7 @@ func update_door_policies(delta: float) -> void:
             autonomy_system.advance_traffic(delta, false)
             if monitor != null:
                 monitor.end_section("traffic_update", traffic_start)
-    if autonomy_system != null and autonomy_system.has_method("process_navigation_changes"):
-        var pending_count := int(autonomy_system.pending_navigation_change_count()) if autonomy_system.has_method("pending_navigation_change_count") else 0
-        if navigation_change_flush_pending or pending_count > 0:
-            var nav_change_start: int = monitor.begin_section("navigation_change_process") if monitor != null else Time.get_ticks_usec()
-            autonomy_system.process_navigation_changes(NAVIGATION_PROP_CHANGE_EVENTS_PER_FRAME, NAVIGATION_PROP_CHANGE_OBJECT_IDS_PER_FRAME)
-            if monitor != null:
-                monitor.end_section("navigation_change_process", nav_change_start)
-            pending_count = int(autonomy_system.pending_navigation_change_count()) if autonomy_system.has_method("pending_navigation_change_count") else 0
-            navigation_change_flush_pending = pending_count > 0
+    process_pending_navigation_changes()
     var release_start: int = monitor.begin_section("door_hold_release") if monitor != null else Time.get_ticks_usec()
     release_completed_door_holds()
     if monitor != null:
@@ -3342,7 +3370,11 @@ func notify_navigation_prop_removed(prop_id: String, prop: Node = null) -> void:
 func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
         autonomy_system.notify_chunk_loaded(chunk_key)
-        flush_navigation_change_bus()
+        # Chunk streaming runs before the NPC phase. Retain the invalidation and
+        # let update_door_policies consume it through the existing bounded event
+        # budget later in this frame instead of rebuilding route state inside the
+        # terrain publication call.
+        navigation_change_flush_pending = true
 
 func notify_navigation_prop_unloaded(prop_id: String, prop: Node) -> Dictionary:
     if autonomy_system == null:
@@ -3355,7 +3387,7 @@ func notify_navigation_prop_unloaded(prop_id: String, prop: Node) -> Dictionary:
 func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
     if autonomy_system:
         autonomy_system.notify_chunk_unloaded(chunk_key)
-        flush_navigation_change_bus()
+        navigation_change_flush_pending = true
 
 func notify_navigation_door_state_changed(door: Node, open: bool) -> void:
     if autonomy_system:
@@ -3394,6 +3426,31 @@ func flush_navigation_change_bus() -> void:
     if autonomy_system != null and autonomy_system.has_method("process_navigation_changes"):
         autonomy_system.process_navigation_changes()
         navigation_change_flush_pending = false
+
+## Startup disables the gameplay/NPC process loop while streamed terrain is
+## published. Keep chunk invalidation out of the terrain callback, but expose
+## the same bounded consumer so the loading owner can advance it once per frame.
+func process_pending_navigation_changes() -> int:
+    if autonomy_system == null or not autonomy_system.has_method("process_navigation_changes"):
+        return 0
+    var frame := Engine.get_process_frames()
+    if navigation_change_process_frame == frame:
+        return 0
+    var pending_count := int(autonomy_system.pending_navigation_change_count()) if autonomy_system.has_method("pending_navigation_change_count") else 0
+    if not navigation_change_flush_pending and pending_count <= 0:
+        return 0
+    navigation_change_process_frame = frame
+    var monitor = performance_monitor()
+    var nav_change_start: int = monitor.begin_section("navigation_change_process") if monitor != null else Time.get_ticks_usec()
+    var events: Array = autonomy_system.process_navigation_changes(
+        NAVIGATION_PROP_CHANGE_EVENTS_PER_FRAME,
+        NAVIGATION_PROP_CHANGE_OBJECT_IDS_PER_FRAME
+    )
+    if monitor != null:
+        monitor.end_section("navigation_change_process", nav_change_start)
+    pending_count = int(autonomy_system.pending_navigation_change_count()) if autonomy_system.has_method("pending_navigation_change_count") else 0
+    navigation_change_flush_pending = pending_count > 0
+    return events.size()
 
 func cell_to_position(cell: Vector2i, level: float) -> Vector3:
     return Vector3(float(cell.x) * CELL, level + 0.04, float(cell.y) * CELL)

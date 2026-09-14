@@ -16,6 +16,8 @@ const STREAMING_STRUCTURE_OPS_PER_FRAME := 24
 const STREAMING_STRUCTURE_FRAME_BUDGET_MS := 6.0
 const STREAMING_STRUCTURE_QUEUE_COMPACT_THRESHOLD := 256
 const CITADEL_PUBLICATION_BUDGET_USEC := 4000
+const STANDALONE_ADMISSION_SAMPLES_PER_SLICE := 2
+const STANDALONE_ADMISSION_BUDGET_USEC := 1200
 
 var main
 var loot
@@ -32,6 +34,7 @@ var generated_door_count := 0
 var generated_utility_count := 0
 var town_home_records := {}
 var pending_structure_ops: Array = []
+var pending_structure_retry_ops: Array = []
 var pending_structure_op_index := 0
 var defer_structure_ops := false
 var deferred_town_home_records := {}
@@ -42,6 +45,7 @@ var terrain_footprint_records := {}
 var natural_prop_exclusion_records := {}
 var private_interior_records := {}
 var private_interior_revision := 0
+var town_home_records_revision := 0
 var citadel_terrain_admission = CitadelTerrainAdmissionScript.new()
 var citadel_publication = CitadelPublicationServiceScript.new()
 var citadel_runtime_bindings
@@ -49,6 +53,7 @@ var regional_source_revision := 0
 var regional_source_generation := 0
 var regional_requirements_cache := {}
 var regional_standalone_requests := {}
+var standalone_admission_states := {}
 
 func setup(main_node) -> void:
     regional_source_generation += 1
@@ -69,7 +74,7 @@ func bind_citadel_runtime() -> bool:
     if citadel_publication.requires_scene_retirement(): return false
     var bindings = GeneratedStructureRuntimeBindingsScript.new()
     if not bindings.configure(main): return false
-    if not citadel_publication.configure_construction_guard(bindings.construction_allowed): return false
+    if not citadel_publication.configure_construction_guard(bindings.construction_members_allowed,true): return false
     if not citadel_publication.configure_door_publication(bindings.register_door, bindings.retire_door): return false
     if not citadel_publication.configure_scene_publication(main, bindings.publish_tree, bindings.retire_tree, true): return false
     citadel_runtime_bindings = bindings
@@ -92,8 +97,37 @@ func region_dependency_revision(bounds: Rect2i) -> String:
     # No source compilation, town generation, home copies or queue scans here.
     return JSON.stringify([String(main.seed_text) if is_instance_valid(main) else "",
         regional_source_generation,regional_source_revision,private_interior_revision,
-        pending_structure_op_index,pending_structure_ops.size(),generated_structures.size(),generated_towns.size(),
+        pending_structure_op_index,pending_structure_ops.size(),pending_structure_retry_ops.size(),generated_structures.size(),generated_towns.size(),
         _regional_edit_revision(),_regional_town_input_revision(bounds),citadel_publication.region_dependency_revision(bounds)])
+
+## Polling only needs to know when a dependency description may have changed.
+## Physical edits and owner receipts are still read freshly by
+## region_dependency_revision/region_publication_readiness at acceptance.
+func region_dependency_scheduling_revision(bounds: Rect2i) -> Array:
+    var npc = main.get("npc_system") if is_instance_valid(main) else null
+    var autonomy = npc.get("autonomy_system") if is_instance_valid(npc) else null
+    var portals = autonomy.get("door_portals") if is_instance_valid(autonomy) else null
+    return [String(main.seed_text) if is_instance_valid(main) else "",
+        regional_source_generation,regional_source_revision,private_interior_revision,town_home_records_revision,
+        pending_structure_op_index,pending_structure_ops.size(),pending_structure_retry_ops.size(),generated_structures.size(),generated_towns.size(),
+        portals.get_instance_id() if is_instance_valid(portals) else 0,
+        portals.door_to_portal.size() if is_instance_valid(portals) else 0,
+        _regional_town_scheduling_revision(bounds),citadel_publication.region_dependency_scheduling_revision(bounds)]
+
+func _regional_town_scheduling_revision(bounds: Rect2i) -> Array:
+    if not is_instance_valid(main) or not CitadelPublicationServiceScript._bounded_region_rectangle(bounds): return []
+    var size := int(main.TOWN_REGION_CELLS)
+    if size <= 0: return []
+    var low := Vector2i(floori(float(bounds.position.x)/size),floori(float(bounds.position.y)/size))-Vector2i.ONE
+    var high := Vector2i(floori(float(bounds.end.x-1)/size),floori(float(bounds.end.y-1)/size))+Vector2i.ONE
+    if (high.x-low.x+1)*(high.y-low.y+1)>256: return ["region_limit"]
+    var cache: Dictionary = main.get("town_region_cache")
+    var result: Array = [cache.size()]
+    for z in range(low.y,high.y+1):
+        for x in range(low.x,high.x+1):
+            var key := Vector2i(x,z)
+            result.append([key,cache.has(key)])
+    return result
 
 func _regional_town_input_revision(bounds: Rect2i) -> Array:
     if not is_instance_valid(main) or not CitadelPublicationServiceScript._bounded_region_rectangle(bounds): return []
@@ -128,14 +162,17 @@ func _regional_edit_revision() -> Array:
         portals.door_to_portal if is_instance_valid(portals) else {}]
 
 func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
-    var revision := region_dependency_revision(bounds)
+    # Descriptions change with source scheduling inputs. Physical terrain,
+    # collision and door state are validated by their live owners at the
+    # acceptance boundary and must not churn this description cache.
+    var revision := region_dependency_scheduling_revision(bounds)
     var cached: Dictionary = regional_requirements_cache.get(bounds,{})
     if cached.get("revision") == revision and cached.get("result",{}).get("status") in ["described","failed"]:
         return cached.result.duplicate(false)
     var result := _uncached_region_dependency_requirements(bounds)
     if regional_requirements_cache.size() >= 64 and not regional_requirements_cache.has(bounds):
         regional_requirements_cache.erase(regional_requirements_cache.keys()[0])
-    regional_requirements_cache[bounds] = {"revision":region_dependency_revision(bounds),"result":result}
+    regional_requirements_cache[bounds] = {"revision":region_dependency_scheduling_revision(bounds),"result":result}
     return result.duplicate(false)
 
 func _uncached_region_dependency_requirements(bounds: Rect2i) -> Dictionary:
@@ -208,7 +245,7 @@ func _uncached_region_dependency_requirements(bounds: Rect2i) -> Dictionary:
                 _describe_regional_live_doors(influence.influenceCells,result.sourceRevisions[id],result)
     if not result.missingSourceIds.is_empty() or not result.unresolvedCrossingIds.is_empty():
         _regional_problem(result,"failed","structure_source_dependencies_unresolved")
-    result["dependencyRevision"] = region_dependency_revision(bounds)
+    result["dependencyRevision"] = region_dependency_scheduling_revision(bounds)
     return result
 
 func region_publication_readiness(bounds: Rect2i) -> Dictionary:
@@ -390,6 +427,9 @@ func _regional_add_footprint(result: Dictionary, footprint: Dictionary) -> void:
 
 static func _regional_add_bounds(result: Dictionary, bounds: Rect2i) -> void:
     if bounds.has_area() and not result.dependencyBounds.has(bounds): result.dependencyBounds.append(bounds)
+    if bounds.has_area() and result.has("domainBounds"):
+        for domain: String in ["terrain","render","navigation"]:
+            if not result.domainBounds[domain].has(bounds): result.domainBounds[domain].append(bounds)
 
 static func _regional_problem(result: Dictionary, status: String, reason: String) -> void:
     if result.status == "failed": return
@@ -398,6 +438,7 @@ static func _regional_problem(result: Dictionary, status: String, reason: String
 
 func reset() -> void:
     regional_standalone_requests.clear()
+    standalone_admission_states.clear()
     regional_requirements_cache.clear()
     regional_source_generation += 1
     regional_source_revision += 1
@@ -414,7 +455,9 @@ func reset() -> void:
     generated_door_count = 0
     generated_utility_count = 0
     town_home_records.clear()
+    town_home_records_revision += 1
     pending_structure_ops.clear()
+    pending_structure_retry_ops.clear()
     pending_structure_op_index = 0
     defer_structure_ops = false
     deferred_town_home_records.clear()
@@ -523,17 +566,22 @@ func update_standalone_structures(center_cell: Vector2i, defer_builds := false, 
                 if max_new_regions > 0 and new_regions >= max_new_regions:
                     return new_regions
                 continue
-            var rng := Candidate.continuation_rng(candidate)
             var base_x: int = candidate.baseCell.x
             var base_z: int = candidate.baseCell.y
             var structure_type: String = candidate.structureType
             var dimensions: Vector2i = candidate.dimensions
-            var level := flat_level_for_footprint(base_x, base_z, dimensions.x, dimensions.y)
-            if is_nan(level):
+            var admission := advance_standalone_terrain_admission(key,candidate)
+            if admission.status=="pending":
+                if max_new_regions > 0 and new_regions >= max_new_regions:
+                    return new_regions
+                continue
+            if admission.status!="ready":
                 generated_structures[key] = false
                 if max_new_regions > 0 and new_regions >= max_new_regions:
                     return new_regions
                 continue
+            var level := float(admission.level)
+            var rng := Candidate.continuation_rng(candidate)
             generated_structures[key] = true
             if defer_builds:
                 enqueue_standalone_structure_build(structure_type, base_x, base_z, level, dimensions, rng)
@@ -729,7 +777,7 @@ func performance_monitor():
     return main.get("runtime_perf_monitor")
 
 func pending_structure_op_count() -> int:
-    return max(0, pending_structure_ops.size() - pending_structure_op_index)
+    return max(0, pending_structure_ops.size() - pending_structure_op_index)+pending_structure_retry_ops.size()
 
 func enqueue_structure_op(op: Dictionary) -> void:
     regional_source_revision += 1
@@ -738,6 +786,9 @@ func enqueue_structure_op(op: Dictionary) -> void:
     pending_structure_ops.append(op)
 
 func process_pending_structure_ops(max_ops := STREAMING_STRUCTURE_OPS_PER_FRAME, budget_ms := STREAMING_STRUCTURE_FRAME_BUDGET_MS) -> int:
+    if not pending_structure_retry_ops.is_empty():
+        pending_structure_ops.append_array(pending_structure_retry_ops)
+        pending_structure_retry_ops.clear()
     if pending_structure_op_index >= pending_structure_ops.size():
         pending_structure_ops.clear()
         pending_structure_op_index = 0
@@ -766,12 +817,19 @@ func process_pending_structure_ops(max_ops := STREAMING_STRUCTURE_OPS_PER_FRAME,
     return processed
 
 func execute_structure_op(op: Dictionary) -> void:
-    regional_source_revision += 1
     if String(op.get("type","")) == "regional_standalone_source":
         var region: Vector2i = op.region
         update_standalone_structures(region*int(main.STRUCTURE_REGION_CELLS),true,1,region)
-        regional_standalone_requests.erase(region)
+        if generated_structures.has(region):
+            regional_standalone_requests.erase(region)
+            regional_source_revision += 1
+        else:
+            # Retain one explicit retry while incremental terrain admission is
+            # pending. Completion owns the revision change and construction
+            # enqueue, so polling cannot consume or restart the request.
+            pending_structure_retry_ops.append(op.duplicate(true))
         return
+    regional_source_revision += 1
     var previous := defer_structure_ops
     defer_structure_ops = false
     var op_type := String(op.get("type", ""))
@@ -814,6 +872,7 @@ func publish_deferred_town_home_records(town_key: String) -> void:
         })
         return
     town_home_records[town_key] = records.duplicate(true)
+    town_home_records_revision += 1
     deferred_town_home_records.erase(town_key)
     update_town_manifest_publish_state(town_key, {
         "status": "published",
@@ -1120,6 +1179,7 @@ func build_town(town: Dictionary) -> void:
         deferred_town_home_records[town_key] = []
     else:
         town_home_records[town_key] = []
+        town_home_records_revision += 1
     generated_town_count += 1
     build_town_paths(center_x, center_z, int(town["radius"]), level)
     build_town_perimeter(center_x, center_z, int(town["radius"]), level, town_key)
@@ -1407,9 +1467,13 @@ func record_town_home(town_key: String, town: Dictionary, base_x: int, base_z: i
         (deferred_town_home_records[town_key] as Array).append(record)
         return
     town_home_records[town_key].append(record)
+    town_home_records_revision += 1
 
 func town_home_records_snapshot() -> Dictionary:
     return town_home_records.duplicate(true)
+
+func town_home_records_source_revision() -> int:
+    return town_home_records_revision
 
 func ensure_town_home_records(town: Dictionary, requirements_or_minimum = {}) -> Array:
     var requirements := normalized_town_manifest_requirements(requirements_or_minimum)
@@ -1890,6 +1954,83 @@ func flat_level_for_footprint(base_x: int, base_z: int, width: int, depth: int) 
     if max_h - min_h > main.CELL * 0.65 or max_h <= main.WATER_LEVEL + 1.2:
         return NAN
     return (min_h + max_h) * 0.5
+
+## Incremental terrain admission for ordinary standalone structures. The state
+## retains only deterministic candidate facts and sampled extrema. Any edit in
+## an intersecting terrain chunk restarts the proof before it can commit.
+func advance_standalone_terrain_admission(region: Vector2i, candidate: Dictionary) -> Dictionary:
+    if candidate.is_empty() or not candidate.get("baseCell") is Vector2i or not candidate.get("dimensions") is Vector2i:
+        standalone_admission_states.erase(region)
+        return {"status":"failed","reason":"invalid_standalone_candidate"}
+    var signature := standalone_admission_revision(candidate)
+    var state: Dictionary = standalone_admission_states.get(region,{})
+    if state.is_empty() or state.get("candidate",{})!=candidate or state.get("revision",[])!=signature:
+        state={"candidate":candidate.duplicate(true),"revision":signature,"cells":standalone_admission_cells(candidate),
+            "cursor":0,"minimum":INF,"maximum":-INF,"failed":false}
+    var started:=Time.get_ticks_usec()
+    var sampled:=0
+    while int(state.cursor)<state.cells.size() and sampled<STANDALONE_ADMISSION_SAMPLES_PER_SLICE \
+            and Time.get_ticks_usec()-started<STANDALONE_ADMISSION_BUDGET_USEC:
+        var cell: Vector2i=state.cells[int(state.cursor)]
+        state.cursor=int(state.cursor)+1
+        var sample:=terrain_surface_sample_at_cell(cell.x,cell.y)
+        sampled+=1
+        if not bool(sample.get("found",false)):
+            state.failed=true
+            break
+        var height:=float(sample.get("height",0.0))
+        state.minimum=minf(float(state.minimum),height)
+        state.maximum=maxf(float(state.maximum),height)
+    if bool(state.failed):
+        standalone_admission_states.erase(region)
+        return {"status":"rejected","reason":"standalone_surface_missing"}
+    if int(state.cursor)<state.cells.size():
+        standalone_admission_states[region]=state
+        return {"status":"pending","reason":"standalone_terrain_admission_sampling",
+            "sampled":state.cursor,"total":state.cells.size()}
+    if standalone_admission_revision(candidate)!=state.revision:
+        standalone_admission_states.erase(region)
+        return {"status":"pending","reason":"standalone_terrain_admission_revision_changed"}
+    standalone_admission_states.erase(region)
+    var minimum:=float(state.minimum)
+    var maximum:=float(state.maximum)
+    if maximum-minimum>main.CELL*0.65 or maximum<=main.WATER_LEVEL+1.2:
+        return {"status":"rejected","reason":"standalone_surface_unsuitable"}
+    return {"status":"ready","level":(minimum+maximum)*0.5,"sampleCount":state.cells.size(),"revision":signature}
+
+
+func standalone_admission_cells(candidate: Dictionary) -> Array[Vector2i]:
+    var base: Vector2i=candidate.baseCell
+    var dimensions: Vector2i=candidate.dimensions
+    var unique: Dictionary={}
+    for x: int in range(base.x,base.x+dimensions.x):
+        unique[Vector2i(x,base.y)]=true
+        unique[Vector2i(x,base.y+dimensions.y-1)]=true
+    for z: int in range(base.y,base.y+dimensions.y):
+        unique[Vector2i(base.x,z)]=true
+        unique[Vector2i(base.x+dimensions.x-1,z)]=true
+    var cells: Array[Vector2i]=[]
+    for cell: Vector2i in unique: cells.append(cell)
+    cells.sort_custom(func(a: Vector2i,b: Vector2i): return a.y<b.y if a.y!=b.y else a.x<b.x)
+    return cells
+
+
+func standalone_admission_revision(candidate: Dictionary) -> Array:
+    var world=main.get("world_generation_system") if is_instance_valid(main) else null
+    var chunk_size:=int(main.CHUNK_SIZE) if is_instance_valid(main) else 1
+    if chunk_size<=0: chunk_size=1
+    var base: Vector2i=candidate.baseCell
+    var dimensions: Vector2i=candidate.dimensions
+    var low:=Vector2i(floori(float(base.x)/chunk_size),floori(float(base.y)/chunk_size))
+    var high:=Vector2i(floori(float(base.x+dimensions.x-1)/chunk_size),floori(float(base.y+dimensions.y-1)/chunk_size))
+    var signature: Array=[String(main.seed_text) if is_instance_valid(main) else "",regional_source_generation,
+        world.get_instance_id() if is_instance_valid(world) else 0]
+    for z: int in range(low.y,high.y+1):
+        for x: int in range(low.x,high.x+1):
+            var key:=Vector2i(x,z)
+            signature.append([key,int(world.call("terrain_volume_chunk_revision",key,chunk_size)) \
+                if is_instance_valid(world) and world.has_method("terrain_volume_chunk_revision") else 0])
+    return signature
 
 func place_structure_block(cell_x: int, cell_z: int, level: float, dy: int, block_type: String, extra_options: Dictionary = {}) -> void:
     if defer_structure_ops:

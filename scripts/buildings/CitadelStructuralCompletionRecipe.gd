@@ -19,13 +19,14 @@ const BuntingDomain = preload("res://scripts/buildings/CitadelMarketBuntingDomai
 const ExteriorBunting = preload("res://scripts/buildings/CitadelExteriorBuntingDomain.gd")
 const SupportResolutionMemo = preload("res://scripts/buildings/BuildingSupportResolutionMemo.gd")
 
-static func prepare(blueprint, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+static func prepare(blueprint, policy: Dictionary, continuation: Callable = Callable(), raw_stage_observer: Callable = Callable()) -> Dictionary:
 	# Execution control is deliberately separate from serializable source policy.
 	# These are operation boundaries, not a bound on inner physical validation.
 	if not _continue(continuation, "structural_started"): return _fail("cancelled")
 	if blueprint == null or not policy.get("furnitureParts") is Array or not policy.get("reservedVolumes") is Array \
 			or not policy.get("protectedObstacles") is Array:
 		return _fail("invalid_structural_completion_input")
+	_time(raw_stage_observer,"structuralPrerequisites",true)
 	var frozen := var_to_bytes(blueprint.snapshot())
 	var frozen_policy := var_to_bytes(policy)
 	# Reject stale producer ownership before any expensive private construction.
@@ -38,12 +39,13 @@ static func prepare(blueprint, policy: Dictionary, continuation: Callable = Call
 		if frozen != var_to_bytes(blueprint.snapshot()) or frozen_policy != var_to_bytes(policy):
 			return _fail("structural_completion_failure_mutated_input")
 		return _fail("structural_manifest_invalid", {"detail": manifest})
-	var facade := Facades.prepare(blueprint, policy, continuation)
+	_time(raw_stage_observer,"structuralPrerequisites",false)
+	var facade := Facades.prepare(blueprint, policy, continuation, raw_stage_observer)
 	if facade.get("reason", "") == "cancelled": return facade
 	if frozen != var_to_bytes(blueprint.snapshot()) or frozen_policy != var_to_bytes(policy):
 		return _fail("structural_completion_failure_mutated_input")
 	if not facade.ready: return _fail("facade_completion_failed", {"detail": facade})
-	var result := prepare_later(Copy.copy_blueprint(facade.afterSnapshot), policy, continuation)
+	var result := prepare_later(Copy.copy_blueprint(facade.afterSnapshot), policy, continuation, raw_stage_observer)
 	if result.get("reason", "") == "cancelled": return result
 	if frozen != var_to_bytes(blueprint.snapshot()) or frozen_policy != var_to_bytes(policy):
 		return _fail("structural_completion_mutated_input")
@@ -52,9 +54,10 @@ static func prepare(blueprint, policy: Dictionary, continuation: Callable = Call
 	if not _continue(continuation, "structural_completed"): return _fail("cancelled")
 	return result
 
-static func prepare_later(blueprint, policy: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+static func prepare_later(blueprint, policy: Dictionary, continuation: Callable = Callable(), raw_stage_observer: Callable = Callable()) -> Dictionary:
 	if not _continue(continuation, "structural_later_started"): return _fail("cancelled")
 	if blueprint == null or not policy.get("protectedObstacles") is Array: return _fail("invalid_later_completion_input")
+	_time(raw_stage_observer,"structuralLaterSetup",true)
 	var source_bytes := var_to_bytes(blueprint.snapshot())
 	var policy_bytes := var_to_bytes(policy)
 	var working = Copy.copy_blueprint(blueprint.snapshot())
@@ -66,31 +69,46 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 		return _fail("structural_manifest_invalid", {"detail": manifest})
 	var protected := _protected_bounds(working, manifest.records, policy.protectedObstacles)
 	if not protected.ready: return protected
+	_time(raw_stage_observer,"structuralLaterSetup",false)
 	var stages: Array = []
 	var support_identities: Dictionary = {}
+	_time(raw_stage_observer,"chimneyCompletion",true)
 	var chimney := _complete_chimneys(working, manifest.records, policy.protectedObstacles, continuation, support_identities)
+	_time(raw_stage_observer,"chimneyCompletion",false)
 	if not chimney.ready: return chimney
 	stages.append(chimney)
+	_time(raw_stage_observer,"bracketFirstCompletion",true)
 	var bracket_first := _complete_brackets(working, manifest.records, "bracket_first", continuation, support_identities)
+	_time(raw_stage_observer,"bracketFirstCompletion",false)
 	if not bracket_first.ready: return bracket_first
 	stages.append(bracket_first)
+	_time(raw_stage_observer,"signCompletion",true)
 	var sign := _complete_signs(working, manifest.records, protected.bounds, continuation, support_identities)
+	_time(raw_stage_observer,"signCompletion",false)
 	if not sign.ready: return sign
 	stages.append(sign)
+	_time(raw_stage_observer,"partyWallCompletion",true)
 	var party := _complete_party_walls(working, manifest.records, continuation, support_identities)
+	_time(raw_stage_observer,"partyWallCompletion",false)
 	if not party.ready: return party
 	stages.append(party)
+	_time(raw_stage_observer,"bracketRetryCompletion",true)
 	var bracket_retry := _complete_brackets(working, manifest.records, "bracket_retry", continuation, support_identities)
+	_time(raw_stage_observer,"bracketRetryCompletion",false)
 	if not bracket_retry.ready: return bracket_retry
 	stages.append(bracket_retry)
+	_time(raw_stage_observer,"buntingCompletion",true)
 	var bunting := _complete_bunting(working, protected.bounds, continuation, support_identities)
+	_time(raw_stage_observer,"buntingCompletion",false)
 	if not bunting.ready: return bunting
 	working = Copy.copy_blueprint(bunting.afterSnapshot)
 	bunting.erase("afterSnapshot")
 	stages.append(bunting)
 	# Threshold completion is last because it adds collision-backed support columns.
 	# Its terminal proof is the ordinary terminal proof; never validate a third time.
+	_time(raw_stage_observer,"thresholdCompletion",true)
 	var threshold := _complete_thresholds(working, manifest.records, policy.protectedObstacles, continuation, support_identities)
+	_time(raw_stage_observer,"thresholdCompletion",false)
 	if not threshold.ready: return threshold
 	working = Copy.copy_blueprint(threshold.afterSnapshot)
 	var final: Dictionary = threshold._terminalProof
@@ -103,13 +121,19 @@ static func prepare_later(blueprint, policy: Dictionary, continuation: Callable 
 	# Generic physical attachment can name foreign mass and does not prove
 	# dressing clearance. Reuse the final proof after all structural changes;
 	# proposing another relocation here is a rejection, never a final-state pass.
+	_time(raw_stage_observer,"finalSignVerification",true)
 	var verified_signs := _verify_final_signs(final.proof, manifest.records, protected.bounds, continuation)
+	_time(raw_stage_observer,"finalSignVerification",false)
 	if not verified_signs.ready: return verified_signs
+	_time(raw_stage_observer,"finalBuntingVerification",true)
 	var verified_bunting := _verify_final_bunting(final.proof,bunting,continuation)
+	_time(raw_stage_observer,"finalBuntingVerification",false)
 	if not verified_bunting.ready: return verified_bunting
 	bunting["terminalVerification"] = verified_bunting
+	_time(raw_stage_observer,"structuralFinalize",true)
 	Copy.clear_caches(working)
 	if source_bytes != var_to_bytes(blueprint.snapshot()) or policy_bytes != var_to_bytes(policy): return _fail("later_completion_mutated_input")
+	_time(raw_stage_observer,"structuralFinalize",false)
 	if not _continue(continuation, "structural_later_completed"): return _fail("cancelled")
 	return {"ready": true, "afterSnapshot": working.snapshot(), "stages": stages,
 		"finalFailureCount": 0, "scope": "Private source completion only; caller has not committed or published it."}
@@ -127,6 +151,9 @@ static func _bunting_manifest(source) -> Dictionary:
 			var exterior := ExteriorBunting.build(source, rope.recipe[ExteriorBunting.OWNERS])
 			if not exterior.ready: return exterior
 	return declaration
+
+static func _time(observer: Callable, stage: String, beginning: bool) -> void:
+	if observer.is_valid(): observer.call(stage,beginning)
 
 static func _complete_bunting(source, protected: Array, continuation: Callable = Callable(), support_identities: Dictionary = {}) -> Dictionary:
 	var result := _complete_bunting_impl(source,protected,continuation,support_identities)

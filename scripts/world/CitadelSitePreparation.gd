@@ -21,10 +21,11 @@ const BLEND_RISE_PER_RUN := 0.35
 const MAX_INFLUENCE_RADIUS_CELLS := 384
 
 
-static func prepare(world_seed: String, region: Vector2i, town_overrides: Dictionary, ordinary_structure_policy: Dictionary, continue_stage: Callable = Callable()) -> Dictionary:
+static func prepare(world_seed: String, region: Vector2i, town_overrides: Dictionary, ordinary_structure_policy: Dictionary, continue_stage: Callable = Callable(), raw_stage_observer: Callable = Callable()) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	var candidate := Field.candidate_for_region(world_seed, region)
 	if candidate.is_empty(): return _result("absent", "no_candidate")
+	_time(raw_stage_observer,"centerSurvey",true)
 	if not _continue(continue_stage, "site_center_survey"): return _result("cancelled", "cancelled")
 	var survey := Survey.new()
 	var center: Vector2i = candidate.centerCell
@@ -33,19 +34,29 @@ static func prepare(world_seed: String, region: Vector2i, town_overrides: Dictio
 		if not _continue(continue_stage, "site_center_survey"): return _result("cancelled", "cancelled")
 		center_result = survey.advance()
 	if center_result.status != "surveyed":
+		_time(raw_stage_observer,"centerSurvey",false)
 		return _survey_failure(center_result)
+	_time(raw_stage_observer,"centerSurvey",false)
 	var biomes: Array = center_result.biomeCounts.keys()
 	var context := {"biome": String(biomes[0]), "siteKey": candidate.siteId, "citadelScale": SCALE}
-	var source := Source.prepare(int(candidate.recipeSeed), context, continue_stage)
+	_time(raw_stage_observer,"recipe",true)
+	var source := Source.prepare(int(candidate.recipeSeed), context, continue_stage, raw_stage_observer)
+	_time(raw_stage_observer,"recipe",false)
 	if not source.get("ready", false):
 		var failed := _result("cancelled" if source.get("reason") == "cancelled" else "failed", String(source.get("reason", "source_preparation_failed")))
 		failed["sourceFailure"] = source
 		return failed
-	if not _continue(continue_stage, "site_geometry_manifest"): return _result("cancelled", "cancelled")
+	_time(raw_stage_observer,"geometryManifest",true)
+	if not _continue(continue_stage, "site_geometry_manifest"):
+		_time(raw_stage_observer,"geometryManifest",false)
+		return _result("cancelled", "cancelled")
 	var manifest := Manifest.build(source.blueprint, source.furnishingPlan, CELL)
+	_time(raw_stage_observer,"geometryManifest",false)
 	if not manifest.ready: return _result("failed", manifest.reason)
 	var level := roundf(float(center_result.minimumSurfaceY) / CELL) * CELL
-	var terrain := prepare_terrain(manifest, candidate, town_overrides, level, ordinary_structure_policy, continue_stage)
+	_time(raw_stage_observer,"terrainPreparation",true)
+	var terrain := prepare_terrain(manifest, candidate, town_overrides, level, ordinary_structure_policy, continue_stage, raw_stage_observer)
+	_time(raw_stage_observer,"terrainPreparation",false)
 	if terrain.status != "prepared": return terrain
 	terrain["candidate"] = candidate
 	terrain["blueprint"] = source.blueprint
@@ -57,7 +68,7 @@ static func prepare(world_seed: String, region: Vector2i, town_overrides: Dictio
 	return terrain
 
 
-static func prepare_terrain(manifest: Dictionary, candidate: Dictionary, town_overrides: Dictionary, level: float, ordinary_structure_policy: Dictionary, continue_stage: Callable = Callable()) -> Dictionary:
+static func prepare_terrain(manifest: Dictionary, candidate: Dictionary, town_overrides: Dictionary, level: float, ordinary_structure_policy: Dictionary, continue_stage: Callable = Callable(), raw_stage_observer: Callable = Callable()) -> Dictionary:
 	var region_cells := int(ordinary_structure_policy.get("regionCells", 0))
 	var spawn_chance := float(ordinary_structure_policy.get("spawnChance", NAN))
 	if region_cells < 34 or not is_finite(spawn_chance) or spawn_chance < 0.0 or spawn_chance > 1.0:
@@ -69,7 +80,9 @@ static func prepare_terrain(manifest: Dictionary, candidate: Dictionary, town_ov
 	var apron := MIN_APRON_CELLS
 	while apron <= Profile.MAX_APRON_CELLS:
 		if not _continue(continue_stage, "site_full_envelope_survey"): return _result("cancelled", "cancelled")
+		_time(raw_stage_observer,"terrainProfile",true)
 		var made := Profile.create(manifest, candidate.worldSeed, candidate.siteId, center, level, apron, CELL)
+		_time(raw_stage_observer,"terrainProfile",false)
 		if not made.ready: return _result("failed", made.reason)
 		var profile: Dictionary = made.profile
 		# One extra column covers floating-grid rounding in density sampling.
@@ -78,25 +91,31 @@ static func prepare_terrain(manifest: Dictionary, candidate: Dictionary, town_ov
 		var reservation: Rect2i = influence.merge(profile.reservationCells)
 		if not declared.encloses(reservation) or not Field.reservation_fits_region(candidate.region, reservation):
 			return _result("failed", "geometry_exceeds_declared_site_influence")
+		_time(raw_stage_observer,"ordinaryConflict",true)
 		var conflict := _standalone_conflict(candidate.worldSeed, reservation, region_cells, spawn_chance)
+		_time(raw_stage_observer,"ordinaryConflict",false)
 		if not conflict.is_empty():
 			var rejected := _result("absent", "ordinary_structure_overlap")
 			rejected["conflict"] = conflict
 			return rejected
+		_time(raw_stage_observer,"envelopeSurvey",true)
 		var survey := Survey.new()
 		var result := survey.begin(candidate.worldSeed, candidate.region, influence, town_overrides)
 		while result.status == "pending_budget":
 			if not _continue(continue_stage, "site_full_envelope_survey"): return _result("cancelled", "cancelled")
 			result = survey.advance()
+		_time(raw_stage_observer,"envelopeSurvey",false)
 		if result.status != "surveyed": return _survey_failure(result)
 		# Visual-only space is reserved/surveyed but never used to choose the
 		# grading plane or terrain support policy.
 		if reservation != influence:
+			_time(raw_stage_observer,"visualReservationSurvey",true)
 			var visual_survey := Survey.new()
 			var visual_result := visual_survey.begin(candidate.worldSeed,candidate.region,reservation,town_overrides)
 			while visual_result.status == "pending_budget":
 				if not _continue(continue_stage,"site_visual_reservation_survey"): return _result("cancelled","cancelled")
 				visual_result = visual_survey.advance()
+			_time(raw_stage_observer,"visualReservationSurvey",false)
 			if visual_result.status != "surveyed": return _survey_failure(visual_result)
 		# The source ground plane is zero, but its world elevation belongs to the
 		# ENTIRE site, not a possibly outlying center cell. Midrange minimizes the
@@ -109,7 +128,9 @@ static func prepare_terrain(manifest: Dictionary, candidate: Dictionary, town_ov
 		# point. This deterministic rule is independent of scheduler/query order.
 		var required := maxi(MIN_APRON_CELLS, ceili(1.5 * height_delta / (CELL * BLEND_RISE_PER_RUN)))
 		if required <= apron:
+			_time(raw_stage_observer,"finalProfile",true)
 			made = Profile.create(manifest, candidate.worldSeed, candidate.siteId, center, level, apron, CELL)
+			_time(raw_stage_observer,"finalProfile",false)
 			if not made.ready: return _result("failed", made.reason)
 			profile = made.profile
 			return {"status": "prepared", "reason": "", "profile": profile,
@@ -145,6 +166,10 @@ static func _survey_failure(survey: Dictionary) -> Dictionary:
 
 static func _continue(callback: Callable, stage: String) -> bool:
 	return not callback.is_valid() or callback.call(stage) == true
+
+
+static func _time(observer: Callable, stage: String, beginning: bool) -> void:
+	if observer.is_valid(): observer.call(stage,beginning)
 
 
 static func _result(status: String, reason: String) -> Dictionary:

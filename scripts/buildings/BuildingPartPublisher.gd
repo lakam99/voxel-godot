@@ -21,6 +21,7 @@ const BuildingGoodsGeometryScript := preload("res://scripts/buildings/BuildingGo
 const BuildingDoorGeometryScript := preload("res://scripts/buildings/BuildingDoorGeometry.gd")
 const SettledCobbleGeometryScript := preload("res://scripts/buildings/SettledCobbleGeometry.gd")
 const PavingFootingAssemblyScript := preload("res://scripts/buildings/PavingFootingAssemblyRecipe.gd")
+const PavingConstructionArtifactScript := preload("res://scripts/buildings/PavingConstructionArtifact.gd")
 const MasonryWallGeometryScript := preload("res://scripts/buildings/MasonryWallGeometry.gd")
 const MasonryAperturePublicationScript := preload("res://scripts/buildings/MasonryAperturePublication.gd")
 const MAX_JOINTED_FINISHES := 4
@@ -101,6 +102,15 @@ var _prepared_masonry
 var _prepared_masonry_identity
 var _prepared_surfaces: Dictionary = {}
 var _prepared_surfaces_identity: Dictionary = _prepared_surfaces
+var _physical_packet_families_by_part_id: Dictionary = {}
+var _physical_packet_mode := false
+var _physical_packet_jointed_artifacts: Dictionary = {}
+# A packet scene is one retained owner. Later packet closures attach to this
+# session; they must never recreate its shared static collider/batches or
+# invalidate source-part boundary epochs that already back live receipts.
+var _physical_packet_session_base: PublicationPreparation.PreparedPublicationBase
+var _physical_packet_session_binding: Dictionary = {}
+var _physical_packet_attached_part_ids: Dictionary = {}
 
 
 func _init() -> void:
@@ -194,6 +204,141 @@ func begin_prepared_publication(prepared: PublicationPreparation.PreparedSource,
 		"masonryPreparationUsec":source.get("masonryPreparationUsec",0),
 		"surfacePreparationUsec":source.get("surfacePreparationUsec",{}),
 		"spatialDependencies":source.get("spatialDependencies")}
+
+
+## Packet-native session start for one already selected physical closure. The
+## packet supplies render geometry only; normal source-part publication still
+## owns collision bodies, static metadata, visual batching and boundaries.
+## Aperture masonry and jointed paving are intentionally rejected until their
+## own packet artifacts exist: never route either through whole-source prepare.
+func begin_physical_group_packet_scene(base: PublicationPreparation.PreparedPublicationBase, packet: PublicationPreparation.PreparedPhysicalGroupPacket, blueprint, parent: Node3D, expected_binding: Dictionary, options: Dictionary = {}) -> Dictionary:
+	if parent==null or options.has("structuralAuthorityBlueprint"):
+		return {"ready":false,"reason":"invalid_physical_packet_scene_request"}
+	var group_ids: Array[String] = packet.group_ids if packet!=null else []
+	var admitted: Dictionary = validate_physical_group_packet(base,packet,expected_binding,group_ids,blueprint)
+	if not admitted.get("ready",false): return admitted
+	var static_only := true
+	for id: String in admitted.memberIds:
+		var entry: Variant = packet.building_entries.get(id)
+		if not entry is Dictionary or not entry.get("families") is Dictionary:
+			return {"ready":false,"reason":"invalid_physical_group_member"}
+		if not entry.families.is_empty(): static_only=false
+	if bool(options.get("packetStaticOnly",false)) and not static_only:
+		return {"ready":false,"reason":"physical_packet_static_only_family_present"}
+	var selected: Dictionary = {}
+	for id: String in admitted.memberIds: selected[id]=true
+	# Jointed paving and aperture masonry are admitted only through their
+	# dedicated value artifacts. Neither may fall back to whole-source prepare.
+	var hydrated_jointed := _hydrate_physical_packet_jointed_artifacts(packet, blueprint)
+	if not hydrated_jointed.ready: return hydrated_jointed
+	clear_published()
+	configure_publication_options(options)
+	if not resumable_scene_publication:
+		return {"ready":false,"reason":"physical_packet_requires_resumable_publication"}
+	if base.prepared_history==null or not base.prepared_history.matches(base.prepared_history.history,base.source_id):
+		return {"ready":false,"reason":"stale_physical_packet_history"}
+	_scene_blueprint=blueprint
+	_scene_parent=weakref(parent)
+	source_blueprint_id=canonical_source_blueprint_id(blueprint)
+	publication_site_id=String(options.get("publicationSiteId", ""))
+	_prepared_history=base.prepared_history
+	surface_history=base.prepared_history.history
+	_prepared_static_records=base.static_records
+	_prepared_static_bindings=base.static_record_bindings
+	_physical_packet_families_by_part_id={}
+	for id: String in packet.building_entries:
+		_physical_packet_families_by_part_id[id]=packet.building_entries[id].families
+	_physical_packet_families_by_part_id.make_read_only()
+	_physical_packet_jointed_artifacts=hydrated_jointed.artifacts
+	_physical_packet_mode=true
+	_physical_packet_session_base=base
+	_physical_packet_session_binding=expected_binding.duplicate()
+	_physical_packet_session_binding.make_read_only()
+	_physical_packet_attached_part_ids=selected.duplicate()
+	_physical_packet_attached_part_ids.make_read_only()
+	var aperture_hydration := _begin_physical_packet_apertures(blueprint,packet)
+	if not aperture_hydration.ready: return aperture_hydration
+	incremental_total_parts=selected.size()
+	incremental_published_parts=0
+	active_publication_started_usec=Time.get_ticks_usec()
+	return {"ready":true,"reason":"","memberIds":admitted.memberIds,"staticOnly":static_only}
+
+
+## Attach one later, disjoint physical packet to the already live packet scene.
+## This is deliberately admission-only: it creates no node and retains every
+## prior collider, batch, boundary epoch, record, and packet family. The scene
+## owner publishes the transaction only after this exact attachment succeeds.
+func attach_physical_group_packet_scene(base: PublicationPreparation.PreparedPublicationBase, packet: PublicationPreparation.PreparedPhysicalGroupPacket, blueprint, parent: Node3D, expected_binding: Dictionary, options: Dictionary = {}) -> Dictionary:
+	if parent==null or options.has("structuralAuthorityBlueprint") or not _physical_packet_mode \
+			or _physical_packet_session_base==null or _physical_packet_session_base!=base \
+			or expected_binding!=_physical_packet_session_binding or _scene_blueprint!=blueprint \
+			or not _scene_owner_matches(blueprint,parent) or source_blueprint_id!=canonical_source_blueprint_id(blueprint):
+		return {"ready":false,"reason":"physical_packet_session_mismatch"}
+	if not base.matches(expected_binding) or base.source_id!=source_blueprint_id \
+			or publication_site_id!=String(options.get("publicationSiteId",publication_site_id)) \
+			or batch_static_parts!=bool(options.get("batchStaticParts",batch_static_parts)) \
+			or not resumable_scene_publication or not bool(options.get("resumableScenePublication",false)):
+		return {"ready":false,"reason":"physical_packet_session_options_mismatch"}
+	if _pending_paving!=null or _pending_masonry!=null or _pending_roof!=null or _static_flush!=null \
+			or not _pending_publication_boundary.is_empty() or _publication_failed():
+		return {"ready":false,"reason":"physical_packet_session_not_between_boundaries"}
+	var group_ids: Array[String] = packet.group_ids if packet!=null else []
+	var admitted: Dictionary = validate_physical_group_packet(base,packet,expected_binding,group_ids,blueprint)
+	if not admitted.get("ready",false): return admitted
+	var selected: Dictionary = {}
+	var static_only := true
+	for id: String in admitted.memberIds:
+		if _physical_packet_attached_part_ids.has(id) or source_part_publication_epoch(id)>0:
+			return {"ready":false,"reason":"physical_packet_member_already_attached"}
+		selected[id]=true
+		var part = blueprint.find_part(id)
+		if part==null: return {"ready":false,"reason":"physical_packet_member_missing"}
+		var entry: Variant = packet.building_entries.get(id)
+		if not entry is Dictionary or not entry.get("families") is Dictionary:
+			return {"ready":false,"reason":"invalid_physical_group_member"}
+		if not entry.families.is_empty(): static_only=false
+	if bool(options.get("packetStaticOnly",false)) and not static_only:
+		return {"ready":false,"reason":"physical_packet_static_only_family_present"}
+	var hydrated_jointed := _hydrate_physical_packet_jointed_artifacts(packet,blueprint)
+	if not hydrated_jointed.ready: return hydrated_jointed
+	var families := _physical_packet_families_by_part_id.duplicate()
+	for id: String in packet.building_entries: families[id]=packet.building_entries[id].families
+	families.make_read_only()
+	var jointed := _physical_packet_jointed_artifacts.duplicate()
+	for id: String in hydrated_jointed.artifacts: jointed[id]=hydrated_jointed.artifacts[id]
+	jointed.make_read_only()
+	var attached := _physical_packet_attached_part_ids.duplicate()
+	for id: String in selected: attached[id]=true
+	attached.make_read_only()
+	_physical_packet_families_by_part_id=families
+	_physical_packet_jointed_artifacts=jointed
+	_physical_packet_attached_part_ids=attached
+	var aperture_hydration := _begin_physical_packet_apertures(blueprint,packet)
+	if not aperture_hydration.ready: return aperture_hydration
+	incremental_total_parts+=selected.size()
+	_scene_finalized=false
+	_finish_validated=false
+	return {"ready":true,"reason":"","memberIds":admitted.memberIds,"staticOnly":static_only}
+
+
+func attach_static_only_group_packet_scene(base: PublicationPreparation.PreparedPublicationBase, packet: PublicationPreparation.PreparedPhysicalGroupPacket, blueprint, parent: Node3D, expected_binding: Dictionary, options: Dictionary = {}) -> Dictionary:
+	var static_options := options.duplicate()
+	static_options["packetStaticOnly"] = true
+	var result := attach_physical_group_packet_scene(base,packet,blueprint,parent,expected_binding,static_options)
+	if not result.get("ready",false): return result
+	if not bool(result.get("staticOnly",false)):
+		return {"ready":false,"reason":"physical_packet_static_only_family_present"}
+	return result
+
+
+## Static-only packets carry no masonry, paving, roof, or jointed value family.
+## Their normal source-part publication remains authoritative for the shared
+## static collision body and visual batches; this named entry point only makes
+## the no-geometry admission explicit and rejects any legacy-family fallback.
+func begin_static_only_group_packet_scene(base: PublicationPreparation.PreparedPublicationBase, packet: PublicationPreparation.PreparedPhysicalGroupPacket, blueprint, parent: Node3D, expected_binding: Dictionary, options: Dictionary = {}) -> Dictionary:
+	var static_options := options.duplicate()
+	static_options["packetStaticOnly"] = true
+	return begin_physical_group_packet_scene(base,packet,blueprint,parent,expected_binding,static_options)
 
 
 func _detach_preparation_for_retirement() -> Dictionary:
@@ -387,8 +532,8 @@ func advance_scene_preparation(budget_usec := 2500) -> Dictionary:
 func publication_status() -> Dictionary:
 	var reason := _paving_failure
 	if reason.is_empty() and _masonry_preparation != null: reason = _masonry_preparation.reason
-	if reason.is_empty() and _masonry_preparation == null: reason = "scene_publication_not_started"
-	var state := "failed" if not reason.is_empty() else ("pending_budget" if _masonry_preparation.state == "pending_budget" else "ready")
+	if reason.is_empty() and _masonry_preparation == null and not _physical_packet_mode: reason = "scene_publication_not_started"
+	var state := "failed" if not reason.is_empty() else ("pending_budget" if _masonry_preparation != null and _masonry_preparation.state == "pending_budget" else "ready")
 	if state=="ready" and (_pending_paving!=null or _pending_masonry!=null or _pending_roof!=null or _static_flush!=null): state="pending_budget"
 	return {"status":state,"reason":reason,"complete":_scene_finalized and state=="ready",
 		"publishedPartCount":incremental_published_parts,"totalParts":incremental_total_parts,
@@ -402,6 +547,12 @@ func clear_published() -> void:
 	_prepared_masonry_identity=null
 	_prepared_surfaces={}
 	_prepared_surfaces_identity=_prepared_surfaces
+	_physical_packet_families_by_part_id={}
+	_physical_packet_jointed_artifacts={}
+	_physical_packet_mode=false
+	_physical_packet_session_base=null
+	_physical_packet_session_binding={}
+	_physical_packet_attached_part_ids={}
 	_paving_history_snapshot=null
 	_paving_history_source=null
 	_paving_history_source_bytes=PackedByteArray()
@@ -484,6 +635,94 @@ func canonical_source_blueprint_id(blueprint) -> String:
 	if blueprint != null and blueprint.recipe is Dictionary:
 		result = String((blueprint.recipe as Dictionary).get("sourceBlueprintId", result))
 	return result
+
+
+## Validate a value-keyed demand packet against the separately restored scene
+## source before any publisher state, Node, collision or visual is created.
+## Packet-scoped members will later use this as their no-fallback admission
+## gate; this method intentionally has no publication side effects.
+func validate_physical_group_packet(base: PublicationPreparation.PreparedPublicationBase, packet: PublicationPreparation.PreparedPhysicalGroupPacket, expected_binding: Dictionary, expected_group_ids: Array[String], blueprint) -> Dictionary:
+	if base == null or packet == null or blueprint == null or not base.matches(expected_binding) or not packet.matches(base,expected_group_ids):
+		return {"ready":false,"reason":"invalid_physical_group_packet"}
+	if canonical_source_blueprint_id(blueprint) != packet.source_id: return {"ready":false,"reason":"stale_physical_group_scene_source"}
+	var expected: Dictionary = {}
+	for group_id: String in expected_group_ids:
+		if not base.description.publication_groups.groups.has(group_id): return {"ready":false,"reason":"unknown_physical_group"}
+		for index: int in base.description.publication_groups.groups[group_id].buildingIndices:
+			if index < 0 or index >= blueprint.parts.size(): return {"ready":false,"reason":"physical_group_member_index_changed"}
+			var id := String(blueprint.parts[index].id)
+			if expected.has(id): return {"ready":false,"reason":"duplicate_physical_group_member"}
+			expected[id] = blueprint.parts[index]
+	if packet.building_entries.size() != expected.size(): return {"ready":false,"reason":"physical_group_member_scope_mismatch"}
+	for id: String in packet.building_entries:
+		if not expected.has(id): return {"ready":false,"reason":"unexpected_physical_group_member"}
+	for id: String in expected:
+		if not packet.building_entries.has(id): return {"ready":false,"reason":"missing_physical_group_member"}
+		var part = expected[id]
+		var binding := PublicationPreparation.static_record_binding(part.snapshot())
+		var entry: Variant = packet.building_entries[id]
+		if not entry is Dictionary or entry.get("id") != id or entry.get("binding") != binding or not entry.get("families") is Dictionary:
+			return {"ready":false,"reason":"stale_physical_group_member"}
+		if base.static_record_bindings.has(id):
+			if not packet.static_records.has(id) or base.static_record_bindings[id] != binding \
+					or var_to_bytes(packet.static_records[id]) != var_to_bytes(base.static_records.get(id,{})):
+				return {"ready":false,"reason":"stale_physical_group_static_record"}
+		elif packet.static_records.has(id): return {"ready":false,"reason":"unexpected_physical_group_static_record"}
+		var expected_families: Dictionary = {}
+		for family: String in ["masonry","paving","roof"]:
+			if PublicationPreparation.geometry_selected(part,family): expected_families[family] = true
+		if part.recipe.has("pavingFootingJoints"): expected_families["jointed_paving"] = true
+		if entry.families.size() != expected_families.size(): return {"ready":false,"reason":"physical_group_family_scope_mismatch"}
+		for family: String in entry.families:
+			if not expected_families.has(family): return {"ready":false,"reason":"unexpected_physical_group_family"}
+		for family: String in expected_families:
+			if not entry.families.has(family): return {"ready":false,"reason":"missing_physical_group_family"}
+			var artifact: Variant = entry.families[family]
+			if family=="jointed_paving":
+				var jointed := _validate_packet_jointed_paving_family(part,artifact,blueprint,binding)
+				if not jointed.ready: return jointed
+			elif not artifact is Dictionary or artifact.get("binding") != binding or not artifact.get("geometry") is Dictionary \
+					or artifact.geometry.is_empty() or artifact.get("packet") == null:
+				return {"ready":false,"reason":"invalid_physical_group_family"}
+	return {"ready":true,"reason":"","memberIds":expected.keys()}
+
+
+func _validate_packet_jointed_paving_family(part, family: Variant, blueprint, binding: String) -> Dictionary:
+	if not family is Dictionary or family.get("binding")!=binding or family.get("kind")!="jointed_paving" \
+			or not family.get("joint") is Dictionary or not family.get("footBindings") is Dictionary or not family.get("artifact") is Dictionary:
+		return {"ready":false,"reason":"invalid_jointed_paving_packet_family"}
+	var declaration: Variant = part.recipe.get("pavingFootingJoints")
+	var joint: Dictionary = family.joint
+	if not declaration is Dictionary or var_to_bytes(joint)!=var_to_bytes(declaration) or not joint.get("footPartIds") is Array:
+		return {"ready":false,"reason":"stale_jointed_paving_declaration"}
+	var feet: Array[AABB] = []
+	for foot_id_value in joint.footPartIds:
+		var foot_id := String(foot_id_value)
+		var foot = blueprint.find_part(foot_id)
+		if foot_id.is_empty() or foot==null or not family.footBindings.has(foot_id) \
+				or PublicationPreparation.static_record_binding(foot.snapshot())!=family.footBindings[foot_id]:
+			return {"ready":false,"reason":"stale_jointed_paving_foot"}
+		feet.append(AABB(foot.position-foot.size*0.5,foot.size))
+	var artifact: Dictionary = family.artifact
+	if artifact.get("geometryDigest")!=joint.get("geometryDigest") or artifact.get("constructionDigest")!=joint.get("constructionDigest") \
+			or not PavingConstructionArtifactScript.clear_of_boxes_value(artifact,feet).get("clear",false):
+		return {"ready":false,"reason":"invalid_jointed_paving_value_artifact"}
+	return {"ready":true,"reason":""}
+
+
+func _hydrate_physical_packet_jointed_artifacts(packet, blueprint) -> Dictionary:
+	var artifacts: Dictionary = {}
+	for id: String in packet.building_entries:
+		var family: Variant = packet.building_entries[id].families.get("jointed_paving")
+		if family==null: continue
+		var part = blueprint.find_part(id)
+		var validated := _validate_packet_jointed_paving_family(part,family,blueprint,PublicationPreparation.static_record_binding(part.snapshot()))
+		if not validated.ready: return validated
+		var hydrated: Dictionary = PavingConstructionArtifactScript.hydrate_value(family.artifact)
+		if not hydrated.completed or not _paving_artifact_valid(hydrated,part):
+			return {"ready":false,"reason":"jointed_paving_packet_hydration_failed"}
+		artifacts[id]=hydrated
+	return {"ready":true,"reason":"","artifacts":artifacts}
 
 
 
@@ -779,6 +1018,22 @@ func prepare_masonry_apertures(blueprint) -> bool:
 	return _masonry_preparation.begin_incremental(blueprint,self) if resumable_scene_publication else _masonry_preparation.begin(blueprint, self)
 
 
+func _begin_physical_packet_apertures(blueprint, packet: PublicationPreparation.PreparedPhysicalGroupPacket) -> Dictionary:
+	var aperture_packets: Dictionary = {}
+	for id: String in packet.building_entries:
+		var entry: Dictionary = packet.building_entries[id]
+		var family: Variant = entry.get("families",{}).get("masonry")
+		if not family is Dictionary: continue
+		var value: Variant = family.get("packet")
+		if value is Dictionary and value.get("kind")=="masonry_aperture_cut/v1":
+			aperture_packets[id]=value
+	if aperture_packets.is_empty(): return {"ready":true,"reason":""}
+	_masonry_preparation=MasonryAperturePublicationScript.new()
+	if not _masonry_preparation.begin_packet(blueprint,self,aperture_packets):
+		return {"ready":false,"reason":_masonry_preparation.reason}
+	return {"ready":true,"reason":""}
+
+
 func _publication_failed() -> bool:
 	return not _paving_failure.is_empty() or (_masonry_preparation != null and _masonry_preparation.state == "failed")
 
@@ -786,6 +1041,7 @@ func _publication_failed() -> bool:
 func _masonry_part_valid(part) -> bool:
 	if _publication_failed(): return false
 	if not _prepared_masonry_part_valid(part): return false
+	if _physical_packet_mode: return true
 	if _masonry_preparation != null and _masonry_preparation.state == "pending_budget": return false
 	if _masonry_preparation != null and not _masonry_preparation.validate_unit_source(self): return false
 	if _masonry_preparation != null and not _masonry_preparation.accepts_source_member(part): return false
@@ -797,6 +1053,8 @@ func _masonry_part_valid(part) -> bool:
 	return _masonry_preparation.ready_for(part, self)
 
 func _prepared_masonry_part_valid(part) -> bool:
+	if _physical_packet_mode:
+		return _physical_packet_family_valid(part,"masonry")
 	if _prepared_masonry!=_prepared_masonry_identity:
 		return _paving_reject("replaced_prepared_masonry")
 	if _prepared_masonry==null: return true
@@ -809,17 +1067,26 @@ func _prepared_masonry_part_valid(part) -> bool:
 func prepared_masonry_geometry(part) -> Dictionary:
 	var started:=Time.get_ticks_usec()
 	if not _prepared_masonry_part_valid(part): return {}
+	if _physical_packet_mode:
+		var packet_family: Dictionary = _physical_packet_family(part,"masonry")
+		var packet_geometry: Dictionary = packet_family.get("geometry",{})
+		_record_publication_stage("physical_packet_masonry_lookup",Time.get_ticks_usec()-started)
+		return packet_geometry
 	if _prepared_masonry==null: return {}
 	var geometry: Dictionary=_prepared_masonry.geometry_for(part)
 	_record_publication_stage("prepared_masonry_lookup",Time.get_ticks_usec()-started)
 	return geometry
 
 func prepared_masonry_packet(part):
-	if not _prepared_masonry_part_valid(part) or _prepared_masonry==null: return null
+	if not _prepared_masonry_part_valid(part): return null
+	if _physical_packet_mode: return _physical_packet_family(part,"masonry").get("packet")
+	if _prepared_masonry==null: return null
 	return _prepared_masonry.packet_for(part)
 
 
 func _prepared_surface_part_valid(part, family: String) -> bool:
+	if _physical_packet_mode:
+		return _physical_packet_family_valid(part,family)
 	if not is_same(_prepared_surfaces,_prepared_surfaces_identity):
 		return _paving_reject("replaced_prepared_surfaces")
 	var artifact=_prepared_surfaces.get(family)
@@ -832,13 +1099,32 @@ func _prepared_surface_part_valid(part, family: String) -> bool:
 
 func prepared_surface_geometry(part, family: String) -> Dictionary:
 	if not _prepared_surface_part_valid(part,family): return {}
+	if _physical_packet_mode: return _physical_packet_family(part,family).get("geometry",{})
 	var artifact=_prepared_surfaces.get(family)
 	return artifact.geometry_for(part) if artifact!=null else {}
 
 func prepared_surface_packet(part, family: String):
 	if not _prepared_surface_part_valid(part,family): return null
+	if _physical_packet_mode: return _physical_packet_family(part,family).get("packet")
 	var artifact=_prepared_surfaces.get(family)
 	return artifact.packet_for(part) if artifact!=null else null
+
+
+func _physical_packet_family(part, family: String) -> Dictionary:
+	if part==null: return {}
+	var families: Variant = _physical_packet_families_by_part_id.get(String(part.id))
+	return families.get(family,{}) if families is Dictionary else {}
+
+
+func _physical_packet_family_valid(part, family: String) -> bool:
+	if part==null or source_blueprint_id.is_empty(): return _paving_reject("physical_packet_source_missing")
+	var expected: bool = PublicationPreparation.geometry_selected(part,family)
+	var value: Dictionary = _physical_packet_family(part,family)
+	if not expected: return value.is_empty()
+	var binding := PublicationPreparation.static_record_binding(part.snapshot())
+	if binding.is_empty() or value.is_empty() or value.get("binding")!=binding or not value.get("geometry") is Dictionary or value.geometry.is_empty() or value.get("packet")==null:
+		return _paving_reject("stale_physical_packet_"+family+"_part")
+	return true
 
 func _publish_masonry_group(parent: Node3D, artifact: Dictionary, group: String, material: Material, label: String) -> void:
 	var transforms: Array = []
@@ -986,6 +1272,8 @@ func _paving_history_identity() -> PackedByteArray:
 
 func _paving_part_valid(part) -> bool:
 	if not _paving_failure.is_empty(): return false
+	if _physical_packet_mode and part.recipe.has("pavingFootingJoints"):
+		return _physical_packet_jointed_artifacts.has(String(part.id))
 	# Feet have no finish artifact, but their exact source identity/pose owns the
 	# aperture. Also recognize retained objects whose ID was changed after begin.
 	var bound: bool = _paving_source_parts.has(part.id) or _paving_source_parts.find_key(part) != null
@@ -1024,7 +1312,7 @@ func _paving_artifact_valid(artifact: Dictionary, part) -> bool:
 
 
 func _publish_jointed_paving(part, parent: Node3D) -> void:
-	var artifact: Dictionary = _paving_artifacts[part.id].artifact
+	var artifact: Dictionary = _physical_packet_jointed_artifacts[String(part.id)] if _physical_packet_mode else _paving_artifacts[part.id].artifact
 	# No geometry recomputation or world-to-local round trip here. Artifacts are
 	# privately owned after preparation and never supplied through source caches.
 	var bed: Dictionary = artifact.entries[0]
@@ -1598,7 +1886,7 @@ func advance_publication_boundary(parent: Node3D, budget_usec := 2500) -> Dictio
 		return {"status":"failed","reason":"scene_publication_owner_mismatch","publicationEpoch":_publication_epoch,"committedSourcePartIds":[]}
 	if _publication_failed(): return _publication_boundary_status("failed",String(publication_status().reason))
 	if _pending_paving!=null or _pending_masonry!=null or _pending_roof!=null \
-			or _masonry_preparation==null or _masonry_preparation.state!="ready":
+			or (not _physical_packet_mode and (_masonry_preparation==null or _masonry_preparation.state!="ready")):
 		return _publication_boundary_status("pending_budget","part_publication_pending")
 	if _static_flush==null: _begin_static_flush(parent,false,true)
 	if _publication_failed(): return _publication_boundary_status("failed",String(publication_status().reason))

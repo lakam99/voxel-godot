@@ -212,8 +212,12 @@ static func _place_connection(body_bounds: Array, core: Array, neutral: Vector3,
 	var envelope := [low_x, domains[0][0] - socket_half.y - PAD, domains[1][0] - socket_half.z - PAD,
 		high_x, domains[0][1] + socket_half.y + PAD, domains[1][1] + socket_half.z + PAD]
 	var nearby: Array = []
+	var certified_clear: Array[bool] = []
 	for obstacle: Dictionary in obstacles:
 		if _overlaps(envelope, obstacle.bounds): nearby.append(obstacle)
+		# Bounds supplied by a caller still drive the original candidate list.
+		# A skipped measurement instead requires the actual valid cardinal pose.
+		certified_clear.append(not measure_override.is_valid() and _clear_of_connection_envelope(envelope, obstacle.get("pose")))
 	var axes: Array = []
 	for axis in [1, 2]:
 		var candidates: Array = []
@@ -245,10 +249,15 @@ static func _place_connection(body_bounds: Array, core: Array, neutral: Vector3,
 				empty_placements += 1
 				continue
 			var pose := Transform3D(Basis.from_scale(end.size), end.position)
+			var admitted_pose: bool = not measure_override.is_valid() and Admission._valid(pose)
 			var clear := true
-			for obstacle: Dictionary in obstacles:
+			for obstacle_index: int in range(obstacles.size()):
+				var obstacle: Dictionary = obstacles[obstacle_index]
 				if work.satPairs >= MAX_SAT_WORK: return {"ready": false, "reason": "connection_sat_work_limit", "work": work.duplicate()}
 				work.satPairs += 1
+				# Preserve every logical pair, its budget boundary and first failure.
+				# _inside_box confines this cardinal end to the certified envelope.
+				if admitted_pose and certified_clear[obstacle_index]: continue
 				var measured: Dictionary = measure_override.call(pose, obstacle.pose) if measure_override.is_valid() else Admission.measure(pose, obstacle.pose)
 				if not measured.get("valid", false):
 					return {"ready": false, "reason": "invalid_connection_measurement", "measurement": measured,
@@ -263,6 +272,21 @@ static func _place_connection(body_bounds: Array, core: Array, neutral: Vector3,
 	return {"ready": false, "reason": "no_clear_connection_in_socket_domain", "attempts": attempts,
 		"emptyPlacementCount": empty_placements, "blockedPlacements": blocked_placements,
 		"socketDomains": domains, "nearbyCount": nearby.size(), "work": work.duplicate()}
+
+static func _clear_of_connection_envelope(envelope: Array, value: Variant) -> bool:
+	if not value is Transform3D: return false
+	var pose: Transform3D = value
+	if not Admission._valid(pose) or not Admission._cardinal(pose.basis): return false
+	# Both valid boxes are cardinal. A strict gap on any world axis proves
+	# Admission.measure clear. The guard exceeds arithmetic rounding throughout
+	# Admission's bounded coordinate/size domain; contact keeps exact SAT evidence.
+	for axis: int in range(3):
+		var radius: float = 0.0
+		for column: int in range(3): radius += absf(float(pose.basis[column][axis])) * 0.5
+		var low: float = float(pose.origin[axis]) - radius
+		var high: float = float(pose.origin[axis]) + radius
+		if float(envelope[axis]) - high > 0.001 or low - float(envelope[axis+3]) > 0.001: return true
+	return false
 
 static func _obstacles(parts: Array) -> Dictionary:
 	if parts.size() > 10000: return _fail("foreign_source_limit")

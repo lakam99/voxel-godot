@@ -8,12 +8,15 @@ const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManif
 const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 
 class SyntheticStartupMain extends MainCoreScript:
+	var voxel_terrain_runtime: Node
 	# Suppress world setup only. Lifecycle observation, timeline reset and failure
 	# handling remain production methods; these state transitions are synthetic.
 	func _ready() -> void:
 		set_process(false)
 		set_process_unhandled_input(false)
 		set_physics_process(false)
+	func world_to_chunk(x: float, z: float) -> Vector2i:
+		return Vector2i(floori(x/(CELL*CHUNK_SIZE)),floori(z/(CELL*CHUNK_SIZE)))
 
 class SyntheticTileWorld extends RefCounted:
 	var stale_snapshot := false
@@ -21,6 +24,39 @@ class SyntheticTileWorld extends RefCounted:
 	func build_navmesh_tile_snapshot(key: String) -> Dictionary:
 		return {"tileKey":key,"sourceKey":"stale-source" if stale_snapshot else "current-source","sourceRevision":1,
 			"surfaces":[{"cell":Vector3i.ZERO,"worldPosition":Vector3.ZERO}]}
+
+class SyntheticPlayerCollisionRuntime extends Node:
+	func collision_mesh_ready_for_body_position(_position: Vector3, _radius: float) -> Dictionary:
+		return {"passed":true,"reason":"synthetic_collision_ready"}
+
+class SyntheticLoadingHud extends RefCounted:
+	var visible := false
+	var message := ""
+	var shows := 0
+	var hides := 0
+	func show_loading_overlay(value: String) -> void:
+		visible=true; message=value; shows+=1
+	func hide_loading_overlay() -> void:
+		visible=false; message=""; hides+=1
+
+class SyntheticPlayerCollisionStructures extends RefCounted:
+	var dispatch_bounds := Rect2i()
+	var physical_bounds := Rect2i()
+	var dispatches := 0
+	func advance_citadel_publication(bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
+		dispatch_bounds = bounds
+		if allow_dispatch: dispatches += 1
+		return {"status":"advanced"}
+	func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
+		physical_bounds = bounds
+		return {"status":"ready","required":false,"sceneInstanceIds":[]}
+
+class SyntheticNavigationTerrainGateMain extends RefCounted:
+	var seed_text := "synthetic-navigation-terrain-gate"
+	var queries: Array[Rect2i] = []
+	func navigation_terrain_publication_readiness(bounds: Rect2i) -> Dictionary:
+		queries.append(bounds)
+		return {"status":"pending","reason":"synthetic_terrain_publication_pending"}
 
 class SyntheticTileDelegate extends RefCounted:
 	var navmesh_world
@@ -52,6 +88,25 @@ class SyntheticCapturedNavigationOwners extends RefCounted:
 	# geometry acceptance. Only RegionalNavigationPublication is production here.
 	var source_key := "synthetic-local-v1"
 	var navmesh_tile_snapshot_cache := {}
+	var accepted_sources := {}
+	func accepted_tile_source(key: String, expected_source: String, seed: String, owner) -> Dictionary:
+		# Synthetic service authority, deliberately separate from input captures.
+		var accepted: Dictionary = accepted_sources.get(key,{})
+		if accepted.is_empty() or accepted.owner.get_ref() != owner: return {}
+		var snapshot: Dictionary = accepted.source.snapshot
+		if snapshot.sourceKey != expected_source or snapshot.worldSeed != seed: return {}
+		return accepted
+	func accepted_tile_state(key: String, expected_source: String, seed: String, owner) -> Dictionary:
+		# Named synthetic ownership/synchronization state, independent of markers.
+		var owned: Dictionary = accepted_tile_source(key,expected_source,seed,owner)
+		if owned.is_empty(): return {"status":"absent","sourceOwned":false,"reason":"synthetic_source_absent"}
+		var region := "region:chunk:"+key
+		var receipt: Dictionary = _tile_publication_receipts.get(region,{})
+		var ready: bool = (not receipt.is_empty() and receipt.get("sourceKey")==expected_source
+			and not dirty_regions_by_region.has(region) and region_rids_by_region.has(region)
+			and navigation_map_dirty_serial==navigation_map_synced_serial)
+		return {"status":"acknowledged" if ready else "retained","sourceOwned":true,"empty":false,
+			"accepted":owned,"acceptedSerial":owned.serial,"receipt":receipt.duplicate(),"reason":"synthetic_publication_state"}
 	var queued_navmesh_tile_source_keys := {"0,0":"synthetic-local-v1","1,0":"synthetic-new-work"}
 	var published_navmesh_tile_keys := {}
 	var empty_navmesh_tile_keys := {}
@@ -79,9 +134,11 @@ class SyntheticCapturedNavigationOwners extends RefCounted:
 	func build_navmesh_tile_snapshot(_key: String) -> Dictionary:
 		build_calls += 1
 		return {"publicationStatus":"pending"}
-	func queue_navmesh_tile_publish(key: String, _urgent: bool) -> void:
+	func queue_navmesh_tile_publish(key: String, _urgent: bool, _owner := {}) -> void:
 		enqueue_calls += 1
 		queued_navmesh_tile_source_keys[key] = navmesh_tile_source_key_for_tile(key)
+	func promote_queued_navmesh_tile_priority(key: String, expected_source: String) -> bool:
+		return queued_navmesh_tile_source_keys.get(key) == expected_source
 	func advance_publication(_budget_usec: int) -> void:
 		calls.append("nav_advance")
 	func _process_queued_navmesh_tile_publishes(_count: int, budget_usec: int, _force: bool, _sync: bool) -> int:
@@ -90,11 +147,12 @@ class SyntheticCapturedNavigationOwners extends RefCounted:
 		# Deterministic exhausted-slice simulation: refuse any later proof in this
 		# slice. Do not sleep/spin or publish the uncaptured neighbouring source.
 		slice_exhausted = true
-	func promote_queued_navmesh_tile_priority(key: String, expected_source: String) -> bool:
-		return queued_navmesh_tile_source_keys.get(key) == expected_source
 		return 0
 	func _sync_navmesh_after_queued_tile_publish() -> void:
 		calls.append("publisher_sync")
+		navigation_map_synced_serial = navigation_map_dirty_serial
+	func publication_sync_pending() -> bool:
+		return navigation_map_dirty_serial!=navigation_map_synced_serial
 	func tile_publication_readiness(key: String, expected_source: String, surfaces: Array, links: Array) -> Dictionary:
 		proof_calls += 1
 		last_proof_links = links.duplicate(true)
@@ -114,34 +172,73 @@ class SyntheticRegionProvider extends RefCounted:
 	var source_revision := 1
 	var dependency_status := "described"
 	var dependency_bounds: Array[Rect2i] = []
+	var dependency_domains: Dictionary = {}
 	var missing_sources: Array[String] = []
 	var unresolved_crossings: Array[String] = []
 	var reject_admission := false
 	var admission_calls := 0
 	var requirements_calls := 0
+	var requirements_builds := 0
+	var requirements_queries: Array[Rect2i] = []
+	var readiness_queries: Array[Rect2i] = []
+	var requirements_cache := {}
 	var next_id := 1
 	var retained := {}
 	var releases: Array[int] = []
-	func request_region(bounds: Rect2i, _priority: int, _reason: String) -> int:
+	static func tile_keys(bounds: Rect2i) -> Array[String]:
+		var keys: Array[String] = []
+		for z in range(floori(float(bounds.position.y)/16),floori(float(bounds.end.y-1)/16)+1):
+			for x in range(floori(float(bounds.position.x)/16),floori(float(bounds.end.x-1)/16)+1): keys.append("%d,%d" % [x,z])
+		keys.sort()
+		return keys
+	func request_region(bounds: Rect2i, priority: int, reason: String) -> int:
+		return request_tiles(tile_keys(bounds),priority,reason)
+	func request_tiles(keys: Array[String], _priority: int, _reason: String) -> int:
 		admission_calls += 1
 		if reject_admission: return 0
 		var id := next_id
 		next_id += 1
-		retained[id] = bounds
+		retained[id] = keys.duplicate()
 		return id
+	func replace_tiles(id: int, keys: Array[String], _priority: int, _reason: String) -> bool:
+		admission_calls += 1
+		if reject_admission or not retained.has(id): return false
+		retained[id] = keys.duplicate()
+		return true
 	func release_region(id: int) -> void:
 		releases.append(id)
 		retained.erase(id)
 	func region_dependency_revision(_bounds: Rect2i) -> String:
 		return "synthetic-source:%d" % source_revision
-	func region_dependency_requirements(_bounds: Rect2i) -> Dictionary:
+	func region_dependency_requirements(bounds: Rect2i) -> Dictionary:
 		requirements_calls += 1
-		return {"status":dependency_status,"reason":"synthetic_dependencies",
+		requirements_queries.append(bounds)
+		var cached: Dictionary = requirements_cache.get(bounds,{})
+		if cached.get("revision")==source_revision: return cached.result.duplicate(false)
+		requirements_builds += 1
+		var result := {"status":dependency_status,"reason":"synthetic_dependencies",
 			"dependencyBounds":dependency_bounds.duplicate(),"sourceRevisions":{"fixture":source_revision},
 			"missingSourceIds":missing_sources.duplicate(),"unresolvedCrossingIds":unresolved_crossings.duplicate(),"requiredCrossings":{}}
+		if not dependency_domains.is_empty(): result["domainBounds"] = dependency_domains.duplicate(true)
+		requirements_cache[bounds] = {"revision":source_revision,"result":result}
+		return result.duplicate(false)
 	func region_publication_readiness(bounds: Rect2i) -> Dictionary:
-		var held := retained.values().any(func(area: Rect2i):return area.encloses(bounds))
-		return {"status":"ready" if ready and held and (not pending_bounds.has_area() or not pending_bounds.intersects(bounds)) else "pending",
+		# Synthetic terrain/structure acknowledgements. Their retention is owned
+		# by coordinator chunks/source requests, not invented provider handles.
+		readiness_queries.append(bounds)
+		return {"status":"ready" if ready and (not pending_bounds.has_area() or not pending_bounds.intersects(bounds)) else "pending",
+			"reason":"synthetic_owner_pending","sourceRevisions":{"fixture":source_revision}}
+	func tiles_publication_readiness(keys: Array[String], bounds: Rect2i, id: int = 0) -> Dictionary:
+		readiness_queries.append(bounds)
+		var held := false
+		for retained_id: int in retained:
+			if id>0 and retained_id!=id: continue
+			if keys.all(func(key: String): return retained[retained_id].has(key)): held = true; break
+		var pending := false
+		if pending_bounds.has_area():
+			var missing := tile_keys(pending_bounds)
+			pending = keys.any(func(key: String): return missing.has(key))
+		return {"status":"ready" if ready and held and not pending else "pending",
 			"reason":"synthetic_owner_pending","sourceRevisions":{"fixture":source_revision}}
 
 class FakeStructureSystem:
@@ -205,8 +302,14 @@ func run() -> void:
 		report_path = ProjectSettings.globalize_path("res://artifacts/tutorial-town/startup-loading-readiness-contract.json")
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	test_scenario_requirements_are_semantic()
+	test_streaming_loading_overlay_ownership()
+	test_stationary_abstract_npc_does_not_own_initial_physical_chunks()
+	await test_player_foreground_streaming_intent()
+	await test_player_collision_dispatches_live_capsule_foreground()
+	test_streaming_forecast_and_navigation_terrain_gate()
 	test_regional_demand_contract()
 	await test_regional_provider_closure_contract()
+	test_regional_sparse_islands_and_capacity()
 	await test_regional_subregion_readiness()
 	await test_regional_cached_navigation_proof_precedes_publisher()
 	test_regional_ordinary_door_leaf_sources()
@@ -220,6 +323,165 @@ func run() -> void:
 	await test_startup_requires_revision_matched_navigation()
 	await test_forced_manifest_failure_keeps_gameplay_disabled_and_visible()
 	finish()
+
+func test_stationary_abstract_npc_does_not_own_initial_physical_chunks() -> void:
+	var main := SyntheticStartupMain.new()
+	var player_body := CharacterBody3D.new()
+	root.add_child(player_body)
+	player_body.position = Vector3.ZERO
+	main.player = player_body
+	var active_body := CharacterBody3D.new()
+	root.add_child(active_body)
+	active_body.position = Vector3(280.0,0.0,0.0)
+	var abstract_body := CharacterBody3D.new()
+	root.add_child(abstract_body)
+	abstract_body.position = Vector3(560.0,0.0,0.0)
+	var transitioning_body := CharacterBody3D.new()
+	root.add_child(transitioning_body)
+	transitioning_body.position = Vector3(840.0,0.0,0.0)
+	var mismatched_body := CharacterBody3D.new()
+	root.add_child(mismatched_body)
+	mismatched_body.position = Vector3(1120.0,0.0,0.0)
+	var fake_npcs := FakeNpcSystem.new()
+	fake_npcs.npcs = [
+		{"id":"active","body":active_body,"simulationLod":"active","abstractSimulated":false,
+			"homePosition":Vector3(308.0,0.0,0.0),"porchCell":Vector2i(249,0)},
+		{"id":"abstract","body":abstract_body,"simulationLod":"abstract","abstractSimulated":true,
+			"homePosition":Vector3(588.0,0.0,0.0),"porchPosition":Vector3(616.0,0.0,0.0),
+			"doorCell":Vector2i(477,0),"guardCell":Vector2i(498,0)},
+		{"id":"transitioning","body":transitioning_body,"simulationLod":"abstract","abstractSimulated":false},
+		{"id":"mismatched","body":mismatched_body,"simulationLod":"active","abstractSimulated":true}
+	]
+	main.npc_system = fake_npcs
+	var keys: Array[Vector2i] = main.initial_gameplay_chunk_keys(0)
+	var abstract_chunks := [Vector2i(14,0),Vector2i(15,0),Vector2i(16,0),Vector2i(17,0)]
+	var passed := keys.has(Vector2i.ZERO) and keys.has(Vector2i(7,0)) \
+		and keys.has(Vector2i(8,0)) \
+		and keys.has(Vector2i(22,0)) and keys.has(Vector2i(29,0)) \
+		and abstract_chunks.all(func(key: Vector2i): return not keys.has(key)) \
+		and not main.npc_requires_physical_startup_streaming(fake_npcs.npcs[1]) \
+		and main.npc_requires_physical_startup_streaming(fake_npcs.npcs[2]) \
+		and main.npc_requires_physical_startup_streaming(fake_npcs.npcs[3])
+	add_result("stationary_abstract_npc_does_not_own_initial_physical_chunks",passed,{
+		"evidenceLevel":"contract","keys":keys,"abstractChunks":abstract_chunks,
+		"activeBodyAndMarkersRetained":keys.has(Vector2i(7,0)) and keys.has(Vector2i(8,0)),
+		"transitionStatesFailClosed":keys.has(Vector2i(22,0)) and keys.has(Vector2i(29,0))
+	})
+	fake_npcs.npcs.clear()
+	main.npc_system = null
+	main.player = null
+	player_body.free()
+	active_body.free()
+	abstract_body.free()
+	transitioning_body.free()
+	mismatched_body.free()
+	main.free()
+
+func test_streaming_loading_overlay_ownership() -> void:
+	var main := SyntheticStartupMain.new()
+	var loading_hud := SyntheticLoadingHud.new()
+	main.hud=loading_hud
+	main.show_streaming_loading_overlay("Preparing destination…","relocation")
+	main.show_streaming_loading_overlay("Waiting for collision…","terrain")
+	main.hide_streaming_loading_overlay("terrain")
+	var retained: bool = loading_hud.visible and loading_hud.message=="Preparing destination…" \
+		and main.streaming_loading_overlay_holds.has("relocation") and not main.streaming_loading_overlay_holds.has("terrain")
+	main.hide_streaming_loading_overlay("relocation")
+	add_result("streaming_loading_overlay_releases_only_its_named_owner",
+		retained and not loading_hud.visible and main.streaming_loading_overlay_holds.is_empty(),{
+			"evidenceLevel":"synthetic_owner_contract","shows":loading_hud.shows,"hides":loading_hud.hides,
+			"doesNotProve":"No rendered loading screen, destination terrain, or live relocation is exercised."})
+	main.free()
+
+func test_streaming_forecast_and_navigation_terrain_gate() -> void:
+	var main := SyntheticStartupMain.new()
+	var origin := Vector3(10.0,2.0,-20.0)
+	var sprint := Vector3(80.0,0.0,0.0)
+	var forecast: Vector3 = main.bounded_streaming_forecast_position(origin,sprint,Vector3.FORWARD)
+	add_result("streaming_forecast_is_bounded_to_one_navigation_tile",
+		is_equal_approx(origin.distance_to(forecast),main.CELL*main.STREAMING_FORECAST_MAX_CELLS),{
+			"evidenceLevel":"pure_scheduling_contract","origin":origin,"forecast":forecast,
+			"doesNotProve":"No terrain, player movement, or frame pacing is exercised."})
+	main.free()
+	const Adapter := preload("res://scripts/npc_ai/navigation/GeneratedWorldNavigationAdapter.gd")
+	var terrain_main := SyntheticNavigationTerrainGateMain.new()
+	var adapter := Adapter.new()
+	adapter.setup(null,terrain_main)
+	var pending: Dictionary = adapter.build_navmesh_tile_snapshot("2,-3")
+	add_result("navigation_capture_waits_for_published_terrain_tile",
+		pending.get("publicationStatus")=="pending"
+		and pending.get("reason")=="synthetic_terrain_publication_pending"
+		and terrain_main.queries==[Rect2i(32,-48,16,16)]
+		and adapter._navigation_capture==null,{
+			"evidenceLevel":"synthetic_ordering_contract","result":pending,"queries":terrain_main.queries,
+			"doesNotProve":"No native terrain, navigation worker, or NavigationServer installation is exercised."})
+	adapter.main=null
+
+func test_player_foreground_streaming_intent() -> void:
+	var main := SyntheticStartupMain.new()
+	var body := CharacterBody3D.new()
+	body.safe_margin = 0.08
+	var collider := CollisionShape3D.new()
+	collider.name = "PlayerCollider"
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = 0.42
+	capsule.height = 1.72
+	collider.shape = capsule
+	collider.position = Vector3(1.35,0.0,0.0)
+	body.add_child(collider)
+	root.add_child(body)
+	body.global_position = Vector3(-0.10,0.0,-0.10)
+	await process_frame
+	main.player = body
+	var intent: Dictionary = main.player_foreground_streaming_intent()
+	var source := FileAccess.get_file_as_string("res://scripts/MainCore.gd")
+	var passed: bool = intent.get("capsuleBounds") is Rect2i and intent.capsuleBounds == Rect2i(0,-1,2,2) \
+		and intent.get("bounds") == Rect2i(0,-16,16,32) \
+		and intent.get("navigationTiles",[]) == [Vector2i(0,-1),Vector2i(0,0)] \
+		and is_equal_approx(float(intent.get("capsuleRadius",0.0)),0.42) \
+		and is_equal_approx(float(intent.get("safeMargin",0.0)),0.08) \
+		and source.find("player_foreground_streaming_intent") >= 0 \
+		and source.find("foreground.navigationTiles") >= 0 \
+		and source.find("streaming_request_foreground_bounds.player") >= 0
+	add_result("startup_foreground_tiles_derive_from_live_player_capsule_and_safe_margin",passed,{
+		"evidenceLevel":"synthetic_geometry_and_static_wiring_contract","intent":intent,
+		"doesNotProve":"No terrain, structure, navigation, frame scheduling or live gameplay readiness is exercised."
+	})
+	body.queue_free()
+	main.free()
+
+func test_player_collision_dispatches_live_capsule_foreground() -> void:
+	var main := SyntheticStartupMain.new()
+	var body := CharacterBody3D.new()
+	body.safe_margin = 0.05
+	var collider := CollisionShape3D.new()
+	collider.name = "PlayerCollider"
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = 0.4
+	capsule.height = 1.8
+	collider.shape = capsule
+	body.add_child(collider)
+	root.add_child(body)
+	body.global_position = Vector3(15.8,0.0,-0.2)
+	await process_frame
+	var runtime := SyntheticPlayerCollisionRuntime.new()
+	var structures := SyntheticPlayerCollisionStructures.new()
+	main.player = body
+	main.voxel_terrain_runtime = runtime
+	main.structure_system = structures
+	var intent: Dictionary = main.player_foreground_streaming_intent()
+	var result: Dictionary = await main.wait_for_initial_player_collision_publication()
+	add_result("startup_player_collision_dispatches_only_live_capsule_foreground",result.get("status")=="ready"
+		and structures.dispatches==1 and structures.dispatch_bounds==intent.get("bounds")
+		and structures.physical_bounds==intent.get("bounds"),{
+		"evidenceLevel":"synthetic_collision_owner_contract",
+		"intent":intent,"dispatchBounds":structures.dispatch_bounds,"physicalBounds":structures.physical_bounds,
+		"doesNotProve":"No real terrain, building packet, NavigationServer, or gameplay traversal is exercised."
+	})
+	main.voxel_terrain_runtime = null
+	runtime.free()
+	body.queue_free()
+	main.free()
 
 func test_regional_demand_contract() -> void:
 	const Regions := preload("res://scripts/world/WorldStreamingCoordinator.gd")
@@ -238,7 +500,7 @@ func test_regional_demand_contract() -> void:
 	var missing_domains: Array = []
 	for item: Dictionary in state.missing: missing_domains.append(String(item.domain))
 	add_result("regional_missing_owner_cannot_report_ready",state.status == "pending" and missing_domains.has("dependencies")
-		and missing_domains.has("terrain") and missing_domains.has("structures") and missing_domains.has("navigation"),state)
+		and regions._provider("terrain")==null and regions._provider("structures")==null and regions._provider("navigation")==null,state)
 	regions.release_region(second)
 	add_result("regional_release_hysteresis",not regions.retained_gameplay_chunks().is_empty(),{})
 	regions.advance(Time.get_ticks_msec()+Regions.RELEASE_HYSTERESIS_MS+1)
@@ -279,27 +541,33 @@ func test_regional_provider_closure_contract() -> void:
 	structures.dependency_bounds.assign([dependency])
 	navigation.ready = false
 	var first := regions.request_region(bounds,0,"synthetic_player")
+	add_result("regional_new_consumer_waits_for_owner_admission",regions.region_readiness(bounds).status=="pending"
+		and terrain.retained.is_empty() and navigation.retained.is_empty(),{})
 	await process_frame
 	regions.advance()
 	# SceneTree's first process_frame signal can precede the frame counter's
 	# first increment; allow that startup boundary without bypassing the guard.
 	await process_frame
 	regions.advance()
-	add_result("regional_expansion_waits_for_fixed_point",regions.region_readiness(bounds).status=="pending"
-		and terrain.retained.is_empty() and navigation.retained.is_empty(),{})
 	await process_frame
 	regions.advance()
 	var state := regions.region_readiness(bounds)
-	var demanded: bool = first>0 and state.closedBounds==dependency
-	for provider: SyntheticRegionProvider in [terrain,structures,navigation]:
-		demanded = demanded and provider.retained.size()==1 and provider.retained.values()[0]==dependency
-	add_result("regional_dependency_closure_reaches_every_owner",demanded and regions.retained_cell_bounds().has(dependency.grow(Regions.RENDER_CELL_SIZE)),state)
+	var demanded: bool = first>0 and navigation.retained.size()==1 and navigation.retained.values()[0]==SyntheticRegionProvider.tile_keys(dependency)
+	var retained_chunks := regions.retained_gameplay_chunks()
+	for key: Vector2i in Regions.chunks_for_bounds(dependency.grow(Regions.RENDER_CELL_SIZE)): demanded = demanded and retained_chunks.has(key)
+	demanded = demanded and terrain.retained.is_empty() and structures.retained.is_empty()
+	demanded = demanded and regions.retained_source_requests().size()==1 and regions.retained_source_requests()[0].bounds==bounds
+	demanded = demanded and regions.retained_source_requests()[0].admissionKeys==Regions.chunks_for_bounds(bounds.grow(Regions.RENDER_CELL_SIZE))
+	add_result("regional_dependency_closure_reaches_every_owner",demanded
+		and structures.requirements_queries.all(func(query: Rect2i): return query==bounds),state)
 	add_result("regional_navigation_ack_required_after_physical_owners",state.status=="pending"
 		and state.domains.terrain.status=="ready" and state.domains.structures.status=="ready" and state.domains.navigation.status=="pending",{})
 	navigation.ready=true
 	state=regions.region_readiness(bounds)
 	add_result("regional_composed_acks_and_source_revisions",state.status=="ready"
-		and state.sourceRevisions.terrain.fixture==1 and state.sourceRevisions.structures.fixture==1 and state.sourceRevisions.navigation.fixture==1,{})
+		and not state.sourceRevisions.terrain.is_empty()
+		and state.sourceRevisions.terrain.all(func(revision: Dictionary): return revision.get("fixture")==1)
+		and state.sourceRevisions.structures.fixture==1 and state.sourceRevisions.navigation.fixture==1,{})
 	var compiled_count := structures.requirements_calls
 	await process_frame
 	regions.advance()
@@ -313,40 +581,48 @@ func test_regional_provider_closure_contract() -> void:
 	state=regions.region_readiness(bounds)
 	add_result("regional_source_revision_invalidates_ready_immediately",state.status=="pending",state)
 	var old_navigation_id: int=navigation.retained.keys()[0]
+	var old_chunks := regions.retained_gameplay_chunks()
 	await process_frame
 	regions.advance()
 	await process_frame
 	regions.advance()
 	state=regions.region_readiness(bounds)
 	add_result("regional_rejected_replacement_keeps_old_owner_demand",state.status=="pending"
-		and state.closedBounds==expanded and navigation.retained.get(old_navigation_id)==dependency
+		and navigation.retained.get(old_navigation_id)==SyntheticRegionProvider.tile_keys(dependency)
+		and regions.retained_gameplay_chunks()==old_chunks and regions._requests[first].dependencyRevision=="synthetic-source:1"
 		and navigation.releases.is_empty(),{})
 	var admission_count := navigation.admission_calls
 	var expanded_compiled_count := structures.requirements_calls
 	navigation.reject_admission=false
-	await process_frame
-	regions.advance()
+	# One navigation turn and one closure turn; no fixed-point delay is required.
+	for frame in range(2):
+		await process_frame
+		regions.advance()
+	var reused_candidate: bool = structures.requirements_calls==expanded_compiled_count
 	state=regions.region_readiness(bounds)
 	add_result("regional_provider_admission_retries_without_source_recompile",state.status=="ready"
 		and navigation.admission_calls==admission_count+1 and navigation.retained.size()==1
-		and navigation.retained.values()[0]==expanded and navigation.releases.has(old_navigation_id)
-		and structures.requirements_calls==expanded_compiled_count and expanded_compiled_count==compiled_count+2,{})
+		and navigation.retained.get(old_navigation_id)==SyntheticRegionProvider.tile_keys(expanded) and navigation.releases.is_empty()
+		and reused_candidate and structures.requirements_builds==2,{})
 	# Declared unresolved obligations block even if providers otherwise say ready.
 	structures.source_revision+=1
 	structures.unresolved_crossings.assign(["synthetic-stair-seam"])
-	await process_frame
-	regions.advance()
+	for frame in range(2):
+		await process_frame
+		regions.advance()
 	add_result("regional_unresolved_declared_crossing_blocks_ready",regions.region_readiness(bounds).status=="failed",{})
 	structures.unresolved_crossings.clear()
 	structures.missing_sources.assign(["synthetic-support"])
 	structures.source_revision+=1
-	await process_frame
-	regions.advance()
+	for frame in range(2):
+		await process_frame
+		regions.advance()
 	add_result("regional_missing_source_part_blocks_ready",regions.region_readiness(bounds).status=="failed",{})
 	structures.missing_sources.clear()
 	structures.source_revision+=1
-	await process_frame
-	regions.advance()
+	for frame in range(2):
+		await process_frame
+		regions.advance()
 	var second := regions.request_region(bounds,1,"synthetic_actor")
 	# Round-robin refresh visits both retained logical owners.
 	for frame in range(4):
@@ -374,6 +650,61 @@ func test_regional_provider_closure_contract() -> void:
 		and regions.region_readiness(bounds).status=="ready",{})
 	regions.configure("",{})
 
+func test_regional_sparse_islands_and_capacity() -> void:
+	# Direct coordinator/helper calls are synthetic retention evidence only.
+	const Regions := preload("res://scripts/world/WorldStreamingCoordinator.gd")
+	const DemandSet := preload("res://scripts/world/RegionDemandSet.gd")
+	var terrain := SyntheticRegionProvider.new()
+	var structures := SyntheticRegionProvider.new()
+	var navigation := SyntheticRegionProvider.new()
+	var regions := Regions.new()
+	var bounds := Rect2i(0,0,1,1)
+	var physical := Rect2i(2800,0,1,1)
+	var crossing := Rect2i(1600,0,1,1)
+	var gap := Rect2i(1400,0,1,1)
+	structures.dependency_domains = {"terrain":[physical],"render":[physical],"navigation":[crossing]}
+	terrain.pending_bounds = gap
+	regions.configure("synthetic-sparse-islands",{"terrain":terrain,"structures":structures,"navigation":navigation})
+	var id: int = regions.request_region(bounds,0,"synthetic islands")
+	if id>0: regions._refresh_request(regions._requests[id])
+	var state: Dictionary = regions.region_readiness(bounds)
+	var chunks := regions.retained_gameplay_chunks()
+	add_result("regional_sparse_islands_do_not_retain_or_query_gap",id>0 and state.status=="ready"
+		and chunks.has(Vector2i(100,0)) and not chunks.has(Vector2i(50,0))
+		and terrain.readiness_queries.all(func(query: Rect2i): return not query.intersects(gap))
+		and structures.requirements_queries.all(func(query: Rect2i): return query==bounds),state)
+	add_result("regional_domains_keep_distinct_sparse_obligations",navigation.retained.size()==1
+		and navigation.retained.values()[0]==["0,0","100,0"] and not navigation.retained.values()[0].has("175,0")
+		and regions.retained_source_requests().size()==1 and regions.retained_cell_bounds().size()<64,{})
+	var source_request: Dictionary = regions.retained_source_requests()[0] if id>0 else {}
+	add_result("regional_source_consumer_preserves_original_identity",source_request.get("ownerId")==id
+		and source_request.get("bounds")==bounds
+		and source_request.get("admissionKeys",[])==Regions.chunks_for_bounds(bounds.grow(Regions.RENDER_CELL_SIZE)),source_request)
+	regions.configure("synthetic-capacity",{"terrain":terrain,"structures":structures,"navigation":navigation})
+	var first: int = regions.request_region(bounds,0,"synthetic compiled candidate")
+	var second: int = regions.request_region(Rect2i(2800,2800,1,1),0,"synthetic still uncompiled")
+	var before := regions.retained_gameplay_chunks()
+	var candidate := {}
+	for key: Vector2i in Regions.chunks_for_bounds(bounds.grow(Regions.RENDER_CELL_SIZE)): candidate[key] = true
+	for index in range(224): candidate[Vector2i(2000+index,0)] = true
+	var staged: Dictionary = regions._requests[first].duplicate(true)
+	staged.members.render = candidate.duplicate()
+	var exact: bool = (first>0 and second>0 and candidate.size()==240 and regions._requests[second].admittedSequence==0
+		and regions._requests[second].providerRequests.is_empty())
+	add_result("regional_capacity_counts_uncompiled_consumer_at_exact_limit",exact
+		and regions._retention_fits(first,staged),{})
+	candidate[Vector2i(3000,0)] = true
+	staged.members.render = candidate.duplicate()
+	add_result("regional_capacity_rejects_uncompiled_consumer_overflow_without_mutation",exact
+		and not regions._retention_fits(first,staged) and before==regions.retained_gameplay_chunks(),{})
+	var sparse := DemandSet.from_regions([bounds,physical],28,256)
+	var restored := DemandSet.from_regions(sparse.get("regions",[]),28,256)
+	add_result("regional_sparse_compression_preserves_exact_grid_membership",sparse.status=="ready" and restored.status=="ready"
+		and sparse.keys==restored.keys and sparse.keys.size()==2 and not sparse.keys.has(Vector2i(50,0)),{})
+	add_result("regional_demand_grid_rejects_overflowing_growth",DemandSet.from_regions([bounds],16,512,2147483647).status=="failed"
+		and DemandSet.from_regions([bounds],2147483647,512).status=="failed",{})
+	regions.configure("")
+
 func test_regional_subregion_readiness() -> void:
 	const Regions := preload("res://scripts/world/WorldStreamingCoordinator.gd")
 	var terrain := SyntheticRegionProvider.new()
@@ -390,6 +721,17 @@ func test_regional_subregion_readiness() -> void:
 	add_result("regional_local_query_does_not_wait_for_unrelated_tiles",regions.region_readiness(full).status=="pending"
 		and regions.region_readiness(Rect2i(0,0,8,8)).status=="ready",{})
 	add_result("regional_local_query_requires_its_own_acknowledgement",regions.region_readiness(Rect2i(20,20,8,8)).status=="pending",{})
+	var navigation_queries_before := navigation.readiness_queries.size()
+	var traversal: Dictionary = regions.player_traversal_readiness(Rect2i(20,20,8,8))
+	add_result("player_traversal_does_not_wait_for_npc_navigation_acknowledgement",
+		traversal.status=="ready" and traversal.readinessScope=="player_traversal"
+		and traversal.requiredDomains==["terrain","structures"]
+		and navigation.readiness_queries.size()==navigation_queries_before,traversal)
+	structures.pending_bounds = Rect2i(16,16,16,16)
+	var physical_pending: Dictionary = regions.player_traversal_readiness(Rect2i(20,20,8,8))
+	add_result("player_traversal_still_waits_for_structure_collision_receipt",
+		physical_pending.status=="pending" and physical_pending.missing.any(
+			func(row: Dictionary): return row.get("domain")=="structures"),physical_pending)
 	regions.configure("")
 
 func test_regional_cached_navigation_proof_precedes_publisher() -> void:
@@ -408,7 +750,7 @@ func test_regional_cached_navigation_proof_precedes_publisher() -> void:
 	pathing.navmesh_world = owners
 	pathing.route_planner = authority
 	authority.delegate = owners
-	owners.navmesh_tile_snapshot_cache["captured-local"] = {
+	var captured := {
 		"tileKey":"0,0","sourceKey":owners.source_key,"worldSeed":main.seed_text,
 		"publicationSource":{"status":"prepared","snapshot":{
 			"sourceKey":owners.source_key,"sourceRevision":7,
@@ -418,7 +760,14 @@ func test_regional_cached_navigation_proof_precedes_publisher() -> void:
 	var door_sources := [
 		{"id":"door-link:synthetic-pair:0,0","portalId":"synthetic-pair","cell":Vector2i(2,3),"start":Vector3(2,0,2),"end":Vector3(2,0,4)},
 		{"id":"door-link:synthetic-pair:0,0","portalId":"synthetic-pair","cell":Vector2i(3,3),"start":Vector3(3,0,2),"end":Vector3(3,0,4)}]
-	owners.navmesh_tile_snapshot_cache["captured-local"].publicationSource.snapshot["doorLinks"] = door_sources
+	captured.publicationSource.snapshot["doorLinks"] = door_sources
+	captured.publicationSource.snapshot["worldSeed"] = main.seed_text
+	freeze_synthetic_navigation_facts(captured.publicationSource)
+	owners.accepted_sources["0,0"] = {"source":captured.publicationSource,"serial":1,"owner":weakref(owners)}
+	# A decoy input cache must never supply receipt obligations.
+	owners.navmesh_tile_snapshot_cache["captured-local"] = {
+		"tileKey":"0,0","sourceKey":owners.source_key,"worldSeed":main.seed_text,
+		"publicationInput":{"status":"prepared","snapshot":{"sourceKey":owners.source_key}}}
 	owners.expected_links.append_array(door_sources)
 	var publication := Publication.new()
 	var configured := publication.configure(main)
@@ -436,7 +785,7 @@ func test_regional_cached_navigation_proof_precedes_publisher() -> void:
 		ready = publication.region_publication_readiness(local_bounds)
 		if ready.status == "ready" and not owners.pump_budgets.is_empty(): break
 	var proof_index := owners.calls.find("receipt_accepted")
-	var nav_index := owners.calls.find("nav_advance")
+	var nav_index := owners.calls.rfind("nav_advance")
 	var pump_index := owners.calls.find("publisher_pump")
 	add_result("synthetic_regional_cached_proof_precedes_busy_publisher",configured and request>0
 		and before.status=="pending" and ready.status=="ready" and owners.accepted_proofs>0
@@ -494,6 +843,7 @@ func test_regional_ordinary_door_leaf_sources() -> void:
 		var portals := SyntheticOrdinaryPortals.new()
 		var portal := SyntheticOrdinaryPortal.new()
 		var adapter := Adapter.new()
+		var accepted_owner := SyntheticCapturedNavigationOwners.new()
 		main.npc_system = npc
 		npc.pathing = pathing
 		npc.autonomy_system = pathing
@@ -504,6 +854,8 @@ func test_regional_ordinary_door_leaf_sources() -> void:
 		structure.main = main
 		var publication := Publication.new()
 		publication._main = weakref(main)
+		publication._nav = weakref(accepted_owner)
+		publication._seed = main.seed_text
 		var first_x: int = 15 if seam else 14
 		for x in [first_x,first_x+1]:
 			var leaf := Node3D.new()
@@ -518,14 +870,39 @@ func test_regional_ordinary_door_leaf_sources() -> void:
 		var requirements := {"status":"described","reason":"","requiredCrossings":{},"dependencyBounds":[]}
 		structure._describe_regional_portal_leaves(portal,"synthetic-home:door",{"sourceKey":"synthetic-home-v1"},portals,requirements)
 		var obligations: Array = requirements.requiredCrossings.values()
-		var snapshot := {"doorLinks":[],"doorPortals":[]}
+		var snapshot := {"sourceKey":accepted_owner.source_key,"worldSeed":main.seed_text,"doorLinks":[],"doorPortals":[]}
 		for obligation: Dictionary in obligations:
 			snapshot.doorLinks.append(obligation.doorSource.duplicate())
 			snapshot.doorPortals.append({"id":obligation.portalId,"cell":obligation.cell,
 				"entrance":obligation.entrance,"exit":obligation.exit})
+		var door_owners := {}
+		for cell in adapter.cached_doors: door_owners[cell] = weakref(adapter.cached_doors[cell])
+		freeze_synthetic_navigation_facts(snapshot)
+		for obligation: Dictionary in obligations:
+			accepted_owner.accepted_sources[obligation.ownerTileKey] = {
+				"source":{"snapshot":snapshot},"serial":1,"owner":weakref(adapter),"doorOwners":door_owners}
+		# Source ownership alone cannot acknowledge either leaf. This fixture
+		# models each declared tile's receipt explicitly, including the seam tile.
+		accepted_owner._tile_publication_receipts.clear()
+		accepted_owner.region_rids_by_region.clear()
+		var pending_without_receipts: bool = obligations.size()==2
+		var pending_mappings: Array[Dictionary] = []
+		for obligation: Dictionary in obligations:
+			var pending: Dictionary = publication._ordinary_door_crossing(obligation,obligation.ownerTileKey,snapshot,adapter)
+			pending_without_receipts = pending_without_receipts and pending.status=="pending"
+			pending_mappings.append({"tileKey":obligation.ownerTileKey,"result":pending})
+		add_result("synthetic_ordinary_leaf_requires_acknowledgement_"+str(seam),pending_without_receipts,
+			{"evidenceLevel":"synthetic_contract","mappings":pending_mappings})
+		for obligation: Dictionary in obligations:
+			var region: String = "region:chunk:"+obligation.ownerTileKey
+			accepted_owner._tile_publication_receipts[region] = {"status":"ready","sourceKey":snapshot.sourceKey,
+				"sourceRevision":7,"installationSerial":11}
+			accepted_owner.region_rids_by_region[region] = true # Synthetic presence only.
 		var all_mapped: bool = requirements.status == "described" and obligations.size() == 2
+		var mapping_results: Array[Dictionary] = []
 		for obligation: Dictionary in obligations:
 			var mapped: Dictionary = publication._ordinary_door_crossing(obligation,obligation.ownerTileKey,snapshot,adapter)
+			mapping_results.append({"tileKey":obligation.ownerTileKey,"result":mapped})
 			all_mapped = all_mapped and mapped.status == "described" \
 				and mapped.get("mapping",{}).get("doorSource") == obligation.doorSource
 		var owned_tiles: Array = obligations.map(func(value: Dictionary):return value.ownerTileKey)
@@ -533,7 +910,7 @@ func test_regional_ordinary_door_leaf_sources() -> void:
 			and owned_tiles == (["0,0","1,0"] if seam else ["0,0","0,0"])
 			and requirements.dependencyBounds.has(Rect2i(first_x,2,1,1))
 			and requirements.dependencyBounds.has(Rect2i(first_x+1,4,1,1)),
-			{"evidenceLevel":"synthetic_contract","requirements":requirements})
+			{"evidenceLevel":"synthetic_contract","requirements":requirements,"allMapped":all_mapped,"mappings":mapping_results})
 		if obligations.size() == 2:
 			var obligation: Dictionary = obligations[0]
 			var duplicated: Dictionary = snapshot.duplicate(true)
@@ -550,6 +927,14 @@ func test_regional_ordinary_door_leaf_sources() -> void:
 				{"evidenceLevel":"synthetic_contract","duplicate":duplicate_result,"source":source_result,"endpoint":endpoint_result})
 		for leaf in portal.leaf_nodes: leaf.free()
 		portal.leaf_nodes.clear()
+
+func freeze_synthetic_navigation_facts(value) -> void:
+	if value is Dictionary:
+		for key in value: freeze_synthetic_navigation_facts(value[key])
+		value.make_read_only()
+	elif value is Array:
+		for item in value: freeze_synthetic_navigation_facts(item)
+		value.make_read_only()
 
 func test_startup_requires_revision_matched_navigation() -> void:
 	# Synthetic source, real NavigationServer install/sync and production startup

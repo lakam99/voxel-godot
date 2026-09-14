@@ -145,9 +145,119 @@ func _verify() -> Dictionary:
 	checks.present_empty_tile_is_distinct_from_outside_domain = rejected_receipt.get("status")=="ready" \
 		and rejected_receipt.get("outputPresent",false) and _valid_tile(rejected_receipt.get("tile")) \
 		and rejected_receipt.tile.surfaces.is_empty()
+	_verify_priority_boundaries(checks,metrics,full)
 	# All producers and heavy graphs leave scope on this worker. The SceneTree
 	# receives only small checks/counters, never a second retained source owner.
 	return report
+
+func _verify_priority_boundaries(checks: Dictionary, metrics: Dictionary, full: Dictionary) -> void:
+	var fixture := _fixture()
+	var producer := Producer.new()
+	var initialized: Dictionary = producer.begin(fixture.manifest,fixture.furniture,Callable(),fixture.solids)
+	checks.priority_fixture_initialized = initialized.status=="ready"
+	if not checks.priority_fixture_initialized: return
+	for key: String in ["2,0","30,0","31,0","10,0"]: producer.request(key)
+	# Explicit synthetic setup enters a real apron sample job without a clock
+	# race. Reprioritization must not restart that job or its dependency cursor.
+	producer._step(0)
+	producer._step(0)
+	var active_job: Dictionary = producer._job
+	var dependencies: Array = producer._active_producers
+	var before: Dictionary = producer.status()
+	var before_queue := producer._requests.duplicate()
+	checks.priority_fixture_has_active_apron_job = before.phase=="sample" and before.activeTileKey=="2,0" \
+		and not active_job.is_empty() and before.compiledProducerCount==0
+	if not checks.priority_fixture_has_active_apron_job:
+		metrics.priorityPrerequisite = before
+		return
+	var oversized: Array[String] = []
+	for index in range(Producer.MAX_OUTPUT_SELECTION+1):
+		var key := "%d,99" % index
+		producer.request(key)
+		oversized.append(key)
+	before = producer.status()
+	before_queue = producer._requests.duplicate()
+	checks.malformed_priority_rejects_before_mutation = producer.prioritize_waiting([]).status=="failed" \
+		and producer.prioritize_waiting(["2,0","2,0"]).status=="failed" \
+		and producer.prioritize_waiting(["2,0","99,98"]).status=="failed" \
+		and producer.prioritize_waiting(oversized).status=="failed" \
+		and producer.prioritize_waiting(["31,0"]).reason=="navigation_active_output_not_selected" \
+		and producer.status()==before and producer._requests==before_queue and is_same(producer._job,active_job)
+	checks.malformed_eligibility_rejects_before_mutation = producer.advance(0,Callable(),["2,0","2,0"]).status=="failed" \
+		and producer.advance(0,Callable(),["2,0","99,98"]).status=="failed" \
+		and producer.advance(0,Callable(),oversized).status=="failed" \
+		and producer.advance(0,Callable(),["31,0"]).reason=="navigation_active_output_not_selected" \
+		and producer.status()==before and producer._requests==before_queue and is_same(producer._job,active_job)
+	var order: Array[String] = ["31,0","2,0","10,0"]
+	checks.late_urgent_only_reorders_waiting_outputs = producer.prioritize_waiting(order).status=="ready" \
+		and producer._requests.slice(0,3)==["31,0","10,0","30,0"] \
+		and producer.status()==before and is_same(producer._job,active_job) and is_same(producer._active_producers,dependencies)
+	order.reverse()
+	checks.caller_priority_array_does_not_alias_queue = producer._requests.slice(0,3)==["31,0","10,0","30,0"]
+	# Even an unlimited kernel must stop before the unselected old queue tail.
+	var selected: Array[String] = ["2,0","10,0","31,0"]
+	var bounded: Dictionary = producer.advance(0,Callable(),selected)
+	checks.selected_kernel_preserves_active_then_waiting_order = bounded.status=="ready" and bounded.phase=="idle" \
+		and bounded.activeTileKey.is_empty() and producer._completed.keys()==["2,0","31,0","10,0"] \
+		and producer.take("30,0").status=="pending" and producer._requests[0]=="30,0"
+	checks.active_apron_and_urgent_tiles_keep_exact_geometry = producer.take("2,0").status=="ready" \
+		and producer.take("31,0").status=="ready" and producer.take("10,0").status=="ready" \
+		and _digest(producer.take("2,0").tile)==_digest(full.tiles["2,0"]) \
+		and _digest(producer.take("31,0").tile)==_digest(full.tiles["31,0"]) \
+		and _digest(producer.take("10,0").tile)==_digest(full.tiles["10,0"])
+	var idle_queue := producer._requests.duplicate()
+	var still_idle: Dictionary = producer.advance(0,Callable(),selected)
+	checks.completed_selection_does_not_start_unselected_work = still_idle.status=="ready" and still_idle.phase=="idle" \
+		and still_idle.activeTileKey.is_empty() and still_idle.completedTileCount==3 and producer._requests==idle_queue \
+		and producer.take("30,0").status=="pending"
+	# The empty/default eligibility remains the established unrestricted path.
+	_drain(producer)
+	checks.eligibility_does_not_persist_across_calls = producer.status().pendingRequestCount==0 and producer.take("30,0").status=="ready"
+	active_job = {}; dependencies = []
+	# A fresh full domain is queued canonically, then each bounded selection is
+	# reversed/rotated. Export must still use original semantic first occurrence.
+	var permuted := Producer.new()
+	permuted.begin(fixture.manifest,fixture.furniture,Callable(),fixture.solids)
+	permuted.request_all()
+	var remaining: Array = permuted.domain().tileKeys.duplicate()
+	var turns := 0
+	var boundaries_valid := true
+	while not remaining.is_empty() and turns<100:
+		remaining.reverse()
+		var count := mini(Producer.MAX_OUTPUT_SELECTION,remaining.size())
+		var chosen: Array[String] = []
+		for index in range(count): chosen.append(remaining[index])
+		var started: Dictionary = permuted.prioritize_waiting(chosen)
+		var advanced: Dictionary = permuted.advance(0,Callable(),chosen)
+		boundaries_valid = boundaries_valid and started.status=="ready" and advanced.status=="ready" and advanced.activeTileKey.is_empty()
+		for key: String in chosen:
+			boundaries_valid = boundaries_valid and permuted.take(key).status=="ready"
+			remaining.erase(key)
+		for key: String in remaining: boundaries_valid = boundaries_valid and permuted.take(key).status=="pending"
+		turns += 1
+	var result: Dictionary = permuted.full_result()
+	checks.permuted_full_domain_respects_every_selected_boundary = boundaries_valid and remaining.is_empty() and turns>1
+	checks.permuted_full_domain_exact_typed_order = result.get("ready",false) and _semantic_digest(result)==_semantic_digest(full)
+	metrics.priority = {"boundedState":bounded,"permutedState":permuted.status(),"selectedTurns":turns}
+	var callback_producer := Producer.new()
+	callback_producer.begin(fixture.manifest,fixture.furniture,Callable(),fixture.solids)
+	for key: String in ["30,0","31,0"]: callback_producer.request(key)
+	# Explicit synthetic continuation reentrancy: promote an unselected key
+	# after the kernel's initial idle check. Neither output may start this call.
+	var callback_state := {"calls":0}
+	var after_callback: Dictionary = callback_producer.advance(0,func(_stage: String) -> bool:
+		callback_state.calls += 1
+		callback_producer.prioritize_waiting(["31,0"])
+		return true, ["30,0"])
+	checks.continuation_reorder_cannot_escape_selected_boundary = after_callback.status=="ready" and after_callback.phase=="idle" \
+		and after_callback.activeTileKey.is_empty() and after_callback.completedTileCount==0 and callback_state.calls==1 \
+		and callback_producer._requests==["31,0","30,0"]
+	callback_producer.prioritize_waiting(["30,0"])
+	var cancelled_callback: Dictionary = callback_producer.advance(0,func(_stage: String) -> bool:
+		callback_producer.cancel()
+		return true, ["30,0"])
+	checks.continuation_cancel_never_indexes_empty_queue = cancelled_callback.status=="cancelled" \
+		and cancelled_callback.pendingRequestCount==0 and cancelled_callback.completedTileCount==0
 
 static func _drain(producer) -> void:
 	var attempts := 0

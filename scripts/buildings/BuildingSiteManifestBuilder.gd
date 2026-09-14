@@ -22,6 +22,16 @@ const MAX_HASH_BYTES := 67108864
 const LOCAL_GROUND_Y := 0.0 # Inherited BuildingBlueprint physical contract.
 const GROUND_TOLERANCE := 0.06
 
+## Canonical bounded typed-value digest used by immutable building-source
+## boundaries. Dictionary ordering is normalized by _hash_value; JSON is never
+## involved in source identity.
+static func canonical_value_digest(value: Variant) -> String:
+	var digest := HashingContext.new()
+	if digest.start(HashingContext.HASH_SHA256) != OK: return ""
+	var budget := {"values": 0, "bytes": 0, "reason": ""}
+	if not _hash_value(value,digest,budget,0): return ""
+	return digest.finish().hex_encode()
+
 
 static func build(blueprint: Variant, furnishing_plan: Variant, cell_size: float = 1.35) -> Dictionary:
 	if not blueprint is Blueprint or not furnishing_plan is Plan:

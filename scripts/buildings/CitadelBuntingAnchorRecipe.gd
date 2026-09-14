@@ -213,6 +213,7 @@ static func _line(proof, original: Dictionary, assembly: Dictionary, passed: Dic
 		if a.get("z",rope.position.z) != b.get("z",rope.position.z): return a.get("z",rope.position.z) < b.get("z",rope.position.z)
 		return a.existing and not b.existing)
 	var rejection_counts: Dictionary = {}
+	var rejection_samples: Array[Dictionary] = []
 	for candidate: Dictionary in candidates:
 		if not run.step("bunting_candidate"): return _fail("cancelled")
 		run.pairs += 1
@@ -221,9 +222,13 @@ static func _line(proof, original: Dictionary, assembly: Dictionary, passed: Dic
 		if result.get("ready",false): return result
 		if run.cancelled or result.reason == "bunting_work_limit": return result
 		rejection_counts[result.reason] = int(rejection_counts.get(result.reason,0))+1
+		if rejection_samples.size()<8:
+			rejection_samples.append({"reason":result.reason,"detail":result.get("detail",{}).duplicate(true),
+				"existing":bool(candidate.get("existing",false)),"low":candidate.get("low",0.0),"high":candidate.get("high",0.0),
+				"y":candidate.get("y",rope.position.y),"z":candidate.get("z",rope.position.z)})
 	var reason := "no_rooted_bunting_endpoint_pair" if candidates.is_empty() else "bunting_tested_placements_rejected"
 	return _fail(reason,{"leftFaces":left.size(),"rightFaces":right.size(),"testedCandidates":candidates.size(),"rejections":rejection_counts,
-		"scope":"Bounded tested placements only; rejection is not a geometric infeasibility proof."})
+		"samples":rejection_samples,"scope":"Bounded tested placements only; rejection is not a geometric infeasibility proof."})
 
 static func _candidate(proof, original: Dictionary, assembly: Dictionary, candidate: Dictionary, half: Vector3, volumes: Array[AABB], run: Run) -> Dictionary:
 	var old: Dictionary = original[assembly.ropeId]
@@ -281,10 +286,10 @@ static func _candidate(proof, original: Dictionary, assembly: Dictionary, candid
 				# Socket proof above certifies each cap; pennants get NO exemption.
 				continue
 			var clear: Dictionary = _clear(member,_pose(obstacle),run)
-			if not clear.ready: return clear
+			if not clear.ready: return _fail(String(clear.reason),{"memberId":member.id,"obstacleId":obstacle.id})
 		for volume: AABB in volumes:
 			var clear: Dictionary = _clear(member,Transform3D(Basis.from_scale(volume.size),volume.get_center()),run)
-			if not clear.ready: return clear
+			if not clear.ready: return _fail(String(clear.reason),{"memberId":member.id,"protectedBounds":volume})
 	var changes: Array[Dictionary] = []
 	for value: Dictionary in records:
 		if var_to_bytes(value) != var_to_bytes(original[value.id]): changes.append(value)
@@ -297,8 +302,38 @@ static func _clear(member, obstacle: Transform3D, run: Run) -> Dictionary:
 	if not run.step("bunting_clearance"): return _fail("cancelled")
 	run.comparisons += 1
 	if run.comparisons > MAX_COMPARISONS: return _fail("bunting_work_limit")
-	var measured: Dictionary = Admission.measure(_pose(member),obstacle)
+	var member_pose := _pose(member)
+	# This is only a conservative broad phase. Strictly disjoint transformed
+	# AABBs prove the represented boxes cannot intersect; face contact and every
+	# uncertain/invalid pose stay on the exact admission path. The logical
+	# clearance step above remains unconditional so cancellation and work-limit
+	# behavior are identical to the scalar path.
+	if _strictly_disjoint(member_pose,obstacle): return {"ready":true}
+	var measured: Dictionary = Admission.measure(member_pose,obstacle)
 	return {"ready":true} if measured.get("valid",false) and measured.get("clear",false) else _fail("bunting_span_blocked")
+
+static func _strictly_disjoint(first: Transform3D, second: Transform3D) -> bool:
+	var first_bounds := _finite_pose_bounds(first)
+	var second_bounds := _finite_pose_bounds(second)
+	if first_bounds.size == Vector3.ZERO or second_bounds.size == Vector3.ZERO: return false
+	return first_bounds.end.x < second_bounds.position.x or second_bounds.end.x < first_bounds.position.x \
+		or first_bounds.end.y < second_bounds.position.y or second_bounds.end.y < first_bounds.position.y \
+		or first_bounds.end.z < second_bounds.position.z or second_bounds.end.z < first_bounds.position.z
+
+static func _finite_pose_bounds(pose: Transform3D) -> AABB:
+	if not pose.origin.is_finite(): return AABB()
+	for axis: int in range(3):
+		if not pose.basis[axis].is_finite() or pose.basis[axis].length() < 0.0001 or pose.basis[axis].length() > 10000.0: return AABB()
+	var bounds := AABB()
+	var first := true
+	for x: float in [-0.5,0.5]:
+		for y: float in [-0.5,0.5]:
+			for z: float in [-0.5,0.5]:
+				var point := pose*Vector3(x,y,z)
+				if not point.is_finite(): return AABB()
+				bounds = AABB(point,Vector3.ZERO) if first else bounds.expand(point)
+				first = false
+	return bounds
 
 ## The producer bounds placement to the actual market and explicitly owns both
 ## opposing faces. Face intersections generate finite candidates, not a spatial
@@ -316,8 +351,13 @@ static func _domain_candidates(a: Dictionary, b: Dictionary, rope: Dictionary, h
 	var start: Vector3 = a.bounds.position.max(b.bounds.position).max(bounds.position)+margin
 	var end: Vector3 = a.bounds.end.min(b.bounds.end).min(bounds.end)-margin
 	if start.y >= end.y or start.z >= end.z: return result
-	var ys: Array[float] = [clampf(rope.position.y,start.y,end.y),(start.y+end.y)*0.5]
-	var zs: Array[float] = [clampf(rope.position.z,start.z,end.z),(start.z+end.z)*0.5]
+	# The mounting receipt identifies a finite shared face volume.  Test its
+	# represented extrema as well as the authored point and midpoint: a later
+	# pavilion or tower may occupy either interior sample even though one edge
+	# remains physically clear.  This is a bounded domain enumeration, never a
+	# tolerance expansion or an unbounded spatial search.
+	var ys: Array[float] = [clampf(rope.position.y,start.y,end.y),start.y,(start.y+end.y)*0.5,end.y]
+	var zs: Array[float] = [clampf(rope.position.z,start.z,end.z),start.z,(start.z+end.z)*0.5,end.z]
 	var seen: Dictionary = {}
 	for y: float in ys:
 		for z: float in zs:

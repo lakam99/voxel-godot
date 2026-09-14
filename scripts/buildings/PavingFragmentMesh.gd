@@ -8,16 +8,32 @@ extends RefCounted
 const MAX_VERTICES := 32768
 
 
+## Compatibility wrapper for existing main-thread finalization.
 static func prepare(entry: Dictionary, unit_box: BoxMesh) -> Dictionary:
+	if unit_box == null or unit_box.size != Vector3.ONE or unit_box.get_surface_count() != 1:
+		return _fail("invalid_original_mesh_frame")
+	var prepared := prepare_arrays(entry,unit_box.surface_get_arrays(0))
+	if not prepared.ready: return prepared
+	var mesh: ArrayMesh = null
+	if prepared.arrays != null:
+		mesh=ArrayMesh.new()
+		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,prepared.arrays)
+	prepared.erase("arrays")
+	prepared["mesh"] = mesh
+	return prepared
+
+
+## Pure worker-safe mesh construction. It returns typed surface arrays only;
+## callers on the main thread decide whether and when to allocate ArrayMesh.
+static func prepare_arrays(entry: Dictionary, template: Array) -> Dictionary:
 	if entry.get("unchanged", true) or not entry.get("original") is Dictionary or not entry.get("cells") is Array or entry.cells.size() > 256:
 		return _fail("requires_changed_construction_entry")
 	var original: Dictionary = entry.original
-	if not original.get("transform") is Transform3D or not original.get("localTransform") is Transform3D or unit_box == null or unit_box.size != Vector3.ONE or unit_box.get_surface_count() != 1:
+	if not original.get("transform") is Transform3D or not original.get("localTransform") is Transform3D:
 		return _fail("invalid_original_mesh_frame")
 	for transform in [original.transform, original.localTransform]:
 		if not transform.origin.is_finite() or not transform.basis.is_finite() or not is_finite(transform.basis.determinant()) or transform.basis.determinant() <= 0.0 or not transform.basis.inverse().is_finite():
 			return _fail("invalid_original_mesh_frame")
-	var template: Array = unit_box.surface_get_arrays(0)
 	var faces: Dictionary = _template_faces(template)
 	if faces.size() != 6: return _fail("unsupported_unit_box_attributes")
 	var coordinates: Dictionary = _source_face_coordinates(entry)
@@ -74,18 +90,69 @@ static func prepare(entry: Dictionary, unit_box: BoxMesh) -> Dictionary:
 					tangents.append_array(PackedFloat32Array([tangent.x, tangent.y, tangent.z, tangent_w]))
 			provenance.append({"cellIndex": cell_index, "firstVertex": start, "vertexCount": positions.size() - start, "source": source_face.duplicate(true)})
 		cell_index += 1
-	var mesh: ArrayMesh = null
+	var arrays: Array = []
 	if not positions.is_empty():
-		var arrays: Array = []
 		arrays.resize(Mesh.ARRAY_MAX)
 		arrays[Mesh.ARRAY_VERTEX] = positions
 		arrays[Mesh.ARRAY_NORMAL] = normals
 		arrays[Mesh.ARRAY_TEX_UV] = uvs
 		arrays[Mesh.ARRAY_TANGENT] = tangents
-		mesh = ArrayMesh.new()
-		mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	return {"ready": true, "mesh": mesh, "original": original.duplicate(true), "faceProvenance": provenance, "vertexCount": positions.size(),
+	return {"ready": true, "arrays": arrays if not positions.is_empty() else null, "original": original.duplicate(true), "faceProvenance": provenance, "vertexCount": positions.size(),
 		"boundarySemantics": "solid_union_with_enclosed_partition_caps"}
+
+
+## Freeze typed surface buffers for a cross-thread paving packet. This rejects
+## every Object/Resource-shaped value before it can enter a worker result.
+static func packet_payload(arrays: Array) -> Dictionary:
+	if not _valid_arrays(arrays): return _fail("invalid_fragment_packet_arrays")
+	var copied: Array = arrays.duplicate(true)
+	var payload := {"primitive":Mesh.PRIMITIVE_TRIANGLES,"arrays":copied,"arraysDigest":_digest(copied),
+		"vertexDigest":_digest(copied[Mesh.ARRAY_VERTEX]),"vertexCount":copied[Mesh.ARRAY_VERTEX].size()}
+	payload.make_read_only()
+	return {"ready":true,"reason":"","payload":payload}
+
+
+## Main-thread-only ArrayMesh hydration. It validates the untouched typed
+## payload before allocation; callers must never rebuild fragments here.
+static func hydrate_packet_payload(payload: Dictionary) -> Dictionary:
+	var validated := validate_packet_payload(payload)
+	if not validated.ready: return validated
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES,payload.arrays)
+	if mesh.get_surface_count()!=1: return _fail("fragment_packet_mesh_hydration_failed")
+	return {"ready":true,"reason":"","mesh":mesh}
+
+
+## Nonallocating admission check for worker-side artifact validation.
+static func validate_packet_payload(payload: Dictionary) -> Dictionary:
+	if not payload.is_read_only() or payload.get("primitive")!=Mesh.PRIMITIVE_TRIANGLES or not payload.get("arrays") is Array \
+			or not _valid_arrays(payload.arrays) or payload.get("arraysDigest")!=_digest(payload.arrays) \
+			or payload.get("vertexDigest")!=_digest(payload.arrays[Mesh.ARRAY_VERTEX]) or payload.get("vertexCount")!=payload.arrays[Mesh.ARRAY_VERTEX].size():
+		return _fail("invalid_fragment_packet_payload")
+	return {"ready":true,"reason":"","vertexCount":payload.vertexCount,"vertexDigest":payload.vertexDigest}
+
+
+static func _valid_arrays(arrays: Variant) -> bool:
+	if not arrays is Array or arrays.size()!=Mesh.ARRAY_MAX or not arrays[Mesh.ARRAY_VERTEX] is PackedVector3Array \
+			or not arrays[Mesh.ARRAY_NORMAL] is PackedVector3Array or not arrays[Mesh.ARRAY_TEX_UV] is PackedVector2Array \
+			or not arrays[Mesh.ARRAY_TANGENT] is PackedFloat32Array: return false
+	for index in range(Mesh.ARRAY_MAX):
+		if index not in [Mesh.ARRAY_VERTEX,Mesh.ARRAY_NORMAL,Mesh.ARRAY_TEX_UV,Mesh.ARRAY_TANGENT] and arrays[index]!=null: return false
+	var count: int = arrays[Mesh.ARRAY_VERTEX].size()
+	if count==0 or count%3!=0 or arrays[Mesh.ARRAY_NORMAL].size()!=count or arrays[Mesh.ARRAY_TEX_UV].size()!=count \
+			or arrays[Mesh.ARRAY_TANGENT].size()!=count*4 or count>MAX_VERTICES: return false
+	for point: Vector3 in arrays[Mesh.ARRAY_VERTEX]: if not point.is_finite(): return false
+	for normal: Vector3 in arrays[Mesh.ARRAY_NORMAL]: if not normal.is_finite(): return false
+	for point: Vector2 in arrays[Mesh.ARRAY_TEX_UV]: if not point.is_finite(): return false
+	for scalar: float in arrays[Mesh.ARRAY_TANGENT]: if not is_finite(scalar): return false
+	return true
+
+
+static func _digest(value: Variant) -> String:
+	var context := HashingContext.new()
+	context.start(HashingContext.HASH_SHA256)
+	context.update(var_to_bytes(value))
+	return context.finish().hex_encode()
 
 
 static func _template_faces(arrays: Array) -> Dictionary:

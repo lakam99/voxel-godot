@@ -13,6 +13,7 @@ const MAX_PRIORITY_BURST := 3
 const MAX_RESULT_VALUES := 2000000
 const MAX_RESULT_DEPTH := 64
 const MAX_RESULT_BYTES := 32 * 1024 * 1024
+const SOURCE_TIMING_HISTORY_LIMIT := 64
 
 class RetirementState extends RefCounted:
 	var payload: Dictionary
@@ -28,6 +29,7 @@ class RetirementState extends RefCounted:
 		return Time.get_ticks_usec()-started
 
 class RunState extends RefCounted:
+	const RAW_PREPARE_STAGE_NAMES := ["centerSurvey", "recipe", "compound", "urbanComposition", "structuralCompletion", "structuralPrerequisites", "facadeOpeningHeads", "facadeLowerBearings", "structuralLaterSetup", "chimneyCompletion", "bracketFirstCompletion", "signCompletion", "partyWallCompletion", "bracketRetryCompletion", "buntingCompletion", "thresholdCompletion", "finalSignVerification", "finalBuntingVerification", "structuralFinalize", "geometryManifest", "terrainPreparation", "terrainProfile", "ordinaryConflict", "envelopeSurvey", "visualReservationSurvey", "finalProfile"]
 	var mutex := Mutex.new()
 	var cancelled := false
 	var stage := "dispatch"
@@ -35,6 +37,8 @@ class RunState extends RefCounted:
 	var started_usec := Time.get_ticks_usec()
 	var previous_usec := started_usec
 	var max_stage_gap_usec := 0
+	var phase_timing := {"rawPrepare":{},"snapshot":{},"freeze":{},"serialization":{}}
+	var raw_prepare_stages := {"centerSurvey":{},"recipe":{},"compound":{},"urbanComposition":{},"structuralCompletion":{},"structuralPrerequisites":{},"facadeOpeningHeads":{},"facadeLowerBearings":{},"structuralLaterSetup":{},"chimneyCompletion":{},"bracketFirstCompletion":{},"signCompletion":{},"partyWallCompletion":{},"bracketRetryCompletion":{},"buntingCompletion":{},"thresholdCompletion":{},"finalSignVerification":{},"finalBuntingVerification":{},"structuralFinalize":{},"geometryManifest":{},"terrainPreparation":{},"terrainProfile":{},"ordinaryConflict":{},"envelopeSurvey":{},"visualReservationSurvey":{},"finalProfile":{}}
 	func cancel() -> void:
 		mutex.lock()
 		cancelled = true
@@ -57,9 +61,50 @@ class RunState extends RefCounted:
 	func snapshot() -> Dictionary:
 		mutex.lock()
 		var result := {"stage":stage,"stageCount":stage_count,"cancelRequested":cancelled,
-			"elapsedUsec":Time.get_ticks_usec()-started_usec,"maxStageGapUsec":max_stage_gap_usec}
+			"elapsedUsec":Time.get_ticks_usec()-started_usec,"maxStageGapUsec":max_stage_gap_usec,
+			"phaseTiming":{"schema":"citadel-site-phase-timing/v1","activePhase":_active_phase(),
+				"rawPrepare":phase_timing.rawPrepare.duplicate(),"snapshot":phase_timing.snapshot.duplicate(),
+				"freeze":phase_timing.freeze.duplicate(),"serialization":phase_timing.serialization.duplicate(),
+				"rawPrepareStages":{"schema":"citadel-site-raw-prepare-stages/v1","stages":raw_prepare_stages.duplicate(true)}}}
 		mutex.unlock()
 		return result
+	func begin_phase(name: String) -> void:
+		if not phase_timing.has(name): return
+		mutex.lock()
+		phase_timing[name] = {"startedUsec":Time.get_ticks_usec(),"finishedUsec":0,"elapsedUsec":0,"complete":false}
+		mutex.unlock()
+	func finish_phase(name: String) -> void:
+		if not phase_timing.has(name): return
+		mutex.lock()
+		var row: Dictionary = phase_timing[name]
+		if not row.is_empty() and not row.complete:
+			row.finishedUsec = Time.get_ticks_usec()
+			row.elapsedUsec = maxi(0,int(row.finishedUsec)-int(row.startedUsec))
+			row.complete = true
+		mutex.unlock()
+	func observe_raw_prepare_stage(name: String, beginning: bool) -> void:
+		if name not in RAW_PREPARE_STAGE_NAMES: return
+		mutex.lock()
+		var now := Time.get_ticks_usec()
+		var row: Dictionary = raw_prepare_stages[name]
+		if beginning:
+			if row.is_empty(): row = {"startedUsec":now,"finishedUsec":0,"activeStartedUsec":0,"elapsedUsec":0,"maxUsec":0,"complete":false,"count":0}
+			row.activeStartedUsec = now
+			row.count = int(row.count)+1
+			row.complete = false
+		elif not row.is_empty() and not bool(row.get("complete",false)):
+			row.finishedUsec = now
+			var elapsed := maxi(0,now-int(row.activeStartedUsec))
+			row.elapsedUsec = int(row.elapsedUsec)+elapsed
+			row.maxUsec = maxi(int(row.maxUsec),elapsed)
+			row.complete = true
+		raw_prepare_stages[name] = row
+		mutex.unlock()
+	func _active_phase() -> String:
+		for name: String in ["rawPrepare","snapshot","freeze","serialization"]:
+			var row: Dictionary = phase_timing[name]
+			if not row.is_empty() and not row.complete: return name
+		return ""
 
 var _epoch := 1
 var _next_token := 1
@@ -79,6 +124,8 @@ var _retirement: RetirementState
 var _retirement_start_error := OK
 var _max_retirement_usec := 0
 var _last_retirement_thread := -1
+var _source_timing_history: Array[Dictionary] = []
+var _source_timing_dropped := 0
 
 func submit(world_seed: String, region: Vector2i, towns: Dictionary, ordinary_policy: Dictionary, priority: bool = false) -> Dictionary:
 	var started := Time.get_ticks_usec()
@@ -109,6 +156,7 @@ func poll() -> Dictionary:
 		_max_join_usec = maxi(_max_join_usec,Time.get_ticks_usec()-join_start)
 		_thread = null
 		joined = true
+		var terminal_status := ""
 		if _active.get("kind","") == "retirement":
 			_max_retirement_usec = maxi(_max_retirement_usec,int(result))
 			_last_retirement_thread = _retirement.released_on_thread
@@ -116,13 +164,18 @@ func poll() -> Dictionary:
 		elif _active.epoch != _epoch or _closing:
 			if result is Dictionary: _queue_retirement(result)
 			_discarded_stale += 1
+			terminal_status = "discarded_stale"
 		elif _active.cancelled or _state.is_cancelled():
 			if result is Dictionary: _queue_retirement(result)
 			_store_completed(_terminal("cancelled","cancelled"),false)
+			terminal_status = "cancelled"
 		elif result is Dictionary:
 			_store_completed(result)
+			terminal_status = String(result.get("status","prepared"))
 		else:
 			_store_completed(_terminal("failed","invalid_worker_return"),false)
+			terminal_status = "invalid_worker_return"
+		_record_source_timing(_active,_state,terminal_status)
 		# Include disposal of rejected payloads in the measured owner call.
 		result = null
 		_active = {}
@@ -148,6 +201,22 @@ func poll() -> Dictionary:
 		"retirementPending":not _retired.is_empty() or _retirement != null,"retirementStartError":_retirement_start_error,
 		"maxRetirementWorkUsec":_max_retirement_usec,"lastRetirementThreadId":_last_retirement_thread,
 		"maxPollUsec":_max_poll_usec,"maxJoinUsec":_max_join_usec,"maxSubmitUsec":_max_submit_usec,"discardedStale":_discarded_stale}
+
+func source_timing() -> Dictionary:
+	var history: Array[Dictionary] = []
+	for row: Dictionary in _source_timing_history: history.append(row.duplicate(true))
+	return {"schema":"citadel-site-source-timing/v1","observedUsec":Time.get_ticks_usec(),"historyLimit":SOURCE_TIMING_HISTORY_LIMIT,
+		"droppedCount":_source_timing_dropped,"history":history,"active":_state.snapshot().get("phaseTiming",{}) if _state != null else {}}
+
+func _record_source_timing(entry: Dictionary, state: RunState, terminal_status: String) -> void:
+	if entry.get("kind","")=="retirement": return
+	var timing: Dictionary = state.snapshot().get("phaseTiming",{}).duplicate(true)
+	var row := {"epoch":int(entry.get("epoch",0)),"token":int(entry.get("token",0)),"sourceKey":String(entry.get("sourceKey","")).left(128),
+		"terminalStatus":terminal_status,"cancelled":bool(entry.get("cancelled",false)) or state.is_cancelled(),"phaseTiming":timing}
+	_source_timing_history.append(row)
+	if _source_timing_history.size()>SOURCE_TIMING_HISTORY_LIMIT:
+		_source_timing_history.pop_front()
+		_source_timing_dropped += 1
 
 func take_result(token: int) -> Dictionary:
 	if not _completed.is_empty() and _completed.token == token and _completed.epoch == _epoch:
@@ -208,18 +277,21 @@ func _next_index() -> int:
 func _start_thread(work: Callable) -> int:
 	return _thread.start(work)
 
-func _prepare_site(request: Dictionary, continuation: Callable) -> Dictionary:
-	return Site.prepare(request.worldSeed,request.region,request.towns,request.ordinaryPolicy,continuation)
+func _prepare_site(request: Dictionary, continuation: Callable, raw_stage_observer: Callable = Callable()) -> Dictionary:
+	return Site.prepare(request.worldSeed,request.region,request.towns,request.ordinaryPolicy,continuation,raw_stage_observer)
 
 func _run(request: Dictionary, state: RunState) -> Dictionary:
 	if not state.advance("preparation_started"): return _terminal("cancelled","cancelled")
-	var raw := _prepare_site(request,state.advance)
+	state.begin_phase("rawPrepare")
+	var raw := _prepare_site(request,state.advance,Callable(state,"observe_raw_prepare_stage"))
+	state.finish_phase("rawPrepare")
 	if state.is_cancelled(): return _terminal("cancelled","cancelled")
 	if raw.get("status","") not in ["prepared","absent","failed","cancelled"]:
 		return _terminal("failed","invalid_preparation_status")
 	# Snapshot objects ONCE on the worker, then detach/freeze every container.
 	# Small status polling and one-shot consumption never copy this payload.
 	if not state.advance("snapshot_started"): return _terminal("cancelled","cancelled")
+	state.begin_phase("snapshot")
 	var result: Dictionary = raw.duplicate(true)
 	if raw.status == "prepared":
 		var blueprint: Variant = raw.get("blueprint")
@@ -234,10 +306,17 @@ func _run(request: Dictionary, state: RunState) -> Dictionary:
 		result.blueprint = blueprint_snapshot.duplicate(true)
 		result.furnishingPlan = furnishing_snapshot.duplicate(true)
 		result.furnishingPlan["accessReservations"] = reservations.duplicate(true)
+	state.finish_phase("snapshot")
 	var count := [0]
+	state.begin_phase("freeze")
 	if not _freeze(result,state,count,0):
+		state.finish_phase("freeze")
 		return _terminal("cancelled","cancelled") if state.is_cancelled() else _terminal("failed","invalid_or_unbounded_worker_payload")
-	if var_to_bytes(result).size() > MAX_RESULT_BYTES: return _terminal("failed","worker_payload_byte_limit")
+	state.finish_phase("freeze")
+	state.begin_phase("serialization")
+	var result_bytes := var_to_bytes(result).size()
+	state.finish_phase("serialization")
+	if result_bytes > MAX_RESULT_BYTES: return _terminal("failed","worker_payload_byte_limit")
 	if not state.advance("result_ready"): return _terminal("cancelled","cancelled")
 	return result
 

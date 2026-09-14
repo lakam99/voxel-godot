@@ -71,6 +71,7 @@ var collision_recovery_stalls_by_actor := {}
 var collision_recovery_stall_trace_records: Array = []
 var counters := {
 	"registeredActors": 0,
+	"unregisteredActors": 0,
 	"requests": 0,
 	"planningBudgetGrants": 0,
 	"planningBudgetDeferrals": 0,
@@ -148,6 +149,39 @@ func register_actor(entry: Dictionary) -> Dictionary:
 	var debug := debug_for_actor(actor_id)
 	entry["routeAuthorityV2"] = debug
 	return debug
+
+
+func unregister_actor(entry_or_id, reason := "actor_unregistered") -> Dictionary:
+	var actor_id := String(entry_or_id.get("id", "")) if entry_or_id is Dictionary else String(entry_or_id)
+	if actor_id == "":
+		return {"ok": false, "status": "failed", "reason": "missing_actor_id", "actorId": ""}
+	var was_registered := registered_actors.has(actor_id) or actor_entries.has(actor_id)
+	var request_id := String(active_request_by_actor.get(actor_id, ""))
+	var request_state := STATE_NONE
+	var cancelled := false
+	if request_id != "" and requests_by_id.has(request_id):
+		var record: Dictionary = requests_by_id[request_id]
+		request_state = String(record.get("state", STATE_NONE))
+		if not (request_state in TERMINAL_STATES):
+			var cancellation := cancel_request(request_id, reason)
+			cancelled = bool(cancellation.get("ok", false)) and String(cancellation.get("state", "")) == STATE_CANCELLED
+			request_state = String(cancellation.get("state", request_state))
+		_clear_probe_cursors_for_request(request_id)
+	active_request_by_actor.erase(actor_id)
+	actor_entries.erase(actor_id)
+	registered_actors.erase(actor_id)
+	collision_recovery_stalls_by_actor.erase(actor_id)
+	if was_registered:
+		counters["unregisteredActors"] = int(counters.get("unregisteredActors", 0)) + 1
+	return {
+		"ok": true,
+		"status": "unregistered" if was_registered or request_id != "" else "absent",
+		"reason": reason,
+		"actorId": actor_id,
+		"requestId": request_id,
+		"requestState": request_state,
+		"cancelled": cancelled
+	}
 
 func submit_request(entry: Dictionary, intent: Dictionary, options := {}) -> Dictionary:
 	var actor_id := actor_id_for_entry(entry)
@@ -596,6 +630,12 @@ func report_invalid_goal(request_id: String, reason := "invalid_goal") -> Dictio
 	return result
 
 func cancel_request(request_id: String, reason := "cancelled") -> Dictionary:
+	if not requests_by_id.has(request_id):
+		return { "ok": false, "reason": "missing_request", "requestId": request_id }
+	var record: Dictionary = requests_by_id[request_id]
+	record["routeLease"] = {}
+	requests_by_id[request_id] = record
+	_clear_probe_cursors_for_request(request_id)
 	var result := transition_request(request_id, STATE_CANCELLED, reason)
 	if bool(result.get("ok", false)):
 		counters["cancelled"] = int(counters.get("cancelled", 0)) + 1
@@ -1105,6 +1145,15 @@ func _probe_cursor_key(request_id: String, route: Dictionary, intent: Dictionary
 			parts.append("%.3f,%.3f,%.3f" % [waypoint.x, waypoint.y, waypoint.z])
 	return "|".join(parts)
 
+
+func _clear_probe_cursors_for_request(request_id: String) -> void:
+	if request_id == "":
+		return
+	var prefix := "%s|" % request_id
+	for key_value in probe_cursors.keys():
+		if String(key_value).begins_with(prefix):
+			probe_cursors.erase(key_value)
+
 func _probe_cell_key(value) -> String:
 	if value is Vector2i:
 		var cell: Vector2i = value
@@ -1133,10 +1182,17 @@ func actor_id_for_entry(entry: Dictionary) -> String:
 	var actor_id := String(entry.get("id", ""))
 	if actor_id != "":
 		return actor_id
-	var body := entry.get("body") as Node
-	if body != null and is_instance_valid(body):
+	var body := _safe_entry_body(entry)
+	if body != null:
 		return str(body.get_instance_id())
 	return ""
+
+
+func _safe_entry_body(entry: Dictionary) -> Node3D:
+	var body_value = entry.get("body")
+	if body_value == null or not is_instance_valid(body_value) or not (body_value is Node3D):
+		return null
+	return body_value as Node3D
 
 func _transition_record(record: Dictionary, state: String, reason: String) -> void:
 	# begin_frame is the sole physics clock for pending-state durations.
@@ -1247,8 +1303,12 @@ func _maybe_capture_pending_stall_trace(record: Dictionary) -> void:
 	var actor_id := String(record.get("actorId", ""))
 	var entry_value = actor_entries.get(actor_id, {})
 	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
-	var body := entry.get("body") as Node3D
-	var position = body.global_position if body != null and is_instance_valid(body) else null
+	# Fixture and streamed actors can leave the registry between the retained
+	# request's creation and this delayed diagnostic. Validate the Variant before
+	# casting it; casting a freed Object is itself a script error and must never
+	# turn an observation path into a gameplay failure.
+	var body := _safe_entry_body(entry)
+	var position = body.global_position if body != null else null
 	var route: Dictionary = record.get("route", {}) if record.get("route", {}) is Dictionary else {}
 	var proof: Dictionary = record.get("routeProof", {}) if record.get("routeProof", {}) is Dictionary else {}
 	var trace := {
@@ -1324,7 +1384,7 @@ func _maybe_capture_scripted_order_stall_trace(actor_id: String, entry: Dictiona
 		return
 	entry["_scriptedOrderStallTraceOrderId"] = order_id
 	counters["scriptedOrderStallTraceCaptures"] = int(counters.get("scriptedOrderStallTraceCaptures", 0)) + 1
-	var body := entry.get("body") as Node3D
+	var body := _safe_entry_body(entry)
 	var trace_seed = main.get("seed_text") if main != null else null
 	var trace := {
 		"capturedWallMsec": now_msec,
@@ -1401,7 +1461,7 @@ func _observe_collision_recovery_stall(record: Dictionary, details) -> void:
 	counters["collisionRecoveryStallTraceCaptures"] = int(counters.get("collisionRecoveryStallTraceCaptures", 0)) + 1
 	var entry_value = actor_entries.get(actor_id, {})
 	var entry: Dictionary = entry_value if entry_value is Dictionary else {}
-	var body := entry.get("body") as Node3D
+	var body := _safe_entry_body(entry)
 	var trace_seed = main.get("seed_text") if main != null else null
 	var trace := {
 		"capturedWallMsec": now_msec,

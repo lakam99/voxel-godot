@@ -86,6 +86,9 @@ func set_day_factor(value: float) -> void:
 func set_lod_visible(enabled: bool) -> void:
     lod_visible = enabled
 
+func set_lod_shadow_enabled(enabled: bool) -> void:
+    shadow_enabled = enabled and bool(get_meta("casts_shadow_when_enabled", false))
+
 func daylight_visibility() -> float:
     if not day_suppressed:
         return 1.0

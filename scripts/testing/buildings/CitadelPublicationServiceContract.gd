@@ -6,6 +6,7 @@ const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const Queue = preload("res://scripts/world/CitadelSiteBuildQueue.gd")
 const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Worker = preload("res://scripts/buildings/BuildingPublicationWorker.gd")
+const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const Service = preload("res://scripts/world/CitadelPublicationService.gd")
 const WorkerControls = preload("res://scripts/testing/buildings/BuildingPublicationWorkerContract.gd")
 const Runtime = preload("res://scripts/terrain/VoxelTerrainRuntime.gd")
@@ -13,6 +14,21 @@ const INPUT := "res://artifacts/citadel-runtime-integration/actual-site-source-0
 const SHA := "7a188cb480f3ed0332b0c568e86f18c061a265dd70a7bc3372ac7cbfd76144bf"
 const REGION := Vector2i(1,-3)
 const SEED := "atlas-1492"
+const ACTUAL_PACKET_GROUP := "building:castle_back_wall_foundation"
+const ACTUAL_INELIGIBLE_GROUP := "building:castle_gatehouse_portcullis"
+const ACTUAL_PACKET_TILE := Vector2i(198,-337)
+const ACTUAL_PACKET_TILE_GROUPS: Array[String] = [
+	"building:castle_compound_foundation_segment_00",
+	"building:castle_tower_04_back",
+	"building:castle_tower_04_battlement_back_0",
+	"building:castle_tower_04_battlement_left_7",
+	"building:castle_tower_04_floor",
+	"building:castle_tower_04_foundation",
+	"building:castle_tower_04_front",
+	"building:castle_tower_04_left",
+	"building:castle_tower_04_right",
+	"building:castle_tower_04_roof_deck"
+]
 
 class Owner extends "res://scripts/MainCore.gd":
 	var voxel_terrain_runtime
@@ -58,6 +74,12 @@ class RetirementProbe extends RefCounted:
 	var cancellations := 0
 	func cancel() -> void: cancellations += 1
 
+class SchedulingJobProbe extends RefCounted:
+	var source_requirement_calls := 0
+	func source_dependency_requirements(_bounds: Rect2i, _binding: Dictionary) -> Dictionary:
+		source_requirement_calls += 1
+		return {"status":"failed","reason":"live_scene_proof_entered_scheduling"}
+
 class ReleaseGuard extends RefCounted:
 	var service
 	func permits(_bounds: Rect2i) -> bool:
@@ -92,6 +114,13 @@ class DescriptionGatedWorker extends Worker:
 		var accepted: bool = forward_description.call(value) == true
 		gate.wait()
 		return accepted
+
+class PacketTrees extends RefCounted:
+	var publish_calls := 0
+	func publish(_parent: Node3D, _id: String, _position: Vector3, _biome: String, _request: Dictionary, _yaw: float) -> Dictionary:
+		publish_calls += 1
+		return {"status":"ignored"}
+	func retire(_id: String, _body: StaticBody3D) -> void: pass
 
 var checks := {}
 var metrics := {}
@@ -154,6 +183,52 @@ func wait_prepared(s, target: int, region: Vector2i, label: String) -> void:
 		s.advance_citadel_publication(bounds(region),true)
 		await process_frame
 	check(label,s.citadel_publication.stats().acceptedCount==target)
+
+func retained_packet_request(binding: Dictionary, group_ids: Array[String]) -> Dictionary:
+	var query := bounds()
+	var admission: Dictionary = Service.DemandSet.from_regions([query],Service.DISCOVERY_CHUNK_SIZE,Service.MAX_DISCOVERY_CHUNKS,32)
+	var navigation: Dictionary = Service.DemandSet.from_regions([query],Service.NAVIGATION_TILE_CELLS,Service.MAX_PENDING_NAVIGATION_TILES)
+	var navigation_keys: Array[String] = []
+	for key: Vector2i in navigation.keys:
+		navigation_keys.append("%d,%d" % [key.x,key.y])
+	navigation_keys.sort()
+	return {"ownerId":77,"bounds":query,"priority":0,"admissionKeys":admission.keys.keys(),
+		"navigationTileKeys":navigation_keys,"sites":[{"binding":binding.duplicate(),"groupIds":group_ids.duplicate()}]}
+
+func retained_packet_tile_request(binding: Dictionary, group_ids: Array[String], tile: Vector2i) -> Dictionary:
+	var request := retained_packet_request(binding,group_ids)
+	var key := "%d,%d" % [tile.x,tile.y]
+	if not request.navigationTileKeys.has(key): request.navigationTileKeys.append(key)
+	request.navigationTileKeys.sort()
+	return request
+
+func exterior_boundary_probe(description, reservation: Rect2i, census: Dictionary) -> Dictionary:
+	if reservation.size.x<=0 or reservation.size.y<=0: return {}
+	var points: Array[Vector2i] = [reservation.position,
+		Vector2i(reservation.end.x-1,reservation.position.y),
+		Vector2i(reservation.position.x,reservation.end.y-1),reservation.end-Vector2i.ONE,
+		Vector2i(reservation.position.x+reservation.size.x/2,reservation.position.y),
+		Vector2i(reservation.position.x+reservation.size.x/2,reservation.end.y-1),
+		Vector2i(reservation.position.x,reservation.position.y+reservation.size.y/2),
+		Vector2i(reservation.end.x-1,reservation.position.y+reservation.size.y/2)]
+	var eligible: Dictionary = {}
+	for group_id: String in census.get("groups",{}):
+		if bool(census.groups[group_id].get("eligible",false)): eligible[group_id] = true
+	for point: Vector2i in points:
+		var bounds := Rect2i(point,Vector2i.ONE)
+		var direct: Dictionary = description.physical_group_requirements(bounds)
+		if direct.get("status")!="described" or not direct.get("groupIds",[]).is_empty(): continue
+		var boundary: Dictionary = description.exterior_structural_group_requirements(bounds,eligible)
+		if boundary.get("status")=="described" and not boundary.get("groupIds",[]).is_empty():
+			return {"bounds":bounds,"direct":direct,"boundary":boundary}
+	return {}
+
+func wait_inflight_kind(s, service, kind: String, label: String) -> void:
+	var deadline := Time.get_ticks_msec()+105000
+	while (service._inflight.get("kind","")!=kind) and Time.get_ticks_msec()<deadline:
+		s.advance_citadel_publication(Rect2i(),true)
+		await process_frame
+	check(label,service._inflight.get("kind","")==kind)
 func close(value: Owner, label: String) -> void:
 	await value.wait_for_terrain_workers_before_quit()
 	check(label+"_publication_shutdown",value.structure_system.citadel_publication.stats().shutdownComplete)
@@ -218,6 +293,207 @@ func actual_source() -> void:
 		check("reentry_deduplicates_pending_request",a._requests.size()==1 and a._requests.has(REGION) and a._requests[REGION].receipt.is_empty() and service.stats().dispatchCount==1)
 	check("preparation_not_city_readiness",s.generated_building_count==0 and s.generated_structures.is_empty() and not service.stats().publicationReady)
 	await close(value,"actual")
+
+func actual_packet_demand() -> void:
+	# The retained-source request is the only production opt-in for packet mode.
+	# Both controls use the frozen fixture; no recipe/city generation occurs.
+	var source := load_actual()
+	check("actual_packet_fixture_frozen",not source.is_empty() and source.is_read_only())
+	if source.is_empty(): return
+	var reservation: Rect2i = source.get("reservationCells",Rect2i())
+	var value := owner()
+	var s = value.structure_system
+	var admission = s.citadel_terrain_admission
+	var service = s.citadel_publication
+	var parent := Node3D.new()
+	var trees := PacketTrees.new()
+	value.add_child(parent)
+	inject(admission,REGION,source)
+	source={}
+	var binding: Dictionary = admission.source_state(REGION).binding
+	check("actual_packet_scene_callbacks_bound",service.configure_scene_publication(parent,trees.publish,trees.retire))
+	check("actual_packet_nonempty_normal_request_admitted",service.set_retained_source_requests([retained_packet_request(binding,[ACTUAL_PACKET_GROUP])]))
+	await wait_inflight_kind(s,service,"physical_group_packet","actual_packet_worker_started")
+	metrics.actualPacketPending={"inflight":service._inflight.duplicate(true),"prepared":service._prepared.size(),"scenes":service._scenes.size(),
+		"sceneCallbacksReady":service._scene_callbacks_ready(),"failures":service._failures.duplicate(true),"stats":service.stats()}
+	var active: Dictionary = service._worker._active
+	var started_groups: Array = active.get("groupIds",[])
+	var actual_base = service._scenes.get(REGION,{}).get("job",null)
+	var base = actual_base._cpu.get("publicationBase") if actual_base!=null else null
+	var census := Preparation.classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source) if base!=null else {}
+	var selected_census: Dictionary = census.get("groups",{}).get(ACTUAL_PACKET_GROUP,{})
+	check("actual_packet_selected_exact_nonempty_normal_group",started_groups==[ACTUAL_PACKET_GROUP] and census.get("ready",false) \
+		and selected_census.get("eligible",false) and selected_census.get("families",[]).has("normal"))
+	var exterior_probe: Dictionary = exterior_boundary_probe(base.description if base!=null else null,reservation,census) if base!=null else {}
+	var exterior_boundary: Dictionary = exterior_probe.get("boundary",{})
+	check("actual_packet_exterior_reservation_selects_minimal_structural_closure",not exterior_probe.is_empty() \
+		and exterior_probe.direct.get("groupIds",[]).is_empty() and exterior_boundary.get("boundarySelection","")=="nearest_collision_bearing_structural_group" \
+		and not exterior_boundary.get("boundaryGroupId","").is_empty() and exterior_boundary.get("groupIds",[]).has(exterior_boundary.get("boundaryGroupId","")) \
+		and exterior_boundary.get("groupIds",[]).size()<base.description.publication_groups.groups.size() and not exterior_boundary.get("publicationAcknowledged",true))
+	metrics.actualPacketStart={"fixtureSha256":SHA,"binding":binding.duplicate(),"groupId":ACTUAL_PACKET_GROUP,
+		"families":selected_census.get("families",[]),"workerKind":active.get("kind",""),
+		"transactionId":service._inflight.get("transactionId",0),"exteriorBoundaryProbe":exterior_probe.duplicate(true),
+		"scope":"actual frozen source, service dispatch and worker packet start plus exterior reservation boundary selection"}
+	# The next receipt has to come from the packet-mode publisher itself.  Keep
+	# the retained demand live while the bounded main-thread publication slices
+	# advance; no complete PreparedSource or legacy scene request is permitted.
+	var receipt: Dictionary = {}
+	var trace: Array[Dictionary] = []
+	var deadline := Time.get_ticks_msec()+120000
+	while Time.get_ticks_msec()<deadline:
+		var scene_entry: Dictionary = service._scenes.get(REGION,{})
+		var scene_job = scene_entry.get("job",null)
+		var phase := String(scene_job.status_count().get("phase","") if scene_job!=null else "")
+		var state := {"inflight":String(service._inflight.get("kind","")),"phase":phase,
+			"packetMode":bool(scene_entry.get("packetMode",false)),"fallback":service._packet_source_fallback.has(REGION)}
+		if trace.is_empty() or trace.back()!=state: trace.append(state)
+		if scene_job!=null:
+			receipt = scene_job.physical_group_receipt(ACTUAL_PACKET_GROUP,binding)
+			if receipt.get("status") in ["ready","failed"]: break
+		s.advance_citadel_publication(Rect2i(),true)
+		await process_frame
+	var final_scene_entry: Dictionary = service._scenes.get(REGION,{})
+	var final_scene_job = final_scene_entry.get("job",null)
+	if final_scene_job!=null and receipt.is_empty(): receipt=final_scene_job.physical_group_receipt(ACTUAL_PACKET_GROUP,binding)
+	var publisher = final_scene_job._building if final_scene_job!=null else null
+	check("actual_packet_physical_receipt_ready",receipt.get("status")=="ready")
+	check("actual_packet_receipt_exact_binding_and_transaction",receipt.get("binding")==binding and receipt.get("groupId")==ACTUAL_PACKET_GROUP \
+		and int(receipt.get("transactionId",0))>0 and int(receipt.get("sceneInstanceId",0))>0)
+	check("actual_packet_receipt_remains_packet_native",bool(final_scene_entry.get("packetMode",false)) and final_scene_job!=null \
+		and bool(final_scene_job._base_packet_mode) and not final_scene_job._cpu.has("prepared") and publisher!=null and bool(publisher._physical_packet_mode) \
+		and not service._packet_source_fallback.has(REGION) and service._failures.is_empty())
+	metrics.actualPacketReceipt={"fixtureSha256":SHA,"binding":binding.duplicate(),"groupId":ACTUAL_PACKET_GROUP,
+		"receipt":receipt.duplicate(true),"trace":trace,"worker":service._worker.poll(),"stats":service.stats(),
+		"scope":"actual frozen source, exact retained group packet compiles and reaches a live physical receipt; no legacy geometry fallback"}
+	await close(value,"actual_packet")
+
+	# A separate admitted source prevents test cancellation from influencing the
+	# deferred-group control. An unsupported door-owning group must retain its
+	# exact source demand and binding in the packet scene. It must never widen to
+	# a complete legacy source preparation.
+	source = load_actual()
+	check("actual_packet_deferred_fixture_frozen",not source.is_empty() and source.is_read_only())
+	if source.is_empty(): return
+	value = owner(); s=value.structure_system; admission=s.citadel_terrain_admission; service=s.citadel_publication
+	parent=Node3D.new()
+	trees=PacketTrees.new()
+	value.add_child(parent)
+	inject(admission,REGION,source); source={}
+	binding=admission.source_state(REGION).binding
+	check("actual_packet_deferred_scene_callbacks_bound",service.configure_scene_publication(parent,trees.publish,trees.retire))
+	check("actual_packet_ineligible_request_admitted",service.set_retained_source_requests([retained_packet_request(binding,[ACTUAL_INELIGIBLE_GROUP])]))
+	var deferred_entry: Dictionary = {}
+	var deferred_demand: Dictionary = {}
+	var deferred_trace: Array[Dictionary] = []
+	var deferred_deadline := Time.get_ticks_msec()+120000
+	while Time.get_ticks_msec()<deferred_deadline:
+		deferred_entry=service._scenes.get(REGION,{})
+		deferred_demand=deferred_entry.get("packetDemandStatus",{})
+		var deferred_state := {"inflight":String(service._inflight.get("kind","")),"prepared":service._prepared.has(REGION),
+			"scene":not deferred_entry.is_empty(),"packetMode":bool(deferred_entry.get("packetMode",false)),
+			"demand":deferred_demand.duplicate(true),"failure":service._failures.get(REGION,{})}
+		if deferred_trace.is_empty() or deferred_trace.back()!=deferred_state: deferred_trace.append(deferred_state)
+		if bool(deferred_entry.get("packetMode",false)) and deferred_demand.get("reason","")=="packet_foreground_groups_deferred": break
+		s.advance_citadel_publication(Rect2i(),true)
+		await process_frame
+	deferred_entry=service._scenes.get(REGION,{})
+	deferred_demand=deferred_entry.get("packetDemandStatus",{})
+	var deferred_job = deferred_entry.get("job",null)
+	active=service._worker._active
+	check("actual_packet_ineligible_is_explicitly_deferred",deferred_demand.get("status")=="retained" \
+		and deferred_demand.get("reason")=="packet_foreground_groups_deferred" \
+		and deferred_demand.get("blockedGroupIds",[]).has(ACTUAL_INELIGIBLE_GROUP) \
+		and deferred_demand.get("deferredGroupIds",[]).has(ACTUAL_INELIGIBLE_GROUP) \
+		and not deferred_demand.get("foregroundGroupIds",[]).has(ACTUAL_INELIGIBLE_GROUP) \
+		and deferred_demand.get("requests",[]).is_empty())
+	check("actual_packet_ineligible_retains_retryable_packet_demand",service._packet_group_ids(binding).has(ACTUAL_INELIGIBLE_GROUP) \
+		and deferred_job!=null and bool(deferred_job._base_packet_mode) and bool(deferred_job._packet_foreground_configured) \
+		and deferred_job._packet_deferred_groups.has(ACTUAL_INELIGIBLE_GROUP) and not deferred_job._packet_foreground_groups.has(ACTUAL_INELIGIBLE_GROUP))
+	check("actual_packet_ineligible_preserves_binding_without_legacy_preparation",bool(deferred_entry.get("packetMode",false)) \
+		and deferred_entry.get("binding",{})==binding and admission.source_state(REGION).binding==binding \
+		and not service._packet_source_fallback.has(REGION) and service._inflight.get("kind","")!="preparation" \
+		and active.get("kind","")!="preparation" and deferred_job!=null and not deferred_job._cpu.has("prepared") \
+		and service._failures.is_empty())
+	metrics.actualPacketDeferred={"fixtureSha256":SHA,"binding":binding.duplicate(),"groupId":ACTUAL_INELIGIBLE_GROUP,
+		"packetDemandStatus":deferred_demand.duplicate(true),"trace":deferred_trace,"workerKind":active.get("kind",""),"dispatchCount":service.stats().dispatchCount,
+		"scope":"actual frozen source keeps an unsupported foreground group explicit and retryable in packet mode; no whole-source legacy preparation"}
+	await close(value,"actual_packet_deferred")
+
+## Exact actual packet closure for the smallest fully eligible navigation tile.
+## It proves retained group ordering, packet physical receipt, then the existing
+## navigation producer receipt. It intentionally stops before NavigationServer,
+## route, NPC, or headed gameplay work.
+func actual_packet_tile_receipt(retain_owner := false, tile: Vector2i = ACTUAL_PACKET_TILE, group_ids: Array[String] = ACTUAL_PACKET_TILE_GROUPS, background_group_id := "") -> Dictionary:
+	var source := load_actual()
+	var report := {"fixtureSha256":SHA,"tileKey":"%d,%d" % [tile.x,tile.y],
+		"groupIds":group_ids.duplicate(),"trace":[],"scope":"actual frozen source packet receipt followed by exact tile producer receipt; no NavigationServer or gameplay"}
+	if source.is_empty() or not source.is_read_only():
+		report.reason="fixture_not_frozen"
+		return report
+	var value := owner()
+	var s = value.structure_system
+	var admission = s.citadel_terrain_admission
+	var service = s.citadel_publication
+	var parent := Node3D.new()
+	var trees := PacketTrees.new()
+	value.add_child(parent)
+	inject(admission,REGION,source)
+	source={}
+	var binding: Dictionary = admission.source_state(REGION).binding
+	if not service.configure_scene_publication(parent,trees.publish,trees.retire) \
+		or not service.set_retained_source_requests([retained_packet_tile_request(binding,group_ids,tile)]):
+		report.reason="service_admission_rejected"
+		await close(value,"actual_packet_tile")
+		return report
+	var physical := {}
+	var navigation := {}
+	var priority_probe := {"requested":background_group_id,"submitted":background_group_id.is_empty(),"retained":false,"p0":false,"p2":false}
+	var deadline := Time.get_ticks_msec()+120000
+	while Time.get_ticks_msec()<deadline:
+		var entry: Dictionary = service._scenes.get(REGION,{})
+		var job = entry.get("job",null)
+		if job!=null:
+			# Submit one known deferred source group while the exact tile's physical
+			# closure is still pending. This uses the real service demand path and
+			# verifies that a retained background tile stays priority 2 rather than
+			# silently joining the startup packet at priority 0.
+			if not priority_probe.submitted:
+				priority_probe.submitted = true
+				service._packet_navigation_physical_ready(REGION,binding,[background_group_id],2)
+			physical={}
+			for group_id: String in group_ids:
+				physical[group_id]=job.physical_group_receipt(group_id,binding)
+			var demand: Dictionary = entry.get("packetDemandStatus",{})
+			for request: Dictionary in demand.get("requests",[]):
+				if request.get("groupIds",[]).has(background_group_id):
+					priority_probe.retained = int(request.get("priority",-1))==2
+				if request.get("groupIds",[]).has(group_ids[0]):
+					priority_probe.p0 = int(request.get("priority",-1))==0
+			priority_probe.p2 = not demand.get("foregroundGroupIds",[]).has(background_group_id)
+			if physical.values().all(func(receipt): return receipt.get("status")=="ready"):
+				navigation=service.navigation_tile_sources(tile)
+		var state := {"inflight":String(service._inflight.get("kind","")),"phase":String(job.status_count().get("phase","") if job!=null else ""),
+			"physicalReady":physical.values().filter(func(receipt): return receipt.get("status")=="ready").size(),"navigation":String(navigation.get("status","")),
+			"navigationReason":String(navigation.get("reason",""))}
+		if report.trace.is_empty() or report.trace.back()!=state: report.trace.append(state)
+		if navigation.get("status") in ["ready","failed"]: break
+		s.advance_citadel_publication(Rect2i(),true)
+		await process_frame
+	report.binding=binding.duplicate()
+	report.physicalReceipts=physical.duplicate(true)
+	report.navigation=navigation.duplicate(true)
+	report.priorityProbe=priority_probe.duplicate(true)
+	report.ready=physical.size()==group_ids.size() and physical.values().all(func(receipt): return receipt.get("status")=="ready") \
+		and navigation.get("status")=="ready" and navigation.get("sources",[]).size()==1 and navigation.sources[0].get("binding")==binding \
+		and (background_group_id.is_empty() or (priority_probe.retained and priority_probe.p0 and priority_probe.p2))
+	report.stats=service.stats()
+	if retain_owner:
+		# The acknowledgement contract continues with this exact frozen source.
+		# It is responsible for calling close after it has released navigation work.
+		report.owner=value
+	else:
+		await close(value,"actual_packet_tile")
+	return report
 
 func controlled_lifecycle() -> void:
 	print("PUBLICATION SERVICE synthetic_lifecycle")
@@ -295,7 +571,7 @@ func runtime_dispatch() -> void:
 	runtime.site_gate = gate
 	check("runtime_real_generation_current",runtime.generation_context_current())
 	runtime._process(0.016)
-	var expected := Rect2i(cell-Vector2i.ONE*176,Vector2i.ONE*353)
+	var expected := Runtime.SITE_GATE_SCRIPT.footprint(value.player.global_position,Runtime.FINAL_VIEW_DISTANCE)
 	check("runtime_current_supplies_player_footprint",s.last_allow and s.last_bounds==expected)
 	check("runtime_current_dispatches",s.citadel_publication.stats().dispatchCount==1)
 	s.reset()
@@ -445,6 +721,7 @@ func early_description_lifecycle() -> void:
 			value.structure_system.advance_citadel_publication(bounds(),true)
 			await process_frame
 		var prefix: String = "early_description_cancel" if cancel_after_transfer else "early_description_complete"
+		var serial := -1
 		check(prefix+"_arrives_before_final_preparation",service._described.has(REGION) and service.stats().acceptedCount==0 and worker.poll().workerRunning)
 		if service._described.has(REGION):
 			var source: Dictionary = admission.source_state(REGION)
@@ -452,7 +729,7 @@ func early_description_lifecycle() -> void:
 			check(prefix+"_source_identity",entry.binding==source.binding and entry.description.binding==source.binding and entry.profile.origin==entry.description.origin)
 			var obligations: Dictionary = service._source_description_requirements(REGION,bounds(),source.binding)
 			check(prefix+"_obligations_are_not_receipt",obligations.get("status")=="described" and obligations.get("publicationAcknowledged")==false and not obligations.has("physicalOwnerAcknowledgements"))
-			var serial: int = entry.serial
+			serial = int(entry.serial)
 			value.structure_system.advance_citadel_publication(bounds(),true)
 			check(prefix+"_transfer_not_duplicated",service._described[REGION].serial==serial)
 		if cancel_after_transfer:
@@ -461,13 +738,72 @@ func early_description_lifecycle() -> void:
 		worker.gate.post() # Always release, including a failed assertion/deadline.
 		if not cancel_after_transfer:
 			await wait_prepared(value.structure_system,1,REGION,prefix+"_final_result_accepted")
-			check(prefix+"_description_survives_final_transfer",service._described.has(REGION))
+			var completed_description = service._prepared.get(REGION,{}).get("prepared",null)
+			completed_description = completed_description.describe(admission.source_state(REGION).binding) if completed_description!=null else null
+			check(prefix+"_description_promotes_completed_representation",service._described.has(REGION) \
+				and service._described[REGION].description==completed_description and service._described[REGION].serial==serial)
 		await close(value,prefix)
+
+func actual_early_description_promotion() -> void:
+	# The two descriptions are independently restored from the actual frozen
+	# source, matching bootstrap->legacy promotion rather than the shared-object
+	# compact/dense sibling control above.
+	var source := load_actual()
+	check("actual_early_promotion_fixture_frozen",not source.is_empty() and source.is_read_only())
+	if source.is_empty(): return
+	# The archived fixture was captured for demanded navigation.  The headed
+	# regression is the ordinary legacy branch, where dense navigation is built
+	# after the early compact transfer. Preserve every frozen source value while
+	# selecting that production branch explicitly.
+	source = source.duplicate(true)
+	source["demandedNavigation"] = false
+	WorkerControls.freeze(source)
+	var value: Owner = owner()
+	var service = value.structure_system.citadel_publication
+	var admission = value.structure_system.citadel_terrain_admission
+	inject(admission,REGION,source)
+	var worker := DescriptionGatedWorker.new()
+	service._worker = worker
+	var deadline := Time.get_ticks_msec()+120000
+	while service._described.is_empty() and Time.get_ticks_msec()<deadline:
+		value.structure_system.advance_citadel_publication(bounds(),true)
+		await process_frame
+	check("actual_early_promotion_compact_arrived",service._described.has(REGION) and worker.poll().workerRunning)
+	var early = service._described.get(REGION,{})
+	var early_description = early.get("description")
+	var early_serial := int(early.get("serial",-1))
+	var binding: Dictionary = admission.source_state(REGION).binding
+	var early_digest := String(early_description.source_identity_digest) if early_description!=null else ""
+	worker.gate.post()
+	await wait_prepared(value.structure_system,1,REGION,"actual_early_promotion_final_accepted")
+	var final_description = service._prepared.get(REGION,{}).get("prepared",null)
+	final_description = final_description.describe(binding) if final_description!=null else null
+	var stored = service._described.get(REGION,{})
+	check("actual_early_promotion_exact_provenance",early_description!=null and final_description!=null \
+		and early_serial>0 and early_digest.length()==64 \
+		and early_digest==String(final_description.source_identity_digest) \
+		and stored.get("description")==final_description and stored.get("binding",{})==binding \
+		and int(stored.get("serial",-1))==early_serial \
+		and stored.get("profile",{}).get("sourceSignature","")==admission.source_state(REGION).sourceSignature \
+		and service._failures.is_empty())
+	# A ready scene must not redirect moving-bound scheduling into live physical
+	# proof. Acceptance owns that work through physical_publication_state.
+	var scheduling_probe := SchedulingJobProbe.new()
+	service._scenes[REGION] = {"region":REGION,"binding":binding,"phase":"scene_ready","job":scheduling_probe}
+	var scheduled: Dictionary = service.region_dependency_requirements(bounds())
+	check("scene_present_scheduling_uses_immutable_description",scheduled.get("status")=="described" \
+		and scheduling_probe.source_requirement_calls==0 and scheduled.get("physicalOwnerAcknowledgements",{}).is_empty())
+	service._scenes.erase(REGION)
+	metrics.actualEarlyPromotion={"binding":binding.duplicate(),"digest":early_digest,"sourceSha256":SHA,
+		"scope":"actual frozen source, independent early compact and final dense descriptors"}
+	await close(value,"actual_early_promotion")
 
 func _run() -> void:
 	await early_description_lifecycle()
+	await actual_early_description_promotion()
 	await retained_demand()
 	await actual_source()
+	await actual_packet_demand()
 	await controlled_lifecycle()
 	await runtime_dispatch()
 	await paused_and_failure()

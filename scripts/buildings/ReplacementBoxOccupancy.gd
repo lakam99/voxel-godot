@@ -6,10 +6,35 @@ extends RefCounted
 const MAX_CELLS := 4096
 const MAX_WORK := 250000
 
+# Only this owner's factory binds a validated, sorted, privately copied list.
+# Both levels are frozen; a replaced member array invalidates the binding.
+class PreparedSolids extends RefCounted:
+	var _solids: Array = []
+	var _bound_solids: Array = []
+	func valid_binding() -> bool:
+		return _solids.is_read_only() and is_same(_solids,_bound_solids)
+
 static func cover(region: Array, solids: Array) -> Dictionary:
 	if not valid(region) or not _valid_list(solids): return _fail("invalid_box_input")
+	return _cover_sorted(region,_sorted(solids))
+
+static func prepare_solids(solids: Array) -> PreparedSolids:
+	if not _valid_list(solids): return null
+	var sorted: Array = _sorted(solids)
+	for box: Array in sorted: box.make_read_only()
+	sorted.make_read_only()
+	var prepared := PreparedSolids.new()
+	prepared._solids = sorted
+	prepared._bound_solids = sorted
+	return prepared
+
+static func cover_prepared(region: Array, prepared) -> Dictionary:
+	if not valid(region) or not prepared is PreparedSolids or not prepared.valid_binding(): return _fail("invalid_box_input")
+	return _cover_sorted(region,prepared._solids)
+
+static func _cover_sorted(region: Array, sorted_solids: Array) -> Dictionary:
 	var work := {"steps": 0}
-	var result := _difference([region.duplicate()], _sorted(solids), work)
+	var result := _difference([region.duplicate()], sorted_solids, work)
 	if not result.ready: return result
 	return {"ready": true, "covered": result.cells.is_empty(), "uncovered": _sorted(result.cells), "work": work.steps, "reason": ""}
 

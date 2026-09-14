@@ -1,6 +1,9 @@
 extends RefCounted
 class_name NavmeshWorldService
 
+## Value-only scheduling events; subscribers must still validate acceptance.
+signal accepted_tile_changed(tile_key: String, source_key: String, world_seed: String, owner_id: int, serial: int, present: bool)
+
 const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/NavigationBackendConfig.gd")
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
@@ -77,6 +80,9 @@ var _staged_mesh: NavigationMesh
 var _staged_binding := {}
 var _publication_bindings := {}
 var _publication_resetting := false
+var _accepted_tile_sources: Dictionary = {}
+var _accepted_source_serial := 0
+var _publication_producers: Dictionary = {}
 
 func setup(config = null) -> void:
 	backend_config = config if config != null else NavigationBackendConfigScript.from_environment()
@@ -84,6 +90,12 @@ func setup(config = null) -> void:
 		_ensure_navigation_map()
 
 func clear() -> void:
+	for reference: WeakRef in _publication_producers.values():
+		var producer = reference.get_ref()
+		if is_instance_valid(producer) and producer.has_method("release_navigation_capture_cache"):
+			producer.release_navigation_capture_cache()
+	_publication_producers.clear()
+	for region: String in _accepted_tile_sources.keys(): _retire_accepted_tile(region)
 	_publication_queue.cancel()
 	_publication_owner = null
 	_publication_bindings.clear()
@@ -163,7 +175,8 @@ func register_chunk_descriptor(descriptor, source_key := "") -> Dictionary:
 		and not dirty_regions_by_region.has(region_id) \
 		and String(existing_metrics.get("signature", "")) == signature \
 		and String(_tile_publication_receipts.get(region_id, {}).get("sourceKey", "")) == source_key \
-		and (descriptor != _staged_descriptor or _publication_bindings.get(region_id,{}) == _staged_binding):
+		and (descriptor != _staged_descriptor or (descriptor == descriptors_by_region.get(region_id) \
+			and _publication_bindings.get(region_id,{}) == _staged_binding)):
 		return {
 			"status": String(region_states.get(region_id, "installed")),
 			"regionId": region_id,
@@ -247,6 +260,9 @@ func unregister_chunk(region_id: String) -> Dictionary:
 func register_tile_snapshot(snapshot: Dictionary) -> Dictionary:
 	if String(snapshot.get("publicationStatus", "ready")) != "ready":
 		return {"status":snapshot.get("publicationStatus", "pending"),"reason":snapshot.get("reason", "source_pending"),"installed":false}
+	# An admitted filter packet has no surface arrays until the worker completes.
+	if snapshot.has("publicationInput"):
+		return _request_prepared_tile(snapshot)
 	# A demand containing only a tile key is not an authoritative empty tile.
 	# Reject it before descriptor replacement can retire the installed geometry.
 	if not bool(snapshot.get("unloaded", false)) and not snapshot.get("surfaces") is Array \
@@ -259,41 +275,71 @@ func register_tile_snapshot(snapshot: Dictionary) -> Dictionary:
 
 func _request_prepared_tile(snapshot: Dictionary) -> Dictionary:
 	if _publication_resetting: return {"status":"pending","installed":false,"reason":"navigation_world_reset"}
-	var source: Dictionary = snapshot.get("publicationSource", {})
-	var tile_key := String(snapshot.get("tileKey", ""))
-	var source_key := String(snapshot.get("sourceKey", ""))
+	var filtering := snapshot.has("publicationInput")
+	var source_value = snapshot.get("publicationInput",{}) if filtering else snapshot.get("publicationSource",{})
+	if not source_value is Dictionary:
+		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
+	var source: Dictionary = source_value
+	if not source.is_read_only() or not source.get("snapshot") is Dictionary or not source.snapshot.is_read_only() \
+			or not source.get("profile") is Dictionary or not source.profile.is_read_only():
+		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
+	var tile_key := String(snapshot.get("tileKey",""))
+	var source_key := String(snapshot.get("sourceKey",""))
 	var owner_ref = snapshot.get("publicationOwner")
 	var owner = owner_ref.get_ref() if owner_ref is WeakRef else null
 	if source.get("status") != "prepared" or owner == null or source_key.is_empty() or tile_key.is_empty():
 		return {"status":"failed","installed":false,"reason":"invalid_navigation_publication_source"}
-	var world_seed := String(source.get("profile", {}).get("worldSeed", ""))
-	if not _source_owner_matches(owner,tile_key,source_key,world_seed):
-		return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
+	var world_seed := String(source.get("profile",{}).get("worldSeed",""))
+	if source.get("snapshot",{}).get("worldSeed") != world_seed or source.snapshot.get("tileKey") != tile_key \
+			or source.snapshot.get("sourceKey") != source_key or source.snapshot.get("regionId") != NavigationBakeDescriptorScript.chunk_region_id(tile_key) \
+			or (filtering and (source.get("profile",{}).get("captureMode") != "filter_input" or not source.has("filterInput"))):
+		return {"status":"failed","installed":false,"reason":"navigation_capture_identity_mismatch"}
+	var queue_state: Dictionary = _publication_queue.stats()
+	var queued_binding: Dictionary = queue_state.binding
+	# A completed slot already owns an immutable captured source. Polling that
+	# slot must stay cheap; perform the full live-source proof once, immediately
+	# before installation, rather than three times on the completion path.
+	var consuming_current_ready: bool = queue_state.status == "ready" \
+		and queued_binding.get("siteId") == tile_key \
+		and queued_binding.get("sourceKey") == world_seed+"|"+source_key
+	var source_validated_in_call := false
+	if not consuming_current_ready:
+		if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+			return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
+		source_validated_in_call = true
+	_publication_producers[owner.get_instance_id()] = owner_ref
+	if owner.has_method("bind_navigation_publication_service"): owner.bind_navigation_publication_service(self)
 	var binding := {"siteId":tile_key,"sourceKey":world_seed+"|"+source_key,
 		"generation":maxi(1,int(source.snapshot.get("sourceRevision",1)))}
-	# Recapture after unrelated global changes does not replace a tile source.
-	# Validate the slot owner even if advance_publication already ran this frame;
-	# a new requester must never adopt an orphaned or stale prepared packet.
-	var active_binding: Dictionary = _publication_queue.stats().binding
+	# Preserve current-slot validation BEFORE the installation cache fast path.
+	var active_binding: Dictionary = queued_binding
 	if active_binding.get("siteId") == tile_key:
 		var active_owner = _publication_owner.get_ref() if _publication_owner != null else null
-		if active_owner != owner or not _source_owner_matches(active_owner,tile_key,_publication_source_key,_publication_world_seed):
+		if active_owner != owner or (not consuming_current_ready \
+				and not _source_owner_matches(active_owner,tile_key,_publication_source_key,_publication_world_seed)):
 			_publication_queue.cancel()
 			_publication_owner = null
 		elif active_binding.get("sourceKey") == binding.sourceKey:
 			binding = active_binding
-	var region_id := String(source.snapshot.get("regionId",NavigationBakeDescriptorScript.chunk_region_id(tile_key)))
-	var receipt: Dictionary = _tile_publication_receipts.get(region_id,{})
-	var existing = descriptors_by_region.get(region_id)
-	if existing is PreparedNavigationDescriptorScript and existing.preparation_valid() \
-			and receipt.get("sourceKey") == source_key and not dirty_regions_by_region.has(region_id) \
-			and region_rids_by_region.has(region_id):
-		var installed_binding: Dictionary = _publication_bindings.get(region_id,{})
-		if installed_binding.get("siteId") == tile_key and installed_binding.get("sourceKey") == binding.sourceKey:
-			binding = installed_binding
-		if installed_binding == binding:
-			return {"status":"installed","installed":true,"cached":true,"regionId":region_id,"tileKey":tile_key}
-	advance_publication()
+	var region_id := String(source.snapshot.regionId)
+	# The progress lookup is structural and O(1). This operation already owns a
+	# physical proof unless it entered with a completed queue slot; acquire that
+	# proof at most once before borrowing an installed source.
+	var accepted := accepted_tile_progress_source(tile_key,source_key,world_seed,owner)
+	if not accepted.is_empty() and not source_validated_in_call:
+		if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+			return {"status":"pending","installed":false,"reason":"navigation_source_owner_changed"}
+		source_validated_in_call=true
+	if not accepted.is_empty():
+		_attach_accepted_source(snapshot,accepted)
+		return {"status":"empty" if accepted.empty else "installed","installed":not accepted.empty,
+			"cached":true,"regionId":region_id,"tileKey":tile_key}
+	# A borrowed accepted result may not be replayed after its installation retires.
+	# A future adapter call obtains the retained input or captures current facts.
+	if snapshot.has("publicationAcceptedSerial"):
+		return {"status":"pending","installed":false,"reason":"navigation_accepted_source_retired"}
+	if not consuming_current_ready:
+		advance_publication()
 	var requested: Dictionary = _publication_queue.request(source,binding)
 	if _publication_queue.stats().binding == binding:
 		_publication_owner = owner_ref
@@ -301,39 +347,228 @@ func _request_prepared_tile(snapshot: Dictionary) -> Dictionary:
 		_publication_world_seed = world_seed
 	if requested.status != "ready":
 		if requested.status == "failed" and _publication_queue.stats().binding == binding:
-			# Report the failure to its retained requester, but release the single
-			# slot so unrelated valid demand can still progress. The caller owns
-			# retry/failure state; cancellation does not acknowledge this tile.
 			_publication_queue.cancel()
 			_publication_owner = null
 		return {"status":requested.status,"reason":requested.get("reason","navigation_preparation_pending"),"installed":false}
 	var ready: Dictionary = _publication_queue.take_ready(binding)
 	if ready.is_empty(): return {"status":"pending","reason":"navigation_preparation_pending","installed":false}
+	var accepted_source: Dictionary = ready.get("acceptedSource",{})
+	if (not source_validated_in_call and not _source_owner_matches(owner,tile_key,source_key,world_seed)) or ready.binding != binding \
+			or accepted_source.get("status") != "prepared" or accepted_source.snapshot.get("worldSeed") != world_seed \
+			or accepted_source.snapshot.get("tileKey") != tile_key or accepted_source.snapshot.get("sourceKey") != source_key \
+			or accepted_source.snapshot.get("regionId") != region_id:
+		_retire_navigation_ready(ready)
+		_publication_owner = null
+		return {"status":"pending","installed":false,"reason":"navigation_completed_source_changed"}
 	_staged_descriptor = ready.descriptor
 	_staged_mesh = ready.mesh
 	_staged_binding = ready.binding
 	var result := register_chunk_descriptor(_staged_descriptor,source_key)
 	if result.get("installed",false) or result.get("status") == "empty":
 		_publication_bindings[region_id] = ready.binding
-	if not result.get("installed",false) and result.get("status") != "empty":
-		_retire_prepared_descriptor(_staged_descriptor)
+		_retire_accepted_tile(region_id)
+		_accepted_source_serial += 1
+		var retained := {"source":accepted_source,"owner":owner_ref,"binding":ready.binding,
+			"descriptorId":_staged_descriptor.get_instance_id(),"serial":_accepted_source_serial,
+			"empty":result.get("status") == "empty","diagnostics":ready.get("diagnostics",{}),
+			"doorOwners":snapshot.get("publicationDoorOwners",{}),
+			"filterProfile":ready.get("filterProfile",{}),
+			"captureProfile":ready.get("captureProfile",{}),
+			"installationSerial":navigation_map_dirty_serial if result.get("status")=="empty" else _tile_publication_receipts.get(region_id,{}).get("installationSerial",-1),
+			"mapRid":navigation_map}
+		retained.make_read_only()
+		_accepted_tile_sources[region_id] = retained
+		accepted_tile_changed.emit(tile_key,source_key,world_seed,owner.get_instance_id(),_accepted_source_serial,true)
+		_attach_accepted_source(snapshot,retained)
+		var monitor = owner.performance_monitor() if owner.has_method("performance_monitor") else null
+		if monitor != null:
+			for field: String in retained.filterProfile:
+				monitor.observe_external_duration("navmesh_worker_"+field,float(retained.filterProfile[field])/1000.0)
+	else:
+		_retire_navigation_ready(ready)
 	_staged_descriptor = null; _staged_mesh = null; _staged_binding = {}
 	_publication_owner = null
 	return result
 
+func accepted_tile_state(tile_key: String, source_key: String, world_seed: String, owner) -> Dictionary:
+	# Read-only borrowed source ownership and live acknowledgement. A queued
+	# server sync is not source loss and must not trigger another worker build.
+	var result := {"status":"absent","reason":"navigation_accepted_source_absent","sourceOwned":false,
+		"empty":false,"accepted":{},"receipt":{},"acceptedSerial":0,"installationSerial":-1}
+	if tile_key.is_empty() or source_key.is_empty() or world_seed.is_empty():
+		return _accepted_state_result(result,"invalid","invalid_publication_request",{})
+	# Validate the requested identity before comparing an older installation.
+	# Stale callers cannot borrow it; a legitimate successor must be free to
+	# capture and replace the predecessor through the ordinary worker path.
+	if not _source_owner_matches(owner,tile_key,source_key,world_seed):
+		return _accepted_state_result(result,"invalid","navigation_source_owner_changed",{})
+	var region: String = NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+	var accepted: Dictionary = _accepted_tile_sources.get(region,{})
+	if accepted.is_empty(): return result
+	if accepted.owner.get_ref()!=owner or accepted.source.snapshot.get("sourceKey")!=source_key \
+			or accepted.source.snapshot.get("worldSeed")!=world_seed:
+		result.reason = "navigation_accepted_source_obsolete"
+		return result
+	result.acceptedSerial = int(accepted.serial)
+	result.installationSerial = int(accepted.installationSerial)
+	result.empty = bool(accepted.empty)
+	var descriptor = descriptors_by_region.get(region)
+	if descriptor==null or descriptor.get_instance_id()!=accepted.descriptorId:
+		return _accepted_state_result(result,"invalid","navigation_accepted_descriptor_retired",{})
+	if not descriptor is PreparedNavigationDescriptorScript or not descriptor.preparation_valid():
+		return _accepted_state_result(result,"invalid","prepared_navigation_source_changed",{})
+	if dirty_regions_by_region.has(region):
+		return _accepted_state_result(result,"invalid","navigation_accepted_source_dirty",{})
+	if _publication_bindings.get(region,{})!=accepted.binding:
+		return _accepted_state_result(result,"invalid","navigation_accepted_binding_changed",{})
+	var snapshot: Dictionary = accepted.source.snapshot
+	if snapshot.get("sourceKey")!=source_key or snapshot.get("worldSeed")!=world_seed \
+			or snapshot.get("tileKey")!=tile_key or snapshot.get("regionId")!=region:
+		return _accepted_state_result(result,"invalid","navigation_accepted_source_changed",{})
+	result.receipt = {"status":"pending","empty":result.empty,"sourceKey":source_key,
+		"sourceRevision":int(descriptor.get("revision")),"installationSerial":result.installationSerial,
+		"acceptedSerial":result.acceptedSerial}
+	if accepted.empty:
+		if not bool(descriptor.get("loaded")) or region_states.get(region)!="empty" or region_rids_by_region.has(region) \
+				or not descriptor.walkable_surfaces.is_empty() or not descriptor.door_links.is_empty() \
+				or not descriptor.crossing_links.is_empty():
+			return _accepted_state_result(result,"invalid","authoritative_empty_source_changed",{})
+		if not backend_config.use_navmesh():
+			return _accepted_state_result(result,"invalid","navmesh_backend_disabled",{})
+		# An empty replacement still owns the removal of its predecessor. Its
+		# barrier is recorded after region/link retirement, even without a RID.
+		if _publication_synced_serial<int(accepted.installationSerial) or publication_sync_pending():
+			return _accepted_state_result(result,"retained","installation_sync_pending",accepted)
+		if navigation_map!=accepted.get("mapRid",RID()) or not NavigationServer3D.get_maps().has(navigation_map):
+			return _accepted_state_result(result,"invalid","installed_map_lost",{})
+		if not NavigationServer3D.map_is_active(navigation_map):
+			return _accepted_state_result(result,"retained","navigation_map_inactive",accepted)
+		# A true empty source has no region iteration to test. First empty
+		# publication also need not manufacture a positive map iteration.
+		return _accepted_state_result(result,"acknowledged","authoritative_empty_complete",accepted)
+	var receipt: Dictionary = _tile_publication_receipts.get(region,{})
+	if not region_rids_by_region.has(region) or receipt.get("sourceKey")!=source_key \
+			or receipt.get("descriptorId")!=accepted.descriptorId or receipt.get("installationSerial")!=accepted.installationSerial:
+		return _accepted_state_result(result,"invalid","navigation_accepted_installation_changed",{})
+	var checked: Dictionary = _validate_tile_installation(region,descriptor,receipt,source_key,{})
+	if not checked.is_empty():
+		return _accepted_state_result(result,"retained" if checked.status=="pending" else "invalid",String(checked.reason),
+			accepted if checked.status=="pending" else {})
+	var region_rid: RID = receipt.regionRid
+	if _navigation_map_iteration_id()<=0 or NavigationServer3D.region_get_iteration_id(region_rid)<=0:
+		return _accepted_state_result(result,"retained","installation_sync_pending",accepted)
+	return _accepted_state_result(result,"acknowledged","tile_publication_complete",accepted)
+
+static func _accepted_state_result(result: Dictionary, status: String, reason: String, accepted: Dictionary) -> Dictionary:
+	result.status = status
+	result.reason = reason
+	result.sourceOwned = status=="retained" or status=="acknowledged"
+	result.accepted = accepted if result.sourceOwned else {}
+	if not result.receipt.is_empty():
+		result.receipt.status = "ready" if status=="acknowledged" else ("pending" if status=="retained" else "failed")
+		result.receipt.reason = reason
+	return result
+
+func accepted_tile_source(tile_key: String, source_key: String, world_seed: String, owner) -> Dictionary:
+	# Compatibility source lookup: borrowed immutable facts survive pending sync
+	# and disabled publication. Callers use accepted_tile_state for readiness.
+	var state: Dictionary = accepted_tile_state(tile_key,source_key,world_seed,owner)
+	return state.accepted if state.sourceOwned else {}
+
+func accepted_tile_progress_source(tile_key: String, source_key: String, world_seed: String, owner) -> Dictionary:
+	# This is intentionally weaker than accepted_tile_state: it lends an already
+	# installed immutable source to a resumable consumer, but never proves that
+	# source is current or route-ready. The consumer must call accepted_tile_state
+	# before acknowledgement, which performs the full live physical proof.
+	if tile_key.is_empty() or source_key.is_empty() or not _source_owner_live(owner,world_seed):
+		return {}
+	var region := NavigationBakeDescriptorScript.chunk_region_id(tile_key)
+	var accepted: Dictionary = _accepted_tile_sources.get(region,{})
+	if accepted.is_empty() or accepted.owner.get_ref()!=owner \
+		or accepted.source.snapshot.get("sourceKey")!=source_key \
+		or accepted.source.snapshot.get("worldSeed")!=world_seed \
+		or accepted.source.snapshot.get("tileKey")!=tile_key \
+		or _publication_bindings.get(region,{})!=accepted.binding \
+		or dirty_regions_by_region.has(region):
+		return {}
+	var descriptor = descriptors_by_region.get(region)
+	if descriptor==null or descriptor.get_instance_id()!=accepted.descriptorId \
+		or not descriptor is PreparedNavigationDescriptorScript or not descriptor.preparation_valid():
+		return {}
+	return accepted
+
+func _attach_accepted_source(request: Dictionary, accepted: Dictionary) -> void:
+	# Only a per-call header copy is mutated; the adapter's cached input stays raw.
+	for field in accepted.source.snapshot: request[field] = accepted.source.snapshot[field]
+	request["publicationSource"] = accepted.source
+	request["publicationAcceptedSerial"] = accepted.serial
+	request["publicationDoorOwners"] = accepted.doorOwners
+	request["publicationCaptureProfile"] = accepted.captureProfile
+	if not accepted.diagnostics.is_empty(): request["publicationDiagnostics"] = accepted.diagnostics
+
+func retire_navigation_payload(payload: Dictionary) -> void:
+	_publication_queue.retire(payload)
+
+func retain_navigation_capture_owner(producer) -> void:
+	_publication_producers[producer.get_instance_id()] = weakref(producer)
+
+func _retire_accepted_tile(region: String) -> void:
+	if not _accepted_tile_sources.has(region): return
+	var retired: Dictionary = _accepted_tile_sources[region]
+	_publication_queue.retire(retired)
+	_accepted_tile_sources.erase(region)
+	var source: Dictionary = retired.source.snapshot
+	var owner = retired.owner.get_ref()
+	accepted_tile_changed.emit(String(source.tileKey),String(source.sourceKey),String(source.worldSeed),
+		owner.get_instance_id() if is_instance_valid(owner) else 0,int(retired.serial),false)
+
+func accepted_tile_scheduling_hint(tile_key: String, world_seed: String, owner) -> Dictionary:
+	# O(1) installation header lookup for a newly retained demand. No source,
+	# geometry or descriptor proof; this result cannot establish readiness.
+	var accepted: Dictionary = _accepted_tile_sources.get(NavigationBakeDescriptorScript.chunk_region_id(tile_key),{})
+	if accepted.is_empty() or not is_instance_valid(owner) or accepted.owner.get_ref()!=owner \
+			or accepted.source.snapshot.get("worldSeed")!=world_seed: return {}
+	return {"sourceKey":String(accepted.source.snapshot.sourceKey),"serial":int(accepted.serial)}
+
+func _retire_navigation_ready(ready: Dictionary) -> void:
+	# NavigationMesh upload resource retains its existing main-thread lifetime.
+	_publication_queue.retire({"descriptor":ready.get("descriptor"),
+		"acceptedSource":ready.get("acceptedSource",{}),"diagnostics":ready.get("diagnostics",{}),
+		"filterProfile":ready.get("filterProfile",{}),"captureProfile":ready.get("captureProfile",{})})
+
 func _source_owner_matches(owner, tile_key: String, source_key: String, world_seed: String) -> bool:
-	return is_instance_valid(owner) and is_instance_valid(owner.get("main")) \
-		and String(owner.main.get("seed_text")) == world_seed \
+	return _source_owner_live(owner,world_seed) \
 		and String(owner.navmesh_tile_source_key_for_tile(tile_key)) == source_key
 
+func _source_owner_live(owner, world_seed: String) -> bool:
+	return is_instance_valid(owner) and is_instance_valid(owner.get("main")) \
+		and not (owner is Node and owner.is_queued_for_deletion()) \
+		and not (owner.main is Node and owner.main.is_queued_for_deletion()) \
+		and String(owner.main.get("seed_text")) == world_seed
+
 func advance_publication(budget_usec := 4000) -> Dictionary:
-	var binding: Dictionary = _publication_queue.stats().binding
-	if not binding.is_empty():
-		var owner = _publication_owner.get_ref() if _publication_owner != null else null
-		if not _source_owner_matches(owner,String(binding.siteId),_publication_source_key,_publication_world_seed):
+	var state: Dictionary = _publication_queue.stats()
+	var binding: Dictionary = state.binding
+	# Explicit zero-budget calls are a synchronous inspection boundary. They are
+	# used by cancellation/retirement owners and must reject a changed source even
+	# when the worker has already advanced in this engine frame.
+	if budget_usec <= 0 and not binding.is_empty():
+		var inspection_owner = _publication_owner.get_ref() if _publication_owner != null else null
+		if not _source_owner_matches(inspection_owner,String(binding.siteId),_publication_source_key,_publication_world_seed):
 			_publication_queue.cancel()
 			_publication_owner = null
-	if _publication_queue.advanced_this_frame(): return _publication_queue.stats()
+			return _publication_queue.stats()
+	if _publication_queue.advanced_this_frame(): return state
+	if not binding.is_empty():
+		var owner = _publication_owner.get_ref() if _publication_owner != null else null
+		# Polling never establishes readiness. Ordinary positive slices check only
+		# lifecycle identity so a large physical proof cannot consume every frame.
+		# A zero-budget caller explicitly asks to hold worker/upload work while
+		# synchronously checking whether its retained source is still current.
+		if not _source_owner_live(owner,_publication_world_seed) \
+				or (budget_usec <= 0 and not _source_owner_matches(owner,String(binding.siteId),_publication_source_key,_publication_world_seed)):
+			_publication_queue.cancel()
+			_publication_owner = null
 	return _publication_queue.advance(budget_usec)
 
 func active_publication_request() -> Dictionary:
@@ -964,37 +1199,9 @@ func tile_publication_readiness(tile_key: String, expected_source_key: String, r
 	var receipt: Dictionary = _tile_publication_receipts.get(region_id, {})
 	for field: String in ["sourceKey","signature","sourceRevision","installationSerial","completeSurfaceCoverage","missingDeclaredSurfaceIds"]:
 		if receipt.has(field): result[field] = receipt[field]
-	if not bool(descriptor.get("loaded")): return _publication_result(result, "pending", "tile_unloaded")
-	if dirty_regions_by_region.has(region_id): return _publication_result(result, "pending", "tile_dirty")
-	if receipt.is_empty(): return _publication_result(result, "pending", "tile_not_installed")
-	if String(receipt.sourceKey) != expected_source_key:
-		return _publication_result(result, "pending", "source_key_mismatch")
-	if descriptor.get_instance_id() != receipt.descriptorId or int(descriptor.get("revision")) != int(receipt.sourceRevision) \
-			or not descriptor.has_method("stable_signature") or String(descriptor.stable_signature()) != String(receipt.signature):
-		return _publication_result(result, "failed", "installed_descriptor_changed")
-	if String(receipt.signature).is_empty(): return _publication_result(result, "failed", "missing_descriptor_signature")
-	if not backend_config.use_navmesh(): return _publication_result(result, "failed", "navmesh_backend_disabled")
-	# Queued server commands are not lost resources. Require an actual explicit
-	# sync before consulting installed membership, including after replacement.
-	if _publication_synced_serial < int(receipt.installationSerial) \
-			or navigation_map_synced_serial != navigation_map_dirty_serial:
-		return _publication_result(result, "pending", "installation_sync_pending")
-	# RID.is_valid only tests the handle, not whether the server still owns it.
-	# Check server membership before making RID-specific calls.
-	if navigation_map != receipt.mapRid or not NavigationServer3D.get_maps().has(navigation_map):
-		return _publication_result(result, "failed", "installed_map_lost")
-	if not NavigationServer3D.map_is_active(navigation_map):
-		return _publication_result(result, "pending", "navigation_map_inactive")
+	var checked: Dictionary = _validate_tile_installation(region_id,descriptor,receipt,expected_source_key,result)
+	if not checked.is_empty(): return checked
 	var region_rid: RID = receipt.regionRid
-	if region_rids_by_region.get(region_id, RID()) != region_rid \
-			or not NavigationServer3D.map_get_regions(navigation_map).has(region_rid):
-		return _publication_result(result, "failed", "installed_region_lost")
-	if not NavigationServer3D.region_get_enabled(region_rid):
-		return _publication_result(result, "pending", "installed_region_disabled")
-	if NavigationServer3D.region_get_transform(region_rid) != Transform3D.IDENTITY:
-		return _publication_result(result, "failed", "installed_region_transform_changed")
-	if int(receipt.polygonCount) <= 0 or receipt.surfaces.is_empty():
-		return _publication_result(result, "failed", "installed_surface_geometry_missing")
 	for value in required_surface_ids:
 		if not value is String or String(value).is_empty():
 			return _publication_result(result, "failed", "invalid_required_surface_id")
@@ -1038,6 +1245,42 @@ func tile_publication_readiness(tile_key: String, expected_source_key: String, r
 			or NavigationServer3D.region_get_iteration_id(region_rid) <= 0:
 		return _publication_result(result, "pending", "installation_sync_pending")
 	return _publication_result(result, "ready", "tile_publication_complete")
+
+func _validate_tile_installation(region_id: String, descriptor, receipt: Dictionary, expected_source_key: String, result: Dictionary) -> Dictionary:
+	# Shared installation checks, independent of caller-specific surface/link
+	# obligations. Never query a region RID before synchronization and membership.
+	if not bool(descriptor.get("loaded")): return _publication_result(result, "pending", "tile_unloaded")
+	if dirty_regions_by_region.has(region_id): return _publication_result(result, "pending", "tile_dirty")
+	if receipt.is_empty(): return _publication_result(result, "pending", "tile_not_installed")
+	if String(receipt.sourceKey) != expected_source_key:
+		return _publication_result(result, "pending", "source_key_mismatch")
+	if descriptor.get_instance_id() != receipt.descriptorId or int(descriptor.get("revision")) != int(receipt.sourceRevision) \
+			or not descriptor.has_method("stable_signature") or String(descriptor.stable_signature()) != String(receipt.signature):
+		return _publication_result(result, "failed", "installed_descriptor_changed")
+	if String(receipt.signature).is_empty(): return _publication_result(result, "failed", "missing_descriptor_signature")
+	if not backend_config.use_navmesh(): return _publication_result(result, "failed", "navmesh_backend_disabled")
+	# Queued server commands are not lost resources. Require an actual explicit
+	# sync before consulting installed membership, including after replacement.
+	if _publication_synced_serial < int(receipt.installationSerial) \
+			or navigation_map_synced_serial != navigation_map_dirty_serial:
+		return _publication_result(result, "pending", "installation_sync_pending")
+	# RID.is_valid only tests the handle, not whether the server still owns it.
+	# Check server membership before making RID-specific calls.
+	if navigation_map != receipt.mapRid or not NavigationServer3D.get_maps().has(navigation_map):
+		return _publication_result(result, "failed", "installed_map_lost")
+	if not NavigationServer3D.map_is_active(navigation_map):
+		return _publication_result(result, "pending", "navigation_map_inactive")
+	var region_rid: RID = receipt.regionRid
+	if region_rids_by_region.get(region_id, RID()) != region_rid \
+			or not NavigationServer3D.map_get_regions(navigation_map).has(region_rid):
+		return _publication_result(result, "failed", "installed_region_lost")
+	if not NavigationServer3D.region_get_enabled(region_rid):
+		return _publication_result(result, "pending", "installed_region_disabled")
+	if NavigationServer3D.region_get_transform(region_rid) != Transform3D.IDENTITY:
+		return _publication_result(result, "failed", "installed_region_transform_changed")
+	if int(receipt.polygonCount) <= 0 or receipt.surfaces.is_empty():
+		return _publication_result(result, "failed", "installed_surface_geometry_missing")
+	return {}
 
 static func _publication_result(result: Dictionary, status: String, reason: String) -> Dictionary:
 	result.status = status
@@ -1100,6 +1343,10 @@ func _record_tile_publication(region_id: String, descriptor, source_key: String,
 		"doorLinkSources":door_link_sources}
 	receipt.make_read_only()
 	_tile_publication_receipts[region_id] = receipt
+
+func publication_sync_pending() -> bool:
+	# A scheduling obligation only; observing it never forces synchronization.
+	return navigation_map_dirty_serial!=navigation_map_synced_serial or _publication_synced_serial<navigation_map_dirty_serial
 
 func sync_navigation_map_if_dirty() -> bool:
 	return _sync_navigation_map_if_dirty()
@@ -1291,6 +1538,7 @@ func _source_rectangle(surface: Dictionary, polygon: Array) -> Dictionary:
 	return NavigationMeshPreparationScript.new()._source_rectangle(surface, polygon)
 
 func _release_region(region_id: String) -> void:
+	_retire_accepted_tile(region_id)
 	_tile_publication_receipts.erase(region_id)
 	_release_door_links_for_region(region_id)
 	for record in crossing_link_records_by_region.get(region_id,[]):

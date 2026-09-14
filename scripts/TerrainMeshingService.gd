@@ -140,9 +140,7 @@ func can_process_native_section_jobs_async() -> bool:
 	return native_backend_available \
 		and backend != null \
 		and backend.has_method("build_chunk_surface_data_from_sections") \
-		and backend.has_method("build_chunk_mesh_from_sections") \
-		and backend.has_method("build_chunk_fluid_surface_data_from_sections") \
-		and backend.has_method("collision_shape_for_mesh")
+		and backend.has_method("build_chunk_fluid_surface_data_from_sections")
 
 func request_chunk_assets(cx: int, cz: int, signature := "", include_collision := true, priority := 0, fluid_only := false) -> Dictionary:
 	var key := Vector2i(cx, cz)
@@ -934,6 +932,11 @@ func collect_async_worker_result() -> Dictionary:
 		retired_payload_jobs.append(retired_payload_job)
 		result.erase("retiredPayloadJob")
 		advance_retired_payload_cleanup(false)
+	var worker_error := String(result.get("workerError", ""))
+	if not worker_error.is_empty():
+		summary["dropped"] = 1
+		summary["dropReason"] = worker_error
+		return summary
 	summary["elapsedMs"] = float(result.get("elapsedMs", 0.0))
 	summary["preparedSections"] = int(result.get("preparedSections", 0))
 	summary["terrainMeshBuildMs"] = float(result.get("terrainMeshBuildMs", 0.0))
@@ -965,14 +968,14 @@ func collect_async_worker_result() -> Dictionary:
 		finalize_summary["fluidMeshBuildMs"] = summary["fluidMeshBuildMs"]
 		finalize_summary["elapsedMs"] = summary["elapsedMs"]
 		return finalize_summary
-	var mesh: Mesh = terrain_mesh_from_surface_data(terrain_surface_data) if not terrain_surface_data.is_empty() else result.get("mesh") as Mesh
+	var mesh: Mesh = terrain_mesh_from_surface_data(terrain_surface_data) if not terrain_surface_data.is_empty() else null
 	if fluid_only and mesh == null:
 		mesh = ArrayMesh.new()
 	if mesh == null:
 		summary["dropped"] = 1
 		summary["dropReason"] = "worker_mesh_missing"
 		return summary
-	var fluid_mesh: Mesh = fluid_mesh_from_surface_data(fluid_surface_data) if not fluid_surface_data.is_empty() else result.get("fluidMesh") as Mesh
+	var fluid_mesh: Mesh = fluid_mesh_from_surface_data(fluid_surface_data) if not fluid_surface_data.is_empty() else null
 	if fluid_mesh == null:
 		fluid_mesh = ArrayMesh.new()
 	mesh.set_meta("terrainMeshingQueued", true)
@@ -983,7 +986,7 @@ func collect_async_worker_result() -> Dictionary:
 	if not fluid_only:
 		mesh = project_chunk_surface_normals(mesh, key.x, key.y)
 		apply_terrain_material(mesh)
-	var shape = result.get("shape")
+	var shape = null
 	if not fluid_only and bool(result.get("includeCollision", false)) and not (shape is Shape3D):
 		var collision_finalize_started_usec := Time.get_ticks_usec()
 		shape = collision_shape_for_mesh(mesh)
@@ -1148,40 +1151,41 @@ func _thread_build_native_chunk_assets(key: Vector2i, signature: String, include
 	var started_usec := Time.get_ticks_usec()
 	var terrain_started_usec := Time.get_ticks_usec()
 	var terrain_surface_data := {}
-	var mesh = null
-	if not fluid_only and worker_backend != null:
-		if worker_backend.has_method("build_chunk_surface_data_from_sections"):
+	var worker_error := ""
+	if not fluid_only:
+		if worker_backend == null or not worker_backend.has_method("build_chunk_surface_data_from_sections"):
+			worker_error = "terrain_surface_data_backend_unavailable"
+		else:
 			var terrain_surface_value = worker_backend.call("build_chunk_surface_data_from_sections", payload)
-			if terrain_surface_value is Dictionary:
+			if terrain_surface_value is Dictionary and not (terrain_surface_value as Dictionary).is_empty():
 				terrain_surface_data = terrain_surface_value
-		elif worker_backend.has_method("build_chunk_mesh_from_sections"):
-			mesh = worker_backend.call("build_chunk_mesh_from_sections", payload)
+			else:
+				worker_error = "terrain_surface_data_invalid"
 	var terrain_mesh_build_ms := elapsed_ms(terrain_started_usec)
 	var fluid_started_usec := Time.get_ticks_usec()
-	var fluid_mesh = null
 	var fluid_surface_data := {}
-	if bool(payload.get("hasFluid", true)) and worker_backend != null and worker_backend.has_method("build_chunk_fluid_surface_data_from_sections"):
-		fluid_surface_data = worker_backend.call("build_chunk_fluid_surface_data_from_sections", payload)
+	if worker_error.is_empty() and bool(payload.get("hasFluid", true)):
+		if worker_backend == null or not worker_backend.has_method("build_chunk_fluid_surface_data_from_sections"):
+			worker_error = "fluid_surface_data_backend_unavailable"
+		else:
+			var fluid_surface_value = worker_backend.call("build_chunk_fluid_surface_data_from_sections", payload)
+			if fluid_surface_value is Dictionary and not (fluid_surface_value as Dictionary).is_empty():
+				fluid_surface_data = fluid_surface_value
+			else:
+				worker_error = "fluid_surface_data_invalid"
 	var fluid_mesh_build_ms := elapsed_ms(fluid_started_usec)
-	var collision_started_usec := Time.get_ticks_usec()
-	var shape = null
-	if not fluid_only and terrain_surface_data.is_empty() and include_collision and mesh is Mesh and worker_backend != null and worker_backend.has_method("collision_shape_for_mesh"):
-		shape = worker_backend.call("collision_shape_for_mesh", mesh)
-	var collision_build_ms := elapsed_ms(collision_started_usec)
 	var result := {
 		"key": key,
 		"terrainSignature": signature,
-		"mesh": mesh,
 		"terrainSurfaceData": terrain_surface_data,
-		"fluidMesh": fluid_mesh,
 		"fluidSurfaceData": fluid_surface_data,
-		"shape": shape,
+		"workerError": worker_error,
 		"includeCollision": include_collision,
 		"fluidOnly": fluid_only,
 		"preparedSections": int((payload.get("sections", []) as Array).size()) if payload.get("sections", []) is Array else 0,
 		"terrainMeshBuildMs": terrain_mesh_build_ms,
 		"fluidMeshBuildMs": fluid_mesh_build_ms,
-		"collisionBuildMs": collision_build_ms,
+		"collisionBuildMs": 0.0,
 		"retiredPayloadJob": payload_job_to_retire,
 		"elapsedMs": elapsed_ms(started_usec)
 	}

@@ -18,6 +18,9 @@ const MAX_SEATS := 32
 const HALF := Dimensions.LOWER_CORBEL_SOCKET_HALF
 const MAX_BATCH_PANELS := 4
 const MAX_COMPLETION_BATCHES := 128
+const SUPPORT_TARGET_CELL := 4.0
+const MAX_SUPPORT_TARGET_CELLS := 64
+const MAX_SUPPORT_TARGET_ENTRIES := 262144
 
 ## One private assembly proof. Only unchanged masonry sample records outside
 ## the new members' conservative influence are reused. Root reachability,
@@ -124,6 +127,8 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 		attempt_count += 1
 		if prepared_input.is_empty():
 			prepared_input = _read(state, panel_id, policy)
+			if prepared_input.get("ready", false):
+				prepared_input["supportTargetIndex"] = _build_support_target_index(prepared_input.blueprint.parts)
 		var input := _select_prepared_panel(prepared_input, panel_id)
 		var proposal := _prepare_input(input, panel_id, policy, continuation, false)
 		if proposal.get("reason", "") == "cancelled": return proposal
@@ -132,7 +137,7 @@ static func _run_independent_completion(source: Dictionary, policy: Dictionary, 
 		if outcome.ready:
 			var delta := _admit_completion_delta(prepared_input, proposal, panel_id)
 			if not delta.ready: return delta
-			var support_delta := _support_targets_for_additions(state.parts, delta.additions, panel_id, prepared_input.blueprint.parts)
+			var support_delta := _support_targets_for_additions(state.parts, delta.additions, panel_id, prepared_input.blueprint.parts, prepared_input.supportTargetIndex)
 			if not support_delta.ready:
 				return {"ready": false, "reason": "lower_completion_support_delta_failed", "panelId": panel_id, "detail": support_delta}
 			# The first accepted proposal crosses the same constructor/snapshot
@@ -176,13 +181,17 @@ static func _accepted_change_support_delta(before: Dictionary, after: Dictionary
 	if influences.size() != after.parts.size() - before.parts.size(): return _fail("invalid_independence_change_inventory")
 	return _support_targets_for_additions(before.parts, influences, panel_id, prepared_parts)
 
-static func _support_targets_for_additions(records: Array, influences: Array, panel_id: String, prepared_parts: Array = []) -> Dictionary:
-	# Keep the complete target scan: a new beam can acquire ordinary-support
-	# dependants that have no edge in the previous explicit support graph.
+static func _support_targets_for_additions(records: Array, influences: Array, panel_id: String, prepared_parts: Array = [], target_index: Dictionary = {}) -> Dictionary:
+	# New ordinary-support edges still require the original exact predicate.
+	# Only the private admitted transaction may omit certified distant targets.
 	var excluded: Dictionary = {panel_id: true}
 	for influence in influences: excluded[influence.id] = true
 	var rooted_targets: Array = []
-	for index in range(records.size()):
+	var ordinals: Array = range(records.size())
+	if not target_index.is_empty() and prepared_parts.size()==records.size() \
+			and is_same(target_index.parts,prepared_parts) and int(target_index.count)==records.size():
+		ordinals = _support_target_ordinals(target_index,influences)
+	for index: int in ordinals:
 		var record: Dictionary = records[index]
 		if excluded.has(record.id): continue
 		var target = Part.new(record) if prepared_parts.is_empty() else prepared_parts[index]
@@ -193,6 +202,59 @@ static func _support_targets_for_additions(records: Array, influences: Array, pa
 				break
 	rooted_targets.sort()
 	return {"ready": true, "rootedTargetIds": rooted_targets}
+
+static func _build_support_target_index(parts: Array) -> Dictionary:
+	var index: Dictionary = {"parts":parts,"count":parts.size(),"cells":{},"memberships":{},"overflow":[],"entries":0}
+	for ordinal: int in range(parts.size()): _set_support_target(index,ordinal,parts[ordinal])
+	return index
+
+static func _support_target_cells(part) -> Array:
+	# Match the existing predicate's certified cardinal domain. Everything else
+	# stays in the complete-scan set, including large footprints. Padding on BOTH
+	# records exceeds its 0.10 rejection margin and roundoff; no geometry changes.
+	if not part.position.is_finite() or not part.size.is_finite() or part.rotation!=Vector3.ZERO: return []
+	var position: Vector3 = part.position.abs()
+	if maxf(position.x,maxf(position.y,position.z))>100000.0 \
+			or maxf(part.size.x,maxf(part.size.y,part.size.z))>10000.0 \
+			or minf(part.size.x,minf(part.size.y,part.size.z))<=0.0: return []
+	var low: Vector2i = Vector2i(floori((float(part.position.x)-float(part.size.x)*0.5-0.101)/SUPPORT_TARGET_CELL),
+		floori((float(part.position.z)-float(part.size.z)*0.5-0.101)/SUPPORT_TARGET_CELL))
+	var high: Vector2i = Vector2i(floori((float(part.position.x)+float(part.size.x)*0.5+0.101)/SUPPORT_TARGET_CELL),
+		floori((float(part.position.z)+float(part.size.z)*0.5+0.101)/SUPPORT_TARGET_CELL))
+	if (high.x-low.x+1)*(high.y-low.y+1)>MAX_SUPPORT_TARGET_CELLS: return []
+	var result: Array = []
+	for z: int in range(low.y,high.y+1):
+		for x: int in range(low.x,high.x+1): result.append(Vector2i(x,z))
+	return result
+
+static func _set_support_target(index: Dictionary, ordinal: int, part) -> void:
+	for cell: Vector2i in index.memberships.get(ordinal,[]):
+		index.cells[cell].erase(ordinal)
+		index.entries -= 1
+		if index.cells[cell].is_empty(): index.cells.erase(cell)
+	index.memberships.erase(ordinal)
+	index.overflow.erase(ordinal)
+	var cells: Array = _support_target_cells(part)
+	if cells.is_empty() or int(index.entries)+cells.size()>MAX_SUPPORT_TARGET_ENTRIES:
+		index.overflow.append(ordinal)
+		return
+	index.memberships[ordinal] = cells
+	for cell: Vector2i in cells:
+		if not index.cells.has(cell): index.cells[cell] = []
+		index.cells[cell].append(ordinal)
+		index.entries += 1
+
+static func _support_target_ordinals(index: Dictionary, influences: Array) -> Array:
+	var required: Dictionary = {}
+	for ordinal: int in index.overflow: required[ordinal] = true
+	for influence in influences:
+		var cells: Array = _support_target_cells(influence)
+		if cells.is_empty(): return range(int(index.count))
+		for cell: Vector2i in cells:
+			for ordinal: int in index.cells.get(cell,[]): required[ordinal] = true
+	var ordinals: Array = required.keys()
+	ordinals.sort() # Preserve original record order, never cell/hash iteration order.
+	return ordinals
 
 static func _propagate_rooted_supports(rooted: Dictionary, support_graph: Dictionary) -> void:
 	var changed := true
@@ -716,13 +778,32 @@ static func _admit_completion_delta(input: Dictionary, proposal: Dictionary, pan
 static func _commit_prepared_members(input: Dictionary, panel_index: int, panel, additions: Array, obstacles: Array) -> void:
 	var previous = input.blueprint
 	# Validate first, then atomically advance the transaction-owned objects.
-	input.obstacles.append_array(obstacles)
-	input.obstacles.sort_custom(func(a,b):return a.id < b.id)
+	_merge_prepared_obstacles(input.obstacles,obstacles)
 	previous.parts[panel_index] = panel
 	previous.physical_parts_by_id[panel.id] = panel
+	var target_index: Dictionary = input.get("supportTargetIndex",{})
+	if not target_index.is_empty(): _set_support_target(target_index,panel_index,panel)
 	for part in additions:
 		previous.parts.append(part)
 		previous.physical_parts_by_id[part.id] = part
+		if not target_index.is_empty(): _set_support_target(target_index,previous.parts.size()-1,part)
+	if not target_index.is_empty(): target_index.count = previous.parts.size()
+
+static func _merge_prepared_obstacles(existing: Array, additions: Array) -> void:
+	# _obstacles sorts both inputs and delta admission rejects duplicate IDs.
+	# Preserve the original array's aliases and the same unique-ID total order.
+	var merged: Array = []
+	var left: int = 0
+	var right: int = 0
+	while left<existing.size() and right<additions.size():
+		if String(existing[left].id)<String(additions[right].id):
+			merged.append(existing[left]); left += 1
+		else:
+			merged.append(additions[right]); right += 1
+	while left<existing.size(): merged.append(existing[left]); left += 1
+	while right<additions.size(): merged.append(additions[right]); right += 1
+	existing.clear()
+	existing.append_array(merged)
 
 static func _read(snapshot: Dictionary, panel_id: String, policy: Dictionary) -> Dictionary:
 	if not snapshot.get("id") is String or not snapshot.get("seed") is int or not snapshot.get("style") is String or not snapshot.get("recipe") is Dictionary or not snapshot.get("parts") is Array or not snapshot.get("rooms") is Array: return _fail("invalid_snapshot")

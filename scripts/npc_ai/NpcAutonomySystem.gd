@@ -538,6 +538,8 @@ func unregister_npc(body: Node) -> void:
 	var context = contexts_by_instance_id.get(instance_id)
 	if context == null:
 		return
+	if route_authority_v2 != null and route_authority_v2.has_method("unregister_actor"):
+		route_authority_v2.unregister_actor(context.stable_id, "actor_unregistered")
 	if simulation_lod != null:
 		simulation_lod.unregister_actor(context.stable_id, "actor_unregistered")
 	contexts_by_instance_id.erase(instance_id)
@@ -667,6 +669,9 @@ func notify_prop_unloaded(prop_id: String, prop: Node) -> Dictionary:
 		else:
 			_on_streamed_prop_exiting(instance_id)
 	return result
+
+func requires_physical_streaming(entry: Dictionary) -> bool:
+	return simulation_lod == null or simulation_lod.requires_physical_streaming(entry)
 
 func _on_streamed_prop_exiting(instance_id: int) -> void:
 	if not _pending_prop_unloads.has(instance_id): return

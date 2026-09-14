@@ -8,6 +8,7 @@ const TreeRequests = preload("res://scripts/environment/TreeRuntimeRequestBuilde
 
 static func compile(blueprint, plan, parts: Dictionary, origin: Vector3, continuation: Callable) -> Dictionary:
 	var members: Dictionary = {}
+	var member_sources: Dictionary = {}
 	var parent: Dictionary = {}
 	var ordinal: int = 0
 	for collection: Array in [blueprint.parts,plan.parts]:
@@ -18,6 +19,16 @@ static func compile(blueprint, plan, parts: Dictionary, origin: Vector3, continu
 			var key: String = ("building:" if building else "furnishing:")+String(part.id)
 			if members.has(key): return _failure("duplicate_group_part")
 			if not parts.has(key): return _failure("missing_group_part")
+			# Source Objects remain private and mutable for publication, while this
+			# compact value identity binds the earlier physical description. Copy
+			# only value fields: no caller-owned recipe, Array or Object aliases.
+			var geometry: Array = [String(part.id),String(part.kind),part.position,part.rotation,part.size,
+				bool(part.collision_enabled),bool(part.recipe.get("visual",true))] if building else \
+				[String(part.id),String(part.archetype),part.position,part.rotation,part.occupied_size,bool(part.collision_enabled)]
+			geometry.make_read_only()
+			var source: Dictionary = {"index":index,"geometry":geometry}
+			source.make_read_only()
+			member_sources[key] = source
 			members[key] = {"index":index,"kind":"building" if building else "furnishing",
 				"bounds":parts[key].bounds,"dependencies":parts[key].dependencies,
 				"door":building and part.kind == "door","hasCollision":bool(part.collision_enabled),
@@ -97,7 +108,8 @@ static func compile(blueprint, plan, parts: Dictionary, origin: Vector3, continu
 	for key: String in order:
 		for field: String in ["members","dependencies","buildingIndices","furnitureIndices","treeIndices","doorPartIds"]:
 			groups[key][field].sort()
-	return {"ready":true,"groups":groups,"groupByPart":by_part,"order":order,
+	member_sources.make_read_only()
+	return {"ready":true,"groups":groups,"groupByPart":by_part,"order":order,"memberSources":member_sources,
 		"treeRecords":tree_result.records,"treeMembers":tree_result.members}
 
 static func _trees(recipe: Dictionary, origin: Vector3) -> Dictionary:

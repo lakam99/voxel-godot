@@ -100,6 +100,7 @@ func _apply(source, changes: Array):
 	return Copy.copy_blueprint(snapshot)
 
 func _exercise() -> void:
+	_broadphase_controls()
 	var source = _source()
 	var assemblies: Array = _assemblies()
 	var initial: PackedByteArray = var_to_bytes(source.snapshot())
@@ -160,6 +161,17 @@ func _exercise() -> void:
 	_mutation_controls(source)
 	_domain_controls()
 
+func _broadphase_controls() -> void:
+	var first := Transform3D(Basis.IDENTITY,Vector3.ZERO)
+	var separated := Transform3D(Basis.IDENTITY,Vector3(1.01,0,0))
+	var face_contact := Transform3D(Basis.IDENTITY,Vector3(1.0,0,0))
+	var rotated_separated := Transform3D(Basis.from_euler(Vector3(0,0,deg_to_rad(25.0))),Vector3(3,0,0))
+	checks["broadphase_strict_disjoint_matches_exact"] = Recipe._strictly_disjoint(first,separated) and Recipe.Admission.measure(first,separated).get("clear",false)
+	checks["broadphase_face_contact_stays_exact"] = not Recipe._strictly_disjoint(first,face_contact) and Recipe.Admission.measure(first,face_contact).get("clear",false)
+	checks["broadphase_rotated_disjoint_matches_exact"] = Recipe._strictly_disjoint(first,rotated_separated) and Recipe.Admission.measure(first,rotated_separated).get("clear",false)
+	var invalid := Transform3D(Basis(Vector3.ZERO,Vector3.ZERO,Vector3.ZERO),Vector3.ZERO)
+	checks["broadphase_invalid_stays_exact"] = not Recipe._strictly_disjoint(first,invalid) and not Recipe.Admission.measure(first,invalid).get("valid",true)
+
 func _domain_controls() -> void:
 	var source = Copy.copy_blueprint(_source().snapshot())
 	var assemblies: Array = _assemblies()
@@ -167,6 +179,23 @@ func _domain_controls() -> void:
 		source.find_part(id).position += Vector3(0,2,5)
 	var domain := {"leftAnchorIds":["wall_-1"],"rightAnchorIds":["wall_1"],"bounds":AABB(Vector3(-5,1,-1),Vector3(10,4,2))}
 	assemblies[0]["placementDomain"] = domain
+	# A declared exterior face volume is finite.  Its boundary lanes are part
+	# of the physical search surface: another approved building can occupy the
+	# authored point and midpoint while an exposed edge is still clear.
+	var left_part = source.find_part("wall_-1")
+	var right_part = source.find_part("wall_1")
+	var edge_half := Vector3(minf(source.find_part("line").size.y,source.find_part("line").size.z),source.find_part("line").size.y,source.find_part("line").size.z)*0.25
+	var edge_candidates := Recipe._domain_candidates(
+		{"part":left_part,"face":source.transformed_part_bounds(left_part).end.x,"bounds":source.transformed_part_bounds(left_part)},
+		{"part":right_part,"face":source.transformed_part_bounds(right_part).position.x,"bounds":source.transformed_part_bounds(right_part)},
+		source.find_part("line").snapshot(),edge_half,edge_half.x*2.0+Recipe.SOCKET_INSET,domain.bounds)
+	var candidate_ys: Array = edge_candidates.map(func(candidate: Dictionary): return candidate.y)
+	var candidate_zs: Array = edge_candidates.map(func(candidate: Dictionary): return candidate.z)
+	var socket_margin := Vector3(0,edge_half.y+Recipe.SOCKET_INSET*2.0,edge_half.z+Recipe.SOCKET_INSET*2.0)
+	var shared_start: Vector3 = source.transformed_part_bounds(left_part).position.max(source.transformed_part_bounds(right_part).position).max(domain.bounds.position)+socket_margin
+	var shared_end: Vector3 = source.transformed_part_bounds(left_part).end.min(source.transformed_part_bounds(right_part).end).min(domain.bounds.end)-socket_margin
+	checks["finite_domain_enumerates_shared_y_boundaries"] = candidate_ys.any(func(value: float): return is_equal_approx(value,shared_start.y)) and candidate_ys.any(func(value: float): return is_equal_approx(value,shared_end.y))
+	checks["finite_domain_enumerates_shared_z_boundaries"] = candidate_zs.any(func(value: float): return is_equal_approx(value,shared_start.z)) and candidate_zs.any(func(value: float): return is_equal_approx(value,shared_end.z))
 	var frozen := var_to_bytes(source.snapshot())
 	var result: Dictionary = Recipe.prepare(source,assemblies,[],_continue)
 	checks["finite_domain_relocation_ready"] = result.get("ready",false)
@@ -249,9 +278,21 @@ func _domain_controls() -> void:
 		if selected:
 			other["placementDomain"] = domain.duplicate(true)
 			inputs.append(other)
-		var failed: Dictionary = Recipe.prepare(trial,inputs,[],_continue)
-		checks["cross_assembly_"+str(selected)+"_rejected"] = not failed.get("ready",true) and not failed.has("changes")
-		evidence["cross_assembly_"+str(selected)] = failed
+		var outcome: Dictionary = Recipe.prepare(trial,inputs,[],_continue)
+		# Boundary enumeration can expose two real, disjoint lanes in one owner
+		# volume.  Acceptance is valid only when every member remains clear of
+		# the other assembly; otherwise the proposal must remain atomic/rejected.
+		var pairwise_clear: bool = not outcome.get("ready",false) or _cross_assembly_clear(trial,outcome)
+		checks["cross_assembly_"+str(selected)+"_rejected_or_pairwise_clear"] = pairwise_clear
+		evidence["cross_assembly_"+str(selected)] = {"result":outcome,"pairwiseClear":pairwise_clear}
+
+func _cross_assembly_clear(source, proposal: Dictionary) -> bool:
+	var staged = _apply(source,proposal.get("changes",[]))
+	for first_id: String in ["line","flag_0","flag_1","flag_2"]:
+		for second_id: String in ["other_line","other_flag_0","other_flag_1","other_flag_2"]:
+			var measured: Dictionary = Recipe.Admission.measure(Recipe._pose(staged.find_part(first_id)),Recipe._pose(staged.find_part(second_id)))
+			if not measured.get("valid",false) or not measured.get("clear",false): return false
+	return true
 
 func _negative_controls(source) -> void:
 	for mode: String in ["missing_left","unrooted_left","forged_root_cache","middle_contact_only","intervening_solid","protected_span","crowded_pennants","unsupported_domain","duplicate_member"]:

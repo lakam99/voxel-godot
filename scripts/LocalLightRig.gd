@@ -46,6 +46,8 @@ static func add_rig(parent: Node3D, profile_id: String, options := {}) -> Dictio
         profile["day_suppressed"] = bool(options["day_suppressed"])
     if options.has("fill_lod_distance"):
         profile["fill_lod_distance"] = float(options["fill_lod_distance"])
+    if options.has("source_lod_distance"):
+        profile["source_lod_distance"] = float(options["source_lod_distance"])
 
     if is_torch_profile(profile_id):
         apply_torch_radius_scale(profile)
@@ -76,6 +78,7 @@ static func profile_for(profile_id: String, context: String, scale: float) -> Di
         "bounce_attenuation": 0.34,
         "shadows": true,
         "day_suppressed": false,
+        "source_lod_distance": 56.0,
         "fill_lod_distance": 56.0
     }
 
@@ -295,6 +298,7 @@ static func create_light(parent: Node3D, prefix: String, profile_id: String, con
     light.set_meta("rig_context", context)
     light.set_meta("casts_shadow_when_enabled", casts_shadows)
     if role == ROLE_SOURCE:
+        light.set_meta("rig_lod_distance", float(profile.get("source_lod_distance", 56.0)))
         light.add_to_group("local_light_rig_source")
     else:
         light.shadow_enabled = false

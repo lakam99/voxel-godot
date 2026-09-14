@@ -13,6 +13,9 @@ const CANOPY_FAMILIES := {
 const EXPECTED_CANOPY_ASSET_COUNT := 43
 const EXPECTED_RUNTIME_ASSET_COUNT := 69
 const VisualAssetRegistryScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
+const CharacterAssetRegistryScript := preload("res://scripts/visual/CharacterAssetRegistry.gd")
+const StaticItemAssetRegistryScript := preload("res://scripts/visual/StaticItemAssetRegistry.gd")
+const AnimatedAssetRegistryScript := preload("res://scripts/visual/AnimatedAssetRegistry.gd")
 
 var report_path := ""
 var results: Array[Dictionary] = []
@@ -68,7 +71,68 @@ func run() -> void:
 		"cachedTreeIds": cached_tree_ids,
 		"errors": registry.last_errors,
 	})
+	var rock_id: String = registry.select_rock_asset_id("mountain", "headless-rock-cache-contract")
+	var cached_rock_scene := registry.scene_cache.get(rock_id) as PackedScene
+	var rock: Node3D = registry.instantiate_asset(rock_id)
+	var rock_meshes: Array[MeshInstance3D] = []
+	if rock != null:
+		collect_meshes(rock, rock_meshes)
+	var importer_owned_scene := cached_rock_scene != null and not cached_rock_scene.resource_path.is_empty()
+	var rock_mesh_ready := rock_meshes.size() > 0 and rock_meshes.all(func(mesh_instance: MeshInstance3D) -> bool:
+		return mesh_instance.mesh != null and mesh_instance.mesh.get_surface_count() > 0)
+	add_result("runtime_rock_uses_importer_owned_scene_and_instantiates_in_headless_renderer", registry_ready and importer_owned_scene and rock != null and rock_mesh_ready, {
+		"renderer": DisplayServer.get_name(),
+		"rockId": rock_id,
+		"cachedResourcePath": cached_rock_scene.resource_path if cached_rock_scene != null else "",
+		"meshCount": rock_meshes.size(),
+		"threadId": OS.get_thread_caller_id(),
+	})
+	if rock != null:
+		rock.free()
+	var sibling_registry_rows: Array[Dictionary] = []
+	var character_registry = CharacterAssetRegistryScript.new()
+	var character_ready: bool = character_registry.setup()
+	var character_ids: Array = character_registry.scene_cache.keys()
+	character_ids.sort()
+	var character_id := String(character_ids[0]) if not character_ids.is_empty() else ""
+	var character_scene := character_registry.scene_cache.get(character_id) as PackedScene
+	var character: Node3D = character_registry.instantiate_asset(character_id)
+	sibling_registry_rows.append(_registry_instance_row("character", character_ready, character_id, character_scene, character))
+	if character != null:
+		character.free()
+	var static_registry = StaticItemAssetRegistryScript.new()
+	var static_ready: bool = static_registry.setup()
+	var static_ids := static_registry.asset_ids()
+	var static_id := String(static_ids[0]) if not static_ids.is_empty() else ""
+	var static_scene := static_registry.scene_cache.get(static_id) as PackedScene
+	var static_item: Node3D = static_registry.instantiate_item(static_id)
+	sibling_registry_rows.append(_registry_instance_row("static_item", static_ready, static_id, static_scene, static_item))
+	if static_item != null:
+		static_item.free()
+	var animated_registry = AnimatedAssetRegistryScript.new()
+	var animated_ready: bool = animated_registry.setup()
+	var animated_ids := animated_registry.asset_ids()
+	var animated_id := String(animated_ids[0]) if not animated_ids.is_empty() else ""
+	var animated_scene := animated_registry.scene_cache.get(animated_id) as PackedScene
+	var animated: Node3D = animated_registry.instantiate_asset(animated_id)
+	sibling_registry_rows.append(_registry_instance_row("animated", animated_ready, animated_id, animated_scene, animated))
+	if animated != null:
+		animated.free()
+	add_result("runtime_glb_registries_retain_importer_owned_scenes_in_headless_renderer", sibling_registry_rows.all(func(row: Dictionary) -> bool: return bool(row.get("passed", false))), sibling_registry_rows)
 	finish(imported_rows)
+
+func _registry_instance_row(label: String, ready: bool, asset_id: String, scene: PackedScene, instance: Node3D) -> Dictionary:
+	var meshes: Array[MeshInstance3D] = []
+	if instance != null:
+		collect_meshes(instance, meshes)
+	return {
+		"label": label,
+		"passed": ready and scene != null and not scene.resource_path.is_empty() and instance != null and not meshes.is_empty(),
+		"assetId": asset_id,
+		"cachedResourcePath": scene.resource_path if scene != null else "",
+		"meshCount": meshes.size(),
+		"threadId": OS.get_thread_caller_id(),
+	}
 
 func select_canopy_assets(manifest: Dictionary) -> Array[Dictionary]:
 	var selected: Array[Dictionary] = []

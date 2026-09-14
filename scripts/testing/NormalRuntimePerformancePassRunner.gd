@@ -5,7 +5,7 @@ const RuntimePerformanceObservationRunnerScript := preload("res://scripts/testin
 const PlaytestSurvivalPolicyScript := preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const RenderObservationScript := preload("res://scripts/perf/RuntimeRenderObservation.gd")
 
-const SAMPLE_EVERY_FRAMES := 6
+const SAMPLE_EVERY_FRAMES := 30
 const DEFAULT_DURATION_SECONDS := 75.0
 const DEFAULT_WARMUP_FRAMES := 120
 const SEGMENT_SECONDS := 8.0
@@ -63,6 +63,8 @@ var last_hold_sample_msec := -1000
 var last_segment_index := -1
 var segment_visit_counts := {}
 var samples := []
+var performance_sample_total_usec := 0
+var performance_sample_max_usec := 0
 var metrics_helper = RuntimePerformanceObservationRunnerScript.new()
 var measurement_start_physics_frame := -1
 var playtest_survival_policy := {}
@@ -190,6 +192,8 @@ func run_normal_runtime_scenario() -> Dictionary:
     last_segment_index = -1
     segment_visit_counts.clear()
     samples.clear()
+    performance_sample_total_usec = 0
+    performance_sample_max_usec = 0
     write_progress("measure_start")
     var started_msec := Time.get_ticks_msec()
     var frame := 0
@@ -199,7 +203,7 @@ func run_normal_runtime_scenario() -> Dictionary:
         await get_tree().process_frame
         observe_player_travel()
         if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
-            samples.append(main.call("debug_performance_state"))
+            capture_performance_sample()
         if frame % 120 == 0:
             write_progress("measure_frame:%d" % frame)
         frame += 1
@@ -245,13 +249,15 @@ func run_tutorial_town_guard_activation_scenario() -> Dictionary:
     reset_runtime_performance_monitor()
     measurement_start_physics_frame = Engine.get_physics_frames()
     samples.clear()
+    performance_sample_total_usec = 0
+    performance_sample_max_usec = 0
     write_progress("guard_activation_measure_start")
     var started_msec := Time.get_ticks_msec()
     var frame := 0
     while float(Time.get_ticks_msec() - started_msec) / 1000.0 < duration_seconds:
         await get_tree().process_frame
         if frame % SAMPLE_EVERY_FRAMES == 0 and main != null and main.has_method("debug_performance_state"):
-            samples.append(main.call("debug_performance_state"))
+            capture_performance_sample()
         if frame % 120 == 0:
             write_progress("guard_activation_measure_frame:%d" % frame)
         frame += 1
@@ -438,7 +444,11 @@ func launch_main_via_menu_new_game_input() -> bool:
     if not bool(menu.get("launching")) and menu.get("active_main") == null:
         startup_loading_failure = "Main Menu New Game input was not accepted"
         return false
-    var max_frames := ceili(140.0 * float(Engine.physics_ticks_per_second))
+    # Keep the observer outside the production readiness deadline. The game
+    # owns the structured loading failure; the runner must not terminate first
+    # and discard the domain that explains it.
+    var startup_observation_seconds := minf(210.0, maxf(140.0, watchdog_seconds - duration_seconds - 30.0))
+    var max_frames := ceili(startup_observation_seconds * float(Engine.physics_ticks_per_second))
     var loading_captured := false
     for frame in range(max_frames):
         await get_tree().process_frame
@@ -788,7 +798,14 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["firstGameplayFramesMs"] = first_gameplay_frames_ms
     metrics["startupLoadingSteps"] = startup_loading_steps.duplicate(true)
     metrics["startupReadinessDomains"] = main.get("startup_readiness_domains").duplicate(true) if main != null and main.get("startup_readiness_domains") is Dictionary else {}
+    var performance_monitor = main.get("runtime_perf_monitor") if main != null else null
+    if performance_monitor != null and performance_monitor.has_method("section_percentiles"):
+        metrics["sectionPercentiles"] = performance_monitor.call("section_percentiles")
     metrics["measuredFrames"] = frame_count
+    metrics["performanceObserverSampleCount"] = samples.size()
+    metrics["performanceObserverSampleTotalMs"] = float(performance_sample_total_usec) / 1000.0
+    metrics["performanceObserverSampleMaxMs"] = float(performance_sample_max_usec) / 1000.0
+    metrics["performanceObserverSampleIntervalFrames"] = SAMPLE_EVERY_FRAMES
     metrics["autosaveEnabled"] = bool(main.get("autosave_enabled")) if main != null else false
     metrics["savePathOverridden"] = OS.get_environment("VOXEL_SAVE_PATH_OVERRIDE").strip_edges() != ""
     metrics["voxelPlaytest"] = OS.get_environment("VOXEL_PLAYTEST").strip_edges()
@@ -816,6 +833,13 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["playerDisplacementDistance"] = delta.length()
     metrics["playerStart"] = vec3(measurement_start)
     metrics["playerEnd"] = vec3(measurement_end)
+
+func capture_performance_sample() -> void:
+    var started_usec := Time.get_ticks_usec()
+    samples.append(main.call("debug_performance_state", false, false))
+    var elapsed_usec := Time.get_ticks_usec() - started_usec
+    performance_sample_total_usec += elapsed_usec
+    performance_sample_max_usec = maxi(performance_sample_max_usec, elapsed_usec)
 
 func routine_v2_planning_profiles(after_physics_frame := -1) -> Array:
     if main == null:
@@ -913,6 +937,15 @@ func player_position() -> Vector3:
     return player_body.global_position if player_body != null else Vector3.INF
 
 func failed_result(reason: String) -> Dictionary:
+    var startup_failure: Dictionary = {}
+    if main != null and is_instance_valid(main) and main.get("startup_loading_failure_result") is Dictionary:
+        startup_failure = (main.get("startup_loading_failure_result") as Dictionary).duplicate(true)
+    var readiness_domains: Dictionary = main.get("startup_readiness_domains").duplicate(true) \
+        if main != null and is_instance_valid(main) and main.get("startup_readiness_domains") is Dictionary else {}
+    var terrain_runtime = main.get("voxel_terrain_runtime") if main != null and is_instance_valid(main) else null
+    var terrain_state: Dictionary = terrain_runtime.call("stats") \
+        if terrain_runtime != null and is_instance_valid(terrain_runtime) and terrain_runtime.has_method("stats") else {}
+    var recent_loading_steps: Array = startup_loading_steps.slice(maxi(0, startup_loading_steps.size() - 24))
     return {
         "id": "normal_runtime_mixed_traversal",
         "scenario": scenario,
@@ -924,7 +957,11 @@ func failed_result(reason: String) -> Dictionary:
             "menuToNewGameInputMs": menu_to_new_game_input_ms,
             "newGameInputToFirstLoadingFrameMs": new_game_input_to_first_loading_frame_ms,
             "newGameInputToGameplayReadyMs": new_game_input_to_gameplay_ready_ms,
-            "firstGameplayFramesMs": first_gameplay_frames_ms
+            "firstGameplayFramesMs": first_gameplay_frames_ms,
+            "startupFailure": startup_failure,
+            "startupReadinessDomains": readiness_domains,
+            "recentStartupLoadingSteps": recent_loading_steps,
+            "terrainRuntime": terrain_state
         }
     }
 

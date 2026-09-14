@@ -541,6 +541,11 @@ func walkable_surface_cell_near(cell: Vector3i, max_up_cells := 16, max_down_cel
 		return terrain_volume_service.walkable_surface_cell_near(cell, max_up_cells, max_down_cells)
 	return surface_projection_for_cell(cell, max_up_cells, max_down_cells)
 
+func navigation_surface_projection_at_known_height(cell: Vector3i, surface_y: float) -> Dictionary:
+	if terrain_volume_service != null and terrain_volume_service.has_method("navigation_surface_projection_at_known_height"):
+		return terrain_volume_service.navigation_surface_projection_at_known_height(cell, surface_y)
+	return {"status": "unavailable", "reason": "terrain_volume_owner_missing", "found": false}
+
 func terrain_volume_revision() -> int:
 	return int(terrain_volume_service.get("revision")) if terrain_volume_service != null else 0
 

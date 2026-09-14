@@ -3,13 +3,24 @@ extends SceneTree
 const StructureSystemScript := preload("res://scripts/StructureSystem.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
 
+class FakeWorld:
+	extends RefCounted
+	var revision := 0
+	func terrain_volume_chunk_revision(_chunk_key: Vector2i,_chunk_size: int) -> int: return revision
+
 class FakeMain:
 	extends RefCounted
 
 	var seed_text := "atlas-1492"
 	var CELL := 1.35
+	var CHUNK_SIZE := 28
+	var WATER_LEVEL := 2.0
 	var TOWN_RADIUS_CELLS := 28
-	var world_generation_system = null
+	var TOWN_REGION_CELLS := 280
+	var STRUCTURE_REGION_CELLS := 140
+	var STRUCTURE_SPAWN_CHANCE := 0.26
+	var town_region_cache := {}
+	var world_generation_system = FakeWorld.new()
 	var runtime_perf_monitor = null
 	var block_calls := 0
 
@@ -53,6 +64,7 @@ func run() -> void:
 	test_bounded_generation_request_is_not_duplicated()
 	test_bounded_deferred_generation_matches_synchronous_manifest()
 	test_missing_required_site_is_structured_failure()
+	test_standalone_admission_is_resumable_and_revision_checked()
 	finish()
 
 func test_known_and_random_seed_determinism() -> void:
@@ -295,6 +307,33 @@ func test_missing_required_site_is_structured_failure() -> void:
 			and ((status.get("metrics", {}) as Dictionary).get("failureReasons", []) as Array).size() >= 2,
 		status
 	)
+
+func test_standalone_admission_is_resumable_and_revision_checked() -> void:
+	var fake:=FakeMain.new("standalone-admission")
+	var system=StructureSystemScript.new()
+	system.main=fake
+	system.regional_source_generation=1
+	var region:=Vector2i(3,-2)
+	var candidate:={"baseCell":Vector2i(10,20),"dimensions":Vector2i(8,7),"structureType":"ruin"}
+	var first: Dictionary=system.advance_standalone_terrain_admission(region,candidate)
+	var first_cursor:=int(system.standalone_admission_states.get(region,{}).get("cursor",0))
+	fake.world_generation_system.revision=1
+	var restarted: Dictionary=system.advance_standalone_terrain_admission(region,candidate)
+	var restarted_cursor:=int(system.standalone_admission_states.get(region,{}).get("cursor",0))
+	var result:=restarted
+	var slices:=1
+	while result.get("status")=="pending" and slices<64:
+		result=system.advance_standalone_terrain_admission(region,candidate)
+		slices+=1
+	var expected_samples:=2*8+2*7-4
+	add_result("standalone_terrain_admission_is_bounded_resumable_and_restarts_on_local_revision",
+		first.get("status")=="pending" and first_cursor<=system.STANDALONE_ADMISSION_SAMPLES_PER_SLICE \
+		and restarted.get("status")=="pending" and restarted_cursor<=system.STANDALONE_ADMISSION_SAMPLES_PER_SLICE \
+		and result.get("status")=="ready" and is_equal_approx(float(result.get("level",NAN)),16.0) \
+		and int(result.get("sampleCount",0))==expected_samples and slices>1 \
+		and not system.standalone_admission_states.has(region),
+		{"first":first,"firstCursor":first_cursor,"restarted":restarted,"restartedCursor":restarted_cursor,
+			"result":result,"slices":slices})
 
 func generated_fixture(seed_value: String) -> Dictionary:
 	var fake := FakeMain.new(seed_value)

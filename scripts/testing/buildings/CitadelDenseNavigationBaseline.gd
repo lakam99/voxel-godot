@@ -46,7 +46,11 @@ func _run() -> void:
 
 func _prepare() -> Dictionary:
 	var checks := {"source_pinned": FileAccess.get_sha256(INPUT) == INPUT_SHA}
+	var demand_order := OS.get_environment("CITADEL_DENSE_NAVIGATION_ORDER")
+	if demand_order.is_empty(): demand_order = "canonical"
+	checks.valid_demand_order = demand_order in ["canonical","rotating"]
 	var report := {"schema": "citadel-dense-navigation-baseline/v1", "passed": false, "complete": false,
+		"demandOrder":demand_order,
 		"checks": checks, "workerThreadId": OS.get_thread_caller_id(), "sourcePath": INPUT, "sourceSha256": INPUT_SHA,
 		"originReport": ORIGIN_REPORT, "worldOrigin": WORLD_ORIGIN,
 		"evidenceLevel": "offline_pinned_source_preparation_baseline",
@@ -54,7 +58,7 @@ func _prepare() -> Dictionary:
 		"comparison": {"artifact": ARTIFACT, "format": "FileAccess.store_var(value, false); full raw navigation_tiles Dictionary",
 			"excludedPaths": ["preparationUsec"], "ordered": true,
 			"semanticSha256Encoding": "Godot Variant encoding into a zero-filled buffer; only the root preparationUsec field is removed. All other values, types, dictionary insertion order and array order are retained."}}
-	if not checks.source_pinned: return report
+	if not checks.source_pinned or not checks.valid_demand_order: return report
 	var origin_hash := FileAccess.get_sha256(ORIGIN_REPORT)
 	var origin: Variant = JSON.parse_string(FileAccess.get_file_as_string(ORIGIN_REPORT))
 	checks.headed_origin_report = origin is Dictionary and origin.get("passed") == true \
@@ -101,7 +105,7 @@ func _prepare() -> Dictionary:
 	var started := Time.get_ticks_usec()
 	var deadline := Deadline.new()
 	print("DENSE NAVIGATION BASELINE worker_preparation")
-	var prepared := Preparation.prepare_source(source.blueprint, furniture, binding, deadline.checkpoint, WORLD_ORIGIN)
+	var prepared := Preparation.prepare_source(source.blueprint, furniture, binding, deadline.checkpoint, WORLD_ORIGIN, Callable(), demand_order=="rotating")
 	report.preparationElapsedUsec = Time.get_ticks_usec() - started
 	report.preparationProgress = {"callbacks": deadline.callbacks, "lastStage": deadline.last_stage, "cancelled": deadline.cancelled}
 	checks.prepared = prepared.get("ready") == true
@@ -111,6 +115,18 @@ func _prepare() -> Dictionary:
 	var payload: Dictionary = prepared.prepared._payload
 	var spatial = payload.spatialDependencies
 	var navigation: Dictionary = spatial.navigation_tiles
+	if demand_order=="rotating":
+		var demand_started := Time.get_ticks_usec()
+		var drained := _drain_rotating_navigation(prepared.get("navigationSource",{}),binding,deadline)
+		report.demandElapsedUsec = Time.get_ticks_usec()-demand_started
+		report.demandProgress = {"callbacks":deadline.callbacks,"lastStage":deadline.last_stage,"cancelled":deadline.cancelled}
+		report.demandSchedule = drained.get("schedule",{})
+		checks.rotating_demand_complete = drained.get("ready",false)
+		if not checks.rotating_demand_complete:
+			report.failure = drained.get("reason","rotating_navigation_failed")
+			return report
+		navigation = drained.navigation
+	report.sourcePreparationPlusDemandUsec = report.preparationElapsedUsec+int(report.get("demandElapsedUsec",0))
 	checks.preparation_worker = payload.workerThreadId == OS.get_thread_caller_id()
 	checks.spatial_binding_origin = spatial.binding == binding and spatial.origin == WORLD_ORIGIN
 	checks.source_input_unchanged = source_before == _typed_sha(source) and furniture_before == _typed_sha(furniture)
@@ -169,6 +185,99 @@ func _prepare() -> Dictionary:
 	checks.complete_artifact_size = report.artifactBytes > 0
 	report.complete = checks.values().all(func(value): return value == true)
 	return report
+
+func _drain_rotating_navigation(source: Dictionary, binding: Dictionary, deadline: Deadline) -> Dictionary:
+	# Offline diagnostic only: start with a full waiting queue, repeatedly change
+	# its selected order, and retain the same production producer throughout.
+	# Call-local eligibility must keep active work and completions within each
+	# declared batch. No scene, route or live-readiness result is fabricated here.
+	if not source.is_read_only() or not source.has("producer") or not source.get("domain") is Dictionary \
+		or not source.get("binding") is Dictionary or not source.binding.is_read_only() or source.binding!=binding:
+		return {"ready":false,"reason":"missing_demanded_producer"}
+	var producer = source.producer
+	var inventory: Dictionary = source.domain
+	if not inventory.is_read_only() or inventory.size()!=4 or inventory.get("status")!="complete" \
+		or inventory.get("scope")!="source_navigation_output":
+		return {"ready":false,"reason":"invalid_demanded_domain"}
+	var domain_members := {}
+	for field: String in ["tileKeys","producerTileKeys"]:
+		var values: Variant = inventory.get(field)
+		if not values is Array or not values.is_read_only() or values.is_empty() or values.size()>16900:
+			return {"ready":false,"reason":"invalid_demanded_domain"}
+		var seen := {}
+		for value in values:
+			if not value is String or value.length()>23 or seen.has(value):
+				return {"ready":false,"reason":"invalid_demanded_domain_key"}
+			var coordinates: PackedStringArray = value.split(",",true)
+			if coordinates.size()!=2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int():
+				return {"ready":false,"reason":"invalid_demanded_domain_key"}
+			var x: int = int(coordinates[0])
+			var z: int = int(coordinates[1])
+			if x < -2147483648 or x > 2147483647 or z < -2147483648 or z > 2147483647 or value!="%d,%d" % [x,z]:
+				return {"ready":false,"reason":"invalid_demanded_domain_key"}
+			seen[value] = true
+			if field=="producerTileKeys" and not domain_members.has(value):
+				return {"ready":false,"reason":"producer_outside_demanded_domain"}
+		var sorted: Array = values.duplicate()
+		sorted.sort()
+		if sorted!=values: return {"ready":false,"reason":"unordered_demanded_domain"}
+		if field=="tileKeys": domain_members = seen
+	var inventory_sha := _typed_sha(inventory)
+	if inventory_sha.length()!=64: return {"ready":false,"reason":"invalid_domain_digest"}
+	var domain: Array[String] = []
+	for key: String in inventory.tileKeys: domain.append(key)
+	domain.reverse()
+	var requested: Dictionary = producer.request_all()
+	if requested.get("status")!="ready": return {"ready":false,"reason":"demanded_request_failed"}
+	var schedule := {"domainCount":domain.size(),"turns":0,"permutedTurns":0,"changedSelections":0,
+		"maxSelected":0,"activeCoverage":true,"completionCoverage":true,"firstTurns":[],"domainUnchanged":false,
+		"domainInventory":inventory,"domainTypedSha256":inventory_sha}
+	var previous_selection: Array[String] = []
+	for turn in range(20000):
+		if not deadline.checkpoint("offline_rotating_navigation"):
+			return {"ready":false,"reason":"rotating_navigation_deadline","schedule":schedule}
+		var remaining: Array[String] = []
+		for key: String in domain:
+			if producer.take(key).get("status")!="ready": remaining.append(key)
+		if remaining.is_empty():
+			var navigation: Dictionary = producer.full_result()
+			schedule.domainUnchanged = is_same(inventory,source.domain) and _typed_sha(source.domain)==inventory_sha
+			var complete: bool = navigation.get("ready",false) and schedule.turns>1 \
+				and schedule.permutedTurns>0 and schedule.changedSelections>0 and schedule.domainUnchanged
+			return {"ready":complete,"reason":"" if complete else "rotating_schedule_unproven",
+				"navigation":navigation,"schedule":schedule}
+		var before: Dictionary = producer.status()
+		var active := String(before.get("activeTileKey",""))
+		if before.get("status")!="ready" or not active.is_empty() and not remaining.has(active):
+			return {"ready":false,"reason":"invalid_rotating_active_source","schedule":schedule}
+		var order: Array[String] = []
+		if not active.is_empty(): order.append(active)
+		var offset: int = (turn*17)%remaining.size()
+		for index in range(remaining.size()):
+			var key: String = remaining[(offset+index)%remaining.size()]
+			if not order.has(key): order.append(key)
+			if order.size()==8: break
+		var selected: Array[String] = order.duplicate()
+		selected.sort()
+		var promoted: Dictionary = producer.prioritize_waiting(order)
+		if promoted.get("status")!="ready":
+			return {"ready":false,"reason":"rotating_priority_rejected","schedule":schedule}
+		var after: Dictionary = producer.advance(8000,deadline.checkpoint,selected)
+		schedule.turns += 1
+		schedule.maxSelected = maxi(schedule.maxSelected,selected.size())
+		if order!=selected: schedule.permutedTurns += 1
+		if not previous_selection.is_empty() and previous_selection!=selected: schedule.changedSelections += 1
+		previous_selection = selected
+		var after_active := String(after.get("activeTileKey",""))
+		schedule.activeCoverage = schedule.activeCoverage and (after_active.is_empty() or selected.has(after_active))
+		for key: String in remaining:
+			if producer.take(key).get("status")=="ready" and not selected.has(key): schedule.completionCoverage = false
+		if schedule.firstTurns.size()<8:
+			schedule.firstTurns.append({"selected":selected,"order":order,"activeBefore":active,"activeAfter":after_active,
+				"completedBefore":before.get("completedTileCount",0),"completedAfter":after.get("completedTileCount",0)})
+		if after.get("status")!="ready" or not schedule.activeCoverage or not schedule.completionCoverage:
+			return {"ready":false,"reason":"rotating_batch_coverage_failed","schedule":schedule}
+	return {"ready":false,"reason":"rotating_navigation_turn_limit","schedule":schedule}
 
 static func _typed_sha(value: Variant) -> String:
 	var bytes := var_to_bytes(value)

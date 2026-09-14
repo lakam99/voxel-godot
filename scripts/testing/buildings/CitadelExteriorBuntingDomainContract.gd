@@ -33,6 +33,8 @@ func _work() -> Dictionary:
 	var owners: Dictionary = association.owners
 	var positive := Domain.build(source, owners)
 	checks.domain_ready = positive.get("ready", false)
+	checks.authored_center_inside_domain_accepted = positive.get("ready",false) and Domain.accepts_authored_center(source,owners,positive.domain.bounds.get_center())
+	checks.authored_center_outside_domain_rejected = positive.get("ready",false) and not Domain.accepts_authored_center(source,owners,positive.domain.bounds.get_center()+Vector3(0,0,positive.domain.bounds.size.z+1.0))
 	checks.immutable = before == var_to_bytes(source.snapshot())
 	checks.actual_owner_ids = owners == {"leftPartId": LANDMARK, "rightPartId": PAV, "courtyardId": "castle_courtyard"}
 	checks.interior_protected = positive.get("protectedRooms", []) == [source.rooms[1].bounds]

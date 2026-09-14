@@ -77,17 +77,106 @@ class PayloadOwner extends Node:
 		terrain_detail_queries += 1
 		return 4
 
+class ValueOnlyBackend extends RefCounted:
+	var terrain_calls := 0
+	var fluid_calls := 0
+	var terrain_thread_id := -1
+	var fluid_thread_id := -1
+	func build_chunk_surface_data_from_sections(_payload: Dictionary) -> Dictionary:
+		terrain_calls += 1
+		terrain_thread_id = OS.get_thread_caller_id()
+		return {"valid":true,
+			"vertices":PackedVector3Array([Vector3.ZERO,Vector3.RIGHT,Vector3.FORWARD]),
+			"normals":PackedVector3Array([Vector3.UP,Vector3.UP,Vector3.UP]),
+			"colors":PackedColorArray([Color.WHITE,Color.WHITE,Color.WHITE]),
+			"faceCount":1,"vertexCount":3,"stepCells":1,"sectionCount":1}
+	func build_chunk_fluid_surface_data_from_sections(_payload: Dictionary) -> Dictionary:
+		fluid_calls += 1
+		fluid_thread_id = OS.get_thread_caller_id()
+		return {"deferred":true,"reason":"no_fluid","hasFluid":false,"waterVertices":PackedVector3Array(),"lavaVertices":PackedVector3Array()}
+
+class ResourceFallbackBackend extends ValueOnlyBackend:
+	var mesh_calls := 0
+	var collision_calls := 0
+	var collision_thread_id := -1
+	func build_chunk_mesh_from_sections(_payload: Dictionary):
+		mesh_calls += 1
+		return Resource.new()
+	func collision_shape_for_mesh(_mesh):
+		collision_calls += 1
+		collision_thread_id = OS.get_thread_caller_id()
+		return null
+
 func _init() -> void:
 	call_deferred("run")
 
 func run() -> void:
 	report_path = OS.get_environment("VOXEL_TERRAIN_MESH_BOUNDS_REPORT").strip_edges()
+	test_async_worker_returns_surface_values_only()
 	test_fluid_only_avoids_terrain_detail_scan()
 	test_generated_surface_bounds_enclose_exact_projection()
 	test_incremental_bounds_match_direct_authority()
 	test_mesh_edits_expand_authoritative_bounds()
 	test_retired_payload_cleanup_is_bounded()
 	finish()
+
+func test_async_worker_returns_surface_values_only() -> void:
+	var service := TerrainMeshingServiceScript.new()
+	var value_backend := ValueOnlyBackend.new()
+	service.backend = value_backend
+	service.native_backend_available = true
+	var value_only_backend_admitted := service.can_process_native_section_jobs_async()
+	var guarded_backend := ResourceFallbackBackend.new()
+	var main_thread_id := OS.get_thread_caller_id()
+	var key := Vector2i(2, -3)
+	var thread := Thread.new()
+	var start_error := thread.start(Callable(service, "_thread_build_native_chunk_assets").bind(
+		key, "", true, false, {"sections":[{}],"hasFluid":true}, guarded_backend, {}))
+	var started := start_error == OK
+	var worker_result = thread.wait_to_finish() if started else null
+	var result_is_value_only := worker_result is Dictionary and not _contains_object(worker_result)
+	service.backend = guarded_backend
+	service.async_worker_result = worker_result if worker_result is Dictionary else {}
+	service.async_worker_task_id = WorkerThreadPool.add_task(func(): pass)
+	service.async_worker_active = service.async_worker_task_id >= 0
+	service.async_worker_key = key
+	if service.async_worker_active:
+		while not WorkerThreadPool.is_task_completed(service.async_worker_task_id):
+			OS.delay_usec(100)
+	var collected: Dictionary = service.collect_async_worker_result()
+	var assets: Dictionary = service.completed_jobs.get(key, {})
+	var main_thread_hydrated := int(collected.get("processed", 0)) == 1 \
+		and assets.get("mesh") is ArrayMesh and assets.get("fluidMesh") is ArrayMesh \
+		and assets.get("shape") is Shape3D and guarded_backend.collision_thread_id == main_thread_id
+	var passed: bool = value_only_backend_admitted and started and result_is_value_only \
+		and guarded_backend.terrain_calls == 1 and guarded_backend.fluid_calls == 1 \
+		and guarded_backend.terrain_thread_id != main_thread_id and guarded_backend.fluid_thread_id != main_thread_id \
+		and guarded_backend.mesh_calls == 0 and guarded_backend.collision_calls == 1 \
+		and not worker_result.has("mesh") and not worker_result.has("fluidMesh") and not worker_result.has("shape") \
+		and String(worker_result.get("workerError", "")).is_empty() and main_thread_hydrated
+	add_result(
+		"terrain_async_worker_returns_surface_values_without_render_or_collision_resources",
+		passed,
+		JSON.stringify({"valueOnlyBackendAdmitted":value_only_backend_admitted,"threadStarted":started,
+			"resultIsValueOnly":result_is_value_only,"terrainCalls":guarded_backend.terrain_calls,
+			"fluidCalls":guarded_backend.fluid_calls,"meshCalls":guarded_backend.mesh_calls,
+			"collisionCalls":guarded_backend.collision_calls,"workerThread":guarded_backend.terrain_thread_id,
+			"mainThread":main_thread_id,"collisionThread":guarded_backend.collision_thread_id,
+			"mainThreadHydrated":main_thread_hydrated,"workerError":worker_result.get("workerError", "") if worker_result is Dictionary else "invalid_result"})
+	)
+
+func _contains_object(value: Variant) -> bool:
+	if value is Object:
+		return true
+	if value is Dictionary:
+		for key in value:
+			if _contains_object(key) or _contains_object(value[key]):
+				return true
+	elif value is Array:
+		for item in value:
+			if _contains_object(item):
+				return true
+	return false
 
 func test_fluid_only_avoids_terrain_detail_scan() -> void:
 	var owner := PayloadOwner.new()

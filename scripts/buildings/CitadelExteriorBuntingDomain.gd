@@ -43,6 +43,15 @@ static func build(source, owners: Variant) -> Dictionary:
 	return {"ready": true, "domain": {"leftAnchorIds": [left.id], "rightAnchorIds": [right.id], "bounds": domain},
 		"protectedRooms": indexed.protectedRooms}
 
+## Producer preflight only: optional dressing may be emitted only when its
+## authored centre belongs to the declared mount relationship.  This neither
+## proves a socket nor clearance; StructuralCompletion remains the sole
+## physical acceptance boundary.
+static func accepts_authored_center(source, owners: Variant, center: Vector3) -> bool:
+	if not center.is_finite(): return false
+	var built := build(source, owners)
+	return built.get("ready",false) and built.domain.bounds.has_point(center)
+
 static func _index(source) -> Dictionary:
 	if not source is Blueprint or source.parts.size() > MAX_PARTS or source.rooms.size() > MAX_ROOMS:
 		return _fail("invalid_exterior_bunting_source")

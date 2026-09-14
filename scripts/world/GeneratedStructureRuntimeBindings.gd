@@ -37,31 +37,57 @@ func available() -> bool:
 ## establish final capsule clearance before it resumes gameplay.
 func construction_allowed(reservation_cells: Rect2i) -> bool:
 	if not available() or reservation_cells.size.x <= 0 or reservation_cells.size.y <= 0: return false
+	var state: Dictionary = _construction_player_state()
+	if state.is_empty(): return false
+	return bool(state.loadingExempt) or not reservation_cells.intersects(state.playerCells)
+
+## One actor/registry read for a batch, without enclosing the empty space
+## between disjoint members. The input remains source collision obligations.
+func construction_members_allowed(member_bounds: Array) -> bool:
+	if not available(): return false
+	var state: Dictionary = _construction_player_state()
+	if state.is_empty(): return false
+	for value: Variant in member_bounds:
+		if not value is AABB: return false
+		var bounds: AABB = value
+		if not bounds.position.is_finite() or not bounds.size.is_finite() or not bounds.end.is_finite() \
+				or bounds.size.x <= 0.0 or bounds.size.y <= 0.0 or bounds.size.z <= 0.0: return false
+		if state.loadingExempt: continue
+		# BuildingSiteManifestBuilder sample-node convention, per member.
+		var minimum: Vector2i = Vector2i(floori(bounds.position.x/state.cellSize),floori(bounds.position.z/state.cellSize))
+		var maximum: Vector2i = Vector2i(ceili(bounds.end.x/state.cellSize)+1,ceili(bounds.end.z/state.cellSize)+1)
+		if Rect2i(minimum,maximum-minimum).intersects(state.playerCells): return false
+	return true
+
+## Caller has already checked the identity-pinned runtime owners. No yielding,
+## movement, collider mutation or registration occurs while using this snapshot.
+func _construction_player_state() -> Dictionary:
 	var main = _main.get_ref()
 	var player = main.get("player")
-	if not _usable(player) or not player is CharacterBody3D or not player.is_inside_tree(): return false
+	if not _usable(player) or not player is CharacterBody3D or not player.is_inside_tree(): return {}
 	var collider = player.get_node_or_null("PlayerCollider")
-	if not _usable(collider) or not collider is CollisionShape3D or not collider.shape is CapsuleShape3D: return false
+	if not _usable(collider) or not collider is CollisionShape3D or not collider.shape is CapsuleShape3D: return {}
 	var capsule: CapsuleShape3D = collider.shape
 	var cell_value: Variant = main.CELL
-	if not (cell_value is float or cell_value is int): return false
+	if not (cell_value is float or cell_value is int): return {}
 	var cell_size := float(cell_value)
 	var center: Vector3 = collider.global_position
 	var basis: Basis = collider.global_basis
 	if not is_finite(cell_size) or cell_size <= 0.0 or not is_finite(capsule.radius) or capsule.radius <= 0.0 \
-			or not center.is_finite() or not basis.x.is_finite() or not basis.y.is_finite() or not basis.z.is_finite(): return false
+			or not center.is_finite() or not basis.x.is_finite() or not basis.y.is_finite() or not basis.z.is_finite(): return {}
 	# Upright capsule support is the actual PlayerCollider contract. A tilted or
 	# collapsed transform cannot be approximated by a guessed horizontal radius.
-	if basis.y.length_squared() <= 0.0 or not is_zero_approx(basis.y.x) or not is_zero_approx(basis.y.z): return false
+	if basis.y.length_squared() <= 0.0 or not is_zero_approx(basis.y.x) or not is_zero_approx(basis.y.z): return {}
 	var radius_x := capsule.radius * Vector2(basis.x.x, basis.z.x).length()
 	var radius_z := capsule.radius * Vector2(basis.x.z, basis.z.z).length()
-	if not is_finite(radius_x) or not is_finite(radius_z) or radius_x <= 0.0 or radius_z <= 0.0: return false
-	if not player.is_physics_processing() and (main.get("startup_loading_active") == true or main.get("runtime_loading_active") == true): return true
+	if not is_finite(radius_x) or not is_finite(radius_z) or radius_x <= 0.0 or radius_z <= 0.0: return {}
+	if not player.is_physics_processing() and (main.get("startup_loading_active") == true or main.get("runtime_loading_active") == true):
+		return {"loadingExempt":true,"cellSize":cell_size}
 	# Same sample-node bounds convention as BuildingSiteManifestBuilder:
 	# floor(min/CELL) through ceil(max/CELL), inclusive, in a half-open Rect2i.
 	var minimum := Vector2i(floori((center.x-radius_x)/cell_size), floori((center.z-radius_z)/cell_size))
 	var maximum := Vector2i(ceili((center.x+radius_x)/cell_size)+1, ceili((center.z+radius_z)/cell_size)+1)
-	return not reservation_cells.intersects(Rect2i(minimum, maximum-minimum))
+	return {"loadingExempt":false,"cellSize":cell_size,"playerCells":Rect2i(minimum,maximum-minimum)}
 
 func publish_tree(parent: Node3D, prop_id: String, position: Vector3, biome: String, tree_request: Dictionary, rotation_y: float) -> Dictionary:
 	if not available(): return _unavailable()

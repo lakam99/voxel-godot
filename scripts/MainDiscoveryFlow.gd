@@ -73,15 +73,22 @@ func update_performance_overlay(delta: float) -> void:
     perf_elapsed = 0.0
     hud.set_performance(debug_performance_state())
 
-func debug_performance_state() -> Dictionary:
+func debug_performance_state(include_scene_inventory := true, include_npc_debug := true) -> Dictionary:
     debug_performance_state_trace("start")
     var hostile_stats: Dictionary = hostile_system.stats() if hostile_system else {}
     debug_performance_state_trace("hostile_stats")
-    var prop_count := count_nodes_with_meta(chunk_root, "kind", "prop") + count_nodes_with_meta(prop_root, "kind", "prop")
+    # Recursive scene inventories are useful for the on-demand overlay, but they
+    # are observer work rather than gameplay work. Runtime playtests request the
+    # bounded form so their sampling does not stop the frame being measured.
+    var prop_count := -1
+    if include_scene_inventory:
+        prop_count = count_nodes_with_meta(chunk_root, "kind", "prop") + count_nodes_with_meta(prop_root, "kind", "prop")
     debug_performance_state_trace("prop_count")
-    var visual_count := count_visual_nodes(chunk_root) + count_visual_nodes(prop_root) + count_visual_nodes(block_root)
+    var visual_count := -1
+    if include_scene_inventory:
+        visual_count = count_visual_nodes(chunk_root) + count_visual_nodes(prop_root) + count_visual_nodes(block_root)
     debug_performance_state_trace("visual_count")
-    if weather_system:
+    if include_scene_inventory and weather_system:
         visual_count += count_visual_nodes(weather_system)
     debug_performance_state_trace("weather_visual_count")
     var story_perf := {
@@ -119,8 +126,9 @@ func debug_performance_state() -> Dictionary:
         "blocks": blocks.size(),
         "hostiles": int(hostile_stats.get("enemies", 0)),
         "pickups": dropped_pickups.size(),
-        "physicsBodies": count_physics_bodies(self),
+        "physicsBodies": count_physics_bodies(self) if include_scene_inventory else -1,
         "drawEstimate": visual_count,
+        "sceneInventoryIncluded": include_scene_inventory,
         "frameMs": perf_frame_ms,
         "chunkMs": perf_chunk_ms,
         "skyMs": perf_sky_ms,
@@ -156,7 +164,7 @@ func debug_performance_state() -> Dictionary:
         "hudRefresh": hud_refresh_stats(),
         "chunkCache": chunk_asset_cache_stats(),
         "treePublication": tree_publication_stats,
-        "npcDebug": npc_debug_overlay_state(),
+        "npcDebug": npc_debug_overlay_state() if include_npc_debug else {},
         "navigationBackend": navigation_backend,
         "navmeshWorld": navmesh_world_stats,
         "story": story_perf
@@ -288,13 +296,101 @@ func teleport_to(value: String) -> bool:
         return false
     var x := float(coords.get("x", 0.0))
     var z := float(coords.get("z", 0.0))
+    var explicit_y := coords.has("y")
     var y := float(coords.get("y", maxf(surface_y_at_position(Vector3(x, 0.0, z)), WATER_LEVEL) + 0.35))
-    if player == null:
+    if player == null or not is_instance_valid(player) or startup_operation_active or runtime_loading_active \
+            or runtime_relocation_active or shutdown_requested:
         return false
-    player.global_position = Vector3(x, y, z)
-    player.velocity = Vector3.ZERO
-    player.set("terrain_grounded", false)
-    bootstrap_initial_chunks()
+    runtime_relocation_active = true
+    var operation_owner := "runtime_relocation"
+    var operation_player := player
+    var destination := Vector3(x,y,z)
+    var previous_position := operation_player.global_position
+    var previous_player_physics := operation_player.is_physics_processing()
+    show_streaming_loading_overlay("Preparing destination…",operation_owner)
+    operation_player.set_physics_process(false)
+    operation_player.velocity = Vector3.ZERO
+    var readiness := await prepare_streaming_destination_staged(destination,operation_owner)
+    if not startup_result_is_ready(readiness):
+        release_streaming_destination(operation_owner)
+        if is_instance_valid(operation_player) and is_same(player,operation_player):
+            operation_player.global_position = previous_position
+            operation_player.set_physics_process(previous_player_physics and not shutdown_requested)
+        hide_streaming_loading_overlay(operation_owner)
+        runtime_relocation_active = false
+        var failure_message := "Teleport failed: %s" % String(readiness.get("reason","destination_not_ready"))
+        if hud: hud.set_teleport_status(failure_message)
+        update_hud(failure_message)
+        return false
+    if shutdown_requested or not is_instance_valid(operation_player) or not is_same(player,operation_player):
+        release_streaming_destination(operation_owner)
+        hide_streaming_loading_overlay(operation_owner)
+        runtime_relocation_active = false
+        return false
+    # A generated landmark may change the authoritative surface after admission.
+    # Preserve an explicit Y, but resolve an inferred Y only from the completed
+    # destination terrain and prove that exact vertical slice before cutover.
+    if not explicit_y:
+        y = maxf(surface_y_at_position(Vector3(x,0.0,z)),WATER_LEVEL)+0.35
+        destination = Vector3(x,y,z)
+        var runtime = get("voxel_terrain_runtime")
+        if runtime==null or not is_instance_valid(runtime):
+            readiness = StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
+        else:
+            readiness = normalized_startup_result(
+                await runtime.wait_for_spawn_presentation(destination,INITIAL_READINESS_TIMEOUT_SECONDS),
+                "invalid_streaming_destination_presentation_result")
+    if not startup_result_is_ready(readiness) or shutdown_requested:
+        release_streaming_destination(operation_owner)
+        if is_instance_valid(operation_player) and is_same(player,operation_player):
+            operation_player.global_position=previous_position
+            operation_player.set_physics_process(previous_player_physics and not shutdown_requested)
+        hide_streaming_loading_overlay(operation_owner)
+        runtime_relocation_active=false
+        return false
+    var request_id := int(readiness.get("metrics",{}).get("requestId",streaming_requests.get(operation_owner,0)))
+    var operation_seed := String(readiness.get("metrics",{}).get("worldSeed",seed_text))
+    var final_state := streaming_destination_readiness(destination,operation_owner,request_id,operation_seed)
+    if final_state.get("status")!="ready":
+        release_streaming_destination(operation_owner)
+        operation_player.global_position=previous_position
+        operation_player.set_physics_process(previous_player_physics and not shutdown_requested)
+        hide_streaming_loading_overlay(operation_owner)
+        runtime_relocation_active=false
+        return false
+    operation_player.global_position = destination
+    operation_player.velocity = Vector3.ZERO
+    operation_player.set("terrain_grounded", false)
+    update_streaming_region_demand()
+    await get_tree().physics_frame
+    var clearance := GeneratedStructurePlayerClearanceScript.inspect(operation_player)
+    var runtime = get("voxel_terrain_runtime")
+    var target_presentation := normalized_startup_result(
+        await runtime.wait_for_spawn_presentation(destination,INITIAL_READINESS_TIMEOUT_SECONDS),
+        "invalid_streaming_destination_presentation_result") if is_instance_valid(runtime) \
+        else StartupReadinessResultScript.failed("missing_terrain_presentation_authority")
+    final_state = streaming_destination_readiness(destination,operation_owner,request_id,operation_seed)
+    if not clearance.get("passed",false) or not startup_result_is_ready(target_presentation) \
+            or final_state.get("status")!="ready" or shutdown_requested:
+        operation_player.global_position=previous_position
+        operation_player.velocity=Vector3.ZERO
+        operation_player.set("terrain_grounded",false)
+        update_streaming_region_demand()
+        release_streaming_destination(operation_owner)
+        operation_player.set_physics_process(previous_player_physics and not shutdown_requested)
+        hide_streaming_loading_overlay(operation_owner)
+        runtime_relocation_active=false
+        var reason := String(target_presentation.get("reason","destination_not_ready"))
+        if not clearance.get("passed",false): reason=String(clearance.get("reason","destination_capsule_not_clear"))
+        elif final_state.get("status")!="ready": reason=String(final_state.get("reason","streaming_destination_changed"))
+        var failure_message := "Teleport failed: %s" % reason
+        if hud: hud.set_teleport_status(failure_message)
+        update_hud(failure_message)
+        return false
+    release_streaming_destination(operation_owner)
+    operation_player.set_physics_process(previous_player_physics and not shutdown_requested)
+    hide_streaming_loading_overlay(operation_owner)
+    runtime_relocation_active=false
     var message := "Teleported: %.0f, %.0f, %.0f" % [x, y, z] if coords.has("y") else "Teleported: %.0f, %.0f" % [x, z]
     if hud:
         hud.set_teleport_status(message)

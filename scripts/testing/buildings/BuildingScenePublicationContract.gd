@@ -1,6 +1,7 @@
 extends SceneTree
 ## Historical source -> real scene publishers and shared production tree queue.
-## Main gameplay boot is suppressed. This is not live-world/visual acceptance.
+## Main gameplay boot is suppressed. Door ownership uses the explicitly
+## synthetic callback below. This is not live-world/visual/door acceptance.
 const Publisher = preload("res://scripts/buildings/BuildingPartPublisher.gd")
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Worker = preload("res://scripts/buildings/BuildingPublicationWorker.gd")
@@ -19,6 +20,29 @@ class SummarySpy extends Publisher:
 	func summary() -> Dictionary:
 		summary_calls += 1
 		return super.summary()
+
+## The historical-source scene fixture does not boot NPC/door registries.
+## This adapter proves balanced callback ownership only; it grants no gameplay
+## door authority and is never used by a production runtime or headed runner.
+class SyntheticDoorLifecycle extends RefCounted:
+	var claims: Dictionary = {}
+	var registered: int = 0
+	var retired: int = 0
+	var retire_before_free: bool = true
+	func register(body: StaticBody3D) -> Dictionary:
+		var id: String = String(body.get_meta("door_portal_id", ""))
+		if id.is_empty() or claims.has(id): return {"status":"failed", "reason":"synthetic_door_identity"}
+		claims[id] = weakref(body)
+		registered += 1
+		return {"status":"registered", "portalId":id}
+	func retire(body: StaticBody3D) -> Dictionary:
+		var id: String = String(body.get_meta("door_portal_id", ""))
+		if not claims.has(id) or claims[id].get_ref() != body:
+			return {"status":"failed", "reason":"synthetic_door_retirement_identity"}
+		retire_before_free = retire_before_free and is_instance_valid(body) and body.get_parent() != null
+		claims.erase(id)
+		retired += 1
+		return {"status":"unregistered", "portalId":id}
 
 var checks := {}
 var metrics := {}
@@ -112,6 +136,8 @@ func actual_publication() -> void:
 	main.add_child(parent)
 	var job_script = load("res://scripts/buildings/BuildingScenePublicationJob.gd")
 	var job = job_script.new()
+	var synthetic_doors: SyntheticDoorLifecycle = SyntheticDoorLifecycle.new()
+	check("actual_synthetic_door_callbacks_bound",job.set_door_callbacks(synthetic_doors.register,synthetic_doors.retire))
 	metrics.metadataPreparationUsec=completed.result.prepared._payload.get("metadataPreparationUsec",0)
 	metrics.historyPreparationUsec=completed.result.prepared._payload.get("historyPreparationUsec",0)
 	metrics.masonryPreparationUsec=completed.result.prepared._payload.get("masonryPreparationUsec",0)
@@ -121,9 +147,24 @@ func actual_publication() -> void:
 	check("actual_masonry_descriptors_prepared",metrics.preparedMasonryCount==1450)
 	prepared_masonry=null
 	check("actual_immutable_history_prepared",completed.result.prepared._payload.get("preparedHistory")!=null)
+	var description = completed.result.prepared.describe(binding)
+	check("actual_compiled_publication_groups",description != null and description.publication_groups.get("ready",false) and description.origin == profile.origin)
+	description = null
 	var begin: Dictionary = job.begin(completed.result.prepared,profile,binding,parent,main.make_tree_from_runtime_request)
-	completed = {}; profile = {}
 	check("actual_begin_queued_without_nodes",begin.status=="pending_budget" and parent.get_child_count()==0)
+	if begin.status != "pending_budget":
+		metrics.rejectedBegin = begin
+		# Rejected begin never takes ownership. Relinquish every caller alias
+		# before polling the existing worker that disposes the prepared source.
+		worker.request_shutdown()
+		check("actual_rejected_begin_retirement_accepted",worker.retire_external_payload(completed))
+		completed = {}; profile = {}
+		deadline = Time.get_ticks_msec()+15000
+		while not worker.poll().shutdownComplete and Time.get_ticks_msec()<deadline: await process_frame
+		check("actual_rejected_begin_worker_shutdown",worker.poll().shutdownComplete)
+		main.free()
+		return
+	completed = {}; profile = {}
 	var status: Dictionary = job.status()
 	var last_phase := ""
 	var next_progress := 0
@@ -143,11 +184,17 @@ func actual_publication() -> void:
 	check("actual_advance_accounting",status.advanceCalls>0 and status.advanceCpuUsec>0 and status.betweenAdvanceUsec>=0)
 	check("actual_no_main_masonry_descriptor",metrics.publisherStages.get("masonry_publish_geometry",{}).get("calls",0)==0 and job._building._masonry_preparation.metrics.maxDescriptorUsec==0)
 	check("actual_prepared_masonry_consumed",metrics.publisherStages.get("prepared_masonry_lookup",{}).get("calls",0)==metrics.preparedMasonryCount)
-	var roof_count := 0
-	for part in job._blueprint.parts:
-		if part!=null and String(part.kind)=="roof" and bool(part.recipe.get("visual",true)): roof_count+=1
+	metrics.roofPublicationSource=measure_prepared_roof_publication(job)
+	var roof_count: int=int(metrics.roofPublicationSource.roofCount)
 	metrics.roofCount=roof_count
-	check("actual_roofs_use_resumable_publication",roof_count>0 and metrics.publisherStages.get("roof_publish_setup",{}).get("calls",0)==roof_count and metrics.publisherStages.get("roof_publish_tiles",{}).get("calls",0)>roof_count)
+	check("actual_roofs_use_resumable_publication",roof_count>0 and metrics.roofPublicationSource.valid \
+		and metrics.roofPublicationSource.preparedCount==roof_count and metrics.roofPublicationSource.maxSegmentsPerGroup>1 \
+		and metrics.publisherStages.get("roof_publish_setup",{}).get("calls",0)==roof_count \
+		and metrics.publisherStages.get("roof_publish_packet_collect",{}).get("calls",0)==metrics.roofPublicationSource.expectedCollectCalls \
+		and metrics.roofPublicationSource.expectedCollectCalls>roof_count \
+		and metrics.publisherStages.get("roof_publish_geometry",{}).get("calls",0)==0 \
+		and metrics.publisherStages.get("roof_publish_collect",{}).get("calls",0)==0 \
+		and metrics.publisherStages.get("roof_publish_compat_custom",{}).get("calls",0)==0)
 	check("actual_roofs_complete_exactly_once",metrics.publisherStages.get("roof_publish_eave",{}).get("calls",0)==roof_count and metrics.publisherStages.get("roof_publish_ridge",{}).get("calls",0)==roof_count and metrics.publisherStages.get("roof_publish_finish",{}).get("calls",0)==roof_count)
 	metrics.retainedMetadata=measure_retained_metadata(job._building)
 	metrics.metadataCache=job._building._static_record_cache_stats.duplicate() if job._building!=null else {}
@@ -161,6 +208,7 @@ func actual_publication() -> void:
 		check("actual_building_count",status.counts.buildingParts==4703 and status.counts.buildingTotal==4703)
 		check("actual_furniture_count",status.counts.furnitureParts==210 and status.counts.furnitureTotal==210)
 		check("actual_trees_all_visuals",status.counts.treesRegistered>0 and status.counts.treeVisualsComplete==status.counts.treesTotal and status.counts.treesSkipped==0)
+		check("actual_synthetic_door_owners_registered",synthetic_doors.registered>0 and synthetic_doors.registered==status.counts.doorsRegistered and synthetic_doors.claims.size()==synthetic_doors.registered)
 		await physics_frame
 		await process_frame
 		await physics_frame
@@ -175,6 +223,8 @@ func actual_publication() -> void:
 		job.advance(2500)
 		await process_frame
 	check("actual_scene_cleanup",job.status().retirementReady and parent.get_child_count()==0)
+	check("actual_synthetic_door_owners_retired_once",synthetic_doors.claims.is_empty() and synthetic_doors.retired==synthetic_doors.registered and synthetic_doors.retire_before_free)
+	metrics.syntheticDoorLifecycle = {"registered":synthetic_doors.registered,"retired":synthetic_doors.retired,"claimsRemaining":synthetic_doors.claims.size(),"retireBeforeFree":synthetic_doors.retire_before_free}
 	metrics.afterCleanup = job.status()
 	var payload: Dictionary = job.take_retirement_payload()
 	check("actual_cpu_retirement_payload",not payload.is_empty())
@@ -197,6 +247,63 @@ func actual_publication() -> void:
 		check("actual_tree_queue_drained",metrics.treeQueue.pending==0 and metrics.treeQueue.activeWorkers==0 and metrics.treeQueue.completed==0)
 	main.free()
 	await process_frame
+
+func measure_prepared_roof_publication(job) -> Dictionary:
+	# Keep borrowed prepared Objects/Arrays inside this synchronous observation
+	# frame. Only scalars survive into metrics and later retirement awaits.
+	var result: Dictionary={"valid":false,"reason":"missing_roof_artifact","partId":"", \
+		"roofCount":0,"preparedCount":0,"expectedCollectCalls":0,"maxSegmentsPerGroup":0,"instanceCount":0}
+	# Count the whole source even if a later prepared-record guard rejects.
+	for part in job._blueprint.parts:
+		if part!=null and String(part.kind)=="roof" and bool(part.recipe.get("visual",true)): result.roofCount+=1
+	if job._building==null: return result
+	var publisher: Variant=job._building
+	var artifact: Variant=publisher._prepared_surfaces.get("roof")
+	if not artifact is Preparation.PreparedGeometry: return result
+	if artifact.family!="roof" or not artifact.matches_history(publisher._prepared_history,publisher.surface_history,publisher.source_blueprint_id): return result
+	for part in job._blueprint.parts:
+		if part==null or String(part.kind)!="roof" or not bool(part.recipe.get("visual",true)): continue
+		result.partId=String(part.id)
+		result.reason="roof_source_binding"
+		if not artifact.has_part(part) or not artifact.validate_part(part): return result
+		var geometry: Dictionary=artifact.geometry_for(part)
+		var packet: Variant=artifact.packet_for(part)
+		result.reason="roof_packet_binding"
+		if geometry.is_empty() or not packet is Dictionary: return result
+		if not packet.is_read_only() or packet.get("family")!="roof" \
+			or packet.get("frame")!=Transform3D(Basis.from_euler(part.rotation),part.position) \
+			or not packet.get("groups") is Dictionary or not packet.groups.is_read_only(): return result
+		for family: String in ["regular","weathered"]:
+			result.reason="roof_packet_group:"+family
+			var transforms: Variant=geometry.get(family+"Transforms")
+			var group: Variant=packet.groups.get(family)
+			if not transforms is Array or not group is Dictionary or not group.is_read_only(): return result
+			if not group.get("segments") is Array: return result
+			var segments: Array=group.segments
+			if not segments.is_read_only() or segments.is_empty()!=transforms.is_empty(): return result
+			var group_instances: int=0
+			for segment: Variant in segments:
+				result.reason="roof_packet_segment:"+family
+				if not segment is Dictionary or not segment.is_read_only(): return result
+				var instance_count: Variant=segment.get("instanceCount")
+				if not instance_count is int or instance_count<1 or instance_count>256: return result
+				for field: String in ["transforms","customData","buffer"]:
+					if not segment.get(field) is Array or not segment[field].is_read_only(): return result
+				if segment.transforms.size()!=instance_count or segment.customData.size()!=instance_count \
+					or segment.buffer.size()!=instance_count*16: return result
+				group_instances+=int(instance_count)
+			result.reason="roof_packet_instance_count:"+family
+			if group_instances!=transforms.size(): return result
+			result.instanceCount+=group_instances
+			result.maxSegmentsPerGroup=maxi(int(result.maxSegmentsPerGroup),segments.size())
+			# Each nonempty packet group is consumed one segment per unit, then
+			# one terminal cursor unit. Empty groups never enter packet_collect.
+			if not segments.is_empty(): result.expectedCollectCalls+=segments.size()+1
+		result.preparedCount+=1
+	result.valid=true
+	result.reason=""
+	result.partId=""
+	return result
 
 func measure_retained_metadata(publisher) -> Dictionary:
 	# Keep observation aliases in a separate call frame: a for-loop iterator can
@@ -332,7 +439,7 @@ func _finish() -> void:
 	var report := {"schema":"building-scene-publication/v1","complete":true,"passed":not checks.values().has(false),
 		"evidenceLevel":"historical_source_actual_publishers_and_shared_tree_queue" if actual_requested else "synthetic_publisher_facade","checks":checks,"metrics":metrics,
 		"measuredBudgetsMet":checks.get("actual_scene_ready",false) and metrics.get("afterCleanup",{}).get("maxAtomicUsec",999999)<=8000 and metrics.get("afterCleanup",{}).get("maxSliceUsec",999999)<=4000,
-		"doesNotProve":"No ordinary-world city spawning, visual acceptance, gameplay doors, NPC behavior, terrain, saves or runtime performance acceptance."}
+		"doesNotProve":"Door registration is an explicitly synthetic balanced callback adapter. No ordinary-world city spawning, visual acceptance, gameplay doors, NPC behavior, terrain, saves or runtime performance acceptance."}
 	var file := FileAccess.open(output+"/report.json",FileAccess.WRITE)
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("SCENE PUBLICATION COMPLETE ",JSON.stringify({"checks":checks.size(),"passed":report.passed}))

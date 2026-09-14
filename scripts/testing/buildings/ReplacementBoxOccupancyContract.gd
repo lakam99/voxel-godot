@@ -84,6 +84,7 @@ func _run() -> void:
 			slabs.append(slab)
 	_rejected("cover_fragment_limit", Occupancy.cover(domain, slabs), "uncovered")
 	_rejected("removed_fragment_limit", Occupancy.removed([domain], slabs), "cells")
+	_prepared_controls(unit,edge_boxes,domain,slabs,too_many)
 	_finish(path)
 
 func _cover(name: String, region: Array, solids: Array, expected: Array) -> void:
@@ -92,7 +93,53 @@ func _cover(name: String, region: Array, solids: Array, expected: Array) -> void
 	_checks[name] = result.get("ready", false) and result.get("covered") == expected.is_empty() and _cells_exact(result.get("uncovered"), expected)
 	_checks[name + "_immutable"] = frozen == var_to_bytes([region, solids])
 	_checks[name + "_repeat"] = var_to_bytes(result) == var_to_bytes(Occupancy.cover(region, solids))
+	var prepared = Occupancy.prepare_solids(solids)
+	_checks[name + "_prepared_exact"] = prepared != null and var_to_bytes(result) == var_to_bytes(Occupancy.cover_prepared(region,prepared))
+	_checks[name + "_prepared_repeat_exact"] = prepared != null and var_to_bytes(result) == var_to_bytes(Occupancy.cover_prepared(region,prepared)) \
+		and frozen == var_to_bytes([region,solids])
 	_evidence[name] = result
+
+func _prepared_controls(unit: Array, edge_boxes: Array, domain: Array, slabs: Array, too_many: Array) -> void:
+	# Reuse the actual immutable owner artifact across different scalar queries;
+	# all complete output dictionaries, including work and ordered cells, match.
+	var integer_box: Array[int] = [0,0,0,1,1,1]
+	var float_box: Array[float] = [-0.0,0.0,0.0,1.0,1.0,1.0]
+	var mixed: Array = [float_box,integer_box,edge_boxes[0].duplicate()]
+	var frozen: PackedByteArray = var_to_bytes(mixed)
+	var prepared = Occupancy.prepare_solids(mixed)
+	_checks["prepared_source_types_signed_zero_and_order_preserved"] = prepared != null \
+		and var_to_bytes(prepared._solids)==var_to_bytes(Occupancy._sorted(mixed)) and frozen==var_to_bytes(mixed)
+	_checks["prepared_nested_values_are_frozen_owned_copies"] = prepared != null and prepared._solids.is_read_only() \
+		and prepared._solids.all(func(box): return box.is_read_only() and not mixed.any(func(source): return is_same(box,source)))
+	for index in range(edge_boxes.size()):
+		_checks["prepared_mixed_endpoint_query_%d" % index] = var_to_bytes(Occupancy.cover(edge_boxes[index],mixed)) \
+			==var_to_bytes(Occupancy.cover_prepared(edge_boxes[index],prepared))
+	var source: Array = [[0.0,0.0,0.0,0.5,1.0,1.0]]
+	var original: Dictionary = Occupancy.cover(unit,source)
+	var retained = Occupancy.prepare_solids(source)
+	source[0][3] = 1.0
+	source.append([2,0,0,3,1,1])
+	source.reverse()
+	_checks["prepared_isolated_from_nested_and_outer_caller_mutation"] = var_to_bytes(original)==var_to_bytes(Occupancy.cover_prepared(unit,retained)) \
+		and var_to_bytes(original)!=var_to_bytes(Occupancy.cover(unit,source))
+	var changed_result: Dictionary = Occupancy.cover_prepared(unit,retained)
+	changed_result.uncovered[0][0] = -7.0
+	changed_result.uncovered.append(unit.duplicate())
+	_checks["prepared_result_mutation_cannot_change_next_query"] = var_to_bytes(original)==var_to_bytes(Occupancy.cover_prepared(unit,retained))
+	var new_prepared = Occupancy.prepare_solids(source)
+	_checks["prepared_new_owner_uses_current_source"] = var_to_bytes(Occupancy.cover(unit,source))==var_to_bytes(Occupancy.cover_prepared(unit,new_prepared))
+	var unsealed := Occupancy.PreparedSolids.new()
+	var tampered = Occupancy.prepare_solids(source)
+	tampered._solids = []
+	var invalid: Dictionary = Occupancy.cover(unit,[null])
+	_checks["prepared_unsealed_and_rebound_artifacts_rejected"] = var_to_bytes(Occupancy.cover_prepared(unit,unsealed))==var_to_bytes(invalid) \
+		and var_to_bytes(Occupancy.cover_prepared(unit,tampered))==var_to_bytes(invalid) \
+		and var_to_bytes(Occupancy.cover_prepared(unit,{"ready":true,"solids":source}))==var_to_bytes(invalid)
+	_checks["prepared_source_cap_exact"] = Occupancy.prepare_solids(too_many)==null \
+		and var_to_bytes(Occupancy.cover(unit,too_many))==var_to_bytes(Occupancy.cover_prepared(unit,Occupancy.prepare_solids(too_many)))
+	_checks["prepared_fragment_failure_exact"] = var_to_bytes(Occupancy.cover(domain,slabs)) \
+		==var_to_bytes(Occupancy.cover_prepared(domain,Occupancy.prepare_solids(slabs)))
+	_evidence["preparedScope"] = "Only sorted immutable solids are reused. Region subtraction, work counters, output ordering and all original limits run afresh for every query; this is not a spatial filter or a cross-source cache."
 
 func _removed(name: String, original: Array, retained: Array, expected: Array) -> void:
 	var frozen: PackedByteArray = var_to_bytes([original, retained])
@@ -127,6 +174,10 @@ func _invalid_controls(unit: Array) -> void:
 		_checks["intersection_invalid_rejects_%d" % index] = Occupancy.intersection(unit, box).is_empty() and Occupancy.intersection(box, unit).is_empty()
 		_rejected("invalid_region_%d" % index, Occupancy.cover(box, [unit]), "uncovered")
 		_rejected("invalid_solid_even_after_cover_%d" % index, Occupancy.cover(unit, [unit, box]), "uncovered")
+		_checks["prepared_invalid_region_exact_%d" % index] = var_to_bytes(Occupancy.cover(box,[unit])) \
+			==var_to_bytes(Occupancy.cover_prepared(box,Occupancy.prepare_solids([unit])))
+		_checks["prepared_invalid_solid_even_after_cover_exact_%d" % index] = Occupancy.prepare_solids([unit,box])==null \
+			and var_to_bytes(Occupancy.cover(unit,[unit,box]))==var_to_bytes(Occupancy.cover_prepared(unit,Occupancy.prepare_solids([unit,box])))
 		_rejected("invalid_original_%d" % index, Occupancy.removed([box], []), "cells")
 		_rejected("invalid_retained_even_empty_original_%d" % index, Occupancy.removed([], [box]), "cells")
 		_checks["invalid_input_immutable_%d" % index] = frozen == var_to_bytes(box)

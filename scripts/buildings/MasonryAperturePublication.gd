@@ -7,6 +7,7 @@ const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const PartBinding = preload("res://scripts/buildings/BuildingPartBinding.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const Descriptor = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
+const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
 const MAX_PARTS := 512
 const MAX_BRICKS := 8192
 const MAX_VERTICES := 262144
@@ -38,6 +39,7 @@ var _begin_cursor := 0
 var _begin_marked: Array = []
 var _descriptor_cursor
 var _descriptor_part
+var _packet_geometry_by_part: Dictionary = {}
 var _solids_group := 0
 var _solids_index := 0
 var _solids_frame: Transform3D
@@ -73,6 +75,49 @@ func begin_incremental(b, publisher) -> bool:
 	_source_order=b.parts.duplicate()
 	_begin_stage="inventory"
 	metrics.beginUsec=Time.get_ticks_usec()-started
+	return true
+
+## Main-owner hydration for immutable physical packets.  This deliberately
+## retains the established declaration validation and clipping/upload code; the
+## worker supplies only values and cannot smuggle Meshes, Nodes, or source part
+## aliases into the scene.
+func begin_packet(b, publisher, packet_by_part: Dictionary) -> bool:
+	if b==null or packet_by_part.is_empty(): return _fail("invalid_aperture_packet_source")
+	if not begin_incremental(b,publisher): return false
+	# Inventory the complete restored source for peer/order validation, then limit
+	# requests to the packet's explicit closure. Never prepare an unrelated
+	# aperture merely because it shares this resident scene source.
+	while _begin_stage=="inventory" and state=="pending_budget": _advance_begin()
+	if _begin_stage=="requests":
+		var selected: Array = []
+		for part in _begin_marked:
+			if packet_by_part.has(String(part.id)): selected.append(part)
+		_begin_marked=selected
+	while _begin_stage!="done" and state=="pending_budget": _advance_begin()
+	if state=="failed": return false
+	var geometry_by_part: Dictionary = {}
+	for part in _begin_marked:
+		var packet: Variant = packet_by_part.get(String(part.id))
+		if not packet is Dictionary or packet.get("kind")!="masonry_aperture_cut/v1" \
+				or packet.get("partId")!=String(part.id) or packet.get("binding")!=Preparation.static_record_binding(part.snapshot()) \
+				or not packet.get("declaration") is Dictionary or not packet.get("peerBindings") is Dictionary \
+				or not packet.get("geometry") is Dictionary or packet.geometry.is_empty():
+			return _fail("invalid_aperture_packet")
+		var key := String(packet.get("key",""))
+		if key.is_empty() or key!=String(part.recipe.get("masonryApertureSource","")) \
+				or var_to_bytes(b.recipe.get("facadeApertures",{}).get(key)) != var_to_bytes(packet.declaration):
+			return _fail("stale_aperture_packet_declaration")
+		for peer_id_value in packet.declaration.get("partIds",[]):
+			var peer_id:=String(peer_id_value)
+			var peer=b.find_part(peer_id)
+			if peer_id.is_empty() or peer==null or packet.peerBindings.get(peer_id)!=Preparation.static_record_binding(peer.snapshot()):
+				return _fail("stale_aperture_packet_peer")
+		geometry_by_part[String(part.id)] = packet.geometry
+	if geometry_by_part.size()!=packet_by_part.size(): return _fail("unexpected_aperture_packet_member")
+	# Packet geometry is already frozen by the worker. Do not duplicate it or
+	# rebuild its descriptor on the frame owner.
+	geometry_by_part.make_read_only()
+	_packet_geometry_by_part=geometry_by_part
 	return true
 
 func _advance_begin() -> void:
@@ -162,7 +207,7 @@ func advance(publisher, budget_usec: int = 2500) -> String:
 				metrics.maxUnitUsec = maxi(metrics.maxUnitUsec, declaration_usec)
 				continue
 			_descriptor_part=Part.new(request.snapshot)
-			var prepared: Dictionary=publisher.prepared_masonry_geometry(request.part)
+			var prepared: Dictionary=_packet_geometry_by_part.get(String(request.part.id),publisher.prepared_masonry_geometry(request.part))
 			if publisher._publication_failed():
 				_fail("stale_prepared_masonry"); break
 			if not prepared.is_empty(): _begin_solids(prepared)

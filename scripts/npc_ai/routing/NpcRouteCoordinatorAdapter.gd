@@ -46,13 +46,13 @@ const ROUTE_CACHE_LIMIT := 128
 # counts does not reintroduce sustained frame spikes.
 const NAVMESH_TILE_PUBLISHES_PER_FRAME := 4
 const NAVMESH_TILE_PUBLISHES_MAX_PER_FRAME := 32
-const BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME := 2
-const PRIORITY_NAVMESH_TILE_PUBLISHES_PER_FRAME := 8
-const PRIORITY_NAVMESH_TILE_PUBLISH_USEC_BUDGET := 20000
-const ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_PUBLISHES_PER_FRAME := 6
-const ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_USEC_BUDGET := 14000
-const PRIORITY_NAVMESH_TILE_POST_FOREGROUND_USEC_BUDGET := 3000
-const BACKGROUND_NAVMESH_TILE_PUBLISH_USEC_BUDGET := 3000
+const BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME := 1
+const PRIORITY_NAVMESH_TILE_PUBLISHES_PER_FRAME := 1
+const PRIORITY_NAVMESH_TILE_PUBLISH_USEC_BUDGET := 750
+const ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_PUBLISHES_PER_FRAME := 1
+const ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_USEC_BUDGET := 750
+const PRIORITY_NAVMESH_TILE_POST_FOREGROUND_USEC_BUDGET := 750
+const BACKGROUND_NAVMESH_TILE_PUBLISH_USEC_BUDGET := 750
 const BACKGROUND_NAVMESH_TILE_PUBLISH_FRAME_INTERVAL := 2
 const BACKGROUND_NAVMESH_TILE_MAX_CHUNK_FRAME_MS := 6.0
 const BACKGROUND_NAVMESH_TILE_MAX_HOSTILE_FRAME_MS := 8.0
@@ -120,22 +120,27 @@ func setup(system_node, main_node, navigation_world) -> void:
 func performance_monitor():
 	return main.get("runtime_perf_monitor") if main != null else null
 
-func begin_frame() -> void:
+func begin_frame(allow_publication := true) -> void:
 	route_budget_tick += 1
 	route_cache_invalidations_this_frame = 0
 	route_cache_tile_evictions_this_frame = 0
 	navmesh_tile_publish_work_this_frame = false
+	_retain_active_navigation_capture_demand()
+	var publication_processed := 0
 	var priority_tiles_waiting := not queued_navmesh_tile_priority_keys.is_empty()
 	var background_queue_due := route_budget_tick % BACKGROUND_NAVMESH_TILE_PUBLISH_FRAME_INTERVAL == 0
-	if BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME > 0 and priority_tiles_waiting:
+	if not allow_publication:
+		var deferred_monitor = performance_monitor()
+		if deferred_monitor != null and (priority_tiles_waiting or not queued_navmesh_tile_keys.is_empty()):
+			deferred_monitor.increment_counter("navmesh_tile_publish_queue_deferred_shared_budget")
+	elif BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME > 0 and priority_tiles_waiting:
 		var foreground_processed := _process_queued_navmesh_tile_publishes(ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_PUBLISHES_PER_FRAME, ACTIVE_JOB_NAVMESH_TILE_FOREGROUND_USEC_BUDGET, true, true)
 		var remaining_priority_tiles := maxi(0, PRIORITY_NAVMESH_TILE_PUBLISHES_PER_FRAME - foreground_processed)
 		var priority_processed := 0
 		if remaining_priority_tiles > 0 and not queued_navmesh_tile_priority_keys.is_empty():
 			var remaining_usec := PRIORITY_NAVMESH_TILE_POST_FOREGROUND_USEC_BUDGET if foreground_processed > 0 else PRIORITY_NAVMESH_TILE_PUBLISH_USEC_BUDGET
 			priority_processed = _process_queued_navmesh_tile_publishes(remaining_priority_tiles, remaining_usec, false, false)
-		if foreground_processed + priority_processed > 0:
-			_sync_navmesh_after_queued_tile_publish()
+		publication_processed = foreground_processed + priority_processed
 	elif BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME > 0 and background_queue_due:
 		if _background_navmesh_tile_publish_should_wait():
 			var monitor = performance_monitor()
@@ -144,8 +149,31 @@ func begin_frame() -> void:
 				monitor.increment_counter("queued_navmesh_tile_depth", queued_navmesh_tile_keys.size())
 		else:
 			var background_processed := _process_queued_navmesh_tile_publishes(BACKGROUND_NAVMESH_TILE_PUBLISHES_PER_FRAME, BACKGROUND_NAVMESH_TILE_PUBLISH_USEC_BUDGET)
-			if background_processed > 0:
-				_sync_navmesh_after_queued_tile_publish()
+			publication_processed = background_processed
+	# The final accepted tile may have left no queued work. Keep the existing
+	# publication tick responsible for its acknowledgement even when processed=0.
+	if publication_processed > 0 or (is_instance_valid(navmesh_world) and navmesh_world.has_method("publication_sync_pending") \
+			and bool(navmesh_world.publication_sync_pending())):
+		_sync_navmesh_after_queued_tile_publish()
+
+## Direct route and regional callers may start a resumable capture before the
+## shared queue owns that tile. The capture is the only work that can release
+## its slot, so retain its exact source as priority completion debt before
+## selecting any competing request. This is scheduling identity only; source
+## validity and physical correctness are still checked at service acceptance.
+func _retain_active_navigation_capture_demand() -> void:
+	if world == null or not world.has_method("active_navigation_capture_tile") \
+			or not world.has_method("active_navigation_capture_source"):
+		return
+	var tile_key := String(world.active_navigation_capture_tile())
+	if tile_key.is_empty() or queued_navmesh_tile_source_keys.has(tile_key):
+		return
+	var retained: Dictionary = world.active_navigation_capture_source(tile_key)
+	var source_key := String(retained.get("sourceKey",""))
+	if source_key.is_empty():
+		return
+	_enqueue_navmesh_tile_publish(tile_key,source_key,true,
+		{"reason":"active_capture_continuation","activeCaptureContinuation":true})
 
 func invalidate() -> void:
 	route_cache.clear()
@@ -160,6 +188,8 @@ func invalidate() -> void:
 	queued_navmesh_tile_keys.clear()
 	queued_navmesh_tile_sequence = 0
 	deferred_navmesh_tile_keys.clear()
+	if is_instance_valid(world) and world.has_method("release_navigation_capture_slot"):
+		world.release_navigation_capture_slot()
 
 func shutdown_for_process_exit() -> void:
 	# This adapter is retained by the legacy facade as well as route helpers.
@@ -1259,19 +1289,15 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 		if tile_key == "":
 			continue
 		var source_key := _navmesh_tile_source_key(tile_key)
-		var published_key := "%s|%s" % [tile_key, source_key]
-		if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
-			publish_debug.append({ "tile": tile_key, "status": "cached_empty" })
-			continue
 		var endpoint_tile := endpoint_tile_keys.has(tile_key)
 		var status_start: int = monitor.begin_section("navmesh_tile_status") if monitor != null else Time.get_ticks_usec()
-		var tile_status := _navmesh_tile_region_status(tile_key)
+		var accepted_state: Dictionary = _navmesh_tile_accepted_state(tile_key,source_key)
 		if monitor != null:
 			monitor.end_section("navmesh_tile_status", status_start)
-		if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key and bool(tile_status.get("installed", false)) and not bool(tile_status.get("dirty", false)) and int(tile_status.get("surfaceCount", 0)) > 0:
+		if accepted_state.get("status") == "acknowledged":
 			if endpoint_tile:
 				missing_endpoint_tile_keys.erase(tile_key)
-			publish_debug.append({ "tile": tile_key, "status": "cached", "region": tile_status })
+			publish_debug.append({"tile":tile_key,"status":"cached_empty" if accepted_state.empty else "cached","region":accepted_state.receipt})
 			continue
 		if route_probe:
 			publish_debug.append({ "tile": tile_key, "status": "probe_missing_ready_tile" })
@@ -1329,7 +1355,7 @@ func _ensure_navmesh_route_tiles(entry: Dictionary, intent: Dictionary) -> bool:
 				queued_route_tiles_still_loading = true
 				if endpoint_tile:
 					queued_endpoint_tile_this_call = true
-				publish_debug.append({ "tile": tile_key, "status": "queued_priority" if priority_queue else "queued_budgeted", "region": tile_status })
+				publish_debug.append({ "tile": tile_key, "status": "queued_priority" if priority_queue else "queued_budgeted", "region": accepted_state.get("receipt", {}) })
 			else:
 				publish_debug.append({ "tile": tile_key, "status": "cost_skipped_budgeted" })
 			continue
@@ -1473,7 +1499,18 @@ func _enqueue_navmesh_tile_publish(tile_key: String, source_key: String, priorit
 	var was_queued := queued_navmesh_tile_source_keys.has(tile_key)
 	queued_navmesh_tile_source_keys[tile_key] = source_key
 	var previous_context: Dictionary = queued_navmesh_tile_contexts.get(tile_key, {}) if queued_navmesh_tile_contexts.get(tile_key, {}) is Dictionary else {}
-	var next_context: Dictionary = (context as Dictionary).duplicate(true) if context is Dictionary and not (context as Dictionary).is_empty() else previous_context.duplicate(true)
+	var incoming_context: Dictionary = (context as Dictionary).duplicate(true) if context is Dictionary else {}
+	var next_context: Dictionary = previous_context.duplicate(true)
+	for field in incoming_context:
+		if field != "queueOwnerKeys":
+			next_context[field] = incoming_context[field]
+	var owner_keys: Dictionary = _queue_owner_keys_for_context(previous_context) \
+		if not previous_context.is_empty() else {}
+	for owner_key in _queue_owner_keys_for_context(incoming_context):
+		owner_keys[owner_key] = true
+	next_context["queueOwnerKeys"] = owner_keys
+	if not owner_keys.is_empty():
+		next_context.erase("discardAfterCompletion")
 	var current_frame := Engine.get_process_frames()
 	var sequence := int(previous_context.get("queueSequence", -1))
 	if sequence < 0:
@@ -1488,9 +1525,70 @@ func _enqueue_navmesh_tile_publish(tile_key: String, source_key: String, priorit
 		queued_navmesh_tile_priority_keys[tile_key] = true
 		if not queued_navmesh_tile_keys.has(tile_key):
 			queued_navmesh_tile_keys.append(tile_key)
-		_resort_navmesh_tile_queue()
 	elif not was_queued:
 		queued_navmesh_tile_keys.append(tile_key)
+
+func _queue_owner_keys_for_context(context: Dictionary) -> Dictionary:
+	var result: Dictionary = {}
+	var explicit = context.get("queueOwnerKeys",{})
+	if explicit is Dictionary:
+		for key in explicit:
+			if not String(key).is_empty() and bool(explicit[key]): result[String(key)] = true
+	if not result.is_empty(): return result
+	var actor_id := String(context.get("actorId",""))
+	if not actor_id.is_empty():
+		result["route:"+actor_id] = true
+	elif bool(context.get("requireInstallationProof",false)):
+		result["readiness:"+String(context.get("reason","unspecified"))] = true
+	elif bool(context.get("activeCaptureContinuation",false)):
+		result["completion:active_capture"] = true
+	elif not bool(context.get("discardAfterCompletion",false)):
+		# Unknown and legacy callers remain fail-closed until they adopt an
+		# explicit releasable owner token.
+		result["external:anonymous"] = true
+	return result
+
+func _queue_owner_key(owner: Dictionary) -> String:
+	var kind := String(owner.get("kind",""))
+	var id := String(owner.get("id",""))
+	if kind.is_empty() or id.is_empty(): return "external:anonymous"
+	return kind+":"+id
+
+func _queued_navmesh_tile_has_resumable_completion(tile_key: String, source_key: String) -> bool:
+	if world != null and world.has_method("active_navigation_capture_source"):
+		var retained: Dictionary = world.active_navigation_capture_source(tile_key)
+		if String(retained.get("sourceKey","")) == source_key: return true
+	if navmesh_world != null and navmesh_world.has_method("active_publication_request"):
+		var request: Dictionary = navmesh_world.active_publication_request()
+		if String(request.get("tileKey","")) == tile_key \
+				and String(request.get("status","")) in ["pending","ready"]: return true
+	return false
+
+func _erase_queued_navmesh_tile(tile_key: String) -> void:
+	queued_navmesh_tile_keys.erase(tile_key)
+	queued_navmesh_tile_source_keys.erase(tile_key)
+	queued_navmesh_tile_priority_keys.erase(tile_key)
+	queued_navmesh_tile_contexts.erase(tile_key)
+	deferred_navmesh_tile_keys.erase(tile_key)
+
+func release_navmesh_tile_publish_owner(tile_key: String, owner: Dictionary) -> bool:
+	if tile_key.is_empty() or not queued_navmesh_tile_source_keys.has(tile_key): return false
+	var context: Dictionary = queued_navmesh_tile_contexts.get(tile_key,{}).duplicate(true)
+	var owners := _queue_owner_keys_for_context(context)
+	var owner_key := _queue_owner_key(owner)
+	if owner_key == "external:anonymous" or not owners.has(owner_key): return false
+	owners.erase(owner_key)
+	context["queueOwnerKeys"] = owners
+	var source_key := String(queued_navmesh_tile_source_keys.get(tile_key,""))
+	if not owners.is_empty():
+		queued_navmesh_tile_contexts[tile_key] = context
+		return true
+	context["discardAfterCompletion"] = true
+	if _queued_navmesh_tile_has_resumable_completion(tile_key,source_key):
+		queued_navmesh_tile_contexts[tile_key] = context
+		return true
+	_erase_queued_navmesh_tile(tile_key)
+	return true
 
 func _resort_navmesh_tile_queue() -> void:
 	# Finish one retry round across time-limited calls before revisiting pending
@@ -1507,6 +1605,25 @@ func _resort_navmesh_tile_queue() -> void:
 	queued_navmesh_tile_keys.sort_custom(func(a, b) -> bool:
 		return _queued_navmesh_tile_precedes(String(a), String(b))
 	)
+
+## Select one retained request without sorting the complete queue. Runtime
+## queues commonly contain a wide streaming frontier while only one tile can
+## use the capture/compiler slot. Re-sorting that frontier twice per frame made
+## queue arbitration more expensive than the bounded publication work itself.
+func _best_queued_navmesh_tile_index(foreground_active_jobs_only: bool, attempted: Dictionary) -> int:
+	var best_index := -1
+	for index in range(queued_navmesh_tile_keys.size()):
+		var tile_key := String(queued_navmesh_tile_keys[index])
+		if attempted.has(tile_key):
+			continue
+		var priority_tile := queued_navmesh_tile_priority_keys.has(tile_key)
+		var context: Dictionary = queued_navmesh_tile_contexts.get(tile_key,{}) \
+			if queued_navmesh_tile_contexts.get(tile_key,{}) is Dictionary else {}
+		if foreground_active_jobs_only and not _queued_navmesh_tile_is_active_job_foreground(context,priority_tile):
+			continue
+		if best_index < 0 or _queued_navmesh_tile_precedes(tile_key,String(queued_navmesh_tile_keys[best_index])):
+			best_index = index
+	return best_index
 
 func _queued_navmesh_tile_precedes(a: String, b: String) -> bool:
 	if deferred_navmesh_tile_keys.has(a) != deferred_navmesh_tile_keys.has(b):
@@ -1529,6 +1646,10 @@ func _queued_navmesh_tile_rank(tile_key: String, priority_tile := false) -> int:
 
 func _queued_navmesh_tile_rank_for_context(context: Dictionary, priority_tile := false) -> int:
 	var rank := 0
+	# Regional priority 0 is the playable-area publication gate. Keep it above
+	# the existing Boolean priority class without changing priority-1 actor work.
+	if int(context.get("regionalPriority",4))==0:
+		rank += 200000
 	if priority_tile:
 		rank += 100000
 	if bool(context.get("activeJobRoute", false)):
@@ -1555,6 +1676,11 @@ func _queued_navmesh_tile_rank_for_context(context: Dictionary, priority_tile :=
 func _restore_queued_navmesh_tile(tile_key: String, source_key: String, priority_tile: bool, context: Dictionary) -> void:
 	if tile_key == "" or source_key == "":
 		return
+	if bool(context.get("discardAfterCompletion",false)) \
+			and _queue_owner_keys_for_context(context).is_empty() \
+			and not _queued_navmesh_tile_has_resumable_completion(tile_key,source_key):
+		_erase_queued_navmesh_tile(tile_key)
+		return
 	queued_navmesh_tile_source_keys[tile_key] = source_key
 	queued_navmesh_tile_contexts[tile_key] = context.duplicate(true)
 	if priority_tile:
@@ -1580,34 +1706,72 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 		return 0
 	if not world.has_method("build_navmesh_tile_snapshot"):
 		return 0
-	_resort_navmesh_tile_queue()
+	# A retry round only needs its deferred markers reset. Select the best current
+	# request linearly below; sorting the entire retained frontier is unnecessary.
+	var has_unattempted := false
+	for queued_key: String in queued_navmesh_tile_keys:
+		if not deferred_navmesh_tile_keys.has(queued_key):
+			has_unattempted = true
+			break
+	if not has_unattempted:
+		deferred_navmesh_tile_keys.clear()
 	if reset_debug:
 		last_navmesh_tile_queue_debug = []
 	var processed := 0
 	var attempts := queued_navmesh_tile_keys.size()
+	var attempted := {}
 	var monitor = performance_monitor()
 	var started_usec := Time.get_ticks_usec()
 	while processed < max_tiles and attempts > 0 and not queued_navmesh_tile_keys.is_empty():
-		if max_usec > 0 and Time.get_ticks_usec() - started_usec >= max_usec:
+		var active_request: Dictionary = navmesh_world.active_publication_request() \
+			if navmesh_world.has_method("active_publication_request") else {}
+		var active_publication := String(active_request.get("tileKey",""))
+		var completing_ready: bool = active_request.get("status") == "ready" \
+			and not active_publication.is_empty() and queued_navmesh_tile_keys.has(active_publication)
+		if not completing_ready and max_usec > 0 and Time.get_ticks_usec() - started_usec >= max_usec:
 			if monitor != null:
 				monitor.increment_counter("navmesh_tile_publish_queue_usec_yields")
 			break
 		# Finish the already-owned compiler/upload slot before capturing another
 		# tile. Those captures cannot be admitted while the slot is occupied and
 		# used to delay even a completed result for an entire retry round.
-		var active_publication := ""
+		var active_capture := ""
 		if navmesh_world.has_method("active_publication_request"):
-			navmesh_world.advance_publication(maxi(1,max_usec-(Time.get_ticks_usec()-started_usec)) if max_usec>0 else 4000)
-			if max_usec>0 and Time.get_ticks_usec()-started_usec>=max_usec: break
-			var active_request: Dictionary = navmesh_world.active_publication_request()
-			active_publication = String(active_request.tileKey)
-			if not active_publication.is_empty():
-				if active_request.status == "pending": break
-				if not queued_navmesh_tile_keys.has(active_publication): break
-				queued_navmesh_tile_keys.erase(active_publication)
-				queued_navmesh_tile_keys.push_front(active_publication)
+			# Poll only an actually owned compiler/upload request. An idle queue may
+			# still perform maintenance in advance_publication; spending this small
+			# gameplay deadline before the retained capture gets a slice can leave
+			# the sole capture slot occupied indefinitely.
+			if not active_publication.is_empty() and not completing_ready:
+				navmesh_world.advance_publication(maxi(1,max_usec-(Time.get_ticks_usec()-started_usec)) if max_usec>0 else 4000)
+				active_request = navmesh_world.active_publication_request()
+				active_publication = String(active_request.get("tileKey",""))
+				completing_ready = active_request.get("status") == "ready" \
+					and not active_publication.is_empty() and queued_navmesh_tile_keys.has(active_publication)
+			if not completing_ready and max_usec>0 and Time.get_ticks_usec()-started_usec>=max_usec: break
+		if not active_publication.is_empty():
+			if active_request.status == "pending": break
+			if not queued_navmesh_tile_keys.has(active_publication): break
+		if active_publication.is_empty() and world.has_method("active_navigation_capture_tile"):
+			var capturing: String = world.active_navigation_capture_tile()
+			if not capturing.is_empty() and queued_navmesh_tile_keys.has(capturing):
+				active_capture = capturing
+		var selection_started := Time.get_ticks_usec()
+		var selected_index := -1
+		if not active_publication.is_empty():
+			selected_index = queued_navmesh_tile_keys.find(active_publication)
+		elif not active_capture.is_empty():
+			selected_index = queued_navmesh_tile_keys.find(active_capture)
+		else:
+			selected_index = _best_queued_navmesh_tile_index(foreground_active_jobs_only,attempted)
+		if monitor != null:
+			monitor.observe_duration("navmesh_tile_queue_select",float(Time.get_ticks_usec()-selection_started)/1000.0)
+		if selected_index < 0:
+			if foreground_active_jobs_only and monitor != null:
+				monitor.increment_counter("navmesh_tile_publish_foreground_queue_exhausted")
+			break
 		attempts -= 1
-		var tile_key := String(queued_navmesh_tile_keys.pop_front())
+		var tile_key := String(queued_navmesh_tile_keys.pop_at(selected_index))
+		attempted[tile_key] = true
 		var requested_source_key := String(queued_navmesh_tile_source_keys.get(tile_key, ""))
 		var priority_tile := queued_navmesh_tile_priority_keys.has(tile_key)
 		var context: Dictionary = queued_navmesh_tile_contexts.get(tile_key, {}) if queued_navmesh_tile_contexts.get(tile_key, {}) is Dictionary else {}
@@ -1623,10 +1787,23 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			_restore_queued_navmesh_tile(tile_key, requested_source_key, priority_tile, context)
 			if monitor != null:
 				monitor.increment_counter("navmesh_tile_publish_foreground_queue_exhausted")
-			if not active_publication.is_empty(): break
+			# The selected capture owns the same sole slot across slices. A
+			# foreground-only visit cannot advance it or select another capture.
+			if not active_publication.is_empty() or tile_key == active_capture: break
 			continue
 		deferred_navmesh_tile_keys.erase(tile_key)
-		var source_key := _navmesh_tile_source_key(tile_key)
+		# The ready slot already owns this exact requested source. Its final live
+		# proof happens in NavmeshWorldService immediately before installation.
+		# A retained capture already owns an immutable, physically validated source.
+		# Keep queue selection on its cheap identity until final installation, where
+		# NavmeshWorldService performs the authoritative physical proof.
+		var retained_capture_source := ""
+		if not completing_ready and world.has_method("active_navigation_capture_source"):
+			var retained_capture: Dictionary = world.active_navigation_capture_source(tile_key)
+			retained_capture_source = String(retained_capture.get("sourceKey",""))
+		var source_key := requested_source_key if completing_ready and tile_key == active_publication \
+			else retained_capture_source if not retained_capture_source.is_empty() \
+			else _navmesh_tile_source_key(tile_key)
 		if requested_source_key != source_key and monitor != null:
 			monitor.increment_counter("navmesh_tile_publish_queue_source_refresh")
 		var debug_record := {
@@ -1639,24 +1816,22 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			"context": context.duplicate(true),
 			"status": "started"
 		}
-		var published_key := "%s|%s" % [tile_key, source_key]
-		if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
-			debug_record["status"] = "cached_empty"
+		var accepted_state: Dictionary = {} if completing_ready and tile_key == active_publication \
+				or not retained_capture_source.is_empty() \
+			else _navmesh_tile_accepted_state(tile_key,source_key)
+		if accepted_state.get("status") == "acknowledged":
+			debug_record["status"] = "cached_empty" if accepted_state.empty else "cached"
+			debug_record["region"] = accepted_state.receipt
 			_record_navmesh_queue_debug(debug_record)
 			continue
-		if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key:
-			var tile_status := _navmesh_tile_region_status(tile_key)
-			if bool(tile_status.get("installed", false)) and not bool(tile_status.get("dirty", false)) and int(tile_status.get("surfaceCount", 0)) > 0:
-				debug_record["status"] = "cached"
-				debug_record["region"] = tile_status
-				_record_navmesh_queue_debug(debug_record)
-				continue
 		var claimed_publish_budget := _claim_active_job_navmesh_tile_foreground_budget() if foreground_publish else _claim_navmesh_tile_publish_budget(PRIORITY_NAVMESH_TILE_PUBLISHES_PER_FRAME - 1 if priority_tile else 0)
-		if not claimed_publish_budget:
+		if not claimed_publish_budget and not (completing_ready and tile_key == active_publication):
 			_restore_queued_navmesh_tile(tile_key, requested_source_key, priority_tile, context)
 			debug_record["status"] = "budget_denied"
 			_record_navmesh_queue_debug(debug_record)
 			break
+		elif not claimed_publish_budget and monitor != null:
+			monitor.increment_counter("navmesh_ready_completion_budget_overrides")
 		var snapshot_start: int = monitor.begin_section("navmesh_tile_snapshot_build") if monitor != null else Time.get_ticks_usec()
 		var snapshot: Dictionary = world.build_navmesh_tile_snapshot(tile_key)
 		if monitor != null:
@@ -1670,6 +1845,15 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			debug_record["reason"] = snapshot.get("reason", "source_pending")
 			_record_navmesh_queue_debug(debug_record)
 			if not active_publication.is_empty(): break
+			# Both reasons mean the sole resumable capture still owns this tile.
+			# Re-visiting it in the same rendered frame cannot advance the cursor;
+			# it only burns the remaining queue/time budget and delays everything
+			# else running in Main._process.  Retain the request and resume on the
+			# next frame, exactly as for an ordinary pending capture slice.
+			if snapshot.get("reason") in ["navigation_capture_pending", "navigation_capture_frame_budget_used"]:
+				if monitor != null and snapshot.get("reason") == "navigation_capture_frame_budget_used":
+					monitor.increment_counter("navmesh_capture_frame_budget_queue_yields")
+				break
 			continue
 		var publish_start: int = monitor.begin_section("navmesh_tile_publish") if monitor != null else Time.get_ticks_usec()
 		var publish_result: Dictionary = navmesh_world.register_tile_snapshot(snapshot)
@@ -1678,6 +1862,8 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 		if not _accept_navmesh_tile_publication(tile_key, source_key, snapshot, publish_result):
 			if foreground_publish: active_job_navmesh_tile_foreground_publishes_this_frame -= 1
 			else: navmesh_tile_publishes_this_frame -= 1
+			if publish_result.get("status") == "failed" and world.has_method("release_navigation_capture_slot"):
+				world.release_navigation_capture_slot(tile_key, source_key)
 			_restore_queued_navmesh_tile(tile_key, source_key, priority_tile, context)
 			deferred_navmesh_tile_keys[tile_key] = true
 			debug_record["status"] = publish_result.get("status", "pending")
@@ -1686,6 +1872,10 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 			if navmesh_world.has_method("active_publication_request") \
 					and not String(navmesh_world.active_publication_request().tileKey).is_empty(): break
 			continue
+		# Acceptance releases the capture even when this was the final queued
+		# tile and no later selector visit can observe its installed receipt.
+		if world.has_method("release_navigation_capture_slot"):
+			world.release_navigation_capture_slot(tile_key, source_key)
 		if monitor != null:
 			monitor.increment_counter("navmesh_route_tiles_published")
 			monitor.increment_counter("navmesh_tile_publish_queue_processed")
@@ -1696,6 +1886,19 @@ func _process_queued_navmesh_tile_publishes(max_tiles: int, max_usec := 0, foreg
 		debug_record["installed"] = bool(publish_result.get("installed", false))
 		_record_navmesh_queue_debug(debug_record)
 	return processed
+
+func _process_ready_navmesh_tile_publication(max_tiles := 1) -> int:
+	if max_tiles <= 0 or not is_instance_valid(navmesh_world) \
+			or not navmesh_world.has_method("active_publication_request"):
+		return 0
+	var request: Dictionary = navmesh_world.active_publication_request()
+	var tile_key := String(request.get("tileKey",""))
+	if request.get("status") != "ready" or tile_key.is_empty() \
+			or not queued_navmesh_tile_keys.has(tile_key):
+		return 0
+	# A completed slot is existing publication debt. Its final validation and
+	# installation must not be postponed by a time slice already spent elsewhere.
+	return _process_queued_navmesh_tile_publishes(max_tiles,1,false,false)
 
 func _record_navmesh_queue_debug(record: Dictionary) -> void:
 	last_navmesh_tile_queue_debug.append(record)
@@ -1764,6 +1967,28 @@ func _claim_navmesh_tile_publish_budget(extra_budget := 0) -> bool:
 	navmesh_tile_publishes_this_frame += 1
 	return true
 
+func _navmesh_tile_accepted_state(tile_key: String, source_key: String) -> Dictionary:
+	var state: Dictionary = {"status":"absent","reason":"navigation_source_owner_unavailable","sourceOwned":false,"empty":false}
+	if is_instance_valid(navmesh_world) and navmesh_world.has_method("accepted_tile_state") \
+			and is_instance_valid(world) and is_instance_valid(main):
+		var seed_value: Variant = main.get("seed_text")
+		if seed_value is String and not seed_value.is_empty():
+			state = navmesh_world.accepted_tile_state(tile_key,source_key,seed_value,world)
+	# Compatibility markers summarize an acknowledged owner query. They never
+	# authorize a shortcut independently of the next live service validation.
+	if state.get("status") == "acknowledged":
+		var published_key: String = "%s|%s" % [tile_key,source_key]
+		if bool(state.get("empty",false)):
+			empty_navmesh_tile_keys[tile_key] = published_key
+			published_navmesh_tile_keys.erase(tile_key)
+		else:
+			published_navmesh_tile_keys[tile_key] = published_key
+			empty_navmesh_tile_keys.erase(tile_key)
+	else:
+		published_navmesh_tile_keys.erase(tile_key)
+		empty_navmesh_tile_keys.erase(tile_key)
+	return state
+
 func _navmesh_tile_source_key(tile_key: String) -> String:
 	if world != null and world.has_method("navmesh_tile_source_key_for_tile"):
 		return String(world.navmesh_tile_source_key_for_tile(tile_key))
@@ -1784,23 +2009,48 @@ func promote_queued_navmesh_tile_priority(tile_key: String, source_key: String) 
 	_resort_navmesh_tile_queue()
 	return true
 
-func queue_navmesh_tile_publish(tile_key: String, priority := false) -> bool:
+## A retained regional foreground owner calls this only after its authoritative
+## source becomes ready. The tile may have been deferred during an earlier
+## source-pending attempt; re-enter it into the current retry round without
+## changing its source, queue age, route context, or priority identity.
+func retry_ready_queued_navmesh_tile_priority(tile_key: String, source_key: String) -> bool:
+	if queued_navmesh_tile_source_keys.get(tile_key, "") != source_key \
+			or not queued_navmesh_tile_priority_keys.has(tile_key):
+		return false
+	if deferred_navmesh_tile_keys.has(tile_key):
+		deferred_navmesh_tile_keys.erase(tile_key)
+		_resort_navmesh_tile_queue()
+	return true
+
+func set_queued_navmesh_tile_regional_priority(tile_key: String, source_key: String, priority: int) -> bool:
+	if priority<0 or priority>4 or queued_navmesh_tile_source_keys.get(tile_key, "") != source_key:
+		return false
+	var context: Dictionary = queued_navmesh_tile_contexts.get(tile_key,{}).duplicate(true)
+	if int(context.get("regionalPriority",4))==priority: return true
+	context["regionalPriority"] = priority
+	queued_navmesh_tile_contexts[tile_key] = context
+	_resort_navmesh_tile_queue()
+	return true
+
+func queue_navmesh_tile_publish(tile_key: String, priority := false, owner := {}) -> bool:
 	if tile_key == "" or world == null or navmesh_world == null:
 		return false
 	var source_key := _navmesh_tile_source_key(tile_key)
 	if source_key == "":
 		return false
+	var owner_key := _queue_owner_key(owner if owner is Dictionary else {})
+	var owner_keys := {owner_key:true}
 	if queued_navmesh_tile_source_keys.get(tile_key, "") == source_key:
+		var existing: Dictionary = queued_navmesh_tile_contexts.get(tile_key,{})
+		if not _queue_owner_keys_for_context(existing).has(owner_key):
+			_enqueue_navmesh_tile_publish(tile_key,source_key,priority,{
+				"reason":"external_queue","queueOwnerKeys":owner_keys})
 		if priority: promote_queued_navmesh_tile_priority(tile_key, source_key)
 		return true
-	var published_key := "%s|%s" % [tile_key, source_key]
-	if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
+	if _navmesh_tile_accepted_state(tile_key,source_key).get("status") == "acknowledged":
 		return false
-	if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key:
-		var tile_status := _navmesh_tile_region_status(tile_key)
-		if bool(tile_status.get("installed", false)) and not bool(tile_status.get("dirty", false)) and int(tile_status.get("surfaceCount", 0)) > 0:
-			return false
-	_enqueue_navmesh_tile_publish(tile_key, source_key, priority, { "reason": "external_queue" })
+	_enqueue_navmesh_tile_publish(tile_key, source_key, priority, {
+		"reason":"external_queue","queueOwnerKeys":owner_keys})
 	var monitor = performance_monitor()
 	if monitor != null:
 		monitor.increment_counter("navmesh_tile_publish_startup_queued")
@@ -1846,15 +2096,11 @@ func prebake_area_tiles(center_cell: Vector2i, radius_cells: int) -> Dictionary:
 			summary["tiles"] = processed
 			var tile_key := "%d,%d" % [tile_x, tile_z]
 			var source_key := _navmesh_tile_source_key(tile_key)
-			var published_key := "%s|%s" % [tile_key, source_key]
-			if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
-				summary["empty"] = int(summary["empty"]) + 1
+			var accepted_state: Dictionary = _navmesh_tile_accepted_state(tile_key,source_key)
+			if accepted_state.get("status") == "acknowledged":
+				var cached_count: String = "empty" if accepted_state.empty else "cachedReady"
+				summary[cached_count] = int(summary[cached_count])+1
 				continue
-			if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key:
-				var status := _navmesh_tile_region_status(tile_key)
-				if bool(status.get("installed", false)) and not bool(status.get("dirty", false)) and int(status.get("surfaceCount", 0)) > 0:
-					summary["cachedReady"] = int(summary["cachedReady"]) + 1
-					continue
 			var snapshot: Dictionary = world.build_navmesh_tile_snapshot(tile_key)
 			if snapshot.is_empty() or String(snapshot.get("publicationStatus", "ready")) != "ready":
 				_enqueue_navmesh_tile_publish(tile_key, source_key, true)
@@ -1926,13 +2172,11 @@ func _accept_navmesh_tile_publication(tile_key: String, source_key: String, snap
 	var empty := String(result.get("status", "")) == "empty" and (snapshot.get("surfaces") is Array or snapshot.get("buildingSurfaces") is Array)
 	if not installed and not empty:
 		return false
-	var published_key := "%s|%s" % [tile_key, source_key]
-	if empty:
-		empty_navmesh_tile_keys[tile_key] = published_key
-		published_navmesh_tile_keys.erase(tile_key)
-	else:
-		published_navmesh_tile_keys[tile_key] = published_key
-		empty_navmesh_tile_keys.erase(tile_key)
+	var accepted_state: Dictionary = _navmesh_tile_accepted_state(tile_key,source_key)
+	if not bool(accepted_state.get("sourceOwned",false)) or bool(accepted_state.get("empty",false)) != empty:
+		return false
+	# Retained pending-sync data completes the source handoff and processed
+	# accounting. Only the acknowledged state above can set readiness markers.
 	queued_navmesh_tile_source_keys.erase(tile_key)
 	queued_navmesh_tile_priority_keys.erase(tile_key)
 	queued_navmesh_tile_contexts.erase(tile_key)
@@ -1963,12 +2207,10 @@ func _routine_route_should_wait_after_navmesh_tile_publish(entry: Dictionary, in
 func _navmesh_tile_ready_for_route(tile_key: String, published_key: String) -> bool:
 	if tile_key == "" or published_key == "":
 		return false
-	if String(empty_navmesh_tile_keys.get(tile_key, "")) == published_key:
-		return true
-	var tile_status := _navmesh_tile_region_status(tile_key)
-	if String(published_navmesh_tile_keys.get(tile_key, "")) == published_key and bool(tile_status.get("installed", false)) and not bool(tile_status.get("dirty", false)) and int(tile_status.get("surfaceCount", 0)) > 0:
-		return true
-	return false
+	var source_key: String = _navmesh_tile_source_key(tile_key)
+	if published_key != "%s|%s" % [tile_key,source_key]:
+		return false
+	return _navmesh_tile_accepted_state(tile_key,source_key).get("status") == "acknowledged"
 
 func _endpoint_navmesh_tile_keys(start_cell: Vector2i, target_cell: Vector2i) -> Dictionary:
 	var result := {}

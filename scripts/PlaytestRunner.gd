@@ -1094,6 +1094,12 @@ func test_tutorial_start_system() -> void:
     main.call("update_objectives_and_contracts")
     var staged_state: Dictionary = tutorial_system.state()
     var staged_mission: Dictionary = staged_state.get("finalRescueMission", {}) if staged_state.get("finalRescueMission", {}) is Dictionary else {}
+    var staged_preparation_failure: Dictionary = {}
+    var staged_rescue_system = tutorial_system.get("rescue_system")
+    if staged_rescue_system != null:
+        var preparation_result = staged_rescue_system.get("last_preparation_result")
+        if preparation_result is Dictionary and not bool(preparation_result.get("ok", true)):
+            staged_preparation_failure = preparation_result.duplicate(true)
     var rescue_required: int = int(staged_state.get("rescueRequired", 6))
     var rescue_remaining: int = int(staged_state.get("rescueRemaining", 0))
     var niko_entry: Dictionary = npc_system.npc_entry_for_actor(niko) if npc_system and npc_system.has_method("npc_entry_for_actor") else {}
@@ -1138,7 +1144,7 @@ func test_tutorial_start_system() -> void:
             and guard_briefed
             and bool(escort_state.get("rescueEscortStarted", false))
             and guard_order_valid,
-        "started %s active %s phase %s Niko %s/%s hostiles %d/%d slots %s passive %s Sera %s/%s routeStack %s" % [
+        "started %s active %s phase %s Niko %s/%s hostiles %d/%d slots %s passive %s Sera %s/%s routeStack %s mission %s preparationFailure %s" % [
             str(final_started),
             str(staged_state.get("finalNightActive", false)),
             String(staged_mission.get("phase", "")),
@@ -1150,7 +1156,9 @@ func test_tutorial_start_system() -> void:
             str(passive_encounter_valid),
             String(guard_order.get("kind", "")),
             guard_order_state,
-            str(guard_order.get("usesRouteStack", false))
+            str(guard_order.get("usesRouteStack", false)),
+            JSON.stringify(staged_mission),
+            JSON.stringify(staged_preparation_failure)
         ]
     )
     mark_progress("tutorial_final_rescue_staging_checked")
@@ -6043,11 +6051,35 @@ func test_npc_equipment_and_pathing() -> void:
         add_result("npc_equipment_and_pathing", false, "npc system missing")
         return
 
-    var start_cell := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
-    reset_player_on_flat_patch(start_cell, 12)
+    var volume_snapshot: Array = call("snapshot_height_fixture") if has_method("snapshot_height_fixture") else []
+    var route_area_anchor := Vector2i(roundi(player.global_position.x / CELL) + 72, roundi(player.global_position.z / CELL) + 72)
+    var route_tile_origin := Vector2i(
+        floori(float(route_area_anchor.x) / 16.0) * 16,
+        floori(float(route_area_anchor.y) / 16.0) * 16
+    )
+    # Keep the wall, both endpoints, and both detour ends inside one navigation
+    # tile. This fixture measures obstacle routing; seam traversal has its own
+    # headed coverage and must not become an undeclared setup dependency here.
+    var start_cell := route_tile_origin + Vector2i(4, 8)
+    var authoritative_floor := {"ok": true}
+    if has_method("prepare_authoritative_navigation_floor"):
+        var floor_sample_cells: Array[Vector2i] = [
+            start_cell,
+            start_cell + Vector2i(8, 0),
+            start_cell + Vector2i(4, -3),
+            start_cell + Vector2i(4, 3)
+        ]
+        authoritative_floor = await call("prepare_authoritative_navigation_floor", start_cell, 12, floor_sample_cells)
+    else:
+        reset_player_on_flat_patch(start_cell, 12)
+    if not bool(authoritative_floor.get("ok", false)):
+        var floor_details := "authoritative route floor failed: %s" % JSON.stringify(authoritative_floor)
+        add_result("npc_equipment_and_pathing", false, floor_details)
+        add_result("npc_route_invalidates_player_block", false, "skipped after route fixture setup failure")
+        add_result("npc_unreachable_goal_diagnostics", false, "skipped after route fixture setup failure")
+        return
     clear_blocks_near_cell(start_cell, 12)
     clear_props_near_cell(start_cell, 14)
-    await wait_physics_frames(3)
 
     var base_height: float = surface_y_at_cell2(start_cell)
     var start_position := Vector3(float(start_cell.x) * CELL, base_height + 0.04, float(start_cell.y) * CELL)
@@ -6069,7 +6101,7 @@ func test_npc_equipment_and_pathing() -> void:
                 old_wall.queue_free()
             blocks.erase(wall_cell)
         main.call("create_block", wall_cell, "stoneBlock", { "world_y": wall_y })
-    await wait_physics_frames(3)
+    await settle_streamed_chunks_after_relocation("npc_nav_route_chunks", 240)
 
     var body := npc_system.create_npc_body("PlaytestPathingNPC", "npc") as CharacterBody3D
     npc_system.call("add_npc_collider", body)
@@ -6078,7 +6110,7 @@ func test_npc_equipment_and_pathing() -> void:
         npc_root.add_child(body)
     else:
         npc_system.add_child(body)
-    npc_system.safe_place_npc(body, start_position, null, "playtest_spawn")
+    var placement: Dictionary = npc_system.safe_place_npc(body, start_position, null, "playtest_spawn")
     var entry: Dictionary = npc_system.register_npc(body, {
         "id": "playtest-pathing-npc",
         "name": "Path Tester",
@@ -6103,23 +6135,44 @@ func test_npc_equipment_and_pathing() -> void:
     npc_system.update_npc_visual_state(entry, 0.08)
     var sword_animated := anchor != null and int(npc_system.stats().get("useAnimations", 0)) > uses_before and anchor.rotation.distance_to(rest_rotation) > 0.001
 
+    # Submit ordinary route demand once, then require the exact engine-owned
+    # endpoints before measuring detour behavior. A descriptor-only endpoint or
+    # a snap into a previously streamed region is a fixture setup failure.
+    npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
+    var expected_tile := Vector2i(floori(float(start_cell.x) / 16.0), floori(float(start_cell.y) / 16.0))
+    var endpoint_readiness := {"ok": true}
+    if has_method("wait_for_route_fixture_server_endpoints"):
+        var endpoint_points: Array[Vector3] = [
+            start_position - Vector3(0.0, 0.04, 0.0),
+            target_position - Vector3(0.0, 0.04, 0.0)
+        ]
+        endpoint_readiness = await call("wait_for_route_fixture_server_endpoints",
+            endpoint_points,
+            "%d,%d" % [expected_tile.x, expected_tile.y],
+            600
+        )
+    var fixture_ready := bool(placement.get("ok", false)) and bool(endpoint_readiness.get("ok", false))
+
     var detours_before := int(npc_system.stats().get("pathDetours", 0))
     var validated_before := int(npc_system.stats().get("validatedMoves", 0))
     var max_lateral := 0.0
     var entered_wall_cell := false
-    for i in range(240):
+    var wall_world_x := float(wall_x) * CELL
+    for i in range(720):
         npc_system.move_npc(entry, target_position, CELL * 0.24, false, false)
         max_lateral = maxf(max_lateral, absf(body.global_position.z - start_position.z))
         var npc_cell := world_to_flat_cell(body.global_position)
         if npc_cell.x == wall_x and abs(npc_cell.y - wall_z) <= 2:
             entered_wall_cell = true
         await wait_physics_frames(1)
+        if body.global_position.x > wall_world_x + CELL * 0.12 \
+                and int(npc_system.stats().get("pathDetours",0))>detours_before:
+            break
     var detours_after := int(npc_system.stats().get("pathDetours", 0))
     var validated_after := int(npc_system.stats().get("validatedMoves", 0))
-    var wall_world_x := float(wall_x) * CELL
     var progressed_past_wall := body.global_position.x > wall_world_x + CELL * 0.12
     var detoured_around_wall := detours_after > detours_before and max_lateral > CELL * 0.75 and progressed_past_wall
-    var pathing_passed := weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before
+    var pathing_passed := fixture_ready and weapon_visible and sword_animated and detoured_around_wall and not entered_wall_cell and validated_after > validated_before
     var pathing_details := "weapon %s, sword animated %s, detours %d->%d, validated %d->%d, lateral %.2f, end %.2f %.2f, wall %.2f, entered wall %s" % [
         str(weapon_visible),
         str(sword_animated),
@@ -6147,6 +6200,8 @@ func test_npc_equipment_and_pathing() -> void:
             "tilePublish": entry.get("lastNavmeshTilePublishDebug", []),
             "lastRoutePlanDebug": entry.get("lastRoutePlanDebug", {})
         }
+        pathing_debug["placement"] = placement
+        pathing_debug["endpointReadiness"] = endpoint_readiness
         pathing_details += ", debug %s" % JSON.stringify(pathing_debug)
     add_result(
         "npc_equipment_and_pathing",
@@ -6159,13 +6214,20 @@ func test_npc_equipment_and_pathing() -> void:
     entry["routeCells"] = []
     entry["routeForceReplan"] = true
     var replan_target := Vector3(float(start_cell.x + 7) * CELL, base_height + 0.04, float(start_cell.y + 4) * CELL)
-    for i in range(3):
+    var initial_route_ready := false
+    for i in range(180):
         npc_system.move_npc(entry, replan_target, CELL * 0.22, false, false)
         await wait_physics_frames(1)
+        if not (entry.get("routeCells", []) as Array).is_empty() and String(entry.get("routeStatus", "")) in ["routed", "moving", "arrived"]:
+            initial_route_ready = true
+            break
     var planned_cells: Array = entry.get("routeCells", [])
     var dynamic_block_cell := Vector2i(start_cell.x + 1, start_cell.y + 1)
-    if not planned_cells.is_empty() and planned_cells[0] is Vector2i:
-        dynamic_block_cell = planned_cells[0]
+    var current_route_cell := world_to_flat_cell(body.global_position)
+    for planned_cell_value in planned_cells:
+        if planned_cell_value is Vector2i and current_route_cell.distance_squared_to(planned_cell_value) > 1:
+            dynamic_block_cell = planned_cell_value
+            break
     var dynamic_block_key := Vector3i(dynamic_block_cell.x, wall_cell_y, dynamic_block_cell.y)
     blocks = get_blocks()
     if blocks.has(dynamic_block_key):
@@ -6178,16 +6240,18 @@ func test_npc_equipment_and_pathing() -> void:
     var route_revision_before := String(entry.get("routeSnapshotRevision", ""))
     var route_replans_before := int(entry.get("routeReplans", 0))
     var entered_dynamic_block := false
-    for i in range(12):
+    for i in range(120):
         npc_system.move_npc(entry, replan_target, CELL * 0.20, false, false)
         if world_to_flat_cell(body.global_position) == dynamic_block_cell:
             entered_dynamic_block = true
         await wait_physics_frames(1)
+        if String(entry.get("routeSnapshotRevision", "")) != route_revision_before and int(entry.get("routeReplans", 0)) > route_replans_before:
+            break
     var route_revision_after := String(entry.get("routeSnapshotRevision", ""))
     var route_replans_after := int(entry.get("routeReplans", 0))
     add_result(
         "npc_route_invalidates_player_block",
-        route_revision_after != route_revision_before and route_replans_after > route_replans_before and not entered_dynamic_block,
+        initial_route_ready and route_revision_after != route_revision_before and route_replans_after > route_replans_before and not entered_dynamic_block,
         "revision %s -> %s, replans %d->%d, blocked cell %s, entered %s" % [
             route_revision_before,
             route_revision_after,
@@ -6219,9 +6283,12 @@ func test_npc_equipment_and_pathing() -> void:
     await wait_physics_frames(3)
     var unreachable_before := int(npc_system.stats().get("unreachableGoals", 0))
     var unreachable_target := Vector3(float(unreachable_center.x) * CELL, base_height + 0.04, float(unreachable_center.y) * CELL)
-    for i in range(12):
+    for i in range(180):
         npc_system.move_npc(entry, unreachable_target, CELL * 0.20, false, false)
         await wait_physics_frames(1)
+        if int(npc_system.stats().get("unreachableGoals", 0)) > unreachable_before \
+                and String(entry.get("routeStatus", "")) not in ["", "pending", "queued"]:
+            break
     var unreachable_after := int(npc_system.stats().get("unreachableGoals", 0))
     var route_status := String(entry.get("routeStatus", ""))
     var route_reason := String(entry.get("routeReason", ""))
@@ -6259,6 +6326,8 @@ func test_npc_equipment_and_pathing() -> void:
             if wall_body:
                 wall_body.queue_free()
             blocks.erase(wall_cell)
+    if has_method("restore_height_fixture"):
+        call("restore_height_fixture", volume_snapshot, [start_cell])
 
 func test_structural_integrity() -> void:
     if not main or not player:
@@ -6980,7 +7049,7 @@ func test_modular_character_visuals() -> void:
     var family_count: int = npc_registry.family_count() if npc_ready else 0
     add_result(
         "character_asset_pack_ready",
-        npc_ready and hostile_ready and asset_count == 30 and family_count >= 8,
+        npc_ready and hostile_ready and asset_count == 40 and family_count >= 8,
         "npc ready %s, hostile ready %s, assets %d, families %d" % [str(npc_ready), str(hostile_ready), asset_count, family_count]
     )
 

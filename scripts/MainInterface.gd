@@ -305,6 +305,8 @@ func map_marker_summary(points: Array) -> String: return ""
 func map_terrain_samples(center_cell: Vector2i, radius: float) -> Array: return []
 func map_color_for_sample(biome: String, height: float) -> Color: return Color.WHITE
 func invalidate_navigation_marker_cache() -> void: pass
+func register_navigation_marker_block(_cell: Vector3i, _body: Node3D, _block_type: String) -> void: pass
+func unregister_navigation_marker_block(_cell: Vector3i, _body: Node = null) -> void: pass
 func _on_ui_slot_clicked(index: int) -> void: pass
 func _on_ui_slot_moved(from_index: int, to_index: int) -> void: pass
 func _on_craft_requested(recipe_id: String) -> void: pass
@@ -334,7 +336,7 @@ func apply_runtime_settings() -> void: pass
 func apply_runtime_setting(setting: String, value, sync_hud: bool = true) -> void: pass
 func apply_local_light_shadows(root: Node = null) -> void: pass
 func update_performance_overlay(delta: float) -> void: pass
-func debug_performance_state() -> Dictionary: return {}
+func debug_performance_state(_include_scene_inventory := true, _include_npc_debug := true) -> Dictionary: return {}
 func count_nodes_with_meta(node: Node, key: String, expected: String = "") -> int: return 0
 func count_visual_nodes(node: Node) -> int: return 0
 func count_physics_bodies(node: Node) -> int: return 0

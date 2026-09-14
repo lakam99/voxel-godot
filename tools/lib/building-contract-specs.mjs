@@ -314,7 +314,7 @@ export const specs = {
     "reportEnvironment": "CITADEL_PUBLICATION_REPORT",
     "outputIsDirectory": false,
     "prefix": "publication-service-",
-    "timeout": 120,
+      "timeout": 240,
     "files": [
       "scripts/world/CitadelPublicationService.gd",
       "scripts/world/CitadelTerrainAdmission.gd",

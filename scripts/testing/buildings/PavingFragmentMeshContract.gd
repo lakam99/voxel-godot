@@ -2,6 +2,7 @@ extends "res://scripts/testing/buildings/ConvexFootingApertureContract.gd"
 
 ## CPU mesh/shader-input contract, never screenshot or game acceptance.
 const Prepare = preload("res://scripts/buildings/PavingFragmentMesh.gd")
+const Artifact = preload("res://scripts/buildings/PavingConstructionArtifact.gd")
 const CpuPublication = preload("res://scripts/testing/buildings/CitadelMarketPublishedOverlapContract.gd")
 
 
@@ -17,6 +18,7 @@ func _run() -> void:
 	for index in range(mini(32, unit_arrays[Mesh.ARRAY_VERTEX].size())):
 		template_rows.append({"position": str(unit_arrays[Mesh.ARRAY_VERTEX][index]), "normal": str(unit_arrays[Mesh.ARRAY_NORMAL][index]), "uv": str(unit_arrays[Mesh.ARRAY_TEX_UV][index]), "tangent": Array(unit_arrays[Mesh.ARRAY_TANGENT].slice(index * 4, index * 4 + 4))})
 	var cases: Array = []
+	var finalize_value_parity_rows: Array = []
 	for mode in ["axis_stone", "tilted_stone", "distinct_parent_and_local", "null_custom_bed"]:
 		var rotation := Vector3.ZERO if mode in ["axis_stone", "null_custom_bed"] else Vector3(0.12, 0.32, -0.18)
 		var local := Transform3D(Basis.from_euler(rotation).scaled(Vector3(2, 1.5, 2.4)), Vector3.ZERO)
@@ -30,16 +32,44 @@ func _run() -> void:
 		if construction.completed:
 			var entry: Dictionary = construction.entries[0]
 			var prepared: Dictionary = Prepare.prepare(entry, unit)
+			var value_prepared: Dictionary = Prepare.prepare_arrays(entry, unit_arrays)
+			var payload_result: Dictionary = Prepare.packet_payload(value_prepared.get("arrays",[])) if value_prepared.get("ready",false) and value_prepared.get("arrays")!=null else {"ready":false}
+			var hydrated: Dictionary = Prepare.hydrate_packet_payload(payload_result.get("payload",{})) if payload_result.get("ready",false) else {"ready":false}
 			row["preparationReady"] = prepared.ready
 			row["reason"] = prepared.get("reason", "")
+			row["valuePreparationReady"] = value_prepared.ready
+			row["packetPayloadReady"] = payload_result.get("ready",false) and payload_result.payload.is_read_only()
+			row["packetHydrationReady"] = hydrated.get("ready",false)
+			var rendered_arrays: Array = prepared.mesh.surface_get_arrays(0) if prepared.ready and prepared.mesh != null else []
+			# ArrayMesh readback is engine-packed for normals/tangents. The exact
+			# transport value is the typed input array; compare position identity and
+			# all attribute cardinalities, not packed readback bytes.
+			row["valueArraysMatchMainThreadMesh"] = value_prepared.ready and prepared.ready and value_prepared.arrays != null \
+				and value_prepared.arrays[Mesh.ARRAY_VERTEX]==rendered_arrays[Mesh.ARRAY_VERTEX] \
+				and value_prepared.arrays[Mesh.ARRAY_NORMAL].size()==rendered_arrays[Mesh.ARRAY_NORMAL].size() \
+				and value_prepared.arrays[Mesh.ARRAY_TEX_UV].size()==rendered_arrays[Mesh.ARRAY_TEX_UV].size() \
+				and value_prepared.arrays[Mesh.ARRAY_TANGENT].size()==rendered_arrays[Mesh.ARRAY_TANGENT].size()
+			row["hydratedVerticesMatchValue"] = hydrated.get("ready",false) \
+				and hydrated.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]==value_prepared.arrays[Mesh.ARRAY_VERTEX]
+			var artifact_construction: Dictionary = construction.duplicate(true)
+			artifact_construction["sourceTransform"] = parent
+			artifact_construction["constructionDigest"] = "synthetic_fragment_contract:" + mode
+			artifact_construction["descriptorDigest"] = "synthetic_fragment_descriptor:" + mode
+			artifact_construction["canonicalApertures"] = construction.canonicalApertures.duplicate(true)
+			var finalize_value_parity := _finalize_value_parity(artifact_construction, unit_arrays, unit)
+			row["finalizeValueParity"] = finalize_value_parity
+			finalize_value_parity_rows.append({"mode": mode, "passed": finalize_value_parity.passed, "checks": finalize_value_parity.checks})
 			if prepared.ready and prepared.mesh != null:
 				row.merge(_inspect_mesh(entry, prepared, cuts, unit, parent), true)
+				row["passed"] = row.passed and row.valueArraysMatchMainThreadMesh and row.packetPayloadReady and row.packetHydrationReady and row.hydratedVerticesMatchValue and finalize_value_parity.passed
 		cases.append(row)
 	var negative_cases := _mesh_negative_controls(unit)
 	var native := {"unchanged": true, "original": {}, "cells": []}
 	var rejects_native: bool = not Prepare.prepare(native, unit).ready
 	var report := {"passed": cases.all(func(row): return row.passed) and rejects_native and negative_cases.all(func(row): return row.passed),
 		"evidenceLevel": "synthetic_CPU_fragment_mesh_and_instance_shader_inputs", "cases": cases,
+		"finalizeValueParity": {"passed": finalize_value_parity_rows.all(func(row): return row.passed), "rows": finalize_value_parity_rows,
+			"scope": "Value finalization packet identity and legacy hydration parity; no publication or gameplay acceptance."},
 		"negativeCases": negative_cases,
 		"unitTemplate": {"vertexCount": unit_arrays[Mesh.ARRAY_VERTEX].size(), "normalCount": unit_arrays[Mesh.ARRAY_NORMAL].size(), "uvCount": unit_arrays[Mesh.ARRAY_TEX_UV].size(), "tangentCount": unit_arrays[Mesh.ARRAY_TANGENT].size(), "rows": template_rows},
 		"rejectsNativePathReplacement": rejects_native,
@@ -51,6 +81,60 @@ func _run() -> void:
 	file.store_string(JSON.stringify(report, "\t"))
 	file.close()
 	quit(0 if report.passed else 2)
+
+
+func _finalize_value_parity(construction: Dictionary, unit_arrays: Array, unit: BoxMesh) -> Dictionary:
+	var value: Dictionary = Artifact.finalize_value(construction, unit_arrays)
+	var legacy: Dictionary = Artifact.finalize(construction, unit)
+	var checks := {"value_completed": value.get("completed", false), "legacy_completed": legacy.get("completed", false),
+		"value_contains_no_object_or_resource": not _contains_object(value), "matching_geometry_digest": false,
+		"matching_counts": false, "matching_cells_after_ignoring_mesh_transport": false,
+		"changed_entries_have_sealed_valid_payloads": false, "value_clear_of_remote_box": false,
+		"legacy_clear_of_remote_box": false, "matching_value_and_legacy_clearance": false}
+	if checks.value_completed and checks.legacy_completed:
+		checks.matching_geometry_digest = value.geometryDigest == legacy.geometryDigest
+		checks.matching_counts = value.vertexCount == legacy.vertexCount and value.changedSolidCount == legacy.changedSolidCount
+		checks.matching_cells_after_ignoring_mesh_transport = var_to_bytes(_without_mesh_transport(value.entries)) == var_to_bytes(_without_mesh_transport(legacy.entries))
+		var payloads_valid := true
+		for entry in value.entries:
+			if entry.get("unchanged", true):
+				continue
+			var payload: Variant = entry.get("meshPayload")
+			var payload_check := Prepare.validate_packet_payload(payload) if payload is Dictionary else {"ready": false}
+			payloads_valid = payloads_valid and payload is Dictionary and payload.is_read_only() and payload_check.ready and payload.vertexDigest == entry.meshVertexDigest
+		checks.changed_entries_have_sealed_valid_payloads = payloads_valid
+		var remote_boxes: Array[AABB] = [AABB(Vector3(10000.0, 10000.0, 10000.0), Vector3.ONE)]
+		var value_cleared: Dictionary = Artifact.clear_of_boxes_value(value, remote_boxes)
+		var legacy_cleared: Dictionary = Artifact.clear_of_boxes(legacy, remote_boxes)
+		checks.value_clear_of_remote_box = value_cleared.get("completed", false) and value_cleared.get("clear", false)
+		checks.legacy_clear_of_remote_box = legacy_cleared.get("completed", false) and legacy_cleared.get("clear", false)
+		checks.matching_value_and_legacy_clearance = var_to_bytes(value_cleared) == var_to_bytes(legacy_cleared)
+	return {"passed": checks.values().all(func(value): return value == true), "checks": checks,
+		"valueReason": value.get("reason", ""), "legacyReason": legacy.get("reason", "")}
+
+
+func _without_mesh_transport(entries: Array) -> Array:
+	var result: Array = []
+	for source in entries:
+		var entry: Dictionary = source.duplicate(true)
+		entry.erase("mesh")
+		entry.erase("meshPayload")
+		result.append(entry)
+	return result
+
+
+func _contains_object(value: Variant) -> bool:
+	if value is Object:
+		return true
+	if value is Dictionary:
+		for key in value:
+			if _contains_object(key) or _contains_object(value[key]):
+				return true
+	elif value is Array:
+		for item in value:
+			if _contains_object(item):
+				return true
+	return false
 
 
 func _inspect_mesh(entry: Dictionary, prepared: Dictionary, cuts: Array[AABB], unit: BoxMesh, parent: Transform3D) -> Dictionary:

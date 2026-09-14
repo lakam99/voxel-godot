@@ -175,7 +175,11 @@ func choose_job_target(entry: Dictionary) -> Vector3:
         return Vector3.INF
     var resource_candidates: Array[Vector3] = []
     add_resource_prop_candidates(resource_candidates, entry, job)
-    var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
+    # Work selection chooses a legal, standable endpoint. The retained V2 route
+    # request performs the authoritative collision-backed route proof before
+    # movement, so synchronously scoring up to hundreds of equivalent endpoint
+    # variants here only duplicates that acceptance work in the gameplay frame.
+    var resource_reachable := choose_best_reachable_position(entry, resource_candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, false)
     if resource_reachable != Vector3.INF and job_position_allowed(entry, resource_reachable, outside_town_job):
         clear_goal_fallback(entry)
         return resource_reachable
@@ -185,7 +189,7 @@ func choose_job_target(entry: Dictionary) -> Vector3:
             clear_goal_fallback(entry)
             return forage_search
     var candidates: Array[Vector3] = job_anchor_candidates(entry, outside_town_job)
-    var reachable := choose_best_reachable_position(entry, candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
+    var reachable := choose_best_reachable_position(entry, candidates, outside_town_job, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, false)
     if reachable != Vector3.INF and job_position_allowed(entry, reachable, outside_town_job):
         clear_goal_fallback(entry)
         return reachable
@@ -256,7 +260,12 @@ func position_is_semantic_guard_anchor(entry: Dictionary, position: Vector3, all
         return false
     if not world.point_allowed(entry, position, allow_outside, false):
         return false
-    return surface_y_at_position(position) >= main.WATER_LEVEL + 0.45
+    # Guard posts and intercept candidates already carry their generated-world
+    # elevation. Goal selection only needs a cheap semantic screen; the V2 route
+    # authority performs the fresh terrain/collision proof before committing
+    # movement. Re-querying generation here duplicated that physical validation
+    # in the gameplay frame and could stall every guard refresh.
+    return position.y >= main.WATER_LEVEL + 0.45
 
 func choose_best_forage(entry: Dictionary, candidates: Array[Node3D]) -> Node3D:
     if world == null:
@@ -316,7 +325,7 @@ func choose_forage_search_target(entry: Dictionary) -> Vector3:
     add_forage_search_sweep_candidates(candidates, entry)
     add_deterministic_ring_candidates(candidates, entry, true)
     candidates = forage_search_candidates_away_from_current_cell(entry, candidates)
-    var reachable := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, true)
+    var reachable := choose_best_reachable_position(entry, candidates, true, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES, false)
     if reachable != Vector3.INF and forage_search_target_requires_travel(entry, reachable) and job_position_allowed(entry, reachable, true):
         return reachable
     # Route cost is an advisory scorer only. V2 owns the collision-backed decision
@@ -1061,9 +1070,13 @@ func deterministic_rng(entry: Dictionary, goal_kind: String) -> RandomNumberGene
     var rng := RandomNumberGenerator.new()
     var seed_text: String = ""
     if main != null:
-        seed_text = String(main.get("seed_text"))
+        var seed_value = main.get("seed_text")
+        if seed_value != null:
+            seed_text = String(seed_value)
         if seed_text == "":
-            seed_text = String(main.get("world_seed"))
+            seed_value = main.get("world_seed")
+            if seed_value != null:
+                seed_text = String(seed_value)
     var search_serial := int(entry.get("forageSearchSerial", 0)) if String(entry.get("job", "")) == "forage" else 0
     var key: String = "%s:%s:%s:%s:%d" % [
         seed_text,

@@ -32,6 +32,7 @@ func run() -> void:
 	var original := body.global_transform
 	evidence.contact = Clearance.inspect(body)
 	checks.floor_contact_clear = evidence.contact.passed
+	checks.floor_contact_has_provenance = _has_contact_provenance(evidence.contact, floor)
 	checks.query_does_not_move_body = body.global_transform == original
 	body.position.y = -0.2
 	await physics_frame
@@ -39,6 +40,7 @@ func run() -> void:
 	original = body.global_transform
 	evidence.overlap = Clearance.inspect(body)
 	checks.penetration_rejected = not evidence.overlap.passed
+	checks.overlap_has_provenance = _has_contact_provenance(evidence.overlap, floor)
 	checks.overlap_query_does_not_recover_body = body.global_transform == original
 	body.position = Vector3(0,3,0)
 	await physics_frame
@@ -56,3 +58,24 @@ func run() -> void:
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("PLAYER CLEARANCE ",passed)
 	quit(0 if passed else 1)
+
+
+func _has_contact_provenance(receipt: Dictionary, expected_collider: CollisionObject3D) -> bool:
+	var contacts: Array = receipt.get("contacts", []) as Array
+	if contacts.is_empty():
+		return false
+	for value in contacts:
+		if not value is Dictionary:
+			return false
+		var contact: Dictionary = value
+		var point: Dictionary = contact.get("point", {}) as Dictionary
+		var normal: Dictionary = contact.get("normal", {}) as Dictionary
+		if not contact.has("depth") or not point.has_all(["x", "y", "z"]) or not normal.has_all(["x", "y", "z"]):
+			return false
+		if int(contact.get("colliderInstanceId", 0)) != expected_collider.get_instance_id():
+			return false
+		if String(contact.get("colliderName", "")) != String(expected_collider.name):
+			return false
+		if String(contact.get("colliderPath", "")).is_empty() or String(contact.get("colliderRid", "")).is_empty():
+			return false
+	return true

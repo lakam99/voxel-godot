@@ -1,6 +1,6 @@
 extends RefCounted
 ## Offline interception only; never returns ready or publishable source.
-static func prepare(blueprint, policy: Dictionary, _continuation: Callable = Callable()) -> Dictionary:
+static func prepare(blueprint, policy: Dictionary, _continuation: Callable = Callable(), _raw_stage_observer: Callable = Callable()) -> Dictionary:
 	var path := OS.get_environment("CITADEL_POLICY_CAPTURE_REPORT").get_base_dir().path_join("input.bin")
 	if FileAccess.file_exists(path): return {"ready": false, "reason": "capture_exists"}
 	var lookup_mismatches: Array = []

@@ -146,6 +146,10 @@ func advance() -> Dictionary:
 	_max_advance_usec = maxi(_max_advance_usec,Time.get_ticks_usec()-started)
 	return stats()
 
+## Passive worker-side source timing. Readiness and source queries never use it.
+func source_timing() -> Dictionary:
+	return _queue.source_timing()
+
 func _accept(receipt: Dictionary) -> void:
 	if receipt.get("status") != "consumed": return
 	var matched: Variant = null

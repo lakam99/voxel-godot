@@ -8,6 +8,7 @@ const Clearance = preload("res://scripts/buildings/layout/BuildingLayoutClearanc
 const STEP := Clearance.BUILDING_SUPPORT_NAV_SAMPLE_STEP
 const CELL := Clearance.CELL
 const TILE := CELL * Clearance.NAV_TILE_CELL_SIZE
+const MAX_OUTPUT_SELECTION := 8
 
 var _clearance: Clearance
 var _manifest: Dictionary = {}
@@ -112,14 +113,51 @@ func request_all() -> Dictionary:
 	for key: String in _domain.tileKeys: request(key)
 	return status()
 
-func advance(budget_usec := 4000, continuation: Callable = Callable()) -> Dictionary:
+## Only waiting outputs change order. An active output keeps its original
+## dependency/apron job and must be covered by the same selected receipt set.
+func prioritize_waiting(tile_order: Array[String]) -> Dictionary:
 	if _cancelled or _phase in ["uninitialized","failed"]: return status()
+	var failure := _selection_failure(tile_order)
+	if not failure.is_empty(): return {"status":"failed","reason":failure}
+	var waiting: Array[String] = []
+	for key: String in tile_order:
+		if key != _active_tile and _requested.has(key): waiting.append(key)
+	for key: String in _requests:
+		if not tile_order.has(key): waiting.append(key)
+	_requests = waiting
+	return status()
+
+func _selection_failure(selection: Array[String]) -> String:
+	if selection.is_empty() or selection.size()>MAX_OUTPUT_SELECTION: return "invalid_navigation_output_selection"
+	var seen := {}
+	for key: String in selection:
+		if seen.has(key) or (not _requested.has(key) and not _completed.has(key)):
+			return "invalid_navigation_output_selection"
+		seen[key] = true
+	if not _active_tile.is_empty() and not seen.has(_active_tile): return "navigation_active_output_not_selected"
+	return ""
+
+func advance(budget_usec := 4000, continuation: Callable = Callable(), eligible_outputs: Array[String] = []) -> Dictionary:
+	if _cancelled or _phase in ["uninitialized","failed"]: return status()
+	var eligible: Array[String] = []
+	if not eligible_outputs.is_empty():
+		var failure := _selection_failure(eligible_outputs)
+		if not failure.is_empty(): return {"status":"failed","reason":failure}
+		eligible = eligible_outputs.duplicate()
 	var started := Time.get_ticks_usec()
 	var deadline := started+budget_usec if budget_usec>0 else 0
 	while not _cancelled and (_phase != "idle" or not _requests.is_empty()):
 		if deadline>0 and Time.get_ticks_usec()>=deadline: break
+		# Eligibility belongs to this call, not retained producer state. Stop at
+		# the output boundary even if this kernel has time to start an old tail.
+		if _phase=="idle" and not eligible.is_empty() and not eligible.has(_requests[0]): break
 		if not _continue(continuation,_stage()):
 			cancel(); break
+		# A direct/offline continuation may change waiting demand. Recheck at
+		# the call boundary before touching the queue; runtime callbacks only
+		# check cancellation, but eligibility must hold for both public paths.
+		if _cancelled: break
+		if _phase=="idle" and (_requests.is_empty() or (not eligible.is_empty() and not eligible.has(_requests[0]))): break
 		_step(deadline)
 		if _phase == "failed": break
 	_preparation_usec += Time.get_ticks_usec()-started

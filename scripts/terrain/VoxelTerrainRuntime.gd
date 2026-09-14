@@ -5,18 +5,24 @@ const GENERATOR_SCRIPT := preload("res://scripts/terrain/VoxelTerrainGenerator.g
 const CONTEXT_SCRIPT := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
 const SITE_GATE_SCRIPT := preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
 const STARTUP_READINESS_RESULT_SCRIPT := preload("res://scripts/world/StartupReadinessResult.gd")
+const NPC_CONSTANTS_SCRIPT := preload("res://scripts/npc_ai/NpcConstants.gd")
 const TERRAIN_SHADER := preload("res://shaders/voxel_terrain_authority.gdshader")
 
 const CELL := 1.35
 const GAME_CHUNK_SIZE := 28
+const NAVIGATION_TILE_CELL_SIZE := NPC_CONSTANTS_SCRIPT.NAV_TILE_CELL_SIZE
 const TERRAIN_COLLISION_LAYER := 2
-const FINAL_VIEW_DISTANCE := 112
+# Keep a broad approach view while leaving enough CPU headroom for terrain,
+# structure and navigation publication during sprinting. The complete radius is
+# settled behind the loading overlay before gameplay starts.
+const FINAL_VIEW_DISTANCE := 96
 const STARTUP_VIEW_DISTANCE := 80
 const RETAINED_VIEW_DISTANCE := STARTUP_VIEW_DISTANCE
 const RETAINED_ACTIVATION_INTERVAL_SECONDS := 0.5
 const RETAINED_MAX_PENDING_NATIVE_TASKS := 8
 const VIEW_DISTANCE_EXPANSION_STEP := 16
 const VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS := 2.0
+const FINAL_EXPANSION_REQUIRED_QUIET_FRAMES := 4
 const STARTUP_VERTICAL_MIN_CELL := -16
 const STARTUP_VERTICAL_MAX_CELL := 48
 const VERTICAL_BOUNDS_EXPANSION_STEP_CELLS := 16
@@ -27,6 +33,7 @@ const COLLISION_SURFACE_TOLERANCE := CELL * 2.5
 const COLLISION_MESH_VERTICAL_MARGIN_CELLS := 4
 const SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const SEED_RESET_REQUIRED_QUIET_FRAMES := 2
+const SITE_TRAVERSAL_READINESS_POLL_USEC := 100000
 const MATERIAL_IDS := {
 	"air": 0, "grass": 1, "dirt": 2, "stone": 3, "sand": 4, "snow": 5,
 	"deepStone": 6, "bedrock": 7, "clay": 8, "gravel": 9, "coalOre": 10,
@@ -52,6 +59,7 @@ var collision_probe_attempts := 0
 var collision_probe_passes := 0
 var view_distance_expansion_elapsed := 0.0
 var view_distance_expansion_requested := false
+var final_expansion_quiet_frames := 0
 var startup_auxiliary_viewers: Array[Dictionary] = []
 var startup_auxiliary_cleanup_requested := false
 var startup_auxiliary_cleanup_frames_remaining := 0
@@ -133,12 +141,13 @@ func advance_retained_viewers(delta: float) -> void:
 	var world = main.get("world_generation_system")
 	for group: Vector2i in groups:
 		if retained_chunk_viewers.has(group): continue
-		var center := (Vector2(group*2)+Vector2.ONE)*float(GAME_CHUNK_SIZE)*CELL
-		var position := Vector3(center.x,0.0,center.y)
-		position.y = float(world.surface_y_at(position))
+		var spec: Dictionary = auxiliary_viewer_spec_for_chunks(retained_viewer_groups[group],world)
+		if spec.is_empty(): continue
+		var position: Vector3 = spec.position
+		var view_distance: int = int(spec.viewDistance)
 		# Do not put a deferred viewer into SiteGate's automatic retry list:
 		# admission completing later must not bypass this activation budget.
-		var admission: Dictionary = site_gate.request_cells(SITE_GATE_SCRIPT.footprint(position,RETAINED_VIEW_DISTANCE))
+		var admission: Dictionary = site_gate.request_cells(SITE_GATE_SCRIPT.footprint(position,view_distance))
 		if admission.get("status") != "ready":
 			retained_activation_reason = "site_admission_pending"
 			return
@@ -146,7 +155,7 @@ func advance_retained_viewers(delta: float) -> void:
 		auxiliary.name = "RetainedRegion_%d_%d" % [group.x,group.y]
 		auxiliary.requires_visuals = true
 		auxiliary.requires_collisions = true
-		if not site_gate.request_viewer(auxiliary,position,RETAINED_VIEW_DISTANCE):
+		if not site_gate.request_viewer(auxiliary,position,view_distance):
 			site_gate.remove_viewer(auxiliary)
 			auxiliary.queue_free()
 			retained_activation_reason = "site_admission_pending"
@@ -177,6 +186,9 @@ func region_publication_readiness(bounds: Rect2i) -> Dictionary:
 		"missingChunks":missing, "sourceRevision":revision}
 var site_traversal_waiting := false
 var last_site_wait_message_usec := 0
+var site_traversal_pending_request := {}
+var site_traversal_last_proof := {}
+var site_traversal_last_poll_usec := 0
 
 func setup(main_node) -> Dictionary:
 	main = main_node
@@ -301,6 +313,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 		viewer.view_distance = STARTUP_VIEW_DISTANCE
 	view_distance_expansion_elapsed = 0.0
 	view_distance_expansion_requested = false
+	final_expansion_quiet_frames = 0
 	update_viewer_position()
 	authority_ready = true
 	set_process(true)
@@ -624,46 +637,45 @@ func _preserve_retained_primary_coverage(next_position: Vector3) -> bool:
 
 func auxiliary_viewer_specs_for_component(component: Array, world_generation) -> Array[Dictionary]:
 	var specs: Array[Dictionary] = []
-	if component.is_empty():
-		return specs
-	var min_chunk := Vector2i(2147483000, 2147483000)
-	var max_chunk := Vector2i(-2147483000, -2147483000)
+	var groups: Dictionary = {}
 	for key_value in component:
-		if not (key_value is Vector2i):
-			continue
+		if not key_value is Vector2i: continue
 		var chunk_key: Vector2i = key_value
-		min_chunk = Vector2i(mini(min_chunk.x, chunk_key.x), mini(min_chunk.y, chunk_key.y))
-		max_chunk = Vector2i(maxi(max_chunk.x, chunk_key.x), maxi(max_chunk.y, chunk_key.y))
+		var group := Vector2i(floori(float(chunk_key.x)/2.0),floori(float(chunk_key.y)/2.0))
+		if not groups.has(group): groups[group] = []
+		groups[group].append(chunk_key)
+	var ordered_groups: Array = groups.keys()
+	ordered_groups.sort_custom(func(a: Vector2i,b: Vector2i): return a.x<b.x if a.x!=b.x else a.y<b.y)
+	for group: Vector2i in ordered_groups:
+		var spec := auxiliary_viewer_spec_for_chunks(groups[group],world_generation)
+		if not spec.is_empty(): specs.append(spec)
+	return specs
+
+func auxiliary_viewer_spec_for_chunks(chunks: Array, world_generation) -> Dictionary:
+	if chunks.is_empty() or world_generation==null: return {}
+	var min_chunk := Vector2i(2147483000,2147483000)
+	var max_chunk := Vector2i(-2147483000,-2147483000)
+	var valid_chunks: Array = []
+	for key_value in chunks:
+		if not key_value is Vector2i: continue
+		var chunk_key: Vector2i = key_value
+		valid_chunks.append(chunk_key)
+		min_chunk = Vector2i(mini(min_chunk.x,chunk_key.x),mini(min_chunk.y,chunk_key.y))
+		max_chunk = Vector2i(maxi(max_chunk.x,chunk_key.x),maxi(max_chunk.y,chunk_key.y))
+	if valid_chunks.is_empty(): return {}
 	var minimum := Vector2(float(min_chunk.x * GAME_CHUNK_SIZE) * CELL, float(min_chunk.y * GAME_CHUNK_SIZE) * CELL)
 	var maximum := Vector2(float((max_chunk.x + 1) * GAME_CHUNK_SIZE) * CELL, float((max_chunk.y + 1) * GAME_CHUNK_SIZE) * CELL)
 	var center_xz := (minimum + maximum) * 0.5
-	var required_distance := center_xz.distance_to(maximum) + CELL * 16.0
+	var half_chunk_diagonal := float(GAME_CHUNK_SIZE)*CELL*sqrt(2.0)*0.5
+	var required_distance := 0.0
+	for chunk_key: Vector2i in valid_chunks:
+		var chunk_center := (Vector2(chunk_key)+Vector2.ONE*0.5)*float(GAME_CHUNK_SIZE)*CELL
+		required_distance = maxf(required_distance,center_xz.distance_to(chunk_center)+half_chunk_diagonal+CELL*4.0)
 	var maximum_view_distance := int(terrain.max_view_distance) if terrain != null else FINAL_VIEW_DISTANCE
-	if required_distance <= float(maximum_view_distance):
-		var center_position := Vector3(center_xz.x, 0.0, center_xz.y)
-		center_position.y = float(world_generation.call("surface_y_at", center_position))
-		specs.append({
-			"position": center_position,
-			"viewDistance": clampi(ceili(required_distance), STARTUP_VIEW_DISTANCE, maximum_view_distance),
-			"chunks": component.duplicate()
-		})
-		return specs
-	for key_value in component:
-		if not (key_value is Vector2i):
-			continue
-		var chunk_key: Vector2i = key_value
-		var position := Vector3(
-			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
-			0.0,
-			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
-		)
-		position.y = float(world_generation.call("surface_y_at", position))
-		specs.append({
-			"position": position,
-			"viewDistance": STARTUP_VIEW_DISTANCE,
-			"chunks": [chunk_key]
-		})
-	return specs
+	if required_distance>float(maximum_view_distance): return {}
+	var center_position := Vector3(center_xz.x,0.0,center_xz.y)
+	center_position.y = float(world_generation.call("surface_y_at",center_position))
+	return {"position":center_position,"viewDistance":ceili(required_distance),"chunks":valid_chunks}
 
 
 func clear_startup_auxiliary_viewers() -> void:
@@ -752,10 +764,15 @@ func vertical_cell_bounds() -> Vector2i:
 	var min_cell := floori(current.position.y)
 	return Vector2i(min_cell, min_cell + floori(current.size.y) - 1)
 
+func vertical_bounds_cover_full() -> bool:
+	var current := vertical_cell_bounds()
+	var target := full_vertical_cell_bounds()
+	return current.x <= target.x and current.y >= target.y
+
 func expand_vertical_bounds_step() -> void:
 	var current := vertical_cell_bounds()
 	var target := full_vertical_cell_bounds()
-	if current == target:
+	if vertical_bounds_cover_full():
 		return
 	apply_vertical_cell_bounds(
 		maxi(target.x, current.x - VERTICAL_BOUNDS_EXPANSION_STEP_CELLS),
@@ -781,6 +798,7 @@ func _process(delta: float) -> void:
 		prune_startup_auxiliary_viewers()
 		collect_volume_edit_changes()
 		process_pending_edit_sections()
+		poll_site_traversal_readiness()
 
 func _physics_process(_delta: float) -> void:
 	if authority_ready and generation_context_current():
@@ -788,6 +806,7 @@ func _physics_process(_delta: float) -> void:
 
 
 func _exit_tree() -> void:
+	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
 	if site_gate != null: site_gate.stop()
 	if viewer != null and is_instance_valid(viewer) and viewer.get_parent() != self:
@@ -795,6 +814,7 @@ func _exit_tree() -> void:
 
 func begin_shutdown() -> void:
 	authority_ready = false
+	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
 	if site_gate != null: site_gate.stop()
 	set_process(false)
@@ -812,6 +832,7 @@ func begin_shutdown() -> void:
 	desired_gameplay_chunks.clear()
 	view_distance_expansion_elapsed = 0.0
 	view_distance_expansion_requested = false
+	final_expansion_quiet_frames = 0
 
 
 func request_final_view_distance_expansion() -> void:
@@ -819,21 +840,65 @@ func request_final_view_distance_expansion() -> void:
 		return
 	view_distance_expansion_requested = true
 	view_distance_expansion_elapsed = 0.0
+	final_expansion_quiet_frames = 0
 	startup_auxiliary_cleanup_requested = true
 	startup_auxiliary_cleanup_frames_remaining = 2
+
+func final_view_distance_expansion_state() -> Dictionary:
+	var pending_native_tasks := voxel_engine_pending_task_count()
+	var current_distance := int(viewer.view_distance) if viewer != null and is_instance_valid(viewer) else 0
+	var vertical_ready := vertical_bounds_cover_full()
+	var retained_keys: Array = retained_gameplay_chunks.keys()
+	var retained_chunks_ready := gameplay_chunks_published(retained_keys)
+	var retained_viewers_ready := retained_chunk_viewers.size() >= retained_viewer_groups.size()
+	var expansion_ready := authority_ready and generation_context_current() \
+		and view_distance_expansion_requested and current_distance >= FINAL_VIEW_DISTANCE \
+		and vertical_ready and retained_chunks_ready and retained_viewers_ready \
+		and pending_native_tasks <= RETAINED_MAX_PENDING_NATIVE_TASKS
+	if expansion_ready:
+		final_expansion_quiet_frames += 1
+	else:
+		final_expansion_quiet_frames = 0
+	var metrics := {
+		"currentViewDistance": current_distance,
+		"finalViewDistance": FINAL_VIEW_DISTANCE,
+		"verticalCellBounds": vertical_cell_bounds(),
+		"finalVerticalCellBounds": full_vertical_cell_bounds(),
+		"retainedGameplayChunks": retained_gameplay_chunks.size(),
+		"publishedRetainedGameplayChunks": published_gameplay_chunk_count(retained_keys),
+		"retainedRegionViewers": retained_chunk_viewers.size(),
+		"retainedViewerGroups": retained_viewer_groups.size(),
+		"retainedActivationReason": retained_activation_reason,
+		"pendingNativeTasks": pending_native_tasks,
+		"nativeTaskLimit": RETAINED_MAX_PENDING_NATIVE_TASKS,
+		"quietFrames": final_expansion_quiet_frames,
+		"requiredQuietFrames": FINAL_EXPANSION_REQUIRED_QUIET_FRAMES
+	}
+	if not authority_ready or not generation_context_current():
+		return STARTUP_READINESS_RESULT_SCRIPT.failed("terrain_generation_pending", {}, [], metrics)
+	if final_expansion_quiet_frames >= FINAL_EXPANSION_REQUIRED_QUIET_FRAMES:
+		return STARTUP_READINESS_RESULT_SCRIPT.ready({}, metrics)
+	var pending_requirements: Array = []
+	if current_distance < FINAL_VIEW_DISTANCE: pending_requirements.append("view_distance")
+	if not vertical_ready: pending_requirements.append("vertical_bounds")
+	if not retained_viewers_ready: pending_requirements.append("retained_viewers")
+	if not retained_chunks_ready: pending_requirements.append("retained_collision")
+	if pending_native_tasks > RETAINED_MAX_PENDING_NATIVE_TASKS: pending_requirements.append("native_tasks")
+	if pending_requirements.is_empty(): pending_requirements.append("quiet_frames")
+	return STARTUP_READINESS_RESULT_SCRIPT.pending("terrain_view_expansion_pending", {}, pending_requirements, metrics)
 
 func update_viewer_distance(delta: float) -> void:
 	if viewer == null or not is_instance_valid(viewer) or not viewer.is_inside_tree() or main == null:
 		return
 	var loading := bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active"))
-	if loading:
+	if loading and not view_distance_expansion_requested:
 		if int(viewer.view_distance) != STARTUP_VIEW_DISTANCE:
 			viewer.view_distance = STARTUP_VIEW_DISTANCE
 		view_distance_expansion_elapsed = 0.0
 		return
 	if not view_distance_expansion_requested:
 		return
-	var vertical_bounds_ready := vertical_cell_bounds() == full_vertical_cell_bounds()
+	var vertical_bounds_ready := vertical_bounds_cover_full()
 	if int(viewer.view_distance) >= FINAL_VIEW_DISTANCE and vertical_bounds_ready:
 		return
 	view_distance_expansion_elapsed += maxf(0.0, delta)
@@ -914,6 +979,7 @@ func stats() -> Dictionary:
 		"currentViewDistance": int(viewer.view_distance) if viewer != null and is_instance_valid(viewer) else 0,
 		"finalViewDistance": FINAL_VIEW_DISTANCE,
 		"viewDistanceExpansionRequested": view_distance_expansion_requested,
+		"finalExpansionQuietFrames": final_expansion_quiet_frames,
 		"startupAuxiliaryViewerCount": startup_auxiliary_viewers.size(),
 		"startupAuxiliaryViewersCreated": startup_auxiliary_viewers_created,
 		"startupAuxiliaryCleanupRequested": startup_auxiliary_cleanup_requested,
@@ -1135,9 +1201,9 @@ func process_pending_gameplay_chunk_publications() -> void:
 func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 	if terrain == null or get_world_3d() == null:
 		return {"passed": false, "reason": "physics_world_missing"}
-	var world_generation = main.get("world_generation_system")
-	if world_generation == null or not world_generation.has_method("surface_y_at"):
-		return {"passed": false, "reason": "surface_facade_missing"}
+	var volume = volume_service()
+	if volume == null or not volume.has_method("terrain_mesh_surface_projection_for_cell"):
+		return {"passed": false, "reason": "terrain_volume_projection_missing"}
 	var origin_x := float(chunk_key.x * GAME_CHUNK_SIZE) * CELL
 	var origin_z := float(chunk_key.y * GAME_CHUNK_SIZE) * CELL
 	var span := float(GAME_CHUNK_SIZE) * CELL
@@ -1150,6 +1216,7 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 	]
 	var hits := 0
 	var matched := 0
+	var expected_surfaces := 0
 	var samples := []
 	var min_surface_cell_y := 2147483000
 	var max_surface_cell_y := -2147483000
@@ -1158,13 +1225,19 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 		var offset: Vector2 = offset_value
 		var x := origin_x + span * offset.x
 		var z := origin_z + span * offset.y
-		var expected_y := float(world_generation.call("surface_y_at", Vector3(x, 0.0, z)))
+		var cell := Vector3i(floori(x / CELL), 0, floori(z / CELL))
+		var projection: Dictionary = volume.call("terrain_mesh_surface_projection_for_cell", cell)
+		if not bool(projection.get("found", false)):
+			samples.append({"x": snappedf(x, 0.01), "z": snappedf(z, 0.01), "expectedTerrainSurface": false})
+			continue
+		expected_surfaces += 1
+		var expected_y := float((projection.get("position", Vector3.ZERO) as Vector3).y)
 		var expected_cell_y := floori(expected_y / CELL)
 		min_surface_cell_y = mini(min_surface_cell_y, expected_cell_y)
 		max_surface_cell_y = maxi(max_surface_cell_y, expected_cell_y)
 		var query := PhysicsRayQueryParameters3D.create(
 			Vector3(x, expected_y + CELL * 48.0, z),
-			Vector3(x, float(world_generation.call("world_bottom_cell_y")) * CELL - CELL * 2.0, z),
+			Vector3(x, float(volume.call("world_bottom_cell_y")) * CELL - CELL * 2.0, z),
 			TERRAIN_COLLISION_LAYER
 		)
 		query.collide_with_areas = false
@@ -1178,6 +1251,10 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 		if delta_y <= COLLISION_SURFACE_TOLERANCE:
 			matched += 1
 		samples.append({"x": snappedf(x, 0.01), "z": snappedf(z, 0.01), "expectedY": snappedf(expected_y, 0.01), "hit": true, "hitY": snappedf(hit_y, 0.01), "deltaY": snappedf(delta_y, 0.01)})
+	if expected_surfaces == 0:
+		var active_vertical_bounds := vertical_cell_bounds()
+		min_surface_cell_y = active_vertical_bounds.x + COLLISION_MESH_VERTICAL_MARGIN_CELLS
+		max_surface_cell_y = active_vertical_bounds.y - COLLISION_MESH_VERTICAL_MARGIN_CELLS
 	var mesh_area := AABB(
 		Vector3(
 			float(chunk_key.x * GAME_CHUNK_SIZE),
@@ -1192,10 +1269,11 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 	)
 	var area_meshed := terrain.is_area_meshed(mesh_area)
 	return {
-		"passed": area_meshed and hits == offsets.size(),
+		"passed": area_meshed and hits == expected_surfaces,
 		"areaMeshed": area_meshed,
 		"meshArea": mesh_area,
 		"hits": hits,
+		"expectedTerrainSurfaces": expected_surfaces,
 		"surfaceMatches": matched,
 		"heightfieldComparisonPassed": matched == offsets.size(),
 		"collisionAuthority": "VoxelTerrain",
@@ -1377,24 +1455,36 @@ func collision_mesh_ready_for_body_position(world_position: Vector3, footprint_r
 
 
 func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
+	var request := {"from":from_position,"to":to_position,"radius":footprint_radius}
+	var now_usec := Time.get_ticks_usec()
+	if site_traversal_waiting and request == site_traversal_pending_request \
+			and now_usec-site_traversal_last_poll_usec<SITE_TRAVERSAL_READINESS_POLL_USEC \
+			and not site_traversal_last_proof.is_empty():
+		return site_traversal_last_proof.duplicate(true)
+	site_traversal_pending_request = request
+	site_traversal_last_poll_usec = now_usec
 	var start := Vector2i(floori(minf(from_position.x,to_position.x)/CELL),floori(minf(from_position.z,to_position.z)/CELL))
 	var end := Vector2i(ceili(maxf(from_position.x,to_position.x)/CELL),ceili(maxf(from_position.z,to_position.z)/CELL))
 	var source: Dictionary = site_gate.request_cells(Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)) \
 		if site_gate != null else {"status":"failed","reason":"terrain_site_gate_missing"}
 	if source.status != "ready":
-		site_traversal_waiting = true
-		_site_wait_message("Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
-		return {"passed":false,"reason":source.reason,"siteAdmission":source}
+		return _retain_site_traversal_wait({"passed":false,"reason":source.reason,"siteAdmission":source},
+			"Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
 	var motion_bounds := Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)
-	# Stable navigation-cell queries reuse source closure between physics frames.
-	# Include every tile intersecting the complete swept capsule margin.
+	# Player motion needs authoritative terrain and structure collision. NPC
+	# navigation publication is retained by WorldStreamingCoordinator, but it is
+	# not a physical prerequisite for moving the player across this capsule.
+	# Keep the aligned bounds so the early dependency description can demand the
+	# building packet before the capsule reaches its physical boundary.
 	var region_low := Vector2i(floori(float(motion_bounds.position.x)/16.0),floori(float(motion_bounds.position.y)/16.0))*16
 	var region_high := Vector2i(ceili(float(motion_bounds.end.x)/16.0),ceili(float(motion_bounds.end.y)/16.0))*16
-	var region: Dictionary = main.world_streaming.region_readiness(Rect2i(region_low,region_high-region_low))
+	var region_bounds := Rect2i(region_low,region_high-region_low)
+	var region: Dictionary = main.world_streaming.player_traversal_readiness(region_bounds) \
+		if main.world_streaming != null and main.world_streaming.has_method("player_traversal_readiness") \
+		else main.structure_system.citadel_physical_publication_state(region_bounds)
 	if region.status != "ready":
-		site_traversal_waiting = true
-		_site_wait_message("Preparing nearby world…" if region.status == "pending" else "World loading failed: %s" % region.reason)
-		return {"passed":false,"reason":region.reason,"regionalPublication":region}
+		return _retain_site_traversal_wait({"passed":false,"reason":region.reason,"regionalPublication":region},
+			"Preparing nearby world…" if region.status == "pending" else "World loading failed: %s" % region.reason)
 	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
 	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
 	var proofs: Array = []
@@ -1416,15 +1506,14 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		}
 		proofs.append(proof)
 		if not bool(proof.get("passed", false)):
-			if site_traversal_waiting: _site_wait_message("Waiting for terrain collision…")
-			return {
+			return _retain_site_traversal_wait({
 				"passed": false,
 				"reason": String(proof.get("reason", "collision_not_ready")),
 				"failedSample": index,
 				"sampleCount": sample_count + 1,
 				"proofs": proofs
-			}
-	site_traversal_waiting = false
+			}, "Waiting for terrain collision…")
+	clear_site_traversal_wait()
 	return {
 		"passed": true,
 		"reason": "collision_mesh_ready",
@@ -1433,7 +1522,30 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		"proofs": proofs
 	}
 
+func _retain_site_traversal_wait(proof: Dictionary, message: String) -> Dictionary:
+	site_traversal_waiting = true
+	site_traversal_last_proof = proof.duplicate(true)
+	_site_wait_message(message)
+	return proof
+
+func clear_site_traversal_wait() -> void:
+	if site_traversal_waiting and main != null and main.has_method("hide_streaming_loading_overlay"):
+		main.call("hide_streaming_loading_overlay","terrain_traversal")
+	site_traversal_waiting = false
+	site_traversal_pending_request.clear()
+	site_traversal_last_proof.clear()
+	site_traversal_last_poll_usec = 0
+
+func poll_site_traversal_readiness() -> void:
+	if not site_traversal_waiting or site_traversal_pending_request.is_empty(): return
+	if Time.get_ticks_usec()-site_traversal_last_poll_usec<SITE_TRAVERSAL_READINESS_POLL_USEC: return
+	collision_proof_for_motion(site_traversal_pending_request.from,site_traversal_pending_request.to,
+		float(site_traversal_pending_request.radius))
+
 func _site_wait_message(message: String) -> void:
+	if main != null and main.has_method("show_streaming_loading_overlay"):
+		main.call("show_streaming_loading_overlay",message,"terrain_traversal")
+		return
 	var now := Time.get_ticks_usec()
 	if now-last_site_wait_message_usec < 1000000: return
 	last_site_wait_message_usec = now
@@ -1449,12 +1561,35 @@ func voxel_terrain_collider(value) -> bool:
 func notify_navigation_chunk_loaded(chunk_key: Vector2i) -> void:
 	var npc_system = main.get("npc_system") if main != null else null
 	if npc_system != null and npc_system.has_method("notify_navigation_chunk_loaded"):
-		npc_system.call("notify_navigation_chunk_loaded", chunk_key)
+		for navigation_tile_key in navigation_tile_keys_for_game_chunk(chunk_key):
+			npc_system.call("notify_navigation_chunk_loaded", navigation_tile_key)
 
 func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
 	var npc_system = main.get("npc_system") if main != null else null
 	if npc_system != null and npc_system.has_method("notify_navigation_chunk_unloaded"):
-		npc_system.call("notify_navigation_chunk_unloaded", chunk_key)
+		for navigation_tile_key in navigation_tile_keys_for_game_chunk(chunk_key):
+			npc_system.call("notify_navigation_chunk_unloaded", navigation_tile_key)
+
+## Native terrain publishes 28-cell gameplay chunks, while NPC topology is
+## partitioned into 16-cell navigation tiles. A gameplay chunk can therefore
+## overlap two or three navigation tiles on either axis. Convert through cell
+## bounds so positive, negative and non-aligned chunks invalidate every owner.
+static func navigation_tile_keys_for_game_chunk(chunk_key: Vector2i) -> Array[Vector2i]:
+	var first_cell := chunk_key * GAME_CHUNK_SIZE
+	var last_cell := first_cell + Vector2i.ONE * (GAME_CHUNK_SIZE - 1)
+	var first_tile := Vector2i(
+		floori(float(first_cell.x) / float(NAVIGATION_TILE_CELL_SIZE)),
+		floori(float(first_cell.y) / float(NAVIGATION_TILE_CELL_SIZE))
+	)
+	var last_tile := Vector2i(
+		floori(float(last_cell.x) / float(NAVIGATION_TILE_CELL_SIZE)),
+		floori(float(last_cell.y) / float(NAVIGATION_TILE_CELL_SIZE))
+	)
+	var result: Array[Vector2i] = []
+	for tile_z in range(first_tile.y, last_tile.y + 1):
+		for tile_x in range(first_tile.x, last_tile.x + 1):
+			result.append(Vector2i(tile_x, tile_z))
+	return result
 
 func game_chunk_for_cell(cell: Vector3i) -> Vector2i:
 	return Vector2i(

@@ -175,6 +175,9 @@ var behavior_case_provider = null
 var interaction_case_provider = null
 var streaming_save_case_provider = null
 var soak_case_provider = null
+# Synthetic NpcSystem adapter telemetry for the two route-install motor fixtures.
+var npc_route_replans := 0
+var npc_path_detours := 0
 var metrics := {
 	"assertions": 0,
 	"selectedCases": 0,
@@ -405,6 +408,12 @@ func contract_cases() -> Array[Dictionary]:
 			"suite": "contract",
 			"timeModes": ["day", "night"],
 			"callable": Callable(self, "test_route_authority_v2_lifecycle")
+		},
+		{
+			"id": "npc_contract_route_authority_v2_unregisters_stale_actor",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_route_authority_v2_unregisters_stale_actor")
 		},
 		{
 			"id": "npc_contract_route_authority_v2_cancellation",
@@ -998,13 +1007,17 @@ func test_npc_navworld_live_tile_snapshot_includes_collision_records(_mode: Stri
 
 	var adapter := GeneratedWorldNavigationAdapterScript.new()
 	adapter.setup(null, main)
-	var snapshot: Dictionary = adapter.build_navmesh_tile_snapshot("0,0")
-	var blocked: Dictionary = snapshot.get("blocked", {}) if snapshot.get("blocked", {}) is Dictionary else {}
-	var doors: Dictionary = snapshot.get("doors", {}) if snapshot.get("doors", {}) is Dictionary else {}
-	var static_records: Array = snapshot.get("staticCollision", []) if snapshot.get("staticCollision", []) is Array else []
-	var static_by_cell: Dictionary = snapshot.get("staticCollisionByCell", {}) if snapshot.get("staticCollisionByCell", {}) is Dictionary else {}
-	var door_records: Array = snapshot.get("doorCollision", []) if snapshot.get("doorCollision", []) is Array else []
-	var door_by_cell: Dictionary = snapshot.get("doorCollisionByCell", {}) if snapshot.get("doorCollisionByCell", {}) is Dictionary else {}
+	var snapshot: Dictionary = await synthetic_capture_navigation_snapshot(adapter,"0,0")
+	var publication := await synthetic_accept_navigation_snapshot(snapshot)
+	# Generic collision probing retains its live-node/index contract. Those maps
+	# are no longer fields of the value-only navigation publication request.
+	var collision_snapshot: Dictionary = adapter._snapshot_with_live_tile_blocks(adapter.cached_static_tile_snapshot(true,true),"0,0")
+	var blocked: Dictionary = collision_snapshot.get("blocked", {})
+	var doors: Dictionary = collision_snapshot.get("doors", {})
+	var static_records: Array = collision_snapshot.get("staticCollision", [])
+	var static_by_cell: Dictionary = collision_snapshot.get("staticCollisionByCell", {})
+	var door_records: Array = collision_snapshot.get("doorCollision", [])
+	var door_by_cell: Dictionary = collision_snapshot.get("doorCollisionByCell", {})
 	var surfaces: Array = snapshot.get("surfaces", []) if snapshot.get("surfaces", []) is Array else []
 	var blocked_cell_published := false
 	var open_cell_published := false
@@ -1017,7 +1030,8 @@ func test_npc_navworld_live_tile_snapshot_includes_collision_records(_mode: Stri
 			blocked_cell_published = true
 		if cell.x == 0 and cell.z == 0:
 			open_cell_published = true
-	var passed := blocked.has(wall_cell) \
+	var passed: bool = publication.accepted and publication.initialPending and publication.shutdownComplete \
+		and blocked.has(wall_cell) \
 		and doors.has(door_cell) \
 		and not static_records.is_empty() \
 		and not door_records.is_empty() \
@@ -1030,8 +1044,41 @@ func test_npc_navworld_live_tile_snapshot_includes_collision_records(_mode: Stri
 		passed,
 		"blocked=%s doors=%s staticRecords=%d doorRecords=%d blockedSurface=%s openSurface=%s" % [JSON.stringify(blocked.keys()), JSON.stringify(doors.keys()), static_records.size(), door_records.size(), str(blocked_cell_published), str(open_cell_published)],
 		["live_static_block_updates_static_collision", "live_door_updates_door_collision", "collision_by_cell_matches_records"],
-		{ "blockedCells": blocked.keys(), "doorCells": doors.keys(), "staticRecordCount": static_records.size(), "doorRecordCount": door_records.size(), "blockedCellPublished": blocked_cell_published, "openCellPublished": open_cell_published }
+		{ "evidenceLevel":"synthetic_contract", "publication":publication, "blockedCells": blocked.keys(), "doorCells": doors.keys(), "staticRecordCount": static_records.size(), "doorRecordCount": door_records.size(), "blockedCellPublished": blocked_cell_published, "openCellPublished": open_cell_published }
 	)
+
+func synthetic_capture_navigation_snapshot(adapter, tile_key: String) -> Dictionary:
+	var deadline := Time.get_ticks_msec()+5000
+	var result: Dictionary = adapter.build_navmesh_tile_snapshot(tile_key)
+	while result.get("publicationStatus") == "pending" and Time.get_ticks_msec()<deadline:
+		await get_tree().process_frame
+		result = adapter.build_navmesh_tile_snapshot(tile_key)
+	return result
+
+func synthetic_accept_navigation_snapshot(snapshot: Dictionary) -> Dictionary:
+	# Shared only by the two existing synthetic collision fixtures. Exercise
+	# admission -> real worker -> service acceptance; no gameplay evidence.
+	var service := NavmeshWorldServiceScript.new()
+	service.setup()
+	var input: Dictionary = snapshot.get("publicationInput",{})
+	var had_no_surfaces := not snapshot.has("surfaces") and not snapshot.has("publicationSource")
+	var result: Dictionary = service.register_tile_snapshot(snapshot)
+	var initial_pending: bool = had_no_surfaces and input.get("status") == "prepared" and result.get("status") == "pending"
+	var deadline := Time.get_ticks_msec()+5000
+	while result.get("status") == "pending" and Time.get_ticks_msec()<deadline:
+		await get_tree().process_frame
+		service.advance_publication()
+		result = service.register_tile_snapshot(snapshot)
+	var source: Dictionary = snapshot.get("publicationSource",{})
+	var accepted: bool = result.get("installed",false) and source.get("status") == "prepared" and source.is_read_only()
+	service.request_publication_shutdown()
+	var shutdown: Dictionary = service.advance_publication()
+	deadline = Time.get_ticks_msec()+5000
+	while not shutdown.get("shutdownComplete",false) and Time.get_ticks_msec()<deadline:
+		await get_tree().process_frame
+		shutdown = service.advance_publication()
+	return {"accepted":accepted,"initialPending":initial_pending,"shutdownComplete":shutdown.get("shutdownComplete",false),
+		"status":result.get("status"),"reason":result.get("reason","")}
 
 func test_clock_day_snapshot(_mode: String) -> Dictionary:
 	var clock = NpcTestClockScript.new()
@@ -1549,6 +1596,113 @@ func test_route_authority_v2_lifecycle(_mode: String) -> Dictionary:
 			"debug": debug,
 			"stats": authority.stats()
 		}
+	)
+
+
+func test_route_authority_v2_unregisters_stale_actor(_mode: String) -> Dictionary:
+	var production_autonomy := NpcAutonomySystemScript.new()
+	production_autonomy.setup(null, null)
+	var production_body := CharacterBody3D.new()
+	var production_entry := {"id": "v2-production-unregister-npc", "body": production_body}
+	var production_context = production_autonomy.register_npc(production_body, {"id": "v2-production-unregister-npc"}, production_entry)
+	var production_authority = production_autonomy.get("route_authority_v2")
+	var production_request: Dictionary = production_authority.submit_request(production_entry, {"kind": "move", "targetCell": Vector2i(2, 1)})
+	var production_request_id := String(production_request.get("requestId", ""))
+	production_authority.mark_pending_nav_data(production_request_id, "fixture_production_wait")
+	production_autonomy.unregister_npc(production_body)
+	var production_retained: Dictionary = production_authority.requests_by_id.get(production_request_id, {}) if production_authority.requests_by_id.get(production_request_id, {}) is Dictionary else {}
+	var production_wired: bool = production_context != null \
+		and production_retained.get("state") == "cancelled" \
+		and production_retained.get("reason") == "actor_unregistered" \
+		and not production_authority.active_request_by_actor.has("v2-production-unregister-npc") \
+		and not production_authority.actor_entries.has("v2-production-unregister-npc") \
+		and not production_autonomy.contexts_by_instance_id.has(production_body.get_instance_id()) \
+		and not production_autonomy.contexts_by_stable_id.has("v2-production-unregister-npc")
+	production_body.free()
+	production_autonomy.free()
+
+	var authority := NpcRouteAuthorityV2Script.new()
+	var body := Node3D.new()
+	add_child(body)
+	var entry := {"id": "v2-unregister-npc", "body": body}
+	var request: Dictionary = authority.submit_request(entry, {"kind": "move", "targetCell": Vector2i(6, 2)}, {"priority": 120})
+	var request_id := String(request.get("requestId", ""))
+	authority.mark_pending_nav_data(request_id, "fixture_nav_data_wait")
+	authority.probe_cursors["%s|fixture" % request_id] = {"completedSamples": 1}
+	var receipt: Dictionary = authority.unregister_actor(entry, "fixture_actor_unregistered")
+	var repeated: Dictionary = authority.unregister_actor("v2-unregister-npc", "fixture_actor_unregistered")
+	body.queue_free()
+	await get_tree().process_frame
+	authority.begin_frame()
+	var retained: Dictionary = authority.requests_by_id.get(request_id, {}) if authority.requests_by_id.get(request_id, {}) is Dictionary else {}
+	var stats: Dictionary = authority.stats()
+	var counters: Dictionary = stats.get("counters", {}) if stats.get("counters", {}) is Dictionary else {}
+	var lifecycle_clean: bool = receipt.get("status") == "unregistered" \
+		and bool(receipt.get("cancelled", false)) \
+		and receipt.get("requestState") == "cancelled" \
+		and repeated.get("status") == "absent" \
+		and retained.get("state") == "cancelled" \
+		and (retained.get("routeLease", {}) as Dictionary).is_empty() \
+		and authority.requests_by_id.has(request_id) \
+		and not authority.active_request_by_actor.has("v2-unregister-npc") \
+		and not authority.actor_entries.has("v2-unregister-npc") \
+		and not authority.registered_actors.has("v2-unregister-npc") \
+		and authority.probe_cursors.is_empty() \
+		and int(stats.get("actorCount", -1)) == 0 \
+		and int(stats.get("activeRequestCount", -1)) == 0 \
+		and int(stats.get("requestCount", -1)) == 1 \
+		and int(counters.get("unregisteredActors", 0)) == 1 \
+		and int(counters.get("cancelled", 0)) == 1
+
+	# Deliberately retain the same freed Variant shape that triggered the headed
+	# runner failure. Diagnostics must tolerate it even if a caller violates the
+	# lifecycle contract, while unregister_actor remains the production owner fix.
+	var stale_body := Node3D.new()
+	add_child(stale_body)
+	var stale_id := "v2-stale-diagnostic-npc"
+	var stale_entry := {
+		"id": stale_id,
+		"body": stale_body,
+		"scriptedOrder": {
+			"id": "stale-order",
+			"state": "PENDING",
+			"usesRouteStack": true,
+			"submittedWallMsec": Time.get_ticks_msec() - NpcRouteAuthorityV2Script.PENDING_STALL_TRACE_WALL_MSEC - 1
+		}
+	}
+	stale_body.queue_free()
+	await get_tree().process_frame
+	authority.actor_entries[stale_id] = stale_entry
+	var stale_body_safe: bool = authority._safe_entry_body(stale_entry) == null
+	var stalled_record := {
+		"actorId": stale_id,
+		"requestId": "stale-request",
+		"state": "pending_nav_data",
+		"reason": "fixture_pending",
+		"createdWallMsec": Time.get_ticks_msec() - NpcRouteAuthorityV2Script.PENDING_STALL_TRACE_WALL_MSEC - 1
+	}
+	authority._maybe_capture_pending_stall_trace(stalled_record)
+	authority._maybe_capture_scripted_order_stall_trace(stale_id, stale_entry)
+	authority.collision_recovery_stalls_by_actor[stale_id] = {
+		"firstWallMsec": Time.get_ticks_msec() - NpcRouteAuthorityV2Script.PENDING_STALL_TRACE_WALL_MSEC - 1,
+		"collisionCount": 1,
+		"captured": false
+	}
+	authority._observe_collision_recovery_stall({"actorId": stale_id, "requestId": "stale-request"}, {"reason": "fixture_collision"})
+	var pending_trace: Dictionary = authority.pending_stall_trace_records.back() if not authority.pending_stall_trace_records.is_empty() else {}
+	var scripted_trace: Dictionary = authority.scripted_order_stall_trace_records.back() if not authority.scripted_order_stall_trace_records.is_empty() else {}
+	var collision_trace: Dictionary = authority.collision_recovery_stall_trace_records.back() if not authority.collision_recovery_stall_trace_records.is_empty() else {}
+	var diagnostics_safe: bool = stale_body_safe \
+		and pending_trace.has("bodyPosition") and pending_trace.get("bodyPosition") == null \
+		and scripted_trace.has("bodyPosition") and scripted_trace.get("bodyPosition") == null \
+		and collision_trace.has("bodyPosition") and collision_trace.get("bodyPosition") == null
+	authority.actor_entries.erase(stale_id)
+	authority.collision_recovery_stalls_by_actor.erase(stale_id)
+	return outcome(
+		production_wired and lifecycle_clean and diagnostics_safe,
+		"receipt=%s repeated=%s retained=%s stats=%s traces=%s/%s/%s" % [JSON.stringify(receipt), JSON.stringify(repeated), JSON.stringify(retained), JSON.stringify(stats), str(not pending_trace.is_empty()), str(not scripted_trace.is_empty()), str(not collision_trace.is_empty())],
+		["production_unregister_calls_route_authority_first", "unregister_cancels_active_request", "unregister_releases_actor_ownership", "unregister_keeps_terminal_request_history", "unregister_is_idempotent", "freed_body_variant_safe_in_all_delayed_diagnostics"],
+		{"productionRetained": production_retained, "receipt": receipt, "repeated": repeated, "retained": retained, "stats": stats, "pendingTrace": pending_trace, "scriptedTrace": scripted_trace, "collisionTrace": collision_trace}
 	)
 
 func test_route_authority_v2_cancellation(_mode: String) -> Dictionary:

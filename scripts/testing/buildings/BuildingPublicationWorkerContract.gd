@@ -344,6 +344,67 @@ func unclaimed_description_retirement(reset_owner: bool) -> void:
 	job.request_shutdown()
 	await drain(job,label+"_shutdown",true)
 
+## This uses the ordinary worker entry points, but stays source/packet-only:
+## no scene root, publisher, collision, navigation or gameplay is involved.
+func base_and_physical_packet() -> void:
+	var job := Worker.new()
+	var blueprint := Blueprint.new("packet-worker",1,"timber")
+	blueprint.add_part({"id":"packet-wall","kind":"wall","material":"fired_brick",
+		"size":Vector3(4,3,0.4),"position":Vector3(-4,1.5,0)})
+	blueprint.add_part({"id":"packet-paving","kind":"foundation","material":"cobblestone",
+		"size":Vector3(4,0.12,3),"position":Vector3(0,0.06,0),
+		"recipe":{"pavingFamily":"civic_setts","pavingHeading":"x"}})
+	blueprint.add_part({"id":"packet-roof","kind":"roof","material":"roof_slate",
+		"size":Vector3(4,0.15,3),"position":Vector3(4,3,0)})
+	var furnishings := Plan.new("packet-worker-furnishings",1,blueprint.id)
+	var furnishing_source: Dictionary = furnishings.snapshot()
+	furnishing_source.accessReservations=[]
+	var input := {"status":"prepared","blueprint":blueprint.snapshot(),"furnishingPlan":furnishing_source,"profile":profile()}
+	freeze(input)
+	var base_receipt: Dictionary = job.dispatch_publication_base(input,BINDING)
+	check("packet_base_dispatch_queued",base_receipt.status=="queued" and base_receipt.token>0)
+	input={}
+	await wait_completed(job,"packet_base")
+	var base_taken: Dictionary = job.take_result(base_receipt.token,BINDING)
+	var base = base_taken.get("result",{}).get("base")
+	check("packet_base_worker_result",base_taken.status=="consumed" and base!=null and base.matches(BINDING) \
+		and base.description.publication_groups.get("ready",false))
+	if base==null:
+		job.request_shutdown()
+		await drain(job,"packet_base_shutdown",true)
+		return
+	var navigation_receipt: Dictionary = job.dispatch_publication_base_navigation(base,BINDING)
+	check("packet_base_navigation_dispatch_queued",navigation_receipt.status=="queued" and navigation_receipt.token>0)
+	await wait_completed(job,"packet_base_navigation")
+	var navigation_taken: Dictionary = job.take_result(navigation_receipt.token,BINDING)
+	var navigation_source: Dictionary = navigation_taken.get("result",{}).get("navigationSource",{})
+	check("packet_base_navigation_source_matches_base",navigation_taken.status=="consumed" and navigation_source.is_read_only() \
+		and navigation_source.get("binding",{})==BINDING and navigation_source.get("producer")!=null)
+	var group_ids: Array[String] = []
+	for group_id in base.description.publication_groups.order: group_ids.append(String(group_id))
+	group_ids.sort()
+	var unsorted: Array[String] = group_ids.duplicate()
+	unsorted.reverse()
+	if unsorted==group_ids: unsorted.append("missing")
+	check("packet_worker_unsorted_scope_rejected",job.dispatch_physical_group_packet(base,unsorted,BINDING).reason=="invalid_physical_group_ids")
+	var packet_receipt: Dictionary = job.dispatch_physical_group_packet(base,group_ids,BINDING)
+	check("packet_worker_dispatch_queued",packet_receipt.status=="queued" and packet_receipt.token>0)
+	await wait_completed(job,"packet_worker")
+	var packet_taken: Dictionary = job.take_result(packet_receipt.token,BINDING)
+	var packet = packet_taken.get("result",{}).get("packet")
+	check("packet_worker_result_matches_base",packet_taken.status=="consumed" and packet!=null and packet.matches(base,group_ids))
+	check("packet_worker_group_scope_value_keyed",packet!=null and packet.building_entries.has("packet-wall") \
+		and packet.building_entries.has("packet-paving") and packet.building_entries.has("packet-roof"))
+	job.request_shutdown()
+	check("packet_worker_external_retirement_accepted",job.retire_external_payload({"base":base,"packet":packet,"navigationSource":navigation_source}))
+	base=null
+	packet=null
+	navigation_source={}
+	base_taken={}
+	packet_taken={}
+	navigation_taken={}
+	await drain(job,"packet_worker_shutdown",true)
+
 func _run() -> void:
 	await real_empty()
 	await queued_cancel()
@@ -356,6 +417,7 @@ func _run() -> void:
 	await description_handoff(true,true)
 	await unclaimed_description_retirement(false)
 	await unclaimed_description_retirement(true)
+	await base_and_physical_packet()
 	var report := {"schema":"building-publication-worker-contract/v1","complete":true,"passed":not checks.values().has(false),
 		"evidenceLevel":"synthetic_owned_worker_retirement_and_empty_real_preparation","checks":checks,"metrics":metrics,
 		"doesNotProve":"No actual Site build, scene publication, runtime lifecycle, terrain, headed or gameplay acceptance."}

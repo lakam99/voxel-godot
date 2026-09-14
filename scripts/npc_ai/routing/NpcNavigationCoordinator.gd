@@ -76,10 +76,10 @@ func prebake_town(center_cell: Vector2i, radius_cells: int) -> Dictionary:
         return route_planner.prebake_area_tiles(center_cell, radius_cells)
     return { "ok": false, "reason": "missing_route_planner" }
 
-func begin_frame() -> void:
+func begin_frame(allow_publication := true) -> void:
     ensure_ready()
     if route_planner != null and route_planner.has_method("begin_frame"):
-        route_planner.begin_frame()
+        route_planner.begin_frame(allow_publication)
     if route_ticket_broker != null and route_ticket_broker.has_method("begin_frame"):
         route_ticket_broker.begin_frame()
     if locomotion != null:

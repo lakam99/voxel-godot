@@ -178,6 +178,57 @@ func _tree(id: String, position: Vector3 = Vector3.ZERO) -> Dictionary:
 		"treeRequest":{"architecture":"broadleaf","speciesGrammar":"synthetic_contract","visualHeight":6.0,
 			"collisionHeight":3.0,"trunkRadius":0.3,"canopyRadius":4.0}}
 
+func _regional_physical_closure() -> void:
+	var blueprint = Blueprint.new("regional-physical",8,"stone")
+	_part(blueprint,"near",2)
+	_part(blueprint,"tile-edge",16,["support"])
+	_part(blueprint,"crossing-peer",80,["far-support"])
+	_part(blueprint,"far-support",120)
+	_part(blueprint,"support",160)
+	_part(blueprint,"unrelated",240)
+	var packet = _packet(blueprint,Plan.new())
+	check("regional_groups_ready",packet.publication_groups.get("ready",false))
+	if not packet.publication_groups.get("ready",false): return
+	# Explicit synthetic crossing facts isolate grid closure, not route geometry.
+	var selected: Dictionary = _crossing("selected",2,"0,0")
+	selected.sourcePartId = "near"
+	selected.tileKeys = ["0,0","3,0"]
+	# This mesh overlaps the query, but its declared seam endpoint is remote.
+	# Regional streaming must defer it until that endpoint enters a query.
+	var boundary_bleed: Dictionary = _crossing("boundary-bleed",2,"11,0")
+	boundary_bleed.sourcePartId = "near"
+	var edge_outgoing: Dictionary = _crossing("edge-outgoing",16,"11,0")
+	edge_outgoing.sourcePartId = "tile-edge"
+	edge_outgoing.endSupportPartId = "unrelated"
+	var peer_outgoing: Dictionary = _crossing("peer-outgoing",80,"11,0")
+	peer_outgoing.sourcePartId = "crossing-peer"
+	peer_outgoing.endSupportPartId = "unrelated"
+	packet.navigation.verticalLinks = [selected,boundary_bleed,edge_outgoing,peer_outgoing]
+	var before: PackedByteArray = var_to_bytes([packet.parts,packet.navigation,packet.publication_groups])
+	var original: Dictionary = packet.group_requirements(_query(2))
+	check("regional_original_query_selects_local_and_mesh_overlapping_crossings",original.crossingIds==["boundary-bleed","selected"] and original.groupIds==["building:near"])
+	var physical: Dictionary = packet.physical_group_requirements(Rect2i(Vector2i.ZERO,Vector2i.ONE*Spatial.NAV_TILE_CELLS))
+	check("physical_tile_keeps_directed_support_without_crossings",physical.status=="described"
+		and physical.groupIds==["building:near","building:support","building:tile-edge"]
+		and physical.crossingIds.is_empty() and physical.requiredCrossings.is_empty())
+	var regional: Dictionary = packet.regional_group_requirements(_query(2))
+	check("regional_owner_tile_adds_only_its_physical_members_and_supports",regional.status=="described"
+		and regional.groupMemberIds==["building:near","building:support","building:tile-edge"])
+	check("regional_crossing_closure_uses_declared_local_endpoint",regional.crossingIds==["selected"]
+		and regional.unresolvedCrossingIds.is_empty())
+	check("regional_new_tile_members_do_not_expand_outgoing_crossings",regional.navigationTileKeys==["0,0"]
+		and not regional.groupMemberIds.has("building:unrelated") and not regional.requiredCrossings.has("edge-outgoing")
+		and not regional.requiredCrossings.has("peer-outgoing") and not regional.requiredCrossings.has("boundary-bleed"))
+	var disjoint: bool = true
+	for rectangle: Rect2i in regional.dependencyBounds:
+		disjoint = disjoint and rectangle.size.x<=Spatial.NAV_TILE_CELLS and rectangle.size.y<=Spatial.NAV_TILE_CELLS
+	check("regional_physical_support_regions_remain_disjoint",disjoint and regional.dependencyBounds.size()>2)
+	check("regional_closure_pure_and_repeatable",before==var_to_bytes([packet.parts,packet.navigation,packet.publication_groups])
+		and var_to_bytes(regional)==var_to_bytes(packet.regional_group_requirements(_query(2))))
+	check("regional_physical_obligations_are_not_receipts",not regional.publicationAcknowledged and not physical.publicationAcknowledged)
+	metrics.regionalNavigationTileKeys = regional.navigationTileKeys
+	metrics.regionalGroupMembers = regional.groupMemberIds
+
 func _trees_and_immutability() -> void:
 	var blueprint = Blueprint.new("trees",5,"stone")
 	blueprint.recipe = {"landscapeTrees":[_tree("chosen")],"urbanPoc":{"treePlacements":[_tree("ignored",Vector3(100,0,0))]}}
@@ -208,8 +259,17 @@ func _trees_and_immutability() -> void:
 	check("real_compact_group_description_compiles",compact!=null)
 	if compact!=null:
 		check("all_compact_source_containers_deeply_read_only",_deep_read_only([compact.binding,compact.parts,compact.cells,
-			compact.navigation,compact.publication_groups],false))
+			compact.navigation,compact.publication_groups,compact.regional_tile_requirements],false))
 		check("compact_does_not_generate_dense_samples",compact.navigation_tiles.is_empty() and compact.navigation_tiles.is_read_only())
+		check("compact_prepares_immutable_regional_membership_index",compact.regional_tile_index_ready \
+			and compact.regional_tile_requirements.is_read_only() and not compact.regional_tile_requirements.is_empty())
+		var indexed_query: Dictionary = compact.regional_group_requirements(_query(0))
+		var reference_query: Dictionary = compact._legacy_regional_group_requirements(_query(0))
+		check("indexed_regional_membership_matches_reference_closure",indexed_query.groupIds==reference_query.groupIds \
+			and indexed_query.groupMemberIds==reference_query.groupMemberIds \
+			and indexed_query.crossingIds==reference_query.crossingIds \
+			and indexed_query.missingSourceIds==reference_query.missingSourceIds \
+			and indexed_query.unresolvedCrossingIds==reference_query.unresolvedCrossingIds)
 		check("compact_preserves_caller_values_and_mutability",source_before==var_to_bytes([immutable.snapshot(),immutable_plan.snapshot()])
 			and not immutable.recipe.is_read_only() and not immutable.recipe.landscapeTrees.is_read_only() and not immutable.recipe.landscapeTrees[0].treeRequest.is_read_only())
 
@@ -223,6 +283,44 @@ func _deep_read_only(value: Variant, inspect_container: bool = true) -> bool:
 		for child in value:
 			if not _deep_read_only(child): return false
 	return true
+
+func _immutable_member_sources() -> void:
+	var blueprint = Blueprint.new("member-source-identity",9,"stone")
+	var post = _part(blueprint,"z",3,[],{},"post")
+	post.rotation = Vector3(0,0.25,0)
+	_part(blueprint,"a",40,[],{"visual":false},"wall",false)
+	var plan = Plan.new("member-furniture",9,blueprint.id)
+	var table = plan.add_part({"id":"z","archetype":"table","position":Vector3(5,0,3),
+		"rotation":Vector3(0,0.5,0),"occupiedSize":Vector3(2,1,1.5),"collision":true})
+	plan.add_part({"id":"a","archetype":"chair","position":Vector3(50,0,0),"collision":false})
+	var before: PackedByteArray = var_to_bytes([blueprint.snapshot(),plan.snapshot()])
+	var packet = _packet(blueprint,plan,Vector3(20,2,-10))
+	check("member_source_identity_compiles",packet.publication_groups.get("ready",false))
+	if not packet.publication_groups.get("ready",false): return
+	var sources: Dictionary = packet.publication_groups.memberSources
+	check("member_source_identity_keeps_namespaces_and_source_order",sources.keys()==["building:z","building:a","furnishing:z","furnishing:a"]
+		and sources["building:z"].index==0 and sources["building:a"].index==1
+		and sources["furnishing:z"].index==0 and sources["furnishing:a"].index==1)
+	check("building_identity_exact_local_geometry",sources["building:z"].geometry==["z","post",Vector3(3,1,0),Vector3(0,0.25,0),Vector3(2,2,2),true,true]
+		and sources["building:a"].geometry==["a","wall",Vector3(40,1,0),Vector3.ZERO,Vector3(2,2,2),false,false])
+	check("furniture_identity_exact_local_geometry",sources["furnishing:z"].geometry==["z","table",Vector3(5,0,3),Vector3(0,0.5,0),Vector3(2,1,1.5),true])
+	check("member_source_identity_owned_deep_readonly",_deep_read_only(sources))
+	check("member_source_identity_does_not_freeze_or_modify_callers",before==var_to_bytes([blueprint.snapshot(),plan.snapshot()])
+		and not blueprint.parts.is_read_only() and not plan.parts.is_read_only() and not post.recipe.is_read_only())
+	var frozen: PackedByteArray = var_to_bytes(sources)
+	post.position.x += 20
+	post.rotation.y += 0.5
+	post.size.x += 1
+	post.collision_enabled = false
+	post.recipe.visual = false
+	table.position.z += 20
+	table.rotation.y += 0.5
+	table.occupied_size.y += 2
+	table.collision_enabled = false
+	blueprint.parts.reverse()
+	plan.parts.reverse()
+	check("member_source_identity_survives_caller_pose_intent_and_order_mutation",frozen==var_to_bytes(sources)
+		and sources["building:z"].index==0 and sources["furnishing:z"].index==0)
 
 func _malformed_and_cancelled() -> void:
 	var cases: Array = [
@@ -284,7 +382,9 @@ func _run() -> void:
 	_directed_and_cycles()
 	_atomic_peers()
 	_bounded_crossing_ownership()
+	_regional_physical_closure()
 	_trees_and_immutability()
+	_immutable_member_sources()
 	_malformed_and_cancelled()
 	var report: Dictionary = {"schema":"building-publication-groups-contract/v1","complete":true,"passed":not checks.values().has(false),
 		"checks":checks,"metrics":metrics,"evidenceLevel":"synthetic_source_group_and_spatial_requirement_contract",

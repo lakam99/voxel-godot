@@ -4,8 +4,10 @@ class_name GeneratedWorldNavigationAdapter
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const NpcEnumsScript := preload("res://scripts/npc_ai/NpcEnums.gd")
 const HomeInteriorServiceScript := preload("res://scripts/npc_ai/behavior/HomeInteriorService.gd")
-const BuildingClearanceScript := preload("res://scripts/buildings/layout/BuildingLayoutClearance.gd")
 const NavigationPublicationSourceScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationSource.gd")
+const NavigationTileCaptureScript := preload("res://scripts/npc_ai/navigation/NavigationTileCapture.gd")
+const GAMEPLAY_NAVIGATION_CAPTURE_BUDGET_USEC := 750
+const LOADING_NAVIGATION_CAPTURE_BUDGET_USEC := 8000
 
 const CELL := NpcConstantsScript.CELL_SIZE
 const NAV_TILE_CELL_SIZE := NpcConstantsScript.NAV_TILE_CELL_SIZE
@@ -19,6 +21,7 @@ const NAV_TERRAIN_PROJECTION_DOWN_CELLS := 24
 const NAV_TERRAIN_PROJECTION_MAX_SURFACE_DEVIATION := CELL * 1.10
 const TRANSITION_COLLISION_INFLATION := NpcConstantsScript.DEFAULT_NPC_RADIUS + NpcConstantsScript.DEFAULT_PERSONAL_SPACE_MARGIN
 const TRANSITION_RECORD_INDEX_MARGIN_CELLS := 2
+const NAVIGATION_CAPTURE_ORDER_KEY := &"_navigationCaptureOrder"
 const NAVMESH_TILE_SNAPSHOT_CACHE_LIMIT := 96
 
 var system
@@ -31,10 +34,12 @@ var cached_props := {}
 var cached_prop_clearance := {}
 var cached_prop_cell_by_object_id := {}
 var cached_prop_collision_records_by_object_id := {}
+var cached_block_keys_by_nav_tile := {}
 # Failed sources have unknown extent: block publication, never invent geometry.
 var collision_source_errors := {}
 var cached_static_collision_records: Array[Dictionary] = []
 var cached_static_collision_by_cell := {}
+var cached_static_collision_capture_sequence := 0
 var cached_door_collision_records: Array[Dictionary] = []
 var cached_door_collision_by_cell := {}
 var cached_private_interior_records_revision := ""
@@ -46,6 +51,7 @@ var navmesh_tile_snapshot_cache_order: Array[String] = []
 var navmesh_tile_revision_by_key := {}
 var navmesh_tile_semantic_revision_by_key := {}
 var navmesh_tile_door_revision_by_key := {}
+var navmesh_tile_load_revision_by_key := {}
 var static_snapshot_revision := 1
 var topology_revision := 1
 var dynamic_revision := 0
@@ -56,13 +62,31 @@ var nav_static_rebuild_count := 0
 var nav_dynamic_update_count := 0
 var dynamic_occupant_cache_frame_key := ""
 var dynamic_occupant_cache := {}
-var building_clearance = BuildingClearanceScript.new()
+var _publication_service_ref: WeakRef
+var _capture_retirement: Dictionary = {}
+var _navigation_capture
+var _last_capture_diagnostic_frame := -1000
 # Opt-in evidence only. Retention is bounded by the existing tile snapshot cache.
 var navigation_rejection_diagnostics_enabled := OS.get_environment("VOXEL_NAVIGATION_REJECTION_DIAGNOSTICS") == "1"
 
 func setup(system_node, main_node) -> void:
     system = system_node
     main = main_node
+
+func _notification(what: int) -> void:
+    if what != NOTIFICATION_PREDELETE: return
+    # Do not discover owners while tearing down. A service that admitted this
+    # producer must outlive its capture cache through the existing exit protocol.
+    var service = _publication_service_ref.get_ref() if _publication_service_ref != null else null
+    if _navigation_capture != null:
+        _navigation_capture.detach_live_records()
+        if is_instance_valid(service): service.retire_navigation_payload({"capture":_navigation_capture})
+        _navigation_capture = null
+    if is_instance_valid(service):
+        service.retire_navigation_payload(navmesh_tile_snapshot_cache)
+        service.retire_navigation_payload(_capture_retirement)
+        navmesh_tile_snapshot_cache = {}
+        _capture_retirement = {}
 
 func performance_monitor():
     return main.get("runtime_perf_monitor") if main != null else null
@@ -77,6 +101,7 @@ func invalidate() -> void:
     navmesh_tile_revision_by_key.clear()
     navmesh_tile_semantic_revision_by_key.clear()
     navmesh_tile_door_revision_by_key.clear()
+    navmesh_tile_load_revision_by_key.clear()
     cached_prop_cell_by_object_id = {}
     cached_prop_collision_records_by_object_id = {}
     cached_private_interior_records_revision = ""
@@ -102,6 +127,8 @@ func apply_navigation_events(events: Array) -> void:
         last_event_revision = maxi(last_event_revision, int(event.get("revision", 0)))
         var kinds: Array = event.get("changeKinds", [])
         var tile_key := String(event.get("tileKey", ""))
+        if _event_has_kind(kinds, NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED):
+            _mark_chunk_load_publication_change(tile_key)
         if _event_changes_static_snapshot(kinds):
             var prop_start: int = monitor.begin_section("generated_nav_prop_event_apply") if monitor != null else Time.get_ticks_usec()
             if _event_is_prop_only_static_change(kinds) and _apply_prop_event_to_static_cache(event):
@@ -207,6 +234,13 @@ func navmesh_tile_source_key() -> String:
 func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if tile_key == "":
         return navmesh_tile_source_key()
+    return _navmesh_tile_source_key_from_building_sources(tile_key,building_navigation_sources(tile_key))
+
+# Compose identity from source facts already obtained in this synchronous call.
+# This helper performs no live proof and must never replace public validation.
+func _navmesh_tile_source_key_from_building_sources(tile_key: String, structures: Dictionary) -> String:
+    if tile_key == "":
+        return navmesh_tile_source_key()
     if not navmesh_tile_revision_by_key.has(tile_key):
         navmesh_tile_revision_by_key[tile_key] = static_snapshot_revision
     var tile_revision := int(navmesh_tile_revision_by_key.get(tile_key, static_snapshot_revision))
@@ -217,7 +251,8 @@ func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
         navmesh_tile_door_revision_by_key[tile_key] = door_state_revision
     var tile_door_revision := int(navmesh_tile_door_revision_by_key.get(tile_key, door_state_revision))
     var key := "%d:%d:%d" % [tile_revision, tile_semantic_revision, tile_door_revision]
-    var structures := building_navigation_sources(tile_key)
+    if navmesh_tile_load_revision_by_key.has(tile_key):
+        key += "|chunk-load:%d" % int(navmesh_tile_load_revision_by_key[tile_key])
     if structures.get("status")!="ready": return key+"|structure:"+String(structures.get("reason","pending"))
     for source: Dictionary in structures.get("sources",[]):
         key += "|%s:%d" % [source.binding.sourceKey,int(source.binding.generation)]
@@ -234,6 +269,15 @@ func building_navigation_sources(tile_key: String) -> Dictionary:
         if not missing.is_empty():
             return {"status":"failed","reason":"source_crossings_unresolved","missingCrossings":missing,"binding":source.binding}
     return result
+
+func navigation_tile_terrain_readiness(tile_key: String) -> Dictionary:
+    if not is_instance_valid(main) or not main.has_method("navigation_terrain_publication_readiness"):
+        # Focused adapters without a production terrain runtime continue to
+        # exercise their declared synthetic authority.
+        return {"status":"ready","reason":"external_terrain_authority"}
+    var tile := _parse_tile_key(tile_key)
+    return main.navigation_terrain_publication_readiness(
+        Rect2i(tile*NAV_TILE_CELL_SIZE,Vector2i.ONE*NAV_TILE_CELL_SIZE))
 
 func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3, allow_outside := false, moving_home := false, margin_cells := ROUTE_NAVMESH_MARGIN_CELLS) -> Array[String]:
     var start_cell := world_cell(start)
@@ -268,36 +312,129 @@ func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3,
 # helper that only updates blocked/doors/paths; that reintroduces planner/probe
 # disagreement and makes NPCs accept routes into walls or reject valid routes.
 func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
+    var started := Time.get_ticks_usec()
+    # Another tile's slot has its own source proof. Retire an already-owned
+    # predecessor even when a direct caller has no queued publisher visit; an
+    # unaccepted capture keeps its slot. Resolve this before requested facts.
+    if _navigation_capture != null and _navigation_capture.tile_key != tile_key:
+        active_navigation_capture_tile()
     var world_seed = main.get("seed_text") if is_instance_valid(main) else null
     if not world_seed is String or world_seed.strip_edges().is_empty():
-        var failed_source := NavigationPublicationSourceScript.new().capture({"worldSeed":world_seed})
-        return {"tileKey":tile_key,"publicationStatus":"failed","reason":failed_source.reason,
-            "publicationSource":failed_source}
-    var building_sources := building_navigation_sources(tile_key)
-    if building_sources.get("status")!="ready":
-        return {"tileKey":tile_key,"publicationStatus":String(building_sources.get("status","pending")),
-            "reason":String(building_sources.get("reason","structure_source_pending"))}
-    # Refresh only invalidated sources; failed shapes are retryable before cache hits.
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"failed","reason":"invalid_worldSeed"}
+    var terrain_readiness := navigation_tile_terrain_readiness(tile_key)
+    if terrain_readiness.get("status") != "ready":
+        if _navigation_capture != null and _navigation_capture.tile_key == tile_key:
+            _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":terrain_readiness.get("status","pending"),
+            "reason":terrain_readiness.get("reason","navigation_terrain_publication_pending")}
+    # Resolving the service may bind or retire payloads. Do it before acquiring
+    # source facts, while preserving the early pending-source maintenance gate.
+    var service = _publication_service()
+    if not is_instance_valid(main) or (main is Node and main.is_queued_for_deletion()) or main.get("seed_text") != world_seed:
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_source_changed_during_capture"}
+    # Streaming and NPC publication can visit the same pending capture inside one
+    # Main callback. Its cooperative slice has already consumed this frame; avoid
+    # paying physical preflight again merely to hit the capture's frame guard.
+    # This shortcut can only report pending. It never accepts or publishes facts.
+    if _navigation_capture != null and _navigation_capture.tile_key == tile_key \
+            and _navigation_capture.has_method("advanced_this_process_frame") \
+            and _navigation_capture.advanced_this_process_frame():
+        var monitor = performance_monitor()
+        if monitor != null: monitor.increment_counter("navmesh_capture_same_frame_visits_deferred")
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_capture_frame_budget_used"}
     if cached_revision != str(static_snapshot_revision):
         build_snapshot({}, true, true)
     _retry_collision_sources()
-    var collision_failure := _collision_publication_failure(tile_key)
-    if not collision_failure.is_empty(): return collision_failure
-    var source_key := navmesh_tile_source_key_for_tile(tile_key)
-    # Keep routing's source key intact while isolating captured worker inputs
-    # across worlds. The tile prefix still supports tile-scoped invalidation.
+    var failure := _collision_publication_failure(tile_key)
+    if not failure.is_empty(): return failure
+    if not is_instance_valid(main) or (main is Node and main.is_queued_for_deletion()) or main.get("seed_text") != world_seed:
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_source_changed_during_capture"}
+    # A capture retains the already validated immutable building artifacts for
+    # its whole cursor lifetime. Repeating navigation_tile_sources here used to
+    # rescan thousands of physical groups on every 4 ms slice. Use only cheap
+    # revision identity while that owner is current; the service revalidates the
+    # physical source at the actual installation boundary below this capture.
+    var retained_capture := active_navigation_capture_source(tile_key)
+    var building_sources: Dictionary = {}
+    var source_key := ""
+    if not retained_capture.is_empty():
+        building_sources = {"status":"ready","sources":retained_capture.sources}
+        source_key = String(retained_capture.sourceKey)
+    else:
+        var preflight_started := Time.get_ticks_usec()
+        building_sources = building_navigation_sources(tile_key)
+        _record_navmesh_capture_cost("navmesh_filter_source_preflight",Time.get_ticks_usec()-preflight_started)
+        if building_sources.get("status") != "ready":
+            if _navigation_capture != null and _navigation_capture.tile_key == tile_key:
+                _discard_navigation_capture()
+            return {"tileKey":tile_key,"publicationStatus":String(building_sources.get("status","pending")),
+                "reason":String(building_sources.get("reason","structure_source_pending"))}
+        source_key = _navmesh_tile_source_key_from_building_sources(tile_key,building_sources)
+    if service != null and service.has_method("accepted_tile_state"):
+        # A cheap scheduling lookup decides whether an installed result exists.
+        # Only a matching result pays accepted_tile_state's authoritative physical
+        # validation. An absent result proceeds directly to capture.
+        var retained: Dictionary = service.accepted_tile_progress_source(tile_key,source_key,world_seed,self) \
+            if service.has_method("accepted_tile_progress_source") else {}
+        var state: Dictionary = service.accepted_tile_state(tile_key,source_key,world_seed,self) \
+            if not retained.is_empty() else {}
+        if state.get("status") == "invalid":
+            if _navigation_capture != null and _navigation_capture.tile_key == tile_key:
+                _discard_navigation_capture()
+            return {"tileKey":tile_key,"sourceKey":source_key,"publicationStatus":"failed",
+                "reason":state.get("reason","navigation_accepted_source_invalid")}
+        if bool(state.get("sourceOwned",false)):
+            if _navigation_capture != null and _navigation_capture.tile_key == tile_key:
+                _discard_navigation_capture()
+            return _accepted_navmesh_request(state.accepted)
+    if _navigation_capture != null and _navigation_capture.tile_key == tile_key \
+            and not _navigation_capture.current_from_entry_source(self,source_key):
+        _discard_navigation_capture()
+        # Retirement is another owner call. Retry with fresh facts rather than
+        # carrying this entry proof through it into a replacement capture.
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_source_changed_during_capture"}
     var cache_key := "%s|%s" % [tile_key, JSON.stringify([world_seed, source_key])]
     if navmesh_tile_snapshot_cache.has(cache_key):
-        var cached_snapshot: Dictionary = navmesh_tile_snapshot_cache[cache_key]
-        return cached_snapshot
-    var snapshot: Dictionary = _snapshot_with_live_tile_blocks(cached_static_tile_snapshot(true, true), tile_key)
-    collision_failure = _collision_publication_failure(tile_key)
-    if not collision_failure.is_empty(): return collision_failure
-    var tile := _parse_tile_key(tile_key)
-    var min_x := tile.x * NAV_TILE_CELL_SIZE
-    var min_z := tile.y * NAV_TILE_CELL_SIZE
-    var surfaces: Array[Dictionary] = []
-    var semantic_regions: Array[Dictionary] = []
+        # Callers receive a header copy. Service acceptance must not put result
+        # aliases into the input cache, or eviction could destroy worker output.
+        return navmesh_tile_snapshot_cache[cache_key].duplicate(false)
+    if _navigation_capture != null and _navigation_capture.tile_key == tile_key and _navigation_capture.status == "ready":
+        # A sealed cursor has detached its live aliases and cannot be resealed.
+        # If its cached input was retired, restart through ordinary capture.
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_capture_input_retired"}
+    if _navigation_capture == null:
+        _navigation_capture = NavigationTileCaptureScript.new()
+        _navigation_capture.begin(self,tile_key,source_key,world_seed,building_sources.get("sources",[]))
+    if _navigation_capture.tile_key != tile_key:
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_capture_slot_busy"}
+    var active_capture = _navigation_capture
+    var progress: Dictionary = active_capture.advance(self,_navigation_capture_budget_usec(),source_key)
+    _record_navmesh_capture_cost("navmesh_filter_capture_step",Time.get_ticks_usec()-started)
+    if progress.status == "stale" or _navigation_capture != active_capture:
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_source_changed_during_capture"}
+    if progress.status != "ready":
+        return {"tileKey":tile_key,"publicationStatus":progress.status,"reason":progress.reason}
+    var snapshot: Dictionary = _navigation_capture.snapshot
+    failure = _collision_publication_failure(tile_key)
+    if not failure.is_empty():
+        _discard_navigation_capture()
+        return failure
+    var live_usec: int = _navigation_capture.profile.liveUsec
+    var terrain: Array[Dictionary] = _navigation_capture.terrain
+    var terrain_usec: int = _navigation_capture.profile.terrainUsec
+    var doors := _navmesh_door_summary_for_tile(snapshot,tile_key,_navigation_capture.source_sites,
+        _navigation_capture.heights,_navigation_capture.projections)
+    var factory := NavigationPublicationSourceScript.new()
+    var tiles: Array[Dictionary] = []
+    for source: Dictionary in building_sources.get("sources",[]):
+        if not _apply_building_door_geometry(doors,source,tile_key):
+            return {"tileKey":tile_key,"publicationStatus":"pending","reason":"structure_door_owner_pending"}
+        tiles.append(factory.retain_filter_building_tile(source))
     var diagnostics := {}
     if navigation_rejection_diagnostics_enabled:
         diagnostics = {"schema":"navigation-live-rejections/v1","tileKey":tile_key,"sourceKey":source_key,
@@ -306,115 +443,198 @@ func build_navmesh_tile_snapshot(tile_key: String) -> Dictionary:
             "rawBuildingSurfaceCount":0,"acceptedBuildingSurfaceCount":0,"rejectedBuildingSurfaceCount":0,
             "rawTerrainCellCount":NAV_TILE_CELL_SIZE*NAV_TILE_CELL_SIZE,"acceptedTerrainSurfaceCount":0,
             "rejectedTerrainCellCount":0,"terrainRejectionReasons":{},"sourceBindings":[],"blockers":{},"recordUsec":0}
-    for z in range(min_z, min_z + NAV_TILE_CELL_SIZE):
-        for x in range(min_x, min_x + NAV_TILE_CELL_SIZE):
-            var cell := Vector2i(x, z)
-            var surface := _navmesh_surface_for_cell(snapshot, cell, diagnostics)
-            if not surface.is_empty() and not _building_blocks_terrain_surface(surface.worldPosition,building_sources,diagnostics,cell):
-                surfaces.append(surface)
-    var source_sites: Array[String] = []
-    for source: Dictionary in building_sources.get("sources",[]): source_sites.append(String(source.binding.siteId))
-    var door_summary := _navmesh_door_summary_for_tile(snapshot, tile_key, source_sites)
-    var building_surfaces: Array[Dictionary] = []
-    var crossing_links: Array[Dictionary] = []
-    var live_records := {}
-    for source: Dictionary in building_sources.get("sources",[]):
-        var source_tile: Dictionary = source.get("tile",{})
-        if not diagnostics.is_empty():
-            diagnostics.rawBuildingSurfaceCount += source_tile.get("surfaces",[]).size()
-            diagnostics.sourceBindings.append(source.binding)
-        for surface: Dictionary in source_tile.get("surfaces",[]):
-            var cell := world_cell(surface.worldPosition)
-            if not live_records.has(cell): live_records[cell] = _transition_collision_records(snapshot,"staticCollisionByCell",cell,cell)
-            var center := Vector2(surface.worldPosition.x,surface.worldPosition.z)
-            var half := Vector2(surface.size.x,surface.size.z)*0.5
-            var rejecting_record: Dictionary = building_clearance._building_support_navigation_blocker_from_records(live_records[cell],surface,surface.worldPosition.y,center-half,center+half,BuildingClearanceScript.BUILDING_SUPPORT_NAV_CLEARANCE,[],true)
-            if rejecting_record.is_empty():
-                building_surfaces.append(surface)
-            elif not diagnostics.is_empty():
-                _record_navigation_rejection(diagnostics,"building",String(surface.id),"live_collision_clearance",rejecting_record,String(surface.get("sourcePartId","")))
-        crossing_links.append_array(source_tile.get("crossingLinks",[]))
-        if not _apply_building_door_geometry(door_summary,source,tile_key):
-            return {"tileKey":tile_key,"publicationStatus":"pending","reason":"structure_door_owner_pending"}
-    var result: Dictionary = {
-        "publicationStatus": "ready",
-        "worldSeed": world_seed,
-        "tileKey": tile_key,
-        "sourceKey": source_key,
-        "regionId": "region:chunk:%s" % tile_key,
-        "sourceRevision": static_snapshot_revision,
-        "topologyRevision": static_snapshot_revision,
-        "dynamicRevision": dynamic_revision,
-        "semanticRevision": semantic_revision,
-        "blocked": snapshot.get("blocked", {}),
-        "doors": snapshot.get("doors", {}),
-        "paths": snapshot.get("paths", {}),
-        "staticCollision": snapshot.get("staticCollision", []),
-        "staticCollisionByCell": snapshot.get("staticCollisionByCell", {}),
-        "doorCollision": snapshot.get("doorCollision", []),
-        "doorCollisionByCell": snapshot.get("doorCollisionByCell", {}),
-        "surfaces": surfaces,
-        "semanticRegions": semantic_regions,
-        "doorPortals": door_summary.get("doorPortals", []),
-        "doorLinks": door_summary.get("doorLinks", [])
-    }
-    result["buildingSurfaces"] = building_surfaces
-    result["crossingLinks"] = crossing_links
-    var factory := NavigationPublicationSourceScript.new()
-    # These are new lists containing only facts from the validated, recursively
-    # sealed building artifact. Preserve the source leaves instead of cloning or
-    # recursively revalidating thousands of already prepared polygons here.
-    factory.seal_prepared_fact_list(building_surfaces)
-    factory.seal_prepared_fact_list(crossing_links)
-    result["publicationSource"] = factory.capture(result)
-    # Main-thread lifecycle validation only; never part of the worker envelope.
+    var input := {"waterLevel":float(main.WATER_LEVEL),"terrainCells":terrain,
+        "staticCollision":snapshot.staticCollision,"buildingTiles":tiles,
+        "doorPortals":doors.doorPortals,"doorLinks":doors.doorLinks,"diagnostics":diagnostics}
+    var result := {"publicationStatus":"ready","worldSeed":world_seed,"tileKey":tile_key,
+        "sourceKey":source_key,"regionId":"region:chunk:"+tile_key,"sourceRevision":static_snapshot_revision,
+        "topologyRevision":static_snapshot_revision,"dynamicRevision":dynamic_revision,"semanticRevision":semantic_revision}
+    var seal_started := Time.get_ticks_usec()
+    var captured: Dictionary = factory.capture_filter_input(result,input)
+    _record_navmesh_capture_cost("navmesh_filter_live_capture",live_usec)
+    _record_navmesh_capture_cost("navmesh_filter_terrain_capture",terrain_usec)
+    _record_navmesh_capture_cost("navmesh_filter_input_seal",Time.get_ticks_usec()-seal_started)
+    _record_navmesh_capture_cost("navmesh_filter_capture_total",Time.get_ticks_usec()-started)
+    if captured.status != "prepared":
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"failed","reason":captured.reason}
+    # Sealing retains only value facts. Keep the cheap revision identity here;
+    # NavmeshWorldService performs the authoritative live physical proof at the
+    # actual acceptance/installation boundary.
+    if _navigation_capture != active_capture or not active_capture.current_from_entry_source(self,source_key):
+        _retire_navmesh_capture({"input":captured})
+        _discard_navigation_capture()
+        return {"tileKey":tile_key,"publicationStatus":"pending","reason":"navigation_source_changed_during_capture"}
+    result["publicationInput"] = captured
     result["publicationOwner"] = weakref(self)
-    if not diagnostics.is_empty():
-        diagnostics.acceptedBuildingSurfaceCount = building_surfaces.size()
-        diagnostics.acceptedTerrainSurfaceCount = surfaces.size()
-        # Source capture uses a strict whitelist; this value-only evidence stays
-        # outside the worker envelope along with the main-thread owner handle.
-        result["publicationDiagnostics"] = diagnostics
-    if result.publicationSource.status != "prepared":
-        result["publicationStatus"] = "failed"
-        result["reason"] = result.publicationSource.reason
-        return result
-    _store_navmesh_tile_snapshot_cache(cache_key, result)
+    var door_owners := {}
+    for cell in snapshot.doors:
+        var body = snapshot.doors[cell]
+        if is_instance_valid(body) and body is Node: door_owners[cell] = weakref(body)
+    door_owners.make_read_only()
+    result["publicationDoorOwners"] = door_owners
+    _store_navmesh_tile_snapshot_cache(cache_key,result)
+    # The same slot owns capture through publication acknowledgement. Retiring
+    # here queues work on the compiler before it can accept this input, while
+    # dropping the slot lets uncaptured tiles displace the deferred ready input.
+    # Only value facts remain retained; no live registry aliases cross the seal.
+    active_capture.detach_live_records()
+    return result.duplicate(false)
+
+func _navigation_capture_budget_usec() -> int:
+    if is_instance_valid(main) and (main.get("startup_loading_active") == true \
+            or main.get("runtime_loading_active") == true):
+        return LOADING_NAVIGATION_CAPTURE_BUDGET_USEC
+    return GAMEPLAY_NAVIGATION_CAPTURE_BUDGET_USEC
+
+func active_navigation_capture_tile() -> String:
+    if _navigation_capture == null: return ""
+    # Queue scheduling needs only the retained owner's cheap lifecycle/source
+    # identity. Physical source validation remains at accepted_tile_state and
+    # register/install boundaries, where it can actually transfer ownership.
+    if not _navigation_capture.current_from_entry_source(self,_navigation_capture.source_key):
+        _discard_navigation_capture()
+        return ""
+    if OS.get_environment("VOXEL_NAVIGATION_CAPTURE_DIAGNOSTICS") == "1":
+        var process_frame := Engine.get_process_frames()
+        if process_frame-_last_capture_diagnostic_frame >= 60:
+            _last_capture_diagnostic_frame = process_frame
+            print("NAVIGATION_CAPTURE_DIAGNOSTIC ",JSON.stringify(_navigation_capture.diagnostic_snapshot()))
+    if _navigation_capture.status == "ready":
+        var service = _publication_service()
+        if service != null and service.has_method("accepted_tile_state"):
+            var state: Dictionary = service.accepted_tile_state(_navigation_capture.tile_key,
+                _navigation_capture.source_key,_navigation_capture.seed_text,self)
+            var active: Dictionary = service.active_publication_request()
+            # Source transfer releases the slot independently of server sync.
+            if bool(state.get("sourceOwned",false)) or state.get("status") == "invalid" \
+                    or (active.tileKey == _navigation_capture.tile_key and active.status == "failed"):
+                _discard_navigation_capture()
+                return ""
+    return _navigation_capture.tile_key
+
+
+func active_navigation_capture_source(tile_key: String) -> Dictionary:
+    if _navigation_capture == null: return {}
+    var retained: Dictionary = _navigation_capture.retained_source(self,tile_key)
+    if retained.is_empty() and _navigation_capture.tile_key == tile_key:
+        _discard_navigation_capture()
+    return retained
+
+func release_navigation_capture_slot(expected_tile := "", expected_source := "") -> void:
+    if _navigation_capture == null: return
+    if not expected_tile.is_empty() and _navigation_capture.tile_key != expected_tile: return
+    if not expected_source.is_empty() and _navigation_capture.source_key != expected_source: return
+    _discard_navigation_capture()
+
+func _discard_navigation_capture() -> void:
+    if _navigation_capture == null: return
+    # Live registry aliases are detached here; value facts and large immutable
+    # source references retire through the established owned worker protocol.
+    _navigation_capture.detach_live_records()
+    _retire_navmesh_capture({"capture":_navigation_capture})
+    _navigation_capture = null
+
+func _navmesh_filter_live_snapshot(tile_key: String) -> Dictionary:
+    var base := cached_static_tile_snapshot(true,true)
+    var tile := _parse_tile_key(tile_key)
+    var snapshot := {}
+    # Only tile cells and the door-axis neighbor halo need live registry values.
+    for field: String in ["blocked","doors","paths","propClearance"]:
+        var local := {}
+        var cells: Dictionary = base.get(field,{})
+        for z in range(tile.y*NAV_TILE_CELL_SIZE-1,(tile.y+1)*NAV_TILE_CELL_SIZE+1):
+            for x in range(tile.x*NAV_TILE_CELL_SIZE-1,(tile.x+1)*NAV_TILE_CELL_SIZE+1):
+                var cell := Vector2i(x,z)
+                if cells.has(cell): local[cell] = cells[cell]
+        snapshot[field] = local
+    var blocks: Dictionary = main.get("blocks")
+    var records: Array = base.get("staticCollision",[])
+    if not blocks.is_empty():
+        for field: String in ["blocked","doors","paths"]: _erase_tile_cells(snapshot[field],tile_key)
+        records = _collision_records_outside_tile(records,tile_key)
+        for block_value in blocks.values():
+            var body := block_value as Node
+            if body == null or not is_instance_valid(body): continue
+            var cell := block_world_cell(body)
+            if cell == INVALID_CELL or tile_key_for_cell(cell) != tile_key: continue
+            var kind := String(body.get_meta("block_type",""))
+            if kind == "door":
+                snapshot.doors[cell] = body
+                snapshot.blocked.erase(cell)
+                # Preserve live finite-shape validation/retry even though static
+                # surface filtering does not consume door collision indexes.
+                _collision_records_for_body(body,cell,kind,true)
+            elif kind == "cobblestonePath":
+                snapshot.paths[cell] = true
+                snapshot.blocked.erase(cell)
+            elif kind == "torch" or not block_xz_blocks_npc(cell,body):
+                snapshot.blocked.erase(cell)
+            else:
+                snapshot.blocked[cell] = body
+                _append_collision_records(records,body,cell,kind,false)
+    var facts: Array[Dictionary] = []
+    # Keep the full ordered collision inventory; only indexing/filtering moves.
+    # No global by-cell index clone or construction occurs on this capture path.
+    for record: Dictionary in records:
+        var fact := _navigation_rejection_record_values(record) if navigation_rejection_diagnostics_enabled else record.duplicate(false)
+        var node = record.get("node")
+        fact.erase("node")
+        fact["terrainNodeValid"] = node == null or is_instance_valid(node)
+        if fact.get("footprint") is Array: fact["footprint"] = fact.footprint.duplicate()
+        facts.append(fact)
+    snapshot["staticCollision"] = facts
+    return snapshot
+
+func _navmesh_node_evidence(node) -> Dictionary:
+    return _navigation_rejection_record_values({"node":node}) if navigation_rejection_diagnostics_enabled and node != null else {}
+
+func _record_navmesh_capture_cost(section: String, elapsed: int) -> void:
+    var monitor = performance_monitor()
+    if monitor != null: monitor.observe_duration(section,float(elapsed)/1000.0)
+
+func _accepted_navmesh_request(accepted: Dictionary) -> Dictionary:
+    var result: Dictionary = accepted.source.snapshot.duplicate(false)
+    result["publicationStatus"] = "ready"
+    result["publicationSource"] = accepted.source
+    result["publicationOwner"] = weakref(self)
+    result["publicationAcceptedSerial"] = accepted.serial
+    result["publicationDoorOwners"] = accepted.doorOwners
+    result["publicationCaptureProfile"] = accepted.captureProfile
+    if not accepted.get("diagnostics",{}).is_empty(): result["publicationDiagnostics"] = accepted.diagnostics
     return result
 
-func _building_blocks_terrain_surface(position: Vector3, sources: Dictionary, diagnostics: Dictionary = {}, cell := INVALID_CELL) -> bool:
-    var center := Vector2(position.x,position.z)
-    for source: Dictionary in sources.get("sources",[]):
-        var records: Array = source.get("tile",{}).get("collisionRecords",[])
-        var rejecting_record: Dictionary = building_clearance._building_support_navigation_blocker_from_records(records,{"sourcePartId":"terrain"},position.y,
-            center-Vector2.ONE*CELL*0.5,center+Vector2.ONE*CELL*0.5)
-        if not rejecting_record.is_empty():
-            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"building_manifest_clearance",rejecting_record)
-            return true
-    return false
+func bind_navigation_publication_service(service) -> void:
+    _publication_service_ref = weakref(service)
+    service.retain_navigation_capture_owner(self)
+    if not _capture_retirement.is_empty():
+        service.retire_navigation_payload(_capture_retirement)
+        _capture_retirement = {}
 
-func _record_navigation_rejection(diagnostics: Dictionary, domain: String, source_id: String, reason: String, record: Dictionary = {}, source_part_id := "") -> void:
-    if diagnostics.is_empty(): return
-    var started := Time.get_ticks_usec()
-    var record_id := String(record.get("id",""))
-    var node = record.get("node")
-    # Registry-only terrain rejection has no collision record. Keep that fact
-    # explicit; never invent collider bounds or run another collision query.
-    var group_key := reason+"|"+record_id
-    if record_id.is_empty() and is_instance_valid(node): group_key += "|node:"+str(node.get_instance_id())
-    if not diagnostics.blockers.has(group_key):
-        diagnostics.blockers[group_key] = {"reason":reason,"record":_navigation_rejection_record_values(record),
-            "buildingSurfaceIdsByPart":{},"terrainCells":[]}
-    var group: Dictionary = diagnostics.blockers[group_key]
-    if domain == "building":
-        if not group.buildingSurfaceIdsByPart.has(source_part_id): group.buildingSurfaceIdsByPart[source_part_id] = []
-        group.buildingSurfaceIdsByPart[source_part_id].append(source_id)
-        diagnostics.rejectedBuildingSurfaceCount += 1
-    else:
-        group.terrainCells.append(source_id)
-        diagnostics.rejectedTerrainCellCount += 1
-        diagnostics.terrainRejectionReasons[reason] = int(diagnostics.terrainRejectionReasons.get(reason,0))+1
-    diagnostics.recordUsec += Time.get_ticks_usec()-started
+func _publication_service():
+    var service = _publication_service_ref.get_ref() if _publication_service_ref != null else null
+    if service != null: return service
+    var npc = main.get("npc_system") if is_instance_valid(main) else null
+    var autonomy = npc.get("autonomy_system") if is_instance_valid(npc) else null
+    service = autonomy.get("navmesh_world") if is_instance_valid(autonomy) else null
+    if is_instance_valid(service) and service.has_method("retire_navigation_payload"):
+        bind_navigation_publication_service(service)
+        return service
+    return null
+
+func release_navigation_capture_cache() -> void:
+    _discard_navigation_capture()
+    _clear_navmesh_tile_snapshot_cache()
+
+func _retire_navmesh_capture(payload: Dictionary) -> void:
+    if payload.is_empty(): return
+    var service = _publication_service()
+    if service != null: service.retire_navigation_payload(payload)
+    else: _capture_retirement[_capture_retirement.size()] = payload
+
+
+
+
 
 func _navigation_rejection_record_values(record: Dictionary) -> Dictionary:
     var result := {}
@@ -495,20 +715,28 @@ func collision_snapshot_for_bounds(entry: Dictionary, bounds: Dictionary, allow_
 func _store_navmesh_tile_snapshot_cache(cache_key: String, snapshot: Dictionary) -> void:
     if cache_key == "" or snapshot.is_empty():
         return
+    if navmesh_tile_snapshot_cache.has(cache_key):
+        _retire_navmesh_capture(navmesh_tile_snapshot_cache[cache_key])
     navmesh_tile_snapshot_cache[cache_key] = snapshot
     navmesh_tile_snapshot_cache_order.erase(cache_key)
     navmesh_tile_snapshot_cache_order.append(cache_key)
     while navmesh_tile_snapshot_cache_order.size() > NAVMESH_TILE_SNAPSHOT_CACHE_LIMIT:
         var evicted := String(navmesh_tile_snapshot_cache_order.pop_front())
+        _retire_navmesh_capture(navmesh_tile_snapshot_cache.get(evicted,{}))
         navmesh_tile_snapshot_cache.erase(evicted)
 
 func _clear_navmesh_tile_snapshot_cache() -> void:
-    navmesh_tile_snapshot_cache.clear()
+    _discard_navigation_capture()
+    var retired := navmesh_tile_snapshot_cache
+    navmesh_tile_snapshot_cache = {}
+    _retire_navmesh_capture(retired)
     navmesh_tile_snapshot_cache_order.clear()
 
 func _clear_navmesh_tile_snapshot_cache_for_tile(tile_key: String) -> void:
     if tile_key == "":
         return
+    if _navigation_capture != null and _navigation_capture.tile_key == tile_key:
+        _discard_navigation_capture()
     var prefix := "%s|" % tile_key
     var evicted_keys: Array[String] = []
     for cache_key_value in navmesh_tile_snapshot_cache.keys():
@@ -516,6 +744,7 @@ func _clear_navmesh_tile_snapshot_cache_for_tile(tile_key: String) -> void:
         if cache_key.begins_with(prefix):
             evicted_keys.append(cache_key)
     for cache_key in evicted_keys:
+        _retire_navmesh_capture(navmesh_tile_snapshot_cache.get(cache_key,{}))
         navmesh_tile_snapshot_cache.erase(cache_key)
         navmesh_tile_snapshot_cache_order.erase(cache_key)
 
@@ -647,6 +876,57 @@ func _collision_index_for_records(records: Array) -> Dictionary:
             _index_collision_record(index, record_value)
     return index
 
+func _rebuild_navigation_capture_static_collision_order() -> void:
+    cached_static_collision_capture_sequence = 0
+    for record_value in cached_static_collision_records:
+        if not record_value is Dictionary:
+            continue
+        var record := record_value as Dictionary
+        record[NAVIGATION_CAPTURE_ORDER_KEY] = cached_static_collision_capture_sequence
+        cached_static_collision_capture_sequence += 1
+
+func navigation_capture_static_collision_candidates(extent: Rect2i) -> Dictionary:
+    # The cell index repeats a spanning record in every covered bucket. Its
+    # capture ordinal identifies that one authoritative inventory occurrence,
+    # so the result can be de-duplicated without scanning the global array and
+    # then restored to the exact original record order.
+    var candidates_by_order := {}
+    var indexed_occurrence_visits := 0
+    var index_cells_visited := 0
+    for z in range(extent.position.y, extent.end.y):
+        for x in range(extent.position.x, extent.end.x):
+            index_cells_visited += 1
+            var records_value = cached_static_collision_by_cell.get(Vector2i(x, z), [])
+            if not records_value is Array:
+                continue
+            for record_value in records_value as Array:
+                if not record_value is Dictionary:
+                    continue
+                indexed_occurrence_visits += 1
+                var record := record_value as Dictionary
+                var order_value = record.get(NAVIGATION_CAPTURE_ORDER_KEY, null)
+                if not order_value is int:
+                    return {"status":"failed", "reason":"navigation_collision_capture_order_missing"}
+                var order := int(order_value)
+                if candidates_by_order.has(order) and not is_same(candidates_by_order[order], record):
+                    return {"status":"failed", "reason":"navigation_collision_capture_order_conflict"}
+                candidates_by_order[order] = record
+    var ordered_keys: Array = candidates_by_order.keys()
+    ordered_keys.sort()
+    var records: Array[Dictionary] = []
+    for order_value in ordered_keys:
+        records.append(candidates_by_order[order_value] as Dictionary)
+    return {
+        "status":"ready", "reason":"", "records":records,
+        "inventoryCount":cached_static_collision_records.size(),
+        "candidateCount":records.size(), "indexCellsVisited":index_cells_visited,
+        "indexedOccurrenceVisits":indexed_occurrence_visits
+    }
+
+func navigation_capture_block_keys(tile_key: String) -> Array:
+    var keys_value = cached_block_keys_by_nav_tile.get(tile_key, [])
+    return (keys_value as Array).duplicate() if keys_value is Array else []
+
 func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -> Dictionary:
     if cached_revision == "" and cached_blocked.is_empty() and cached_doors.is_empty() and cached_paths.is_empty() and cached_props.is_empty():
         return build_snapshot({}, allow_outside, moving_home)
@@ -749,7 +1029,31 @@ func _mark_incremental_static_change(tile_key := "") -> void:
         cached_revision = str(static_snapshot_revision)
     if String(tile_key) != "":
         navmesh_tile_revision_by_key[String(tile_key)] = static_snapshot_revision
-    _clear_navmesh_tile_snapshot_cache()
+        # Prop publication already supplies the exact affected navigation tile.
+        # Keep unrelated sealed inputs and an unrelated in-progress capture: their
+        # tile-local source identities and physical facts have not changed.
+        _clear_navmesh_tile_snapshot_cache_for_tile(String(tile_key))
+    else:
+        # An unscoped event cannot prove locality, so retain the conservative
+        # full invalidation used by world resets and unknown source mutations.
+        _clear_navmesh_tile_snapshot_cache()
+
+func _mark_chunk_load_publication_change(tile_key: String) -> void:
+    if tile_key.length() > 23:
+        return
+    var coordinates := tile_key.split(",", true)
+    if coordinates.size() != 2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int():
+        return
+    var x := int(coordinates[0])
+    var z := int(coordinates[1])
+    if x < -2147483648 or x > 2147483647 or z < -2147483648 or z > 2147483647 \
+            or tile_key != "%d,%d" % [x, z]:
+        return
+    # Loading acknowledges volume collision; it does not change the shared
+    # blocks/props index. Match service dirtiness once per delivered entry,
+    # including change-bus batches sharing the same event revision.
+    navmesh_tile_load_revision_by_key[tile_key] = int(navmesh_tile_load_revision_by_key.get(tile_key, 0)) + 1
+    _clear_navmesh_tile_snapshot_cache_for_tile(tile_key)
 
 func _apply_prop_event_to_static_cache(event: Dictionary) -> bool:
     if cached_revision == "":
@@ -791,8 +1095,10 @@ func rebuild_static_cells() -> int:
     cached_prop_clearance = {}
     cached_prop_cell_by_object_id = {}
     cached_prop_collision_records_by_object_id = {}
+    cached_block_keys_by_nav_tile = {}
     cached_static_collision_records = []
     cached_static_collision_by_cell = {}
+    cached_static_collision_capture_sequence = 0
     cached_door_collision_records = []
     cached_door_collision_by_cell = {}
     height_cache = {}
@@ -801,15 +1107,23 @@ func rebuild_static_cells() -> int:
         return 0
     var scanned := 0
     var blocks: Dictionary = main.get("blocks")
-    for block in blocks.values():
+    # Keep the authoritative Dictionary traversal order while partitioning the
+    # live registry once per static revision. A capture can then refresh body,
+    # metadata and collider facts for its tile without walking the loaded world.
+    for block_key in blocks.keys():
         scanned += 1
+        var block = blocks.get(block_key)
         var body := block as Node
         if body == null or not is_instance_valid(body):
             continue
-        var block_type := String(body.get_meta("block_type", ""))
         var block_cell := block_world_cell(body)
         if block_cell == INVALID_CELL:
             continue
+        var block_tile_key := tile_key_for_cell(block_cell)
+        if not cached_block_keys_by_nav_tile.has(block_tile_key):
+            cached_block_keys_by_nav_tile[block_tile_key] = []
+        cached_block_keys_by_nav_tile[block_tile_key].append(block_key)
+        var block_type := String(body.get_meta("block_type", ""))
         if block_type == "door":
             cached_doors[block_cell] = body
             _add_collision_records(body, block_cell, block_type, true)
@@ -846,6 +1160,8 @@ func _add_collision_records(body: Node, cell: Vector2i, block_type: String, is_d
             cached_door_collision_records.append(record)
             _index_collision_record(cached_door_collision_by_cell, record)
         else:
+            record[NAVIGATION_CAPTURE_ORDER_KEY] = cached_static_collision_capture_sequence
+            cached_static_collision_capture_sequence += 1
             cached_static_collision_records.append(record)
             _index_collision_record(cached_static_collision_by_cell, record)
             if prop_object_id != "":
@@ -1054,6 +1370,8 @@ func _remove_collision_records_for_prop(object_id: String) -> bool:
             cached_static_collision_records.erase(record)
             _unindex_collision_record(cached_static_collision_by_cell, record)
         cached_prop_collision_records_by_object_id.erase(object_id)
+        if cached_static_collision_records.is_empty():
+            cached_static_collision_capture_sequence = 0
         return not indexed_records.is_empty()
     var filtered: Array[Dictionary] = []
     var removed := false
@@ -1064,6 +1382,7 @@ func _remove_collision_records_for_prop(object_id: String) -> bool:
         filtered.append(record)
     if removed:
         cached_static_collision_records = filtered
+        _rebuild_navigation_capture_static_collision_order()
         cached_static_collision_by_cell = _collision_index_for_records(cached_static_collision_records)
     return removed
 
@@ -1159,10 +1478,13 @@ func _index_prop_clearance(prop: Node3D, prop_cell: Vector2i) -> void:
                 cached_prop_clearance[cell] = prop
 
 func block_xz_blocks_npc(cell: Vector2i, body: Node) -> bool:
+    return _block_xz_blocks_npc_with_caches(cell,body,height_cache,terrain_projection_cache)
+
+func _block_xz_blocks_npc_with_caches(cell: Vector2i, body: Node, heights: Dictionary, projections: Dictionary) -> bool:
     if main == null or not (body is Node3D):
         return true
     var block_center_y := (body as Node3D).global_position.y
-    var floor_y := height_for_cell(cell)
+    var floor_y := _height_for_cell_with_caches(cell,heights,projections)
     var clearance_center_y := floor_y + NpcConstantsScript.DEFAULT_NPC_STANDING_HEIGHT + NpcConstantsScript.DEFAULT_HEADROOM_MARGIN + CELL * 0.45
     return block_center_y <= clearance_center_y
 
@@ -1230,23 +1552,29 @@ func cell_position(cell: Vector2i) -> Vector3:
     return Vector3(float(cell.x) * CELL, y + 0.04, float(cell.y) * CELL)
 
 func height_for_cell(cell: Vector2i) -> float:
+    return _height_for_cell_with_caches(cell,height_cache,terrain_projection_cache)
+
+func _height_for_cell_with_caches(cell: Vector2i, heights: Dictionary, projections: Dictionary) -> float:
     if main == null:
         return 0.0
-    if height_cache.has(cell):
-        return float(height_cache[cell])
-    var projection := terrain_projection_for_cell(cell)
+    if heights.has(cell):
+        return float(heights[cell])
+    var projection := _terrain_projection_for_cell_with_cache(cell,projections)
     var y := 0.0
     if bool(projection.get("found", false)):
         var position: Vector3 = projection.get("position", Vector3(float(cell.x) * CELL, 0.0, float(cell.y) * CELL))
         y = position.y
     else:
         y = float(main.call("surface_y_at_cell", Vector3i(cell.x, 0, cell.y))) if main.has_method("surface_y_at_cell") else 0.0
-    height_cache[cell] = y
+    heights[cell] = y
     return y
 
 func terrain_projection_for_cell(cell: Vector2i) -> Dictionary:
-    if terrain_projection_cache.has(cell):
-        return terrain_projection_cache[cell]
+    return _terrain_projection_for_cell_with_cache(cell,terrain_projection_cache)
+
+func _terrain_projection_for_cell_with_cache(cell: Vector2i, projections: Dictionary) -> Dictionary:
+    if projections.has(cell):
+        return projections[cell]
     var projection := {}
     var world_generation = main.get("world_generation_system") if main != null else null
     var probe_y := 0
@@ -1259,8 +1587,14 @@ func terrain_projection_for_cell(cell: Vector2i) -> Dictionary:
     if world_generation != null and world_generation.has_method("terrain_volume_column_has_surface_projection_affecting_edits"):
         var has_surface_edits := bool(world_generation.call("terrain_volume_column_has_surface_projection_affecting_edits", probe_cell))
         if not has_surface_edits:
-            terrain_projection_cache[cell] = fallback_projection
+            projections[cell] = fallback_projection
             return fallback_projection
+        if world_generation.has_method("navigation_surface_projection_at_known_height"):
+            var known_boundary: Dictionary = world_generation.call(
+                "navigation_surface_projection_at_known_height", probe_cell, surface_y)
+            if known_boundary.get("status") == "ready" and bool(known_boundary.get("found", false)):
+                projections[cell] = known_boundary
+                return known_boundary
     if world_generation != null and world_generation.has_method("walkable_surface_cell_near"):
         projection = world_generation.call("walkable_surface_cell_near", probe_cell, NAV_TERRAIN_PROJECTION_UP_CELLS, NAV_TERRAIN_PROJECTION_DOWN_CELLS)
     elif world_generation != null and world_generation.has_method("surface_projection_for_cell"):
@@ -1271,7 +1605,7 @@ func terrain_projection_for_cell(cell: Vector2i) -> Dictionary:
             projection = fallback_projection
     if (projection.is_empty() or not bool(projection.get("found", false))) and main != null and main.has_method("surface_y_at_cell"):
         projection = fallback_projection
-    terrain_projection_cache[cell] = projection
+    projections[cell] = projection
     return projection
 
 func surface_height_projection(cell: Vector2i, probe_y: int, surface_y: float) -> Dictionary:
@@ -1869,58 +2203,9 @@ func candidate_cells_near(entry: Dictionary, target_cell: Vector2i, allow_outsid
     )
     return result
 
-func _navmesh_surface_for_cell(snapshot: Dictionary, cell: Vector2i, diagnostics: Dictionary = {}) -> Dictionary:
-    if main == null:
-        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"missing_main")
-        return {}
-    if height_for_cell(cell) < main.WATER_LEVEL + 0.45:
-        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"below_water_clearance")
-        return {}
-    var door := door_at(snapshot, cell)
-    if door != null:
-        var door_state := String(door.get_meta("door_state", NpcEnumsScript.DOOR_STATE_CLOSED))
-        if bool(door.get_meta("locked", false)) or bool(door.get_meta("jammed", false)) or bool(door.get_meta("destroyed", false)) or bool(door.get_meta("unloaded", false)):
-            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"door_flags",{"node":door})
-            return {}
-        if door_state in [String(NpcEnumsScript.DOOR_STATE_LOCKED), String(NpcEnumsScript.DOOR_STATE_JAMMED), String(NpcEnumsScript.DOOR_STATE_DESTROYED), String(NpcEnumsScript.DOOR_STATE_UNLOADED)]:
-            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"door_state",{"node":door,"state":door_state})
-            return {}
-    var blocking_node = static_blocker(snapshot, cell)
-    if blocking_node != null:
-        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"static_cell_blocker",{"node":blocking_node})
-        return {}
-    if door == null:
-        var blocking_record := static_collision_blocker(snapshot, cell)
-        if not blocking_record.is_empty():
-            _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"static_collision",blocking_record)
-            return {}
-    var blocking_prop = prop_clearance_blocker(snapshot, cell)
-    if blocking_prop != null:
-        _record_navigation_rejection(diagnostics,"terrain",cell_key(cell),"prop_clearance",{"node":blocking_prop})
-        return {}
-    var position := cell_position(cell)
-    var span_y := floori(position.y / CELL)
-    position.y = float(span_y) * CELL + 0.04
-    var traversal_tags: Array[String] = ["terrain"]
-    var semantic_region_ids: Array[String] = []
-    if door != null:
-        traversal_tags.append("door")
-    if is_path_cell(snapshot, cell):
-        traversal_tags.append("path")
-    var surface := {
-        "cell": Vector3i(cell.x, span_y, cell.y),
-        "spanIndex": 0,
-        "worldPosition": position,
-        "floorNormal": Vector3.UP,
-        "headroom": 3.0,
-        "lateralClearance": 1.0,
-        "blocked": false,
-        "semanticRegionIds": semantic_region_ids,
-        "traversalTags": traversal_tags
-    }
-    return surface
 
-func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String, source_sites: Array[String] = []) -> Dictionary:
+
+func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String, source_sites: Array[String] = [], capture_heights: Dictionary = {}, capture_projections: Dictionary = {}) -> Dictionary:
     var portals: Array[Dictionary] = []
     var links: Array[Dictionary] = []
     var doors: Dictionary = snapshot.get("doors", {})
@@ -1943,8 +2228,14 @@ func _navmesh_door_summary_for_tile(snapshot: Dictionary, tile_key: String, sour
         var step := Vector2i(1, 0) if axis == "x" else Vector2i(0, 1)
         var entrance_cell := cell - step
         var exit_cell := cell + step
-        var entrance := cell_position(entrance_cell)
-        var exit := cell_position(exit_cell)
+        var entrance: Vector3
+        var exit: Vector3
+        if capture_heights.is_empty():
+            entrance = cell_position(entrance_cell)
+            exit = cell_position(exit_cell)
+        else:
+            entrance = Vector3(float(entrance_cell.x)*CELL,_height_for_cell_with_caches(entrance_cell,capture_heights,capture_projections)+0.04,float(entrance_cell.y)*CELL)
+            exit = Vector3(float(exit_cell.x)*CELL,_height_for_cell_with_caches(exit_cell,capture_heights,capture_projections)+0.04,float(exit_cell.y)*CELL)
         _append_navmesh_door({"doorPortals":portals,"doorLinks":links},door,cell,tile_key,axis,entrance,exit)
     return { "doorPortals": portals, "doorLinks": links }
 
@@ -1968,8 +2259,8 @@ func _append_navmesh_door(summary: Dictionary, door: Node, cell: Vector2i, tile_
         })
         summary.doorLinks.append({
             "id": "door-link:%s:%s" % [portal_id, tile_key],
-            "from": _nav_span_key(tile_key, entrance_cell),
-            "to": _nav_span_key(tile_key, exit_cell),
+            "from": _nav_span_key(tile_key, entrance_cell, entrance),
+            "to": _nav_span_key(tile_key, exit_cell, exit),
             "portalId": portal_id,
             "actionId": "open",
             "start": entrance,
@@ -2015,8 +2306,7 @@ func _door_crossing_axis(door: Node, snapshot := {}, cell := INVALID_CELL) -> St
     var facing := float(door.get_meta("closed_rotation", (door as Node3D).rotation.y if door is Node3D else 0.0))
     return "x" if absf(sin(facing)) > absf(cos(facing)) else "z"
 
-func _nav_span_key(tile_key: String, cell: Vector2i) -> String:
-    var position := cell_position(cell)
+func _nav_span_key(tile_key: String, cell: Vector2i, position: Vector3) -> String:
     return "%s:%d,%d,%d:0" % [tile_key, cell.x, floori(position.y / CELL), cell.y]
 
 func _parse_tile_key(tile_key: String) -> Vector2i:

@@ -8,6 +8,10 @@ var worker = Worker.new()
 var _binding := {}
 var _token := 0
 var _descriptor
+var _accepted_source: Dictionary = {}
+var _filter_diagnostics: Dictionary = {}
+var _filter_profile: Dictionary = {}
+var _capture_profile: Dictionary = {}
 var _mesh: NavigationMesh
 var _polygon := 0
 var _state := "idle"
@@ -51,8 +55,13 @@ func advance(budget_usec := 4000) -> Dictionary:
 		if taken.status == "consumed":
 			var result: Dictionary = taken.result
 			if result.get("ready",false):
-				_descriptor = result.prepared.take(_binding)
-				if _descriptor != null:
+				var payload: Dictionary = result.prepared.take(_binding)
+				_descriptor = payload.get("descriptor")
+				_accepted_source = payload.get("acceptedSource", {})
+				_filter_diagnostics = payload.get("diagnostics", {})
+				_filter_profile = payload.get("filterProfile", {})
+				_capture_profile = payload.get("captureProfile", {})
+				if _descriptor != null and _accepted_source.get("status") == "prepared":
 					prepared_count += 1
 					_reason = "navigation_upload_pending"
 				else:
@@ -60,7 +69,7 @@ func advance(budget_usec := 4000) -> Dictionary:
 			else:
 				_state = "failed"; _reason = String(result.get("reason","navigation_preparation_failed"))
 			_token = 0
-	if _descriptor != null and _state != "ready" and not _closing:
+	if _descriptor != null and _state not in ["ready", "failed"] and not _closing:
 		var geometry: Dictionary = _descriptor.prepared_geometry()
 		if geometry.is_empty():
 			_state = "failed"; _reason = "navigation_preparation_changed"
@@ -88,8 +97,10 @@ func advanced_this_frame() -> bool:
 
 func take_ready(binding: Dictionary) -> Dictionary:
 	if _closing or binding != _binding or _state != "ready": return {}
-	var result := {"descriptor":_descriptor,"mesh":_mesh,"binding":_binding}
+	var result := {"descriptor":_descriptor,"mesh":_mesh,"binding":_binding,
+		"acceptedSource":_accepted_source,"diagnostics":_filter_diagnostics,"filterProfile":_filter_profile,"captureProfile":_capture_profile}
 	_descriptor = null; _mesh = null; _polygon = 0
+	_accepted_source = {}; _filter_diagnostics = {}; _filter_profile = {}; _capture_profile = {}
 	_binding = {}; _token = 0; _state = "idle"; _reason = ""
 	return result
 
@@ -99,8 +110,11 @@ func retire(payload: Dictionary) -> void:
 
 func cancel() -> void:
 	worker.reset()
-	if _descriptor != null: retire({"descriptor":_descriptor})
+	if _descriptor != null or not _accepted_source.is_empty() or not _filter_diagnostics.is_empty() or not _filter_profile.is_empty() or not _capture_profile.is_empty():
+		retire({"descriptor":_descriptor,"acceptedSource":_accepted_source,
+			"diagnostics":_filter_diagnostics,"filterProfile":_filter_profile,"captureProfile":_capture_profile})
 	_descriptor = null; _mesh = null; _polygon = 0
+	_accepted_source = {}; _filter_diagnostics = {}; _filter_profile = {}; _capture_profile = {}
 	_binding = {}; _token = 0; _state = "idle"; _reason = ""
 
 func request_shutdown() -> void:

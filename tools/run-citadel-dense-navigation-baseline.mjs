@@ -10,8 +10,10 @@ const originText = '(-4500.9, 41.85, -3800.25)';
 const worldOrigin = [-4500.9, 41.85, -3800.25];
 
 cli(async () => {
-  const o = options(process.argv.slice(2), { outputdirectory: '' });
+  const o = options(process.argv.slice(2), { outputdirectory: '', demandorder: 'canonical' });
   demand(o.outputdirectory, 'OutputDirectory required; acquisition runs only when the Godot baseline window is available');
+  const demandOrder = String(o.demandorder).toLowerCase();
+  demand(['canonical', 'rotating'].includes(demandOrder), 'DemandOrder must be Canonical or Rotating');
   const integration = path.join(projectDefault, 'artifacts/citadel-runtime-integration');
   const source = path.join(integration, 'candidate-recipe-source-profile-32/source.bin');
   const sourceReportPath = path.join(path.dirname(source), 'report.json');
@@ -45,18 +47,30 @@ cli(async () => {
   const previous = Object.fromEntries(relevantEnvironment.map(key => [key, process.env[key]]));
   write(path.join(evidence, 'evidence-before.json'), { schema: 'citadel-dense-navigation-acquisition/v1', output, sourcePath: source,
     sourceSha256, sourceReportPath, originReportPath, originReportSha256: before[originReportPath], worldOrigin, binding,
-    sourceSha256Inventory: before, engineSha256, nativeSha256, clearedEnvironmentNames: relevantEnvironment,
+    sourceSha256Inventory: before, engineSha256, nativeSha256, clearedEnvironmentNames: relevantEnvironment, demandOrder,
     comparison: { artifact: 'navigation-tiles.bin', excludedPaths: ['preparationUsec'], ordered: true },
     scope: 'Offline saved-source dense navigation preparation oracle only. No recipe regeneration or live acceptance.', startedUtc: new Date().toISOString() });
   for (const key of relevantEnvironment) delete process.env[key];
+  process.env.CITADEL_DENSE_NAVIGATION_ORDER = demandOrder;
   let result, failure;
   try {
     result = await runSpecial('building-contract', ['-Contract', 'CitadelDenseNavigationBaseline.gd', '-OutputDirectory', o.outputdirectory,
       '-ReportEnvironment', 'CITADEL_DENSE_NAVIGATION_REPORT', '-TimeoutSeconds', '150']);
     const report = read(path.join(output, 'report.json'));
-    assertReport(report, { schema: 'citadel-dense-navigation-baseline/v1', complete: true, passed: true, sourceSha256,
+    assertReport(report, { schema: 'citadel-dense-navigation-baseline/v1', complete: true, passed: true, sourceSha256, demandOrder,
       originReportSha256: before[originReportPath], worldOrigin: originText, binding });
     demand(Object.keys(report.checks ?? {}).length > 0 && Object.values(report.checks).every(value => value === true), 'Dense baseline checks failed');
+    if (demandOrder === 'rotating') {
+      const schedule = report.demandSchedule;
+      demand(schedule?.turns > 1 && schedule.permutedTurns > 0 && schedule.changedSelections > 0 &&
+        schedule.maxSelected > 0 && schedule.maxSelected <= 8 && schedule.activeCoverage === true &&
+        schedule.completionCoverage === true && schedule.domainUnchanged === true &&
+        schedule.domainInventory?.scope === 'source_navigation_output' &&
+        Array.isArray(schedule.domainInventory.tileKeys) && schedule.domainInventory.tileKeys.length === schedule.domainCount &&
+        /^[a-f0-9]{64}$/.test(schedule.domainTypedSha256 ?? '') && Array.isArray(schedule.firstTurns) &&
+        schedule.firstTurns.length > 0 && schedule.firstTurns.length <= 8,
+      'Rotating demand did not prove bounded, changing selections and complete batch coverage');
+    }
     demand(JSON.stringify(report.comparison?.excludedPaths) === JSON.stringify(['preparationUsec']) && report.comparison?.ordered === true,
       'Only the root preparationUsec timing may be excluded from later comparison');
     demand(/^[a-f0-9]{64}$/.test(report.semanticSha256 ?? '') && /^[a-f0-9]{64}$/.test(report.rawTypedSha256 ?? ''), 'Missing complete typed navigation digests');
@@ -69,6 +83,7 @@ cli(async () => {
     assertNoGodot();
   } catch (error) { failure = error; }
   finally {
+    delete process.env.CITADEL_DENSE_NAVIGATION_ORDER;
     for (const [key, value] of Object.entries(previous)) process.env[key] = value;
     const audit = auditContinuationSources(projectDefault, before), inventoryAudit = auditContinuationInventory(projectDefault, inventory);
     write(path.join(evidence, 'evidence-after.json'), { passed: !failure && audit.unchanged && inventoryAudit.unchanged, output,

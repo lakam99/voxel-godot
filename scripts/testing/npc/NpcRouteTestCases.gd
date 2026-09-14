@@ -24,6 +24,7 @@ var runner = null
 
 class RouteTestMain:
 	extends Node
+	var seed_text := "synthetic-route-filter-contract"
 	var WATER_LEVEL := -1000.0
 	var blocks := {}
 	var chunk_root := Node.new()
@@ -1317,6 +1318,7 @@ func test_route_navmesh_planner_goal_kinds(_mode: String) -> Dictionary:
 	var planner = NavmeshRoutePlannerScript.new()
 	planner.setup(service, null, null, null)
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3(0.0, 0.0, 0.0)
 	var entry := {
 		"id": "navmesh_goal_test",
@@ -1421,6 +1423,7 @@ func test_route_generated_fallback_open_terrain_only(_mode: String) -> Dictionar
 	adapter.world = GeneratedFallbackWorld.new()
 	adapter.navmesh_planner = RefCounted.new()
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3.ZERO
 	var entry := {
 		"id": "test-open-forager",
@@ -1543,13 +1546,16 @@ func test_route_generated_fallback_rejects_no_progress_partial(_mode: String) ->
 func test_route_probe_start_overlap_escape_outward_only(_mode: String) -> Dictionary:
 	var service = CollisionProbeServiceScript.new()
 	var body := CharacterBody3D.new()
+	runner.add_child(body)
 	var current_sample := Vector3(CELL * 0.34, 0.0, 0.0)
 	body.position = current_sample
 	body.global_position = current_sample
 	var block := collision_block(Vector2i.ZERO, "stoneBlock")
+	runner.add_child(block)
 	block.position = Vector3.ZERO
 	block.global_position = Vector3.ZERO
 	var door := collision_door(Vector2i.ZERO)
+	runner.add_child(door)
 	door.position = Vector3.ZERO
 	door.global_position = Vector3.ZERO
 	var outward_sample := Vector3(CELL * 0.90, 0.0, 0.0)
@@ -1729,9 +1735,11 @@ func test_route_collision_occupied_cell_blocks_node(_mode: String) -> Dictionary
 func test_route_navmesh_surfaces_exclude_collision_occupied_cells(_mode: String) -> Dictionary:
 	var wall := collision_block(Vector2i(1, 0), "woodBlock", Vector3(CELL, 0.0, 0.0), Vector3(CELL * 0.18, CELL * 1.8, CELL * 0.96))
 	var setup := collision_adapter_with_blocks([wall])
+	# Synthetic collision/source contract; the real worker supplies accepted facts.
 	var adapter = setup.get("adapter")
 	var validation_snapshot: Dictionary = setup.get("snapshot", {})
-	var navmesh_snapshot: Dictionary = adapter.build_navmesh_tile_snapshot("0,0")
+	var navmesh_snapshot: Dictionary = await runner.synthetic_capture_navigation_snapshot(adapter,"0,0")
+	var publication: Dictionary = await runner.synthetic_accept_navigation_snapshot(navmesh_snapshot)
 	var surfaces: Array = navmesh_snapshot.get("surfaces", []) if navmesh_snapshot.get("surfaces", []) is Array else []
 	var collision_blocker: Dictionary = adapter.static_collision_blocker(validation_snapshot, Vector2i(1, 0))
 	var blocked_cell_surface := false
@@ -1745,13 +1753,14 @@ func test_route_navmesh_surfaces_exclude_collision_occupied_cells(_mode: String)
 			blocked_cell_surface = true
 		if cell.x == 0 and cell.z == 0:
 			open_cell_surface = true
-	var passed := not collision_blocker.is_empty() and not blocked_cell_surface and open_cell_surface
+	var passed: bool = publication.accepted and publication.initialPending and publication.shutdownComplete \
+		and not collision_blocker.is_empty() and not blocked_cell_surface and open_cell_surface
 	free_collision_setup(setup)
 	return outcome(
 		passed,
 		"collision=%s blockedSurface=%s openSurface=%s surfaceCount=%d" % [JSON.stringify(collision_blocker), str(blocked_cell_surface), str(open_cell_surface), surfaces.size()],
 		["navmesh_surface_uses_collision_records", "collision_occupied_cell_not_published_as_walkable"],
-		{ "collision": collision_blocker, "blockedCellSurface": blocked_cell_surface, "openCellSurface": open_cell_surface, "surfaceCount": surfaces.size() }
+		{ "evidenceLevel":"synthetic_contract", "publication":publication, "collision": collision_blocker, "blockedCellSurface": blocked_cell_surface, "openCellSurface": open_cell_surface, "surfaceCount": surfaces.size() }
 	)
 
 func test_route_home_collision_lattice_exact_detour(_mode: String) -> Dictionary:
@@ -2074,6 +2083,7 @@ func test_route_navmesh_post_validation_rejects_wall_cross(_mode: String) -> Dic
 	var planner := NavmeshRoutePlannerScript.new()
 	planner.setup(service, null, null, adapter)
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3.ZERO
 	var entry := {
 		"id": "navmesh-wall-cross",
@@ -2100,6 +2110,7 @@ func test_route_navmesh_post_validation_rejects_wall_cross(_mode: String) -> Dic
 func test_route_scripted_target_expands_navmesh_tiles(_mode: String) -> Dictionary:
 	var adapter = GeneratedWorldNavigationAdapterScript.new()
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3.ZERO
 	var target_cell := Vector2i(110, -18)
 	var target := Vector3(float(target_cell.x) * NpcConstantsScript.CELL_SIZE, 0.0, float(target_cell.y) * NpcConstantsScript.CELL_SIZE)
@@ -2474,6 +2485,7 @@ func test_route_substrate_changed_collision_revalidates_before_commit(_mode: Str
 
 func collision_adapter_with_blocks(block_nodes: Array) -> Dictionary:
 	var main := RouteTestMain.new()
+	runner.add_child(main)
 	for node_value in block_nodes:
 		var body := node_value as Node
 		if body == null:
@@ -2485,6 +2497,7 @@ func collision_adapter_with_blocks(block_nodes: Array) -> Dictionary:
 	adapter.setup(null, main)
 	adapter.rebuild_static_cells()
 	var body := Node3D.new()
+	main.add_child(body)
 	body.global_position = Vector3.ZERO
 	var entry := {
 		"id": "collision-route-test",

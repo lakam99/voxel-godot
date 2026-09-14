@@ -79,7 +79,41 @@ func _run() -> void:
 	var reversed_result: Dictionary = _probe("reversed_panel_source_order", reverse_input)
 	_checks["source_order_exact_determinism"] = var_to_bytes(seam_result) == var_to_bytes(reversed_result)
 	_candidate_world_controls(expected)
+	_local_witness_reuse_controls()
 	_finish(path)
+
+func _local_witness_reuse_controls() -> void:
+	# The prepared witness belongs to one evaluate call. Reusing the same live
+	# Blueprint objects after an actual edit must construct a new witness set.
+	var fixture: Dictionary = _fixture(1.0e-6)
+	var original: Dictionary = _probe("local_witness_initial",fixture)
+	for source in [fixture.before,fixture.after]: source.find_part("synthetic_witness").position.x = 10.0
+	var moved: Dictionary = _probe("local_witness_moved_between_calls",fixture)
+	_checks["local_witness_edit_rebuilds_current_coverage"] = original.get("allAddedSeamsPreoccupied")==true \
+		and moved.get("ready")==true and moved.get("allAddedSeamsPreoccupied")==false \
+		and not moved.get("newWorldSeamCells",[]).is_empty() \
+		and moved.get("unchangedCardinalWitnessIds")==original.get("unchangedCardinalWitnessIds")
+	for source in [fixture.before,fixture.after]: source.find_part("synthetic_witness").position.x = 0.0
+	var restored: Dictionary = _probe("local_witness_restored_between_calls",fixture)
+	_checks["local_witness_restore_recovers_complete_typed_report"] = var_to_bytes(restored)==var_to_bytes(original)
+	# This pose is admissible to SAT, but its positive X face is outside the
+	# scalar occupancy domain. Preserve the original lazy consumption boundary:
+	# with no seam/contact query the bad witness list is never consulted.
+	var unused: Dictionary = _fixture(0.0)
+	for source in [unused.before,unused.after]: source.find_part("synthetic_witness").position.x = 100000.0
+	var unused_result: Dictionary = _probe("unused_out_of_domain_witness",unused)
+	_checks["unused_invalid_world_bounds_do_not_add_early_failure"] = unused_result.get("ready")==true \
+		and unused_result.get("allSeamWorldCoverage",[]).is_empty() and unused_result.get("contacts",[]).is_empty()
+	var consumed: Dictionary = _fixture(1.0e-6)
+	for source in [consumed.before,consumed.after]: source.find_part("synthetic_witness").position.x = 100000.0
+	var consumed_result: Dictionary = _probe("queried_out_of_domain_witness",consumed)
+	_checks["invalid_world_bounds_fail_at_original_cover_boundary"] = consumed_result.get("ready")==false \
+		and consumed_result.get("reason")=="whole_seam_coverage_unresolved"
+	_add(consumed.after,_record("synthetic_candidate_intrusion","wall",Vector3(0,0.75,0),Vector3(0.125,0.25,0.25)))
+	var first_failure: Dictionary = _probe("candidate_intrusion_before_invalid_world_cover",consumed)
+	_checks["witness_preparation_preserves_candidate_failure_order"] = first_failure.get("ready")==false \
+		and first_failure.get("reason")=="candidate_foreign_collision_intrusion" \
+		and first_failure.get("peerId")=="synthetic_candidate_intrusion"
 
 func _candidate_world_controls(expected_seam: Array) -> void:
 	var moved_inside: Dictionary = _fixture(1.0e-6)

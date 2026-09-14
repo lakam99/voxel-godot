@@ -10,6 +10,7 @@ const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const CELL := 1.35
 
 var runner = null
+var transient_nodes: Array[Node] = []
 
 class FakeMain:
 	extends Node
@@ -18,6 +19,7 @@ class FakeMain:
 	func _init() -> void:
 		player = Node3D.new()
 		player.name = "Player"
+		add_child(player)
 
 	func surface_y_at_position(_position: Vector3) -> float:
 		return 0.0
@@ -31,6 +33,7 @@ class FakeNpcSystem:
 
 	func _init() -> void:
 		main = FakeMain.new()
+		add_child(main)
 		placement_service = NpcSafePlacementServiceScript.new()
 		placement_service.setup(self, main)
 
@@ -70,6 +73,9 @@ func cases() -> Array[Dictionary]:
 		["npc_stream_active_forage_lifecycle_stays_physical", "test_active_forage_lifecycle_stays_physical"],
 		["npc_stream_route_across_chunk_boundary", "test_route_across_chunk_boundary"],
 		["npc_stream_prefetch_before_boundary", "test_prefetch_before_boundary"],
+		["npc_stream_prefetch_is_paced_and_route_sensitive", "test_prefetch_is_paced_and_route_sensitive"],
+		["npc_stream_unset_route_does_not_prefetch_world_edge", "test_unset_route_does_not_prefetch_world_edge"],
+		["npc_stream_physical_region_demand_matches_lifecycle", "test_physical_region_demand_matches_lifecycle"],
 		["npc_stream_unloaded_goal_pending_not_teleport", "test_unloaded_goal_pending_not_teleport"],
 		["npc_stream_topology_hold_releases_when_ready", "test_topology_hold_releases_when_ready"],
 		["npc_stream_abstract_respects_locked_portal", "test_abstract_respects_locked_portal"],
@@ -172,6 +178,67 @@ func test_prefetch_before_boundary(_mode: String) -> Dictionary:
 	var passed: bool = not (result.get("requested", []) as Array).is_empty() and String(((result.get("requested", []) as Array)[0] as Dictionary).get("tileKey", "")) == "0,0"
 	return outcome(passed, "prefetch=%s" % JSON.stringify(result), ["near_boundary_prefetch_requested"], { "result": result, "requests": setup.autonomy.requested_tiles })
 
+func test_prefetch_is_paced_and_route_sensitive(_mode: String) -> Dictionary:
+	var setup := lod_setup()
+	var entry := make_entry("stream-prefetch-paced", Vector3.ZERO)
+	entry["routeKey"] = "route-a"
+	entry["routeCells"] = [Vector2i(15, 0), Vector2i(16, 0)]
+	var first: Dictionary = setup.service.prefetch_for_entry(entry)
+	var first_request_count: int = setup.autonomy.requested_tiles.size()
+	var repeated: Dictionary = setup.service.prefetch_for_entry(entry)
+	var repeated_request_count: int = setup.autonomy.requested_tiles.size()
+	entry["routeKey"] = "route-b"
+	entry["routeCells"] = [Vector2i(31, 0), Vector2i(32, 0)]
+	var changed: Dictionary = setup.service.prefetch_for_entry(entry)
+	var passed: bool = first_request_count == 2 and String(repeated.get("reason", "")) == "prefetch_paced" \
+		and repeated_request_count == first_request_count and setup.autonomy.requested_tiles.size() == first_request_count + 2 \
+		and not (changed.get("requested", []) as Array).is_empty()
+	return outcome(passed, "first=%s repeated=%s changed=%s requests=%s" % [JSON.stringify(first), JSON.stringify(repeated),
+		JSON.stringify(changed), JSON.stringify(setup.autonomy.requested_tiles)],
+		["unchanged_route_prefetch_paced", "changed_route_prefetches_immediately"],
+		{"first":first,"repeated":repeated,"changed":changed,"requests":setup.autonomy.requested_tiles})
+
+func test_unset_route_does_not_prefetch_world_edge(_mode: String) -> Dictionary:
+	var setup := lod_setup()
+	var entry := make_entry("stream-unset-route", Vector3.ZERO)
+	entry["routeCells"] = []
+	entry["routeGoalCell"] = Vector2i(999999, 999999)
+	var unset_result: Dictionary = setup.service.prefetch_for_entry(entry)
+	entry["routeGoalCell"] = Vector2i(18, 2)
+	var real_result: Dictionary = setup.service.prefetch_for_entry(entry)
+	var requested: Array = setup.autonomy.requested_tiles
+	var passed := String(unset_result.get("reason", "")) == "no_route" \
+		and requested.size() == 1 \
+		and String((requested[0] as Dictionary).get("tileKey", "")) == "1,0" \
+		and not (real_result.get("requested", []) as Array).is_empty()
+	return outcome(
+		passed,
+		"unset=%s real=%s requests=%s" % [JSON.stringify(unset_result), JSON.stringify(real_result), JSON.stringify(requested)],
+		["unset_route_sentinel_rejected", "world_edge_tile_not_requested", "real_goal_still_prefetched"],
+		{"unset":unset_result,"real":real_result,"requests":requested}
+	)
+
+func test_physical_region_demand_matches_lifecycle(_mode: String) -> Dictionary:
+	var setup := lod_setup()
+	var entry := make_entry("stream-region-owner", Vector3.ZERO)
+	var active_retained: bool = setup.service.requires_physical_streaming(entry)
+	entry["simulationLod"] = "abstract"
+	entry["abstractSimulated"] = true
+	var stationary_released: bool = not setup.service.requires_physical_streaming(entry)
+	entry["scriptedOrder"] = {"state":"PENDING","usesRouteStack":true}
+	var ordered_retained: bool = setup.service.requires_physical_streaming(entry)
+	entry["scriptedOrder"] = {}
+	entry["activeGoalKind"] = "forage"
+	entry["jobPhase"] = "outbound"
+	var forage_retained: bool = setup.service.requires_physical_streaming(entry)
+	var passed := active_retained and stationary_released and ordered_retained and forage_retained
+	return outcome(
+		passed,
+		"active=%s stationaryReleased=%s ordered=%s forage=%s" % [str(active_retained), str(stationary_released), str(ordered_retained), str(forage_retained)],
+		["active_actor_retains_region", "stationary_abstract_actor_releases_region", "accepted_route_order_retains_region", "active_forage_retains_region"],
+		{"active":active_retained,"stationaryReleased":stationary_released,"ordered":ordered_retained,"forage":forage_retained}
+	)
+
 func test_unloaded_goal_pending_not_teleport(_mode: String) -> Dictionary:
 	var setup := lod_setup()
 	var entry := make_entry("stream-unloaded", Vector3(2.0, 0.0, 2.0))
@@ -220,6 +287,7 @@ func test_lod_hysteresis_no_thrashing(_mode: String) -> Dictionary:
 
 func test_actor_removal_releases_all_ownership(_mode: String) -> Dictionary:
 	var fake := FakeNpcSystem.new()
+	transient_nodes.append(fake)
 	var autonomy := NpcAutonomySystemScript.new()
 	if runner is Node:
 		runner.add_child(autonomy)
@@ -335,10 +403,10 @@ func test_save_world_signature_unchanged(_mode: String) -> Dictionary:
 
 func lod_setup() -> Dictionary:
 	var fake := FakeNpcSystem.new()
+	transient_nodes.append(fake)
 	var autonomy := FakeAutonomy.new()
 	var service = NpcSimulationLodServiceScript.new()
 	service.setup(autonomy, fake, fake.main)
-	autonomy.service = service
 	return { "service": service, "fake": fake, "autonomy": autonomy }
 
 class FakeNavigationWorld:
@@ -348,7 +416,6 @@ class FakeNavigationWorld:
 		return bool(ready_tiles.get(tile_key, false))
 
 class FakeAutonomy:
-	var service = null
 	var requested_tiles := []
 	var navigation_world = FakeNavigationWorld.new()
 
@@ -367,6 +434,9 @@ class FakeAutonomy:
 func make_entry(id: String, position: Vector3) -> Dictionary:
 	var body := CharacterBody3D.new()
 	body.name = id
+	if runner is Node:
+		runner.add_child(body)
+	transient_nodes.append(body)
 	body.position = position
 	body.global_position = position
 	body.collision_layer = NpcConstantsScript.COLLISION_NPC_BODY
@@ -436,6 +506,12 @@ func read_text(path: String) -> String:
 	return text
 
 func outcome(passed: bool, details: String, assertions: Array, key_state: Dictionary) -> Dictionary:
+	# Detached service stubs retain their no-tree behavior; only transform subjects
+	# enter the runner tree. Both have an explicit per-case deletion lifetime.
+	for node in transient_nodes:
+		if is_instance_valid(node):
+			node.queue_free()
+	transient_nodes.clear()
 	return {
 		"passed": passed,
 		"details": details,

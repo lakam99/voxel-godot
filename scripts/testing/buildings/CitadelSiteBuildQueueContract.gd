@@ -21,8 +21,9 @@ class SyntheticQueue extends "res://scripts/world/CitadelSiteBuildQueue.gd":
 			return ERR_CANT_CREATE
 		return super._start_thread(callback)
 
-	func _prepare_site(request: Dictionary, continue_stage: Callable) -> Dictionary:
+	func _prepare_site(request: Dictionary, continue_stage: Callable, raw_stage_observer: Callable = Callable()) -> Dictionary:
 		_note({"event": "entered", "immutable": _frozen(request)})
+		if raw_stage_observer.is_valid(): raw_stage_observer.call("centerSurvey",true)
 		enter_gate.wait()
 		var allowed: bool = continue_stage.call("synthetic_checkpoint")
 		_note({"event": "checkpoint", "allowed": allowed, "request": request.duplicate(true)})
@@ -31,6 +32,7 @@ class SyntheticQueue extends "res://scripts/world/CitadelSiteBuildQueue.gd":
 		# Deliberately return non-cancelled data after cancellation: late-result fencing.
 		retained_raw = {"status": "absent", "synthetic": true, "request": request,
 			"payload": {"items": [{"value": 17}]}}
+		if raw_stage_observer.is_valid(): raw_stage_observer.call("centerSurvey",false)
 		return retained_raw
 
 	func _note(value: Dictionary) -> void:
@@ -71,6 +73,7 @@ func _run() -> void:
 		return
 	var started := Time.get_ticks_usec()
 	_alias_duplicate_consume()
+	_phase_timing_controls()
 	_validation()
 	_saturation_fairness()
 	_reset_same_seed()
@@ -138,6 +141,36 @@ func _alias_duplicate_consume() -> void:
 	_take(q, ticket.token, "stale_token")
 	_check("consume_releases_completed_slot", int(_poll(q).get("completedToken", -1)) == 0)
 	_finish(q, "alias")
+
+func _phase_timing_controls() -> void:
+	var q := SyntheticQueue.new()
+	var ticket := q.submit(SEED+":timing",REGION,{},POLICY)
+	_check("timing_submit",ticket.get("status")=="queued")
+	_check("timing_active",_until(q,func(_s): return q.observed().size()==1))
+	var active: Dictionary = q.source_timing()
+	var phases: Dictionary = active.get("active",{})
+	_check("timing_active_scalar_schema",active.get("schema")=="citadel-site-source-timing/v1" and active.get("history",[]).is_empty()
+		and phases.get("activePhase")=="rawPrepare" and int(phases.get("rawPrepare",{}).get("startedUsec",0))>0)
+	if not phases.is_empty(): phases.rawPrepare.startedUsec = -1
+	_check("timing_observation_is_copied",int(q.source_timing().get("active",{}).get("rawPrepare",{}).get("startedUsec",0))>0)
+	q.enter_gate.post(); q.exit_gate.post()
+	_check("timing_completed",_completed(q,int(ticket.token)))
+	var completed: Dictionary = q.source_timing()
+	var rows: Array = completed.get("history",[])
+	var row: Dictionary = rows[0] if rows.size()==1 else {}
+	var timing: Dictionary = row.get("phaseTiming",{})
+	_check("timing_completed_phase_order",row.get("token")==ticket.token and row.get("terminalStatus")=="absent"
+		and timing.get("rawPrepare",{}).get("complete",false) and timing.get("snapshot",{}).get("complete",false)
+		and timing.get("freeze",{}).get("complete",false) and timing.get("serialization",{}).get("complete",false)
+		and int(timing.rawPrepare.finishedUsec)<=int(timing.snapshot.startedUsec)
+		and int(timing.snapshot.finishedUsec)<=int(timing.freeze.startedUsec)
+		and int(timing.freeze.finishedUsec)<=int(timing.serialization.startedUsec))
+	var raw_stages: Dictionary = timing.get("rawPrepareStages",{}).get("stages",{})
+	_check("timing_completed_raw_stage",timing.get("rawPrepareStages",{}).get("schema")=="citadel-site-raw-prepare-stages/v1"
+		and raw_stages.get("centerSurvey",{}).get("complete",false) and int(raw_stages.centerSurvey.elapsedUsec)>=0)
+	_take(q,ticket.token,"consumed")
+	_check("timing_history_survives_consumption",q.source_timing().get("history",[]).size()==1)
+	_finish(q,"timing")
 
 func _validation() -> void:
 	var q := SyntheticQueue.new()

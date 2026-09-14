@@ -185,9 +185,9 @@ static func compose(blueprint, seed: int):
 	return _compose(blueprint, seed, {})
 
 
-static func compose_prepared(blueprint, seed: int, diagnostic_callback: Callable = Callable()) -> Dictionary:
+static func compose_prepared(blueprint, seed: int, diagnostic_callback: Callable = Callable(), raw_stage_observer: Callable = Callable()) -> Dictionary:
 	var handoff: Dictionary = {}
-	var result = _compose(blueprint, seed, handoff, diagnostic_callback)
+	var result = _compose(blueprint, seed, handoff, diagnostic_callback, raw_stage_observer)
 	if result == null:
 		handoff["ready"] = false
 		handoff["reason"] = String(handoff.get("reason", "citadel_composition_failed"))
@@ -210,7 +210,7 @@ static func prepare_furnishings(blueprint, seed: int) -> Dictionary:
 	return {"ready": true, "furnishingPlan": plan, "interiorProgram": source.recipe.get("interiorProgram", {}).duplicate(true)}
 
 
-static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callback: Callable = Callable()):
+static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callback: Callable = Callable(), raw_stage_observer: Callable = Callable()):
 	if blueprint == null:
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "base_layout_started"):
@@ -421,10 +421,12 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	settle_household_ground_dressing(blueprint)
 	if not _emit_compose_diagnostic(diagnostic_callback, "structural_completion_prepare_started"):
 		return null
+	_time(raw_stage_observer,"structuralCompletion",true)
 	var structural_completion := StructuralCompletionRecipeScript.prepare(blueprint, {
 		"furnitureParts": furniture.snapshot().parts,
 		"reservedVolumes": furniture.protected_access_reservations,
-		"protectedObstacles": reservations.obstacles}, diagnostic_callback)
+		"protectedObstacles": reservations.obstacles}, diagnostic_callback, raw_stage_observer)
+	_time(raw_stage_observer,"structuralCompletion",false)
 	if structural_completion.get("reason", "") == "cancelled":
 		handoff["reason"] = "cancelled"
 		return null
@@ -475,6 +477,10 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	handoff["structuralCompletion"] = completion_evidence
 	handoff["perimeterAlleyBearing"] = perimeter_bearing
 	return blueprint
+
+
+static func _time(observer: Callable, stage: String, beginning: bool) -> void:
+	if observer.is_valid(): observer.call(stage,beginning)
 
 
 static func append_perimeter_alley_outer_bearing(blueprint) -> Dictionary:
@@ -1885,9 +1891,20 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 		{"start": market_lane_x - 8.0, "end": market_lane_x + 8.0, "z": front_z + 33.5, "y": base_y + market_terrace_rise + 6.0},
 		{"start": 3.0, "end": 20.0, "z": keep_front_z - 9.0, "y": base_y + market_terrace_rise * 2.0 + 5.4}
 	]
+	# The third line is optional exterior dressing.  Its old fixed coordinates
+	# can describe a different forecourt after deterministic layout variation;
+	# do not publish an unowned, unmountable string and make it a structural
+	# loading requirement.  Final socket and clearance proof still occurs after
+	# all source geometry is assembled.
+	var exterior_line: Dictionary = lines[2]
+	var exterior_center := Vector3((float(exterior_line.start)+float(exterior_line.end))*0.5,
+		float(exterior_line.y)+0.33,float(exterior_line.z))
+	var exterior_emittable := ExteriorBunting.accepts_authored_center(blueprint,exterior.owners,exterior_center)
 	var cloth_materials: Array[String] = ["wool_rust", "linen", "wool_moss"]
 	var assemblies: Array = []
 	for line_index in range(lines.size()):
+		if line_index == 2 and not exterior_emittable:
+			continue
 		var line: Dictionary = lines[line_index] as Dictionary
 		var start_x := float(line.get("start", 0.0))
 		var end_x := float(line.get("end", 0.0))

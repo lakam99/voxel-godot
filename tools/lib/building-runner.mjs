@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 
 export const projectDefault = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 export const godotDefault = 'C:/Users/arkam/Desktop/Godot_v4.6.1-stable_win64.exe/Godot_v4.6.1-stable_win64_console.exe';
@@ -26,13 +26,39 @@ export function options(argv, defaults = {}, switches = []) {
   return out;
 }
 export function choice(value, values, label) { const match = values.find(v => v.toLowerCase() === String(value).toLowerCase()); demand(match !== undefined, `${label} must be one of ${values.join(', ')}`); return match; }
-export function assertNoGodot(processList) {
+export function assertNoGodot(processList, { platform = process.platform, run } = {}) {
   // Preserve the original exclusive-engine pre/post gate without controlling
   // unrelated processes. Only the owned watchdog may terminate its own job.
-  const listing = processList ?? (process.platform === 'win32'
-    ? execFileSync('tasklist.exe', ['/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true })
-    : execFileSync('ps', ['-A', '-o', 'comm='], { encoding: 'utf8' }));
-  const names = listing.split(/\r?\n/).map(line => line.startsWith('"') ? line.slice(1, line.indexOf('"', 1)) : line.trim());
+  let names;
+  if (processList == null && platform === 'win32') {
+    // Get-Process provides structured names without invoking tasklist. Any
+    // error, timeout, diagnostic output or incomplete inventory rejects.
+    const script = [
+      '$ErrorActionPreference = "Stop"',
+      '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)',
+      '$items = @(Get-Process -ErrorAction Stop | ForEach-Object { [PSCustomObject]@{ name = $_.ProcessName; pid = $_.Id } })',
+      'if ($items.Count -eq 0) { throw "Empty process inventory" }',
+      '[PSCustomObject]@{ schema = "process-name-inventory/v1"; complete = $true; count = $items.Count; processes = $items } | ConvertTo-Json -Depth 4 -Compress'
+    ].join('; ');
+    const result = (run ?? spawnSync)('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      { encoding: 'utf8', windowsHide: true, timeout: 10000, maxBuffer: 1024 * 1024 });
+    demand(result && !result.error && result.status === 0 && result.signal == null &&
+      typeof result.stdout === 'string' && typeof result.stderr === 'string' && result.stderr.length === 0,
+    'Windows process inventory failed or produced diagnostics');
+    const inventory = JSON.parse(result.stdout.replace(/^\uFEFF/, ''));
+    demand(inventory?.schema === 'process-name-inventory/v1' && inventory.complete === true &&
+      Array.isArray(inventory.processes) && inventory.processes.length > 0 &&
+      Number.isInteger(inventory.count) && inventory.count === inventory.processes.length &&
+      inventory.processes.every(item => item && typeof item.name === 'string' && item.name.trim().length > 0 &&
+        Number.isInteger(item.pid) && item.pid >= 0) &&
+      new Set(inventory.processes.map(item => item.pid)).size === inventory.count,
+    'Invalid or incomplete Windows process inventory');
+    names = inventory.processes.map(item => item.name);
+  } else {
+    // Keep the existing injected CSV/plain-name contract and Unix behavior.
+    const listing = processList ?? (run ?? execFileSync)('ps', ['-A', '-o', 'comm='], { encoding: 'utf8' });
+    names = listing.split(/\r?\n/).map(line => line.startsWith('"') ? line.slice(1, line.indexOf('"', 1)) : line.trim());
+  }
   demand(!names.some(name => /godot/i.test(name)), 'Another Godot instance is running or remains after the run');
 }
 export function integer(value, min, max, label) { const n = Number(value); demand(Number.isInteger(n) && n >= min && n <= max, `Invalid ${label}`); return n; }

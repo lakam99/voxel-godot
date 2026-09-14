@@ -12,7 +12,30 @@ const Part = preload("res://scripts/buildings/BuildingPart.gd")
 const MAX_FINISHES := 4
 
 
+## Legacy main-thread entry point. Preserve its mesh-bearing artifacts and
+## clearance check while delegating all construction to the value-only path.
 static func prepare(b, finish_ids: Array, feet: Array, nominal_joint: float) -> Dictionary:
+	var unit := BoxMesh.new()
+	unit.size = Vector3.ONE
+	var value := prepare_value(b, finish_ids, feet, nominal_joint, unit.surface_get_arrays(0))
+	if not value.ready:
+		return value
+	var bounds: Array[AABB] = []
+	for foot in feet:
+		bounds.append(AABB(foot.position - foot.size * 0.5, foot.size))
+	var artifacts: Dictionary = {}
+	for id in finish_ids:
+		var finalized: Dictionary = Artifact.hydrate_value(value.artifacts[id])
+		if not finalized.completed: return _failure("finalization:" + String(finalized.get("reason", "")))
+		var clearance: Dictionary = Artifact.clear_of_boxes(finalized, bounds)
+		if not clearance.completed or not clearance.get("clear", false): return _failure("real_foot_clearance_not_proven")
+		artifacts[id] = finalized
+	return {"ready": true, "artifacts": artifacts, "joints": value.joints}
+
+
+## Worker-safe construction result. Its finished artifacts retain only typed
+## packet values; no BoxMesh or ArrayMesh can escape this method.
+static func prepare_value(b, finish_ids: Array, feet: Array, nominal_joint: float, unit_surface_arrays: Array) -> Dictionary:
 	if b == null or b.parts.size() > 10000 or finish_ids.is_empty() or finish_ids.size() > MAX_FINISHES or feet.is_empty() or feet.size() > FootCuts.MAX_FEET:
 		return _failure("assembly_collection_limit")
 	var by_id: Dictionary = {}
@@ -29,8 +52,6 @@ static func prepare(b, finish_ids: Array, feet: Array, nominal_joint: float) -> 
 	var history := History.new()
 	history.configure(b.recipe, b.parts)
 	var source_id: String = String(b.recipe.get("sourceBlueprintId", b.id))
-	var unit := BoxMesh.new()
-	unit.size = Vector3.ONE
 	var artifacts: Dictionary = {}
 	var joints: Dictionary = {}
 	for id in finish_ids:
@@ -43,9 +64,9 @@ static func prepare(b, finish_ids: Array, feet: Array, nominal_joint: float) -> 
 		if not cut.completed: return _failure("cut_recipe:" + String(cut.get("reason", "")))
 		var construction: Dictionary = Artifact.compile(described, b.part_transform(finish), cut.apertures)
 		if not construction.completed: return _failure("construction:" + String(construction.get("reason", "")))
-		var finalized: Dictionary = Artifact.finalize(construction, unit)
+		var finalized: Dictionary = Artifact.finalize_value(construction, unit_surface_arrays)
 		if not finalized.completed: return _failure("finalization:" + String(finalized.get("reason", "")))
-		var clearance: Dictionary = Artifact.clear_of_boxes(finalized, bounds)
+		var clearance: Dictionary = Artifact.clear_of_boxes_value(finalized, bounds)
 		if not clearance.completed or not clearance.get("clear", false): return _failure("real_foot_clearance_not_proven")
 		artifacts[id] = finalized
 		joints[id] = {"footPartIds": foot_ids.duplicate(), "nominalJoint": nominal_joint,

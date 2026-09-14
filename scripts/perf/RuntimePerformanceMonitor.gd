@@ -111,6 +111,27 @@ func section_ms(name: String) -> float:
 func section_max_ms(name: String) -> float:
     return float(max_section_ms.get(name, 0.0))
 
+## On-demand diagnostic used after a performance observation. Keeping this out
+## of summary() avoids sorting every HUD/debug refresh in ordinary gameplay.
+func section_percentiles() -> Dictionary:
+    var names := {}
+    for sample_value in frame_samples:
+        var sample: Dictionary = sample_value
+        for name in sample.get("sections",{}): names[String(name)] = true
+    var result := {}
+    for name: String in names:
+        var values := []
+        for sample_value in frame_samples:
+            var sections: Dictionary = (sample_value as Dictionary).get("sections",{})
+            values.append(float(sections.get(name,0.0)))
+        result[name] = {
+            "p50Ms":_percentile(values,0.50),
+            "p95Ms":_percentile(values,0.95),
+            "p99Ms":_percentile(values,0.99),
+            "maxMs":_max_value(values)
+        }
+    return result
+
 func counter_value(name: String) -> int:
     return int(counters.get(name, 0))
 

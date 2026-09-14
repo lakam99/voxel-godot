@@ -76,6 +76,9 @@ func _run() -> void:
 	report.scenePreparationUsec = publisher.scene_preparation_usec
 	report.masonryState = publisher._masonry_preparation.state if publisher._masonry_preparation!=null else "absent"
 	report.workerMetrics = result.metrics
+	# This is an admission census over the frozen Citadel source.  It does not
+	# claim that an eligible group has been published, navigated, or rendered.
+	report.actualPacketEligibilityCensus = result.get("actualPacketEligibilityCensus",{})
 	# Exact test-only inspection and teardown are outside mainBeginUsec. This
 	# synthetic fixture is not a whole-frame or runtime-disposal benchmark.
 	if installed.ready:
@@ -159,6 +162,7 @@ static func _prepare() -> Dictionary:
 	c.spatial_containers_read_only = payload.spatialDependencies.parts.is_read_only() and payload.spatialDependencies.navigation.is_read_only()
 	_spatial_controls(c)
 	var synthetic := _synthetic_controls(c)
+	var actual_census := _actual_packet_eligibility_census(fixture,c)
 	var cancellation_hits := [0]
 	var cancel_started := Time.get_ticks_usec()
 	var cancelled := Preparation.prepare_source(fixture.blueprint,fixture.furnishingPlan,BINDING,func(stage):
@@ -168,9 +172,75 @@ static func _prepare() -> Dictionary:
 	var cancellation_total := Time.get_ticks_usec()-cancel_started
 	c.fixture_hash_unchanged = FileAccess.get_sha256(INPUT)==SHA
 	return {"ready":true,"prepared":prepared.prepared,"failurePrepared":synthetic.prepared,"checks":c,"reportBytes":old_reports,"snapshotBytes":old_snapshot,
+		"actualPacketEligibilityCensus":actual_census,
 		"threadId":OS.get_thread_caller_id(),"metrics":{"maxCallbackGapUsec":maximum_gap[0],"stages":stages,
 		"syntheticCancellationStages":synthetic.stageCount,"actualCancellationTotalUsec":cancellation_total,
 		"spatialDependencies":payload.spatialDependencies.summary()}}
+
+static func _actual_packet_eligibility_census(fixture: Dictionary, c: Dictionary) -> Dictionary:
+	# Prepare a distinct base from deep-frozen copies so the census is bound to
+	# the exact admitted source but cannot mutate the fixture used by the legacy
+	# comparison above.  This does not invoke a site recipe, scene publisher, or
+	# engine navigation API.
+	var building: Variant = fixture.get("blueprint")
+	var furnishing: Variant = fixture.get("furnishingPlan")
+	var profile: Variant = fixture.get("profile")
+	if not building is Dictionary or not furnishing is Dictionary or not profile is Dictionary:
+		c.actual_packet_eligibility_fixture_shape = false
+		c.actual_packet_eligibility_base_ready = false
+		c.actual_packet_eligibility_output_valid = false
+		return {}
+	var frozen_building: Dictionary = building.duplicate(true)
+	var frozen_furnishing: Dictionary = furnishing.duplicate(true)
+	frozen_building.make_read_only()
+	frozen_furnishing.make_read_only()
+	c.actual_packet_eligibility_fixture_shape = true
+	var prepared := Preparation.prepare_publication_base(frozen_building,frozen_furnishing,BINDING,profile)
+	c.actual_packet_eligibility_base_ready = prepared.ready
+	if not prepared.ready:
+		c.actual_packet_eligibility_output_valid = false
+		return {}
+	var base = prepared.base
+	var census := Preparation.classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source)
+	var output := {
+		"schema":"citadel-physical-group-packet-eligibility-census/v1",
+		"fixture":{"path":INPUT,"sha256":SHA},
+		"binding":BINDING.duplicate(),
+		"sourceId":base.source_id,
+		"groups":census.get("groups",{})
+	}
+	c.actual_packet_eligibility_output_valid = census.ready and _valid_actual_packet_eligibility_census(output,base.description.publication_groups)
+	if not c.actual_packet_eligibility_output_valid: return {}
+	return output
+
+static func _valid_actual_packet_eligibility_census(output: Dictionary, publication_groups: Dictionary) -> bool:
+	if output.size()!=5 or output.get("schema")!="citadel-physical-group-packet-eligibility-census/v1": return false
+	var fixture: Variant = output.get("fixture")
+	var binding: Variant = output.get("binding")
+	var groups: Variant = output.get("groups")
+	if not fixture is Dictionary or fixture.size()!=2 or fixture.get("path")!=INPUT or fixture.get("sha256")!=SHA: return false
+	if not binding is Dictionary or binding!=BINDING or not Preparation.valid_binding(binding): return false
+	if not output.get("sourceId") is String or String(output.sourceId).is_empty() or not groups is Dictionary: return false
+	var expected: Variant = publication_groups.get("groups")
+	if not expected is Dictionary or groups.keys().size()!=expected.keys().size(): return false
+	for id_value in expected.keys():
+		var id := String(id_value)
+		var entry: Variant = groups.get(id)
+		if not entry is Dictionary or entry.size()!=3 or not entry.get("eligible") is bool:
+			return false
+		var reasons: Variant = entry.get("reasons")
+		var families: Variant = entry.get("families")
+		if not reasons is Array or not families is Array: return false
+		var prior_reason := ""
+		for reason_value in reasons:
+			if not reason_value is String or String(reason_value).is_empty() or String(reason_value)<=prior_reason: return false
+			prior_reason=String(reason_value)
+		var prior_family := ""
+		for family_value in families:
+			if not family_value is String or String(family_value).is_empty() or String(family_value)<=prior_family: return false
+			prior_family=String(family_value)
+		if bool(entry.eligible)!=reasons.is_empty(): return false
+	return true
 
 static func _spatial_controls(c: Dictionary) -> void:
 	# Synthetic source closure, not physical support or gameplay acceptance.
@@ -217,6 +287,64 @@ static func _synthetic_controls(c: Dictionary) -> Dictionary:
 	var plan := Plan.new("furniture",3,"synthetic")
 	var bs: Dictionary = b.snapshot()
 	var fs: Dictionary = plan.snapshot(); fs.accessReservations = []
+	var base_building: Dictionary = bs.duplicate(true); base_building.make_read_only()
+	var base_furnishing: Dictionary = fs.duplicate(true); base_furnishing.make_read_only()
+	var base_result := Preparation.prepare_publication_base(base_building,base_furnishing,BINDING,{"origin":Vector3.ZERO})
+	c.packet_base_ready_and_immutable = base_result.ready and base_result.base.matches(BINDING) \
+		and base_result.base.description.publication_groups.get("ready",false)
+	var scene_source := Preparation.restore_publication_scene_source(base_result.get("base"),BINDING)
+	c.packet_scene_source_restores_isolated_resolved_graph = scene_source.ready and scene_source.sourceId==base_result.base.source_id \
+		and not is_same(scene_source.blueprint,b) and not is_same(scene_source.blueprint.parts[0],b.parts[0]) \
+		and scene_source.blueprint.parts.size()==b.parts.size()
+	c.packet_scene_source_stale_binding_rejected = Preparation.restore_publication_scene_source(base_result.get("base"),{"siteId":"other","sourceKey":"other","generation":1})=={"ready":false,"reason":"invalid_publication_base_scene_request"}
+	var packet_ids: Array[String] = []
+	if base_result.ready and not base_result.base.description.publication_groups.order.is_empty():
+		packet_ids.append(String(base_result.base.description.publication_groups.order[0]))
+	var packet_stages: Array[String] = []
+	var group_packet := Preparation.compile_physical_group_packet(base_result.get("base"),packet_ids,func(stage):
+		packet_stages.append(stage)
+		return true)
+	c.packet_group_reason = String(group_packet.get("reason",""))
+	c.packet_group_compiles_from_isolated_source = group_packet.ready and group_packet.packet.matches(base_result.get("base"),packet_ids) \
+		and group_packet.packet.building_entries.is_read_only() and group_packet.packet.static_records.is_read_only()
+	var navigation_stages: Array[String] = []
+	var base_navigation := Preparation.prepare_navigation_source(base_result.get("base"),BINDING,func(stage):
+		navigation_stages.append(stage)
+		return true)
+	c.packet_base_navigation_source_isolated = base_navigation.ready and base_navigation.navigationSource.is_read_only() \
+		and base_navigation.navigationSource.get("binding",{})==BINDING and base_navigation.navigationSource.get("producer")!=null \
+		and navigation_stages.has("publication_navigation_source_ready") and not navigation_stages.any(func(stage):
+			return String(stage).begins_with("publication_source_") or String(stage).begins_with("publication_physical_") \
+				or String(stage).begins_with("publication_masonry_") or String(stage).begins_with("publication_paving_") \
+				or String(stage).begins_with("publication_roof_"))
+	c.packet_base_navigation_stale_binding_rejected = Preparation.prepare_navigation_source(base_result.get("base"),{"siteId":"other","sourceKey":"other","generation":1}) \
+		=={"ready":false,"reason":"invalid_publication_base_navigation_request"}
+	c.packet_reuses_resolved_base_without_whole_physical_replay = not packet_stages.any(func(stage):
+		return String(stage).begins_with("publication_route_") or String(stage).begins_with("publication_physical_") \
+			or String(stage).begins_with("publication_history_"))
+	c.packet_unknown_group_rejected = Preparation.compile_physical_group_packet(base_result.get("base"),["missing-group"])=={"ready":false,"reason":"unknown_physical_group"}
+	_packet_eligibility_census_controls(c)
+	# A joint declaration must come from the real footing assembly recipe. The
+	# worker packet retains the sealed value artifact, never a hydrated mesh.
+	var jointed_base := _jointed_packet_base()
+	var jointed_groups: Array[String] = []
+	if jointed_base.ready:
+		for group_id in jointed_base.base.description.publication_groups.order:
+			jointed_groups.append(String(group_id))
+	var jointed_packet := Preparation.compile_physical_group_packet(jointed_base.get("base"),jointed_groups)
+	var jointed_family: Dictionary = {}
+	if jointed_packet.ready:
+		for entry in jointed_packet.packet.building_entries.values():
+			if entry.families.has("jointed_paving"): jointed_family = entry.families.jointed_paving
+	c.packet_jointed_paving_value_artifact_ready = jointed_base.ready and jointed_packet.ready and not jointed_family.is_empty() \
+		and jointed_family.is_read_only() and jointed_family.kind=="jointed_paving" and jointed_family.artifact.get("completed",false) \
+		and not _contains_object(jointed_family) and jointed_family.artifact.entries.all(func(entry):
+			return entry.get("unchanged",true) or entry.get("meshPayload") is Dictionary and entry.meshPayload.is_read_only())
+	c.packet_jointed_paving_declaration_digest_exact = not jointed_family.is_empty() \
+		and jointed_family.joint.geometryDigest==jointed_family.artifact.geometryDigest \
+		and jointed_family.joint.constructionDigest==jointed_family.artifact.constructionDigest \
+		and jointed_family.footBindings.size()==jointed_family.joint.footPartIds.size()
+	c.packet_mutable_source_rejected = Preparation.prepare_publication_base(bs,fs,BINDING,{"origin":Vector3.ZERO})=={"ready":false,"reason":"mutable_publication_base_source"}
 	var evaluated := Preparation.evaluate(b)
 	c.legacy_virtual_resolve_twice = evaluated.ready and b.calls==2
 	var authority := Authority.new()
@@ -249,6 +377,41 @@ static func _synthetic_controls(c: Dictionary) -> Dictionary:
 		and not rebound.prepared.take(BINDING).is_empty()
 	return {"stageCount":stages.size(),"prepared":sample.prepared}
 
+static func _packet_eligibility_census_controls(c: Dictionary) -> void:
+	var parts: Array = [
+		{"id":"normal","kind":"foundation","material":"cobblestone","recipe":{}},
+		{"id":"jointed","kind":"foundation","material":"cobblestone","recipe":{"pavingFootingJoints":{"footPartIds":["foot"]}}},
+		{"id":"foot","kind":"beam","material":"stone","recipe":{}},
+		{"id":"aperture","kind":"wall","material":"stone","recipe":{"masonryApertureSource":"opening"}},
+		{"id":"door","kind":"door","material":"timber","recipe":{}},
+		{"id":"unused","kind":"lantern","material":"iron","recipe":{}}
+	]
+	parts.make_read_only()
+	var groups := {
+		"normal":{"buildingIndices":[0],"furnitureIndices":[],"treeIndices":[],"doorPartIds":[]},
+		"jointed":{"buildingIndices":[1,2],"furnitureIndices":[],"treeIndices":[],"doorPartIds":[]},
+		"aperture":{"buildingIndices":[3],"furnitureIndices":[],"treeIndices":[],"doorPartIds":[]},
+		"door":{"buildingIndices":[4],"furnitureIndices":[],"treeIndices":[],"doorPartIds":["door"]},
+		"furniture":{"buildingIndices":[],"furnitureIndices":[0],"treeIndices":[],"doorPartIds":[]},
+		"tree":{"buildingIndices":[],"furnitureIndices":[],"treeIndices":[0],"doorPartIds":[]},
+		"unsupported":{"buildingIndices":[99],"furnitureIndices":[],"treeIndices":[],"doorPartIds":[]}
+	}
+	groups.make_read_only()
+	var furnishings: Array = [{"id":"packet-chair","roomId":"room","archetype":"chair","material":"timber_board",
+		"position":Vector3.ZERO,"rotation":Vector3.ZERO,"occupiedSize":Vector3.ONE,"collision":true,"semantic":"chair","recipe":{}}]
+	furnishings.make_read_only()
+	var census := Preparation.classify_physical_group_packet_eligibility({"groups":groups},{"parts":parts},{"parts":furnishings})
+	c.packet_eligibility_census_ready = census.ready
+	c.packet_eligibility_normal_and_jointed = census.ready and census.groups.normal.eligible and census.groups.normal.families==["normal"] \
+		and census.groups.jointed.eligible and census.groups.jointed.families==["jointed_paving"]
+	# Furnishing, doors, and aperture-tagged masonry each have a packet path.
+	# Trees still require their owned publication/retirement path and must remain
+	# outside the foreground physical-packet compiler.
+	c.packet_eligibility_packet_capable_and_tree_blocked = census.ready and census.groups.furniture.eligible \
+		and census.groups.aperture.eligible and census.groups.aperture.reasons.is_empty() \
+		and census.groups.door.eligible and census.groups.door.reasons.is_empty() \
+		and census.groups.tree.reasons==["tree"] and census.groups.unsupported.reasons==["unsupported"]
+
 func _finish() -> void:
 	report.checks=checks
 	report.complete=true
@@ -257,6 +420,16 @@ func _finish() -> void:
 	f.store_string(JSON.stringify(report,"\t")); f.close()
 	print("PREPARATION CONTRACT ",JSON.stringify({"passed":report.passed,"checks":checks.size(),"mainBeginUsec":report.get("mainBeginUsec",0)}))
 	quit(0 if report.passed else 1)
+
+static func _contains_object(value: Variant) -> bool:
+	if value is Object: return true
+	if value is Dictionary:
+		for key in value:
+			if _contains_object(key) or _contains_object(value[key]): return true
+	elif value is Array:
+		for item in value:
+			if _contains_object(item): return true
+	return false
 
 static func _jointed_failure_source() -> Dictionary:
 	# Same minimal jointed-paving construction as PavingFootingPublisherContract;
@@ -273,3 +446,21 @@ static func _jointed_failure_source() -> Dictionary:
 	var p := Plan.new("furniture",41,b.id)
 	var fs: Dictionary = p.snapshot(); fs.accessReservations=[]
 	return Preparation.prepare_source(b.snapshot(),fs,BINDING)
+
+static func _jointed_packet_base() -> Dictionary:
+	# This value source deliberately follows the production assembly path; a
+	# hand-written pavingFootingJoints dictionary would not prove the special
+	# packet gate sees a valid jointed-paving declaration.
+	var b := Blueprint.new("synthetic_jointed_packet",42,"timber")
+	b.recipe={"sourceBlueprintId":"synthetic_jointed_packet_history"}
+	var finish = b.add_part({"id":"finish","kind":"foundation","material":"cobblestone","collision":false,
+		"position":Vector3(0,0.0625,0),"size":Vector3(4,0.125,4),"recipe":{"pavingFamily":"civic_setts"}})
+	var foot = b.add_part({"id":"foot","kind":"beam","material":"stone_foundation","collision":true,
+		"position":Vector3(0,0.25,0),"size":Vector3(0.25,0.5,0.25)})
+	var assembly: Dictionary = Assembly.prepare(b,[finish.id],[foot],0.01)
+	if not assembly.ready: return assembly
+	finish.recipe.pavingFootingJoints=assembly.joints.finish.duplicate(true)
+	var plan := Plan.new("synthetic_jointed_packet_furniture",42,b.id)
+	var building_source: Dictionary = b.snapshot(); building_source.make_read_only()
+	var furnishing_source: Dictionary = plan.snapshot(); furnishing_source.accessReservations=[]; furnishing_source.make_read_only()
+	return Preparation.prepare_publication_base(building_source,furnishing_source,BINDING,{"origin":Vector3.ZERO})

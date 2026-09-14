@@ -9,11 +9,15 @@ const History = preload("res://scripts/buildings/SurfaceHistoryField.gd")
 const MasonryGeometry = preload("res://scripts/buildings/MasonryDescriptorGeometry.gd")
 const Materials = preload("res://scripts/buildings/ConstructionMaterialCatalog.gd")
 const MasonryPacket = preload("res://scripts/buildings/BuildingMasonryRenderPacket.gd")
+const MasonryAperturePacket = preload("res://scripts/buildings/BuildingMasonryAperturePacket.gd")
 const CobbleGeometry = preload("res://scripts/buildings/SettledCobbleGeometry.gd")
 const RoofGeometry = preload("res://scripts/buildings/BuildingRoofGeometry.gd")
 const SurfacePacket = preload("res://scripts/buildings/BuildingSurfaceRenderPacket.gd")
 const PartRecord = preload("res://scripts/buildings/BuildingPart.gd")
 const SpatialDependencies = preload("res://scripts/buildings/BuildingSpatialDependencies.gd")
+const NavigationProducer = preload("res://scripts/buildings/BuildingNavigationTileProducer.gd")
+const PavingAssembly = preload("res://scripts/buildings/PavingFootingAssemblyRecipe.gd")
+const UnitBoxArrays = preload("res://scripts/buildings/UnitBoxSurfaceArrays.gd")
 const METADATA_MAX_DEPTH := 128
 
 class Continuation extends RefCounted:
@@ -30,12 +34,67 @@ class PreparedSource extends RefCounted:
 	var _binding: Dictionary = {}
 	var _payload: Dictionary = {}
 	var _consumed := false
+	func describe(expected_binding: Dictionary):
+		if _consumed or _binding != expected_binding: return null
+		var description = _payload.get("spatialDependencies")
+		return description if description != null and description.binding == expected_binding else null
 	func take(expected_binding: Dictionary) -> Dictionary:
 		if _consumed or _payload.is_empty() or _binding != expected_binding: return {}
 		_consumed = true
 		var result := _payload
 		_payload = {}
 		return result
+
+## Immutable worker-produced source prerequisite for demand-bound physical
+## packets. This is deliberately not a PreparedSource and has no scene or
+## publication-ready meaning. It retains only admitted value source plus the
+## shared, fully prepared facts that a per-group compiler may validate against.
+class PreparedPublicationBase extends RefCounted:
+	var binding: Dictionary = {}
+	var profile: Dictionary = {}
+	var building_source: Dictionary = {}
+	var furnishing_source: Dictionary = {}
+	var description = null
+	var static_records: Dictionary = {}
+	var static_record_bindings: Dictionary = {}
+	var prepared_history = null
+	var packet_eligibility: Dictionary = {}
+	var source_id := ""
+	var _scene_blueprint = null
+	var _scene_furnishing_plan = null
+	var _scene_source_consumed := false
+	func matches(expected_binding: Dictionary) -> bool:
+		return binding == expected_binding and binding.is_read_only() and profile.is_read_only() \
+			and building_source.is_read_only() and furnishing_source.is_read_only() \
+			and description != null and description.binding == binding and not source_id.is_empty()
+	func take_scene_source(expected_binding: Dictionary) -> Dictionary:
+		if _scene_source_consumed or expected_binding!=binding or _scene_blueprint==null or _scene_furnishing_plan==null:
+			return {}
+		_scene_source_consumed=true
+		var result := {"blueprint":_scene_blueprint,"furnishingPlan":_scene_furnishing_plan,"sourceId":source_id}
+		_scene_blueprint=null
+		_scene_furnishing_plan=null
+		return result
+
+## Value-keyed group artifact. It contains no restored BuildingPart aliases:
+## callers must validate its binding/member records before constructing Nodes.
+class PreparedPhysicalGroupPacket extends RefCounted:
+	var binding: Dictionary = {}
+	var source_id := ""
+	var group_ids: Array[String] = []
+	var building_entries: Dictionary = {}
+	## Immutable furnishing records are carried separately from structural
+	## geometry. FurnishingPublisher remains the only visual/collision builder;
+	## the packet merely binds its selected source records to this closure.
+	var furnishing_entries: Dictionary = {}
+	var static_records: Dictionary = {}
+	var history_source_id := ""
+	var preparation_usec := 0
+	func matches(base: PreparedPublicationBase, expected_groups: Array[String]) -> bool:
+		return base != null and binding == base.binding and source_id == base.source_id \
+			and history_source_id == base.source_id and group_ids == expected_groups \
+			and binding.is_read_only() and building_entries.is_read_only() and furnishing_entries.is_read_only() \
+			and static_records.is_read_only()
 
 class PreparedHistory extends RefCounted:
 	# Only the compiler constructs this certificate, after isolating and freezing
@@ -191,7 +250,362 @@ static func valid_binding(binding: Dictionary) -> bool:
 		and binding.get("sourceKey") is String and not binding.sourceKey.is_empty() \
 		and binding.get("generation") is int and binding.generation > 0
 
-static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable(), world_origin := Vector3.ZERO, description_callback: Callable = Callable()) -> Dictionary:
+## Build the immutable prerequisite for future demand-bound group packets.
+## This is intentionally a separate API from prepare_source: callers cannot
+## treat it as scene input or publication readiness.
+static func prepare_publication_base(building: Dictionary, furniture: Dictionary, binding: Dictionary, profile: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if not valid_binding(binding) or not profile is Dictionary: return _failed("invalid_publication_base_request")
+	var source_binding := binding.duplicate()
+	source_binding.make_read_only()
+	var source_profile := profile.duplicate(true)
+	source_profile.make_read_only()
+	var guard := Continuation.new()
+	guard.callback = continuation
+	var restored := Source.restore(building, furniture, guard.advance)
+	if not restored.ready: return _failed(restored.reason)
+	var diagnostics := evaluate(restored.blueprint, {}, guard.advance)
+	if not diagnostics.ready: return _failed(diagnostics.reason)
+	# Physical resolution can rewrite derived part facts. Capture that resolved
+	# source once in the base; a demanded packet must never replay evaluation on
+	# the entire citadel merely to reach the same member bindings.
+	var graph := MetadataGraph.new()
+	graph.guard = guard
+	var resolved_building: Variant = graph.walk(restored.blueprint.snapshot(), [], true)
+	if guard.cancelled: return _failed("cancelled")
+	if not graph.eligible or not resolved_building is Dictionary:
+		return _failed("resolved_publication_base_snapshot_invalid")
+	var description = SpatialDependencies.compile_description(restored.blueprint,restored.furnishingPlan,source_binding,source_profile.get("origin",Vector3.ZERO),guard.advance)
+	if description == null: return _failed("cancelled" if guard.cancelled else "spatial_dependency_compilation_failed")
+	var metadata := _compile_static_records(restored.blueprint, guard.advance)
+	if not metadata.ready: return _failed(metadata.reason)
+	var history_result := _compile_history(restored.blueprint, guard.advance)
+	if not history_result.ready: return _failed(history_result.reason)
+	if not building.is_read_only() or not furniture.is_read_only(): return _failed("mutable_publication_base_source")
+	var base := PreparedPublicationBase.new()
+	base.binding = source_binding
+	base.profile = source_profile
+	base.building_source = resolved_building
+	base.furnishing_source = furniture
+	base.description = description
+	base.static_records = metadata.staticRecords
+	base.static_record_bindings = metadata.staticRecordBindings
+	base.prepared_history = history_result.preparedHistory
+	base.source_id = String(restored.blueprint.recipe.get("sourceBlueprintId", restored.blueprint.id))
+	base._scene_blueprint = restored.blueprint
+	base._scene_furnishing_plan = restored.furnishingPlan
+	var eligibility := classify_physical_group_packet_eligibility(description.publication_groups,resolved_building,furniture)
+	if not eligibility.get("ready",false): return eligibility
+	eligibility.make_read_only()
+	base.packet_eligibility=eligibility
+	if not base.matches(source_binding): return _failed("invalid_publication_base")
+	return {"ready":true,"reason":"","base":base,"diagnostics":diagnostics,
+		"metadataPreparationUsec":metadata.metadataPreparationUsec,"historyPreparationUsec":history_result.historyPreparationUsec}
+
+## Main-thread scene source reconstruction for a validated base. This creates a
+## fresh private object graph; it neither prepares geometry nor consumes a
+## group packet. The scene job may own this graph while packet workers rebuild
+## their own separate graphs from the same frozen admitted values.
+static func restore_publication_scene_source(base: PreparedPublicationBase, expected_binding: Dictionary) -> Dictionary:
+	if base == null or not base.matches(expected_binding): return _failed("invalid_publication_base_scene_request")
+	# The base worker already restored and round-trip validated this exact private
+	# graph. Transfer it once instead of repeating the multi-megabyte decode and
+	# serialization check in a gameplay frame.
+	var restored := base.take_scene_source(expected_binding)
+	if restored.is_empty(): return _failed("publication_base_scene_source_unavailable")
+	if restored.sourceId != base.source_id or restored.blueprint.parts.size()+restored.furnishingPlan.parts.size()!=base.description.parts.size():
+		return _failed("stale_publication_base_scene_source")
+	return {"ready":true,"reason":"","blueprint":restored.blueprint,"furnishingPlan":restored.furnishingPlan,
+		"sourceId":restored.sourceId}
+
+## Compile an isolated, value-keyed packet for an already dependency-closed
+## group set. It reconstructs a private source so no main-thread or base
+## BuildingPart object is sealed, mutated, or retained by this worker result.
+static func compile_physical_group_packet(base: PreparedPublicationBase, group_ids: Array[String], continuation: Callable = Callable()) -> Dictionary:
+	if base == null or not base.matches(base.binding) or group_ids.is_empty(): return _failed("invalid_physical_group_packet_request")
+	var ordered: Array[String] = group_ids.duplicate()
+	ordered.sort()
+	var seen: Dictionary = {}
+	for id: String in ordered:
+		if id.is_empty() or seen.has(id): return _failed("invalid_physical_group_ids")
+		seen[id] = true
+	if ordered != group_ids: return _failed("invalid_physical_group_ids")
+	var groups: Dictionary = base.description.publication_groups.get("groups",{})
+	var eligibility := base.packet_eligibility
+	if eligibility.is_empty(): eligibility=classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source)
+	if not eligibility.ready: return _failed(String(eligibility.reason))
+	var selected_indices: Dictionary = {}
+	var selected_furnishing_indices: Dictionary = {}
+	for id: String in ordered:
+		if not groups.has(id): return _failed("unknown_physical_group")
+		var group_eligibility: Variant = eligibility.groups.get(id)
+		if not group_eligibility is Dictionary: return _failed("invalid_physical_group_eligibility")
+		if not group_eligibility.eligible:
+			var reason := String(group_eligibility.reasons[0]) if not group_eligibility.reasons.is_empty() else "unsupported"
+			return _failed("physical_packet_aperture_artifact_required" if reason=="aperture" else "physical_packet_"+reason+"_unsupported")
+		for index: int in groups[id].buildingIndices: selected_indices[index] = true
+		for index: int in groups[id].furnitureIndices: selected_furnishing_indices[index] = true
+	var guard := Continuation.new()
+	guard.callback = continuation
+	var started := Time.get_ticks_usec()
+	var restored := Source.restore(base.building_source, base.furnishing_source, guard.advance)
+	if not restored.ready: return _failed(restored.reason)
+	var source_id := String(restored.blueprint.recipe.get("sourceBlueprintId", restored.blueprint.id))
+	if source_id != base.source_id: return _failed("stale_physical_group_source")
+	if base.prepared_history == null or not base.prepared_history.matches(base.prepared_history.history,source_id):
+		return _failed("stale_physical_group_history")
+	var artifacts: Dictionary = {}
+	var jointed_families: Dictionary = {}
+	var selected_ids: Dictionary = {}
+	for raw_index in selected_indices.keys():
+		var index := int(raw_index)
+		if index < 0 or index >= restored.blueprint.parts.size(): return _failed("invalid_physical_group_member_index")
+		var selected_part = restored.blueprint.parts[index]
+		if selected_part.recipe.has("pavingFootingJoints"):
+			var jointed := _compile_jointed_paving_family(restored.blueprint, selected_part, UnitBoxArrays.canonical())
+			if not jointed.ready: return _failed(jointed.reason)
+			jointed_families[String(selected_part.id)] = jointed.family
+		selected_ids[String(selected_part.id)] = true
+	for family: String in ["masonry","paving","roof"]:
+		var compiled := _compile_geometry(restored.blueprint,base.prepared_history,guard.advance,false,family,selected_ids)
+		if not compiled.ready: return _failed(compiled.reason)
+		artifacts[family] = compiled.artifact
+	var entries: Dictionary = {}
+	var furnishing_entries: Dictionary = {}
+	var records: Dictionary = {}
+	var indices: Array = selected_indices.keys()
+	indices.sort()
+	for index: int in indices:
+		var part = restored.blueprint.parts[index]
+		var id := String(part.id)
+		var source_binding := static_record_binding(part.snapshot())
+		if source_binding.is_empty(): return _failed("physical_group_record_encoding_failed")
+		if base.static_record_bindings.has(id) and base.static_record_bindings[id] != source_binding:
+			return _failed("stale_physical_group_member")
+		if base.static_records.has(id): records[id] = base.static_records[id]
+		var families: Dictionary = {}
+		for family: String in artifacts:
+			if not geometry_selected(part,family): continue
+			var artifact = artifacts[family]
+			if artifact == null: return _failed("missing_physical_group_artifact")
+			var geometry: Dictionary = artifact.geometry_for(part)
+			var packet = artifact.packet_for(part)
+			if family=="masonry" and part.recipe.has("masonryApertureSource"):
+				packet = MasonryAperturePacket.compile(part,geometry,restored.blueprint)
+			if geometry.is_empty() or packet == null or (packet is Dictionary and packet.is_empty()): return _failed("incomplete_physical_group_artifact")
+			families[family] = {"binding":source_binding,"geometry":geometry,"packet":packet}
+		if jointed_families.has(id):
+			var jointed_family: Dictionary = jointed_families[id]
+			if jointed_family.get("binding") != source_binding: return _failed("stale_jointed_paving_member")
+			families["jointed_paving"] = jointed_family
+		families.make_read_only()
+		var entry := {"id":id,"binding":source_binding,"families":families}
+		entry.make_read_only()
+		entries[id] = entry
+	var furnishing_indices: Array = selected_furnishing_indices.keys()
+	furnishing_indices.sort()
+	for index: int in furnishing_indices:
+		if index < 0 or index >= restored.furnishingPlan.parts.size(): return _failed("invalid_physical_group_furnishing_index")
+		var furnishing_part = restored.furnishingPlan.parts[index]
+		if furnishing_part == null: return _failed("invalid_physical_group_furnishing")
+		var furnishing_id := String(furnishing_part.id)
+		if furnishing_id.is_empty() or furnishing_entries.has(furnishing_id): return _failed("duplicate_physical_group_furnishing")
+		var furnishing_snapshot: Dictionary = furnishing_part.snapshot()
+		var frozen_furnishing: Variant = _freeze_value(furnishing_snapshot)
+		if not frozen_furnishing is Dictionary: return _failed("physical_group_furnishing_freeze_failed")
+		var furnishing_binding := static_record_binding(frozen_furnishing)
+		if furnishing_binding.is_empty(): return _failed("physical_group_furnishing_record_encoding_failed")
+		var furnishing_entry := {"id":furnishing_id,"binding":furnishing_binding,"record":frozen_furnishing}
+		furnishing_entry.make_read_only()
+		furnishing_entries[furnishing_id] = furnishing_entry
+	entries.make_read_only()
+	furnishing_entries.make_read_only()
+	records.make_read_only()
+	var packet := PreparedPhysicalGroupPacket.new()
+	packet.binding = base.binding
+	packet.source_id = source_id
+	packet.group_ids = ordered
+	packet.group_ids.make_read_only()
+	packet.building_entries = entries
+	packet.furnishing_entries = furnishing_entries
+	packet.static_records = records
+	packet.history_source_id = source_id
+	packet.preparation_usec = Time.get_ticks_usec()-started
+	if not packet.matches(base,ordered): return _failed("invalid_physical_group_packet")
+	return {"ready":true,"reason":"","packet":packet}
+
+
+## Classifies frozen source snapshots without restoring BuildingPart or scene
+## objects. This is the admission census for demand-bound physical packets.
+static func classify_physical_group_packet_eligibility(publication_groups: Dictionary, building_source: Dictionary, furnishing_source: Dictionary = {}) -> Dictionary:
+	var groups: Variant = publication_groups.get("groups")
+	var building_parts: Variant = building_source.get("parts")
+	var furnishing_parts: Variant = furnishing_source.get("parts",[])
+	if not groups is Dictionary or not building_parts is Array or not furnishing_parts is Array:
+		return _failed("invalid_packet_eligibility_source")
+	var jointed_feet: Dictionary = {}
+	for snapshot_value in building_parts:
+		if not snapshot_value is Dictionary: continue
+		var recipe: Variant = snapshot_value.get("recipe",{})
+		if not recipe is Dictionary or not recipe.has("pavingFootingJoints"): continue
+		var declaration: Variant = recipe.pavingFootingJoints
+		if not declaration is Dictionary or not declaration.get("footPartIds") is Array: continue
+		for foot_id in declaration.footPartIds: jointed_feet[String(foot_id)] = true
+	var results: Dictionary = {}
+	var ids: Array = groups.keys()
+	ids.sort()
+	for id_value in ids:
+		var id := String(id_value)
+		var group: Variant = groups[id]
+		var reasons: Array[String] = []
+		var families: Array[String] = []
+		if not group is Dictionary:
+			reasons.append("unsupported")
+		else:
+			var building_indices: Variant = group.get("buildingIndices",[])
+			var furniture_indices: Variant = group.get("furnitureIndices",[])
+			var tree_indices: Variant = group.get("treeIndices",[])
+			if not building_indices is Array or not furniture_indices is Array or not tree_indices is Array:
+				reasons.append("unsupported")
+			else:
+				# Furniture is packet-capable through the frozen furnishing record
+				# entries below. It has no structural geometry compiler and remains
+				# published solely by FurnishingPublisher on the scene owner.
+				for index_value in furniture_indices:
+					var furnishing_index := int(index_value)
+					if furnishing_index < 0 or furnishing_index >= furnishing_parts.size() or not furnishing_parts[furnishing_index] is Dictionary:
+						if not reasons.has("unsupported"): reasons.append("unsupported")
+				if not tree_indices.is_empty(): reasons.append("tree")
+				# Door geometry is already published through the ordinary individual
+				# body path. Packet admission only permits it when the scene job later
+				# proves the same body was registered with its existing portal owner
+				# before committing a group receipt. That owner-side gate cannot live in
+				# this frozen worker census.
+				if not (group.get("doorPartIds",[]) is Array): reasons.append("unsupported")
+				for index_value in building_indices:
+					var index := int(index_value)
+					if index < 0 or index >= building_parts.size() or not building_parts[index] is Dictionary:
+						if not reasons.has("unsupported"): reasons.append("unsupported")
+						continue
+					var part: Dictionary = building_parts[index]
+					var recipe: Variant = part.get("recipe",{})
+					if not recipe is Dictionary:
+						if not reasons.has("unsupported"): reasons.append("unsupported")
+						continue
+					# Aperture geometry is admitted only through its dedicated value-only
+					# cut instruction.  The worker does not build Mesh resources; the
+					# restored scene owner hydrates it through the existing cutter.
+					if recipe.has("pavingFootingJoints"):
+						if not families.has("jointed_paving"): families.append("jointed_paving")
+					elif not _snapshot_geometry_family(part).is_empty() and not families.has("normal"):
+						families.append("normal")
+		reasons.sort()
+		families.sort()
+		var entry := {"eligible":reasons.is_empty(),"reasons":reasons,"families":families}
+		entry.make_read_only()
+		results[id] = entry
+	results.make_read_only()
+	return {"ready":true,"reason":"","groups":results}
+
+
+static func _snapshot_geometry_family(part: Dictionary) -> String:
+	var recipe: Variant = part.get("recipe",{})
+	if not recipe is Dictionary or not bool(recipe.get("visual",true)): return ""
+	var kind := String(part.get("kind",""))
+	var material := String(part.get("material",part.get("materialId","")))
+	if kind in ["wall","foundation"] and Materials.is_masonry_material(material) and not (kind=="foundation" and Materials.is_cobble_material(material)):
+		return "masonry"
+	if kind=="foundation" and Materials.is_cobble_material(material): return "paving"
+	if kind=="roof": return "roof"
+	return ""
+
+
+static func _compile_jointed_paving_family(blueprint, finish, unit_surface_arrays: Array) -> Dictionary:
+	var declaration: Variant = finish.recipe.get("pavingFootingJoints")
+	if not declaration is Dictionary or declaration.size() != 4 or not declaration.get("footPartIds") is Array \
+			or not (declaration.get("nominalJoint") is float or declaration.get("nominalJoint") is int):
+		return _failed("invalid_jointed_paving_declaration")
+	var foot_ids: Array = declaration.footPartIds
+	if foot_ids.is_empty() or foot_ids.size() > PavingAssembly.FootCuts.MAX_FEET:
+		return _failed("invalid_jointed_paving_feet")
+	var by_id: Dictionary = {}
+	for part in blueprint.parts:
+		if part == null or by_id.has(String(part.id)): return _failed("invalid_jointed_paving_source")
+		by_id[String(part.id)] = part
+	var feet: Array = []
+	var foot_bindings: Dictionary = {}
+	for foot_id_value in foot_ids:
+		var foot_id := String(foot_id_value)
+		if foot_id.is_empty() or foot_bindings.has(foot_id) or not by_id.has(foot_id): return _failed("invalid_jointed_paving_feet")
+		var foot = by_id[foot_id]
+		var binding := static_record_binding(foot.snapshot())
+		if binding.is_empty(): return _failed("jointed_paving_foot_binding_failed")
+		foot_bindings[foot_id] = binding
+		feet.append(foot)
+	var result: Dictionary = PavingAssembly.prepare_value(blueprint, [String(finish.id)], feet, float(declaration.nominalJoint), unit_surface_arrays)
+	if not result.ready: return _failed("jointed_paving_prepare:" + String(result.reason))
+	var joint: Variant = result.joints.get(String(finish.id))
+	var artifact: Variant = result.artifacts.get(String(finish.id))
+	if not joint is Dictionary or not artifact is Dictionary or var_to_bytes(joint) != var_to_bytes(declaration):
+		return _failed("jointed_paving_declaration_mismatch")
+	if artifact.get("geometryDigest") != declaration.get("geometryDigest") or artifact.get("constructionDigest") != declaration.get("constructionDigest"):
+		return _failed("jointed_paving_digest_mismatch")
+	if not _value_graph_safe(artifact): return _failed("jointed_paving_resource_in_value")
+	var family: Variant = _freeze_value({"binding":static_record_binding(finish.snapshot()),"kind":"jointed_paving",
+		"joint":joint,"footBindings":foot_bindings,"artifact":artifact})
+	if not family is Dictionary: return _failed("jointed_paving_freeze_failed")
+	return {"ready":true,"reason":"","family":family}
+
+
+static func _value_graph_safe(value: Variant) -> bool:
+	if value is Object: return false
+	if value is Dictionary:
+		for key in value:
+			if not _value_graph_safe(key) or not _value_graph_safe(value[key]): return false
+	elif value is Array:
+		for item in value:
+			if not _value_graph_safe(item): return false
+	return true
+
+
+static func _freeze_value(value: Variant) -> Variant:
+	if value is Object: return null
+	if value is Dictionary:
+		var copied: Dictionary = {}
+		for key in value:
+			var frozen_key: Variant = _freeze_value(key)
+			var frozen_value: Variant = _freeze_value(value[key])
+			if (key != null and frozen_key == null) or (value[key] != null and frozen_value == null): return null
+			copied[frozen_key] = frozen_value
+		copied.make_read_only()
+		return copied
+	if value is Array:
+		var copied: Array = []
+		for item in value:
+			var frozen: Variant = _freeze_value(item)
+			if item != null and frozen == null: return null
+			copied.append(frozen)
+		copied.make_read_only()
+		return copied
+	return value
+
+
+## Build the exclusive navigation cursor from the same frozen compact
+## description as a packet base. It deliberately does not restore source
+## parts or compile physical render geometry.
+static func prepare_navigation_source(base: PreparedPublicationBase, expected_binding: Dictionary, continuation: Callable = Callable()) -> Dictionary:
+	if base == null or not base.matches(expected_binding): return _failed("invalid_publication_base_navigation_request")
+	var guard := Continuation.new()
+	guard.callback = continuation
+	var producer := NavigationProducer.new()
+	var progress := producer.begin(base.description.navigation,base.description.furnishing_navigation,guard.advance,base.description.solid_records)
+	if progress.get("status","failed") in ["failed","cancelled"]:
+		return _failed("cancelled" if guard.cancelled else "navigation_producer_initialization_failed")
+	if not guard.advance("publication_navigation_source_ready"): return _failed("cancelled")
+	var source := {"producer":producer,"binding":base.binding,"domain":producer.domain()}
+	source.make_read_only()
+	return {"ready":true,"reason":"","navigationSource":source}
+
+static func prepare_source(building: Dictionary, furniture: Dictionary, binding: Dictionary, continuation: Callable = Callable(), world_origin := Vector3.ZERO, description_callback: Callable = Callable(), demanded_navigation := false) -> Dictionary:
 	if not valid_binding(binding): return _failed("invalid_publication_binding")
 	# Freeze identity before invoking any caller callback or expensive work.
 	var source_binding := binding.duplicate()
@@ -220,8 +634,22 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		surface_timings[family]=compiled.preparationUsec
 	surfaces.make_read_only()
 	surface_timings.make_read_only()
-	var spatial = description.compile_navigation(guard.advance)
-	if spatial == null: return _failed("cancelled" if guard.cancelled else "spatial_dependency_compilation_failed")
+	var spatial = description
+	var navigation_source: Dictionary = {}
+	if demanded_navigation:
+		# The worker returns exclusive producer ownership separately from scene
+		# data. The scene may borrow the frozen description, never this cursor.
+		var producer := NavigationProducer.new()
+		var progress := producer.begin(description.navigation, description.furnishing_navigation, guard.advance, description.solid_records)
+		if progress.get("status", "failed") in ["failed", "cancelled"]:
+			return _failed("cancelled" if guard.cancelled else "navigation_producer_initialization_failed")
+		# The frozen inventory is independent of the exclusively owned cursor.
+		# Consumers may retain it while the worker compiles demanded tile outputs.
+		navigation_source = {"producer":producer, "binding":source_binding, "domain":producer.domain()}
+		navigation_source.make_read_only()
+	else:
+		spatial = description.compile_navigation(guard.advance)
+		if spatial == null: return _failed("cancelled" if guard.cancelled else "spatial_dependency_compilation_failed")
 	if not guard.advance("publication_preparation_ready"): return _failed("cancelled")
 	var prepared := PreparedSource.new()
 	prepared._binding = source_binding
@@ -236,7 +664,7 @@ static func prepare_source(building: Dictionary, furniture: Dictionary, binding:
 		"preparedMasonry":masonry.preparedMasonry, "masonryPreparationUsec":masonry.masonryPreparationUsec,
 		"preparedSurfaces":surfaces,"surfacePreparationUsec":surface_timings,
 		"spatialDependencies":spatial}
-	return {"ready":true, "reason":"", "prepared":prepared, "description":description}
+	return {"ready":true, "reason":"", "prepared":prepared, "description":description, "navigationSource":navigation_source}
 
 ## Same visible wall/foundation dispatch as the publisher, including tagged
 ## aperture walls. No cuts, Nodes, Resources, uploads or geometry alternatives.
@@ -245,7 +673,7 @@ static func _compile_masonry(blueprint, prepared_history: PreparedHistory, conti
 	if not result.ready: return result
 	return {"ready":true,"reason":"","preparedMasonry":result.artifact,"masonryPreparationUsec":result.preparationUsec}
 
-static func _compile_geometry(blueprint, prepared_history: PreparedHistory, continuation: Callable = Callable(), seal_owned_parts := false, family := "masonry") -> Dictionary:
+static func _compile_geometry(blueprint, prepared_history: PreparedHistory, continuation: Callable = Callable(), seal_owned_parts := false, family := "masonry", selected_ids: Dictionary = {}) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	var guard := Continuation.new()
 	guard.callback = continuation
@@ -260,6 +688,7 @@ static func _compile_geometry(blueprint, prepared_history: PreparedHistory, cont
 		var seen: Dictionary = {}
 		for part in blueprint.parts:
 			if not guard.advance("publication_"+family+"_part"): return _failed("cancelled")
+			if not selected_ids.is_empty() and not selected_ids.has(String(part.id)): continue
 			if not geometry_selected(part,family): continue
 			var id := String(part.id)
 			if seen.has(id): return _failed("duplicate_"+family+"_part_id")

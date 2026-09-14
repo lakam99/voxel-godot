@@ -90,8 +90,10 @@ class FakeCollisionProbe:
 class FakeMain:
 	extends Node
 	const WATER_LEVEL := -100.0
+	var surface_query_calls := 0
 
 	func surface_y_at_position(_position: Vector3) -> float:
+		surface_query_calls += 1
 		return 0.0
 
 class FakeHostileClockMain:
@@ -745,8 +747,10 @@ func test_guard_target_never_falls_back_to_porch(_mode: String) -> Dictionary:
 	var goal_planner = NpcSemanticGoalPlannerScript.new()
 	var world := FakeGuardTargetWorld.new()
 	var route_planner := FakeUnreachableRoutePlanner.new()
-	goal_planner.setup(null, FakeMain.new(), world, route_planner)
+	var fake_main := FakeMain.new()
+	goal_planner.setup(null, fake_main, world, route_planner)
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3.ZERO
 	var porch := Vector3(CELL, 0.0, 0.0)
 	var guard_post := Vector3(CELL * 24.0, 0.0, 0.0)
@@ -765,27 +769,33 @@ func test_guard_target_never_falls_back_to_porch(_mode: String) -> Dictionary:
 	for candidate in candidates:
 		if candidate is Vector3 and (candidate as Vector3).distance_to(porch) <= 0.01:
 			porch_present = true
+	var surface_query_calls := fake_main.surface_query_calls
 	var passed := target.distance_to(guard_post) <= 0.01 \
 		and not porch_present \
 		and route_planner.route_cost_calls == 0 \
 		and world.static_goal_checks == 0 \
+		and surface_query_calls == 0 \
 		and String(entry_data.get("routeReason", "")) == ""
 	body.free()
+	fake_main.free()
 	return outcome(
 		passed,
-		"target=%s guard=%s porchPresent=%s routeCostCalls=%d staticGoalChecks=%d reason=%s" % [str(target), str(guard_post), str(porch_present), route_planner.route_cost_calls, world.static_goal_checks, String(entry_data.get("routeReason", ""))],
-		["guard_target_preserves_assigned_post", "guard_candidates_exclude_home_porch", "guard_target_defers_route_reachability_to_v2"],
-		{ "target": target, "guardPost": guard_post, "porch": porch, "porchPresent": porch_present, "routeCostCalls": route_planner.route_cost_calls, "staticGoalChecks": world.static_goal_checks, "reason": String(entry_data.get("routeReason", "")) }
+		"target=%s guard=%s porchPresent=%s routeCostCalls=%d staticGoalChecks=%d surfaceQueries=%d reason=%s" % [str(target), str(guard_post), str(porch_present), route_planner.route_cost_calls, world.static_goal_checks, surface_query_calls, String(entry_data.get("routeReason", ""))],
+		["guard_target_preserves_assigned_post", "guard_candidates_exclude_home_porch", "guard_target_defers_physical_reachability_to_v2"],
+		{ "target": target, "guardPost": guard_post, "porch": porch, "porchPresent": porch_present, "routeCostCalls": route_planner.route_cost_calls, "staticGoalChecks": world.static_goal_checks, "surfaceQueries": surface_query_calls, "reason": String(entry_data.get("routeReason", "")) }
 	)
 
 func test_guard_intercept_defers_topology_to_v2(_mode: String) -> Dictionary:
 	var goal_planner = NpcSemanticGoalPlannerScript.new()
 	var world := FakeGuardTargetWorld.new()
 	var route_planner := FakeUnreachableRoutePlanner.new()
-	goal_planner.setup(null, FakeMain.new(), world, route_planner)
+	var fake_main := FakeMain.new()
+	goal_planner.setup(null, fake_main, world, route_planner)
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3.ZERO
 	var hostile := Node3D.new()
+	runner.add_child(hostile)
 	hostile.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
 	var entry_data := {
 		"id": "guard-intercept-test",
@@ -810,6 +820,7 @@ func test_guard_intercept_defers_topology_to_v2(_mode: String) -> Dictionary:
 		and route_planner.route_cost_calls == 0
 	body.free()
 	hostile.free()
+	fake_main.free()
 	return outcome(
 		passed,
 		"target=%s hostileDistance=%.3f snapshotCalls=%d staticGoalChecks=%d routeCostCalls=%d" % [str(target), target_distance, world.snapshot_calls, world.static_goal_checks, route_planner.route_cost_calls],
@@ -820,10 +831,13 @@ func test_guard_intercept_defers_topology_to_v2(_mode: String) -> Dictionary:
 func test_guard_intercept_selection_is_incremental(_mode: String) -> Dictionary:
 	var goal_planner = NpcSemanticGoalPlannerScript.new()
 	var world := FakeGuardTargetWorld.new()
-	goal_planner.setup(null, FakeMain.new(), world, FakeUnreachableRoutePlanner.new())
+	var fake_main := FakeMain.new()
+	goal_planner.setup(null, fake_main, world, FakeUnreachableRoutePlanner.new())
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3.ZERO
 	var hostile := Node3D.new()
+	runner.add_child(hostile)
 	hostile.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
 	var entry_data := {
 		"id": "guard-intercept-budget-test",
@@ -851,6 +865,7 @@ func test_guard_intercept_selection_is_incremental(_mode: String) -> Dictionary:
 		and world.static_goal_checks == 0
 	body.free()
 	hostile.free()
+	fake_main.free()
 	return outcome(
 		passed,
 		"calls=%s total=%d target=%s distance=%.3f pending=%s" % [JSON.stringify(calls_per_refresh), world.cell_position_calls, str(target), target_distance, str(entry_data.get("guardInterceptSelectionPending", false))],
@@ -862,6 +877,7 @@ func test_guard_pending_intercept_does_not_submit_stale_route(_mode: String) -> 
 	var fake_npc := FakeNpcSystem.new()
 	var executor: Variant = make_executor(fake_npc)
 	var hostile := Node3D.new()
+	runner.add_child(hostile)
 	hostile.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
 	var entry_data := entry("Guard", {
 		"id": "guard-pending-intercept-test",
@@ -901,12 +917,15 @@ func test_daylight_inactive_hostile_not_selected(_mode: String) -> Dictionary:
 	var combat = NpcCombatScript.new()
 	combat.hostile_system = hostile_system
 	var ordinary := Node3D.new()
+	runner.add_child(ordinary)
 	ordinary.name = "ordinary_shadow"
 	ordinary.global_position = Vector3(CELL * 4.0, 0.0, 0.0)
 	var daylight_immune := Node3D.new()
+	runner.add_child(daylight_immune)
 	daylight_immune.name = "daylight_immune_guardian"
 	daylight_immune.global_position = Vector3(CELL * 8.0, 0.0, 0.0)
 	var scripted_battle := Node3D.new()
+	runner.add_child(scripted_battle)
 	scripted_battle.name = "scripted_battle_hostile"
 	scripted_battle.global_position = Vector3(CELL * 12.0, 0.0, 0.0)
 	hostile_system.enemies = [
@@ -1036,9 +1055,13 @@ func test_night_blocked_home_explicit_failure_no_teleport(_mode: String) -> Dict
 	return outcome(passed, "terminal=%s before=%s after=%s" % [JSON.stringify(terminal), str(before), str(body.global_position)], ["terminal_blocked_home", "no_teleport", "inside_false"], { "terminal": terminal })
 
 func test_threat_exception_explicit(_mode: String) -> Dictionary:
-	var result := select_and_plan(entry("Hunter", { "canFight": true, "nightGuard": false }), NpcEnumsScript.SCHEDULE_STATE_NIGHT, { "activeThreat": true, "threat": Node3D.new() })
+	var threat := Node3D.new()
+	runner.add_child(threat)
+	var result := select_and_plan(entry("Hunter", { "canFight": true, "nightGuard": false }), NpcEnumsScript.SCHEDULE_STATE_NIGHT, { "activeThreat": true, "threat": threat })
 	var passed: bool = result.goal.get("goalKind") == NpcEnumsScript.GOAL_KIND_GUARD and String(result.goal.get("exceptionReason", "")) == "explicit_active_threat_exception"
-	return outcome(passed, "goal=%s reason=%s" % [String(result.goal.get("goalKind")), String(result.goal.get("reason"))], ["threat_exception_goal", "explicit_reason"], compact_result(result))
+	var key_state := compact_result(result)
+	threat.free()
+	return outcome(passed, "goal=%s reason=%s" % [String(result.goal.get("goalKind")), String(result.goal.get("reason"))], ["threat_exception_goal", "explicit_reason"], key_state)
 
 func test_executor_decays_guard_cooldown(_mode: String) -> Dictionary:
 	var fake_autonomy := FakeAutonomy.new()
@@ -1150,8 +1173,9 @@ func test_goal_hysteresis_no_thrashing(_mode: String) -> Dictionary:
 
 func test_action_interrupt_releases_resources(_mode: String) -> Dictionary:
 	var fake_autonomy := FakeAutonomy.new()
+	var fake_npc := FakeNpcSystem.new()
 	var executor := NpcPlanExecutorScript.new()
-	executor.setup(fake_autonomy, FakeNpcSystem.new(), null, {
+	executor.setup(fake_autonomy, fake_npc, null, {
 		"schedule": schedule,
 		"guardRoster": roster,
 		"perception": null,
@@ -1164,6 +1188,7 @@ func test_action_interrupt_releases_resources(_mode: String) -> Dictionary:
 	executor.call("_release_action_owned_state", entry_data, "test_interrupt")
 	var passed: bool = fake_autonomy.traffic_releases == 1 and fake_autonomy.door_releases == 1 and entry_data.get("activeDoorTrafficGroupId", "") == ""
 	fake_autonomy.queue_free()
+	fake_npc.queue_free()
 	return outcome(passed, "traffic=%d door=%d" % [fake_autonomy.traffic_releases, fake_autonomy.door_releases], ["traffic_released", "door_hold_released"], { "traffic": fake_autonomy.traffic_releases, "door": fake_autonomy.door_releases })
 
 func test_scripted_order_priority_and_cancel(_mode: String) -> Dictionary:
@@ -1664,6 +1689,7 @@ func test_forager_active_goal_enters_search_from_idle(_mode: String) -> Dictiona
 func test_forager_search_excludes_current_cell(_mode: String) -> Dictionary:
 	var semantic_planner := NpcSemanticGoalPlannerScript.new()
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3(CELL * 3.0, 0.0, CELL * 2.0)
 	var current_cell_candidate := body.global_position + Vector3(0.2, 0.0, -0.2)
 	var next_cell_candidate := body.global_position + Vector3(CELL, 0.0, 0.0)
@@ -1684,8 +1710,11 @@ func test_forager_unscored_search_anchor_defers_to_v2(_mode: String) -> Dictiona
 	var semantic_planner := NpcSemanticGoalPlannerScript.new()
 	var world := FakeRouteWorld.new()
 	var body := Node3D.new()
+	runner.add_child(body)
 	body.global_position = Vector3(CELL * 3.0, 0.0, 0.0)
-	semantic_planner.setup(null, FakeMain.new(), world, FakeUnreachableRoutePlanner.new())
+	var fake_main := FakeMain.new()
+	var route_planner := FakeUnreachableRoutePlanner.new()
+	semantic_planner.setup(null, fake_main, world, route_planner)
 	var entry_data := {
 		"id": "forager-unscored-search-anchor",
 		"job": "forage",
@@ -1700,13 +1729,15 @@ func test_forager_unscored_search_anchor_defers_to_v2(_mode: String) -> Dictiona
 	var passed := target != Vector3.INF \
 		and semantic_planner.forage_search_target_requires_travel(entry_data, target) \
 		and not world.point_inside_town(entry_data, target) \
-		and world.point_inside_work_area(entry_data, target)
+		and world.point_inside_work_area(entry_data, target) \
+		and route_planner.route_cost_calls == 0
 	body.queue_free()
+	fake_main.free()
 	return outcome(
 		passed,
-		"target=%s routeReason=%s" % [str(target), String(entry_data.get("routeReason", ""))],
-		["semantic_search_anchor_survives_unscored_route_cost", "search_anchor_is_outside_town", "v2_remains_collision_route_authority"],
-		{ "target": target, "routeReason": String(entry_data.get("routeReason", "")) }
+		"target=%s routeReason=%s routeCostCalls=%d" % [str(target), String(entry_data.get("routeReason", "")), route_planner.route_cost_calls],
+		["semantic_search_anchor_survives_unscored_route_cost", "search_anchor_is_outside_town", "selection_defers_route_cost_to_v2", "v2_remains_collision_route_authority"],
+		{ "target": target, "routeReason": String(entry_data.get("routeReason", "")), "routeCostCalls": route_planner.route_cost_calls }
 	)
 
 func test_forager_semantic_catalog_accepts_biome_food(_mode: String) -> Dictionary:
@@ -1714,8 +1745,10 @@ func test_forager_semantic_catalog_accepts_biome_food(_mode: String) -> Dictiona
 	var system := FakeForageSystem.new()
 	system.service = service
 	var semantic_planner := NpcSemanticGoalPlannerScript.new()
-	semantic_planner.setup(system, FakeMain.new(), FakeRouteWorld.new(), null)
+	var fake_main := FakeMain.new()
+	semantic_planner.setup(system, fake_main, FakeRouteWorld.new(), null)
 	var aloe := Node3D.new()
+	runner.add_child(aloe)
 	aloe.set_meta("kind", "prop")
 	aloe.set_meta("material", "aloePatch")
 	aloe.set_meta("drop", "aloe")
@@ -1732,6 +1765,7 @@ func test_forager_semantic_catalog_accepts_biome_food(_mode: String) -> Dictiona
 		and queried.size() == 1 \
 		and semantic_planner.prop_matches_job(aloe, entry_data, "forage")
 	aloe.queue_free()
+	fake_main.free()
 	return outcome(
 		passed,
 		"drops=%s queried=%d" % [JSON.stringify(drops), queried.size()],
@@ -2454,6 +2488,7 @@ func make_executor(fake_npc: FakeNpcSystem, fake_autonomy: Variant = null) -> Va
 	if fake_autonomy == null:
 		fake_npc.add_child(autonomy)
 	var fake_main := FakeMain.new()
+	fake_npc.add_child(fake_main)
 	autonomy.route_world = FakeRouteWorld.new()
 	autonomy.route_authority_v2 = NpcRouteAuthorityV2Script.new()
 	autonomy.route_authority_v2.setup(fake_npc, fake_main, FakeCollisionProbe.new())

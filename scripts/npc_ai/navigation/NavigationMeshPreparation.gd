@@ -203,6 +203,7 @@ func _surface_mergeable_for_mesh(surface: Dictionary) -> bool:
 
 func _merged_grid_polygons(grid: Dictionary, y: float, owners: Dictionary = {}, surface_polygons: Dictionary = {}, polygon_offset := 0) -> Array:
 	var result := []
+	var rectangles: Array[Dictionary] = []
 	var keys: Array = grid.keys()
 	keys.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		if a.y == b.y:
@@ -232,19 +233,64 @@ func _merged_grid_polygons(grid: Dictionary, y: float, owners: Dictionary = {}, 
 		for z in range(start.y, end_z + 1):
 			for x in range(start.x, end_x + 1):
 				visited[Vector2i(x, z)] = true
-				for surface_id in owners.get(Vector2i(x, z), []):
-					_record_surface_polygon(surface_polygons, String(surface_id), polygon_offset + result.size())
-		var min_x := float(start.x) * CELL - CELL * 0.5
-		var max_x := float(end_x) * CELL + CELL * 0.5
-		var min_z := float(start.y) * CELL - CELL * 0.5
-		var max_z := float(end_z) * CELL + CELL * 0.5
-		result.append([
-			Vector3(min_x, y, min_z),
-			Vector3(min_x, y, max_z),
-			Vector3(max_x, y, max_z),
-			Vector3(max_x, y, min_z)
-		])
+		rectangles.append({"minX":start.x,"maxX":end_x+1,"minZ":start.y,"maxZ":end_z+1})
+	# Greedy rectangles keep the mesh compact, but a corner ending in the middle
+	# of another rectangle's edge is not a shared NavigationServer edge. Split
+	# the longer rectangle at every such junction so all output remains compact,
+	# convex quads with matching internal edge segments around holes and obstacles.
+	rectangles=_split_grid_rectangle_t_junctions(rectangles)
+	rectangles.sort_custom(func(a: Dictionary,b: Dictionary):
+		if a.minZ!=b.minZ: return a.minZ<b.minZ
+		if a.minX!=b.minX: return a.minX<b.minX
+		if a.maxZ!=b.maxZ: return a.maxZ<b.maxZ
+		return a.maxX<b.maxX)
+	for rectangle: Dictionary in rectangles:
+		for z in range(int(rectangle.minZ),int(rectangle.maxZ)):
+			for x in range(int(rectangle.minX),int(rectangle.maxX)):
+				for surface_id in owners.get(Vector2i(x,z),[]):
+					_record_surface_polygon(surface_polygons,String(surface_id),polygon_offset+result.size())
+		result.append(_grid_rectangle_points(rectangle,y))
 	return result
+
+func _split_grid_rectangle_t_junctions(source: Array[Dictionary]) -> Array[Dictionary]:
+	var rectangles: Array[Dictionary] = source.duplicate(true)
+	var changed := true
+	while changed:
+		changed=false
+		for index in range(rectangles.size()):
+			var rectangle: Dictionary = rectangles[index]
+			var split_axis := ""
+			var split_value := 0
+			for other_index in range(rectangles.size()):
+				if index==other_index: continue
+				var other: Dictionary = rectangles[other_index]
+				for corner in [Vector2i(other.minX,other.minZ),Vector2i(other.minX,other.maxZ),
+						Vector2i(other.maxX,other.minZ),Vector2i(other.maxX,other.maxZ)]:
+					if (corner.y==rectangle.minZ or corner.y==rectangle.maxZ) \
+							and corner.x>rectangle.minX and corner.x<rectangle.maxX:
+						split_axis="x"; split_value=corner.x; break
+					if (corner.x==rectangle.minX or corner.x==rectangle.maxX) \
+							and corner.y>rectangle.minZ and corner.y<rectangle.maxZ:
+						split_axis="z"; split_value=corner.y; break
+				if not split_axis.is_empty(): break
+			if split_axis.is_empty(): continue
+			var first := rectangle.duplicate()
+			var second := rectangle.duplicate()
+			if split_axis=="x": first.maxX=split_value; second.minX=split_value
+			else: first.maxZ=split_value; second.minZ=split_value
+			rectangles[index]=first
+			rectangles.append(second)
+			changed=true
+			break
+	return rectangles
+
+func _grid_rectangle_points(rectangle: Dictionary,y: float) -> Array[Vector3]:
+	var min_x := (float(rectangle.minX)-0.5)*CELL
+	var max_x := (float(rectangle.maxX)-0.5)*CELL
+	var min_z := (float(rectangle.minZ)-0.5)*CELL
+	var max_z := (float(rectangle.maxZ)-0.5)*CELL
+	return [Vector3(min_x,y,min_z),Vector3(min_x,y,max_z),
+		Vector3(max_x,y,max_z),Vector3(max_x,y,min_z)]
 
 func _surface_polygon(surface: Dictionary) -> Array[Vector3]:
 	var polygon_value = surface.get("polygon", [])
