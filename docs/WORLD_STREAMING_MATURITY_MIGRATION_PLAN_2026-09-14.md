@@ -1,6 +1,6 @@
 # World streaming maturity migration — execution handoff
 
-Date: 2026-09-14. Status: **GATE 0 COMPLETE; Gate 1 has not run.**
+Date: 2026-09-14. Status: **GATE 1 LIFECYCLE COMPLETE; PERFORMANCE ACCEPTANCE PENDING; GATE 2 HAS NOT STARTED.**
 
 ## 0. Assignment, location, and authority
 
@@ -266,12 +266,12 @@ Each completion entry must record commit, source/binary hashes, exact commands, 
 | Gate | Status | Commit / evidence / next action |
 |---|---|---|
 | G0 snapshot + branch | COMPLETE | Snapshot `94d823cdbad8425553c0a76b3f4e4fc5f2d662a3`; switched the same Citadel worktree to descendant branch `codex/world-streaming-maturity-migration`; full inventory, native hashes, known failures, commands and evidence limits in `docs/WORLD_STREAMING_MATURITY_G0_SNAPSHOT_2026-09-14.md`; no tests run; next action is the frozen G1 baseline when implementation continues |
-| G1A movement | NOT STARTED | Isolate local terrain proof; instrument entire physics chain |
-| G1B identity/demand | NOT STARTED | Separate unchanged membership handoff from priority; bound true dirty refresh |
-| G1C transactions | NOT STARTED | Attribute service-unit time; independent retained occupancy waits; bound actual work |
-| G1D navigation | NOT STARTED | Correct accumulated-vs-slice metrics; preserve existing resumability/ack lifecycle |
-| G1E shared budget + headed checkpoint | NOT STARTED | Charge all pumps; verify fixed-seed approach and real-time sprint |
-| G2 profile/decisions | NOT STARTED | Select remaining costly kernels from corrected profile |
+| G1A movement | COMPLETE | Commit `26383424`; local revision-bound terrain receipts only, zero structure/nav calls in motion; 66-check native admission and real collision publication pass |
+| G1B identity/demand | LIFECYCLE COMPLETE; PERF PENDING | Commit `26383424`; membership/view revisions separated and handles stable; 72-check retention plus 102-check consumer contracts pass; costly all-group refresh is the first G2 profile target |
+| G1C transactions | COMPLETE | Commit `26383424`; exact 3D actor guard, independent occupied transactions, no whole-source fallback, semantic first-useful closure; 149 service, 545 job and 109 construction checks pass |
+| G1D navigation | COMPLETE | Commit `8306d3b`; per-slice capture/upload/install/ack telemetry; 262-result shutdown, mapping and real nonempty packet acknowledgement pass |
+| G1E shared budget + headed checkpoint | LIFECYCLE COMPLETE; PERF PENDING | Commit `26383424`; one 6 ms gameplay envelope/4 ms Citadel claim; exact headed lifecycle PASS and five-minute sprint recorded. Citadel demand refresh, orchestration and autosave snapshot remain release blockers. Full evidence: `docs/WORLD_STREAMING_MATURITY_G1_RUNTIME_LIFECYCLE_2026-09-14.md` |
+| G2 profile/decisions | NEXT; NOT STARTED | Profile/replace Citadel all-group rank/closure refresh and attribute autosave snapshot ownership from the corrected G1 trace; do not start with native raster tuning |
 | G3 progressive preparation/native | NOT STARTED | Early immutable partitions; implement only justified kernels; parity and throughput |
 | G4 scale/retirement | NOT STARTED | Spatial batching/detail/cleanup; exterior/interior visuals and soak |
 | G5 acceptance/handoff | NOT STARTED | Full matrix, final commits, clean status, ready-for-merge report; DO NOT MERGE |
