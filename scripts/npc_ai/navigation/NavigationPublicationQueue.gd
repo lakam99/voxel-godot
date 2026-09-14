@@ -23,6 +23,14 @@ var _worker_state := {}
 var max_advance_usec := 0
 var prepared_count := 0
 var uploaded_count := 0
+var phase_metrics: Dictionary = {}
+
+func _record_phase(label: String, started_usec: int) -> void:
+	var elapsed := Time.get_ticks_usec()-started_usec
+	var metric: Dictionary=phase_metrics.get(label,{"calls":0,"totalUsec":0,"maxUsec":0,"lastUsec":0})
+	metric.calls+=1; metric.totalUsec+=elapsed; metric.lastUsec=elapsed
+	metric.maxUsec=maxi(int(metric.maxUsec),elapsed)
+	phase_metrics[label]=metric
 
 func request(source: Dictionary, binding: Dictionary) -> Dictionary:
 	if _closing: return {"status":"failed","reason":"navigation_publication_closing"}
@@ -46,12 +54,16 @@ func advance(budget_usec := 4000) -> Dictionary:
 	if _last_frame == frame: return stats()
 	_last_frame = frame
 	var started := Time.get_ticks_usec()
+	var phase_started := Time.get_ticks_usec()
 	_worker_state = worker.poll()
+	_record_phase("worker_poll",phase_started)
 	if not _retired.is_empty() and worker.retire_external_payload(_retired):
 		_retired = {}
 		_worker_state["shutdownComplete"] = false
 	if _token > 0 and not String(_worker_state.get("completedStatus","")).is_empty():
+		phase_started=Time.get_ticks_usec()
 		var taken: Dictionary = worker.take_result(_token,_binding)
+		_record_phase("worker_result_acceptance",phase_started)
 		if taken.status == "consumed":
 			var result: Dictionary = taken.result
 			if result.get("ready",false):
@@ -70,22 +82,28 @@ func advance(budget_usec := 4000) -> Dictionary:
 				_state = "failed"; _reason = String(result.get("reason","navigation_preparation_failed"))
 			_token = 0
 	if _descriptor != null and _state not in ["ready", "failed"] and not _closing:
+		phase_started=Time.get_ticks_usec()
 		var geometry: Dictionary = _descriptor.prepared_geometry()
+		_record_phase("geometry_enumeration",phase_started)
 		if geometry.is_empty():
 			_state = "failed"; _reason = "navigation_preparation_changed"
 		else:
 			if _mesh == null:
+				phase_started=Time.get_ticks_usec()
 				_mesh = NavigationMesh.new()
 				_mesh.set_vertices(geometry.vertices)
+				_record_phase("vertex_upload",phase_started)
 				if _mesh.get_vertices() != geometry.vertices:
 					_state = "failed"; _reason = "navigation_vertex_upload_mismatch"
 			var count := 0
+			phase_started=Time.get_ticks_usec()
 			while _state != "failed" and _polygon < geometry.polygons.size() and count < 128 and Time.get_ticks_usec()-started < budget_usec:
 				_mesh.add_polygon(geometry.polygons[_polygon])
 				if _mesh.get_polygon(_polygon) != geometry.polygons[_polygon]:
 					_state = "failed"; _reason = "navigation_polygon_upload_mismatch"
 					break
 				_polygon += 1; count += 1
+			_record_phase("polygon_upload_slice",phase_started)
 			if _state != "failed" and _polygon == geometry.polygons.size():
 				_state = "ready"; _reason = "navigation_upload_complete"
 				uploaded_count += 1
@@ -127,6 +145,7 @@ func stats() -> Dictionary:
 		"busy":not _binding.is_empty() or not _retired.is_empty() or worker.has_pending_work(),
 		"preparedCount":prepared_count,"uploadedCount":uploaded_count,"uploadPolygon":_polygon,
 		"retiredBatchCount":_retired.size(),"maxAdvanceUsec":max_advance_usec,
+		"phaseMetrics":phase_metrics.duplicate(true),
 		"shutdownComplete":_closing and _retired.is_empty() and not worker.has_pending_work() and bool(_worker_state.get("shutdownComplete",false))}
 
 func finish_shutdown_for_owner_exit() -> void:

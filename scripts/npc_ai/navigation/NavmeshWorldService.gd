@@ -48,6 +48,7 @@ var max_path_query_usec := 0
 var slowest_path_query := {}
 var install_duration_samples_usec: Array[int] = []
 var path_query_duration_samples_usec: Array[int] = []
+var publication_phase_metrics: Dictionary = {}
 var dirty_regions_by_region := {}
 var dirty_region_queue: Array[String] = []
 var rebuild_count := 0
@@ -139,6 +140,7 @@ func clear() -> void:
 	navigation_map_last_iteration_id = -1
 	install_duration_samples_usec.clear()
 	path_query_duration_samples_usec.clear()
+	publication_phase_metrics.clear()
 	installed_door_link_count = 0
 	door_link_state_revision = 0
 	door_link_install_failure_count = 0
@@ -1396,6 +1398,7 @@ func stats() -> Dictionary:
 		"maxPathQueryUsec": max_path_query_usec,
 		"pathQueryP95Usec": _percentile_usec(path_query_duration_samples_usec, 0.95),
 		"slowestPathQuery": slowest_path_query.duplicate(true)
+		,"publicationPhaseMetrics":publication_phase_metrics.duplicate(true)
 		,"publication":_publication_queue.stats()
 	}
 
@@ -1478,17 +1481,22 @@ func _ensure_navigation_map() -> void:
 func _install_region(region_id: String, descriptor) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	_tile_publication_receipts.erase(region_id)
+	var phase_started := Time.get_ticks_usec()
 	var surface_polygons: Dictionary = descriptor.prepared_geometry().get("surfacePolygons",{}) if descriptor is PreparedNavigationDescriptorScript else {}
 	var navigation_mesh = _staged_mesh if descriptor == _staged_descriptor and _staged_mesh != null else _build_navigation_mesh(descriptor, surface_polygons)
+	_record_publication_phase("mesh_resource_build",phase_started)
 	if navigation_mesh == null:
 		return {"status":"failed","regionId":region_id,"reason":"invalid_navigation_preparation"}
 	# Resource construction/upload completed before retiring the old installation.
+	phase_started=Time.get_ticks_usec()
 	_release_region(region_id)
+	_record_publication_phase("prior_region_release",phase_started)
 	var polygon_count := int(navigation_mesh.get_polygon_count()) if navigation_mesh != null and navigation_mesh.has_method("get_polygon_count") else 0
 	var vertex_count := int(navigation_mesh.get_vertices().size()) if navigation_mesh != null and navigation_mesh.has_method("get_vertices") else 0
 	if polygon_count <= 0:
 		region_metrics_by_region[region_id] = { "status": "empty", "polygonCount": 0, "vertexCount": vertex_count }
 		return { "status": "empty", "regionId": region_id, "polygonCount": 0, "vertexCount": vertex_count }
+	phase_started=Time.get_ticks_usec()
 	var region_rid := NavigationServer3D.region_create()
 	NavigationServer3D.region_set_map(region_rid, navigation_map)
 	NavigationServer3D.region_set_navigation_mesh(region_rid, navigation_mesh)
@@ -1499,8 +1507,11 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 	_mark_navigation_map_dirty()
 	region_rids_by_region[region_id] = region_rid
 	region_ids_by_rid[region_rid] = region_id
+	_record_publication_phase("server_region_registration",phase_started)
+	phase_started=Time.get_ticks_usec()
 	var link_metrics := _install_door_links_for_region(region_id, descriptor)
 	var crossing_metrics := _install_crossing_links_for_region(region_id, descriptor)
+	_record_publication_phase("link_registration",phase_started)
 	last_install_usec = Time.get_ticks_usec() - started
 	_record_timing_sample(install_duration_samples_usec, last_install_usec)
 	installed_region_count += 1
@@ -1514,7 +1525,9 @@ func _install_region(region_id: String, descriptor) -> Dictionary:
 		"crossingLinks": crossing_metrics
 	}
 	region_metrics_by_region[region_id] = metrics
+	phase_started=Time.get_ticks_usec()
 	_record_tile_publication(region_id, descriptor, "", region_rid, navigation_mesh, surface_polygons)
+	_record_publication_phase("final_acceptance_record",phase_started)
 	return metrics.duplicate(true)
 
 func _build_navigation_mesh(descriptor, surface_polygons: Dictionary = {}):
@@ -2011,6 +2024,13 @@ func _record_timing_sample(samples: Array[int], value: int) -> void:
 	while samples.size() > MAX_TIMING_SAMPLES:
 		samples.pop_front()
 
+func _record_publication_phase(label: String, started_usec: int) -> void:
+	var elapsed := Time.get_ticks_usec()-started_usec
+	var metric: Dictionary=publication_phase_metrics.get(label,{"calls":0,"totalUsec":0,"maxUsec":0,"lastUsec":0})
+	metric.calls+=1; metric.totalUsec+=elapsed; metric.lastUsec=elapsed
+	metric.maxUsec=maxi(int(metric.maxUsec),elapsed)
+	publication_phase_metrics[label]=metric
+
 func _route_options_summary(options := {}) -> Dictionary:
 	if not (options is Dictionary):
 		return {}
@@ -2251,14 +2271,17 @@ func _mark_navigation_map_dirty() -> void:
 	navigation_map_dirty_serial += 1
 
 func _sync_navigation_map_if_dirty() -> bool:
+	var started := Time.get_ticks_usec()
 	if navigation_map_synced_serial == navigation_map_dirty_serial:
 		navigation_map_last_iteration_id = _navigation_map_iteration_id()
+		_record_publication_phase("synchronization_observation",started)
 		return false
 	if navigation_map.is_valid() and NavigationServer3D.has_method("map_force_update"):
 		NavigationServer3D.call("map_force_update", navigation_map)
 		_publication_synced_serial = navigation_map_dirty_serial
 	navigation_map_last_iteration_id = _navigation_map_iteration_id()
 	navigation_map_synced_serial = navigation_map_dirty_serial
+	_record_publication_phase("synchronization",started)
 	return true
 
 func _navigation_map_readiness(sync_dirty := false) -> Dictionary:

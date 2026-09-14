@@ -15,7 +15,9 @@ var projections := {}
 var source_sites: Array[String] = []
 var status := "pending"
 var reason := "navigation_capture_pending"
-var profile := {"liveUsec":0, "terrainUsec":0, "maxStepUsec":0, "steps":0,
+var profile := {"liveUsec":0, "terrainUsec":0, "maxStepUsec":0, "steps":0,"unitSteps":0,
+	"sliceCount":0,"lastSliceUsec":0,"maxSliceUsec":0,"lastSliceUnits":0,
+	"phaseLifetimeUsec":{},"lastSlicePhaseUsec":{},"maxSlicePhaseUsec":{},
 	"blockInventoryCount":0, "blockCandidateCount":0, "blockCandidateVisits":0,
 	"blockColliderReads":0,
 	"collisionInventoryCount":0, "collisionCandidateCount":0,
@@ -134,14 +136,27 @@ func advance(owner, budget_usec: int, entry_source_key: String = "") -> Dictiona
 	_last_frame = frame
 	var deadline := started + maxi(1, budget_usec)
 	var units := 0
+	var slice_phases: Dictionary = {}
 	while status == "pending" and units < 4096 and Time.get_ticks_usec() < deadline:
 		var unit_started := Time.get_ticks_usec()
-		var was_terrain := _phase == "terrain"
+		var unit_phase := _phase
+		var was_terrain := unit_phase == "terrain"
 		_step(owner)
-		profile["terrainUsec" if was_terrain else "liveUsec"] += Time.get_ticks_usec()-unit_started
+		var unit_usec := Time.get_ticks_usec()-unit_started
+		profile["terrainUsec" if was_terrain else "liveUsec"] += unit_usec
+		profile.maxStepUsec=maxi(int(profile.maxStepUsec),unit_usec)
+		profile.phaseLifetimeUsec[unit_phase]=int(profile.phaseLifetimeUsec.get(unit_phase,0))+unit_usec
+		slice_phases[unit_phase]=int(slice_phases.get(unit_phase,0))+unit_usec
 		units += 1
 	profile.steps += 1
-	profile.maxStepUsec = maxi(profile.maxStepUsec, Time.get_ticks_usec()-started)
+	profile.unitSteps += units
+	profile.sliceCount += 1
+	profile.lastSliceUsec = Time.get_ticks_usec()-started
+	profile.maxSliceUsec = maxi(int(profile.maxSliceUsec),int(profile.lastSliceUsec))
+	profile.lastSliceUnits = units
+	profile.lastSlicePhaseUsec = slice_phases
+	for phase: String in slice_phases:
+		profile.maxSlicePhaseUsec[phase]=maxi(int(profile.maxSlicePhaseUsec.get(phase,0)),int(slice_phases[phase]))
 	# The caller supplied a fresh physical source key at this slice's entry.
 	# No mutation-capable callback or await occurs inside the value capture loop,
 	# so repeat only the cheap lifecycle/revision identity here. The final seal
