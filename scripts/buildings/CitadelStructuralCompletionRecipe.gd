@@ -49,7 +49,9 @@ static func prepare(blueprint, policy: Dictionary, continuation: Callable = Call
 	if result.get("reason", "") == "cancelled": return result
 	if frozen != var_to_bytes(blueprint.snapshot()) or frozen_policy != var_to_bytes(policy):
 		return _fail("structural_completion_mutated_input")
-	if not result.ready: return result
+	if not result.ready:
+		result["facade"] = _without_snapshot(facade)
+		return result
 	result["facade"] = _without_snapshot(facade)
 	if not _continue(continuation, "structural_completed"): return _fail("cancelled")
 	return result

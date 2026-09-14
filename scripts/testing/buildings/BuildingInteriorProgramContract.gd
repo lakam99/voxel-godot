@@ -2,6 +2,7 @@ extends SceneTree
 
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Interior = preload("res://scripts/buildings/BuildingInteriorProgram.gd")
+const FurnishingPlan = preload("res://scripts/buildings/FurnishingPlan.gd")
 
 func _initialize() -> void:
 	var report_path := OS.get_environment("VOXEL_INTERIOR_PROGRAM_REPORT").simplify_path()
@@ -19,6 +20,19 @@ func _initialize() -> void:
 		"interiorInwardDirection": Vector3.LEFT, "interiorWallOffset": 0.48}})
 	var first := Interior.ensure_recipe_program(blueprint)
 	var second := Interior.ensure_recipe_program(blueprint)
+	var clear_blueprint = Blueprint.new("clear-view-contract", 19, "citadel")
+	clear_blueprint.rooms = [room_a.duplicate(true)]
+	clear_blueprint.add_part({"id": "clear_window", "kind": "window", "material": "window_glass", "position": right_window,
+		"size": Vector3(0.1, 1.2, 0.9), "collision": false, "recipe": {"roomId": "room_a",
+		"interiorInwardDirection": Vector3.LEFT, "interiorWallOffset": 0.48, "interiorProgramMode": "clear_view"}})
+	var clear_plan = FurnishingPlan.new("clear-view-plan", 19, clear_blueprint.id)
+	var clear_program := Interior.apply_to_plan(clear_blueprint, clear_plan)
+	var clear_audit := Interior.audit_plan(clear_blueprint, clear_plan)
+	var blocked_plan = FurnishingPlan.new("blocked-view-plan", 19, clear_blueprint.id)
+	var view_volume: AABB = (clear_program.apertures[0] as Dictionary).viewVolume
+	blocked_plan.add_part({"id": "solid_window_blocker", "roomId": "room_a", "archetype": "cabinet",
+		"position": view_volume.get_center(), "occupiedSize": Vector3(0.4, 0.8, 0.4), "collision": true})
+	var blocked_audit := Interior.audit_plan(clear_blueprint, blocked_plan)
 	var checks := {
 		"declared_room_wins_over_room_order_and_overlap": Interior.room_for_window([room_b, room_a], right_window, "room_a", Vector3.LEFT, 0.48).get("id") == "room_a",
 		"opposite_facade_boundary_is_accepted": Interior.room_for_window([room_a], left_window, "room_a", Vector3.RIGHT, 0.48).get("id") == "room_a",
@@ -31,7 +45,11 @@ func _initialize() -> void:
 		"program_signature_is_deterministic": var_to_bytes(first) == var_to_bytes(second),
 		"valid_window_emits_one_bound_aperture": (first.get("apertures", []) as Array).size() == 1 \
 			and String((first.apertures[0] as Dictionary).get("windowId", "")) == "window_a" \
-			and String((first.apertures[0] as Dictionary).get("roomId", "")) == "room_a"}
+			and String((first.apertures[0] as Dictionary).get("roomId", "")) == "room_a",
+		"clear_view_emits_no_window_ornaments": clear_program.get("publishedWindowCount") == 1 \
+			and clear_program.get("publishedPartCount") == 0 and clear_plan.parts.is_empty() and clear_audit.get("passed", false),
+		"clear_view_rejects_solid_furniture_in_view_volume": not blocked_audit.get("passed", true) \
+			and (blocked_audit.get("violations", []) as Array).any(func(value): return String(value).contains("solid_window_blocker"))}
 	var report := {"passed": checks.values().all(func(value): return value == true), "checks": checks,
 		"schemaVersion": Interior.SCHEMA_VERSION,
 		"scope": "Pure deterministic room/window recipe binding; no rendering, publication, gameplay, NPC or navigation claim."}

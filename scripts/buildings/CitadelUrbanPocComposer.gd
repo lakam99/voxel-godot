@@ -232,6 +232,7 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	blueprint.rooms = blueprint.rooms.filter(func(room): return not bool((room as Dictionary).get("castleCourtyardResidence", false)) and not bool((room as Dictionary).get("castleResidenceRoom", false)))
 	var recipe: Dictionary = blueprint.recipe.duplicate(true) as Dictionary
 	recipe["courtyardResidences"] = []
+	recipe["citadelUrbanHomes"] = []
 	var grammar: Dictionary = recipe.get("castleGrammar", {}) as Dictionary
 	var foundation_height := float(recipe.get("foundationHeight", 0.62))
 	var courtyard_depth := float(grammar.get("courtyardDepth", 84.0))
@@ -325,6 +326,7 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		if landscape_cancel.stopped:
 			handoff["reason"] = "cancelled"
 			return null
+		tree_records = retain_home_clear_tree_records(blueprint, tree_records)
 		urban_layout["treePlacements"] = tree_records
 		recipe["urbanPoc"] = urban_layout
 		recipe["landscapeTrees"] = urban_layout["treePlacements"]
@@ -333,6 +335,7 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		recipe[StreetHouseStructuralManifestScript.KEY] = blueprint.recipe.get(StreetHouseStructuralManifestScript.KEY, {}).duplicate(true)
 		recipe[BuntingManifest.KEY] = blueprint.recipe.get(BuntingManifest.KEY, []).duplicate(true)
 		recipe["citadelMarketHousePair"] = blueprint.recipe.get("citadelMarketHousePair", {}).duplicate(true)
+		recipe["citadelUrbanHomes"] = blueprint.recipe.get("citadelUrbanHomes", []).duplicate(true)
 		blueprint.set_recipe(recipe)
 	if not _emit_compose_diagnostic(diagnostic_callback, "perimeter_dressing_bunting_trees_completed"):
 		return null
@@ -360,7 +363,7 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	var furniture = prepared_furnishings.furnishingPlan
 	var frozen_furniture := var_to_bytes(furniture.snapshot())
 	var frozen_furniture_reservations := var_to_bytes(furniture.protected_access_reservations)
-	var reservations := ShopRecipeScript.furnishing_obstacles(furniture.snapshot(), furniture.protected_access_reservations)
+	var reservations := shop_furnishing_obstacles(furniture)
 	if not reservations.ready:
 		push_error("Citadel shop furnishing reservations are invalid")
 		return null
@@ -371,6 +374,8 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	var shops := ShopRecipeScript.prepare(blueprint, reservations.obstacles,
 		add_market_stall_household, add_terminal_shop_row, plan_courtyard_household, plan_terminal_shop_household)
 	if not shops.ready:
+		handoff["reason"] = String(shops.get("reason", "citadel_shop_composition_failed"))
+		handoff["shopFailure"] = shops
 		push_error("Citadel shop composition failed: %s" % String(shops.get("reason", "unknown")))
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "shop_recipe_prepare_completed"):
@@ -379,6 +384,28 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	# record object and source order; append the recipe's actual new frame parts.
 	if not _emit_compose_diagnostic(diagnostic_callback, "shop_merge_started"):
 		return null
+	var terminal_omission: Dictionary = shops.get("terminals", {}).get("omission", {}) as Dictionary
+	var omitted_part_ids: Array = terminal_omission.get("removedPartIds", []) as Array
+	if not omitted_part_ids.is_empty():
+		var omitted_set: Dictionary = {}
+		for omitted_id_value in omitted_part_ids:
+			var omitted_id := String(omitted_id_value)
+			if omitted_id.is_empty() or omitted_set.has(omitted_id):
+				handoff["reason"] = "citadel_shop_omission_invalid"
+				return null
+			omitted_set[omitted_id] = true
+		var removed_count := 0
+		for index in range(blueprint.parts.size() - 1, -1, -1):
+			var source_part = blueprint.parts[index]
+			if source_part != null and omitted_set.has(String(source_part.id)):
+				blueprint.parts.remove_at(index)
+				blueprint.physical_parts_by_id.erase(String(source_part.id))
+				removed_count += 1
+		if removed_count != omitted_set.size():
+			handoff["reason"] = "citadel_shop_omission_source_mismatch"
+			handoff["shopOmission"] = {"expected": omitted_set.keys(), "removedCount": removed_count}
+			return null
+		handoff["shopOmission"] = terminal_omission.duplicate(true)
 	var originals: Dictionary = {}
 	for part in blueprint.parts: originals[part.id] = part
 	for part in shops.blueprint.parts:
@@ -477,6 +504,26 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	handoff["structuralCompletion"] = completion_evidence
 	handoff["perimeterAlleyBearing"] = perimeter_bearing
 	return blueprint
+
+
+static func shop_furnishing_obstacles(furniture) -> Dictionary:
+	if furniture == null:
+		return {"ready": false, "reason": "missing_furnishing_plan"}
+	# Urban-home furniture is already enclosed by the house geometry consumed by
+	# the exterior household planner.  Keep every doorway reservation, plus any
+	# furnishing not owned by an enclosed urban home, so market placement cannot
+	# use a home entry while avoiding redundant interior obstacle rectangles.
+	var snapshot: Dictionary = furniture.snapshot()
+	var exterior_parts: Array = []
+	for record_value in snapshot.get("parts", []) as Array:
+		if not record_value is Dictionary:
+			return {"ready": false, "reason": "invalid_furnishing_record"}
+		var record: Dictionary = record_value as Dictionary
+		var recipe: Dictionary = record.get("recipe", {}) as Dictionary
+		if String(recipe.get("citadelUrbanHomeId", "")).is_empty():
+			exterior_parts.append(record)
+	snapshot["parts"] = exterior_parts
+	return ShopRecipeScript.furnishing_obstacles(snapshot, furniture.protected_access_reservations)
 
 
 static func _time(observer: Callable, stage: String, beginning: bool) -> void:
@@ -741,6 +788,51 @@ static func build_tree_placement_records(sites: Array, seed: int, continuation: 
 		})
 	if not _emit_compose_diagnostic(continuation, "landscape_tree_records_completed"): return []
 	return records
+
+
+static func retain_home_clear_tree_records(blueprint, records: Array) -> Array:
+	# Candidate selection uses a cheap trunk-scale index.  Acceptance uses the
+	# generated recipe's actual canopy radius, so a large seeded tree cannot be
+	# retained through a house envelope or another retained canopy.
+	var homes: Array = blueprint.recipe.get("citadelUrbanHomes", []) as Array
+	var retained: Array = []
+	for record_value in records:
+		if not record_value is Dictionary:
+			continue
+		var record: Dictionary = record_value as Dictionary
+		var position: Vector3 = record.get("position", Vector3.INF) as Vector3
+		var radius := float(record.get("canopyRadius", 0.0))
+		if not position.is_finite() or radius <= 0.0:
+			continue
+		var home_clear := true
+		for home_value in homes:
+			if not home_value is Dictionary:
+				continue
+			var home: Dictionary = home_value as Dictionary
+			var origin: Vector3 = home.get("origin", Vector3.INF) as Vector3
+			var width := float(home.get("interiorWidth", 0.0))
+			var depth := float(home.get("interiorDepth", 0.0))
+			if not origin.is_finite() or width <= 0.0 or depth <= 0.0:
+				home_clear = false
+				break
+			var closest_x := clampf(position.x, origin.x - width * 0.5, origin.x + width * 0.5)
+			var closest_z := clampf(position.z, origin.z - depth * 0.5, origin.z + depth * 0.5)
+			if Vector2(position.x - closest_x, position.z - closest_z).length() < radius + 0.40:
+				home_clear = false
+				break
+		if not home_clear:
+			continue
+		var separated := true
+		for retained_value in retained:
+			var other: Dictionary = retained_value as Dictionary
+			var other_position: Vector3 = other.get("position", Vector3.INF) as Vector3
+			var other_radius := float(other.get("canopyRadius", 0.0))
+			if Vector2(position.x - other_position.x, position.z - other_position.z).length() < radius + other_radius + 0.80:
+				separated = false
+				break
+		if separated:
+			retained.append(record)
+	return retained
 
 
 static func add_seeded_room_life(blueprint, seed: int, variation: float) -> void:
@@ -1308,7 +1400,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 			var window_z := center.z + float(window_index) * window_offset
 			var window_phase := posmod(prefix.hash() + floor_index * 17 + window_index * 31, 5)
 			var window_material := "window_warm_glass" if window_phase in [0, 1, 3] else "window_glass"
-			add_part(blueprint, "%s_window_%02d_%d" % [prefix, floor_index, window_index], "window", window_material, Vector3(facade_x, floor_y, window_z), Vector3(0.10, 1.18, 0.88), {"collision": false, "variation": variation, "semantic": "citadel_urban_window", "roomId": room_id, "interiorInwardDirection": interior_inward, "interiorWallOffset": window_wall_offset})
+			add_part(blueprint, "%s_window_%02d_%d" % [prefix, floor_index, window_index], "window", window_material, Vector3(facade_x, floor_y, window_z), Vector3(0.10, 1.18, 0.88), {"collision": false, "variation": variation, "semantic": "citadel_urban_window", "roomId": room_id, "interiorInwardDirection": interior_inward, "interiorWallOffset": window_wall_offset, "interiorProgramMode": "clear_view"})
 	for corner_z in [center.z - depth * 0.5 + 0.18, center.z + depth * 0.5 - 0.18]:
 		add_part(blueprint, "%s_frame_%d" % [prefix, int(round(corner_z * 10.0))], "beam", "timber_beam", Vector3(upper_facade_x + street_side * 0.05, ground_y + wall_height * 0.58, corner_z), Vector3(0.24, wall_height * 0.82, 0.24), {"collision": false, "variation": variation, "semantic": "citadel_urban_frame"})
 	for intermediate_z in [center.z - depth * 0.31, center.z + depth * 0.31]:
@@ -1352,7 +1444,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		add_part(blueprint, "%s_sign_arm" % prefix, "beam", "timber_beam", Vector3(facade_x + street_side * 0.38, ground_y + 2.70, sign_z), Vector3(0.12, 0.12, 1.05), {"collision": false, "variation": variation, "semantic": "citadel_household_sign"})
 		add_part(blueprint, "%s_hanging_sign" % prefix, "sign", "painted_decor", Vector3(facade_x + street_side * 0.40, ground_y + 2.28, sign_z + 0.42), Vector3(0.12, 0.72, 0.62), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_sign"})
 	var window_box_z := center.z - window_offset
-	add_part(blueprint, "%s_window_box" % prefix, "crate", "timber_board", Vector3(facade_x + street_side * 0.16, ground_y + 2.18, window_box_z), Vector3(0.36, 0.28, 1.14), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_window_box"})
+	add_part(blueprint, "%s_window_box" % prefix, "crate", "timber_board", Vector3(facade_x + street_side * 0.16, ground_y + 1.90, window_box_z), Vector3(0.36, 0.28, 1.14), {"collision": false, "variation": variation + 0.03, "semantic": "citadel_household_window_box"})
 	if household_phase > 0.30:
 		add_part(blueprint, "%s_household_tool_rack" % prefix, "tool_rack", "ironwork", Vector3(facade_x + street_side * 0.24, ground_y + 1.78, center.z - lerpf(1.65, 2.30, household_phase)), Vector3(0.20, 1.28, 1.12), {"rotation": Vector3(0.0, street_side * PI * 0.5, 0.0), "collision": false, "variation": variation, "semantic": "citadel_household_tools"})
 	if household_phase < 0.58:
@@ -1364,7 +1456,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		var bay_y := ground_y + minf(wall_height * 0.66, 5.1)
 		add_part(blueprint, "%s_projecting_bay_backing" % prefix, "wall", material, Vector3(facade_x + street_side * 0.16, bay_y, bay_z), Vector3(1.18, 2.20, 1.76), {"collision": true, "variation": variation + 0.012, "semantic": "citadel_household_projecting_bay_backing", "physicalIntent": "structural_mass", "requiresStructuralSupport": true})
 		add_part(blueprint, "%s_projecting_bay" % prefix, "wall", material, Vector3(facade_x + street_side * 0.42, bay_y, bay_z), Vector3(0.78, 2.05, 2.20), {"collision": false, "variation": variation + 0.025, "semantic": "citadel_household_projecting_bay", "physicalIntent": "facade_attachment", "physicalRequiredAnchorPartIds": ["%s_projecting_bay_backing" % prefix]})
-		add_part(blueprint, "%s_projecting_bay_window" % prefix, "window", "window_glass", Vector3(facade_x + street_side * 0.84, bay_y + 0.08, bay_z), Vector3(0.12, 1.22, 1.10), {"collision": false, "variation": variation, "semantic": "citadel_household_projecting_bay", "roomId": room_id, "interiorInwardDirection": interior_inward, "interiorWallOffset": window_wall_offset + 0.84})
+		add_part(blueprint, "%s_projecting_bay_window" % prefix, "window", "window_glass", Vector3(facade_x + street_side * 0.84, bay_y + 0.08, bay_z), Vector3(0.12, 1.22, 1.10), {"collision": false, "variation": variation, "semantic": "citadel_household_projecting_bay", "roomId": room_id, "interiorInwardDirection": interior_inward, "interiorWallOffset": window_wall_offset + 0.84, "interiorProgramMode": "clear_view"})
 		add_part(blueprint, "%s_projecting_bay_roof" % prefix, "decor", "roof_shingle", Vector3(facade_x + street_side * 0.44, bay_y + 1.20, bay_z), Vector3(1.12, 0.18, 2.62), {"rotation": Vector3(0.0, 0.0, street_side * deg_to_rad(-8.0)), "collision": false, "variation": variation - 0.02, "semantic": "citadel_household_projecting_bay"})
 	# Residential lanes reserve their frontage for entry. Commercial stalls are
 	# produced only by the marketplace layout, which owns their clear footprint.
@@ -1405,6 +1497,19 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	})
 	if not declaration.ready:
 		push_error("Citadel street-house declaration failed for %s: %s" % [prefix, String(declaration.get("reason", "unknown"))])
+	else:
+		var homes: Array = blueprint.recipe.get("citadelUrbanHomes", []) as Array
+		homes.append({
+			"id": prefix,
+			"roomId": room_id,
+			"doorId": prefix + "_door",
+			"origin": Vector3(upper_center_x, ground_y, center.z),
+			"interiorWidth": upper_width - STREET_ROOM_INSET * 2.0,
+			"interiorDepth": depth - STREET_ROOM_INSET * 2.0,
+			"interiorHeight": wall_height - 0.22,
+			"streetSide": street_side
+		})
+		blueprint.recipe["citadelUrbanHomes"] = homes
 	return declaration.ready
 
 
@@ -1568,8 +1673,12 @@ static func add_civic_service_yard(blueprint, center: Vector3, variation: float)
 		add_traffic_wear(blueprint, "urban_civic_route_wear_%02d" % route_index, Vector3(center.x - 1.0 + float(route_index % 2) * 0.68, center.y + 0.232, route_z), Vector2(12.8, 1.72 + float(route_index % 2) * 0.18), 0.0, variation - 0.05 + float(route_index) * 0.011, "citadel_civic_route_wear")
 	var shed_center := center + Vector3(4.2, 0.0, 1.2)
 	for post_side in [-1.0, 1.0]:
-		add_part(blueprint, "urban_civic_shed_post_%d" % int(post_side), "beam", "timber_beam", shed_center + Vector3(post_side * 2.0, 1.30, -0.72), Vector3(0.22, 2.60, 0.22), {"collision": false, "variation": variation + post_side * 0.018, "semantic": "citadel_civic_service_shed"})
-		add_part(blueprint, "urban_civic_shed_brace_%d" % int(post_side), "beam", "timber_beam", shed_center + Vector3(post_side * 1.70, 2.10, -0.48), Vector3(0.15, 1.08, 0.15), {"rotation": Vector3(0.0, 0.0, post_side * deg_to_rad(38.0)), "collision": false, "variation": variation, "semantic": "citadel_civic_service_shed"})
+		var post_id := "urban_civic_shed_post_%d" % int(post_side)
+		add_part(blueprint, post_id, "beam", "timber_beam", shed_center + Vector3(post_side * 2.0, 1.30, -0.72), Vector3(0.22, 2.60, 0.22), {"collision": false, "variation": variation + post_side * 0.018, "semantic": "citadel_civic_service_shed"})
+		# These small diagonal strips only articulate the shed silhouette. The posts
+		# own the real rooted structure; do not classify a non-colliding trim strip
+		# as another load-bearing or gameplay-collision authority.
+		add_part(blueprint, "urban_civic_shed_brace_%d" % int(post_side), "beam", "timber_beam", shed_center + Vector3(post_side * 1.70, 2.10, -0.72), Vector3(0.15, 1.08, 0.15), {"rotation": Vector3(0.0, 0.0, post_side * deg_to_rad(38.0)), "collision": false, "variation": variation, "semantic": "citadel_civic_service_shed", "physicalIntent": "visual_detail"})
 	for roof_strip in range(8):
 		add_part(blueprint, "urban_civic_shed_roof_%02d" % roof_strip, "decor", "timber_board", shed_center + Vector3(-2.05 + float(roof_strip) * 0.58, 2.54 + float(roof_strip % 3) * 0.018, 0.0), Vector3(0.56, 0.10, 2.25), {"rotation": Vector3(deg_to_rad(-9.0), 0.0, 0.0), "collision": false, "variation": variation + float(roof_strip) * 0.011, "semantic": "citadel_civic_service_shed"})
 	for storage_index in range(5):

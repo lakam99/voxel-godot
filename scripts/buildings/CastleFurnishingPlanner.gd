@@ -14,6 +14,7 @@ const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/Interio
 const CitadelResidenceManifestBuilderScript := preload("res://scripts/buildings/CitadelResidenceManifestBuilder.gd")
 const BuildingNavigationManifestBuilderScript := preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
 const BuildingInteriorProgramScript := preload("res://scripts/buildings/BuildingInteriorProgram.gd")
+const CitadelUrbanHomeFurnishingPlannerScript := preload("res://scripts/buildings/CitadelUrbanHomeFurnishingPlanner.gd")
 
 
 static func build(castle_blueprint, furnishing_seed: int, world_origin := Vector3.ZERO):
@@ -28,6 +29,13 @@ static func build(castle_blueprint, furnishing_seed: int, world_origin := Vector
 			continue
 		var residence: Dictionary = residence_value as Dictionary
 		append_residence_furnishings(plan, residence, castle_foundation_height, furnishing_seed)
+	var urban_home_plan = CitadelUrbanHomeFurnishingPlannerScript.build(castle_blueprint, furnishing_seed)
+	if urban_home_plan == null:
+		return null
+	plan.add_protected_access_reservations(urban_home_plan.access_reservations_snapshot())
+	for urban_part in urban_home_plan.parts:
+		if urban_part == null or plan.add_part(urban_part.snapshot()) == null:
+			return null
 	var egress_result := rebuild_furniture_blocked_egress(plan, castle_blueprint, residences, castle_foundation_height, furnishing_seed, world_origin)
 	if not bool(egress_result.get("complete", false)):
 		return null

@@ -95,9 +95,17 @@ static func prepare(source_b, furnishing_obstacles: Array, market_producer: Call
 	var household_records: Dictionary = {}
 	for id in ids:
 		household_records[id] = var_to_bytes(b.find_part(id).snapshot())
-	var terminals := prepare_terminal_frames(b, float(int(source.seed) % 19) / 100.0 - 0.09, furnishing_obstacles, plan.households, terminal_producer, terminal_planner)
+	var terminal_variation := float(int(source.seed) % 19) / 100.0 - 0.09
+	var terminals := prepare_terminal_frames(b, terminal_variation, furnishing_obstacles, plan.households, terminal_producer, terminal_planner)
 	if not bool(terminals.get("ready", false)):
-		return {"ready": false, "reason": "terminal_recipe_failed", "terminals": terminals}
+		var layout: Dictionary = terminals.get("layout", {}) as Dictionary
+		if String(terminals.get("reason", "")) == "terminal_public_paving_unavailable" and String(layout.get("reason", "")) == "no_recipe_placement":
+			var omission := omit_unplaceable_terminal_household(b, terminal_variation, terminal_producer)
+			if not bool(omission.get("ready", false)):
+				return {"ready": false, "reason": "terminal_omission_failed", "terminals": terminals, "omission": omission}
+			terminals = {"ready": true, "omitted": true, "reason": "no_legal_public_paving", "layout": layout, "omission": omission}
+		else:
+			return {"ready": false, "reason": "terminal_recipe_failed", "terminals": terminals}
 	for id in ids:
 		if household_records[id] != var_to_bytes(b.find_part(id).snapshot()):
 			return {"ready": false, "reason": "terminal_changed_household", "partId": id}
@@ -135,6 +143,30 @@ static func prepare(source_b, furnishing_obstacles: Array, market_producer: Call
 		"householdOnlySourceFieldsPreservedBeforeCanopyJoints": preserved, "terminals": terminals,
 		"canopies": canopies, "includesCanopyFrames": include_canopy_frames,
 		"storageLayouts": storage_layouts, "preparationUsec": Time.get_ticks_usec() - started}
+
+
+static func omit_unplaceable_terminal_household(blueprint, variation: float, terminal_producer: Callable) -> Dictionary:
+	var scratch = FrozenBlueprint.new("terminal_omission_membership", blueprint.seed, blueprint.style)
+	terminal_producer.call(scratch, Vector3.ZERO, variation)
+	if scratch.parts.is_empty():
+		return {"ready": false, "reason": "empty_terminal_membership"}
+	var member_ids := {}
+	for part in scratch.parts:
+		if part == null or String(part.id).is_empty() or member_ids.has(String(part.id)):
+			return {"ready": false, "reason": "invalid_terminal_membership"}
+		member_ids[String(part.id)] = true
+	var removed: Array[String] = []
+	for index in range(blueprint.parts.size() - 1, -1, -1):
+		var part = blueprint.parts[index]
+		if part != null and member_ids.has(String(part.id)):
+			removed.append(String(part.id))
+			blueprint.parts.remove_at(index)
+	for member_id in member_ids:
+		blueprint.physical_parts_by_id.erase(String(member_id))
+	removed.sort()
+	if removed.size() != member_ids.size():
+		return {"ready": false, "reason": "terminal_membership_missing", "expected": member_ids.keys(), "removed": removed}
+	return {"ready": true, "removedPartIds": removed, "policy": "omit_complete_optional_household_when_generated_public_space_has_no_legal_footprint"}
 
 
 static func copy_source(source: Dictionary):

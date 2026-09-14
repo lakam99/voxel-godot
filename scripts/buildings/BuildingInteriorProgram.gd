@@ -2,6 +2,7 @@ extends RefCounted
 class_name BuildingInteriorProgram
 
 const SCHEMA_VERSION := 2
+const InteriorFurnishingLayoutScript := preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
 
 
 static func apply_to_plan(blueprint, plan) -> Dictionary:
@@ -22,6 +23,10 @@ static func apply_to_plan(blueprint, plan) -> Dictionary:
 		var window_id := String(aperture.get("windowId", "")).strip_edges()
 		var room_id := String(aperture.get("roomId", "")).strip_edges()
 		if window_id.is_empty() or room_id.is_empty() or published_windows.has(window_id):
+			continue
+		var mode := String(aperture.get("mode", "lit_plant")).strip_edges().to_lower()
+		if mode == "clear_view":
+			published_windows[window_id] = true
 			continue
 		var viewpoint: Vector3 = aperture.get("viewpoint", Vector3.ZERO) as Vector3
 		var side: Vector3 = aperture.get("side", Vector3.RIGHT) as Vector3
@@ -100,6 +105,9 @@ static func ensure_recipe_program(blueprint) -> Dictionary:
 		var view_height := maxf(0.78, opening_height * 0.80)
 		var view_size := Vector3(maxf(0.48, opening_span * 0.74), view_height, 1.28) if absf(inward.z) > 0.5 else Vector3(1.28, view_height, maxf(0.48, opening_span * 0.74))
 		var phase := float(posmod((String(blueprint.id) + ":" + String(part.id)).hash(), 4093)) / 4093.0
+		var mode := String(part.recipe.get("interiorProgramMode", "lit_plant")).strip_edges().to_lower()
+		if mode not in ["lit_plant", "clear_view"]:
+			continue
 		apertures.append({
 			"windowId": String(part.id),
 			"roomId": String(room.get("id", "")),
@@ -108,7 +116,8 @@ static func ensure_recipe_program(blueprint) -> Dictionary:
 			"lowerY": lower_y,
 			"sideOffset": maxf(0.10, minf(0.30, opening_span * 0.22)),
 			"viewVolume": AABB(view_center - view_size * 0.5, view_size),
-			"materialPhase": phase
+			"materialPhase": phase,
+			"mode": mode
 		})
 	var program := {"schemaVersion": SCHEMA_VERSION, "apertures": apertures}
 	blueprint.recipe["interiorProgram"] = program.duplicate(true)
@@ -151,6 +160,19 @@ static func audit_plan(blueprint, plan) -> Dictionary:
 		var aperture: Dictionary = aperture_by_window[window_id] as Dictionary
 		var view_volume: AABB = aperture.get("viewVolume", AABB()) as AABB
 		var entries: Array = program_parts_by_window.get(window_id, []) as Array
+		var mode := String(aperture.get("mode", "lit_plant")).strip_edges().to_lower()
+		if mode == "clear_view":
+			if not entries.is_empty():
+				violations.append("%s clear-view aperture contains window ornaments" % window_id)
+			else:
+				published_windows += 1
+			for furnishing_part in plan.parts:
+				if furnishing_part == null or not furnishing_part.collision_enabled:
+					continue
+				var occupied_bounds := InteriorFurnishingLayoutScript.horizontal_bounds(furnishing_part.position, furnishing_part.occupied_size, furnishing_part.rotation)
+				if occupied_bounds.intersects(view_volume):
+					violations.append("%s clear view volume is blocked by %s" % [window_id, String(furnishing_part.id)])
+			continue
 		var has_plant := false
 		var has_candle := false
 		for furnishing_part in entries:
@@ -171,7 +193,7 @@ static func audit_plan(blueprint, plan) -> Dictionary:
 				continue
 			if String(furnishing_part.recipe.get("interiorProgramWindowId", "")).strip_edges() == window_id:
 				continue
-			var occupied_bounds := AABB(furnishing_part.position - furnishing_part.occupied_size * 0.5, furnishing_part.occupied_size)
+			var occupied_bounds := InteriorFurnishingLayoutScript.horizontal_bounds(furnishing_part.position, furnishing_part.occupied_size, furnishing_part.rotation)
 			if occupied_bounds.intersects(view_volume):
 				violations.append("%s view volume is blocked by %s" % [window_id, String(furnishing_part.id)])
 	return {

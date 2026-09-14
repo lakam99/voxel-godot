@@ -310,6 +310,7 @@ func _run() -> void:
 	await _frame()
 	evidence.sceneAudit = await _audit_scene()
 	checks.scene_audit = evidence.sceneAudit.get("passed",false)
+	checks.urban_home_interiors_live = evidence.sceneAudit.get("urbanHomeInteriorReady",false)
 	evidence.structuralClearance = _audit_stair_clearance()
 	checks.structural_clearance = evidence.structuralClearance.passed
 	checks.camera_facing_candidate = await _look_toward_candidate()
@@ -767,13 +768,26 @@ func _capture_inspection_views() -> Dictionary:
 		var desired := target+lane_axis*12.0+Vector3.UP*2.2
 		views.append({"label":"urban_street_%s_houses"%row_id,
 			"position":_clamp_inspection_camera(target,desired),"target":target})
-	for sample: Dictionary in evidence.sceneAudit.furnitureSamples.slice(0,2):
-		var body := main.get_node_or_null(NodePath(sample.path)) as Node3D
-		if body==null: return {"passed":false,"reason":"furniture_sample_disappeared"}
-		var record: Dictionary=body.get_meta("furnishing_part_record")
-		var size: Vector3=record.occupiedSize
-		views.append({"label":"furniture_%d"%views.size(),"position":body.to_global(Vector3(0,size.y+0.8,maxf(size.x,size.z)+1.0)),
-			"target":body.to_global(Vector3(0,size.y*0.5,0)),"furniture":sample})
+	var interior_home_ids: Array[String] = []
+	for home_value in evidence.sceneAudit.get("urbanHomeInteriors",[]):
+		if interior_home_ids.size()>=2: break
+		if not home_value is Dictionary or not bool((home_value as Dictionary).get("complete",false)): continue
+		var home: Dictionary=home_value as Dictionary
+		var room_bounds: AABB=home.get("worldBounds",AABB())
+		var street_side:=signf(float(home.get("streetSide",0.0)))
+		if room_bounds.size.x<=1.8 or room_bounds.size.z<=1.8 or is_zero_approx(street_side): continue
+		var home_id:=String(home.get("id",""))
+		var room_center:=room_bounds.get_center()
+		var street_x:=room_bounds.end.x-0.72 if street_side>0.0 else room_bounds.position.x+0.72
+		var rear_x:=room_bounds.position.x+0.72 if street_side>0.0 else room_bounds.end.x-0.72
+		var first_position:=Vector3(street_x,room_bounds.position.y+1.45,room_bounds.position.z+minf(0.92,room_bounds.size.z*0.25))
+		var second_position:=Vector3(rear_x,room_bounds.position.y+1.55,room_bounds.end.z-minf(0.92,room_bounds.size.z*0.25))
+		var target:=Vector3(room_center.x,room_bounds.position.y+0.95,room_center.z)
+		views.append({"label":"home_interior_%s_door_side"%home_id,"position":first_position,"target":target,"urbanHome":home})
+		views.append({"label":"home_interior_%s_rear_side"%home_id,"position":second_position,"target":target,"urbanHome":home})
+		interior_home_ids.append(home_id)
+	if interior_home_ids.size()<2:
+		return {"passed":false,"reason":"fewer_than_two_complete_live_urban_home_interiors","homeIds":interior_home_ids}
 	var observer := Camera3D.new()
 	observer.name="DiagnosticCitadelInspectionCamera"
 	observer.fov=72.0
@@ -800,6 +814,7 @@ func _capture_inspection_views() -> Dictionary:
 	await _frame()
 	var identity := _accepted_current()
 	return {"passed":passed and identity.passed and root.get_camera_3d()==player.camera,"views":views,"identity":identity,
+		"interiorHomeIds":interior_home_ids,
 		"scope":"Diagnostic camera views of unchanged production scene; no player placement, movement, interaction or navigation acceptance."}
 
 func _begin_finalization() -> bool:
@@ -1292,7 +1307,8 @@ func _navigation_demand_facts(owners: Dictionary) -> Array[Dictionary]:
 func _audit_scene() -> Dictionary:
 	var service = main.structure_system.citadel_publication
 	var site: Node3D = service.scene_root(region)
-	var result := {"passed":false,"nodeCount":0,"meshes":0,"multiMeshes":0,"instances":0,"collisionShapes":0,"furnitureBodies":0,"trees":0,"doors":0,"badBindings":[],"physicsProbes":[]}
+	var result := {"passed":false,"nodeCount":0,"meshes":0,"multiMeshes":0,"instances":0,"collisionShapes":0,"furnitureBodies":0,
+		"urbanFurnitureBodies":0,"urbanHomeInteriorReady":false,"urbanHomeInteriors":[],"trees":0,"doors":0,"badBindings":[],"physicsProbes":[]}
 	if not is_instance_valid(site) or site.get_parent()!=main: return result
 	# Retain existing bounded counters once, after publication. These are
 	# observations only and must never participate in scene acceptance.
@@ -1336,6 +1352,8 @@ func _audit_scene() -> Dictionary:
 	var source_parts := {}
 	var seen_collisions := {}
 	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+	var accepted_blueprint: Dictionary=accepted_source.get("blueprint",{})
+	var urban_live: Dictionary={}
 	# Packet publication deliberately keeps non-foreground groups deferred.  This
 	# headed audit compares every collider in the acknowledged packet closure to
 	# its accepted source record; it must not require undispatched background
@@ -1422,6 +1440,17 @@ func _audit_scene() -> Dictionary:
 			if node is StaticBody3D and node.has_meta("furnishing_part_record"):
 				result.furnitureBodies += 1
 				var archetype := String(node.get_meta("furnishing_archetype",""))
+				var furnishing_record: Dictionary=node.get_meta("furnishing_part_record")
+				var furnishing_recipe: Dictionary=furnishing_record.get("recipe",{})
+				if String(furnishing_recipe.get("castleResidenceFamily",""))=="urban_home":
+					result.urbanFurnitureBodies += 1
+					var home_id:=String(furnishing_recipe.get("citadelUrbanHomeId",""))
+					var home: Dictionary=urban_live.get(home_id,{"id":home_id,"roomId":String(furnishing_record.get("roomId","")),"archetypes":{},"samples":[]})
+					home.archetypes[archetype]=int(home.archetypes.get(archetype,0))+1
+					if home.samples.size()<24:
+						home.samples.append({"path":String(main.get_path_to(node)),"id":String(node.get_meta("furnishing_part_id","")),
+							"archetype":archetype,"position":node.global_position,"occupiedSize":furnishing_record.get("occupiedSize",Vector3.ZERO)})
+					urban_live[home_id]=home
 				if result.furnitureSamples.size()<2 and not result.furnitureSamples.any(func(sample):return sample.archetype==archetype):
 					result.furnitureSamples.append({"path":String(main.get_path_to(node)),"archetype":archetype,"id":String(node.get_meta("furnishing_part_id",""))})
 			if node is StaticBody3D and node.has_meta("tree_visual_state"):
@@ -1456,7 +1485,27 @@ func _audit_scene() -> Dictionary:
 		var semantic := String(source_parts[part_id].get("semantic",""))
 		result.missingSourceCollisionSemantics[semantic]=int(result.missingSourceCollisionSemantics.get(semantic,0))+1
 	result.missingSourceCollisionIds.sort()
-	result.passed = stack.is_empty() and result.rootMatchesProfile and result.rootVisible and result.visibleGeometry>0 and have_bounds and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
+	var rooms_by_id: Dictionary={}
+	for room_value in accepted_blueprint.get("rooms",[]):
+		if room_value is Dictionary: rooms_by_id[String((room_value as Dictionary).get("id",""))]=room_value
+	var required_archetypes: Array[String]=["bed","table","chair","hearth"]
+	var complete_home_count:=0
+	for descriptor_value in accepted_blueprint.get("recipe",{}).get("citadelUrbanHomes",[]):
+		if not descriptor_value is Dictionary: continue
+		var descriptor: Dictionary=descriptor_value as Dictionary
+		var home_id:=String(descriptor.get("id",""))
+		var room_id:=String(descriptor.get("roomId",""))
+		var live: Dictionary=urban_live.get(home_id,{"id":home_id,"roomId":room_id,"archetypes":{},"samples":[]})
+		var room: Dictionary=rooms_by_id.get(room_id,{})
+		var local_bounds: AABB=room.get("bounds",AABB())
+		var complete:=not room.is_empty() and required_archetypes.all(func(archetype):return int(live.archetypes.get(archetype,0))>0)
+		if complete: complete_home_count+=1
+		result.urbanHomeInteriors.append({"id":home_id,"roomId":room_id,"streetSide":descriptor.get("streetSide",0.0),
+			"worldBounds":site.global_transform*local_bounds,"archetypes":live.archetypes,"samples":live.samples,"complete":complete})
+	result.urbanHomeInteriorReady=complete_home_count>=2 and result.urbanFurnitureBodies>0
+	result["completeUrbanHomeInteriorCount"]=complete_home_count
+	result["generatedUrbanHomeCount"]=(accepted_blueprint.get("recipe",{}).get("citadelUrbanHomes",[]) as Array).size()
+	result.passed = stack.is_empty() and result.rootMatchesProfile and result.rootVisible and result.visibleGeometry>0 and have_bounds and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.urbanHomeInteriorReady and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
 	result.passed = result.passed and result.collisionMismatches.is_empty() and source_parts.size()==seen_collisions.size() and not source_parts.is_empty()
 	return result
 

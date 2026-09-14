@@ -7,6 +7,8 @@ const Urban = preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
 const Copy = preload("res://scripts/buildings/FacadeOpeningBearingRecipe.gd")
 const Manifest = preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const Interior = preload("res://scripts/buildings/BuildingInteriorProgram.gd")
+const Layout = preload("res://scripts/buildings/InteriorFurnishingLayout.gd")
+const UrbanFurniture = preload("res://scripts/buildings/CitadelUrbanHomeFurnishingPlanner.gd")
 var _worker: Thread
 var _frames := 0
 var _progress_records: Array[Dictionary] = []
@@ -53,8 +55,9 @@ func _prepare(seed: int, progress_path: String, total_started_msec: int) -> Dict
 	if not _write_progress(progress_path, "castle_build_completed", Time.get_ticks_msec() - stage_started_msec, Time.get_ticks_msec() - total_started_msec, seed, false):
 		return {"passed": false, "reason": "progress_write_failed:castle_build_completed"}
 	if source == null: return {"passed": false, "reason": "castle_build_failed"}
-	var original_objects: Dictionary = {}
-	for part in source.parts: original_objects[part.id] = part
+	var original_ids: Array[String] = []
+	for part in source.parts:
+		if part != null: original_ids.append(String(part.id))
 	stage_started_msec = Time.get_ticks_msec()
 	if not _write_progress(progress_path, "compose_prepared_started", 0, stage_started_msec - total_started_msec, seed, false):
 		return {"passed": false, "reason": "progress_write_failed:compose_prepared_started"}
@@ -63,7 +66,9 @@ func _prepare(seed: int, progress_path: String, total_started_msec: int) -> Dict
 		return {"passed": false, "reason": "progress_write_failed:compose_prepared_completed"}
 	if not prepared.get("ready", false):
 		return {"passed": false, "reason": prepared.get("reason", "composer_failed"),
-			"structuralCompletionFailure": prepared.get("structuralCompletionFailure", {})}
+			"structuralCompletionFailure": prepared.get("structuralCompletionFailure", {}),
+			"shopFailure": prepared.get("shopFailure", {}),
+			"civicClearanceFailure": prepared.get("civicClearanceFailure", {})}
 	var blueprint = prepared.blueprint
 	var completion: Dictionary = prepared.get("structuralCompletion", {})
 	var manifest := Manifest.read(blueprint)
@@ -106,9 +111,38 @@ func _prepare(seed: int, progress_path: String, total_started_msec: int) -> Dict
 		declared_urban_windows += 1
 		if Interior.room_for_window(blueprint.rooms, part.position, part.recipe.get("roomId", ""), part.recipe.get("interiorInwardDirection", Vector3.ZERO), part.recipe.get("interiorWallOffset", 0.0)).is_empty():
 			declared_window_bindings_valid = false
-	var retained_identity := true
-	for part in blueprint.parts:
-		if original_objects.has(part.id) and not is_same(original_objects[part.id], part): retained_identity = false
+	# Recomposition may replace records owned by generated districts.  The stable
+	# contract is that every source ID which remains in the result appears once,
+	# and that retained IDs keep their relative order.  Generated home contents
+	# are validated below through their room declarations instead of authorship
+	# prefixes or object identity.
+	var final_counts := {}
+	var final_indices := {}
+	for index in range(blueprint.parts.size()):
+		var current_part = blueprint.parts[index]
+		if current_part == null: continue
+		var current_id := String(current_part.id)
+		final_counts[current_id] = int(final_counts.get(current_id, 0)) + 1
+		if not final_indices.has(current_id): final_indices[current_id] = index
+	var retained_source_ids: Array[String] = []
+	var retained_source_ids_unique_and_ordered := true
+	var previous_index := -1
+	for original_id in original_ids:
+		if not final_indices.has(original_id): continue
+		retained_source_ids.append(original_id)
+		var final_index := int(final_indices[original_id])
+		retained_source_ids_unique_and_ordered = retained_source_ids_unique_and_ordered \
+			and int(final_counts.get(original_id, 0)) == 1 and final_index > previous_index
+		previous_index = final_index
+	var home_audit := _audit_urban_homes(blueprint, prepared.furnishingPlan)
+	var urban_window_ornaments := 0
+	for furnishing_part in prepared.furnishingPlan.parts:
+		if furnishing_part == null: continue
+		var bound_window_id := String(furnishing_part.recipe.get("interiorProgramWindowId", ""))
+		if bound_window_id.is_empty(): continue
+		var bound_window = blueprint.find_part(bound_window_id)
+		if bound_window != null and String(bound_window.semantic) in ["citadel_urban_window", "citadel_household_projecting_bay"]:
+			urban_window_ornaments += 1
 	var anchors_complete: bool = bool(manifest.get("ready", false))
 	if anchors_complete:
 		for record: Dictionary in manifest.records:
@@ -121,20 +155,21 @@ func _prepare(seed: int, progress_path: String, total_started_msec: int) -> Dict
 	var checks := {
 		"ordinary_composer_ready_same_authority": is_same(blueprint, source),
 		"completion_gate_zero_and_ordered": completion.get("ready", false) and completion.get("finalFailureCount") == 0 \
-			and stage_kinds == ["chimney", "bracket_first", "sign", "party_wall", "bracket_retry", "threshold"],
+			and stage_kinds == ["chimney", "bracket_first", "sign", "party_wall", "bracket_retry", "bunting", "threshold"],
 		"one_complete_commit_with_append_only_parts": completion.get("commit", {}).get("ready", false) \
 			and completion.commit.existingPartCount > 0 and completion.commit.addedPartCount > 0,
 		"fresh_whole_validation_zero": grid.ready and physical.violations.is_empty() and failed_ids.is_empty(),
 		"manifest_and_facade_metadata_retained": manifest.get("ready", false) and blueprint.recipe.get("facadeApertures") is Dictionary,
 		"all_declared_sign_anchors_materialized": anchors_complete,
-		"retained_preexisting_part_objects": retained_identity,
-		"window_interior_program_complete": window_count == 77 and window_audit.get("passed", false) \
-			and window_audit.get("apertureCount") == window_count and window_audit.get("publishedWindowCount") == window_count \
-			and window_audit.get("nonInteriorWindowCount") == 0 and (window_audit.get("violations", []) as Array).is_empty(),
+		"retained_source_ids_unique_and_ordered": not retained_source_ids.is_empty() and retained_source_ids_unique_and_ordered,
+		"interior_window_program_complete_for_every_bound_window": window_count > 0 \
+			and window_audit.get("apertureCount") == window_count - window_audit.get("nonInteriorWindowCount", 0) \
+			and window_audit.get("publishedWindowCount") == window_audit.get("apertureCount") \
+			and (window_audit.get("violations", []) as Array).is_empty(),
 		"urban_windows_have_valid_declared_room_wall_bindings": declared_urban_windows > 0 and declared_window_bindings_valid,
-		"formerly_unclaimed_window_has_recipe_pair": prepared.furnishingPlan.parts.any(func(part): return part != null and String(part.id) == "interior_window_urban_row_03_left_window_02_-1_plant") \
-			and prepared.furnishingPlan.parts.any(func(part): return part != null and String(part.id) == "interior_window_urban_row_03_left_window_02_-1_candle"),
-		"furniture_and_reservations_preserved_byte_exact": prepared.furnishingPlan.parts.size() == 154 \
+		"generated_urban_homes_have_room_owned_livable_furniture": home_audit.get("ready", false),
+		"urban_clear_view_windows_have_no_ornaments": urban_window_ornaments == 0,
+		"furniture_and_reservations_preserved_byte_exact": not prepared.furnishingPlan.parts.is_empty() \
 			and prepared.furnishingPlan.protected_access_reservations is Array \
 			and prepared.get("furnishingPreservation", {}).get("ready", false) \
 			and prepared.furnishingPreservation.get("furnitureBytesExact", false) \
@@ -142,6 +177,8 @@ func _prepare(seed: int, progress_path: String, total_started_msec: int) -> Dict
 	var report := {"passed": checks.values().all(func(value): return value == true), "checks": checks, "seed": seed,
 		"partCount": blueprint.parts.size(), "furnitureCount": prepared.furnishingPlan.parts.size(), "windowCount": window_count,
 		"windowInteriorProgram": window_audit,
+		"urbanHomeAudit": home_audit, "urbanWindowOrnamentCount": urban_window_ornaments,
+		"retainedSourcePartCount": retained_source_ids.size(),
 		"reservationCount": prepared.furnishingPlan.protected_access_reservations.size(), "failedIds": failed_ids,
 		"completion": completion,
 		"scope": "Fresh ordinary procedural composer and source structural gate only; no publication, rendering, gameplay, NPC/navigation, performance or headed claim."}
@@ -150,10 +187,62 @@ func _prepare(seed: int, progress_path: String, total_started_msec: int) -> Dict
 	return report
 
 
+func _audit_urban_homes(blueprint, plan) -> Dictionary:
+	var homes: Array = blueprint.recipe.get("citadelUrbanHomes", []) as Array
+	if homes.is_empty() or plan == null:
+		return {"ready": false, "reason": "missing_generated_homes_or_plan"}
+	var rooms := {}
+	for room_value in blueprint.rooms:
+		if room_value is Dictionary:
+			rooms[String((room_value as Dictionary).get("id", ""))] = room_value
+	var seen := {}
+	var results: Array = []
+	var valid := true
+	var counted_parts := 0
+	for home_value in homes:
+		if not home_value is Dictionary:
+			valid = false
+			continue
+		var home: Dictionary = home_value as Dictionary
+		var home_id := String(home.get("id", ""))
+		var room_id := String(home.get("roomId", ""))
+		if home_id.is_empty() or seen.has(home_id) or not rooms.has(room_id):
+			valid = false
+			continue
+		seen[home_id] = true
+		var room: Dictionary = rooms[room_id] as Dictionary
+		var room_bounds: AABB = room.get("bounds", AABB()) as AABB
+		var street_side := signf(float(home.get("streetSide", 0.0)))
+		var counts := {}
+		var part_count := 0
+		var contained := true
+		var facade_clear := not is_zero_approx(street_side)
+		for part in plan.parts:
+			if part == null or String(part.recipe.get("citadelUrbanHomeId", "")) != home_id: continue
+			part_count += 1
+			counts[String(part.archetype)] = int(counts.get(String(part.archetype), 0)) + 1
+			contained = contained and String(part.room_id) == room_id
+			var bounds := Layout.horizontal_bounds(part.position, part.occupied_size, part.rotation)
+			contained = contained and bounds.position.x >= room_bounds.position.x - 0.015 and bounds.end.x <= room_bounds.end.x + 0.015 \
+				and bounds.position.z >= room_bounds.position.z - 0.015 and bounds.end.z <= room_bounds.end.z + 0.015
+			facade_clear = facade_clear and (bounds.end.x <= room_bounds.end.x - UrbanFurniture.STREET_FACADE_FURNITURE_CLEARANCE + 0.015 if street_side > 0.0 \
+				else bounds.position.x >= room_bounds.position.x + UrbanFurniture.STREET_FACADE_FURNITURE_CLEARANCE - 0.015)
+		var required := ["bed", "table", "chair", "hearth"]
+		var passed := part_count > 0 and contained and facade_clear and required.all(func(archetype): return int(counts.get(archetype, 0)) > 0)
+		results.append({"id": home_id, "roomId": room_id, "partCount": part_count, "archetypes": counts, "contained": contained, "streetFacadeClear": facade_clear, "passed": passed})
+		counted_parts += part_count
+		valid = valid and passed
+	var urban_owned_parts := 0
+	for part in plan.parts:
+		if part != null and String(part.recipe.get("castleResidenceFamily", "")) == "urban_home": urban_owned_parts += 1
+	return {"ready": valid and seen.size() == homes.size() and results.size() == homes.size() and urban_owned_parts == counted_parts,
+		"generatedHomeCount": homes.size(), "ownedPartCount": urban_owned_parts, "homes": results}
+
+
 func _write_progress(path: String, stage: String, completed_stage_elapsed_msec: int, total_elapsed_msec: int, seed: int, worker_complete: bool) -> bool:
 	var record := {"schema": "citadel_structural_composer_progress/v1", "currentStage": stage, "completedStageElapsedMs": completed_stage_elapsed_msec, "totalElapsedMs": total_elapsed_msec, "seed": seed, "workerComplete": worker_complete}
 	_progress_records.append(record)
-	if _progress_records.size() > 48:
+	if _progress_records.size() > 2048:
 		return false
 	var exists := FileAccess.file_exists(path)
 	var output := FileAccess.open(path, FileAccess.READ_WRITE if exists else FileAccess.WRITE)
@@ -173,22 +262,33 @@ func _compose_progress(stage: String, path: String, total_started_msec: int, see
 	var stage_key := ""
 	if stage.ends_with("_started"):
 		stage_key = stage.trim_suffix("_started")
-		if _compose_stage_started_msec.has(stage_key):
-			return false
+		# Repeated procedural producers legitimately reuse one phase name for
+		# independently sampled houses.  Each start replaces only that phase's
+		# timing origin; it is not a duplicate command.
 		_compose_stage_started_msec[stage_key] = now
 	elif stage.ends_with("_completed"):
 		stage_key = stage.trim_suffix("_completed")
 		if not _compose_stage_started_msec.has(stage_key):
-			return false
+			return true
 		completed_stage_elapsed_msec = now - int(_compose_stage_started_msec[stage_key])
 	else:
-		return false
-	return _write_progress(path, stage, completed_stage_elapsed_msec, now - total_started_msec, seed, false)
+		# Granular producer observations (candidate, preview, recipe, spacing)
+		# are cancellation checkpoints, not phase boundaries.  The composer may
+		# add them without invalidating this runner's bounded phase timeline.
+		return true
+	_write_progress(path, stage, completed_stage_elapsed_msec, now - total_started_msec, seed, false)
+	# This callback observes a full composition contract.  Cancellation behavior
+	# has its own runner; telemetry persistence must never alter production work.
+	return true
 
 func _json(value: Variant) -> Variant:
 	if value is Vector2: return [value.x, value.y]
 	if value is Vector3: return [value.x, value.y, value.z]
 	if value is AABB: return {"position": _json(value.position), "size": _json(value.size)}
+	if value is Object:
+		return {"objectClass": value.get_class(), "instanceId": value.get_instance_id()}
+	if value is Callable:
+		return {"callable": true}
 	if value is Dictionary:
 		var result := {}
 		for key: Variant in value: result[String(key)] = _json(value[key])

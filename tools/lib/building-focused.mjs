@@ -22,7 +22,10 @@ export async function runFocused(name, argv, runOwnedProcess) {
     Object.assign(metadata, { phase: o.phase, seed: 'atlas-1492', headed: false, timeoutSeconds: timeout });
     if (o.phase === 'facade') files.splice(files.indexOf('scripts/buildings/BuildingScenePublicationJob.gd'), 1);
   }
-  if (name === 'citadel-structural-composer-contract') env.VOXEL_STRUCTURAL_COMPOSER_SEED = String(integer(o.seed, -2147483648, 2147483647, 'Seed'));
+  if (name === 'citadel-structural-composer-contract') {
+    env.VOXEL_STRUCTURAL_COMPOSER_SEED = String(integer(o.seed, -2147483648, 2147483647, 'Seed'));
+    env.VOXEL_STRUCTURAL_COMPOSER_PROGRESS = path.join(c.run, 'progress.jsonl');
+  }
   if (['citadel-publication-service-contract', 'citadel-site-build-queue-contract'].includes(name)) metadata.seed = 'atlas-1492';
   if (['citadel-profile-snapshot-contract', 'citadel-publication-preflight'].includes(name)) {
     const fixture = path.join(c.project, 'artifacts/citadel-runtime-integration/actual-site-source-05/result.bin');
