@@ -216,12 +216,56 @@ func _navigation_priority_contract() -> void:
 	_check("preparation_rank_uses_actual_admission_intersection",service._preparation_priority(Vector2i.ZERO,source)==1)
 	_shutdown(service,"navigation_priority_shutdown_balanced")
 
+func _view_intent_is_separate_scheduling_state() -> void:
+	var service = Service.new()
+	var request := _consumer(1)
+	request.sites = [{"binding":{"siteId":"view-site","sourceKey":"view-source","generation":1},
+		"groupIds":["floor","door"]}]
+	_check("view_fixture_manifest_admitted",service.set_retained_source_requests([request]))
+	var demand_revision: int = service._demand_revision
+	var view_revision: int = service._view_revision
+	var source_state: PackedByteArray = var_to_bytes([
+		service._retained_region_bounds,
+		service._retained_consumers[0].bounds,
+		service._retained_consumers[0].admissionKeys,
+		service._retained_consumers[0].navigationTileKeys,
+		service._retained_consumers[0].sites,
+		service._retained_navigation_priorities,
+		service._retained_binding_priorities,
+		service._retained_discovery_priorities])
+	var raw := {"origin":Vector3(11.2,3.1,-6.7),"forward":Vector3(0.8,0.2,0.2),
+		"predictedOrigin":Vector3(26.1,3.0,-2.2),"horizontalFovDegrees":73.0,"farDistance":181.0}
+	var normalized: Dictionary = preload("res://scripts/world/GeneratedContentViewPriority.gd").normalize(raw)
+	_check("view_update_is_admitted_without_spatial_revision",service.set_retained_view_intents([
+		{"ownerId":1,"viewIntent":raw}]) and service._demand_revision==demand_revision
+		and service._view_revision==view_revision+1)
+	_check("view_update_preserves_source_membership_and_priority_state",var_to_bytes([
+		service._retained_region_bounds,
+		service._retained_consumers[0].bounds,
+		service._retained_consumers[0].admissionKeys,
+		service._retained_consumers[0].navigationTileKeys,
+		service._retained_consumers[0].sites,
+		service._retained_navigation_priorities,
+		service._retained_binding_priorities,
+		service._retained_discovery_priorities])==source_state)
+	_check("view_update_is_normalized_and_privately_owned",service._retained_consumers[0].viewIntent==normalized)
+	var after_view_revision: int = service._view_revision
+	_check("identical_view_update_is_revision_noop",service.set_retained_view_intents([
+		{"ownerId":1,"viewIntent":raw}]) and service._view_revision==after_view_revision
+		and service._demand_revision==demand_revision)
+	var before_invalid: PackedByteArray = var_to_bytes([service._retained_consumers,service._view_revision,service._demand_revision])
+	_check("invalid_view_update_rejects_atomically",not service.set_retained_view_intents([
+		{"ownerId":1,"viewIntent":{"origin":Vector3.ZERO}}])
+		and var_to_bytes([service._retained_consumers,service._view_revision,service._demand_revision])==before_invalid)
+	_shutdown(service,"view_intent_shutdown_balanced")
+
 func _run() -> void:
 	_ownership_and_schema()
 	_invalid_atomic_inputs()
 	_limits_and_edges()
 	_group_capacity()
 	_navigation_priority_contract()
+	_view_intent_is_separate_scheduling_state()
 	var report := {"schema":"citadel-retention-manifest-contract/v1","complete":true,
 		"passed":not checks.values().has(false),"checks":checks,"metrics":metrics,
 		"evidenceLevel":"synthetic_service_input_ownership_contract",

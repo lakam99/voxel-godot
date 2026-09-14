@@ -10,6 +10,7 @@ var _npc: WeakRef
 var _autonomy: WeakRef
 var _smart: WeakRef
 var _portals: WeakRef
+const MAX_CONSTRUCTION_ACTOR_QUERY_RESULTS := 64
 
 func configure(main) -> bool:
 	if _main != null:
@@ -47,17 +48,46 @@ func construction_members_allowed(member_bounds: Array) -> bool:
 	if not available(): return false
 	var state: Dictionary = _construction_player_state()
 	if state.is_empty(): return false
+	var main = _main.get_ref()
+	var player = main.get("player")
 	for value: Variant in member_bounds:
 		if not value is AABB: return false
 		var bounds: AABB = value
 		if not bounds.position.is_finite() or not bounds.size.is_finite() or not bounds.end.is_finite() \
 				or bounds.size.x <= 0.0 or bounds.size.y <= 0.0 or bounds.size.z <= 0.0: return false
-		if state.loadingExempt: continue
-		# BuildingSiteManifestBuilder sample-node convention, per member.
-		var minimum: Vector2i = Vector2i(floori(bounds.position.x/state.cellSize),floori(bounds.position.z/state.cellSize))
-		var maximum: Vector2i = Vector2i(ceili(bounds.end.x/state.cellSize)+1,ceili(bounds.end.z/state.cellSize)+1)
-		if Rect2i(minimum,maximum-minimum).intersects(state.playerCells): return false
+		# The active player is checked from its current capsule even before a newly
+		# added fixture/body has synchronized into PhysicsServer. Loading exempts
+		# only that deliberately physics-disabled player, never other live actors.
+		if not state.loadingExempt and bounds.intersects(state.playerBounds): return false
+		if _construction_actor_overlaps(bounds,player): return false
 	return true
+
+## Fresh broad-phase evidence for every collision-bearing installation member.
+## This is deliberately queried at the final job boundary rather than cached:
+## actor movement, replacement, collision disablement and vertical separation
+## are all observed by the physics owner. Static NPC/hostile/wildlife bodies are
+## included by their production identity, while terrain/structure bodies are not.
+func _construction_actor_overlaps(bounds: AABB, player) -> bool:
+	var main = _main.get_ref()
+	if not _usable(main) or not main is Node3D or main.get_world_3d()==null: return true
+	var shape := BoxShape3D.new()
+	shape.size = bounds.size
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = shape
+	query.transform = Transform3D(Basis.IDENTITY,bounds.get_center())
+	query.collision_mask = 0xFFFFFFFF
+	query.collide_with_bodies = true
+	query.collide_with_areas = false
+	if _usable(player) and player is CollisionObject3D: query.exclude = [player.get_rid()]
+	var hits: Array[Dictionary] = main.get_world_3d().direct_space_state.intersect_shape(query,MAX_CONSTRUCTION_ACTOR_QUERY_RESULTS)
+	for hit: Dictionary in hits:
+		var collider = hit.get("collider")
+		if not _usable(collider) or not collider is CollisionObject3D: continue
+		var kind := String(collider.get_meta("kind",""))
+		if collider is CharacterBody3D or kind in ["npc","hostile","wildlife"] \
+				or String(collider.get_meta("material",""))=="wildlife":
+			return true
+	return false
 
 ## Caller has already checked the identity-pinned runtime owners. No yielding,
 ## movement, collider mutation or registration occurs while using this snapshot.
@@ -80,14 +110,17 @@ func _construction_player_state() -> Dictionary:
 	if basis.y.length_squared() <= 0.0 or not is_zero_approx(basis.y.x) or not is_zero_approx(basis.y.z): return {}
 	var radius_x := capsule.radius * Vector2(basis.x.x, basis.z.x).length()
 	var radius_z := capsule.radius * Vector2(basis.x.z, basis.z.z).length()
-	if not is_finite(radius_x) or not is_finite(radius_z) or radius_x <= 0.0 or radius_z <= 0.0: return {}
+	var radius_y := maxf(capsule.height*0.5,capsule.radius)*basis.y.length()
+	if not is_finite(radius_x) or not is_finite(radius_z) or not is_finite(radius_y) \
+			or radius_x <= 0.0 or radius_z <= 0.0 or radius_y <= 0.0: return {}
 	if not player.is_physics_processing() and (main.get("startup_loading_active") == true or main.get("runtime_loading_active") == true):
 		return {"loadingExempt":true,"cellSize":cell_size}
 	# Same sample-node bounds convention as BuildingSiteManifestBuilder:
 	# floor(min/CELL) through ceil(max/CELL), inclusive, in a half-open Rect2i.
 	var minimum := Vector2i(floori((center.x-radius_x)/cell_size), floori((center.z-radius_z)/cell_size))
 	var maximum := Vector2i(ceili((center.x+radius_x)/cell_size)+1, ceili((center.z+radius_z)/cell_size)+1)
-	return {"loadingExempt":false,"cellSize":cell_size,"playerCells":Rect2i(minimum,maximum-minimum)}
+	var player_bounds := AABB(center-Vector3(radius_x,radius_y,radius_z),Vector3(radius_x*2.0,radius_y*2.0,radius_z*2.0))
+	return {"loadingExempt":false,"cellSize":cell_size,"playerCells":Rect2i(minimum,maximum-minimum),"playerBounds":player_bounds}
 
 func publish_tree(parent: Node3D, prop_id: String, position: Vector3, biome: String, tree_request: Dictionary, rotation_y: float) -> Dictionary:
 	if not available(): return _unavailable()

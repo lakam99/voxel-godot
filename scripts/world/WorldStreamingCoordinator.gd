@@ -28,6 +28,7 @@ var _providers: Dictionary = {}
 var _bounds: Array[Rect2i] = []
 var _chunks: Dictionary = {}
 var _revision := 0
+var _view_revision := 0
 var last_rejection := ""
 var _refresh_cursor := 0
 var _expiry_cursor := 0
@@ -50,6 +51,7 @@ func configure(seed_text: String, providers: Dictionary = {}) -> void:
 	_expiry_cursor = 0
 	_last_advance_frame = -1
 	_navigation_turn = false
+	_view_revision += 1
 	_rebuild()
 
 ## `foreground_navigation_tiles` is the immediate player-safety capsule. It
@@ -680,9 +682,22 @@ func set_request_view_intent(request_id: int, value: Variant) -> bool:
 		last_rejection = ""
 		return true
 	request["viewIntent"] = normalized
-	_revision += 1
+	_view_revision += 1
 	last_rejection = ""
 	return true
+
+func view_revision() -> int:
+	return _view_revision
+
+func retained_view_intents() -> Array[Dictionary]:
+	var result: Array[Dictionary] = []
+	var ids: Array = _requests.keys()
+	ids.sort()
+	for id: int in ids:
+		var request: Dictionary = _requests[id]
+		if int(request.get("releaseAt",-1)) >= 0: continue
+		result.append({"ownerId":id,"viewIntent":request.get("viewIntent",{}).duplicate(true)})
+	return result
 
 func retained_gameplay_chunks() -> Dictionary:
 	return _chunks.duplicate()

@@ -52,6 +52,9 @@ var last_terrain_collision_proof := {}
 var player_defense = PlayerDefenseControllerScript.new()
 var dodge_input_was_pressed := false
 var last_movement_wish := Vector3.ZERO
+var telemetry_presentation_frame := -1
+var telemetry_physics_ticks_in_presentation := 0
+var telemetry_motion_proof_usec_in_presentation := 0
 
 func _ready() -> void:
     set_physics_process(true)
@@ -116,6 +119,8 @@ func _unhandled_input(event: InputEvent) -> void:
     request_dodge(requested_direction)
 
 func _physics_process(delta: float) -> void:
+    var physics_started_usec := Time.get_ticks_usec()
+    _begin_physics_telemetry()
     physics_ticks += 1
     player_defense.advance(delta)
     var forward := -global_transform.basis.z
@@ -163,7 +168,9 @@ func _physics_process(delta: float) -> void:
     var jumping := (automated_jump if automated_input else Input.is_key_pressed(KEY_SPACE)) and not dodging
     if main != null and main.has_method("terrain_collision_motion_proof"):
         var predicted_position := global_position + movement_direction * speed * delta
+        var proof_started_usec := Time.get_ticks_usec()
         var collision_proof: Dictionary = main.call("terrain_collision_motion_proof", global_position, predicted_position, 0.42)
+        telemetry_motion_proof_usec_in_presentation += Time.get_ticks_usec() - proof_started_usec
         last_terrain_collision_proof = collision_proof
         if not bool(collision_proof.get("passed", false)):
             terrain_collision_hold_frames += 1
@@ -174,6 +181,7 @@ func _physics_process(delta: float) -> void:
             set_meta("terrain_collision_hold", true)
             set_meta("terrain_collision_hold_reason", String(collision_proof.get("reason", "collision_not_ready")))
             update_camera_feel(delta)
+            _finish_physics_telemetry(physics_started_usec)
             return
     set_meta("terrain_collision_hold", false)
     set_meta("terrain_collision_hold_reason", "")
@@ -192,6 +200,26 @@ func _physics_process(delta: float) -> void:
     if bool(motor_state.get("airborne_obstacle_blocked")):
         airborne_obstacle_blocks += 1
     update_camera_feel(delta)
+    _finish_physics_telemetry(physics_started_usec)
+
+func _begin_physics_telemetry() -> void:
+    var presentation_frame := Engine.get_process_frames()
+    var monitor = main.get("runtime_perf_monitor") if main != null else null
+    if telemetry_presentation_frame != presentation_frame:
+        if telemetry_presentation_frame >= 0 and monitor != null:
+            monitor.observe_gauge("player_physics_ticks_per_presentation",float(telemetry_physics_ticks_in_presentation))
+            monitor.observe_external_duration("player_motion_proof_presented_total",float(telemetry_motion_proof_usec_in_presentation)/1000.0)
+        telemetry_presentation_frame = presentation_frame
+        telemetry_physics_ticks_in_presentation = 0
+        telemetry_motion_proof_usec_in_presentation = 0
+    telemetry_physics_ticks_in_presentation += 1
+    if monitor != null:
+        monitor.increment_counter("player_physics_callbacks")
+
+func _finish_physics_telemetry(started_usec: int) -> void:
+    var monitor = main.get("runtime_perf_monitor") if main != null else null
+    if monitor != null:
+        monitor.observe_external_duration("player_physics_callback",float(Time.get_ticks_usec()-started_usec)/1000.0)
 
 func defense_input_available() -> bool:
     if survival == null or float(survival.get("health")) <= 0.0:

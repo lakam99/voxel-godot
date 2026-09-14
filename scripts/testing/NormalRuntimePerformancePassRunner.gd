@@ -737,12 +737,33 @@ func observe_voxel_collision_clearance(player_body: CharacterBody3D, current: Ve
     if not (position_proof is Dictionary):
         return
     var collision_samples = (position_proof as Dictionary).get("samples", [])
-    if not (collision_samples is Array) or collision_samples.is_empty():
+    var hit_y := INF
+    # Older motion receipts carried a direct ray sample. The bounded runtime
+    # receipt now proves only local chunk/collider publication, deliberately
+    # avoiding a per-motion surface ray. Keep this acceptance live by pairing
+    # that current receipt with the CharacterBody's actual slide contact; do not
+    # add a diagnostic physics query back to the production motion hot path.
+    if collision_samples is Array and not collision_samples.is_empty():
+        var center_sample = collision_samples[0]
+        if center_sample is Dictionary and bool((center_sample as Dictionary).get("hit", false)):
+            hit_y = float((center_sample as Dictionary).get("hitY", current.y))
+    if not is_finite(hit_y):
+        var mesh_proof: Variant = (position_proof as Dictionary).get("mesh", {})
+        if not mesh_proof is Dictionary or String((mesh_proof as Dictionary).get("collisionAuthority", "")) != "VoxelTerrain":
+            return
+        var runtime = main.get("voxel_terrain_runtime") if main != null else null
+        if runtime == null or not runtime.has_method("voxel_terrain_collider"):
+            return
+        for index in range(player_body.get_slide_collision_count()):
+            var collision := player_body.get_slide_collision(index)
+            if collision == null or collision.get_normal().y <= 0.25:
+                continue
+            if not bool(runtime.call("voxel_terrain_collider", collision.get_collider())):
+                continue
+            hit_y = collision.get_position().y
+            break
+    if not is_finite(hit_y):
         return
-    var center_sample = collision_samples[0]
-    if not (center_sample is Dictionary) or not bool((center_sample as Dictionary).get("hit", false)):
-        return
-    var hit_y := float((center_sample as Dictionary).get("hitY", current.y))
     var clearance := current.y - hit_y
     minimum_collision_clearance = minf(minimum_collision_clearance, clearance)
     maximum_below_collision = maxf(maximum_below_collision, -clearance)

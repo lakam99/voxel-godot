@@ -30,17 +30,21 @@ const ACTUAL_PACKET_TILE_GROUPS: Array[String] = [
 	"building:castle_tower_04_roof_deck"
 ]
 
-class Owner extends "res://scripts/MainCore.gd":
-	var voxel_terrain_runtime
+class Owner extends "res://scripts/MainRuntimeTools.gd":
 	func _ready() -> void: pass # Deliberately no gameplay boot.
 
 class ObservedStructures extends Structures:
 	var last_bounds := Rect2i()
 	var last_allow := false
-	func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
+	var last_budget_usec := -1
+	var advance_calls := 0
+	func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := false,
+			budget_usec := CITADEL_PUBLICATION_BUDGET_USEC) -> Dictionary:
 		last_bounds = observer_bounds
 		last_allow = allow_dispatch
-		return super.advance_citadel_publication(observer_bounds,allow_dispatch)
+		last_budget_usec = budget_usec
+		advance_calls += 1
+		return super.advance_citadel_publication(observer_bounds,allow_dispatch,budget_usec)
 
 class QuietGate extends "res://scripts/terrain/VoxelTerrainSiteGate.gd":
 	# Real current-profile comparison; suppress unrelated native loading work.
@@ -322,8 +326,12 @@ func actual_packet_demand() -> void:
 	var base = actual_base._cpu.get("publicationBase") if actual_base!=null else null
 	var census := Preparation.classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source) if base!=null else {}
 	var selected_census: Dictionary = census.get("groups",{}).get(ACTUAL_PACKET_GROUP,{})
+	var useful: Dictionary = service._first_useful_packet_groups(base.description,base,census,{}) if base!=null else {}
 	check("actual_packet_selected_exact_nonempty_normal_group",started_groups==[ACTUAL_PACKET_GROUP] and census.get("ready",false) \
 		and selected_census.get("eligible",false) and selected_census.get("families",[]).has("normal"))
+	check("actual_first_useful_window_includes_structural_clearance_anchor",useful.get("status")=="ready" \
+		and useful.get("structuralGroupIds",[]).size()==1 \
+		and useful.get("structuralGroupIds",[]).all(func(id): return useful.get("groupIds",[]).has(id)))
 	var exterior_probe: Dictionary = exterior_boundary_probe(base.description if base!=null else null,reservation,census) if base!=null else {}
 	var exterior_boundary: Dictionary = exterior_probe.get("boundary",{})
 	check("actual_packet_exterior_reservation_selects_minimal_structural_closure",not exterior_probe.is_empty() \
@@ -345,7 +353,7 @@ func actual_packet_demand() -> void:
 		var scene_job = scene_entry.get("job",null)
 		var phase := String(scene_job.status_count().get("phase","") if scene_job!=null else "")
 		var state := {"inflight":String(service._inflight.get("kind","")),"phase":phase,
-			"packetMode":bool(scene_entry.get("packetMode",false)),"fallback":service._packet_source_fallback.has(REGION)}
+			"packetMode":bool(scene_entry.get("packetMode",false))}
 		if trace.is_empty() or trace.back()!=state: trace.append(state)
 		if scene_job!=null:
 			receipt = scene_job.physical_group_receipt(ACTUAL_PACKET_GROUP,binding)
@@ -361,7 +369,7 @@ func actual_packet_demand() -> void:
 		and int(receipt.get("transactionId",0))>0 and int(receipt.get("sceneInstanceId",0))>0)
 	check("actual_packet_receipt_remains_packet_native",bool(final_scene_entry.get("packetMode",false)) and final_scene_job!=null \
 		and bool(final_scene_job._base_packet_mode) and not final_scene_job._cpu.has("prepared") and publisher!=null and bool(publisher._physical_packet_mode) \
-		and not service._packet_source_fallback.has(REGION) and service._failures.is_empty())
+		and service._failures.is_empty())
 	metrics.actualPacketReceipt={"fixtureSha256":SHA,"binding":binding.duplicate(),"groupId":ACTUAL_PACKET_GROUP,
 		"receipt":receipt.duplicate(true),"trace":trace,"worker":service._worker.poll(),"stats":service.stats(),
 		"scope":"actual frozen source, exact retained group packet compiles and reaches a live physical receipt; no legacy geometry fallback"}
@@ -411,7 +419,7 @@ func actual_packet_demand() -> void:
 		and deferred_job._packet_deferred_groups.has(ACTUAL_INELIGIBLE_GROUP) and not deferred_job._packet_foreground_groups.has(ACTUAL_INELIGIBLE_GROUP))
 	check("actual_packet_ineligible_preserves_binding_without_legacy_preparation",bool(deferred_entry.get("packetMode",false)) \
 		and deferred_entry.get("binding",{})==binding and admission.source_state(REGION).binding==binding \
-		and not service._packet_source_fallback.has(REGION) and service._inflight.get("kind","")!="preparation" \
+		and service._inflight.get("kind","")!="preparation" \
 		and active.get("kind","")!="preparation" and deferred_job!=null and not deferred_job._cpu.has("prepared") \
 		and service._failures.is_empty())
 	metrics.actualPacketDeferred={"fixtureSha256":SHA,"binding":binding.duplicate(),"groupId":ACTUAL_INELIGIBLE_GROUP,
@@ -541,6 +549,8 @@ func controlled_lifecycle() -> void:
 	var runtime := Runtime.new()
 	runtime.main = value
 	runtime.authority_ready = false
+	# The fixture invokes the child without Main's ordinary frame-token setup.
+	value.startup_loading_active = true
 	deadline = Time.get_ticks_msec()+5000
 	while Time.get_ticks_msec()<deadline:
 		runtime._process(0.016)
@@ -570,6 +580,9 @@ func runtime_dispatch() -> void:
 	gate._store = a.profile_store
 	runtime.site_gate = gate
 	check("runtime_real_generation_current",runtime.generation_context_current())
+	# This fixture calls the terrain child directly rather than through Main's
+	# normal frame setup, so use the production explicit-loading lifecycle.
+	value.startup_loading_active = true
 	runtime._process(0.016)
 	var player_cell := Vector2i(floori(value.player.global_position.x/Runtime.CELL),floori(value.player.global_position.z/Runtime.CELL))
 	var expected := Rect2i(player_cell-Vector2i(2,2),Vector2i(5,5))
@@ -586,6 +599,25 @@ func runtime_dispatch() -> void:
 	runtime.terrain.free(); runtime.terrain=null
 	runtime.site_gate=null; runtime.main=null; runtime.free()
 	await close(value,"runtime_hooks")
+
+func shared_gameplay_budget() -> void:
+	var value := owner()
+	var structures: ObservedStructures = value.structure_system
+	var observer := bounds()
+	var before := structures.advance_calls
+	value.advance_citadel_publication_shared(observer,true)
+	check("shared_budget_rejects_call_without_frame_claim",structures.advance_calls==before)
+	value.gameplay_publication_frame_token = Engine.get_process_frames()
+	value.gameplay_publication_frame_started_usec = Time.get_ticks_usec()
+	value.gameplay_publication_lane = 2
+	value.gameplay_publication_deadline_usec = value.gameplay_publication_frame_started_usec+6000
+	value.advance_citadel_publication_shared(observer,true)
+	var after_first := structures.advance_calls
+	value.advance_citadel_publication_shared(observer,true)
+	check("shared_budget_allows_only_one_citadel_claim_per_frame",after_first==before+1 and structures.advance_calls==after_first)
+	check("shared_budget_caps_citadel_grant_at_four_milliseconds",
+		structures.last_budget_usec>0 and structures.last_budget_usec<=Structures.CITADEL_PUBLICATION_BUDGET_USEC)
+	await close(value,"shared_gameplay_budget")
 
 func paused_and_failure() -> void:
 	print("PUBLICATION SERVICE paused_and_failure")
@@ -808,6 +840,7 @@ func _run() -> void:
 	await actual_packet_demand()
 	await controlled_lifecycle()
 	await runtime_dispatch()
+	await shared_gameplay_budget()
 	await paused_and_failure()
 	var report := {"schema":"citadel-publication-service-contract/v1","complete":true,"passed":not checks.values().has(false),
 		"evidenceLevel":"historical_source_direct_service_and_synthetic_lifecycle","sourceSha256":SHA,"seed":SEED,
@@ -831,19 +864,24 @@ func view_ranked_rolling_windows() -> void:
 		"horizontalFovDegrees":90.0,"farDistance":180.0}
 	var service := Service.new()
 	var first: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],{})
+	var safety: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],
+		[{"ownerId":"spatial-safety","groupIds":["synthetic-group-005"],"priority":0}],{})
 	var completed: Dictionary = {}
 	for id: String in first.get("foregroundGroupIds",[]): completed[id]=true
 	var second: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],completed)
 	var union := completed.duplicate()
 	for id: String in second.get("foregroundGroupIds",[]): union[id]=true
 	check("view_window_caps_city_publication_without_full_source_fallback",first.get("status")=="ready"
-		and first.get("foregroundGroupIds",[]).size()==Service.MAX_INCREMENTAL_FOREGROUND_GROUPS
-		and first.get("deferredGroupIds",[]).size()==44)
+		and first.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS
+		and first.get("deferredGroupIds",[]).size()==76)
 	check("view_window_promotes_gate_and_dependency_complete_lookthrough",first.get("portalGroupIds",[]).has("synthetic-group-005")
 		and first.get("foregroundGroupIds",[]).has("synthetic-group-005")
 		and first.get("foregroundGroupIds",[]).has("synthetic-group-299"))
+	check("view_window_keeps_spatial_readiness_smaller_than_background_window",
+		safety.get("readinessGroupIds",[])==["synthetic-group-005","synthetic-group-299"]
+		and safety.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS)
 	check("completed_window_promotes_all_remaining_city_groups",second.get("status")=="ready"
-		and second.get("foregroundGroupIds",[]).size()==44 and second.get("deferredGroupIds",[]).is_empty()
+		and second.get("foregroundGroupIds",[]).size()==76 and second.get("deferredGroupIds",[]).is_empty()
 		and union.size()==groups.size())
 	metrics.viewRankedRollingWindows={"firstCount":first.get("foregroundGroupIds",[]).size(),
 		"secondCount":second.get("foregroundGroupIds",[]).size(),"firstPortalGroups":first.get("portalGroupIds",[])}

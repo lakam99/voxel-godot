@@ -482,11 +482,16 @@ func voxel_terrain_authority_active() -> bool:
         and bool(voxel_terrain_runtime.get("authority_ready"))
 
 func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
-    if not voxel_terrain_authority_active():
+    var started_usec := Time.get_ticks_usec()
+    if voxel_terrain_runtime == null or not is_instance_valid(voxel_terrain_runtime) \
+        or not bool(voxel_terrain_runtime.get("authority_ready")):
         return {"passed": false, "reason": "voxel_terrain_authority_unavailable"}
     if not voxel_terrain_runtime.has_method("collision_proof_for_motion"):
         return {"passed": false, "reason": "voxel_collision_motion_api_missing"}
-    return voxel_terrain_runtime.call("collision_proof_for_motion", from_position, to_position, footprint_radius)
+    var result: Dictionary = voxel_terrain_runtime.call("collision_proof_for_motion", from_position, to_position, footprint_radius)
+    if runtime_perf_monitor != null:
+        runtime_perf_monitor.observe_external_duration("player_motion_preflight",float(Time.get_ticks_usec()-started_usec)/1000.0)
+    return result
 
 func update_voxel_authority_chunks(force: bool) -> void:
     var monitor = runtime_perf_monitor
@@ -497,9 +502,13 @@ func update_voxel_authority_chunks(force: bool) -> void:
     var shared_gameplay_schedule := not force and not startup_loading_active \
         and not runtime_loading_active and streaming_loading_request_owner.is_empty()
     if shared_gameplay_schedule:
+        gameplay_publication_frame_token = Engine.get_process_frames()
+        gameplay_publication_frame_started_usec = publication_frame_started_usec
         gameplay_publication_lane = posmod(gameplay_publication_lane + 1, 4)
         gameplay_publication_deadline_usec = publication_frame_started_usec + GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC
     else:
+        gameplay_publication_frame_token = -1
+        gameplay_publication_frame_started_usec = 0
         gameplay_publication_lane = -1
         gameplay_publication_deadline_usec = 0
     npc_navigation_publication_permitted = true
@@ -584,6 +593,45 @@ func update_voxel_authority_chunks(force: bool) -> void:
         and Time.get_ticks_usec() + 1000 < gameplay_publication_deadline_usec
     )
     last_center_chunk = center
+    if shared_gameplay_schedule and monitor != null:
+        var orchestration_usec := Time.get_ticks_usec()-publication_frame_started_usec
+        monitor.observe_external_duration("gameplay_publication_orchestration",float(orchestration_usec)/1000.0)
+        monitor.observe_gauge("gameplay_publication_remaining_usec",maxi(0,gameplay_publication_deadline_usec-Time.get_ticks_usec()))
+        if orchestration_usec>GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC:
+            gameplay_publication_overrun_count+=1
+            monitor.increment_counter("gameplay_publication_budget_overrun")
+
+## The only ordinary-gameplay claim for Citadel publication. Main establishes
+## one frame token/deadline before any lane work; a child callback may consume
+## at most the unspent remainder once, never a fresh private 4 ms allowance.
+func advance_citadel_publication_shared(observer_bounds: Rect2i, allow_dispatch: bool) -> Dictionary:
+    if structure_system==null: return {}
+    var explicit_loading := startup_loading_active or runtime_loading_active or not streaming_loading_request_owner.is_empty()
+    if explicit_loading:
+        return structure_system.advance_citadel_publication(observer_bounds,allow_dispatch,StructureSystemScript.CITADEL_PUBLICATION_BUDGET_USEC)
+    var frame := Engine.get_process_frames()
+    if gameplay_publication_frame_token!=frame or gameplay_publication_lane!=2 \
+            or gameplay_publication_citadel_claimed_frame==frame:
+        if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_deferred")
+        return structure_system.citadel_publication.stats()
+    var remaining := maxi(0,gameplay_publication_deadline_usec-Time.get_ticks_usec())
+    if remaining<=0:
+        if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_budget_exhausted")
+        return structure_system.citadel_publication.stats()
+    var granted := mini(StructureSystemScript.CITADEL_PUBLICATION_BUDGET_USEC,remaining)
+    gameplay_publication_citadel_claimed_frame=frame
+    var started := Time.get_ticks_usec()
+    var result: Dictionary=structure_system.advance_citadel_publication(observer_bounds,allow_dispatch,granted)
+    var elapsed := Time.get_ticks_usec()-started
+    gameplay_publication_max_atom_usec=maxi(gameplay_publication_max_atom_usec,elapsed)
+    if runtime_perf_monitor!=null:
+        runtime_perf_monitor.observe_external_duration("gameplay_publication_citadel",float(elapsed)/1000.0)
+        runtime_perf_monitor.observe_gauge("gameplay_publication_citadel_grant_usec",granted)
+        runtime_perf_monitor.observe_gauge("gameplay_publication_total_elapsed_usec",Time.get_ticks_usec()-gameplay_publication_frame_started_usec)
+    if Time.get_ticks_usec()>gameplay_publication_deadline_usec:
+        gameplay_publication_overrun_count+=1
+        if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_overrun")
+    return result
 
 func process_streaming_structure_work() -> int:
     if structure_system == null:

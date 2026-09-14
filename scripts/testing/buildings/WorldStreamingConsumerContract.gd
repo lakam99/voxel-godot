@@ -532,6 +532,7 @@ func _view_intent_is_stable_scheduling_input() -> void:
 	var navigation_id: int = _nav_id(context,id)
 	var provider_replacements: int = int(context.navigation.replacement_calls)
 	var revision_before: int = context.coordinator.revision()
+	var view_revision_before: int = context.coordinator.view_revision()
 	var raw := {"origin":Vector3(1.0,2.0,1.0),"forward":Vector3(0.0,0.0,-1.0),
 		"predictedOrigin":Vector3(1.0,2.0,-7.0),"horizontalFovDegrees":78.0,"farDistance":181.0}
 	_check("view_intent_rejects_non_dictionary_without_mutation",
@@ -539,7 +540,8 @@ func _view_intent_is_stable_scheduling_input() -> void:
 		and context.coordinator.revision()==revision_before and _nav_id(context,id)==navigation_id)
 	_check("view_intent_updates_scheduling_without_provider_handle_churn",
 		context.coordinator.set_request_view_intent(id,raw)
-		and context.coordinator.revision()==revision_before+1 and _nav_id(context,id)==navigation_id
+		and context.coordinator.revision()==revision_before
+		and context.coordinator.view_revision()==view_revision_before+1 and _nav_id(context,id)==navigation_id
 		and context.navigation.replacement_calls==provider_replacements)
 	var normalized: Dictionary = ViewPriority.normalize(raw)
 	var manifest: Dictionary = context.coordinator.retained_source_requests()[0]
@@ -551,15 +553,18 @@ func _view_intent_is_stable_scheduling_input() -> void:
 	jittered.origin += Vector3(0.2,0.2,0.2)
 	jittered.predictedOrigin += Vector3(0.2,0.2,0.2)
 	var stable_revision: int = context.coordinator.revision()
+	var stable_view_revision: int = context.coordinator.view_revision()
 	_check("sub_quantum_camera_jitter_is_a_noop",
 		context.coordinator.set_request_view_intent(id,jittered)
 		and context.coordinator.revision()==stable_revision
+		and context.coordinator.view_revision()==stable_view_revision
 		and context.navigation.replacement_calls==provider_replacements)
 	var turned := raw.duplicate(true)
 	turned.forward = Vector3.RIGHT
 	_check("meaningful_view_turn_changes_only_scheduling_revision",
 		context.coordinator.set_request_view_intent(id,turned)
-		and context.coordinator.revision()==stable_revision+1 and _nav_id(context,id)==navigation_id
+		and context.coordinator.revision()==stable_revision
+		and context.coordinator.view_revision()==stable_view_revision+1 and _nav_id(context,id)==navigation_id
 		and context.navigation.replacement_calls==provider_replacements)
 	var groups := {
 		"gate":{"bounds":AABB(Vector3(-2,0,-22),Vector3(4,4,4)),"doorPartIds":["gate-door"]},

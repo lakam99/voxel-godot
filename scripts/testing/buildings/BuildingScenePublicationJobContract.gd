@@ -651,6 +651,7 @@ func _run() -> void:
 	await spatial_dependency_ownership()
 	await base_packet_gate_control()
 	await packet_transaction_order_control()
+	await packet_occupied_transaction_rotation_control()
 	await packet_foreground_deferral_control()
 	await packet_furnishing_session_control()
 	await packet_door_lifecycle_control()
@@ -929,6 +930,45 @@ func packet_transaction_order_control() -> void:
 		check("packet_order_adapter_accepts_exact_canonical_transaction",job.activate_physical_group_packet_scene(int(promoted.id)).status=="pending_budget")
 	job.cancel()
 	await drain(job,"packet_order")
+
+
+func packet_occupied_transaction_rotation_control() -> void:
+	var blueprint := Blueprint.new("packet-occupied-rotation",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_occupied_rotation_history","landscapeTrees":[]}
+	blueprint.add_part({"id":"occupied-room","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(-6,1,0)})
+	blueprint.add_part({"id":"independent-room","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(6,1,0)})
+	var plan := Plan.new("packet-occupied-rotation-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile := frozen_profile()
+	var base_result := Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("occupied_rotation_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var groups: Array[String] = []
+	for raw_id in base_result.base.description.publication_groups.order: groups.append(String(raw_id))
+	groups.sort()
+	check("occupied_rotation_has_two_independent_groups",groups.size()==2)
+	if groups.size()!=2: return
+	var trees := SyntheticTrees.new()
+	var job := Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
+	var first: Dictionary=job.pending_publication_transaction()
+	check("occupied_rotation_pins_one_dependency_complete_root",first.get("status")=="pending" and first.groupIds.size()==1
+		and first.get("estimatedCost",{}).get("bytes",0)>0 and first.get("cancelRevision",-1)==0)
+	var retained: Dictionary=job.defer_occupied_publication_transaction(int(first.transactionId),"synthetic_actor_overlap")
+	var second: Dictionary=job.pending_publication_transaction()
+	check("occupied_rotation_selects_other_room",retained.get("status")=="retained" and second.get("status")=="pending"
+		and second.groupIds.size()==1 and second.groupIds[0]!=first.groupIds[0] and job._occupied_transactions.size()==1)
+	job.defer_occupied_publication_transaction(int(second.transactionId),"synthetic_actor_overlap")
+	var restored: Dictionary=job.pending_publication_transaction()
+	check("occupied_rotation_restores_exact_first_transaction",restored.transactionId==first.transactionId
+		and restored.binding==first.binding and restored.groupIds==first.groupIds and restored.estimatedCost==first.estimatedCost
+		and restored.occupancyWaitReason=="synthetic_actor_overlap" and restored.occupancyWaitCount==1)
+	job.cancel()
+	await drain(job,"packet_occupied_rotation")
 
 
 ## A packet job may have a resident scene from an earlier closure while the

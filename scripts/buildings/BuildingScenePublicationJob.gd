@@ -13,6 +13,13 @@ const BuildingPublisher = preload("res://scripts/buildings/BuildingPartPublisher
 const FurniturePublisher = preload("res://scripts/buildings/FurnishingPublisher.gd")
 const MAX_TRANSACTION_GROUPS := 64
 const MAX_TRANSACTION_MEMBERS := 256
+const MAX_TRANSACTION_ESTIMATED_BYTES := 8*1024*1024
+const MAX_TRANSACTION_COLLISION_MEMBERS := 256
+const MAX_TRANSACTION_REGISTRATIONS := 128
+const ESTIMATED_BUILDING_MEMBER_BYTES := 32768
+const ESTIMATED_FURNITURE_MEMBER_BYTES := 8192
+const ESTIMATED_TREE_MEMBER_BYTES := 24576
+const ESTIMATED_COLLISION_PROOF_BYTES := 4096
 const SELECTION_BUDGET_USEC := 1000
 const MAX_PHYSICAL_REQUIREMENT_TILES := 512
 const MAX_PHYSICAL_REQUIREMENT_VALUES := 131072
@@ -82,6 +89,9 @@ var _background_cursor := 0
 var _selection_stack: Array = []
 var _selection_groups: Array[String] = []
 var _selection_members := 0
+var _selection_estimated_bytes := 0
+var _selection_collision_members := 0
+var _selection_registrations := 0
 var _selection_has_demand := false
 var _selection_set: Dictionary = {}
 var _transaction: Dictionary = {}
@@ -90,6 +100,7 @@ var _transaction_building_cursor := 0
 var _transaction_furniture_cursor := 0
 var _transaction_tree_cursor := 0
 var _transaction_visual_cursor := 0
+var _occupied_transactions: Array[Dictionary] = []
 var _group_receipts: Dictionary = {}
 var _member_witnesses: Dictionary = {}
 var _boundary_witnesses: Dictionary = {}
@@ -145,7 +156,8 @@ func begin(prepared, profile: Dictionary, binding: Dictionary, parent: Node3D, t
 		"spatialDescription":_spatial,"groupRequests":_group_requests,"groupReceipts":_group_receipts,
 		"memberWitnesses":_member_witnesses,"boundaryWitnesses":_boundary_witnesses,
 		"treeBySourceIndex":_tree_by_source_index,"skippedTreeIndices":_skipped_tree_indices,
-		"requestHeap":_request_heap,"selectionStack":_selection_stack,"physicalRequirementMemo":_physical_requirement_memo}
+		"requestHeap":_request_heap,"selectionStack":_selection_stack,"physicalRequirementMemo":_physical_requirement_memo,
+		"occupiedTransactions":_occupied_transactions}
 	_parent = weakref(parent)
 	_tree_receiver = weakref(tree_callback.get_object())
 	_tree_method = tree_callback.get_method()
@@ -177,6 +189,7 @@ func begin_prepared_base(base: Preparation.PreparedPublicationBase, profile: Dic
 	_cpu = {"publicationBase":base,"profile":profile,"binding":_binding,
 		"spatialDescription":_spatial,"groupRequests":_group_requests,"groupReceipts":_group_receipts,
 		"requestHeap":_request_heap,"selectionStack":_selection_stack,"physicalPacketInbox":_physical_packet_inbox,
+		"occupiedTransactions":_occupied_transactions,
 		"packetStaticOnlyGroups":_packet_static_only_groups,
 		"packetForegroundGroups":_packet_foreground_groups,"packetDeferredGroups":_packet_deferred_groups,
 		"physicalRequirementMemo":_physical_requirement_memo,"nodeMetadata":[]}
@@ -303,7 +316,11 @@ func status_count() -> Dictionary:
 		"furnitureParts":_furniture_cursor, "furnitureTotal":_plan.parts.size() if _plan != null else 0,
 		"treesRegistered":_registered_tree_ids.size(), "treesSkipped":_trees_skipped,
 		"treesTotal":_trees.size(), "treeVisualsComplete":_visuals_complete, "freedNodes":_freed_nodes,
-		"doorsRegistered":_door_registered_ids.size(), "doorClaims":_door_claims.size(), "doorsRetired":_doors_retired}
+		"doorsRegistered":_door_registered_ids.size(), "doorClaims":_door_claims.size(), "doorsRetired":_doors_retired,
+		"physicalGroupsComplete":_group_receipts.size(), "physicalGroupsTotal":_groups.get("groups",{}).size(),
+		"retainedGroupRequests":_group_requests.size(), "packetForegroundGroups":_packet_foreground_groups.size(),
+		"occupiedTransactions":_occupied_transactions.size(),"publicationTransactionId":int(_transaction.get("transactionId",0)),
+		"transactionEstimatedCost":_transaction.get("estimatedCost",{})}
 
 
 func advance(budget_usec: int = 2500, expected_transaction_id: int = -1) -> Dictionary:
@@ -388,8 +405,13 @@ func take_retirement_payload() -> Dictionary:
 	_request_heap = []
 	_selection_stack = []
 	_selection_groups = []
+	_selection_members = 0
+	_selection_estimated_bytes = 0
+	_selection_collision_members = 0
+	_selection_registrations = 0
 	_selection_set = {}
 	_transaction = {}
+	_occupied_transactions = []
 	_group_receipts = {}
 	_member_witnesses = {}
 	_boundary_witnesses = {}
@@ -666,6 +688,9 @@ func replace_publication_group_demands(requests: Array, expected_binding: Dictio
 	_selection_groups = []
 	_selection_set = {}
 	_selection_members = 0
+	_selection_estimated_bytes = 0
+	_selection_collision_members = 0
+	_selection_registrations = 0
 	_selection_has_demand = false
 	# Reset only the cheap background iterator. Already committed groups are
 	# skipped; pinned groups remain owned by their original immutable transaction.
@@ -805,6 +830,7 @@ func pending_publication_transaction() -> Dictionary:
 				# Packet publication has no implicit background work. The caller must
 				# retain an explicit foreground closure before another transaction can
 				# be selected; deferred source groups stay resident at the service.
+				if not _occupied_transactions.is_empty(): return _restore_occupied_transaction()
 				return {"status":"pending","reason":"physical_packet_foreground_demand_pending","binding":_binding,
 					"foregroundGroups":_packet_foreground_groups.size(),"deferredGroups":_packet_deferred_groups.size()}
 			elif _background_cursor < _groups.order.size():
@@ -814,6 +840,7 @@ func pending_publication_transaction() -> Dictionary:
 				_selection_stack.append({"id":id,"priority":2147483647,"cursor":0})
 			else:
 				if _group_receipts.size() != _groups.groups.size():
+					if not _occupied_transactions.is_empty(): return _restore_occupied_transaction()
 					_fail("publication_group_selection_incomplete")
 					return {"status":"failed","reason":_reason}
 				return _pin_transaction()
@@ -830,12 +857,28 @@ func pending_publication_transaction() -> Dictionary:
 				_selection_stack.append({"id":dependency,"priority":frame.priority,"cursor":0})
 			continue
 		var members: int = group.members.size()
-		if not _selection_groups.is_empty() and (_selection_groups.size() >= MAX_TRANSACTION_GROUPS or _selection_members+members > MAX_TRANSACTION_MEMBERS):
+		var group_collisions: int = group.collisionMemberBounds.size()
+		var group_registrations: int = group.furnitureIndices.size()+group.treeIndices.size()
+		var group_bytes: int = group.buildingIndices.size()*ESTIMATED_BUILDING_MEMBER_BYTES \
+			+group.furnitureIndices.size()*ESTIMATED_FURNITURE_MEMBER_BYTES \
+			+group.treeIndices.size()*ESTIMATED_TREE_MEMBER_BYTES+group_collisions*ESTIMATED_COLLISION_PROOF_BYTES
+		if not _selection_groups.is_empty() and (_selection_groups.size() >= MAX_TRANSACTION_GROUPS \
+				or _selection_members+members > MAX_TRANSACTION_MEMBERS \
+				or _selection_estimated_bytes+group_bytes > MAX_TRANSACTION_ESTIMATED_BYTES \
+				or _selection_collision_members+group_collisions > MAX_TRANSACTION_COLLISION_MEMBERS \
+				or _selection_registrations+group_registrations > MAX_TRANSACTION_REGISTRATIONS):
 			return _pin_transaction()
 		_selection_stack.pop_back()
 		_selection_groups.append(String(frame.id))
 		_selection_set[frame.id] = true
 		_selection_members += members
+		_selection_estimated_bytes += group_bytes
+		_selection_collision_members += group_collisions
+		_selection_registrations += group_registrations
+		# Packet requests are independent dependency-complete roots. Pin after
+		# each root closure so an occupied doorway cannot hold unrelated retained
+		# houses inside the same source transaction.
+		if _base_packet_mode and _selection_stack.is_empty(): return _pin_transaction()
 		if _selection_groups.size() >= MAX_TRANSACTION_GROUPS or _selection_members >= MAX_TRANSACTION_MEMBERS:
 			return _pin_transaction()
 		if _base_packet_mode and _selection_stack.is_empty() and _request_heap.is_empty():
@@ -849,6 +892,47 @@ func pending_publication_transaction() -> Dictionary:
 			if not _group_receipts.has(id) and not _selection_set.has(id):
 				_selection_stack.append({"id":id,"priority":2147483647,"cursor":0})
 	return {"status":"pending_budget","reason":"publication_group_selection_pending","binding":_binding}
+
+
+## Rotate an occupancy-blocked, still immutable transaction behind other
+## retained work. No member is reselected, rebuilt or acknowledged while it
+## waits; its exact source binding and transaction id survive every yield.
+func defer_occupied_publication_transaction(expected_transaction_id: int, reason := "actor_occupancy") -> Dictionary:
+	if _transaction.is_empty() or int(_transaction.get("transactionId",0))!=expected_transaction_id \
+			or _phase in ["teardown","detach_publishers","retired","consumed"]:
+		return {"status":"rejected","reason":"publication_transaction_changed"}
+	var retained: Dictionary = _transaction.duplicate(true)
+	retained["occupancyWaitReason"] = reason
+	retained["occupancyWaitStartedUsec"] = int(retained.get("occupancyWaitStartedUsec",Time.get_ticks_usec()))
+	retained["occupancyWaitCount"] = int(retained.get("occupancyWaitCount",0))+1
+	retained["resumePhase"] = _phase
+	retained.make_read_only()
+	_occupied_transactions.append(retained)
+	_transaction = {}
+	_cpu["activePublicationTransaction"] = {}
+	_cpu.erase("activePhysicalPacket")
+	_packet_static_only_groups = {}
+	_transaction_building_cursor = 0
+	_transaction_furniture_cursor = 0
+	_transaction_tree_cursor = 0
+	_transaction_visual_cursor = 0
+	_phase = "packet_wait" if _base_packet_mode else "transaction_select"
+	return {"status":"retained","transactionId":expected_transaction_id,"reason":reason}
+
+
+func _restore_occupied_transaction() -> Dictionary:
+	var retained: Dictionary = _occupied_transactions.pop_front()
+	_transaction = retained
+	_cpu["activePublicationTransaction"] = retained
+	if _base_packet_mode:
+		var packet = _physical_packet_inbox.get(String(retained.get("physicalPacketKey","")))
+		if packet != null:
+			_cpu["activePhysicalPacket"] = packet
+			_packet_static_only_groups = _packet_static_only_groups_for(packet)
+		_phase = String(retained.get("resumePhase","packet_wait"))
+	else:
+		_phase = String(retained.get("resumePhase","building"))
+	return _transaction
 
 
 func _pin_transaction() -> Dictionary:
@@ -873,6 +957,15 @@ func _pin_transaction() -> Dictionary:
 	_selection_groups.make_read_only()
 	collision_bounds.make_read_only()
 	var group_key := _physical_packet_key(_selection_groups)
+	var estimated_bytes := building_indices.size()*ESTIMATED_BUILDING_MEMBER_BYTES \
+		+furniture_indices.size()*ESTIMATED_FURNITURE_MEMBER_BYTES \
+		+tree_indices.size()*ESTIMATED_TREE_MEMBER_BYTES \
+		+collision_bounds.size()*ESTIMATED_COLLISION_PROOF_BYTES
+	var estimated_cost := {"bytes":estimated_bytes,"geometryMembers":building_indices.size(),
+		"collisionMembers":collision_bounds.size(),"registrations":furniture_indices.size()+tree_indices.size(),
+		"byteLimit":MAX_TRANSACTION_ESTIMATED_BYTES,"collisionLimit":MAX_TRANSACTION_COLLISION_MEMBERS,
+		"registrationLimit":MAX_TRANSACTION_REGISTRATIONS}
+	estimated_cost.make_read_only()
 	var transaction_status := "ready"
 	var transaction_reason := ""
 	if _base_packet_mode and not _physical_packet_inbox.has(group_key):
@@ -880,12 +973,16 @@ func _pin_transaction() -> Dictionary:
 		transaction_reason = "physical_group_packet_pending"
 	_transaction = {"status":transaction_status,"reason":transaction_reason,"binding":_binding,"id":_transaction_serial,"transactionId":_transaction_serial,
 		"groupIds":_selection_groups,"buildingIndices":building_indices,"furnitureIndices":furniture_indices,
-		"treeIndices":tree_indices,"collisionMemberBounds":collision_bounds,"physicalPacketKey":group_key}
+		"treeIndices":tree_indices,"collisionMemberBounds":collision_bounds,"physicalPacketKey":group_key,
+		"estimatedCost":estimated_cost,"pinnedUsec":Time.get_ticks_usec(),"cancelRevision":_cancel_revision}
 	_transaction.make_read_only()
 	_cpu["activePublicationTransaction"] = _transaction
 	_selection_groups = []
 	_selection_set = {}
 	_selection_members = 0
+	_selection_estimated_bytes = 0
+	_selection_collision_members = 0
+	_selection_registrations = 0
 	_selection_has_demand = false
 	_transaction_building_cursor = 0
 	_transaction_furniture_cursor = 0

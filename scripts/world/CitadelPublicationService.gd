@@ -27,6 +27,15 @@ const MAX_PENDING_NAVIGATION_TILES := 512
 # one priority class per four successful worker dispatches, never per query.
 const PRIORITY_AGING_DISPATCH_TURNS := 4
 const MAX_INCREMENTAL_FOREGROUND_GROUPS := 256
+const VIEW_WINDOW_PROGRESS_TARGET_GROUPS := 224
+const FIRST_USEFUL_HOME_COUNT := 2
+const FIRST_USEFUL_HOME_ARCHETYPES: Array[String] = ["bed","chair","hearth","table"]
+const FIRST_USEFUL_STRUCTURAL_SEMANTICS: Array[String] = [
+	"castle_gatehouse_wall_stair_exit",
+	"castle_gatehouse_wall_stair_landing",
+	"castle_keep_stair_exit",
+	"castle_keep_stair_landing",
+]
 
 var _admission
 var _worker = Worker.new()
@@ -42,13 +51,10 @@ var _retained_discovery_priorities: Dictionary = {}
 var _observer_region_bounds := Rect2i()
 var _observer_bounds_rejected := false
 var _demand_revision := 0
+var _view_revision := 0
 var _prepared: Dictionary = {}
 var _navigation: Dictionary = {}
 var _pending_packet_navigation: Dictionary = {}
-# Packet publication records an exact oversized foreground closure here before
-# retiring its partial scene into the complete-source lifecycle. A narrow or
-# not-yet-described request must never set this marker or silently widen.
-var _packet_source_fallback: Dictionary = {}
 # A retained source query starts before its description has supplied a precise
 # physical closure.  Keep its immutable base outside the scene lifecycle so
 # the next retained request can promote that same source revision into packet
@@ -88,6 +94,7 @@ var _prefer_retirement := true
 var _scene_started_count := 0
 var _scene_completed_count := 0
 var _scene_max_step_usec := 0
+var _scene_unit_metrics: Dictionary = {}
 var _advancing := false
 var _configuration_serial := 0
 var _world_reset_pending := false
@@ -204,12 +211,14 @@ func configure(admission) -> void:
 	_retained_region_bounds = []
 	_retained_consumers = []
 	_clear_retained_priorities()
-	_packet_source_fallback = {}
 	_observer_region_bounds = Rect2i()
 	_observer_bounds_rejected = false
 	_demand_revision += 1
+	_view_revision += 1
 	_inflight = {}
 	_failures = {}
+	_scene_unit_metrics = {}
+	_scene_max_step_usec = 0
 	_admission = admission
 	var state: Dictionary = admission.stats()
 	_generation = int(state.generation)
@@ -375,6 +384,33 @@ func set_retained_source_requests(requests: Array) -> bool:
 	_demand_revision += 1
 	return true
 
+## Camera intent is scheduling state, not spatial/source ownership. Applying it
+## must not replay the immutable source manifest or invalidate the currently
+## retained packet transaction. The newest view is consumed when that bounded
+## window completes and the job asks for its next window.
+func set_retained_view_intents(values: Array) -> bool:
+	if _closing or values.size()>MAX_RETAINED_BOUNDS: return false
+	var by_owner: Dictionary = {}
+	for value in values:
+		if not value is Dictionary or not value.get("ownerId") is int or int(value.ownerId)<=0 \
+				or by_owner.has(int(value.ownerId)) or not value.get("viewIntent",{}) is Dictionary:
+			return false
+		var raw: Dictionary = value.get("viewIntent",{})
+		var normalized: Dictionary = ViewPriority.normalize(raw)
+		if not raw.is_empty() and normalized.is_empty(): return false
+		by_owner[int(value.ownerId)] = normalized
+	var changed := false
+	for consumer: Dictionary in _retained_consumers:
+		var owner_id := int(consumer.ownerId)
+		if not by_owner.has(owner_id): continue
+		var next: Dictionary = by_owner[owner_id]
+		if consumer.get("viewIntent",{}) == next: continue
+		if next.is_empty(): consumer.erase("viewIntent")
+		else: consumer["viewIntent"] = next
+		changed = true
+	if changed: _view_revision += 1
+	return true
+
 func _clear_retained_priorities() -> void:
 	_retained_navigation_priorities = {}
 	_retained_binding_priorities = {}
@@ -517,9 +553,6 @@ func _current_binding(binding: Dictionary) -> bool:
 		and String(_admission.stats().worldSeed) == _seed
 
 func _prune_unwanted(ready: Dictionary) -> void:
-	for region: Vector2i in _packet_source_fallback.keys():
-		if not ready.has(region) or ready[region].binding != _packet_source_fallback[region]:
-			_packet_source_fallback.erase(region)
 	for region: Vector2i in _navigation.keys():
 		if not ready.has(region) or ready[region].binding != _navigation[region].binding:
 			_retire(_navigation[region])
@@ -669,7 +702,6 @@ func _packet_group_ids(binding: Dictionary) -> Array[String]:
 	return ids
 
 func _packet_requested_for_source(region: Vector2i, binding: Dictionary) -> bool:
-	if _packet_source_fallback.get(region,{})==binding: return false
 	for consumer: Dictionary in _retained_consumers:
 		for site: Dictionary in consumer.sites:
 			if site.binding==binding and (not site.groupIds.is_empty() or not site.get("foregroundNavigationTileKeys",[]).is_empty()): return true
@@ -681,8 +713,6 @@ func _packet_requested_for_source(region: Vector2i, binding: Dictionary) -> bool
 ## scene.  A consumer that already names sites (including an empty/ineligible
 ## group set) is an actual publication demand and follows normal eligibility.
 func _packet_bootstrap_requested_for_source(source: Dictionary) -> bool:
-	for fallback_binding in _packet_source_fallback.values():
-		if fallback_binding==source.get("binding",{}): return false
 	for consumer: Dictionary in _retained_consumers:
 		if not consumer.sites.is_empty(): continue
 		if source.reservationCells.intersects(consumer.bounds): return true
@@ -807,7 +837,8 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 		if not blocked_ids.has(id): blocked_ids.append(id)
 	blocked_ids.sort()
 	return {"status":"ready","requests":window.requests,"deferredGroupIds":window.deferredGroupIds,
-		"foregroundGroupIds":window.foregroundGroupIds,"viewPrioritizedGroupIds":window.viewPrioritizedGroupIds,
+		"foregroundGroupIds":window.foregroundGroupIds,"readinessGroupIds":window.readinessGroupIds,
+		"viewPrioritizedGroupIds":window.viewPrioritizedGroupIds,
 		"portalGroupIds":window.portalGroupIds,"blockedGroupIds":blocked_ids,"boundaryGroupIds":boundary_ids,
 		"censusReady":census.get("ready",base==null),"rollingWindow":true}
 
@@ -821,6 +852,19 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	for request: Dictionary in base_requests:
 		for id: String in request.groupIds:
 			candidates[id] = {"id":id,"priority":int(request.priority),"distanceSquared":0.0,"portal":false,"throughPortal":false}
+	var useful: Dictionary = _first_useful_packet_groups(description,base,census,completed)
+	if useful.get("status")!="ready": return useful
+	for id: String in useful.get("groupIds",[]):
+		if not candidates.has(id):
+			candidates[id]={"id":id,"priority":0,"distanceSquared":0.0,"portal":false,"throughPortal":false}
+	# Only explicit spatial/tile owners gate gameplay readiness. Camera-ranked
+	# neighbours remain background presentation work and cannot hold the player
+	# until a rolling city window (or the whole source) is installed.
+	var readiness: Dictionary = {}
+	for id: String in candidates:
+		var readiness_closure: Dictionary = _packet_dependency_window(groups,id,completed)
+		if readiness_closure.get("status")!="ready": return readiness_closure
+		for required_id: String in readiness_closure.groupIds: readiness[required_id]=true
 	for consumer: Dictionary in consumers:
 		var view: Dictionary = consumer.get("viewIntent",{})
 		if view.is_empty(): continue
@@ -868,7 +912,10 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 			selected_priority[required_id]=mini(int(selected_priority.get(required_id,row.priority)),int(row.priority))
 		if int(row.priority)<4: view_ids.append(id)
 		if bool(row.get("portal",false)) or bool(row.get("throughPortal",false)): portal_ids.append(id)
-		if selected.size()>=MAX_INCREMENTAL_FOREGROUND_GROUPS: break
+		# Do not scan thousands of lower-ranked closures trying to fill the final
+		# few slots. This still publishes a substantial bounded window and the
+		# retained job selects another window after acknowledgement.
+		if selected.size()>=VIEW_WINDOW_PROGRESS_TARGET_GROUPS: break
 	var by_priority: Dictionary = {}
 	for id: String in selected_order:
 		var priority := int(selected_priority[id])
@@ -886,8 +933,93 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	portal_ids = _unique_sorted_strings(portal_ids)
 	var blocked_ids: Array = blocked.keys()
 	blocked_ids.sort()
+	var readiness_ids: Array[String] = []
+	for id: String in readiness: readiness_ids.append(id)
+	readiness_ids.sort()
 	return {"status":"ready","requests":requests,"foregroundGroupIds":selected_order,
+		"readinessGroupIds":readiness_ids,
+		"firstUsefulHomeIds":useful.get("homeIds",[]),"firstUsefulDoorGroupId":useful.get("doorGroupId",""),
+		"firstUsefulStructuralGroupIds":useful.get("structuralGroupIds",[]),
 		"deferredGroupIds":deferred,"viewPrioritizedGroupIds":view_ids,"portalGroupIds":portal_ids,"blockedGroupIds":blocked_ids}
+
+## Choose semantic first-content anchors from immutable generated source data.
+## This is not seed/name choreography: every qualifying Citadel contributes the
+## first two complete home furnishing sets, one publishable door closure and a
+## real stair/landing support.  The latter keeps first-useful readiness honest:
+## a visually useful packet must also expose a live player-capsule clearance
+## witness rather than declaring readiness from furniture and one door alone.
+func _first_useful_packet_groups(description, base, census: Dictionary, completed: Dictionary) -> Dictionary:
+	if base==null: return {"status":"ready","groupIds":[],"homeIds":[],"doorGroupId":"","structuralGroupIds":[]}
+	var groups: Dictionary = description.publication_groups.get("groups",{})
+	var by_part: Dictionary = description.publication_groups.get("groupByPart",{})
+	var furnishing_source: Dictionary = base.furnishing_source
+	var furnishing_parts: Variant = furnishing_source.get("parts",[])
+	if not furnishing_parts is Array: return {"status":"failed","reason":"invalid_first_useful_furnishing_source"}
+	var homes: Dictionary = {}
+	for raw_part in furnishing_parts:
+		if not raw_part is Dictionary: continue
+		var part: Dictionary = raw_part
+		var recipe: Variant = part.get("recipe",{})
+		if not recipe is Dictionary: continue
+		var home_id := String(recipe.get("citadelUrbanHomeId",""))
+		var archetype := String(part.get("archetype",""))
+		var member_id := "furnishing:"+String(part.get("id",""))
+		if home_id.is_empty() or archetype not in FIRST_USEFUL_HOME_ARCHETYPES or not by_part.has(member_id): continue
+		var group_id := String(by_part[member_id])
+		if not _packet_group_closure_publishable(description,census,group_id,completed): continue
+		if not homes.has(home_id): homes[home_id]={}
+		if not homes[home_id].has(archetype): homes[home_id][archetype]=group_id
+	var selected: Dictionary = {}
+	var selected_homes: Array[String] = []
+	var home_ids: Array = homes.keys()
+	home_ids.sort()
+	for home_id_value in home_ids:
+		var home_id := String(home_id_value)
+		var archetypes: Dictionary = homes[home_id]
+		if not FIRST_USEFUL_HOME_ARCHETYPES.all(func(value: String): return archetypes.has(value)): continue
+		for archetype: String in FIRST_USEFUL_HOME_ARCHETYPES: selected[String(archetypes[archetype])]=true
+		selected_homes.append(home_id)
+		if selected_homes.size()>=FIRST_USEFUL_HOME_COUNT: break
+	var door_group_id := ""
+	var ordered_group_ids: Array = groups.keys()
+	ordered_group_ids.sort()
+	for group_id_value in ordered_group_ids:
+		var group_id := String(group_id_value)
+		if groups[group_id].get("doorPartIds",[]).is_empty(): continue
+		if _packet_group_closure_publishable(description,census,group_id,completed):
+			door_group_id=group_id
+			selected[group_id]=true
+			break
+	var structural_candidates: Dictionary = {}
+	var building_parts: Variant = base.building_source.get("parts",[])
+	if not building_parts is Array: return {"status":"failed","reason":"invalid_first_useful_building_source"}
+	for raw_part in building_parts:
+		if not raw_part is Dictionary: continue
+		var part: Dictionary = raw_part
+		if String(part.get("semantic","")) not in FIRST_USEFUL_STRUCTURAL_SEMANTICS: continue
+		var member_id := "building:"+String(part.get("id",""))
+		if not by_part.has(member_id): continue
+		var group_id := String(by_part[member_id])
+		if not _packet_group_closure_publishable(description,census,group_id,completed): continue
+		structural_candidates[group_id]=true
+	if structural_candidates.is_empty():
+		return {"status":"failed","reason":"first_useful_structural_group_missing"}
+	var structural_candidate_ids: Array = structural_candidates.keys()
+	structural_candidate_ids.sort()
+	var structural_group_id := String(structural_candidate_ids[0])
+	selected[structural_group_id]=true
+	var selected_ids: Array[String] = []
+	for group_id: String in selected: selected_ids.append(group_id)
+	selected_ids.sort()
+	return {"status":"ready","groupIds":selected_ids,"homeIds":selected_homes,"doorGroupId":door_group_id,
+		"structuralGroupIds":[structural_group_id]}
+
+func _packet_group_closure_publishable(description, census: Dictionary, group_id: String, completed: Dictionary) -> bool:
+	var closure: Dictionary = _packet_dependency_window(description.publication_groups.groups,group_id,completed)
+	if closure.get("status")!="ready": return false
+	for required_id: String in closure.groupIds:
+		if not _packet_group_publishable(description,census,required_id): return false
+	return true
 
 static func _unique_sorted_strings(values: Array[String]) -> Array[String]:
 	var seen: Dictionary = {}
@@ -971,14 +1103,11 @@ func _collect_publication_base(region: Vector2i, current: Dictionary, result: Di
 			return
 	var packet_plan: Dictionary = _base_packet_eligible(base,current.binding,region) if result.get("ready",false) and base!=null else {}
 	if not result.get("ready",false) or base==null or packet_plan.get("status")!="ready":
-		if packet_plan.get("reason")=="packet_foreground_scope_too_large":
-			_packet_source_fallback[region] = current.binding.duplicate()
-		if base!=null: _retire({"base":base})
-		var receipt := _worker.dispatch_scene_source(current.get("source",{}),current.binding)
-		if receipt.get("status") in ["started","queued"] and not receipt.get("duplicate",false):
-			_inflight={"kind":"preparation","region":region,"binding":current.binding.duplicate(),"token":int(receipt.token)}
-			_dispatch_count+=1
-		else: _inflight={}
+		if base!=null:
+			_retain_packet_bootstrap_base(region,current,base,result.get("profile",{}))
+		if packet_plan.get("status")=="failed":
+			_failures[region]={"binding":current.binding.duplicate(),"reason":String(packet_plan.get("reason","packet_publication_plan_failed"))}
+		_inflight={}
 		return
 	# A packet base is sufficient to start the foreground physical scene.  Do
 	# not construct its dense navigation producer here: that previously let a
@@ -1009,9 +1138,9 @@ func _collect_physical_group_packet(region: Vector2i, current: Dictionary, resul
 	var offered: Dictionary = entry.job.offer_physical_group_packet(packet,current.binding)
 	if offered.get("status")!="retained":
 		_failures[region]={"binding":current.binding,"reason":String(offered.get("reason","physical_packet_offer_failed"))}; _retire_scene(region); return
-	var activated: Dictionary = entry.job.activate_physical_group_packet_scene(transaction_id)
-	if activated.get("status")!="pending_budget":
-		_failures[region]={"binding":current.binding,"reason":String(activated.get("reason","physical_packet_activate_failed"))}; _retire_scene(region)
+	# Activation is deliberately left to the next main-thread pump. The exact
+	# actor-volume guard is re-read there, after worker latency and immediately
+	# before any scene/collider publication can advance.
 
 func _dispatch(ready: Dictionary, observer: Vector2i) -> bool:
 	var candidates: Array[Dictionary] = _dispatch_candidates(ready,observer,true)
@@ -1178,11 +1307,10 @@ func _dispatch_candidate(candidate: Dictionary, ready: Dictionary) -> void:
 				_record_successful_dispatch(candidate,order)
 				return
 			if bootstrap_requested and not packet_requested: return
-			# Exact group membership is now known but cannot use packet mode.  Drop
-			# the base and enter the established source path only for that ineligible
-			# demand; an unresolved bootstrap never falls back on its own.
-			_retire(bootstrap)
-			_packet_bootstrap_bases.erase(region)
+			var packet_state: Dictionary = _base_packet_eligible(base,source.binding,region) if packet_requested else {"status":"pending"}
+			if packet_state.get("status")=="failed":
+				_failures[region]={"binding":source.binding.duplicate(),"reason":String(packet_state.get("reason","packet_publication_plan_failed"))}
+			return
 		receipt = _worker.dispatch_publication_base(source.source,source.binding) if packet_requested or bootstrap_requested \
 			else _worker.dispatch_scene_source(source.source,source.binding)
 		if receipt.get("status") not in ["started","queued"]: return
@@ -1326,6 +1454,7 @@ func request_shutdown() -> void:
 	_clear_retained_priorities()
 	_observer_region_bounds = Rect2i()
 	_demand_revision += 1
+	_view_revision += 1
 	_retire_all_scenes()
 	_desired = {}
 	_inflight = {}
@@ -1345,8 +1474,12 @@ func stats() -> Dictionary:
 			"demandRevision":int(entry.get("demandRevision",-1)),"packetDemandStatus":String(demand.get("status","")),
 			"packetDemandReason":String(demand.get("reason","")),"packetDemandRequests":demand.get("requests",[]).size(),
 			"packetForegroundGroups":demand.get("foregroundGroupIds",[]).size(),"packetDeferredGroups":demand.get("deferredGroupIds",[]).size(),
+			"packetReadinessGroups":demand.get("readinessGroupIds",[]).size(),
 			"physicalGroupsComplete":int(job_status.get("physicalGroupsComplete",0)),"physicalGroupsTotal":int(job_status.get("physicalGroupsTotal",0)),
-			"retainedGroupRequests":int(job_status.get("retainedGroupRequests",0)),"publicationTransactionId":int(job_status.get("publicationTransactionId",0))})
+			"retainedGroupRequests":int(job_status.get("retainedGroupRequests",0)),"publicationTransactionId":int(job_status.get("publicationTransactionId",0)),
+			"occupiedTransactions":int(job_status.get("occupiedTransactions",0)),"occupancyWaitReason":String(entry.get("occupancyWaitReason","")),
+			"occupancyWaitCount":int(entry.get("occupancyWaitCount",0)),
+			"occupancyWaitUsec":Time.get_ticks_usec()-int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec())) if entry.has("occupancyWaitStartedUsec") else 0})
 	scenes.sort_custom(func(a: Dictionary,b: Dictionary) -> bool:
 		var left: Vector2i = a.region
 		var right: Vector2i = b.region
@@ -1368,7 +1501,7 @@ func stats() -> Dictionary:
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
 		"dispatchCount":_dispatch_count,"acceptedCount":_accepted_count,"maxAdvanceUsec":_max_advance_usec,
 		"publicationReady":false,"worker":_last_worker_status,"sourceScheduling":scheduling,
-		"sceneDiagnostics":scenes,"demandRevision":_demand_revision,
+		"sceneDiagnostics":scenes,"sceneUnitMetrics":_scene_unit_metrics.duplicate(true),"demandRevision":_demand_revision,"viewRevision":_view_revision,
 		"doorLifecycleConfigured":_door_lifecycle_configured,"doorLifecycleAvailable":_door_callbacks_ready(),
 		"constructionStatus":"available" if _scene_callbacks_ready() else "pending",
 		"constructionReason":"" if _scene_callbacks_ready() else "scene_lifecycle_capability_missing",
@@ -1465,12 +1598,8 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 			entry["packetDemandStatus"] = plan.duplicate(true)
 			return false
 		if plan.get("foregroundGroupIds",[]).size()>MAX_INCREMENTAL_FOREGROUND_GROUPS:
-			# A city-scale closure is cheaper and more stable as one prepared source
-			# than as thousands of packet receipts that are replaced while walking.
-			# Preserve the source binding, retire the partial packet scene, and let
-			# the next worker turn use the established full-source lifecycle.
-			_packet_source_fallback[entry.region] = entry.binding.duplicate()
-			_retire_scene(entry.region)
+			entry["packetDemandStatus"]={"status":"failed","reason":"packet_foreground_scope_too_large",
+				"groupCount":plan.foregroundGroupIds.size()}
 			return false
 		var navigation_groups: Dictionary = entry.get("navigationPhysicalGroups",{})
 		if not navigation_groups.is_empty():
@@ -1499,7 +1628,9 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 				if priority==0:
 					for group_id: String in requested:
 						if not plan.foregroundGroupIds.has(group_id): plan.foregroundGroupIds.append(group_id)
+						if not plan.readinessGroupIds.has(group_id): plan.readinessGroupIds.append(group_id)
 			plan.foregroundGroupIds.sort()
+			plan.readinessGroupIds.sort()
 			var deferred: Array[String] = []
 			for group_id: String in plan.deferredGroupIds:
 				if not navigation_ids.has(group_id): deferred.append(group_id)
@@ -1508,9 +1639,14 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 		if packet_result.get("status")!="retained":
 			entry["packetDemandStatus"] = packet_result.duplicate(true)
 			return false
+		# Gameplay readiness is the semantic first-content closure assembled by the
+		# plan (spatial safety, two complete homes and a door). The wider ranked
+		# window remains non-blocking presentation work before and after readiness.
+		var readiness_group_ids: Array = plan.readinessGroupIds
 		entry["packetDemandStatus"] = {"status":"retained","reason":"packet_foreground_groups_deferred" if not plan.blockedGroupIds.is_empty() and plan.requests.is_empty() else "",
 			"requests":plan.requests.duplicate(true),
-			"foregroundGroupIds":plan.foregroundGroupIds.duplicate(),"deferredGroupIds":plan.deferredGroupIds.duplicate(),
+			"foregroundGroupIds":plan.foregroundGroupIds.duplicate(),"readinessGroupIds":readiness_group_ids.duplicate(),
+			"deferredGroupIds":plan.deferredGroupIds.duplicate(),
 			"viewPrioritizedGroupIds":plan.get("viewPrioritizedGroupIds",[]).duplicate(),
 			"portalGroupIds":plan.get("portalGroupIds",[]).duplicate(),
 			"blockedGroupIds":plan.blockedGroupIds.duplicate(),"boundaryGroupIds":plan.boundaryGroupIds.duplicate()}
@@ -1531,6 +1667,15 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 	entry["demandRevision"] = _demand_revision
 	return true
 
+func _record_scene_unit(label: String, started_usec: int) -> void:
+	var elapsed := Time.get_ticks_usec()-started_usec
+	var metric: Dictionary = _scene_unit_metrics.get(label,{"calls":0,"totalUsec":0,"maxUsec":0,"lastUsec":0})
+	metric.calls += 1
+	metric.totalUsec += elapsed
+	metric.maxUsec = maxi(int(metric.maxUsec),elapsed)
+	metric.lastUsec = elapsed
+	_scene_unit_metrics[label] = metric
+
 func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_usec: int) -> void:
 	# One shared budget, fair across building and retirement. No per-site budget
 	# multiplication. Job.advance itself packs cheap work into its remaining slice.
@@ -1546,7 +1691,9 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 			# Keep this owner visible during callbacks, including reentrant reset
 			# or attempted root rebinding, until its current unit returns.
 			var entry: Dictionary=_retiring_scenes[0]
+			var retirement_started := Time.get_ticks_usec()
 			entry.job.advance(remaining)
+			_record_scene_unit("retirement_advance",retirement_started)
 			_retiring_scenes.pop_front()
 			if entry.job.status().retirementReady:
 				var payload: Dictionary=entry.job.take_retirement_payload()
@@ -1557,7 +1704,9 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 		elif allow_build and _scene_callbacks_ready():
 			for region: Vector2i in _prepared.keys():
 				if ready.has(region) and not _region_retiring(region) and not _failures.has(region):
+					var start_scene_started := Time.get_ticks_usec()
 					progressed=_start_scene(region,ready[region])
+					_record_scene_unit("scene_start",start_scene_started)
 					if progressed or configuration!=_configuration_serial or demand_revision!=_demand_revision or _closing: break
 			if not progressed and configuration==_configuration_serial and demand_revision==_demand_revision and not _closing:
 				var regions: Array=_scenes.keys()
@@ -1572,8 +1721,22 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					# readiness acknowledgement; a later demand revision can demote it
 					# before it publishes another packet.
 					if entry.phase not in ["publishing","scene_ready"] or not ready.has(region): continue
-					if not _refresh_scene_group_demand(entry): continue
+					var demand_started := Time.get_ticks_usec()
+					var demand_ready := _refresh_scene_group_demand(entry)
+					_record_scene_unit("demand_refresh",demand_started)
+					if not demand_ready: continue
+					# The exact spatial safety closure is sufficient to resume gameplay.
+					# This resident owner continues view-ranked/background publication.
+					if bool(entry.get("packetMode",false)) and entry.phase=="publishing" \
+							and _packet_foreground_physical_ready(region,entry.binding):
+						entry["firstUsefulWindowReady"]=true
+						entry.phase="scene_ready"
+						_scene_completed_count+=1
+						progressed=true
+						break
+					var selection_started := Time.get_ticks_usec()
 					var transaction: Dictionary = entry.job.pending_publication_transaction()
+					_record_scene_unit("transaction_selection",selection_started)
 					if transaction.get("status") in ["failed","cancelled"]:
 						_failures[region] = {"binding":entry.binding,"reason":transaction.get("reason","publication_transaction_failed")}
 						_retire_scene(region)
@@ -1592,12 +1755,36 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 								# The completed rolling window is guaranteed progress. Keep
 								# the resident scene and promote its next view-ranked window.
 								entry["demandRevision"]=-1
-								entry.phase="publishing"
 								progressed=true
 								break
 							if entry.phase!="scene_ready":
 								entry.phase="scene_ready"
 								_scene_completed_count+=1
+							progressed=true
+							break
+						if transaction.get("status")=="ready":
+							var packet_guard_started := Time.get_ticks_usec()
+							var packet_guard_allowed := _construction_transaction_allowed(transaction)
+							_record_scene_unit("occupancy_guard",packet_guard_started)
+							if not packet_guard_allowed:
+								var deferred_occupancy: Dictionary = entry.job.defer_occupied_publication_transaction(int(transaction.transactionId))
+								if deferred_occupancy.get("status")!="retained":
+									_failures[region]={"binding":entry.binding,"reason":String(deferred_occupancy.get("reason","occupancy_defer_failed"))}
+									_retire_scene(region)
+								else:
+									entry["occupancyWaitReason"]="actor_occupancy"
+									entry["occupancyWaitCount"]=int(entry.get("occupancyWaitCount",0))+1
+									entry["occupancyWaitStartedUsec"]=int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec()))
+								_scene_cursor=(index+1)%regions.size()
+								progressed=true
+								break
+							var activated: Dictionary = entry.job.activate_physical_group_packet_scene(int(transaction.transactionId))
+							if activated.get("status")!="pending_budget":
+								_failures[region]={"binding":entry.binding,"reason":String(activated.get("reason","physical_packet_activate_failed"))}
+								_retire_scene(region)
+							else:
+								entry.erase("occupancyWaitReason")
+								entry.erase("occupancyWaitStartedUsec")
 							progressed=true
 							break
 						if transaction.get("status") not in ["ready","pending"] \
@@ -1643,21 +1830,40 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 							blocked["reason"] = "packet_foreground_groups_deferred"
 							entry["packetDemandStatus"] = blocked
 							progressed=true; break
+						var dispatch_started := Time.get_ticks_usec()
 						var receipt := _worker.dispatch_physical_group_packet(base,transaction.groupIds,entry.binding)
+						_record_scene_unit("packet_dispatch",dispatch_started)
 						if receipt.get("status") in ["started","queued"] and not receipt.get("duplicate",false):
 							_inflight={"kind":"physical_group_packet","region":region,"binding":entry.binding,"token":int(receipt.token),"transactionId":int(transaction.transactionId)}
 							progressed=true
 						break
 					if transaction.get("status")!="ready": continue
-					if not _construction_transaction_allowed(transaction):
+					var guard_started := Time.get_ticks_usec()
+					var guard_allowed := _construction_transaction_allowed(transaction)
+					_record_scene_unit("occupancy_guard",guard_started)
+					if not guard_allowed:
 						if configuration!=_configuration_serial or demand_revision!=_demand_revision or _closing: break
-						continue
+						var deferred_occupancy: Dictionary = entry.job.defer_occupied_publication_transaction(int(transaction.transactionId))
+						if deferred_occupancy.get("status")!="retained":
+							_failures[region]={"binding":entry.binding,"reason":String(deferred_occupancy.get("reason","occupancy_defer_failed"))}
+							_retire_scene(region)
+						else:
+							entry["occupancyWaitReason"]="actor_occupancy"
+							entry["occupancyWaitCount"]=int(entry.get("occupancyWaitCount",0))+1
+							entry["occupancyWaitStartedUsec"]=int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec()))
+						_scene_cursor=(index+1)%regions.size()
+						progressed=true
+						break
+					entry.erase("occupancyWaitReason")
+					entry.erase("occupancyWaitStartedUsec")
 					# Guard callbacks are external owners too: recapture no mutable
 					# job from a generation/entry cancelled during the callback.
 					if not is_same(_scenes.get(region),entry) or entry.phase!="publishing" or entry.job.status_count().phase!=phase: continue
 					if _admission.source_state(region).get("binding",{}) != entry.binding or not _scene_callbacks_ready(): continue
 					_scene_cursor=(index+1)%regions.size()
+					var job_started := Time.get_ticks_usec()
 					var result: Dictionary=entry.job.advance(remaining,int(transaction.transactionId))
+					_record_scene_unit("job_advance",job_started)
 					if not is_same(_scenes.get(region),entry):
 						# A callback invalidated/moved this owner. It cannot publish
 						# readiness or a failure into its replacement generation.
@@ -1982,7 +2188,7 @@ func _packet_foreground_physical_ready(region: Vector2i, binding: Dictionary) ->
 	if not bool(entry.get("packetMode",false)): return true
 	var demand: Dictionary = entry.get("packetDemandStatus",{})
 	if demand.get("status")!="retained": return false
-	for group_id: String in demand.get("foregroundGroupIds",[]):
+	for group_id: String in demand.get("readinessGroupIds",demand.get("foregroundGroupIds",[])):
 		if entry.job.physical_group_receipt(group_id,binding).get("status")!="ready": return false
 	return true
 

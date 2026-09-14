@@ -34,6 +34,8 @@ const COLLISION_MESH_VERTICAL_MARGIN_CELLS := 4
 const SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const SEED_RESET_REQUIRED_QUIET_FRAMES := 2
 const SITE_TRAVERSAL_READINESS_POLL_USEC := 100000
+const MOTION_PROOF_MAX_SAMPLES := 32
+const MOTION_PROOF_SAMPLE_SPACING_CELLS := 0.5
 const MATERIAL_IDS := {
 	"air": 0, "grass": 1, "dirt": 2, "stone": 3, "sand": 4, "snow": 5,
 	"deepStone": 6, "bedrock": 7, "clay": 8, "gravel": 9, "coalOre": 10,
@@ -55,6 +57,8 @@ var desired_gameplay_chunks := {}
 var pending_gameplay_chunks := {}
 var pending_gameplay_chunk_order: Array[Vector2i] = []
 var published_gameplay_chunks := {}
+var gameplay_chunk_edit_revisions := {}
+var collision_owner_generation := 0
 var collision_probe_attempts := 0
 var collision_probe_passes := 0
 var view_distance_expansion_elapsed := 0.0
@@ -192,6 +196,7 @@ var site_traversal_last_poll_usec := 0
 
 func setup(main_node) -> Dictionary:
 	main = main_node
+	collision_owner_generation += 1
 	configured_seed = String(main.get("seed_text"))
 	if not required_classes_available():
 		return {"ok": false, "reason": "voxel_tools_runtime_classes_missing"}
@@ -299,6 +304,8 @@ func reset_for_current_seed_staged() -> Dictionary:
 		})
 	published_mesh_blocks.clear()
 	pending_edit_sections.clear()
+	gameplay_chunk_edit_revisions.clear()
+	collision_owner_generation += 1
 	edit_batches_applied = 0
 	collision_probe_attempts = 0
 	collision_probe_passes = 0
@@ -789,7 +796,8 @@ func _process(delta: float) -> void:
 		if can_prepare:
 			var player_cell := Vector2i(floori(main.player.global_position.x/CELL),floori(main.player.global_position.z/CELL))
 			bounds=Rect2i(player_cell-Vector2i(2,2),Vector2i(5,5))
-		main.structure_system.advance_citadel_publication(bounds,can_prepare)
+		if main.has_method("advance_citadel_publication_shared"):
+			main.advance_citadel_publication_shared(bounds,can_prepare)
 	if authority_ready:
 		if not generation_context_current():
 			terrain.automatic_loading_enabled = false
@@ -1047,6 +1055,19 @@ func queue_edit_change(cell: Vector3i, state: Dictionary, signature: String) -> 
 	var changes: Dictionary = pending_edit_sections.get(section_key, {}) if pending_edit_sections.get(section_key, {}) is Dictionary else {}
 	changes[cell] = {"state": state.duplicate(true), "signature": signature}
 	pending_edit_sections[section_key] = changes
+	# Invalidate only collision publications whose meshing halo can contain this
+	# edit. This happens when the durable revision is observed, before the native
+	# edit is pasted, so locomotion cannot reuse a stale local receipt.
+	var affected_chunks := {}
+	for dz in [-2, 0, 2]:
+		for dx in [-2, 0, 2]:
+			affected_chunks[game_chunk_for_cell(cell + Vector3i(dx, 0, dz))] = true
+	for chunk_key: Vector2i in affected_chunks:
+		gameplay_chunk_edit_revisions[chunk_key] = int(gameplay_chunk_edit_revisions.get(chunk_key, 0)) + 1
+		if published_gameplay_chunks.erase(chunk_key):
+			notify_navigation_chunk_unloaded(chunk_key)
+		if desired_gameplay_chunks.has(chunk_key):
+			queue_pending_gameplay_chunk(chunk_key)
 
 func process_pending_edit_sections() -> void:
 	if terrain == null or pending_edit_sections.is_empty():
@@ -1280,6 +1301,11 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 		"surfaceMatches": matched,
 		"heightfieldComparisonPassed": matched == offsets.size(),
 		"collisionAuthority": "VoxelTerrain",
+		"configuredSeed": configured_seed,
+		"collisionOwnerGeneration": collision_owner_generation,
+		"terrainInstanceId": terrain.get_instance_id(),
+		"chunk": chunk_key,
+		"chunkEditRevision": int(gameplay_chunk_edit_revisions.get(chunk_key, 0)),
 		"probeCount": offsets.size(),
 		"samples": samples
 	}
@@ -1458,75 +1484,119 @@ func collision_mesh_ready_for_body_position(world_position: Vector3, footprint_r
 
 
 func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, footprint_radius := 0.42) -> Dictionary:
+	var monitor = main.get("runtime_perf_monitor") if main != null else null
+	var motion_started := Time.get_ticks_usec()
+	if monitor != null:
+		monitor.increment_counter("terrain_motion_proof_entries")
 	var request := {"from":from_position,"to":to_position,"radius":footprint_radius}
 	var now_usec := Time.get_ticks_usec()
 	if site_traversal_waiting and request == site_traversal_pending_request \
 			and now_usec-site_traversal_last_poll_usec<SITE_TRAVERSAL_READINESS_POLL_USEC \
 			and not site_traversal_last_proof.is_empty():
-		return site_traversal_last_proof.duplicate(true)
+		var retained := site_traversal_last_proof.duplicate(true)
+		_record_motion_proof(monitor,motion_started,int(retained.get("sampleCount",0)),int(retained.get("chunkCount",0)),true)
+		return retained
 	site_traversal_pending_request = request
 	site_traversal_last_poll_usec = now_usec
-	var start := Vector2i(floori(minf(from_position.x,to_position.x)/CELL),floori(minf(from_position.z,to_position.z)/CELL))
-	var end := Vector2i(ceili(maxf(from_position.x,to_position.x)/CELL),ceili(maxf(from_position.z,to_position.z)/CELL))
-	var source: Dictionary = site_gate.request_cells(Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)) \
-		if site_gate != null else {"status":"failed","reason":"terrain_site_gate_missing"}
-	if source.status != "ready":
-		return _retain_site_traversal_wait({"passed":false,"reason":source.reason,"siteAdmission":source},
-			"Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
-	var motion_bounds := Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)
-	# Structure publication is observed here so retained demand keeps advancing,
-	# but it is not a prerequisite for ordinary player motion.  Late structure
-	# packets pass through GeneratedStructureRuntimeBindings' real capsule guard,
-	# so an unpublished wall cannot materialize through the player.  Terrain mesh
-	# collision remains the movement authority.
-	var region_low := Vector2i(floori(float(motion_bounds.position.x)/16.0),floori(float(motion_bounds.position.y)/16.0))*16
-	var region_high := Vector2i(ceili(float(motion_bounds.end.x)/16.0),ceili(float(motion_bounds.end.y)/16.0))*16
-	var region_bounds := Rect2i(region_low,region_high-region_low)
-	var region: Dictionary = main.world_streaming.player_traversal_readiness(region_bounds) \
-		if main.world_streaming != null and main.world_streaming.has_method("player_traversal_readiness") \
-		else {"status":"ready","reason":"terrain_proved_by_native_samples","requiredDomains":["terrain"]}
-	var structure_publication: Dictionary = main.structure_system.citadel_physical_publication_state(region_bounds) \
-		if main.structure_system != null and main.structure_system.has_method("citadel_physical_publication_state") else {}
-	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
-	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
+	if not _local_collision_identity_current():
+		var invalid := _retain_site_traversal_wait({"passed":false,"reason":"terrain_collision_owner_stale","sampleCount":0,"chunkCount":0}, "Waiting for terrain collision…")
+		_record_motion_proof(monitor,motion_started,0,0,false)
+		return invalid
+	var displacement := to_position - from_position
+	var distance := displacement.length()
+	var sample_spacing := maxf(CELL * MOTION_PROOF_SAMPLE_SPACING_CELLS, footprint_radius)
+	var sample_segments := maxi(1,ceili(distance/sample_spacing))
+	if sample_segments + 1 > MOTION_PROOF_MAX_SAMPLES:
+		var split := _retain_site_traversal_wait({"passed":false,"reason":"motion_sweep_requires_progression",
+			"sampleCount":0,"chunkCount":0,"requestedSamples":sample_segments+1,
+			"maximumSamples":MOTION_PROOF_MAX_SAMPLES}, "Waiting for terrain collision…")
+		_record_motion_proof(monitor,motion_started,0,0,false)
+		return split
+	var chunk_started := Time.get_ticks_usec()
+	var required_chunks := _motion_gameplay_chunks(from_position,to_position,footprint_radius)
+	if monitor != null: monitor.observe_external_duration("terrain_motion_proof_chunk_receipts",float(Time.get_ticks_usec()-chunk_started)/1000.0)
+	for chunk_key: Vector2i in required_chunks:
+		var receipt: Dictionary = published_gameplay_chunks.get(chunk_key,{}) if published_gameplay_chunks.get(chunk_key,{}) is Dictionary else {}
+		if not _collision_chunk_receipt_current(chunk_key,receipt):
+			var missing := _retain_site_traversal_wait({"passed":false,"reason":"collision_chunk_publication_pending",
+				"missingChunk":chunk_key,"sampleCount":0,"chunkCount":required_chunks.size()}, "Waiting for terrain collision…")
+			_record_motion_proof(monitor,motion_started,0,required_chunks.size(),false)
+			return missing
 	var proofs: Array = []
-	for index in range(sample_count + 1):
-		var weight := float(index) / float(sample_count)
+	for index in range(sample_segments + 1):
+		var weight := float(index) / float(sample_segments)
 		var sample_position := from_position.lerp(to_position, weight)
+		var mesh_started := Time.get_ticks_usec()
 		var mesh_proof := collision_mesh_ready_for_body_position(sample_position, footprint_radius)
-		var support_observation := collision_proof_for_world_position(sample_position, footprint_radius) \
-			if bool(mesh_proof.get("passed", false)) else {}
+		if monitor != null: monitor.observe_external_duration("terrain_motion_proof_mesh_query",float(Time.get_ticks_usec()-mesh_started)/1000.0)
 		var proof := {
 			"passed": bool(mesh_proof.get("passed", false)),
 			"reason": String(mesh_proof.get("reason", "collision_mesh_not_ready")),
 			"position": sample_position,
 			"mesh": mesh_proof,
 			"supportRequiredForMotion": false,
-			"supportObservationPassed": bool(support_observation.get("passed", false)) if not support_observation.is_empty() else false,
-			"supportObservationReason": String(support_observation.get("reason", "not_sampled")) if not support_observation.is_empty() else "not_sampled",
-			"samples": support_observation.get("samples", []) if not support_observation.is_empty() else []
+			"supportObservationReason": "not_sampled_hot_path"
 		}
 		proofs.append(proof)
 		if not bool(proof.get("passed", false)):
-			return _retain_site_traversal_wait({
+			var failed := _retain_site_traversal_wait({
 				"passed": false,
 				"reason": String(proof.get("reason", "collision_not_ready")),
-				"regionalPublication": region,
-				"structurePublication": structure_publication,
 				"failedSample": index,
-				"sampleCount": sample_count + 1,
+				"sampleCount": sample_segments + 1,
+				"chunkCount": required_chunks.size(),
 				"proofs": proofs
 			}, "Waiting for terrain collision…")
+			_record_motion_proof(monitor,motion_started,sample_segments+1,required_chunks.size(),false)
+			return failed
 	clear_site_traversal_wait()
-	return {
+	var result := {
 		"passed": true,
 		"reason": "collision_mesh_ready",
-		"regionalPublication": region,
-		"structurePublication": structure_publication,
 		"supportRequiredForMotion": false,
-		"sampleCount": sample_count + 1,
+		"sampleCount": sample_segments + 1,
+		"chunkCount": required_chunks.size(),
+		"collisionOwnerGeneration":collision_owner_generation,
 		"proofs": proofs
 	}
+	_record_motion_proof(monitor,motion_started,sample_segments+1,required_chunks.size(),false)
+	return result
+
+func _local_collision_identity_current() -> bool:
+	if not authority_ready or terrain == null or not is_instance_valid(terrain) or main == null:
+		return false
+	if configured_seed != String(main.get("seed_text")):
+		return false
+	var volume = volume_service()
+	return volume != null and int(volume.get("revision")) == last_volume_revision
+
+func _collision_chunk_receipt_current(chunk_key: Vector2i, receipt: Dictionary) -> bool:
+	return bool(receipt.get("passed",false)) and receipt.get("chunk") == chunk_key \
+		and String(receipt.get("configuredSeed","")) == configured_seed \
+		and int(receipt.get("collisionOwnerGeneration",-1)) == collision_owner_generation \
+		and int(receipt.get("terrainInstanceId",0)) == terrain.get_instance_id() \
+		and int(receipt.get("chunkEditRevision",-1)) == int(gameplay_chunk_edit_revisions.get(chunk_key,0)) \
+		and not pending_gameplay_chunks.has(chunk_key)
+
+func _motion_gameplay_chunks(from_position: Vector3, to_position: Vector3, footprint_radius: float) -> Array[Vector2i]:
+	var margin_cells := ceili(maxf(0.0,footprint_radius)/CELL)+2
+	var low := Vector2i(floori(minf(from_position.x,to_position.x)/CELL),floori(minf(from_position.z,to_position.z)/CELL))-Vector2i.ONE*margin_cells
+	var high := Vector2i(ceili(maxf(from_position.x,to_position.x)/CELL),ceili(maxf(from_position.z,to_position.z)/CELL))+Vector2i.ONE*margin_cells
+	var first := Vector2i(floori(float(low.x)/GAME_CHUNK_SIZE),floori(float(low.y)/GAME_CHUNK_SIZE))
+	var last := Vector2i(floori(float(high.x)/GAME_CHUNK_SIZE),floori(float(high.y)/GAME_CHUNK_SIZE))
+	var result: Array[Vector2i] = []
+	for z in range(first.y,last.y+1):
+		for x in range(first.x,last.x+1): result.append(Vector2i(x,z))
+	return result
+
+func _record_motion_proof(monitor, started_usec: int, samples: int, chunks: int, reused: bool) -> void:
+	if monitor == null: return
+	monitor.increment_counter("terrain_motion_proof_samples",samples)
+	monitor.increment_counter("terrain_motion_proof_chunks",chunks)
+	if reused: monitor.increment_counter("terrain_motion_proof_retained_poll_hits")
+	monitor.observe_gauge("terrain_motion_proof_last_samples",float(samples))
+	monitor.observe_gauge("terrain_motion_proof_last_chunks",float(chunks))
+	monitor.observe_external_duration("terrain_motion_proof",float(Time.get_ticks_usec()-started_usec)/1000.0)
 
 func _retain_site_traversal_wait(proof: Dictionary, message: String) -> Dictionary:
 	site_traversal_waiting = true

@@ -5,15 +5,20 @@ extends "res://scripts/testing/buildings/GeneratedStructureRuntimeBindingsContra
 class CountedBindings extends "res://scripts/world/GeneratedStructureRuntimeBindings.gd":
 	var owner_reads: int = 0
 	var player_reads: int = 0
+	var actor_queries: int = 0
 	func available() -> bool:
 		owner_reads += 1
 		return super.available()
 	func _construction_player_state() -> Dictionary:
 		player_reads += 1
 		return super._construction_player_state()
+	func _construction_actor_overlaps(bounds: AABB, player) -> bool:
+		actor_queries += 1
+		return super._construction_actor_overlaps(bounds,player)
 	func clear_counts() -> void:
 		owner_reads = 0
 		player_reads = 0
+		actor_queries = 0
 
 func _member_cells(bounds: AABB, cell: float) -> Rect2i:
 	# Independently express the documented sample-node convention, then compare
@@ -22,17 +27,25 @@ func _member_cells(bounds: AABB, cell: float) -> Rect2i:
 	var high: Vector2i = Vector2i(ceili(bounds.end.x/cell)+1,ceili(bounds.end.z/cell)+1)
 	return Rect2i(low,high-low)
 
+func _actor(c: Dictionary, body: CollisionObject3D, position: Vector3, kind: String) -> CollisionObject3D:
+	body.position = position
+	if kind=="wildlife": body.set_meta("material","wildlife")
+	else: body.set_meta("kind",kind)
+	var collider := CollisionShape3D.new()
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(0.8,1.6,0.8)
+	collider.shape = shape
+	body.add_child(collider)
+	c.main.add_child(body)
+	return body
+
 func _compare_members(c: Dictionary, label: String, members: Array) -> bool:
-	var expected: bool = true
-	for bounds: AABB in members:
-		var allowed: bool = c.binding.construction_allowed(_member_cells(bounds,c.main.CELL))
-		expected = expected and allowed
 	var original: PackedByteArray = var_to_bytes(members)
 	var pose: Transform3D = c.main.player.global_transform
 	c.binding.clear_counts()
 	var actual: bool = c.binding.construction_members_allowed(members)
-	check(label+"_same_per_member_decision",actual==expected)
 	check(label+"_one_owner_and_actor_validation",c.binding.owner_reads==1 and c.binding.player_reads==1)
+	check(label+"_bounded_fresh_actor_queries",c.binding.actor_queries<=members.size())
 	check(label+"_does_not_move_actor_or_mutate_members",pose==c.main.player.global_transform and original==var_to_bytes(members))
 	return actual
 
@@ -60,8 +73,8 @@ func _run() -> void:
 	check("active_gap_between_members_remains_clear",_compare_members(c,"disjoint_gap",disjoint))
 	check("enclosing_rectangle_would_incorrectly_block_gap",not c.binding.construction_allowed(_member_cells(disjoint[0].merge(disjoint[1]),c.main.CELL)))
 	check("member_under_actor_denied",not _compare_members(c,"intersecting_member",[disjoint[0],local,disjoint[1]]))
-	check("above_actor_keeps_existing_xz_footprint_rule",not _compare_members(c,"vertical_member",[AABB(Vector3(-1,100,-1),Vector3(2,2,2))]))
-	check("sample_node_rounding_keeps_inclusive_edge",not _compare_members(c,"sample_edge",[AABB(Vector3(1.36,0,-0.1),Vector3(0.01,1,0.2))]))
+	check("above_actor_respects_vertical_separation",_compare_members(c,"vertical_member",[AABB(Vector3(-1,100,-1),Vector3(2,2,2))]))
+	check("exact_volume_does_not_inherit_sample_node_xz_padding",_compare_members(c,"sample_edge",[AABB(Vector3(1.36,0,-0.1),Vector3(0.01,1,0.2))]))
 	_compare_members(c,"negative_boundary",[AABB(Vector3(-2.8,0,-0.1),Vector3(0.1,1,0.2))])
 	var many: Array = []
 	for i: int in range(128): many.append(AABB(Vector3(50+i*4,0,-1),Vector3.ONE))
@@ -74,7 +87,19 @@ func _run() -> void:
 	collider.position.x = 0.0
 	player.position.x = -20.0*c.main.CELL
 	check("negative_actor_allows_local_members",_compare_members(c,"negative_actor",[local]))
-	player.position.x = 4.0*c.main.CELL
+	var npc := _actor(c,CharacterBody3D.new(),Vector3(0,0.8,0),"npc")
+	var hostile := _actor(c,StaticBody3D.new(),Vector3(5,0.8,0),"hostile")
+	var wildlife := _actor(c,StaticBody3D.new(),Vector3(10,0.8,0),"wildlife")
+	await physics_frame
+	check("npc_occupancy_blocks_member",not _compare_members(c,"npc_actor",[local]))
+	check("hostile_occupancy_blocks_member",not _compare_members(c,"hostile_actor",[AABB(Vector3(4,0,-1),Vector3(2,2,2))]))
+	check("wildlife_occupancy_blocks_member",not _compare_members(c,"wildlife_actor",[AABB(Vector3(9,0,-1),Vector3(2,2,2))]))
+	check("other_actor_vertical_separation_allows_member",_compare_members(c,"actor_vertical",[AABB(Vector3(-1,20,-1),Vector3(12,2,2))]))
+	npc.position.y=30.0; hostile.position.y=30.0; wildlife.position.y=30.0
+	await physics_frame
+	check("moved_actors_release_exact_members",_compare_members(c,"actors_moved",[
+		local,AABB(Vector3(4,0,-1),Vector3(2,2,2)),AABB(Vector3(9,0,-1),Vector3(2,2,2))]))
+	player.position.x = 2.0*c.main.CELL
 	check("batch_unscaled_outside",_compare_members(c,"unscaled",[local]))
 	collider.scale = Vector3(8,1,2)
 	check("batch_actual_scaled_radius_blocks",not _compare_members(c,"scaled",[local]))

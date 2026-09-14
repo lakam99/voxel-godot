@@ -48,6 +48,7 @@ var streaming_request_foreground_tiles: Dictionary = {}
 var streaming_request_foreground_bounds: Dictionary = {}
 var streaming_request_peripheral_margins: Dictionary = {}
 var streaming_applied_revision := -1
+var streaming_applied_view_revision := -1
 var streaming_active := false
 var streaming_player_cell := Vector2i(2147483647,2147483647)
 var streaming_demand_error := ""
@@ -62,6 +63,11 @@ var runtime_relocation_active := false
 var gameplay_publication_deadline_usec := 0
 var npc_navigation_publication_permitted := true
 var gameplay_publication_lane := -1
+var gameplay_publication_frame_token := -1
+var gameplay_publication_frame_started_usec := 0
+var gameplay_publication_citadel_claimed_frame := -1
+var gameplay_publication_max_atom_usec := 0
+var gameplay_publication_overrun_count := 0
 var post_startup_trace_frames := 0
 var height_noise: FastNoiseLite
 var ridge_noise: FastNoiseLite
@@ -837,6 +843,7 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     streaming_request_foreground_bounds.clear()
     streaming_request_peripheral_margins.clear()
     streaming_applied_revision = -1
+    streaming_applied_view_revision = -1
     streaming_active = true
     streaming_player_cell = Vector2i(floori(player.global_position.x/(CELL*32.0)),floori(player.global_position.z/(CELL*32.0)))
     var foreground: Dictionary = player_foreground_streaming_intent()
@@ -1042,9 +1049,16 @@ func apply_streaming_region_demand(advance_budget_usec := 4000) -> bool:
     world_streaming.advance(-1, advance_budget_usec)
     if monitor != null:
         monitor.end_section("streaming_coordinator_advance", advance_start)
-    if streaming_applied_revision == world_streaming.revision(): return true
     var runtime = get("voxel_terrain_runtime")
     if structure_system == null or runtime == null: return false
+    if streaming_applied_view_revision != world_streaming.view_revision():
+        var view_start: int = monitor.begin_section("streaming_view_intent_handoff") if monitor != null else 0
+        if not structure_system.citadel_publication.set_retained_view_intents(world_streaming.retained_view_intents()):
+            streaming_demand_error = "structure_view_intent_rejected"
+            return false
+        streaming_applied_view_revision = world_streaming.view_revision()
+        if monitor != null: monitor.end_section("streaming_view_intent_handoff",view_start)
+    if streaming_applied_revision == world_streaming.revision(): return true
     var source_start: int = monitor.begin_section("streaming_source_request_handoff") if monitor != null else 0
     var retained_sources: Array[Dictionary] = world_streaming.retained_source_requests()
     var source_requests_accepted: bool = structure_system.citadel_publication.set_retained_source_requests(retained_sources)
@@ -1061,6 +1075,7 @@ func apply_streaming_region_demand(advance_budget_usec := 4000) -> bool:
     if monitor != null:
         monitor.end_section("streaming_chunk_request_handoff", chunks_start)
     streaming_applied_revision = world_streaming.revision()
+    streaming_applied_view_revision = world_streaming.view_revision()
     return true
 
 func update_streaming_region_demand() -> void:
@@ -1182,6 +1197,7 @@ func reset_streaming_region_demand() -> void:
     streaming_request_foreground_bounds.clear()
     streaming_request_peripheral_margins.clear()
     streaming_applied_revision = -1
+    streaming_applied_view_revision = -1
     var runtime = get("voxel_terrain_runtime")
     if runtime != null: runtime.clear_retained_gameplay_chunks()
 

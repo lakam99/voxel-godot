@@ -4,6 +4,9 @@ class_name RuntimePerformanceMonitor
 const WINDOW_SECONDS := 10.0
 const SPIKE_THRESHOLD_MS := 33.0
 const MAX_FRAME_SAMPLES := 900
+const MAX_SECTION_SAMPLES := 900
+const MAX_SECTION_SAMPLE_NAMES := 128
+const MAX_GAUGES := 128
 
 var clock_seconds := 0.0
 var frame_start_usec := 0
@@ -18,6 +21,9 @@ var counters := {}
 var frame_samples := []
 var last_frame_ms := 0.0
 var last_spike := {}
+var section_samples := {}
+var gauges := {}
+var max_gauges := {}
 
 func reset() -> void:
     frame_start_usec = 0
@@ -32,6 +38,9 @@ func reset() -> void:
     frame_samples = []
     last_frame_ms = 0.0
     last_spike = {}
+    section_samples = {}
+    gauges = {}
+    max_gauges = {}
 
 func begin_frame(delta: float) -> void:
     clock_seconds += maxf(0.0, delta)
@@ -65,6 +74,7 @@ func observe_duration(name: String, duration_ms: float) -> float:
         return duration_ms
     last_section_ms[name] = duration_ms
     max_section_ms[name] = maxf(float(max_section_ms.get(name, 0.0)), duration_ms)
+    _push_section_sample(name, duration_ms)
     if in_frame:
         frame_sections[name] = float(frame_sections.get(name, 0.0)) + duration_ms
     return duration_ms
@@ -74,7 +84,16 @@ func observe_external_duration(name: String, duration_ms: float) -> float:
         return duration_ms
     last_section_ms[name] = duration_ms
     max_section_ms[name] = maxf(float(max_section_ms.get(name, 0.0)), duration_ms)
+    _push_section_sample(name, duration_ms)
     return duration_ms
+
+func observe_gauge(name: String, value: float) -> void:
+    if name == "" or not is_finite(value):
+        return
+    if not gauges.has(name) and gauges.size() >= MAX_GAUGES:
+        return
+    gauges[name] = value
+    max_gauges[name] = maxf(float(max_gauges.get(name, value)), value)
 
 func increment_counter(name: String, amount := 1) -> void:
     if name == "":
@@ -102,6 +121,8 @@ func summary() -> Dictionary:
         "lastFrameSections": last_frame_sections.duplicate(true),
         "counters": counters.duplicate(true),
         "lastFrameCounters": last_frame_counters.duplicate(true),
+        "gauges": gauges.duplicate(true),
+        "maxGauges": max_gauges.duplicate(true),
         "sampleCount": frame_samples.size()
     }
 
@@ -114,23 +135,27 @@ func section_max_ms(name: String) -> float:
 ## On-demand diagnostic used after a performance observation. Keeping this out
 ## of summary() avoids sorting every HUD/debug refresh in ordinary gameplay.
 func section_percentiles() -> Dictionary:
-    var names := {}
-    for sample_value in frame_samples:
-        var sample: Dictionary = sample_value
-        for name in sample.get("sections",{}): names[String(name)] = true
     var result := {}
-    for name: String in names:
-        var values := []
-        for sample_value in frame_samples:
-            var sections: Dictionary = (sample_value as Dictionary).get("sections",{})
-            values.append(float(sections.get(name,0.0)))
+    for name: String in section_samples:
+        var values: Array = section_samples[name]
         result[name] = {
             "p50Ms":_percentile(values,0.50),
             "p95Ms":_percentile(values,0.95),
             "p99Ms":_percentile(values,0.99),
-            "maxMs":_max_value(values)
+            "maxMs":_max_value(values),
+            "sampleCount":values.size()
         }
     return result
+
+func _push_section_sample(name: String, duration_ms: float) -> void:
+    if not section_samples.has(name):
+        if section_samples.size() >= MAX_SECTION_SAMPLE_NAMES:
+            return
+        section_samples[name] = []
+    var values: Array = section_samples[name]
+    values.append(duration_ms)
+    if values.size() > MAX_SECTION_SAMPLES:
+        values.pop_front()
 
 func counter_value(name: String) -> int:
     return int(counters.get(name, 0))

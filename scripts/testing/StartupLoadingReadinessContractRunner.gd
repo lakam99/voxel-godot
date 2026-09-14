@@ -43,7 +43,8 @@ class SyntheticPlayerCollisionStructures extends RefCounted:
 	var dispatch_bounds := Rect2i()
 	var physical_bounds := Rect2i()
 	var dispatches := 0
-	func advance_citadel_publication(bounds := Rect2i(), allow_dispatch := false) -> Dictionary:
+	func advance_citadel_publication(bounds := Rect2i(), allow_dispatch := false,
+			_budget_usec := CITADEL_PUBLICATION_BUDGET_USEC) -> Dictionary:
 		dispatch_bounds = bounds
 		if allow_dispatch: dispatches += 1
 		return {"status":"advanced"}

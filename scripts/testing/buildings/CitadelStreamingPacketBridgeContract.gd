@@ -91,7 +91,6 @@ func _run_bridge() -> void:
 	var legacy_preparation_seen := false
 	var publication_base_seen := false
 	var bootstrap_seen := false
-	var pre_description_fallback_seen := false
 	var initial_unresolved_request_seen := false
 	var legacy_scene_seen := false
 	var publication_base_revision := -1
@@ -121,11 +120,10 @@ func _run_bridge() -> void:
 		var entry: Dictionary = service._scenes.get(REGION,{})
 		var job = entry.get("job",null)
 		var inflight_kind := String(service._inflight.get("kind",""))
-		var fallback_now: Dictionary = service._packet_source_fallback.get(REGION,{})
 		var state := {"inflight":inflight_kind,"phase":String(job.status_count().get("phase","") if job!=null else ""),
 			"streamingRevision":value.world_streaming.revision(),"expectedCount":expected.size(),"retainedSiteCount":(retained.get("sites",[]) as Array).size(),
 			"prepared":service._prepared.has(REGION),"bootstrap":service._packet_bootstrap_bases.has(REGION),"sceneCount":service._scenes.size(),
-			"fallback":not fallback_now.is_empty(),"sceneCallbacksReady":service._scene_callbacks_ready(),"failures":service._failures.duplicate(true)}
+			"sceneCallbacksReady":service._scene_callbacks_ready(),"failures":service._failures.duplicate(true)}
 		if report.packetTrace.is_empty() or report.packetTrace.back()!=state: report.packetTrace.append(state)
 		if inflight_kind=="publication_base":
 			publication_base_seen=true
@@ -133,7 +131,6 @@ func _run_bridge() -> void:
 		if service._packet_bootstrap_bases.has(REGION):
 			bootstrap_seen=true
 			if bootstrap_revision<0: bootstrap_revision=value.world_streaming.revision()
-		if not fallback_now.is_empty() and expected.is_empty(): pre_description_fallback_seen=true
 		if not entry.is_empty() and not bool(entry.get("packetMode",false)): legacy_scene_seen=true
 		if inflight_kind=="preparation": legacy_preparation_seen=true
 		if inflight_kind=="physical_group_packet":
@@ -173,7 +170,6 @@ func _run_bridge() -> void:
 		and publication_base_seen and bootstrap_seen
 		and publication_base_revision>=0 and bootstrap_revision>=publication_base_revision
 		and described_revision>=bootstrap_revision and packet_revision>=described_revision)
-	check("pre_description_demand_never_enters_full_source_fallback",not pre_description_fallback_seen)
 	check("bootstrap_did_not_enter_legacy_scene_preparation",not legacy_preparation_seen)
 	check("bootstrap_did_not_create_legacy_scene",not legacy_scene_seen)
 	check("citadel_service_enters_physical_packet_route",packet_seen)

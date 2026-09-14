@@ -41,7 +41,8 @@ class Structures extends RefCounted:
 	var physical_requests := 0
 	# This native-terrain fixture deliberately has no building sources. The
 	# publication receipt is synthetic; real service ownership is tested elsewhere.
-	func advance_citadel_publication(_bounds := Rect2i(), _allow_dispatch := false) -> Dictionary:
+	func advance_citadel_publication(_bounds := Rect2i(), _allow_dispatch := false,
+			_budget_usec := CITADEL_PUBLICATION_BUDGET_USEC) -> Dictionary:
 		return {"publicationReady":false,"fixture":"synthetic_no_building_publication"}
 	func citadel_physical_publication_state(bounds: Rect2i) -> Dictionary:
 		physical_bounds = bounds
@@ -383,13 +384,15 @@ func _player_containment() -> void:
 	runtime.last_site_wait_message_usec = -1000000
 	var initialized: Dictionary = runtime.setup(context)
 	check("player_runtime_setup",initialized.ok)
+	for chunk_key: Vector2i in runtime._motion_gameplay_chunks(start,start+Vector3.RIGHT*6.0,0.42):
+		runtime.request_gameplay_chunk_publication(chunk_key)
 	# This headless phase proves collision/motor containment, not rendering.
 	# Do not ask the dummy renderer to publish the synthetic plane's visuals.
 	runtime.viewer.requires_visuals = false
 	player.set_physics_process(true)
 	await _frames(4)
 	check("real_player_held_while_source_pending",player.global_position==start and player.velocity==Vector3.ZERO and player.terrain_collision_hold_frames>=4)
-	check("player_wait_message_emitted",not host.messages.is_empty() and String(host.messages[0]).contains("Preparing landmark"))
+	check("player_wait_message_emitted",not host.messages.is_empty() and String(host.messages[0]).contains("Waiting for terrain collision"))
 	check("ordinary_source_wait_never_opens_modal_overlay",host.overlay_shows.is_empty())
 	var stamina_before := float(player.survival.stamina)
 	check("pending_source_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
@@ -410,14 +413,14 @@ func _player_containment() -> void:
 	var before_dodge: Vector3 = player.global_position
 	await _frames(2)
 	check("accepted_dodge_uses_real_physics",player.global_position.x>before_dodge.x and player.global_position.y>-0.1)
-	var before_failure: Vector3 = player.global_position
+	var before_admission_failure: Vector3 = player.global_position
 	admitted.failure = "synthetic_site_preparation_failed"
 	runtime.last_site_wait_message_usec = -1000000
 	await _frames(4)
-	check("failed_source_stops_active_dodge",player.global_position==before_failure and player.velocity==Vector3.ZERO and player.last_terrain_collision_proof.get("reason")==admitted.failure)
+	check("admission_failure_does_not_rescan_or_stop_published_local_motion",player.global_position.x>before_admission_failure.x
+		and player.last_terrain_collision_proof.get("passed",false) and structure_owner.physical_requests==0)
 	check("failed_source_stops_native_loading",not runtime.terrain.automatic_loading_enabled)
-	check("failure_message_emitted",host.messages.any(func(value):return String(value).contains("Landmark loading failed")))
-	check("failed_source_message_keeps_exact_reason",host.messages.any(func(value):return String(value).contains("Landmark loading failed: synthetic_site_preparation_failed")))
+	check("admission_failure_emits_no_hot_path_failure_message",not host.messages.any(func(value):return String(value).contains("Landmark loading failed")))
 	player.set_physics_process(false)
 	player_evidence = {"start":start,"end":player.global_position,"holdFrames":player.terrain_collision_hold_frames,
 		"messages":host.messages,"lastProof":player.last_terrain_collision_proof,
@@ -434,14 +437,13 @@ func _player_containment() -> void:
 	context.message_host = null
 
 func _physical_publication_controls(runtime: ObservedRuntime, player, structures: Structures, host: PlayerHost) -> Dictionary:
-	# The native plane is already published. Only the synthetic structure receipt
-	# changes below; the act uses ordinary Player physics and never writes position.
-	# Structure state remains visible in proof telemetry while late construction's
-	# capsule guard, rather than a modal movement hold, owns physical safety.
+	# The native plane is already published. Synthetic structure receipts change
+	# below to prove that ordinary movement never calls this non-terrain owner.
+	# Late construction remains protected by its transaction-time capsule guard.
 	var before: Vector3 = player.global_position
 	var no_landmark: Dictionary = runtime.collision_proof_for_motion(before,before,0.42)
-	check("physical_no_landmark_ready_preserves_native_motion",no_landmark.passed and structures.physical_requests>0
-		and no_landmark.get("structurePublication")==structures.physical_receipt)
+	check("physical_no_landmark_ready_preserves_native_motion",no_landmark.passed and structures.physical_requests==0
+		and not no_landmark.has("structurePublication") and not no_landmark.has("regionalPublication"))
 	var mesh: Dictionary = runtime.collision_mesh_ready_for_body_position(before,0.42)
 	check("physical_controls_have_native_collision",bool(mesh.get("passed",false)))
 	structures.physical_receipt = {"status":"pending","required":true,"reason":"synthetic_buildings_pending","siteIds":["synthetic_native_site"]}
@@ -452,18 +454,17 @@ func _physical_publication_controls(runtime: ObservedRuntime, player, structures
 	var pending: Dictionary = player.last_terrain_collision_proof.duplicate(true)
 	check("physical_pending_does_not_hold_real_player",player.global_position.x>before.x
 		and player.terrain_collision_hold_frames==hold_before and not player.get_meta("terrain_collision_hold",false))
-	check("physical_pending_preserves_structured_observation",pending.get("passed",false)
-		and pending.get("structurePublication")==structures.physical_receipt and not pending.has("siteAdmission"))
+	check("physical_pending_structure_test_double_receives_zero_calls",pending.get("passed",false)
+		and structures.physical_requests==0 and not pending.has("structurePublication") and not pending.has("regionalPublication"))
 	check("physical_pending_never_enters_wait_state",not runtime.site_traversal_waiting)
 	check("physical_pending_emits_no_modal_or_repeated_status",host.overlay_shows.size()==overlay_count
 		and host.messages.size()==message_count)
-	# This direct local proof checks that the aligned region observation still
-	# reaches the structure owner without depending on its result.
+	# A direct proof remains local and bounded too.
 	var sweep_from: Vector3 = player.global_position
 	var sweep: Dictionary = runtime.collision_proof_for_motion(sweep_from,sweep_from,0.42)
 	var captured_bounds := structures.physical_bounds
-	check("physical_observation_reaches_structure_owner",sweep.get("passed",false)
-		and sweep.get("structurePublication")==structures.physical_receipt and captured_bounds.size==Vector2i(16,16))
+	check("physical_direct_sweep_skips_structure_owner",sweep.get("passed",false)
+		and structures.physical_requests==0 and captured_bounds==Rect2i())
 	structures.physical_receipt = {"status":"ready","required":true,"siteIds":["synthetic_native_site"]}
 	await _frames(2)
 	check("physical_pending_to_ready_keeps_real_motor_running",player.last_terrain_collision_proof.get("passed",false))
@@ -472,8 +473,8 @@ func _physical_publication_controls(runtime: ObservedRuntime, player, structures
 	await _frames(4)
 	var failed: Dictionary = player.last_terrain_collision_proof.duplicate(true)
 	check("physical_failed_does_not_hold_real_player",player.global_position.x>before.x and not player.get_meta("terrain_collision_hold",false))
-	check("physical_failed_preserves_structured_observation",failed.get("passed",false)
-		and failed.get("structurePublication")==structures.physical_receipt and not failed.has("siteAdmission"))
+	check("physical_failed_structure_receipt_cannot_affect_local_motion",failed.get("passed",false)
+		and structures.physical_requests==0 and not failed.has("structurePublication"))
 	check("physical_failed_never_opens_modal_overlay",host.overlay_shows.size()==overlay_count)
 	structures.physical_receipt = {"status":"ready","required":true,"siteIds":["synthetic_native_site"]}
 	var deadline := Time.get_ticks_msec()+3000
@@ -484,4 +485,4 @@ func _physical_publication_controls(runtime: ObservedRuntime, player, structures
 	# The caller immediately exercises the original successful real dodge and
 	# source-failure-during-dodge controls with this required/ready receipt active.
 	return {"pending":pending,"failed":failed,"ready":ready,"observedBounds":captured_bounds,"modalOverlayShows":host.overlay_shows.duplicate(true),
-		"fixture":"Synthetic physical-publication receipts; real native collision proof, Player motor and dodge. No actual building publication or live gameplay acceptance."}
+		"fixture":"Synthetic non-terrain test double receives zero motion calls; real native collision proof, Player motor and dodge. No actual building publication or live gameplay acceptance."}
