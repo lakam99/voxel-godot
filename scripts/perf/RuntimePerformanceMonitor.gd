@@ -5,7 +5,10 @@ const WINDOW_SECONDS := 10.0
 const SPIKE_THRESHOLD_MS := 33.0
 const MAX_FRAME_SAMPLES := 900
 const MAX_SECTION_SAMPLES := 900
-const MAX_SECTION_SAMPLE_NAMES := 128
+# Startup and streaming now expose more than 128 bounded owners. Keep enough
+# room for late, infrequent autosave attribution without making sampling
+# unbounded or sorting it during ordinary summary/HUD polling.
+const MAX_SECTION_SAMPLE_NAMES := 192
 const MAX_GAUGES := 128
 
 var clock_seconds := 0.0

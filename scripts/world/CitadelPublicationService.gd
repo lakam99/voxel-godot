@@ -28,6 +28,7 @@ const MAX_PENDING_NAVIGATION_TILES := 512
 const PRIORITY_AGING_DISPATCH_TURNS := 4
 const MAX_INCREMENTAL_FOREGROUND_GROUPS := 256
 const VIEW_WINDOW_PROGRESS_TARGET_GROUPS := 224
+const SCENE_UNIT_SAMPLE_CAPACITY := 4096
 const FIRST_USEFUL_HOME_COUNT := 2
 const FIRST_USEFUL_HOME_ARCHETYPES: Array[String] = ["bed","chair","hearth","table"]
 const FIRST_USEFUL_STRUCTURAL_SEMANTICS: Array[String] = [
@@ -762,6 +763,8 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 			_observer_region_bounds.size.x,_observer_region_bounds.size.y],"bounds":_observer_region_bounds,"priority":0,
 			"sites":[{"binding":binding,"groupIds":observer_requirements.get("groupIds",[]),
 			"foregroundGroupIds":observer_requirements.get("groupIds",[])}]})
+	var owner_closure_started := Time.get_ticks_usec()
+	var owner_group_ids := 0
 	for consumer: Dictionary in consumers:
 		for site: Dictionary in consumer.sites:
 			if site.binding!=binding: continue
@@ -825,7 +828,11 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 				else: blocked[id] = true
 			if not publishable.is_empty(): requests.append({"ownerId":"region:%s" % str(consumer.ownerId),"groupIds":publishable,"priority":consumer.priority})
 			for id: String in publishable: foreground[id] = true
+			owner_group_ids += publishable.size()
+	_record_scene_unit("demand_owner_closure",owner_closure_started,owner_group_ids)
+	var view_window_started := Time.get_ticks_usec()
 	var window: Dictionary = _bounded_packet_view_window(description,base,census,consumers,requests,completed)
+	_record_scene_unit("demand_view_window_total",view_window_started,description.publication_groups.groups.size())
 	if window.get("status")!="ready": return window
 	var blocked_ids: Array[String] = []
 	for id: String in blocked:
@@ -852,7 +859,9 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	for request: Dictionary in base_requests:
 		for id: String in request.groupIds:
 			candidates[id] = {"id":id,"priority":int(request.priority),"distanceSquared":0.0,"portal":false,"throughPortal":false}
+	var first_useful_started := Time.get_ticks_usec()
 	var useful: Dictionary = _first_useful_packet_groups(description,base,census,completed)
+	_record_scene_unit("demand_first_useful",first_useful_started,groups.size())
 	if useful.get("status")!="ready": return useful
 	for id: String in useful.get("groupIds",[]):
 		if not candidates.has(id):
@@ -861,37 +870,49 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	# neighbours remain background presentation work and cannot hold the player
 	# until a rolling city window (or the whole source) is installed.
 	var readiness: Dictionary = {}
+	var readiness_started := Time.get_ticks_usec()
 	for id: String in candidates:
 		var readiness_closure: Dictionary = _packet_dependency_window(groups,id,completed)
 		if readiness_closure.get("status")!="ready": return readiness_closure
 		for required_id: String in readiness_closure.groupIds: readiness[required_id]=true
+	_record_scene_unit("demand_readiness_closure",readiness_started,candidates.size())
+	var view_rank_started := Time.get_ticks_usec()
+	var ranked_group_rows := 0
 	for consumer: Dictionary in consumers:
 		var view: Dictionary = consumer.get("viewIntent",{})
 		if view.is_empty(): continue
-		for row: Dictionary in ViewPriority.ranked_groups(groups,view):
+		var ranked: Array[Dictionary] = ViewPriority.ranked_groups(groups,view)
+		ranked_group_rows += ranked.size()
+		for row: Dictionary in ranked:
 			var id := String(row.id)
 			var current: Dictionary = candidates.get(id,{})
 			if current.is_empty() or int(row.priority)<int(current.priority) \
 					or int(row.priority)==int(current.priority) and float(row.distanceSquared)<float(current.distanceSquared):
 				candidates[id]=row.duplicate(true)
+	_record_scene_unit("demand_view_rank_and_merge",view_rank_started,ranked_group_rows)
 	# Legacy/direct owners without a camera retain their exact source request.
 	# A rolling city window exists only when a gameplay consumer supplies view
 	# intent; this keeps background tools and navigation-only requests narrow.
 	var ordered: Array[Dictionary] = []
 	for row: Dictionary in candidates.values():
 		if not completed.has(String(row.id)): ordered.append(row)
+	var candidate_sort_started := Time.get_ticks_usec()
 	ordered.sort_custom(func(a: Dictionary,b: Dictionary):
 		if int(a.priority)!=int(b.priority): return int(a.priority)<int(b.priority)
 		if not is_equal_approx(float(a.distanceSquared),float(b.distanceSquared)):
 			return float(a.distanceSquared)<float(b.distanceSquared)
 		return String(a.id)<String(b.id))
+	_record_scene_unit("demand_candidate_sort",candidate_sort_started,ordered.size())
 	var selected: Dictionary = {}
 	var selected_priority: Dictionary = {}
 	var selected_order: Array[String] = []
 	var view_ids: Array[String] = []
 	var portal_ids: Array[String] = []
 	var blocked: Dictionary = {}
+	var selection_started := Time.get_ticks_usec()
+	var selection_rows := 0
 	for row: Dictionary in ordered:
+		selection_rows += 1
 		var id := String(row.id)
 		if not groups.has(id): return {"status":"failed","reason":"packet_foreground_group_unknown","groupId":id}
 		var closure: Dictionary = _packet_dependency_window(groups,id,completed)
@@ -916,6 +937,8 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 		# few slots. This still publishes a substantial bounded window and the
 		# retained job selects another window after acknowledgement.
 		if selected.size()>=VIEW_WINDOW_PROGRESS_TARGET_GROUPS: break
+	_record_scene_unit("demand_selection_closure",selection_started,selection_rows)
+	var result_started := Time.get_ticks_usec()
 	var by_priority: Dictionary = {}
 	for id: String in selected_order:
 		var priority := int(selected_priority[id])
@@ -936,6 +959,7 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	var readiness_ids: Array[String] = []
 	for id: String in readiness: readiness_ids.append(id)
 	readiness_ids.sort()
+	_record_scene_unit("demand_result_assembly",result_started,groups.size())
 	return {"status":"ready","requests":requests,"foregroundGroupIds":selected_order,
 		"readinessGroupIds":readiness_ids,
 		"firstUsefulHomeIds":useful.get("homeIds",[]),"firstUsefulDoorGroupId":useful.get("doorGroupId",""),
@@ -1501,7 +1525,7 @@ func stats() -> Dictionary:
 		"activeToken":_inflight.get("token",0),"failures":_failures.duplicate(true),
 		"dispatchCount":_dispatch_count,"acceptedCount":_accepted_count,"maxAdvanceUsec":_max_advance_usec,
 		"publicationReady":false,"worker":_last_worker_status,"sourceScheduling":scheduling,
-		"sceneDiagnostics":scenes,"sceneUnitMetrics":_scene_unit_metrics.duplicate(true),"demandRevision":_demand_revision,"viewRevision":_view_revision,
+		"sceneDiagnostics":scenes,"sceneUnitMetrics":_scene_unit_metrics_compact(),"demandRevision":_demand_revision,"viewRevision":_view_revision,
 		"doorLifecycleConfigured":_door_lifecycle_configured,"doorLifecycleAvailable":_door_callbacks_ready(),
 		"constructionStatus":"available" if _scene_callbacks_ready() else "pending",
 		"constructionReason":"" if _scene_callbacks_ready() else "scene_lifecycle_capability_missing",
@@ -1593,7 +1617,9 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 	if bool(entry.get("packetMode",false)):
 		var base: Preparation.PreparedPublicationBase = entry.job._cpu.get("publicationBase")
 		var completed: Dictionary = entry.job.completed_physical_group_ids(entry.binding)
+		var plan_started := Time.get_ticks_usec()
 		var plan: Dictionary = _packet_foreground_plan(entry.region,entry.binding,base.description if base!=null else null,base,completed)
+		_record_scene_unit("demand_plan_total",plan_started,base.description.publication_groups.groups.size() if base!=null else 0)
 		if plan.get("status")!="ready":
 			entry["packetDemandStatus"] = plan.duplicate(true)
 			return false
@@ -1601,6 +1627,7 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 			entry["packetDemandStatus"]={"status":"failed","reason":"packet_foreground_scope_too_large",
 				"groupCount":plan.foregroundGroupIds.size()}
 			return false
+		var navigation_merge_started := Time.get_ticks_usec()
 		var navigation_groups: Dictionary = entry.get("navigationPhysicalGroups",{})
 		if not navigation_groups.is_empty():
 			# Navigation publication can ask for tiles from both the capsule and the
@@ -1635,7 +1662,10 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 			for group_id: String in plan.deferredGroupIds:
 				if not navigation_ids.has(group_id): deferred.append(group_id)
 			plan.deferredGroupIds = deferred
+		_record_scene_unit("demand_navigation_merge",navigation_merge_started,navigation_groups.size())
+		var handoff_started := Time.get_ticks_usec()
 		var packet_result: Dictionary = entry.job.replace_packet_foreground_group_demands(plan.requests,plan.deferredGroupIds,entry.binding)
+		_record_scene_unit("demand_job_handoff",handoff_started,plan.foregroundGroupIds.size()+plan.deferredGroupIds.size())
 		if packet_result.get("status")!="retained":
 			entry["packetDemandStatus"] = packet_result.duplicate(true)
 			return false
@@ -1643,6 +1673,7 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 		# plan (spatial safety, two complete homes and a door). The wider ranked
 		# window remains non-blocking presentation work before and after readiness.
 		var readiness_group_ids: Array = plan.readinessGroupIds
+		var status_copy_started := Time.get_ticks_usec()
 		entry["packetDemandStatus"] = {"status":"retained","reason":"packet_foreground_groups_deferred" if not plan.blockedGroupIds.is_empty() and plan.requests.is_empty() else "",
 			"requests":plan.requests.duplicate(true),
 			"foregroundGroupIds":plan.foregroundGroupIds.duplicate(),"readinessGroupIds":readiness_group_ids.duplicate(),
@@ -1650,6 +1681,7 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 			"viewPrioritizedGroupIds":plan.get("viewPrioritizedGroupIds",[]).duplicate(),
 			"portalGroupIds":plan.get("portalGroupIds",[]).duplicate(),
 			"blockedGroupIds":plan.blockedGroupIds.duplicate(),"boundaryGroupIds":plan.boundaryGroupIds.duplicate()}
+		_record_scene_unit("demand_status_copy",status_copy_started,plan.foregroundGroupIds.size()+plan.deferredGroupIds.size())
 		entry["demandRevision"] = _demand_revision
 		# A previously acknowledged packet scene stays available for its committed
 		# closure, but a new foreground demand must not inherit that acknowledgement.
@@ -1667,14 +1699,63 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 	entry["demandRevision"] = _demand_revision
 	return true
 
-func _record_scene_unit(label: String, started_usec: int) -> void:
+func _record_scene_unit(label: String, started_usec: int, work_units := -1) -> void:
 	var elapsed := Time.get_ticks_usec()-started_usec
-	var metric: Dictionary = _scene_unit_metrics.get(label,{"calls":0,"totalUsec":0,"maxUsec":0,"lastUsec":0})
+	var metric: Dictionary = _scene_unit_metrics.get(label,{"calls":0,"totalUsec":0,"maxUsec":0,"lastUsec":0,
+		"samples":[],"sampleCursor":0,"workUnitsTotal":0,"workUnitsMax":0,"workUnitsLast":0})
 	metric.calls += 1
 	metric.totalUsec += elapsed
 	metric.maxUsec = maxi(int(metric.maxUsec),elapsed)
 	metric.lastUsec = elapsed
+	var samples: Array = metric.samples
+	if samples.size()<SCENE_UNIT_SAMPLE_CAPACITY:
+		samples.append(elapsed)
+	else:
+		var cursor := int(metric.sampleCursor)%SCENE_UNIT_SAMPLE_CAPACITY
+		samples[cursor]=elapsed
+		metric.sampleCursor=(cursor+1)%SCENE_UNIT_SAMPLE_CAPACITY
+	metric.samples=samples
+	if work_units>=0:
+		metric.workUnitsTotal += work_units
+		metric.workUnitsMax = maxi(int(metric.workUnitsMax),work_units)
+		metric.workUnitsLast = work_units
 	_scene_unit_metrics[label] = metric
+
+func _scene_unit_metrics_snapshot() -> Dictionary:
+	var result: Dictionary = {}
+	for label: String in _scene_unit_metrics:
+		var metric: Dictionary = _scene_unit_metrics[label].duplicate(true)
+		var samples: Array = metric.get("samples",[])
+		var ordered: Array = samples.duplicate()
+		ordered.sort()
+		metric.erase("samples")
+		metric.erase("sampleCursor")
+		metric["sampleCount"] = ordered.size()
+		metric["sampleCapacity"] = SCENE_UNIT_SAMPLE_CAPACITY
+		metric["sampleScope"] = "bounded_all_calls" if int(metric.calls)<=SCENE_UNIT_SAMPLE_CAPACITY else "bounded_recent_calls"
+		metric["p50Usec"] = _scene_unit_percentile(ordered,0.50)
+		metric["p95Usec"] = _scene_unit_percentile(ordered,0.95)
+		metric["p99Usec"] = _scene_unit_percentile(ordered,0.99)
+		result[label]=metric
+	return result
+
+## Explicit, bounded diagnostic snapshot. Ordinary stats deliberately omit the
+## retained samples so polling cannot sort/copy the profiler's ring every frame.
+func profile_scene_unit_metrics() -> Dictionary:
+	return _scene_unit_metrics_snapshot()
+
+func _scene_unit_metrics_compact() -> Dictionary:
+	var result: Dictionary = {}
+	for label: String in _scene_unit_metrics:
+		var source: Dictionary = _scene_unit_metrics[label]
+		result[label]={"calls":source.calls,"totalUsec":source.totalUsec,"maxUsec":source.maxUsec,"lastUsec":source.lastUsec,
+			"workUnitsTotal":source.workUnitsTotal,"workUnitsMax":source.workUnitsMax,"workUnitsLast":source.workUnitsLast}
+	return result
+
+static func _scene_unit_percentile(ordered: Array, percentile: float) -> int:
+	if ordered.is_empty(): return 0
+	var index := clampi(ceili(percentile*float(ordered.size()))-1,0,ordered.size()-1)
+	return int(ordered[index])
 
 func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_usec: int) -> void:
 	# One shared budget, fair across building and retirement. No per-site budget

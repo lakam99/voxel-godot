@@ -229,7 +229,9 @@ node tools/run-citadel-candidate-teleport-playtest.mjs -OutputDirectory artifact
 node tools/run-normal-runtime-performance-pass.mjs -Resolution 1920x1080 -DurationSeconds 300 -TimeoutSeconds 600 -ReportPath artifacts/world-streaming-maturity/g1/normal-sprint-01/report.json -ProgressPath artifacts/world-streaming-maturity/g1/normal-sprint-01/progress.txt
 
 # Source-only diagnostic; not scene, collision, or live gameplay acceptance.
-node tools/run-citadel-candidate-recipe-diagnostic.mjs -OutputDirectory artifacts/world-streaming-maturity/g2/recipe-01 -Seed atlas-3376622889 -CandidateRegion "-2,-2" -ExpectedRecipeSeed 1393179273 -ExpectReady
+# Current ownership validation requires a fresh candidate-recipe-* directory
+# directly below artifacts/citadel-runtime-integration.
+node tools/run-citadel-candidate-recipe-diagnostic.mjs -OutputDirectory artifacts/citadel-runtime-integration/candidate-recipe-g2-01 -Seed atlas-3376622889 -CandidateRegion "-2,-2" -ExpectedRecipeSeed 1393179273 -ExpectReady
 
 # Only for selected native work. Reuse pinned bindings; fetch if actually absent.
 node tools/build-native-terrain-meshing.mjs --target template_debug --api-version 4.6
@@ -271,8 +273,8 @@ Each completion entry must record commit, source/binary hashes, exact commands, 
 | G1C transactions | COMPLETE | Commit `26383424`; exact 3D actor guard, independent occupied transactions, no whole-source fallback, semantic first-useful closure; 149 service, 545 job and 109 construction checks pass |
 | G1D navigation | COMPLETE | Commit `8306d3b`; per-slice capture/upload/install/ack telemetry; 262-result shutdown, mapping and real nonempty packet acknowledgement pass |
 | G1E shared budget + headed checkpoint | LIFECYCLE COMPLETE; PERF PENDING | Commit `26383424`; one 6 ms gameplay envelope/4 ms Citadel claim; exact headed lifecycle PASS and five-minute sprint recorded. Citadel demand refresh, orchestration and autosave snapshot remain release blockers. Full evidence: `docs/WORLD_STREAMING_MATURITY_G1_RUNTIME_LIFECYCLE_2026-09-14.md` |
-| G2 profile/decisions | NEXT; NOT STARTED | Profile/replace Citadel all-group rank/closure refresh and attribute autosave snapshot ownership from the corrected G1 trace; do not start with native raster tuning |
-| G3 progressive preparation/native | NOT STARTED | Early immutable partitions; implement only justified kernels; parity and throughput |
+| G2 profile/decisions | COMPLETE | Corrected three-run source profile, moving-player headed stage profile, autosave ownership, loading comparator and native decision recorded in `docs/WORLD_STREAMING_MATURITY_G2_PROFILE_AND_NATIVE_DECISION_2026-09-14.md`; no native kernel selected; performance remains pending |
+| G3 progressive preparation/native | NEXT; NOT STARTED | Build timing-free stable plan/spatial/dependency index and sealed early immutable partitions; re-profile before admitting any native kernel; parity and throughput |
 | G4 scale/retirement | NOT STARTED | Spatial batching/detail/cleanup; exterior/interior visuals and soak |
 | G5 acceptance/handoff | NOT STARTED | Full matrix, final commits, clean status, ready-for-merge report; DO NOT MERGE |
 

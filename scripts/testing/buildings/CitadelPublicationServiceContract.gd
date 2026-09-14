@@ -883,5 +883,13 @@ func view_ranked_rolling_windows() -> void:
 	check("completed_window_promotes_all_remaining_city_groups",second.get("status")=="ready"
 		and second.get("foregroundGroupIds",[]).size()==76 and second.get("deferredGroupIds",[]).is_empty()
 		and union.size()==groups.size())
+	var stage_profile: Dictionary = service.profile_scene_unit_metrics()
+	var rank_profile: Dictionary = stage_profile.get("demand_view_rank_and_merge",{})
+	check("view_window_profile_is_bounded_and_attributes_rank_scale",
+		int(rank_profile.get("calls",0))==3 and int(rank_profile.get("workUnitsTotal",0))==900
+		and int(rank_profile.get("sampleCount",0))==3 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
+		and int(rank_profile.get("p50Usec",-1))>=0 and int(rank_profile.get("p95Usec",-1))>=int(rank_profile.get("p50Usec",0))
+		and not rank_profile.has("samples"))
 	metrics.viewRankedRollingWindows={"firstCount":first.get("foregroundGroupIds",[]).size(),
-		"secondCount":second.get("foregroundGroupIds",[]).size(),"firstPortalGroups":first.get("portalGroupIds",[])}
+		"secondCount":second.get("foregroundGroupIds",[]).size(),"firstPortalGroups":first.get("portalGroupIds",[]),
+		"stageProfile":stage_profile}

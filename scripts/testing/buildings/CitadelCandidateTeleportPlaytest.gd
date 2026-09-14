@@ -1872,6 +1872,10 @@ func _finish(outcome: String,reason: String) -> void:
 	checks.setup_write_limit = placements.is_empty() if not spawn_cell.is_empty() else (placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES)
 	if is_instance_valid(main) and main.runtime_perf_monitor != null:
 		evidence.runtimePerformance = main.runtime_perf_monitor.summary()
+	if is_instance_valid(main) and main.structure_system != null \
+			and main.structure_system.citadel_publication != null \
+			and main.structure_system.citadel_publication.has_method("profile_scene_unit_metrics"):
+		evidence.publicationStageProfile = main.structure_system.citadel_publication.profile_scene_unit_metrics()
 	if is_instance_valid(render_observation):
 		evidence.renderObservation = render_observation.summary()
 		render_observation.stop()

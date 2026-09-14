@@ -110,37 +110,58 @@ func create_save_snapshot() -> Dictionary:
             "rotationY": player.rotation.y,
             "pitch": float(player.get("pitch"))
         }
-    return {
+    var result := {
         "seed": seed_text,
         "timeOfDay": time_of_day,
-        "weather": weather_system.snapshot() if weather_system else {},
-        "tutorial": tutorial_system.snapshot() if tutorial_system else {},
-        "player": player_state,
-        "inventory": {
+    }
+    var stage_started := runtime_perf_monitor.begin_section("autosave_snapshot_weather_tutorial") if runtime_perf_monitor != null else 0
+    result["weather"] = weather_system.snapshot() if weather_system else {}
+    result["tutorial"] = tutorial_system.snapshot() if tutorial_system else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_weather_tutorial", stage_started)
+    result["player"] = player_state
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_inventory") if runtime_perf_monitor != null else 0
+    result["inventory"] = {
             "slots": inventory_system.snapshot() if inventory_system else [],
             "size": inventory_system.size if inventory_system else ItemCatalogScript.INVENTORY_SIZE,
             "selectedSlot": inventory_system.selected_slot if inventory_system else 0
-        },
-        "crafting": crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {},
-        "terrain": snapshot_volume_edits(),
-        "terrainVolume": snapshot_terrain_volume(),
-        "subsurface": snapshot_subsurface(),
-        "removedProps": removed_props.keys(),
-        "survival": survival_system.snapshot() if survival_system else {},
-        "progression": progression_system.snapshot() if progression_system else {},
-        "equipment": equipment_system.snapshot() if equipment_system else {},
-        "objectives": objective_system.snapshot() if objective_system else {},
-        "contracts": contract_system.snapshot() if contract_system else {},
-        "story": story_director.snapshot() if story_director else {},
-        "npcJobFacts": npc_system.snapshot_job_facts() if npc_system and npc_system.has_method("snapshot_job_facts") else [],
-        "exploration": snapshot_exploration(),
-        "deathCount": death_count,
-        "respawnPoint": vector3_to_array(respawn_point) if respawn_point is Vector3 else [],
-        "beaconCharge": beacon_charge,
-        "beaconRaidStage": beacon_raid_stage,
-        "sanctuaryEstablished": sanctuary_established,
-        "blocks": snapshot_player_blocks()
     }
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_inventory", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_crafting") if runtime_perf_monitor != null else 0
+    result["crafting"] = crafting_system.snapshot() if crafting_system and crafting_system.has_method("snapshot") else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_crafting", stage_started)
+    result["terrain"] = snapshot_volume_edits()
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_terrain_volume") if runtime_perf_monitor != null else 0
+    result["terrainVolume"] = snapshot_terrain_volume()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_terrain_volume", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_subsurface") if runtime_perf_monitor != null else 0
+    result["subsurface"] = snapshot_subsurface()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_subsurface", stage_started)
+    result["removedProps"] = removed_props.keys()
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_systems") if runtime_perf_monitor != null else 0
+    result["survival"] = survival_system.snapshot() if survival_system else {}
+    result["progression"] = progression_system.snapshot() if progression_system else {}
+    result["equipment"] = equipment_system.snapshot() if equipment_system else {}
+    result["objectives"] = objective_system.snapshot() if objective_system else {}
+    result["contracts"] = contract_system.snapshot() if contract_system else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_systems", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_story") if runtime_perf_monitor != null else 0
+    result["story"] = story_director.snapshot() if story_director else {}
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_story", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_npc_jobs") if runtime_perf_monitor != null else 0
+    result["npcJobFacts"] = npc_system.snapshot_job_facts() if npc_system and npc_system.has_method("snapshot_job_facts") else []
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_npc_jobs", stage_started)
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_exploration") if runtime_perf_monitor != null else 0
+    result["exploration"] = snapshot_exploration()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_exploration", stage_started)
+    result["deathCount"] = death_count
+    result["respawnPoint"] = vector3_to_array(respawn_point) if respawn_point is Vector3 else []
+    result["beaconCharge"] = beacon_charge
+    result["beaconRaidStage"] = beacon_raid_stage
+    result["sanctuaryEstablished"] = sanctuary_established
+    stage_started = runtime_perf_monitor.begin_section("autosave_snapshot_player_blocks") if runtime_perf_monitor != null else 0
+    result["blocks"] = snapshot_player_blocks()
+    if runtime_perf_monitor != null: runtime_perf_monitor.end_section("autosave_snapshot_player_blocks", stage_started)
+    return result
 
 func apply_save_snapshot(snapshot: Dictionary) -> bool:
     if String(snapshot.get("seed", seed_text)) != seed_text:
