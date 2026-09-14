@@ -4,6 +4,7 @@ extends SceneTree
 ## Synthetic contract: real coordinator, named source/terrain/navigation owners.
 ## Direct closure calls isolate demand state; no engine frame or live proof claim.
 const Coordinator = preload("res://scripts/world/WorldStreamingCoordinator.gd")
+const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const A := Rect2i(0,0,1,1)
 const B := Rect2i(112,0,1,1)
 const C := Rect2i(224,0,1,1)
@@ -522,6 +523,63 @@ func _foreground_admission_preempts_ready_backlog() -> void:
 			== int(context.coordinator._requests[foreground_id].sequence))
 	_cleanup(context,"foreground_admission_preemption_cleanup")
 
+func _view_intent_is_stable_scheduling_input() -> void:
+	var context := _context()
+	var id := _request(context,A,"view_intent_setup")
+	if id<=0:
+		_cleanup(context,"view_intent_setup_cleanup")
+		return
+	var navigation_id: int = _nav_id(context,id)
+	var provider_replacements: int = int(context.navigation.replacement_calls)
+	var revision_before: int = context.coordinator.revision()
+	var raw := {"origin":Vector3(1.0,2.0,1.0),"forward":Vector3(0.0,0.0,-1.0),
+		"predictedOrigin":Vector3(1.0,2.0,-7.0),"horizontalFovDegrees":78.0,"farDistance":181.0}
+	_check("view_intent_rejects_non_dictionary_without_mutation",
+		not context.coordinator.set_request_view_intent(id,"invalid")
+		and context.coordinator.revision()==revision_before and _nav_id(context,id)==navigation_id)
+	_check("view_intent_updates_scheduling_without_provider_handle_churn",
+		context.coordinator.set_request_view_intent(id,raw)
+		and context.coordinator.revision()==revision_before+1 and _nav_id(context,id)==navigation_id
+		and context.navigation.replacement_calls==provider_replacements)
+	var normalized: Dictionary = ViewPriority.normalize(raw)
+	var manifest: Dictionary = context.coordinator.retained_source_requests()[0]
+	_check("view_intent_manifest_is_normalized_and_private",manifest.get("viewIntent",{})==normalized)
+	manifest.viewIntent.origin = Vector3(900,0,900)
+	_check("view_intent_manifest_mutation_cannot_change_owner",
+		context.coordinator.retained_source_requests()[0].viewIntent==normalized)
+	var jittered := raw.duplicate(true)
+	jittered.origin += Vector3(0.2,0.2,0.2)
+	jittered.predictedOrigin += Vector3(0.2,0.2,0.2)
+	var stable_revision: int = context.coordinator.revision()
+	_check("sub_quantum_camera_jitter_is_a_noop",
+		context.coordinator.set_request_view_intent(id,jittered)
+		and context.coordinator.revision()==stable_revision
+		and context.navigation.replacement_calls==provider_replacements)
+	var turned := raw.duplicate(true)
+	turned.forward = Vector3.RIGHT
+	_check("meaningful_view_turn_changes_only_scheduling_revision",
+		context.coordinator.set_request_view_intent(id,turned)
+		and context.coordinator.revision()==stable_revision+1 and _nav_id(context,id)==navigation_id
+		and context.navigation.replacement_calls==provider_replacements)
+	var groups := {
+		"gate":{"bounds":AABB(Vector3(-2,0,-22),Vector3(4,4,4)),"doorPartIds":["gate-door"]},
+		"interior":{"bounds":AABB(Vector3(-3,0,-43),Vector3(6,4,6)),"doorPartIds":[]},
+		"visible":{"bounds":AABB(Vector3(20,0,-32),Vector3(4,4,4)),"doorPartIds":[]},
+		"near_offscreen":{"bounds":AABB(Vector3(29,0,-1),Vector3(2,2,2)),"doorPartIds":[]},
+		"background":{"bounds":AABB(Vector3(99,0,-1),Vector3(2,2,2)),"doorPartIds":[]}}
+	var ranked: Array[Dictionary] = ViewPriority.ranked_groups(groups,{
+		"origin":Vector3.ZERO,"forward":Vector3(0,0,-1),"predictedOrigin":Vector3(0,0,-12),
+		"horizontalFovDegrees":80.0,"farDistance":180.0})
+	var rank_by_id: Dictionary = {}
+	for row: Dictionary in ranked: rank_by_id[row.id]=row
+	metrics["viewRanks"] = rank_by_id.duplicate(true)
+	_check("view_priority_orders_gate_lookthrough_visible_near_and_background",
+		rank_by_id.gate.priority==1 and rank_by_id.gate.portal
+		and rank_by_id.interior.priority==1 and rank_by_id.interior.throughPortal
+		and rank_by_id.visible.priority==2 and rank_by_id.near_offscreen.priority==3
+		and rank_by_id.background.priority==4)
+	_cleanup(context,"view_intent_cleanup_balanced")
+
 func _run() -> void:
 	var probe = Coordinator.new()
 	var available: bool = probe.has_method("replace_region")
@@ -538,6 +596,7 @@ func _run() -> void:
 		_ready_base_survives_pending_forecast_refresh()
 		_live_acceptance_under_scheduling_churn()
 		_foreground_admission_preempts_ready_backlog()
+		_view_intent_is_stable_scheduling_input()
 	var report := {"schema":"world-streaming-consumer-contract/v1","complete":true,
 		"passed":not checks.values().has(false),"checks":checks,"metrics":metrics,
 		"evidenceLevel":"synthetic_retained_consumer_contract",

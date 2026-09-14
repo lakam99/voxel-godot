@@ -136,6 +136,7 @@ class SyntheticCapturedNavigationOwners extends RefCounted:
 		return {"publicationStatus":"pending"}
 	func queue_navmesh_tile_publish(key: String, _urgent: bool, _owner := {}) -> void:
 		enqueue_calls += 1
+		calls.append("enqueue:%s" % key)
 		queued_navmesh_tile_source_keys[key] = navmesh_tile_source_key_for_tile(key)
 	func promote_queued_navmesh_tile_priority(key: String, expected_source: String) -> bool:
 		return queued_navmesh_tile_source_keys.get(key) == expected_source
@@ -723,15 +724,20 @@ func test_regional_subregion_readiness() -> void:
 	add_result("regional_local_query_requires_its_own_acknowledgement",regions.region_readiness(Rect2i(20,20,8,8)).status=="pending",{})
 	var navigation_queries_before := navigation.readiness_queries.size()
 	var traversal: Dictionary = regions.player_traversal_readiness(Rect2i(20,20,8,8))
-	add_result("player_traversal_does_not_wait_for_npc_navigation_acknowledgement",
+	add_result("player_traversal_requires_only_authoritative_terrain_acknowledgement",
 		traversal.status=="ready" and traversal.readinessScope=="player_traversal"
-		and traversal.requiredDomains==["terrain","structures"]
+		and traversal.requiredDomains==["terrain"]
 		and navigation.readiness_queries.size()==navigation_queries_before,traversal)
 	structures.pending_bounds = Rect2i(16,16,16,16)
-	var physical_pending: Dictionary = regions.player_traversal_readiness(Rect2i(20,20,8,8))
-	add_result("player_traversal_still_waits_for_structure_collision_receipt",
-		physical_pending.status=="pending" and physical_pending.missing.any(
-			func(row: Dictionary): return row.get("domain")=="structures"),physical_pending)
+	var traversal_with_structure_pending: Dictionary = regions.player_traversal_readiness(Rect2i(20,20,8,8))
+	add_result("ordinary_player_traversal_does_not_wait_for_structure_publication",
+		traversal_with_structure_pending.status=="ready"
+		and traversal_with_structure_pending.requiredDomains==["terrain"],traversal_with_structure_pending)
+	var startup_physical: Dictionary = regions.initial_physical_readiness(Rect2i(20,20,8,8))
+	add_result("initial_physical_readiness_still_waits_for_structure_collision_receipt",
+		startup_physical.status=="pending" and startup_physical.readinessScope=="initial_physical"
+		and startup_physical.requiredDomains==["terrain","structures"] and startup_physical.missing.any(
+			func(row: Dictionary): return row.get("domain")=="structures"),startup_physical)
 	regions.configure("")
 
 func test_regional_cached_navigation_proof_precedes_publisher() -> void:
@@ -787,11 +793,13 @@ func test_regional_cached_navigation_proof_precedes_publisher() -> void:
 	var proof_index := owners.calls.find("receipt_accepted")
 	var nav_index := owners.calls.rfind("nav_advance")
 	var pump_index := owners.calls.find("publisher_pump")
+	var competing_enqueue_index := owners.calls.find("enqueue:1,0")
 	add_result("synthetic_regional_cached_proof_precedes_busy_publisher",configured and request>0
 		and before.status=="pending" and ready.status=="ready" and owners.accepted_proofs>0
-		and proof_index>=0 and nav_index>proof_index and pump_index>nav_index
+		and proof_index>=0 and competing_enqueue_index>proof_index and nav_index>proof_index and pump_index>nav_index
 		and owners.pump_budgets.all(func(budget: int):return budget>0 and budget<=4000)
-		and owners.enqueue_calls==0 and owners.build_calls==0
+		and owners.enqueue_calls==2 and owners.calls.count("enqueue:0,0")==1
+		and owners.calls.count("enqueue:1,0")==1 and owners.build_calls==0
 		and publication.region_publication_readiness(full_bounds).status=="pending",
 		{"evidenceLevel":"synthetic_contract","ready":ready,"calls":owners.calls.duplicate(),
 		"pumpBudgetsUsec":owners.pump_budgets.duplicate(),"enqueueCalls":owners.enqueue_calls,"buildCalls":owners.build_calls})

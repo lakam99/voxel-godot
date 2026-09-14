@@ -1814,6 +1814,12 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	var paving_center_z := (paving_north_z + paving_south_z) * 0.5
 	if not is_finite(paving_depth) or not is_finite(paving_center_z) or paving_depth <= 0.0:
 		return {"ready": false, "reason": "invalid_civic_quarter_paving_geometry"}
+	var requested_paving := Rect2(Vector2(19.0,paving_south_z),Vector2(48.0,paving_depth))
+	var supported_paving := _supported_civic_paving_rect(blueprint,requested_paving)
+	if not supported_paving.ready: return supported_paving
+	var paving_rect: Rect2 = supported_paving.bounds
+	var paving_size := Vector3(paving_rect.size.x,0.08,paving_rect.size.y)
+	var paving_position := Vector3(paving_rect.get_center().x,base_y+0.18,paving_rect.get_center().y)
 	var houses := civic_house_specs(keep_front_z)
 	for house: Dictionary in houses:
 		if not StreetOpeningLayout.prepare(float(house.depth),float(house.height)).ready:
@@ -1823,8 +1829,7 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	# reshape the roof/chimney by feeding a relocated world pose back into it.
 	if infill_environment!=null:
 		var source_before := var_to_bytes(blueprint.snapshot())
-		var paving_size := Vector3(48.0,0.08,paving_depth)
-		var paving_preview = CivicInfill.Part.new({"position":Vector3(43.0,base_y+0.18,paving_center_z),"size":paving_size})
+		var paving_preview = CivicInfill.Part.new({"position":paving_position,"size":paving_size})
 		var paving_bounds: AABB=blueprint.transformed_part_bounds(paving_preview)
 		var producer := func(target, spec: Dictionary): return _add_civic_house(target,spec,base_y,variation)
 		infill=CivicInfill.prepare_with_terrace_reconciliation(infill_environment,houses,producer,Rect2(Vector2(paving_bounds.position.x,paving_bounds.position.z),Vector2(paving_bounds.size.x,paving_bounds.size.z)),base_y,continuation)
@@ -1833,7 +1838,7 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 		var terrace_commit := CivicInfill.Terraces.commit(blueprint,infill.terraceOriginals,infill.terraceReplacements)
 		if not terrace_commit.ready: return terrace_commit
 		houses=infill.specs
-	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, base_y + 0.18, paving_center_z), Vector3(48.0, 0.08, paving_depth), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
+	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", paving_position, paving_size, {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
 	for house_value in houses:
 		var house: Dictionary = house_value as Dictionary
 		if not _add_civic_house(blueprint,house,base_y,variation):
@@ -1841,7 +1846,34 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	for route_index in range(3):
 		var route_z := keep_front_z - 13.5 + float(route_index) * 5.2
 		add_traffic_wear(blueprint, "urban_civic_quarter_route_%02d" % route_index, Vector3(37.8, base_y + 0.232, route_z), Vector2(27.0, 1.84), 0.0, variation - 0.04 + float(route_index) * 0.011, "citadel_civic_route_wear")
-	return {"ready": true, "commonsLayout": commons_layout, "pavingNorthZ": paving_north_z, "pavingSouthZ": paving_south_z, "pavingDepth": paving_depth, "pavingCenterZ": paving_center_z, "pavingMargin": paving_margin,"infill":infill}
+	return {"ready": true, "commonsLayout": commons_layout, "pavingNorthZ": paving_rect.end.y, "pavingSouthZ": paving_rect.position.y, "pavingDepth": paving_rect.size.y, "pavingCenterZ": paving_rect.get_center().y, "pavingMargin": paving_margin,"pavingBounds":paving_rect,"pavingSupportBounds":supported_paving.supportBounds,"infill":infill}
+
+## The civic finish is decorative, but its footprint still comes from the real
+## generated courtyard support. This prevents a fixed design slab from crossing
+## a narrower curtain wall while keeping planning and emitted geometry identical.
+static func _supported_civic_paving_rect(blueprint, requested: Rect2) -> Dictionary:
+	if blueprint==null or not requested.position.is_finite() or not requested.size.is_finite() \
+			or requested.size.x<=0.0 or requested.size.y<=0.0:
+		return {"ready":false,"reason":"invalid_civic_quarter_paving_request"}
+	var support_bounds := Rect2()
+	var support_ids: Array[String] = []
+	for part in blueprint.parts:
+		if part==null or not String(part.id).begins_with("castle_compound_paving_segment_") \
+				or String(part.semantic)!="castle_courtyard_paving" or not bool(part.collision_enabled): continue
+		var bounds: AABB=blueprint.transformed_part_bounds(part)
+		var rectangle:=Rect2(Vector2(bounds.position.x,bounds.position.z),Vector2(bounds.size.x,bounds.size.z))
+		if not rectangle.intersects(requested): continue
+		support_bounds=rectangle if support_ids.is_empty() else support_bounds.merge(rectangle)
+		support_ids.append(String(part.id))
+	if support_ids.is_empty():
+		# Isolated civic recipe fixtures deliberately have no castle enclosure.
+		# Production compounds always take one of the generated sources above.
+		return {"ready":true,"bounds":requested,"supportBounds":requested,"supportPartIds":[],"source":"standalone_civic_recipe"}
+	var clipped:=requested.intersection(support_bounds)
+	if clipped.size.x<8.0 or clipped.size.y<8.0:
+		return {"ready":false,"reason":"civic_quarter_paving_support_too_small"}
+	support_ids.sort()
+	return {"ready":true,"bounds":clipped,"supportBounds":support_bounds,"supportPartIds":support_ids,"source":"generated_courtyard_paving_envelope"}
 
 
 static func add_civic_commons(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> Dictionary:

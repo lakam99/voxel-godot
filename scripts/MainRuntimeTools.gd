@@ -491,12 +491,11 @@ func terrain_collision_motion_proof(from_position: Vector3, to_position: Vector3
 func update_voxel_authority_chunks(force: bool) -> void:
     var monitor = runtime_perf_monitor
     var publication_frame_started_usec := Time.get_ticks_usec()
-    # A visible traversal hold is an owned loading phase. Let every retained
-    # publication owner drain with its loading budget while the overlay hides
-    # incomplete terrain/structures; the four gameplay lanes resume only after
-    # the authoritative traversal gate releases that hold.
+    # Ordinary traversal stays on the bounded gameplay schedule even if a HUD
+    # overlay is owned by an unrelated operation.  Only explicit loading and
+    # relocation lifecycles may switch publication to their loading cadence.
     var shared_gameplay_schedule := not force and not startup_loading_active \
-        and not runtime_loading_active and not streaming_loading_overlay_active
+        and not runtime_loading_active and streaming_loading_request_owner.is_empty()
     if shared_gameplay_schedule:
         gameplay_publication_lane = posmod(gameplay_publication_lane + 1, 4)
         gameplay_publication_deadline_usec = publication_frame_started_usec + GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC

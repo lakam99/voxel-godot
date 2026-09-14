@@ -571,7 +571,8 @@ func runtime_dispatch() -> void:
 	runtime.site_gate = gate
 	check("runtime_real_generation_current",runtime.generation_context_current())
 	runtime._process(0.016)
-	var expected := Runtime.SITE_GATE_SCRIPT.footprint(value.player.global_position,Runtime.FINAL_VIEW_DISTANCE)
+	var player_cell := Vector2i(floori(value.player.global_position.x/Runtime.CELL),floori(value.player.global_position.z/Runtime.CELL))
+	var expected := Rect2i(player_cell-Vector2i(2,2),Vector2i(5,5))
 	check("runtime_current_supplies_player_footprint",s.last_allow and s.last_bounds==expected)
 	check("runtime_current_dispatches",s.citadel_publication.stats().dispatchCount==1)
 	s.reset()
@@ -799,6 +800,7 @@ func actual_early_description_promotion() -> void:
 	await close(value,"actual_early_promotion")
 
 func _run() -> void:
+	view_ranked_rolling_windows()
 	await early_description_lifecycle()
 	await actual_early_description_promotion()
 	await retained_demand()
@@ -814,3 +816,34 @@ func _run() -> void:
 	file.store_string(JSON.stringify(report,"\t")); file.close()
 	print("PUBLICATION SERVICE COMPLETE ",JSON.stringify({"passed":report.passed,"checks":checks.size()}))
 	quit(0 if report.passed else 1)
+
+func view_ranked_rolling_windows() -> void:
+	# Pure scheduling coverage for a city larger than one physical packet window.
+	# Geometry and receipts remain covered by the actual frozen-source cases.
+	var groups: Dictionary = {}
+	for index: int in range(300):
+		var id := "synthetic-group-%03d" % index
+		var dependencies: Array = ["synthetic-group-299"] if index==5 else []
+		groups[id]={"bounds":AABB(Vector3(float(index%12)*4.0-22.0,0.0,-10.0-float(index/12)*3.0),Vector3(3,3,3)),
+			"doorPartIds":["gate-door"] if index==5 else [],"dependencies":dependencies}
+	var description := {"publication_groups":{"groups":groups}}
+	var view := {"origin":Vector3.ZERO,"forward":Vector3(0,0,-1),"predictedOrigin":Vector3(0,0,-20),
+		"horizontalFovDegrees":90.0,"farDistance":180.0}
+	var service := Service.new()
+	var first: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],{})
+	var completed: Dictionary = {}
+	for id: String in first.get("foregroundGroupIds",[]): completed[id]=true
+	var second: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],completed)
+	var union := completed.duplicate()
+	for id: String in second.get("foregroundGroupIds",[]): union[id]=true
+	check("view_window_caps_city_publication_without_full_source_fallback",first.get("status")=="ready"
+		and first.get("foregroundGroupIds",[]).size()==Service.MAX_INCREMENTAL_FOREGROUND_GROUPS
+		and first.get("deferredGroupIds",[]).size()==44)
+	check("view_window_promotes_gate_and_dependency_complete_lookthrough",first.get("portalGroupIds",[]).has("synthetic-group-005")
+		and first.get("foregroundGroupIds",[]).has("synthetic-group-005")
+		and first.get("foregroundGroupIds",[]).has("synthetic-group-299"))
+	check("completed_window_promotes_all_remaining_city_groups",second.get("status")=="ready"
+		and second.get("foregroundGroupIds",[]).size()==44 and second.get("deferredGroupIds",[]).is_empty()
+		and union.size()==groups.size())
+	metrics.viewRankedRollingWindows={"firstCount":first.get("foregroundGroupIds",[]).size(),
+		"secondCount":second.get("foregroundGroupIds",[]).size(),"firstPortalGroups":first.get("portalGroupIds",[])}

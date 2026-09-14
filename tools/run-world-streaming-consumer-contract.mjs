@@ -8,6 +8,7 @@ cli(async () => {
   const files = [
     'scripts/testing/buildings/WorldStreamingConsumerContract.gd',
     'scripts/world/WorldStreamingCoordinator.gd',
+    'scripts/world/GeneratedContentViewPriority.gd',
     'scripts/world/RegionDemandSet.gd',
     'tools/run-world-streaming-consumer-contract.mjs',
     'tools/lib/building-runner.mjs',

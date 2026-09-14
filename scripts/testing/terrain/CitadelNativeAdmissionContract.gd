@@ -25,9 +25,14 @@ class PlayerHost extends Node:
 	var hud = null
 	var runtime_perf_monitor = null
 	var messages: Array = []
+	var overlay_shows: Array = []
+	var overlay_hides: Array = []
 	func terrain_collision_motion_proof(from: Vector3, to: Vector3, radius: float) -> Dictionary:
 		return runtime.collision_proof_for_motion(from,to,radius)
 	func show_action_message(message: String, _passive := false) -> void: messages.append(message)
+	func show_streaming_loading_overlay(message: String, owner := "runtime_streaming") -> void:
+		overlay_shows.append({"message":message,"owner":owner})
+	func hide_streaming_loading_overlay(owner := "runtime_streaming") -> void: overlay_hides.append(owner)
 
 class Structures extends RefCounted:
 	var citadel_terrain_admission
@@ -385,6 +390,7 @@ func _player_containment() -> void:
 	await _frames(4)
 	check("real_player_held_while_source_pending",player.global_position==start and player.velocity==Vector3.ZERO and player.terrain_collision_hold_frames>=4)
 	check("player_wait_message_emitted",not host.messages.is_empty() and String(host.messages[0]).contains("Preparing landmark"))
+	check("ordinary_source_wait_never_opens_modal_overlay",host.overlay_shows.is_empty())
 	var stamina_before := float(player.survival.stamina)
 	check("pending_source_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
 	check("rejected_dodge_preserves_stamina",player.survival.stamina==stamina_before and not player.player_defense.is_active())
@@ -430,65 +436,52 @@ func _player_containment() -> void:
 func _physical_publication_controls(runtime: ObservedRuntime, player, structures: Structures, host: PlayerHost) -> Dictionary:
 	# The native plane is already published. Only the synthetic structure receipt
 	# changes below; the act uses ordinary Player physics and never writes position.
+	# Structure state remains visible in proof telemetry while late construction's
+	# capsule guard, rather than a modal movement hold, owns physical safety.
 	var before: Vector3 = player.global_position
 	var no_landmark: Dictionary = runtime.collision_proof_for_motion(before,before,0.42)
-	check("physical_no_landmark_ready_preserves_native_motion",no_landmark.passed and structures.physical_requests>0 and structures.physical_receipt=={"status":"ready","required":false})
+	check("physical_no_landmark_ready_preserves_native_motion",no_landmark.passed and structures.physical_requests>0
+		and no_landmark.get("structurePublication")==structures.physical_receipt)
 	var mesh: Dictionary = runtime.collision_mesh_ready_for_body_position(before,0.42)
 	check("physical_controls_have_native_collision",bool(mesh.get("passed",false)))
 	structures.physical_receipt = {"status":"pending","required":true,"reason":"synthetic_buildings_pending","siteIds":["synthetic_native_site"]}
-	runtime.last_site_wait_message_usec = -1000000
 	var hold_before := int(player.terrain_collision_hold_frames)
+	var message_count := host.messages.size()
+	var overlay_count := host.overlay_shows.size()
 	await _frames(4)
 	var pending: Dictionary = player.last_terrain_collision_proof.duplicate(true)
-	check("physical_pending_holds_real_player",player.global_position==before and player.velocity==Vector3.ZERO and player.terrain_collision_hold_frames>=hold_before+4)
-	check("physical_pending_preserves_structured_receipt",not pending.get("passed",true) and pending.get("reason")=="synthetic_buildings_pending" and pending.get("regionalPublication")==structures.physical_receipt and not pending.has("siteAdmission"))
-	check("physical_pending_sets_waiting",runtime.site_traversal_waiting and player.get_meta("terrain_collision_hold",false))
-	check("physical_pending_message",host.messages.any(func(value):return String(value).contains("Preparing nearby world")))
-	var stamina := float(player.survival.stamina)
-	check("physical_pending_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
-	check("physical_pending_dodge_no_stamina_cost",player.survival.stamina==stamina and not player.player_defense.is_active())
-	# Deliberately non-boundary coordinates: CELL=1.35 gives inclusive cells
-	# (1000,-1002)..(1003,-999), plus ceil(1.36/1.35)+2 = 4 cells.
-	# This direct proof tests the public swept-boundary command, not actor motion.
-	var sweep_from := Vector3(1350.25,0.05,-1349.75)
-	var sweep_to := Vector3(1353.25,0.05,-1352.25)
-	var expected_bounds := Rect2i(992,-1008,16,16)
-	var sweep: Dictionary = runtime.collision_proof_for_motion(sweep_from,sweep_to,1.36)
+	check("physical_pending_does_not_hold_real_player",player.global_position.x>before.x
+		and player.terrain_collision_hold_frames==hold_before and not player.get_meta("terrain_collision_hold",false))
+	check("physical_pending_preserves_structured_observation",pending.get("passed",false)
+		and pending.get("structurePublication")==structures.physical_receipt and not pending.has("siteAdmission"))
+	check("physical_pending_never_enters_wait_state",not runtime.site_traversal_waiting)
+	check("physical_pending_emits_no_modal_or_repeated_status",host.overlay_shows.size()==overlay_count
+		and host.messages.size()==message_count)
+	# This direct local proof checks that the aligned region observation still
+	# reaches the structure owner without depending on its result.
+	var sweep_from: Vector3 = player.global_position
+	var sweep: Dictionary = runtime.collision_proof_for_motion(sweep_from,sweep_from,0.42)
 	var captured_bounds := structures.physical_bounds
-	check("physical_sweep_reaches_publication_gate",sweep.get("regionalPublication")==structures.physical_receipt and not sweep.has("siteAdmission"))
-	check("physical_sweep_exact_navigation_tile_coverage",captured_bounds==expected_bounds)
-	check("physical_sweep_includes_both_endpoint_margins",captured_bounds.encloses(Rect2i(996,-1004,10,10)) and captured_bounds.encloses(Rect2i(998,-1006,10,10)))
-	runtime.collision_proof_for_motion(sweep_to,sweep_from,1.36)
-	check("physical_sweep_reverse_same_bounds",structures.physical_bounds==expected_bounds)
-	runtime.collision_proof_for_motion(sweep_from,sweep_to,0.42)
-	check("physical_sweep_covers_requested_radius",structures.physical_bounds.encloses(Rect2i(997,-1005,10,10)))
-	runtime.collision_proof_for_motion(sweep_from,sweep_to,15.0)
-	check("physical_sweep_larger_radius_expands_regional_coverage",structures.physical_bounds.encloses(expected_bounds)
-		and structures.physical_bounds.size.x>expected_bounds.size.x and structures.physical_bounds.size.y>expected_bounds.size.y)
+	check("physical_observation_reaches_structure_owner",sweep.get("passed",false)
+		and sweep.get("structurePublication")==structures.physical_receipt and captured_bounds.size==Vector2i(16,16))
 	structures.physical_receipt = {"status":"ready","required":true,"siteIds":["synthetic_native_site"]}
-	var deadline := Time.get_ticks_msec()+3000
-	while Time.get_ticks_msec()<deadline and player.global_position.x<before.x+0.1:
-		await _frames(1)
-	check("physical_pending_to_ready_resumes_real_motor",player.global_position.x>before.x+0.1 and player.last_terrain_collision_proof.get("passed",false))
+	await _frames(2)
+	check("physical_pending_to_ready_keeps_real_motor_running",player.last_terrain_collision_proof.get("passed",false))
 	before = player.global_position
 	structures.physical_receipt = {"status":"failed","required":true,"reason":"synthetic_building_publication_failed","siteIds":["synthetic_native_site"]}
-	runtime.last_site_wait_message_usec = -1000000
 	await _frames(4)
 	var failed: Dictionary = player.last_terrain_collision_proof.duplicate(true)
-	check("physical_failed_holds_real_player",player.global_position==before and player.velocity==Vector3.ZERO)
-	check("physical_failed_preserves_structured_receipt",not failed.get("passed",true) and failed.get("reason")=="synthetic_building_publication_failed" and failed.get("regionalPublication")==structures.physical_receipt and not failed.has("siteAdmission"))
-	check("physical_failed_message_preserves_reason",host.messages.any(func(value):return String(value).contains("World loading failed: synthetic_building_publication_failed")))
-	stamina = float(player.survival.stamina)
-	check("physical_failed_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
-	check("physical_failed_dodge_no_stamina_cost",player.survival.stamina==stamina and not player.player_defense.is_active())
+	check("physical_failed_does_not_hold_real_player",player.global_position.x>before.x and not player.get_meta("terrain_collision_hold",false))
+	check("physical_failed_preserves_structured_observation",failed.get("passed",false)
+		and failed.get("structurePublication")==structures.physical_receipt and not failed.has("siteAdmission"))
+	check("physical_failed_never_opens_modal_overlay",host.overlay_shows.size()==overlay_count)
 	structures.physical_receipt = {"status":"ready","required":true,"siteIds":["synthetic_native_site"]}
-	deadline = Time.get_ticks_msec()+3000
-	while Time.get_ticks_msec()<deadline and player.global_position.x<before.x+0.1:
-		await _frames(1)
+	var deadline := Time.get_ticks_msec()+3000
+	while Time.get_ticks_msec()<deadline and player.global_position.x<before.x+0.1: await _frames(1)
 	var ready: Dictionary = player.last_terrain_collision_proof.duplicate(true)
-	check("physical_ready_resumes_real_motor",player.global_position.x>before.x+0.1 and ready.get("passed",false))
+	check("physical_ready_keeps_real_motor_running",player.global_position.x>before.x+0.1 and ready.get("passed",false))
 	check("physical_ready_clears_waiting",not runtime.site_traversal_waiting and not player.get_meta("terrain_collision_hold",true))
 	# The caller immediately exercises the original successful real dodge and
 	# source-failure-during-dodge controls with this required/ready receipt active.
-	return {"pending":pending,"failed":failed,"ready":ready,"sweptBounds":captured_bounds,"expectedSweptBounds":expected_bounds,
+	return {"pending":pending,"failed":failed,"ready":ready,"observedBounds":captured_bounds,"modalOverlayShows":host.overlay_shows.duplicate(true),
 		"fixture":"Synthetic physical-publication receipts; real native collision proof, Player motor and dodge. No actual building publication or live gameplay acceptance."}

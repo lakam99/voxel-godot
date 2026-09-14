@@ -10,6 +10,7 @@ const SceneJob = preload("res://scripts/buildings/BuildingScenePublicationJob.gd
 const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const DemandSet = preload("res://scripts/world/RegionDemandSet.gd")
+const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const MAX_REGIONS := 16
 const MAX_RETAINED_BOUNDS := 64
 const MAX_DISCOVERY_CHUNKS := 256
@@ -247,6 +248,10 @@ func set_retained_source_requests(requests: Array) -> bool:
 		if not value.get("navigationTileKeys") is Array or value.navigationTileKeys.is_empty() \
 			or value.navigationTileKeys.size()>MAX_PENDING_NAVIGATION_TILES: return false
 		if value.has("navigationTilePriorities") and not value.navigationTilePriorities is Dictionary: return false
+		var raw_view_intent: Variant = value.get("viewIntent",{})
+		if not raw_view_intent is Dictionary: return false
+		var view_intent: Dictionary = ViewPriority.normalize(raw_view_intent)
+		if not raw_view_intent.is_empty() and view_intent.is_empty(): return false
 		if value.get("sites",[]).size()>MAX_REGIONS: return false
 		ids[value.ownerId] = true
 		var consumer_keys: Dictionary = {}
@@ -351,8 +356,10 @@ func set_retained_source_requests(requests: Array) -> bool:
 			binding_priorities[binding_key] = mini(int(binding_priorities.get(binding_key,4)),int(value.priority))
 		var retained_tile_priorities := {}
 		for key: String in navigation_keys: retained_tile_priorities[key] = int(declared_tile_priorities.get(key,value.priority))
-		owned.append({"ownerId":value.ownerId,"bounds":value.bounds,"priority":value.priority,
-			"admissionKeys":admission_keys,"navigationTileKeys":navigation_keys,"navigationTilePriorities":retained_tile_priorities,"sites":sites})
+		var retained_consumer := {"ownerId":value.ownerId,"bounds":value.bounds,"priority":value.priority,
+			"admissionKeys":admission_keys,"navigationTileKeys":navigation_keys,"navigationTilePriorities":retained_tile_priorities,"sites":sites}
+		if not view_intent.is_empty(): retained_consumer["viewIntent"] = view_intent
+		owned.append(retained_consumer)
 	var bounds: Array[Rect2i] = []
 	var world_bounds := Rect2i(-1000000,-1000000,2000000,2000000)
 	for rectangle: Rect2i in DemandSet.rectangles(discovery,DISCOVERY_CHUNK_SIZE):
@@ -699,7 +706,7 @@ func _retain_packet_bootstrap_base(region: Vector2i, current: Dictionary, base, 
 		_described[region] = {"binding":current.binding.duplicate(),"profile":immutable_profile,"description":description,
 			"configuration":_configuration_serial,"serial":_description_serial}
 
-func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description, base = null) -> Dictionary:
+func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description, base = null, completed: Dictionary = {}) -> Dictionary:
 	if description==null or description.binding!=binding or not description.publication_groups.get("ready",false):
 		return {"status":"pending","reason":"packet_foreground_description_pending"}
 	var foreground: Dictionary = {}
@@ -788,18 +795,130 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 				else: blocked[id] = true
 			if not publishable.is_empty(): requests.append({"ownerId":"region:%s" % str(consumer.ownerId),"groupIds":publishable,"priority":consumer.priority})
 			for id: String in publishable: foreground[id] = true
-	var deferred: Array[String] = []
-	for id: String in description.publication_groups.groups:
-		if not foreground.has(id): deferred.append(id)
-	deferred.sort()
+	var window: Dictionary = _bounded_packet_view_window(description,base,census,consumers,requests,completed)
+	if window.get("status")!="ready": return window
 	var blocked_ids: Array[String] = []
 	for id: String in blocked:
 		blocked_ids.append(id)
 	blocked_ids.sort()
 	var boundary_ids: Array = boundary_groups.keys()
 	boundary_ids.sort()
-	return {"status":"ready","requests":requests,"deferredGroupIds":deferred,"foregroundGroupIds":foreground.keys(),
-		"blockedGroupIds":blocked_ids,"boundaryGroupIds":boundary_ids,"censusReady":census.get("ready",base==null)}
+	for id: String in window.get("blockedGroupIds",[]):
+		if not blocked_ids.has(id): blocked_ids.append(id)
+	blocked_ids.sort()
+	return {"status":"ready","requests":window.requests,"deferredGroupIds":window.deferredGroupIds,
+		"foregroundGroupIds":window.foregroundGroupIds,"viewPrioritizedGroupIds":window.viewPrioritizedGroupIds,
+		"portalGroupIds":window.portalGroupIds,"blockedGroupIds":blocked_ids,"boundaryGroupIds":boundary_ids,
+		"censusReady":census.get("ready",base==null),"rollingWindow":true}
+
+## Select one bounded, dependency-complete publication window. Completed groups
+## make room for the next window, so a retained city eventually finishes while
+## the current view controls which unfinished work advances first.
+func _bounded_packet_view_window(description, base, census: Dictionary, consumers: Array,
+		base_requests: Array, completed: Dictionary) -> Dictionary:
+	var groups: Dictionary = description.publication_groups.groups
+	var candidates: Dictionary = {}
+	for request: Dictionary in base_requests:
+		for id: String in request.groupIds:
+			candidates[id] = {"id":id,"priority":int(request.priority),"distanceSquared":0.0,"portal":false,"throughPortal":false}
+	for consumer: Dictionary in consumers:
+		var view: Dictionary = consumer.get("viewIntent",{})
+		if view.is_empty(): continue
+		for row: Dictionary in ViewPriority.ranked_groups(groups,view):
+			var id := String(row.id)
+			var current: Dictionary = candidates.get(id,{})
+			if current.is_empty() or int(row.priority)<int(current.priority) \
+					or int(row.priority)==int(current.priority) and float(row.distanceSquared)<float(current.distanceSquared):
+				candidates[id]=row.duplicate(true)
+	# Legacy/direct owners without a camera retain their exact source request.
+	# A rolling city window exists only when a gameplay consumer supplies view
+	# intent; this keeps background tools and navigation-only requests narrow.
+	var ordered: Array[Dictionary] = []
+	for row: Dictionary in candidates.values():
+		if not completed.has(String(row.id)): ordered.append(row)
+	ordered.sort_custom(func(a: Dictionary,b: Dictionary):
+		if int(a.priority)!=int(b.priority): return int(a.priority)<int(b.priority)
+		if not is_equal_approx(float(a.distanceSquared),float(b.distanceSquared)):
+			return float(a.distanceSquared)<float(b.distanceSquared)
+		return String(a.id)<String(b.id))
+	var selected: Dictionary = {}
+	var selected_priority: Dictionary = {}
+	var selected_order: Array[String] = []
+	var view_ids: Array[String] = []
+	var portal_ids: Array[String] = []
+	var blocked: Dictionary = {}
+	for row: Dictionary in ordered:
+		var id := String(row.id)
+		if not groups.has(id): return {"status":"failed","reason":"packet_foreground_group_unknown","groupId":id}
+		var closure: Dictionary = _packet_dependency_window(groups,id,completed)
+		if closure.get("status")!="ready": return closure
+		var eligible := true
+		for required_id: String in closure.groupIds:
+			if base!=null and not _packet_group_publishable(description,census,required_id):
+				eligible=false
+				blocked[required_id]=true
+		if not eligible: continue
+		var additions := 0
+		for required_id: String in closure.groupIds:
+			if not selected.has(required_id): additions+=1
+		if selected.size()+additions>MAX_INCREMENTAL_FOREGROUND_GROUPS: continue
+		for required_id: String in closure.groupIds:
+			if not selected.has(required_id): selected_order.append(required_id)
+			selected[required_id]=true
+			selected_priority[required_id]=mini(int(selected_priority.get(required_id,row.priority)),int(row.priority))
+		if int(row.priority)<4: view_ids.append(id)
+		if bool(row.get("portal",false)) or bool(row.get("throughPortal",false)): portal_ids.append(id)
+		if selected.size()>=MAX_INCREMENTAL_FOREGROUND_GROUPS: break
+	var by_priority: Dictionary = {}
+	for id: String in selected_order:
+		var priority := int(selected_priority[id])
+		if not by_priority.has(priority): by_priority[priority]=[]
+		by_priority[priority].append(id)
+	var requests: Array[Dictionary] = []
+	for priority: int in range(5):
+		if by_priority.has(priority):
+			requests.append({"ownerId":"view-window:%d" % priority,"groupIds":by_priority[priority],"priority":priority})
+	var deferred: Array[String] = []
+	for id: String in groups:
+		if not completed.has(id) and not selected.has(id): deferred.append(id)
+	deferred.sort()
+	view_ids = _unique_sorted_strings(view_ids)
+	portal_ids = _unique_sorted_strings(portal_ids)
+	var blocked_ids: Array = blocked.keys()
+	blocked_ids.sort()
+	return {"status":"ready","requests":requests,"foregroundGroupIds":selected_order,
+		"deferredGroupIds":deferred,"viewPrioritizedGroupIds":view_ids,"portalGroupIds":portal_ids,"blockedGroupIds":blocked_ids}
+
+static func _unique_sorted_strings(values: Array[String]) -> Array[String]:
+	var seen: Dictionary = {}
+	for value: String in values: seen[value]=true
+	var result: Array[String] = []
+	for value: String in seen: result.append(value)
+	result.sort()
+	return result
+
+static func _packet_dependency_window(groups: Dictionary, first_id: String, completed: Dictionary) -> Dictionary:
+	var visiting: Dictionary = {}
+	var ordered: Array[String] = []
+	var stack: Array = [[first_id,false]]
+	while not stack.is_empty():
+		var frame: Array = stack.pop_back()
+		var id := String(frame[0])
+		if completed.has(id): continue
+		if not groups.has(id): return {"status":"failed","reason":"publication_group_dependency_missing","groupId":id}
+		if bool(frame[1]):
+			visiting[id]=2
+			if not ordered.has(id): ordered.append(id)
+			continue
+		if int(visiting.get(id,0))==2: continue
+		if int(visiting.get(id,0))==1: return {"status":"failed","reason":"publication_group_dependency_cycle","groupId":id}
+		visiting[id]=1
+		stack.append([id,true])
+		var dependencies: Array = groups[id].get("dependencies",[]).duplicate()
+		dependencies.sort()
+		dependencies.reverse()
+		for dependency in dependencies: stack.append([String(dependency),false])
+	return {"status":"ready","groupIds":ordered}
 
 func _packet_group_publishable(description, census: Dictionary, group_id: String) -> bool:
 	if not bool(census.get("groups",{}).get(group_id,{}).get("eligible",false)):
@@ -1340,7 +1459,8 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 	if entry.get("demandRevision",-1)==_demand_revision: return true
 	if bool(entry.get("packetMode",false)):
 		var base: Preparation.PreparedPublicationBase = entry.job._cpu.get("publicationBase")
-		var plan: Dictionary = _packet_foreground_plan(entry.region,entry.binding,base.description if base!=null else null,base)
+		var completed: Dictionary = entry.job.completed_physical_group_ids(entry.binding)
+		var plan: Dictionary = _packet_foreground_plan(entry.region,entry.binding,base.description if base!=null else null,base,completed)
 		if plan.get("status")!="ready":
 			entry["packetDemandStatus"] = plan.duplicate(true)
 			return false
@@ -1391,6 +1511,8 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 		entry["packetDemandStatus"] = {"status":"retained","reason":"packet_foreground_groups_deferred" if not plan.blockedGroupIds.is_empty() and plan.requests.is_empty() else "",
 			"requests":plan.requests.duplicate(true),
 			"foregroundGroupIds":plan.foregroundGroupIds.duplicate(),"deferredGroupIds":plan.deferredGroupIds.duplicate(),
+			"viewPrioritizedGroupIds":plan.get("viewPrioritizedGroupIds",[]).duplicate(),
+			"portalGroupIds":plan.get("portalGroupIds",[]).duplicate(),
 			"blockedGroupIds":plan.blockedGroupIds.duplicate(),"boundaryGroupIds":plan.boundaryGroupIds.duplicate()}
 		entry["demandRevision"] = _demand_revision
 		# A previously acknowledged packet scene stays available for its committed
@@ -1465,6 +1587,14 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 						# owner pending states remain retryable without worker work.
 						if transaction.get("status")=="pending" and transaction.get("reason")=="physical_packet_foreground_demand_pending" \
 								and _packet_foreground_physical_ready(region,entry.binding):
+							if not entry.get("packetDemandStatus",{}).get("deferredGroupIds",[]).is_empty() \
+									and not entry.get("packetDemandStatus",{}).get("requests",[]).is_empty():
+								# The completed rolling window is guaranteed progress. Keep
+								# the resident scene and promote its next view-ranked window.
+								entry["demandRevision"]=-1
+								entry.phase="publishing"
+								progressed=true
+								break
 							if entry.phase!="scene_ready":
 								entry.phase="scene_ready"
 								_scene_completed_count+=1

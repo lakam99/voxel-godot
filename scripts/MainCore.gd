@@ -10,6 +10,7 @@ const StartupReadinessResultScript := preload("res://scripts/world/StartupReadin
 const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
 const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
+const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
 const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarkerIndex.gd")
@@ -844,6 +845,7 @@ func bootstrap_initial_chunks_staged(urgent_radius := 1) -> Dictionary:
     if not retain_streaming_region("player", WorldStreamingCoordinatorScript.playable_bounds(player.global_position), 0,
             foreground.navigationTiles, foreground.bounds):
         return StartupReadinessResultScript.failed(streaming_demand_error)
+    world_streaming.set_request_view_intent(int(streaming_requests.player),player_streaming_view_intent(player.global_position))
     # Keep existing scenario requirements in addition to the nearby player area.
     for key in urgent_keys:
         if not retain_streaming_region("startup:%s" % key, Rect2i(key*CHUNK_SIZE,Vector2i.ONE*CHUNK_SIZE), 1,
@@ -990,6 +992,18 @@ func foreground_streaming_intent_for_position(position: Vector3, lead_position :
     return {"bounds":bounds,"capsuleBounds":capsule_bounds,"navigationTiles":tiles,"capsuleRadius":capsule.radius,
         "safeMargin":player.safe_margin,"radiusXZ":Vector2(radius,radius),"leadPosition":lead_position if lead_position.is_finite() else Vector3.INF}
 
+func player_streaming_view_intent(predicted_position: Vector3) -> Dictionary:
+    if player == null or not is_instance_valid(player): return {}
+    var camera := player.get("camera") as Camera3D
+    var origin := camera.global_position if camera != null and is_instance_valid(camera) else player.global_position
+    var forward := -camera.global_basis.z if camera != null and is_instance_valid(camera) else -player.global_basis.z
+    forward.y = 0.0
+    var fov := camera.fov if camera != null and is_instance_valid(camera) else 72.0
+    return GeneratedContentViewPriorityScript.normalize({
+        "origin":origin,"forward":forward,"predictedOrigin":predicted_position,
+        "horizontalFovDegrees":fov,"farDistance":GeneratedContentViewPriorityScript.DEFAULT_FAR_DISTANCE
+    })
+
 func retain_streaming_region(owner: String, bounds: Rect2i, priority: int, foreground_navigation_tiles: Array = [],
 		foreground_bounds := Rect2i(), member_hysteresis_ms := WorldStreamingCoordinatorScript.RELEASE_HYSTERESIS_MS,
 		peripheral_margin_cells := WorldStreamingCoordinatorScript.RENDER_CELL_SIZE) -> bool:
@@ -1091,6 +1105,11 @@ func update_streaming_region_demand() -> void:
     else:
         retain_streaming_region("predicted_traversal",forecast_foreground.bounds,0,
             forecast_foreground.navigationTiles,forecast_foreground.bounds,0)
+    var view_intent := player_streaming_view_intent(forecast)
+    for owner in ["player","predicted_traversal"]:
+        var request_id := int(streaming_requests.get(owner,0))
+        if request_id>0 and not world_streaming.set_request_view_intent(request_id,view_intent):
+            streaming_demand_error=world_streaming.last_rejection
     if monitor != null:
         monitor.end_section("streaming_player_intent", intent_start)
     var actors_start: int = monitor.begin_section("streaming_actor_intents") if monitor != null else 0
@@ -1221,7 +1240,7 @@ func wait_for_initial_region_physical_readiness() -> Dictionary:
         if pending_chunk_loads.is_empty():
             call("process_streaming_structure_work")
             process_pending_chunk_prop_spawns()
-        state = world_streaming.player_traversal_readiness(
+        state = world_streaming.initial_physical_readiness(
             streaming_request_foreground_bounds.player,
             int(streaming_requests.get("player",-1))
         )

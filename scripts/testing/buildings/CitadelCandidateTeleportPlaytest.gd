@@ -283,6 +283,7 @@ func _run() -> void:
 	# accepted reservation to make a scene appear.  This keeps the diagnostic on
 	# the same streaming demand path as a player approaching the citadel.
 	evidence.prePublicationApproach = await _approach_until_scene_publication()
+	checks.no_modal_loading_during_publication_approach = int(evidence.prePublicationApproach.get("modalLoadingVisibleFrames",-1))==0
 	checks.pre_publication_approach = evidence.prePublicationApproach.get("passed",false)
 	if not checks.pre_publication_approach:
 		await _finish("failed",String(evidence.prePublicationApproach.get("reason","publication_demand_not_reached"))); return
@@ -324,6 +325,7 @@ func _run() -> void:
 		await _finish("scene_ready",""); return
 	if checks.scene_audit and checks.ready_capture_still_owned:
 		evidence.approach=await _approach_scene()
+		checks.no_modal_loading_during_close_approach = int(evidence.approach.get("modalLoadingVisibleFrames",-1))==0
 		checks.close_approach=evidence.approach.get("reached",false)
 		if not await _capture("close"):
 			await _finish("failed","close_capture_failed"); return
@@ -866,7 +868,18 @@ func _approach_motion_snapshot() -> Dictionary:
 		contacts.append({"path":String(collider.get_path()) if collider is Node else str(collider),"position":contact.get_position(),"normal":contact.get_normal()})
 	return {"velocity":player.velocity,"onFloor":player.is_on_floor(),"terrainGrounded":player.get("terrain_grounded"),
 		"terrainHold":player.get_meta("terrain_collision_hold",false),"terrainProof":player.get("last_terrain_collision_proof"),
-		"groundY":main.ground_y_near_position(player.global_position),"contacts":contacts}
+		"groundY":main.ground_y_near_position(player.global_position),"contacts":contacts,
+		"modalLoadingVisible":_modal_loading_visible()}
+
+func _modal_loading_visible() -> bool:
+	if not is_instance_valid(main): return false
+	if bool(main.get("streaming_loading_overlay_active")): return true
+	var hud_value = main.get("hud")
+	if is_instance_valid(hud_value):
+		var overlay = hud_value.get("loading_overlay")
+		if is_instance_valid(overlay) and bool(overlay.visible): return true
+	var startup_value = main.get("startup_overlay")
+	return is_instance_valid(startup_value) and bool(startup_value.visible)
 
 func _approach_until_scene_publication() -> Dictionary:
 	phase="ordinary_input_publication_demand"
@@ -879,6 +892,7 @@ func _approach_until_scene_publication() -> Dictionary:
 	var previous := player.global_position
 	var start_position := previous
 	var samples: Array=[]
+	var modal_loading_visible_frames := 0
 	var reason := "publication_demand_time_limit"
 	var reached := false
 	if bool(player.get("automated_input")) or not player.is_physics_processing():
@@ -888,6 +902,7 @@ func _approach_until_scene_publication() -> Dictionary:
 	while Time.get_ticks_msec()<until and _within_deadline():
 		await physics_frame
 		await _frame()
+		if _modal_loading_visible(): modal_loading_visible_frames+=1
 		if not _outside(reservation):
 			reason="player_entered_reservation_before_publication_demand"
 			break
@@ -927,10 +942,13 @@ func _approach_until_scene_publication() -> Dictionary:
 	await _frame()
 	var identity := _accepted_current()
 	var capsule := Clearance.inspect(player)
-	return {"passed":reached and identity.passed and capsule.passed and _outside(reservation),
-		"reason":reason if identity.passed and capsule.passed and _outside(reservation) else "publication_demand_identity_or_capsule_failed",
+	var result_reason := reason if identity.passed and capsule.passed and _outside(reservation) else "publication_demand_identity_or_capsule_failed"
+	if modal_loading_visible_frames>0: result_reason="modal_loading_visible_during_publication_approach"
+	return {"passed":reached and identity.passed and capsule.passed and _outside(reservation) and modal_loading_visible_frames==0,
+		"reason":result_reason,
 		"elapsedMsec":Time.get_ticks_msec()-begun,"from":start_position,"to":player.global_position,
 		"distanceMoved":player.global_position.distance_to(start_position),"samples":samples,"identity":identity,"capsule":capsule,
+		"modalLoadingVisibleFrames":modal_loading_visible_frames,
 		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_SHIFT),
 		"scope":"Ordinary key-input approach until the source publishes its first demanded packet; no transform write, route command or reservation entry."}
 
@@ -965,6 +983,7 @@ func _approach_scene() -> Dictionary:
 	var previous := player.global_position
 	var start_position := previous
 	var samples: Array=[]
+	var modal_loading_visible_frames := 0
 	var reason := "approach_time_limit"
 	var reached := false
 	var distance := INF
@@ -977,6 +996,7 @@ func _approach_scene() -> Dictionary:
 	while Time.get_ticks_msec()<until and _within_deadline():
 		await physics_frame
 		await _frame()
+		if _modal_loading_visible(): modal_loading_visible_frames+=1
 		var position: Vector3=player.global_position
 		distance=Vector2(maxf(maxf(bounds.position.x-position.x,position.x-bounds.end.x),0.0),maxf(maxf(bounds.position.z-position.z,position.z-bounds.end.z),0.0)).length()
 		if distance<=8.0:
@@ -1005,8 +1025,11 @@ func _approach_scene() -> Dictionary:
 	var identity := _accepted_current()
 	var capsule := Clearance.inspect(player)
 	evidence.closeVisibility=_inspect_visibility()
-	return {"reached":reached and identity.passed and capsule.passed,"reason":reason if identity.passed and capsule.passed else "approach_identity_or_capsule_failed",
+	var result_reason := reason if identity.passed and capsule.passed else "approach_identity_or_capsule_failed"
+	if modal_loading_visible_frames>0: result_reason="modal_loading_visible_during_close_approach"
+	return {"reached":reached and identity.passed and capsule.passed and modal_loading_visible_frames==0,"reason":result_reason,
 		"elapsedMsec":Time.get_ticks_msec()-begun,"from":start_position,"to":player.global_position,"distanceToVisualBounds":distance,"samples":samples,"capsule":capsule,"identity":identity,
+		"modalLoadingVisibleFrames":modal_loading_visible_frames,
 		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_A) and not Input.is_key_pressed(KEY_D) and not Input.is_key_pressed(KEY_SPACE) and not Input.is_key_pressed(KEY_SHIFT),
 		"scope":"Ordinary key-input approach from initial spawn; not interior/furniture interaction or NPC acceptance." if not spawn_cell.is_empty() else "Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance."}
 

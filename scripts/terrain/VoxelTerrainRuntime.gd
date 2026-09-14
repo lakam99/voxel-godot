@@ -785,7 +785,10 @@ func _process(delta: float) -> void:
 	if main != null and main.structure_system != null:
 		var can_prepare: bool = authority_ready and generation_context_current() \
 			and main.player != null and main.player.is_inside_tree()
-		var bounds := SITE_GATE_SCRIPT.footprint(main.player.global_position,FINAL_VIEW_DISTANCE) if can_prepare else Rect2i()
+		var bounds := Rect2i()
+		if can_prepare:
+			var player_cell := Vector2i(floori(main.player.global_position.x/CELL),floori(main.player.global_position.z/CELL))
+			bounds=Rect2i(player_cell-Vector2i(2,2),Vector2i(5,5))
 		main.structure_system.advance_citadel_publication(bounds,can_prepare)
 	if authority_ready:
 		if not generation_context_current():
@@ -1471,20 +1474,19 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 		return _retain_site_traversal_wait({"passed":false,"reason":source.reason,"siteAdmission":source},
 			"Preparing landmark ground…" if source.status == "pending" else "Landmark loading failed: %s" % source.reason)
 	var motion_bounds := Rect2i(start,end-start+Vector2i.ONE).grow(ceili(footprint_radius/CELL)+2)
-	# Player motion needs authoritative terrain and structure collision. NPC
-	# navigation publication is retained by WorldStreamingCoordinator, but it is
-	# not a physical prerequisite for moving the player across this capsule.
-	# Keep the aligned bounds so the early dependency description can demand the
-	# building packet before the capsule reaches its physical boundary.
+	# Structure publication is observed here so retained demand keeps advancing,
+	# but it is not a prerequisite for ordinary player motion.  Late structure
+	# packets pass through GeneratedStructureRuntimeBindings' real capsule guard,
+	# so an unpublished wall cannot materialize through the player.  Terrain mesh
+	# collision remains the movement authority.
 	var region_low := Vector2i(floori(float(motion_bounds.position.x)/16.0),floori(float(motion_bounds.position.y)/16.0))*16
 	var region_high := Vector2i(ceili(float(motion_bounds.end.x)/16.0),ceili(float(motion_bounds.end.y)/16.0))*16
 	var region_bounds := Rect2i(region_low,region_high-region_low)
 	var region: Dictionary = main.world_streaming.player_traversal_readiness(region_bounds) \
 		if main.world_streaming != null and main.world_streaming.has_method("player_traversal_readiness") \
-		else main.structure_system.citadel_physical_publication_state(region_bounds)
-	if region.status != "ready":
-		return _retain_site_traversal_wait({"passed":false,"reason":region.reason,"regionalPublication":region},
-			"Preparing nearby world…" if region.status == "pending" else "World loading failed: %s" % region.reason)
+		else {"status":"ready","reason":"terrain_proved_by_native_samples","requiredDomains":["terrain"]}
+	var structure_publication: Dictionary = main.structure_system.citadel_physical_publication_state(region_bounds) \
+		if main.structure_system != null and main.structure_system.has_method("citadel_physical_publication_state") else {}
 	var distance := Vector2(to_position.x - from_position.x, to_position.z - from_position.z).length()
 	var sample_count := maxi(1, ceili(distance / maxf(CELL, footprint_radius * 2.0)))
 	var proofs: Array = []
@@ -1509,6 +1511,8 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 			return _retain_site_traversal_wait({
 				"passed": false,
 				"reason": String(proof.get("reason", "collision_not_ready")),
+				"regionalPublication": region,
+				"structurePublication": structure_publication,
 				"failedSample": index,
 				"sampleCount": sample_count + 1,
 				"proofs": proofs
@@ -1517,6 +1521,8 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 	return {
 		"passed": true,
 		"reason": "collision_mesh_ready",
+		"regionalPublication": region,
+		"structurePublication": structure_publication,
 		"supportRequiredForMotion": false,
 		"sampleCount": sample_count + 1,
 		"proofs": proofs
@@ -1543,9 +1549,9 @@ func poll_site_traversal_readiness() -> void:
 		float(site_traversal_pending_request.radius))
 
 func _site_wait_message(message: String) -> void:
-	if main != null and main.has_method("show_streaming_loading_overlay"):
-		main.call("show_streaming_loading_overlay",message,"terrain_traversal")
-		return
+	# Ordinary traversal never acquires a modal loading-screen owner.  A true
+	# terrain miss may clamp a step while its retained request advances, but the
+	# player stays in the live world and receives at most a throttled status.
 	var now := Time.get_ticks_usec()
 	if now-last_site_wait_message_usec < 1000000: return
 	last_site_wait_message_usec = now

@@ -18,6 +18,7 @@ const FOREGROUND_PRIORITY := 0
 const REQUIRED_DOMAINS := ["terrain", "structures", "navigation"]
 const RETAINED_DOMAINS := ["terrain", "render", "navigation", "discovery"]
 const DemandSet = preload("res://scripts/world/RegionDemandSet.gd")
+const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
 
 var _seed := ""
 var _next_id := 1
@@ -77,7 +78,7 @@ func request_region(bounds: Rect2i, priority: int, reason: String, foreground_na
 		"sequence":1,"admittedSequence":0,"bounds":bounds,"closedBounds":bounds,
 		"priority":priority,"reason":reason,"releaseAt":-1,"requirements":{},
 		"dependencyRevision":null,"sets":base.sets,"members":{},"sourceMembers":{},
-		"providerRequests":{},"foregroundNavigationTiles":foreground.keys,"foregroundBounds":foreground_bounds,
+		"providerRequests":{},"foregroundNavigationTiles":foreground.keys,"foregroundBounds":foreground_bounds,"viewIntent":{},
 		"memberHysteresisMs":member_hysteresis_ms,
 		"peripheralMarginCells":peripheral_margin_cells,
 		"closureStatus":"pending","closureReason":"dependencies_pending"}
@@ -650,10 +651,38 @@ func retained_source_requests() -> Array[Dictionary]:
 		var background: Dictionary = request.get("providerRequests",{}).get("navigationBackground",{})
 		for key: Vector2i in _held_keys(request,"navigation"):
 			navigation_priorities["%d,%d" % [key.x,key.y]] = int(background.get("priority",request.priority)) if background.get("keys",{}).has(key) else int(request.priority)
-		result.append({"ownerId":id,"bounds":request.bounds,"priority":request.priority,
+		var retained_request := {"ownerId":id,"bounds":request.bounds,"priority":request.priority,
 			"admissionKeys":admission_keys,"navigationTileKeys":_string_keys(_held_keys(request,"navigation")),
-			"navigationTilePriorities":navigation_priorities,"sites":sites})
+			"navigationTilePriorities":navigation_priorities,"sites":sites}
+		if not request.get("viewIntent",{}).is_empty():
+			retained_request["viewIntent"] = request.viewIntent.duplicate(true)
+		result.append(retained_request)
 	return result
+
+## View intent changes scheduling only.  It never replaces the retained region,
+## reacquires a provider handle, or invalidates an acknowledged source closure.
+func set_request_view_intent(request_id: int, value: Variant) -> bool:
+	if not _requests.has(request_id):
+		last_rejection = "unknown_region_request"
+		return false
+	var request: Dictionary = _requests[request_id]
+	if int(request.get("releaseAt",0))>=0:
+		last_rejection = "released_region_request"
+		return false
+	if value != null and not value is Dictionary:
+		last_rejection = "invalid_view_intent"
+		return false
+	var normalized: Dictionary = ViewPriority.normalize(value)
+	if value is Dictionary and not value.is_empty() and normalized.is_empty():
+		last_rejection = "invalid_view_intent"
+		return false
+	if request.get("viewIntent",{})==normalized:
+		last_rejection = ""
+		return true
+	request["viewIntent"] = normalized
+	_revision += 1
+	last_rejection = ""
+	return true
 
 func retained_gameplay_chunks() -> Dictionary:
 	return _chunks.duplicate()
@@ -677,12 +706,16 @@ func revision() -> int:
 func region_readiness(bounds: Rect2i, request_id: int = 0) -> Dictionary:
 	return _region_readiness(bounds,request_id,REQUIRED_DOMAINS,["terrain","render","navigation"],"gameplay")
 
-## Readiness for physical player movement. Navigation remains retained and
-## progresses independently, but an NPC tile acknowledgement is not collision.
-## The dependency description and structure receipt still prevent the player
-## from reaching unpublished building geometry.
+## Ordinary locomotion requires the authoritative terrain mesh only. Generated
+## structures remain retained and their live construction guard prevents late
+## collision from appearing through the player.
 func player_traversal_readiness(bounds: Rect2i, request_id: int = 0) -> Dictionary:
-	return _region_readiness(bounds,request_id,["terrain","structures"],["terrain","render"],"player_traversal")
+	return _region_readiness(bounds,request_id,["terrain"],["terrain","render"],"player_traversal")
+
+## Startup and explicit relocation are atomic transitions and keep their
+## stronger physical-world gate.
+func initial_physical_readiness(bounds: Rect2i, request_id: int = 0) -> Dictionary:
+	return _region_readiness(bounds,request_id,["terrain","structures"],["terrain","render"],"initial_physical")
 
 func _region_readiness(bounds: Rect2i, request_id: int, required_domains: Array,
 		retained_domains: Array, readiness_scope: String) -> Dictionary:

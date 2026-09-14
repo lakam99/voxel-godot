@@ -950,6 +950,12 @@ func physical_group_receipt(group_id: String, expected_binding: Dictionary) -> D
 	_finish_physical_proof(proof)
 	return result
 
+func completed_physical_group_ids(expected_binding: Dictionary) -> Dictionary:
+	if not _group_owner_available(expected_binding): return {}
+	var result: Dictionary = {}
+	for id: String in _group_receipts: result[id]=true
+	return result
+
 
 ## A packet-static receipt is a live physical receipt with the exact immutable
 ## static/collision member scope retained. It is deliberately not a prediction:
