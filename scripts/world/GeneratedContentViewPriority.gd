@@ -39,10 +39,24 @@ static func normalize(value: Variant) -> Dictionary:
 		"horizontalFovDegrees":fov,"farDistance":far_distance}
 
 static func ranked_groups(groups: Dictionary, view_intent: Dictionary) -> Array[Dictionary]:
+	var ids: Array[String] = []
+	var doors: Array[String] = []
+	for id: String in groups:
+		ids.append(id)
+		if not groups[id].get("doorPartIds",[]).is_empty(): doors.append(id)
+	return ranked_group_subset(groups,ids,doors,view_intent)
+
+
+## Rank an already bounded spatial candidate set while finding the facing
+## portal from the plan's complete compact door index. This preserves the
+## original typed ordering rules without scanning every source group.
+static func ranked_group_subset(groups: Dictionary, candidate_ids: Array[String],
+		door_group_ids: Array[String], view_intent: Dictionary) -> Array[Dictionary]:
 	var view := normalize(view_intent)
 	var result: Array[Dictionary] = []
 	if view.is_empty():
-		for id: String in groups:
+		for id: String in candidate_ids:
+			if not groups.has(id): continue
 			result.append({"id":id,"priority":4,"distanceSquared":INF,"portal":false,"throughPortal":false})
 		result.sort_custom(_rank_precedes)
 		return result
@@ -53,9 +67,9 @@ static func ranked_groups(groups: Dictionary, view_intent: Dictionary) -> Array[
 	var cone_cos := cos(deg_to_rad(float(view.horizontalFovDegrees)*0.5))
 	var portal_id := ""
 	var portal_score := INF
-	for id: String in groups:
+	for id: String in door_group_ids:
+		if not groups.has(id): continue
 		var group: Dictionary = groups[id]
-		if group.get("doorPartIds",[]).is_empty(): continue
 		var center := _horizontal_center(group.get("bounds",AABB()))
 		if not center.is_finite(): continue
 		var delta := center-origin
@@ -67,7 +81,8 @@ static func ranked_groups(groups: Dictionary, view_intent: Dictionary) -> Array[
 			portal_score=score
 			portal_id=id
 	var portal_center := _horizontal_center(groups.get(portal_id,{}).get("bounds",AABB())) if not portal_id.is_empty() else Vector3.INF
-	for id: String in groups:
+	for id: String in candidate_ids:
+		if not groups.has(id): continue
 		var group: Dictionary = groups[id]
 		var center := _horizontal_center(group.get("bounds",AABB()))
 		if not center.is_finite(): continue

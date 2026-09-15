@@ -16,6 +16,7 @@ const MAX_TRANSACTION_MEMBERS := 256
 const MAX_TRANSACTION_ESTIMATED_BYTES := 8*1024*1024
 const MAX_TRANSACTION_COLLISION_MEMBERS := 256
 const MAX_TRANSACTION_REGISTRATIONS := 128
+const PACKET_PARTITION_WORLD_SIZE := 16.0
 const ESTIMATED_BUILDING_MEMBER_BYTES := 32768
 const ESTIMATED_FURNITURE_MEMBER_BYTES := 8192
 const ESTIMATED_TREE_MEMBER_BYTES := 24576
@@ -92,6 +93,7 @@ var _selection_members := 0
 var _selection_estimated_bytes := 0
 var _selection_collision_members := 0
 var _selection_registrations := 0
+var _selection_partition_key := ""
 var _selection_has_demand := false
 var _selection_set: Dictionary = {}
 var _transaction: Dictionary = {}
@@ -123,6 +125,7 @@ var _packet_static_only_groups: Dictionary = {}
 ## source-wide background scan.
 var _packet_foreground_groups: Dictionary = {}
 var _packet_deferred_groups: Dictionary = {}
+var _packet_deferred_group_count := 0
 var _packet_foreground_configured := false
 var _packet_deferred_transactions := 0
 
@@ -409,6 +412,7 @@ func take_retirement_payload() -> Dictionary:
 	_selection_estimated_bytes = 0
 	_selection_collision_members = 0
 	_selection_registrations = 0
+	_selection_partition_key = ""
 	_selection_set = {}
 	_transaction = {}
 	_occupied_transactions = []
@@ -423,6 +427,7 @@ func take_retirement_payload() -> Dictionary:
 	_packet_static_only_groups = {}
 	_packet_foreground_groups = {}
 	_packet_deferred_groups = {}
+	_packet_deferred_group_count = 0
 	_packet_foreground_configured = false
 	_binding = {}
 	_phase = "consumed"
@@ -449,7 +454,7 @@ func status() -> Dictionary:
 		"advanceCalls":_advance_calls,"advanceCpuUsec":_advance_cpu_usec,
 		"publicationTransactionId":_transaction.get("id",0),"physicalGroupsComplete":_group_receipts.size(),
 		"physicalGroupsTotal":_groups.get("groups",{}).size(),"retainedGroupRequests":_group_requests.size(),
-		"packetForegroundGroups":_packet_foreground_groups.size(),"packetDeferredGroups":_packet_deferred_groups.size(),
+		"packetForegroundGroups":_packet_foreground_groups.size(),"packetDeferredGroups":_packet_deferred_group_count,
 		"packetDeferredTransactions":_packet_deferred_transactions,
 		# Includes caller work, result snapshots and frame waits; not pure sleep.
 		"betweenAdvanceUsec":_between_advance_usec,
@@ -575,7 +580,13 @@ func _navigation_physical_requirements(packet, tile_key: String, bounds: Rect2i)
 		return entries[tile_key]
 	_physical_requirement_metrics.misses += 1
 	var closure_started: int = Time.get_ticks_usec()
-	var result: Dictionary = packet.physical_group_requirements(bounds)
+	var base: Preparation.PreparedPublicationBase = _cpu.get("publicationBase")
+	var compact_plan = base.publication_plan if base!=null and base.matches(_binding) else null
+	# The compact plan conservatively contains the authoritative physical-member
+	# closure while excluding navigation-domain regions that have no collider in
+	# this tile. Topology/crossing output remains owned by `packet` below.
+	var result: Dictionary = compact_plan.physical_group_requirements(bounds) if compact_plan!=null \
+		else packet.physical_group_requirements(bounds)
 	var closure_usec: int = Time.get_ticks_usec()-closure_started
 	_physical_requirement_metrics.closureUsec += closure_usec
 	_physical_requirement_metrics.maxClosureUsec = maxi(_physical_requirement_metrics.maxClosureUsec,closure_usec)
@@ -691,6 +702,7 @@ func replace_publication_group_demands(requests: Array, expected_binding: Dictio
 	_selection_estimated_bytes = 0
 	_selection_collision_members = 0
 	_selection_registrations = 0
+	_selection_partition_key = ""
 	_selection_has_demand = false
 	# Reset only the cheap background iterator. Already committed groups are
 	# skipped; pinned groups remain owned by their original immutable transaction.
@@ -735,12 +747,113 @@ func replace_packet_foreground_group_demands(requests: Array, deferred_group_ids
 	if retained.get("status") != "retained": return retained
 	_packet_foreground_groups = foreground
 	_packet_deferred_groups = deferred
+	_packet_deferred_group_count = deferred.size()
 	_packet_foreground_configured = true
 	_cpu["packetForegroundGroups"] = _packet_foreground_groups
 	_cpu["packetDeferredGroups"] = _packet_deferred_groups
 	_defer_unoffered_packet_transaction()
 	return {"status":"retained","binding":_binding,"foregroundGroups":foreground.size(),"deferredGroups":deferred.size(),
 		"deferredTransactionCount":_packet_deferred_transactions}
+
+
+## Compact equivalent for a worker-built complete publication plan. Every
+## unfinished group not named by foreground is deferred by definition, so no
+## source-wide complement is copied on a camera-only revision.
+func replace_packet_foreground_group_demands_compact(requests: Array, explicit_deferred_group_ids: Array,
+		expected_binding: Dictionary) -> Dictionary:
+	if not _base_packet_mode: return {"status":"failed","reason":"packet_foreground_requires_packet_mode"}
+	if not _group_owner_available(expected_binding): return {"status":"pending","reason":"structure_source_owner_unavailable"}
+	var foreground: Dictionary = {}
+	for request in requests:
+		if not request is Dictionary or not request.get("groupIds") is Array:
+			return {"status":"failed","reason":"invalid_packet_foreground_demand"}
+		for id in request.groupIds:
+			if not id is String or not _groups.groups.has(id): return {"status":"failed","reason":"unknown_publication_group"}
+			foreground[id] = true
+	for id: String in foreground:
+		for dependency: String in _groups.groups[id].dependencies:
+			if not _group_receipts.has(dependency) and not foreground.has(dependency):
+				return {"status":"failed","reason":"packet_foreground_dependency_deferred"}
+	var explicit_deferred: Dictionary = {}
+	for id in explicit_deferred_group_ids:
+		if not id is String or not _groups.groups.has(id) or foreground.has(id):
+			return {"status":"failed","reason":"invalid_packet_explicit_deferred_group"}
+		explicit_deferred[id] = true
+	var retained: Dictionary = replace_publication_group_demands(requests,expected_binding)
+	if retained.get("status") != "retained": return retained
+	_packet_foreground_groups = foreground
+	_packet_deferred_groups = explicit_deferred
+	var unfinished_foreground := foreground.size()
+	for id: String in foreground:
+		if _group_receipts.has(id): unfinished_foreground -= 1
+	_packet_deferred_group_count = maxi(0,_groups.groups.size()-_group_receipts.size()-unfinished_foreground)
+	_packet_foreground_configured = true
+	_cpu["packetForegroundGroups"] = _packet_foreground_groups
+	_cpu["packetDeferredGroups"] = _packet_deferred_group_count
+	_defer_unoffered_packet_transaction()
+	return {"status":"retained","binding":_binding,"foregroundGroups":foreground.size(),
+		"deferredGroups":_packet_deferred_group_count,"deferredTransactionCount":_packet_deferred_transactions}
+
+
+## Replace dependency-complete navigation collision demand without rebuilding
+## the unchanged view owners. Old approach tiles may be demoted or released,
+## so a reversal cannot leave every previously foreground tile at priority 0.
+func retain_packet_supplemental_group_demands(requests: Array, expected_binding: Dictionary) -> Dictionary:
+	if not _base_packet_mode: return {"status":"failed","reason":"packet_foreground_requires_packet_mode"}
+	if not _group_owner_available(expected_binding): return {"status":"pending","reason":"structure_source_owner_unavailable"}
+	var additions: Dictionary = {}
+	for request in requests:
+		if not request is Dictionary or not request.get("groupIds") is Array or not request.get("priority") is int:
+			return {"status":"failed","reason":"invalid_packet_supplemental_demand"}
+		var priority: int = int(request.priority)
+		if priority<0 or priority>4: return {"status":"failed","reason":"invalid_packet_supplemental_priority"}
+		for id in request.groupIds:
+			if not id is String or not _groups.groups.has(id): return {"status":"failed","reason":"unknown_publication_group"}
+			additions[id]=mini(int(additions.get(id,priority)),priority)
+	for id: String in additions:
+		for dependency: String in _groups.groups[id].dependencies:
+			if not _group_receipts.has(dependency) and not _packet_foreground_groups.has(dependency) and not additions.has(dependency):
+				return {"status":"failed","reason":"packet_supplemental_dependency_missing"}
+	var navigation_owner: Dictionary={}
+	for id: String in additions: navigation_owner[id]=int(additions[id])
+	_demand_owners["scene-job:navigation"]=navigation_owner
+	var desired: Dictionary={}
+	for owner: Dictionary in _demand_owners.values():
+		for id: String in owner:
+			desired[id]=mini(int(desired.get(id,owner[id])),int(owner[id]))
+	var previous: Dictionary=_group_requests
+	for id: String in previous:
+		if not desired.has(id): _group_requests.erase(id)
+	for id: String in desired:
+		if _group_receipts.has(id): continue
+		if previous.has(id) and int(previous[id].priority)!=int(desired[id]):
+			_group_requests[id]={"id":id,"priority":2147483647,"sequence":previous[id].sequence}
+		_enqueue_group(id,int(desired[id]))
+	_packet_foreground_groups={}
+	for id: String in desired:
+		if not _group_receipts.has(id): _packet_foreground_groups[id]=true
+		_packet_deferred_groups.erase(id)
+	# A not-yet-pinned selection is scheduling state only. Rebuild it from the
+	# latest owner priorities; an immutable pinned/offered transaction is retained.
+	_selection_stack.clear()
+	_selection_groups=[]
+	_selection_set={}
+	_selection_members=0
+	_selection_estimated_bytes=0
+	_selection_collision_members=0
+	_selection_registrations=0
+	_selection_partition_key=""
+	_selection_has_demand=false
+	_cpu["groupRequests"]=_group_requests
+	_cpu["demandOwners"]=_demand_owners
+	_cpu["packetForegroundGroups"]=_packet_foreground_groups
+	var unfinished_foreground := _packet_foreground_groups.size()
+	for id: String in _packet_foreground_groups:
+		if _group_receipts.has(id): unfinished_foreground-=1
+	_packet_deferred_group_count=maxi(0,_groups.groups.size()-_group_receipts.size()-unfinished_foreground)
+	_cpu["packetDeferredGroups"]=_packet_deferred_group_count
+	return {"status":"retained","binding":_binding,"supplementalGroups":additions.size(),
+		"foregroundGroups":_packet_foreground_groups.size(),"deferredGroups":_packet_deferred_group_count}
 
 
 func _defer_unoffered_packet_transaction() -> void:
@@ -819,10 +932,16 @@ func pending_publication_transaction() -> Dictionary:
 	var started: int = Time.get_ticks_usec()
 	while Time.get_ticks_usec()-started < SELECTION_BUDGET_USEC:
 		if _selection_stack.is_empty():
+			if _base_packet_mode and not _selection_groups.is_empty():
+				var next_entry := _peek_request()
+				if next_entry.is_empty() or _packet_partition_key(String(next_entry.id)) != _selection_partition_key:
+					return _pin_transaction()
 			var entry: Dictionary = _pop_request()
 			if not entry.is_empty():
 				if not is_same(_group_requests.get(entry.id),entry) or _group_receipts.has(entry.id) or _selection_set.has(entry.id): continue
 				_selection_has_demand = _selection_has_demand or int(entry.priority)<2147483647
+				if _base_packet_mode and _selection_groups.is_empty():
+					_selection_partition_key = _packet_partition_key(String(entry.id))
 				_selection_stack.append({"id":entry.id,"priority":entry.priority,"cursor":0})
 			elif not _selection_groups.is_empty():
 				return _pin_transaction()
@@ -832,7 +951,7 @@ func pending_publication_transaction() -> Dictionary:
 				# be selected; deferred source groups stay resident at the service.
 				if not _occupied_transactions.is_empty(): return _restore_occupied_transaction()
 				return {"status":"pending","reason":"physical_packet_foreground_demand_pending","binding":_binding,
-					"foregroundGroups":_packet_foreground_groups.size(),"deferredGroups":_packet_deferred_groups.size()}
+					"foregroundGroups":_packet_foreground_groups.size(),"deferredGroups":_packet_deferred_group_count}
 			elif _background_cursor < _groups.order.size():
 				var id: String = _groups.order[_background_cursor]
 				_background_cursor += 1
@@ -875,10 +994,6 @@ func pending_publication_transaction() -> Dictionary:
 		_selection_estimated_bytes += group_bytes
 		_selection_collision_members += group_collisions
 		_selection_registrations += group_registrations
-		# Packet requests are independent dependency-complete roots. Pin after
-		# each root closure so an occupied doorway cannot hold unrelated retained
-		# houses inside the same source transaction.
-		if _base_packet_mode and _selection_stack.is_empty(): return _pin_transaction()
 		if _selection_groups.size() >= MAX_TRANSACTION_GROUPS or _selection_members >= MAX_TRANSACTION_MEMBERS:
 			return _pin_transaction()
 		if _base_packet_mode and _selection_stack.is_empty() and _request_heap.is_empty():
@@ -983,6 +1098,7 @@ func _pin_transaction() -> Dictionary:
 	_selection_estimated_bytes = 0
 	_selection_collision_members = 0
 	_selection_registrations = 0
+	_selection_partition_key = ""
 	_selection_has_demand = false
 	_transaction_building_cursor = 0
 	_transaction_furniture_cursor = 0
@@ -999,6 +1115,35 @@ func _pin_transaction() -> Dictionary:
 
 static func _physical_packet_key(group_ids: Array[String]) -> String:
 	return var_to_bytes(group_ids).hex_encode()
+
+
+## Packet roots may share one worker/installation transaction only inside a
+## small deterministic spatial partition. Door roots remain isolated because
+## their portal lifecycle is independently acknowledged. An actor occupying a
+## different room/house therefore cannot hold the rest of the Citadel while
+## nearby collision-bearing peers avoid one worker round trip per group.
+func _packet_partition_key(group_id: String) -> String:
+	var group: Dictionary = _groups.get("groups",{}).get(group_id,{})
+	if group.is_empty() or not group.get("doorPartIds",[]).is_empty():
+		return "isolated:"+group_id
+	var bounds: Variant = group.get("collisionBounds",group.get("bounds"))
+	if not bounds is AABB or not bounds.position.is_finite() or not bounds.size.is_finite():
+		return "isolated:"+group_id
+	var center: Vector3 = bounds.get_center()
+	return "%d,%d,%d" % [floori(center.x/PACKET_PARTITION_WORLD_SIZE),
+		floori(center.y/PACKET_PARTITION_WORLD_SIZE),floori(center.z/PACKET_PARTITION_WORLD_SIZE)]
+
+
+## Discard stale heap heads without consuming the next live request. This is
+## the same identity test as _pop_request and does not change FIFO age.
+func _peek_request() -> Dictionary:
+	while not _request_heap.is_empty():
+		var entry: Dictionary = _request_heap[0]
+		if is_same(_group_requests.get(entry.id),entry) and not _group_receipts.has(entry.id) \
+				and not _selection_set.has(entry.id):
+			return entry
+		_pop_request()
+	return {}
 
 
 ## Classify directly from the immutable packet entries and this exact pinned
@@ -1047,11 +1192,33 @@ func physical_group_receipt(group_id: String, expected_binding: Dictionary) -> D
 	_finish_physical_proof(proof)
 	return result
 
+
+## Exact multi-group readiness with one live proof context. This has identical
+## authority to calling `physical_group_receipt` for every ID, but shared
+## member/boundary witnesses are checked once instead of once per dependency.
+func physical_groups_receipt(group_ids: Array, expected_binding: Dictionary) -> Dictionary:
+	var proof: Dictionary = _begin_physical_proof("group_set_receipt",expected_binding)
+	var pending: Array[String] = []
+	for raw_id in group_ids:
+		if not raw_id is String or raw_id.is_empty() or not _groups.get("groups",{}).has(raw_id):
+			_finish_physical_proof(proof)
+			return {"status":"failed","reason":"unknown_publication_group"}
+		if _physical_group_receipt_with_context(raw_id,proof).get("status")!="ready": pending.append(raw_id)
+	_finish_physical_proof(proof)
+	return {"status":"ready","reason":"","groupCount":group_ids.size()} if pending.is_empty() \
+		else {"status":"pending","reason":"physical_group_publication_pending","pendingGroupIds":pending}
+
 func completed_physical_group_ids(expected_binding: Dictionary) -> Dictionary:
 	if not _group_owner_available(expected_binding): return {}
 	var result: Dictionary = {}
 	for id: String in _group_receipts: result[id]=true
 	return result
+
+
+## Scheduling observation only. It does not validate live nodes/collision and
+## must never be used as a gameplay-readiness receipt.
+func physical_group_packet_completed_for_scheduling(group_id: String, expected_binding: Dictionary) -> bool:
+	return _group_owner_available(expected_binding) and _group_receipts.has(group_id)
 
 
 ## A packet-static receipt is a live physical receipt with the exact immutable

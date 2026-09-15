@@ -15,6 +15,7 @@ const RoofGeometry = preload("res://scripts/buildings/BuildingRoofGeometry.gd")
 const SurfacePacket = preload("res://scripts/buildings/BuildingSurfaceRenderPacket.gd")
 const PartRecord = preload("res://scripts/buildings/BuildingPart.gd")
 const SpatialDependencies = preload("res://scripts/buildings/BuildingSpatialDependencies.gd")
+const CitadelPlan = preload("res://scripts/world/CitadelPublicationPlan.gd")
 const NavigationProducer = preload("res://scripts/buildings/BuildingNavigationTileProducer.gd")
 const PavingAssembly = preload("res://scripts/buildings/PavingFootingAssemblyRecipe.gd")
 const UnitBoxArrays = preload("res://scripts/buildings/UnitBoxSurfaceArrays.gd")
@@ -59,6 +60,7 @@ class PreparedPublicationBase extends RefCounted:
 	var static_record_bindings: Dictionary = {}
 	var prepared_history = null
 	var packet_eligibility: Dictionary = {}
+	var publication_plan: CitadelPlan
 	var source_id := ""
 	var _scene_blueprint = null
 	var _scene_furnishing_plan = null
@@ -66,7 +68,8 @@ class PreparedPublicationBase extends RefCounted:
 	func matches(expected_binding: Dictionary) -> bool:
 		return binding == expected_binding and binding.is_read_only() and profile.is_read_only() \
 			and building_source.is_read_only() and furnishing_source.is_read_only() \
-			and description != null and description.binding == binding and not source_id.is_empty()
+			and description != null and description.binding == binding and not source_id.is_empty() \
+			and publication_plan != null and publication_plan.matches(binding,description.publication_groups.groups)
 	func take_scene_source(expected_binding: Dictionary) -> Dictionary:
 		if _scene_source_consumed or expected_binding!=binding or _scene_blueprint==null or _scene_furnishing_plan==null:
 			return {}
@@ -297,9 +300,13 @@ static func prepare_publication_base(building: Dictionary, furniture: Dictionary
 	if not eligibility.get("ready",false): return eligibility
 	eligibility.make_read_only()
 	base.packet_eligibility=eligibility
+	var plan_result := CitadelPlan.build(description,resolved_building,furniture,eligibility,guard.advance)
+	if not plan_result.get("ready",false): return _failed(String(plan_result.get("reason","publication_plan_failed")))
+	base.publication_plan=plan_result.plan
 	if not base.matches(source_binding): return _failed("invalid_publication_base")
 	return {"ready":true,"reason":"","base":base,"diagnostics":diagnostics,
-		"metadataPreparationUsec":metadata.metadataPreparationUsec,"historyPreparationUsec":history_result.historyPreparationUsec}
+		"metadataPreparationUsec":metadata.metadataPreparationUsec,"historyPreparationUsec":history_result.historyPreparationUsec,
+		"publicationPlanPreparationUsec":plan_result.preparationUsec,"publicationPlanSignature":plan_result.outputSignature}
 
 ## Main-thread scene source reconstruction for a validated base. This creates a
 ## fresh private object graph; it neither prepares geometry nor consumes a
@@ -347,7 +354,35 @@ static func compile_physical_group_packet(base: PreparedPublicationBase, group_i
 	var guard := Continuation.new()
 	guard.callback = continuation
 	var started := Time.get_ticks_usec()
-	var restored := Source.restore(base.building_source, base.furnishing_source, guard.advance)
+	# Restore the immutable group partition, not the complete city. Group
+	# compilation previously decoded and round-trip encoded all 4k+ source parts
+	# for every one- or few-group packet. The publication plan already supplies a
+	# dependency-closed, source-indexed selection; preserve the complete recipe
+	# and room metadata needed by the existing geometry compilers while narrowing
+	# only their part arrays. The worker still owns a fresh private object graph.
+	var packet_building_source := base.building_source.duplicate(false)
+	var packet_building_parts: Array = []
+	var source_indices: Array = selected_indices.keys()
+	source_indices.sort()
+	for raw_index in source_indices:
+		if not guard.advance("publication_packet_partition"): return _failed("cancelled")
+		var building_source_index := int(raw_index)
+		if building_source_index < 0 or building_source_index >= base.building_source.parts.size():
+			return _failed("invalid_physical_group_member_index")
+		packet_building_parts.append(base.building_source.parts[building_source_index])
+	packet_building_source["parts"] = packet_building_parts
+	var packet_furnishing_source := base.furnishing_source.duplicate(false)
+	var packet_furnishing_parts: Array = []
+	var source_furnishing_indices: Array = selected_furnishing_indices.keys()
+	source_furnishing_indices.sort()
+	for raw_index in source_furnishing_indices:
+		if not guard.advance("publication_packet_partition"): return _failed("cancelled")
+		var furnishing_source_index := int(raw_index)
+		if furnishing_source_index < 0 or furnishing_source_index >= base.furnishing_source.parts.size():
+			return _failed("invalid_physical_group_furnishing_index")
+		packet_furnishing_parts.append(base.furnishing_source.parts[furnishing_source_index])
+	packet_furnishing_source["parts"] = packet_furnishing_parts
+	var restored := Source.restore(packet_building_source, packet_furnishing_source, guard.advance)
 	if not restored.ready: return _failed(restored.reason)
 	var source_id := String(restored.blueprint.recipe.get("sourceBlueprintId", restored.blueprint.id))
 	if source_id != base.source_id: return _failed("stale_physical_group_source")
@@ -356,10 +391,7 @@ static func compile_physical_group_packet(base: PreparedPublicationBase, group_i
 	var artifacts: Dictionary = {}
 	var jointed_families: Dictionary = {}
 	var selected_ids: Dictionary = {}
-	for raw_index in selected_indices.keys():
-		var index := int(raw_index)
-		if index < 0 or index >= restored.blueprint.parts.size(): return _failed("invalid_physical_group_member_index")
-		var selected_part = restored.blueprint.parts[index]
+	for selected_part in restored.blueprint.parts:
 		if selected_part.recipe.has("pavingFootingJoints"):
 			var jointed := _compile_jointed_paving_family(restored.blueprint, selected_part, UnitBoxArrays.canonical())
 			if not jointed.ready: return _failed(jointed.reason)
@@ -372,9 +404,7 @@ static func compile_physical_group_packet(base: PreparedPublicationBase, group_i
 	var entries: Dictionary = {}
 	var furnishing_entries: Dictionary = {}
 	var records: Dictionary = {}
-	var indices: Array = selected_indices.keys()
-	indices.sort()
-	for index: int in indices:
+	for index: int in restored.blueprint.parts.size():
 		var part = restored.blueprint.parts[index]
 		var id := String(part.id)
 		var source_binding := static_record_binding(part.snapshot())
@@ -401,10 +431,7 @@ static func compile_physical_group_packet(base: PreparedPublicationBase, group_i
 		var entry := {"id":id,"binding":source_binding,"families":families}
 		entry.make_read_only()
 		entries[id] = entry
-	var furnishing_indices: Array = selected_furnishing_indices.keys()
-	furnishing_indices.sort()
-	for index: int in furnishing_indices:
-		if index < 0 or index >= restored.furnishingPlan.parts.size(): return _failed("invalid_physical_group_furnishing_index")
+	for index: int in restored.furnishingPlan.parts.size():
 		var furnishing_part = restored.furnishingPlan.parts[index]
 		if furnishing_part == null: return _failed("invalid_physical_group_furnishing")
 		var furnishing_id := String(furnishing_part.id)

@@ -256,11 +256,24 @@ func advance(budget_usec := 4000) -> Dictionary:
 	# Ready receipts are cheap to revisit. Do not spend an entire frame on one
 	# while a nearby captured tile waits for its bounded source-ID proof.
 	var visited := 0
-	while not _order.is_empty() and visited < mini(8,_order.size()) and Time.get_ticks_usec() < deadline:
+	var visited_keys: Dictionary={}
+	var foreground_key := _priority_zero_pending_key()
+	if not foreground_key.is_empty() and foreground_key!=completion_key and Time.get_ticks_usec()<deadline:
+		var foreground_started := Time.get_ticks_usec()
+		_advance_tile(foreground_key,deadline)
+		_tile_visits+=1
+		visited+=1
+		visited_keys[foreground_key]=true
+		_last_tile_work={"tileKey":foreground_key,"status":_tiles[foreground_key].status,
+			"reason":_tiles[foreground_key].reason,"cursor":_tiles[foreground_key].cursor,
+			"hasSnapshot":int(_tiles[foreground_key].get("acceptedSerial",0))>0,
+			"elapsedUsec":Time.get_ticks_usec()-foreground_started}
+	var foreground_blocking: bool = not foreground_key.is_empty() and String(_tiles.get(foreground_key,{}).get("status",""))!="ready"
+	while not foreground_blocking and not _order.is_empty() and visited < mini(8,_order.size()) and Time.get_ticks_usec() < deadline:
 		_cursor %= _order.size()
 		var key := _order[_cursor]
 		_cursor = (_cursor+1)%_order.size()
-		if key == completion_key:
+		if key == completion_key or visited_keys.has(key):
 			visited += 1
 			continue
 		var tile_started := Time.get_ticks_usec()
@@ -280,6 +293,16 @@ func advance(budget_usec := 4000) -> Dictionary:
 			if published > 0 or nav.publication_sync_pending(): publisher._sync_navmesh_after_queued_tile_publish()
 	_max_advance_usec = maxi(_max_advance_usec,Time.get_ticks_usec()-started)
 	return _stats()
+
+
+func _priority_zero_pending_key() -> String:
+	# _reorder keeps priority classes stable and lexical within a class. Scan only
+	# the leading foreground class; background frontier size cannot affect this
+	# playable-area decision.
+	for key: String in _order:
+		if _priority(key)>0: break
+		if _tiles.get(key,{}).get("status")!="ready": return key
+	return ""
 
 func _accepted_completion_key(nav, adapter) -> String:
 	if not nav.has_method("accepted_tile_progress_source"): return ""
@@ -491,7 +514,34 @@ func _advance_tile_owned(key: String, deadline: int) -> void:
 			if tile.cursor < retained_terrain.size()+retained_building.size():
 				tile.reason = "navigation_source_ids_pending"
 				return
-	var source_key: String = adapter.navmesh_tile_source_key_for_tile(key)
+	# The retained publisher owns source refresh and final live validation while
+	# an exact request is queued. Rewalking Citadel collision receipts here could
+	# consume the entire regional slice every frame without advancing its capture.
+	# A changed source is written back into the queue by the publisher, and an
+	# accepted request is removed, so either transition falls through next visit.
+	var retained_queue_source := String(publisher.queued_navmesh_tile_source_keys.get(key,""))
+	var retained_capture: Dictionary = adapter.active_navigation_capture_source(key) \
+		if adapter.has_method("active_navigation_capture_source") else {}
+	if not retained_queue_source.is_empty() and retained_queue_source==String(tile.get("sourceKey","")) \
+			and String(retained_capture.get("sourceKey",""))==retained_queue_source:
+		if _priority(key)<=1:
+			publisher.promote_queued_navmesh_tile_priority(key,retained_queue_source)
+			if publisher.has_method("retry_ready_queued_navmesh_tile_priority"):
+				publisher.retry_ready_queued_navmesh_tile_priority(key,retained_queue_source)
+		if publisher.has_method("set_queued_navmesh_tile_regional_priority"):
+			publisher.set_queued_navmesh_tile_regional_priority(key,retained_queue_source,_priority(key))
+		tile.status = "pending"
+		if tile.reason in ["", "navigation_source_pending", "navigation_accepted_source_absent"]:
+			tile.reason = "navigation_publication_retained"
+		return
+	# Acquire structure facts once. The key helper is deliberately pure over the
+	# obtained immutable artifacts; calling the public key query here would repeat
+	# the same physical proof before the queue can consume it. Focused synthetic
+	# adapters keep the older public-only contract.
+	var sources: Dictionary = adapter.building_navigation_sources(key)
+	var source_key: String = String(adapter._navmesh_tile_source_key_from_building_sources(key,sources)) \
+		if adapter.has_method("_navmesh_tile_source_key_from_building_sources") \
+		else String(adapter.navmesh_tile_source_key_for_tile(key))
 	if tile.get("sourceKey","") != source_key:
 		tile = _new_tile()
 		tile.sourceKey = source_key
@@ -515,7 +565,6 @@ func _advance_tile_owned(key: String, deadline: int) -> void:
 		_receipt_rechecks += 1
 		return
 	# This source owner independently rejects unresolved authoritative crossings.
-	var sources: Dictionary = adapter.building_navigation_sources(key)
 	if sources.get("status") != "ready":
 		tile.status = sources.get("status","pending")
 		tile.reason = sources.get("reason","building_navigation_source_pending")
@@ -533,6 +582,14 @@ func _advance_tile_owned(key: String, deadline: int) -> void:
 			publisher.retry_ready_queued_navmesh_tile_priority(key,source_key)
 	if publisher.has_method("set_queued_navmesh_tile_regional_priority"):
 		publisher.set_queued_navmesh_tile_regional_priority(key,source_key,_priority(key))
+	# A newly queued publisher request cannot already be this call's accepted
+	# result. Let its resumable capture run before performing the service's final
+	# physical/current-owner proof; the next visit falls through after acceptance.
+	if adapter.has_method("_navmesh_tile_source_key_from_building_sources") \
+			and String(publisher.queued_navmesh_tile_source_keys.get(key,""))==source_key:
+		tile.status = "pending"
+		tile.reason = "navigation_publication_retained"
+		return
 	for index in range(publisher.last_navmesh_tile_queue_debug.size()-1,-1,-1):
 		var attempt: Dictionary = publisher.last_navmesh_tile_queue_debug[index]
 		if attempt.get("tile") != key or attempt.get("source") != source_key: continue

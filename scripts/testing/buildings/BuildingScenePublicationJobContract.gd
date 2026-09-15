@@ -652,6 +652,7 @@ func _run() -> void:
 	await base_packet_gate_control()
 	await packet_transaction_order_control()
 	await packet_occupied_transaction_rotation_control()
+	await packet_local_partition_batch_control()
 	await packet_foreground_deferral_control()
 	await packet_furnishing_session_control()
 	await packet_door_lifecycle_control()
@@ -875,12 +876,18 @@ func base_packet_gate_control() -> void:
 	var activated: Dictionary = job.activate_physical_group_packet_scene(int(promoted.id))
 	check("packet_gate_adapter_activates_only_ready_transaction",activated.status=="pending_budget" and job.own_node_root()==null and job._building==null)
 	var receipt: Dictionary = {}
+	check("packet_gate_group_set_receipt_pending_before_publication",
+		job.physical_groups_receipt([first_group],Fixtures.BINDING).status=="pending")
 	for index in range(1024):
 		job.advance(4000,int(promoted.id))
 		receipt=job.physical_group_receipt(first_group,Fixtures.BINDING)
 		if receipt.status in ["ready","failed"]: break
 	check("packet_gate_adapter_publishes_selected_boundary",receipt.status=="ready" and job._building!=null \
 		and job._building._physical_packet_mode and job._furniture==null and trees.calls==0)
+	check("packet_gate_group_set_receipt_matches_single_authority",
+		job.physical_groups_receipt([first_group],Fixtures.BINDING).status=="ready")
+	check("packet_gate_group_set_receipt_rejects_unknown_group",
+		job.physical_groups_receipt(["missing-group"],Fixtures.BINDING).status=="failed")
 	var static_receipt: Dictionary = job.static_only_group_receipt(first_group,Fixtures.BINDING)
 	check("packet_gate_static_only_receipt_retains_exact_static_scope",static_receipt.status=="ready" \
 		and static_receipt.publicationKind=="packet_static_only" and static_receipt.packetSourceId==base_result.base.source_id \
@@ -971,6 +978,36 @@ func packet_occupied_transaction_rotation_control() -> void:
 	await drain(job,"packet_occupied_rotation")
 
 
+func packet_local_partition_batch_control() -> void:
+	var blueprint := Blueprint.new("packet-local-partition",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_local_partition_history","landscapeTrees":[]}
+	blueprint.add_part({"id":"local-a","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(1,1,1)})
+	blueprint.add_part({"id":"local-b","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(3,1,1)})
+	var plan := Plan.new("packet-local-partition-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile := frozen_profile()
+	var base_result := Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("local_partition_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var groups: Array[String]=[]
+	for raw_id in base_result.base.description.publication_groups.order: groups.append(String(raw_id))
+	groups.sort()
+	check("local_partition_has_two_groups",groups.size()==2)
+	if groups.size()!=2: return
+	var trees := SyntheticTrees.new()
+	var job := Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
+	var transaction: Dictionary=job.pending_publication_transaction()
+	check("local_partition_coalesces_roots",transaction.get("status")=="pending" and transaction.groupIds==groups
+		and transaction.get("physicalPacketKey","")==Job._physical_packet_key(groups))
+	job.cancel()
+	await drain(job,"packet_local_partition")
+
+
 ## A packet job may have a resident scene from an earlier closure while the
 ## streaming owner changes its next foreground tile. An unoffered pending
 ## packet contains no scene side effects and must be safely deferred, rather
@@ -999,9 +1036,10 @@ func packet_foreground_deferral_control() -> void:
 	var job := Job.new()
 	var begun: Dictionary = job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
 	check("packet_foreground_base_begin",begun.status=="pending_budget")
-	var configured: Dictionary = job.replace_packet_foreground_group_demands([
+	var configured: Dictionary = job.replace_packet_foreground_group_demands_compact([
 		{"ownerId":"foreground","groupIds":[first],"priority":0}], [second], Fixtures.BINDING)
-	check("packet_foreground_scope_retained",configured.status=="retained" and configured.foregroundGroups==1 and configured.deferredGroups==1)
+	check("packet_foreground_scope_retained",configured.status=="retained" and configured.foregroundGroups==1 and configured.deferredGroups==1 \
+		and job._packet_deferred_groups.has(second))
 	var first_pending: Dictionary = job.pending_publication_transaction()
 	check("packet_foreground_selects_only_offered_group",first_pending.status=="pending" and first_pending.groupIds==[first])
 	var first_packet := Preparation.compile_physical_group_packet(base_result.base,first_pending.groupIds)
@@ -1020,18 +1058,18 @@ func packet_foreground_deferral_control() -> void:
 	if first_receipt.status!="ready" or resident_root==null:
 		job.cancel(); await drain(job,"packet_foreground_setup_failed"); return
 	var source_revision_before_second_receipt: Array = job.source_dependency_revision()
-	var next_scope: Dictionary = job.replace_packet_foreground_group_demands([
+	var next_scope: Dictionary = job.replace_packet_foreground_group_demands_compact([
 		{"ownerId":"foreground","groupIds":[second],"priority":0}], [], Fixtures.BINDING)
 	check("packet_foreground_next_scope_retained",next_scope.status=="retained" and next_scope.foregroundGroups==1 and next_scope.deferredGroups==0)
 	var second_pending: Dictionary = job.pending_publication_transaction()
 	check("packet_foreground_unoffered_second_packet_pinned",second_pending.status=="pending" and second_pending.groupIds==[second] and job.own_node_root()==resident_root)
-	var deferred: Dictionary = job.replace_packet_foreground_group_demands([], [second], Fixtures.BINDING)
+	var deferred: Dictionary = job.replace_packet_foreground_group_demands_compact([], [second], Fixtures.BINDING)
 	check("packet_foreground_unoffered_packet_deferred",deferred.status=="retained" and deferred.deferredTransactionCount==1)
 	var waiting: Dictionary = job.pending_publication_transaction()
 	check("packet_foreground_no_background_autoselection",waiting.status=="pending" and waiting.reason=="physical_packet_foreground_demand_pending" and job.status().publicationTransactionId==0)
 	check("packet_foreground_deferral_preserves_resident_receipt",job.own_node_root()==resident_root \
 		and job.physical_group_receipt(first,Fixtures.BINDING).status=="ready" and job.status().physicalGroupsComplete==1)
-	var resumed: Dictionary = job.replace_packet_foreground_group_demands([
+	var resumed: Dictionary = job.replace_packet_foreground_group_demands_compact([
 		{"ownerId":"foreground","groupIds":[second],"priority":0}], [], Fixtures.BINDING)
 	check("packet_foreground_deferred_group_can_resume",resumed.status=="retained")
 	var resumed_pending: Dictionary = job.pending_publication_transaction()

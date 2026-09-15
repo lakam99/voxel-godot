@@ -10,6 +10,7 @@ const Queue = preload("res://scripts/world/CitadelSiteBuildQueue.gd")
 const Store = preload("res://scripts/world/GeneratedSiteProfileStore.gd")
 const MAX_REQUEST_REGIONS := 16
 const MAX_RETAINED_SOURCES := 16
+const MAX_PREFETCH_REGIONS := 2
 
 var profile_store
 var world_seed := ""
@@ -20,6 +21,7 @@ var _policy: Dictionary = {}
 var _decisions: Dictionary = {}
 var _candidates: Dictionary = {}
 var _requests: Dictionary = {}
+var _prefetch_regions: Array[Vector2i] = []
 var _sources: Dictionary = {}
 var _retired: Dictionary = {}
 var _generation := 0
@@ -33,6 +35,7 @@ func configure(seed_text: String, towns: Dictionary, ordinary_policy: Dictionary
 	if not _sources.is_empty(): _retired[_generation] = _sources
 	_sources = {}
 	_requests.clear()
+	_prefetch_regions.clear()
 	_decisions.clear()
 	_candidates.clear()
 	_generation += 1
@@ -83,9 +86,10 @@ func request_bounds(bounds: Rect2i, priority := true) -> Dictionary:
 			if decision.get("status") in ["prepared", "absent"]: continue
 			waiting = true
 			if not _requests.has(region):
-				_requests[region] = {"priority":priority,"receipt":{}}
-			elif priority:
-				_requests[region].priority = true
+				_requests[region] = {"priority":priority,"receipt":{},"prefetch":false}
+			else:
+				_requests[region].prefetch = false
+				if priority: _requests[region].priority = true
 	return _result("pending" if waiting else "ready", "preparing_citadel_terrain" if waiting else "")
 
 func request_source(region: Vector2i, priority := true) -> Dictionary:
@@ -96,8 +100,35 @@ func request_source(region: Vector2i, priority := true) -> Dictionary:
 		return source_state(region)
 	var decision: Dictionary = _decisions.get(region,{})
 	if decision.get("status") in ["failed","absent"]: return decision.duplicate()
-	if not _requests.has(region): _requests[region] = {"priority":priority,"receipt":{}}
+	if not _requests.has(region): _requests[region] = {"priority":priority,"receipt":{},"prefetch":false}
+	else:
+		_requests[region].prefetch = false
+		if priority: _requests[region].priority = true
 	return _result("pending","preparing_citadel_source")
+
+
+## Scheduling-only lookahead. A real bounds/source request atomically promotes
+## the same region and can no longer be cancelled by a camera reversal.
+func set_prefetch_regions(regions: Array[Vector2i]) -> bool:
+	if _closing or not _fatal.is_empty() or not _town_inputs_finalized \
+			or regions.size()>MAX_PREFETCH_REGIONS: return false
+	var ordered: Array[Vector2i] = []
+	for region: Vector2i in regions:
+		if not Field._valid_region(region) or ordered.has(region): return false
+		ordered.append(region)
+	ordered.sort_custom(func(a: Vector2i,b: Vector2i): return a.y<b.y if a.y!=b.y else a.x<b.x)
+	for region: Vector2i in _prefetch_regions:
+		if ordered.has(region): continue
+		var request: Dictionary = _requests.get(region,{})
+		if request.get("prefetch",false):
+			var token := int(request.get("receipt",{}).get("token",0))
+			_requests.erase(region)
+			if token>0: _queue.cancel(token)
+	for region: Vector2i in ordered:
+		if _decisions.get(region,{}).get("status") in ["prepared","absent","failed"]: continue
+		if not _requests.has(region): _requests[region]={"priority":false,"receipt":{},"prefetch":true}
+	_prefetch_regions=ordered
+	return true
 
 func source_state(region: Vector2i) -> Dictionary:
 	# Non-enqueuing identity lookup: an existing prepared consumer must not
@@ -224,11 +255,13 @@ func request_shutdown() -> void:
 	_closing = true
 	_queue.request_shutdown()
 	_requests.clear()
+	_prefetch_regions.clear()
 	if not _sources.is_empty(): _retired[_generation] = _sources
 	_sources = {}
 
 func stats() -> Dictionary:
 	return {"generation":_generation,"worldSeed":world_seed,"pendingRegions":_requests.size(),
+		"prefetchRegions":_prefetch_regions.duplicate(),"prefetchPending":_prefetch_pending_count(),
 		"preparedSites":_sources.size(),"decidedRegions":_decisions.size(),"failure":_fatal,
 		"retiredGenerations":_retired.size(),"maxAdvanceUsec":_max_advance_usec,
 		"shutdownComplete":_closing and _retired.is_empty() and bool(_last_queue_status.get("shutdownComplete",false)),
@@ -237,6 +270,13 @@ func stats() -> Dictionary:
 static func _valid_bounds(bounds: Rect2i) -> bool:
 	return bounds.size.x > 0 and bounds.size.y > 0 and absi(bounds.position.x)<=1000000 and absi(bounds.position.y)<=1000000 \
 		and int(bounds.position.x)+int(bounds.size.x)<=1000000 and int(bounds.position.y)+int(bounds.size.y)<=1000000
+
+
+func _prefetch_pending_count() -> int:
+	var count := 0
+	for request: Dictionary in _requests.values():
+		if bool(request.get("prefetch",false)): count += 1
+	return count
 
 static func _result(state: String, reason: String) -> Dictionary:
 	return {"status":state,"reason":reason}

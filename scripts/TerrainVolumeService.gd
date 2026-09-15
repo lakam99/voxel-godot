@@ -26,6 +26,13 @@ var configured_max_height := 120.0
 var generator_ref: WeakRef
 var sections := {}
 var edited_cells := {}
+# Durable save records are normalized and frozen when an edit changes. Autosave
+# only assembles section references, instead of walking and deep-copying every
+# live edit on the gameplay thread.
+var durable_delta_cells_by_section := {}
+var durable_delta_section_snapshots := {}
+var durable_delta_dirty_sections := {}
+var durable_delta_section_revisions := {}
 var scene_block_cells := {}
 var mesh_edited_column_counts := {}
 var mesh_edited_cells_by_section := {}
@@ -60,6 +67,10 @@ func active_generator():
 func reset() -> void:
 	sections.clear()
 	edited_cells.clear()
+	durable_delta_cells_by_section.clear()
+	durable_delta_section_snapshots.clear()
+	durable_delta_dirty_sections.clear()
+	durable_delta_section_revisions.clear()
 	scene_block_cells.clear()
 	mesh_edited_column_counts.clear()
 	mesh_edited_cells_by_section.clear()
@@ -1050,6 +1061,7 @@ func set_cell_state_with_previous(cell: Vector3i, state: Dictionary, previous_fl
 	if cell_state_affects_surface_projection(normalized):
 		adjust_surface_projection_edited_column_count(cell, 1)
 	revision += 1
+	_update_durable_delta_cell(cell,normalized)
 	if fluid_state_changed(fluid_mesh_payload_state(previous_fluid_state), fluid_mesh_payload_state(normalized)):
 		mark_fluid_section_changed(cell)
 	var skip_loaded_section_write := String(normalized_metadata.get("source", "")) == "scene_block" \
@@ -1080,6 +1092,7 @@ func clear_cell_state(cell: Vector3i, reason := "") -> void:
 	if cell_state_affects_surface_projection(previous):
 		adjust_surface_projection_edited_column_count(cell, -1)
 	revision += 1
+	_update_durable_delta_cell(cell,{})
 	if fluid_state_changed(fluid_mesh_payload_state(previous), fluid_mesh_payload_state(restored_state)):
 		mark_fluid_section_changed(cell)
 	var previous_metadata: Dictionary = previous.get("metadata", {}) if previous.get("metadata", {}) is Dictionary else {}
@@ -2090,6 +2103,7 @@ func apply_box_edit(min_cell: Vector3i, max_cell: Vector3i, state: Dictionary, r
 				if previous_surface_affects:
 					adjust_surface_projection_edited_column_count(cell, -1)
 				edited_cells[cell] = normalized
+				_update_durable_delta_cell(cell,normalized)
 				write_loaded_section_cell_state(cell, normalized)
 				if previous_mesh_affects or cell_state_affects_terrain_mesh(normalized):
 					dirty_lookup[section_key_for_cell(cell)] = true
@@ -2192,31 +2206,15 @@ func mark_section_dirty(section_key: Vector3i, flags := {}) -> void:
 	dirty_sections[section_key] = entry
 
 func save_section_delta(section_key: Vector3i) -> Dictionary:
-	var cells := []
-	var origin := section_key * SECTION_SIZE
-	for cell_value in edited_cells.keys():
-		var cell: Vector3i = cell_value
-		if section_key_for_cell(cell) != section_key:
-			continue
-		var state: Dictionary = edited_cells[cell]
-		if not cell_state_saved_in_delta(state):
-			continue
-		var saved_state := state.duplicate(true)
-		saved_state["cell"] = vector3i_to_array(cell)
-		saved_state["sectionKey"] = vector3i_to_array(section_key)
-		saved_state["localCell"] = vector3i_to_array(local_cell_for(cell))
-		cells.append({
-			"local": vector3i_to_array(local_cell_for(cell)),
-			"cell": vector3i_to_array(cell),
-			"state": saved_state
-		})
-	return {
-		"schemaVersion": 1,
-		"sectionKey": vector3i_to_array(section_key),
-		"originCell": vector3i_to_array(origin),
-		"revision": revision,
-		"cells": cells
-	}
+	_refresh_durable_delta_section(section_key)
+	if durable_delta_section_snapshots.has(section_key):
+		return durable_delta_section_snapshots[section_key]
+	var empty_cells: Array = []
+	empty_cells.make_read_only()
+	var empty := {"schemaVersion":1,"sectionKey":vector3i_to_array(section_key),
+		"originCell":vector3i_to_array(section_key*SECTION_SIZE),"revision":revision,"cells":empty_cells}
+	empty.make_read_only()
+	return empty
 
 func load_section(section_key: Vector3i, delta: Dictionary) -> void:
 	var cells_value = delta.get("cells", [])
@@ -2243,25 +2241,72 @@ func load_section(section_key: Vector3i, delta: Dictionary) -> void:
 		rebuild_sky_light_column(column.x, column.y, "loaded_delta")
 
 func save_all_section_deltas() -> Dictionary:
-	var section_lookup := {}
-	for cell_value in edited_cells.keys():
-		var cell: Vector3i = cell_value
-		if not cell_state_saved_in_delta(edited_cells[cell]):
-			continue
-		section_lookup[section_key_for_cell(cell)] = true
-	var deltas := []
-	for key_value in section_lookup.keys():
-		var section_key: Vector3i = key_value
-		var delta := save_section_delta(section_key)
-		if (delta.get("cells", []) as Array).is_empty():
-			continue
-		deltas.append(delta)
+	var section_keys: Array = durable_delta_cells_by_section.keys()
+	section_keys.sort_custom(_vector3i_less)
+	var deltas: Array = []
+	for section_key: Vector3i in section_keys:
+		_refresh_durable_delta_section(section_key)
+		var delta: Dictionary = durable_delta_section_snapshots.get(section_key,{})
+		if not delta.is_empty(): deltas.append(delta)
+	deltas.make_read_only()
 	return {
 		"schemaVersion": 1,
 		"sectionSize": SECTION_SIZE,
 		"revision": revision,
 		"sections": deltas
 	}
+
+func _update_durable_delta_cell(cell: Vector3i, state: Dictionary) -> void:
+	var section_key := section_key_for_cell(cell)
+	var bucket: Dictionary = durable_delta_cells_by_section.get(section_key,{})
+	if state.is_empty() or not cell_state_saved_in_delta(state):
+		bucket.erase(cell)
+	else:
+		var saved_state: Dictionary = state.duplicate(true)
+		saved_state["cell"] = vector3i_to_array(cell)
+		saved_state["sectionKey"] = vector3i_to_array(section_key)
+		saved_state["localCell"] = vector3i_to_array(local_cell_for(cell))
+		var record: Variant = _freeze_durable_delta_value({"local":vector3i_to_array(local_cell_for(cell)),
+			"cell":vector3i_to_array(cell),"state":saved_state})
+		if record is Dictionary: bucket[cell]=record
+	if bucket.is_empty(): durable_delta_cells_by_section.erase(section_key)
+	else: durable_delta_cells_by_section[section_key]=bucket
+	durable_delta_dirty_sections[section_key]=true
+	durable_delta_section_revisions[section_key]=revision
+
+func _refresh_durable_delta_section(section_key: Vector3i) -> void:
+	if not durable_delta_dirty_sections.has(section_key): return
+	durable_delta_dirty_sections.erase(section_key)
+	var bucket: Dictionary = durable_delta_cells_by_section.get(section_key,{})
+	if bucket.is_empty():
+		durable_delta_section_snapshots.erase(section_key)
+		return
+	var cells: Array = []
+	var cell_keys: Array = bucket.keys()
+	cell_keys.sort_custom(_vector3i_less)
+	for cell: Vector3i in cell_keys: cells.append(bucket[cell])
+	cells.make_read_only()
+	var delta := {"schemaVersion":1,"sectionKey":vector3i_to_array(section_key),
+		"originCell":vector3i_to_array(section_key*SECTION_SIZE),
+		"revision":int(durable_delta_section_revisions.get(section_key,revision)),"cells":cells}
+	delta.make_read_only()
+	durable_delta_section_snapshots[section_key]=delta
+
+static func _vector3i_less(a: Vector3i, b: Vector3i) -> bool:
+	return a.z<b.z or a.z==b.z and (a.y<b.y or a.y==b.y and a.x<b.x)
+
+static func _freeze_durable_delta_value(value: Variant) -> Variant:
+	if value is Dictionary:
+		var frozen_dictionary: Dictionary = {}
+		for key in value: frozen_dictionary[key]=_freeze_durable_delta_value(value[key])
+		frozen_dictionary.make_read_only()
+		return frozen_dictionary
+	if value is Array:
+		var frozen_array: Array = []
+		for item in value: frozen_array.append(_freeze_durable_delta_value(item))
+		frozen_array.make_read_only()
+		return frozen_array
+	return value
 
 func load_section_deltas(snapshot_value) -> void:
 	var snapshot: Dictionary = snapshot_value if snapshot_value is Dictionary else {}

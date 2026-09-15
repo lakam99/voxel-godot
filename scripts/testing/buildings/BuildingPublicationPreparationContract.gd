@@ -2,6 +2,7 @@ extends SceneTree
 ## Actual frozen source plus explicit synthetic ownership/cancellation controls.
 ## No recipe rebuild, parts, gameplay, live streaming or visual acceptance.
 const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparation.gd")
+const CitadelPlan = preload("res://scripts/world/CitadelPublicationPlan.gd")
 const Source = preload("res://scripts/buildings/BuildingPublicationSource.gd")
 const Castle = preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const Publisher = preload("res://scripts/buildings/BuildingPartPublisher.gd")
@@ -201,6 +202,7 @@ static func _actual_packet_eligibility_census(fixture: Dictionary, c: Dictionary
 		c.actual_packet_eligibility_output_valid = false
 		return {}
 	var base = prepared.base
+	_publication_plan_controls(c,base)
 	var census := Preparation.classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source)
 	var output := {
 		"schema":"citadel-physical-group-packet-eligibility-census/v1",
@@ -212,6 +214,61 @@ static func _actual_packet_eligibility_census(fixture: Dictionary, c: Dictionary
 	c.actual_packet_eligibility_output_valid = census.ready and _valid_actual_packet_eligibility_census(output,base.description.publication_groups)
 	if not c.actual_packet_eligibility_output_valid: return {}
 	return output
+
+static func _publication_plan_controls(c: Dictionary, base) -> void:
+	var plan = base.publication_plan
+	var groups: Dictionary = base.description.publication_groups.groups
+	c.publication_plan_bound_and_immutable = plan!=null and plan.matches(BINDING,groups) \
+		and plan.order.is_read_only() and plan.dependency_closures.is_read_only() \
+		and plan.center_buckets.is_read_only() and plan.bounds_buckets.is_read_only()
+	c.publication_plan_timing_free_typed_signature = plan!=null and plan.output_signature.length()==64 \
+		and plan.output_signature.is_valid_hex_number(false)
+	if plan==null: return
+	var replay := CitadelPlan.build(base.description,base.building_source,base.furnishing_source,base.packet_eligibility)
+	c.publication_plan_replay_signature_exact = replay.get("ready",false) and replay.outputSignature==plan.output_signature \
+		and replay.plan.order==plan.order
+	var cancelled := CitadelPlan.build(base.description,base.building_source,base.furnishing_source,base.packet_eligibility,
+		func(stage: String): return stage!="publication_plan_group")
+	c.publication_plan_cancel_has_no_partial_output = not cancelled.get("ready",false) and cancelled.get("reason")=="cancelled" \
+		and not cancelled.has("plan") and plan.matches(BINDING,groups)
+	var closure_parity := true
+	for index: int in [0,plan.order.size()/2,plan.order.size()-1]:
+		var id: String = plan.order[index]
+		var direct: Dictionary = base.description._publication_group_closure(id)
+		var indexed: Dictionary = plan.dependency_window(id)
+		var indexed_ids: Array = indexed.get("groupIds",[]).duplicate(); indexed_ids.sort()
+		closure_parity = closure_parity and direct.get("status")=="described" and direct.get("groupIds",[])==indexed_ids
+	c.publication_plan_dependency_closure_parity = closure_parity
+	var first_bounds: AABB = groups[plan.order[0]].bounds
+	var center := first_bounds.get_center()
+	var cell := Vector2i(floori(center.x/1.35),floori(center.z/1.35))
+	var query := Rect2i(cell-Vector2i.ONE,Vector2i(3,3))
+	var direct_query: Dictionary = base.description.physical_group_requirements(query)
+	var indexed_query: Dictionary = plan.physical_group_requirements(query)
+	var indexed_set: Dictionary = {}
+	for id: String in indexed_query.get("groupIds",[]): indexed_set[id]=true
+	c.publication_plan_physical_query_conservatively_preserves_authority = direct_query.get("status")=="described" \
+		and direct_query.get("groupIds",[]).all(func(id): return indexed_set.has(id)) \
+		and int(indexed_query.get("queryCandidateCount",CitadelPlan.MAX_VIEW_CANDIDATES*2+1))<=CitadelPlan.MAX_VIEW_CANDIDATES*2
+	var approach := {"origin":center+Vector3(0,2,96),"forward":Vector3(0,0,-1),
+		"predictedOrigin":center+Vector3(0,2,64),"horizontalFovDegrees":72.0,"farDistance":180.0}
+	var first_rank: Dictionary = plan.ranked_groups(approach,{})
+	var side_rank: Dictionary = plan.ranked_groups({"origin":center+Vector3(96,2,0),"forward":Vector3(-1,0,0),
+		"predictedOrigin":center+Vector3(64,2,0),"horizontalFovDegrees":72.0,"farDistance":180.0},{})
+	var replay_rank: Dictionary = plan.ranked_groups(approach,{})
+	c.publication_plan_approach_order_deterministic_and_bounded = var_to_bytes(first_rank)==var_to_bytes(replay_rank) \
+		and first_rank.get("status")=="ready" and side_rank.get("status")=="ready" \
+		and int(first_rank.get("candidateCount",0))<=CitadelPlan.MAX_VIEW_CANDIDATES \
+		and int(side_rank.get("candidateCount",0))<=CitadelPlan.MAX_VIEW_CANDIDATES
+	c.publication_plan_semantic_courtyard_anchor_is_immutable = not plan.courtyard_group_ids.is_empty() \
+		and not plan.selected_courtyard_group_ids.is_empty() and plan.courtyard_group_ids.is_read_only() \
+		and plan.selected_courtyard_group_ids.is_read_only() \
+		and plan.courtyard_group_ids.has(plan.selected_courtyard_group_ids[0])
+	var completed: Dictionary = {}
+	if not first_rank.get("rows",[]).is_empty(): completed[String(first_rank.rows[0].id)]=true
+	var after_edit_like_completion: Dictionary = plan.ranked_groups(approach,completed)
+	c.publication_plan_completion_filter_is_stable = completed.is_empty() or not after_edit_like_completion.rows.any(
+		func(row: Dictionary): return completed.has(String(row.id))) and var_to_bytes(plan.ranked_groups(approach,{}))==var_to_bytes(first_rank)
 
 static func _valid_actual_packet_eligibility_census(output: Dictionary, publication_groups: Dictionary) -> bool:
 	if output.size()!=5 or output.get("schema")!="citadel-physical-group-packet-eligibility-census/v1": return false

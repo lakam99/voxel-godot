@@ -234,6 +234,10 @@ func navmesh_tile_source_key() -> String:
 func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if tile_key == "":
         return navmesh_tile_source_key()
+    var structures = main.get("structure_system") if is_instance_valid(main) else null
+    if is_instance_valid(structures) and structures.has_method("navigation_tile_source_identity"):
+        return _navmesh_tile_source_key_from_building_sources(
+            tile_key,structures.navigation_tile_source_identity(_parse_tile_key(tile_key)))
     return _navmesh_tile_source_key_from_building_sources(tile_key,building_navigation_sources(tile_key))
 
 # Compose identity from source facts already obtained in this synchronous call.

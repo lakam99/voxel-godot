@@ -11,6 +11,7 @@ const Streaming = preload("res://scripts/world/WorldStreamingCoordinator.gd")
 const SEARCH_RING := 2
 const VIEW_CELLS := 112
 const MAX_SETUP_WRITES := 2
+const FAR_SOURCE_DISCOVERY_APPROACH_METERS := 800.0
 
 class SeededMain extends "res://scripts/Main.gd":
 	# The title UI has no seed entry. Seed and optional initial cell are fixture-owned:
@@ -219,16 +220,66 @@ func _run() -> void:
 	if not await _capture("pending"):
 		await _finish("failed","pending_capture_failed"); return
 	phase = "ordinary_source_discovery"
+	var discovery_motion := not spawn_cell.is_empty() and float(search.get("selectedDistanceWorld",0.0))>FAR_SOURCE_DISCOVERY_APPROACH_METERS
+	var discovery_started := Time.get_ticks_msec()
+	var discovery_from := player.global_position
+	var discovery_samples: Array=[]
+	var discovery_next_sample := discovery_started
+	var discovery_modal_frames := 0
+	var discovery_previous := discovery_from
+	var discovery_recovery_count := 0
+	var discovery_strafe_until := 0
+	var discovery_jump_until := 0
+	var discovery_look_ready := true
+	if discovery_motion: discovery_look_ready=await _look_toward_candidate()
+	if discovery_motion and discovery_look_ready:
+		_movement_key(KEY_W,true)
+		_movement_key(KEY_SHIFT,true)
 	while _within_deadline():
+		if discovery_motion: await physics_frame
 		await _frame()
+		if discovery_motion:
+			if _modal_loading_visible(): discovery_modal_frames+=1
+			var discovery_now := Time.get_ticks_msec()
+			_movement_key(KEY_SPACE,discovery_now<discovery_jump_until)
+			_movement_key(KEY_W,discovery_now>=discovery_strafe_until)
+			_movement_key(KEY_A,discovery_now<discovery_strafe_until and discovery_recovery_count%4==2)
+			_movement_key(KEY_D,discovery_now<discovery_strafe_until and discovery_recovery_count%4==0)
+			if discovery_now>=discovery_next_sample:
+				discovery_next_sample=discovery_now+1000
+				if discovery_now-discovery_started>1000 and player.global_position.distance_to(discovery_previous)<0.30 \
+						and discovery_now>=discovery_strafe_until:
+					discovery_recovery_count+=1
+					if discovery_recovery_count%2==1: discovery_jump_until=discovery_now+250
+					else: discovery_strafe_until=discovery_now+1500
+				if discovery_samples.size()<96:
+					discovery_samples.append({"elapsedMsec":discovery_now-discovery_started,"position":player.global_position,
+						"distanceMoved":player.global_position.distance_to(discovery_from),"ordinaryWPressed":Input.is_key_pressed(KEY_W),
+						"sprinting":player.get("is_sprinting"),"recoveryCount":discovery_recovery_count,"motion":_approach_motion_snapshot()})
+				discovery_previous=player.global_position
+			if not await _look_toward_candidate(): discovery_look_ready=false; break
 		var source := _source_summary()
 		if source.get("status") in ["failed","absent"]:
+			if discovery_motion: _release_approach_keys()
 			await _finish(String(source.status),String(source.get("reason","source_rejected"))); return
 		if source.get("status") in ["ready","prepared"]:
 			reservation = source.reservationCells
 			source_binding = source.binding.duplicate()
 			source_signature = source.sourceSignature
 			break
+	if discovery_motion:
+		_release_approach_keys()
+		await physics_frame
+		await _frame()
+	evidence.sourceDiscoveryApproach={"active":discovery_motion,"lookReady":discovery_look_ready,
+		"elapsedMsec":Time.get_ticks_msec()-discovery_started,"from":discovery_from,"to":player.global_position,
+		"distanceMoved":player.global_position.distance_to(discovery_from),"modalLoadingVisibleFrames":discovery_modal_frames,
+		"samples":discovery_samples,"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_SHIFT),
+		"scope":"Ordinary W/Shift and viewport look while production ahead-of-player source preparation runs; no transform write or generated-artifact prewarm."}
+	checks.source_discovery_approach = not discovery_motion or discovery_look_ready and discovery_modal_frames==0 \
+		and player.global_position.distance_to(discovery_from)>100.0 and discovery_samples.any(func(row: Dictionary): return row.get("ordinaryWPressed",false))
+	if not checks.source_discovery_approach:
+		await _finish("failed","source_discovery_approach_failed"); return
 	if reservation.size.x <= 0 or reservation.size.y <= 0:
 		await _finish("timeout","ordinary_source_not_accepted"); return
 	if not _pin_accepted_owners():
@@ -333,6 +384,10 @@ func _run() -> void:
 			await _finish("failed","approach_checkpoint_write_failed"); return
 		if not checks.close_approach:
 			await _finish("failed",String(evidence.approach.get("reason","approach_blocked"))); return
+		evidence.demandDrain=await _wait_for_demanded_window()
+		checks.demanded_window_drains_within_target=evidence.demandDrain.get("passed",false)
+		if not checks.demanded_window_drains_within_target:
+			await _finish("failed",String(evidence.demandDrain.get("reason","demanded_window_did_not_drain"))); return
 		var navigation_inventory := _navigation_domain_inventory()
 		evidence.navigationInventory = navigation_inventory
 		if not navigation_inventory.get("passed",false):
@@ -349,6 +404,36 @@ func _run() -> void:
 		if not checks.navigation_publication:
 			await _finish("failed",String(evidence.navigationPublication.get("reason","navigation_publication_incomplete"))); return
 	await _finish("scene_ready" if checks.scene_audit else "failed","" if checks.scene_audit else "scene_observation_failed")
+
+func _wait_for_demanded_window() -> Dictionary:
+	phase="demanded_window_drain"
+	var begun:=Time.get_ticks_msec()
+	var until:=mini(deadline-10000,begun+60000)
+	var samples: Array=[]
+	var modal_frames:=0
+	while Time.get_ticks_msec()<until and _within_deadline():
+		await physics_frame
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		var publication: Dictionary=main.structure_system.citadel_publication.stats()
+		var diagnostic: Dictionary={}
+		for row: Dictionary in publication.get("sceneDiagnostics",[]):
+			if row.get("region") == region: diagnostic=row; break
+		var milestones: Dictionary=diagnostic.get("publicationMilestones",{})
+		var complete_usec:=int(milestones.get("completeDemandedUsec",-1))
+		if samples.is_empty() or Time.get_ticks_msec()-int(samples.back().get("sampledMsec",0))>=1000:
+			samples.append({"sampledMsec":Time.get_ticks_msec(),"elapsedMsec":Time.get_ticks_msec()-begun,
+				"completeDemandedUsec":complete_usec,"physicalGroupsComplete":diagnostic.get("physicalGroupsComplete",0),
+				"foregroundGroups":diagnostic.get("packetForegroundGroups",0),"deferredGroups":diagnostic.get("packetDeferredGroups",0)})
+		if complete_usec>=0:
+			return {"passed":complete_usec<=45000000 and modal_frames==0,
+				"reason":"demanded_window_complete" if complete_usec<=45000000 else "demanded_window_exceeded_target",
+				"completeDemandedUsec":complete_usec,"elapsedMsec":Time.get_ticks_msec()-begun,
+				"modalLoadingVisibleFrames":modal_frames,"samples":samples,
+				"scope":"Stationary ordinary gameplay frames after the collision-backed approach; no direct publication polling, helper completion or transform write."}
+	return {"passed":false,"reason":"demanded_window_drain_timeout","elapsedMsec":Time.get_ticks_msec()-begun,
+		"modalLoadingVisibleFrames":modal_frames,"samples":samples,
+		"scope":"Stationary ordinary gameplay frames after the collision-backed approach; no direct publication polling, helper completion or transform write."}
 
 func _navigation_domain_inventory() -> Dictionary:
 	var result := {"passed":false,"reason":"navigation_domain_owner_unavailable","tileKeys":[]}
@@ -884,7 +969,16 @@ func _modal_loading_visible() -> bool:
 func _approach_until_scene_publication() -> Dictionary:
 	phase="ordinary_input_publication_demand"
 	var begun := Time.get_ticks_msec()
-	var until := mini(deadline-10000,begun+20000)
+	# A near-spawn diagnostic needs only a short demand window.  The explicit
+	# far-start mode keeps using ordinary input across the wilderness until the
+	# accepted reservation actually enters the production view; do not turn its
+	# representative journey into a 20-second stationary/timeout artefact.
+	var far_discovery: bool=bool(evidence.get("sourceDiscoveryApproach",{}).get("active",false))
+	# The measured wilderness route can include several collision-recovery
+	# detours before the retained window reaches a roughly 400 m Citadel.  Keep
+	# this below the overall watchdog while allowing representative sprint travel
+	# to reach exact demand without changing position or bypassing collision.
+	var until := mini(deadline-10000,begun+(240000 if far_discovery else 20000))
 	var next_sample := begun
 	var strafe_until := 0
 	var jump_until := 0
@@ -955,12 +1049,13 @@ func _approach_until_scene_publication() -> Dictionary:
 func _packet_scene_publication_started(scene: Dictionary) -> bool:
 	if main.structure_system==null: return false
 	var publication = main.structure_system.citadel_publication
-	# Source preparation is already the retained production publication job for
-	# this exact binding. Treat it as the demand boundary so the runner can keep
-	# the loading overlay active while preparation completes, instead of failing
-	# an arbitrary 20-second approach window before the scene job can exist.
+	# A speculative publication-base job is intentionally allowed to finish well
+	# before the player reaches the accepted reservation.  It cannot end this
+	# movement proof.  Only an exact source demand may promote worker activity to
+	# the demanded-packet boundary observed by the fixture.
 	var inflight: Dictionary = publication._inflight
-	if inflight.get("region") == region and inflight.get("binding",{}) == source_binding \
+	var exact_demand: bool = publication._desired.has(region) or publication._demand_started_usec.has(region)
+	if exact_demand and inflight.get("region") == region and inflight.get("binding",{}) == source_binding \
 			and inflight.get("kind") in ["publication_base","publication_base_navigation","preparation","physical_group_packet"]:
 		return true
 	if scene.get("status")!="publishing": return false
@@ -1046,8 +1141,12 @@ func _nearest_candidate(position: Vector3) -> Dictionary:
 			found.append({"candidate":value,"distanceWorld":distance})
 	found.sort_custom(func(a: Dictionary,b: Dictionary)->bool:
 		return a.distanceWorld < b.distanceWorld or a.distanceWorld == b.distanceWorld and String(a.candidate.siteId) < String(b.candidate.siteId))
+	var selected: Dictionary=select_candidate(found,requested_region)
+	var selected_distance := 0.0
+	for row: Dictionary in found:
+		if row.candidate==selected: selected_distance=float(row.distanceWorld); break
 	return {"originRegion":origin,"ringRadius":SEARCH_RING,"regionsExamined":(SEARCH_RING*2+1)*(SEARCH_RING*2+1),"candidates":found,
-		"selected":select_candidate(found,requested_region),"nearestWithinSearchOnly":requested_region.is_empty(),
+		"selected":selected,"selectedDistanceWorld":selected_distance,"nearestWithinSearchOnly":requested_region.is_empty(),
 		"requestedRegion":requested_region,"selectionMode":"nearest" if requested_region.is_empty() else "explicit_bounded_field_region","acceptedSiteNotGuaranteed":true}
 
 static func valid_region_request(request: String) -> bool:

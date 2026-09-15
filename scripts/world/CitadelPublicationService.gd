@@ -9,6 +9,7 @@ const Preparation = preload("res://scripts/buildings/BuildingPublicationPreparat
 const SceneJob = preload("res://scripts/buildings/BuildingScenePublicationJob.gd")
 const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
+const SitePreparation = preload("res://scripts/world/CitadelSitePreparation.gd")
 const DemandSet = preload("res://scripts/world/RegionDemandSet.gd")
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const MAX_REGIONS := 16
@@ -27,8 +28,16 @@ const MAX_PENDING_NAVIGATION_TILES := 512
 # one priority class per four successful worker dispatches, never per query.
 const PRIORITY_AGING_DISPATCH_TURNS := 4
 const MAX_INCREMENTAL_FOREGROUND_GROUPS := 256
-const VIEW_WINDOW_PROGRESS_TARGET_GROUPS := 224
+const MAX_ACTIVE_NAVIGATION_PHYSICAL_GROUPS := 256
+# Navigation can retain a much wider source closure than the facing physical
+# packet. Merge it through a smaller rolling foreground so one tile cannot turn
+# hundreds of tiny battlement groups into a single long-lived scene backlog.
+const MAX_NAVIGATION_MERGED_FOREGROUND_GROUPS := 128
+const VIEW_WINDOW_PROGRESS_TARGET_GROUPS := 64
 const SCENE_UNIT_SAMPLE_CAPACITY := 4096
+# Leave headroom for the scene job's final bounded atomic unit and scheduler
+# jitter inside the public 4 ms gameplay-thread ceiling.
+const SCENE_JOB_SLICE_USEC := 1500
 const FIRST_USEFUL_HOME_COUNT := 2
 const FIRST_USEFUL_HOME_ARCHETYPES: Array[String] = ["bed","chair","hearth","table"]
 const FIRST_USEFUL_STRUCTURAL_SEMANTICS: Array[String] = [
@@ -37,6 +46,11 @@ const FIRST_USEFUL_STRUCTURAL_SEMANTICS: Array[String] = [
 	"castle_keep_stair_exit",
 	"castle_keep_stair_landing",
 ]
+# G2 measured a 57 s source p95 and representative sprint speed of 15.4 m/s.
+# Add twelve seconds for a reversal plus the 180 m visible range. This is a
+# scheduling envelope only; it does not retain terrain or certify a source.
+const SOURCE_PREFETCH_LOOKAHEAD_METERS := 15.4 * (57.0 + 12.0) + 180.0
+const SOURCE_PREFETCH_LATERAL_METERS := float(SitePreparation.MAX_INFLUENCE_RADIUS_CELLS) * SitePreparation.CELL + 180.0
 
 var _admission
 var _worker = Worker.new()
@@ -51,6 +65,10 @@ var _retained_binding_priorities: Dictionary = {}
 var _retained_discovery_priorities: Dictionary = {}
 var _observer_region_bounds := Rect2i()
 var _observer_bounds_rejected := false
+var _prefetch_regions: Array[Vector2i] = []
+var _prefetch_rejected := false
+var _prefetch_started_usec: Dictionary = {}
+var _demand_started_usec: Dictionary = {}
 var _demand_revision := 0
 var _view_revision := 0
 var _prepared: Dictionary = {}
@@ -213,7 +231,11 @@ func configure(admission) -> void:
 	_retained_consumers = []
 	_clear_retained_priorities()
 	_observer_region_bounds = Rect2i()
+	_prefetch_regions.clear()
+	_prefetch_started_usec.clear()
+	_demand_started_usec.clear()
 	_observer_bounds_rejected = false
+	_prefetch_rejected = false
 	_demand_revision += 1
 	_view_revision += 1
 	_inflight = {}
@@ -360,7 +382,19 @@ func set_retained_source_requests(requests: Array) -> bool:
 			# Empty is meaningful only when the coordinator explicitly supplied the
 			# capsule closure. Legacy/direct callers omit the field and retain their
 			# established tile-derived packet request.
-			if site.has("foregroundGroupIds"): retained_site["foregroundGroupIds"] = foreground_groups
+			if site.has("foregroundGroupIds"):
+				retained_site["foregroundGroupIds"] = foreground_groups
+				# Validate the worker eligibility once when ownership crosses into this
+				# service. A matching immutable plan signature lets demand planning
+				# reuse the typed closure without another per-ID scan.
+				var source_plan = _publication_plan_for_binding(binding)
+				var plan_eligible := source_plan!=null
+				if source_plan!=null:
+					for group_id: String in foreground_groups:
+						if not source_plan.eligible_group_ids.has(group_id):
+							plan_eligible=false
+							break
+				if plan_eligible: retained_site["foregroundPlanSignature"]=source_plan.output_signature
 			sites.append(retained_site)
 			var binding_key := _priority_binding_key(binding)
 			binding_priorities[binding_key] = mini(int(binding_priorities.get(binding_key,4)),int(value.priority))
@@ -384,6 +418,17 @@ func set_retained_source_requests(requests: Array) -> bool:
 	_retained_discovery_priorities = discovery_priorities
 	_demand_revision += 1
 	return true
+
+
+func _publication_plan_for_binding(binding: Dictionary):
+	for region: Vector2i in _scenes:
+		var entry: Dictionary = _scenes[region]
+		if entry.get("binding",{})!=binding: continue
+		var job = entry.get("job",null)
+		var base = job._cpu.get("publicationBase",null) if job!=null else null
+		if base!=null and base.publication_plan!=null and base.publication_plan.matches(binding,base.description.publication_groups.groups):
+			return base.publication_plan
+	return null
 
 ## Camera intent is scheduling state, not spatial/source ownership. Applying it
 ## must not replay the immutable source manifest or invalidate the currently
@@ -511,6 +556,11 @@ func _refresh_demand(bounds: Rect2i) -> Dictionary:
 		# the next owner slice; do not strand a resident packet scene on the old
 		# empty closure.
 		_demand_revision += 1
+	_prefetch_regions = _prefetch_regions_for_views()
+	var now_usec := Time.get_ticks_usec()
+	for region: Vector2i in _prefetch_regions:
+		if not _prefetch_started_usec.has(region): _prefetch_started_usec[region]=now_usec
+	_prefetch_rejected = _admission==null or not _admission.set_prefetch_regions(_prefetch_regions)
 	var rectangles: Array[Rect2i] = _retained_region_bounds.duplicate()
 	if _observer_region_bounds != Rect2i(): rectangles.append(_observer_region_bounds)
 	# Original consumer discovery is an exact union of at most256 chunks; the
@@ -541,17 +591,79 @@ func _refresh_demand(bounds: Rect2i) -> Dictionary:
 					intersects = true
 					break
 			if not intersects or not _current_binding(source.binding): continue
+			# Conservative influence overlap starts/reuses source preparation.  The
+			# player-facing demand clock begins only when the exact accepted
+			# reservation enters an ordinary retained window.  Keeping these clocks
+			# separate makes prefetch lead measurable instead of charging speculative
+			# recipe time to visible publication latency.
+			if not _demand_started_usec.has(region): _demand_started_usec[region]=now_usec
 			ready[region] = source
 			if source.status == "prepared" and not _prepared.has(region) and not _scenes.has(region) and not _region_retiring(region) and not _failures.has(region) \
 					and (_inflight.is_empty() or _inflight.region != region):
 				_admission.request_source(region,true)
 		desired[region] = true
+	# A completed speculative source can also prepare its compact publication
+	# base while it is still ahead of the player.  It is deliberately not added
+	# to desired: reversing the view removes it from ready on the next slice and
+	# retires/cancels only this speculative publication work.  Exact observer or
+	# retained-site overlap remains the sole start of player-facing demand time.
+	for region: Vector2i in _prefetch_regions:
+		if ready.has(region): continue
+		var source: Dictionary = _admission.source_state(region)
+		if source.get("status") == "ready" and _current_binding(source.binding):
+			ready[region] = source
 	_desired = desired
 	return ready
 
 func _current_binding(binding: Dictionary) -> bool:
 	return int(binding.get("generation",-1)) == _generation \
 		and String(_admission.stats().worldSeed) == _seed
+
+
+## Select at most two deterministic candidate regions intersecting the current
+## view corridor. Reversing before real demand cancels only speculative work;
+## a promoted physical request remains owned by ordinary admission.
+func _prefetch_regions_for_views() -> Array[Vector2i]:
+	var rows: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	for consumer: Dictionary in _retained_consumers:
+		var view: Dictionary = ViewPriority.normalize(consumer.get("viewIntent",{}))
+		if view.is_empty(): continue
+		var origin: Vector3 = view.origin
+		var forward: Vector3 = view.forward
+		var finish := origin+forward*SOURCE_PREFETCH_LOOKAHEAD_METERS
+		var low_cell := Vector2i(floori(minf(origin.x,finish.x)/SitePreparation.CELL),
+			floori(minf(origin.z,finish.z)/SitePreparation.CELL))-Vector2i.ONE*SitePreparation.MAX_INFLUENCE_RADIUS_CELLS
+		var high_cell := Vector2i(ceili(maxf(origin.x,finish.x)/SitePreparation.CELL),
+			ceili(maxf(origin.z,finish.z)/SitePreparation.CELL))+Vector2i.ONE*SitePreparation.MAX_INFLUENCE_RADIUS_CELLS
+		var low_region := Field.region_for_cell(low_cell)
+		var high_region := Field.region_for_cell(high_cell)
+		if (high_region.x-low_region.x+1)*(high_region.y-low_region.y+1)>16: continue
+		for z: int in range(low_region.y,high_region.y+1):
+			for x: int in range(low_region.x,high_region.x+1):
+				var region := Vector2i(x,z)
+				if seen.has(region): continue
+				var candidate: Dictionary = Field.candidate_for_region(_seed,region)
+				if candidate.is_empty(): continue
+				var center_cell: Vector2i = candidate.centerCell
+				var center := Vector3(float(center_cell.x)*SitePreparation.CELL,origin.y,float(center_cell.y)*SitePreparation.CELL)
+				var delta := center-origin
+				var depth := Vector3(delta.x,0.0,delta.z).dot(forward)
+				if depth < -SOURCE_PREFETCH_LATERAL_METERS or depth > SOURCE_PREFETCH_LOOKAHEAD_METERS+SOURCE_PREFETCH_LATERAL_METERS: continue
+				var closest := origin+forward*clampf(depth,0.0,SOURCE_PREFETCH_LOOKAHEAD_METERS)
+				var lateral := Vector2(center.x-closest.x,center.z-closest.z).length()
+				if lateral>SOURCE_PREFETCH_LATERAL_METERS: continue
+				seen[region]=true
+				rows.append({"region":region,"depth":maxf(0.0,depth),"lateral":lateral,"siteId":String(candidate.siteId)})
+	rows.sort_custom(func(a: Dictionary,b: Dictionary):
+		if not is_equal_approx(float(a.depth),float(b.depth)): return float(a.depth)<float(b.depth)
+		if not is_equal_approx(float(a.lateral),float(b.lateral)): return float(a.lateral)<float(b.lateral)
+		return String(a.siteId)<String(b.siteId))
+	var result: Array[Vector2i] = []
+	for row: Dictionary in rows:
+		result.append(row.region)
+		if result.size()>=Admission.MAX_PREFETCH_REGIONS: break
+	return result
 
 func _prune_unwanted(ready: Dictionary) -> void:
 	for region: Vector2i in _navigation.keys():
@@ -709,11 +821,19 @@ func _packet_requested_for_source(region: Vector2i, binding: Dictionary) -> bool
 	return false
 
 ## A no-site retained source consumer is the coordinator's first pass before
-## it has a description from which to derive group membership.  It is the one
-## case that may retain a publication base without entering a whole-source
-## scene.  A consumer that already names sites (including an empty/ineligible
-## group set) is an actual publication demand and follows normal eligibility.
-func _packet_bootstrap_requested_for_source(source: Dictionary) -> bool:
+## it has a description from which to derive group membership.  A view-prefetch
+## source uses the same compact-base path, including the narrow frame where the
+## ordinary observer has reached its reservation but retained membership has
+## not caught up.  Legacy observer-only demand keeps its established lifecycle.
+func _packet_bootstrap_requested_for_source(region: Vector2i, source: Dictionary) -> bool:
+	var has_view_owner := false
+	for consumer: Dictionary in _retained_consumers:
+		if not ViewPriority.normalize(consumer.get("viewIntent",{})).is_empty():
+			has_view_owner = true
+			break
+	if has_view_owner and (_prefetch_regions.has(region) or (_prefetch_started_usec.has(region) \
+			and _observer_region_bounds.has_area() and source.get("reservationCells") is Rect2i \
+			and source.reservationCells.intersects(_observer_region_bounds))): return true
 	for consumer: Dictionary in _retained_consumers:
 		if not consumer.sites.is_empty(): continue
 		if source.reservationCells.intersects(consumer.bounds): return true
@@ -745,6 +865,7 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 	var requests: Array[Dictionary] = []
 	var boundary_groups: Dictionary = {}
 	var census: Dictionary = base.packet_eligibility if base!=null else {}
+	var compact_plan = base.publication_plan if base!=null else null
 	if base!=null and census.is_empty():
 		census=Preparation.classify_physical_group_packet_eligibility(description.publication_groups,base.building_source,base.furnishing_source)
 	var consumers: Array = _retained_consumers.duplicate()
@@ -753,10 +874,19 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 	# record after admission.  Describe its exact source closure here; this is
 	# scheduling input only.  Packet compilation, scene installation and fresh
 	# collision validation remain below this boundary.
+	var observer_owned_by_consumer := false
+	for retained_consumer: Dictionary in consumers:
+		if not retained_consumer.get("bounds") is Rect2i or not retained_consumer.bounds.encloses(_observer_region_bounds): continue
+		for retained_site: Dictionary in retained_consumer.sites:
+			if retained_site.get("binding",{})==binding and retained_site.has("foregroundGroupIds"):
+				observer_owned_by_consumer=true
+				break
+		if observer_owned_by_consumer: break
 	var observer_source: Dictionary = _admission.source_state(region) if _admission!=null else {}
-	if _observer_region_bounds.has_area() and observer_source.get("binding",{})==binding \
+	if not observer_owned_by_consumer and _observer_region_bounds.has_area() and observer_source.get("binding",{})==binding \
 			and observer_source.get("reservationCells") is Rect2i and observer_source.reservationCells.intersects(_observer_region_bounds):
-		var observer_requirements: Dictionary = description.physical_group_requirements(_observer_region_bounds)
+		var observer_requirements: Dictionary = compact_plan.physical_group_requirements(_observer_region_bounds) \
+			if compact_plan!=null else description.physical_group_requirements(_observer_region_bounds)
 		if observer_requirements.get("status")!="described":
 			return {"status":observer_requirements.get("status","pending"),"reason":observer_requirements.get("reason","packet_observer_description_pending")}
 		consumers.append({"ownerId":"observer:%d,%d,%d,%d" % [_observer_region_bounds.position.x,_observer_region_bounds.position.y,
@@ -765,70 +895,26 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 			"foregroundGroupIds":observer_requirements.get("groupIds",[])}]})
 	var owner_closure_started := Time.get_ticks_usec()
 	var owner_group_ids := 0
-	for consumer: Dictionary in consumers:
-		for site: Dictionary in consumer.sites:
-			if site.binding!=binding: continue
-			var ids: Dictionary = {}
-			if site.has("foregroundGroupIds"):
-				for id: String in site.foregroundGroupIds: ids[id] = true
-				# An explicitly empty immediate closure means this streaming tile has
-				# no member of its own.  It is not permission to leave a retained
-				# source resident forever without a physical packet.  When the
-				# consumer already intersects the conservative reservation, retain
-				# the nearest eligible exterior structural closure.  The worker still
-				# prepares the immutable packet and the scene validates it at the
-				# physical installation boundary.
-				if ids.is_empty():
-					var boundary: Dictionary = _packet_exterior_boundary_requirements(region,binding,description,consumer,census)
-					if boundary.get("status") not in ["described","pending"]:
-						return {"status":boundary.get("status","failed"),"reason":boundary.get("reason","packet_exterior_boundary_failed")}
-					if boundary.get("status")=="described":
-						for id: String in boundary.get("groupIds",[]): ids[id] = true
-						if not String(boundary.get("boundaryGroupId","")).is_empty():
-							boundary_groups[String(boundary.boundaryGroupId)] = true
-			else:
-				var foreground_tiles: Array = site.get("foregroundNavigationTileKeys",[])
-				if foreground_tiles.is_empty():
-				# Existing direct service callers retain their explicit group closure.
-				# Production streaming supplies tile keys, which are always derived here.
-					for id: String in site.groupIds: ids[id] = true
-				else:
-					for key: String in foreground_tiles:
-						var coordinates: PackedStringArray = key.split(",",true)
-						if coordinates.size()!=2: return {"status":"failed","reason":"invalid_packet_foreground_tile"}
-						var tile := Vector2i(int(coordinates[0]),int(coordinates[1]))
-						var requirements: Dictionary = description.physical_group_requirements(Rect2i(tile*NAVIGATION_TILE_CELLS,Vector2i.ONE*NAVIGATION_TILE_CELLS))
-						if requirements.get("status")!="described": return {"status":requirements.get("status","pending"),"reason":requirements.get("reason","packet_foreground_description_pending")}
-						for id: String in requirements.get("groupIds",[]): ids[id] = true
-					# A capsule can overlap the source's declared reservation before any
-					# of its navigation tiles intersects source geometry.  Keep the
-					# ordinary tile-derived closure empty in that case, but give the
-					# packet scene one nearest real structural collision closure to
-					# publish.  The live scene receipt remains the only acknowledgement.
-					if ids.is_empty():
-						var boundary: Dictionary = _packet_exterior_boundary_requirements(region,binding,description,consumer,census)
-						if boundary.get("status") not in ["described","pending"]:
-							return {"status":boundary.get("status","failed"),"reason":boundary.get("reason","packet_exterior_boundary_failed")}
-						if boundary.get("status")=="described":
-							for id: String in boundary.get("groupIds",[]):
-								ids[id] = true
-							if not String(boundary.get("boundaryGroupId","")).is_empty():
-								boundary_groups[String(boundary.boundaryGroupId)] = true
-			var ordered: Array[String] = []
-			for id: String in ids:
-				ordered.append(id)
-			ordered.sort()
-			var publishable: Array[String] = []
-			for id: String in ordered:
-				if not description.publication_groups.groups.has(id): return {"status":"failed","reason":"packet_foreground_group_unknown","groupId":id}
-				var eligible := false
-				if base!=null and census.get("ready",false):
-					eligible = _packet_group_publishable(description,census,id)
-				if base==null or eligible: publishable.append(id)
-				else: blocked[id] = true
-			if not publishable.is_empty(): requests.append({"ownerId":"region:%s" % str(consumer.ownerId),"groupIds":publishable,"priority":consumer.priority})
-			for id: String in publishable: foreground[id] = true
-			owner_group_ids += publishable.size()
+	var door_lifecycle_available := _door_callbacks_ready()
+	var owner_identity := _packet_owner_demand_identity(consumers,binding,door_lifecycle_available)
+	var scene_entry: Dictionary = _scenes.get(region,{})
+	var owner_cache: Dictionary = scene_entry.get("packetOwnerPlanCache",{})
+	if owner_cache.get("binding",{})==binding and owner_cache.get("identity",[])==owner_identity:
+		requests=owner_cache.requests
+		blocked=owner_cache.blocked
+		boundary_groups=owner_cache.boundaryGroups
+		owner_group_ids=int(owner_cache.groupCount)
+	else:
+		var owner_result: Dictionary = _build_packet_owner_demand(region,binding,description,base,census,
+			compact_plan,consumers,door_lifecycle_available)
+		if owner_result.get("status")!="ready": return owner_result
+		requests=owner_result.requests
+		blocked=owner_result.blocked
+		boundary_groups=owner_result.boundaryGroups
+		owner_group_ids=int(owner_result.groupCount)
+		if not scene_entry.is_empty():
+			scene_entry["packetOwnerPlanCache"]={"binding":binding,"identity":owner_identity,
+				"requests":requests,"blocked":blocked,"boundaryGroups":boundary_groups,"groupCount":owner_group_ids}
 	_record_scene_unit("demand_owner_closure",owner_closure_started,owner_group_ids)
 	var view_window_started := Time.get_ticks_usec()
 	var window: Dictionary = _bounded_packet_view_window(description,base,census,consumers,requests,completed)
@@ -843,11 +929,112 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 	for id: String in window.get("blockedGroupIds",[]):
 		if not blocked_ids.has(id): blocked_ids.append(id)
 	blocked_ids.sort()
-	return {"status":"ready","requests":window.requests,"deferredGroupIds":window.deferredGroupIds,
+	var explicit_deferred: Array[String] = []
+	for id: String in window.deferredGroupIds: explicit_deferred.append(id)
+	for id: String in blocked_ids:
+		if not explicit_deferred.has(id): explicit_deferred.append(id)
+	explicit_deferred.sort()
+	return {"status":"ready","requests":window.requests,"deferredGroupIds":explicit_deferred,
 		"foregroundGroupIds":window.foregroundGroupIds,"readinessGroupIds":window.readinessGroupIds,
 		"viewPrioritizedGroupIds":window.viewPrioritizedGroupIds,
 		"portalGroupIds":window.portalGroupIds,"blockedGroupIds":blocked_ids,"boundaryGroupIds":boundary_ids,
+		"firstUsefulGroupIds":window.get("firstUsefulGroupIds",[]),
+		"firstUsefulHomeIds":window.get("firstUsefulHomeIds",[]),
+		"firstUsefulDoorGroupId":window.get("firstUsefulDoorGroupId",""),
+		"firstUsefulStructuralGroupIds":window.get("firstUsefulStructuralGroupIds",[]),
+		"courtyardGroupIds":window.get("courtyardGroupIds",[]),
+		"deferredGroupCount":window.get("deferredGroupCount",window.deferredGroupIds.size()),
+		"implicitDeferred":window.get("implicitDeferred",false),
+		"candidateCount":window.get("candidateCount",description.publication_groups.groups.size()),
 		"censusReady":census.get("ready",base==null),"rollingWindow":true}
+
+
+static func _packet_owner_demand_identity(consumers: Array, binding: Dictionary,
+		door_lifecycle_available: bool) -> Array:
+	var result: Array = [binding,door_lifecycle_available]
+	for consumer: Dictionary in consumers:
+		for site: Dictionary in consumer.sites:
+			if site.get("binding",{})!=binding: continue
+			result.append([consumer.get("ownerId"),consumer.get("priority"),consumer.get("bounds"),
+				site.get("groupIds",[]),site.get("foregroundGroupIds",null),
+				site.get("foregroundNavigationTileKeys",[])])
+	return result
+
+
+func _build_packet_owner_demand(region: Vector2i, binding: Dictionary, description, base,
+		census: Dictionary, compact_plan, consumers: Array, door_lifecycle_available: bool) -> Dictionary:
+	var requests: Array[Dictionary] = []
+	var blocked: Dictionary = {}
+	var boundary_groups: Dictionary = {}
+	var owner_group_ids := 0
+	for consumer: Dictionary in consumers:
+		for site: Dictionary in consumer.sites:
+			if site.binding!=binding: continue
+			var ids: Dictionary = {}
+			var dependency_complete := site.has("foregroundGroupIds")
+			var trusted_foreground: bool = compact_plan!=null and door_lifecycle_available \
+				and String(site.get("foregroundPlanSignature",""))==String(compact_plan.output_signature) \
+				and site.get("foregroundGroupIds",[]).size()>0
+			if trusted_foreground:
+				requests.append({"ownerId":"region:%s" % str(consumer.ownerId),
+					"groupIds":site.foregroundGroupIds,"priority":consumer.priority,"dependencyComplete":true})
+				owner_group_ids+=site.foregroundGroupIds.size()
+				continue
+			if site.has("foregroundGroupIds"):
+				if site.foregroundGroupIds.is_empty():
+					var boundary: Dictionary = _packet_exterior_boundary_requirements(region,binding,description,consumer,census,compact_plan)
+					if boundary.get("status") not in ["described","pending"]:
+						return {"status":boundary.get("status","failed"),"reason":boundary.get("reason","packet_exterior_boundary_failed")}
+					if boundary.get("status")=="described":
+						for id: String in boundary.get("groupIds",[]): ids[id]=true
+						if not String(boundary.get("boundaryGroupId","")).is_empty(): boundary_groups[String(boundary.boundaryGroupId)]=true
+			else:
+				var foreground_tiles: Array = site.get("foregroundNavigationTileKeys",[])
+				if foreground_tiles.is_empty():
+					for id: String in site.groupIds: ids[id]=true
+				else:
+					dependency_complete=true
+					for key: String in foreground_tiles:
+						var coordinates: PackedStringArray = key.split(",",true)
+						if coordinates.size()!=2: return {"status":"failed","reason":"invalid_packet_foreground_tile"}
+						var tile := Vector2i(int(coordinates[0]),int(coordinates[1]))
+						var tile_bounds := Rect2i(tile*NAVIGATION_TILE_CELLS,Vector2i.ONE*NAVIGATION_TILE_CELLS)
+						var requirements: Dictionary = compact_plan.physical_group_requirements(tile_bounds) \
+							if compact_plan!=null else description.physical_group_requirements(tile_bounds)
+						if requirements.get("status")!="described":
+							return {"status":requirements.get("status","pending"),"reason":requirements.get("reason","packet_foreground_description_pending")}
+						for id: String in requirements.get("groupIds",[]): ids[id]=true
+					if ids.is_empty():
+						var boundary: Dictionary = _packet_exterior_boundary_requirements(region,binding,description,consumer,census,compact_plan)
+						if boundary.get("status") not in ["described","pending"]:
+							return {"status":boundary.get("status","failed"),"reason":boundary.get("reason","packet_exterior_boundary_failed")}
+						if boundary.get("status")=="described":
+							for id: String in boundary.get("groupIds",[]): ids[id]=true
+							if not String(boundary.get("boundaryGroupId","")).is_empty(): boundary_groups[String(boundary.boundaryGroupId)]=true
+			var ordered: Array[String] = []
+			if site.has("foregroundGroupIds") and not site.foregroundGroupIds.is_empty():
+				for id: String in site.foregroundGroupIds: ordered.append(id)
+			if ordered.is_empty():
+				for id: String in ids: ordered.append(id)
+				ordered.sort()
+			var publishable: Array[String] = []
+			for id: String in ordered:
+				if not description.publication_groups.groups.has(id):
+					return {"status":"failed","reason":"packet_foreground_group_unknown","groupId":id}
+				var eligible := false
+				if base!=null and census.get("ready",false):
+					if compact_plan!=null:
+						eligible=compact_plan.eligible_group_ids.has(id) \
+							and (description.publication_groups.groups[id].get("doorPartIds",[]).is_empty() or door_lifecycle_available)
+					else: eligible=_packet_group_publishable(description,census,id)
+				if base==null or eligible: publishable.append(id)
+				else: blocked[id]=true
+			if not publishable.is_empty():
+				requests.append({"ownerId":"region:%s" % str(consumer.ownerId),"groupIds":publishable,
+					"priority":consumer.priority,"dependencyComplete":dependency_complete})
+			owner_group_ids+=publishable.size()
+	return {"status":"ready","requests":requests,"blocked":blocked,
+		"boundaryGroups":boundary_groups,"groupCount":owner_group_ids}
 
 ## Select one bounded, dependency-complete publication window. Completed groups
 ## make room for the next window, so a retained city eventually finishes while
@@ -855,12 +1042,20 @@ func _packet_foreground_plan(region: Vector2i, binding: Dictionary, description,
 func _bounded_packet_view_window(description, base, census: Dictionary, consumers: Array,
 		base_requests: Array, completed: Dictionary) -> Dictionary:
 	var groups: Dictionary = description.publication_groups.groups
+	var compact_plan = base.publication_plan if base!=null else null
 	var candidates: Dictionary = {}
+	var readiness: Dictionary = {}
 	for request: Dictionary in base_requests:
 		for id: String in request.groupIds:
 			candidates[id] = {"id":id,"priority":int(request.priority),"distanceSquared":0.0,"portal":false,"throughPortal":false}
+			# Exact member/tile queries already return a complete immutable
+			# dependency closure. Do not traverse all of those same closures again
+			# merely to label the gameplay-readiness subset.
+			if bool(request.get("dependencyComplete",false)): readiness[id]=true
 	var first_useful_started := Time.get_ticks_usec()
-	var useful: Dictionary = _first_useful_packet_groups(description,base,census,completed)
+	var has_view_intent := consumers.any(func(consumer: Dictionary): return not consumer.get("viewIntent",{}).is_empty())
+	var useful: Dictionary = _first_useful_packet_groups(description,base,census,completed,compact_plan) if has_view_intent \
+		else {"status":"ready","groupIds":[],"homeIds":[],"doorGroupId":"","structuralGroupIds":[]}
 	_record_scene_unit("demand_first_useful",first_useful_started,groups.size())
 	if useful.get("status")!="ready": return useful
 	for id: String in useful.get("groupIds",[]):
@@ -869,19 +1064,27 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	# Only explicit spatial/tile owners gate gameplay readiness. Camera-ranked
 	# neighbours remain background presentation work and cannot hold the player
 	# until a rolling city window (or the whole source) is installed.
-	var readiness: Dictionary = {}
 	var readiness_started := Time.get_ticks_usec()
 	for id: String in candidates:
-		var readiness_closure: Dictionary = _packet_dependency_window(groups,id,completed)
+		if readiness.has(id): continue
+		var readiness_closure: Dictionary = _packet_dependency_window_for_plan(compact_plan,groups,id,completed)
 		if readiness_closure.get("status")!="ready": return readiness_closure
 		for required_id: String in readiness_closure.groupIds: readiness[required_id]=true
 	_record_scene_unit("demand_readiness_closure",readiness_started,candidates.size())
 	var view_rank_started := Time.get_ticks_usec()
 	var ranked_group_rows := 0
+	var ranked_view_keys: Dictionary = {}
 	for consumer: Dictionary in consumers:
-		var view: Dictionary = consumer.get("viewIntent",{})
+		var view: Dictionary = ViewPriority.normalize(consumer.get("viewIntent",{}))
 		if view.is_empty(): continue
-		var ranked: Array[Dictionary] = ViewPriority.ranked_groups(groups,view)
+		var view_key := JSON.stringify([view.origin,view.forward,view.predictedOrigin,
+			view.horizontalFovDegrees,view.farDistance])
+		if ranked_view_keys.has(view_key): continue
+		ranked_view_keys[view_key]=true
+		var ranked_result: Dictionary = compact_plan.ranked_groups(view,completed) if compact_plan!=null \
+			else {"status":"ready","rows":ViewPriority.ranked_groups(groups,view),"candidateCount":groups.size()}
+		if ranked_result.get("status")!="ready": return ranked_result
+		var ranked: Array[Dictionary] = ranked_result.rows
 		ranked_group_rows += ranked.size()
 		for row: Dictionary in ranked:
 			var id := String(row.id)
@@ -895,7 +1098,10 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	# intent; this keeps background tools and navigation-only requests narrow.
 	var ordered: Array[Dictionary] = []
 	for row: Dictionary in candidates.values():
-		if not completed.has(String(row.id)): ordered.append(row)
+		# Exact member/semantic readiness is already seeded below in stable ID
+		# order.  Sorting those rows again made the first cold view refresh scale
+		# with its full dependency closure; only optional ranked rows need ranking.
+		if not completed.has(String(row.id)) and not readiness.has(String(row.id)): ordered.append(row)
 	var candidate_sort_started := Time.get_ticks_usec()
 	ordered.sort_custom(func(a: Dictionary,b: Dictionary):
 		if int(a.priority)!=int(b.priority): return int(a.priority)<int(b.priority)
@@ -903,9 +1109,15 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 			return float(a.distanceSquared)<float(b.distanceSquared)
 		return String(a.id)<String(b.id))
 	_record_scene_unit("demand_candidate_sort",candidate_sort_started,ordered.size())
-	var selected: Dictionary = {}
+	# Exact spatial/semantic readiness is mandatory, not part of the optional
+	# presentation-window quota. Seed its complete dependency closure first;
+	# ranked view rows then fill only the remaining bounded capacity.
+	var selected: Dictionary = readiness.duplicate()
 	var selected_priority: Dictionary = {}
 	var selected_order: Array[String] = []
+	for id: String in selected: selected_order.append(id)
+	selected_order.sort()
+	for id: String in selected_order: selected_priority[id]=0
 	var view_ids: Array[String] = []
 	var portal_ids: Array[String] = []
 	var blocked: Dictionary = {}
@@ -915,13 +1127,16 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 		selection_rows += 1
 		var id := String(row.id)
 		if not groups.has(id): return {"status":"failed","reason":"packet_foreground_group_unknown","groupId":id}
-		var closure: Dictionary = _packet_dependency_window(groups,id,completed)
+		var closure: Dictionary = _packet_dependency_window_for_plan(compact_plan,groups,id,completed)
 		if closure.get("status")!="ready": return closure
-		var eligible := true
-		for required_id: String in closure.groupIds:
-			if base!=null and not _packet_group_publishable(description,census,required_id):
-				eligible=false
-				blocked[required_id]=true
+		var eligible: bool = base==null or compact_plan!=null and compact_plan.publication_closure_eligible(id,_door_callbacks_ready())
+		if base!=null and compact_plan==null:
+			eligible=true
+			for required_id: String in closure.groupIds:
+				if not _packet_group_publishable(description,census,required_id): eligible=false
+		if not eligible:
+			for required_id: String in closure.groupIds:
+				if not _packet_group_publishable_from_plan(description,census,required_id,compact_plan): blocked[required_id]=true
 		if not eligible: continue
 		var additions := 0
 		for required_id: String in closure.groupIds:
@@ -936,7 +1151,7 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 		# Do not scan thousands of lower-ranked closures trying to fill the final
 		# few slots. This still publishes a substantial bounded window and the
 		# retained job selects another window after acknowledgement.
-		if selected.size()>=VIEW_WINDOW_PROGRESS_TARGET_GROUPS: break
+		if selected.size()>=maxi(readiness.size(),VIEW_WINDOW_PROGRESS_TARGET_GROUPS): break
 	_record_scene_unit("demand_selection_closure",selection_started,selection_rows)
 	var result_started := Time.get_ticks_usec()
 	var by_priority: Dictionary = {}
@@ -949,22 +1164,31 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 		if by_priority.has(priority):
 			requests.append({"ownerId":"view-window:%d" % priority,"groupIds":by_priority[priority],"priority":priority})
 	var deferred: Array[String] = []
-	for id: String in groups:
-		if not completed.has(id) and not selected.has(id): deferred.append(id)
-	deferred.sort()
+	var deferred_count := groups.size()-completed.size()-selected.size()
+	if compact_plan==null:
+		for id: String in groups:
+			if not completed.has(id) and not selected.has(id): deferred.append(id)
+		deferred.sort()
+		deferred_count=deferred.size()
 	view_ids = _unique_sorted_strings(view_ids)
 	portal_ids = _unique_sorted_strings(portal_ids)
 	var blocked_ids: Array = blocked.keys()
 	blocked_ids.sort()
+	if compact_plan!=null:
+		deferred.clear()
+		for id: String in blocked_ids: deferred.append(id)
 	var readiness_ids: Array[String] = []
 	for id: String in readiness: readiness_ids.append(id)
 	readiness_ids.sort()
-	_record_scene_unit("demand_result_assembly",result_started,groups.size())
+	_record_scene_unit("demand_result_assembly",result_started,ranked_group_rows)
 	return {"status":"ready","requests":requests,"foregroundGroupIds":selected_order,
 		"readinessGroupIds":readiness_ids,
+		"firstUsefulGroupIds":useful.get("groupIds",[]),
 		"firstUsefulHomeIds":useful.get("homeIds",[]),"firstUsefulDoorGroupId":useful.get("doorGroupId",""),
 		"firstUsefulStructuralGroupIds":useful.get("structuralGroupIds",[]),
-		"deferredGroupIds":deferred,"viewPrioritizedGroupIds":view_ids,"portalGroupIds":portal_ids,"blockedGroupIds":blocked_ids}
+		"courtyardGroupIds":useful.get("courtyardGroupIds",[]),
+		"deferredGroupIds":deferred,"deferredGroupCount":deferred_count,"implicitDeferred":compact_plan!=null,
+		"candidateCount":ranked_group_rows,"viewPrioritizedGroupIds":view_ids,"portalGroupIds":portal_ids,"blockedGroupIds":blocked_ids}
 
 ## Choose semantic first-content anchors from immutable generated source data.
 ## This is not seed/name choreography: every qualifying Citadel contributes the
@@ -972,60 +1196,89 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 ## real stair/landing support.  The latter keeps first-useful readiness honest:
 ## a visually useful packet must also expose a live player-capsule clearance
 ## witness rather than declaring readiness from furniture and one door alone.
-func _first_useful_packet_groups(description, base, census: Dictionary, completed: Dictionary) -> Dictionary:
+func _first_useful_packet_groups(description, base, census: Dictionary, completed: Dictionary, compact_plan = null) -> Dictionary:
 	if base==null: return {"status":"ready","groupIds":[],"homeIds":[],"doorGroupId":"","structuralGroupIds":[]}
+	if compact_plan==null: compact_plan=base.publication_plan
+	if compact_plan!=null:
+		if compact_plan.selected_first_useful_structural_group_ids.is_empty():
+			return {"status":"failed","reason":"first_useful_structural_group_missing"}
+		var roots: Array[String] = []
+		for group_id: String in compact_plan.selected_first_useful_home_group_ids: roots.append(group_id)
+		for group_id: String in compact_plan.selected_first_useful_structural_group_ids:
+			if not roots.has(group_id): roots.append(group_id)
+		for group_id: String in compact_plan.selected_courtyard_group_ids:
+			if not roots.has(group_id): roots.append(group_id)
+		var door_group_id: String = compact_plan.selected_first_useful_door_group_id if _door_callbacks_ready() else ""
+		if not door_group_id.is_empty() and not roots.has(door_group_id): roots.append(door_group_id)
+		roots.sort()
+		return {"status":"ready","groupIds":roots,
+			"homeIds":compact_plan.selected_first_useful_home_ids,
+			"doorGroupId":door_group_id,
+			"structuralGroupIds":compact_plan.selected_first_useful_structural_group_ids,
+			"courtyardGroupIds":compact_plan.selected_courtyard_group_ids}
 	var groups: Dictionary = description.publication_groups.get("groups",{})
 	var by_part: Dictionary = description.publication_groups.get("groupByPart",{})
-	var furnishing_source: Dictionary = base.furnishing_source
-	var furnishing_parts: Variant = furnishing_source.get("parts",[])
-	if not furnishing_parts is Array: return {"status":"failed","reason":"invalid_first_useful_furnishing_source"}
 	var homes: Dictionary = {}
-	for raw_part in furnishing_parts:
-		if not raw_part is Dictionary: continue
-		var part: Dictionary = raw_part
-		var recipe: Variant = part.get("recipe",{})
-		if not recipe is Dictionary: continue
-		var home_id := String(recipe.get("citadelUrbanHomeId",""))
-		var archetype := String(part.get("archetype",""))
-		var member_id := "furnishing:"+String(part.get("id",""))
-		if home_id.is_empty() or archetype not in FIRST_USEFUL_HOME_ARCHETYPES or not by_part.has(member_id): continue
-		var group_id := String(by_part[member_id])
-		if not _packet_group_closure_publishable(description,census,group_id,completed): continue
-		if not homes.has(home_id): homes[home_id]={}
-		if not homes[home_id].has(archetype): homes[home_id][archetype]=group_id
+	if compact_plan!=null:
+		homes=compact_plan.first_useful_homes
+	else:
+		var furnishing_source: Dictionary = base.furnishing_source
+		var furnishing_parts: Variant = furnishing_source.get("parts",[])
+		if not furnishing_parts is Array: return {"status":"failed","reason":"invalid_first_useful_furnishing_source"}
+		for raw_part in furnishing_parts:
+			if not raw_part is Dictionary: continue
+			var part: Dictionary = raw_part
+			var recipe: Variant = part.get("recipe",{})
+			if not recipe is Dictionary: continue
+			var home_id := String(recipe.get("citadelUrbanHomeId",""))
+			var archetype := String(part.get("archetype",""))
+			var member_id := "furnishing:"+String(part.get("id",""))
+			if home_id.is_empty() or archetype not in FIRST_USEFUL_HOME_ARCHETYPES or not by_part.has(member_id): continue
+			var group_id := String(by_part[member_id])
+			if not _packet_group_closure_publishable(description,census,group_id,completed,compact_plan): continue
+			if not homes.has(home_id): homes[home_id]={}
+			if not homes[home_id].has(archetype): homes[home_id][archetype]=group_id
 	var selected: Dictionary = {}
 	var selected_homes: Array[String] = []
-	var home_ids: Array = homes.keys()
-	home_ids.sort()
+	var home_ids: Array = compact_plan.first_useful_home_ids if compact_plan!=null else homes.keys()
+	if compact_plan==null: home_ids.sort()
 	for home_id_value in home_ids:
 		var home_id := String(home_id_value)
 		var archetypes: Dictionary = homes[home_id]
 		if not FIRST_USEFUL_HOME_ARCHETYPES.all(func(value: String): return archetypes.has(value)): continue
+		var home_publishable := true
+		for archetype: String in FIRST_USEFUL_HOME_ARCHETYPES:
+			if not _packet_group_closure_publishable(description,census,String(archetypes[archetype]),completed,compact_plan): home_publishable=false
+		if not home_publishable: continue
 		for archetype: String in FIRST_USEFUL_HOME_ARCHETYPES: selected[String(archetypes[archetype])]=true
 		selected_homes.append(home_id)
 		if selected_homes.size()>=FIRST_USEFUL_HOME_COUNT: break
 	var door_group_id := ""
-	var ordered_group_ids: Array = groups.keys()
-	ordered_group_ids.sort()
+	var ordered_group_ids: Array = compact_plan.door_group_ids if compact_plan!=null else groups.keys()
+	if compact_plan==null: ordered_group_ids.sort()
 	for group_id_value in ordered_group_ids:
 		var group_id := String(group_id_value)
 		if groups[group_id].get("doorPartIds",[]).is_empty(): continue
-		if _packet_group_closure_publishable(description,census,group_id,completed):
+		if _packet_group_closure_publishable(description,census,group_id,completed,compact_plan):
 			door_group_id=group_id
 			selected[group_id]=true
 			break
 	var structural_candidates: Dictionary = {}
-	var building_parts: Variant = base.building_source.get("parts",[])
-	if not building_parts is Array: return {"status":"failed","reason":"invalid_first_useful_building_source"}
-	for raw_part in building_parts:
-		if not raw_part is Dictionary: continue
-		var part: Dictionary = raw_part
-		if String(part.get("semantic","")) not in FIRST_USEFUL_STRUCTURAL_SEMANTICS: continue
-		var member_id := "building:"+String(part.get("id",""))
-		if not by_part.has(member_id): continue
-		var group_id := String(by_part[member_id])
-		if not _packet_group_closure_publishable(description,census,group_id,completed): continue
-		structural_candidates[group_id]=true
+	if compact_plan!=null:
+		for group_id: String in compact_plan.first_useful_structural_group_ids:
+			if _packet_group_closure_publishable(description,census,group_id,completed,compact_plan): structural_candidates[group_id]=true
+	else:
+		var building_parts: Variant = base.building_source.get("parts",[])
+		if not building_parts is Array: return {"status":"failed","reason":"invalid_first_useful_building_source"}
+		for raw_part in building_parts:
+			if not raw_part is Dictionary: continue
+			var part: Dictionary = raw_part
+			if String(part.get("semantic","")) not in FIRST_USEFUL_STRUCTURAL_SEMANTICS: continue
+			var member_id := "building:"+String(part.get("id",""))
+			if not by_part.has(member_id): continue
+			var group_id := String(by_part[member_id])
+			if not _packet_group_closure_publishable(description,census,group_id,completed,compact_plan): continue
+			structural_candidates[group_id]=true
 	if structural_candidates.is_empty():
 		return {"status":"failed","reason":"first_useful_structural_group_missing"}
 	var structural_candidate_ids: Array = structural_candidates.keys()
@@ -1038,11 +1291,12 @@ func _first_useful_packet_groups(description, base, census: Dictionary, complete
 	return {"status":"ready","groupIds":selected_ids,"homeIds":selected_homes,"doorGroupId":door_group_id,
 		"structuralGroupIds":[structural_group_id]}
 
-func _packet_group_closure_publishable(description, census: Dictionary, group_id: String, completed: Dictionary) -> bool:
-	var closure: Dictionary = _packet_dependency_window(description.publication_groups.groups,group_id,completed)
+func _packet_group_closure_publishable(description, census: Dictionary, group_id: String, completed: Dictionary, compact_plan = null) -> bool:
+	if compact_plan!=null: return compact_plan.publication_closure_eligible(group_id,_door_callbacks_ready())
+	var closure: Dictionary = _packet_dependency_window_for_plan(compact_plan,description.publication_groups.groups,group_id,completed)
 	if closure.get("status")!="ready": return false
 	for required_id: String in closure.groupIds:
-		if not _packet_group_publishable(description,census,required_id): return false
+		if not _packet_group_publishable_from_plan(description,census,required_id,compact_plan): return false
 	return true
 
 static func _unique_sorted_strings(values: Array[String]) -> Array[String]:
@@ -1076,6 +1330,11 @@ static func _packet_dependency_window(groups: Dictionary, first_id: String, comp
 		for dependency in dependencies: stack.append([String(dependency),false])
 	return {"status":"ready","groupIds":ordered}
 
+
+static func _packet_dependency_window_for_plan(compact_plan, groups: Dictionary, first_id: String, completed: Dictionary) -> Dictionary:
+	return compact_plan.dependency_window(first_id,completed) if compact_plan!=null \
+		else _packet_dependency_window(groups,first_id,completed)
+
 func _packet_group_publishable(description, census: Dictionary, group_id: String) -> bool:
 	if not bool(census.get("groups",{}).get(group_id,{}).get("eligible",false)):
 		return false
@@ -1086,13 +1345,21 @@ func _packet_group_publishable(description, census: Dictionary, group_id: String
 	# installation.
 	return group.get("doorPartIds",[]).is_empty() or _door_callbacks_ready()
 
+
+func _packet_group_publishable_from_plan(description, census: Dictionary, group_id: String, compact_plan = null) -> bool:
+	if compact_plan==null: return _packet_group_publishable(description,census,group_id)
+	if not compact_plan.eligible_group_ids.has(group_id): return false
+	var group: Dictionary = description.publication_groups.get("groups",{}).get(group_id,{})
+	return group.get("doorPartIds",[]).is_empty() or _door_callbacks_ready()
+
 ## The source reservation is a conservative physical-safety envelope.  When a
 ## retained consumer already intersects it but has no tile-owned group, request
 ## the nearest declared structural closure rather than asking the player to
 ## enter an unpublished collision area.  This only selects immutable source
 ## membership; `BuildingScenePublicationJob` still validates and acknowledges
 ## the physical packet when it is installed.
-func _packet_exterior_boundary_requirements(region: Vector2i, binding: Dictionary, description, consumer: Dictionary, census: Dictionary) -> Dictionary:
+func _packet_exterior_boundary_requirements(region: Vector2i, binding: Dictionary, description, consumer: Dictionary,
+		census: Dictionary, compact_plan = null) -> Dictionary:
 	if _admission==null or not consumer.get("bounds") is Rect2i:
 		return {"status":"pending","reason":"packet_exterior_source_pending"}
 	var source: Dictionary = _admission.source_state(region)
@@ -1101,11 +1368,17 @@ func _packet_exterior_boundary_requirements(region: Vector2i, binding: Dictionar
 	var reservation: Rect2i = source.reservationCells
 	if not reservation.intersects(consumer.bounds):
 		return {"status":"described","groupIds":[]}
+	if compact_plan!=null:
+		var indexed: Dictionary = compact_plan.exterior_structural_group_requirements(consumer.bounds)
+		if indexed.get("status")=="described":
+			for group_id: String in indexed.get("groupIds",[]):
+				if not _packet_group_publishable_from_plan(description,census,group_id,compact_plan):
+					return {"status":"pending","reason":"exterior_structural_group_unavailable"}
+		return indexed
 	var eligible: Dictionary = {}
 	if census.get("ready",false):
 		for group_id: String in census.get("groups",{}):
-			if _packet_group_publishable(description,census,group_id):
-				eligible[group_id] = true
+			if _packet_group_publishable(description,census,group_id): eligible[group_id] = true
 	return description.exterior_structural_group_requirements(consumer.bounds,eligible)
 
 func _base_packet_eligible(base, binding: Dictionary, region: Vector2i) -> Dictionary:
@@ -1119,7 +1392,7 @@ func _base_packet_eligible(base, binding: Dictionary, region: Vector2i) -> Dicti
 
 func _collect_publication_base(region: Vector2i, current: Dictionary, result: Dictionary) -> void:
 	var base = result.get("base")
-	if result.get("ready",false) and base!=null and _packet_bootstrap_requested_for_source(current):
+	if result.get("ready",false) and base!=null and _packet_bootstrap_requested_for_source(region,current):
 		_retain_packet_bootstrap_base(region,current,base,result.get("profile",{}))
 		if _packet_bootstrap_bases.has(region):
 			_accepted_count += 1
@@ -1283,6 +1556,21 @@ func _dispatch_candidates(ready: Dictionary, observer: Vector2i, include_prepara
 	candidates.sort_custom(func(a: Dictionary,b: Dictionary): return _schedule_before(a.priority,a.schedule,b.priority,b.schedule))
 	return candidates
 
+
+func _has_dispatchable_navigation(ready: Dictionary) -> bool:
+	for region: Vector2i in _navigation:
+		var entry: Dictionary = _navigation[region]
+		if ready.has(region) and ready[region].binding==entry.binding and not _failures.has(region) \
+				and not entry.get("navigationSource",{}).is_empty() and not entry.requested.is_empty():
+			return true
+	return false
+
+
+func _navigation_physical_packet_pending(entry: Dictionary) -> bool:
+	for group_id: String in entry.get("navigationPhysicalGroups",{}):
+		if not entry.job.physical_group_packet_completed_for_scheduling(group_id,entry.binding): return true
+	return false
+
 func _dispatch_candidate(candidate: Dictionary, ready: Dictionary) -> void:
 	var region: Vector2i = candidate.region
 	var keys: Array[String] = []
@@ -1318,7 +1606,7 @@ func _dispatch_candidate(candidate: Dictionary, ready: Dictionary) -> void:
 		# and cancellation behavior.  Do not add a base turn to that path: it
 		# changes both its worker boundary and its observable dispatch contract.
 		var packet_requested: bool = _packet_requested_for_source(region,source.binding)
-		var bootstrap_requested: bool = _packet_bootstrap_requested_for_source(source)
+		var bootstrap_requested: bool = _packet_bootstrap_requested_for_source(region,source)
 		if _packet_bootstrap_bases.has(region):
 			var bootstrap: Dictionary = _packet_bootstrap_bases[region]
 			var base = bootstrap.get("base")
@@ -1477,6 +1765,9 @@ func request_shutdown() -> void:
 	_retained_consumers = []
 	_clear_retained_priorities()
 	_observer_region_bounds = Rect2i()
+	_prefetch_regions.clear()
+	_prefetch_started_usec.clear()
+	_demand_started_usec.clear()
 	_demand_revision += 1
 	_view_revision += 1
 	_retire_all_scenes()
@@ -1497,13 +1788,17 @@ func stats() -> Dictionary:
 			"jobPhase":job_status.get("phase",""),"packetMode":bool(entry.get("packetMode",false)),
 			"demandRevision":int(entry.get("demandRevision",-1)),"packetDemandStatus":String(demand.get("status","")),
 			"packetDemandReason":String(demand.get("reason","")),"packetDemandRequests":demand.get("requests",[]).size(),
-			"packetForegroundGroups":demand.get("foregroundGroupIds",[]).size(),"packetDeferredGroups":demand.get("deferredGroupIds",[]).size(),
+			"packetForegroundGroups":demand.get("foregroundGroupIds",[]).size(),
+			"packetDeferredGroups":int(demand.get("deferredGroupCount",demand.get("deferredGroupIds",[]).size())),
 			"packetReadinessGroups":demand.get("readinessGroupIds",[]).size(),
 			"physicalGroupsComplete":int(job_status.get("physicalGroupsComplete",0)),"physicalGroupsTotal":int(job_status.get("physicalGroupsTotal",0)),
 			"retainedGroupRequests":int(job_status.get("retainedGroupRequests",0)),"publicationTransactionId":int(job_status.get("publicationTransactionId",0)),
 			"occupiedTransactions":int(job_status.get("occupiedTransactions",0)),"occupancyWaitReason":String(entry.get("occupancyWaitReason","")),
 			"occupancyWaitCount":int(entry.get("occupancyWaitCount",0)),
-			"occupancyWaitUsec":Time.get_ticks_usec()-int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec())) if entry.has("occupancyWaitStartedUsec") else 0})
+			"occupancyWaitUsec":Time.get_ticks_usec()-int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec())) if entry.has("occupancyWaitStartedUsec") else 0,
+			"navigationPhysicalGroups":entry.get("navigationPhysicalGroups",{}).size(),
+			"navigationPhysicalPending":entry.get("navigationPhysicalPending",{}).duplicate(),
+			"publicationMilestones":entry.get("publicationMilestones",{}).duplicate(true)})
 	scenes.sort_custom(func(a: Dictionary,b: Dictionary) -> bool:
 		var left: Vector2i = a.region
 		var right: Vector2i = b.region
@@ -1519,6 +1814,7 @@ func stats() -> Dictionary:
 			"preparationUsecScope":"cumulative wall time inside producer begin/advance calls; excludes time between calls"})
 	return {"generation":_generation,"worldSeed":_seed,"desiredSites":_desired.size(),
 		"retainedBounds":_retained_region_bounds.size(),"observerBoundsRejected":_observer_bounds_rejected,
+		"prefetchRegions":_prefetch_regions.duplicate(),"prefetchRejected":_prefetch_rejected,
 		"residentSites":_resident_region_count(),"residentLimit":MAX_REGIONS,
 		"worldResetPending":_world_reset_pending,"worldResetReady":world_reset_ready(),
 		"preparedSites":_prepared.size(),"bootstrapBases":_packet_bootstrap_bases.size(),"describedSites":_described.size(),"pendingRetirements":_retired.size(),
@@ -1607,7 +1903,14 @@ func _start_scene(region: Vector2i, source: Dictionary) -> bool:
 		_failures[region]={"binding":prepared.binding,"reason":String(result.get("reason","scene_begin_failed"))}
 		_retire(prepared); _prepared.erase(region)
 		return false
-	_scenes[region]={"region":region,"binding":prepared.binding,"profile":prepared.profile,"job":job,"phase":"publishing","packetMode":packet_mode}
+	var demand_started := int(_demand_started_usec.get(region,Time.get_ticks_usec()))
+	var prefetch_started := int(_prefetch_started_usec.get(region,demand_started))
+	_scenes[region]={"region":region,"binding":prepared.binding,"profile":prepared.profile,"job":job,"phase":"publishing","packetMode":packet_mode,
+		"publicationMilestones":{"sourceDemandStartedUsec":demand_started,
+			"prefetchStartedUsec":prefetch_started,"prefetchLeadUsec":maxi(0,demand_started-prefetch_started),
+			"sceneStartedAfterDemandUsec":maxi(0,Time.get_ticks_usec()-demand_started),
+			"firstSilhouetteUsec":-1,"usableGatePathUsec":-1,"visibleCourtyardUsec":-1,
+			"accessibleHomeUsec":-1,"completeDemandedUsec":-1,"fullSourceUsec":-1}}
 	_prepared.erase(region)
 	_scene_started_count+=1
 	return true
@@ -1615,8 +1918,18 @@ func _start_scene(region: Vector2i, source: Dictionary) -> bool:
 func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 	if entry.get("demandRevision",-1)==_demand_revision: return true
 	if bool(entry.get("packetMode",false)):
+		# Camera/bounds revisions may arrive several times while one immutable
+		# foreground packet window is still publishing. If that window already
+		# contains every new immediate physical and navigation group, retain it and
+		# let the latest view select the *next* window. This makes view motion a
+		# priority input without withdrawing accepted work or rebuilding closures.
+		if _packet_window_covers_current_immediate_demand(entry):
+			if not _retain_navigation_physical_demand(entry): return false
+			entry["demandRevision"]=_demand_revision
+			return true
 		var base: Preparation.PreparedPublicationBase = entry.job._cpu.get("publicationBase")
 		var completed: Dictionary = entry.job.completed_physical_group_ids(entry.binding)
+		_record_publication_milestones(entry,completed,base.description.publication_groups.groups.size() if base!=null else 0)
 		var plan_started := Time.get_ticks_usec()
 		var plan: Dictionary = _packet_foreground_plan(entry.region,entry.binding,base.description if base!=null else null,base,completed)
 		_record_scene_unit("demand_plan_total",plan_started,base.description.publication_groups.groups.size() if base!=null else 0)
@@ -1646,26 +1959,34 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 				if not requested_by_priority.has(priority): requested_by_priority[priority] = []
 				requested_by_priority[priority].append(group_id)
 				navigation_ids[group_id] = true
+			var navigation_slots := maxi(0,MAX_NAVIGATION_MERGED_FOREGROUND_GROUPS-plan.foregroundGroupIds.size())
 			for priority: int in range(5):
 				if not requested_by_priority.has(priority): continue
 				var requested: Array[String] = []
-				for group_id: String in requested_by_priority[priority]: requested.append(group_id)
-				requested.sort()
+				requested_by_priority[priority].sort()
+				for group_id: String in requested_by_priority[priority]:
+					if plan.foregroundGroupIds.has(group_id): continue
+					if navigation_slots<=0: break
+					requested.append(group_id)
+					navigation_slots-=1
+				if requested.is_empty(): continue
 				plan.requests.append({"ownerId":"navigation:%d,%d:%d" % [entry.region.x,entry.region.y,priority],"groupIds":requested,"priority":priority})
 				if priority==0:
 					for group_id: String in requested:
-						if not plan.foregroundGroupIds.has(group_id): plan.foregroundGroupIds.append(group_id)
+						plan.foregroundGroupIds.append(group_id)
 						if not plan.readinessGroupIds.has(group_id): plan.readinessGroupIds.append(group_id)
 			plan.foregroundGroupIds.sort()
 			plan.readinessGroupIds.sort()
-			var deferred: Array[String] = []
-			for group_id: String in plan.deferredGroupIds:
-				if not navigation_ids.has(group_id): deferred.append(group_id)
-			plan.deferredGroupIds = deferred
+			if not bool(plan.get("implicitDeferred",false)):
+				var deferred: Array[String] = []
+				for group_id: String in plan.deferredGroupIds:
+					if not navigation_ids.has(group_id): deferred.append(group_id)
+				plan.deferredGroupIds = deferred
 		_record_scene_unit("demand_navigation_merge",navigation_merge_started,navigation_groups.size())
 		var handoff_started := Time.get_ticks_usec()
-		var packet_result: Dictionary = entry.job.replace_packet_foreground_group_demands(plan.requests,plan.deferredGroupIds,entry.binding)
-		_record_scene_unit("demand_job_handoff",handoff_started,plan.foregroundGroupIds.size()+plan.deferredGroupIds.size())
+		var packet_result: Dictionary = entry.job.replace_packet_foreground_group_demands_compact(plan.requests,plan.deferredGroupIds,entry.binding) \
+			if bool(plan.get("implicitDeferred",false)) else entry.job.replace_packet_foreground_group_demands(plan.requests,plan.deferredGroupIds,entry.binding)
+		_record_scene_unit("demand_job_handoff",handoff_started,plan.foregroundGroupIds.size()+plan.get("deferredGroupCount",plan.deferredGroupIds.size()))
 		if packet_result.get("status")!="retained":
 			entry["packetDemandStatus"] = packet_result.duplicate(true)
 			return false
@@ -1677,9 +1998,15 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 		entry["packetDemandStatus"] = {"status":"retained","reason":"packet_foreground_groups_deferred" if not plan.blockedGroupIds.is_empty() and plan.requests.is_empty() else "",
 			"requests":plan.requests.duplicate(true),
 			"foregroundGroupIds":plan.foregroundGroupIds.duplicate(),"readinessGroupIds":readiness_group_ids.duplicate(),
-			"deferredGroupIds":plan.deferredGroupIds.duplicate(),
+			"deferredGroupIds":plan.deferredGroupIds.duplicate(),"deferredGroupCount":packet_result.get("deferredGroups",plan.get("deferredGroupCount",0)),
+			"implicitDeferred":plan.get("implicitDeferred",false),"candidateCount":plan.get("candidateCount",0),
 			"viewPrioritizedGroupIds":plan.get("viewPrioritizedGroupIds",[]).duplicate(),
 			"portalGroupIds":plan.get("portalGroupIds",[]).duplicate(),
+			"firstUsefulGroupIds":plan.get("firstUsefulGroupIds",[]).duplicate(),
+			"firstUsefulHomeIds":plan.get("firstUsefulHomeIds",[]).duplicate(),
+			"firstUsefulDoorGroupId":plan.get("firstUsefulDoorGroupId",""),
+			"firstUsefulStructuralGroupIds":plan.get("firstUsefulStructuralGroupIds",[]).duplicate(),
+			"courtyardGroupIds":plan.get("courtyardGroupIds",[]).duplicate(),
 			"blockedGroupIds":plan.blockedGroupIds.duplicate(),"boundaryGroupIds":plan.boundaryGroupIds.duplicate()}
 		_record_scene_unit("demand_status_copy",status_copy_started,plan.foregroundGroupIds.size()+plan.deferredGroupIds.size())
 		entry["demandRevision"] = _demand_revision
@@ -1697,6 +2024,70 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 	var result: Dictionary = entry.job.replace_publication_group_demands(requests,entry.binding)
 	if result.get("status") != "retained": return false
 	entry["demandRevision"] = _demand_revision
+	return true
+
+
+func _packet_window_covers_current_immediate_demand(entry: Dictionary) -> bool:
+	var demand: Dictionary = entry.get("packetDemandStatus",{})
+	if demand.get("status")!="retained" or demand.get("foregroundGroupIds",[]).is_empty(): return false
+	var retained: Dictionary = {}
+	var incomplete := false
+	for group_id: String in demand.foregroundGroupIds:
+		retained[group_id]=true
+		if not entry.job.physical_group_packet_completed_for_scheduling(group_id,entry.binding): incomplete=true
+	if not incomplete: return false
+	var observer_covered := not _observer_region_bounds.has_area()
+	var matched_site := false
+	for consumer: Dictionary in _retained_consumers:
+		if consumer.get("bounds") is Rect2i and consumer.bounds.encloses(_observer_region_bounds): observer_covered=true
+		for site: Dictionary in consumer.sites:
+			if site.binding!=entry.binding: continue
+			matched_site=true
+			if not site.has("foregroundGroupIds"): return false
+			for group_id: String in site.foregroundGroupIds:
+				if not retained.has(group_id) and not entry.job.physical_group_packet_completed_for_scheduling(group_id,entry.binding): return false
+	if not matched_site or not observer_covered: return false
+	return true
+
+
+func _retain_navigation_physical_demand(entry: Dictionary) -> bool:
+	var demand: Dictionary=entry.get("packetDemandStatus",{})
+	var foreground: Array=demand.get("foregroundGroupIds",[])
+	var navigation_slots:=maxi(0,MAX_NAVIGATION_MERGED_FOREGROUND_GROUPS-foreground.size())
+	var by_priority: Dictionary = {}
+	var navigation: Dictionary = entry.get("navigationPhysicalGroups",{})
+	for group_id: String in navigation:
+		if entry.job.physical_group_packet_completed_for_scheduling(group_id,entry.binding): continue
+		if foreground.has(group_id): continue
+		var priority: int = int(navigation[group_id])
+		if priority<0 or priority>4: return false
+		if not by_priority.has(priority): by_priority[priority]=[]
+		by_priority[priority].append(group_id)
+	var requests: Array[Dictionary]=[]
+	for priority: int in range(5):
+		if not by_priority.has(priority) or navigation_slots<=0: continue
+		by_priority[priority].sort()
+		var admitted: Array[String]=[]
+		for group_id: String in by_priority[priority]:
+			if navigation_slots<=0: break
+			admitted.append(group_id)
+			navigation_slots-=1
+		if admitted.is_empty(): continue
+		requests.append({"ownerId":"navigation-supplement:%d" % priority,
+			"groupIds":admitted,"priority":priority})
+	if requests.is_empty(): return true
+	var retained: Dictionary=entry.job.retain_packet_supplemental_group_demands(requests,entry.binding)
+	if retained.get("status")!="retained":
+		entry["packetDemandStatus"]=retained
+		return false
+	for request: Dictionary in requests:
+		for group_id: String in request.groupIds:
+			if not demand.get("foregroundGroupIds",[]).has(group_id): demand.foregroundGroupIds.append(group_id)
+			if int(request.priority)==0 and not demand.get("readinessGroupIds",[]).has(group_id): demand.readinessGroupIds.append(group_id)
+	demand.foregroundGroupIds.sort()
+	demand.readinessGroupIds.sort()
+	demand["deferredGroupCount"]=retained.get("deferredGroups",demand.get("deferredGroupCount",0))
+	entry["packetDemandStatus"]=demand
 	return true
 
 func _record_scene_unit(label: String, started_usec: int, work_units := -1) -> void:
@@ -1720,6 +2111,35 @@ func _record_scene_unit(label: String, started_usec: int, work_units := -1) -> v
 		metric.workUnitsMax = maxi(int(metric.workUnitsMax),work_units)
 		metric.workUnitsLast = work_units
 	_scene_unit_metrics[label] = metric
+
+
+static func _milestone_targets_complete(targets: Array, completed: Dictionary) -> bool:
+	if targets.is_empty(): return false
+	for raw_id in targets:
+		if not raw_id is String or not completed.has(raw_id): return false
+	return true
+
+
+func _record_publication_milestones(entry: Dictionary, completed: Dictionary, total_groups: int) -> void:
+	var milestones: Dictionary = entry.get("publicationMilestones",{})
+	if milestones.is_empty(): return
+	var elapsed := maxi(0,Time.get_ticks_usec()-int(milestones.sourceDemandStartedUsec))
+	if int(milestones.firstSilhouetteUsec)<0 and not completed.is_empty(): milestones.firstSilhouetteUsec=elapsed
+	var demand: Dictionary = entry.get("packetDemandStatus",{})
+	var gate_targets: Array = demand.get("firstUsefulStructuralGroupIds",[]).duplicate()
+	var door_id := String(demand.get("firstUsefulDoorGroupId",""))
+	if not door_id.is_empty() and not gate_targets.has(door_id): gate_targets.append(door_id)
+	if int(milestones.usableGatePathUsec)<0 and _milestone_targets_complete(gate_targets,completed):
+		milestones.usableGatePathUsec=elapsed
+	if int(milestones.visibleCourtyardUsec)<0 and _milestone_targets_complete(demand.get("courtyardGroupIds",[]),completed):
+		milestones.visibleCourtyardUsec=elapsed
+	if int(milestones.accessibleHomeUsec)<0 and _milestone_targets_complete(demand.get("firstUsefulGroupIds",[]),completed):
+		milestones.accessibleHomeUsec=elapsed
+	if int(milestones.completeDemandedUsec)<0 and _milestone_targets_complete(demand.get("foregroundGroupIds",[]),completed):
+		milestones.completeDemandedUsec=elapsed
+	if int(milestones.fullSourceUsec)<0 and total_groups>0 and completed.size()>=total_groups:
+		milestones.fullSourceUsec=elapsed
+	entry.publicationMilestones=milestones
 
 func _scene_unit_metrics_snapshot() -> Dictionary:
 	var result: Dictionary = {}
@@ -1773,7 +2193,7 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 			# or attempted root rebinding, until its current unit returns.
 			var entry: Dictionary=_retiring_scenes[0]
 			var retirement_started := Time.get_ticks_usec()
-			entry.job.advance(remaining)
+			entry.job.advance(mini(remaining,SCENE_JOB_SLICE_USEC))
 			_record_scene_unit("retirement_advance",retirement_started)
 			_retiring_scenes.pop_front()
 			if entry.job.status().retirementReady:
@@ -1808,8 +2228,13 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					if not demand_ready: continue
 					# The exact spatial safety closure is sufficient to resume gameplay.
 					# This resident owner continues view-ranked/background publication.
-					if bool(entry.get("packetMode",false)) and entry.phase=="publishing" \
-							and _packet_foreground_physical_ready(region,entry.binding):
+					var packet_foreground_ready := bool(entry.get("packetMode",false)) \
+							and _packet_foreground_physical_ready(region,entry.binding)
+					if packet_foreground_ready:
+						var milestone_base: Preparation.PreparedPublicationBase = entry.job._cpu.get("publicationBase")
+						_record_publication_milestones(entry,entry.job.completed_physical_group_ids(entry.binding),
+							milestone_base.description.publication_groups.groups.size() if milestone_base!=null else 0)
+					if entry.phase=="publishing" and packet_foreground_ready:
 						entry["firstUsefulWindowReady"]=true
 						entry.phase="scene_ready"
 						_scene_completed_count+=1
@@ -1830,8 +2255,8 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 						# precise pending reason as dispatchable; ordinary selection and
 						# owner pending states remain retryable without worker work.
 						if transaction.get("status")=="pending" and transaction.get("reason")=="physical_packet_foreground_demand_pending" \
-								and _packet_foreground_physical_ready(region,entry.binding):
-							if not entry.get("packetDemandStatus",{}).get("deferredGroupIds",[]).is_empty() \
+								and packet_foreground_ready:
+							if int(entry.get("packetDemandStatus",{}).get("deferredGroupCount",0))>0 \
 									and not entry.get("packetDemandStatus",{}).get("requests",[]).is_empty():
 								# The completed rolling window is guaranteed progress. Keep
 								# the resident scene and promote its next view-ranked window.
@@ -1871,6 +2296,10 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 						if transaction.get("status") not in ["ready","pending"] \
 								or transaction.get("status")=="pending" and transaction.get("reason")!="physical_group_packet_pending": continue
 						if not _inflight.is_empty(): continue
+						# Navigation already has a prepared immutable source and live gameplay
+						# requests. Let the outer shared-worker arbiter claim this idle turn
+						# before another view-only physical packet.
+						if not _navigation_physical_packet_pending(entry) and _has_dispatchable_navigation(ready): break
 						var base: Preparation.PreparedPublicationBase = entry.job._cpu.get("publicationBase")
 						var census: Dictionary = base.packet_eligibility
 						if census.is_empty(): census=Preparation.classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source)
@@ -1939,11 +2368,15 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					entry.erase("occupancyWaitStartedUsec")
 					# Guard callbacks are external owners too: recapture no mutable
 					# job from a generation/entry cancelled during the callback.
-					if not is_same(_scenes.get(region),entry) or entry.phase!="publishing" or entry.job.status_count().phase!=phase: continue
+					# A packet scene remains a live publisher after its first gameplay
+					# acknowledgement. Later rolling transactions must advance on that
+					# same resident owner instead of being stranded in `building`.
+					if not is_same(_scenes.get(region),entry) or entry.phase not in ["publishing","scene_ready"] \
+							or entry.job.status_count().phase!=phase: continue
 					if _admission.source_state(region).get("binding",{}) != entry.binding or not _scene_callbacks_ready(): continue
 					_scene_cursor=(index+1)%regions.size()
 					var job_started := Time.get_ticks_usec()
-					var result: Dictionary=entry.job.advance(remaining,int(transaction.transactionId))
+					var result: Dictionary=entry.job.advance(mini(remaining,SCENE_JOB_SLICE_USEC),int(transaction.transactionId))
 					_record_scene_unit("job_advance",job_started)
 					if not is_same(_scenes.get(region),entry):
 						# A callback invalidated/moved this owner. It cannot publish
@@ -1973,7 +2406,7 @@ func _has_scene_work(ready: Dictionary) -> bool:
 	for region: Vector2i in _prepared:
 		if ready.has(region) and not _region_retiring(region) and not _failures.has(region): return true
 	for region: Vector2i in _scenes:
-		if ready.has(region) and _scenes[region].phase=="publishing": return true
+		if ready.has(region) and _scenes[region].phase in ["publishing","scene_ready"]: return true
 	return false
 
 func scene_state(region: Vector2i) -> Dictionary:
@@ -2226,9 +2659,12 @@ func navigation_tile_sources(tile_key: Vector2i) -> Dictionary:
 				return {"status":"pending","reason":"structure_navigation_scene_pending","sources":[]}
 			var key := "%d,%d" % [tile_key.x,tile_key.y]
 			var tile_receipt: Variant = null
+			# A prepared navigation producer does not acknowledge scene collision.
+			# Retain and freshly prove this tile's physical closure on every path,
+			# including when another tile already caused the source to be prepared.
+			if not _packet_navigation_physical_ready(region,source.binding,physical.get("groupIds",[]),_navigation_priority(key)):
+				return {"status":"pending","reason":"structure_collision_publication_pending","sources":[]}
 			if not _navigation.has(region):
-				if not _packet_navigation_physical_ready(region,source.binding,physical.get("groupIds",[]),_navigation_priority(key)):
-					return {"status":"pending","reason":"structure_collision_publication_pending","sources":[]}
 				if not _begin_packet_navigation_source(region,source.binding,_navigation_priority(key)):
 					return {"status":"pending","reason":"structure_navigation_source_pending","sources":[]}
 				return {"status":"pending","reason":"structure_navigation_source_pending","sources":[]}
@@ -2244,6 +2680,34 @@ func navigation_tile_sources(tile_key: Vector2i) -> Dictionary:
 			sources.append(artifact)
 	return {"status":"ready","sources":sources}
 
+
+## Lightweight current-owner identity for navigation source-key validation.
+## This never retains demand, scans physical receipts, or constructs an
+## artifact. `navigation_tile_sources` remains the mandatory physical/crossing
+## proof before capture; accepted installation checks may use this identity to
+## reject a retired/replaced scene without replaying that proof on Main.
+func navigation_tile_source_identity(tile_key: Vector2i) -> Dictionary:
+	var bounds := Rect2i(tile_key*16,Vector2i.ONE*16)
+	if _admission==null or _world_reset_pending or _closing:
+		return {"status":"pending","reason":"structure_world_reset_pending","sources":[]}
+	var low := Field.region_for_cell(bounds.position)
+	var high := Field.region_for_cell(bounds.end-Vector2i.ONE)
+	var sources: Array = []
+	for z in range(low.y,high.y+1):
+		for x in range(low.x,high.x+1):
+			var region := Vector2i(x,z)
+			var source: Dictionary = _admission.source_state(region)
+			if source.get("status") not in ["ready","prepared"] or not source.get("reservationCells") is Rect2i \
+					or not source.reservationCells.intersects(bounds): continue
+			var physical: Dictionary = _navigation_tile_physical_requirements(region,bounds,source.binding)
+			if physical.get("status")!="described":
+				return {"status":"pending","reason":physical.get("reason","structure_navigation_description_pending"),"sources":[]}
+			if physical.get("groupIds",[]).is_empty(): continue
+			if not _scenes.has(region) or _scenes[region].binding!=source.binding or _region_retiring(region):
+				return {"status":"pending","reason":"structure_navigation_scene_pending","sources":[]}
+			sources.append({"binding":source.binding})
+	return {"status":"ready","sources":sources}
+
 func _navigation_tile_physical_requirements(region: Vector2i, bounds: Rect2i, binding: Dictionary) -> Dictionary:
 	var described: Dictionary = _described.get(region,{})
 	var description = described.get("description",null)
@@ -2257,7 +2721,18 @@ func _navigation_tile_physical_requirements(region: Vector2i, bounds: Rect2i, bi
 		description = live_base.description if live_base!=null else null
 	if description==null or description.binding!=binding:
 		return {"status":"pending","reason":"structure_navigation_description_pending"}
-	return description.physical_group_requirements(bounds)
+	# This query gates physical scene/collider publication only. The navigation
+	# producer below still owns topology and crossing dependencies. Use the
+	# conservative exact-member plan so a single tile cannot inherit the much
+	# wider navigation-domain region closure.
+	var base_entry: Dictionary = _packet_bootstrap_bases.get(region,{})
+	var base = base_entry.get("base",null)
+	if base==null and _scenes.has(region):
+		var job = _scenes[region].get("job",null)
+		base = job._cpu.get("publicationBase",null) if job!=null else null
+	var compact_plan = base.publication_plan if base!=null else null
+	return compact_plan.physical_group_requirements(bounds) if compact_plan!=null \
+		else description.physical_group_requirements(bounds)
 
 ## Dense navigation remains deferred until the already-demanded foreground
 ## physical packet has a real scene receipt.  The packet scene still owns the
@@ -2269,9 +2744,9 @@ func _packet_foreground_physical_ready(region: Vector2i, binding: Dictionary) ->
 	if not bool(entry.get("packetMode",false)): return true
 	var demand: Dictionary = entry.get("packetDemandStatus",{})
 	if demand.get("status")!="retained": return false
-	for group_id: String in demand.get("readinessGroupIds",demand.get("foregroundGroupIds",[])):
-		if entry.job.physical_group_receipt(group_id,binding).get("status")!="ready": return false
-	return true
+	var receipt: Dictionary = entry.job.physical_groups_receipt(
+		demand.get("readinessGroupIds",demand.get("foregroundGroupIds",[])),binding)
+	return receipt.get("status")=="ready"
 
 ## A navigation tile receives its own exact physical group request.  It must
 ## not wait behind other retained tiles merely because they share a source.
@@ -2282,16 +2757,57 @@ func _packet_navigation_physical_ready(region: Vector2i, binding: Dictionary, gr
 	if priority<0 or priority>4: return false
 	var required: Dictionary = entry.get("navigationPhysicalGroups",{})
 	var changed := false
-	for group_id: String in group_ids:
-		if not required.has(group_id) or int(required[group_id])>priority:
-			required[group_id] = priority
+	# This map is a bounded active scheduling window, not a lifetime census.
+	# Completed groups stay installed in the resident scene and need no retained
+	# heap entry. Without pruning, a 64-tile background ring promoted thousands
+	# of unrelated groups into every demand refresh and delayed the current tile.
+	for retained_id: String in required.keys():
+		if entry.job.physical_group_packet_completed_for_scheduling(retained_id,binding):
+			required.erase(retained_id)
 			changed = true
+	var pending_ids: Array[String] = []
+	for group_id: String in group_ids:
+		# Scheduling asks only whether the packet transaction completed. The
+		# navigation artifact immediately below performs one consolidated live
+		# node/collision proof for the exact group closure. Repeating a standalone
+		# physical proof for every group made a 100+ group tile scale quadratically.
+		if not entry.job.physical_group_packet_completed_for_scheduling(group_id,binding):
+			pending_ids.append(group_id)
+	pending_ids.sort()
+	if not pending_ids.is_empty():
+		# A newly urgent tile may replace unstarted lower-priority scheduling
+		# demand. Pinned worker/scene transactions remain owned and complete; only
+		# the mutable next-work window changes.
+		for retained_id: String in required.keys():
+			if int(required[retained_id])>priority:
+				required.erase(retained_id)
+				changed = true
+		var more_urgent_pending := false
+		for retained_id: String in required:
+			if int(required[retained_id])<priority:
+				more_urgent_pending = true
+				break
+		if not more_urgent_pending:
+			var additions := 0
+			for group_id: String in pending_ids:
+				if not required.has(group_id): additions+=1
+			# A tile closure is atomic. Deferring the whole closure preserves its
+			# dependency proof; inserting a prefix can strand a group whose support
+			# was left outside the active window.
+			if required.size()+additions<=MAX_ACTIVE_NAVIGATION_PHYSICAL_GROUPS:
+				for group_id: String in pending_ids:
+					if not required.has(group_id) or int(required[group_id])>priority:
+						required[group_id]=priority
+						changed=true
 	if changed:
 		entry["navigationPhysicalGroups"] = required
 		entry["demandRevision"] = -1
-	for group_id: String in group_ids:
-		if entry.job.physical_group_receipt(group_id,binding).get("status")!="ready": return false
-	return true
+	var pending: Dictionary = {}
+	for group_id: String in pending_ids:
+		if pending.size()<32:
+			pending[group_id]="structure_collision_publication_pending"
+	entry["navigationPhysicalPending"] = pending
+	return pending.is_empty()
 
 func _queue_packet_navigation_source(region: Vector2i, binding: Dictionary, priority: int) -> void:
 	if priority<0 or priority>4: return

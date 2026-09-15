@@ -26,7 +26,7 @@ class SyntheticQueue extends Queue:
 	func cancel(token: int) -> bool:
 		cancelled_tokens.append(token)
 		return super.cancel(token)
-	func _prepare_site(_request: Dictionary, continuation: Callable) -> Dictionary:
+	func _prepare_site(_request: Dictionary, continuation: Callable, _raw_stage_observer: Callable = Callable()) -> Dictionary:
 		if mode == "prepared":
 			var value: Dictionary = source_templates[_request.region].duplicate(true)
 			value.blueprint = Blueprint.new("synthetic-admission",1,"stone")
@@ -116,6 +116,7 @@ func _run() -> void:
 			if not _candidate(Vector2i(x,z)).is_empty(): regions.append(Vector2i(x,z))
 	check("candidate_fixture_count", regions.size()>=10)
 	_store_controls()
+	await _prefetch_lifecycle()
 	await _bounds_and_pressure()
 	await _receipts_and_failures()
 	await _lifecycle()
@@ -149,6 +150,39 @@ func _store_controls() -> void:
 	var other_seed := p.duplicate(true); other_seed.worldSeed = "other"; _freeze(other_seed)
 	check("store_seed_rejected",not store.append_prepared_profile(other_seed))
 	check("store_rejections_preserve_snapshot",var_to_bytes(two)==var_to_bytes(store.snapshot()))
+
+func _prefetch_lifecycle() -> void:
+	var first: Vector2i = regions[0]
+	var second: Vector2i = regions[1]
+	var third: Vector2i = regions[2]
+	var a = _admission()
+	check("prefetch_two_regions_retained",a.set_prefetch_regions([second,first]) and a.stats().prefetchRegions==[first,second] \
+		and a.stats().prefetchPending==2 and a._requests[first].prefetch and not a._requests[first].priority)
+	check("prefetch_capacity_rejected_without_mutation",not a.set_prefetch_regions([first,second,third]) \
+		and a.stats().prefetchRegions==[first,second] and a.stats().prefetchPending==2)
+	check("real_source_request_promotes_prefetch",a.request_source(first,true).status=="pending" \
+		and not a._requests[first].prefetch and a._requests[first].priority)
+	check("view_reversal_preserves_promoted_request",a.set_prefetch_regions([second]) and a._requests.has(first) \
+		and not a._requests[first].prefetch and a._requests.has(second) and a._requests[second].prefetch)
+	await _drain(a,"prefetch_promoted")
+	var gated = _admission("gated")
+	check("prefetch_active_setup",gated.set_prefetch_regions([first]))
+	gated.advance(); gated.advance()
+	var deadline := Time.get_ticks_msec()+2000
+	while gated._queue._state != null and gated._queue._state.snapshot().stage!="synthetic_wait" and Time.get_ticks_msec()<deadline: await process_frame
+	var token := int(gated._requests.get(first,{}).get("receipt",{}).get("token",0))
+	check("prefetch_active_worker_entered",token>0 and gated._queue._state!=null and gated._queue._state.snapshot().stage=="synthetic_wait")
+	check("prefetch_reversal_cancels_only_speculative",gated.set_prefetch_regions([]) and not gated._requests.has(first) \
+		and gated._queue.cancelled_tokens.has(token) and gated._decisions.is_empty())
+	gated._queue.gate.post()
+	deadline=Time.get_ticks_msec()+4000
+	var queue_status: Dictionary = gated.advance().queue
+	while (queue_status.get("workerRunning",false) or queue_status.get("retirementPending",false) \
+			or int(queue_status.get("completedToken",0))!=0) and Time.get_ticks_msec()<deadline:
+		await process_frame
+		queue_status=gated.advance().queue
+	check("prefetch_cancel_has_no_failure_decision",gated._decisions.is_empty() and gated.profile_store.snapshot().is_empty())
+	await _drain(gated,"prefetch_cancel")
 func _bounds_and_pressure() -> void:
 	var a = _admission(); var first: Vector2i = regions[0]
 	var declared := Admission.declared_influence(_candidate(first))

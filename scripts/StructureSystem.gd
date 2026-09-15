@@ -95,6 +95,9 @@ func advance_citadel_publication(observer_bounds := Rect2i(), allow_dispatch := 
 func navigation_tile_sources(tile: Vector2i) -> Dictionary:
     return citadel_publication.navigation_tile_sources(tile)
 
+func navigation_tile_source_identity(tile: Vector2i) -> Dictionary:
+    return citadel_publication.navigation_tile_source_identity(tile)
+
 func region_dependency_revision(bounds: Rect2i) -> String:
     # No source compilation, town generation, home copies or queue scans here.
     return JSON.stringify([String(main.seed_text) if is_instance_valid(main) else "",

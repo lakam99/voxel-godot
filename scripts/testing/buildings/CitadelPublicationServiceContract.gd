@@ -331,7 +331,20 @@ func actual_packet_demand() -> void:
 		and selected_census.get("eligible",false) and selected_census.get("families",[]).has("normal"))
 	check("actual_first_useful_window_includes_structural_clearance_anchor",useful.get("status")=="ready" \
 		and useful.get("structuralGroupIds",[]).size()==1 \
-		and useful.get("structuralGroupIds",[]).all(func(id): return useful.get("groupIds",[]).has(id)))
+		and useful.get("structuralGroupIds",[]).all(func(id): return useful.get("groupIds",[]).has(id)) \
+		and not useful.get("courtyardGroupIds",[]).is_empty() \
+		and useful.get("courtyardGroupIds",[]).all(func(id): return useful.get("groupIds",[]).has(id)))
+	var retained_before: Array[Dictionary]=service._retained_consumers
+	var view_origin: Vector3=base.profile.get("origin",Vector3.ZERO)+Vector3(0,2,96)
+	var probe_consumers: Array[Dictionary]=[{"ownerId":919,"bounds":reservation,"priority":0,"sites":[],
+		"viewIntent":{"origin":view_origin,"forward":Vector3(0,0,-1),"predictedOrigin":view_origin+Vector3(0,0,-32),
+		"horizontalFovDegrees":72.0,"farDistance":180.0}}]
+	service._retained_consumers=probe_consumers
+	var progressive_plan: Dictionary=service._packet_foreground_plan(REGION,binding,base.description,base)
+	service._retained_consumers=retained_before
+	check("actual_progressive_plan_propagates_courtyard_milestone_targets",progressive_plan.get("status")=="ready" \
+		and not progressive_plan.get("courtyardGroupIds",[]).is_empty() \
+		and progressive_plan.get("courtyardGroupIds",[]).all(func(id): return progressive_plan.get("firstUsefulGroupIds",[]).has(id)))
 	var exterior_probe: Dictionary = exterior_boundary_probe(base.description if base!=null else null,reservation,census) if base!=null else {}
 	var exterior_boundary: Dictionary = exterior_probe.get("boundary",{})
 	check("actual_packet_exterior_reservation_selects_minimal_structural_closure",not exterior_probe.is_empty() \
@@ -863,6 +876,27 @@ func view_ranked_rolling_windows() -> void:
 	var view := {"origin":Vector3.ZERO,"forward":Vector3(0,0,-1),"predictedOrigin":Vector3(0,0,-20),
 		"horizontalFovDegrees":90.0,"farDistance":180.0}
 	var service := Service.new()
+	service._seed=SEED
+	var candidate: Dictionary = Field.candidate_for_region(SEED,REGION)
+	var candidate_center := Vector3(float(candidate.centerCell.x)*1.35,0.0,float(candidate.centerCell.y)*1.35)
+	var observer_source := {"reservationCells":Rect2i(candidate.centerCell-Vector2i.ONE*8,Vector2i.ONE*16)}
+	var prefetch_view := {"origin":candidate_center-Vector3(800,0,0),"forward":Vector3(1,0,0),
+		"predictedOrigin":candidate_center-Vector3(760,0,0),"horizontalFovDegrees":72.0,"farDistance":180.0}
+	service._observer_region_bounds=Rect2i(candidate.centerCell-Vector2i.ONE*2,Vector2i.ONE*4)
+	service._prefetch_started_usec[REGION]=Time.get_ticks_usec()
+	service._retained_consumers=[{"viewIntent":prefetch_view,"sites":[],"bounds":Rect2i()}]
+	check("observer_exact_reservation_bootstraps_packet_before_retained_membership",
+		service._packet_bootstrap_requested_for_source(REGION,observer_source))
+	service._observer_region_bounds=Rect2i()
+	service._retained_consumers=[{"viewIntent":prefetch_view}]
+	var prefetch_first: Array[Vector2i]=service._prefetch_regions_for_views()
+	var prefetch_replay: Array[Vector2i]=service._prefetch_regions_for_views()
+	service._retained_consumers=[{"viewIntent":{"origin":prefetch_view.origin,"forward":Vector3(-1,0,0),
+		"predictedOrigin":prefetch_view.origin-Vector3(40,0,0),"horizontalFovDegrees":72.0,"farDistance":180.0}}]
+	var prefetch_reverse: Array[Vector2i]=service._prefetch_regions_for_views()
+	check("view_prefetch_uses_measured_corridor_and_is_deterministic",prefetch_first.has(REGION) \
+		and prefetch_first==prefetch_replay and prefetch_first.size()<=Admission.MAX_PREFETCH_REGIONS \
+		and not prefetch_reverse.has(REGION))
 	var first: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],{})
 	var safety: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],
 		[{"ownerId":"spatial-safety","groupIds":["synthetic-group-005"],"priority":0}],{})
@@ -873,23 +907,40 @@ func view_ranked_rolling_windows() -> void:
 	for id: String in second.get("foregroundGroupIds",[]): union[id]=true
 	check("view_window_caps_city_publication_without_full_source_fallback",first.get("status")=="ready"
 		and first.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS
-		and first.get("deferredGroupIds",[]).size()==76)
+		and first.get("deferredGroupIds",[]).size()==groups.size()-Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS)
 	check("view_window_promotes_gate_and_dependency_complete_lookthrough",first.get("portalGroupIds",[]).has("synthetic-group-005")
 		and first.get("foregroundGroupIds",[]).has("synthetic-group-005")
 		and first.get("foregroundGroupIds",[]).has("synthetic-group-299"))
 	check("view_window_keeps_spatial_readiness_smaller_than_background_window",
 		safety.get("readinessGroupIds",[])==["synthetic-group-005","synthetic-group-299"]
 		and safety.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS)
-	check("completed_window_promotes_all_remaining_city_groups",second.get("status")=="ready"
-		and second.get("foregroundGroupIds",[]).size()==76 and second.get("deferredGroupIds",[]).is_empty()
-		and union.size()==groups.size())
+	check("completed_window_promotes_next_bounded_city_window",second.get("status")=="ready"
+		and second.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS
+		and second.get("deferredGroupIds",[]).size()==groups.size()-Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS*2
+		and union.size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS*2)
+	var drain_completed := {}
+	var drain_windows := 0
+	var drain_duplicate := false
+	while drain_completed.size()<groups.size() and drain_windows<8:
+		var window: Dictionary=service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],drain_completed)
+		if window.get("status")!="ready": break
+		for id: String in window.get("foregroundGroupIds",[]):
+			if drain_completed.has(id): drain_duplicate=true
+			drain_completed[id]=true
+		drain_windows+=1
+	var drained: Dictionary=service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],drain_completed)
+	check("rolling_city_demand_eventually_drains_without_duplicate_groups",drain_completed.size()==groups.size()
+		and drain_windows==ceili(float(groups.size())/float(Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS)) and not drain_duplicate)
+	check("drained_city_window_is_stable_and_empty",drained.get("status")=="ready"
+		and drained.get("foregroundGroupIds",[]).is_empty() and drained.get("deferredGroupIds",[]).is_empty()
+		and int(drained.get("deferredGroupCount",-1))==0)
 	var stage_profile: Dictionary = service.profile_scene_unit_metrics()
 	var rank_profile: Dictionary = stage_profile.get("demand_view_rank_and_merge",{})
 	check("view_window_profile_is_bounded_and_attributes_rank_scale",
-		int(rank_profile.get("calls",0))==3 and int(rank_profile.get("workUnitsTotal",0))==900
-		and int(rank_profile.get("sampleCount",0))==3 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
+		int(rank_profile.get("calls",0))==9 and int(rank_profile.get("workUnitsTotal",0))==2700
+		and int(rank_profile.get("sampleCount",0))==9 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
 		and int(rank_profile.get("p50Usec",-1))>=0 and int(rank_profile.get("p95Usec",-1))>=int(rank_profile.get("p50Usec",0))
 		and not rank_profile.has("samples"))
 	metrics.viewRankedRollingWindows={"firstCount":first.get("foregroundGroupIds",[]).size(),
 		"secondCount":second.get("foregroundGroupIds",[]).size(),"firstPortalGroups":first.get("portalGroupIds",[]),
-		"stageProfile":stage_profile}
+		"drainWindowCount":drain_windows,"drainedGroupCount":drain_completed.size(),"stageProfile":stage_profile}

@@ -142,6 +142,16 @@ func run() -> void:
 	)
 
 	var saved_deltas := service.save_all_section_deltas()
+	var repeated_deltas := service.save_all_section_deltas()
+	var saved_sections: Array = saved_deltas.get("sections",[])
+	var repeated_sections: Array = repeated_deltas.get("sections",[])
+	var retained_section_identity: bool = saved_sections.size()==1 and repeated_sections.size()==1 \
+		and is_same(saved_sections[0],repeated_sections[0])
+	var retained_record_immutable: bool = retained_section_identity and saved_sections[0].is_read_only() \
+		and saved_sections[0].cells.is_read_only() and saved_sections[0].cells[0].is_read_only() \
+		and saved_sections[0].cells[0].state.is_read_only()
+	add_result("durable_delta_snapshot_reuses_deep_immutable_section",retained_record_immutable,
+		{"sectionCount":saved_sections.size(),"retainedIdentity":retained_section_identity})
 	var loaded_service = TerrainVolumeServiceScript.new()
 	loaded_service.setup(null, FixtureGenerator.new(generator.states))
 	loaded_service.load_section_deltas(saved_deltas)
@@ -157,6 +167,12 @@ func run() -> void:
 			"sectionRevisions": loaded_payload.get("sectionRevisions", [])
 		}
 	)
+	service.clear_cell_state(target,"payload_contract_clear")
+	var cleared_deltas: Dictionary = service.save_all_section_deltas()
+	add_result("durable_delta_snapshot_invalidates_only_changed_section",
+		saved_sections.size()==1 and sample_saved_delta(saved_deltas,target).get("fluid")=="lava" \
+		and sample_saved_delta(cleared_deltas,target).is_empty(),
+		{"before":sample_saved_delta(saved_deltas,target),"after":sample_saved_delta(cleared_deltas,target)})
 
 	var stale_state := service.begin_exact_fluid_payload_for_meshing_chunk(0, 0, 2, 0, 0, 14)
 	service.set_cell_state(Vector3i(0, 0, 1), fluid_state("water"), "payload_contract_stale", false)
@@ -387,6 +403,14 @@ func json_safe(value):
 			result.append(json_safe(item))
 		return result
 	return value
+
+func sample_saved_delta(snapshot: Dictionary, cell: Vector3i) -> Dictionary:
+	for section: Dictionary in snapshot.get("sections",[]):
+		for record: Dictionary in section.get("cells",[]):
+			var coordinates: Array = record.get("cell",[])
+			if coordinates.size()==3 and Vector3i(int(coordinates[0]),int(coordinates[1]),int(coordinates[2]))==cell:
+				return record.get("state",{})
+	return {}
 
 func all_passed() -> bool:
 	for result in results:

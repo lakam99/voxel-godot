@@ -1063,6 +1063,13 @@ func verify_retained_priority_promotion() -> void:
 		and int(adapter.queued_navmesh_tile_contexts["3,0"].regionalPriority)==0
 		and int(adapter.queued_navmesh_tile_contexts["3,0"].queueSequence)==int(zero_context.queueSequence)
 		and adapter.queued_navmesh_tile_source_keys["0,0"]=="promotion:1", {})
+	adapter.deferred_navmesh_tile_keys["3,0"] = true
+	adapter._resort_navmesh_tile_queue()
+	add_result("deferred_regional_zero_remains_ahead_of_unattempted_background",
+		adapter.queued_navmesh_tile_keys.front()=="3,0"
+		and adapter.deferred_navmesh_tile_keys.has("3,0")
+		and not adapter.deferred_navmesh_tile_keys.has("1,0"),
+		{"queue":adapter.queued_navmesh_tile_keys.duplicate()})
 	add_result("priority_promotion_rejects_stale_or_absent_source",
 		not adapter.promote_queued_navmesh_tile_priority("1,0", "stale")
 		and not adapter.promote_queued_navmesh_tile_priority("2,0", "absent")

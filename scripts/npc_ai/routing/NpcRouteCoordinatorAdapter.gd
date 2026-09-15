@@ -1626,6 +1626,16 @@ func _best_queued_navmesh_tile_index(foreground_active_jobs_only: bool, attempte
 	return best_index
 
 func _queued_navmesh_tile_precedes(a: String, b: String) -> bool:
+	# Regional priority zero is a playable-area publication gate. Once its
+	# authoritative source is ready it must be polled ahead of background work,
+	# even when a previous compiler/upload attempt deferred it. The per-call
+	# attempted set still prevents a hot retry loop within one frame.
+	var a_context: Dictionary = queued_navmesh_tile_contexts.get(a, {}) if queued_navmesh_tile_contexts.get(a, {}) is Dictionary else {}
+	var b_context: Dictionary = queued_navmesh_tile_contexts.get(b, {}) if queued_navmesh_tile_contexts.get(b, {}) is Dictionary else {}
+	var a_regional_foreground := int(a_context.get("regionalPriority", 4)) == 0
+	var b_regional_foreground := int(b_context.get("regionalPriority", 4)) == 0
+	if a_regional_foreground != b_regional_foreground:
+		return a_regional_foreground
 	if deferred_navmesh_tile_keys.has(a) != deferred_navmesh_tile_keys.has(b):
 		return not deferred_navmesh_tile_keys.has(a)
 	var a_priority := queued_navmesh_tile_priority_keys.has(a)
@@ -1636,8 +1646,6 @@ func _queued_navmesh_tile_precedes(a: String, b: String) -> bool:
 	var b_rank := _queued_navmesh_tile_rank(b, b_priority)
 	if a_rank != b_rank:
 		return a_rank > b_rank
-	var a_context: Dictionary = queued_navmesh_tile_contexts.get(a, {}) if queued_navmesh_tile_contexts.get(a, {}) is Dictionary else {}
-	var b_context: Dictionary = queued_navmesh_tile_contexts.get(b, {}) if queued_navmesh_tile_contexts.get(b, {}) is Dictionary else {}
 	return int(a_context.get("queueSequence", 0)) < int(b_context.get("queueSequence", 0))
 
 func _queued_navmesh_tile_rank(tile_key: String, priority_tile := false) -> int:
