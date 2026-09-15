@@ -14,7 +14,11 @@ const OWNER_SIZE := CELL * 32.0
 const MAX_PART_CELLS := 256
 const SUPPORT_FIELDS := ["physicalSupportPartIds", "physicalRequiredSupportPartIds",
 	"physicalRequiredSeatPartIds", "physicalRequiredRoofFramePartIds",
-	"physicalAnchorPartIds", "physicalRequiredAnchorPartIds"]
+	"physicalAnchorPartIds", "physicalRequiredAnchorPartIds",
+	# Access is a publication dependency, not a structural bearing claim. A
+	# raised destination must not stream before the authored flight that makes
+	# it reachable, even though both remain independently grounded solids.
+	"publicationRequiredAccessPartIds"]
 
 var binding: Dictionary = {}
 var origin := Vector3.ZERO

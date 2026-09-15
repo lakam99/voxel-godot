@@ -15,6 +15,7 @@ func _run() -> void:
 	checks.composed_keep_source_pinned=FileAccess.get_sha256(full_source_path)=="3a324e02b9c61d5249ea97b119caed19a98bce3d0158ec8d0f23c113682dc34f"
 	if not checks.composed_keep_source_pinned: quit(2); return
 	var full_source: Dictionary=FileAccess.open(full_source_path,FileAccess.READ).get_var(false)
+	_exterior_ground_policy_contract()
 	for spec in [{"id":"keep", "width":4.3,"depth":6.4,"base":4.42,"rise":3.457142857,"levels":2}, {"id":"gatehouse","width":2.38,"depth":7.84,"base":0.82,"rise":3.0,"levels":4}, {"id":"castle_keep_stair","width":4.3,"composed":true}]:
 		var b = Blueprint.new(spec.id,1,"stone")
 		if spec.get("composed",false):
@@ -126,3 +127,42 @@ func _run() -> void:
 	if file==null: quit(2); return
 	file.store_string(JSON.stringify({"passed":passed,"checks":checks,"evidence":evidence,"scope":"Producer, physical-validator and published collision contract. No world streaming or live player traversal acceptance."},"\t")); file.close()
 	quit(0 if passed else 1)
+
+
+func _exterior_ground_policy_contract() -> void:
+	var b=Blueprint.new("street-ground-policy",773,"stone")
+	Urban.reset_street_house_structural_manifest(b)
+	var layout:={"rowCenterPhases":[0.72,1.68,2.62,3.48],"laneCenters":[0.0,1.8,22.0,12.0],
+		"rowWidthBiases":[0.0,0.0,0.0,0.0],"rowStoreyBonuses":[0,0,0,0],"marketTerraceRise":0.0,
+		"marketStalls":[{"offset":Vector3(-5.8,0.0,-2.55),"side":-1.0,"depth":-1.0,"variation":-0.018}]}
+	var built: Dictionary=Urban.add_street_sequence(b,-50.0,0.0,0.62,0.0,layout)
+	evidence.exterior_ground_build=built.duplicate(true)
+	checks.exterior_ground_source_ready=built.get("ready",false)
+	var by_id: Dictionary={}
+	for part in b.parts: by_id[String(part.id)]=part
+	if not checks.exterior_ground_source_ready:
+		evidence.exterior_ground_part_ids=by_id.keys()
+		return
+	var forbidden: Array[String]=[]
+	for id: String in by_id:
+		if id.begins_with("urban_street_climb_") or id.begins_with("urban_market_plaza_retaining") \
+				or id.begins_with("urban_upper_lane") or id.begins_with("urban_terrace_"):
+			forbidden.append(id)
+	checks.exterior_ground_has_no_artificial_terrace_parts=forbidden.is_empty()
+	var foundations: Array=[]
+	for row in range(4):
+		for side in ["left","right"]:
+			var id:="urban_row_%02d_%s_foundation"%[row,side]
+			if by_id.has(id): foundations.append(by_id[id])
+	checks.exterior_ground_building_foundations_preserved=foundations.size()==8
+	checks.exterior_ground_buildings_share_site_datum=foundations.all(func(part):
+		return is_equal_approx(part.position.y+part.size.y*0.5,0.62) and is_equal_approx(part.position.y-part.size.y*0.5,0.0))
+	var plaza=by_id.get("urban_market_plaza")
+	checks.exterior_ground_plaza_is_visual_finish=plaza!=null and plaza.kind=="ground_patch" \
+		and not plaza.collision_enabled and plaza.physical_intent=="visual_detail" \
+		and is_equal_approx(plaza.position.y-plaza.size.y*0.5,0.76)
+	var raised_layout: Dictionary=layout.duplicate(true)
+	raised_layout.marketTerraceRise=1.8
+	checks.exterior_ground_positive_recipe_rise_rejected=not Urban.add_street_sequence(Blueprint.new("raised-rejected",774,"stone"),-50.0,0.0,0.62,0.0,raised_layout).get("ready",false)
+	evidence.exterior_ground={"forbiddenPartIds":forbidden,"foundationIds":foundations.map(func(part):return String(part.id)),
+		"plaza":plaza.snapshot() if plaza!=null else {}}

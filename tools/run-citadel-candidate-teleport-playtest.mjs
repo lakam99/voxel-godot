@@ -19,15 +19,20 @@ export async function runTeleportPlaytest(input, dependencies = {}) {
   const hashes = await (dependencies.sourceHashes ?? sourceHashes)(project, 'teleport', runner);
   const args = [script, '--resolution', o.resolution, '--windowed', ...(o.gameArguments.length ? ['--', ...o.gameArguments] : [])];
   await writeJson(join(run, 'launch.json'), { schema: 'citadel-candidate-teleport-launch/v1', projectPath: project, head: (dependencies.git ?? git)(project, ['rev-parse', 'HEAD']).trim(), seed: o.seed, requestedRegion: o.candidateRegion,
-    timeoutSeconds: o.overallTimeoutSeconds, startupTimeoutSeconds: o.startupTimeoutSeconds, testTimeoutSeconds: o.timeoutSeconds, manualInspectionSeconds: o.manualInspectionSeconds, internalDeadlineSeconds: o.timeoutSeconds - 45, launchOptions: o.launchOptions, resolution: o.resolution, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
+    timeoutSeconds: o.overallTimeoutSeconds, startupTimeoutSeconds: o.startupTimeoutSeconds, testTimeoutSeconds: o.timeoutSeconds, manualInspectionSeconds: o.manualInspectionSeconds, scaleSoakSeconds: o.scaleSoakSeconds, playerInspectionOnly: o.playerInspectionOnly, internalDeadlineSeconds: o.timeoutSeconds - 45, launchOptions: o.launchOptions, resolution: o.resolution, headed: true, scene: script, arguments: args, sourceHashes: hashes, recordedUtc: new Date().toISOString(),
     spawnCell: o.spawnCell, placementMode: initialSpawn ? 'initial_spawn' : 'teleport', captureNavigationRejections: o.captureNavigationRejections,
     evidenceLevel: initialSpawn ? 'headed initial-location New Game diagnostic; bypasses title UI; not ordinary menu or NPC acceptance' : 'headed teleport-assisted diagnostic; not continuous travel or NPC acceptance',
     fixtureChanges: [initialSpawn ? 'seed and initial spawn selection before player attachment and terrain streaming; no generated artifact prewarm' : 'seed-selector-only Main subclass',
       initialSpawn ? 'zero setup teleports; ordinary startup owns physics readiness' : 'two counted exterior setup teleports; physics held only for setup clearance',
-      'isolated ordinary user data', 'labelled diagnostic camera views after ordinary player approach'] });
+      'isolated ordinary user data',
+      ...(o.scaleSoakSeconds > 0 ? ['test-only player-survival god mode during the scale soak; movement, collision, world time, weather, hostiles, NPCs and autosave remain live'] : []),
+      ...(o.playerInspectionOnly ? ['focused player-scale itinerary shakedown; does not execute or prove the retirement soak'] : []),
+      'labelled diagnostic camera views after ordinary player approach'] });
   const env = { ...inheritedEnv, APPDATA: join(run, 'userdata'), LOCALAPPDATA: join(run, 'userdata'), CITADEL_CANDIDATE_TELEPORT_OUTPUT: run, CITADEL_CANDIDATE_TELEPORT_SEED: o.seed,
     CITADEL_CANDIDATE_TELEPORT_SECONDS: String(o.timeoutSeconds), CITADEL_CANDIDATE_STARTUP_SECONDS: String(o.startupTimeoutSeconds), CITADEL_CANDIDATE_MANUAL_SECONDS: String(o.manualInspectionSeconds), CITADEL_CANDIDATE_TELEPORT_REGION: o.candidateRegion, CITADEL_CANDIDATE_RESOLUTION: o.resolution,
     CITADEL_CANDIDATE_SPAWN_CELL: o.spawnCell,
+    CITADEL_CANDIDATE_SCALE_SOAK_SECONDS: String(o.scaleSoakSeconds),
+    CITADEL_CANDIDATE_PLAYER_INSPECTION_ONLY: o.playerInspectionOnly ? '1' : '',
     VOXEL_NAVIGATION_REJECTION_DIAGNOSTICS: o.captureNavigationRejections ? '1' : '' };
   const runOwnedProcess = dependencies.runOwnedProcess ?? (await import('./run-godot-scene-watchdog.mjs')).runOwnedProcess;
   const result = await runCandidatePhase({ project, run, kind: 'teleport', env, runOwnedProcess, timeoutSeconds: o.overallTimeoutSeconds, args: ['--path', project, '--script', ...args] });

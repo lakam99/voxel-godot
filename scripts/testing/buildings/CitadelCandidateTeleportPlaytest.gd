@@ -8,10 +8,14 @@ const Gate = preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
 const Clearance = preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const RenderObservation = preload("res://scripts/perf/RuntimeRenderObservation.gd")
 const Streaming = preload("res://scripts/world/WorldStreamingCoordinator.gd")
+const SurvivalPolicy = preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const SEARCH_RING := 2
 const VIEW_CELLS := 112
 const MAX_SETUP_WRITES := 2
 const FAR_SOURCE_DISCOVERY_APPROACH_METERS := 800.0
+const SCALE_SOAK_CYCLES := 3
+const SCALE_SOAK_AWAY_METERS := 460.0
+const SCALE_SOAK_SAMPLE_MSEC := 10000
 
 class SeededMain extends "res://scripts/Main.gd":
 	# The title UI has no seed entry. Seed and optional initial cell are fixture-owned:
@@ -105,6 +109,8 @@ var source_signature := ""
 var original_position := Vector3.ZERO
 var finished := false
 var manual_seconds := 0
+var scale_soak_seconds := 0
+var player_inspection_only := false
 var last_timeline_state := ""
 var evidence_error: Dictionary = {}
 var accepted_owners: Dictionary = {} # Weak identity pins, never scene ownership.
@@ -129,9 +135,14 @@ func _run() -> void:
 	var limit := int(OS.get_environment("CITADEL_CANDIDATE_TELEPORT_SECONDS"))
 	var startup_limit := int(OS.get_environment("CITADEL_CANDIDATE_STARTUP_SECONDS"))
 	manual_seconds=int(OS.get_environment("CITADEL_CANDIDATE_MANUAL_SECONDS"))
+	scale_soak_seconds=int(OS.get_environment("CITADEL_CANDIDATE_SCALE_SOAK_SECONDS"))
+	player_inspection_only=OS.get_environment("CITADEL_CANDIDATE_PLAYER_INSPECTION_ONLY")=="1"
 	if manual_seconds not in [0,1800]:
 		printerr("Invalid manual inspection allowance"); quit(2); return
-	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 600 or startup_limit < 15 or startup_limit > 180:
+	if (scale_soak_seconds!=0 and (scale_soak_seconds<180 or scale_soak_seconds>1800)) \
+			or (manual_seconds>0 and scale_soak_seconds>0) or (player_inspection_only and (manual_seconds>0 or scale_soak_seconds>0)):
+		printerr("Invalid scale soak allowance"); quit(2); return
+	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 1200 or startup_limit < 15 or startup_limit > 180:
 		printerr("Missing/invalid owned runner output or deadline"); quit(2); return
 	started = Time.get_ticks_msec()
 	deadline = started + startup_limit*1000
@@ -184,6 +195,16 @@ func _run() -> void:
 	player = main.get("player") as CharacterBody3D
 	if not checks.exact_seed or not checks.startup_gameplay_domain_ready or not is_instance_valid(player):
 		await _finish("failed","startup_identity_or_readiness_mismatch"); return
+	if scale_soak_seconds>0 or player_inspection_only:
+		# This gate observes streaming ownership for as long as 30 minutes. Protect
+		# the production player from starvation/death without altering movement,
+		# collision, world time, weather, hostiles, NPCs or autosave behavior.
+		evidence.scaleSoakSurvivalPolicy=SurvivalPolicy.enable_player_god_mode(main,"citadel_scale_retirement_soak")
+		checks.scale_soak_survival_policy=evidence.scaleSoakSurvivalPolicy.get("enabled",false) \
+			and evidence.scaleSoakSurvivalPolicy.get("reason","")=="citadel_scale_retirement_soak" \
+			and evidence.scaleSoakSurvivalPolicy.get("scope","")=="player_survival_damage_only"
+		if not checks.scale_soak_survival_policy:
+			await _finish("failed",String(evidence.scaleSoakSurvivalPolicy.get("failure","scale_soak_survival_policy_failed"))); return
 	if not spawn_cell.is_empty():
 		var initial_readiness := _initial_spawn_physical_readiness()
 		evidence.initialSpawnPhysicalReadiness = initial_readiness
@@ -197,6 +218,8 @@ func _run() -> void:
 	if not checks.runtime_owners_available:
 		await _finish("failed","ordinary_runtime_owners_missing"); return
 	original_position = player.global_position
+	if scale_soak_seconds>0:
+		evidence.scaleSoakProcessBaseline=await _resource_census("process_baseline")
 	if not spawn_cell.is_empty():
 		evidence.initialSpawn = main.diagnostic_spawn_evidence.duplicate(true)
 		checks.initial_spawn_selected_before_attachment = evidence.initialSpawn.get("beforePlayerAttachment",false) and evidence.initialSpawn.get("beforeTerrainRuntime",false)
@@ -274,10 +297,14 @@ func _run() -> void:
 	evidence.sourceDiscoveryApproach={"active":discovery_motion,"lookReady":discovery_look_ready,
 		"elapsedMsec":Time.get_ticks_msec()-discovery_started,"from":discovery_from,"to":player.global_position,
 		"distanceMoved":player.global_position.distance_to(discovery_from),"modalLoadingVisibleFrames":discovery_modal_frames,
+		"completionMode":"ahead_of_travel" if player.global_position.distance_to(discovery_from)<100.0 else "sustained_moving_preparation",
 		"samples":discovery_samples,"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_SHIFT),
 		"scope":"Ordinary W/Shift and viewport look while production ahead-of-player source preparation runs; no transform write or generated-artifact prewarm."}
+	var discovery_elapsed:=Time.get_ticks_msec()-discovery_started
+	var preparation_overlapped_motion: bool=discovery_samples.any(func(row: Dictionary): return row.get("ordinaryWPressed",false)) \
+		and (discovery_elapsed<2000 or player.global_position.distance_to(discovery_from)>5.0 and discovery_samples.size()>=2)
 	checks.source_discovery_approach = not discovery_motion or discovery_look_ready and discovery_modal_frames==0 \
-		and player.global_position.distance_to(discovery_from)>100.0 and discovery_samples.any(func(row: Dictionary): return row.get("ordinaryWPressed",false))
+		and preparation_overlapped_motion
 	if not checks.source_discovery_approach:
 		await _finish("failed","source_discovery_approach_failed"); return
 	if reservation.size.x <= 0 or reservation.size.y <= 0:
@@ -384,10 +411,28 @@ func _run() -> void:
 			await _finish("failed","approach_checkpoint_write_failed"); return
 		if not checks.close_approach:
 			await _finish("failed",String(evidence.approach.get("reason","approach_blocked"))); return
-		evidence.demandDrain=await _wait_for_demanded_window()
-		checks.demanded_window_drains_within_target=evidence.demandDrain.get("passed",false)
-		if not checks.demanded_window_drains_within_target:
-			await _finish("failed",String(evidence.demandDrain.get("reason","demanded_window_did_not_drain"))); return
+		if not player_inspection_only:
+			evidence.demandDrain=await _wait_for_demanded_window()
+			checks.demanded_window_drains_within_target=evidence.demandDrain.get("passed",false)
+			if not checks.demanded_window_drains_within_target:
+				await _finish("failed",String(evidence.demandDrain.get("reason","demanded_window_did_not_drain"))); return
+		else:
+			evidence.demandDrain={"passed":false,"reason":"focused_player_inspection_excludes_timing_acceptance",
+				"scope":"The focused itinerary shakedown omits timing and retirement acceptance; the full scale-soak mode remains authoritative."}
+		if scale_soak_seconds>0:
+			evidence.scaleSoak=await _run_scale_soak()
+			checks.scale_soak_duration=evidence.scaleSoak.get("durationPassed",false)
+			checks.scale_soak_cycles=evidence.scaleSoak.get("cyclesPassed",false)
+			checks.scale_soak_autosave=evidence.scaleSoak.get("autosavePassed",false)
+			checks.scale_soak_resources_settle=evidence.scaleSoak.get("settlementPassed",false)
+			checks.scale_soak_no_modal=evidence.scaleSoak.get("modalLoadingVisibleFrames",-1)==0
+			if not evidence.scaleSoak.get("passed",false):
+				await _finish("failed",String(evidence.scaleSoak.get("reason","scale_soak_failed"))); return
+		if scale_soak_seconds>0 or player_inspection_only:
+			evidence.playerScaleInspection=await _run_player_scale_inspection()
+			checks.scale_soak_player_inspection=evidence.playerScaleInspection.get("passed",false)
+			if not checks.scale_soak_player_inspection:
+				await _finish("failed",String(evidence.playerScaleInspection.get("reason","player_scale_inspection_failed"))); return
 		var navigation_inventory := _navigation_domain_inventory()
 		evidence.navigationInventory = navigation_inventory
 		if not navigation_inventory.get("passed",false):
@@ -434,6 +479,512 @@ func _wait_for_demanded_window() -> Dictionary:
 	return {"passed":false,"reason":"demanded_window_drain_timeout","elapsedMsec":Time.get_ticks_msec()-begun,
 		"modalLoadingVisibleFrames":modal_frames,"samples":samples,
 		"scope":"Stationary ordinary gameplay frames after the collision-backed approach; no direct publication polling, helper completion or transform write."}
+
+func _run_scale_soak() -> Dictionary:
+	var soak_started:=Time.get_ticks_msec()
+	var soak_deadline:=soak_started+scale_soak_seconds*1000
+	# The requested interval is a minimum observation duration, not a timeout for
+	# completing three collision-backed 920 m round trips. Keep a separate bounded
+	# completion/audit reserve so slow deterministic rebuilds cannot truncate the
+	# required third cycle. The outer owned-process watchdog remains authoritative.
+	deadline=soak_deadline+900000
+	var near_target:=player.global_position
+	var center:=Vector3(candidate.centerCell.x*float(main.CELL),near_target.y,candidate.centerCell.y*float(main.CELL))
+	var away_direction:=Vector2(near_target.x-center.x,near_target.z-center.z).normalized()
+	if away_direction.length_squared()<0.5: away_direction=Vector2(0.0,1.0)
+	var away_target:=near_target+Vector3(away_direction.x,0.0,away_direction.y)*SCALE_SOAK_AWAY_METERS
+	var cycles: Array[Dictionary]=[]
+	var samples: Array[Dictionary]=[]
+	var next_sample:=soak_started
+	var modal_frames:=0
+	var peak_static_memory:=int(Performance.get_monitor(Performance.MEMORY_STATIC))
+	var autosave_started_before:=int(main.autosave_jobs_started)
+	var autosave_completed_before:=int(main.autosave_jobs_completed)
+	var autosave_failed_before:=int(main.autosave_jobs_failed)
+	for cycle_index in SCALE_SOAK_CYCLES:
+		var cycle_started:=Time.get_ticks_msec()
+		var away_move:=await _ordinary_move_to(away_target,150000,18.0,"scale_soak_leave_%02d"%(cycle_index+1))
+		modal_frames+=int(away_move.get("modalLoadingVisibleFrames",0))
+		if not away_move.get("passed",false):
+			cycles.append({"cycle":cycle_index+1,"leave":away_move})
+			return _scale_soak_result(false,"leave_movement_failed",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		var retired:=await _wait_for_citadel_retirement(120000)
+		modal_frames+=int(retired.get("modalLoadingVisibleFrames",0))
+		if not retired.get("passed",false):
+			return _scale_soak_result(false,"retirement_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		var away_world_settlement:=await _wait_for_world_streaming_settlement(60000,"away_%02d"%(cycle_index+1))
+		modal_frames+=int(away_world_settlement.get("modalLoadingVisibleFrames",0))
+		if not away_world_settlement.get("passed",false):
+			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
+				"awayWorldSettlement":away_world_settlement})
+			return _scale_soak_result(false,"away_world_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		var away_census:=await _resource_census("away_settled_%02d"%(cycle_index+1))
+		var revisit_move:=await _ordinary_move_to(near_target,180000,2.5,"scale_soak_revisit_%02d"%(cycle_index+1))
+		modal_frames+=int(revisit_move.get("modalLoadingVisibleFrames",0))
+		if not revisit_move.get("passed",false):
+			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
+				"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move})
+			return _scale_soak_result(false,"revisit_movement_failed",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		await _look_toward_candidate()
+		var revisited:=await _wait_for_revisit_settlement(180000)
+		modal_frames+=int(revisited.get("modalLoadingVisibleFrames",0))
+		if not revisited.get("passed",false):
+			return _scale_soak_result(false,"revisit_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		var revisit_world_settlement:=await _wait_for_world_streaming_settlement(60000,"revisit_%02d"%(cycle_index+1))
+		modal_frames+=int(revisit_world_settlement.get("modalLoadingVisibleFrames",0))
+		if not revisit_world_settlement.get("passed",false):
+			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
+				"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move,
+				"settlement":revisited,"revisitWorldSettlement":revisit_world_settlement})
+			return _scale_soak_result(false,"revisit_world_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		var revisit_census:=await _resource_census("revisit_settled_%02d"%(cycle_index+1))
+		cycles.append({"cycle":cycle_index+1,"elapsedMsec":Time.get_ticks_msec()-soak_started,
+			"durationMsec":Time.get_ticks_msec()-cycle_started,"leave":away_move,"retirement":retired,
+			"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move,
+			"settlement":revisited,"revisitWorldSettlement":revisit_world_settlement,"revisitCensus":revisit_census})
+		# Spread the three real retirement/revisit cycles over the requested soak
+		# interval. Stationary time remains ordinary gameplay with autosave active.
+		var cycle_boundary:=soak_started+int(float(scale_soak_seconds*1000)*float(cycle_index+1)/float(SCALE_SOAK_CYCLES))
+		phase="scale_soak_stationary_%02d"%(cycle_index+1)
+		while Time.get_ticks_msec()<mini(cycle_boundary,soak_deadline):
+			await _frame()
+			if _modal_loading_visible(): modal_frames+=1
+			var now:=Time.get_ticks_msec()
+			if now>=next_sample:
+				next_sample=now+SCALE_SOAK_SAMPLE_MSEC
+				var sample:=_resource_sample("stationary_%02d"%(cycle_index+1))
+				peak_static_memory=maxi(peak_static_memory,int(sample.staticMemoryBytes))
+				samples.append(sample)
+	while Time.get_ticks_msec()<soak_deadline:
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		var now:=Time.get_ticks_msec()
+		if now>=next_sample:
+			next_sample=now+SCALE_SOAK_SAMPLE_MSEC
+			var sample:=_resource_sample("terminal_settle")
+			peak_static_memory=maxi(peak_static_memory,int(sample.staticMemoryBytes))
+			samples.append(sample)
+	return _scale_soak_result(true,"",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+
+func _scale_soak_result(flow_passed: bool, flow_reason: String, soak_started: int, cycles: Array[Dictionary], samples: Array[Dictionary],
+		modal_frames: int, peak_static_memory: int, autosave_started_before: int, autosave_completed_before: int, autosave_failed_before: int) -> Dictionary:
+	var duration_msec:=Time.get_ticks_msec()-soak_started
+	var duration_passed:=duration_msec>=scale_soak_seconds*1000
+	var cycles_passed:=cycles.size()==SCALE_SOAK_CYCLES and cycles.all(func(row: Dictionary):
+		return row.leave.get("passed",false) and row.retirement.get("passed",false) \
+			and row.awayWorldSettlement.get("passed",false) and row.revisit.get("passed",false) \
+			and row.settlement.get("passed",false) and row.revisitWorldSettlement.get("passed",false))
+	var autosave_started:=int(main.autosave_jobs_started)-autosave_started_before
+	var autosave_completed:=int(main.autosave_jobs_completed)-autosave_completed_before
+	var autosave_failed:=int(main.autosave_jobs_failed)-autosave_failed_before
+	var autosave_passed:=bool(main.autosave_enabled) and autosave_started>0 and autosave_completed>0 and autosave_failed==0
+	var settlement:=_settlement_comparison(cycles)
+	var settlement_passed: bool=bool(settlement.get("passed",false))
+	var passed: bool=flow_passed and duration_passed and cycles_passed and autosave_passed and settlement_passed and modal_frames==0
+	var reason:=flow_reason
+	if reason.is_empty() and not duration_passed: reason="scale_soak_duration_short"
+	if reason.is_empty() and not cycles_passed: reason="scale_soak_cycles_incomplete"
+	if reason.is_empty() and not autosave_passed: reason="scale_soak_autosave_incomplete"
+	if reason.is_empty() and not settlement_passed: reason="scale_soak_resource_growth"
+	if reason.is_empty() and modal_frames>0: reason="modal_loading_during_scale_soak"
+	return {"passed":passed,"reason":reason,"requestedSeconds":scale_soak_seconds,"durationMsec":duration_msec,
+		"durationPassed":duration_passed,"cyclesPassed":cycles_passed,"autosavePassed":autosave_passed,
+		"settlementPassed":settlement_passed,"modalLoadingVisibleFrames":modal_frames,"cycleCount":cycles.size(),
+		"cycles":cycles,"samples":samples,"sampleIntervalMsec":SCALE_SOAK_SAMPLE_MSEC,"peakStaticMemoryBytes":peak_static_memory,
+		"autosave":{"enabled":main.autosave_enabled,"started":autosave_started,"completed":autosave_completed,"failed":autosave_failed},
+		"settlement":settlement,"processBaseline":evidence.get("scaleSoakProcessBaseline",{}),
+		"scope":"Headed ordinary gameplay with ordinary key/mouse movement, real streaming retirement/revisit, autosave, engine memory monitors and live scene-tree census. No player transform write or publication helper completion."}
+
+func _settlement_comparison(cycles: Array[Dictionary]) -> Dictionary:
+	if cycles.size()<SCALE_SOAK_CYCLES: return {"passed":false,"reason":"insufficient_comparable_checkpoints"}
+	# The first complete leave/rebuild is the stated warmup cycle: it populates
+	# renderer, allocator and incremental-publication caches. Cycle two is the
+	# first post-warmup settled checkpoint; later cycles may not grow >5% from it.
+	var warm: Dictionary=cycles[1].revisitCensus
+	var comparisons: Array[Dictionary]=[]
+	var checkpoint_comparisons: Array[Dictionary]=[]
+	var metrics: Array[String]=["staticMemoryBytes","nodeCount","resourceCount","orphanNodeCount","siteNodes","siteGeometry","siteCollisionShapes","siteStaticBodies","siteMultiMeshes","siteMultiMeshInstances","siteShadowCasters","citadelPreparedRepresentations","citadelCompactCaches","citadelLiveSceneSites","citadelResidentSites","citadelRetainedBounds"]
+	var group_accountable_metrics: Array[String]=["siteNodes","siteGeometry","siteCollisionShapes","siteMultiMeshes","siteMultiMeshInstances","siteShadowCasters"]
+	for cycle_index in range(2,cycles.size()):
+		var current: Dictionary=cycles[cycle_index].revisitCensus
+		var warm_world: Dictionary=warm.get("worldStreaming",{})
+		var current_world: Dictionary=current.get("worldStreaming",{})
+		var same_world_signature: bool=not String(warm_world.get("settlementSignature","")).is_empty() \
+			and warm_world.get("settlementSignature")==current_world.get("settlementSignature")
+		checkpoint_comparisons.append({"cycle":cycle_index+1,"passed":same_world_signature,
+			"baselineSignature":warm_world.get("settlementSignature",""),
+			"currentSignature":current_world.get("settlementSignature",""),
+			"reason":"equivalent_authoritative_world_state" if same_world_signature else "world_state_not_equivalent"})
+		for metric: String in metrics:
+			var baseline_value:=int(warm.get(metric,0))
+			var current_value:=int(current.get(metric,0))
+			var limit:=ceili(float(baseline_value)*1.05)
+			var raw_passed:=current_value<=limit
+			var baseline_groups:=int(warm.get("citadelPhysicalGroupsComplete",0))
+			var current_groups:=int(current.get("citadelPhysicalGroupsComplete",0))
+			var baseline_density:=float(baseline_value)/float(baseline_groups) if baseline_groups>0 else 0.0
+			var current_density:=float(current_value)/float(current_groups) if current_groups>0 else 0.0
+			var density_limit:=baseline_density*1.05
+			var group_accounted:=not raw_passed and metric in group_accountable_metrics and current_groups>baseline_groups \
+				and baseline_groups>0 and current_density<=density_limit
+			comparisons.append({"cycle":cycle_index+1,"metric":metric,"warmValue":baseline_value,"currentValue":current_value,
+				"limit":limit,"growthRatio":float(current_value)/float(baseline_value) if baseline_value>0 else (0.0 if current_value==0 else -1.0),
+				"rawPassed":raw_passed,"accounted":group_accounted,
+				"accountedBy":"additional deterministic physical groups at stable or lower per-group density" if group_accounted else "",
+				"baselinePhysicalGroups":baseline_groups,"currentPhysicalGroups":current_groups,
+				"baselinePerGroup":baseline_density,"currentPerGroup":current_density,"perGroupLimit":density_limit,
+				"passed":raw_passed or group_accounted})
+	return {"passed":checkpoint_comparisons.all(func(row: Dictionary):return row.passed) \
+		and comparisons.all(func(row: Dictionary):return row.passed),"warmupCycle":1,"baselineCycle":2,
+		"checkpointComparisons":checkpoint_comparisons,"comparisons":comparisons,
+		"criterion":"After one complete warmup cycle, no unaccounted positive growth above five percent from the first post-warmup settled revisit. Only live Citadel subtree counts may be accounted by additional deterministic physical groups when per-group density stays within five percent; process-wide and lifecycle/cache counts always use the raw ceiling."}
+
+func _wait_for_citadel_retirement(timeout_msec: int) -> Dictionary:
+	phase="scale_soak_retirement"
+	var begun:=Time.get_ticks_msec()
+	var stable_frames:=0
+	var modal_frames:=0
+	var last_state: Dictionary={}
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		last_state=main.structure_system.citadel_publication.scene_state(region)
+		var stats: Dictionary=main.structure_system.citadel_publication.stats()
+		# A forward prefetch may intentionally retain one immutable description/base.
+		# Retirement means player-facing nodes, scene preparation and callbacks are
+		# gone; it does not require throwing away that bounded compact cache.
+		var compact_caches:=int(stats.get("describedSites",0))+int(stats.get("bootstrapBases",0))
+		var settled: bool=last_state.get("status")=="absent" and int(stats.get("constructedScenes",-1))==0 \
+			and int(stats.get("publishingScenes",-1))==0 and int(stats.get("preparedSites",-1))==0 \
+			and int(stats.get("retiringScenes",-1))==0 and int(stats.get("pendingRetirements",-1))==0
+		settled=settled and int(stats.get("residentSites",Admission.MAX_PREFETCH_REGIONS+1))<=Admission.MAX_PREFETCH_REGIONS \
+			and compact_caches<=Admission.MAX_PREFETCH_REGIONS*2
+		stable_frames=stable_frames+1 if settled else 0
+		if stable_frames>=30:
+			return {"passed":modal_frames==0,"reason":"retired_and_disposed","elapsedMsec":Time.get_ticks_msec()-begun,
+				"stableFrames":stable_frames,"modalLoadingVisibleFrames":modal_frames,"scene":last_state,"publication":stats}
+	return {"passed":false,"reason":"retirement_timeout","elapsedMsec":Time.get_ticks_msec()-begun,
+		"stableFrames":stable_frames,"modalLoadingVisibleFrames":modal_frames,"scene":last_state}
+
+func _wait_for_revisit_settlement(timeout_msec: int) -> Dictionary:
+	phase="scale_soak_revisit_settlement"
+	var begun:=Time.get_ticks_msec()
+	var stable_frames:=0
+	var modal_frames:=0
+	var last_status: Dictionary={}
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		var scene: Dictionary=main.structure_system.citadel_publication.scene_state(region)
+		var publication: Dictionary=main.structure_system.citadel_publication.stats()
+		var entry: Dictionary=main.structure_system.citadel_publication._scenes.get(region,{})
+		var job_status: Dictionary=entry.job.status_count() if entry.get("job")!=null else {}
+		var diagnostic: Dictionary={}
+		for row: Dictionary in publication.get("sceneDiagnostics",[]):
+			if row.get("region")==region: diagnostic=row; break
+		var milestones: Dictionary=diagnostic.get("publicationMilestones",{})
+		var foreground: Dictionary=main.player_foreground_streaming_intent()
+		var physical: Dictionary=main.structure_system.citadel_physical_publication_state(
+			foreground.get("bounds",Rect2i())) if foreground.get("bounds") is Rect2i else {}
+		# A resident packet deliberately continues view-ranked detail after the
+		# current player closure is acknowledged, so packet_wait is not an idle or
+		# gameplay-readiness contract. Settle on the authoritative current physical
+		# receipt and source owner; the later census accounts for ongoing detail.
+		var settled: bool=scene.get("status") in ["scene_ready","publishing"] \
+			and scene.get("binding",{})==source_binding and physical.get("status")=="ready" \
+			and physical.get("required",false) and int(milestones.get("completeDemandedUsec",-1))>=0 \
+			and int(job_status.get("occupiedTransactions",-1))==0 and publication.get("failures",{}).is_empty()
+		stable_frames=stable_frames+1 if settled else 0
+		last_status={"scene":scene,"job":job_status,"physical":physical,"diagnostic":diagnostic,"publication":publication}
+		if stable_frames>=30:
+			return {"passed":modal_frames==0,"reason":"revisit_foreground_physical_settled","elapsedMsec":Time.get_ticks_msec()-begun,
+				"stableFrames":stable_frames,"modalLoadingVisibleFrames":modal_frames,"status":last_status}
+	return {"passed":false,"reason":"revisit_settlement_timeout","elapsedMsec":Time.get_ticks_msec()-begun,
+		"stableFrames":stable_frames,"modalLoadingVisibleFrames":modal_frames,"status":last_status}
+
+func _wait_for_route_physical_settlement(bounds: Rect2i, timeout_msec: int, label: String) -> Dictionary:
+	phase="scale_inspection_physical_settlement:"+label
+	var begun:=Time.get_ticks_msec()
+	var stable_frames:=0
+	var modal_frames:=0
+	var last_status: Dictionary={}
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		var scene: Dictionary=main.structure_system.citadel_publication.scene_state(region)
+		var physical: Dictionary=main.structure_system.citadel_physical_publication_state(bounds)
+		var publication: Dictionary=main.structure_system.citadel_publication.stats()
+		var settled: bool=scene.get("status") in ["scene_ready","publishing"] \
+			and scene.get("binding",{})==source_binding and physical.get("status")=="ready" \
+			and physical.get("required",false) and publication.get("failures",{}).is_empty()
+		stable_frames=stable_frames+1 if settled else 0
+		last_status={"bounds":bounds,"scene":scene,"physical":physical,"publication":publication}
+		if stable_frames>=30:
+			return {"passed":modal_frames==0,"reason":"route_physical_settled","elapsedMsec":Time.get_ticks_msec()-begun,
+				"stableFrames":stable_frames,"modalLoadingVisibleFrames":modal_frames,"status":last_status,
+				"scope":"Exact source-derived route bounds and production physical receipts; unrelated occupied transactions remain retryable."}
+	return {"passed":false,"reason":"route_physical_settlement_timeout","elapsedMsec":Time.get_ticks_msec()-begun,
+		"stableFrames":stable_frames,"modalLoadingVisibleFrames":modal_frames,"status":last_status,
+		"scope":"Exact source-derived route bounds and production physical receipts; unrelated occupied transactions remain retryable."}
+
+func _route_bounds_for_world_points(points: Array[Vector3], margin_cells: int) -> Rect2i:
+	if points.is_empty(): return Rect2i()
+	var minimum:=Vector2(INF,INF)
+	var maximum:=Vector2(-INF,-INF)
+	for point: Vector3 in points:
+		minimum=minimum.min(Vector2(point.x,point.z))
+		maximum=maximum.max(Vector2(point.x,point.z))
+	var cell_size:=float(main.CELL)
+	var low:=Vector2i(floori(minimum.x/cell_size),floori(minimum.y/cell_size))-Vector2i.ONE*margin_cells
+	var high:=Vector2i(ceili(maximum.x/cell_size),ceili(maximum.y/cell_size))+Vector2i.ONE*(margin_cells+1)
+	return Rect2i(low,high-low)
+
+func _wait_for_world_streaming_settlement(timeout_msec: int, label: String) -> Dictionary:
+	phase="scale_soak_world_settlement:"+label
+	var begun:=Time.get_ticks_msec()
+	var ready_since:=-1
+	var stable_signature:=""
+	var modal_frames:=0
+	var samples: Array[Dictionary]=[]
+	var next_sample:=begun
+	var last_state: Dictionary={}
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		last_state=_world_streaming_settlement_snapshot()
+		var now:=Time.get_ticks_msec()
+		if now>=next_sample:
+			next_sample=now+1000
+			samples.append(last_state.duplicate(true))
+		if bool(last_state.get("ready",false)):
+			var current_signature:=String(last_state.get("settlementSignature",""))
+			if ready_since<0 or current_signature!=stable_signature:
+				ready_since=now
+				stable_signature=current_signature
+			# A real ten-second quiet window catches deferred prop and native terrain
+			# publications without using resource counts as an acceptance predicate.
+			if now-ready_since>=10000:
+				return {"passed":modal_frames==0,"reason":"authoritative_world_queues_quiet",
+					"elapsedMsec":now-begun,"quietMsec":now-ready_since,
+					"modalLoadingVisibleFrames":modal_frames,"state":last_state,"samples":samples,
+					"scope":"Read-only observation of production chunk, prop, terrain, collision, structure and voxel-runtime queues; no helper processing or resource-count targeting."}
+		else:
+			ready_since=-1
+			stable_signature=""
+	return {"passed":false,"reason":"world_streaming_settlement_timeout","elapsedMsec":Time.get_ticks_msec()-begun,
+		"quietMsec":0 if ready_since<0 else Time.get_ticks_msec()-ready_since,
+		"modalLoadingVisibleFrames":modal_frames,"state":last_state,"samples":samples}
+
+func _world_streaming_settlement_snapshot() -> Dictionary:
+	var voxel: Dictionary=main.voxel_terrain_runtime.stats() if main.voxel_terrain_runtime!=null \
+		and main.voxel_terrain_runtime.has_method("stats") else {}
+	var meshing_pending:=int(main.terrain_meshing_service.pending_job_count()) if main.terrain_meshing_service!=null \
+		and main.terrain_meshing_service.has_method("pending_job_count") else 0
+	var meshing_completed:=int(main.terrain_meshing_service.completed_job_count()) if main.terrain_meshing_service!=null \
+		and main.terrain_meshing_service.has_method("completed_job_count") else 0
+	var expected_chunks:=maxi(1,(int(main.render_distance)*2+1)*(int(main.render_distance)*2+1))
+	var chunk_keys: Array[String]=[]
+	for key_value in main.chunks.keys(): chunk_keys.append(str(key_value))
+	chunk_keys.sort()
+	var result:={"sampledMsec":Time.get_ticks_msec(),"chunkNodes":main.chunks.size(),"expectedChunkNodes":expected_chunks,
+		"playerChunk":str(main.world_to_chunk(player.position.x,player.position.z)),"chunkKeySignature":"|".join(chunk_keys),
+		"pendingChunkLoads":main.pending_chunk_loads.size(),"pendingChunkProps":main.pending_chunk_prop_spawns.size(),
+		"pendingTerrainRefreshes":main.pending_chunk_terrain_refreshes.size(),
+		"pendingCollisionRefreshes":main.pending_chunk_collision_refreshes.size(),
+		"pendingExposureScans":main.pending_generated_volume_exposure_scans.size(),
+		"pendingStructureOps":int(main.pending_streaming_structure_work_count()),
+		"terrainMeshingPending":meshing_pending,"terrainMeshingCompleted":meshing_completed,
+		"voxelDesiredGameplayChunks":int(voxel.get("desiredGameplayChunks",0)),
+		"voxelPendingGameplayChunks":int(voxel.get("pendingGameplayChunks",0)),
+		"voxelPendingGameplayChunkQueue":int(voxel.get("pendingGameplayChunkQueue",0)),
+		"voxelPublishedGameplayChunks":int(voxel.get("publishedGameplayChunks",0)),
+		"voxelPendingEditSections":int(voxel.get("pendingEditSections",0))}
+	# Native terrain meshing, exposure and prop queues may intentionally retain
+	# background work outside the current 7x7 gameplay view. They are included in
+	# the stable signature and evidence, but are not falsely required to reach zero.
+	# The foreground view is ready when its ordinary chunk coverage is published
+	# and its directly blocking refresh/structure queues are empty.
+	result.ready=int(result.chunkNodes)>=expected_chunks and int(result.pendingChunkLoads)==0 \
+		and int(result.pendingTerrainRefreshes)==0 and int(result.pendingCollisionRefreshes)==0 \
+		and int(result.pendingStructureOps)==0 and meshing_completed==0 \
+		and int(result.voxelPendingEditSections)==0 and int(result.voxelPublishedGameplayChunks)>=expected_chunks
+	result.settlementSignature=str([result.playerChunk,result.chunkKeySignature,result.chunkNodes,result.pendingChunkProps,
+		result.pendingExposureScans,result.voxelDesiredGameplayChunks,result.voxelPendingGameplayChunks,
+		result.voxelPendingGameplayChunkQueue,result.voxelPublishedGameplayChunks])
+	return result
+
+func _ordinary_move_to(target: Vector3, timeout_msec: int, stop_distance: float, phase_name: String,
+		allow_lateral_recovery := true, hold_jump := false, sprint := true) -> Dictionary:
+	phase=phase_name
+	var begun:=Time.get_ticks_msec()
+	var from:=player.global_position
+	var previous:=from
+	var frame_previous:=from
+	var path_distance:=0.0
+	var next_sample:=begun
+	var recovery_count:=0
+	var strafe_until:=0
+	var jump_until:=0
+	var modal_frames:=0
+	var aim_convergence_misses:=0
+	var first_modal: Dictionary={}
+	var samples: Array[Dictionary]=[]
+	var discontinuity: Dictionary={}
+	var target_reached_during_motion:=false
+	var minimum_remaining:=INF
+	if bool(player.get("automated_input")) or not player.is_physics_processing(): return {"passed":false,"reason":"ordinary_player_input_unavailable"}
+	# Turn in place before advancing into the next waypoint leg. Keeping W held
+	# while rotating from a lateral leg into a narrow street makes an artificial
+	# arc that a human player naturally avoids.
+	_movement_key(KEY_W,false); _movement_key(KEY_SHIFT,sprint)
+	if not await _look_toward_world_xz(target): aim_convergence_misses+=1
+	_movement_key(KEY_W,true)
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await physics_frame
+		await _frame()
+		var frame_distance:=player.global_position.distance_to(frame_previous)
+		if frame_distance>30.0:
+			discontinuity={"elapsedMsec":Time.get_ticks_msec()-begun,"from":frame_previous,
+				"to":player.global_position,"distance":frame_distance,
+				"reason":"Frame-to-frame displacement exceeded ordinary player movement; death/respawn or an external transform write invalidates this route."}
+			break
+		path_distance+=frame_distance
+		frame_previous=player.global_position
+		if _modal_loading_visible():
+			modal_frames+=1
+			if first_modal.is_empty():
+				first_modal={"elapsedMsec":Time.get_ticks_msec()-begun,
+					"streamingActive":bool(main.get("streaming_loading_overlay_active")),
+					"streamingHolds":main.get("streaming_loading_overlay_holds").duplicate(true),
+					"startupActive":bool(main.get("startup_loading_active")),
+					"runtimeActive":bool(main.get("runtime_loading_active"))}
+		var planar_distance:=Vector2(player.global_position.x-target.x,player.global_position.z-target.z).length()
+		minimum_remaining=minf(minimum_remaining,planar_distance)
+		if planar_distance<=stop_distance:
+			target_reached_during_motion=true
+			break
+		var now:=Time.get_ticks_msec()
+		_movement_key(KEY_SPACE,hold_jump or now<jump_until)
+		_movement_key(KEY_W,not allow_lateral_recovery or now>=strafe_until)
+		_movement_key(KEY_A,allow_lateral_recovery and now<strafe_until and recovery_count%4==2)
+		_movement_key(KEY_D,allow_lateral_recovery and now<strafe_until and recovery_count%4==0)
+		if now>=next_sample:
+			next_sample=now+1000
+			if now-begun>1000 and player.global_position.distance_to(previous)<0.30 and now>=strafe_until:
+				recovery_count+=1
+				if not allow_lateral_recovery or recovery_count%2==1: jump_until=now+250
+				else: strafe_until=now+1500
+			if samples.size()<180: samples.append({"elapsedMsec":now-begun,"position":player.global_position,
+				"distanceToTarget":planar_distance,"pathDistance":path_distance,"ordinaryWPressed":Input.is_key_pressed(KEY_W),
+				"sprinting":player.get("is_sprinting"),"recoveryCount":recovery_count,"motion":_approach_motion_snapshot()})
+			previous=player.global_position
+		# Mouse smoothing and an airborne close-range target can need more than one
+		# correction window. A human does not abandon the route after one such
+		# miss; keep feeding ordinary mouse input and retain the miss as evidence.
+		# At close range, release forward while turning so input latency cannot make
+		# the player orbit a narrow waypoint indefinitely.
+		var pause_for_close_aim:=planar_distance<=maxf(5.0,stop_distance*3.0)
+		if pause_for_close_aim: _movement_key(KEY_W,false)
+		if not await _look_toward_world_xz(target): aim_convergence_misses+=1
+		if pause_for_close_aim: _movement_key(KEY_W,true)
+	_release_approach_keys()
+	await physics_frame; await _frame()
+	var remaining:=Vector2(player.global_position.x-target.x,player.global_position.z-target.z).length()
+	var reached:=target_reached_during_motion or remaining<=stop_distance
+	var result_reason:="unexpected_player_discontinuity" if not discontinuity.is_empty() else \
+		("modal_loading_during_movement" if modal_frames>0 else ("target_reached" if reached else "movement_timeout"))
+	return {"passed":reached and modal_frames==0 and discontinuity.is_empty(),"reason":result_reason,
+		"elapsedMsec":Time.get_ticks_msec()-begun,"from":from,"to":player.global_position,"target":target,"remainingDistance":remaining,
+		"pathDistance":path_distance,"displacement":player.global_position.distance_to(from),"samples":samples,
+		"minimumRemainingDistance":minimum_remaining,"targetReachedDuringMotion":target_reached_during_motion,
+		"discontinuity":discontinuity,
+		"aimConvergenceMisses":aim_convergence_misses,
+		"modalLoadingVisibleFrames":modal_frames,"firstModal":first_modal,
+		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_SHIFT),
+		"scope":"Ordinary W/Shift, mouse-look, jump and lateral recovery through the production player controller and collision.",
+		"heldJump":hold_jump,"sprintInput":sprint}
+
+func _look_toward_world_xz(target: Vector3) -> bool:
+	main.capture_mouse_if_no_modal()
+	var direction:=target-player.global_position
+	var sensitivity:=float(player.get("mouse_sensitivity"))
+	if Vector2(direction.x,direction.z).length()<0.01 or sensitivity<=0.0: return false
+	for attempt in range(12):
+		var error:=wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
+		if absf(error)<0.04: return true
+		var motion:=InputEventMouseMotion.new()
+		motion.relative=Vector2(clampf(-error/sensitivity,-600,600),0.0)
+		root.push_input(motion)
+		await _frame()
+		direction=target-player.global_position
+	return absf(wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI))<0.04
+
+func _resource_sample(label: String) -> Dictionary:
+	var service=main.structure_system.citadel_publication
+	var stats: Dictionary=service.stats()
+	var world_state:=_world_streaming_settlement_snapshot()
+	return {"label":label,"elapsedMsec":_elapsed(),"staticMemoryBytes":int(Performance.get_monitor(Performance.MEMORY_STATIC)),
+		"nodeCount":int(Performance.get_monitor(Performance.OBJECT_NODE_COUNT)),"resourceCount":int(Performance.get_monitor(Performance.OBJECT_RESOURCE_COUNT)),
+		"orphanNodeCount":int(Performance.get_monitor(Performance.OBJECT_ORPHAN_NODE_COUNT)),
+		"renderObjects":int(Performance.get_monitor(Performance.RENDER_TOTAL_OBJECTS_IN_FRAME)),
+		"drawCalls":int(Performance.get_monitor(Performance.RENDER_TOTAL_DRAW_CALLS_IN_FRAME)),
+		"primitives":int(Performance.get_monitor(Performance.RENDER_TOTAL_PRIMITIVES_IN_FRAME)),
+		"citadelResidentSites":int(stats.get("residentSites",0)),"citadelRetainedBounds":int(stats.get("retainedBounds",0)),
+		"citadelRetiringScenes":int(stats.get("retiringScenes",0)),"citadelPendingRetirements":int(stats.get("pendingRetirements",0)),
+		"citadelPreparedRepresentations":int(stats.get("describedSites",0))+int(stats.get("preparedSites",0))+int(stats.get("bootstrapBases",0)),
+		"citadelCompactCaches":int(stats.get("describedSites",0))+int(stats.get("bootstrapBases",0)),
+		"citadelLiveSceneSites":int(stats.get("constructedScenes",0))+int(stats.get("publishingScenes",0)),"worldStreaming":world_state,
+		"autosaveStarted":int(main.autosave_jobs_started),"autosaveCompleted":int(main.autosave_jobs_completed),"autosaveFailed":int(main.autosave_jobs_failed)}
+
+func _resource_census(label: String) -> Dictionary:
+	phase="scale_soak_census:"+label
+	var result: Dictionary=_resource_sample(label)
+	var service=main.structure_system.citadel_publication
+	var site: Node3D=service.scene_root(region) if not candidate.is_empty() else null
+	var physical_groups_complete:=0
+	var physical_groups_total:=0
+	for diagnostic: Dictionary in service.stats().get("sceneDiagnostics",[]):
+		if diagnostic.get("region")!=region: continue
+		physical_groups_complete=int(diagnostic.get("physicalGroupsComplete",0))
+		physical_groups_total=int(diagnostic.get("physicalGroupsTotal",0))
+		break
+	var stack: Array[Node]=[]
+	if is_instance_valid(site): stack.append(site)
+	var mesh_resources: Dictionary={}
+	var material_resources: Dictionary={}
+	var shape_resources: Dictionary={}
+	result.merge({"citadelPhysicalGroupsComplete":physical_groups_complete,"citadelPhysicalGroupsTotal":physical_groups_total,
+		"siteNodes":0,"siteGeometry":0,"siteMeshes":0,"siteMultiMeshes":0,"siteMultiMeshInstances":0,
+		"siteCollisionShapes":0,"siteStaticBodies":0,"siteShadowCasters":0,"siteVisibilityRanged":0,
+		"uniqueMeshResources":0,"uniqueMaterialResources":0,"uniqueShapeResources":0},true)
+	while not stack.is_empty() and _within_deadline():
+		for unit in range(256):
+			if stack.is_empty(): break
+			var node: Node=stack.pop_back()
+			if not is_instance_valid(node): continue
+			result.siteNodes+=1
+			for child: Node in node.get_children(): stack.append(child)
+			if node is StaticBody3D: result.siteStaticBodies+=1
+			if node is CollisionShape3D and node.shape!=null and not node.disabled:
+				result.siteCollisionShapes+=1; shape_resources[node.shape.get_instance_id()]=true
+			if node is GeometryInstance3D:
+				result.siteGeometry+=1
+				if node.cast_shadow!=GeometryInstance3D.SHADOW_CASTING_SETTING_OFF: result.siteShadowCasters+=1
+				if node.visibility_range_begin>0.0 or node.visibility_range_end>0.0: result.siteVisibilityRanged+=1
+				if node.material_override!=null: material_resources[node.material_override.get_instance_id()]=true
+			if node is MeshInstance3D and node.mesh!=null:
+				result.siteMeshes+=1; mesh_resources[node.mesh.get_instance_id()]=true
+				for surface_index in node.mesh.get_surface_count():
+					var material: Material=node.mesh.surface_get_material(surface_index)
+					if material!=null: material_resources[material.get_instance_id()]=true
+			if node is MultiMeshInstance3D and node.multimesh!=null:
+				result.siteMultiMeshes+=1; result.siteMultiMeshInstances+=node.multimesh.instance_count
+				if node.multimesh.mesh!=null: mesh_resources[node.multimesh.mesh.get_instance_id()]=true
+		await _frame()
+	result.uniqueMeshResources=mesh_resources.size(); result.uniqueMaterialResources=material_resources.size(); result.uniqueShapeResources=shape_resources.size()
+	result.censusComplete=stack.is_empty()
+	result.censusScope="Live Citadel scene subtree and its deterministic physical-group progress plus engine-wide Performance memory/node/resource/render monitors. Counts do not estimate GPU allocation bytes."
+	return result
 
 func _navigation_domain_inventory() -> Dictionary:
 	var result := {"passed":false,"reason":"navigation_domain_owner_unavailable","tileKeys":[]}
@@ -804,6 +1355,417 @@ func _navigation_audit_receipt(nav, adapter, key: String, saved: Dictionary, sur
 		return accepted.get("receipt",{}).duplicate()
 	return nav.tile_publication_readiness(key,String(saved.sourceKey),surfaces,links)
 
+func _run_player_scale_inspection() -> Dictionary:
+	# This itinerary is derived from the accepted source samples and bounds. It
+	# drives only ordinary key/mouse input through PlayerController and uses the
+	# production interaction ray for doors; no transform, motor or door API call.
+	phase="scale_player_inspection_prepare"
+	var bounds: AABB=evidence.sceneAudit.visualBounds
+	var gate_sample: Dictionary={}
+	var stair_sample: Dictionary={}
+	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
+		if sample.id=="castle_gatehouse_portcullis": gate_sample=sample
+		elif String(sample.semantic)=="castle_gatehouse_wall_stair_landing": stair_sample=sample
+	if gate_sample.is_empty() or stair_sample.is_empty():
+		return {"passed":false,"reason":"required_gate_or_stair_sample_missing"}
+	var homes: Array[Dictionary]=[]
+	for home_value in evidence.sceneAudit.get("urbanHomeInteriors",[]):
+		if home_value is Dictionary and bool((home_value as Dictionary).get("complete",false)):
+			homes.append(home_value as Dictionary)
+	if homes.is_empty(): return {"passed":false,"reason":"complete_urban_home_sample_missing"}
+	var home: Dictionary=homes[0]
+	var gate_pose: Transform3D=gate_sample.transform
+	var gate_position:=gate_pose.origin
+	var center:=bounds.get_center()
+	var outward_2d:=Vector2(gate_position.x-center.x,gate_position.z-center.z)
+	if absf(outward_2d.x)>=absf(outward_2d.y): outward_2d=Vector2(signf(outward_2d.x),0.0)
+	else: outward_2d=Vector2(0.0,signf(outward_2d.y))
+	if outward_2d.length_squared()<0.5: return {"passed":false,"reason":"gate_outward_axis_unresolved"}
+	var outward:=Vector3(outward_2d.x,0.0,outward_2d.y)
+	var tangent:=Vector3(outward.z,0.0,-outward.x)
+	var half_outward:=absf(outward.x)*bounds.size.x*0.5+absf(outward.z)*bounds.size.z*0.5
+	var half_tangent:=absf(tangent.x)*bounds.size.x*0.5+absf(tangent.z)*bounds.size.z*0.5
+	var side_sign:=1.0 if player.global_position.distance_to(center-outward*half_outward+tangent*half_tangent) \
+		<=player.global_position.distance_to(center-outward*half_outward-tangent*half_tangent) else -1.0
+	var margin:=14.0
+	var perimeter_side:=tangent*side_sign
+	var corner_near:=center-outward*(half_outward+margin)+perimeter_side*(half_tangent+margin)
+	var corner_gate:=center+outward*(half_outward+margin)+perimeter_side*(half_tangent+margin)
+	# The approach finishes close enough to read the opposite curtain wall. Move
+	# straight out to its clear perimeter lane before turning toward the corner;
+	# a diagonal chord can legitimately clip a buttress even though both endpoints
+	# are outside. This remains ordinary player motion over production terrain.
+	var approach_tangent_offset:=clampf((player.global_position-center).dot(tangent),
+		-half_tangent-margin,half_tangent+margin)
+	var curtain_clearance:=center-outward*(half_outward+margin)+tangent*approach_tangent_offset
+	# The operable stance is measured from the source gate plane. Keep the
+	# capsule just outside the closed grille while remaining inside ordinary
+	# action reach; the approach landing itself extends farther outward.
+	var gate_outside:=gate_position+outward*0.65
+	var gate_staging:=gate_outside+perimeter_side*10.0
+	var gate_inside:=gate_position-outward*3.2
+	var stages: Array[Dictionary]=[]
+	for move_spec: Dictionary in [
+		{"label":"curtain_clearance","target":curtain_clearance,"stop":4.0},
+		{"label":"curtain_near_corner","target":corner_near,"stop":3.0},
+		{"label":"curtain_gate_corner","target":corner_gate,"stop":3.2}]:
+		var moved:=await _ordinary_move_to(move_spec.target,180000,float(move_spec.stop),"scale_inspection_"+String(move_spec.label))
+		stages.append({"stage":move_spec.label,"movement":moved})
+		if not moved.get("passed",false): return {"passed":false,"reason":"inspection_route_"+String(move_spec.label),"stages":stages}
+	var gate_staging_move:=await _ordinary_move_to(gate_staging,180000,3.0,"scale_inspection_gate_staging")
+	stages.append({"stage":"gate_staging","movement":gate_staging_move})
+	if not gate_staging_move.get("passed",false): return {"passed":false,"reason":"inspection_route_gate_staging","stages":stages}
+	var gate_route_bounds:=_route_bounds_for_world_points([gate_outside,gate_position,gate_inside],2)
+	var gate_settlement:=await _wait_for_route_physical_settlement(gate_route_bounds,120000,"gate")
+	stages.append({"stage":"gate_settlement","settlement":gate_settlement})
+	if not gate_settlement.get("passed",false): return {"passed":false,"reason":"gate_detail_did_not_settle","stages":stages}
+	var gate_door_settlement:=await _wait_for_live_door(String(gate_sample.id),gate_position,120000,"gate")
+	stages.append({"stage":"gate_door_settlement","settlement":gate_door_settlement})
+	if not gate_door_settlement.get("passed",false): return {"passed":false,"reason":"live_gate_door_missing","stages":stages}
+	# Publish the exact gate route while the player is still at the clear corner.
+	# Walking to the leaf first can legitimately make the occupancy guard retain
+	# an overlapping collision packet indefinitely.
+	var gate_alignment:=gate_position+outward*5.0
+	var gate_alignment_move:=await _ordinary_move_to(gate_alignment,180000,3.0,"scale_inspection_gate_alignment",false)
+	stages.append({"stage":"gate_alignment","movement":gate_alignment_move})
+	if not gate_alignment_move.get("passed",false): return {"passed":false,"reason":"inspection_route_gate_alignment","stages":stages}
+	# The source-derived point is measured from the leaf centre.  A closed
+	# portcullis and the player's capsule reserve the final portion of that line;
+	# standing on the approach's top landing is the intended usable exterior
+	# pose.  The production interaction ray and post-open crossing below remain
+	# the acceptance authorities for reachability and passage.
+	var gate_approach:=await _ordinary_move_to(gate_outside,180000,0.85,"scale_inspection_gate_exterior",false,true)
+	stages.append({"stage":"gate_exterior","movement":gate_approach})
+	if not gate_approach.get("passed",false): return {"passed":false,"reason":"inspection_route_gate_exterior","stages":stages}
+	var gate_door:=_live_door_by_part_id(String(gate_sample.id))
+	if gate_door==null: return {"passed":false,"reason":"live_gate_door_missing","stages":stages}
+	var gate_views:=await _capture_day_night_player_view("gate_exterior",gate_position+Vector3.UP*1.2)
+	stages.append({"stage":"gate_views","views":gate_views})
+	if not gate_views.get("passed",false): return {"passed":false,"reason":"gate_day_night_capture_failed","stages":stages}
+	var gate_open:=await _toggle_door_with_player_input(gate_door,true,"citadel_gate_open")
+	stages.append({"stage":"gate_open","interaction":gate_open})
+	if not gate_open.get("passed",false): return {"passed":false,"reason":"gate_did_not_open_through_player_input","stages":stages}
+	var gate_cross:=await _ordinary_move_to(gate_inside,45000,2.1,"scale_inspection_gate_cross",false,true)
+	var gate_interior_clearance:=(player.global_position-gate_position).dot(-outward)
+	gate_cross["gateInteriorClearance"]=gate_interior_clearance
+	stages.append({"stage":"gate_cross","movement":gate_cross})
+	if not gate_cross.get("passed",false) or gate_interior_clearance<=1.0:
+		return {"passed":false,"reason":"gate_crossing_failed","stages":stages}
+	var room_bounds: AABB=home.worldBounds
+	var street_side:=signf(float(home.streetSide))
+	var home_outside_x:=room_bounds.end.x+1.4 if street_side>0.0 else room_bounds.position.x-1.4
+	var home_outside:=Vector3(home_outside_x,room_bounds.position.y,room_bounds.get_center().z)
+	var home_staging_x:=room_bounds.end.x+8.0 if street_side>0.0 else room_bounds.position.x-8.0
+	var home_staging:=Vector3(home_staging_x,room_bounds.position.y,room_bounds.get_center().z)
+	var home_inside:=Vector3(room_bounds.get_center().x,room_bounds.position.y+0.2,room_bounds.get_center().z)
+	# Each generated civic row can shift laterally with the terrace. Derive the
+	# real gap between its paired façades; assuming one straight central X line
+	# cuts through later offset rows on this valid seed.
+	var civic_rows: Dictionary={}
+	for home_value in evidence.sceneAudit.get("urbanHomeInteriors",[]):
+		if not home_value is Dictionary: continue
+		var row_home:=home_value as Dictionary
+		var row_id:=String(row_home.get("id",""))
+		var side:="left" if row_id.ends_with("_left") else ("right" if row_id.ends_with("_right") else "")
+		if not row_id.begins_with("urban_row_") or side.is_empty(): continue
+		var row_key:=row_id.trim_suffix("_"+side)
+		if not civic_rows.has(row_key): civic_rows[row_key]={}
+		civic_rows[row_key][side]=row_home
+	var civic_row_spans: Array[Dictionary]=[]
+	for row_key: String in civic_rows:
+		var pair: Dictionary=civic_rows[row_key]
+		if not pair.has("left") or not pair.has("right"): continue
+		var first_bounds: AABB=(pair.left as Dictionary).worldBounds
+		var second_bounds: AABB=(pair.right as Dictionary).worldBounds
+		var west: AABB=first_bounds if first_bounds.position.x<second_bounds.position.x else second_bounds
+		var east: AABB=second_bounds if first_bounds.position.x<second_bounds.position.x else first_bounds
+		var gap_low:=west.end.x
+		var gap_high:=east.position.x
+		var overlap_low:=maxf(west.position.z,east.position.z)
+		var overlap_high:=minf(west.end.z,east.end.z)
+		if gap_high-gap_low<1.2 or overlap_high<=overlap_low: continue
+		var row_floor_y:=(first_bounds.position.y+second_bounds.position.y)*0.5
+		civic_row_spans.append({"point":Vector3((gap_low+gap_high)*0.5,row_floor_y,(overlap_low+overlap_high)*0.5),
+			"lowZ":overlap_low,"highZ":overlap_high,"lowX":west.position.x,"highX":east.end.x,"rowId":row_key})
+	civic_row_spans.sort_custom(func(a: Dictionary,b: Dictionary): return (a.point as Vector3).distance_squared_to(gate_position)<(b.point as Vector3).distance_squared_to(gate_position))
+	if civic_row_spans.is_empty(): return {"passed":false,"reason":"source_civic_street_spine_missing","stages":stages}
+	var travel_sign:=signf(home_staging.z-gate_position.z)
+	if is_zero_approx(travel_sign): return {"passed":false,"reason":"source_civic_street_direction_missing","stages":stages}
+	var civic_route_points: Array[Vector3]=[civic_row_spans[0].point]
+	for row_index in range(1,civic_row_spans.size()):
+		var previous: Dictionary=civic_row_spans[row_index-1]
+		var following: Dictionary=civic_row_spans[row_index]
+		var previous_edge:=float(previous.highZ if travel_sign>0.0 else previous.lowZ)
+		var following_edge:=float(following.lowZ if travel_sign>0.0 else following.highZ)
+		if (following_edge-previous_edge)*travel_sign<=0.2:
+			return {"passed":false,"reason":"source_civic_row_transition_missing","stages":stages,
+				"previousRow":previous.rowId,"followingRow":following.rowId}
+		var transition_z:=(previous_edge+following_edge)*0.5
+		civic_route_points.append(Vector3((previous.point as Vector3).x,room_bounds.position.y,transition_z))
+		# The last paired row can carry an authored cross-lane structural span.
+		# When the selected home is beyond that pair, remain in the open band
+		# between rows, go around the pair's source AABB, then continue on its far
+		# side. This uses generated extents and destination direction, not a seed or
+		# collision-specific coordinate exception.
+		var home_side:=signf(home_staging.x-(following.point as Vector3).x)
+		var home_beyond_pair:=row_index==civic_row_spans.size()-1 and not is_zero_approx(home_side) \
+			and (home_staging.x>float(following.highX) or home_staging.x<float(following.lowX))
+		if home_beyond_pair:
+			var bypass_x:=float(following.highX)+4.0 if home_side>0.0 else float(following.lowX)-4.0
+			civic_route_points.append(Vector3(bypass_x,room_bounds.position.y,transition_z))
+			civic_route_points.append(Vector3(bypass_x,room_bounds.position.y,
+				float(following.highZ)+4.0 if travel_sign>0.0 else float(following.lowZ)-4.0))
+		else:
+			civic_route_points.append(Vector3((following.point as Vector3).x,room_bounds.position.y,transition_z))
+			civic_route_points.append(following.point)
+	# Shift from the final row gap toward the selected home's street side only
+	# in the source-declared open band between that row and the home footprint.
+	var last_span: Dictionary=civic_row_spans.back()
+	var last_edge:=float(last_span.highZ if travel_sign>0.0 else last_span.lowZ)
+	var home_near_edge:=room_bounds.position.z if travel_sign>0.0 else room_bounds.end.z
+	if (home_near_edge-last_edge)*travel_sign<=0.2:
+		return {"passed":false,"reason":"source_civic_home_transition_missing","stages":stages}
+	var home_transition_z:=(last_edge+home_near_edge)*0.5
+	civic_route_points.append(Vector3((civic_route_points.back() as Vector3).x,room_bounds.position.y,home_transition_z))
+	civic_route_points.append(Vector3(home_staging.x,room_bounds.position.y,home_transition_z))
+	civic_route_points.append(home_staging)
+	var market_platform_target:=Vector3.INF
+	for span: Dictionary in civic_row_spans:
+		if String(span.rowId)=="urban_row_02":
+			market_platform_target=span.point
+			break
+	if not market_platform_target.is_finite():
+		return {"passed":false,"reason":"source_market_platform_row_missing","stages":stages}
+	var market_capture_route_index:=0
+	var market_capture_distance:=INF
+	for route_index in range(civic_route_points.size()):
+		var distance:=(civic_route_points[route_index] as Vector3).distance_squared_to(market_platform_target)
+		if distance<market_capture_distance:
+			market_capture_distance=distance
+			market_capture_route_index=route_index
+	# Photograph from the preceding ordinary street waypoint, rather than from
+	# the plaza centre where its four approaches would be hidden beneath the
+	# player's feet. The route remains generated-row-derived and collision-backed.
+	market_capture_route_index=maxi(0,market_capture_route_index-1)
+	var civic_lane_alignment:=Vector3(civic_route_points[0].x,room_bounds.position.y,player.global_position.z)
+	var lane_alignment_move:=await _ordinary_move_to(civic_lane_alignment,45000,0.75,"scale_inspection_civic_lane_alignment",true,false,false)
+	stages.append({"stage":"civic_lane_alignment","movement":lane_alignment_move})
+	if not lane_alignment_move.get("passed",false): return {"passed":false,"reason":"civic_lane_alignment_failed","stages":stages}
+	for route_index in range(civic_route_points.size()):
+		# The generated street spine climbs successive source-authored terraces.
+		# Hold ordinary jump across the lane rather than treating a terrace riser as
+		# a flat-ground obstruction and oscillating against its static collider.
+		var route_move:=await _ordinary_move_to(civic_route_points[route_index],60000,0.65,"scale_inspection_civic_route_%02d"%route_index,true,true)
+		stages.append({"stage":"civic_route_%02d"%route_index,"movement":route_move,"sourcePoint":civic_route_points[route_index]})
+		if not route_move.get("passed",false): return {"passed":false,"reason":"civic_route_failed","stages":stages}
+	# Reaching the home tile submits its exact foreground closure through the
+	# ordinary streaming owner. Give that handoff several real frames, then leave
+	# the not-yet-active shared civic paving by the same collision-backed route.
+	# The accepted packet remains retryable; activation must never occur beneath
+	# the player merely to make this inspection proceed.
+	for handoff_frame in range(30): await _frame()
+	for route_index in range(civic_route_points.size()-1,-1,-1):
+		var reverse_route:=await _ordinary_move_to(civic_route_points[route_index],60000,0.65,"scale_inspection_home_clearance_route_%02d"%route_index,true,true)
+		stages.append({"stage":"home_clearance_route_%02d"%route_index,"movement":reverse_route,"sourcePoint":civic_route_points[route_index]})
+		if not reverse_route.get("passed",false): return {"passed":false,"reason":"home_clearance_route_failed","stages":stages}
+	# A home transaction may depend on shared civic paving whose collision spans
+	# the gate landing. Wait at the already traversed exterior corner, beyond the
+	# accepted visual/collision envelope, so the pinned packet can finish without
+	# publishing beneath the player.
+	var home_publication_clearance:=await _ordinary_move_to(corner_gate,180000,3.2,"scale_inspection_home_publication_clearance")
+	stages.append({"stage":"home_publication_clearance","movement":home_publication_clearance})
+	if not home_publication_clearance.get("passed",false):
+		return {"passed":false,"reason":"home_publication_clearance_failed","stages":stages}
+	var home_low:=room_bounds.position
+	var home_high:=room_bounds.end
+	var home_route_bounds:=_route_bounds_for_world_points([
+		Vector3(home_low.x,home_low.y,home_low.z),Vector3(home_high.x,home_high.y,home_high.z),
+		home_outside,home_inside],1)
+	# Require the complete source-derived room, doorway and one-cell physical
+	# border.  The separate staging point deliberately stays outside this proof:
+	# including the player's current capsule in a replacement-collision query
+	# correctly leaves its overlapping paving transactions occupancy-blocked and
+	# would make an otherwise ready furnished room impossible to acknowledge.
+	var home_settlement:=await _wait_for_route_physical_settlement(home_route_bounds,240000,"home")
+	stages.append({"stage":"home_settlement","settlement":home_settlement})
+	if not home_settlement.get("passed",false): return {"passed":false,"reason":"home_detail_did_not_settle","stages":stages}
+	var home_door_id:=String(home.id)+"_door"
+	var home_door_settlement:=await _wait_for_live_door(home_door_id,home_outside,120000,"home")
+	stages.append({"stage":"home_door_settlement","settlement":home_door_settlement})
+	if not home_door_settlement.get("passed",false): return {"passed":false,"reason":"live_home_door_missing","stages":stages}
+	var return_gate_staging:=await _ordinary_move_to(gate_staging,180000,3.0,"scale_inspection_return_gate_staging")
+	stages.append({"stage":"return_gate_staging","movement":return_gate_staging})
+	if not return_gate_staging.get("passed",false): return {"passed":false,"reason":"return_gate_staging_failed","stages":stages}
+	var return_gate_alignment:=await _ordinary_move_to(gate_alignment,60000,2.5,"scale_inspection_return_gate_alignment",false)
+	stages.append({"stage":"return_gate_alignment","movement":return_gate_alignment})
+	if not return_gate_alignment.get("passed",false): return {"passed":false,"reason":"return_gate_alignment_failed","stages":stages}
+	var return_gate_cross:=await _ordinary_move_to(gate_inside,45000,2.0,"scale_inspection_return_gate_cross",false,true)
+	stages.append({"stage":"return_gate_cross","movement":return_gate_cross})
+	if not return_gate_cross.get("passed",false): return {"passed":false,"reason":"return_gate_cross_failed","stages":stages}
+	var return_lane_alignment:=await _ordinary_move_to(civic_lane_alignment,45000,0.75,"scale_inspection_return_lane_alignment",true,false,false)
+	stages.append({"stage":"return_lane_alignment","movement":return_lane_alignment})
+	if not return_lane_alignment.get("passed",false): return {"passed":false,"reason":"return_lane_alignment_failed","stages":stages}
+	for route_index in range(civic_route_points.size()):
+		var return_route:=await _ordinary_move_to(civic_route_points[route_index],60000,0.65,"scale_inspection_return_route_%02d"%route_index,true,true)
+		stages.append({"stage":"return_route_%02d"%route_index,"movement":return_route,"sourcePoint":civic_route_points[route_index]})
+		if not return_route.get("passed",false): return {"passed":false,"reason":"return_route_failed","stages":stages}
+		if route_index==market_capture_route_index:
+			var market_views:=await _capture_day_night_player_view("market_platform_slope",market_platform_target+Vector3.UP*0.8)
+			stages.append({"stage":"market_platform_slope_views","views":market_views,
+				"sourceTarget":market_platform_target,"routeIndex":route_index})
+			if not market_views.get("passed",false):
+				return {"passed":false,"reason":"market_platform_slope_capture_failed","stages":stages}
+	var street_move:=await _ordinary_move_to(home_outside,120000,0.65,"scale_inspection_civic_street",false,true)
+	stages.append({"stage":"civic_street","movement":street_move})
+	if not street_move.get("passed",false): return {"passed":false,"reason":"civic_street_route_failed","stages":stages}
+	var home_door:=_live_door_by_part_id(home_door_id)
+	if home_door==null: return {"passed":false,"reason":"live_home_door_missing","stages":stages}
+	var street_views:=await _capture_day_night_player_view("civic_street",home_door.global_position+Vector3.UP*1.0)
+	stages.append({"stage":"street_views","views":street_views})
+	if not street_views.get("passed",false): return {"passed":false,"reason":"street_day_night_capture_failed","stages":stages}
+	var home_open:=await _toggle_door_with_player_input(home_door,true,"citadel_home_open")
+	stages.append({"stage":"home_open","interaction":home_open})
+	if not home_open.get("passed",false): return {"passed":false,"reason":"home_door_did_not_open_through_player_input","stages":stages}
+	var home_entry:=await _ordinary_move_to(home_inside,45000,1.25,"scale_inspection_home_entry",false,true)
+	stages.append({"stage":"home_entry","movement":home_entry})
+	var strict_room_xz:=Rect2(Vector2(room_bounds.position.x,room_bounds.position.z)+Vector2.ONE*0.45,
+		Vector2(room_bounds.size.x,room_bounds.size.z)-Vector2.ONE*0.90)
+	var strict_inside:=strict_room_xz.has_point(Vector2(player.global_position.x,player.global_position.z)) \
+		and player.global_position.y>=room_bounds.position.y-0.20 and player.global_position.y<=room_bounds.end.y
+	if not home_entry.get("passed",false) or not strict_inside:
+		return {"passed":false,"reason":"strict_furnished_home_entry_failed","stages":stages,"roomBounds":room_bounds}
+	var furniture_target:=home_inside+Vector3.UP*0.8
+	var furniture_samples: Array=home.get("samples",[])
+	if not furniture_samples.is_empty(): furniture_target=(furniture_samples[0] as Dictionary).get("position",furniture_target)+Vector3.UP*0.4
+	var interior_views:=await _capture_day_night_player_view("furnished_home_interior",furniture_target)
+	stages.append({"stage":"interior_views","views":interior_views,"strictInside":true,"roomBounds":room_bounds})
+	if not interior_views.get("passed",false): return {"passed":false,"reason":"interior_day_night_capture_failed","stages":stages}
+	var home_exit:=await _ordinary_move_to(home_outside,45000,1.0,"scale_inspection_home_exit",false,true)
+	stages.append({"stage":"home_exit","movement":home_exit})
+	if not home_exit.get("passed",false): return {"passed":false,"reason":"home_exit_failed","stages":stages}
+	var home_close:=await _toggle_door_with_player_input(home_door,false,"citadel_home_close")
+	stages.append({"stage":"home_close","interaction":home_close})
+	if not home_close.get("passed",false): return {"passed":false,"reason":"home_door_close_failed","stages":stages}
+	var stair_pose: Transform3D=stair_sample.transform
+	var stair_target:=stair_pose*Vector3(0.0,float(stair_sample.size.y)*0.5+0.1,0.0)
+	var stair_move:=await _ordinary_move_to(stair_target,120000,1.0,"scale_inspection_gate_stair")
+	stages.append({"stage":"gate_stair","movement":stair_move})
+	if not stair_move.get("passed",false): return {"passed":false,"reason":"gate_stair_route_failed","stages":stages}
+	var stair_views:=await _capture_day_night_player_view("gate_stair",stair_target+Vector3.UP*1.0)
+	stages.append({"stage":"stair_views","views":stair_views})
+	if not stair_views.get("passed",false): return {"passed":false,"reason":"stair_day_night_capture_failed","stages":stages}
+	return {"passed":true,"reason":"ordinary_player_scale_inspection_complete","stages":stages,
+		"homeId":home.id,"roomBounds":room_bounds,"scope":"Source-derived perimeter itinerary, ordinary W/Shift/mouse input, production collision and right-click door interactions; no transform, motor or door-authority helper call."}
+
+func _nearest_live_door(target: Vector3, max_distance: float) -> Node3D:
+	var site: Node3D=main.structure_system.citadel_publication.scene_root(region)
+	if not is_instance_valid(site): return null
+	var best: Node3D=null
+	var best_distance:=max_distance
+	var stack: Array[Node]=[site]
+	while not stack.is_empty():
+		var node: Node=stack.pop_back()
+		for child: Node in node.get_children(): stack.append(child)
+		if node is Node3D and String(node.get_meta("block_type",""))=="door":
+			var distance:=Vector2(node.global_position.x-target.x,node.global_position.z-target.z).length()
+			if distance<=best_distance: best=node; best_distance=distance
+	return best
+
+
+func _live_door_by_part_id(part_id: String) -> Node3D:
+	var site: Node3D=main.structure_system.citadel_publication.scene_root(region)
+	if not is_instance_valid(site) or part_id.is_empty(): return null
+	var stack: Array[Node]=[site]
+	while not stack.is_empty():
+		var node: Node=stack.pop_back()
+		for child: Node in node.get_children(): stack.append(child)
+		if node is Node3D and String(node.get_meta("block_type",""))=="door" \
+				and String(node.get_meta("building_part_id",""))==part_id:
+			return node as Node3D
+	return null
+
+
+func _wait_for_live_door(part_id: String, expected_position: Vector3, timeout_msec: int, label: String) -> Dictionary:
+	phase="scale_inspection_live_door_settlement:"+label
+	var begun:=Time.get_ticks_msec()
+	var stable_frames:=0
+	var last_publication: Dictionary={}
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await _frame()
+		var door:=_live_door_by_part_id(part_id)
+		last_publication=main.structure_system.citadel_publication.stats()
+		var current: bool=is_instance_valid(door) and door.global_position.distance_to(expected_position)<=0.25 \
+			and last_publication.get("failures",{}).is_empty()
+		stable_frames=stable_frames+1 if current else 0
+		if stable_frames>=30:
+			return {"passed":true,"reason":"source_door_live","partId":part_id,
+				"elapsedMsec":Time.get_ticks_msec()-begun,"stableFrames":stable_frames,
+				"position":door.global_position,"expectedPosition":expected_position}
+	return {"passed":false,"reason":"source_door_not_live","partId":part_id,
+		"elapsedMsec":Time.get_ticks_msec()-begun,"stableFrames":stable_frames,"publication":last_publication}
+
+func _toggle_door_with_player_input(door: Node3D, desired_open: bool, label: String) -> Dictionary:
+	if not is_instance_valid(door): return {"passed":false,"reason":"door_missing"}
+	main.capture_mouse_if_no_modal()
+	var hit: Dictionary={}
+	var attempts:=0
+	for attempt in range(120):
+		attempts=attempt+1
+		var target:=door.global_position+Vector3.UP*0.65
+		var direction: Vector3=(target-player.camera.global_position).normalized()
+		var yaw_delta:=wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
+		var pitch_delta:=atan2(direction.y,Vector2(direction.x,direction.z).length())-float(player.get("pitch"))
+		var motion:=InputEventMouseMotion.new()
+		motion.relative=Vector2(-yaw_delta,-pitch_delta)*0.12/maxf(0.0001,float(player.get("mouse_sensitivity")))
+		if bool(player.get("invert_y")): motion.relative.y=-motion.relative.y
+		root.push_input(motion)
+		await physics_frame
+		await _frame()
+		hit=main.focused_interaction_hit()
+		if main.interaction_block_from_collider(hit.get("collider"))==door: break
+	if main.interaction_block_from_collider(hit.get("collider"))!=door:
+		return {"passed":false,"reason":"door_not_in_production_interaction_ray","attempts":attempts,"hit":hit}
+	for pressed: bool in [true,false]:
+		var click:=InputEventMouseButton.new()
+		click.button_index=MOUSE_BUTTON_RIGHT; click.pressed=pressed
+		click.position=root.get_visible_rect().size*0.5; click.global_position=click.position
+		root.push_input(click)
+	for frame in range(24): await physics_frame
+	var actual_open:=bool(door.get_meta("open",false))
+	return {"passed":actual_open==desired_open,"reason":"door_state_reached" if actual_open==desired_open else "door_state_mismatch",
+		"label":label,"attempts":attempts,"desiredOpen":desired_open,"actualOpen":actual_open,
+		"doorPath":String(main.get_path_to(door)),"scope":"Production focus ray and ordinary viewport right-click input."}
+
+func _capture_day_night_player_view(label: String, target: Vector3) -> Dictionary:
+	var aimed:=false
+	var aim_attempts:=0
+	for attempt in range(10):
+		aim_attempts=attempt+1
+		if await _look_toward_world_xz(target):
+			aimed=true
+			break
+		await physics_frame
+	if not aimed: return {"passed":false,"reason":"player_view_aim_failed","aimAttempts":aim_attempts}
+	var day_saved:=await _capture("player_day_"+label,"ordinary_player_viewport")
+	var original_launch_options: Dictionary=main.launch_options
+	var original_force_daytime:=bool(original_launch_options.forceDaytime)
+	var original_time:=float(main.time_of_day)
+	var inspection_launch_options: Dictionary=original_launch_options.duplicate(true)
+	inspection_launch_options.forceDaytime=false
+	main.launch_options=inspection_launch_options
+	main.time_of_day=0.75
+	for frame in range(12): await _frame()
+	var night_environment:={"clockPhase":main.clock_phase(),"nightFactor":main.clock_night_factor(),"weather":main.weather_system.snapshot()}
+	var night_saved:=await _capture("player_night_"+label,"ordinary_player_viewport")
+	main.launch_options=original_launch_options
+	main.time_of_day=original_time
+	for frame in range(12): await _frame()
+	var restored:=not original_force_daytime or is_equal_approx(main.clock_phase(),0.5)
+	return {"passed":day_saved and night_saved and float(night_environment.nightFactor)>0.75 and restored,
+		"daySaved":day_saved,"nightSaved":night_saved,"nightEnvironment":night_environment,"daytimeRestored":restored,
+		"aimAttempts":aim_attempts,
+		"scope":"Same live player pose/camera under production day and night sky updates; a delimited diagnostic clock change is restored after capture."}
+
 func _capture_inspection_views() -> Dictionary:
 	# Render the existing live world from explicitly diagnostic cameras. This does
 	# not move the player, publish geometry, change lighting or prove traversal.
@@ -978,7 +1940,11 @@ func _approach_until_scene_publication() -> Dictionary:
 	# detours before the retained window reaches a roughly 400 m Citadel.  Keep
 	# this below the overall watchdog while allowing representative sprint travel
 	# to reach exact demand without changing position or bypassing collision.
-	var until := mini(deadline-10000,begun+(240000 if far_discovery else 20000))
+	# A scale soak must first earn its comparable near state through the same
+	# kilometre-scale ordinary approach. Allow recovery around generated cliffs
+	# without weakening the ordinary-input or collision requirements.
+	var far_budget_msec:=360000 if scale_soak_seconds>0 else 240000
+	var until := mini(deadline-10000,begun+(far_budget_msec if far_discovery else 20000))
 	var next_sample := begun
 	var strafe_until := 0
 	var jump_until := 0
@@ -1772,7 +2738,7 @@ func _frame() -> void:
 	await process_frame
 	if Time.get_ticks_msec()>=next_progress:
 		next_progress = Time.get_ticks_msec()+1000
-		var compact_movement_observer := phase=="ordinary_input_approach"
+		var compact_movement_observer := phase.begins_with("ordinary_input_") or phase.begins_with("scale_soak_leave_") or phase.begins_with("scale_soak_revisit_")
 		var observation_started := Time.get_ticks_usec()
 		if compact_movement_observer:
 			# This progress heartbeat observes only bounded values already owned by
@@ -1993,7 +2959,8 @@ func _finish(outcome: String,reason: String) -> void:
 		"evidenceLevel":"headed initial-location New Game diagnostic; title UI bypassed; ordinary observer admission and service publication" if not spawn_cell.is_empty() else "headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
 		"fixtureChanges":["Main seed and optional initial spawn selection before attachment; no generated artifact prewarm","zero setup teleports; production startup physics readiness" if not spawn_cell.is_empty() else "up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","bounded ordinary W/Shift approach with brief jumps and lateral recovery","labelled diagnostic inspection cameras after player approach","isolated ordinary save directory"],
 		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
-		"manualInspectionSeconds":manual_seconds,
+		"manualInspectionSeconds":manual_seconds,"scaleSoakSeconds":scale_soak_seconds,
+		"playerInspectionOnly":player_inspection_only,
 		"shutdown":"manual inspection follows readiness; user exit or bounded session expiry" if manual_seconds>0 and passed else "ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})
 	passed=passed and report_written
 	print("CITADEL CANDIDATE TELEPORT outcome=",outcome," reason=",reason," placements=",placements.size()," passed=",passed)

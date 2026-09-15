@@ -86,6 +86,8 @@ var _group_requests: Dictionary = {}
 var _demand_owners: Dictionary = {}
 var _request_heap: Array = []
 var _request_sequence := 0
+var _packet_partition_sequences: Dictionary = {}
+var _packet_partition_sequence := 0
 var _background_cursor := 0
 var _selection_stack: Array = []
 var _selection_groups: Array[String] = []
@@ -103,6 +105,8 @@ var _transaction_furniture_cursor := 0
 var _transaction_tree_cursor := 0
 var _transaction_visual_cursor := 0
 var _occupied_transactions: Array[Dictionary] = []
+var _occupied_group_ids: Dictionary = {}
+var _occupied_blocked_requests: Array[Dictionary] = []
 var _group_receipts: Dictionary = {}
 var _member_witnesses: Dictionary = {}
 var _boundary_witnesses: Dictionary = {}
@@ -254,6 +258,14 @@ func activate_physical_group_packet_scene(expected_transaction_id: int) -> Dicti
 	if _building == null:
 		_phase = "building_begin"
 	else:
+		# A prior transaction can finish its group receipt while a late static
+		# metadata/batch boundary is still owned by the resident publisher.  That
+		# boundary is retryable work, not a source/session mismatch. Drain it before
+		# attaching the next immutable packet; the transaction and inbox stay pinned.
+		if _building.has_pending_static_flush() or not _building._pending_publication_boundary.is_empty():
+			_phase = "packet_attach_boundary"
+			return {"status":"pending_budget","reason":"physical_packet_prior_boundary_pending",
+				"binding":_binding,"publicationTransactionId":expected_transaction_id}
 		# Subsequent closures stay in the exact same root and publisher session.
 		# The initial restored source is the immutable witness for every later
 		# packet, so no later worker result can replace earlier physical owners.
@@ -261,7 +273,12 @@ func activate_physical_group_packet_scene(expected_transaction_id: int) -> Dicti
 			if not _packet_static_only_groups.is_empty() and _packet_static_only_groups.size()==packet.group_ids.size() \
 			else _building.attach_physical_group_packet_scene(base,packet,_blueprint,_root,_binding,packet_options)
 		_cpu["packetAttach"] = attached
-		if not attached.get("ready",false): return {"status":"rejected","reason":String(attached.get("reason","physical_packet_session_attach_failed"))}
+		if not attached.get("ready",false):
+			var rejection := attached.duplicate(true)
+			rejection["status"] = "rejected"
+			rejection["transactionId"] = expected_transaction_id
+			rejection["phase"] = _phase
+			return rejection
 		_phase = "building_finish" if transaction.groupIds.is_empty() else "building"
 	return {"status":"pending_budget","binding":_binding,"publicationTransactionId":expected_transaction_id}
 
@@ -406,6 +423,8 @@ func take_retirement_payload() -> Dictionary:
 	_group_requests = {}
 	_demand_owners = {}
 	_request_heap = []
+	_packet_partition_sequences = {}
+	_packet_partition_sequence = 0
 	_selection_stack = []
 	_selection_groups = []
 	_selection_members = 0
@@ -416,6 +435,8 @@ func take_retirement_payload() -> Dictionary:
 	_selection_set = {}
 	_transaction = {}
 	_occupied_transactions = []
+	_occupied_group_ids = {}
+	_occupied_blocked_requests = []
 	_group_receipts = {}
 	_member_witnesses = {}
 	_boundary_witnesses = {}
@@ -479,7 +500,10 @@ func source_dependency_description(expected_binding: Dictionary):
 func source_dependency_requirements(bounds: Rect2i, expected_binding: Dictionary) -> Dictionary:
 	if not _group_owner_available(expected_binding):
 		return {"status":"pending","reason":"structure_source_owner_unavailable"}
-	var result: Dictionary = _spatial.regional_group_requirements(bounds)
+	# Spatial indexes are sealed immutable worker output. Runtime acceptance adds
+	# current door portal/link receipts, so take an owned deep copy before
+	# decorating either the result or its nested crossing records.
+	var result: Dictionary = _spatial.regional_group_requirements(bounds).duplicate(true)
 	if result.get("status") != "described": return result
 	var proof: Dictionary = _begin_physical_proof("source_requirements",expected_binding)
 	var receipts: Dictionary = {}
@@ -687,6 +711,14 @@ func replace_publication_group_demands(requests: Array, expected_binding: Dictio
 	_demand_owners = owners
 	_group_requests = {}
 	_request_heap.clear()
+	_occupied_blocked_requests.clear()
+	# A foreground closure is normally emitted in view/readiness order, while
+	# source IDs inside it are semantic. Retain the first occurrence of each
+	# spatial packet partition, then keep its peers adjacent in the heap. Without
+	# this packet-local rank an interleaved Citadel closure pins one tiny worker
+	# packet whenever the next semantic ID happens to live in another block.
+	_packet_partition_sequences = {}
+	_packet_partition_sequence = 0
 	for id: String in desired:
 		if _group_receipts.has(id): continue
 		# Preserve original age when priority/owner changes without removing the
@@ -871,11 +903,22 @@ func _defer_unoffered_packet_transaction() -> void:
 
 
 func _enqueue_group(id: String, priority: int) -> void:
-	if _group_receipts.has(id): return
+	# A parked occupancy transaction still owns its exact uncommitted groups.
+	# Demand refresh may rebuild the heap while that actor remains in place, but
+	# it must not compile a second packet for the same physical members.
+	if _group_receipts.has(id) or _occupied_group_ids.has(id): return
 	var previous: Dictionary = _group_requests.get(id,{})
 	if not previous.is_empty() and int(previous.priority) <= priority: return
 	if previous.is_empty(): _request_sequence += 1
-	var entry: Dictionary = {"id":id,"priority":priority,"sequence":previous.get("sequence",_request_sequence)}
+	var partition_sequence := 0
+	if _base_packet_mode:
+		var partition := _packet_partition_key(id)
+		if not _packet_partition_sequences.has(partition):
+			_packet_partition_sequence += 1
+			_packet_partition_sequences[partition] = _packet_partition_sequence
+		partition_sequence = int(_packet_partition_sequences[partition])
+	var entry: Dictionary = {"id":id,"priority":priority,"sequence":previous.get("sequence",_request_sequence),
+		"packetPartitionSequence":partition_sequence}
 	_group_requests[id] = entry
 	_request_heap.append(entry)
 	var index: int = _request_heap.size()-1
@@ -888,8 +931,41 @@ func _enqueue_group(id: String, priority: int) -> void:
 		index = parent_index
 
 
+func _group_closure_reserved_by_occupancy(group_id: String) -> bool:
+	if _occupied_group_ids.is_empty(): return false
+	var pending: Array[String] = [group_id]
+	var visited: Dictionary = {}
+	while not pending.is_empty():
+		var id: String = pending.pop_back()
+		if visited.has(id): continue
+		visited[id] = true
+		if _occupied_group_ids.has(id): return true
+		for dependency: String in _groups.groups.get(id,{}).get("dependencies",[]): pending.append(dependency)
+	return false
+
+
+func _release_occupancy_blocked_requests() -> void:
+	if _occupied_blocked_requests.is_empty(): return
+	var retained: Array[Dictionary] = []
+	for entry: Dictionary in _occupied_blocked_requests:
+		var id := String(entry.get("id",""))
+		if id.is_empty() or _group_receipts.has(id) or not _group_requests.has(id): continue
+		if _group_closure_reserved_by_occupancy(id):
+			retained.append(entry)
+			continue
+		# Reuse the original request age. The sentinel makes the normal heap
+		# insertion path replace this still-owned request without inventing a new
+		# demand or allowing a duplicate scope.
+		_group_requests[id] = {"id":id,"priority":2147483647,"sequence":entry.get("sequence",_request_sequence)}
+		_enqueue_group(id,int(entry.get("priority",2147483647)))
+	_occupied_blocked_requests = retained
+
+
 func _request_precedes(a: Dictionary, b: Dictionary) -> bool:
-	return int(a.priority)<int(b.priority) or (int(a.priority)==int(b.priority) and int(a.sequence)<int(b.sequence))
+	if int(a.priority)!=int(b.priority): return int(a.priority)<int(b.priority)
+	if _base_packet_mode and int(a.get("packetPartitionSequence",0))!=int(b.get("packetPartitionSequence",0)):
+		return int(a.get("packetPartitionSequence",0))<int(b.get("packetPartitionSequence",0))
+	return int(a.sequence)<int(b.sequence)
 
 
 func _pop_request() -> Dictionary:
@@ -934,11 +1010,15 @@ func pending_publication_transaction() -> Dictionary:
 		if _selection_stack.is_empty():
 			if _base_packet_mode and not _selection_groups.is_empty():
 				var next_entry := _peek_request()
-				if next_entry.is_empty() or _packet_partition_key(String(next_entry.id)) != _selection_partition_key:
+				if next_entry.is_empty() or _selection_soft_limit_reached() \
+						or _packet_partition_key(String(next_entry.id)) != _selection_partition_key:
 					return _pin_transaction()
 			var entry: Dictionary = _pop_request()
 			if not entry.is_empty():
 				if not is_same(_group_requests.get(entry.id),entry) or _group_receipts.has(entry.id) or _selection_set.has(entry.id): continue
+				if _group_closure_reserved_by_occupancy(String(entry.id)):
+					_occupied_blocked_requests.append(entry)
+					continue
 				_selection_has_demand = _selection_has_demand or int(entry.priority)<2147483647
 				if _base_packet_mode and _selection_groups.is_empty():
 					_selection_partition_key = _packet_partition_key(String(entry.id))
@@ -981,12 +1061,11 @@ func pending_publication_transaction() -> Dictionary:
 		var group_bytes: int = group.buildingIndices.size()*ESTIMATED_BUILDING_MEMBER_BYTES \
 			+group.furnitureIndices.size()*ESTIMATED_FURNITURE_MEMBER_BYTES \
 			+group.treeIndices.size()*ESTIMATED_TREE_MEMBER_BYTES+group_collisions*ESTIMATED_COLLISION_PROOF_BYTES
-		if not _selection_groups.is_empty() and (_selection_groups.size() >= MAX_TRANSACTION_GROUPS \
-				or _selection_members+members > MAX_TRANSACTION_MEMBERS \
-				or _selection_estimated_bytes+group_bytes > MAX_TRANSACTION_ESTIMATED_BYTES \
-				or _selection_collision_members+group_collisions > MAX_TRANSACTION_COLLISION_MEMBERS \
-				or _selection_registrations+group_registrations > MAX_TRANSACTION_REGISTRATIONS):
-			return _pin_transaction()
+		# Never split one dependency root from the support groups already selected
+		# beneath it. Soft caps are checked above only after the DFS stack empties,
+		# before another independent root is admitted. A closure may therefore
+		# exceed a soft packet target, but cannot publish a child ahead of an
+		# occupancy-deferred support transaction.
 		_selection_stack.pop_back()
 		_selection_groups.append(String(frame.id))
 		_selection_set[frame.id] = true
@@ -994,8 +1073,6 @@ func pending_publication_transaction() -> Dictionary:
 		_selection_estimated_bytes += group_bytes
 		_selection_collision_members += group_collisions
 		_selection_registrations += group_registrations
-		if _selection_groups.size() >= MAX_TRANSACTION_GROUPS or _selection_members >= MAX_TRANSACTION_MEMBERS:
-			return _pin_transaction()
 		if _base_packet_mode and _selection_stack.is_empty() and _request_heap.is_empty():
 			return _pin_transaction()
 		# Coalesce background peers too. A queued demand is selected first on the
@@ -1009,6 +1086,13 @@ func pending_publication_transaction() -> Dictionary:
 	return {"status":"pending_budget","reason":"publication_group_selection_pending","binding":_binding}
 
 
+func _selection_soft_limit_reached() -> bool:
+	return _selection_groups.size()>=MAX_TRANSACTION_GROUPS or _selection_members>=MAX_TRANSACTION_MEMBERS \
+		or _selection_estimated_bytes>=MAX_TRANSACTION_ESTIMATED_BYTES \
+		or _selection_collision_members>=MAX_TRANSACTION_COLLISION_MEMBERS \
+		or _selection_registrations>=MAX_TRANSACTION_REGISTRATIONS
+
+
 ## Rotate an occupancy-blocked, still immutable transaction behind other
 ## retained work. No member is reselected, rebuilt or acknowledged while it
 ## waits; its exact source binding and transaction id survive every yield.
@@ -1016,6 +1100,11 @@ func defer_occupied_publication_transaction(expected_transaction_id: int, reason
 	if _transaction.is_empty() or int(_transaction.get("transactionId",0))!=expected_transaction_id \
 			or _phase in ["teardown","detach_publishers","retired","consumed"]:
 		return {"status":"rejected","reason":"publication_transaction_changed"}
+	# Rotation is a pre-activation scheduling operation. Once a packet has
+	# attached members or begun a publication boundary, its cursors and witnesses
+	# must remain pinned; the service pauses that transaction in place instead.
+	if _base_packet_mode and _phase!="packet_wait":
+		return {"status":"rejected","reason":"occupied_packet_rotation_after_scene_mutation"}
 	var retained: Dictionary = _transaction.duplicate(true)
 	retained["occupancyWaitReason"] = reason
 	retained["occupancyWaitStartedUsec"] = int(retained.get("occupancyWaitStartedUsec",Time.get_ticks_usec()))
@@ -1023,6 +1112,7 @@ func defer_occupied_publication_transaction(expected_transaction_id: int, reason
 	retained["resumePhase"] = _phase
 	retained.make_read_only()
 	_occupied_transactions.append(retained)
+	for id: String in retained.get("groupIds",[]): _occupied_group_ids[id] = true
 	_transaction = {}
 	_cpu["activePublicationTransaction"] = {}
 	_cpu.erase("activePhysicalPacket")
@@ -1037,6 +1127,7 @@ func defer_occupied_publication_transaction(expected_transaction_id: int, reason
 
 func _restore_occupied_transaction() -> Dictionary:
 	var retained: Dictionary = _occupied_transactions.pop_front()
+	for id: String in retained.get("groupIds",[]): _occupied_group_ids.erase(id)
 	_transaction = retained
 	_cpu["activePublicationTransaction"] = retained
 	if _base_packet_mode:
@@ -1532,13 +1623,19 @@ func _commit_transaction() -> bool:
 	var transaction_groups: Dictionary = {}
 	for id: String in _transaction.groupIds: transaction_groups[id] = true
 	for index: int in _transaction.buildingIndices:
-		var key: String = "building:"+String(_blueprint.parts[index].id)
-		_member_witnesses[key].publicationEpoch = _building.source_part_publication_epoch(String(_blueprint.parts[index].id))
+		var key: String = "building:"+str(_blueprint.parts[index].id)
+		if not _member_witnesses.has(key):
+			return _commit_proof_failure(proof,"publication_transaction_building_witness_missing:%s:%d:%d:%s" % [
+				key,_transaction_building_cursor,_transaction.buildingIndices.size(),str(_transaction.get("transactionId",0))])
+		_member_witnesses[key].publicationEpoch = _building.source_part_publication_epoch(str(_blueprint.parts[index].id))
 	for id: String in _transaction.groupIds:
 		proof.counters.transactionGroups += 1
 		for dependency: String in _groups.groups[id].dependencies:
-			if not transaction_groups.has(dependency) and _physical_group_receipt_with_context(dependency,proof).get("status") != "ready":
-				return _commit_proof_failure(proof,"publication_support_owner_lost")
+			if not transaction_groups.has(dependency):
+				var support_receipt:=_physical_group_receipt_with_context(dependency,proof)
+				if support_receipt.get("status") != "ready":
+					return _commit_proof_failure(proof,"publication_support_unavailable:%s:%s:%s" % [
+						String(support_receipt.get("reason","unknown")),id,dependency])
 		for member: String in _groups.groups[id].members:
 			if not _member_live_with_context(member,proof): return _commit_proof_failure(proof,"publication_group_member_incomplete:"+member)
 	for id: String in _transaction.groupIds:
@@ -1564,6 +1661,7 @@ func _commit_transaction() -> bool:
 		receipt.make_read_only()
 		_group_receipts[id] = receipt
 	_finish_physical_proof(proof)
+	_release_occupancy_blocked_requests()
 	_transaction = {}
 	_cpu["activePublicationTransaction"] = {}
 	_phase = "packet_wait" if _base_packet_mode else "transaction_select"
@@ -1586,6 +1684,13 @@ func _step(remaining_usec: int) -> bool:
 			or not _root.global_transform.is_equal_approx(Transform3D(Basis.IDENTITY, _cpu.profile.origin))):
 		return _fail("publication_root_moved")
 	match _phase:
+		"packet_attach_boundary":
+			var boundary_result: Dictionary = _building.advance_publication_boundary(_root,clampi(remaining_usec,1,4000))
+			if _cancelled: return false
+			if boundary_result.status=="failed": return _fail(String(boundary_result.reason))
+			if boundary_result.status=="ready":
+				_phase="packet_wait"
+				return false
 		"building_begin":
 			_root = Node3D.new()
 			_root.name = "PreparedBuildingScene"

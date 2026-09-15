@@ -685,7 +685,10 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 			row_centers.append(row_z)
 			row_index += 1
 		var rows := row_centers.size()
-		var terrace_step_height := 1.80
+		# The district may bend around buildings, but it does not manufacture
+		# exterior elevation. Natural relief remains terrain authority and only
+		# individual structures may publish foundations above it.
+		var terrace_step_height := 0.0
 		var keep_center_z := courtyard_depth * keep_offset_z
 		var keep_front_z := keep_center_z - keep_depth * 0.5
 		var entry_approach: Dictionary = palace_grammar.get("entryApproach", {}) as Dictionary
@@ -829,7 +832,7 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 					"centerZ": resolved_row_z,
 					"leftDistrictClass": left_district_class,
 					"rightDistrictClass": right_district_class,
-					"terraceElevation": 0.0 if resolved_row_z < first_turn_z else terrace_step_height if resolved_row_z < final_turn_z else terrace_step_height * 2.0,
+					"terraceElevation": 0.0,
 					"frontDirectionLeft": front_direction_left,
 					"frontDirectionRight": front_direction_right
 				})
@@ -838,29 +841,25 @@ static func castle_courtyard_occupancy_lattice(courtyard_width := 0.0, courtyard
 		var first_stair_start_z := first_turn_z + route_half_width
 		var first_stair_end_z := first_stair_start_z + processional_transition_span
 		var first_stair_center_z := first_stair_start_z + processional_center_to_start
-		var processional_transitions: Array[Dictionary] = [
-			{"ordinal": 0, "idPrefix": "castle_terrace_stair_00", "centerX": turn_offset, "centerZ": first_stair_center_z, "width": route_half_width * 2.0 * 1.12 * 1.82, "fromElevation": 0.0, "toElevation": terrace_step_height, "startZ": first_stair_start_z, "endZ": first_stair_end_z},
-			{"ordinal": 1, "idPrefix": "castle_terrace_stair_01", "centerX": 0.0, "centerZ": second_stair_center_z, "width": route_half_width * 2.0 * 1.12 * 1.82, "fromElevation": terrace_step_height, "toElevation": terrace_step_height * 2.0, "startZ": second_stair_start_z, "endZ": second_stair_end_z}
-		]
+		var processional_transitions: Array[Dictionary] = []
 		street_records.append({"id": "processional_00_gate_lane", "x": 0.0, "z": (boulevard_front_z + first_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": first_turn_z - boulevard_front_z, "elevation": 0.0})
 		street_records.append({"id": "processional_01_first_turn", "x": turn_offset * 0.5, "z": first_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": 0.0})
 		street_records.append({"id": "processional_02a_civic_approach", "x": turn_offset, "z": (first_turn_z + first_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": first_stair_start_z - first_turn_z, "elevation": 0.0})
-		street_records.append({"id": "processional_02b_civic_climb", "x": turn_offset, "z": (first_stair_end_z + final_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": final_turn_z - first_stair_end_z, "elevation": terrace_step_height})
+		# Keep the stable record id for saved/generated description parity, but the
+		# former climb is now an ordinary lane beginning where the approach ends.
+		street_records.append({"id": "processional_02b_civic_climb", "x": turn_offset, "z": (first_stair_start_z + final_turn_z) * 0.5, "width": route_half_width * 2.0, "depth": final_turn_z - first_stair_start_z, "elevation": 0.0})
 		street_records.append({"id": "processional_03_final_turn", "x": turn_offset * 0.5, "z": final_turn_z, "width": absf(turn_offset) + route_half_width * 2.0, "depth": route_half_width * 2.0, "elevation": terrace_step_height})
-		var final_stair_owner_ids: Array[String] = []
-		for final_stair_step_index in range(1, 8):
-			final_stair_owner_ids.append("castle_terrace_stair_01_%02d" % final_stair_step_index)
-		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": second_stair_start_z - final_turn_z, "elevation": terrace_step_height, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_start_z, "handoffTransitionOwnerId": String(final_stair_owner_ids.front()), "handoffTransitionSemantic": "castle_processional_step"})
-		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_start_z + second_stair_end_z) * 0.5, "width": route_half_width * 2.0, "depth": second_stair_end_z - second_stair_start_z, "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_stairs", "transitionOwned": true, "allowedTransitionOwnerIds": final_stair_owner_ids, "handoffSeamZ": second_stair_end_z, "handoffSourceOwnerId": String(final_stair_owner_ids.back()), "handoffSourceSemantic": "castle_processional_step", "handoffTransitionOwnerId": "castle_keep_palace_entry_forecourt", "handoffTransitionSemantic": "castle_keep_palace_entry_forecourt"})
+		street_records.append({"id": "processional_04a_palace_approach", "x": 0.0, "z": (final_turn_z + second_stair_start_z) * 0.5, "width": route_half_width * 2.0, "depth": second_stair_start_z - final_turn_z, "elevation": 0.0})
+		street_records.append({"id": "processional_04b_palace_reveal", "x": 0.0, "z": (second_stair_start_z + entry_ramp_start_z) * 0.5, "width": route_half_width * 2.0, "depth": entry_ramp_start_z - second_stair_start_z, "elevation": 0.0, "routeDestination": "palace_entry_stairs"})
 		var entry_transition_owner_ids: Array[String] = ["castle_keep_palace_entry_forecourt"]
 		street_records.append({"id": "processional_04c_palace_entry_transition", "x": 0.0, "z": (entry_ramp_start_z + palace_entry_route_terminal_z) * 0.5, "width": route_half_width * 2.0, "depth": maxf(0.2, palace_entry_route_terminal_z - entry_ramp_start_z), "elevation": terrace_step_height * 2.0, "routeDestination": "palace_entry_forecourt", "transitionOwned": true, "allowedTransitionOwnerIds": entry_transition_owner_ids})
 		var urban_rooms := {
-			"gate": {"center": Vector3(0.0, 0.0, first_turn_z - cell_spacing * 0.28), "width": absf(turn_offset) + route_half_width * 2.0, "depth": cell_spacing * 0.72, "sightlineTarget": Vector3(turn_offset, terrace_step_height + 2.2, first_stair_center_z + 2.0)},
-			"palace": {"center": Vector3(0.0, terrace_step_height * 2.0, (final_turn_z + keep_front_z) * 0.5), "width": keep_width * 1.55, "depth": keep_front_z - final_turn_z, "sightlineTarget": Vector3(0.0, terrace_step_height * 2.0 + clampf(keep_depth * 0.28, 7.0, 10.0), keep_center_z)}
+			"gate": {"center": Vector3(0.0, 0.0, first_turn_z - cell_spacing * 0.28), "width": absf(turn_offset) + route_half_width * 2.0, "depth": cell_spacing * 0.72, "sightlineTarget": Vector3(turn_offset, 2.2, first_stair_center_z + 2.0)},
+			"palace": {"center": Vector3(0.0, 0.0, (final_turn_z + keep_front_z) * 0.5), "width": keep_width * 1.55, "depth": keep_front_z - final_turn_z, "sightlineTarget": Vector3(0.0, clampf(keep_depth * 0.28, 7.0, 10.0), keep_center_z)}
 		}
 		var route_necks := [
-			{"id": "civic_climb", "center": Vector3(turn_offset, terrace_step_height, first_stair_center_z + 3.2), "direction": "z", "clearWidth": route_half_width * 2.0, "clearHeight": 5.0, "projectionDepth": 1.45},
-			{"id": "palace_turn", "center": Vector3(turn_offset * 0.5, terrace_step_height, final_turn_z), "direction": "x", "clearWidth": route_half_width * 2.0, "clearHeight": 5.2, "projectionDepth": 1.65}
+			{"id": "civic_lane", "center": Vector3(turn_offset, 0.0, first_stair_center_z + 3.2), "direction": "z", "clearWidth": route_half_width * 2.0, "clearHeight": 5.0, "projectionDepth": 1.45},
+			{"id": "palace_turn", "center": Vector3(turn_offset * 0.5, 0.0, final_turn_z), "direction": "x", "clearWidth": route_half_width * 2.0, "clearHeight": 5.2, "projectionDepth": 1.65}
 		]
 		return {
 			"mode": "district_grid",

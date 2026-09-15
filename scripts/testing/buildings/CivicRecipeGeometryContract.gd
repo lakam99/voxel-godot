@@ -17,8 +17,9 @@ const EPSILON := 0.025
 const STRUCTURAL_RECIPES_KEY := "citadelStreetHouseStructuralRecipes"
 const CIVIC_DECLARATION_ADDITIONS := {
 	"facadeApertures": ["urban_civic_house_east_stone_facade", "urban_civic_house_east_upper_facade", "urban_civic_house_wall_stone_facade", "urban_civic_house_wall_upper_facade"],
-	STRUCTURAL_RECIPES_KEY: ["urban_civic_house_east", "urban_civic_house_wall"]}
-const COMMONS_LOCAL_GEOMETRY_SIGNATURE := "68678f0ccf3704fed6410aee6ad8de5461f3c88dcfbf9cdc80b87b4698d2815d"
+	STRUCTURAL_RECIPES_KEY: ["urban_civic_house_east", "urban_civic_house_wall"],
+	"citadelUrbanHomes": ["urban_civic_house_east", "urban_civic_house_wall"]}
+const COMMONS_LOCAL_GEOMETRY_SIGNATURE := "4bc2d90341fb68a868def72131d3efd03b7fe421213774e0cd24dbbb9f1ea315"
 const COMMONS_MEMBER_ORDER := [
 	"urban_civic_commons_stone_00", "urban_civic_commons_stone_01", "urban_civic_commons_stone_02", "urban_civic_commons_stone_03",
 	"urban_civic_commons_stone_04", "urban_civic_commons_stone_05", "urban_civic_commons_stone_06", "urban_civic_commons_stone_07",
@@ -64,8 +65,8 @@ func run() -> void:
 	var layout_audits := [audit_commons_layout_overlap(208159), audit_commons_layout_overlap(208160)]
 	for field: String in ["streetPartsByteExact", "streetRoomsByteExact", "streetRecipeRecordsByteExact", "changedExistingDeclarationRejected", "unexpectedDeclarationAdditionRejected"]:
 		check(field, layout_audits.all(func(audit): return bool(audit.get(field, false))))
-	var clear_layout_audit := audit_independently_clear_street_legacy_parity()
-	check("independently_clear_street_layout_retains_full_legacy_parity", bool(clear_layout_audit.get("passed", false)))
+	var clear_layout_audit := audit_ground_level_street_policy()
+	check("street_layout_has_no_recipe_authored_exterior_terraces", bool(clear_layout_audit.get("passed", false)))
 	check("shared_street_row_geometry_is_deterministic_and_malformed_input_fails_closed", audit_street_row_geometry_contract())
 	check("commons_recipe_tracks_generated_row_and_clears_two_seed_layouts", layout_audits.all(func(audit): return bool(audit.get("passed", false))))
 	check("commons_fourteen_piece_local_geometry_is_seed_independent", layout_audits.size() == 2 and layout_audits[0].get("localGeometrySignature") == COMMONS_LOCAL_GEOMETRY_SIGNATURE and layout_audits[1].get("localGeometrySignature") == COMMONS_LOCAL_GEOMETRY_SIGNATURE)
@@ -81,7 +82,7 @@ func run() -> void:
 	check("missing_seat_fails_closed", not bool(audit_civic_parts(missing_seat).get("passed", true)))
 	check("missing_roof_half_fails_closed", not bool(audit_civic_parts(missing_roof).get("passed", true)))
 	var passed := checks.all(func(row): return bool(row.passed))
-	var report := {"passed": passed, "checks": checks, "forwardAudit": forward_audit, "reversedAudit": reversed_audit, "layoutOverlapAudits": layout_audits, "clearStreetLegacyParityAudit": clear_layout_audit, "commonsPhysicalIntentAudit": commons_intent_audit, "unsupportedBeamControls": unsupported_controls, "physicalRoofAudit": {"passed": physical_report.get("passed", false), "failedCivicRoofIds": failed_civic_roof_ids, "violations": physical_report.get("violations", [])}, "civicSignature": civic_signature(forward_parts), "evidenceLevel": "procedural_recipe_geometry_contract", "doesNotProve": "No scene publication, rendered image, gameplay, NPC or navigation acceptance."}
+	var report := {"passed": passed, "checks": checks, "forwardAudit": forward_audit, "reversedAudit": reversed_audit, "layoutOverlapAudits": layout_audits, "groundLevelStreetPolicyAudit": clear_layout_audit, "commonsPhysicalIntentAudit": commons_intent_audit, "unsupportedBeamControls": unsupported_controls, "physicalRoofAudit": {"passed": physical_report.get("passed", false), "failedCivicRoofIds": failed_civic_roof_ids, "violations": physical_report.get("violations", [])}, "civicSignature": civic_signature(forward_parts), "evidenceLevel": "procedural_recipe_geometry_contract", "doesNotProve": "No scene publication, rendered image, gameplay, NPC or navigation acceptance."}
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	var file := FileAccess.open(report_path, FileAccess.WRITE)
 	if file == null:
@@ -115,7 +116,7 @@ func fixture_urban_layout() -> Dictionary:
 
 
 func complete_fixture_urban_layout() -> Dictionary:
-	return {"rowCenterPhases": [0.72, 1.68, 2.62, 3.48], "laneCenters": [0.0, 1.8, 22.0, 12.0], "rowWidthBiases": [0.0, 0.0, 0.0, 0.0], "rowStoreyBonuses": [0, 0, 0, 0], "marketTerraceRise": 1.8, "marketStalls": [{"offset": Vector3(-5.8, 0.0, -2.55), "side": -1.0, "depth": -1.0, "variation": -0.018}, {"offset": Vector3(5.4, 0.0, 1.82), "side": 1.0, "depth": 1.0, "variation": 0.014}, {"offset": Vector3(-2.2, 0.0, 2.72), "side": -1.0, "depth": 1.0, "variation": 0.031}]}
+	return {"rowCenterPhases": [0.72, 1.68, 2.62, 3.48], "laneCenters": [0.0, 1.8, 22.0, 12.0], "rowWidthBiases": [0.0, 0.0, 0.0, 0.0], "rowStoreyBonuses": [0, 0, 0, 0], "marketTerraceRise": 0.0, "marketStalls": [{"offset": Vector3(-5.8, 0.0, -2.55), "side": -1.0, "depth": -1.0, "variation": -0.018}, {"offset": Vector3(5.4, 0.0, 1.82), "side": 1.0, "depth": 1.0, "variation": 0.014}, {"offset": Vector3(-2.2, 0.0, 2.72), "side": -1.0, "depth": 1.0, "variation": 0.031}]}
 
 
 func civic_parts(blueprint) -> Array:
@@ -298,16 +299,9 @@ func audit_commons_layout_overlap(seed: int) -> Dictionary:
 	var street_result: Dictionary = Composer.add_street_sequence(fixture, front_z, keep_front_z, foundation_height, variation, layout)
 	if not bool(street_result.get("ready", false)):
 		return {"passed": false, "seed": seed, "reason": "street_sequence_failed", "detail": street_result}
-	var current_street_signature := blueprint_content_signature(fixture)
 	var street_parts_before: Array = fixture.parts.map(func(part): return part.snapshot()).duplicate(true)
 	var street_rooms_before: Array = fixture.rooms.duplicate(true)
 	var street_recipe_before: Dictionary = fixture.recipe.duplicate(true)
-	var legacy_fixture = Blueprint.new("legacy_street_layout_%d" % seed, seed, "civic")
-	legacy_fixture.set_recipe({"castleGrammar": grammar, "facadeApertures": {}, "urbanPoc": layout})
-	add_legacy_street_sequence(legacy_fixture, front_z, keep_front_z, foundation_height, variation, layout)
-	# Historical whole-street equality is observational for packed layouts.
-	# Its acceptance control below uses independently clear legacy geometry.
-	var legacy_street_byte_exact := current_street_signature == blueprint_content_signature(legacy_fixture)
 	var quarter_result: Dictionary = Composer.add_civic_quarter(fixture, front_z, keep_front_z, foundation_height, variation, layout)
 	if not bool(quarter_result.get("ready", false)):
 		return {"passed": false, "seed": seed, "reason": "civic_quarter_failed", "detail": quarter_result}
@@ -317,6 +311,7 @@ func audit_commons_layout_overlap(seed: int) -> Dictionary:
 	var street_parts_exact: bool = fixture.parts.size() >= street_parts_before.size() and var_to_bytes(fixture.parts.slice(0, street_parts_before.size()).map(func(part): return part.snapshot())) == var_to_bytes(street_parts_before)
 	var street_rooms_exact: bool = fixture.rooms.size() >= street_rooms_before.size() and var_to_bytes(fixture.rooms.slice(0, street_rooms_before.size())) == var_to_bytes(street_rooms_before)
 	var street_recipe_exact := dictionary_preserves_existing_records(street_recipe_before, fixture.recipe)
+	var street_recipe_reason := dictionary_preservation_failure(street_recipe_before, fixture.recipe)
 	var street_byte_exact := street_parts_exact and street_rooms_exact and street_recipe_exact
 	# Explicit synthetic oracle controls on detached copies of actual records.
 	# Civic additions must never license changes to an existing street house.
@@ -340,22 +335,11 @@ func audit_commons_layout_overlap(seed: int) -> Dictionary:
 	var measured_back_north_z: float = world_bounds(back).end.z
 	var edge_clearance_ok := absf(row_two_foundation_south_z - measured_foundation_south_z) <= EPSILON and measured_back_north_z <= measured_foundation_south_z - 0.50 + EPSILON
 	var commons_center: Vector3 = commons_layout.hub
-	var seat = seating.filter(func(part): return String(part.id) == "urban_civic_commons_bench").front()
-	var legacy_fixed_center := Vector3(28.0, foundation_height + 0.244, keep_front_z - 18.0)
-	var fixed_355_delta_z: float = legacy_fixed_center.z + 3.55 - float(seat.position.z)
-	var fixed_180_delta_z: float = legacy_fixed_center.z + 1.80 - float(seat.position.z)
-	var fixed_355 := clone_parts_translated(seating, Vector3(0.0, 0.0, fixed_355_delta_z), "fixed_355_%d" % seed)
-	var fixed_180 := clone_parts_translated(seating, Vector3(0.0, 0.0, fixed_180_delta_z), "fixed_180_%d" % seed)
-	# Fixed offsets were historical failure witnesses against the old streets,
-	# not assertions that an intentionally repaired street must still collide.
-	add_legacy_civic_quarter(legacy_fixture, keep_front_z, foundation_height, variation)
-	var legacy_envelopes: Array = legacy_fixture.parts.filter(func(part): return is_collision_building_envelope(part))
-	var fixed_355_overlaps := seating_envelope_overlaps(legacy_fixture, fixed_355, legacy_envelopes)
-	var fixed_180_overlaps := seating_envelope_overlaps(legacy_fixture, fixed_180, legacy_envelopes)
 	var boundary_delta_z := measured_foundation_south_z + 0.10 - measured_back_north_z
-	var boundary_clone := clone_parts_translated(seating, Vector3(0.0, 0.0, boundary_delta_z), "boundary_%d" % seed)
+	var boundary_delta_x := world_bounds(row_two_foundation).get_center().x - world_bounds(back).get_center().x
+	var boundary_delta_y := world_bounds(row_two_foundation).get_center().y - world_bounds(back).get_center().y
+	var boundary_clone := clone_parts_translated(seating, Vector3(boundary_delta_x, boundary_delta_y, boundary_delta_z), "boundary_%d" % seed)
 	var boundary_overlaps := seating_envelope_overlaps(fixture, boundary_clone, envelopes)
-	var fixed_controls_ok := (not fixed_355_overlaps.is_empty() if seed == 208159 else fixed_355_overlaps.is_empty()) and (fixed_180_overlaps.is_empty() if seed == 208159 else not fixed_180_overlaps.is_empty())
 	var paving = fixture.parts.filter(func(part): return String(part.id) == "urban_civic_quarter_paving").front()
 	var paving_bounds := world_bounds(paving)
 	var commons_footprint: AABB = commons_layout.footprint
@@ -367,46 +351,62 @@ func audit_commons_layout_overlap(seed: int) -> Dictionary:
 	var five_ray_corridor_clear := commons_approach_corridor_clear(commons, commons_center)
 	var local_geometry_signature := commons_local_geometry_signature(commons, commons_center)
 	var quarter_nonpaving_byte_exact := audit_civic_quarter_nonpaving_parity(front_z, keep_front_z, foundation_height, variation, layout)
-	var passed := seating.size() == 6 and commons.size() == 14 and new_overlaps.is_empty() and edge_clearance_ok and fixed_controls_ok and not boundary_overlaps.is_empty() and contained_by_paving and paving_formula_ok and five_ray_corridor_clear and street_byte_exact and quarter_nonpaving_byte_exact and not local_geometry_signature.is_empty()
-	return {"passed": passed, "seed": seed, "seatingCount": seating.size(), "commonsCount": commons.size(), "memberOrder": commons.map(func(part): return String(part.id)), "newOverlapIds": new_overlaps, "fixed355OverlapIds": fixed_355_overlaps, "fixed180OverlapIds": fixed_180_overlaps, "fixedOffsetControlAuthority": "explicit_legacy_street_and_civic_quarter", "fixedControlsOk": fixed_controls_ok, "boundaryOverlapIds": boundary_overlaps, "envelopeCount": envelopes.size(), "frontZ": front_z, "keepFrontZ": keep_front_z, "rowTwoFoundationSouthZ": row_two_foundation_south_z, "measuredFoundationSouthZ": measured_foundation_south_z, "measuredBackNorthZ": measured_back_north_z, "edgeClearance": measured_foundation_south_z - measured_back_north_z, "edgeClearanceOk": edge_clearance_ok, "commonsHub": commons_center, "commonsFootprint": commons_footprint, "containedByCivicPaving": contained_by_paving, "pavingFormulaOk": paving_formula_ok, "pavingBounds": paving_bounds, "fiveRayApproachCorridorClear": five_ray_corridor_clear, "streetRecordsByteExact": street_byte_exact, "streetPartsByteExact": street_parts_exact, "streetRoomsByteExact": street_rooms_exact, "streetRecipeRecordsByteExact": street_recipe_exact, "changedExistingDeclarationRejected": changed_existing_rejected, "unexpectedDeclarationAdditionRejected": extra_declaration_rejected, "expectedDeclarationAdditions": CIVIC_DECLARATION_ADDITIONS, "streetParityAuthority": "current_before_after_civic_insertion", "legacyStreetByteExactObservation": legacy_street_byte_exact, "quarterNonpavingByteExact": quarter_nonpaving_byte_exact, "localGeometrySignature": local_geometry_signature}
+	var passed := seating.size() == 6 and commons.size() == 14 and new_overlaps.is_empty() and edge_clearance_ok and not boundary_overlaps.is_empty() and contained_by_paving and paving_formula_ok and five_ray_corridor_clear and street_byte_exact and quarter_nonpaving_byte_exact and not local_geometry_signature.is_empty()
+	return {"passed": passed, "seed": seed, "seatingCount": seating.size(), "commonsCount": commons.size(), "memberOrder": commons.map(func(part): return String(part.id)), "newOverlapIds": new_overlaps, "boundaryOverlapIds": boundary_overlaps, "negativeControlAuthority": "boundary_clone_at_generated_house_foundation", "envelopeCount": envelopes.size(), "frontZ": front_z, "keepFrontZ": keep_front_z, "rowTwoFoundationSouthZ": row_two_foundation_south_z, "measuredFoundationSouthZ": measured_foundation_south_z, "measuredBackNorthZ": measured_back_north_z, "edgeClearance": measured_foundation_south_z - measured_back_north_z, "edgeClearanceOk": edge_clearance_ok, "commonsHub": commons_center, "commonsFootprint": commons_footprint, "containedByCivicPaving": contained_by_paving, "pavingFormulaOk": paving_formula_ok, "pavingBounds": paving_bounds, "fiveRayApproachCorridorClear": five_ray_corridor_clear, "streetRecordsByteExact": street_byte_exact, "streetPartsByteExact": street_parts_exact, "streetRoomsByteExact": street_rooms_exact, "streetRecipeRecordsByteExact": street_recipe_exact, "streetRecipePreservationFailure": street_recipe_reason, "changedExistingDeclarationRejected": changed_existing_rejected, "unexpectedDeclarationAdditionRejected": extra_declaration_rejected, "expectedDeclarationAdditions": CIVIC_DECLARATION_ADDITIONS, "streetParityAuthority": "current_before_after_civic_insertion", "quarterNonpavingByteExact": quarter_nonpaving_byte_exact, "localGeometrySignature": local_geometry_signature}
 
 
 func dictionary_preserves_existing_records(before: Dictionary, after: Dictionary) -> bool:
-	# Only the exact two civic house records and their four facade declarations
-	# may be appended. Existing record bytes, types and key order remain exact.
-	if var_to_bytes(after.keys()) != var_to_bytes(before.keys()):
-		return false
+	return dictionary_preservation_failure(before, after).is_empty()
+
+
+func dictionary_preservation_failure(before: Dictionary, after: Dictionary) -> String:
+	# Only the two civic houses and their four facade declarations may be added.
+	# The composers prepend keyed declarations but append ordered home records;
+	# every pre-existing record retains exact bytes and relative order.
+	if after.keys().map(func(key): return String(key)) != before.keys().map(func(key): return String(key)):
+		return "top_level_keys_changed"
 	for key in before:
 		if CIVIC_DECLARATION_ADDITIONS.has(key):
-			if not before[key] is Dictionary or not after[key] is Dictionary:
-				return false
-			var old_records: Dictionary = before[key]
-			var new_records: Dictionary = after[key]
-			var expected_keys: Array = old_records.keys()
-			expected_keys.append_array(CIVIC_DECLARATION_ADDITIONS[key])
-			if var_to_bytes(new_records.keys()) != var_to_bytes(expected_keys):
-				return false
-			for record_key in old_records:
-				if var_to_bytes(old_records[record_key]) != var_to_bytes(new_records[record_key]):
-					return false
+			var additions: Array = CIVIC_DECLARATION_ADDITIONS[key]
+			if before[key] is Dictionary and after[key] is Dictionary:
+				var old_records: Dictionary = before[key]
+				var new_records: Dictionary = after[key]
+				var actual_key_strings: Array = new_records.keys().map(func(record_key): return String(record_key))
+				var addition_strings: Array = additions.map(func(record_key): return String(record_key))
+				var old_key_strings: Array = old_records.keys().map(func(record_key): return String(record_key))
+				var actual_additions: Array = actual_key_strings.filter(func(record_key): return addition_strings.has(record_key))
+				var retained_keys: Array = actual_key_strings.filter(func(record_key): return not addition_strings.has(record_key))
+				if actual_key_strings.size() != old_key_strings.size() + addition_strings.size() \
+						or actual_additions != addition_strings or retained_keys != old_key_strings:
+					return "keyed_additions_changed:%s" % key
+				for record_key in old_records:
+					if var_to_bytes(old_records[record_key]) != var_to_bytes(new_records[record_key]):
+						return "existing_keyed_record_changed:%s:%s" % [key, record_key]
+			elif before[key] is Array and after[key] is Array:
+				var old_array: Array = before[key]
+				var new_array: Array = after[key]
+				if new_array.size() != old_array.size() + additions.size() \
+						or var_to_bytes(new_array.slice(0, old_array.size())) != var_to_bytes(old_array):
+					return "ordered_addition_extent_changed:%s" % key
+				var added_ids: Array = new_array.slice(old_array.size()).map(func(record): return String((record as Dictionary).get("id", "")))
+				if var_to_bytes(added_ids) != var_to_bytes(additions):
+					return "ordered_addition_ids_changed:%s" % key
+			else:
+				return "record_container_type_changed:%s" % key
 		elif var_to_bytes(before[key]) != var_to_bytes(after[key]):
-			return false
-	return true
+			return "unapproved_record_changed:%s" % key
+	return ""
 
 
-func audit_independently_clear_street_legacy_parity() -> Dictionary:
-	# Explicit synthetic spacing, not a searched seed or the packer's own
-	# changed-row verdict. Prove clearance on legacy-produced structural boxes.
-	# Longitudinal space must also be sufficient for the historical 42m floor.
+func audit_ground_level_street_policy() -> Dictionary:
+	# Explicit spacious geometry keeps packing independent from this policy test.
 	var spacious_front := -60.0
 	var layout := complete_fixture_urban_layout()
 	layout["rowCenterPhases"] = [0.50, 1.65, 2.80, 3.95]
 	var current = Blueprint.new("clear_street_current", 1, "test")
-	var legacy = Blueprint.new("clear_street_legacy", 1, "test")
 	current.set_recipe({"facadeApertures": {}})
-	legacy.set_recipe({"facadeApertures": {}})
-	add_legacy_street_sequence(legacy, spacious_front, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
-	var structural: Array = legacy.parts.filter(func(part):
+	var outcome: Dictionary = Composer.add_street_sequence(current, spacious_front, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
+	var structural: Array = current.parts.filter(func(part):
 		var id := String(part.id)
 		return id.begins_with("urban_row_") and (id.ends_with("_foundation") or id.contains("_upper_shell_") or id.contains("_stone_shell_")))
 	var overlaps: Array[String] = []
@@ -422,16 +422,28 @@ func audit_independently_clear_street_legacy_parity() -> Dictionary:
 			var bb: AABB = world_bounds(b)
 			if minf(ab.end.x, bb.end.x) > maxf(ab.position.x, bb.position.x) and minf(ab.end.z, bb.end.z) > maxf(ab.position.z, bb.position.z):
 				overlaps.append("%s:%s" % [a.id, b.id])
-	var outcome: Dictionary = Composer.add_street_sequence(current, spacious_front, KEEP_FRONT_Z, BASE_Y, 0.0, layout)
-	var legacy_signature := blueprint_content_signature(legacy)
-	var current_signature := blueprint_content_signature(current)
+	var foundation_parts: Array = current.parts.filter(func(part): return String(part.id).begins_with("urban_row_") and String(part.id).ends_with("_foundation"))
+	var forbidden_parts: Array = current.parts.filter(func(part):
+		var id:=String(part.id)
+		return id.begins_with("urban_street_climb_") or id.begins_with("urban_market_plaza_retaining") or id.begins_with("urban_upper_lane") or id.begins_with("urban_terrace_"))
+	var plaza_parts: Array = current.parts.filter(func(part): return String(part.id) == "urban_market_plaza")
+	var plaza = plaza_parts.front() if not plaza_parts.is_empty() else null
 	var clear: bool = axis_aligned and structural.size() == 56 and overlaps.is_empty()
-	return {"passed": clear and bool(outcome.get("ready", false)) and current_signature == legacy_signature,
+	var foundations_preserved := foundation_parts.size() == 8
+	var foundations_at_datum := foundation_parts.all(func(part): return is_equal_approx(part.position.y + part.size.y * 0.5, BASE_Y))
+	var no_forbidden_parts := forbidden_parts.is_empty()
+	var plaza_is_visual_ground_patch: bool = plaza != null and not plaza.collision_enabled and String(plaza.kind) == "ground_patch"
+	var policy: bool = foundations_preserved and foundations_at_datum and no_forbidden_parts and plaza_is_visual_ground_patch
+	return {"passed": clear and bool(outcome.get("ready", false)) and policy,
 		"evidenceLevel": "synthetic_explicit_spacing_actual_recipe_boxes", "layout": layout,"frontZ":spacious_front,"keepFrontZ":KEEP_FRONT_Z,
-		"legacyStructuralCount": structural.size(), "legacyStructuralAxisAligned": axis_aligned,
-		"legacyStructuralOverlapIds": overlaps, "independentlyClear": clear,
-		"currentReady": outcome.get("ready", false), "legacySignature": legacy_signature,
-		"currentSignature": current_signature, "fullContentByteExact": current_signature == legacy_signature}
+		"structuralCount": structural.size(), "structuralAxisAligned": axis_aligned,
+		"structuralOverlapIds": overlaps, "independentlyClear": clear,
+		"currentReady": outcome.get("ready", false), "foundationCount":foundation_parts.size(),
+		"foundationsPreserved": foundations_preserved, "foundationsAtDatum": foundations_at_datum,
+		"forbiddenPartIds":forbidden_parts.map(func(part):return String(part.id)), "noForbiddenParts": no_forbidden_parts,
+		"plazaFound": plaza != null, "plazaKind": String(plaza.kind) if plaza != null else "",
+		"plazaCollisionEnabled": bool(plaza.collision_enabled) if plaza != null else true,
+		"plazaIsVisualGroundPatch": plaza_is_visual_ground_patch, "policyPassed":policy}
 
 
 func audit_commons_physical_intent_recipe() -> Dictionary:
@@ -493,6 +505,9 @@ func audit_street_row_geometry_contract() -> bool:
 	var nan_rise := complete_fixture_urban_layout()
 	nan_rise["marketTerraceRise"] = NAN
 	malformed_street_cases.append({"id": "nan_market_rise", "layout": nan_rise, "baseY": BASE_Y, "variation": 0.0})
+	var artificial_rise := complete_fixture_urban_layout()
+	artificial_rise["marketTerraceRise"] = 1.8
+	malformed_street_cases.append({"id": "artificial_market_rise", "layout": artificial_rise, "baseY": BASE_Y, "variation": 0.0})
 	var wrong_stalls := complete_fixture_urban_layout()
 	wrong_stalls["marketStalls"] = "bad"
 	malformed_street_cases.append({"id": "wrong_stall_collection", "layout": wrong_stalls, "baseY": BASE_Y, "variation": 0.0})
@@ -563,7 +578,9 @@ func commons_local_geometry_signature(commons: Array, hub: Vector3) -> String:
 		return ""
 	var records: Array[Dictionary] = []
 	for part in commons:
-		records.append({"id": String(part.id), "kind": String(part.kind), "material": String(part.material_id), "positionFromHub": (part.position as Vector3) - hub, "size": part.size, "rotation": part.rotation, "collision": bool(part.collision_enabled), "semantic": String(part.semantic)})
+		var local_position: Vector3 = (part.position as Vector3) - hub
+		local_position = Vector3(snappedf(local_position.x, 0.0001), snappedf(local_position.y, 0.0001), snappedf(local_position.z, 0.0001))
+		records.append({"id": String(part.id), "kind": String(part.kind), "material": String(part.material_id), "positionFromHub": local_position, "size": part.size, "rotation": part.rotation, "collision": bool(part.collision_enabled), "semantic": String(part.semantic)})
 	records.sort_custom(func(a, b): return String(a.id) < String(b.id))
 	return Marshalls.raw_to_base64(var_to_bytes(records)).sha256_text()
 
@@ -592,52 +609,6 @@ func add_legacy_civic_quarter(blueprint, keep_front_z: float, base_y: float, var
 	for route_index in range(3):
 		var route_z := keep_front_z - 13.5 + float(route_index) * 5.2
 		Composer.add_traffic_wear(blueprint, "urban_civic_quarter_route_%02d" % route_index, Vector3(37.8, base_y + 0.232, route_z), Vector2(27.0, 1.84), 0.0, variation - 0.04 + float(route_index) * 0.011, "citadel_civic_route_wear")
-
-
-func add_legacy_street_sequence(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float, urban_layout: Dictionary) -> void:
-	# Independent copy of the pre-refactor valid-input formula. It is retained
-	# only as a byte-parity oracle for this focused contract.
-	var usable_depth := maxf(42.0, keep_front_z - front_z - 5.0)
-	var segment_depth := usable_depth / 4.0
-	var center_phases: Array = urban_layout.get("rowCenterPhases", [0.72, 1.68, 2.62, 3.48]) as Array
-	var centers: Array[float] = []
-	for center_phase in center_phases:
-		centers.append(front_z + segment_depth * float(center_phase))
-	var lane_centers: Array = urban_layout.get("laneCenters", [0.0, 1.8, 22.0, 12.0]) as Array
-	var market_terrace_rise := float(urban_layout.get("marketTerraceRise", 1.8))
-	var elevations: Array[float] = [base_y, base_y, base_y + market_terrace_rise, base_y + market_terrace_rise * 2.0]
-	var row_width_biases: Array = urban_layout.get("rowWidthBiases", [0.0, 0.0, 0.0, 0.0]) as Array
-	var row_storey_bonuses: Array = urban_layout.get("rowStoreyBonuses", [0, 0, 0, 0]) as Array
-	var row_depths: Array[float] = []
-	var palette: Array[String] = ["painted_brick_cream", "painted_brick_sage", "painted_brick_rose", "painted_brick_ochre", "painted_brick_azure", "painted_brick_plum"]
-	for row_index in range(centers.size()):
-		var row_z := centers[row_index]
-		var lane_x := float(lane_centers[row_index])
-		var row_depth := segment_depth * (0.82 if row_index == 1 else 0.90)
-		row_depths.append(row_depth)
-		var lane_width := 5.8 if row_index != 2 else 16.0
-		for side in [-1, 1]:
-			var width := 7.4 + float((row_index + side + 5) % 3) * 0.9 + float(row_width_biases[row_index])
-			var storeys := 2 + ((row_index + (1 if side > 0 else 0)) % 2) + int(row_storey_bonuses[row_index])
-			var wall_height := 3.1 * float(storeys)
-			var center_x := lane_x + float(side) * (lane_width * 0.5 + width * 0.5)
-			var material := palette[(row_index * 2 + (1 if side > 0 else 0)) % palette.size()]
-			Composer.add_street_house(blueprint, "urban_row_%02d_%s" % [row_index, "right" if side > 0 else "left"], Vector3(center_x, 0.0, row_z), width, row_depth, wall_height, float(-side), elevations[row_index], material, variation + float(row_index) * 0.012)
-	var plaza_z := centers[2]
-	var market_y := elevations[2]
-	Composer.add_grounded_foundation(blueprint, "urban_market_plaza_retaining", Vector3(lane_centers[2], 0.0, plaza_z), 18.0, segment_depth * 0.82, market_y + 0.24, variation - 0.05, "citadel_market_plaza_retaining")
-	Composer.add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"variation": variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
-	Composer.add_street_climb(blueprint, float(lane_centers[2]), centers[1] + row_depths[1] * 0.48, centers[2] - row_depths[2] * 0.46, base_y, market_terrace_rise, variation)
-	Composer.add_street_climb(blueprint, float(lane_centers[3]), centers[2] + row_depths[2] * 0.48, centers[3] - row_depths[3] * 0.46, market_y, market_terrace_rise, variation)
-	var legacy_stalls: Array = urban_layout.get("marketStalls", []) as Array
-	if legacy_stalls.is_empty():
-		legacy_stalls = [
-			{"offset": Vector3(-5.8, 0.0, -2.55), "side": -1.0, "depth": -1.0, "variation": -0.018},
-			{"offset": Vector3(5.4, 0.0, 1.82), "side": 1.0, "depth": 1.0, "variation": 0.014},
-			{"offset": Vector3(-2.2, 0.0, 2.72), "side": -1.0, "depth": 1.0, "variation": 0.031}
-		]
-	Composer.add_market_stalls(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z), variation, legacy_stalls)
-	Composer.add_terminal_shop_row(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z + segment_depth * 0.34), variation)
 
 
 func aabb_contains_aabb_xz_with_margin(outer: AABB, inner: AABB, margin: float) -> bool:

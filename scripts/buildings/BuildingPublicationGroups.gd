@@ -57,6 +57,13 @@ static func compile(blueprint, plan, parts: Dictionary, origin: Vector3, continu
 			for id in aperture.partIds:
 				if not id is String or not _union(parent,key,"building:"+id):
 					return _failure("missing_aperture_group_peer")
+		if part.recipe.has("publicationAtomicPeerPartIds"):
+			var peers: Variant=part.recipe.publicationAtomicPeerPartIds
+			if not peers is Array or (peers as Array).is_empty():
+				return _failure("invalid_publication_atomic_peer_group")
+			for id in peers:
+				if not id is String or not _union(parent,key,"building:"+id):
+					return _failure("missing_publication_atomic_peer")
 	var tree_result: Dictionary = _trees(blueprint.recipe,origin)
 	if not tree_result.ready: return tree_result
 	for key: String in tree_result.members:

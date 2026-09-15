@@ -15,8 +15,8 @@ export const errorPattern = /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|r
 export function parseOptions(argv, kind) {
   const names = ['OutputDirectory', ...(kind === 'watcher' ? [] : ['Seed', 'CandidateRegion']),
     ...(kind === 'recipe' ? ['CaptureBlueprint', 'ExpectReady', 'CaptureFailure', 'ExpectedRecipeSeed'] : []),
-    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'Resolution', 'SpawnCell', 'CaptureNavigationRejections'] : [])];
-  const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'captureNavigationRejections']);
+    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'ScaleSoakSeconds', 'PlayerInspectionOnly', 'Resolution', 'SpawnCell', 'CaptureNavigationRejections'] : [])];
+  const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'playerInspectionOnly', 'captureNavigationRejections']);
   const options = {};
   for (let i = 0; i < argv.length; i++) {
     const match = /^--?([^=:]+)(?:[=:](.*))?$/.exec(argv[i]);
@@ -67,7 +67,7 @@ export function recipeOptions(input) {
   return o;
 }
 export function teleportOptions(input, env) {
-  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, captureNavigationRejections: false, resolution: '1280x720', ...input };
+  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, scaleSoakSeconds: 0, playerInspectionOnly: false, captureNavigationRejections: false, resolution: '1280x720', ...input };
   if (!['1280x720', '1920x1080'].includes(o.resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
   validateSeed(o.seed);
   if (o.candidateRegion !== '') regionCoordinates(o.candidateRegion);
@@ -76,13 +76,21 @@ export function teleportOptions(input, env) {
     regionCoordinates(o.spawnCell);
     if (!o.skipTutorial || !o.candidateRegion) throw new Error('SpawnCell requires SkipTutorial and an explicit CandidateRegion; tutorial scenario placement must not override the initial location.');
   }
-  o.timeoutSeconds = integer(o.timeoutSeconds, 90, 600, 'TimeoutSeconds');
+  o.timeoutSeconds = integer(o.timeoutSeconds, 90, 1200, 'TimeoutSeconds');
   o.startupTimeoutSeconds = integer(o.startupTimeoutSeconds, 15, 180, 'StartupTimeoutSeconds');
-  for (const key of ['skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'captureNavigationRejections']) if (typeof o[key] !== 'boolean') throw new Error('Invalid boolean: ' + key);
+  o.scaleSoakSeconds = integer(o.scaleSoakSeconds, 0, 1800, 'ScaleSoakSeconds');
+  if (o.scaleSoakSeconds > 0 && o.scaleSoakSeconds < 180) throw new Error('ScaleSoakSeconds must be 0 or 180..1800. Gate 4 acceptance requires 1800.');
+  if (o.manualInspection && o.scaleSoakSeconds > 0) throw new Error('ManualInspection and ScaleSoakSeconds are mutually exclusive.');
+  if (o.playerInspectionOnly && (o.manualInspection || o.scaleSoakSeconds > 0)) throw new Error('PlayerInspectionOnly is a focused shakedown and cannot be combined with ManualInspection or ScaleSoakSeconds.');
+  for (const key of ['skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'playerInspectionOnly', 'captureNavigationRejections']) if (typeof o[key] !== 'boolean') throw new Error('Invalid boolean: ' + key);
   o.launchOptions = { skipTutorial: o.skipTutorial, forceDaytime: o.forceDaytime, forceClearWeather: o.forceClearWeather };
   o.gameArguments = Object.entries(o.launchOptions).filter(([, enabled]) => enabled).map(([key]) => '-' + key[0].toUpperCase() + key.slice(1));
   o.manualInspectionSeconds = o.manualInspection ? 1800 : 0;
-  o.overallTimeoutSeconds = o.startupTimeoutSeconds + o.timeoutSeconds + o.manualInspectionSeconds;
+  // Scale-soak seconds are the required observation floor. Three real
+  // retirement/revisit traversals and final audits get a separate bounded
+  // reserve rather than racing that floor.
+  const scaleCompletionReserveSeconds = o.scaleSoakSeconds > 0 ? 960 : (o.playerInspectionOnly ? 360 : 0);
+  o.overallTimeoutSeconds = o.startupTimeoutSeconds + o.timeoutSeconds + o.manualInspectionSeconds + o.scaleSoakSeconds + scaleCompletionReserveSeconds;
   const inherited = Object.keys(env).filter(key => /^VOXEL_/i.test(key) && env[key]);
   if (inherited.length) throw new Error(`Unset inherited VOXEL_* modes before this diagnostic: ${inherited.join(', ')}`);
   return o;

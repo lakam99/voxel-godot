@@ -321,9 +321,7 @@ func audit_structural_supports() -> Dictionary:
 	var parts_by_id := {}
 	var house_floor_count := 0
 	var grounded_house_foundation_count := 0
-	var grounded_street_climb_count := 0
-	var grounded_terrace_count := 0
-	var grounded_terrace_stair_count := 0
+	var artificial_exterior_parts: Array[String] = []
 	if blueprint == null:
 		return {"passed": false, "failures": ["missing_blueprint"]}
 	for part in blueprint.parts:
@@ -349,30 +347,18 @@ func audit_structural_supports() -> Dictionary:
 					failures.append("unsupported_house_floor:%s" % part_id)
 				else:
 					grounded_house_foundation_count += 1
-		if semantic == "citadel_street_climb":
-			if bounds.position.y > 0.02:
-				failures.append("floating_street_climb:%s" % part_id)
-			else:
-				grounded_street_climb_count += 1
-		elif semantic == "citadel_urban_terrace":
-			if bounds.position.y > 0.02:
-				failures.append("floating_terrace:%s" % part_id)
-			else:
-				grounded_terrace_count += 1
-		elif semantic == "citadel_urban_stair":
-			if bounds.position.y > 0.02:
-				failures.append("floating_terrace_stair:%s" % part_id)
-			else:
-				grounded_terrace_stair_count += 1
-	var market_support = parts_by_id.get("urban_market_plaza_retaining", null)
+		if semantic in ["citadel_street_climb", "citadel_urban_terrace", "citadel_urban_stair"] \
+				or part_id.begins_with("urban_market_plaza_retaining") or part_id.begins_with("urban_upper_lane"):
+			artificial_exterior_parts.append(part_id)
 	var market_paving = parts_by_id.get("urban_market_plaza", null)
-	if market_support == null or market_paving == null:
-		failures.append("missing_market_support")
+	if market_paving == null:
+		failures.append("missing_market_paving")
 	else:
-		var market_support_bounds := review_part_bounds(market_support)
 		var market_paving_bounds := review_part_bounds(market_paving)
-		if not bool(market_support.collision_enabled) or market_support_bounds.position.y > 0.02 or market_support_bounds.end.y < market_paving_bounds.position.y - 0.03:
-			failures.append("unsupported_market_plaza")
+		var foundation_height := float(blueprint.recipe.get("foundationHeight", 0.62))
+		if bool(market_paving.collision_enabled) or String(market_paving.kind) != "ground_patch" \
+				or absf(market_paving_bounds.position.y - (foundation_height + 0.14)) > 0.03:
+			failures.append("market_plaza_is_not_visual_finish_on_shared_ground")
 	var tower = parts_by_id.get("urban_civic_tower", null)
 	var tower_foundation = parts_by_id.get("urban_civic_tower_foundation", null)
 	if tower == null or tower_foundation == null:
@@ -382,15 +368,14 @@ func audit_structural_supports() -> Dictionary:
 		var tower_foundation_bounds := review_part_bounds(tower_foundation)
 		if not bool(tower_foundation.collision_enabled) or tower_foundation_bounds.position.y > 0.02 or absf(tower_foundation_bounds.end.y - tower_bounds.position.y) > 0.02:
 			failures.append("unsupported_civic_tower")
-	var passed := failures.is_empty() and house_floor_count > 0 and grounded_house_foundation_count == house_floor_count and grounded_street_climb_count > 0 and grounded_terrace_count == 3 and grounded_terrace_stair_count == 12
+	var passed := failures.is_empty() and artificial_exterior_parts.is_empty() and house_floor_count > 0 and grounded_house_foundation_count == house_floor_count
 	return {
 		"passed": passed,
 		"failures": failures,
 		"houseFloorCount": house_floor_count,
 		"groundedHouseFoundationCount": grounded_house_foundation_count,
-		"groundedStreetClimbCount": grounded_street_climb_count,
-		"groundedTerraceCount": grounded_terrace_count,
-		"groundedTerraceStairCount": grounded_terrace_stair_count
+		"artificialExteriorPartIds": artificial_exterior_parts,
+		"marketPlazaIsVisualFinish": market_paving != null and not bool(market_paving.collision_enabled)
 	}
 
 

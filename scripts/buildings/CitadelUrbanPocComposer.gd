@@ -2,7 +2,7 @@ extends RefCounted
 class_name CitadelUrbanPocComposer
 
 const MARKET_LANE_X := 22.0
-const MARKET_TERRACE_RISE := 1.8
+const MARKET_TERRACE_RISE := 0.0
 const STREET_FOUNDATION_EXTRA := 0.28
 const STREET_UPPER_EXTRA := 0.62
 const STREET_UPPER_SHIFT := 0.31
@@ -151,6 +151,11 @@ static func plan_terminal_shop_household(blueprint, member_ids: Array, front: Ve
 	# row is independently revalidated by CitadelShopRecipe before binding.
 	var proof_count := [0]
 	var eligibility := func(id: String) -> Dictionary:
+		# Terminal frames belong to their own same-grade building foundation. Do
+		# not opportunistically turn a courtyard or civic paving slab into the
+		# building's structural seat.
+		if String(records[id].part.semantic) != "citadel_terminal_shop_foundation":
+			return {"ready": false, "reason": "incomplete_rooted_support_coverage"}
 		if proof_count[0] >= MAX_TERMINAL_SUPPORT_PROOFS:
 			return {"ready": false, "reason": "terminal_support_proof_limit", "completedProofs": proof_count[0]}
 		# Each closure can scan the complete record map for every context
@@ -225,8 +230,6 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		if part_id.begins_with("castle_residence_") or part_id.begins_with("castle_route_frontage_") or part_id.begins_with("castle_sightline_screen_") or part_id.begins_with("castle_gate_market_") or part_id.begins_with("castle_route_neck_"):
 			if blueprint.is_grounded_structural_root(part): retired_roots.append(part.snapshot())
 			continue
-		if part != null and String(part.kind) == "foundation" and (part_id.begins_with("castle_terrace_block_") or part_id.begins_with("castle_district_processional_")):
-			part.recipe["topSurfaceMaterial"] = "worn_cobble"
 		retained_parts.append(part)
 	blueprint.parts = retained_parts
 	blueprint.rooms = blueprint.rooms.filter(func(room): return not bool((room as Dictionary).get("castleCourtyardResidence", false)) and not bool((room as Dictionary).get("castleResidenceRoom", false)))
@@ -263,7 +266,6 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		handoff["streetSequenceFailure"] = street_sequence
 		return null
 	add_civic_landmark(blueprint, Vector3(-14.0, 0.0, keep_front_z - 4.0), foundation_height + 2.0, variation)
-	add_terraced_edge(blueprint, Vector3(17.5, 0.0, keep_front_z - 9.0), foundation_height, variation)
 	var infill_environment := _civic_infill_environment(blueprint,grammar,front_z,keep_front_z,foundation_height,variation,urban_layout,diagnostic_callback)
 	if not infill_environment.ready:
 		handoff["reason"]=infill_environment.reason
@@ -338,6 +340,11 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		recipe["citadelUrbanHomes"] = blueprint.recipe.get("citadelUrbanHomes", []).duplicate(true)
 		blueprint.set_recipe(recipe)
 	if not _emit_compose_diagnostic(diagnostic_callback, "perimeter_dressing_bunting_trees_completed"):
+		return null
+	var terminal_foundation := add_terminal_shop_foundation(blueprint, variation)
+	if not bool(terminal_foundation.get("ready", false)):
+		handoff["reason"] = "citadel_terminal_foundation_failed"
+		handoff["terminalFoundationFailure"] = terminal_foundation
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "roof_frames_started"):
 		return null
@@ -922,7 +929,7 @@ static func _tree_sample_blocker(part) -> bool:
 static func is_primary_tree_paving(part) -> bool:
 	if part == null or String(part.kind) != "foundation" or String(part.material_id) not in ["cobblestone", "worn_cobble"]:
 		return false
-	return String(part.semantic) in ["castle_courtyard_paving", "citadel_market_plaza", "citadel_perimeter_alley"]
+	return String(part.semantic) in ["castle_courtyard_paving", "citadel_market_plaza", "citadel_perimeter_alley", "citadel_terminal_shop_foundation"]
 
 
 static func tree_site_is_open(blueprint, position: Vector3) -> bool:
@@ -1028,7 +1035,9 @@ static func street_rear_boundary(source, keep_front_z: float) -> float:
 
 static func sample_urban_layout(seed: int, grammar: Dictionary, front_z: float, keep_front_z: float, foundation_height: float, street_rear_z: float = INF) -> Dictionary:
 	var market_lane_x := lerpf(17.5, 25.0, stable_unit(seed, "market-lane"))
-	var market_terrace_rise := lerpf(1.45, 2.15, stable_unit(seed, "market-rise"))
+	# Civic streets follow the site ground. Height belongs to generated terrain;
+	# this layout must not manufacture a second terrace datum above it.
+	var market_terrace_rise := MARKET_TERRACE_RISE
 	var lane_centers: Array[float] = [
 		lerpf(-1.4, 1.1, stable_unit(seed, "lane-0")),
 		lerpf(0.6, 3.4, stable_unit(seed, "lane-1")),
@@ -1257,7 +1266,7 @@ static func street_sequence_input(front_z: float, keep_front_z: float, base_y: f
 				normalized.append(float(item))
 		normalized_arrays[key] = normalized
 	var rise_value: Variant = urban_layout.get("marketTerraceRise", MARKET_TERRACE_RISE)
-	if not (rise_value is int or rise_value is float) or not is_finite(float(rise_value)) or float(rise_value) <= 0.0:
+	if not (rise_value is int or rise_value is float) or not is_finite(float(rise_value)) or absf(float(rise_value)) > 0.0001:
 		return {"ready": false, "reason": "invalid_market_terrace_rise"}
 	var stalls_value: Variant = urban_layout.get("marketStalls", [])
 	if not stalls_value is Array:
@@ -1304,10 +1313,9 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 	var centers: Array[float] = []
 	centers.assign(row_geometry.centers as Array)
 	var lane_centers: Array = prepared.laneCenters as Array
-	var market_terrace_rise := float(prepared.marketTerraceRise)
 	var prepared_base_y := float(prepared.baseY)
 	var prepared_variation := float(prepared.variation)
-	var elevations: Array[float] = [prepared_base_y, prepared_base_y, prepared_base_y + market_terrace_rise, prepared_base_y + market_terrace_rise * 2.0]
+	var elevations: Array[float] = [prepared_base_y, prepared_base_y, prepared_base_y, prepared_base_y]
 	var row_width_biases: Array = prepared.rowWidthBiases as Array
 	var row_storey_bonuses: Array = prepared.rowStoreyBonuses as Array
 	var row_depths: Array[float] = []
@@ -1330,20 +1338,12 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 	# Bunting consumers receive these producer IDs, never infer a seed/position.
 	blueprint.recipe["citadelMarketHousePair"] = {"leftHouseId":"urban_row_%02d_left"%2,
 		"rightHouseId":"urban_row_%02d_right"%2,"plazaPartId":"urban_market_plaza"}
-	add_grounded_foundation(blueprint, "urban_market_plaza_retaining", Vector3(lane_centers[2], 0.0, plaza_z), 18.0, segment_depth * 0.82, market_y + 0.24, prepared_variation - 0.05, "citadel_market_plaza_retaining")
-	add_part(blueprint, "urban_market_plaza", "foundation", "cobblestone", Vector3(lane_centers[2], market_y + 0.27, plaza_z), Vector3(17.88, 0.10, segment_depth * 0.80), {"navigationRole": "walkable_support", "variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
-	add_street_climb(blueprint, float(lane_centers[2]), centers[1] + row_depths[1] * 0.48, centers[2] - row_depths[2] * 0.46, prepared_base_y, market_terrace_rise, prepared_variation)
-	add_street_climb(blueprint, float(lane_centers[3]), centers[2] + row_depths[2] * 0.48, centers[3] - row_depths[3] * 0.46, market_y, market_terrace_rise, prepared_variation)
-	# Raised houses need a raised street as well. Carry the upper flight onto a
-	# grounded lane through the destination row, including both entry thresholds.
-	var upper_from_z := centers[2] + row_depths[2] * 0.48
-	var upper_step_run := maxf(0.48, (centers[3] - row_depths[3] * 0.46 - upper_from_z) / 8.0)
-	var upper_lane_start := upper_from_z + upper_step_run * 8.0
-	var upper_lane_end := centers[3] + row_depths[3] * 0.5
-	add_grounded_foundation(blueprint, "urban_upper_lane", Vector3(float(lane_centers[3]), 0.0, (upper_lane_start + upper_lane_end) * 0.5), 6.4, upper_lane_end - upper_lane_start, elevations[3], prepared_variation, "citadel_upper_lane")
-	blueprint.parts.back().recipe.navigationRole = "walkable_support"
-	add_market_stalls(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z), prepared_variation, prepared.marketStalls as Array)
-	add_terminal_shop_row(blueprint, Vector3(float(lane_centers[2]), market_y + 0.24, plaza_z + segment_depth * 0.34), prepared_variation)
+	# The plaza is a thin finish over the shared ground, never a collision or
+	# grading authority. Terrain/courtyard paving remains the walkable surface.
+	add_part(blueprint, "urban_market_plaza", "ground_patch", "cobblestone", Vector3(lane_centers[2], market_y + 0.15, plaza_z), Vector3(17.88, 0.02, segment_depth * 0.80), {"collision": false, "variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x", "physicalIntent": "visual_detail"})
+	add_market_stalls(blueprint, Vector3(float(lane_centers[2]), market_y + 0.14, plaza_z), prepared_variation, prepared.marketStalls as Array)
+	var terminal_center := Vector3(float(lane_centers[2]), market_y + 0.14, plaza_z + segment_depth * 0.34)
+	add_terminal_shop_row(blueprint, terminal_center, prepared_variation)
 	return {"ready": true, "rowGeometry": row_geometry}
 
 
@@ -1620,14 +1620,6 @@ static func add_partitioned_street_facade(blueprint, prefix: String, facade_x: f
 	return {"ready": true, "partCount": staged.parts.size()}
 
 
-static func add_street_climb(blueprint, center_x: float, from_z: float, to_z: float, base_y: float, rise: float, variation: float) -> void:
-	var step_count := 8
-	var tread_depth := maxf(0.48, (to_z - from_z) / float(step_count))
-	for step_index in range(step_count):
-		var step_top_y := base_y + rise * float(step_index + 1) / float(step_count)
-		add_part(blueprint, "urban_street_climb_%d_%02d" % [int(round(base_y * 100.0)), step_index], "stair_tread", "cobblestone", Vector3(center_x, step_top_y * 0.5, from_z + tread_depth * (float(step_index) + 0.5)), Vector3(6.4, step_top_y, tread_depth + 0.03), {"variation": variation, "semantic": "citadel_street_climb", "pavingFamily": "lane_cobbles", "pavingRegion": "urban_street_climb_%d" % int(round(base_y * 100.0)), "pavingHeading": "z"})
-
-
 static func add_market_stalls(blueprint, center: Vector3, variation: float, stalls: Array) -> void:
 	for stall_value in stalls:
 		var stall: Dictionary = stall_value as Dictionary
@@ -1665,6 +1657,27 @@ static func add_terminal_shop_row(blueprint, center: Vector3, variation: float) 
 			var goods_size := Vector3(0.46, 0.72, 0.42) if goods_kind == "sack" else Vector3(0.48, 0.46, 0.48)
 			add_part(blueprint, "urban_%s_goods_%02d" % [bay_key, goods_index], goods_kind, goods_material, Vector3(goods_x, goods_y, goods_z), goods_size, {"rotation": Vector3(0.0, deg_to_rad(float(goods_index - 2) * 8.0), 0.0), "collision": false, "variation": variation + float(goods_index) * 0.015, "semantic": "citadel_terminal_shop_goods"})
 		add_traffic_wear(blueprint, "urban_%s_wear" % bay_key, Vector3(bay_x, center.y + 0.042, center.z - 2.46), Vector2(2.75, 3.20), 0.0, variation - 0.04, "citadel_terminal_shop_wear")
+
+
+static func add_terminal_shop_foundation(blueprint, variation: float) -> Dictionary:
+	if blueprint == null:
+		return {"ready": false, "reason": "invalid_or_existing_terminal_foundation"}
+	var middle_lintel = null
+	for part in blueprint.parts:
+		if part != null and String(part.id) == "urban_terminal_row_foundation":
+			return {"ready": false, "reason": "invalid_or_existing_terminal_foundation"}
+		if part != null and String(part.id) == "urban_terminal_01_lintel":
+			middle_lintel = part
+	if middle_lintel == null:
+		return {"ready": false, "reason": "missing_terminal_row"}
+	var standing_y := float(middle_lintel.position.y) - 2.62
+	if not is_finite(standing_y) or standing_y <= 0.0:
+		return {"ready": false, "reason": "invalid_terminal_standing_datum"}
+	var terminal_center := Vector3(float(middle_lintel.position.x), standing_y, float(middle_lintel.position.z) + 0.02)
+	# One rooted foundation serves the built three-bay shop and its customer
+	# frontage. Its top matches the courtyard datum; it is not a civic terrace.
+	add_part(blueprint, "urban_terminal_row_foundation", "foundation", "cobblestone", Vector3(terminal_center.x, standing_y * 0.5, terminal_center.z + 1.25), Vector3(15.2, standing_y, 9.6), {"collision": true, "variation": variation - 0.045, "semantic": "citadel_terminal_shop_foundation", "physicalIntent": "structural_root", "physicalRoot": true, "pavingFamily": "shop_foundation_setts", "pavingRegion": "citadel_terminal_shop", "pavingHeading": "x"})
+	return {"ready": true, "foundationId": "urban_terminal_row_foundation", "standingY": standing_y}
 
 
 static func add_civic_service_yard(blueprint, center: Vector3, variation: float) -> void:
@@ -1993,16 +2006,6 @@ static func add_civic_roof_section(blueprint, center: Vector3, tower_width: floa
 			var level_width := maxf(0.20, half_run * 2.0 * (1.0 - upper_fraction))
 			var support_id := "urban_civic_tower" if level == 0 else "urban_civic_roof_gable_%d_%02d" % [int(gable_side), level - 1]
 			add_part(blueprint, "urban_civic_roof_gable_%d_%02d" % [int(gable_side), level], "wall", "painted_brick_cream", Vector3(center.x, tower_top_y + rise * level_fraction, center.z + gable_side * tower_depth * 0.5), Vector3(level_width, rise / 4.0 + 0.04, 0.22), {"variation": variation - 0.018 + float(level) * 0.004, "semantic": "citadel_civic_gable_closure", "physicalIntent": "structural_mass", "physicalRequiredSupportPartIds": [support_id], "roofRole": "gable_closure", "roofUpperFraction": upper_fraction})
-
-
-static func add_terraced_edge(blueprint, center: Vector3, base_y: float, variation: float) -> void:
-	for level in range(3):
-		var terrace_top_y := base_y + float(level + 1) * 0.72
-		var terrace_z := center.z + float(level) * 2.4
-		add_grounded_foundation(blueprint, "urban_terrace_%02d" % level, Vector3(center.x, 0.0, terrace_z), 12.0 - float(level) * 1.4, 4.8, terrace_top_y, variation, "citadel_urban_terrace")
-		for step in range(4):
-			var step_top_y := base_y + float(level) * 0.72 + float(step + 1) * 0.18
-			add_part(blueprint, "urban_terrace_step_%02d_%02d" % [level, step], "stair_tread", "stone_foundation", Vector3(center.x - 6.6 + float(step) * 0.42, step_top_y * 0.5, terrace_z - 2.0 + float(step) * 0.42), Vector3(1.5, step_top_y, 0.46), {"variation": variation, "semantic": "citadel_urban_stair"})
 
 
 static func add_dressing_clusters(blueprint, front_z: float, keep_front_z: float, base_y: float, variation: float) -> void:

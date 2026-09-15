@@ -50,6 +50,7 @@ var static_part_records: Dictionary = {}
 var static_visual_batches: Dictionary = {}
 var static_visual_collecting := false
 var static_visual_part_transform := Transform3D.IDENTITY
+var static_visual_part_tier := "structural"
 var static_visual_transform_count := 0
 var static_batch_peak_instances := 0
 var incremental_progress_callback: Callable
@@ -289,7 +290,9 @@ func attach_physical_group_packet_scene(base: PublicationPreparation.PreparedPub
 	var static_only := true
 	for id: String in admitted.memberIds:
 		if _physical_packet_attached_part_ids.has(id) or source_part_publication_epoch(id)>0:
-			return {"ready":false,"reason":"physical_packet_member_already_attached"}
+			return {"ready":false,"reason":"physical_packet_member_already_attached","memberId":id,
+				"attached":_physical_packet_attached_part_ids.has(id),"publicationEpoch":source_part_publication_epoch(id),
+				"groupIds":group_ids.duplicate()}
 		selected[id]=true
 		var part = blueprint.find_part(id)
 		if part==null: return {"ready":false,"reason":"physical_packet_member_missing"}
@@ -596,6 +599,7 @@ func clear_published() -> void:
 	static_visual_batches.clear()
 	static_visual_collecting = false
 	static_visual_part_transform = Transform3D.IDENTITY
+	static_visual_part_tier = "structural"
 	static_visual_transform_count = 0
 	static_batch_peak_instances = 0
 	incremental_total_parts = 0
@@ -815,6 +819,7 @@ func publish_static_part(part, parent: Node3D) -> void:
 	if bool(part.recipe.get("visual", true)):
 		static_visual_collecting = true
 		static_visual_part_transform = Transform3D(Basis.from_euler(part.rotation), part.position)
+		static_visual_part_tier = static_render_tier_for_part(part)
 		publish_visual(part, parent)
 		if bool(part.recipe.get("practicalLight", false)):
 			if _pending_masonry!=null: _pending_masonry.defer_practical_light=true
@@ -822,12 +827,15 @@ func publish_static_part(part, parent: Node3D) -> void:
 			else: publish_practical_light(part, parent)
 		static_visual_collecting = false
 		static_visual_part_transform = Transform3D.IDENTITY
+		static_visual_part_tier = "structural"
 	elif bool(part.recipe.get("practicalLight", false)):
 		static_visual_collecting = true
 		static_visual_part_transform = Transform3D(Basis.from_euler(part.rotation), part.position)
+		static_visual_part_tier = static_render_tier_for_part(part)
 		publish_practical_light(part, parent)
 		static_visual_collecting = false
 		static_visual_part_transform = Transform3D.IDENTITY
+		static_visual_part_tier = "structural"
 
 
 func static_collision_batch(parent: Node3D) -> StaticBody3D:
@@ -1643,6 +1651,7 @@ func publish_cloth_pennant(part, parent: Node3D) -> void:
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	if static_visual_collecting:
 		visual.transform = static_visual_part_transform
+		apply_static_visual_render_policy(visual,static_visual_part_tier)
 	parent.add_child(visual)
 	visual_batch_count += 1
 
@@ -1675,6 +1684,7 @@ func publish_irregular_ground_patch(part, parent: Node3D) -> void:
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	if static_visual_collecting:
 		visual.transform = static_visual_part_transform
+		apply_static_visual_render_policy(visual,static_visual_part_tier)
 	parent.add_child(visual)
 	visual_batch_count += 1
 
@@ -1731,6 +1741,7 @@ func add_mesh_visual(parent: Node3D, mesh: Mesh, size: Vector3, position: Vector
 	visual.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 	if static_visual_collecting:
 		visual.transform = static_visual_part_transform * visual.transform
+		apply_static_visual_render_policy(visual,static_visual_part_tier)
 	parent.add_child(visual)
 	visual_batch_count += 1
 
@@ -1779,7 +1790,7 @@ func add_mesh_batch(parent: Node3D, mesh: Mesh, transforms: Array, material: Mat
 	if transforms.is_empty() or mesh == null:
 		return null
 	var custom_data := custom_data_override if custom_data_override.size() == transforms.size() else build_batch_custom_data(transforms)
-	var upload := MeshBatchUpload.new(mesh,transforms,custom_data,material,node_name,parent,static_visual_part_transform,static_visual_collecting)
+	var upload := MeshBatchUpload.new(mesh,transforms,custom_data,material,node_name,parent,static_visual_part_transform,static_visual_collecting,static_visual_part_tier)
 	while upload.state not in ["ready","failed"]: upload.advance(self)
 	if upload.state=="failed": _paving_reject(upload.reason)
 	return upload.result()
@@ -1823,10 +1834,10 @@ func add_box_visual(parent: Node3D, size: Vector3, position: Vector3, material: 
 func collect_static_visual_transform(transform: Transform3D, material: Material, custom_data := Color(0.5, 0.5, 0.5, 1.0)) -> void:
 	if material == null:
 		return
-	var key := str(material.get_instance_id())
+	var key := "%s|%s"%[material.get_instance_id(),static_visual_part_tier]
 	var group: Dictionary = static_visual_batches.get(key, {}) if static_visual_batches.get(key, {}) is Dictionary else {}
 	if group.is_empty():
-		group = {"material": material, "transforms": [], "customData": []}
+		group = {"material": material, "transforms": [], "customData": [], "renderTier":static_visual_part_tier}
 	var transforms: Array = group.get("transforms", []) as Array
 	var custom_data_values: Array = group.get("customData", []) as Array
 	transforms.append(transform)
@@ -1838,15 +1849,48 @@ func collect_static_visual_transform(transform: Transform3D, material: Material,
 
 func collect_prepared_static_visual_segment(segment, material: Material) -> void:
 	if material==null or segment.instanceCount==0: return
-	var key := str(material.get_instance_id())
+	var key := "%s|%s"%[material.get_instance_id(),static_visual_part_tier]
 	var group: Dictionary = static_visual_batches.get(key,{})
-	if group.is_empty(): group={"material":material,"transforms":[],"customData":[]}
+	if group.is_empty(): group={"material":material,"transforms":[],"customData":[],"renderTier":static_visual_part_tier}
 	if not group.has("preparedSegments"): group.preparedSegments={}
 	group.preparedSegments[group.transforms.size()] = segment
 	group.transforms.append_array(segment.transforms)
 	group.customData.append_array(segment.customData)
 	static_visual_transform_count += segment.instanceCount
 	static_visual_batches[key] = group
+
+
+func static_render_tier_for_part(part) -> String:
+	# The generated source part—not a camera heuristic—owns presentation class.
+	# Collision and interaction remain fully independent of this render policy.
+	var kind:=String(part.kind).to_lower()
+	var semantic:=String(part.semantic).to_lower()
+	var size: Vector3=part.size
+	var extent:=maxf(size.x,maxf(size.y,size.z))
+	if kind in ["wall","foundation","roof"] or semantic.contains("curtain") \
+			or semantic.contains("gatehouse") or semantic.contains("keep") or extent>=4.0:
+		return "silhouette"
+	if bool(part.collision_enabled) or kind in ["stair","window","beam","post","arch"] or extent>=0.75:
+		return "structural"
+	return "detail"
+
+
+func apply_static_visual_render_policy(instance: GeometryInstance3D, tier: String) -> void:
+	var visibility_end:=240.0
+	var fade_margin:=18.0
+	var casts_shadow:=true
+	match tier:
+		"silhouette":
+			visibility_end=360.0; fade_margin=24.0
+		"detail":
+			visibility_end=140.0; fade_margin=14.0; casts_shadow=false
+	instance.visibility_range_end=visibility_end
+	instance.visibility_range_end_margin=fade_margin
+	instance.visibility_range_fade_mode=GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
+	instance.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_ON if casts_shadow else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	instance.set_meta("building_render_tier",tier)
+	instance.set_meta("building_visibility_range",visibility_end)
+	instance.set_meta("building_shadow_policy","directional_range" if casts_shadow else "none")
 
 
 func flush_static_batches(parent: Node3D) -> void:

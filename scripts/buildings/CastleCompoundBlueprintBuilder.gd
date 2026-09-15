@@ -1962,6 +1962,11 @@ static func add_citadel_terraces(blueprint, grammar: Dictionary, courtyard_width
 	var route_centers: Array = grid.get("routeCenters", []) as Array
 	var street_records: Array = grid.get("streetRecords", []) as Array
 	var processional_transitions: Array = grid.get("processionalTransitions", []) as Array
+	# A district grid no longer implies a terraced town. When the sampler declares
+	# the ground-following policy, publish neither shallow placeholder slabs nor
+	# exterior stair/retaining geometry. Building foundations remain independent.
+	if float(grid.get("terraceStepHeight", 0.0)) <= 0.0001 and processional_transitions.is_empty():
+		return
 	var terrace_exclusions := courtyard_residence_egress_corridors(residences, foundation_height)
 	terrace_exclusions.append_array(courtyard_residence_structural_exclusions(residences))
 	terrace_exclusions.append_array(reserved_walkways)

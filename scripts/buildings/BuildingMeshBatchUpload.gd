@@ -11,15 +11,16 @@ var _material: Material
 var _name: String
 var _frame: Transform3D
 var _track: bool
+var _render_tier: String
 var _parent: WeakRef
 var _result: WeakRef
 var _multi: MultiMesh
 var _cursor := 0
 
 func _init(mesh: Mesh, transforms: Array, custom: Array, material: Material,
-		node_name: String, parent: Node3D, frame: Transform3D, track: bool) -> void:
+		node_name: String, parent: Node3D, frame: Transform3D, track: bool, render_tier := "structural") -> void:
 	_mesh=mesh; _transforms=transforms; _custom=custom; _material=material
-	_name=node_name; _frame=frame; _track=track; _parent=weakref(parent)
+	_name=node_name; _frame=frame; _track=track; _render_tier=render_tier; _parent=weakref(parent)
 	if transforms.is_empty(): state="ready"
 	elif mesh==null or custom.size()!=transforms.size():
 		state="failed"; reason="invalid_mesh_batch"
@@ -64,7 +65,8 @@ func _step(publisher) -> void:
 			instance.name=_name
 			instance.multimesh=_multi
 			instance.material_override=_material
-			instance.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			if _track: publisher.apply_static_visual_render_policy(instance,_render_tier)
+			else: instance.cast_shadow=GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 			parent.add_child(instance)
 			if _track: publisher.published_nodes.append(instance)
 			publisher.visual_batch_count+=1

@@ -149,7 +149,17 @@ func publication_boundary_controls() -> void:
 			receipts_hidden=receipts_hidden and publisher.source_part_publication_epoch("visible_a")==0 \
 				and publisher.source_part_publication_epoch("visible_b")==0 \
 				and is_same(body.get_meta("building_part_records"),first_records)
+		var attached_visual: MultiMeshInstance3D
+		for published_node in publisher.published_nodes:
+			if published_node is MultiMeshInstance3D:
+				attached_visual=published_node
+				break
 		check(label+"_attached_visual_is_not_receipt",receipts_hidden and publisher._static_flush.state=="commit" and publisher.visual_batch_count==1)
+		check(label+"_source_tier_visibility_and_shadow_policy",is_instance_valid(attached_visual) \
+			and attached_visual.get_meta("building_render_tier","")=="structural" \
+			and is_equal_approx(attached_visual.visibility_range_end,240.0) \
+			and attached_visual.visibility_range_fade_mode==GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF \
+			and attached_visual.cast_shadow==GeometryInstance3D.SHADOW_CASTING_SETTING_ON)
 		var second: Dictionary = drain_publication_boundary(publisher,parent,budget)
 		check(label+"_shared_batch_atomic_receipt",second.status=="ready" and second.publicationEpoch==2 \
 			and second.committedSourcePartIds==["visible_a","visible_b"] and second.committedSourcePartIds.is_read_only() \

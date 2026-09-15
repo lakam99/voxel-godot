@@ -118,7 +118,7 @@ func _step(publisher) -> void:
 			instance.name = "ConstructionStaticVisualBatch"
 			instance.multimesh = _mesh
 			instance.material_override = _material
-			instance.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			publisher.apply_static_visual_render_policy(instance,String(_groups[_keys[_group_index]].get("renderTier","structural")))
 			parent.add_child(instance)
 			publisher.published_nodes.append(instance)
 			publisher.visual_batch_count += 1

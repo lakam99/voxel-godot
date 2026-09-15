@@ -155,6 +155,16 @@ static func omit_unplaceable_terminal_household(blueprint, variation: float, ter
 		if part == null or String(part.id).is_empty() or member_ids.has(String(part.id)):
 			return {"ready": false, "reason": "invalid_terminal_membership"}
 		member_ids[String(part.id)] = true
+	# The optional row now owns a same-grade building foundation. If the whole
+	# shop cannot be legally placed, remove that foundation with the shop rather
+	# than leaving a purposeless civic slab behind.
+	var foundation_count := 0
+	for part in blueprint.parts:
+		if part != null and String(part.semantic) == "citadel_terminal_shop_foundation":
+			foundation_count += 1
+			member_ids[String(part.id)] = true
+	if foundation_count != 1:
+		return {"ready": false, "reason": "terminal_foundation_membership_invalid", "foundationCount": foundation_count}
 	var removed: Array[String] = []
 	for index in range(blueprint.parts.size() - 1, -1, -1):
 		var part = blueprint.parts[index]

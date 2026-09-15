@@ -327,6 +327,30 @@ func actual_packet_demand() -> void:
 	var census := Preparation.classify_physical_group_packet_eligibility(base.description.publication_groups,base.building_source,base.furnishing_source) if base!=null else {}
 	var selected_census: Dictionary = census.get("groups",{}).get(ACTUAL_PACKET_GROUP,{})
 	var useful: Dictionary = service._first_useful_packet_groups(base.description,base,census,{}) if base!=null else {}
+	var dependency_probe_id := ""
+	var dependency_probe_closure: Dictionary={}
+	if base!=null:
+		for group_id: String in base.description.publication_groups.groups:
+			var candidate_closure: Dictionary=base.publication_plan.dependency_window(group_id,{})
+			if candidate_closure.get("status")=="ready" and candidate_closure.get("groupIds",[]).size()>1 \
+					and candidate_closure.get("groupIds",[]).all(func(id): return census.get("groups",{}).get(id,{}).get("eligible",false)):
+				dependency_probe_id=group_id
+				dependency_probe_closure=candidate_closure
+				break
+	var dependency_entry: Dictionary=service._scenes.get(REGION,{})
+	var complete_selection: Dictionary=service._bounded_navigation_group_requests(dependency_entry,
+		{dependency_probe_id:0},[],dependency_probe_closure.get("groupIds",[]).size(),"contract-navigation") \
+		if not dependency_probe_id.is_empty() else {}
+	var capped_selection: Dictionary=service._bounded_navigation_group_requests(dependency_entry,
+		{dependency_probe_id:0},[],maxi(0,dependency_probe_closure.get("groupIds",[]).size()-1),"contract-navigation") \
+		if not dependency_probe_id.is_empty() else {}
+	var complete_selected: Array=[]
+	for request: Dictionary in complete_selection.get("requests",[]): complete_selected.append_array(request.groupIds)
+	check("actual_navigation_cap_probe_has_dependency_closure",not dependency_probe_id.is_empty())
+	check("actual_navigation_cap_admits_whole_dependency_closure",complete_selection.get("status")=="ready" \
+		and dependency_probe_closure.get("groupIds",[]).all(func(id): return complete_selected.has(id)))
+	check("actual_navigation_cap_never_admits_partial_dependency_closure",capped_selection.get("status")=="ready" \
+		and capped_selection.get("requests",[]).is_empty())
 	check("actual_packet_selected_exact_nonempty_normal_group",started_groups==[ACTUAL_PACKET_GROUP] and census.get("ready",false) \
 		and selected_census.get("eligible",false) and selected_census.get("families",[]).has("normal"))
 	check("actual_first_useful_window_includes_structural_clearance_anchor",useful.get("status")=="ready" \
@@ -622,11 +646,12 @@ func shared_gameplay_budget() -> void:
 	check("shared_budget_rejects_call_without_frame_claim",structures.advance_calls==before)
 	value.gameplay_publication_frame_token = Engine.get_process_frames()
 	value.gameplay_publication_frame_started_usec = Time.get_ticks_usec()
-	value.gameplay_publication_lane = 2
+	value.gameplay_publication_lane = 0
 	value.gameplay_publication_deadline_usec = value.gameplay_publication_frame_started_usec+6000
 	value.advance_citadel_publication_shared(observer,true)
 	var after_first := structures.advance_calls
 	value.advance_citadel_publication_shared(observer,true)
+	check("shared_budget_claim_is_not_starved_by_lane_cadence",after_first==before+1)
 	check("shared_budget_allows_only_one_citadel_claim_per_frame",after_first==before+1 and structures.advance_calls==after_first)
 	check("shared_budget_caps_citadel_grant_at_four_milliseconds",
 		structures.last_budget_usec>0 and structures.last_budget_usec<=Structures.CITADEL_PUBLICATION_BUDGET_USEC)
@@ -725,6 +750,16 @@ func retained_demand() -> void:
 	service._prune_unwanted(service._refresh_demand(Rect2i()))
 	service._prune_unwanted({})
 	check("retained_release_cancels_once",service._scenes.is_empty() and service._retiring_scenes.size()==1 and probe.cancellations==1)
+	service._retiring_scenes.clear() # Only the synthetic job above, no resources.
+	# A speculative/prefetch-ready source may keep its compact description, but
+	# it is not an exact scene consumer and therefore cannot retain live nodes.
+	var prefetch_probe := RetirementProbe.new()
+	var prefetch_source: Dictionary = a.source_state(last)
+	service._desired = {}
+	service._scenes[last] = {"region":last,"binding":prefetch_source.binding,"phase":"scene_ready","job":prefetch_probe}
+	service._prune_unwanted({last:prefetch_source})
+	check("prefetch_only_ready_source_retires_live_scene",service._scenes.is_empty() \
+		and service._retiring_scenes.size()==1 and prefetch_probe.cancellations==1)
 	service._retiring_scenes.clear() # Only the synthetic job above, no resources.
 	# Capacity limits residency, never the complete desired/ready maps.
 	var dispatch_probe := DispatchProbe.new()
@@ -825,6 +860,8 @@ func actual_early_description_promotion() -> void:
 	var final_description = service._prepared.get(REGION,{}).get("prepared",null)
 	final_description = final_description.describe(binding) if final_description!=null else null
 	var stored = service._described.get(REGION,{})
+	check("actual_early_promotion_semantic_revision_matches",service._description_revision_matches(REGION,binding,
+		service._prepared.get(REGION,{}).get("profile",{}),final_description))
 	check("actual_early_promotion_exact_provenance",early_description!=null and final_description!=null \
 		and early_serial>0 and early_digest.length()==64 \
 		and early_digest==String(final_description.source_identity_digest) \
@@ -900,6 +937,14 @@ func view_ranked_rolling_windows() -> void:
 	var first: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],{})
 	var safety: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],
 		[{"ownerId":"spatial-safety","groupIds":["synthetic-group-005"],"priority":0}],{})
+	var wide_required_ids: Array[String]=[]
+	for index: int in range(20,300): wide_required_ids.append("synthetic-group-%03d" % index)
+	var wide_safety: Dictionary=service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],
+		[{"ownerId":"wide-spatial-safety","groupIds":wide_required_ids,"priority":0,"dependencyComplete":true}],{})
+	var wide_completed: Dictionary={}
+	for index in range(20,220): wide_completed["synthetic-group-%03d" % index]=true
+	var resumed_wide_safety: Dictionary=service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],
+		[{"ownerId":"wide-spatial-safety","groupIds":wide_required_ids,"priority":0,"dependencyComplete":true}],wide_completed)
 	var completed: Dictionary = {}
 	for id: String in first.get("foregroundGroupIds",[]): completed[id]=true
 	var second: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],completed)
@@ -914,6 +959,14 @@ func view_ranked_rolling_windows() -> void:
 	check("view_window_keeps_spatial_readiness_smaller_than_background_window",
 		safety.get("readinessGroupIds",[])==["synthetic-group-005","synthetic-group-299"]
 		and safety.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS)
+	check("mandatory_spatial_closure_can_exceed_optional_view_quota",wide_safety.get("status")=="ready"
+		and wide_safety.get("readinessGroupIds",[]).size()==wide_required_ids.size()
+		and wide_safety.get("foregroundGroupIds",[]).size()==wide_required_ids.size()
+		and wide_required_ids.size()>Service.MAX_INCREMENTAL_FOREGROUND_GROUPS)
+	check("completed_exact_receipts_do_not_consume_next_foreground_window",resumed_wide_safety.get("status")=="ready"
+		and resumed_wide_safety.get("readinessGroupIds",[]).size()==wide_required_ids.size()-wide_completed.size()
+		and resumed_wide_safety.get("readinessGroupIds",[]).all(func(id: String): return not wide_completed.has(id))
+		and resumed_wide_safety.get("foregroundGroupIds",[]).all(func(id: String): return not wide_completed.has(id)))
 	check("completed_window_promotes_next_bounded_city_window",second.get("status")=="ready"
 		and second.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS
 		and second.get("deferredGroupIds",[]).size()==groups.size()-Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS*2
@@ -937,8 +990,8 @@ func view_ranked_rolling_windows() -> void:
 	var stage_profile: Dictionary = service.profile_scene_unit_metrics()
 	var rank_profile: Dictionary = stage_profile.get("demand_view_rank_and_merge",{})
 	check("view_window_profile_is_bounded_and_attributes_rank_scale",
-		int(rank_profile.get("calls",0))==9 and int(rank_profile.get("workUnitsTotal",0))==2700
-		and int(rank_profile.get("sampleCount",0))==9 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
+		int(rank_profile.get("calls",0))==11 and int(rank_profile.get("workUnitsTotal",0))==3300
+		and int(rank_profile.get("sampleCount",0))==11 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
 		and int(rank_profile.get("p50Usec",-1))>=0 and int(rank_profile.get("p95Usec",-1))>=int(rank_profile.get("p50Usec",0))
 		and not rank_profile.has("samples"))
 	metrics.viewRankedRollingWindows={"firstCount":first.get("foregroundGroupIds",[]).size(),

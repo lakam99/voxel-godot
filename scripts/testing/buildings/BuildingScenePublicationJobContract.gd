@@ -652,7 +652,10 @@ func _run() -> void:
 	await base_packet_gate_control()
 	await packet_transaction_order_control()
 	await packet_occupied_transaction_rotation_control()
+	await packet_occupied_dependency_reservation_control()
 	await packet_local_partition_batch_control()
+	await packet_interleaved_partition_batch_control()
+	await packet_oversized_dependency_closure_control()
 	await packet_foreground_deferral_control()
 	await packet_furnishing_session_control()
 	await packet_door_lifecycle_control()
@@ -966,16 +969,63 @@ func packet_occupied_transaction_rotation_control() -> void:
 	check("occupied_rotation_pins_one_dependency_complete_root",first.get("status")=="pending" and first.groupIds.size()==1
 		and first.get("estimatedCost",{}).get("bytes",0)>0 and first.get("cancelRevision",-1)==0)
 	var retained: Dictionary=job.defer_occupied_publication_transaction(int(first.transactionId),"synthetic_actor_overlap")
+	# A per-frame owner refresh must not recreate the parked packet scope.
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
 	var second: Dictionary=job.pending_publication_transaction()
-	check("occupied_rotation_selects_other_room",retained.get("status")=="retained" and second.get("status")=="pending"
+	check("occupied_refresh_reserves_parked_group",retained.get("status")=="retained" and second.get("status")=="pending"
 		and second.groupIds.size()==1 and second.groupIds[0]!=first.groupIds[0] and job._occupied_transactions.size()==1)
 	job.defer_occupied_publication_transaction(int(second.transactionId),"synthetic_actor_overlap")
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
 	var restored: Dictionary=job.pending_publication_transaction()
 	check("occupied_rotation_restores_exact_first_transaction",restored.transactionId==first.transactionId
 		and restored.binding==first.binding and restored.groupIds==first.groupIds and restored.estimatedCost==first.estimatedCost
 		and restored.occupancyWaitReason=="synthetic_actor_overlap" and restored.occupancyWaitCount==1)
 	job.cancel()
 	await drain(job,"packet_occupied_rotation")
+
+
+func packet_occupied_dependency_reservation_control() -> void:
+	var blueprint := Blueprint.new("packet-occupied-dependency",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_occupied_dependency_history","landscapeTrees":[]}
+	blueprint.add_part({"id":"support","kind":"foundation","material":"stone","collision":true,
+		"size":Vector3(2,2,2),"position":Vector3(-6,1,0)})
+	blueprint.add_part({"id":"dependent","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(-6,3,0)})
+	blueprint.add_part({"id":"independent","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(6,1,0)})
+	var plan := Plan.new("packet-occupied-dependency-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile := frozen_profile()
+	var base_result := Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("occupied_dependency_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var groups: Dictionary=base_result.base.description.publication_groups.groups
+	var by_part: Dictionary=base_result.base.description.publication_groups.groupByPart
+	var support_id := String(by_part.get("building:support",""))
+	var dependent_id := String(by_part.get("building:dependent",""))
+	var independent_id := String(by_part.get("building:independent",""))
+	check("occupied_dependency_fixture_has_direct_support",not support_id.is_empty() and support_id!=dependent_id
+		and groups.get(dependent_id,{}).get("dependencies",[]).has(support_id))
+	if support_id.is_empty() or support_id==dependent_id or not groups.get(dependent_id,{}).get("dependencies",[]).has(support_id): return
+	var trees := SyntheticTrees.new()
+	var job := Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":[support_id],"priority":0}],
+		[dependent_id,independent_id],Fixtures.BINDING)
+	var support_transaction: Dictionary=job.pending_publication_transaction()
+	job.defer_occupied_publication_transaction(int(support_transaction.transactionId),"synthetic_actor_overlap")
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground",
+		"groupIds":[support_id,dependent_id,independent_id],"priority":0}],[],Fixtures.BINDING)
+	var independent_transaction: Dictionary=job.pending_publication_transaction()
+	check("occupied_support_blocks_dependent_duplicate_selection",independent_transaction.get("status")=="pending"
+		and independent_transaction.groupIds==[independent_id] and not independent_transaction.groupIds.has(support_id))
+	job.defer_occupied_publication_transaction(int(independent_transaction.transactionId),"synthetic_actor_overlap")
+	var restored: Dictionary=job.pending_publication_transaction()
+	check("occupied_support_restores_before_dependent",restored.get("transactionId",0)==support_transaction.get("transactionId",-1)
+		and restored.groupIds==[support_id])
+	job.cancel()
+	await drain(job,"packet_occupied_dependency")
 
 
 func packet_local_partition_batch_control() -> void:
@@ -1006,6 +1056,78 @@ func packet_local_partition_batch_control() -> void:
 		and transaction.get("physicalPacketKey","")==Job._physical_packet_key(groups))
 	job.cancel()
 	await drain(job,"packet_local_partition")
+
+
+## Semantic source IDs routinely interleave spatial blocks in a large generated
+## structure. Packet scheduling must preserve the first requested block while
+## selecting its local peers, or the spatial batching contract degenerates into
+## one worker dispatch per source ID.
+func packet_interleaved_partition_batch_control() -> void:
+	var blueprint := Blueprint.new("packet-interleaved-partition",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_interleaved_partition_history","landscapeTrees":[]}
+	for spec: Dictionary in [
+		{"id":"a-near","position":Vector3(1,1,1)},
+		{"id":"b-far","position":Vector3(33,1,1)},
+		{"id":"c-near","position":Vector3(3,1,1)},
+		{"id":"d-far","position":Vector3(35,1,1)}]:
+		blueprint.add_part({"id":spec.id,"kind":"wall","material":"timber_beam","collision":true,
+			"size":Vector3(1,2,1),"position":spec.position})
+	var plan := Plan.new("packet-interleaved-partition-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile := frozen_profile()
+	var base_result := Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("interleaved_partition_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var groups: Array[String]=["building:a-near","building:b-far","building:c-near","building:d-far"]
+	var trees := SyntheticTrees.new()
+	var job := Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
+	var first: Dictionary=job.pending_publication_transaction()
+	check("interleaved_partition_coalesces_first_local_block",first.get("status")=="pending"
+		and first.groupIds==["building:a-near","building:c-near"])
+	job.defer_occupied_publication_transaction(int(first.get("transactionId",0)),"contract_rotation")
+	var second: Dictionary=job.pending_publication_transaction()
+	check("interleaved_partition_coalesces_second_local_block",second.get("status")=="pending"
+		and second.groupIds==["building:b-far","building:d-far"])
+	job.cancel()
+	await drain(job,"packet_interleaved_partition")
+
+
+## A soft packet target may separate independent roots, but never a root from
+## its dependency chain. The 65th group reproduces the historical split at the
+## 64-group cap without constructing generated-world content.
+func packet_oversized_dependency_closure_control() -> void:
+	var blueprint := Blueprint.new("packet-closure-cap",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_closure_cap_history","landscapeTrees":[]}
+	for index in range(65):
+		var recipe: Dictionary={}
+		if index>0: recipe["physicalRequiredSupportPartIds"]=["closure-%02d"%(index-1)]
+		blueprint.add_part({"id":"closure-%02d"%index,"kind":"post","material":"timber_beam","collision":false,
+			"size":Vector3(0.2,1.0,0.2),"position":Vector3(float(index)*0.01,0.5,0),"recipe":recipe})
+	var plan := Plan.new("packet-closure-cap-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile:=frozen_profile()
+	var base_result:=Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("closure_cap_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var trees:=SyntheticTrees.new()
+	var job:=Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	var root_group:="building:closure-64"
+	var requested:=job.request_publication_groups([root_group],Fixtures.BINDING,0)
+	var transaction: Dictionary={}
+	for attempt in range(128):
+		transaction=job.pending_publication_transaction()
+		if transaction.get("status")!="pending_budget": break
+	check("closure_cap_request_retained",requested.get("status")=="retained")
+	check("closure_cap_keeps_root_with_all_dependencies",transaction.get("status")=="pending"
+		and transaction.get("groupIds",[]).size()==65 and transaction.get("groupIds",[]).has("building:closure-00")
+		and transaction.get("groupIds",[]).has(root_group))
+	job.cancel()
+	await drain(job,"packet_closure_cap")
 
 
 ## A packet job may have a resident scene from an earlier closure while the
@@ -1147,7 +1269,18 @@ func packet_furnishing_session_control() -> void:
 		job.offer_physical_group_packet(furnishing_packet.packet,Fixtures.BINDING)
 		var second_ready := job.pending_publication_transaction()
 		check("packet_furnishing_exact_packet_promoted",second_ready.status=="ready" and second_ready.groupIds==[furnishing_group])
-		job.activate_physical_group_packet_scene(int(second_ready.id))
+		# Model a late resident static boundary arriving between packet receipts.
+		# The adapter must drain and retry it without rejecting the pinned packet.
+		job._building._ensure_publication_boundary()
+		var deferred_attach: Dictionary=job.activate_physical_group_packet_scene(int(second_ready.id))
+		check("packet_append_drains_prior_boundary_before_attach",deferred_attach.status=="pending_budget"
+			and deferred_attach.reason=="physical_packet_prior_boundary_pending" and job.status().phase=="packet_attach_boundary")
+		for boundary_slice in range(64):
+			job.advance(4000,int(second_ready.id))
+			if job.status().phase=="packet_wait": break
+		check("packet_append_prior_boundary_returns_to_same_transaction",job.status().phase=="packet_wait"
+			and job.pending_publication_transaction().get("id",0)==second_ready.id
+			and job.activate_physical_group_packet_scene(int(second_ready.id)).status=="pending_budget")
 		for index in range(1024):
 			job.advance(4000,int(second_ready.id))
 			if job.physical_group_receipt(furnishing_group,Fixtures.BINDING).status in ["ready","failed"]: break
@@ -1404,6 +1537,8 @@ func spatial_dependency_ownership() -> void:
 		if job._cpu.has("buildingBegin"): break
 	var described: Dictionary = job.source_dependency_requirements(bounds,Fixtures.BINDING)
 	check("spatial_live_source_described",described.get("status")=="described" and described.get("partIds",[]).has("building:tiny-post"))
+	check("spatial_runtime_requirements_are_owned_mutable_copy",not described.is_read_only()
+		and not (described.get("requiredCrossings",{}) as Dictionary).is_read_only())
 	check("spatial_not_publication_receipt",not described.get("publicationAcknowledged",true))
 	var stale := Fixtures.BINDING.duplicate()
 	stale.generation+=1

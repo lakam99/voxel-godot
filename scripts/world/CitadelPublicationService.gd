@@ -27,6 +27,11 @@ const MAX_PENDING_NAVIGATION_TILES := 512
 # Scheduling policy, not a measured latency target. An eligible waiter gains
 # one priority class per four successful worker dispatches, never per query.
 const PRIORITY_AGING_DISPATCH_TURNS := 4
+# Optional view breadth is a scheduling quota. An exact player/nav safety
+# closure may legitimately be wider (the gatehouse joins many collision-bearing
+# parts), but remains finite and is split below by the job's measured byte,
+# member, collision, registration and time budgets.
+const MAX_REQUIRED_FOREGROUND_GROUPS := 1024
 const MAX_INCREMENTAL_FOREGROUND_GROUPS := 256
 const MAX_ACTIVE_NAVIGATION_PHYSICAL_GROUPS := 256
 # Navigation can retain a much wider source closure than the facing physical
@@ -678,10 +683,16 @@ func _prune_unwanted(ready: Dictionary) -> void:
 		if not ready.has(region) or ready[region].binding != _described[region].binding:
 			_retire_description(region)
 	for region: Vector2i in _scenes.keys():
-		if not ready.has(region) or ready[region].binding != _scenes[region].binding:
+		# Ahead prefetch may retain the compact immutable description/base, but it
+		# cannot pin live nodes, colliders, doors or interaction registrations once
+		# exact retained demand expires. `_desired` includes coordinator hysteresis,
+		# so ordinary reversals still keep the accepted scene for the grace window.
+		if not _desired.has(region) or not ready.has(region) or ready[region].binding != _scenes[region].binding:
 			_retire_scene(region)
 	for region: Vector2i in _prepared.keys():
-		if not ready.has(region) or ready[region].binding != _prepared[region].binding:
+		# A scene-ready payload is heavier than the reusable speculative base and
+		# owns callbacks that only exact demand may activate.
+		if not _desired.has(region) or not ready.has(region) or ready[region].binding != _prepared[region].binding:
 			_retire(_prepared[region])
 			_prepared.erase(region)
 	for region: Vector2i in _failures.keys():
@@ -1047,6 +1058,13 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	var readiness: Dictionary = {}
 	for request: Dictionary in base_requests:
 		for id: String in request.groupIds:
+			# A retained exact closure describes everything the consumer still
+			# owns, including groups whose revision-matched physical receipts are
+			# already installed.  Completed groups must remain acknowledged but do
+			# not consume the next packet's bounded foreground capacity.  Counting
+			# them here made dense civic tiles eventually reject their own progress
+			# as an oversized request after hundreds of groups had completed.
+			if completed.has(id): continue
 			candidates[id] = {"id":id,"priority":int(request.priority),"distanceSquared":0.0,"portal":false,"throughPortal":false}
 			# Exact member/tile queries already return a complete immutable
 			# dependency closure. Do not traverse all of those same closures again
@@ -1112,6 +1130,8 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 	# Exact spatial/semantic readiness is mandatory, not part of the optional
 	# presentation-window quota. Seed its complete dependency closure first;
 	# ranked view rows then fill only the remaining bounded capacity.
+	if readiness.size()>MAX_REQUIRED_FOREGROUND_GROUPS:
+		return {"status":"failed","reason":"packet_required_foreground_scope_too_large","groupCount":readiness.size()}
 	var selected: Dictionary = readiness.duplicate()
 	var selected_priority: Dictionary = {}
 	var selected_order: Array[String] = []
@@ -1141,7 +1161,7 @@ func _bounded_packet_view_window(description, base, census: Dictionary, consumer
 		var additions := 0
 		for required_id: String in closure.groupIds:
 			if not selected.has(required_id): additions+=1
-		if selected.size()+additions>MAX_INCREMENTAL_FOREGROUND_GROUPS: continue
+		if selected.size()+additions>maxi(MAX_INCREMENTAL_FOREGROUND_GROUPS,readiness.size()): continue
 		for required_id: String in closure.groupIds:
 			if not selected.has(required_id): selected_order.append(required_id)
 			selected[required_id]=true
@@ -1386,8 +1406,8 @@ func _base_packet_eligible(base, binding: Dictionary, region: Vector2i) -> Dicti
 	var plan: Dictionary = _packet_foreground_plan(region,binding,base.description,base)
 	if plan.get("status")!="ready": return plan
 	if not plan.get("censusReady",false): return {"status":"failed","reason":"packet_foreground_census_missing"}
-	if plan.get("foregroundGroupIds",[]).size()>MAX_INCREMENTAL_FOREGROUND_GROUPS:
-		return {"status":"failed","reason":"packet_foreground_scope_too_large","groupCount":plan.foregroundGroupIds.size()}
+	if plan.get("readinessGroupIds",[]).size()>MAX_REQUIRED_FOREGROUND_GROUPS:
+		return {"status":"failed","reason":"packet_required_foreground_scope_too_large","groupCount":plan.readinessGroupIds.size()}
 	return plan
 
 func _collect_publication_base(region: Vector2i, current: Dictionary, result: Dictionary) -> void:
@@ -1878,6 +1898,16 @@ func _prune_invalid_scenes() -> void:
 				_failures[region]={"binding":entry.binding,"reason":"constructed_scene_owner_lost" if entry.phase=="scene_ready" else "publication_scene_owner_lost"}
 				_retire_scene(region)
 
+func _description_revision_matches(region: Vector2i, binding: Dictionary, profile: Dictionary, description) -> bool:
+	if not _described.has(region): return true
+	var retained: Dictionary = _described[region]
+	var prior = retained.get("description")
+	return retained.get("binding",{})==binding and retained.get("configuration",-1)==_configuration_serial \
+		and retained.get("profile",{}).get("sourceSignature","")==profile.get("sourceSignature","") \
+		and prior!=null and description!=null and prior.binding==binding and description.binding==binding \
+		and prior.origin==description.origin and prior.source_identity_digest.length()==64 \
+		and prior.source_identity_digest==description.source_identity_digest
+
 func _start_scene(region: Vector2i, source: Dictionary) -> bool:
 	if not _scene_callbacks_ready() or _scenes.has(region) or _region_retiring(region): return false
 	if not _prepared.has(region) or _scenes.has(region) or _region_retiring(region) or not _scene_callbacks_ready(): return false
@@ -1888,11 +1918,17 @@ func _start_scene(region: Vector2i, source: Dictionary) -> bool:
 	var packet_mode: bool = bool(prepared.get("packetMode",false))
 	var description = prepared.base.description if packet_mode else prepared.prepared.describe(prepared.binding)
 	if description==null or description.binding!=prepared.binding or description.origin!=prepared.profile.origin \
-			or (_described.has(region) and _described[region].description!=description):
+			or not _description_revision_matches(region,prepared.binding,prepared.profile,description):
 		_failures[region] = {"binding":prepared.binding,"reason":"scene_description_identity_mismatch"}
 		_retire(prepared)
 		_prepared.erase(region)
 		return false
+	if _described.has(region) and _described[region].description!=description:
+		# Revisit reconstruction creates a new immutable descriptor object for the
+		# same source revision. Promote that exact owner while preserving the
+		# revision serial; object identity is a lifetime fact, not world identity.
+		_described[region].profile=prepared.profile
+		_described[region].description=description
 	var parent: Node3D=_scene_parent.get_ref() as Node3D
 	var job=SceneJob.new()
 	if not job.set_tree_retire_callback(Callable(_tree_retire_receiver.get_ref(),_tree_retire_method),_require_tree_retirement_ack): return false
@@ -1936,9 +1972,9 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 		if plan.get("status")!="ready":
 			entry["packetDemandStatus"] = plan.duplicate(true)
 			return false
-		if plan.get("foregroundGroupIds",[]).size()>MAX_INCREMENTAL_FOREGROUND_GROUPS:
-			entry["packetDemandStatus"]={"status":"failed","reason":"packet_foreground_scope_too_large",
-				"groupCount":plan.foregroundGroupIds.size()}
+		if plan.get("readinessGroupIds",[]).size()>MAX_REQUIRED_FOREGROUND_GROUPS:
+			entry["packetDemandStatus"]={"status":"failed","reason":"packet_required_foreground_scope_too_large",
+				"groupCount":plan.readinessGroupIds.size()}
 			return false
 		var navigation_merge_started := Time.get_ticks_usec()
 		var navigation_groups: Dictionary = entry.get("navigationPhysicalGroups",{})
@@ -1949,32 +1985,24 @@ func _refresh_scene_group_demand(entry: Dictionary) -> bool:
 			# is promoted into the startup gate before the capsule tile can receive a
 			# receipt. Preserve the per-tile request priority all the way to group
 			# selection. A group shared by tiles keeps its most urgent owner.
-			var requested_by_priority: Dictionary = {}
 			var navigation_ids: Dictionary = {}
 			for group_id: String in navigation_groups:
 				var priority: int = int(navigation_groups[group_id])
 				if priority<0 or priority>4:
 					entry["packetDemandStatus"] = {"status":"failed","reason":"invalid_navigation_physical_priority"}
 					return false
-				if not requested_by_priority.has(priority): requested_by_priority[priority] = []
-				requested_by_priority[priority].append(group_id)
 				navigation_ids[group_id] = true
 			var navigation_slots := maxi(0,MAX_NAVIGATION_MERGED_FOREGROUND_GROUPS-plan.foregroundGroupIds.size())
-			for priority: int in range(5):
-				if not requested_by_priority.has(priority): continue
-				var requested: Array[String] = []
-				requested_by_priority[priority].sort()
-				for group_id: String in requested_by_priority[priority]:
-					if plan.foregroundGroupIds.has(group_id): continue
-					if navigation_slots<=0: break
-					requested.append(group_id)
-					navigation_slots-=1
-				if requested.is_empty(): continue
-				plan.requests.append({"ownerId":"navigation:%d,%d:%d" % [entry.region.x,entry.region.y,priority],"groupIds":requested,"priority":priority})
-				if priority==0:
-					for group_id: String in requested:
-						plan.foregroundGroupIds.append(group_id)
-						if not plan.readinessGroupIds.has(group_id): plan.readinessGroupIds.append(group_id)
+			var navigation_selection := _bounded_navigation_group_requests(entry,navigation_groups,
+				plan.foregroundGroupIds,navigation_slots,"navigation:%d,%d" % [entry.region.x,entry.region.y])
+			if navigation_selection.get("status")!="ready":
+				entry["packetDemandStatus"] = navigation_selection.duplicate(true)
+				return false
+			for request: Dictionary in navigation_selection.requests:
+				plan.requests.append(request)
+				for group_id: String in request.groupIds:
+					if not plan.foregroundGroupIds.has(group_id): plan.foregroundGroupIds.append(group_id)
+					if int(request.priority)==0 and not plan.readinessGroupIds.has(group_id): plan.readinessGroupIds.append(group_id)
 			plan.foregroundGroupIds.sort()
 			plan.readinessGroupIds.sort()
 			if not bool(plan.get("implicitDeferred",false)):
@@ -2054,27 +2082,12 @@ func _retain_navigation_physical_demand(entry: Dictionary) -> bool:
 	var demand: Dictionary=entry.get("packetDemandStatus",{})
 	var foreground: Array=demand.get("foregroundGroupIds",[])
 	var navigation_slots:=maxi(0,MAX_NAVIGATION_MERGED_FOREGROUND_GROUPS-foreground.size())
-	var by_priority: Dictionary = {}
 	var navigation: Dictionary = entry.get("navigationPhysicalGroups",{})
-	for group_id: String in navigation:
-		if entry.job.physical_group_packet_completed_for_scheduling(group_id,entry.binding): continue
-		if foreground.has(group_id): continue
-		var priority: int = int(navigation[group_id])
-		if priority<0 or priority>4: return false
-		if not by_priority.has(priority): by_priority[priority]=[]
-		by_priority[priority].append(group_id)
-	var requests: Array[Dictionary]=[]
-	for priority: int in range(5):
-		if not by_priority.has(priority) or navigation_slots<=0: continue
-		by_priority[priority].sort()
-		var admitted: Array[String]=[]
-		for group_id: String in by_priority[priority]:
-			if navigation_slots<=0: break
-			admitted.append(group_id)
-			navigation_slots-=1
-		if admitted.is_empty(): continue
-		requests.append({"ownerId":"navigation-supplement:%d" % priority,
-			"groupIds":admitted,"priority":priority})
+	var selection := _bounded_navigation_group_requests(entry,navigation,foreground,navigation_slots,"navigation-supplement")
+	if selection.get("status")!="ready":
+		entry["packetDemandStatus"]=selection.duplicate(true)
+		return false
+	var requests: Array=selection.requests
 	if requests.is_empty(): return true
 	var retained: Dictionary=entry.job.retain_packet_supplemental_group_demands(requests,entry.binding)
 	if retained.get("status")!="retained":
@@ -2089,6 +2102,55 @@ func _retain_navigation_physical_demand(entry: Dictionary) -> bool:
 	demand["deferredGroupCount"]=retained.get("deferredGroups",demand.get("deferredGroupCount",0))
 	entry["packetDemandStatus"]=demand
 	return true
+
+
+## Navigation owns complete collision closures, but its retained set may be
+## wider than the rolling physical window. Apply the cap to whole dependency
+## closures rather than individual alphabetic IDs; otherwise the admitted
+## subset can strand a requested group behind an intentionally deferred parent.
+func _bounded_navigation_group_requests(entry: Dictionary, navigation: Dictionary,
+		foreground: Array, slot_limit: int, owner_prefix: String) -> Dictionary:
+	if slot_limit<=0: return {"status":"ready","requests":[]}
+	var base: Preparation.PreparedPublicationBase = entry.job._cpu.get("publicationBase")
+	if base==null or base.description==null: return {"status":"pending","reason":"packet_publication_base_pending"}
+	var completed: Dictionary=entry.job.completed_physical_group_ids(entry.binding)
+	var compact_plan=base.publication_plan
+	var groups: Dictionary=base.description.publication_groups.groups
+	var retained: Dictionary={}
+	for group_id: String in foreground: retained[group_id]=true
+	var selected: Dictionary={}
+	var selected_priority: Dictionary={}
+	var by_priority: Dictionary={}
+	for group_id: String in navigation:
+		var priority:=int(navigation[group_id])
+		if priority<0 or priority>4: return {"status":"failed","reason":"invalid_navigation_physical_priority"}
+		if not by_priority.has(priority): by_priority[priority]=[]
+		by_priority[priority].append(group_id)
+	var remaining:=slot_limit
+	for priority: int in range(5):
+		if not by_priority.has(priority): continue
+		by_priority[priority].sort()
+		for group_id: String in by_priority[priority]:
+			if completed.has(group_id) or retained.has(group_id) or selected.has(group_id): continue
+			var closure: Dictionary=_packet_dependency_window_for_plan(compact_plan,groups,group_id,completed)
+			if closure.get("status")!="ready": return closure
+			var additions: Array[String]=[]
+			for required_id: String in closure.groupIds:
+				if completed.has(required_id) or retained.has(required_id) or selected.has(required_id): continue
+				additions.append(required_id)
+			if additions.size()>remaining: continue
+			for required_id: String in additions:
+				selected[required_id]=true
+				selected_priority[required_id]=priority
+				remaining-=1
+	var requests: Array[Dictionary]=[]
+	for priority: int in range(5):
+		var ids: Array[String]=[]
+		for group_id: String in selected:
+			if int(selected_priority[group_id])==priority: ids.append(group_id)
+		ids.sort()
+		if not ids.is_empty(): requests.append({"ownerId":"%s:%d" % [owner_prefix,priority],"groupIds":ids,"priority":priority})
+	return {"status":"ready","requests":requests,"admittedGroups":selected.size(),"remainingSlots":remaining}
 
 func _record_scene_unit(label: String, started_usec: int, work_units := -1) -> void:
 	var elapsed := Time.get_ticks_usec()-started_usec
@@ -2286,7 +2348,8 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 								break
 							var activated: Dictionary = entry.job.activate_physical_group_packet_scene(int(transaction.transactionId))
 							if activated.get("status")!="pending_budget":
-								_failures[region]={"binding":entry.binding,"reason":String(activated.get("reason","physical_packet_activate_failed"))}
+								_failures[region]={"binding":entry.binding,"reason":String(activated.get("reason","physical_packet_activate_failed")),
+									"diagnostics":activated.duplicate(true),"transaction":transaction.duplicate(true)}
 								_retire_scene(region)
 							else:
 								entry.erase("occupancyWaitReason")
@@ -2320,14 +2383,34 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 								if not _packet_group_publishable(base.description,census,group_id) and not ids.has(group_id): ids.append(group_id)
 								if not deferred.has(group_id): deferred.append(group_id)
 							var remaining_requests: Array = []
+							var remaining_group_ids: Dictionary={}
 							for raw_request in blocked.get("requests",[]):
 								if not raw_request is Dictionary: continue
 								var remaining_ids: Array[String] = []
 								for group_id: String in raw_request.get("groupIds",[]):
-									if not transaction_ids.has(group_id): remaining_ids.append(group_id)
+									if not transaction_ids.has(group_id):
+										remaining_ids.append(group_id)
+										remaining_group_ids[group_id]=true
 								if not remaining_ids.is_empty():
 									remaining_requests.append({"ownerId":raw_request.ownerId,"groupIds":remaining_ids,"priority":raw_request.priority})
-							var deferred_result: Dictionary = entry.job.replace_packet_foreground_group_demands(remaining_requests,deferred,entry.binding)
+							# A group previously recorded as explicitly blocked can become part
+							# of another retained owner on a later merged navigation revision.
+							# Foreground wins; keeping the stale diagnostic copy in both sets
+							# would reject an otherwise dependency-complete compact plan.
+							if bool(blocked.get("implicitDeferred",false)):
+								var normalized_deferred: Array=[]
+								for group_id: String in deferred:
+									if not remaining_group_ids.has(group_id): normalized_deferred.append(group_id)
+								deferred=normalized_deferred
+							# Compact packet plans intentionally do not materialize the full
+							# source-wide deferred complement.  Preserve that contract when a
+							# selected transaction is later found to contain an ineligible
+							# member; widening this update through the complete-scope API makes
+							# an otherwise valid camera revision fail merely because unrelated
+							# groups were implicit.
+							var deferred_result: Dictionary = entry.job.replace_packet_foreground_group_demands_compact(
+								remaining_requests,deferred,entry.binding) if bool(blocked.get("implicitDeferred",false)) \
+								else entry.job.replace_packet_foreground_group_demands(remaining_requests,deferred,entry.binding)
 							if deferred_result.get("status")!="retained":
 								_failures[region] = {"binding":entry.binding,"reason":String(deferred_result.get("reason","packet_deferred_transaction_rejected"))}
 								_retire_scene(region); progressed=true; break
@@ -2353,14 +2436,22 @@ func _pump_scenes(ready: Dictionary, allow_build: bool, started: int, budget_use
 					_record_scene_unit("occupancy_guard",guard_started)
 					if not guard_allowed:
 						if configuration!=_configuration_serial or demand_revision!=_demand_revision or _closing: break
-						var deferred_occupancy: Dictionary = entry.job.defer_occupied_publication_transaction(int(transaction.transactionId))
-						if deferred_occupancy.get("status")!="retained":
-							_failures[region]={"binding":entry.binding,"reason":String(deferred_occupancy.get("reason","occupancy_defer_failed"))}
-							_retire_scene(region)
-						else:
-							entry["occupancyWaitReason"]="actor_occupancy"
+						if bool(entry.get("packetMode",false)):
+							# This packet already owns scene-side cursors/witnesses. Rotating it
+							# would replay partial publication. Keep its exact phase pinned and
+							# simply stop before the next mutation until the actor clears.
+							entry["occupancyWaitReason"]="actor_occupancy_active_transaction"
 							entry["occupancyWaitCount"]=int(entry.get("occupancyWaitCount",0))+1
 							entry["occupancyWaitStartedUsec"]=int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec()))
+						else:
+							var deferred_occupancy: Dictionary = entry.job.defer_occupied_publication_transaction(int(transaction.transactionId))
+							if deferred_occupancy.get("status")!="retained":
+								_failures[region]={"binding":entry.binding,"reason":String(deferred_occupancy.get("reason","occupancy_defer_failed"))}
+								_retire_scene(region)
+							else:
+								entry["occupancyWaitReason"]="actor_occupancy"
+								entry["occupancyWaitCount"]=int(entry.get("occupancyWaitCount",0))+1
+								entry["occupancyWaitStartedUsec"]=int(entry.get("occupancyWaitStartedUsec",Time.get_ticks_usec()))
 						_scene_cursor=(index+1)%regions.size()
 						progressed=true
 						break

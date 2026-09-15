@@ -604,14 +604,16 @@ func update_voxel_authority_chunks(force: bool) -> void:
 ## The only ordinary-gameplay claim for Citadel publication. Main establishes
 ## one frame token/deadline before any lane work; a child callback may consume
 ## at most the unspent remainder once, never a fresh private 4 ms allowance.
+## This claim is available on every gameplay frame. At low render rates a
+## lane-2-only claim starves cheap incremental atoms for seconds even though the
+## other lanes leave most of the shared envelope unused.
 func advance_citadel_publication_shared(observer_bounds: Rect2i, allow_dispatch: bool) -> Dictionary:
     if structure_system==null: return {}
     var explicit_loading := startup_loading_active or runtime_loading_active or not streaming_loading_request_owner.is_empty()
     if explicit_loading:
         return structure_system.advance_citadel_publication(observer_bounds,allow_dispatch,StructureSystemScript.CITADEL_PUBLICATION_BUDGET_USEC)
     var frame := Engine.get_process_frames()
-    if gameplay_publication_frame_token!=frame or gameplay_publication_lane!=2 \
-            or gameplay_publication_citadel_claimed_frame==frame:
+    if gameplay_publication_frame_token!=frame or gameplay_publication_citadel_claimed_frame==frame:
         if runtime_perf_monitor!=null: runtime_perf_monitor.increment_counter("gameplay_publication_citadel_deferred")
         return structure_system.citadel_publication.stats()
     var remaining := maxi(0,gameplay_publication_deadline_usec-Time.get_ticks_usec())
