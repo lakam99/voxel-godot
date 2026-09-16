@@ -344,13 +344,20 @@ func actual_packet_demand() -> void:
 	var capped_selection: Dictionary=service._bounded_navigation_group_requests(dependency_entry,
 		{dependency_probe_id:0},[],maxi(0,dependency_probe_closure.get("groupIds",[]).size()-1),"contract-navigation") \
 		if not dependency_probe_id.is_empty() else {}
+	var exact_overflow_selection: Dictionary=service._bounded_navigation_group_requests(dependency_entry,
+		{dependency_probe_id:0},[],maxi(0,dependency_probe_closure.get("groupIds",[]).size()-1),"contract-navigation",true) \
+		if not dependency_probe_id.is_empty() else {}
 	var complete_selected: Array=[]
 	for request: Dictionary in complete_selection.get("requests",[]): complete_selected.append_array(request.groupIds)
+	var exact_overflow_selected: Array=[]
+	for request: Dictionary in exact_overflow_selection.get("requests",[]): exact_overflow_selected.append_array(request.groupIds)
 	check("actual_navigation_cap_probe_has_dependency_closure",not dependency_probe_id.is_empty())
 	check("actual_navigation_cap_admits_whole_dependency_closure",complete_selection.get("status")=="ready" \
 		and dependency_probe_closure.get("groupIds",[]).all(func(id): return complete_selected.has(id)))
 	check("actual_navigation_cap_never_admits_partial_dependency_closure",capped_selection.get("status")=="ready" \
 		and capped_selection.get("requests",[]).is_empty())
+	check("actual_navigation_exact_closure_uses_hard_headroom_without_partial_publish",exact_overflow_selection.get("status")=="ready" \
+		and dependency_probe_closure.get("groupIds",[]).all(func(id): return exact_overflow_selected.has(id)))
 	check("actual_packet_selected_exact_nonempty_normal_group",started_groups==[ACTUAL_PACKET_GROUP] and census.get("ready",false) \
 		and selected_census.get("eligible",false) and selected_census.get("families",[]).has("normal"))
 	check("actual_first_useful_window_includes_structural_clearance_anchor",useful.get("status")=="ready" \
@@ -903,6 +910,20 @@ func _run() -> void:
 func view_ranked_rolling_windows() -> void:
 	# Pure scheduling coverage for a city larger than one physical packet window.
 	# Geometry and receipts remain covered by the actual frozen-source cases.
+	check("navigation_supplement_has_independent_rolling_capacity",
+		Service._navigation_supplement_slots(127,0)==Service.MAX_NAVIGATION_MERGED_FOREGROUND_GROUPS
+		and Service._navigation_supplement_slots(127,64)==64
+		and Service._navigation_supplement_slots(Service.MAX_REQUIRED_FOREGROUND_GROUPS-8,0)==8)
+	check("view_progress_advances_once_per_distinct_revision",
+		Service._view_progress_due({},7)
+		and not Service._view_progress_due({"viewRevision":7},7)
+		and Service._view_progress_due({"viewRevision":7},8))
+	check("stationary_presentation_warmup_has_hard_resident_ceiling",
+		Service._presentation_progress_due({"viewRevision":7},7,512,4,true)
+		and not Service._presentation_progress_due({"viewRevision":7},7,Service.MAX_RESIDENT_PRESENTATION_GROUPS,4,true)
+		and not Service._presentation_progress_due({"viewRevision":7},7,512,0,true)
+		and not Service._presentation_progress_due({"viewRevision":7},7,512,4,false)
+		and Service._presentation_progress_due({"viewRevision":7},8,Service.MAX_RESIDENT_PRESENTATION_GROUPS,0,false))
 	var groups: Dictionary = {}
 	for index: int in range(300):
 		var id := "synthetic-group-%03d" % index
@@ -948,6 +969,9 @@ func view_ranked_rolling_windows() -> void:
 	var completed: Dictionary = {}
 	for id: String in first.get("foregroundGroupIds",[]): completed[id]=true
 	var second: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],completed)
+	var stationary: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],[],completed,false)
+	var stationary_safety: Dictionary = service._bounded_packet_view_window(description,null,{},[{"viewIntent":view}],
+		[{"ownerId":"spatial-safety","groupIds":["synthetic-group-005"],"priority":0}],{},false)
 	var union := completed.duplicate()
 	for id: String in second.get("foregroundGroupIds",[]): union[id]=true
 	check("view_window_caps_city_publication_without_full_source_fallback",first.get("status")=="ready"
@@ -971,6 +995,12 @@ func view_ranked_rolling_windows() -> void:
 		and second.get("foregroundGroupIds",[]).size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS
 		and second.get("deferredGroupIds",[]).size()==groups.size()-Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS*2
 		and union.size()==Service.VIEW_WINDOW_PROGRESS_TARGET_GROUPS*2)
+	check("unchanged_view_does_not_drain_another_presentation_window",stationary.get("status")=="ready"
+		and stationary.get("foregroundGroupIds",[]).is_empty()
+		and stationary.get("deferredGroupCount",0)==groups.size()-completed.size())
+	check("unchanged_view_still_publishes_exact_spatial_safety",stationary_safety.get("status")=="ready"
+		and stationary_safety.get("readinessGroupIds",[])==["synthetic-group-005","synthetic-group-299"]
+		and stationary_safety.get("foregroundGroupIds",[])==["synthetic-group-005","synthetic-group-299"])
 	var drain_completed := {}
 	var drain_windows := 0
 	var drain_duplicate := false
@@ -990,8 +1020,8 @@ func view_ranked_rolling_windows() -> void:
 	var stage_profile: Dictionary = service.profile_scene_unit_metrics()
 	var rank_profile: Dictionary = stage_profile.get("demand_view_rank_and_merge",{})
 	check("view_window_profile_is_bounded_and_attributes_rank_scale",
-		int(rank_profile.get("calls",0))==11 and int(rank_profile.get("workUnitsTotal",0))==3300
-		and int(rank_profile.get("sampleCount",0))==11 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
+		int(rank_profile.get("calls",0))==13 and int(rank_profile.get("workUnitsTotal",0))==3300
+		and int(rank_profile.get("sampleCount",0))==13 and int(rank_profile.get("sampleCapacity",0))==Service.SCENE_UNIT_SAMPLE_CAPACITY
 		and int(rank_profile.get("p50Usec",-1))>=0 and int(rank_profile.get("p95Usec",-1))>=int(rank_profile.get("p50Usec",0))
 		and not rank_profile.has("samples"))
 	metrics.viewRankedRollingWindows={"firstCount":first.get("foregroundGroupIds",[]).size(),

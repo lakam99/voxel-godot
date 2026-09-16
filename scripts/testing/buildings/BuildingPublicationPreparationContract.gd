@@ -457,17 +457,17 @@ static func _packet_eligibility_census_controls(c: Dictionary) -> void:
 	var furnishings: Array = [{"id":"packet-chair","roomId":"room","archetype":"chair","material":"timber_board",
 		"position":Vector3.ZERO,"rotation":Vector3.ZERO,"occupiedSize":Vector3.ONE,"collision":true,"semantic":"chair","recipe":{}}]
 	furnishings.make_read_only()
-	var census := Preparation.classify_physical_group_packet_eligibility({"groups":groups},{"parts":parts},{"parts":furnishings})
+	var census := Preparation.classify_physical_group_packet_eligibility({"groups":groups,"treeRecords":[{"id":"tree-record"}]},{"parts":parts},{"parts":furnishings})
 	c.packet_eligibility_census_ready = census.ready
 	c.packet_eligibility_normal_and_jointed = census.ready and census.groups.normal.eligible and census.groups.normal.families==["normal"] \
 		and census.groups.jointed.eligible and census.groups.jointed.families==["jointed_paving"]
-	# Furnishing, doors, and aperture-tagged masonry each have a packet path.
-	# Trees still require their owned publication/retirement path and must remain
-	# outside the foreground physical-packet compiler.
-	c.packet_eligibility_packet_capable_and_tree_blocked = census.ready and census.groups.furniture.eligible \
+	# Furnishing, doors, aperture-tagged masonry and valid tree records each have
+	# a packet path. Trees still publish and retire through their existing owner;
+	# the packet only binds that callback work to the exact source group.
+	c.packet_eligibility_packet_capable_and_tree_owned = census.ready and census.groups.furniture.eligible \
 		and census.groups.aperture.eligible and census.groups.aperture.reasons.is_empty() \
 		and census.groups.door.eligible and census.groups.door.reasons.is_empty() \
-		and census.groups.tree.reasons==["tree"] and census.groups.unsupported.reasons==["unsupported"]
+		and census.groups.tree.eligible and census.groups.tree.reasons.is_empty() and census.groups.unsupported.reasons==["unsupported"]
 
 func _finish() -> void:
 	report.checks=checks

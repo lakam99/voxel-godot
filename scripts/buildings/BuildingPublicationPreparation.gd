@@ -467,7 +467,8 @@ static func classify_physical_group_packet_eligibility(publication_groups: Dicti
 	var groups: Variant = publication_groups.get("groups")
 	var building_parts: Variant = building_source.get("parts")
 	var furnishing_parts: Variant = furnishing_source.get("parts",[])
-	if not groups is Dictionary or not building_parts is Array or not furnishing_parts is Array:
+	var tree_records: Variant = publication_groups.get("treeRecords",[])
+	if not groups is Dictionary or not building_parts is Array or not furnishing_parts is Array or not tree_records is Array:
 		return _failed("invalid_packet_eligibility_source")
 	var jointed_feet: Dictionary = {}
 	for snapshot_value in building_parts:
@@ -501,7 +502,14 @@ static func classify_physical_group_packet_eligibility(publication_groups: Dicti
 					var furnishing_index := int(index_value)
 					if furnishing_index < 0 or furnishing_index >= furnishing_parts.size() or not furnishing_parts[furnishing_index] is Dictionary:
 						if not reasons.has("unsupported"): reasons.append("unsupported")
-				if not tree_indices.is_empty(): reasons.append("tree")
+				# Trees do not need worker-built mesh artifacts: their immutable
+				# publication-group record is already bound to this exact base and the
+				# scene owner registers it through the existing tree callback. Validate
+				# that record here so a tree-only packet can authorize that normal path.
+				for index_value in tree_indices:
+					var tree_index := int(index_value)
+					if tree_index < 0 or tree_index >= tree_records.size() or not tree_records[tree_index] is Dictionary:
+						if not reasons.has("unsupported"): reasons.append("unsupported")
 				# Door geometry is already published through the ordinary individual
 				# body path. Packet admission only permits it when the scene job later
 				# proves the same body was registered with its existing portal owner

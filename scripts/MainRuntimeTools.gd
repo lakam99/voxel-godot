@@ -512,6 +512,14 @@ func update_voxel_authority_chunks(force: bool) -> void:
         gameplay_publication_lane = -1
         gameplay_publication_deadline_usec = 0
     npc_navigation_publication_permitted = true
+    # Claim the Citadel's existing bounded share before broad streaming demand can
+    # consume the whole frame envelope. The terrain child calls the same method
+    # later, but the frame token admits exactly one claim. This preserves the
+    # shared 6 ms deadline/4 ms subordinate cap while preventing a resident
+    # revisit packet from starving indefinitely behind unrelated chunk work.
+    if shared_gameplay_schedule and structure_system!=null and player!=null:
+        var citadel_cell:=Vector2i(world_to_cell(player.position.x),world_to_cell(player.position.z))
+        advance_citadel_publication_shared(Rect2i(citadel_cell-Vector2i(2,2),Vector2i(5,5)),true)
     var center := world_to_chunk(player.position.x, player.position.z)
     var demand_start: int = monitor.begin_section("streaming_region_demand") if monitor != null else 0
     update_streaming_region_demand()

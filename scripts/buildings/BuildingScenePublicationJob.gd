@@ -16,7 +16,11 @@ const MAX_TRANSACTION_MEMBERS := 256
 const MAX_TRANSACTION_ESTIMATED_BYTES := 8*1024*1024
 const MAX_TRANSACTION_COLLISION_MEMBERS := 256
 const MAX_TRANSACTION_REGISTRATIONS := 128
-const PACKET_PARTITION_WORLD_SIZE := 16.0
+# A 32 m cell keeps packet uploads locally cullable while allowing dense civic
+# walls/foundations in the same block to share one worker/install transaction.
+# The former 16 m cell split exact Citadel navigation closures into ~150 tiny
+# packets even though member/collision caps still bounded every transaction.
+const PACKET_PARTITION_WORLD_SIZE := 32.0
 const ESTIMATED_BUILDING_MEMBER_BYTES := 32768
 const ESTIMATED_FURNITURE_MEMBER_BYTES := 8192
 const ESTIMATED_TREE_MEMBER_BYTES := 24576
@@ -194,12 +198,16 @@ func begin_prepared_base(base: Preparation.PreparedPublicationBase, profile: Dic
 	_groups = description.publication_groups
 	_base_packet_mode = true
 	_cpu = {"publicationBase":base,"profile":profile,"binding":_binding,
+		"nodeMetadata":[], "treeBodies":_tree_bodies, "treeIds":_tree_ids,
+		"registeredTreeIds":_registered_tree_ids, "treeVisualSeen":_tree_visual_seen,
+		"treeRetirementClaims":_tree_retirement_claims, "treeClaimOrder":_tree_claim_order,
+		"treeBySourceIndex":_tree_by_source_index,"skippedTreeIndices":_skipped_tree_indices,
 		"spatialDescription":_spatial,"groupRequests":_group_requests,"groupReceipts":_group_receipts,
 		"requestHeap":_request_heap,"selectionStack":_selection_stack,"physicalPacketInbox":_physical_packet_inbox,
 		"occupiedTransactions":_occupied_transactions,
 		"packetStaticOnlyGroups":_packet_static_only_groups,
 		"packetForegroundGroups":_packet_foreground_groups,"packetDeferredGroups":_packet_deferred_groups,
-		"physicalRequirementMemo":_physical_requirement_memo,"nodeMetadata":[]}
+		"physicalRequirementMemo":_physical_requirement_memo}
 	_parent = weakref(parent)
 	_tree_receiver = weakref(tree_callback.get_object())
 	_tree_method = tree_callback.get_method()
@@ -253,6 +261,15 @@ func activate_physical_group_packet_scene(expected_transaction_id: int) -> Dicti
 		var restored := Preparation.restore_publication_scene_source(base,_binding)
 		if not restored.get("ready",false): return {"status":"rejected","reason":String(restored.get("reason","physical_packet_scene_restore_failed"))}
 		_cpu["packetSceneSource"] = restored
+		var records: Variant = restored.blueprint.recipe.get("landscapeTrees",null)
+		if records==null:
+			var urban: Variant=restored.blueprint.recipe.get("urbanPoc",{})
+			if not urban is Dictionary: return {"status":"rejected","reason":"invalid_tree_collection"}
+			records=urban.get("treePlacements",[])
+		if not records is Array or records.size()!=_groups.get("treeRecords",[]).size():
+			return {"status":"rejected","reason":"invalid_tree_collection"}
+		_trees=records
+		_cpu["treeRecords"]=_trees
 	_packet_static_only_groups = _packet_static_only_groups_for(packet)
 	_cpu["packetStaticOnlyGroups"] = _packet_static_only_groups
 	if _building == null:
@@ -848,17 +865,33 @@ func retain_packet_supplemental_group_demands(requests: Array, expected_binding:
 				return {"status":"failed","reason":"packet_supplemental_dependency_missing"}
 	var navigation_owner: Dictionary={}
 	for id: String in additions: navigation_owner[id]=int(additions[id])
+	var previous_navigation_owner: Dictionary=_demand_owners.get("scene-job:navigation",{})
+	if previous_navigation_owner==navigation_owner and _supplemental_owner_is_scheduled(navigation_owner):
+		# Navigation acknowledgement can refresh every frame while the physical
+		# selector is cooperatively walking a large dependency closure. An
+		# identical owner map is not a scheduling mutation and must not discard
+		# the selection stack or its already-popped heap entries.
+		return {"status":"retained","binding":_binding,"supplementalGroups":additions.size(),
+			"foregroundGroups":_packet_foreground_groups.size(),"deferredGroups":_packet_deferred_group_count}
 	_demand_owners["scene-job:navigation"]=navigation_owner
 	var desired: Dictionary={}
 	for owner: Dictionary in _demand_owners.values():
 		for id: String in owner:
 			desired[id]=mini(int(desired.get(id,owner[id])),int(owner[id]))
 	var previous: Dictionary=_group_requests
-	for id: String in previous:
-		if not desired.has(id): _group_requests.erase(id)
+	# A changed supplemental owner invalidates an unpinned selection. Rebuild the
+	# heap completely before clearing it so entries already popped into that
+	# selection remain retryable. Preserve original age, and never duplicate an
+	# immutable pinned or occupancy-owned transaction.
+	var pinned_groups: Dictionary={}
+	for id: String in _transaction.get("groupIds",[]): pinned_groups[id]=true
+	_group_requests={}
+	_request_heap.clear()
+	_packet_partition_sequences={}
+	_packet_partition_sequence=0
 	for id: String in desired:
-		if _group_receipts.has(id): continue
-		if previous.has(id) and int(previous[id].priority)!=int(desired[id]):
+		if _group_receipts.has(id) or pinned_groups.has(id) or _occupied_group_ids.has(id): continue
+		if previous.has(id):
 			_group_requests[id]={"id":id,"priority":2147483647,"sequence":previous[id].sequence}
 		_enqueue_group(id,int(desired[id]))
 	_packet_foreground_groups={}
@@ -886,6 +919,16 @@ func retain_packet_supplemental_group_demands(requests: Array, expected_binding:
 	_cpu["packetDeferredGroups"]=_packet_deferred_group_count
 	return {"status":"retained","binding":_binding,"supplementalGroups":additions.size(),
 		"foregroundGroups":_packet_foreground_groups.size(),"deferredGroups":_packet_deferred_group_count}
+
+
+func _supplemental_owner_is_scheduled(owner: Dictionary) -> bool:
+	for id: String in owner:
+		if _group_receipts.has(id) or _group_requests.has(id) or _selection_set.has(id) or _occupied_group_ids.has(id):
+			continue
+		if _transaction.get("groupIds",[]).has(id): continue
+		if _selection_stack.any(func(frame: Dictionary): return String(frame.get("id",""))==id): continue
+		return false
+	return true
 
 
 func _defer_unoffered_packet_transaction() -> void:
@@ -1130,6 +1173,17 @@ func _restore_occupied_transaction() -> Dictionary:
 	for id: String in retained.get("groupIds",[]): _occupied_group_ids.erase(id)
 	_transaction = retained
 	_cpu["activePublicationTransaction"] = retained
+	# Occupancy rotation is allowed only while a packet is waiting, before it
+	# mutates the resident scene.  The cursors are job-global, however, so a
+	# different transaction may have completed while this immutable transaction
+	# was parked.  Restore the pre-activation cursor state explicitly; otherwise
+	# the parked packet can inherit the completed packet's cursor, skip all of
+	# its members, and reach commit without live member witnesses.
+	_transaction_building_cursor = 0
+	_transaction_furniture_cursor = 0
+	_transaction_tree_cursor = 0
+	_transaction_visual_cursor = 0
+	_active_member = ""
 	if _base_packet_mode:
 		var packet = _physical_packet_inbox.get(String(retained.get("physicalPacketKey","")))
 		if packet != null:
@@ -1787,7 +1841,7 @@ func _step(remaining_usec: int) -> bool:
 					# Packet receipts with door members must cross the same registration
 					# phase as ordinary scene publication. _member_live then binds the
 					# receipt to the exact body/portal claim rather than mere geometry.
-					_phase = "packet_door_registration" if _packet_transaction_has_doors(_transaction) else (("furniture_begin" if _furniture == null else "furniture") if not _transaction.furnitureIndices.is_empty() else "group_commit")
+					_phase = "packet_door_registration" if _packet_transaction_has_doors(_transaction) else (("furniture_begin" if _furniture == null else "furniture") if not _transaction.furnitureIndices.is_empty() else ("tree_registration" if not _transaction.treeIndices.is_empty() else "group_commit"))
 				else:
 					_phase = "door_registration" if _door_receiver != null else ("furniture_begin" if _furniture == null else "furniture")
 		"building_finish":
@@ -1811,7 +1865,7 @@ func _step(remaining_usec: int) -> bool:
 			_phase = "furniture"
 		"furniture":
 			if _transaction_furniture_cursor >= _transaction.furnitureIndices.size():
-				_phase = "group_commit" if _base_packet_mode else "tree_registration"
+				_phase = ("tree_registration" if not _transaction.treeIndices.is_empty() else "group_commit") if _base_packet_mode else "tree_registration"
 			else:
 				var source_index: int = _transaction.furnitureIndices[_transaction_furniture_cursor]
 				if source_index < 0 or source_index >= _plan.parts.size(): return _fail("furniture_source_index_changed")
@@ -1882,7 +1936,7 @@ func _packet_door_lifecycle_available() -> bool:
 func _register_door() -> bool:
 	if _door_cursor >= _building.published_nodes.size():
 		if _base_packet_mode:
-			_phase = ("furniture_begin" if _furniture == null else "furniture") if not _transaction.furnitureIndices.is_empty() else "group_commit"
+			_phase = ("furniture_begin" if _furniture == null else "furniture") if not _transaction.furnitureIndices.is_empty() else ("tree_registration" if not _transaction.treeIndices.is_empty() else "group_commit")
 		else:
 			_phase = "furniture_begin" if _furniture == null else "furniture"
 		return true

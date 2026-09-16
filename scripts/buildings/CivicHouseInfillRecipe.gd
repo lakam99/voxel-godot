@@ -291,14 +291,13 @@ static func compatible_underlay(part, ground_y: float) -> bool:
 	if part.kind!="foundation" or part.rotation!=Vector3.ZERO: return false
 	# Exact producer-owned base layers only. Raised beds, unrelated foundations,
 	# and noncolliding decorative structures remain obstacles.
-	var carved_paving: bool = _indexed_id(part.id,"castle_compound_paving_segment_") and part.recipe.get("egressCarved",false)==true and part.recipe.get("navigationRole")=="walkable_support" and part.recipe.get("pavingRegion")=="citadel_courtyard" and part.recipe.get("pavingHeading")=="x"
-	# The production castle carves its ground around egress/entry corridors and
-	# emits indexed segments. Their identity and geometry come from the same
-	# add_courtyard_foundation_and_paving producer, not a broad decor exemption.
+	var courtyard_paving: bool = _indexed_id(part.id,"castle_compound_paving_segment_") and part.recipe.get("continuousGroundCourse",false)==true and part.recipe.get("navigationRole")=="walkable_support" and part.recipe.get("pavingRegion")=="citadel_courtyard" and part.recipe.get("pavingHeading")=="x"
+	# The production courtyard now has one continuous, shallow ground course.
+	# Building foundations remain separate grounded structural roots.
 	if Support.declared(part,ground_y):
 		return true
-	if (part.id=="castle_courtyard_paving" or carved_paving) and part.semantic=="castle_courtyard_paving" and part.recipe.get("pavingFamily","")=="courtyard_setts" and part.collision_enabled and part.material_id=="cobblestone":
-		return part.position.y==Vector3(0,ground_y+0.07,0).y and part.size.y==Vector3(0,0.14,0).y
+	if courtyard_paving and part.semantic=="castle_courtyard_paving" and part.recipe.get("pavingFamily","")=="courtyard_setts" and part.collision_enabled and part.material_id=="cobblestone":
+		return is_equal_approx(part.position.y,0.06) and is_equal_approx(part.size.y,0.04) and is_equal_approx(float(part.recipe.get("gradeSurfaceY",NAN)),0.08)
 	if part.id=="urban_civic_quarter_paving" and part.semantic=="citadel_civic_quarter_paving" and part.recipe.get("pavingFamily","")=="civic_setts" and not part.collision_enabled:
 		return part.position.y==Vector3(0,ground_y+0.18,0).y and part.size.y==Vector3(0,0.08,0).y
 	return false

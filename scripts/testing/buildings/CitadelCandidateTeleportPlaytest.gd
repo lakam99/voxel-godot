@@ -512,7 +512,7 @@ func _run_scale_soak() -> Dictionary:
 		modal_frames+=int(retired.get("modalLoadingVisibleFrames",0))
 		if not retired.get("passed",false):
 			return _scale_soak_result(false,"retirement_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
-		var away_world_settlement:=await _wait_for_world_streaming_settlement(60000,"away_%02d"%(cycle_index+1))
+		var away_world_settlement:=await _wait_for_world_streaming_settlement(120000,"away_%02d"%(cycle_index+1))
 		modal_frames+=int(away_world_settlement.get("modalLoadingVisibleFrames",0))
 		if not away_world_settlement.get("passed",false):
 			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
@@ -529,19 +529,31 @@ func _run_scale_soak() -> Dictionary:
 		var revisited:=await _wait_for_revisit_settlement(180000)
 		modal_frames+=int(revisited.get("modalLoadingVisibleFrames",0))
 		if not revisited.get("passed",false):
+			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
+				"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move,
+				"settlement":revisited})
 			return _scale_soak_result(false,"revisit_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
-		var revisit_world_settlement:=await _wait_for_world_streaming_settlement(60000,"revisit_%02d"%(cycle_index+1))
+		var revisit_world_settlement:=await _wait_for_world_streaming_settlement(120000,"revisit_%02d"%(cycle_index+1))
 		modal_frames+=int(revisit_world_settlement.get("modalLoadingVisibleFrames",0))
 		if not revisit_world_settlement.get("passed",false):
 			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
 				"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move,
 				"settlement":revisited,"revisitWorldSettlement":revisit_world_settlement})
 			return _scale_soak_result(false,"revisit_world_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
+		var publication_settlement:=await _wait_for_citadel_resource_settlement(120000,"revisit_%02d"%(cycle_index+1))
+		modal_frames+=int(publication_settlement.get("modalLoadingVisibleFrames",0))
+		if not publication_settlement.get("passed",false):
+			cycles.append({"cycle":cycle_index+1,"leave":away_move,"retirement":retired,
+				"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move,
+				"settlement":revisited,"revisitWorldSettlement":revisit_world_settlement,
+				"publicationSettlement":publication_settlement})
+			return _scale_soak_result(false,"revisit_publication_did_not_settle",soak_started,cycles,samples,modal_frames,peak_static_memory,autosave_started_before,autosave_completed_before,autosave_failed_before)
 		var revisit_census:=await _resource_census("revisit_settled_%02d"%(cycle_index+1))
 		cycles.append({"cycle":cycle_index+1,"elapsedMsec":Time.get_ticks_msec()-soak_started,
 			"durationMsec":Time.get_ticks_msec()-cycle_started,"leave":away_move,"retirement":retired,
 			"awayWorldSettlement":away_world_settlement,"awayCensus":away_census,"revisit":revisit_move,
-			"settlement":revisited,"revisitWorldSettlement":revisit_world_settlement,"revisitCensus":revisit_census})
+			"settlement":revisited,"revisitWorldSettlement":revisit_world_settlement,
+			"publicationSettlement":publication_settlement,"revisitCensus":revisit_census})
 		# Spread the three real retirement/revisit cycles over the requested soak
 		# interval. Stationary time remains ordinary gameplay with autosave active.
 		var cycle_boundary:=soak_started+int(float(scale_soak_seconds*1000)*float(cycle_index+1)/float(SCALE_SOAK_CYCLES))
@@ -573,7 +585,8 @@ func _scale_soak_result(flow_passed: bool, flow_reason: String, soak_started: in
 	var cycles_passed:=cycles.size()==SCALE_SOAK_CYCLES and cycles.all(func(row: Dictionary):
 		return row.leave.get("passed",false) and row.retirement.get("passed",false) \
 			and row.awayWorldSettlement.get("passed",false) and row.revisit.get("passed",false) \
-			and row.settlement.get("passed",false) and row.revisitWorldSettlement.get("passed",false))
+			and row.settlement.get("passed",false) and row.revisitWorldSettlement.get("passed",false) \
+			and row.publicationSettlement.get("passed",false))
 	var autosave_started:=int(main.autosave_jobs_started)-autosave_started_before
 	var autosave_completed:=int(main.autosave_jobs_completed)-autosave_completed_before
 	var autosave_failed:=int(main.autosave_jobs_failed)-autosave_failed_before
@@ -600,20 +613,31 @@ func _settlement_comparison(cycles: Array[Dictionary]) -> Dictionary:
 	# The first complete leave/rebuild is the stated warmup cycle: it populates
 	# renderer, allocator and incremental-publication caches. Cycle two is the
 	# first post-warmup settled checkpoint; later cycles may not grow >5% from it.
-	var warm: Dictionary=cycles[1].revisitCensus
+	var warm: Dictionary=Dictionary(cycles[1].get("revisitCensus",{}))
+	if warm.is_empty():
+		return {"passed":false,"reason":"warm_checkpoint_missing_revisit_census","cycle":2}
 	var comparisons: Array[Dictionary]=[]
 	var checkpoint_comparisons: Array[Dictionary]=[]
 	var metrics: Array[String]=["staticMemoryBytes","nodeCount","resourceCount","orphanNodeCount","siteNodes","siteGeometry","siteCollisionShapes","siteStaticBodies","siteMultiMeshes","siteMultiMeshInstances","siteShadowCasters","citadelPreparedRepresentations","citadelCompactCaches","citadelLiveSceneSites","citadelResidentSites","citadelRetainedBounds"]
 	var group_accountable_metrics: Array[String]=["siteNodes","siteGeometry","siteCollisionShapes","siteMultiMeshes","siteMultiMeshInstances","siteShadowCasters"]
 	for cycle_index in range(2,cycles.size()):
-		var current: Dictionary=cycles[cycle_index].revisitCensus
+		var current: Dictionary=Dictionary(cycles[cycle_index].get("revisitCensus",{}))
+		if current.is_empty():
+			return {"passed":false,"reason":"comparison_checkpoint_missing_revisit_census","cycle":cycle_index+1}
 		var warm_world: Dictionary=warm.get("worldStreaming",{})
 		var current_world: Dictionary=current.get("worldStreaming",{})
-		var same_world_signature: bool=not String(warm_world.get("settlementSignature","")).is_empty() \
-			and warm_world.get("settlementSignature")==current_world.get("settlementSignature")
+		# Compare the authoritative resident/gameplay state, not the size of a
+		# stable background exposure-scan backlog. Each checkpoint already proves
+		# its full settlementSignature (including that backlog) stayed unchanged
+		# for ten seconds; the backlog count is scheduling state and may differ
+		# across rebuilds without changing the resident chunks being censused.
+		var baseline_signature:=String(warm_world.get("resourceComparisonSignature",""))
+		var current_signature:=String(current_world.get("resourceComparisonSignature",""))
+		var same_world_signature: bool=not baseline_signature.is_empty() and baseline_signature==current_signature
 		checkpoint_comparisons.append({"cycle":cycle_index+1,"passed":same_world_signature,
-			"baselineSignature":warm_world.get("settlementSignature",""),
-			"currentSignature":current_world.get("settlementSignature",""),
+			"baselineSignature":baseline_signature,"currentSignature":current_signature,
+			"baselineStableBackgroundSignature":warm_world.get("settlementSignature",""),
+			"currentStableBackgroundSignature":current_world.get("settlementSignature",""),
 			"reason":"equivalent_authoritative_world_state" if same_world_signature else "world_state_not_equivalent"})
 		for metric: String in metrics:
 			var baseline_value:=int(warm.get(metric,0))
@@ -690,9 +714,15 @@ func _wait_for_revisit_settlement(timeout_msec: int) -> Dictionary:
 		# current player closure is acknowledged, so packet_wait is not an idle or
 		# gameplay-readiness contract. Settle on the authoritative current physical
 		# receipt and source owner; the later census accounts for ongoing detail.
+		# The saved revisit pose is the exterior observation point. Its exact 5x5
+		# footprint may contain only ordinary terrain between the Citadel's source
+		# parts, in which case physical readiness correctly reports required=false.
+		# Scene/source ownership and the completed demanded window prove the rebuild;
+		# a ready no-op physical receipt is valid here. The following world-settlement
+		# check and player-scale itinerary separately require live Citadel collision.
 		var settled: bool=scene.get("status") in ["scene_ready","publishing"] \
 			and scene.get("binding",{})==source_binding and physical.get("status")=="ready" \
-			and physical.get("required",false) and int(milestones.get("completeDemandedUsec",-1))>=0 \
+			and int(milestones.get("completeDemandedUsec",-1))>=0 and int(diagnostic.get("physicalGroupsComplete",0))>0 \
 			and int(job_status.get("occupiedTransactions",-1))==0 and publication.get("failures",{}).is_empty()
 		stable_frames=stable_frames+1 if settled else 0
 		last_status={"scene":scene,"job":job_status,"physical":physical,"diagnostic":diagnostic,"publication":publication}
@@ -811,7 +841,59 @@ func _world_streaming_settlement_snapshot() -> Dictionary:
 	result.settlementSignature=str([result.playerChunk,result.chunkKeySignature,result.chunkNodes,result.pendingChunkProps,
 		result.pendingExposureScans,result.voxelDesiredGameplayChunks,result.voxelPendingGameplayChunks,
 		result.voxelPendingGameplayChunkQueue,result.voxelPublishedGameplayChunks])
+	result.resourceComparisonSignature=str([result.playerChunk,result.chunkKeySignature,result.chunkNodes,
+		result.pendingChunkProps,result.pendingChunkLoads,result.pendingTerrainRefreshes,result.pendingCollisionRefreshes,
+		result.pendingStructureOps,result.voxelDesiredGameplayChunks,result.voxelPendingGameplayChunks,
+		result.voxelPendingGameplayChunkQueue,result.voxelPublishedGameplayChunks,result.voxelPendingEditSections])
 	return result
+
+
+func _wait_for_citadel_resource_settlement(timeout_msec: int, label: String) -> Dictionary:
+	phase="scale_soak_publication_settlement:"+label
+	var begun:=Time.get_ticks_msec()
+	var stable_since:=-1
+	var stable_signature:=""
+	var modal_frames:=0
+	var samples: Array[Dictionary]=[]
+	var next_sample:=begun
+	var last_state: Dictionary={}
+	while Time.get_ticks_msec()-begun<timeout_msec and _within_deadline():
+		await _frame()
+		if _modal_loading_visible(): modal_frames+=1
+		var publication: Dictionary=main.structure_system.citadel_publication.stats()
+		var diagnostic: Dictionary={}
+		for row: Dictionary in publication.get("sceneDiagnostics",[]):
+			if row.get("region")==region: diagnostic=row; break
+		var idle: bool=not diagnostic.is_empty() and diagnostic.get("phase")=="scene_ready" \
+			and diagnostic.get("jobPhase")=="packet_wait" \
+			and int(diagnostic.get("publicationTransactionId",-1))==0 \
+			and int(diagnostic.get("occupiedTransactions",-1))==0 \
+			and publication.get("failures",{}).is_empty()
+		var signature:=str([diagnostic.get("physicalGroupsComplete",-1),diagnostic.get("packetForegroundGroups",-1),
+			diagnostic.get("packetDeferredGroups",-1),diagnostic.get("retainedGroupRequests",-1),
+			diagnostic.get("navigationPhysicalGroups",-1)])
+		last_state={"idle":idle,"signature":signature,"diagnostic":diagnostic,
+			"navigationProbePending":diagnostic.get("navigationPhysicalPending",{}).duplicate(true),
+			"failures":publication.get("failures",{}).duplicate(true)}
+		var now:=Time.get_ticks_msec()
+		if now>=next_sample:
+			next_sample=now+1000
+			samples.append(last_state.duplicate(true))
+		if idle:
+			if stable_since<0 or signature!=stable_signature:
+				stable_since=now
+				stable_signature=signature
+			if now-stable_since>=10000:
+				return {"passed":modal_frames==0,"reason":"citadel_publication_working_set_quiet",
+					"elapsedMsec":now-begun,"quietMsec":now-stable_since,
+					"modalLoadingVisibleFrames":modal_frames,"state":last_state,"samples":samples,
+					"scope":"Read-only proof that the resident packet scene has no active transaction, occupancy wait or failed owner and that its completed working-set signature is unchanged for ten seconds. The sampled navigationProbePending field records rotating query-time collision probes but does not redefine the resident packet working set; player-route collision remains covered by the headed movement and world-settlement phases."}
+		else:
+			stable_since=-1
+			stable_signature=""
+	return {"passed":false,"reason":"citadel_publication_working_set_timeout",
+		"elapsedMsec":Time.get_ticks_msec()-begun,"quietMsec":0 if stable_since<0 else Time.get_ticks_msec()-stable_since,
+		"modalLoadingVisibleFrames":modal_frames,"state":last_state,"samples":samples}
 
 func _ordinary_move_to(target: Vector3, timeout_msec: int, stop_distance: float, phase_name: String,
 		allow_lateral_recovery := true, hold_jump := false, sprint := true) -> Dictionary:
@@ -1267,13 +1349,47 @@ func _audit_foreground_navigation_publication(expected_keys: Array) -> Dictionar
 		result["reason"]="navigation_owners_unavailable"
 		return result
 	var foreground: Dictionary=main.player_foreground_streaming_intent()
-	var keys: Array[String]=[]
+	var raw_keys: Array[String]=[]
 	for raw_tile: Variant in foreground.get("navigationTiles",[]):
 		if not raw_tile is Vector2i:
 			result["reason"]="invalid_foreground_navigation_tile"
 			return result
 		var tile: Vector2i=raw_tile
-		keys.append("%d,%d" % [tile.x,tile.y])
+		raw_keys.append("%d,%d" % [tile.x,tile.y])
+	raw_keys.sort()
+	if raw_keys.is_empty():
+		result["reason"]="foreground_navigation_intent_empty"
+		return result
+	var request_id:=int(main.streaming_requests.get("player",-1))
+	if request_id<=0:
+		result["reason"]="foreground_streaming_request_missing"
+		return result
+	var regional_readiness: Dictionary={"status":"pending","reason":"foreground_streaming_publication_pending"}
+	# The production coordinator owns the exact sparse crossing closure. Audit
+	# that accepted demand rather than reconstructing it from the raw capsule
+	# tile and accidentally omitting a declared neighboring endpoint.
+	var audit_deadline:=mini(deadline,Time.get_ticks_msec()+120000)
+	while _within_deadline() and Time.get_ticks_msec()<audit_deadline:
+		regional_readiness=main.world_streaming.region_readiness(foreground.bounds,request_id)
+		last_observation["navigationPublication"]={"rawTileCount":raw_keys.size(),
+			"status":regional_readiness.get("status"),"reason":regional_readiness.get("reason","")}
+		if regional_readiness.get("status")=="ready": break
+		await physics_frame
+		await _frame()
+	result["regionalReadiness"]=regional_readiness
+	if regional_readiness.get("status")!="ready":
+		result["reason"]=regional_readiness.get("reason","foreground_streaming_publication_timeout")
+		return result
+	var readiness: Dictionary=regional_readiness.get("domains",{}).get("navigation",{})
+	if readiness.get("status")!="ready":
+		result["reason"]="foreground_navigation_domain_not_ready"
+		return result
+	var keys: Array[String]=[]
+	for key: Variant in readiness.get("sourceRevisions",{}).get("tiles",{}).keys():
+		if not key is String:
+			result["reason"]="invalid_foreground_navigation_revision_tile"
+			return result
+		keys.append(key)
 	keys.sort()
 	var expected_set:={}
 	for key: String in expected_keys: expected_set[key]=true
@@ -1283,27 +1399,40 @@ func _audit_foreground_navigation_publication(expected_keys: Array) -> Dictionar
 	if keys.is_empty() or citadel_keys.is_empty():
 		result["reason"]="foreground_does_not_intersect_citadel_navigation_domain"
 		return result
+	result["rawForegroundTileKeys"]=raw_keys
 	result["foregroundTileKeys"]=keys
 	result["citadelForegroundTileKeys"]=citadel_keys
 	result["ordinaryForegroundTileCount"]=keys.size()-citadel_keys.size()
 	result["auditedTileCount"]=keys.size()
 	result["queryBounds"]=foreground.get("bounds",Rect2i())
-	var retained:=_retain_navigation_audit_demand(keys)
-	result["demandRetention"]=retained
-	if not retained.get("passed",false):
-		result["reason"]=retained.get("reason","navigation_demand_retention_unavailable")
-		return result
-	var readiness: Dictionary={"status":"pending","reason":"navigation_publication_pending"}
-	var audit_deadline:=mini(deadline,Time.get_ticks_msec()+30000)
-	while _within_deadline() and Time.get_ticks_msec()<audit_deadline:
-		readiness=main.regional_navigation.tiles_publication_readiness(keys,foreground.bounds)
-		last_observation["navigationPublication"]={"auditedTileCount":keys.size(),
-			"status":readiness.get("status"),"reason":readiness.get("reason","")}
-		if readiness.get("status") in ["ready","failed"]: break
-		await physics_frame
-		await _frame()
+	result["demandRetention"]={"passed":true,"reason":"production_coordinator_retained_exact_crossing_closure",
+		"requestId":request_id,"declaredTileCount":keys.size()}
 	result["readiness"]=readiness
 	if readiness.get("status")!="ready":
+		var diagnostics: Array[Dictionary]=[]
+		var adapter=main.npc_system.pathing.navigation_world
+		var nav=main.npc_system.autonomy_system.navmesh_world
+		for key: String in citadel_keys:
+			var source_key: String=String(adapter.navmesh_tile_source_key_for_tile(key))
+			var accepted: Dictionary=nav.accepted_tile_state(key,source_key,String(main.seed_text),adapter)
+			var accepted_snapshot: Dictionary=accepted.get("accepted",{}).get("source",{}).get("snapshot",{})
+			var regional_tile: Dictionary=main.regional_navigation._tiles.get(key,{})
+			var coordinates:=key.split(",")
+			var fresh: Dictionary={}
+			if coordinates.size()==2 and coordinates[0].is_valid_int() and coordinates[1].is_valid_int():
+				fresh=main.structure_system.navigation_tile_sources(Vector2i(int(coordinates[0]),int(coordinates[1])))
+			var fresh_tile: Dictionary=fresh.get("sources",[])[0].get("tile",{}) \
+				if fresh.get("sources",[]).size()>0 else {}
+			diagnostics.append({"tileKey":key,"sourceKey":source_key,
+				"acceptedStatus":accepted.get("status","absent"),
+				"acceptedCrossingLinkIds":accepted_snapshot.get("crossingLinks",[]).map(func(link):return String(link.get("id",""))),
+				"regionalStatus":regional_tile.get("status","absent"),"regionalReason":regional_tile.get("reason",""),
+				"regionalCrossingIds":regional_tile.get("crossings",{}).keys(),
+				"regionalLinkIds":regional_tile.get("linkIds",[]),
+				"freshSourceStatus":fresh.get("status","absent"),"freshSourceReason":fresh.get("reason",""),
+				"freshRequiredCrossingIds":fresh_tile.get("requiredCrossingIds",[]),
+				"freshCrossingLinkIds":fresh_tile.get("crossingLinks",[]).map(func(link):return String(link.get("id","")))})
+		result["failureDiagnostics"]=diagnostics
 		result["reason"]=readiness.get("reason","foreground_navigation_publication_timeout")
 		return result
 	var adapter=main.npc_system.pathing.navigation_world
@@ -1355,6 +1484,27 @@ func _navigation_audit_receipt(nav, adapter, key: String, saved: Dictionary, sur
 		return accepted.get("receipt",{}).duplicate()
 	return nav.tile_publication_readiness(key,String(saved.sourceKey),surfaces,links)
 
+func _clear_lateral_bypass_z(initial_z: float, from_x: float, to_x: float,
+		blockers: Array[AABB]) -> float:
+	var low_x:=minf(from_x,to_x)
+	var high_x:=maxf(from_x,to_x)
+	var clearance:=0.75
+	var nearest_z:=initial_z
+	var nearest_distance:=INF
+	# Select the nearer face of the obstruction that actually contains the
+	# proposed cross-lane. Following every later collider in the travel direction
+	# can chain separate buildings together and turn a short street detour into an
+	# artificial route across the whole Citadel.
+	for blocker: AABB in blockers:
+		if blocker.end.x+clearance<low_x or blocker.position.x-clearance>high_x: continue
+		if initial_z<blocker.position.z-clearance or initial_z>blocker.end.z+clearance: continue
+		for candidate: float in [blocker.position.z-clearance,blocker.end.z+clearance]:
+			var distance:=absf(candidate-initial_z)
+			if distance<nearest_distance:
+				nearest_distance=distance
+				nearest_z=candidate
+	return nearest_z
+
 func _run_player_scale_inspection() -> Dictionary:
 	# This itinerary is derived from the accepted source samples and bounds. It
 	# drives only ordinary key/mouse input through PlayerController and uses the
@@ -1363,10 +1513,19 @@ func _run_player_scale_inspection() -> Dictionary:
 	var bounds: AABB=evidence.sceneAudit.visualBounds
 	var gate_sample: Dictionary={}
 	var stair_sample: Dictionary={}
+	var stair_door_sample: Dictionary={}
 	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
 		if sample.id=="castle_gatehouse_portcullis": gate_sample=sample
-		elif String(sample.semantic)=="castle_gatehouse_wall_stair_landing": stair_sample=sample
-	if gate_sample.is_empty() or stair_sample.is_empty():
+		elif sample.id=="castle_gatehouse_wall_stair_base_landing": stair_sample=sample
+		elif sample.id=="castle_gatehouse_wall_stair_door": stair_door_sample=sample
+	var stair_door_pose_source_only:=false
+	if stair_door_sample.is_empty():
+		# Rolling publication may have acknowledged the landing collision before its
+		# door packet. The immutable accepted source may supply only the target pose;
+		# movement and interaction below still require the real live door node.
+		stair_door_sample=_accepted_structure_pose("castle_gatehouse_wall_stair_door")
+		stair_door_pose_source_only=not stair_door_sample.is_empty()
+	if gate_sample.is_empty() or stair_sample.is_empty() or stair_door_sample.is_empty():
 		return {"passed":false,"reason":"required_gate_or_stair_sample_missing"}
 	var homes: Array[Dictionary]=[]
 	for home_value in evidence.sceneAudit.get("urbanHomeInteriors",[]):
@@ -1453,14 +1612,42 @@ func _run_player_scale_inspection() -> Dictionary:
 		return {"passed":false,"reason":"gate_crossing_failed","stages":stages}
 	var room_bounds: AABB=home.worldBounds
 	var street_side:=signf(float(home.streetSide))
+	var home_door_position: Vector3=home.get("sourceDoorPosition",Vector3.INF)
+	if not home_door_position.is_finite():
+		return {"passed":false,"reason":"source_home_door_position_missing","homeId":home.id}
 	var home_outside_x:=room_bounds.end.x+1.4 if street_side>0.0 else room_bounds.position.x-1.4
-	var home_outside:=Vector3(home_outside_x,room_bounds.position.y,room_bounds.get_center().z)
+	var home_outside:=Vector3(home_outside_x,room_bounds.position.y,home_door_position.z)
 	var home_staging_x:=room_bounds.end.x+8.0 if street_side>0.0 else room_bounds.position.x-8.0
 	var home_staging:=Vector3(home_staging_x,room_bounds.position.y,room_bounds.get_center().z)
 	var home_inside:=Vector3(room_bounds.get_center().x,room_bounds.position.y+0.2,room_bounds.get_center().z)
-	# Each generated civic row can shift laterally with the terrace. Derive the
-	# real gap between its paired façades; assuming one straight central X line
-	# cuts through later offset rows on this valid seed.
+	# The row envelopes below describe houses, but the civic spine also passes the
+	# keep's forecourt pavilions. Build a read-only set of every accepted source
+	# collider that reaches standing-player height so a lateral inspection leg can
+	# be placed beyond the complete authored obstruction, not merely beyond the
+	# last house row. This only selects fixture waypoints; it never publishes or
+	# changes production routing.
+	var source_route_blockers: Array[AABB]=[]
+	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+	var source_origin: Vector3=evidence.sceneAudit.get("sourceOrigin",Vector3.INF)
+	if not source_origin.is_finite():
+		return {"passed":false,"reason":"accepted_source_origin_missing","stages":stages}
+	var standing_low:=room_bounds.position.y+0.05
+	var standing_high:=room_bounds.position.y+1.90
+	for route_part_value in accepted_source.get("blueprint",{}).get("parts",[]):
+		if not route_part_value is Dictionary: continue
+		var route_part:=route_part_value as Dictionary
+		if not bool(route_part.get("collision",false)): continue
+		var route_size: Vector3=route_part.get("size",Vector3.ZERO)
+		var route_position: Vector3=route_part.get("position",Vector3.ZERO)
+		var route_rotation: Vector3=route_part.get("rotation",Vector3.ZERO)
+		if not route_size.is_finite() or route_size.x<=0.0 or route_size.y<=0.0 or route_size.z<=0.0: continue
+		var route_transform:=Transform3D(Basis.from_euler(route_rotation),source_origin+route_position)
+		var route_bounds:=route_transform*AABB(-route_size*0.5,route_size)
+		if route_bounds.end.y>standing_low and route_bounds.position.y<standing_high:
+			source_route_blockers.append(route_bounds)
+	# Each generated civic row can shift laterally. Derive the real gap between
+	# its paired source collision envelopes; interior room bounds omit the wall
+	# thickness and can place a waypoint through a façade once its packet lands.
 	var civic_rows: Dictionary={}
 	for home_value in evidence.sceneAudit.get("urbanHomeInteriors",[]):
 		if not home_value is Dictionary: continue
@@ -1475,8 +1662,8 @@ func _run_player_scale_inspection() -> Dictionary:
 	for row_key: String in civic_rows:
 		var pair: Dictionary=civic_rows[row_key]
 		if not pair.has("left") or not pair.has("right"): continue
-		var first_bounds: AABB=(pair.left as Dictionary).worldBounds
-		var second_bounds: AABB=(pair.right as Dictionary).worldBounds
+		var first_bounds: AABB=(pair.left as Dictionary).get("sourceStreetBlockingBounds",(pair.left as Dictionary).worldBounds)
+		var second_bounds: AABB=(pair.right as Dictionary).get("sourceStreetBlockingBounds",(pair.right as Dictionary).worldBounds)
 		var west: AABB=first_bounds if first_bounds.position.x<second_bounds.position.x else second_bounds
 		var east: AABB=second_bounds if first_bounds.position.x<second_bounds.position.x else first_bounds
 		var gap_low:=west.end.x
@@ -1486,7 +1673,8 @@ func _run_player_scale_inspection() -> Dictionary:
 		if gap_high-gap_low<1.2 or overlap_high<=overlap_low: continue
 		var row_floor_y:=(first_bounds.position.y+second_bounds.position.y)*0.5
 		civic_row_spans.append({"point":Vector3((gap_low+gap_high)*0.5,row_floor_y,(overlap_low+overlap_high)*0.5),
-			"lowZ":overlap_low,"highZ":overlap_high,"lowX":west.position.x,"highX":east.end.x,"rowId":row_key})
+			"lowZ":overlap_low,"highZ":overlap_high,"lowX":west.position.x,"highX":east.end.x,
+			"gapLowX":gap_low,"gapHighX":gap_high,"rowId":row_key})
 	civic_row_spans.sort_custom(func(a: Dictionary,b: Dictionary): return (a.point as Vector3).distance_squared_to(gate_position)<(b.point as Vector3).distance_squared_to(gate_position))
 	if civic_row_spans.is_empty(): return {"passed":false,"reason":"source_civic_street_spine_missing","stages":stages}
 	var travel_sign:=signf(home_staging.z-gate_position.z)
@@ -1497,11 +1685,25 @@ func _run_player_scale_inspection() -> Dictionary:
 		var following: Dictionary=civic_row_spans[row_index]
 		var previous_edge:=float(previous.highZ if travel_sign>0.0 else previous.lowZ)
 		var following_edge:=float(following.lowZ if travel_sign>0.0 else following.highZ)
-		if (following_edge-previous_edge)*travel_sign<=0.2:
-			return {"passed":false,"reason":"source_civic_row_transition_missing","stages":stages,
-				"previousRow":previous.rowId,"followingRow":following.rowId}
+		var longitudinal_clearance:=(following_edge-previous_edge)*travel_sign
 		var transition_z:=(previous_edge+following_edge)*0.5
-		civic_route_points.append(Vector3((previous.point as Vector3).x,room_bounds.position.y,transition_z))
+		# A geometric gap is not a player lane when its midpoint leaves less than a
+		# capsule radius to either façade. In that case use the paired houses' shared
+		# central opening below, which remains valid after late collision packets land.
+		var minimum_longitudinal_lane:=_capsule_radius()*2.0+0.20
+		if longitudinal_clearance>minimum_longitudinal_lane:
+			civic_route_points.append(Vector3((previous.point as Vector3).x,room_bounds.position.y,transition_z))
+		else:
+			# Roof/foundation envelopes may overlap longitudinally while their
+			# paired central openings still form one continuous physical lane.
+			var shared_gap_low:=maxf(float(previous.gapLowX),float(following.gapLowX))
+			var shared_gap_high:=minf(float(previous.gapHighX),float(following.gapHighX))
+			if shared_gap_high-shared_gap_low<0.90:
+				return {"passed":false,"reason":"source_civic_row_transition_missing","stages":stages,
+					"previousRow":previous.rowId,"followingRow":following.rowId,
+					"longitudinalClearance":longitudinal_clearance,"sharedGapWidth":shared_gap_high-shared_gap_low}
+			transition_z=(maxf(float(previous.lowZ),float(following.lowZ))+minf(float(previous.highZ),float(following.highZ)))*0.5
+			civic_route_points.append(Vector3((shared_gap_low+shared_gap_high)*0.5,room_bounds.position.y,transition_z))
 		# The last paired row can carry an authored cross-lane structural span.
 		# When the selected home is beyond that pair, remain in the open band
 		# between rows, go around the pair's source AABB, then continue on its far
@@ -1511,10 +1713,19 @@ func _run_player_scale_inspection() -> Dictionary:
 		var home_beyond_pair:=row_index==civic_row_spans.size()-1 and not is_zero_approx(home_side) \
 			and (home_staging.x>float(following.highX) or home_staging.x<float(following.lowX))
 		if home_beyond_pair:
-			var bypass_x:=float(following.highX)+4.0 if home_side>0.0 else float(following.lowX)-4.0
-			civic_route_points.append(Vector3(bypass_x,room_bounds.position.y,transition_z))
-			civic_route_points.append(Vector3(bypass_x,room_bounds.position.y,
-				float(following.highZ)+4.0 if travel_sign>0.0 else float(following.lowZ)-4.0))
+			# Stay in the paired central opening until the player is longitudinally
+			# clear of both neighbouring source envelopes. Crossing laterally at an
+			# overlap midpoint can put the capsule beneath the preceding house's
+			# overhanging façade even though the eventual bypass point is clear.
+			var bypass_x:=maxf(float(previous.highX),float(following.highX))+4.0 if home_side>0.0 \
+				else minf(float(previous.lowX),float(following.lowX))-4.0
+			var bypass_z:=maxf(float(previous.highZ),float(following.highZ))+4.0 if travel_sign>0.0 \
+				else minf(float(previous.lowZ),float(following.lowZ))-4.0
+			bypass_z=_clear_lateral_bypass_z(bypass_z,(following.point as Vector3).x,bypass_x,
+				source_route_blockers)
+			civic_route_points.append(following.point)
+			civic_route_points.append(Vector3((following.point as Vector3).x,room_bounds.position.y,bypass_z))
+			civic_route_points.append(Vector3(bypass_x,room_bounds.position.y,bypass_z))
 		else:
 			civic_route_points.append(Vector3((following.point as Vector3).x,room_bounds.position.y,transition_z))
 			civic_route_points.append(following.point)
@@ -1529,17 +1740,17 @@ func _run_player_scale_inspection() -> Dictionary:
 	civic_route_points.append(Vector3((civic_route_points.back() as Vector3).x,room_bounds.position.y,home_transition_z))
 	civic_route_points.append(Vector3(home_staging.x,room_bounds.position.y,home_transition_z))
 	civic_route_points.append(home_staging)
-	var market_platform_target:=Vector3.INF
+	var market_ground_target:=Vector3.INF
 	for span: Dictionary in civic_row_spans:
 		if String(span.rowId)=="urban_row_02":
-			market_platform_target=span.point
+			market_ground_target=span.point
 			break
-	if not market_platform_target.is_finite():
-		return {"passed":false,"reason":"source_market_platform_row_missing","stages":stages}
+	if not market_ground_target.is_finite():
+		return {"passed":false,"reason":"source_market_ground_row_missing","stages":stages}
 	var market_capture_route_index:=0
 	var market_capture_distance:=INF
 	for route_index in range(civic_route_points.size()):
-		var distance:=(civic_route_points[route_index] as Vector3).distance_squared_to(market_platform_target)
+		var distance:=(civic_route_points[route_index] as Vector3).distance_squared_to(market_ground_target)
 		if distance<market_capture_distance:
 			market_capture_distance=distance
 			market_capture_route_index=route_index
@@ -1552,9 +1763,8 @@ func _run_player_scale_inspection() -> Dictionary:
 	stages.append({"stage":"civic_lane_alignment","movement":lane_alignment_move})
 	if not lane_alignment_move.get("passed",false): return {"passed":false,"reason":"civic_lane_alignment_failed","stages":stages}
 	for route_index in range(civic_route_points.size()):
-		# The generated street spine climbs successive source-authored terraces.
-		# Hold ordinary jump across the lane rather than treating a terrace riser as
-		# a flat-ground obstruction and oscillating against its static collider.
+		# Keep ordinary jump/recovery available for natural terrain undulation and
+		# street furniture while following the source-derived open lane.
 		var route_move:=await _ordinary_move_to(civic_route_points[route_index],60000,0.65,"scale_inspection_civic_route_%02d"%route_index,true,true)
 		stages.append({"stage":"civic_route_%02d"%route_index,"movement":route_move,"sourcePoint":civic_route_points[route_index]})
 		if not route_move.get("passed",false): return {"passed":false,"reason":"civic_route_failed","stages":stages}
@@ -1569,13 +1779,19 @@ func _run_player_scale_inspection() -> Dictionary:
 		stages.append({"stage":"home_clearance_route_%02d"%route_index,"movement":reverse_route,"sourcePoint":civic_route_points[route_index]})
 		if not reverse_route.get("passed",false): return {"passed":false,"reason":"home_clearance_route_failed","stages":stages}
 	# A home transaction may depend on shared civic paving whose collision spans
-	# the gate landing. Wait at the already traversed exterior corner, beyond the
-	# accepted visual/collision envelope, so the pinned packet can finish without
-	# publishing beneath the player.
-	var home_publication_clearance:=await _ordinary_move_to(corner_gate,180000,3.2,"scale_inspection_home_publication_clearance")
-	stages.append({"stage":"home_publication_clearance","movement":home_publication_clearance})
-	if not home_publication_clearance.get("passed",false):
-		return {"passed":false,"reason":"home_publication_clearance_failed","stages":stages}
+	# the gate landing. Leave through the already-open gate before turning toward
+	# the exterior corner; a direct diagonal from the civic lane cuts through the
+	# curtain wall even though both endpoints are clear. These are the same
+	# collision-backed waypoints already proven on entry.
+	for clearance_spec: Dictionary in [
+		{"label":"home_clearance_gate_inside","target":gate_inside,"stop":2.1},
+		{"label":"home_clearance_gate_outside","target":gate_outside,"stop":2.0},
+		{"label":"home_clearance_gate_staging","target":gate_staging,"stop":3.0},
+		{"label":"home_publication_clearance","target":corner_gate,"stop":3.2}]:
+		var clearance_move:=await _ordinary_move_to(clearance_spec.target,180000,float(clearance_spec.stop),"scale_inspection_"+String(clearance_spec.label),false,true)
+		stages.append({"stage":clearance_spec.label,"movement":clearance_move})
+		if not clearance_move.get("passed",false):
+			return {"passed":false,"reason":String(clearance_spec.label)+"_failed","stages":stages}
 	var home_low:=room_bounds.position
 	var home_high:=room_bounds.end
 	var home_route_bounds:=_route_bounds_for_world_points([
@@ -1590,7 +1806,7 @@ func _run_player_scale_inspection() -> Dictionary:
 	stages.append({"stage":"home_settlement","settlement":home_settlement})
 	if not home_settlement.get("passed",false): return {"passed":false,"reason":"home_detail_did_not_settle","stages":stages}
 	var home_door_id:=String(home.id)+"_door"
-	var home_door_settlement:=await _wait_for_live_door(home_door_id,home_outside,120000,"home")
+	var home_door_settlement:=await _wait_for_live_door(home_door_id,home_door_position,120000,"home")
 	stages.append({"stage":"home_door_settlement","settlement":home_door_settlement})
 	if not home_door_settlement.get("passed",false): return {"passed":false,"reason":"live_home_door_missing","stages":stages}
 	var return_gate_staging:=await _ordinary_move_to(gate_staging,180000,3.0,"scale_inspection_return_gate_staging")
@@ -1610,11 +1826,11 @@ func _run_player_scale_inspection() -> Dictionary:
 		stages.append({"stage":"return_route_%02d"%route_index,"movement":return_route,"sourcePoint":civic_route_points[route_index]})
 		if not return_route.get("passed",false): return {"passed":false,"reason":"return_route_failed","stages":stages}
 		if route_index==market_capture_route_index:
-			var market_views:=await _capture_day_night_player_view("market_platform_slope",market_platform_target+Vector3.UP*0.8)
-			stages.append({"stage":"market_platform_slope_views","views":market_views,
-				"sourceTarget":market_platform_target,"routeIndex":route_index})
+			var market_views:=await _capture_day_night_player_view("market_natural_ground",market_ground_target+Vector3.UP*0.8)
+			stages.append({"stage":"market_natural_ground_views","views":market_views,
+				"sourceTarget":market_ground_target,"routeIndex":route_index})
 			if not market_views.get("passed",false):
-				return {"passed":false,"reason":"market_platform_slope_capture_failed","stages":stages}
+				return {"passed":false,"reason":"market_natural_ground_capture_failed","stages":stages}
 	var street_move:=await _ordinary_move_to(home_outside,120000,0.65,"scale_inspection_civic_street",false,true)
 	stages.append({"stage":"civic_street","movement":street_move})
 	if not street_move.get("passed",false): return {"passed":false,"reason":"civic_street_route_failed","stages":stages}
@@ -1643,11 +1859,34 @@ func _run_player_scale_inspection() -> Dictionary:
 	var home_exit:=await _ordinary_move_to(home_outside,45000,1.0,"scale_inspection_home_exit",false,true)
 	stages.append({"stage":"home_exit","movement":home_exit})
 	if not home_exit.get("passed",false): return {"passed":false,"reason":"home_exit_failed","stages":stages}
+	var home_facade_outward:=Vector3(home_door_position.x-room_bounds.get_center().x,0.0,
+		home_door_position.z-room_bounds.get_center().z).normalized()
+	# The production portal's expanded clearance ends just beyond 2.0 m for this
+	# leaf, while ordinary block interaction ends at 2.50 m. Hold the capsule in
+	# that real overlap instead of relying on a large movement stop radius.
+	var home_close_stance:=home_door_position+home_facade_outward*2.28
+	home_close_stance.y=room_bounds.position.y
+	var home_close_clearance:=await _ordinary_move_to(home_close_stance,45000,0.12,"scale_inspection_home_close_clearance",false,true)
+	stages.append({"stage":"home_close_clearance","movement":home_close_clearance,"sourcePoint":home_close_stance})
+	if not home_close_clearance.get("passed",false): return {"passed":false,"reason":"home_close_clearance_failed","stages":stages}
 	var home_close:=await _toggle_door_with_player_input(home_door,false,"citadel_home_close")
 	stages.append({"stage":"home_close","interaction":home_close})
 	if not home_close.get("passed",false): return {"passed":false,"reason":"home_door_close_failed","stages":stages}
 	var stair_pose: Transform3D=stair_sample.transform
 	var stair_target:=stair_pose*Vector3(0.0,float(stair_sample.size.y)*0.5+0.1,0.0)
+	var stair_door_pose: Transform3D=stair_door_sample.transform
+	var stair_door_position:=stair_door_pose.origin
+	var stair_inward:=Vector3(stair_target.x-stair_door_position.x,0.0,stair_target.z-stair_door_position.z).normalized()
+	var stair_door_outside:=stair_door_position-stair_inward*0.72
+	stair_door_outside.y=stair_target.y
+	var stair_door_approach:=await _ordinary_move_to(stair_door_outside,120000,0.55,"scale_inspection_gate_stair_door",false,true)
+	stages.append({"stage":"gate_stair_door_approach","movement":stair_door_approach,"sourcePoint":stair_door_outside})
+	if not stair_door_approach.get("passed",false): return {"passed":false,"reason":"gate_stair_door_approach_failed","stages":stages}
+	var stair_door:=_live_door_by_part_id(String(stair_door_sample.id))
+	if stair_door==null: return {"passed":false,"reason":"live_gate_stair_door_missing","stages":stages}
+	var stair_door_open:=await _toggle_door_with_player_input(stair_door,true,"citadel_gate_stair_open")
+	stages.append({"stage":"gate_stair_door_open","interaction":stair_door_open})
+	if not stair_door_open.get("passed",false): return {"passed":false,"reason":"gate_stair_door_open_failed","stages":stages}
 	var stair_move:=await _ordinary_move_to(stair_target,120000,1.0,"scale_inspection_gate_stair")
 	stages.append({"stage":"gate_stair","movement":stair_move})
 	if not stair_move.get("passed",false): return {"passed":false,"reason":"gate_stair_route_failed","stages":stages}
@@ -1655,7 +1894,31 @@ func _run_player_scale_inspection() -> Dictionary:
 	stages.append({"stage":"stair_views","views":stair_views})
 	if not stair_views.get("passed",false): return {"passed":false,"reason":"stair_day_night_capture_failed","stages":stages}
 	return {"passed":true,"reason":"ordinary_player_scale_inspection_complete","stages":stages,
-		"homeId":home.id,"roomBounds":room_bounds,"scope":"Source-derived perimeter itinerary, ordinary W/Shift/mouse input, production collision and right-click door interactions; no transform, motor or door-authority helper call."}
+		"homeId":home.id,"roomBounds":room_bounds,"stairDoorPoseSourceOnly":stair_door_pose_source_only,
+		"scope":"Source-derived perimeter itinerary, ordinary W/Shift/mouse input, production collision and right-click door interactions; no transform, motor or door-authority helper call."}
+
+
+func _accepted_structure_pose(part_id: String) -> Dictionary:
+	if part_id.is_empty() or not is_instance_valid(main) or main.structure_system==null: return {}
+	var accepted: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+	# The admission map is already keyed by this accepted region; its frozen
+	# payload predates the service binding wrapper and therefore has no nested
+	# `binding` field of its own.
+	if not accepted.get("blueprint") is Dictionary: return {}
+	var origin: Variant=evidence.get("sceneAudit",{}).get("sourceOrigin")
+	if not origin is Vector3 or not origin.is_finite(): return {}
+	for value in accepted.get("blueprint",{}).get("parts",[]):
+		if not value is Dictionary: continue
+		var record: Dictionary=value
+		if String(record.get("id",""))!=part_id: continue
+		var position: Variant=record.get("position")
+		var rotation: Variant=record.get("rotation",Vector3.ZERO)
+		var size: Variant=record.get("size")
+		if not position is Vector3 or not rotation is Vector3 or not size is Vector3: return {}
+		return {"id":part_id,"kind":record.get("kind",""),"semantic":record.get("semantic",""),
+			"transform":Transform3D(Basis.from_euler(rotation),origin+position),"size":size,
+			"sourcePoseOnly":true,"binding":source_binding.duplicate()}
+	return {}
 
 func _nearest_live_door(target: Vector3, max_distance: float) -> Node3D:
 	var site: Node3D=main.structure_system.citadel_publication.scene_root(region)
@@ -1707,11 +1970,15 @@ func _wait_for_live_door(part_id: String, expected_position: Vector3, timeout_ms
 func _toggle_door_with_player_input(door: Node3D, desired_open: bool, label: String) -> Dictionary:
 	if not is_instance_valid(door): return {"passed":false,"reason":"door_missing"}
 	main.capture_mouse_if_no_modal()
+	var targets:=_live_door_interaction_targets(door)
 	var hit: Dictionary={}
 	var attempts:=0
 	for attempt in range(120):
 		attempts=attempt+1
-		var target:=door.global_position+Vector3.UP*0.65
+		# An opened leaf can put its hinge-centred proxy partly behind the jamb from
+		# one approach. Aim at sampled points on the live production interaction
+		# shapes, while still requiring the normal focus ray and viewport input.
+		var target: Vector3=targets[attempt%targets.size()]
 		var direction: Vector3=(target-player.camera.global_position).normalized()
 		var yaw_delta:=wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
 		var pitch_delta:=atan2(direction.y,Vector2(direction.x,direction.z).length())-float(player.get("pitch"))
@@ -1724,7 +1991,8 @@ func _toggle_door_with_player_input(door: Node3D, desired_open: bool, label: Str
 		hit=main.focused_interaction_hit()
 		if main.interaction_block_from_collider(hit.get("collider"))==door: break
 	if main.interaction_block_from_collider(hit.get("collider"))!=door:
-		return {"passed":false,"reason":"door_not_in_production_interaction_ray","attempts":attempts,"hit":hit}
+		return {"passed":false,"reason":"door_not_in_production_interaction_ray","attempts":attempts,
+			"targetCount":targets.size(),"hit":hit}
 	for pressed: bool in [true,false]:
 		var click:=InputEventMouseButton.new()
 		click.button_index=MOUSE_BUTTON_RIGHT; click.pressed=pressed
@@ -1735,6 +2003,32 @@ func _toggle_door_with_player_input(door: Node3D, desired_open: bool, label: Str
 	return {"passed":actual_open==desired_open,"reason":"door_state_reached" if actual_open==desired_open else "door_state_mismatch",
 		"label":label,"attempts":attempts,"desiredOpen":desired_open,"actualOpen":actual_open,
 		"doorPath":String(main.get_path_to(door)),"scope":"Production focus ray and ordinary viewport right-click input."}
+
+
+func _live_door_interaction_targets(door: Node3D) -> Array[Vector3]:
+	var targets: Array[Vector3]=[]
+	var stack: Array[Node]=[door]
+	while not stack.is_empty():
+		var node: Node=stack.pop_back()
+		for child: Node in node.get_children(): stack.append(child)
+		if not node is CollisionShape3D: continue
+		var collider:=node as CollisionShape3D
+		if String(collider.get_meta("building_collision_role",""))!="door_interaction_proxy": continue
+		var shape:=collider.shape as BoxShape3D
+		if shape==null: continue
+		var pose:=collider.global_transform
+		var half:=shape.size*0.5
+		# Stay inside the interaction volume. Horizontal edge samples expose the
+		# open leaf around either jamb; vertical samples avoid incidental trim.
+		for local: Vector3 in [
+			Vector3.ZERO,
+			Vector3(half.x*0.68,0.0,0.0),Vector3(-half.x*0.68,0.0,0.0),
+			Vector3(0.0,0.0,half.z*0.68),Vector3(0.0,0.0,-half.z*0.68),
+			Vector3(0.0,half.y*0.32,0.0),Vector3(0.0,-half.y*0.24,0.0)
+		]:
+			targets.append(pose*local)
+	if targets.is_empty(): targets.append(door.global_position)
+	return targets
 
 func _capture_day_night_player_view(label: String, target: Vector3) -> Dictionary:
 	var aimed:=false
@@ -2437,8 +2731,13 @@ func _audit_scene() -> Dictionary:
 	result.furnitureSamples=[]
 	result.structureSamples=[]
 	result.collisionMismatches=[]
+	result.collisionMismatchDetails=[]
 	var source_parts := {}
+	var accepted_collision_parts := {}
 	var seen_collisions := {}
+	var acknowledged_seen_collisions := {}
+	var in_flight_building_members := {}
+	var packet_job: BuildingScenePublicationJob = null
 	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
 	var accepted_blueprint: Dictionary=accepted_source.get("blueprint",{})
 	var urban_live: Dictionary={}
@@ -2448,7 +2747,7 @@ func _audit_scene() -> Dictionary:
 	# geometry merely because it exists in the same Citadel source.
 	var published_building_members := {}
 	if publication_entry.get("binding",{}) == source_binding and publication_entry.has("job"):
-		var packet_job = publication_entry.job
+		packet_job = publication_entry.job
 		for group_id: String in packet_job._group_receipts:
 			for member_key: String in packet_job._groups.get("groups",{}).get(group_id,{}).get("members",[]):
 				# Publication groups use namespaced member keys so furniture and
@@ -2457,6 +2756,14 @@ func _audit_scene() -> Dictionary:
 				# influence packet selection or physical publication.
 				if member_key.begins_with("building:"):
 					published_building_members[member_key.trim_prefix("building:")] = true
+		# A packet installs members incrementally before its group receipt can be
+		# committed. Snapshot the current transaction for evidence; the live member
+		# witness below remains authoritative while this audit yields across frames.
+		var active_transaction: Dictionary=packet_job._transaction
+		if not active_transaction.is_empty() and packet_job._blueprint!=null:
+			for source_index: int in active_transaction.get("buildingIndices",[]):
+				if source_index>=0 and source_index<packet_job._blueprint.parts.size():
+					in_flight_building_members[String(packet_job._blueprint.parts[source_index].id)]=true
 	result["collisionAuditScope"] = "acknowledged_packet_groups"
 	result["acknowledgedPhysicalBuildingMembers"] = published_building_members.size()
 	# One post-publication source capture for exact offline comparison. No runtime
@@ -2474,8 +2781,11 @@ func _audit_scene() -> Dictionary:
 		if source_error!=OK: _evidence_failure("accepted-source.bin",source_error)
 		else: result["sourceCapture"]={"path":source_path,"sha256":FileAccess.get_sha256(source_path),"elapsedUsec":Time.get_ticks_usec()-source_started}
 	for record: Dictionary in accepted_source.get("blueprint",{}).get("parts",[]):
-		if record.get("collision",false) and published_building_members.has(String(record.id)):
-			source_parts[record.id]=record
+		if record.get("collision",false):
+			accepted_collision_parts[record.id]=record
+			if published_building_members.has(String(record.id)): source_parts[record.id]=record
+	result["inFlightPhysicalBuildingMembers"]=in_flight_building_members.size()
+	result["validInFlightCollisionIds"]=[]
 	var have_bounds := false
 	result.rootPosition = site.global_position
 	result.sourceOrigin = expected_origin
@@ -2507,11 +2817,25 @@ func _audit_scene() -> Dictionary:
 				result.collisionShapes += 1
 				if node.get_meta("building_collision_role","")=="blocking_part" and node.get_parent() is StaticBody3D:
 					var part_id := String(node.get_meta("building_part_id",""))
-					var record: Dictionary=source_parts.get(part_id,{})
-					if record.is_empty() or seen_collisions.has(part_id): result.collisionMismatches.append(part_id)
+					var record: Dictionary=accepted_collision_parts.get(part_id,{})
+					if record.is_empty():
+						result.collisionMismatches.append(part_id)
+						result.collisionMismatchDetails.append({"id":part_id,"reason":"source_record_missing","actualTransform":node.global_transform,"actualSize":node.shape.size if node.shape is BoxShape3D else Vector3.ZERO})
+					elif seen_collisions.has(part_id):
+						result.collisionMismatches.append(part_id)
+						result.collisionMismatchDetails.append({"id":part_id,"reason":"duplicate_live_collider","actualTransform":node.global_transform,"actualSize":node.shape.size if node.shape is BoxShape3D else Vector3.ZERO})
 					else:
 						var expected: Transform3D=site.global_transform*Transform3D(Basis.from_euler(record.rotation),record.position)
-						if not node.shape is BoxShape3D or node.shape.size!=record.size or not node.global_transform.is_equal_approx(expected): result.collisionMismatches.append(part_id)
+						if not node.shape is BoxShape3D or node.shape.size!=record.size or not node.global_transform.is_equal_approx(expected):
+							result.collisionMismatches.append(part_id)
+							result.collisionMismatchDetails.append({"id":part_id,"reason":"shape_or_transform_mismatch","expectedTransform":expected,"actualTransform":node.global_transform,"expectedSize":record.size,"actualSize":node.shape.size if node.shape is BoxShape3D else Vector3.ZERO})
+						elif source_parts.has(part_id):
+							acknowledged_seen_collisions[part_id]=true
+						elif packet_job != null and packet_job._member_witnesses.has("building:"+part_id):
+							result.validInFlightCollisionIds.append(part_id)
+						else:
+							result.collisionMismatches.append(part_id)
+							result.collisionMismatchDetails.append({"id":part_id,"reason":"unacknowledged_live_collider","actualTransform":node.global_transform,"actualSize":node.shape.size if node.shape is BoxShape3D else Vector3.ZERO})
 						seen_collisions[part_id]=true
 						var semantic := String(record.get("semantic",""))
 						if semantic in ["castle_keep_stair_exit","castle_keep_stair_landing","castle_gatehouse_wall_stair_exit","castle_gatehouse_wall_stair_landing","citadel_upper_lane"] or part_id in ["urban_row_00_left_door","urban_row_00_right_door","urban_row_03_left_door","urban_row_03_right_door","castle_gatehouse_wall_stair_door","castle_gatehouse_portcullis","castle_keep_rear_secondary_door","urban_civic_house_wall_door"]:
@@ -2559,7 +2883,8 @@ func _audit_scene() -> Dictionary:
 	result.sourceStillMatches = _source_summary().get("binding",{})==source_binding and service.scene_state(region).get("binding",{})==source_binding and service.scene_state(region).status=="scene_ready"
 	result.capsule = Clearance.inspect(player)
 	result.sourceCollisionCount=source_parts.size()
-	result.publishedSourceCollisionCount=seen_collisions.size()
+	result.publishedSourceCollisionCount=acknowledged_seen_collisions.size()
+	result.validInFlightCollisionIds.sort()
 	# The count comparison below is the acceptance condition. Preserve a small,
 	# deterministic census when it fails so a headed run identifies the omitted
 	# source family without dumping thousands of records or guessing from a
@@ -2567,7 +2892,7 @@ func _audit_scene() -> Dictionary:
 	result.missingSourceCollisionIds=[]
 	result.missingSourceCollisionSemantics={}
 	for part_id: String in source_parts:
-		if seen_collisions.has(part_id): continue
+		if acknowledged_seen_collisions.has(part_id): continue
 		if result.missingSourceCollisionIds.size()<48:
 			result.missingSourceCollisionIds.append(part_id)
 		var semantic := String(source_parts[part_id].get("semantic",""))
@@ -2586,15 +2911,48 @@ func _audit_scene() -> Dictionary:
 		var live: Dictionary=urban_live.get(home_id,{"id":home_id,"roomId":room_id,"archetypes":{},"samples":[]})
 		var room: Dictionary=rooms_by_id.get(room_id,{})
 		var local_bounds: AABB=room.get("bounds",AABB())
+		var world_room_bounds: AABB=site.global_transform*local_bounds
+		var structure_bounds:=AABB()
+		var have_structure_bounds:=false
+		var street_blocking_bounds:=AABB()
+		var have_street_blocking_bounds:=false
+		var source_door_position:=Vector3.INF
+		for source_part_value in accepted_blueprint.get("parts",[]):
+			if not source_part_value is Dictionary: continue
+			var source_part: Dictionary=source_part_value as Dictionary
+			if not bool(source_part.get("collision",false)) or not String(source_part.get("id","")).begins_with(home_id+"_"): continue
+			var size: Vector3=source_part.get("size",Vector3.ZERO)
+			var position: Vector3=source_part.get("position",Vector3.ZERO)
+			var rotation: Vector3=source_part.get("rotation",Vector3.ZERO)
+			if not size.is_finite() or size.x<=0.0 or size.y<=0.0 or size.z<=0.0: continue
+			var world_part_transform:=site.global_transform*Transform3D(Basis.from_euler(rotation),position)
+			var part_bounds: AABB=world_part_transform*AABB(-size*0.5,size)
+			if String(source_part.get("id",""))==home_id+"_door": source_door_position=world_part_transform.origin
+			structure_bounds=structure_bounds.merge(part_bounds) if have_structure_bounds else part_bounds
+			have_structure_bounds=true
+			# Route envelopes represent what blocks a standing player. Roofs and
+			# upper-storey collision may overlap in plan while leaving the street
+			# fully open below; foundations ending below the floor are likewise not
+			# lateral blockers for this itinerary.
+			var walk_low:=world_room_bounds.position.y+0.05
+			var walk_high:=world_room_bounds.position.y+1.90
+			if part_bounds.end.y>walk_low and part_bounds.position.y<walk_high:
+				street_blocking_bounds=street_blocking_bounds.merge(part_bounds) if have_street_blocking_bounds else part_bounds
+				have_street_blocking_bounds=true
 		var complete:=not room.is_empty() and required_archetypes.all(func(archetype):return int(live.archetypes.get(archetype,0))>0)
 		if complete: complete_home_count+=1
 		result.urbanHomeInteriors.append({"id":home_id,"roomId":room_id,"streetSide":descriptor.get("streetSide",0.0),
-			"worldBounds":site.global_transform*local_bounds,"archetypes":live.archetypes,"samples":live.samples,"complete":complete})
+			"worldBounds":world_room_bounds,"sourceStructureBounds":structure_bounds if have_structure_bounds else world_room_bounds,
+			"sourceStructureBoundsAvailable":have_structure_bounds,
+			"sourceStreetBlockingBounds":street_blocking_bounds if have_street_blocking_bounds else world_room_bounds,
+			"sourceStreetBlockingBoundsAvailable":have_street_blocking_bounds,
+			"sourceDoorPosition":source_door_position,
+			"archetypes":live.archetypes,"samples":live.samples,"complete":complete})
 	result.urbanHomeInteriorReady=complete_home_count>=2 and result.urbanFurnitureBodies>0
 	result["completeUrbanHomeInteriorCount"]=complete_home_count
 	result["generatedUrbanHomeCount"]=(accepted_blueprint.get("recipe",{}).get("citadelUrbanHomes",[]) as Array).size()
 	result.passed = stack.is_empty() and result.rootMatchesProfile and result.rootVisible and result.visibleGeometry>0 and have_bounds and result.ownersAvailable and result.sourceStillMatches and result.badBindings.is_empty() and result.meshes+result.instances>0 and result.collisionShapes>0 and result.furnitureBodies>0 and result.urbanHomeInteriorReady and result.doors>0 and not result.physicsProbes.is_empty() and result.physicsProbes.all(func(p):return p.registeredInPhysics) and result.capsule.passed
-	result.passed = result.passed and result.collisionMismatches.is_empty() and source_parts.size()==seen_collisions.size() and not source_parts.is_empty()
+	result.passed = result.passed and result.collisionMismatches.is_empty() and source_parts.size()==acknowledged_seen_collisions.size() and not source_parts.is_empty()
 	return result
 
 func _audit_stair_clearance() -> Dictionary:

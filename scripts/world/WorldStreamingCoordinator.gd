@@ -607,6 +607,35 @@ func _compile_sets(requirements: Dictionary, bounds: Rect2i, peripheral_margin_c
 	for domain: String in ["terrain","render","navigation"]:
 		var regions: Array = domains.get(domain,requirements.get("dependencyBounds",[])).duplicate()
 		regions.append(bounds)
+		if domain=="navigation":
+			# Declared crossings are indivisible publication obligations. A local
+			# owner tile may name an adjacent endpoint outside the query capsule;
+			# retain that exact sparse peer without expanding source discovery or
+			# filling the envelope between them.
+			var crossings: Variant=requirements.get("requiredCrossings",{})
+			if not crossings is Dictionary:
+				return {"status":"failed","reason":"invalid_navigation_crossing_closure"}
+			var crossing_tiles: Dictionary={}
+			for crossing_id: String in crossings:
+				var crossing: Variant=crossings[crossing_id]
+				if not crossing is Dictionary or crossing.get("sourceId")!=crossing_id \
+						or not crossing.get("tileKeys") is Array:
+					return {"status":"failed","reason":"invalid_navigation_crossing_closure"}
+				for tile_key_value: Variant in crossing.tileKeys:
+					if not tile_key_value is String:
+						return {"status":"failed","reason":"invalid_navigation_crossing_tile"}
+					var tile_key: String=tile_key_value
+					var coordinates:=tile_key.split(",")
+					if coordinates.size()!=2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int():
+						return {"status":"failed","reason":"invalid_navigation_crossing_tile"}
+					var tile:=Vector2i(int(coordinates[0]),int(coordinates[1]))
+					if tile_key!="%d,%d" % [tile.x,tile.y]:
+						return {"status":"failed","reason":"invalid_navigation_crossing_tile"}
+					crossing_tiles[tile]=true
+			var ordered_crossing_tiles: Array=crossing_tiles.keys()
+			ordered_crossing_tiles.sort_custom(func(a: Vector2i,b: Vector2i):return a.y<b.y if a.y!=b.y else a.x<b.x)
+			for tile: Vector2i in ordered_crossing_tiles:
+				regions.append(Rect2i(tile*16,Vector2i.ONE*16))
 		var step: int = 16 if domain=="navigation" else GAME_CHUNK_SIZE
 		var limit: int = 512 if domain=="navigation" else MAX_RETAINED_CHUNKS
 		var compiled: Dictionary = DemandSet.from_regions(regions,step,limit,peripheral_margin_cells if domain=="render" else 0)

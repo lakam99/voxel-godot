@@ -61,6 +61,16 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 		return _failure("missing_household_members")
 	var pivot := Vector3(member_bounds.get_center().x, member_bounds.position.y, member_bounds.get_center().z)
 	var height := member_bounds.size.y
+	var old_center := Vector2(pivot.x, pivot.z)
+	# A continuous city platform can be much larger than this household's search
+	# radius. Only geometry capable of reaching a candidate footprint or its
+	# approach can affect the result. This conservative envelope includes the
+	# furthest translated member extent, circulation, and full approach length;
+	# it changes no candidate or collision rule, but avoids repeatedly scanning
+	# unrelated buildings across the rest of the same physical paving part.
+	var member_half_span := maxf(member_bounds.size.x, member_bounds.size.z) * 0.5
+	var influence_margin := radius + member_half_span + maxf(circulation, approach_length) + spacing + 1.25
+	var candidate_influence := Rect2(old_center - Vector2.ONE * influence_margin, Vector2.ONE * influence_margin * 2.0)
 	var rooms: Array[Rect2] = []
 	var access_count := 0
 	for room in blueprint.rooms:
@@ -69,7 +79,9 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 		if not _valid_bounds(room.bounds) or not room.get("accesses", []) is Array:
 			return _failure("invalid_room_bounds")
 		if String(room.get("role", "")) != "courtyard":
-			rooms.append(_xz(room.bounds))
+			var room_rect := _xz(room.bounds)
+			if room_rect.intersects(candidate_influence):
+				rooms.append(room_rect)
 		access_count += room.get("accesses", []).size()
 		if access_count > MAX_COLLECTION:
 			return _failure("collection_limit_exceeded")
@@ -79,7 +91,9 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 			var access_bounds := AABB(access.position - access.size * 0.5, access.size)
 			if not _valid_bounds(access_bounds):
 				return _failure("invalid_room_access")
-			rooms.append(_xz(access_bounds))
+			var access_rect := _xz(access_bounds)
+			if access_rect.intersects(candidate_influence):
+				rooms.append(access_rect)
 	var reservations: Array[Rect2] = []
 	if policy.get("reservedFootprints", []).size() > MAX_COLLECTION:
 		return _failure("collection_limit_exceeded")
@@ -118,7 +132,7 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 		var approach_obstacles: Array[Rect2] = []
 		var fixed: Array[Rect2] = []
 		for rect in reservations + rooms:
-			if rect.intersects(allowed):
+			if rect.intersects(allowed) and rect.intersects(candidate_influence):
 				fixed.append(rect)
 		for other_id in records:
 			if members.has(other_id) or other_id == id:
@@ -129,7 +143,7 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 				continue
 			var bounds: AABB = other.bounds
 			var rect: Rect2 = other.xz
-			if not rect.grow(maxf(1.25, circulation)).intersects(allowed):
+			if not rect.grow(maxf(1.25, circulation)).intersects(candidate_influence):
 				continue
 			if part.kind == "door" or part.kind == "stair_tread" or part.kind == "ramp":
 				fixed.append(rect.grow(1.25 if part.kind == "door" else circulation))
@@ -153,7 +167,6 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 				first = false
 			var size := _xz(rotated).size
 			var half := size * 0.5
-			var old_center := Vector2(pivot.x, pivot.z)
 			var minimum := (allowed.position + half).max(old_center - Vector2.ONE * radius)
 			var maximum := (allowed.end - half).min(old_center + Vector2.ONE * radius)
 			if maximum.x < minimum.x or maximum.y < minimum.y:

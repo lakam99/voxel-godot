@@ -14,13 +14,9 @@ static func declared(part, ground_y: float) -> bool:
 	if not declaration is Dictionary or declaration.size()!=DECLARATION.size(): return false
 	for key: String in DECLARATION:
 		if typeof(declaration.get(key))!=typeof(DECLARATION[key]) or declaration.get(key)!=DECLARATION[key]: return false
-	var prefix := "castle_compound_foundation_segment_"
-	var suffix: String=part.id.trim_prefix(prefix)
-	if not part.id.begins_with(prefix) or not suffix.is_valid_int(): return false
-	var index := suffix.to_int()
-	if index<0 or index>=MAX_PARTS or part.id!="%s%02d"%[prefix,index]: return false
-	if part.recipe.get("egressCarved")!=true or part.recipe.get("navigationRole")!="structural_mass": return false
-	return part.kind=="foundation" and part.semantic=="castle_courtyard_foundation" and part.material_id=="stone_foundation" and part.collision_enabled and part.rotation==Vector3.ZERO and part.position.is_finite() and part.size.is_finite() and part.size.x>0.0 and part.size.z>0.0 and part.position.y==Vector3(0,ground_y*0.5,0).y and part.size.y==Vector3(0,ground_y,0).y
+	if part.id!="castle_compound_foundation_segment_00" or part.recipe.get("continuousGroundCourse")!=true \
+			or part.recipe.get("navigationRole")!="structural_mass": return false
+	return part.kind=="foundation" and part.semantic=="castle_courtyard_foundation" and part.material_id=="stone_foundation" and part.collision_enabled and part.rotation==Vector3.ZERO and part.position.is_finite() and part.size.is_finite() and part.size.x>0.0 and part.size.z>0.0 and is_equal_approx(part.position.y,0.02) and is_equal_approx(part.size.y,0.04) and is_equal_approx(float(part.recipe.get("gradeSurfaceY",NAN)),0.08)
 
 static func bind(environment, rebuilt, owner: String, envelope: AABB, ground_y: float, continuation: Callable) -> Dictionary:
 	var membership := Membership.street_house_memberships(rebuilt)

@@ -652,12 +652,15 @@ func _run() -> void:
 	await base_packet_gate_control()
 	await packet_transaction_order_control()
 	await packet_occupied_transaction_rotation_control()
+	await packet_occupied_transaction_cursor_restore_control()
 	await packet_occupied_dependency_reservation_control()
 	await packet_local_partition_batch_control()
 	await packet_interleaved_partition_batch_control()
 	await packet_oversized_dependency_closure_control()
 	await packet_foreground_deferral_control()
+	await packet_supplemental_refresh_preserves_selection_control()
 	await packet_furnishing_session_control()
+	await packet_tree_session_control()
 	await packet_door_lifecycle_control()
 	packet_publisher_validation_control()
 	packet_publisher_incremental_session_control()
@@ -946,9 +949,9 @@ func packet_occupied_transaction_rotation_control() -> void:
 	var blueprint := Blueprint.new("packet-occupied-rotation",1,"timber")
 	blueprint.recipe={"sourceBlueprintId":"packet_occupied_rotation_history","landscapeTrees":[]}
 	blueprint.add_part({"id":"occupied-room","kind":"wall","material":"timber_beam","collision":true,
-		"size":Vector3(1,2,1),"position":Vector3(-6,1,0)})
+		"size":Vector3(1,2,1),"position":Vector3(-20,1,0)})
 	blueprint.add_part({"id":"independent-room","kind":"wall","material":"timber_beam","collision":true,
-		"size":Vector3(1,2,1),"position":Vector3(6,1,0)})
+		"size":Vector3(1,2,1),"position":Vector3(20,1,0)})
 	var plan := Plan.new("packet-occupied-rotation-plan",1,blueprint.id)
 	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
 	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
@@ -984,15 +987,81 @@ func packet_occupied_transaction_rotation_control() -> void:
 	await drain(job,"packet_occupied_rotation")
 
 
+## A parked packet is pre-activation state.  Completing another packet while
+## it waits must not lend that packet's terminal member cursor to the parked
+## transaction when it is restored.  This is the repeated-retirement/revisit
+## failure mode: the restored transaction must publish and witness its own
+## exact member before commit.
+func packet_occupied_transaction_cursor_restore_control() -> void:
+	var blueprint := Blueprint.new("packet-occupied-cursor-restore",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_occupied_cursor_restore_history","landscapeTrees":[]}
+	blueprint.add_part({"id":"parked-room","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(-20,1,0)})
+	blueprint.add_part({"id":"completed-room","kind":"wall","material":"timber_beam","collision":true,
+		"size":Vector3(1,2,1),"position":Vector3(20,1,0)})
+	var plan := Plan.new("packet-occupied-cursor-restore-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile := frozen_profile()
+	var base_result := Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("occupied_cursor_restore_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var groups: Array[String]=[]
+	for raw_id in base_result.base.description.publication_groups.order: groups.append(String(raw_id))
+	groups.sort()
+	check("occupied_cursor_restore_has_two_groups",groups.size()==2)
+	if groups.size()!=2: return
+	var trees := SyntheticTrees.new()
+	var job := Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
+	var parked: Dictionary=job.pending_publication_transaction()
+	check("occupied_cursor_restore_first_packet_parked",parked.get("status")=="pending"
+		and parked.groupIds.size()==1
+		and job.defer_occupied_publication_transaction(int(parked.transactionId),"synthetic_actor_overlap").get("status")=="retained")
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":groups,"priority":0}],[],Fixtures.BINDING)
+	var completing: Dictionary=job.pending_publication_transaction()
+	var completing_packet:=Preparation.compile_physical_group_packet(base_result.base,completing.groupIds)
+	check("occupied_cursor_restore_second_packet_compiled",completing.get("status")=="pending"
+		and completing_packet.ready and completing.groupIds.size()==1 and completing.groupIds[0]!=parked.groupIds[0])
+	if not completing_packet.ready:
+		job.cancel(); await drain(job,"packet_occupied_cursor_restore_compile_failed"); return
+	job.offer_physical_group_packet(completing_packet.packet,Fixtures.BINDING)
+	var completing_ready: Dictionary=job.pending_publication_transaction()
+	job.activate_physical_group_packet_scene(int(completing_ready.id))
+	for index in range(1024):
+		job.advance(4000,int(completing_ready.id))
+		if job.physical_group_receipt(String(completing.groupIds[0]),Fixtures.BINDING).status in ["ready","failed"]: break
+	check("occupied_cursor_restore_second_packet_completed",
+		job.physical_group_receipt(String(completing.groupIds[0]),Fixtures.BINDING).status=="ready"
+		and job._transaction_building_cursor==1)
+	var restored: Dictionary=job.pending_publication_transaction()
+	check("occupied_cursor_restore_resets_all_member_cursors",restored.get("transactionId",0)==parked.get("transactionId",-1)
+		and job._transaction_building_cursor==0 and job._transaction_furniture_cursor==0
+		and job._transaction_tree_cursor==0 and job._transaction_visual_cursor==0)
+	var restored_packet:=Preparation.compile_physical_group_packet(base_result.base,restored.groupIds)
+	if restored_packet.ready:
+		job.offer_physical_group_packet(restored_packet.packet,Fixtures.BINDING)
+		var restored_ready: Dictionary=job.pending_publication_transaction()
+		job.activate_physical_group_packet_scene(int(restored_ready.id))
+		for index in range(1024):
+			job.advance(4000,int(restored_ready.id))
+			if job.physical_group_receipt(String(parked.groupIds[0]),Fixtures.BINDING).status in ["ready","failed"]: break
+	check("occupied_cursor_restore_parked_packet_has_live_witness",
+		restored_packet.ready and job.physical_group_receipt(String(parked.groupIds[0]),Fixtures.BINDING).status=="ready")
+	job.cancel()
+	await drain(job,"packet_occupied_cursor_restore")
+
+
 func packet_occupied_dependency_reservation_control() -> void:
 	var blueprint := Blueprint.new("packet-occupied-dependency",1,"timber")
 	blueprint.recipe={"sourceBlueprintId":"packet_occupied_dependency_history","landscapeTrees":[]}
 	blueprint.add_part({"id":"support","kind":"foundation","material":"stone","collision":true,
-		"size":Vector3(2,2,2),"position":Vector3(-6,1,0)})
+		"size":Vector3(2,2,2),"position":Vector3(-20,1,0)})
 	blueprint.add_part({"id":"dependent","kind":"wall","material":"timber_beam","collision":true,
-		"size":Vector3(1,2,1),"position":Vector3(-6,3,0)})
+		"size":Vector3(1,2,1),"position":Vector3(-20,3,0)})
 	blueprint.add_part({"id":"independent","kind":"wall","material":"timber_beam","collision":true,
-		"size":Vector3(1,2,1),"position":Vector3(6,1,0)})
+		"size":Vector3(1,2,1),"position":Vector3(20,1,0)})
 	var plan := Plan.new("packet-occupied-dependency-plan",1,blueprint.id)
 	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
 	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
@@ -1211,6 +1280,63 @@ func packet_foreground_deferral_control() -> void:
 	await drain(job,"packet_foreground")
 
 
+## Navigation demand refreshes can arrive while the cooperative selector owns
+## heap entries in its unpinned stack. A changed owner must requeue that work;
+## an identical owner must leave the in-progress selection untouched.
+func packet_supplemental_refresh_preserves_selection_control() -> void:
+	var blueprint := Blueprint.new("packet-supplemental-refresh",1,"timber")
+	blueprint.recipe={"sourceBlueprintId":"packet_supplemental_refresh_history","landscapeTrees":[]}
+	for index in range(2):
+		blueprint.add_part({"id":"part_%d"%index,"kind":"post","material":"timber_beam","collision":false,
+			"size":Vector3(0.2,1.0,0.2),"position":Vector3(float(index)*20.0,0.0,0.0)})
+	var plan := Plan.new("packet-supplemental-refresh-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile:=frozen_profile()
+	var base_result:=Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("supplemental_refresh_base_ready",base_result.ready)
+	if not base_result.ready: return
+	var groups: Array[String]=[]
+	for raw_id in base_result.base.description.publication_groups.order: groups.append(String(raw_id))
+	check("supplemental_refresh_fixture_has_two_groups",groups.size()==2)
+	if groups.size()!=2: return
+	var trees:=SyntheticTrees.new()
+	var job:=Job.new()
+	job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish)
+	job.replace_packet_foreground_group_demands_compact([
+		{"ownerId":"foreground","groupIds":groups,"priority":1}],[],Fixtures.BINDING)
+	var selected_entry: Dictionary=job._pop_request()
+	check("supplemental_refresh_fixture_pops_live_request",not selected_entry.is_empty())
+	if selected_entry.is_empty():
+		job.cancel(); await drain(job,"supplemental_refresh_empty"); return
+	job._selection_stack.append({"id":selected_entry.id,"priority":selected_entry.priority,"cursor":0})
+	var changed:=job.retain_packet_supplemental_group_demands([
+		{"ownerId":"navigation","groupIds":[groups[0]],"priority":0}],Fixtures.BINDING)
+	var heap_ids: Array=job._request_heap.map(func(entry):return String((entry as Dictionary).id))
+	check("supplemental_refresh_changed_owner_requeues_discarded_selection",changed.status=="retained" \
+		and job._selection_stack.is_empty() and heap_ids.has(String(selected_entry.id)))
+	var resumed_entry: Dictionary=job._pop_request()
+	job._selection_stack.append({"id":resumed_entry.id,"priority":resumed_entry.priority,"cursor":0})
+	var stack_identity: Dictionary=job._selection_stack[0]
+	var unchanged:=job.retain_packet_supplemental_group_demands([
+		{"ownerId":"navigation","groupIds":[groups[0]],"priority":0}],Fixtures.BINDING)
+	check("supplemental_refresh_identical_owner_preserves_selection",unchanged.status=="retained" \
+		and job._selection_stack.size()==1 and is_same(job._selection_stack[0],stack_identity))
+	# A parked/rebuilt scene may retain the owner map after its unpinned selector
+	# was discarded. The same navigation request must restore that missing work,
+	# rather than treating an owner record alone as a live packet witness.
+	job._selection_stack.clear()
+	job._selection_set.clear()
+	job._group_requests.clear()
+	job._request_heap.clear()
+	var restored:=job.retain_packet_supplemental_group_demands([
+		{"ownerId":"navigation","groupIds":[groups[0]],"priority":0}],Fixtures.BINDING)
+	check("supplemental_refresh_identical_stale_owner_restores_missing_selection",restored.status=="retained" \
+		and job._group_requests.has(groups[0]))
+	job.cancel()
+	await drain(job,"supplemental_refresh")
+
+
 ## Furnishings use the same resident packet session as structural groups, but
 ## retain their own immutable source records and publish only through the
 ## existing FurnishingPublisher. This proves an append never clears an earlier
@@ -1292,6 +1418,54 @@ func packet_furnishing_session_control() -> void:
 		and job.physical_group_receipt(structural_group,Fixtures.BINDING).status=="ready" and job.status().physicalGroupsComplete==2)
 	job.cancel()
 	await drain(job,"packet_furnishing")
+
+
+## A tree-only packet carries no worker mesh artifact. It binds the immutable
+## tree group to the resident scene, then uses the same owner callback, live
+## visual/collision witness, group receipt, and acknowledged retirement path as
+## ordinary publication.
+func packet_tree_session_control() -> void:
+	var blueprint := Blueprint.new("packet-tree",1,"timber")
+	var tree_request: Dictionary={"biome":"town","architecture":"broadleaf","speciesGrammar":"packet_contract",
+		"visualHeight":3.0,"collisionHeight":2.0,"trunkRadius":0.2,"canopyRadius":1.0}
+	blueprint.recipe={"sourceBlueprintId":"packet_tree_history","landscapeTrees":[
+		{"id":"packet-tree-a","position":Vector3(2,0,0),"rotationY":0.25,"canopyRadius":1.0,
+			"rootButtressFootprints":[],"treeRequest":tree_request}]}
+	var plan:=Plan.new("packet-tree-plan",1,blueprint.id)
+	var building: Dictionary=blueprint.snapshot(); building.make_read_only()
+	var furnishing: Dictionary=plan.snapshot(); furnishing.accessReservations=[]; furnishing.make_read_only()
+	var profile:=frozen_profile()
+	var base_result:=Preparation.prepare_publication_base(building,furnishing,Fixtures.BINDING,profile)
+	check("packet_tree_base_ready",base_result.ready and base_result.base.matches(Fixtures.BINDING))
+	if not base_result.ready: return
+	var tree_group:=""
+	for raw_group in base_result.base.description.publication_groups.order:
+		var group_id:=String(raw_group)
+		if not base_result.base.description.publication_groups.groups[group_id].treeIndices.is_empty(): tree_group=group_id
+	var census: Dictionary=base_result.base.packet_eligibility
+	var compiled:=Preparation.compile_physical_group_packet(base_result.base,[tree_group]) if not tree_group.is_empty() else {}
+	check("packet_tree_compiler_binds_tree_only_group",not tree_group.is_empty() and census.groups[tree_group].eligible \
+		and compiled.get("ready",false) and compiled.packet.building_entries.is_empty() and compiled.packet.furnishing_entries.is_empty())
+	if not compiled.get("ready",false): return
+	var trees:=SyntheticTrees.new()
+	var job:=Job.new()
+	check("packet_tree_retirement_callback_bound",job.set_tree_retire_callback(trees.retire))
+	check("packet_tree_base_begin",job.begin_prepared_base(base_result.base,profile,Fixtures.BINDING,parent,trees.publish).status=="pending_budget")
+	job.replace_packet_foreground_group_demands([{"ownerId":"foreground","groupIds":[tree_group],"priority":0}],[],Fixtures.BINDING)
+	var pending: Dictionary=job.pending_publication_transaction()
+	check("packet_tree_scope_pending",pending.status=="pending" and pending.groupIds==[tree_group])
+	job.offer_physical_group_packet(compiled.packet,Fixtures.BINDING)
+	var ready: Dictionary=job.pending_publication_transaction()
+	check("packet_tree_adapter_accepted",ready.status=="ready" and job.activate_physical_group_packet_scene(int(ready.id)).status=="pending_budget")
+	for index in range(1024):
+		job.advance(4000,int(ready.id))
+		if job.physical_group_receipt(tree_group,Fixtures.BINDING).status in ["ready","failed"]: break
+	var receipt:=job.physical_group_receipt(tree_group,Fixtures.BINDING)
+	check("packet_tree_publishes_owned_live_witness",receipt.status=="ready" and receipt.publicationKind=="packet_physical" \
+		and trees.calls==1 and trees.published==1 and job.status_count().treesRegistered==1)
+	job.cancel()
+	await drain(job,"packet_tree")
+	check("packet_tree_retirement_balanced",trees.retired==1 and trees.retire_before_free)
 
 
 ## Packet doors are frozen source members, but their physical receipt is only

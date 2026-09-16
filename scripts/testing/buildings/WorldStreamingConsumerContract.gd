@@ -16,6 +16,7 @@ class SyntheticStructures extends RefCounted:
 	var calls: Array[Rect2i] = []
 	var pending: Dictionary = {}
 	var domains: Dictionary = {}
+	var crossings: Dictionary = {}
 	func region_dependency_revision(_bounds: Rect2i) -> Dictionary:
 		return {"fixtureRevision":revision}
 	func region_dependency_scheduling_revision(_bounds: Rect2i) -> Dictionary:
@@ -24,7 +25,7 @@ class SyntheticStructures extends RefCounted:
 		calls.append(bounds)
 		return {"status":"pending" if pending.has(bounds) else "described","reason":"synthetic_source",
 			"sourceRevisions":{"fixture":revision},"missingSourceIds":[],"unresolvedCrossingIds":[],
-			"domainBounds":domains.get(bounds,{}).duplicate(true),"requiredCrossings":{},
+			"domainBounds":domains.get(bounds,{}).duplicate(true),"requiredCrossings":crossings.get(bounds,{}).duplicate(true),
 			"sites":[] if pending.has(bounds) else [{"binding":{"siteId":"synthetic-site","sourceKey":"source-%d" % revision,"generation":revision},
 				"groupIds":["group:%d:%d" % [bounds.position.x,bounds.position.y]]+extra_groups}]}
 	func region_publication_readiness(bounds: Rect2i) -> Dictionary:
@@ -370,6 +371,20 @@ func _navigation_union_capacity() -> void:
 		and context.structures.calls.all(func(bounds: Rect2i): return bounds==A))
 	_cleanup(context,"navigation_union_cleanup_balanced")
 
+func _declared_crossing_navigation_closure() -> void:
+	var context:=_context()
+	context.structures.crossings[A]={"edge-seam":{"sourceId":"edge-seam","ownerTileKey":"0,0",
+		"kind":"physical","binding":{"sourceKey":"source-1","generation":1},
+		"requiredLinkIds":["edge-seam"],"tileKeys":["0,0","1,0"]}}
+	var id:=_request(context,A,"declared_crossing_closure_setup")
+	if id>0:
+		var navigation_id:=_nav_id(context,id)
+		_check("declared_crossing_retains_exact_sparse_endpoint_tiles",
+			navigation_id>0 and context.navigation.requests[navigation_id].keys==["0,0","1,0"])
+	else:
+		_check("declared_crossing_retains_exact_sparse_endpoint_tiles",false)
+	_cleanup(context,"declared_crossing_closure_cleanup_balanced")
+
 func _foreground_navigation_tiles() -> void:
 	var context := _context()
 	# The retained navigation set is deliberately wider than the immediate
@@ -597,6 +612,7 @@ func _run() -> void:
 		_transaction_and_candidate_identity()
 		_consumer_capacity_and_release()
 		_navigation_union_capacity()
+		_declared_crossing_navigation_closure()
 		_foreground_navigation_tiles()
 		_ready_base_survives_pending_forecast_refresh()
 		_live_acceptance_under_scheduling_churn()

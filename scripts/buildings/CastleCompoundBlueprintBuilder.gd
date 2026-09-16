@@ -18,6 +18,14 @@ const MAX_RAISED_ROUTE_HANDOFF_GAP := 0.01
 const MIN_RAISED_ROUTE_HANDOFF_WIDTH := 1.24
 const STAIR_LANDING_DEPTH := 1.04
 const RAISED_ROUTE_HANDOFF_AGENT_MARGIN := 0.30
+const COURTYARD_GRADE_BED_HEIGHT := 0.04
+const COURTYARD_GRADE_PAVING_HEIGHT := 0.04
+const COURTYARD_GRADE_SURFACE_Y := COURTYARD_GRADE_BED_HEIGHT + COURTYARD_GRADE_PAVING_HEIGHT
+# Keep each collision owner local while avoiding a seam through the standard
+# perimeter-house approach cadence. The resulting production tiles are about
+# 21-22 m across, far smaller than the complete courtyard footprint.
+const COURTYARD_GRADE_PAVING_MAX_SPAN := 22.0
+const GATEHOUSE_STAIR_ENTRY_LATERAL_OFFSET := -0.48
 
 
 static func build(seed: int, raw_context: Dictionary = {}):
@@ -218,13 +226,9 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 		append_courtyard_residence_rooms(room_records, building, foundation_height)
 	blueprint.set_room_records(room_records)
 
-	# The courtyard is a physical, paved interior of the perimeter—not an empty
-	# ground plane placed underneath a decorative wall ring.  Residence ramps
-	# are real egress corridors, so carve the compound slab and paving around
-	# them rather than burying their walk planes inside a monolithic foundation.
-	# Each corridor receives a structural underfill below its ramp in
-	# add_courtyard_outbuilding(), keeping the visual and collision load path
-	# continuous without turning the ramp into an embedded navigation endpoint.
+	# The courtyard is one continuous, shallow paved ground course. Buildings
+	# retain their own full-height foundations and egress geometry, but public
+	# ground must not become a raised terrace or be carved into player traps.
 	var half_width := courtyard_width * 0.5
 	var half_depth := courtyard_depth * 0.5
 	# Four curtain runs terminate against the corner towers. The front run is
@@ -2512,24 +2516,45 @@ static func transformed_residence_doorway_geometry(spec: Dictionary) -> Dictiona
 
 
 static func add_courtyard_foundation_and_paving(blueprint, residences: Array[Dictionary], courtyard_width: float, courtyard_depth: float, foundation_height: float, variation: float, reserved_walkways: Array[Dictionary] = []) -> void:
-	var foundation_exclusions := courtyard_residence_egress_corridors(residences, foundation_height)
-	foundation_exclusions.append_array(reserved_walkways)
+	# Residence and keep-entry exclusions used to split this base into dozens of
+	# raised pieces. Their full-height edges left terrain-deep holes beside door
+	# approaches. The bottom platform is public ground, so it is continuous and
+	# only a shallow finish above the source ground plane. The arguments remain
+	# for the stable producer boundary; building-owned foundations and approaches
+	# are still emitted by their own recipes above this course.
+	var _residences := residences
+	var _foundation_height := foundation_height
+	var _reserved_walkways := reserved_walkways
 	var foundation_bounds := Rect2(-courtyard_width * 0.5, -courtyard_depth * 0.5, courtyard_width, courtyard_depth)
-	var foundation_rects := subtract_courtyard_egress_corridors(foundation_bounds, foundation_exclusions)
-	for index in range(foundation_rects.size()):
-		var rect: Rect2 = foundation_rects[index] as Rect2
-		if rect.size.x <= 0.04 or rect.size.y <= 0.04:
-			continue
-		add_part(blueprint, "castle_compound_foundation_segment_%02d" % index, "foundation", "stone_foundation", Vector3(rect.get_center().x, foundation_height * 0.5, rect.get_center().y), Vector3(rect.size.x, foundation_height, rect.size.y), {"variation": variation, "semantic": "castle_courtyard_foundation", "navigationRole": "structural_mass", "egressCarved": true, "physicalRoot": true, "courtyardSupport": {"version":1,"producer":"castle_courtyard_foundation_and_paving","role":"shared_foundation"}})
-	var paving_exclusions := courtyard_residence_egress_corridors(residences, foundation_height, 0.0)
-	paving_exclusions.append_array(reserved_walkways)
-	var paving_bounds := Rect2(-courtyard_width * 0.5 + 0.41, -courtyard_depth * 0.5 + 0.41, courtyard_width - 0.82, courtyard_depth - 0.82)
-	var paving_rects := subtract_courtyard_egress_corridors(paving_bounds, paving_exclusions)
-	for index in range(paving_rects.size()):
-		var rect: Rect2 = paving_rects[index] as Rect2
-		if rect.size.x <= 0.04 or rect.size.y <= 0.04:
-			continue
-		add_part(blueprint, "castle_compound_paving_segment_%02d" % index, "foundation", "cobblestone", Vector3(rect.get_center().x, foundation_height + 0.07, rect.get_center().y), Vector3(rect.size.x, 0.14, rect.size.y), {"variation": variation + 0.03, "semantic": "castle_courtyard_paving", "pavingFamily": "courtyard_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x", "navigationRole": "walkable_support", "egressCarved": true})
+	add_part(blueprint, "castle_compound_foundation_segment_00", "foundation", "stone_foundation",
+		Vector3(foundation_bounds.get_center().x, COURTYARD_GRADE_BED_HEIGHT * 0.5, foundation_bounds.get_center().y),
+		Vector3(foundation_bounds.size.x, COURTYARD_GRADE_BED_HEIGHT, foundation_bounds.size.y),
+		{"variation": variation, "semantic": "castle_courtyard_foundation", "navigationRole": "structural_mass",
+		"continuousGroundCourse": true, "gradeSurfaceY": COURTYARD_GRADE_SURFACE_Y, "physicalRoot": true,
+		"courtyardSupport": {"version":1,"producer":"castle_courtyard_foundation_and_paving","role":"shared_foundation"}})
+	# The finish is one logical ground course, but its physical publication is
+	# divided into a deterministic edge-sharing grid. A city-sized collision box
+	# makes any player standing anywhere in the courtyard reserve the same scene
+	# transaction and can strand unrelated houses behind it. These boxes exactly
+	# tessellate the bed: there are no exclusions, elevation changes, or gaps, and
+	# the continuous bed remains beneath every shared edge.
+	var columns := maxi(1, ceili(foundation_bounds.size.x / COURTYARD_GRADE_PAVING_MAX_SPAN))
+	var rows := maxi(1, ceili(foundation_bounds.size.y / COURTYARD_GRADE_PAVING_MAX_SPAN))
+	var paving_index := 0
+	for row in range(rows):
+		var low_z := foundation_bounds.position.y + foundation_bounds.size.y * float(row) / float(rows)
+		var high_z := foundation_bounds.position.y + foundation_bounds.size.y * float(row + 1) / float(rows)
+		for column in range(columns):
+			var low_x := foundation_bounds.position.x + foundation_bounds.size.x * float(column) / float(columns)
+			var high_x := foundation_bounds.position.x + foundation_bounds.size.x * float(column + 1) / float(columns)
+			add_part(blueprint, "castle_compound_paving_segment_%02d" % paving_index, "foundation", "cobblestone",
+				Vector3((low_x + high_x) * 0.5, COURTYARD_GRADE_BED_HEIGHT + COURTYARD_GRADE_PAVING_HEIGHT * 0.5, (low_z + high_z) * 0.5),
+				Vector3(high_x - low_x, COURTYARD_GRADE_PAVING_HEIGHT, high_z - low_z),
+				{"variation": variation + 0.03, "semantic": "castle_courtyard_paving", "pavingFamily": "courtyard_setts",
+				"pavingRegion": "citadel_courtyard", "pavingHeading": "x", "navigationRole": "walkable_support",
+				"continuousGroundCourse": true, "gradeSurfaceY": COURTYARD_GRADE_SURFACE_Y,
+				"groundCourseTile": {"version": 1, "column": column, "row": row, "columns": columns, "rows": rows}})
+			paving_index += 1
 
 
 static func keep_entry_transition_exclusions(blueprint) -> Array[Dictionary]:
@@ -2881,10 +2906,36 @@ static func add_gatehouse(blueprint, width: float, depth: float, height: float, 
 	var pier_width := (width - opening_width) * 0.5
 	var wall_y := foundation_height + height * 0.5
 	var passage_floor_top := foundation_height + 0.14
-	# The gatehouse is a raised, load-bearing part of the compound.  Its full
-	# footprint supplies the continuous passage floor and physically supports
-	# both piers; entry steps meet this exterior edge from normal terrain.
-	add_part(blueprint, "castle_gatehouse_foundation", "foundation", "stone_foundation", Vector3(0.0, foundation_height * 0.5, center_z), Vector3(width + 0.22, foundation_height, depth + 0.22), {"variation": variation, "semantic": "castle_gatehouse_foundation"})
+	# The gatehouse remains a raised, load-bearing building foundation. Recess only
+	# the courtyard-side stair doorway: a full rear edge intersects that door's
+	# portal, while a core plus two rear shoulders retains the passage and pier
+	# support everywhere else.
+	var foundation_width := width + 0.22
+	var foundation_depth := depth + 0.22
+	var stair_center_x := -(opening_width * 0.5 + pier_width * 0.5)
+	var stair_door_width := clampf(pier_width * 0.48, 1.02, 1.30)
+	var stair_entry_x := stair_center_x + GATEHOUSE_STAIR_ENTRY_LATERAL_OFFSET
+	var rear_recess_depth := minf(0.76, foundation_depth * 0.16)
+	add_part(blueprint, "castle_gatehouse_foundation", "foundation", "stone_foundation",
+		Vector3(0.0, foundation_height * 0.5, center_z - rear_recess_depth * 0.5),
+		Vector3(foundation_width, foundation_height, foundation_depth - rear_recess_depth),
+		{"variation": variation, "semantic": "castle_gatehouse_foundation"})
+	var rear_recess_width := stair_door_width + 0.90
+	var foundation_min_x := -foundation_width * 0.5
+	var foundation_max_x := foundation_width * 0.5
+	var recess_min_x := stair_entry_x - rear_recess_width * 0.5
+	var recess_max_x := stair_entry_x + rear_recess_width * 0.5
+	for shoulder in [
+		{"id": -1, "minimum": foundation_min_x, "maximum": recess_min_x},
+		{"id": 1, "minimum": recess_max_x, "maximum": foundation_max_x}
+	]:
+		var shoulder_width: float = float(shoulder.maximum) - float(shoulder.minimum)
+		if shoulder_width > 0.04:
+			add_part(blueprint, "castle_gatehouse_foundation_rear_%d" % int(shoulder.id), "foundation", "stone_foundation",
+				Vector3((float(shoulder.minimum) + float(shoulder.maximum)) * 0.5, foundation_height * 0.5,
+					center_z + foundation_depth * 0.5 - rear_recess_depth * 0.5),
+				Vector3(shoulder_width, foundation_height, rear_recess_depth),
+				{"variation": variation, "semantic": "castle_gatehouse_foundation"})
 	# Match the courtyard paving elevation throughout the passage.  Without this
 	# cap the inner threshold leaves a small but real collision ledge after the
 	# gate has opened.
@@ -2959,8 +3010,9 @@ static func add_gatehouse_stair_bay(blueprint, center_x: float, span: float, cen
 	var front_z := center_z - depth * 0.5
 	var wall_y := foundation_height + height * 0.5
 	var door_width := clampf(span * 0.48, 1.02, 1.30)
+	var entry_door_x := center_x + GATEHOUSE_STAIR_ENTRY_LATERAL_OFFSET
+	var entry_clear_width := door_width + 0.90
 	var door_height := minf(2.44, height - 0.40)
-	var rear_side_width := (span - door_width) * 0.5
 	# Preserve the historical pier id on the exterior load-bearing front face;
 	# downstream shell/foundation checks still see a pier seated on the same
 	# foundation while the new bay owns its usable interior.
@@ -2970,12 +3022,30 @@ static func add_gatehouse_stair_bay(blueprint, center_x: float, span: float, cen
 	# It therefore encloses the stair without stealing even a fraction of the
 	# player-width gate route.
 	add_part(blueprint, "castle_gatehouse_stair_bay_inner_wall", "wall", masonry_material, Vector3(center_x + span * 0.5 - shell_thickness * 0.5, wall_y, center_z), Vector3(shell_thickness, height, depth), {"variation": variation, "semantic": "castle_gatehouse_stair_bay_wall"})
-	for side in [-1.0, 1.0]:
+	var bay_min_x := center_x - span * 0.5
+	var bay_max_x := center_x + span * 0.5
+	var door_min_x := entry_door_x - entry_clear_width * 0.5
+	# The switchback landing is centred in the bay while its door is offset toward
+	# the outer wall. Leave the inner half open all the way to the bay wall; a
+	# narrow rear-wall return here clips the right-hand side of a player capsule
+	# even though the visible door leaf itself is clear.
+	var door_max_x := bay_max_x
+	for rear_section in [
+		{"id": -1, "minimum": bay_min_x, "maximum": door_min_x},
+		{"id": 1, "minimum": door_max_x, "maximum": bay_max_x}
+	]:
+		var rear_side_width: float = float(rear_section.maximum) - float(rear_section.minimum)
 		if rear_side_width > 0.08:
-			add_part(blueprint, "castle_gatehouse_stair_bay_rear_%d" % int(side), "wall", masonry_material, Vector3(center_x + side * (door_width * 0.5 + rear_side_width * 0.5), foundation_height + door_height * 0.5, rear_z), Vector3(rear_side_width, door_height, shell_thickness), {"variation": variation, "semantic": "castle_gatehouse_stair_bay_rear"})
+			add_part(blueprint, "castle_gatehouse_stair_bay_rear_%d" % int(rear_section.id), "wall", masonry_material,
+				Vector3((float(rear_section.minimum) + float(rear_section.maximum)) * 0.5, foundation_height + door_height * 0.5, rear_z),
+				Vector3(rear_side_width, door_height, shell_thickness), {"variation": variation, "semantic": "castle_gatehouse_stair_bay_rear"})
 	var rear_header_height := height - door_height
-	add_part(blueprint, "castle_gatehouse_stair_bay_rear_header", "wall", masonry_material, Vector3(center_x, foundation_height + door_height + rear_header_height * 0.5, rear_z), Vector3(door_width, rear_header_height, shell_thickness), {"variation": variation, "semantic": "castle_gatehouse_stair_bay_rear_header"})
-	add_part(blueprint, "castle_gatehouse_wall_stair_door", "door", "painted_door", Vector3(center_x, foundation_height + door_height * 0.5, rear_z + shell_thickness * 0.68), Vector3(door_width - 0.14, door_height, 0.16), {"rotation": Vector3(0.0, PI, 0.0), "variation": variation - 0.03, "semantic": "castle_gatehouse_wall_stair_entry"})
+	add_part(blueprint, "castle_gatehouse_stair_bay_rear_header", "wall", masonry_material,
+		Vector3((door_min_x + door_max_x) * 0.5, foundation_height + door_height + rear_header_height * 0.5, rear_z),
+		Vector3(door_max_x - door_min_x, rear_header_height, shell_thickness),
+		{"variation": variation, "semantic": "castle_gatehouse_stair_bay_rear_header"})
+	var stair_entry_surface_offset:=0.30
+	add_part(blueprint, "castle_gatehouse_wall_stair_door", "door", "painted_door", Vector3(entry_door_x, foundation_height + stair_entry_surface_offset + door_height * 0.5, rear_z + shell_thickness * 0.68), Vector3(door_width - 0.14, door_height, 0.16), {"rotation": Vector3(0.0, PI, 0.0), "variation": variation - 0.03, "semantic": "castle_gatehouse_wall_stair_entry", "doorEgress": {"approachPartIds": ["castle_gatehouse_wall_stair_base_landing", "castle_gatehouse_wall_stair_entry_ramp"], "clearanceLaneWidth": door_width + 0.90, "outwardEndpointPartId": "castle_gatehouse_wall_stair_entry_ramp"}})
 	var climb_segments := clampi(ceili(height / 3.55), 2, 5)
 	var stair_start: int = blueprint.parts.size()
 	add_switchback_stair_flights(blueprint, "castle_gatehouse_wall_stair", Vector3(center_x, 0.0, center_z), span - shell_thickness * 2.0 - 0.08, depth - shell_thickness * 2.0 - 0.12, foundation_height + 0.20, height / float(climb_segments), climb_segments, "stone_foundation", variation, "castle_gatehouse_wall_stair")
@@ -2996,8 +3066,35 @@ static func add_gatehouse_stair_bay(blueprint, center_x: float, span: float, cen
 	var entry_max_z := rear_z + shell_thickness * 0.5
 	entry_floor.position.z = (entry_min_z + entry_max_z) * 0.5
 	entry_floor.size.z = entry_max_z - entry_min_z
+	entry_floor.recipe["doorEgressFor"] = "castle_gatehouse_wall_stair_door"
 	var fill_height := foundation_height + 0.10
-	add_part(blueprint, "castle_gatehouse_wall_stair_entry_underfill", "foundation", "stone_foundation", Vector3(center_x, fill_height * 0.5, entry_floor.position.z), Vector3(entry_floor.size.x, fill_height, entry_floor.size.z), {"variation": variation, "semantic": "castle_gatehouse_stair_entry_underfill", "navigationRole": "structural_mass"})
+	var floor_min_x := entry_floor.position.x - entry_floor.size.x * 0.5
+	var floor_max_x := entry_floor.position.x + entry_floor.size.x * 0.5
+	var underfill_clear_width := entry_clear_width
+	var underfill_min_x := entry_door_x - underfill_clear_width * 0.5
+	var underfill_max_x := entry_door_x + underfill_clear_width * 0.5
+	for seat_section in [
+		{"id": -1, "minimum": floor_min_x, "maximum": underfill_min_x},
+		{"id": 1, "minimum": underfill_max_x, "maximum": floor_max_x}
+	]:
+		var entry_seat_width: float = float(seat_section.maximum) - float(seat_section.minimum)
+		if entry_seat_width > 0.04:
+			add_part(blueprint, "castle_gatehouse_wall_stair_entry_underfill_%d" % int(seat_section.id), "foundation", "stone_foundation",
+				Vector3((float(seat_section.minimum) + float(seat_section.maximum)) * 0.5, fill_height * 0.5, entry_floor.position.z),
+				Vector3(entry_seat_width, fill_height, entry_floor.size.z),
+				{"variation": variation, "semantic": "castle_gatehouse_stair_entry_underfill", "navigationRole": "structural_mass"})
+	# The stair bay is a building, so its raised landing remains legitimate. Join
+	# that landing directly to the continuous courtyard grade with one seated span
+	# instead of exposing the gatehouse foundation as a step-height wall.
+	var entry_surface_y := entry_floor.position.y + entry_floor.size.y * 0.5
+	var entry_ramp_length := 2.20
+	var entry_ramp_rise := entry_surface_y - COURTYARD_GRADE_SURFACE_Y
+	var entry_ramp_rotation := Vector3(asin(entry_ramp_rise / entry_ramp_length), 0.0, 0.0)
+	var entry_ramp_size := Vector3(entry_clear_width, 0.14, entry_ramp_length)
+	var entry_ramp_basis := Basis.from_euler(entry_ramp_rotation)
+	var entry_ramp_upper_end := entry_ramp_basis * Vector3(0.0, entry_ramp_size.y * 0.5, -entry_ramp_size.z * 0.5)
+	var entry_ramp_upper_target := Vector3(entry_door_x, entry_surface_y, entry_max_z - 0.10)
+	add_part(blueprint, "castle_gatehouse_wall_stair_entry_ramp", "ramp", "stone_foundation", entry_ramp_upper_target - entry_ramp_upper_end, entry_ramp_size, {"rotation": entry_ramp_rotation, "variation": variation - 0.015, "semantic": "castle_gatehouse_wall_stair_entry_ramp", "navigationRole": "transition", "navigationEndSupportPartId": "castle_gatehouse_wall_stair_base_landing", "doorEgressFor": "castle_gatehouse_wall_stair_door", "physicalIntent": "structural_mass", "physicalRequiredSeatPartIds": ["castle_compound_foundation_segment_00", "castle_gatehouse_wall_stair_base_landing"]})
 
 
 static func add_gatehouse_roof_deck_with_stair_hatch(blueprint, width: float, depth: float, height: float, foundation_height: float, center_z: float, stair_center_x: float, stair_span: float, variation: float) -> void:
@@ -3405,7 +3502,9 @@ static func add_keep_palace_wings(blueprint, center: Vector3, width: float, dept
 		var bay_count := maxi(2, roundi(wing_depth / 8.0))
 		for bay in range(bay_count):
 			var bay_z := wing_center.z + lerpf(-wing_depth * 0.30, wing_depth * 0.30, float(bay) / float(maxi(1, bay_count - 1)))
-			add_part(blueprint, "castle_keep_palace_wing_outer_pier_%d_%02d" % [int(side), bay], "wall", "stone_foundation", Vector3(outer_face_x, foundation_height + wing_height * 0.34, bay_z), Vector3(0.38, wing_height * 0.68, 0.56), {"variation": variation - 0.02, "semantic": "castle_keep_palace_wing_outer_bay"})
+			var pier_id := "castle_keep_palace_wing_outer_pier_%d_%02d" % [int(side), bay]
+			add_part(blueprint, pier_id + "_foundation", "foundation", "stone_foundation", Vector3(outer_face_x, foundation_height * 0.5, bay_z), Vector3(0.38, foundation_height, 0.56), {"variation": variation - 0.02, "semantic": "castle_keep_palace_wing_foundation", "physicalRoot": true})
+			add_part(blueprint, pier_id, "wall", "stone_foundation", Vector3(outer_face_x, foundation_height + wing_height * 0.34, bay_z), Vector3(0.38, wing_height * 0.68, 0.56), {"variation": variation - 0.02, "semantic": "castle_keep_palace_wing_outer_bay"})
 			for level in range(2):
 				var window_y := foundation_height + 2.0 + float(level) * minf(2.8, wing_height * 0.36)
 				if window_y < foundation_height + wing_height - 0.70:

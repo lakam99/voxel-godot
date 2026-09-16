@@ -1,6 +1,6 @@
 # World streaming maturity migration — execution handoff
 
-Date: 2026-09-14. Status: **GATE 1 LIFECYCLE COMPLETE; PERFORMANCE ACCEPTANCE PENDING; GATE 2 HAS NOT STARTED.**
+Date: 2026-09-14. Status: **GATE 4 SCALE/RETIREMENT COMPLETE; GATE 5 MATURITY ACCEPTANCE PENDING.**
 
 ## 0. Assignment, location, and authority
 
@@ -275,7 +275,7 @@ Each completion entry must record commit, source/binary hashes, exact commands, 
 | G1E shared budget + headed checkpoint | LIFECYCLE COMPLETE; PERF PENDING | Commit `26383424`; one 6 ms gameplay envelope/4 ms Citadel claim; exact headed lifecycle PASS and five-minute sprint recorded. Citadel demand refresh, orchestration and autosave snapshot remain release blockers. Full evidence: `docs/WORLD_STREAMING_MATURITY_G1_RUNTIME_LIFECYCLE_2026-09-14.md` |
 | G2 profile/decisions | COMPLETE | Corrected three-run source profile, moving-player headed stage profile, autosave ownership, loading comparator and native decision recorded in `docs/WORLD_STREAMING_MATURITY_G2_PROFILE_AND_NATIVE_DECISION_2026-09-14.md`; no native kernel selected; performance remains pending |
 | G3 progressive preparation/native | COMPLETE | Timing-free immutable plan/spatial/dependency index, locality-sealed rolling packets, ahead-of-player preparation, semantic milestones, incremental save delta snapshot, deterministic lifecycle coverage, and a 1.528 km ordinary-input headed pass are recorded in `docs/WORLD_STREAMING_MATURITY_G3_PROGRESSIVE_PREPARATION_2026-09-14.md`; no native kernel selected |
-| G4 scale/retirement | NEXT; NOT STARTED | Spatial batching/detail/cleanup; exterior/interior visuals, resource census, three retirement/revisit cycles, and ≥30-minute autosave soak |
+| G4 scale/retirement | COMPLETE | This Gate 4 commit: continuous ground-course Citadel platform (no artificial terraces or holes), source/packet resource caps, repeated retirement/revisit proof and a 34.68-minute headed autosave soak passed. Exact commands, source hash, captures, resource evidence and scope limits: `docs/WORLD_STREAMING_MATURITY_G4_SCALE_RETIREMENT_2026-09-16.md` |
 | G5 acceptance/handoff | NOT STARTED | Full matrix, final commits, clean status, ready-for-merge report; DO NOT MERGE |
 
 ## 8. Engine references — implementation constraints, not rewrite mandates

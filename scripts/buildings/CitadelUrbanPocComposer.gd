@@ -3,9 +3,17 @@ class_name CitadelUrbanPocComposer
 
 const MARKET_LANE_X := 22.0
 const MARKET_TERRACE_RISE := 0.0
+const PUBLIC_GROUND_SURFACE_Y := 0.08
 const STREET_FOUNDATION_EXTRA := 0.28
 const STREET_UPPER_EXTRA := 0.62
 const STREET_UPPER_SHIFT := 0.31
+const GATEHOUSE_ENTRY_LANE_WIDTH := 14.0
+const STREET_FOUNDATION_ENTRY_RECESS_DEPTH := 0.72
+const STREET_ENTRY_FOUNDATION_DEPTH := 2.24
+const STREET_ENTRY_OUTER_REACH := 0.83
+const STREET_ENTRY_SPAN := 1.58
+const STREET_ENTRY_RAMP_LENGTH := 1.45
+const STREET_ENTRY_RAMP_SEAT_INSET := 0.10
 const StreetOpeningLayout := preload("res://scripts/buildings/StreetHouseOpeningLayout.gd")
 const STREET_ROOM_INSET := StreetOpeningLayout.ROOM_INSET
 const STREET_WINDOW_WIDTH := StreetOpeningLayout.WINDOW_WIDTH
@@ -35,10 +43,10 @@ const FacadePartition = preload("res://scripts/buildings/FacadePartitionGeometry
 const FacadeBlueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 
 
-static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector3, additional_reservations: Array[Rect2] = [], search_radius: float = 25.0, approach_width: float = 1.8, support_eligibility: Callable = Callable()) -> Dictionary:
+static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector3, additional_reservations: Array[Rect2] = [], search_radius: float = 25.0, approach_width: float = 1.8, support_eligibility: Callable = Callable(), grid_step: float = 0.25) -> Dictionary:
 	# Recipe adapter: derive eligible surfaces and fixed ecology reservations.
 	# This does not move parts and is not yet invoked by compose().
-	if blueprint == null or blueprint.parts.size() > RigidHouseholdLayoutRecipeScript.MAX_PARTS or member_ids.size() > RigidHouseholdLayoutRecipeScript.MAX_COLLECTION or not _layout_radius_valid(approach_width):
+	if blueprint == null or blueprint.parts.size() > RigidHouseholdLayoutRecipeScript.MAX_PARTS or member_ids.size() > RigidHouseholdLayoutRecipeScript.MAX_COLLECTION or not _layout_radius_valid(approach_width) or not _layout_radius_valid(grid_step):
 		return {"ready": false, "reason": "invalid_or_oversized_source"}
 	var members: Dictionary = {}
 	for id in member_ids:
@@ -109,7 +117,7 @@ static func plan_household_on_paving(blueprint, member_ids: Array, front: Vector
 		reservations.append(rect)
 	return RigidHouseholdLayoutRecipeScript.plan(blueprint, member_ids, {"pavingPartIds": paving_ids,
 		"reservedFootprints": reservations, "front": front, "searchRadius": radius,
-		"clearance": 0.1, "circulation": 0.8, "approachLength": 3.8, "approachWidth": approach_width, "gridStep": 0.25})
+		"clearance": 0.1, "circulation": 0.8, "approachLength": 3.8, "approachWidth": approach_width, "gridStep": grid_step})
 
 
 static func plan_terminal_shop_household(blueprint, member_ids: Array, front: Vector3, reservations: Array[Rect2]) -> Dictionary:
@@ -174,16 +182,18 @@ static func _layout_radius_valid(value: Variant) -> bool:
 
 
 static func plan_courtyard_household(blueprint, member_ids: Array, front: Vector3, reservations: Array[Rect2]) -> Dictionary:
-	# Batch placement must consider the generated courtyard, not an old
-	# diagnostic's fixed neighbourhood radius. No new paving is invented.
+	# The public platform is one continuous physical surface, but a mobile market
+	# household only needs its local neighbourhood.  Using the full Citadel span as
+	# a candidate radius made the deterministic quarter-metre search enumerate the
+	# entire platform after the old paving fragments were removed.  This bound is
+	# placement policy, not a second ground authority: accepted footprints must
+	# still lie on the real continuous paving part below.
 	if blueprint == null or not blueprint.recipe.get("castleGrammar") is Dictionary:
 		return {"ready": false, "reason": "missing_courtyard_extent"}
 	var grammar: Dictionary = blueprint.recipe.castleGrammar
 	if not _layout_radius_valid(grammar.get("courtyardWidth")) or not _layout_radius_valid(grammar.get("courtyardDepth")):
 		return {"ready": false, "reason": "missing_courtyard_extent"}
-	var width := float(grammar.courtyardWidth)
-	var depth := float(grammar.courtyardDepth)
-	return plan_household_on_paving(blueprint, member_ids, front, reservations, maxf(width, depth) * 0.5)
+	return plan_household_on_paving(blueprint, member_ids, front, reservations, 20.0, 1.8, Callable(), 0.5)
 
 
 static func compose(blueprint, seed: int):
@@ -224,7 +234,17 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 	var retired_roots: Array = []
 	for part in blueprint.parts:
 		var part_id := String(part.id) if part != null else ""
+		var part_semantic := String(part.semantic) if part != null else ""
 		if part_id.begins_with("castle_courtyard_") and part_id not in ["castle_courtyard_foundation", "castle_courtyard_paving"]:
+			if blueprint.is_grounded_structural_root(part): retired_roots.append(part.snapshot())
+			continue
+		# The compound source still carries the former district roadbeds and their
+		# retaining fill.  They sit above the Citadel-wide ground course and recreate
+		# artificial terraces even though the public paving is now continuous.  The
+		# urban composition owns grade-level streets, so retire only those old raised
+		# surfaces/fills here; decorative drains and margins remain at public grade.
+		if part_id.begins_with("castle_district_") \
+				or part_semantic in ["castle_route_terrace_walkway", "castle_route_junction"]:
 			if blueprint.is_grounded_structural_root(part): retired_roots.append(part.snapshot())
 			continue
 		if part_id.begins_with("castle_residence_") or part_id.begins_with("castle_route_frontage_") or part_id.begins_with("castle_sightline_screen_") or part_id.begins_with("castle_gate_market_") or part_id.begins_with("castle_route_neck_"):
@@ -545,10 +565,14 @@ static func append_perimeter_alley_outer_bearing(blueprint) -> Dictionary:
 	if finishes.is_empty():
 		return {"ready": false, "reason": "missing_perimeter_alley_finishes"}
 	var added_ids: Array[String] = []
+	var grounded_finish_ids: Array[String] = []
 	for finish in finishes:
 		var side := signf(finish.position.x)
 		if is_zero_approx(side) or not finish.collision_enabled or finish.size.x < 1.20 or finish.size.z < 1.20:
 			return {"ready": false, "reason": "invalid_perimeter_alley_finish", "finishId": String(finish.id)}
+		if finish.recipe.get("continuousGroundCourse",false)==true and blueprint.is_grounded_structural_root(finish):
+			grounded_finish_ids.append(String(finish.id))
+			continue
 		var strip_width := minf(0.50, finish.size.x * 0.25)
 		var local_center := Vector3(side * (finish.size.x * 0.5 - strip_width * 0.5), -finish.size.y * 0.5 - 0.05, 0.0)
 		var finish_transform := Transform3D(Basis.from_euler(finish.rotation), finish.position)
@@ -557,7 +581,7 @@ static func append_perimeter_alley_outer_bearing(blueprint) -> Dictionary:
 			return {"ready": false, "reason": "duplicate_perimeter_alley_bearing", "bearingId": strip_id}
 		add_part(blueprint, strip_id, "foundation", "stone_foundation", finish_transform * local_center, Vector3(strip_width, 0.10, finish.size.z), {"rotation": finish.rotation, "collision": true, "visual": false, "variation": float(finish.recipe.get("variation", 0.0)) - 0.01, "semantic": "citadel_perimeter_alley_outer_bearing", "physicalIntent": "walkable_surface"})
 		added_ids.append(strip_id)
-	return {"ready": added_ids.size() == finishes.size(), "count": added_ids.size(), "bearingIds": added_ids}
+	return {"ready": added_ids.size()+grounded_finish_ids.size() == finishes.size(), "count": added_ids.size(), "bearingIds": added_ids, "groundedFinishIds": grounded_finish_ids}
 
 
 static func reset_street_house_structural_manifest(blueprint) -> Dictionary:
@@ -995,7 +1019,7 @@ static func add_perimeter_neighborhoods(blueprint, grammar: Dictionary, keep_fro
 			var local_base_y := perimeter_site_support_top(blueprint, Vector3(alley_x, base_y, center_z), base_y)
 			if not add_street_house(blueprint, "urban_perimeter_%s_%02d" % ["east" if side > 0.0 else "west", row_index], Vector3(side * side_x, 0.0, center_z), width, depth, height, -side, local_base_y, material, variation + side * 0.018 + float(row_index) * 0.011): return false
 			var alley_id := "urban_perimeter_alley_%d_%02d" % [int(side), row_index]
-			add_part(blueprint, alley_id, "foundation", "worn_cobble", Vector3(alley_x, local_base_y + 0.16, center_z), Vector3(2.1, 0.10, depth * 0.82), {"collision": true, "navigationRole": "walkable_support", "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley", "pavingFamily": "lane_cobbles", "pavingRegion": alley_id, "pavingHeading": "z"})
+			add_part(blueprint, alley_id, "foundation", "worn_cobble", Vector3(alley_x, PUBLIC_GROUND_SURFACE_Y - 0.02, center_z), Vector3(2.1, 0.04, depth * 0.82), {"collision": true, "navigationRole": "walkable_support", "variation": variation - 0.04 + float(row_index) * 0.008, "semantic": "citadel_perimeter_alley", "pavingFamily": "lane_cobbles", "pavingRegion": alley_id, "pavingHeading": "z", "continuousGroundCourse": true, "gradeSurfaceY": PUBLIC_GROUND_SURFACE_Y})
 	return true
 
 
@@ -1210,7 +1234,10 @@ static func _street_row_house_width(index: int, side: int, bias: float) -> float
 
 
 static func _street_row_house_x(index: int, side: int, lane_x: float, width: float) -> float:
-	var lane_width := 5.8 if index != 2 else 16.0
+	# The first pair frames the gatehouse court. Its foundations must remain
+	# outside the retained gatehouse and stair-door approach rather than borrowing
+	# the central processional lane as building mass.
+	var lane_width := GATEHOUSE_ENTRY_LANE_WIDTH if index == 0 else (16.0 if index == 2 else 5.8)
 	return lane_x + float(side) * (lane_width * 0.5 + width * 0.5)
 
 
@@ -1375,7 +1402,7 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 	var interior_inward := Vector3(-street_side, 0.0, 0.0)
 	var room_facade_x := upper_center_x + street_side * (upper_width * 0.5 - 0.34)
 	var window_wall_offset := absf(facade_x - room_facade_x)
-	add_grounded_foundation(blueprint, "%s_foundation" % prefix, center, width + STREET_FOUNDATION_EXTRA, depth + STREET_FOUNDATION_EXTRA, ground_y, variation - 0.02, "citadel_urban_house_foundation")
+	add_street_house_foundation(blueprint, prefix, center, width + STREET_FOUNDATION_EXTRA, depth + STREET_FOUNDATION_EXTRA, ground_y, street_side, variation - 0.02)
 	blueprint.rooms.append({
 		"id": room_id,
 		"bounds": AABB(Vector3(upper_center_x - upper_width * 0.5 + STREET_ROOM_INSET, ground_y + 0.18, center.z - depth * 0.5 + STREET_ROOM_INSET), Vector3(upper_width - STREET_ROOM_INSET * 2.0, wall_height - 0.22, depth - STREET_ROOM_INSET * 2.0)),
@@ -1383,7 +1410,9 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		"citadelUrbanRoom": true,
 		"accesses": [{"id": "%s_entry" % prefix, "kind": "exterior_door", "position": Vector3(facade_x - street_side * 0.84, ground_y + 0.72, center.z), "size": Vector3(StreetOpeningLayout.ACCESS_WIDTH, 2.18, StreetOpeningLayout.ACCESS_WIDTH)}]
 	})
-	add_part(blueprint, "%s_interior_floor" % prefix, "floor", "timber_board", Vector3(upper_center_x - street_side * 0.16, ground_y + 0.11, center.z), Vector3(maxf(0.8, upper_width - 0.74), 0.20, maxf(0.8, depth - 0.74)), {"variation": variation - 0.015, "semantic": "citadel_urban_interior_floor", "physicalIntent": "walkable_surface"})
+	var interior_floor_width := maxf(0.8, upper_width - 0.74) - STREET_FOUNDATION_ENTRY_RECESS_DEPTH
+	var interior_floor_center_x := upper_center_x - street_side * (0.16 + STREET_FOUNDATION_ENTRY_RECESS_DEPTH * 0.5)
+	add_part(blueprint, "%s_interior_floor" % prefix, "floor", "timber_board", Vector3(interior_floor_center_x, ground_y + 0.11, center.z), Vector3(interior_floor_width, 0.20, maxf(0.8, depth - 0.74)), {"variation": variation - 0.015, "semantic": "citadel_urban_interior_floor", "physicalIntent": "walkable_surface"})
 	var floor_count := maxi(2, roundi(wall_height / 3.1))
 	var upper_openings: Array[Dictionary] = [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": StreetOpeningLayout.DOOR_WIDTH}]
 	for floor_index in range(1, floor_count):
@@ -1416,12 +1445,48 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 				var gable_window_material := "window_warm_glass" if posmod(prefix.hash() + int(gable_sign * 7.0) + int(window_sign * 13.0), 4) != 0 else "window_glass"
 				add_part(blueprint, "%s_gable_recess_%d_%d" % [prefix, int(gable_sign), int(window_sign)], "decor", "window_recess", Vector3(upper_center_x + window_sign * upper_width * 0.22, ground_y + minf(5.05, wall_height * 0.58), gable_z + gable_sign * 0.015), Vector3(0.88, 1.14, 0.10), {"collision": false, "variation": variation, "semantic": "citadel_urban_gable_blind_recess"})
 	add_part(blueprint, "%s_door_recess" % prefix, "decor", "window_recess", Vector3(facade_x - street_side * 0.18, ground_y + 1.30, center.z), Vector3(0.12, 2.66, 1.56), {"collision": false, "variation": variation - 0.03, "semantic": "citadel_urban_door_reveal"})
-	add_part(blueprint, "%s_door" % prefix, "door", "painted_door", Vector3(facade_x - street_side * 0.10, ground_y + 1.25, center.z), StreetOpeningLayout.DOOR_SIZE, {"rotation": Vector3(0.0, -street_side * PI * 0.5, 0.0), "collision": true, "variation": variation, "semantic": "citadel_urban_door", "roomId": room_id})
+	var door_id := "%s_door" % prefix
+	var entry_landing_id := "%s_entry_landing" % prefix
+	var entry_ramp_id := "%s_entry_ramp" % prefix
+	var landing_size := Vector3(STREET_ENTRY_FOUNDATION_DEPTH, 0.20, STREET_ENTRY_SPAN)
+	# Seat the leaf on the building's actual entry floor. Keeping its bottom at
+	# foundation height makes authored portal probes pass through structural mass.
+	var door_center_y:=ground_y+landing_size.y+StreetOpeningLayout.DOOR_SIZE.y*0.5
+	add_part(blueprint, door_id, "door", "painted_door", Vector3(facade_x - street_side * 0.10, door_center_y, center.z), StreetOpeningLayout.DOOR_SIZE, {"rotation": Vector3(0.0, -street_side * PI * 0.5, 0.0), "collision": true, "variation": variation, "semantic": "citadel_urban_door", "roomId": room_id, "doorEgress": {"approachPartIds": [entry_landing_id, entry_ramp_id], "clearanceLaneWidth": StreetOpeningLayout.DOOR_WIDTH + 1.04, "outwardEndpointPartId": entry_ramp_id}})
 	add_part(blueprint, "%s_door_lintel" % prefix, "beam", "timber_beam", Vector3(upper_facade_x + street_side * 0.03, ground_y + 2.64, center.z), Vector3(0.24, 0.22, 1.82), {"collision": false, "variation": variation - 0.015, "semantic": "citadel_urban_door_joinery"})
 	add_part(blueprint, "%s_door_hood" % prefix, "decor", "roof_shingle", Vector3(facade_x + street_side * 0.58, ground_y + 2.84, center.z), Vector3(1.28, 0.16, 2.08), {"rotation": Vector3(0.0, 0.0, street_side * deg_to_rad(-12.0)), "collision": false, "variation": variation - 0.025, "semantic": "citadel_urban_door_hood"})
 	for bracket_z in [-0.66, 0.66]:
 		add_part(blueprint, "%s_door_bracket_%d" % [prefix, int(bracket_z * 100.0)], "beam", "timber_beam", Vector3(facade_x + street_side * 0.31, ground_y + 2.53, center.z + bracket_z), Vector3(0.14, 0.76, 0.14), {"rotation": Vector3(0.0, 0.0, street_side * deg_to_rad(-42.0)), "collision": false, "variation": variation + bracket_z * 0.008, "semantic": "citadel_urban_door_joinery"})
-	add_part(blueprint, "%s_door_threshold" % prefix, "foundation", "worn_cobble", Vector3(facade_x + street_side * 0.43, ground_y + 0.07, center.z), Vector3(0.92, 0.14, 1.58), {"collision": false, "variation": variation - 0.04, "semantic": "citadel_threshold_wear"})
+	# Keep the outer edge fixed while carrying the landing beneath the interior
+	# floor. This makes the floor a genuinely supported bridge over the doorway
+	# recess without extending the raised building foundation into the street.
+	var threshold_center := Vector3(facade_x + street_side * (STREET_ENTRY_OUTER_REACH - STREET_ENTRY_FOUNDATION_DEPTH * 0.5), ground_y + 0.07, center.z)
+	# This is a building-owned stoop, not a public terrace. The narrow grounded
+	# course bears the threshold and landing; a declared ramp returns immediately
+	# to the continuous Citadel grade so no vertical face traps the player.
+	var landing_seat_ids: Array[String] = []
+	var landing_seat_depth := 0.18
+	for landing_side in [-1.0, 1.0]:
+		var seat_id := "%s_entry_foundation_%d" % [prefix, int(landing_side)]
+		var seat_z: float = center.z + landing_side * (STREET_ENTRY_SPAN * 0.5 - landing_seat_depth * 0.5)
+		add_grounded_foundation(blueprint, seat_id, Vector3(threshold_center.x, ground_y, seat_z), STREET_ENTRY_FOUNDATION_DEPTH, landing_seat_depth, ground_y, variation - 0.025, "citadel_urban_house_entry_foundation")
+		landing_seat_ids.append(seat_id)
+	add_part(blueprint, "%s_door_threshold" % prefix, "foundation", "worn_cobble", threshold_center, Vector3(STREET_ENTRY_FOUNDATION_DEPTH, 0.14, STREET_ENTRY_SPAN), {"collision": false, "variation": variation - 0.04, "semantic": "citadel_threshold_wear"})
+	add_part(blueprint, entry_landing_id, "floor", "timber_board", Vector3(threshold_center.x, ground_y + landing_size.y * 0.5, center.z), landing_size, {"variation": variation - 0.015, "semantic": "citadel_urban_entry_landing", "navigationRole": "walkable_support", "doorEgressFor": door_id, "physicalIntent": "structural_mass", "physicalRequiredSeatPartIds": landing_seat_ids})
+	var ramp_upper_surface_y := ground_y + landing_size.y
+	var ramp_rise := ramp_upper_surface_y - PUBLIC_GROUND_SURFACE_Y
+	var ramp_rotation := Vector3(-asin(ramp_rise / STREET_ENTRY_RAMP_LENGTH), -street_side * PI * 0.5, 0.0)
+	var ramp_size := Vector3(1.58, 0.14, STREET_ENTRY_RAMP_LENGTH)
+	var ramp_basis := Basis.from_euler(ramp_rotation)
+	var ramp_upper_end := ramp_basis * Vector3(0.0, ramp_size.y * 0.5, ramp_size.z * 0.5)
+	# Overlap the upper end with the landing instead of terminating on its exact
+	# polygon edge, where point-in-support certification is precision-sensitive.
+	var ramp_upper_target := Vector3(threshold_center.x + street_side * (STREET_ENTRY_FOUNDATION_DEPTH * 0.5 - STREET_ENTRY_RAMP_SEAT_INSET), ramp_upper_surface_y, center.z)
+	var ramp_position := ramp_upper_target - ramp_upper_end
+	# The ramp is a short structural span seated at both ends. Treating it as a
+	# ground-supported slab would demand fill beneath its open middle and recreate
+	# the very entry wall the ramp removes.
+	add_part(blueprint, entry_ramp_id, "ramp", "timber_board", ramp_position, ramp_size, {"rotation": ramp_rotation, "variation": variation - 0.01, "semantic": "citadel_urban_entry_ramp", "navigationRole": "transition", "navigationEndSupportPartId": entry_landing_id, "doorEgressFor": door_id, "physicalIntent": "structural_mass", "physicalRequiredSeatPartIds": ["castle_compound_foundation_segment_00", entry_landing_id]})
 	var lantern_z := center.z + minf(depth * 0.22, 1.55)
 	add_part(blueprint, "%s_lantern_frame" % prefix, "decor", "ironwork", Vector3(facade_x + street_side * 0.16, ground_y + 2.35, lantern_z), Vector3(0.18, 0.48, 0.34), {"collision": false, "variation": variation, "semantic": "citadel_urban_lantern_frame"})
 	add_part(blueprint, "%s_lantern_flame" % prefix, "decor", "candle_flame", Vector3(facade_x + street_side * 0.20, ground_y + 2.34, lantern_z), Vector3(0.10, 0.20, 0.12), {"collision": false, "variation": variation, "semantic": "citadel_urban_lantern_flame"})
@@ -1687,6 +1752,7 @@ static func add_civic_service_yard(blueprint, center: Vector3, variation: float)
 	var shed_center := center + Vector3(4.2, 0.0, 1.2)
 	for post_side in [-1.0, 1.0]:
 		var post_id := "urban_civic_shed_post_%d" % int(post_side)
+		add_grounded_foundation(blueprint, post_id + "_foundation", shed_center + Vector3(post_side * 2.0, 0.0, -0.72), 0.22, 0.22, center.y, variation + post_side * 0.018, "citadel_civic_service_shed_foundation")
 		add_part(blueprint, post_id, "beam", "timber_beam", shed_center + Vector3(post_side * 2.0, 1.30, -0.72), Vector3(0.22, 2.60, 0.22), {"collision": false, "variation": variation + post_side * 0.018, "semantic": "citadel_civic_service_shed"})
 		# These small diagonal strips only articulate the shed silhouette. The posts
 		# own the real rooted structure; do not classify a non-colliding trim strip
@@ -2016,7 +2082,9 @@ static func add_dressing_clusters(blueprint, front_z: float, keep_front_z: float
 		for strip_index in range(6):
 			add_part(blueprint, "urban_awning_%02d_%02d" % [index, strip_index], "decor", awning_material, Vector3(center.x - 1.45 + float(strip_index) * 0.58, base_y + 2.35 + absf(float(strip_index) - 2.5) * 0.025, center.z), Vector3(0.56, 0.075, 1.76), {"rotation": Vector3(deg_to_rad(-9.0), 0.0, 0.0), "collision": false, "variation": variation + float(index) * 0.02 + float(strip_index) * 0.005, "semantic": "citadel_market_awning"})
 		for support_side in [-1.0, 1.0]:
-			add_part(blueprint, "urban_awning_support_%02d_%d" % [index, int(support_side)], "beam", "timber_beam", Vector3(center.x + support_side * 1.52, base_y + 1.18, center.z + 0.52), Vector3(0.16, 2.36, 0.16), {"collision": false, "variation": variation, "semantic": "citadel_market_awning_support"})
+			var support_id := "urban_awning_support_%02d_%d" % [index, int(support_side)]
+			add_grounded_foundation(blueprint, support_id + "_foundation", Vector3(center.x + support_side * 1.52, 0.0, center.z + 0.52), 0.16, 0.16, base_y, variation, "citadel_market_awning_foundation")
+			add_part(blueprint, support_id, "beam", "timber_beam", Vector3(center.x + support_side * 1.52, base_y + 1.18, center.z + 0.52), Vector3(0.16, 2.36, 0.16), {"collision": false, "variation": variation, "semantic": "citadel_market_awning_support"})
 		for crate_index in range(3):
 			add_part(blueprint, "urban_crate_%02d_%02d" % [index, crate_index], "crate", "timber_board", Vector3(center.x - 1.1 + float(crate_index) * 0.82, base_y + 0.34, center.z + 0.8), Vector3(0.68, 0.68 + float(crate_index % 2) * 0.25, 0.68), {"collision": false, "variation": variation, "semantic": "citadel_market_crate"})
 	for banner_index in range(5):
@@ -2106,6 +2174,28 @@ static func add_grounded_foundation(blueprint, part_id: String, center: Vector3,
 	if top_y <= 0.02:
 		return
 	add_part(blueprint, part_id, "foundation", "stone_foundation", Vector3(center.x, top_y * 0.5, center.z), Vector3(width, top_y, depth), {"variation": variation, "semantic": semantic, "physicalIntent": "structural_mass"})
+
+
+static func add_street_house_foundation(blueprint, prefix: String, center: Vector3, width: float, depth: float, top_y: float, street_side: float, variation: float) -> void:
+	if top_y <= 0.02:
+		return
+	# Preserve the complete building footprint except for a shallow, door-width
+	# recess at the street face. The core and two facade shoulders still support
+	# the house and interior floor; the entry landing bridges the small centre
+	# recess. A full rectangular slab here intersects the generated door portal
+	# even though its visible outer endpoint is already in the public plaza.
+	var recess_depth := minf(STREET_FOUNDATION_ENTRY_RECESS_DEPTH, width * 0.18)
+	var core_width := width - recess_depth
+	var core_center := center - Vector3(street_side * recess_depth * 0.5, 0.0, 0.0)
+	add_grounded_foundation(blueprint, "%s_foundation" % prefix, core_center, core_width, depth, top_y, variation, "citadel_urban_house_foundation")
+	var recess_span := minf(depth - 0.20, StreetOpeningLayout.DOOR_WIDTH + 0.08)
+	var shoulder_depth := (depth - recess_span) * 0.5
+	var shoulder_x := center.x + street_side * (width * 0.5 - recess_depth * 0.5)
+	for shoulder_side in [-1.0, 1.0]:
+		var shoulder_z: float = center.z + float(shoulder_side) * (recess_span * 0.5 + shoulder_depth * 0.5)
+		add_grounded_foundation(blueprint, "%s_foundation_facade_side_%d" % [prefix, int(shoulder_side)],
+			Vector3(shoulder_x, center.y, shoulder_z), recess_depth, shoulder_depth, top_y,
+			variation, "citadel_urban_house_foundation")
 
 
 static func paving_treatments(urban_layout: Dictionary, front_z: float, keep_front_z: float) -> Array:
