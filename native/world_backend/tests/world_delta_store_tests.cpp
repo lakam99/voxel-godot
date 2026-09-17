@@ -2,6 +2,7 @@
 
 #include "../core/world_delta_store.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -69,9 +70,13 @@ VWB_TEST(world_delta_store_commits_typed_state_sections_and_preserves_old_pins) 
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, receipt.status);
     VWB_EXPECT_EQ(1ULL, receipt.revision);
     VWB_EXPECT_EQ(std::string("delta:negative"), receipt.transaction_id);
-    VWB_EXPECT_EQ(2U, receipt.affected_sections.size());
-    VWB_EXPECT((receipt.affected_sections[0].section == CellCoord{-1, -1, -2}));
-    VWB_EXPECT((receipt.affected_sections[1].section == CellCoord{1, 0, 1}));
+    VWB_EXPECT_EQ(54U, receipt.affected_sections.size());
+    VWB_EXPECT((receipt.affected_sections.front().section == CellCoord{-2, -2, -3}));
+    VWB_EXPECT((receipt.affected_sections.back().section == CellCoord{2, 1, 2}));
+    VWB_EXPECT(std::find(receipt.affected_sections.begin(), receipt.affected_sections.end(),
+        WorldDeltaSectionKey{{-1, -1, -2}}) != receipt.affected_sections.end());
+    VWB_EXPECT(std::find(receipt.affected_sections.begin(), receipt.affected_sections.end(),
+        WorldDeltaSectionKey{{1, 0, 1}}) != receipt.affected_sections.end());
 
     VWB_EXPECT_EQ(0ULL, before.revision());
     VWB_EXPECT(!before.effective_value_at({-1, -16, -17}));
@@ -106,7 +111,9 @@ VWB_TEST(world_delta_store_scene_overlay_wins_only_while_it_exists) {
     }));
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, clear_receipt.status);
     VWB_EXPECT_EQ(3ULL, clear_receipt.revision);
-    VWB_EXPECT_EQ(1U, clear_receipt.affected_sections.size());
+    VWB_EXPECT_EQ(27U, clear_receipt.affected_sections.size());
+    VWB_EXPECT((clear_receipt.affected_sections.front().section == CellCoord{-1, -1, -1}));
+    VWB_EXPECT((clear_receipt.affected_sections.back().section == CellCoord{1, 1, 1}));
     const WorldDeltaPinnedSnapshot restored = store.pin();
     VWB_EXPECT(!restored.value_at(WorldDeltaNamespace::scene_overlay, target));
     VWB_EXPECT_EQ(stone(), restored.effective_value_at(target)->state);
@@ -319,19 +326,48 @@ VWB_TEST(world_delta_store_uses_stable_namespace_cell_and_section_ordering) {
         set(WorldDeltaNamespace::terrain_override, {16, 16, 0}, stone()),
         set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, air()),
     }));
-    VWB_EXPECT_EQ(4U, receipt.affected_sections.size());
-    VWB_EXPECT((receipt.affected_sections[0].section == CellCoord{0, 0, 0}));
-    VWB_EXPECT((receipt.affected_sections[1].section == CellCoord{1, 0, 0}));
-    VWB_EXPECT((receipt.affected_sections[2].section == CellCoord{1, 0, 1}));
-    VWB_EXPECT((receipt.affected_sections[3].section == CellCoord{1, 1, 0}));
+    VWB_EXPECT_EQ(64U, receipt.affected_sections.size());
+    VWB_EXPECT((receipt.affected_sections.front().section == CellCoord{-1, -1, -1}));
+    VWB_EXPECT((receipt.affected_sections.back().section == CellCoord{2, 2, 2}));
     const auto records = store.pin().records();
     VWB_EXPECT_EQ(5U, records.size());
     VWB_EXPECT_EQ(WorldDeltaNamespace::terrain_override, records[0].name_space);
     VWB_EXPECT((records[0].coordinate == CellCoord{0, 0, 0}));
     VWB_EXPECT((records[1].coordinate == CellCoord{16, 0, 0}));
-    VWB_EXPECT((records[2].coordinate == CellCoord{16, 0, 16}));
+    VWB_EXPECT((records[2].coordinate == CellCoord{16, 16, 0}));
+    VWB_EXPECT_EQ(WorldDeltaNamespace::terrain_override, records[2].name_space);
     VWB_EXPECT((records[3].coordinate == CellCoord{16, 16, 0}));
-    VWB_EXPECT_EQ(WorldDeltaNamespace::scene_overlay, records[4].name_space);
+    VWB_EXPECT_EQ(WorldDeltaNamespace::scene_overlay, records[3].name_space);
+    VWB_EXPECT((records[4].coordinate == CellCoord{16, 0, 16}));
+    VWB_EXPECT_EQ(WorldDeltaNamespace::terrain_override, records[4].name_space);
+}
+
+VWB_TEST(world_delta_store_invalidates_the_complete_negative_boundary_neighborhood_in_zyx_order) {
+    WorldDeltaStore store;
+    const auto receipt = store.commit(transaction("delta:negative-boundary", 0, {
+        set(WorldDeltaNamespace::terrain_override, {-16, -16, -16}, stone()),
+    }));
+    VWB_EXPECT_EQ(27U, receipt.affected_sections.size());
+    VWB_EXPECT((receipt.affected_sections.front().section == CellCoord{-2, -2, -2}));
+    VWB_EXPECT((receipt.affected_sections.back().section == CellCoord{0, 0, 0}));
+    const WorldDeltaSectionKey owner{{-1, -1, -1}};
+    VWB_EXPECT(std::find(receipt.affected_sections.begin(), receipt.affected_sections.end(), owner)
+        != receipt.affected_sections.end());
+    for (std::int32_t z = -2; z <= 0; ++z) {
+        for (std::int32_t y = -2; y <= 0; ++y) {
+            for (std::int32_t x = -2; x <= 0; ++x) {
+                const WorldDeltaSectionKey expected{{x, y, z}};
+                VWB_EXPECT(std::find(receipt.affected_sections.begin(), receipt.affected_sections.end(), expected)
+                    != receipt.affected_sections.end());
+            }
+        }
+    }
+    for (std::size_t index = 1; index < receipt.affected_sections.size(); ++index) {
+        const CellCoord before = receipt.affected_sections[index - 1U].section;
+        const CellCoord after = receipt.affected_sections[index].section;
+        VWB_EXPECT(before.z < after.z || (before.z == after.z && (before.y < after.y
+            || (before.y == after.y && before.x < after.x))));
+    }
 }
 
 VWB_TEST(world_delta_store_imported_max_revision_refuses_an_overflowing_commit) {

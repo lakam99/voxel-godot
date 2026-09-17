@@ -74,6 +74,9 @@ struct WorldDeltaCommitReceipt {
     WorldDeltaCommitStatus status = WorldDeltaCommitStatus::no_change;
     std::string transaction_id;
     std::uint64_t revision = 0;
+    // Conservative invalidation keys. Every changed owner section contributes
+    // its complete 3x3x3 section neighborhood so boundary consumers cannot
+    // retain stale halo data.
     std::vector<WorldDeltaSectionKey> affected_sections;
 
     bool operator==(const WorldDeltaCommitReceipt &other) const noexcept;
@@ -134,6 +137,9 @@ public:
 
     std::uint64_t revision() const noexcept;
     WorldDeltaPinnedSnapshot pin() const;
+    // Strong exception guarantee: validation, replacement-state construction,
+    // receipt allocation, and durable transaction journaling all complete
+    // before the immutable state pointer is published.
     WorldDeltaCommitReceipt commit(const WorldDeltaTransaction &transaction);
 
 private:

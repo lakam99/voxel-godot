@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <type_traits>
 #include <utility>
 
 namespace voxel::world_backend {
@@ -18,20 +19,18 @@ struct NamespaceCellKey {
 
 struct NamespaceCellKeyLess {
     bool operator()(const NamespaceCellKey &left, const NamespaceCellKey &right) const noexcept {
-        if (left.name_space != right.name_space) {
-            return static_cast<std::uint8_t>(left.name_space) < static_cast<std::uint8_t>(right.name_space);
-        }
-        if (left.coordinate.x != right.coordinate.x) return left.coordinate.x < right.coordinate.x;
+        if (left.coordinate.z != right.coordinate.z) return left.coordinate.z < right.coordinate.z;
         if (left.coordinate.y != right.coordinate.y) return left.coordinate.y < right.coordinate.y;
-        return left.coordinate.z < right.coordinate.z;
+        if (left.coordinate.x != right.coordinate.x) return left.coordinate.x < right.coordinate.x;
+        return static_cast<std::uint8_t>(left.name_space) < static_cast<std::uint8_t>(right.name_space);
     }
 };
 
 struct SectionKeyLess {
     bool operator()(const WorldDeltaSectionKey &left, const WorldDeltaSectionKey &right) const noexcept {
-        if (left.section.x != right.section.x) return left.section.x < right.section.x;
+        if (left.section.z != right.section.z) return left.section.z < right.section.z;
         if (left.section.y != right.section.y) return left.section.y < right.section.y;
-        return left.section.z < right.section.z;
+        return left.section.x < right.section.x;
     }
 };
 
@@ -149,6 +148,21 @@ WorldDeltaSectionKey section_key_for(const CellCoord &coordinate) {
     return {split_cell(coordinate, WorldDeltaStore::SECTION_SIZE).value().section};
 }
 
+void add_conservative_invalidation_neighborhood(
+    const WorldDeltaSectionKey &owner, std::set<WorldDeltaSectionKey, SectionKeyLess> &affected) {
+    for (std::int32_t z_offset = -1; z_offset <= 1; ++z_offset) {
+        for (std::int32_t y_offset = -1; y_offset <= 1; ++y_offset) {
+            for (std::int32_t x_offset = -1; x_offset <= 1; ++x_offset) {
+                affected.insert({{
+                    static_cast<std::int32_t>(owner.section.x + x_offset),
+                    static_cast<std::int32_t>(owner.section.y + y_offset),
+                    static_cast<std::int32_t>(owner.section.z + z_offset),
+                }});
+            }
+        }
+    }
+}
+
 const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
     switch (reason) {
     case WorldDeltaRejectReason::invalid_transaction: return "invalid world delta transaction";
@@ -171,6 +185,8 @@ struct WorldDeltaStore::TransactionRecord {
     std::vector<std::uint8_t> canonical;
     WorldDeltaCommitReceipt receipt;
 };
+
+static_assert(std::is_nothrow_move_assignable_v<std::shared_ptr<const WorldDeltaSnapshotState>>);
 
 bool WorldDeltaState::operator==(const WorldDeltaState &other) const noexcept {
     return density == other.density && solid == other.solid && material == other.material
@@ -227,6 +243,9 @@ WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits) : limits_(l
     if (limits_.max_records == 0U || limits_.max_transactions == 0U) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
+    // Reserve once so a later journal append cannot allocate after a candidate
+    // state exists. Constructor failure leaves no observable store.
+    transactions_.reserve(limits_.max_transactions);
     auto initial = std::make_shared<WorldDeltaSnapshotState>();
     initial->revision = limits_.initial_revision;
     state_ = std::move(initial);
@@ -239,7 +258,9 @@ std::uint64_t WorldDeltaStore::revision() const noexcept { return state_->revisi
 WorldDeltaPinnedSnapshot WorldDeltaStore::pin() const { return WorldDeltaPinnedSnapshot(state_); }
 
 WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &transaction) {
-    const std::vector<std::uint8_t> canonical = canonical_transaction(transaction);
+    static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
+    static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
+    std::vector<std::uint8_t> canonical = canonical_transaction(transaction);
     const auto replay = std::find_if(transactions_.begin(), transactions_.end(), [&](const TransactionRecord &record) {
         return record.transaction_id == transaction.transaction_id;
     });
@@ -268,12 +289,12 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &tra
                 next->records[key] = {operation.name_space, operation.coordinate, *operation.state, 0};
                 changed_records.push_back(key);
                 changed = true;
-                affected.insert(section_key_for(operation.coordinate));
+                add_conservative_invalidation_neighborhood(section_key_for(operation.coordinate), affected);
             }
         } else if (found != next->records.end()) {
             next->records.erase(found);
             changed = true;
-            affected.insert(section_key_for(operation.coordinate));
+            add_conservative_invalidation_neighborhood(section_key_for(operation.coordinate), affected);
         }
     }
     if (next->records.size() > limits_.max_records) {
@@ -294,10 +315,14 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &tra
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
         receipt.affected_sections.assign(affected.begin(), affected.end());
-        state_ = std::move(next);
     }
-    transactions_.push_back({transaction.transaction_id, canonical, receipt});
-    return receipt;
+    // All throwing work is deliberately complete before either durable journal
+    // or current state becomes observable. reserve() plus the static assertion
+    // above make this move append nonthrowing.
+    TransactionRecord journal{transaction.transaction_id, std::move(canonical), receipt};
+    transactions_.push_back(std::move(journal));
+    if (changed) state_ = std::move(next);
+    return std::move(receipt);
 }
 
 } // namespace voxel::world_backend
