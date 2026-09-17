@@ -11,6 +11,7 @@ direct-npc-navigation-report.json
 direct-npc-navigation-progress.txt
 artifacts/**
 native/terrain_meshing/godot-cpp/
+native/terrain_meshing/toolchains/
 native/terrain_meshing/.sconsign.dblite
 native/terrain_meshing/bin/
 native/terrain_meshing/build/

@@ -1,0 +1,49 @@
+{
+  "schema": "native-world-backend-toolchain-lock/v1",
+  "godotCpp": {
+    "revisionFile": "../terrain_meshing/godot-cpp-revision.txt",
+    "license": "MIT",
+    "licenseFile": "../terrain_meshing/godot-cpp/LICENSE.md",
+    "licenseSha256": "26a5b210d90760156ce886267ce9df235787dcc6cebfd7ecd95ef5b6fdcc95bf"
+  },
+  "msvc": {
+    "compilerVersion": "19.44.35228",
+    "linkerVersion": "14.44.35228.0",
+    "toolsetVersion": "14.44.35207",
+    "sconsProductVersion": "14.3",
+    "hostArchitecture": "x64",
+    "targetArchitecture": "amd64",
+    "vcvarsArgs": "-vcvars_ver=14.44.35207",
+    "vcvars64Sha256": "6b516d8fcf543c14b2d861e1f45661e0029230fe0dc48e86ce78522801822209",
+    "clSha256": "88c8344236a27a6e727e0a8edc49aaa2690bdc7a9464b9d18cc7abe70a9f1c0d",
+    "linkSha256": "ca11e6c45debd34bf652dfe984c5360a531a005ed78bf72852330c9c2590cf0d"
+  },
+  "godot": {
+    "version": "4.6.1.stable.official.14d19694e",
+    "major": 4,
+    "minor": 6,
+    "patch": 1,
+    "status": "stable",
+    "hash": "14d19694e",
+    "engineCommitSha": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
+    "consoleSha256": "bd9e27c6994a128aaab45cdda4d372de87b91900618ba2de55c6aa29248d5b56"
+  },
+  "llvmCoverage": {
+    "version": "23.1.1",
+    "resourceDirVersion": "23",
+    "platform": "x86_64-pc-windows-msvc",
+    "archive": "clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst",
+    "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/clang+llvm-23.1.1-x86_64-pc-windows-msvc.tar.zst",
+    "bytes": 489740247,
+    "sha256": "c8a12d754b5050c5668b56a5425c806792d46c70f7244b1216046164aa4b6462",
+    "license": "Apache-2.0 WITH LLVM-exception",
+    "licenseFile": "include/llvm/Support/LICENSE.TXT",
+    "licenseSha256": "54cbc326a78b9400065bfc5830a57fdcdaf808286d4ac35d8a9e324aa77b7241",
+    "toolSha256": {
+      "clangCl": "d43b7fa07b5b77b716e60600ad2792cfb2eeb370aecb6144bf6c698f2c6d7467",
+      "llvmProfdata": "f91486f965caf0f83d71160c9d1b69c7ccef9897339d25e362383b80e7a5dbbe",
+      "llvmCov": "59b350ca719d03683e625b366ba0806e33e6effe7836116ced9200a29a59ac70",
+      "profileRuntime": "7753d4b1280faad4dc69df3317e5dbb700f47a5e822e17712e96c13945fd386c"
+    }
+  }
+}

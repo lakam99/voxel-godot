@@ -41,8 +41,20 @@ def generate(env):
 
     env["TARGET_ARCH"] = target_arch
     env["MSVC_SETUP_RUN"] = False
+    # SCons identifies the VS 2022 product family as 14.3 even when selecting
+    # a newer v143 toolset. N1 automation supplies the exact BuildTools
+    # vcvars script so an incomplete Community install cannot win discovery.
     env["MSVS_VERSION"] = "14.3"
     env["MSVC_VERSION"] = "14.3"
+    msvc_use_script = os.environ.get("VWB_MSVC_USE_SCRIPT")
+    msvc_toolset_version = os.environ.get("VWB_MSVC_TOOLSET_VERSION")
+    if msvc_use_script or msvc_toolset_version:
+        if not msvc_use_script or not os.path.isabs(msvc_use_script) or not os.path.isfile(msvc_use_script):
+            raise RuntimeError("VWB_MSVC_USE_SCRIPT must name an existing absolute vcvars64.bat")
+        if not msvc_toolset_version:
+            raise RuntimeError("VWB_MSVC_TOOLSET_VERSION is required with VWB_MSVC_USE_SCRIPT")
+        env["MSVC_USE_SCRIPT"] = msvc_use_script
+        env["MSVC_USE_SCRIPT_ARGS"] = "-vcvars_ver=" + msvc_toolset_version
     env["is_msvc"] = True
     env["use_mingw"] = False
 

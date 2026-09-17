@@ -1,0 +1,24 @@
+{
+  "schema": "native-world-backend-source-manifest/v1",
+  "coreSources": [
+    "core/authority.cpp",
+    "core/coordinates.cpp",
+    "core/legacy_seed_hash.cpp",
+    "core/sha256.cpp",
+    "core/world_identity.cpp"
+  ],
+  "coreHeaders": [
+    "core/authority.hpp",
+    "core/coordinates.hpp",
+    "core/legacy_seed_hash.hpp",
+    "core/sha256.hpp",
+    "core/world_identity.hpp"
+  ],
+  "testSources": [
+    "tests/test_main.cpp",
+    "tests/world_backend_core_tests.cpp"
+  ],
+  "testHeaders": [
+    "tests/test_harness.hpp"
+  ]
+}

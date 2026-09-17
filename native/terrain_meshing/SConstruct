@@ -1,30 +1,232 @@
 #!/usr/bin/env python
 
 import os
+import json
+import hashlib
 import subprocess
+import atexit
 
-godot_cpp_dir = os.environ.get("GODOT_CPP_DIR", "godot-cpp")
+project_root = os.path.abspath(os.path.join(Dir(".").abspath, "..", ".."))
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source_file:
+        for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def project_file_record(path):
+    absolute = os.path.abspath(path)
+    if not os.path.isfile(absolute):
+        raise RuntimeError("Expected native build input file: " + absolute)
+    return {
+        "path": os.path.relpath(absolute, project_root).replace("\\", "/"),
+        "sha256": sha256_file(absolute),
+        "bytes": os.path.getsize(absolute),
+    }
+
+def resolved_tool_record(build_env, variable):
+    expanded = build_env.subst_list("$" + variable)
+    if not expanded or not expanded[0]:
+        raise RuntimeError("SCons tool variable is empty: " + variable)
+    command = str(expanded[0][0]).strip().strip('"')
+    resolved = command if os.path.isabs(command) and os.path.isfile(command) else build_env.WhereIs(command, path=build_env["ENV"].get("PATH"))
+    if not resolved or not os.path.isfile(resolved):
+        raise RuntimeError("Could not resolve SCons tool " + variable + ": " + command)
+    absolute = os.path.abspath(resolved)
+    return {"path": absolute, "sha256": sha256_file(absolute)}
+
+godot_cpp_dir = os.path.abspath(os.environ.get("GODOT_CPP_DIR", "godot-cpp"))
 if not os.path.exists(os.path.join(godot_cpp_dir, "SConstruct")):
     raise RuntimeError("Missing godot-cpp bindings. Set GODOT_CPP_DIR or run node tools/build-native-terrain-meshing.mjs --fetch-godot-cpp.")
 with open("godot-cpp-revision.txt", encoding="utf-8") as revision_file:
     required_revision = revision_file.read().strip()
 actual_revision = subprocess.check_output(["git", "-C", godot_cpp_dir, "rev-parse", "HEAD"], text=True).strip()
+actual_dependency_status = subprocess.check_output(["git", "-C", godot_cpp_dir, "status", "--short"], text=True).strip()
 if actual_revision != required_revision:
     raise RuntimeError("godot-cpp revision mismatch; use the revision in godot-cpp-revision.txt")
+if actual_dependency_status:
+    raise RuntimeError("godot-cpp dependency must be clean")
 
 env = SConscript(os.path.join(godot_cpp_dir, "SConstruct"))
 env = env.Clone()
-env.Append(CPPPATH=["src"])
 env.Append(CXXFLAGS=["/O2"] if env["platform"] == "windows" and env.get("is_msvc", False) else ["-O2"])
+# MSVC's PDB server normally survives its compiler parent. Owned automation
+# assigns a run-unique endpoint and this hook stops only that endpoint so the
+# build Job Object can prove a natural zero-member drain.
+if os.environ.get("_MSPDBSRV_ENDPOINT_"):
+    env["ENV"]["_MSPDBSRV_ENDPOINT_"] = os.environ["_MSPDBSRV_ENDPOINT_"]
+    pdb_server = env.WhereIs("mspdbsrv.exe", path=env["ENV"].get("PATH"))
+    if pdb_server:
+        atexit.register(lambda: subprocess.run([pdb_server, "-stop"],
+            env=os.environ.copy(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False))
+env.Append(CPPPATH=["src", os.path.normpath(os.path.join("..", "world_backend", "core"))])
 
 env.VariantDir("build", "src", duplicate=0)
 sources = Glob("build/*.cpp")
+extension_source_paths = []
+extension_header_paths = []
+for current_root, _, filenames in os.walk(os.path.join(Dir(".").abspath, "src")):
+    for filename in filenames:
+        extension = os.path.splitext(filename)[1].lower()
+        path = os.path.join(current_root, filename)
+        if extension == ".cpp":
+            extension_source_paths.append(path)
+        elif extension in [".h", ".hpp"]:
+            extension_header_paths.append(path)
+extension_source_paths.sort()
+extension_header_paths.sort()
+if sorted(os.path.basename(str(source)) for source in sources) != sorted(os.path.basename(path) for path in extension_source_paths):
+    raise RuntimeError("SCons extension sources do not match the exact src/*.cpp inventory")
 kernel_env = env.Clone()
 kernel_env.Append(CXXFLAGS=["/fp:strict"] if env["platform"] == "windows" and env.get("is_msvc", False) else ["-ffp-contract=off"])
 kernel_sources = [source for source in sources if str(source).endswith("building_support_kernel.cpp")]
 sources = [source for source in sources if source not in kernel_sources]
 sources += kernel_env.SharedObject(kernel_sources)
 target_name = "terrain_meshing_backend{}{}".format(env["suffix"], env["SHLIBSUFFIX"])
-library = env.SharedLibrary(os.path.join("bin", target_name), source=sources)
+world_backend_root = os.path.normpath(os.path.join(Dir(".").abspath, "..", "world_backend"))
+world_backend_manifest_path = os.path.join(world_backend_root, "source-manifest.json")
+with open(world_backend_manifest_path, encoding="utf-8") as manifest_file:
+    world_backend_manifest = json.load(manifest_file)
+if world_backend_manifest.get("schema") != "native-world-backend-source-manifest/v1":
+    raise RuntimeError("Unsupported native world backend source manifest schema")
 
-Default(library)
+manifest_groups = ["coreSources", "coreHeaders", "testSources", "testHeaders"]
+manifest_extensions = {"coreSources": [".cpp"], "coreHeaders": [".h", ".hpp"], "testSources": [".cpp"], "testHeaders": [".h", ".hpp"]}
+manifest_prefixes = {"coreSources": "core/", "coreHeaders": "core/", "testSources": "tests/", "testHeaders": "tests/"}
+manifest_paths = set()
+for group in manifest_groups:
+    entries = world_backend_manifest.get(group)
+    if not isinstance(entries, list) or not all(isinstance(entry, str) for entry in entries):
+        raise RuntimeError("Invalid native world backend manifest group: " + group)
+    for entry in entries:
+        normalized = entry
+        segments = normalized.split("/")
+        if (not normalized or "\\" in normalized or normalized.startswith("/")
+                or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":")
+                or any(segment in ["", ".", ".."] for segment in segments)
+                or not normalized.startswith(manifest_prefixes[group])
+                or os.path.splitext(normalized)[1].lower() not in manifest_extensions[group]
+                or normalized in manifest_paths):
+            raise RuntimeError("Unsafe or duplicate native world backend manifest path: " + entry)
+        manifest_paths.add(normalized)
+        if not os.path.isfile(os.path.join(world_backend_root, normalized)):
+            raise RuntimeError("Missing native world backend manifest source: " + normalized)
+
+discovered_paths = set()
+for directory in ["core", "tests"]:
+    for current_root, _, filenames in os.walk(os.path.join(world_backend_root, directory)):
+        for filename in filenames:
+            if os.path.splitext(filename)[1].lower() not in [".cpp", ".h", ".hpp"]:
+                continue
+            discovered_paths.add(os.path.relpath(os.path.join(current_root, filename), world_backend_root).replace("\\", "/"))
+if discovered_paths != manifest_paths:
+    missing = sorted(discovered_paths - manifest_paths)
+    stale = sorted(manifest_paths - discovered_paths)
+    raise RuntimeError("Native world backend manifest mismatch; unlisted={}, missing={}".format(missing, stale))
+
+default_configuration = "release" if ARGUMENTS.get("target", "template_debug") == "template_release" else "debug"
+configuration = os.environ.get("VWB_CONFIGURATION", default_configuration)
+if configuration not in ["debug", "release", "coverage"]:
+    raise RuntimeError("world_backend_configuration must be debug, release, or coverage")
+
+core_env = env.Clone()
+core_env.Append(CPPPATH=[os.path.join(world_backend_root, "core")])
+for flag_group in ["CCFLAGS", "CXXFLAGS"]:
+    core_env[flag_group] = [flag for flag in core_env.get(flag_group, [])
+        if str(flag).lower() not in ["/o1", "/o2", "/od", "/ox", "/rtc1", "-o0", "-o1", "-o2", "-o3", "-os"]]
+if core_env["platform"] == "windows" and core_env.get("is_msvc", False):
+    core_flags = ["/fp:strict", "/EHsc", "/Z7"]
+    core_flags += ["/O2"] if configuration == "release" else ["/Od", "/RTC1"]
+    core_env.AppendUnique(CXXFLAGS=core_flags)
+else:
+    core_flags = ["-ffp-contract=off", "-fno-fast-math"]
+    core_flags += ["-O2", "-g"] if configuration == "release" else ["-O0", "-g"]
+    core_env.AppendUnique(CXXFLAGS=core_flags)
+
+world_build_directory = os.path.join("build", "world_backend", configuration)
+core_sources = [os.path.join(world_backend_root, entry) for entry in world_backend_manifest["coreSources"]]
+test_sources = [os.path.join(world_backend_root, entry) for entry in world_backend_manifest["testSources"]]
+core_objects = [core_env.Object(os.path.join(world_build_directory, "core", os.path.splitext(os.path.basename(source))[0]), source=source) for source in core_sources]
+core_library = core_env.StaticLibrary(os.path.join(world_build_directory, "world_backend_core"), source=core_objects)
+
+test_env = core_env.Clone()
+test_env.Append(CPPPATH=[os.path.join(world_backend_root, "tests")])
+test_objects = [test_env.Object(os.path.join(world_build_directory, "tests", os.path.splitext(os.path.basename(source))[0]), source=source) for source in test_sources]
+test_program_path = os.path.join(world_build_directory, "world_backend_core_tests")
+test_link_flags = []
+if test_env["platform"] == "windows" and test_env.get("is_msvc", False):
+    test_link_flags.append("/DEBUG:FULL")
+    if configuration == "coverage":
+        test_link_flags.append("/PROFILE")
+test_env.AppendUnique(LINKFLAGS=test_link_flags)
+test_program = test_env.Program(test_program_path, source=test_objects + [core_library],
+    PDB=test_program_path + ".pdb")
+
+# The existing GDExtension remains the N1 adapter target. Linking the pure core
+# now catches ABI/build drift without registering a second runtime authority.
+library_path = os.path.join("bin", target_name)
+library_env = env.Clone()
+if library_env["platform"] == "windows" and library_env.get("is_msvc", False):
+    library_env.AppendUnique(LINKFLAGS=["/DEBUG:FULL"])
+library = library_env.SharedLibrary(library_path, source=sources + [core_library], PDB=library_path + ".pdb")
+
+extension_build_input_paths = [
+    os.path.join(Dir(".").abspath, "SConstruct"),
+    os.path.join(Dir(".").abspath, "scons_tools", "windows.py"),
+    os.path.join(Dir(".").abspath, "godot-cpp-revision.txt"),
+    os.path.join(project_root, "addons", "terrain_meshing_backend", "terrain_meshing_backend.gdextension"),
+]
+
+build_manifest_path = os.path.join(world_build_directory, "build-manifest.json")
+os.makedirs(os.path.dirname(build_manifest_path), exist_ok=True)
+selected_vcvars = str(library_env.get("MSVC_USE_SCRIPT", ""))
+pure_core_inputs = {
+    "manifest": project_file_record(world_backend_manifest_path),
+    "sources": [project_file_record(os.path.join(world_backend_root, path)) for path in sorted(manifest_paths)],
+}
+pure_core_inputs_digest = hashlib.sha256(json.dumps(
+    pure_core_inputs, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+with open(build_manifest_path, "w", encoding="utf-8", newline="\n") as build_manifest_file:
+    json.dump({
+        "schema": "native-world-backend-build-manifest/v1",
+        "configuration": configuration,
+        "godotTarget": ARGUMENTS.get("target", "template_debug"),
+        "godotCpp": {
+            "path": godot_cpp_dir,
+            "requiredRevision": required_revision,
+            "actualRevision": actual_revision,
+            "status": actual_dependency_status,
+            "apiVersion": ARGUMENTS.get("api_version", ""),
+        },
+        "coreSources": [os.path.relpath(source, world_backend_root).replace("\\", "/") for source in core_sources],
+        "testSources": [os.path.relpath(source, world_backend_root).replace("\\", "/") for source in test_sources],
+        "pureCoreInputs": pure_core_inputs,
+        "pureCoreInputsDigestSha256": pure_core_inputs_digest,
+        "extensionSources": [project_file_record(path) for path in extension_source_paths],
+        "extensionHeaders": [project_file_record(path) for path in extension_header_paths],
+        "extensionBuildInputs": [project_file_record(path) for path in extension_build_input_paths],
+        "resolvedTools": {
+            "cxx": resolved_tool_record(library_env, "CXX"),
+            "link": resolved_tool_record(library_env, "LINK"),
+        },
+        "msvcSelection": {
+            "sconsProductVersion": str(library_env.get("MSVC_VERSION", "")),
+            "requestedToolsetVersion": os.environ.get("VWB_MSVC_TOOLSET_VERSION", ""),
+            "hostArchitecture": "x64",
+            "targetArchitecture": str(library_env.get("TARGET_ARCH", "")),
+            "vcvarsPath": os.path.abspath(selected_vcvars) if selected_vcvars else None,
+            "vcvarsSha256": sha256_file(selected_vcvars) if selected_vcvars and os.path.isfile(selected_vcvars) else None,
+            "vcvarsArgs": str(library_env.get("MSVC_USE_SCRIPT_ARGS", "")),
+        },
+        "coreCcFlags": [str(flag) for flag in core_env.get("CCFLAGS", [])],
+        "coreCxxFlags": [str(flag) for flag in core_env.get("CXXFLAGS", [])],
+        "extensionCcFlags": [str(flag) for flag in library_env.get("CCFLAGS", [])],
+        "extensionCxxFlags": [str(flag) for flag in library_env.get("CXXFLAGS", [])],
+        "kernelCxxFlags": [str(flag) for flag in kernel_env.get("CXXFLAGS", [])],
+        "testLinkFlags": [str(flag) for flag in test_env.get("LINKFLAGS", [])],
+        "extensionLinkFlags": [str(flag) for flag in library_env.get("LINKFLAGS", [])],
+    }, build_manifest_file, indent=2, sort_keys=True)
+    build_manifest_file.write("\n")
+
+Default([library, test_program])
