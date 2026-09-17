@@ -29,17 +29,17 @@ VWB_TEST(world_source_definition_admits_validated_seed_and_rejects_boundary_erro
     VWB_EXPECT_EQ(4U, definition.revisions().cell_center_query_revision);
     VWB_EXPECT_EQ(5U, definition.revisions().surface_column_query_revision);
     WorldSourceDescriptor invalid = atlas_descriptor(); invalid.admitted_biome_seed.utf8 = "other";
-    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition(invalid));
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.revisions.surface_column_query_revision = 0;
-    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition(invalid));
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.revisions.biome_region_field_revision = 99;
-    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition(invalid));
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.constants.cell_size_meters = std::numeric_limits<double>::quiet_NaN();
-    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition(invalid));
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.constants.cell_center_offset_cells = 1.0;
-    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition(invalid));
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.constants.minimum_surface_meters = 121.0;
-    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition(invalid));
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
 }
 
 VWB_TEST(world_source_definition_digest_tracks_physical_facts_not_request_authority) {
