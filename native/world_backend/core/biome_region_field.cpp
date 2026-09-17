@@ -280,9 +280,6 @@ double BiomeRegionField::value_noise(const AdmittedBiomeSeed &seed, const BiomeV
     }
     const std::int32_t x0 = checked_lattice_coordinate(point.x);
     const std::int32_t z0 = checked_lattice_coordinate(point.z);
-    if (x0 == std::numeric_limits<std::int32_t>::max() || z0 == std::numeric_limits<std::int32_t>::max()) {
-        throw std::invalid_argument("biome value noise cannot address a lattice successor");
-    }
     // x0/z0 are floors, so each fraction is already in [0, 1).
     const double tx = smooth_curve_unit(point.x - static_cast<double>(x0));
     const double tz = smooth_curve_unit(point.z - static_cast<double>(z0));
