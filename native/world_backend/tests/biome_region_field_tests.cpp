@@ -79,7 +79,7 @@ VWB_TEST(biome_region_field_utf8_validation_covers_all_scalar_encodings_and_reje
     for (const std::string &invalid : std::vector<std::string>{
              "\x80", "\xC2", "\xC2\x41", "\xE0\xA0", "\xE0\x80\x80",
              "\xE1\x41\x80", "\xE1\x80\x41", "\xED\xA0\x80", "\xF0\x90\x80",
-             "\xF0\x80\x80\x80", "\xF1\x41\x80\x80", "\xF1\x80\x41\x80",
+             "\xF0", "\xF4", "\xF0\x80\x80\x80", "\xF1\x41\x80\x80", "\xF1\x80\x41\x80",
              "\xF1\x80\x80\x41", "\xF4\x90\x80\x80"}) {
         VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::admit_utf8_seed(invalid));
     }
@@ -90,6 +90,13 @@ VWB_TEST(biome_region_field_utf8_validation_covers_all_scalar_encodings_and_reje
         BiomeRegionField::validate_admitted_seed(all_widths, "not-the-same"));
     VWB_EXPECT_THROW(std::invalid_argument,
         BiomeRegionField::validate_admitted_seed(code_points({'a'}), std::string("a\0", 2)));
+    // Direct invalid-scalar validation remains fail-closed. It necessarily
+    // reaches the canonical/presentation mismatch before the later scalar
+    // guard: a strict UTF-8 decoder cannot produce a surrogate or >U+10FFFF.
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::validate_admitted_seed(code_points({0xd800U}), "a"));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::validate_admitted_seed(code_points({0x110000U}), "a"));
 }
 
 VWB_TEST(biome_region_field_value_equality_and_interpolation_contracts_cover_each_field) {
