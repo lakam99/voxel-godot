@@ -70,6 +70,92 @@ VWB_TEST(biome_region_field_uses_unicode_scalar_fnv_not_utf8_bytes) {
     VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::stable_unit(code_points({0x110000U})));
 }
 
+VWB_TEST(biome_region_field_utf8_validation_covers_all_scalar_encodings_and_rejections) {
+    const std::vector<std::uint32_t> all_widths = code_points({0x007fU, 0x07ffU, 0xffffU, 0x10ffffU});
+    const std::string encoded("\x7f\xDF\xBF\xEF\xBF\xBF\xF4\x8F\xBF\xBF", 10);
+    VWB_EXPECT_EQ(all_widths,
+        BiomeRegionField::validate_admitted_seed(all_widths, encoded).code_points);
+
+    for (const std::string &invalid : std::vector<std::string>{
+             "\x80", "\xC2", "\xC2\x41", "\xE0\xA0", "\xE0\x80\x80",
+             "\xE1\x41\x80", "\xE1\x80\x41", "\xED\xA0\x80", "\xF0\x90\x80",
+             "\xF0\x80\x80\x80", "\xF1\x41\x80\x80", "\xF1\x80\x41\x80",
+             "\xF1\x80\x80\x41", "\xF4\x90\x80\x80"}) {
+        VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::admit_utf8_seed(invalid));
+    }
+    VWB_EXPECT_EQ(code_points({0x0800U}), BiomeRegionField::admit_utf8_seed("\xE0\xA0\x80").code_points);
+    VWB_EXPECT_EQ(code_points({0xd7ffU}), BiomeRegionField::admit_utf8_seed("\xED\x9F\xBF").code_points);
+    VWB_EXPECT_EQ(code_points({0x10000U}), BiomeRegionField::admit_utf8_seed("\xF0\x90\x80\x80").code_points);
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::validate_admitted_seed(all_widths, "not-the-same"));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::validate_admitted_seed(code_points({'a'}), std::string("a\0", 2)));
+}
+
+VWB_TEST(biome_region_field_value_equality_and_interpolation_contracts_cover_each_field) {
+    const AdmittedBiomeSeed seed = atlas();
+    VWB_EXPECT_EQ(seed, (AdmittedBiomeSeed{seed.code_points, seed.utf8}));
+    AdmittedBiomeSeed different_seed = seed;
+    different_seed.code_points.back() = '3';
+    VWB_EXPECT(!(seed == different_seed));
+    different_seed = seed;
+    different_seed.utf8 += "x";
+    VWB_EXPECT(!(seed == different_seed));
+
+    VWB_EXPECT_EQ((BiomeRegion{4, -5}), (BiomeRegion{4, -5}));
+    VWB_EXPECT(!(BiomeRegion{4, -5} == BiomeRegion{3, -5}));
+    VWB_EXPECT(!(BiomeRegion{4, -5} == BiomeRegion{4, -4}));
+    VWB_EXPECT_EQ((BiomeVec2{1.0F, -2.0F}), (BiomeVec2{1.0F, -2.0F}));
+    VWB_EXPECT(!(BiomeVec2{1.0F, -2.0F} == BiomeVec2{2.0F, -2.0F}));
+    VWB_EXPECT(!(BiomeVec2{1.0F, -2.0F} == BiomeVec2{1.0F, -3.0F}));
+
+    const BiomeRegionSample sample = BiomeRegionField::sample(seed, {14250.75F, -8810.25F});
+    for (unsigned field = 0; field < 14U; ++field) {
+        BiomeRegionSample changed = sample;
+        if (field == 0U) ++changed.version;
+        if (field == 1U) ++changed.region.x;
+        if (field == 2U) ++changed.region.z;
+        if (field == 3U) changed.region_id += ":other";
+        if (field == 4U) changed.site_position.x += 1.0F;
+        if (field == 5U) changed.site_position.z += 1.0F;
+        if (field == 6U) changed.biome += ":other";
+        if (field == 7U) changed.temperature += 1.0;
+        if (field == 8U) changed.moisture += 1.0;
+        if (field == 9U) changed.second_distance_meters += 1.0;
+        if (field == 10U) changed.edge_distance_meters += 1.0;
+        if (field == 11U) changed.ecotone_weight += 1.0;
+        if (field == 12U) changed.minimum_core_radius_meters += 1.0;
+        if (field == 13U) changed.minimum_core_diameter_meters += 1.0;
+        VWB_EXPECT(!(sample == changed));
+    }
+
+    const double a = BiomeRegionField::value_noise(seed, {-2.0F, -3.0F}, "interpolation");
+    const double b = BiomeRegionField::value_noise(seed, {-1.0F, -3.0F}, "interpolation");
+    const double c = BiomeRegionField::value_noise(seed, {-2.0F, -2.0F}, "interpolation");
+    const double d = BiomeRegionField::value_noise(seed, {-1.0F, -2.0F}, "interpolation");
+    VWB_EXPECT(near((a + b + c + d) * 0.25,
+        BiomeRegionField::value_noise(seed, {-1.5F, -2.5F}, "interpolation")));
+}
+
+VWB_TEST(biome_region_field_public_validation_and_coordinate_error_paths_are_strict) {
+    const AdmittedBiomeSeed seed = atlas();
+    VWB_EXPECT(BiomeRegionField::climate_channel(seed, {-2, 3}, "temperature") >= 0.0);
+    VWB_EXPECT(BiomeRegionField::climate_channel(seed, {-2, 3}, "moisture") <= 1.0);
+    VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::climate_channel(seed, {0, 0}, ""));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::site_position(AdmittedBiomeSeed{{}, ""}, {0, 0}));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::region_id(AdmittedBiomeSeed{code_points({'a'}), "b"}, {0, 0}));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::value_noise(seed, {0.0F, std::numeric_limits<float>::infinity()}, "x"));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::value_noise(seed, {-std::numeric_limits<float>::max(), 0.0F}, "x"));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::sample(seed, {0.0F, std::numeric_limits<float>::infinity()}));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::sample(seed, {-std::numeric_limits<float>::max(), 0.0F}));
+}
+
 VWB_TEST(biome_region_field_fixed_atlas_sample_matches_script_golden) {
     const BiomeRegionSample sample = BiomeRegionField::sample(atlas(), {14250.75, -8810.25});
     VWB_EXPECT_EQ((BiomeRegion{2, -2}), sample.region);
