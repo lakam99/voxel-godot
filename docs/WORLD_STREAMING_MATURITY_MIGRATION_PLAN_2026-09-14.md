@@ -208,6 +208,16 @@ count. Continue to require real terrain solidity, safe fail-closed movement,
 honest collision-hold reporting and clean lifecycle evidence; do not claim that
 the current admission threshold is a hard native-work cap.
 
+**Superseding migration decision, 2026-09-17:** the deferral and
+GDScript-first implementation detail above are retained as history, but are no
+longer current implementation policy. The authorized N0–N9 native-world-backend
+migration in `CODEX_NATIVE_WORLD_BACKEND_MIGRATION_HANDOFF_2026-09-17.md` now
+owns terrain source, collision-first streaming, and validated deletion of the
+old collision path. The Gate-5 release matrix and all physical-safety,
+performance, lifecycle, visual, and gameplay acceptance requirements in this
+plan remain authoritative; the native migration must pass them on its final
+build.
+
 - Execute the matrix in §6 with frozen source/binary hashes and preserved input saves. Full gameplay acceptance starts at the actual menu and uses normal runtime settings, collision and input. Extend existing headed fixtures where necessary; no teleport/helper-driven act phase, forced safe movement, bypassed interactions, or metadata-only success.
 - Validate New Game and Continue initial readiness, tutorial town/actors, wilderness sprint, Citadel approach from gate and side, rapid turns/reversals, interior furnishings, gate/door/stair passage, nearby NPC behavior, edit/dig/build/harvest, combat/survival, autosave/manual save, reload during pending work, exit/cancel during preparation/installation/sync, and later revisit. Use established broad/NPC/terrain/save fixtures; inspect their reports and actual visuals.
 - Resolve failures within authorized ownership. A green boolean cannot waive an engine error, unsafe collision, missing required crossing, source mismatch, missing demanded content or visible stutter. Baseline defects remain listed and separately attributed; a defect blocking this plan's ordinary flow must be resolved before acceptance, even if inherited. Request additional scope only for a needed protected route/motor/door-behavior change.

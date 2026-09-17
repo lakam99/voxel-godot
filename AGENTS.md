@@ -476,6 +476,15 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 
 ### Deterministic terrain-collision tile pipeline
 
+> **Historical backlog note (superseded 2026-09-17):** the implementation and
+> deferral decisions in this subsection predate
+> `CODEX_NATIVE_WORLD_BACKEND_MIGRATION_HANDOFF_2026-09-17.md`. The native
+> N0–N9 migration now owns this cutover, including a pure native source core,
+> standalone native coverage, collision-first publication, and deletion of the
+> old production path after validation. Preserve the measurements and safety
+> requirements below, but do not implement a new GDScript-first collision
+> authority or treat the former post-Gate-5 deferral as current policy.
+
 The current `VoxelTerrainRuntime` obtains player terrain collision as a side
 effect of moving broad `VoxelViewer` footprints. This remains acceptable as a
 temporary implementation, but it is not a bounded long-term streaming design.
@@ -532,6 +541,16 @@ proceed on the current implementation, with the deferred architecture and its
 measured limitations carried into the final handoff.
 
 ### Route-finalization occupancy scalability
+
+> **Historical backlog note (superseded 2026-09-17):** the inherited Gate-5
+> tranche cursorized the relevant planning/finalization work. Treat its exact
+> ordering, validator budgets, and LOD eviction as protected behavior. Verify
+> the current contracts before changing anything; N6 may optimize source and
+> approach-candidate spatial indexes, including SmartObjectService indexing,
+> without changing the protected route result/order or live proof semantics;
+> do not reimplement the older atomic design described below. Native N6 may
+> move only the CPU/query boundary defined by the migration handoff and must
+> leave final live collision/occupancy proof with the existing route authority.
 
 Gate 5's 32-NPC workload uses a 48-step cheap-work slice for incremental route
 planning while retaining two collision-backed validation calls per admitted
