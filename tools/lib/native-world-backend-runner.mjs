@@ -29,6 +29,16 @@ export const expectedToolchainLockValue = {
     revisionFile: '../terrain_meshing/godot-cpp-revision.txt', license: 'MIT',
     licenseFile: '../terrain_meshing/godot-cpp/LICENSE.md', licenseSha256: godotCppLicenseSha256,
   },
+  fastNoiseLite: {
+    engineCommitSha: '14d19694e0c88a3f9e82d899a0400f27a24c176e',
+    upstreamVersion: '1.1.0', upstreamCommitSha: 'f7af54b56518aa659e1cf9fb103c0b6e36a833d9',
+    license: 'MIT', licenseFile: 'core/thirdparty/fast_noise_lite/LICENSE',
+    licenseSha256: 'c08da3239b919c12f4ec616b457a8dd0fc923c8102c8a742c4006fcb5de28fb0',
+    patchedHeaderFile: 'core/thirdparty/fast_noise_lite/FastNoiseLite.h',
+    patchedHeaderSha256: '38b24b9b04aa5e9f1e63336d4acbbbb73b11f15b697bb08a25f5ec0c6c274901',
+    godotPatchSha256: '123ec6a215a20154b5f33c0f63d04e1442fa6d98db0ddca4fa2960d0c3354a7c',
+    upstreamHeaderSha256: '3faf87ccfa1b46a2d5af402ba0439a13a73a3e567b80c375be1dcf700d86fc6e',
+  },
   msvc: {
     compilerVersion: '19.44.35228', linkerVersion: '14.44.35228.0', toolsetVersion: '14.44.35207',
     sconsProductVersion: '14.3', hostArchitecture: 'x64', targetArchitecture: 'amd64',
@@ -224,6 +234,7 @@ export async function inventoryProjectBuildInputs(project) {
     'native/world_backend/source-manifest.json',
     'native/world_backend/toolchain-lock.json',
     'native/world_backend/coverage_canary/coverage_canary.cpp',
+    'native/world_backend/core/thirdparty/fast_noise_lite/LICENSE',
     'scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd',
     'tools/run-native-world-backend-tests.mjs',
     'tools/lib/native-compiler-owned-wrapper.mjs',
@@ -655,7 +666,7 @@ async function resolveLlvmToolchain({ project, output, options }) {
   throw new Error(`Pinned LLVM coverage toolchain is absent. Re-run with --fetch-llvm or --llvm-root PATH. Expected ${llvmArchiveUrl} (${llvmArchiveBytes} bytes, SHA-256 ${llvmArchiveSha256}).`);
 }
 
-export function coverageTotals(exportJson, expectedFiles) {
+export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = expectedFiles) {
   if (exportJson.type !== 'llvm.coverage.json.export' || !Array.isArray(exportJson.data) || exportJson.data.length !== 1) throw new Error('Unexpected llvm-cov JSON schema.');
   const files = exportJson.data[0].files ?? [];
   const byPath = new Map(files.map(file => [resolve(file.filename).toLowerCase(), file]));
@@ -681,8 +692,9 @@ export function coverageTotals(exportJson, expectedFiles) {
       throw new Error(`LLVM branch summary/detail mismatch for ${file.filename}.`);
     }
   }
+  const allowedCoreSet = new Set(allowedCoreFiles.map(path => resolve(path).toLowerCase()));
   const unexpectedCore = files.filter(file => /[\\/]native[\\/]world_backend[\\/]core[\\/]/i.test(file.filename)
-    && !expectedFiles.some(path => resolve(path).toLowerCase() === resolve(file.filename).toLowerCase()));
+    && !allowedCoreSet.has(resolve(file.filename).toLowerCase()));
   if (unexpectedCore.length) throw new Error(`llvm-cov reported unmanifested core sources: ${unexpectedCore.map(file => file.filename).join(', ')}`);
   const total = metric => selected.reduce((sum, file) => sum + Number(file.summary?.[metric]?.count ?? 0), 0);
   const covered = metric => selected.reduce((sum, file) => sum + Number(file.summary?.[metric]?.covered ?? 0), 0);
@@ -736,7 +748,8 @@ async function clangCompile({ project, output, label, llvm, sources, executable 
   return { run, pdb, args };
 }
 
-async function collectLlvmCoverage({ project, output, label, llvm, executable, expectedFiles }) {
+async function collectLlvmCoverage({ project, output, label, llvm, executable, expectedFiles,
+  allowedCoreFiles = expectedFiles }) {
   const profileRaw = join(output, `${label}.profraw`);
   const profileData = join(output, `${label}.profdata`);
   const test = await runOwned({ project, output, label: `${label}-execute`, executable, args: [], timeoutSeconds: 120,
@@ -749,7 +762,7 @@ async function collectLlvmCoverage({ project, output, label, llvm, executable, e
   const reportRun = await runOwned({ project, output, label: `${label}-report`, executable: llvm.llvmCov,
     args: ['report', executable, `-instr-profile=${profileData}`, '--show-branch-summary', ...expectedFiles], timeoutSeconds: 120 });
   const exportJson = JSON.parse(await readFile(exportRun.stdoutPath, 'utf8'));
-  const coverage = coverageTotals(exportJson, expectedFiles);
+  const coverage = coverageTotals(exportJson, expectedFiles, allowedCoreFiles);
   return {
     ...coverage,
     artifacts: {
@@ -778,10 +791,13 @@ export async function runLlvmCoverage({ project, output, options, source }) {
 
   const manifest = JSON.parse(await readFile(source.manifestPath, 'utf8'));
   const coreSources = manifest.coreSources.map(path => join(project, 'native', 'world_backend', path));
+  const allowedCoreFiles = [...coreSources,
+    ...manifest.coreHeaders.map(path => join(project, 'native', 'world_backend', path))];
   const testSources = manifest.testSources.map(path => join(project, 'native', 'world_backend', path));
   const executable = join(coverageDirectory, 'world_backend_core_tests.exe');
   const build = await clangCompile({ project, output, label: 'coverage-core-build', llvm, sources: [...coreSources, ...testSources], executable });
-  const coverage = await collectLlvmCoverage({ project, output, label: 'coverage-core', llvm, executable, expectedFiles: coreSources });
+  const coverage = await collectLlvmCoverage({ project, output, label: 'coverage-core', llvm, executable,
+    expectedFiles: coreSources, allowedCoreFiles });
   const complete = ['lines', 'functions', 'branches'].every(metric => coverage.totals[metric].count > 0 && coverage.totals[metric].covered === coverage.totals[metric].count);
   return {
     status: complete ? 'passed' : 'failed_threshold', requiredMetrics: ['line', 'function', 'branch'],
@@ -846,6 +862,10 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     const dependencyDirectory = join(project, 'native', 'terrain_meshing', 'godot-cpp');
     const dependencyLicensePath = resolve(dirname(toolchainLockPath), toolchainLockValue.godotCpp.licenseFile);
     const dependencyLicenseSha256 = await hashFile(dependencyLicensePath);
+    const noiseLicensePath = resolve(dirname(toolchainLockPath), toolchainLockValue.fastNoiseLite.licenseFile);
+    const noiseHeaderPath = resolve(dirname(toolchainLockPath), toolchainLockValue.fastNoiseLite.patchedHeaderFile);
+    const noiseLicenseSha256 = await hashFile(noiseLicensePath);
+    const noiseHeaderSha256 = await hashFile(noiseHeaderPath);
     receipt.dependency = {
       pinnedRevision: (await readFile(pinPath, 'utf8')).trim(),
       actualRevision: await gitText(dependencyDirectory, ['rev-parse', 'HEAD']),
@@ -856,9 +876,29 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
         sha256: dependencyLicenseSha256,
         pinnedSha256: toolchainLockValue.godotCpp.licenseSha256,
       },
+      fastNoiseLite: {
+        engineCommitSha: toolchainLockValue.fastNoiseLite.engineCommitSha,
+        upstreamVersion: toolchainLockValue.fastNoiseLite.upstreamVersion,
+        upstreamCommitSha: toolchainLockValue.fastNoiseLite.upstreamCommitSha,
+        license: {
+          identifier: toolchainLockValue.fastNoiseLite.license,
+          path: relative(project, noiseLicensePath).replaceAll('\\', '/'),
+          sha256: noiseLicenseSha256,
+          pinnedSha256: toolchainLockValue.fastNoiseLite.licenseSha256,
+        },
+        patchedHeader: {
+          path: relative(project, noiseHeaderPath).replaceAll('\\', '/'),
+          sha256: noiseHeaderSha256,
+          pinnedSha256: toolchainLockValue.fastNoiseLite.patchedHeaderSha256,
+        },
+        godotPatchSha256: toolchainLockValue.fastNoiseLite.godotPatchSha256,
+        upstreamHeaderSha256: toolchainLockValue.fastNoiseLite.upstreamHeaderSha256,
+      },
     };
     if (receipt.dependency.actualRevision !== receipt.dependency.pinnedRevision || receipt.dependency.status) throw new Error('godot-cpp dependency does not match the clean pinned revision.');
     if (dependencyLicenseSha256 !== toolchainLockValue.godotCpp.licenseSha256) throw new Error('godot-cpp license file differs from the N1 pin.');
+    if (noiseLicenseSha256 !== toolchainLockValue.fastNoiseLite.licenseSha256) throw new Error('FastNoiseLite license file differs from the N2 pin.');
+    if (noiseHeaderSha256 !== toolchainLockValue.fastNoiseLite.patchedHeaderSha256) throw new Error('FastNoiseLite patched header differs from the N2 pin.');
     const scons = dependencies.scons ?? sconsCommand();
     for (const configuration of ['debug', 'release']) {
       receipt.configurations.push(await buildAndTest({

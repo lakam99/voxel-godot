@@ -15,6 +15,10 @@ inventory to each build manifest and installed binary, and records the Godot
 load/invoke/unload smoke as integration evidence.
 
 N1 guarantees compatibility only for Windows x86-64 with the recorded MSVC
-toolchain and strict floating-point flags. The core has no third-party runtime
-dependency. SHA-256 is a local, tested implementation of FIPS 180-4 rather than
-a dependency or an engine service.
+toolchain and strict floating-point flags. N2 vendors Godot 4.6.1's exact
+patched FastNoiseLite 1.1.0 header privately for deterministic source parity;
+the lock file records the engine/upstream commits, patch, header, and MIT
+license hashes. It is a build-time header dependency, not a runtime service,
+and its third-party lines are not part of the first-party coverage denominator.
+SHA-256 remains a local, tested implementation of FIPS 180-4 rather than a
+dependency or an engine service.

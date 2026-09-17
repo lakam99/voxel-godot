@@ -4,7 +4,12 @@ Date: 2026-09-17
 
 Migration authority: `CODEX_NATIVE_WORLD_BACKEND_MIGRATION_HANDOFF_2026-09-17.md`
 
-Status: frozen pre-implementation contract; N2 is not complete
+Status: implemented and verified; fixture-only activation, no production cutover
+
+Completion evidence is recorded in
+`N2_FIRST_END_TO_END_VERTICAL_SLICE_2026-09-17.md`. This file remains the
+frozen behavioral contract and records the source-translation correction found
+by its full 33,915-sample headed oracle.
 
 ## 1. Stage boundary
 
@@ -48,6 +53,12 @@ The independent GDScript oracle must reproduce
    solid-material rule; and
 5. encode SDF as a 16-bit VoxelBuffer channel and both material channels as the
    same 8-bit material ID.
+
+The bounded N2 lattice generator does not invent generated fluid state: the
+current Voxel Tools generator emits density and material only, so generated
+snapshot fluid is `none`. Typed deltas still carry and validate an explicit
+fluid field. Full generated-fluid/world-volume authority remains an N3 concern;
+calling `underground_fluid_for_cell` here would be another source translation.
 
 Parity is ordered typed data, not only a digest, image, or mesh comparison.
 Every mismatched cell reports its coordinate and each mismatched field.
@@ -121,9 +132,13 @@ not port town/site shaping, which remains N3/N4.
 
 Frozen lattice-origin anchors from the current generator are:
 
-- slope pair: cell columns `(-20,13,-2)` and `(-20,13,-1)`, reference surface
-  Y `17.901000000000003` and `18.819000000000003`, delta `0.918` over one
-  1.35-metre cell;
+- negative-coordinate surface pair: cell columns `(-20,13,-2)` and
+  `(-20,13,-1)` both report reference surface Y `17.901000000000003`.
+  The pre-implementation value `18.819000000000003` for the second column was
+  a direct-by-cell mistranslation: the production generator first stores
+  `Vector3(cell) * 1.35` in `real_t`, then the public surface query maps that
+  rounded world position back through `floor(position / cell_size)`. The
+  headed 33,915-sample oracle exposed and supersedes that assertion;
 - seam-crossing cave air: `(-33,-2,-5)` has density
   `-0.6017665929014142`, and `(-32,-2,-5)` has density
   `-0.35286612593816424`; both are non-solid `air` in the swamp surface

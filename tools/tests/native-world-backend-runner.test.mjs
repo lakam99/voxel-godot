@@ -75,6 +75,15 @@ test('LLVM duplicate expansion tuples aggregate by source identity before summar
   assert.throws(() => coverageTotals(value, [filename]), /branch summary\/detail mismatch/);
 });
 
+test('LLVM coverage permits only explicitly manifested core headers outside the source denominator', () => {
+  const source = resolve('C:/repo/native/world_backend/core/source.cpp');
+  const header = resolve('C:/repo/native/world_backend/core/thirdparty/dependency.hpp');
+  const value = coverageExport(source, []);
+  value.data[0].files.push({ ...structuredClone(value.data[0].files[0]), filename: header });
+  assert.doesNotThrow(() => coverageTotals(value, [source], [source, header]));
+  assert.throws(() => coverageTotals(value, [source]), /unmanifested core sources/);
+});
+
 test('toolchain lock validation fails closed on pin or license-path drift', () => {
   assert.equal(validateToolchainLockValue(structuredClone(expectedToolchainLockValue)).schema,
     'native-world-backend-toolchain-lock/v1');
@@ -90,6 +99,9 @@ test('toolchain lock validation fails closed on pin or license-path drift', () =
   const godotDrift = structuredClone(expectedToolchainLockValue);
   godotDrift.godot.patch = 0;
   assert.throws(() => validateToolchainLockValue(godotDrift), /does not exactly match/);
+  const noiseDrift = structuredClone(expectedToolchainLockValue);
+  noiseDrift.fastNoiseLite.patchedHeaderSha256 = '0'.repeat(64);
+  assert.throws(() => validateToolchainLockValue(noiseDrift), /does not exactly match/);
 });
 
 test('project input inventory includes the owned launcher and adapter/build surfaces', async () => {
@@ -97,6 +109,7 @@ test('project input inventory includes the owned launcher and adapter/build surf
   const paths = inventory.n1Inputs.map(item => item.path);
   assert(paths.includes('tools/lib/owned-process.mjs'));
   assert(paths.includes('scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'));
+  assert(paths.includes('native/world_backend/core/thirdparty/fast_noise_lite/LICENSE'));
   assert(inventory.extensionSources.some(item => item.path.endsWith('/terrain_meshing_backend.cpp')));
   assert.match(inventory.digestSha256, /^[0-9a-f]{64}$/);
 });

@@ -3,19 +3,30 @@
   "coreSources": [
     "core/authority.cpp",
     "core/coordinates.cpp",
+    "core/fast_noise_compat.cpp",
     "core/legacy_seed_hash.cpp",
     "core/sha256.cpp",
+    "core/terrain_meshing.cpp",
+    "core/terrain_snapshot.cpp",
+    "core/terrain_source.cpp",
     "core/world_identity.cpp"
   ],
   "coreHeaders": [
     "core/authority.hpp",
     "core/coordinates.hpp",
+    "core/fast_noise_compat.hpp",
     "core/legacy_seed_hash.hpp",
     "core/sha256.hpp",
+    "core/terrain_meshing.hpp",
+    "core/terrain_snapshot.hpp",
+    "core/terrain_source.hpp",
+    "core/thirdparty/fast_noise_lite/FastNoiseLite.h",
     "core/world_identity.hpp"
   ],
   "testSources": [
     "tests/test_main.cpp",
+    "tests/terrain_meshing_tests.cpp",
+    "tests/terrain_source_tests.cpp",
     "tests/world_backend_core_tests.cpp"
   ],
   "testHeaders": [

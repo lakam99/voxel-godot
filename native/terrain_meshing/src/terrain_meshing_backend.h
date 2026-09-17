@@ -27,6 +27,7 @@ protected:
 public:
 	Dictionary backend_summary() const;
 	Dictionary world_backend_core_smoke() const;
+	Dictionary n2_prepare_vertical_slice(const Dictionary &p_request) const;
 	Variant build_chunk_mesh(Object *p_main, int32_t p_cx, int32_t p_cz);
 	Dictionary build_chunk_surface_data_from_sections(const Dictionary &p_payload);
 	Variant build_chunk_mesh_from_sections(const Dictionary &p_payload);
