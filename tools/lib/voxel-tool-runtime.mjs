@@ -519,12 +519,16 @@ async function runHeadedTool(toolId, rawArgs) {
   const screenshotDir = screenshotEnvironment ? resolveProjectPath(parsed.options.screenshotDir, configuredScreenshots) : '';
   const traceDir = toolId === 'npc/run-npc-observation-tests' ? resolveProjectPath(parsed.options.traceDir, 'artifacts/npc/traces/npc-observation') : '';
   const guard = headedAcceptanceGuards[toolId];
+  let acceptanceGuardReport = null;
+  let acceptanceGuardReportPath = '';
   if (guard) {
     const [runnerPath, allowedPatterns] = guard;
     const guardReportPath = resolveProjectPath(undefined, `artifacts/node-tools/npc-acceptance-guards/${toolId.replaceAll('/', '-')}.json`);
     const guardReport = await runAcceptanceRunnerAudit(['--runner-path', runnerPath, '--report-path', guardReportPath, '--test-id', `${toolId.replaceAll('/', '_')}_guard`, ...(allowedPatterns.length ? ['--allowed-shortcut-pattern', allowedPatterns.join(';')] : [])]);
     await writeJson(guardReportPath, guardReport);
     if (guardReport.status !== 'passed') throw new Error(`NPC acceptance runner guard failed: ${guardReportPath}`);
+    acceptanceGuardReport = guardReport;
+    acceptanceGuardReportPath = guardReportPath;
   }
   await Promise.all([ensureDirectory(dirname(reportPath)), ensureDirectory(dirname(progressPath)), screenshotDir ? ensureDirectory(screenshotDir) : Promise.resolve(), traceDir ? ensureDirectory(traceDir) : Promise.resolve()]);
   await Promise.all([removeFile(reportPath), removeFile(progressPath), screenshotDir ? clearPngFiles(screenshotDir) : Promise.resolve()]);
@@ -614,6 +618,13 @@ async function runHeadedTool(toolId, rawArgs) {
   if (!(await exists(reportPath))) throw new Error(`Missing report from ${toolId}: ${reportPath}`);
   const report = await readJson(reportPath);
   if (report.runToken && report.runToken !== runToken) throw new Error(`Stale report token from ${toolId}`);
+  // The guard is wrapper-owned evidence. A runner cannot truthfully attest to a
+  // static audit that was performed before it launched, so attach the actual
+  // passed audit here rather than requiring each scene to fabricate one.
+  if (acceptanceGuardReport) {
+    report.forbiddenCallSelfScan = acceptanceGuardReport;
+    report.forbiddenCallSelfScanReportPath = acceptanceGuardReportPath;
+  }
   if (runtimePerformanceObservation) {
     report.ownedProcessLifecycle = runtimePerformanceOwnedLifecycle({ ...execution.summary, summaryPath: execution.summaryPath });
     if (!report.ownedProcessLifecycle.passed) {
@@ -621,8 +632,8 @@ async function runHeadedTool(toolId, rawArgs) {
       report.failureCount = Number(report.failureCount ?? 0) + 1;
       report.ownedProcessLifecycleFailure = 'owned process did not reach natural zero-membership shutdown';
     }
-    await writeJson(reportPath, report);
   }
+  if (acceptanceGuardReport || runtimePerformanceObservation) await writeJson(reportPath, report);
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (execution.code !== 0 || !reportPassed(report)) process.exitCode = 1;
 }

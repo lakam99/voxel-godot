@@ -31,8 +31,9 @@ export async function runAcceptanceGuardSelfTest(rawArgs = process.argv.slice(2)
   const tutorial = runGuard(
     join(projectRoot, 'scripts/testing/npc/NpcRealTutorialPlaythroughRunner.gd'),
     guardReports.realTutorial, 'npc_tutorial_real_knock_repair_sleep_morning_foragers',
+    ['final_rescue_fixture_setup_allowance'],
   );
-  addResult('guard_passes_real_tutorial_runner', tutorial.status === 0, 'exitCode=' + tutorial.status);
+  addResult('guard_passes_real_tutorial_runner_with_documented_fixture_allowance', tutorial.status === 0, 'exitCode=' + tutorial.status);
   const goHome = runGuard(
     join(projectRoot, 'scripts/testing/npc/NpcGoHomeVisualPlaytestRunner.gd'),
     guardReports.goHomeVisual, 'npc_go_home_visual_door_traversal',
