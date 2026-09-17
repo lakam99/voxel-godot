@@ -8,6 +8,17 @@ import { requireOwnedWindowsTick } from './owned-live-clock.mjs';
 const now = () => new Date().toISOString();
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+export function automatedGodotArguments(executable, args) {
+  const result = [...args];
+  if (!/godot/i.test(path.basename(executable))) return result;
+  if (result.some(argument => argument === '--audio-driver' || argument.startsWith('--audio-driver='))) return result;
+  // Test-side bus muting happens after the engine has already initialized its
+  // audio backend. Every watchdog-owned Godot launch is automated, so select
+  // the engine's non-playing driver before project startup. Production/manual
+  // launches outside this owner remain unchanged.
+  return ['--audio-driver', 'Dummy', ...result];
+}
+
 function environmentBlock(env) {
   const entries = new Map();
   for (const key of Object.keys(env).sort()) {
@@ -177,6 +188,7 @@ export async function runOwnedProcess(options = {}) {
     s.args = options.args ?? [];
     if (!Array.isArray(s.args) || s.args.some(a => typeof a !== 'string' || a.includes('\0')))
       throw new Error('args must be an array of NUL-free strings');
+    s.args = automatedGodotArguments(s.executable, s.args);
     if (options.env !== undefined && (options.env === null || typeof options.env !== 'object' || Array.isArray(options.env)))
       throw new Error('env must be a complete environment map');
     const base = path.join(s.projectPath, 'artifacts', 'watchdog', runId);

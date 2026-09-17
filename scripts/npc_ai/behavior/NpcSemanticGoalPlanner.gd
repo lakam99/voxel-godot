@@ -10,6 +10,11 @@ const MAX_ROUTE_SCORED_CANDIDATES := 16
 const MAX_HOME_INTERIOR_GOAL_CELLS := 64
 const RESOURCE_SCAN_NODE_LIMIT := 1200
 const RESOURCE_SCAN_CANDIDATE_LIMIT := 16
+const UTILITY_ANCHOR_QUERY_LIMIT := 64
+const UTILITY_ANCHOR_LIMIT := 8
+const TRADER_FALLBACK_SELECTION_KEY := "_traderFallbackSelection"
+const UTILITY_ANCHOR_KINDS := ["trader_stall", "workstation", "storage", "bed"]
+const UTILITY_ANCHOR_BLOCK_TYPES := ["traderStall", "workbench", "furnace", "chest", "bed", "campfire", "anvil"]
 const BLOCKED_ENDPOINT_MEMORY_FRAMES := 360
 const INVALID_CELL := Vector2i(999999, 999999)
 const GUARD_INTERCEPT_DIRECTIONS := [
@@ -151,15 +156,295 @@ func actor_inside_home(entry: Dictionary, position: Vector3) -> bool:
     return bool(HomeInteriorServiceScript.status(entry, position, portal).get("strictInside", false))
 
 func choose_day_target(entry: Dictionary) -> Vector3:
+    var monitor = performance_monitor()
+    var measure_trader_fallback := monitor != null and String(entry.get("job", "")) == "trade"
+    var trader_fallback_start: int = monitor.begin_section("npc_trader_fallback_choose_day_target") if measure_trader_fallback else 0
     if world == null or planner == null:
+        if measure_trader_fallback:
+            monitor.end_section("npc_trader_fallback_choose_day_target", trader_fallback_start)
         return entry.get("porchPosition", Vector3.ZERO)
     var candidates: Array[Vector3] = town_anchor_candidates(entry)
     var reachable := choose_best_reachable_position(entry, candidates, false, false, CELL * 0.85, MAX_ROUTE_SCORED_CANDIDATES)
     if reachable != Vector3.INF:
         clear_goal_fallback(entry)
+        if measure_trader_fallback:
+            monitor.end_section("npc_trader_fallback_choose_day_target", trader_fallback_start)
         return reachable
     set_goal_fallback(entry, "blocked", "no_reachable_wander_anchor")
+    if measure_trader_fallback:
+        monitor.end_section("npc_trader_fallback_choose_day_target", trader_fallback_start)
     return entry.get("porchPosition", Vector3.ZERO)
+
+## Advances the trader-only fallback selector by at most one expensive world
+## check. Pending and invalidated results intentionally never contain a target.
+func advance_trader_fallback_target(entry: Dictionary, request_id: String) -> Dictionary:
+    var monitor = performance_monitor()
+    var selection_start: int = monitor.begin_section("npc_trader_fallback_choose_day_target") if monitor != null else 0
+    var result := _advance_trader_fallback_target(entry, request_id, monitor)
+    if monitor != null:
+        monitor.end_section("npc_trader_fallback_choose_day_target", selection_start)
+        monitor.increment_counter("npc_trader_fallback_selector_calls")
+        monitor.increment_counter("npc_trader_fallback_selector_%s" % String(result.get("status", "unknown")))
+    return result
+
+func _advance_trader_fallback_target(entry: Dictionary, request_id: String, monitor) -> Dictionary:
+    if request_id == "" or world == null or main == null:
+        clear_trader_fallback_target_selection(entry, "invalid_context")
+        return {"status":"exhausted", "reason":"invalid_context"}
+    var service = smart_object_service()
+    if service == null or not service.has_method("query_resource_nodes") or not service.has_method("query_scope_revision"):
+        clear_trader_fallback_target_selection(entry, "missing_smart_object_service")
+        return {"status":"exhausted", "reason":"missing_smart_object_service"}
+    var body_value = entry.get("body")
+    var body: Node3D = body_value as Node3D if body_value != null and is_instance_valid(body_value) and body_value is Node3D else null
+    var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+    var options := utility_anchor_query_options()
+    var current_scope: Dictionary = service.query_scope_revision(entry, UTILITY_ANCHOR_KINDS, options, origin)
+    var current_identity := trader_fallback_selection_identity(entry, request_id, body, origin, current_scope)
+    var state_value = entry.get(TRADER_FALLBACK_SELECTION_KEY, {})
+    var state: Dictionary = state_value if state_value is Dictionary else {}
+    if not state.is_empty() and state.get("identity", {}) != current_identity:
+        var prior_identity: Dictionary = state.get("identity", {}) if state.get("identity", {}) is Dictionary else {}
+        var reason := trader_fallback_invalidation_reason(prior_identity, current_identity)
+        clear_trader_fallback_target_selection(entry, reason)
+        entry["lastTraderFallbackSelectionDebug"] = {
+            "status":"invalidated", "reason":reason, "requestId":request_id
+        }
+        return {"status":"invalidated", "reason":reason}
+    if state.is_empty():
+        state = begin_trader_fallback_selection(entry, request_id, body, origin, service, options)
+        entry[TRADER_FALLBACK_SELECTION_KEY] = state
+        entry["traderFallbackSelectionPending"] = true
+    var expensive_check_used := false
+    if String(state.get("phase", "approach")) == "approach":
+        var descriptors: Array = state.get("utilityDescriptors", []) if state.get("utilityDescriptors", []) is Array else []
+        var cursor := int(state.get("approachCursor", 0))
+        var added := int(state.get("utilityApproachesAdded", 0))
+        if cursor < descriptors.size() and added < UTILITY_ANCHOR_LIMIT:
+            var descriptor: Dictionary = descriptors[cursor] if descriptors[cursor] is Dictionary else {}
+            state["approachChecks"] = int(state.get("approachChecks", 0)) + 1
+            var approach_start: int = monitor.begin_section("npc_utility_anchor_approach") if monitor != null else 0
+            var approach_result := {}
+            if world.has_method("advance_first_approach_cell"):
+                var descriptor_request_id := "%s|%s" % [request_id, String(descriptor.get("objectId", cursor))]
+                approach_result = world.advance_first_approach_cell(entry, descriptor.get("position", Vector3.ZERO), false, descriptor_request_id)
+            else:
+                var approach_cells: Array = world.approach_cells_for_target(entry, descriptor.get("position", Vector3.ZERO), false) if world.has_method("approach_cells_for_target") else []
+                approach_result = {
+                    "status":"ready" if not approach_cells.is_empty() else "exhausted",
+                    "cell":approach_cells[0] if not approach_cells.is_empty() else Vector2i(999999, 999999)
+                }
+            if monitor != null:
+                monitor.end_section("npc_utility_anchor_approach", approach_start)
+            expensive_check_used = true
+            var approach_status := String(approach_result.get("status", "exhausted"))
+            if approach_status == "pending":
+                entry[TRADER_FALLBACK_SELECTION_KEY] = state
+                return trader_fallback_pending_result(entry, state, "utility_approach_pending")
+            if approach_status == "invalidated":
+                entry[TRADER_FALLBACK_SELECTION_KEY] = state
+                return trader_fallback_pending_result(entry, state, "utility_approach_invalidated")
+            state["approachCursor"] = cursor + 1
+            var cell_value = approach_result.get("cell", Vector2i(999999, 999999))
+            if approach_status == "ready" and cell_value is Vector2i:
+                var position: Vector3 = world.cell_position(cell_value as Vector2i)
+                if world.point_inside_town(entry, position):
+                    var candidates: Array = state.get("candidates", []) if state.get("candidates", []) is Array else []
+                    candidates.append(position)
+                    state["candidates"] = candidates
+                    state["utilityApproachesAdded"] = added + 1
+        if int(state.get("approachCursor", 0)) >= descriptors.size() or int(state.get("utilityApproachesAdded", 0)) >= UTILITY_ANCHOR_LIMIT:
+            prepare_trader_fallback_validation(entry, state, origin)
+        entry[TRADER_FALLBACK_SELECTION_KEY] = state
+        if expensive_check_used:
+            return trader_fallback_pending_result(entry, state, "utility_approach_pending")
+    if String(state.get("phase", "")) == "validate":
+        var validation_candidates: Array = state.get("validationCandidates", []) if state.get("validationCandidates", []) is Array else []
+        var validation_cursor := int(state.get("validationCursor", 0))
+        while validation_cursor < validation_candidates.size() and endpoint_temporarily_blocked(entry, validation_candidates[validation_cursor]):
+            validation_cursor += 1
+            state["validationCursor"] = validation_cursor
+        if validation_cursor >= validation_candidates.size():
+            return finish_trader_fallback_exhausted(entry, state)
+        var candidate: Vector3 = validation_candidates[validation_cursor]
+        state["validationCursor"] = validation_cursor + 1
+        state["standabilityChecks"] = int(state.get("standabilityChecks", 0)) + 1
+        if position_can_be_goal(entry, candidate, false, false):
+            store_resolved_endpoint_debug(entry, candidate, candidate, false, false, CELL * 0.85, "standable_without_route_cost", 0.0)
+            clear_goal_fallback(entry)
+            var debug := trader_fallback_debug(state, "ready", "nearest_valid_candidate")
+            debug["target"] = candidate
+            entry["lastTraderFallbackSelectionDebug"] = debug
+            publish_incremental_utility_anchor_debug(entry, state, "ready")
+            clear_trader_fallback_target_selection(entry, "ready")
+            return {"status":"ready", "reason":"nearest_valid_candidate", "target":candidate}
+        entry[TRADER_FALLBACK_SELECTION_KEY] = state
+        if int(state.get("validationCursor", 0)) >= validation_candidates.size():
+            return finish_trader_fallback_exhausted(entry, state)
+        return trader_fallback_pending_result(entry, state, "standability_pending")
+    return finish_trader_fallback_exhausted(entry, state)
+
+func utility_anchor_query_options() -> Dictionary:
+    return {
+        "limit": UTILITY_ANCHOR_QUERY_LIMIT,
+        "outsideTown": false,
+        "insideTownOnly": true,
+        "workAreaOnly": true,
+        "collectAllSpatialMatches": true,
+        "distanceMode": "3d",
+        "blockTypes": UTILITY_ANCHOR_BLOCK_TYPES,
+        "bypassCache": true
+    }
+
+func begin_trader_fallback_selection(entry: Dictionary, request_id: String, body: Node3D, origin: Vector3, service, options: Dictionary) -> Dictionary:
+    var candidates: Array[Vector3] = []
+    candidates.append(entry.get("porchPosition", Vector3.ZERO))
+    candidates.append(entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO)))
+    add_path_candidates(candidates, entry, false)
+    var query_start: int = performance_monitor().begin_section("npc_utility_anchor_index_query") if performance_monitor() != null else 0
+    var indexed_nodes: Array[Node3D] = service.query_resource_nodes(entry, UTILITY_ANCHOR_KINDS, options)
+    if performance_monitor() != null:
+        performance_monitor().end_section("npc_utility_anchor_index_query", query_start)
+    var descriptors: Array[Dictionary] = []
+    for node in indexed_nodes:
+        if node == null or not is_instance_valid(node):
+            continue
+        if not (String(node.get_meta("block_type", "")) in UTILITY_ANCHOR_BLOCK_TYPES):
+            continue
+        if not world.point_inside_town(entry, node.global_position):
+            continue
+        descriptors.append({"objectId":stable_node_id(node), "position":node.global_position})
+    descriptors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        var a_distance: float = (a.get("position", Vector3.ZERO) as Vector3).distance_squared_to(origin)
+        var b_distance: float = (b.get("position", Vector3.ZERO) as Vector3).distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return String(a.get("objectId", "")) < String(b.get("objectId", ""))
+        return a_distance < b_distance
+    )
+    if descriptors.size() > UTILITY_ANCHOR_QUERY_LIMIT:
+        descriptors.resize(UTILITY_ANCHOR_QUERY_LIMIT)
+    var scope: Dictionary = service.query_scope_revision(entry, UTILITY_ANCHOR_KINDS, options, origin)
+    return {
+        "identity":trader_fallback_selection_identity(entry, request_id, body, origin, scope),
+        "requestId":request_id,
+        "phase":"approach",
+        "candidates":candidates,
+        "utilityDescriptors":descriptors,
+        "approachCursor":0,
+        "utilityApproachesAdded":0,
+        "approachChecks":0,
+        "standabilityChecks":0,
+        "validationCursor":0,
+        "indexedReturned":indexed_nodes.size(),
+        "acceptedUtilityNodes":descriptors.size()
+    }
+
+func prepare_trader_fallback_validation(entry: Dictionary, state: Dictionary, origin: Vector3) -> void:
+    refresh_blocked_endpoint_memory(entry)
+    var raw_candidates: Array[Vector3] = []
+    for candidate_value in state.get("candidates", []):
+        if candidate_value is Vector3:
+            raw_candidates.append(candidate_value)
+    var ordered := unique_positions(raw_candidates)
+    ordered.sort_custom(func(a: Vector3, b: Vector3) -> bool:
+        var a_distance := a.distance_squared_to(origin)
+        var b_distance := b.distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return position_key(a) < position_key(b)
+        return a_distance < b_distance
+    )
+    if ordered.size() > MAX_ROUTE_SCORED_CANDIDATES:
+        ordered.resize(MAX_ROUTE_SCORED_CANDIDATES)
+    state["phase"] = "validate"
+    state["validationCandidates"] = ordered
+    state["validationCursor"] = 0
+    state.erase("candidates")
+    state.erase("utilityDescriptors")
+
+func trader_fallback_selection_identity(entry: Dictionary, request_id: String, body: Node3D, origin: Vector3, scope: Dictionary) -> Dictionary:
+    return {
+        "requestId":request_id,
+        "actorId":String(entry.get("id", "")),
+        "bodyInstanceId":body.get_instance_id() if body != null else 0,
+        "origin":[snappedf(origin.x, 0.001), snappedf(origin.y, 0.001), snappedf(origin.z, 0.001)],
+        "townCenter":entry.get("townCenter", Vector2i.ZERO),
+        "townRadius":int(entry.get("townRadius", 18)),
+        "porchPosition":trader_fallback_identity_position(entry.get("porchPosition", Vector3.ZERO)),
+        "guardPosition":trader_fallback_identity_position(entry.get("guardPosition", entry.get("porchPosition", Vector3.ZERO))),
+        "townKey":String(entry.get("townKey", "")),
+        "homeStableId":String(entry.get("homeStableId", "")),
+        "homeKey":str(entry.get("homeKey", "")),
+        "homeCell":entry.get("homeCell", Vector2i.ZERO),
+        "porchCell":entry.get("porchCell", Vector2i.ZERO),
+        "sourceScope":scope.duplicate(true)
+    }
+
+func trader_fallback_identity_position(value) -> Array:
+    var position: Vector3 = value if value is Vector3 else Vector3.ZERO
+    return [snappedf(position.x, 0.001), snappedf(position.y, 0.001), snappedf(position.z, 0.001)]
+
+func trader_fallback_invalidation_reason(previous: Dictionary, current: Dictionary) -> String:
+    if String(previous.get("requestId", "")) != String(current.get("requestId", "")):
+        return "request_changed"
+    if String(previous.get("actorId", "")) != String(current.get("actorId", "")) or int(previous.get("bodyInstanceId", 0)) != int(current.get("bodyInstanceId", 0)) or previous.get("origin", []) != current.get("origin", []):
+        return "actor_changed"
+    if previous.get("townCenter", Vector2i.ZERO) != current.get("townCenter", Vector2i.ZERO) or int(previous.get("townRadius", 18)) != int(current.get("townRadius", 18)):
+        return "town_changed"
+    if previous.get("porchPosition", []) != current.get("porchPosition", []) or previous.get("guardPosition", []) != current.get("guardPosition", []):
+        return "anchor_changed"
+    for key in ["townKey", "homeStableId", "homeKey", "homeCell", "porchCell"]:
+        if previous.get(key) != current.get(key):
+            return "assignment_changed"
+    return "source_changed"
+
+func trader_fallback_pending_result(entry: Dictionary, state: Dictionary, reason: String) -> Dictionary:
+    entry["traderFallbackSelectionPending"] = true
+    entry["lastTraderFallbackSelectionDebug"] = trader_fallback_debug(state, "pending", reason)
+    publish_incremental_utility_anchor_debug(entry, state, "pending")
+    return {"status":"pending", "reason":reason}
+
+func finish_trader_fallback_exhausted(entry: Dictionary, state: Dictionary) -> Dictionary:
+    var debug := trader_fallback_debug(state, "exhausted", "no_reachable_wander_anchor")
+    entry["lastTraderFallbackSelectionDebug"] = debug
+    publish_incremental_utility_anchor_debug(entry, state, "exhausted")
+    set_goal_fallback(entry, "blocked", "no_reachable_wander_anchor")
+    clear_trader_fallback_target_selection(entry, "exhausted")
+    return {"status":"exhausted", "reason":"no_reachable_wander_anchor"}
+
+func trader_fallback_debug(state: Dictionary, status: String, reason: String) -> Dictionary:
+    return {
+        "status":status,
+        "reason":reason,
+        "requestId":String(state.get("requestId", "")),
+        "phase":String(state.get("phase", "")),
+        "indexedReturned":int(state.get("indexedReturned", 0)),
+        "acceptedUtilityNodes":int(state.get("acceptedUtilityNodes", 0)),
+        "approachChecks":int(state.get("approachChecks", 0)),
+        "appendedApproachCandidates":int(state.get("utilityApproachesAdded", 0)),
+        "standabilityChecks":int(state.get("standabilityChecks", 0)),
+        "validationCandidates":int((state.get("validationCandidates", []) as Array).size()) if state.get("validationCandidates", []) is Array else 0
+    }
+
+func publish_incremental_utility_anchor_debug(entry: Dictionary, state: Dictionary, status: String) -> void:
+    entry["lastUtilityAnchorDebug"] = {
+        "selectionMode":"incremental_trader_fallback",
+        "selectionStatus":status,
+        "selectionPhase":String(state.get("phase", "")),
+        "indexedReturned":int(state.get("indexedReturned", 0)),
+        "acceptedUtilityNodes":int(state.get("acceptedUtilityNodes", 0)),
+        "approachChecks":int(state.get("approachChecks", 0)),
+        "appendedApproachCandidates":int(state.get("utilityApproachesAdded", 0)),
+        "standabilityChecks":int(state.get("standabilityChecks", 0))
+    }
+
+func clear_trader_fallback_target_selection(entry: Dictionary, _reason := "cancelled") -> void:
+    if world != null and world.has_method("cancel_approach_cell_certification"):
+        # The selector owns exactly one adapter certification per actor. Cancel
+        # actor-scoped so the object-qualified request identity retained by the
+        # adapter cannot survive selection reset.
+        world.cancel_approach_cell_certification(entry)
+    entry.erase(TRADER_FALLBACK_SELECTION_KEY)
+    entry.erase("traderFallbackSelectionPending")
 
 func choose_job_target(entry: Dictionary) -> Vector3:
     if world == null or planner == null:
@@ -393,6 +678,11 @@ func stable_node_id(node: Node) -> String:
         return ""
     if node.has_meta("prop_id"):
         return String(node.get_meta("prop_id"))
+    if node.has_meta("cell"):
+        var cell = node.get_meta("cell")
+        if cell is Vector3i:
+            var block_type := String(node.get_meta("block_type", node.name))
+            return "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, block_type]
     if node.has_meta("smart_object_id"):
         return String(node.get_meta("smart_object_id"))
     return String(node.name)
@@ -681,25 +971,44 @@ func add_path_candidates(candidates: Array[Vector3], entry: Dictionary, outside_
             candidates.append(pos)
 
 func add_utility_anchor_candidates(candidates: Array[Vector3], entry: Dictionary) -> void:
-    if main == null or world == null:
+    if world == null:
         return
-    var blocks: Dictionary = main.get("blocks")
-    var utility_types := ["traderStall", "workbench", "furnace", "chest", "bed", "campfire", "anvil"]
+    var service = smart_object_service()
+    if service == null or not service.has_method("query_resource_nodes"):
+        return
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
+    var monitor = performance_monitor()
+    var query_start: int = monitor.begin_section("npc_utility_anchor_index_query") if monitor != null else 0
+    var indexed_nodes: Array[Node3D] = service.query_resource_nodes(entry, UTILITY_ANCHOR_KINDS, {
+        "limit": UTILITY_ANCHOR_QUERY_LIMIT,
+        "outsideTown": false,
+        "insideTownOnly": true,
+        "workAreaOnly": true,
+        "collectAllSpatialMatches": true,
+        "distanceMode": "3d",
+        "blockTypes": UTILITY_ANCHOR_BLOCK_TYPES,
+        "bypassCache": true
+    })
+    if monitor != null:
+        monitor.end_section("npc_utility_anchor_index_query", query_start)
     var utility_nodes: Array[Node3D] = []
-    for value in blocks.values():
-        var node := value as Node3D
+    for node in indexed_nodes:
         if node == null or not is_instance_valid(node):
             continue
-        if not (String(node.get_meta("block_type", "")) in utility_types):
+        if not (String(node.get_meta("block_type", "")) in UTILITY_ANCHOR_BLOCK_TYPES):
             continue
         if not world.point_inside_town(entry, node.global_position):
             continue
         utility_nodes.append(node)
     utility_nodes.sort_custom(func(a: Node3D, b: Node3D) -> bool:
-        return a.global_position.distance_squared_to(origin) < b.global_position.distance_squared_to(origin)
+        var a_distance := a.global_position.distance_squared_to(origin)
+        var b_distance := b.global_position.distance_squared_to(origin)
+        if is_equal_approx(a_distance, b_distance):
+            return stable_node_id(a) < stable_node_id(b)
+        return a_distance < b_distance
     )
+    var approach_start: int = monitor.begin_section("npc_utility_anchor_approach") if monitor != null else 0
     var added := 0
     for node in utility_nodes:
         for cell in world.approach_cells_for_target(entry, node.global_position, false):
@@ -708,8 +1017,16 @@ func add_utility_anchor_candidates(candidates: Array[Vector3], entry: Dictionary
                 candidates.append(pos)
                 added += 1
                 break
-        if added >= 8:
+        if added >= UTILITY_ANCHOR_LIMIT:
             break
+    if monitor != null:
+        monitor.end_section("npc_utility_anchor_approach", approach_start)
+    entry["lastUtilityAnchorDebug"] = {
+        "indexedReturned": indexed_nodes.size(),
+        "acceptedUtilityNodes": utility_nodes.size(),
+        "appendedApproachCandidates": added,
+        "totalCandidatesAfter": candidates.size()
+    }
 
 func add_resource_prop_candidates(candidates: Array[Vector3], entry: Dictionary, job: String) -> void:
     if main == null or world == null or not (job in ["wood", "stone", "forage"]):
@@ -791,6 +1108,11 @@ func smart_object_service():
     if system == null or not system.has_method("smart_object_service"):
         return null
     return system.smart_object_service()
+
+func performance_monitor():
+    if system == null or not system.has_method("performance_monitor"):
+        return null
+    return system.performance_monitor()
 
 func resource_kinds_for_job(job: String) -> Array:
     if job == "wood":

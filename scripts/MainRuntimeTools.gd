@@ -10,6 +10,12 @@ const STREAMING_CHUNK_PROP_FRAME_BUDGET_MS := 1.35
 const STREAMING_COLLISION_DEFER_MIN_CHUNK_DISTANCE := 2
 const STREAMING_TERRAIN_MESH_JOBS_PER_FRAME := 1
 const STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS := 3.25
+const STREAMING_TERRAIN_MESH_GAMEPLAY_FRAME_BUDGET_MS := 1.5
+# A 64-cell gameplay slice is one third of the loading slice. It keeps useful
+# cursor progress while bounding the source-sampling atom independently of the
+# timer check that follows each sampled cell.
+const STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS := 64
+const STREAMING_TERRAIN_MESH_LOADING_MAX_CELLS := 192
 const GAMEPLAY_WORLD_PUBLICATION_BUDGET_USEC := 6000
 const STREAMING_EXTERIOR_LOD_MIN_CHUNK_DISTANCE := 0
 const STREAMING_EXTERIOR_LOD_STEP_CELLS := 14
@@ -1000,12 +1006,41 @@ func process_pending_terrain_meshing_jobs(center: Vector2i) -> int:
             if terrain_meshing_service.has_method("completed_job_count"):
                 monitor.increment_counter("terrain_meshing_completed_queue_depth", int(terrain_meshing_service.completed_job_count()))
         return 0
+    var terrain_mesh_budget_ms := STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS
+    var terrain_mesh_max_cells := STREAMING_TERRAIN_MESH_LOADING_MAX_CELLS
+    if gameplay_publication_deadline_usec > 0:
+        var remaining_publication_usec := maxi(0, gameplay_publication_deadline_usec - Time.get_ticks_usec())
+        # TerrainVolumeService deliberately floors a non-empty slice at 0.1 ms.
+        # If less than that remains, retain the resumable job for the next terrain
+        # lane instead of granting work beyond the shared gameplay deadline.
+        if remaining_publication_usec < 100:
+            if monitor != null:
+                monitor.increment_counter("terrain_meshing_jobs_deferred_publication_budget")
+            return 0
+        terrain_mesh_budget_ms = minf(
+            STREAMING_TERRAIN_MESH_GAMEPLAY_FRAME_BUDGET_MS,
+            float(remaining_publication_usec) / 1000.0
+        )
+        terrain_mesh_max_cells = STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS
     var queue_start: int = monitor.begin_section("terrain_meshing_job_queue") if monitor != null else Time.get_ticks_usec()
-    var result: Dictionary = terrain_meshing_service.process_jobs(
-        STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
-        STREAMING_TERRAIN_MESH_FRAME_BUDGET_MS,
-        center
-    )
+    var result: Dictionary
+    if gameplay_publication_deadline_usec > 0:
+        result = terrain_meshing_service.process_jobs(
+            STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
+            terrain_mesh_budget_ms,
+            center,
+            terrain_mesh_max_cells,
+            gameplay_publication_deadline_usec,
+            STREAMING_TERRAIN_MESH_GAMEPLAY_MAX_CELLS
+        )
+    else:
+        # Loading retains the service defaults: 192 terrain cells and the
+        # independent 2048-cell exact-fluid allowance.
+        result = terrain_meshing_service.process_jobs(
+            STREAMING_TERRAIN_MESH_JOBS_PER_FRAME,
+            terrain_mesh_budget_ms,
+            center
+        )
     var processed := int(result.get("processed", 0))
     var work_count := processed
     if work_count <= 0 and int(result.get("payloadCells", 0)) > 0:

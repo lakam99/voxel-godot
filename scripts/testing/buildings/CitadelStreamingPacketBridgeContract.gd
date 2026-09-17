@@ -5,7 +5,7 @@ extends "res://scripts/testing/buildings/CitadelPublicationServiceContract.gd"
 ## CitadelPublicationService. No test supplies a site group ID.
 const TARGET_TILE := Vector2i(199,-337)
 
-class StreamingRuntime extends RefCounted:
+class StreamingRuntime extends Node3D:
 	var retained := {}
 	func set_retained_gameplay_chunks(value: Dictionary) -> void: retained=value.duplicate()
 
@@ -180,7 +180,9 @@ func _run_bridge() -> void:
 func _finish(report: Dictionary, value) -> void:
 	if value!=null:
 		value.world_streaming.configure("")
+		var runtime = value.voxel_terrain_runtime
 		value.voxel_terrain_runtime=null
+		if is_instance_valid(runtime): runtime.free()
 		await close(value,"streaming_packet_bridge")
 	var output := {"schema":"citadel-streaming-packet-bridge-contract/v1","complete":true,
 		"passed":not checks.values().has(false),"checks":checks,"result":report,

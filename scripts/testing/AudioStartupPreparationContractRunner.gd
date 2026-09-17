@@ -148,6 +148,8 @@ func test_staged_owner(expected_streams: Dictionary, expected_keys: Array, expec
 	root.add_child(staged)
 	measurements.reserveAndCreatePlayersUsec = Time.get_ticks_usec() - started
 	check("staged_reserves_original_rng_before_first_yield", randi() == expected_random)
+	var master_bus := AudioServer.get_bus_index(&"Master")
+	check("automated_runs_mute_master_audio_output", staged.automated_playback_muted and master_bus >= 0 and AudioServer.is_bus_mute(master_bus))
 	check("staged_begin_owns_thirteen_players", owned_players(staged).size() == 13 and staged.get_child_count() == 13)
 	check("staged_begin_publishes_no_stream_or_playback", staged.streams.is_empty() and players_are_stopped(staged) and not staged.is_processing())
 	var colors := [Color(0.3, 0.4, 0.5), Color(0.8, 0.6, 0.2)]

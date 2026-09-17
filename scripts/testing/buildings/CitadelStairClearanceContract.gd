@@ -16,7 +16,7 @@ func _run() -> void:
 	if not checks.composed_keep_source_pinned: quit(2); return
 	var full_source: Dictionary=FileAccess.open(full_source_path,FileAccess.READ).get_var(false)
 	_exterior_ground_policy_contract()
-	for spec in [{"id":"keep", "width":4.3,"depth":6.4,"base":4.42,"rise":3.457142857,"levels":2}, {"id":"gatehouse","width":2.38,"depth":7.84,"base":0.82,"rise":3.0,"levels":4}, {"id":"castle_keep_stair","width":4.3,"composed":true}]:
+	for spec in [{"id":"keep", "width":4.3,"depth":6.4,"base":4.42,"rise":3.457142857,"levels":2}, {"id":"gatehouse","width":2.38,"depth":7.84,"base":0.82,"rise":3.0,"levels":4}, {"id":"gatehouse_tight","width":2.08,"depth":7.84,"base":0.82,"rise":3.0,"levels":4}, {"id":"castle_keep_stair","width":4.3,"composed":true}]:
 		var b = Blueprint.new(spec.id,1,"stone")
 		if spec.get("composed",false):
 			var recipe: Dictionary=full_source.blueprint.recipe
@@ -31,6 +31,9 @@ func _run() -> void:
 			var physical: Dictionary = b.validate_physical_integrity()
 			checks[spec.id+"_physical"] = physical.passed
 			evidence[spec.id+"_physical_failures"] = physical.get("violations",[])
+			var carriage_parts: Array = b.parts.filter(func(part): return String(part.id).contains("_carriage_"))
+			checks[spec.id+"_carriage_npc_width"] = not carriage_parts.is_empty() and carriage_parts.all(func(part): return part.size.x >= 0.84)
+			evidence[spec.id+"_carriage_widths"] = carriage_parts.map(func(part): return {"id": part.id, "width": part.size.x})
 		var navigation: Dictionary = Navigation.build(b, Transform3D.IDENTITY)
 		var unresolved: Array = []
 		for link in navigation.verticalLinks:

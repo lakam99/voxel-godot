@@ -2,6 +2,7 @@ import { readFile, writeFile, mkdir, lstat, stat, open } from 'node:fs/promises'
 import { dirname, basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -11,11 +12,20 @@ export const helperSource = 'tools/lib/citadel-candidate-runner.mjs';
 export const watchdogSource = 'tools/run-godot-scene-watchdog.mjs';
 export const watchdogDependencies = ['tools/lib/owned-process.mjs', 'tools/lib/owned-native-host.mjs', 'tools/native/OwnedProcessNative.cs', 'tools/native/OwnedProcessHost.cs'];
 export const errorPattern = /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|resources still in use/i;
+export const projectFingerprintBounds = Object.freeze({
+  maximumFileCount: 20000,
+  maximumFileBytes: 2 * 1024 * 1024 * 1024,
+  maximumTotalBytes: 8 * 1024 * 1024 * 1024,
+});
+
+const excludedProjectInput = path => /^(?:\.godot|artifacts|userdata|node_modules|__pycache__|\.cache)(?:\/|$)/i.test(path)
+  || /^(?:playtest-report\.json|playtest-progress\.txt)$/i.test(path);
 
 export function parseOptions(argv, kind) {
-  const names = ['OutputDirectory', ...(kind === 'watcher' ? [] : ['Seed', 'CandidateRegion']),
+  const names = ['OutputDirectory', ...(!['watcher', 'journey'].includes(kind) ? ['Seed', 'CandidateRegion'] : []),
     ...(kind === 'recipe' ? ['CaptureBlueprint', 'ExpectReady', 'CaptureFailure', 'ExpectedRecipeSeed'] : []),
-    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'ScaleSoakSeconds', 'PlayerInspectionOnly', 'Resolution', 'SpawnCell', 'CaptureNavigationRejections'] : [])];
+    ...(kind === 'teleport' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'SkipTutorial', 'ForceDaytime', 'ForceClearWeather', 'ManualInspection', 'ScaleSoakSeconds', 'PlayerInspectionOnly', 'Resolution', 'SpawnCell', 'CaptureNavigationRejections'] : []),
+    ...(kind === 'journey' ? ['TimeoutSeconds', 'StartupTimeoutSeconds', 'Resolution', 'ContinueFrom'] : [])];
   const switches = new Set(['captureBlueprint', 'expectReady', 'captureFailure', 'skipTutorial', 'forceDaytime', 'forceClearWeather', 'manualInspection', 'playerInspectionOnly', 'captureNavigationRejections']);
   const options = {};
   for (let i = 0; i < argv.length; i++) {
@@ -54,30 +64,43 @@ export function validateSeed(seed) {
   if (typeof seed !== 'string' || !seed.trim() || seed.length > 128) throw new Error('A nonempty seed of at most 128 characters is required.');
 }
 export function recipeOptions(input) {
-  const o = { seed: 'atlas-30895044', candidateRegion: '0,-1', expectedRecipeSeed: 1747969299, captureBlueprint: false, expectReady: false, captureFailure: false, ...input };
+  const defaultExpectation = !Boolean(input.captureBlueprint) && !Boolean(input.captureFailure);
+  const o = { seed: 'atlas-30895044', candidateRegion: '0,-1', expectedRecipeSeed: 1747969299, captureBlueprint: false, expectReady: defaultExpectation, captureFailure: false, ...input };
   if (o.captureBlueprint && o.expectReady) throw new Error('ExpectReady requires public Recipe entry; cannot combine with CaptureBlueprint.');
   if (o.captureFailure && (o.expectReady || o.captureBlueprint)) throw new Error('CaptureFailure requires only public failure replay.');
   validateSeed(o.seed);
   o.region = regionCoordinates(o.candidateRegion);
   o.expectedRecipeSeed = integer(o.expectedRecipeSeed, 0, 2147483647, 'ExpectedRecipeSeed');
-  o.expectedError = o.expectReady || o.captureBlueprint ? '' : expectedError;
+	// Rejected sources are reported through the typed diagnostic receipt. They
+	// are not engine failures: a production discovery run may safely continue
+	// to the next deterministic candidate.
+  o.expectedError = '';
   o.runSeconds = o.expectReady || o.captureFailure || o.captureBlueprint ? 540 : 180;
   o.sourceSeconds = o.runSeconds === 540 ? 450 : 150;
   o.proofSeconds = o.expectReady ? 60 : 0;
   return o;
 }
 export function teleportOptions(input, env) {
-  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, scaleSoakSeconds: 0, playerInspectionOnly: false, captureNavigationRejections: false, resolution: '1280x720', ...input };
+  const o = { seed: 'atlas-30895044', candidateRegion: '', timeoutSeconds: 600, startupTimeoutSeconds: 120, skipTutorial: false, forceDaytime: false, forceClearWeather: false, manualInspection: false, scaleSoakSeconds: 0, playerInspectionOnly: false, captureNavigationRejections: false, menuJourney: false, menuContinueJourney: false, continueFrom: '', resolution: '1280x720', ...input };
   if (!['1280x720', '1920x1080'].includes(o.resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
-  validateSeed(o.seed);
+  if (!o.menuJourney) validateSeed(o.seed);
+  if (typeof o.menuJourney !== 'boolean') throw new Error('Invalid boolean: menuJourney');
+  if (typeof o.menuContinueJourney !== 'boolean') throw new Error('Invalid boolean: menuContinueJourney');
+  if (o.menuContinueJourney !== Boolean(o.continueFrom)) throw new Error('MenuContinueJourney requires one ContinueFrom source, and ContinueFrom requires MenuContinueJourney.');
+  if (o.menuContinueJourney && !o.menuJourney) throw new Error('MenuContinueJourney is a visible-menu journey mode.');
+  if (o.menuJourney && (o.candidateRegion !== '' || o.spawnCell || o.skipTutorial || o.forceDaytime || o.forceClearWeather)) throw new Error('MenuJourney uses production New Game seed and launch settings; candidate, spawn, and launch overrides are forbidden.');
   if (o.candidateRegion !== '') regionCoordinates(o.candidateRegion);
   o.spawnCell ??= '';
   if (o.spawnCell !== '') {
     regionCoordinates(o.spawnCell);
     if (!o.skipTutorial || !o.candidateRegion) throw new Error('SpawnCell requires SkipTutorial and an explicit CandidateRegion; tutorial scenario placement must not override the initial location.');
   }
-  o.timeoutSeconds = integer(o.timeoutSeconds, 90, 1200, 'TimeoutSeconds');
-  o.startupTimeoutSeconds = integer(o.startupTimeoutSeconds, 15, 180, 'StartupTimeoutSeconds');
+  o.timeoutSeconds = integer(o.timeoutSeconds, 90, 2400, 'TimeoutSeconds');
+  // Diagnostics may observe the production startup's own 120-second
+  // navigation-readiness deadline after earlier loading stages. This outer
+  // ceiling preserves that structured result instead of cutting it off early;
+  // Gate acceptance still evaluates the recorded 90-second comparator.
+  o.startupTimeoutSeconds = integer(o.startupTimeoutSeconds, 15, 360, 'StartupTimeoutSeconds');
   o.scaleSoakSeconds = integer(o.scaleSoakSeconds, 0, 1800, 'ScaleSoakSeconds');
   if (o.scaleSoakSeconds > 0 && o.scaleSoakSeconds < 180) throw new Error('ScaleSoakSeconds must be 0 or 180..1800. Gate 4 acceptance requires 1800.');
   if (o.manualInspection && o.scaleSoakSeconds > 0) throw new Error('ManualInspection and ScaleSoakSeconds are mutually exclusive.');
@@ -111,16 +134,96 @@ export async function freshDirectory(project, output, prefix = '') {
 }
 export const writeJson = (path, value) => writeFile(path, JSON.stringify(value, null, 2) + '\n', 'utf8');
 export const readJson = async path => JSON.parse((await readFile(path, 'utf8')).replace(/^\uFEFF/, ''));
-export const sha256 = async path => createHash('sha256').update(await readFile(path)).digest('hex');
+export const sha256 = (path, maximumBytes = Number.POSITIVE_INFINITY) => new Promise((resolveHash, reject) => {
+  const hash = createHash('sha256');
+  const stream = createReadStream(path);
+  let bytes = 0;
+  stream.on('error', reject);
+  stream.on('data', chunk => {
+    bytes += chunk.length;
+    if (bytes > maximumBytes) stream.destroy(new Error(`Hash input exceeded ${maximumBytes} bytes: ${path}`));
+    else hash.update(chunk);
+  });
+  stream.on('end', () => resolveHash(hash.digest('hex')));
+});
 export function git(project, args) { return execFileSync('git', ['-C', project, ...args], { encoding: 'utf8', windowsHide: true, maxBuffer: 32 * 1024 * 1024 }); }
-export async function sourceHashes(project, kind, runner) {
-  const patterns = kind === 'recipe' ? ['--cached', '--others', '--exclude-standard', '--', 'scripts/*.gd', 'scripts/**/*.gd'] : ['--cached', '--others', '--exclude-standard', '--', '*.gd', '*.tscn', 'project.godot'];
-  const files = git(project, ['ls-files', '-z', ...patterns]).split('\0').filter(Boolean);
-  files.push(`scripts/testing/buildings/CitadelCandidate${kind === 'recipe' ? 'RecipeDiagnostic' : 'TeleportPlaytest'}.gd`, runner, watchdogSource, ...watchdogDependencies, helperSource);
-  if (kind === 'teleport') files.push('addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll', 'scripts/perf/RuntimeRenderObservation.gd');
+export async function assertNoReparseComponents(path, label = 'Path') {
+  let cursor = resolve(path);
+  while (true) {
+    const info = await lstat(cursor);
+    if (info.isSymbolicLink()) throw new Error(`${label} contains a symlink, junction, or reparse component: ${cursor}`);
+    const parent = dirname(cursor);
+    if (parent === cursor) return;
+    cursor = parent;
+  }
+}
+export function godotEngineSiblingPath(executable) {
+  const name = basename(executable);
+  if (!/_console\.exe$/i.test(name)) return null;
+  return join(dirname(executable), name.replace(/_console(?=\.exe$)/i, ''));
+}
+export async function projectInputManifest(project, extraFiles = []) {
+  const listed = git(project, ['ls-files', '-z', '--cached', '--others', '--exclude-standard'])
+    .split('\0').filter(Boolean).map(path => path.replaceAll('\\', '/'));
+  const files = [...new Set([...listed, ...extraFiles.map(path => path.replaceAll('\\', '/'))])]
+    .filter(path => !excludedProjectInput(path)).sort();
+  if (files.length > projectFingerprintBounds.maximumFileCount) {
+    throw new Error(`Project input fingerprint exceeds ${projectFingerprintBounds.maximumFileCount} files.`);
+  }
   const hashes = {};
-  for (const file of [...new Set(files)].sort()) hashes[file] = await sha256(join(project, file));
-  return hashes;
+  let totalBytes = 0;
+  for (const file of files) {
+    if (!file || file.startsWith('/') || /^[A-Za-z]:\//.test(file) || file.split('/').includes('..')) {
+      throw new Error(`Unsafe project input path: ${file}`);
+    }
+    const absolute = join(project, file);
+    const info = await lstat(absolute);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Project input is not a regular file: ${file}`);
+    if (info.size > projectFingerprintBounds.maximumFileBytes) throw new Error(`Project input exceeds per-file fingerprint bound: ${file}`);
+    totalBytes += info.size;
+    if (totalBytes > projectFingerprintBounds.maximumTotalBytes) throw new Error('Project input fingerprint exceeds its total-byte bound.');
+    hashes[file] = await sha256(absolute, projectFingerprintBounds.maximumFileBytes);
+  }
+  const aggregate = Object.entries(hashes).map(([file, hash]) => `${file}\0${hash}\n`).join('');
+  return {
+    schema: 'project-input-fingerprint/v1',
+    fileCount: files.length,
+    totalBytes,
+    aggregateSha256: createHash('sha256').update(aggregate).digest('hex'),
+    exclusions: ['.godot/**', 'artifacts/**', 'userdata/**', 'node_modules/**', '__pycache__/**', '.cache/**', 'playtest-report.json', 'playtest-progress.txt'],
+    bounds: projectFingerprintBounds,
+    files: hashes,
+  };
+}
+export async function sourceHashes(project, kind, runner) {
+  const required = [`scripts/testing/buildings/CitadelCandidate${kind === 'recipe' ? 'RecipeDiagnostic' : 'TeleportPlaytest'}.gd`,
+    runner, watchdogSource, ...watchdogDependencies, helperSource];
+  if (kind === 'teleport') required.push(
+    'addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll',
+    'addons/zylann.voxel/bin/libvoxel.windows.template_release.x86_64.dll',
+    'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll',
+    'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_release.x86_64.dll',
+    'scripts/perf/RuntimeRenderObservation.gd');
+  return (await projectInputManifest(project, required)).files;
+}
+export async function runtimeBinaryManifest(project, executable = godotExe) {
+  const candidates = {
+    godot: executable,
+    ...(godotEngineSiblingPath(executable) ? { godotEngine: godotEngineSiblingPath(executable) } : {}),
+    voxelGdextensionDebug: join(project, 'addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll'),
+    voxelGdextensionRelease: join(project, 'addons/zylann.voxel/bin/libvoxel.windows.template_release.x86_64.dll'),
+    terrainMeshingGdextensionDebug: join(project, 'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll'),
+    terrainMeshingGdextensionRelease: join(project, 'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_release.x86_64.dll'),
+  };
+  const result = {};
+  for (const [id, path] of Object.entries(candidates)) {
+    await assertNoReparseComponents(path, `Runtime binary ${id}`);
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Required runtime binary is not a regular file: ${path}`);
+    if (info.size > projectFingerprintBounds.maximumFileBytes) throw new Error(`Runtime binary exceeds fingerprint bound: ${path}`);
+    result[id] = { path, bytes: info.size, sha256: await sha256(path, projectFingerprintBounds.maximumFileBytes) };
+  }
+  return result;
 }
 export async function auditSources(project, hashes) {
   const finalSourceHashes = {}, changedSources = [], readErrors = [];

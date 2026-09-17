@@ -78,17 +78,24 @@ static func fit_columns(moving: AABB, allowed: Rect2, obstacles: Array, clearanc
 	var tested := 0
 	var tested_columns := 0
 	var work := source.size()*16+endpoints.size()*(32+int(ceil(log(float(endpoints.size()+1))/log(2.0))))
-	var fit_charge := 128+relevant.size()*(64+8*int(ceil(log(float(2*relevant.size()+4))/log(2.0))))
 	for candidate: Dictionary in candidates:
 		if not proceed.call(): return _fail("cancelled",tested)
 		var column: AABB = candidate.bounds
 		if seen.has(column.position.x): continue
 		seen[column.position.x]=true
+		# Fixed-X fitting can only be affected by obstacles that overlap this
+		# actual column. Preserve the complete `relevant` inventory for endpoint
+		# discovery and the final full-source proof; this local set merely avoids
+		# repeatedly sorting Z intervals that cannot intersect this column.
+		var column_relevant := _column_relevant(column,relevant,clearance,proceed)
+		if not column_relevant.ready: return _fail(String(column_relevant.reason),tested)
+		var column_boxes: Array = column_relevant.boxes
+		var fit_charge: int = 128+relevant.size()+column_boxes.size()*(64+8*int(ceil(log(float(2*column_boxes.size()+4))/log(2.0))))
 		if work+fit_charge>MAX_COLUMN_WORK:
 			return {"ready":false,"reason":"column_work_limit_exceeded","testedCandidates":tested,"testedColumns":tested_columns,"workUpperBound":work,"nextColumnWork":fit_charge,"sourceObstacleCount":source.size(),"relevantObstacleCount":relevant.size()}
 		work+=fit_charge
 		tested_columns+=1
-		var result := fit(column,allowed,relevant,clearance,proceed)
+		var result := fit(column,allowed,column_boxes,clearance,proceed)
 		tested+=int(result.get("testedCandidates",0))
 		if stopped.value: return _fail("cancelled",tested)
 		if not result.ready: continue
@@ -106,6 +113,14 @@ static func fit_columns(moving: AABB, allowed: Rect2, obstacles: Array, clearanc
 		return {"ready":true,"translation":total,"placedBounds":placed,"testedCandidates":tested,"testedColumns":tested_columns,
 			"columnEndpoints":endpoints.size(),"workUpperBound":work,"sourceObstacleCount":source.size(),"relevantObstacleCount":relevant.size(),"searchScope":"finite_geometry_columns_nearest_x_then_lower_x_not_global_optimum"}
 	return {"ready":false,"reason":"no_clear_endpoint_column","testedCandidates":tested,"testedColumns":tested_columns,"workUpperBound":work,"sourceObstacleCount":source.size(),"relevantObstacleCount":relevant.size()}
+
+static func _column_relevant(column: AABB, relevant: Array, clearance: float, proceed: Callable) -> Dictionary:
+	var boxes: Array = []
+	for obstacle: AABB in relevant:
+		if not proceed.call(): return _fail("cancelled")
+		if _axis_overlap(column,obstacle,0,clearance) and _axis_overlap(column,obstacle,1,0.0):
+			boxes.append(obstacle)
+	return {"ready":true,"boxes":boxes}
 
 static func _column_endpoint_valid(column: AABB,allowed: Rect2,endpoint: Dictionary) -> bool:
 	if float(column.position.x)<float(allowed.position.x) or _upper(column,0)>minf(float(allowed.end.x),float(allowed.position.x)+float(allowed.size.x)): return false

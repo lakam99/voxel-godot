@@ -32,6 +32,10 @@ const TRANSIENT_SAVE_KEYS := [
 	"activeDoorTrafficGroupId",
 	"jobReservationId",
 	"jobApproachSlotId",
+	"_traderFallbackSelection",
+	"traderFallbackSelectionPending",
+	"traderFallbackRequestId",
+	"traderFallbackRequestSerial",
 	"trafficWaitReason",
 	"npc_requested_velocity",
 	"npc_applied_velocity",
@@ -362,10 +366,18 @@ func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 		"traffic": 0,
 		"smartObjects": 0,
 		"doorHolds": 0,
+		"routeRequests": 0,
+		"routeJobs": 0,
+		"approachJobs": 0,
 		"routeState": 0,
 		"avoidance": 0
 	}
 	if autonomy_system != null:
+		if autonomy_system.has_method("cancel_and_evict_route_work_for_actor"):
+			var route_release: Dictionary = autonomy_system.cancel_and_evict_route_work_for_actor(entry, reason)
+			released["routeRequests"] = 1 if bool(route_release.get("cancelled", false)) else 0
+			released["routeJobs"] = int(route_release.get("evictedJobs", 0))
+			released["approachJobs"] = int(route_release.get("evictedApproachJobs", 0))
 		if autonomy_system.has_method("release_npc_traffic_reservations"):
 			released["traffic"] = int(autonomy_system.release_npc_traffic_reservations(actor_id, reason))
 		if autonomy_system.has_method("release_npc_door_hold"):

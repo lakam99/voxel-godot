@@ -68,6 +68,8 @@ var simulation_lod
 var route_authority_v2
 var _pending_prop_unloads: Dictionary = {}
 var _pending_door_unloads: Dictionary = {}
+var _last_route_service_owned_actor_count := 0
+var _last_route_service_invocation_count := 0
 
 func _init() -> void:
 	scheduler = NpcBrainSchedulerScript.new()
@@ -122,13 +124,43 @@ func setup(system_node: Node, main_node: Node) -> void:
 	})
 
 func _physics_process(delta: float) -> void:
+	# Keep physics attribution aggregate and constant-cost. In particular, do not
+	# publish a duration for every actor: the headed observation only needs the
+	# callback/stage totals plus truthful actor/service counts.
+	var monitor = performance_monitor()
+	var callback_start: int = monitor.begin_section("npc_physics_callback") if monitor != null else 0
 	if route_authority_v2 != null:
-		route_authority_v2.begin_frame()
-	process_navigation_changes(NAV_CHANGE_EVENTS_PER_PHYSICS_TICK, NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK)
-	build_navigation_tiles(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK)
+		route_authority_v2.begin_frame(Engine.get_process_frames())
+	var stage_start: int = monitor.begin_section("npc_physics_navigation_changes") if monitor != null else 0
+	_process_navigation_changes_with_monitor(
+		NAV_CHANGE_EVENTS_PER_PHYSICS_TICK,
+		NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK,
+		monitor
+	)
+	if monitor != null:
+		monitor.end_section("npc_physics_navigation_changes", stage_start)
+	stage_start = monitor.begin_section("npc_physics_tile_build") if monitor != null else 0
+	_build_navigation_tiles_with_monitor(NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK, monitor)
+	if monitor != null:
+		monitor.end_section("npc_physics_tile_build", stage_start)
+	stage_start = monitor.begin_section("npc_physics_dirty_regions") if monitor != null else 0
 	process_navmesh_dirty_regions(1)
+	if monitor != null:
+		monitor.end_section("npc_physics_dirty_regions", stage_start)
+	stage_start = monitor.begin_section("npc_physics_traffic") if monitor != null else 0
 	advance_traffic(delta)
+	if monitor != null:
+		monitor.end_section("npc_physics_traffic", stage_start)
+	stage_start = monitor.begin_section("npc_physics_route_service") if monitor != null else 0
 	service_active_route_work(delta)
+	if monitor != null:
+		monitor.end_section("npc_physics_route_service", stage_start)
+		monitor.observe_gauge("npc_physics_owned_actor_count", float(_last_route_service_owned_actor_count))
+		monitor.observe_gauge("npc_physics_route_service_invocation_count", float(_last_route_service_invocation_count))
+		monitor.increment_counter("npc_physics_callbacks", 1)
+		monitor.increment_counter("npc_physics_owned_actor_count", _last_route_service_owned_actor_count)
+		monitor.increment_counter("npc_physics_route_service_invocation_count", _last_route_service_invocation_count)
+		monitor.end_section("npc_physics_callback", callback_start)
 
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_PREDELETE:
@@ -281,6 +313,8 @@ func generated_navigation_adapter():
 	return pathing.get("navigation_world")
 
 func begin_update_frame() -> void:
+	if route_authority_v2 != null:
+		route_authority_v2.begin_frame(Engine.get_process_frames())
 	if plan_executor != null and plan_executor.has_method("begin_update_frame"):
 		plan_executor.begin_update_frame()
 
@@ -346,6 +380,8 @@ func physics_route_service_owns_motion(entry: Dictionary) -> bool:
 
 
 func service_active_route_work(delta: float) -> void:
+	_last_route_service_owned_actor_count = 0
+	_last_route_service_invocation_count = 0
 	if plan_executor == null or npc_system == null:
 		return
 	var entries = npc_system.get("npcs")
@@ -357,12 +393,16 @@ func service_active_route_work(delta: float) -> void:
 		var entry: Dictionary = entry_value
 		if not physics_route_service_owns_motion(entry):
 			continue
+		_last_route_service_owned_actor_count += 1
 		if simulation_lod != null and simulation_lod.should_hold_active_movement(entry):
 			record_motion_skipped(entry, "topology_hold")
 			continue
 		if bool(entry.get("abstractSimulated", false)) or String(entry.get("simulationLod", "")) == NpcSimulationLodServiceScript.STATE_ABSTRACT:
 			record_motion_skipped(entry, "abstract")
 			continue
+		# This counts executor invocations, including calls that truthfully report
+		# no movement advance. It is not a completed-motion counter.
+		_last_route_service_invocation_count += 1
 		var result: Dictionary = plan_executor.advance_physics_route_service(entry, delta)
 		if bool(result.get("advanced", false)):
 			record_motion_update(entry, result)
@@ -507,6 +547,8 @@ func home_interior_status(entry: Dictionary, position: Vector3) -> Dictionary:
 	return perception_service.home_interior_status(entry, position)
 
 func release_action_owned_state(entry: Dictionary, reason := "released") -> void:
+	if plan_executor != null and plan_executor.has_method("clear_trader_fallback_target_selection"):
+		plan_executor.clear_trader_fallback_target_selection(entry, reason)
 	release_npc_traffic_reservations(entry, reason)
 	var body := entry.get("body") as Node
 	release_npc_door_hold(body if body != null else String(entry.get("id", "")), true)
@@ -522,9 +564,36 @@ func cancel_active_route_request(entry: Dictionary, reason := "order_replaced") 
 	var request_id := String(active.get("requestId", ""))
 	if request_id == "":
 		return {"ok": true, "cancelled": false, "reason": "missing_request_id"}
+	if plan_executor != null and plan_executor.has_method("evict_route_candidate_cache_for_request"):
+		plan_executor.evict_route_candidate_cache_for_request(request_id)
 	var result: Dictionary = route_authority_v2.cancel_request(request_id, reason)
 	result["cancelled"] = bool(result.get("ok", false))
 	return result
+
+func cancel_and_evict_route_work_for_actor(entry: Dictionary, reason := "actor_demoted") -> Dictionary:
+	# LOD demotion is actor-scoped. Cancel the retained authority request first,
+	# then evict the substrate's actor-unique candidate/search jobs in O(1).
+	var cancellation := {"ok": true, "cancelled": false, "reason": "no_active_request"}
+	if route_authority_v2 != null:
+		var active: Dictionary = route_authority_v2.runtime_for_entry(entry)
+		var request_id := String(active.get("requestId", ""))
+		if request_id != "":
+			cancellation = route_authority_v2.cancel_request(request_id, reason)
+			cancellation["cancelled"] = bool(cancellation.get("ok", false))
+	var evicted := 0
+	if plan_executor != null and plan_executor.has_method("evict_route_candidate_cache_for_actor"):
+		evicted = int(plan_executor.evict_route_candidate_cache_for_actor(entry))
+	var evicted_approach := 0
+	var generated_world = generated_navigation_adapter()
+	if generated_world != null and generated_world.has_method("cancel_approach_cell_certification"):
+		evicted_approach = int(generated_world.cancel_approach_cell_certification(entry))
+	return {
+		"ok": bool(cancellation.get("ok", false)),
+		"cancelled": bool(cancellation.get("cancelled", false)),
+		"evictedJobs": evicted,
+		"evictedApproachJobs": evicted_approach,
+		"reason": reason
+	}
 
 func cleanup_actor_ownership(entry_or_id, reason := "cleanup") -> Dictionary:
 	if simulation_lod == null:
@@ -538,6 +607,8 @@ func unregister_npc(body: Node) -> void:
 	var context = contexts_by_instance_id.get(instance_id)
 	if context == null:
 		return
+	if plan_executor != null and plan_executor.has_method("evict_route_candidate_cache_for_actor"):
+		plan_executor.evict_route_candidate_cache_for_actor(context.stable_id)
 	if route_authority_v2 != null and route_authority_v2.has_method("unregister_actor"):
 		route_authority_v2.unregister_actor(context.stable_id, "actor_unregistered")
 	if simulation_lod != null:
@@ -606,7 +677,8 @@ func notify_terrain_edited(cell: Vector2i, old_height: float, new_height: float)
 	var origin := Vector3(float(cell.x) * NpcConstantsScript.CELL_SIZE - NpcConstantsScript.CELL_SIZE * 0.5, min_y, float(cell.y) * NpcConstantsScript.CELL_SIZE - NpcConstantsScript.CELL_SIZE * 0.5)
 	var bounds := AABB(origin, Vector3(NpcConstantsScript.CELL_SIZE, max_y - min_y, NpcConstantsScript.CELL_SIZE))
 	var object_id := "terrain:%d,%d" % [cell.x, cell.y]
-	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT, object_id, bounds, NavigationChangeBusScript.tile_keys_for_bounds(bounds))
+	change_bus.emit_change(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT, object_id, bounds,
+		NavigationChangeBusScript.terrain_capture_tile_keys_for_bounds(bounds))
 	telemetry.increment(&"change_terrain_edit")
 
 func notify_terrain_cells_edited(cells: Array) -> int:
@@ -625,11 +697,12 @@ func notify_terrain_cells_edited(cells: Array) -> int:
 			bounds_by_tile[tile_key] = bounds
 	for tile_key_value in bounds_by_tile.keys():
 		var tile_key := String(tile_key_value)
+		var edit_bounds: AABB = bounds_by_tile[tile_key]
 		change_bus.emit_change(
 			NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT,
 			"terrain_tile:%s" % tile_key,
-			bounds_by_tile[tile_key],
-			[tile_key]
+			edit_bounds,
+			NavigationChangeBusScript.terrain_capture_tile_keys_for_bounds(edit_bounds)
 		)
 		telemetry.increment(&"change_terrain_edit")
 	return bounds_by_tile.size()
@@ -1014,7 +1087,9 @@ func register_semantic_region(kind: StringName, region_id: String, bounds: AABB,
 	return revision
 
 func process_navigation_changes(max_events := -1, max_object_ids := -1) -> Array:
-	var monitor = main.get("runtime_perf_monitor") if main != null else null
+	return _process_navigation_changes_with_monitor(max_events, max_object_ids, performance_monitor())
+
+func _process_navigation_changes_with_monitor(max_events: int, max_object_ids: int, monitor) -> Array:
 	var bus_start: int = monitor.begin_section("nav_change_bus_process") if monitor != null else Time.get_ticks_usec()
 	var events: Array = navigation_world.process_change_bus(max_events, max_object_ids) if navigation_world != null else []
 	if monitor != null:
@@ -1122,16 +1197,22 @@ func snapshot_has_transient_lifecycle_state(snapshot: Dictionary) -> bool:
 	return simulation_lod.snapshot_has_transient_state(snapshot) if simulation_lod != null else false
 
 func build_navigation_tiles(max_jobs := 1) -> Array:
+	return _build_navigation_tiles_with_monitor(max_jobs, performance_monitor())
+
+func _build_navigation_tiles_with_monitor(max_jobs: int, monitor) -> Array:
 	if navigation_world == null:
 		return []
 	var started := Time.get_ticks_usec()
 	var built: Array = navigation_world.build_next_tiles(max_jobs, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
 	var duration_usec := Time.get_ticks_usec() - started
 	telemetry.record_duration(&"navigation_build_work", duration_usec, NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC)
-	if main != null and main.get("runtime_perf_monitor") != null:
-		main.get("runtime_perf_monitor").observe_duration("navigation_tile_build", float(duration_usec) / 1000.0)
+	if monitor != null:
+		monitor.observe_duration("navigation_tile_build", float(duration_usec) / 1000.0)
 	telemetry.observe_navigation_stats(navigation_world.stats())
 	return built
+
+func performance_monitor():
+	return main.get("runtime_perf_monitor") if main != null else null
 
 func navigation_backend_summary() -> Dictionary:
 	var summary: Dictionary = navigation_backend_config.to_summary() if navigation_backend_config != null else NavigationBackendConfigScript.default_config().to_summary()

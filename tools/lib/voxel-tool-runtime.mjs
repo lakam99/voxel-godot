@@ -271,6 +271,7 @@ const scriptTools = {
   'run-motion-rig-contract': ['res://scripts/testing/combat/MotionRigContractRunner.gd', 'VOXEL_MOTION_RIG_CONTRACT_REPORT'],
   'run-procedural-tree-performance-benchmark': ['res://scripts/testing/ProceduralTreePerformanceBenchmarkRunner.gd', 'VOXEL_PROCEDURAL_TREE_PERFORMANCE_REPORT'],
   'run-project-compile-smoke': ['res://scripts/testing/ProjectCompileSmokeRunner.gd', 'VOXEL_PROJECT_COMPILE_REPORT'],
+  'run-runtime-performance-observation-contract-tests': ['res://scripts/testing/RuntimePerformanceObservationContractRunner.gd', 'VOXEL_RUNTIME_PERF_CONTRACT_REPORT'],
   'run-seeded-cottage-recipe-contract': ['res://scripts/testing/buildings/SeededCottageRecipeContractRunner.gd', 'VOXEL_SEEDED_COTTAGE_RECIPE_CONTRACT_REPORT'],
   'run-startup-loading-readiness-contract-tests': ['res://scripts/testing/StartupLoadingReadinessContractRunner.gd', 'VOXEL_STARTUP_READINESS_CONTRACT_REPORT'],
   'run-structure-town-manifest-contract-tests': ['res://scripts/testing/StructureTownManifestContractRunner.gd', 'VOXEL_STRUCTURE_TOWN_MANIFEST_REPORT'],
@@ -409,7 +410,7 @@ async function runConfiguredGodot(toolId, rawArgs) {
     await clearPngFiles(screenshotDir);
   }
   const runToken = randomUUID().replaceAll('-', '');
-  const environment = { ...process.env };
+  const environment = { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1' };
   if (requiresReport) environment[reportEnvironment] = reportPath;
   if (parsed.options.seed !== undefined) environment.VOXEL_TEST_SEED = String(parsed.options.seed);
   if (parsed.options.timeMode !== undefined) environment.VOXEL_NPC_TIME_MODE = String(parsed.options.timeMode).toLowerCase();
@@ -453,7 +454,7 @@ async function runConfiguredGodot(toolId, rawArgs) {
 
 function sceneArgumentOptions(options) {
   const forwarded = [];
-  const excluded = new Set(['godotExe', 'reportPath', 'progressPath', 'screenshotPath', 'screenshotDir', 'traceDir', 'artifactDir', 'timeoutSeconds', 'watchdogSeconds', 'headless', 'visible', 'help']);
+  const excluded = new Set(['godotExe', 'reportPath', 'progressPath', 'screenshotPath', 'screenshotDir', 'traceDir', 'artifactDir', 'timeoutSeconds', 'watchdogSeconds', 'headless', 'visible', 'help', 'acceptance', 'diagnostic', 'routePlanDetailedTiming']);
   for (const [key, value] of Object.entries(options)) {
     if (excluded.has(key) || value === undefined || value === false) continue;
     const flag = `--${key.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`)}`;
@@ -461,6 +462,49 @@ function sceneArgumentOptions(options) {
     if (value !== true) forwarded.push(String(value));
   }
   return forwarded;
+}
+
+export function runtimePerformanceObservationArguments(root, scene, options = {}) {
+  const args = ['--path', root];
+  if (options.resolution !== undefined) {
+    const resolution = String(options.resolution);
+    if (!['1280x720', '1920x1080'].includes(resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
+    args.push('--resolution', resolution, '--windowed');
+  }
+  if (scene) args.push('--scene', scene);
+  return args;
+}
+
+export function headedToolEnvironment(baseEnvironment, toolId) {
+  const environment = { ...baseEnvironment };
+  delete environment.VOXEL_RUNTIME_PERF_LAUNCH_MODE;
+  delete environment.VOXEL_ROUTE_PLAN_DETAILED_TIMING;
+  if (toolId === 'run-runtime-performance-observation')
+    environment.VOXEL_RUNTIME_PERF_LAUNCH_MODE = 'ordinary_realtime_project_pacing';
+  return environment;
+}
+
+export function runtimePerformanceOwnedLifecycle(summary = {}) {
+  const zeroOwnedWork = summary.authoritativeZeroProven === true
+    && summary.finalMembershipKnown === true
+    && Array.isArray(summary.finalJobMemberPids)
+    && summary.finalJobMemberPids.length === 0;
+  const naturalShutdown = summary.rootExited === true && summary.timedOut === false
+    && summary.forcedCleanup === false && summary.cleanupUnresolved === false;
+  return {
+    zeroOwnedWork,
+    naturalShutdown,
+    passed: zeroOwnedWork && naturalShutdown && summary.cleanupPassed === true,
+    cleanupPassed: summary.cleanupPassed === true,
+    authoritativeZeroProven: summary.authoritativeZeroProven === true,
+    finalMembershipKnown: summary.finalMembershipKnown === true,
+    finalJobMemberPids: Array.isArray(summary.finalJobMemberPids) ? summary.finalJobMemberPids : null,
+    rootExited: summary.rootExited === true,
+    timedOut: summary.timedOut === true,
+    forcedCleanup: summary.forcedCleanup === true,
+    cleanupUnresolved: summary.cleanupUnresolved === true,
+    watchdogSummaryPath: summary.summaryPath ?? null
+  };
 }
 
 async function runHeadedTool(toolId, rawArgs) {
@@ -485,8 +529,13 @@ async function runHeadedTool(toolId, rawArgs) {
   await Promise.all([ensureDirectory(dirname(reportPath)), ensureDirectory(dirname(progressPath)), screenshotDir ? ensureDirectory(screenshotDir) : Promise.resolve(), traceDir ? ensureDirectory(traceDir) : Promise.resolve()]);
   await Promise.all([removeFile(reportPath), removeFile(progressPath), screenshotDir ? clearPngFiles(screenshotDir) : Promise.resolve()]);
   const runToken = randomUUID().replaceAll('-', '');
+  const runtimePerformanceObservation = toolId === 'run-runtime-performance-observation';
+  if (runtimePerformanceObservation && asBoolean(parsed.options.acceptance) && asBoolean(parsed.options.diagnostic))
+    throw new Error('Choose either --acceptance or --diagnostic, not both.');
+  const runtimePerformanceAcceptance = runtimePerformanceObservation && asBoolean(parsed.options.acceptance);
   const environment = {
-    ...process.env,
+    ...headedToolEnvironment(process.env, toolId),
+    VOXEL_DISABLE_AUDIO_PLAYBACK: '1',
     VOXEL_PLAYTEST: '1',
     VOXEL_TEST_SEED: String(parsed.options.seed ?? 'atlas-1492'),
     [reportEnvironment]: reportPath,
@@ -496,6 +545,15 @@ async function runHeadedTool(toolId, rawArgs) {
     VOXEL_GIT_BRANCH: gitValue(['branch', '--show-current']),
     VOXEL_GIT_COMMIT: gitValue(['rev-parse', 'HEAD'])
   };
+  if (runtimePerformanceObservation) {
+    environment.VOXEL_RUNTIME_PERF_ACCEPTANCE = runtimePerformanceAcceptance ? '1' : '0';
+    if (asBoolean(parsed.options.routePlanDetailedTiming))
+      environment.VOXEL_ROUTE_PLAN_DETAILED_TIMING = '1';
+    if (runtimePerformanceAcceptance && parsed.options.scenario === undefined)
+      environment.VOXEL_RUNTIME_PERF_SCENARIO = 'Gate5Town32Npc';
+    if (parsed.options.resolution !== undefined)
+      environment.VOXEL_RUNTIME_PERF_RESOLUTION = String(parsed.options.resolution);
+  }
   if (screenshotEnvironment) environment[screenshotEnvironment] = screenshotDir;
   if (traceDir) environment.VOXEL_NPC_OBSERVATION_TRACE_DIR = traceDir;
   // Normal-runtime measurement must use ordinary startup and frame timing.
@@ -537,8 +595,10 @@ async function runHeadedTool(toolId, rawArgs) {
     if (toolId.endsWith('no-flags')) environment.VOXEL_REAL_TUTORIAL_PHASE7_LIVE_ACCEPTANCE = '1';
   }
   const godot = await findGodot(parsed.options.godotExe);
-  const godotArguments = toolId === 'run-normal-runtime-performance-pass'
-    ? ['--path', projectRoot] : ['--fixed-fps', '60', '--path', projectRoot];
+  const godotArguments = runtimePerformanceObservation
+    ? runtimePerformanceObservationArguments(projectRoot, scene, parsed.options)
+    : toolId === 'run-normal-runtime-performance-pass'
+      ? ['--path', projectRoot] : ['--fixed-fps', '60', '--path', projectRoot];
   if (toolId === 'run-normal-runtime-performance-pass' && parsed.options.resolution !== undefined) {
     const resolution = String(parsed.options.resolution);
     if (!['1280x720', '1920x1080'].includes(resolution)) throw new Error('Resolution must be 1280x720 or 1920x1080.');
@@ -547,13 +607,22 @@ async function runHeadedTool(toolId, rawArgs) {
     environment.VOXEL_NORMAL_RUNTIME_PERF_RESOLUTION = resolution;
   }
   if (['npc/run-npc-observation-tests','npc/run-real-tutorial-playthrough'].includes(toolId) && !asBoolean(parsed.options.visible)) godotArguments.unshift('--headless');
-  if (scene) godotArguments.push('--scene', scene);
+  if (scene && !runtimePerformanceObservation) godotArguments.push('--scene', scene);
   const forwarded = [...sceneArgumentOptions(parsed.options), ...parsed.passthrough];
   if (forwarded.length) godotArguments.push('--', ...forwarded);
   const execution = await runGodotProcess(godot, godotArguments, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds ?? parsed.options.watchdogSeconds, 300) });
   if (!(await exists(reportPath))) throw new Error(`Missing report from ${toolId}: ${reportPath}`);
   const report = await readJson(reportPath);
   if (report.runToken && report.runToken !== runToken) throw new Error(`Stale report token from ${toolId}`);
+  if (runtimePerformanceObservation) {
+    report.ownedProcessLifecycle = runtimePerformanceOwnedLifecycle({ ...execution.summary, summaryPath: execution.summaryPath });
+    if (!report.ownedProcessLifecycle.passed) {
+      report.passed = false;
+      report.failureCount = Number(report.failureCount ?? 0) + 1;
+      report.ownedProcessLifecycleFailure = 'owned process did not reach natural zero-membership shutdown';
+    }
+    await writeJson(reportPath, report);
+  }
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (execution.code !== 0 || !reportPassed(report)) process.exitCode = 1;
 }
@@ -624,6 +693,8 @@ export async function runPlaytest(rawArgs, mode = 'playtest') {
     VOXEL_PLAYTEST_REPORT: reportPath, VOXEL_PLAYTEST_PROGRESS: progressPath,
     VOXEL_PLAYTEST_SCREENSHOT: screenshotPath, VOXEL_PLAYTEST_RUN_TOKEN: runToken
   };
+  if (parsed.options.watchdogSeconds !== undefined)
+    environment.VOXEL_PLAYTEST_WATCHDOG_SECONDS = String(asNumber(parsed.options.watchdogSeconds, 240));
   if (parsed.options.only) environment.VOXEL_PLAYTEST_ONLY = String(parsed.options.only);
   const godot = await findGodot(parsed.options.godotExe);
   const argumentsList = ['--fixed-fps', '60'];
@@ -679,10 +750,15 @@ export async function runWorldSignature(rawArgs) {
   if (!asBoolean(parsed.options.updateBaseline) && (spawnSync('git', ['-C', projectRoot, 'diff', '--quiet', '--', baselineRelativePath]).status !== 0 || spawnSync('git', ['-C', projectRoot, 'diff', '--cached', '--quiet', '--', baselineRelativePath]).status !== 0)) throw new Error(`World signature baseline has uncommitted changes: ${baselineRelativePath}`);
   await ensureDirectory(dirname(outputPath));
   await removeFile(outputPath);
-  const environment = { ...process.env, VOXEL_WORLD_SIGNATURE_OUTPUT: outputPath, VOXEL_TEST_SEED: seed };
+  const environment = {
+    ...process.env,
+    VOXEL_DISABLE_AUDIO_PLAYBACK: '1',
+    VOXEL_WORLD_SIGNATURE_OUTPUT: outputPath,
+    VOXEL_TEST_SEED: seed
+  };
   if (asBoolean(parsed.options.updateBaseline)) environment.VOXEL_WORLD_SIGNATURE_UPDATE_BASELINE = '1';
   const godot = await findGodot(parsed.options.godotExe);
-  const argumentsList = ['--fixed-fps', '60'];
+  const argumentsList = ['--fixed-fps', '60', '--audio-driver', 'Dummy'];
   if (!asBoolean(parsed.options.visible)) argumentsList.push('--headless');
   argumentsList.push('--path', projectRoot, '--scene', 'res://scenes/WorldSignature.tscn');
   const execution = await runGodotProcess(godot, argumentsList, { env: environment, timeoutSeconds: asNumber(parsed.options.timeoutSeconds, 900) });

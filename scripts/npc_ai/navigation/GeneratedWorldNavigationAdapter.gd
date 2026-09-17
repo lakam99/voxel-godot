@@ -23,6 +23,7 @@ const TRANSITION_COLLISION_INFLATION := NpcConstantsScript.DEFAULT_NPC_RADIUS + 
 const TRANSITION_RECORD_INDEX_MARGIN_CELLS := 2
 const NAVIGATION_CAPTURE_ORDER_KEY := &"_navigationCaptureOrder"
 const NAVMESH_TILE_SNAPSHOT_CACHE_LIMIT := 96
+const APPROACH_CERTIFICATION_VALIDATIONS_PER_CALL := 4
 
 var system
 var main
@@ -52,6 +53,14 @@ var navmesh_tile_revision_by_key := {}
 var navmesh_tile_semantic_revision_by_key := {}
 var navmesh_tile_door_revision_by_key := {}
 var navmesh_tile_load_revision_by_key := {}
+## Terrain edits change a tile's authoritative surface facts, but do not alter
+## the global live block/prop/collision inventory. Keep that identity separate
+## so a local dig never triggers a full world collision-registry rebuild.
+var navmesh_tile_terrain_revision_by_key := {}
+# Monotonic source-identity clock. A scoped edit advances only the affected
+# tile's fact revision; an unscoped terrain event advances the common baseline.
+var terrain_revision_clock := 0
+var terrain_global_revision := 0
 var static_snapshot_revision := 1
 var topology_revision := 1
 var dynamic_revision := 0
@@ -62,6 +71,8 @@ var nav_static_rebuild_count := 0
 var nav_dynamic_update_count := 0
 var dynamic_occupant_cache_frame_key := ""
 var dynamic_occupant_cache := {}
+var approach_certification_jobs := {}
+var active_approach_certification_by_actor := {}
 var _publication_service_ref: WeakRef
 var _capture_retirement: Dictionary = {}
 var _navigation_capture
@@ -102,22 +113,29 @@ func invalidate() -> void:
     navmesh_tile_semantic_revision_by_key.clear()
     navmesh_tile_door_revision_by_key.clear()
     navmesh_tile_load_revision_by_key.clear()
+    navmesh_tile_terrain_revision_by_key.clear()
+    terrain_revision_clock = 0
+    terrain_global_revision = 0
     cached_prop_cell_by_object_id = {}
     cached_prop_collision_records_by_object_id = {}
     cached_private_interior_records_revision = ""
     dynamic_occupant_cache_frame_key = ""
     dynamic_occupant_cache = {}
     cached_private_interior_records = []
+    approach_certification_jobs.clear()
+    active_approach_certification_by_actor.clear()
 
 func apply_navigation_events(events: Array) -> void:
     var monitor = performance_monitor()
     var apply_start: int = monitor.begin_section("generated_nav_event_apply") if monitor != null else Time.get_ticks_usec()
     var static_changed := false
+    var terrain_changed := false
     var dynamic_changed := false
     var semantic_changed := false
     var semantic_global_changed := false
     var door_state_changed := false
     var static_changed_tiles: Array[String] = []
+    var terrain_changed_tiles := {}
     var semantic_changed_tiles: Array[String] = []
     var door_state_changed_tiles: Array[String] = []
     for event_value in events:
@@ -129,6 +147,10 @@ func apply_navigation_events(events: Array) -> void:
         var tile_key := String(event.get("tileKey", ""))
         if _event_has_kind(kinds, NpcEnumsScript.CHANGE_KIND_CHUNK_LOADED):
             _mark_chunk_load_publication_change(tile_key)
+        if _event_has_kind(kinds, NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT):
+            terrain_changed = true
+            for affected_tile_key in _terrain_capture_tile_keys_for_event(event):
+                terrain_changed_tiles[affected_tile_key] = true
         if _event_changes_static_snapshot(kinds):
             var prop_start: int = monitor.begin_section("generated_nav_prop_event_apply") if monitor != null else Time.get_ticks_usec()
             if _event_is_prop_only_static_change(kinds) and _apply_prop_event_to_static_cache(event):
@@ -161,6 +183,30 @@ func apply_navigation_events(events: Array) -> void:
         _clear_navmesh_tile_snapshot_cache()
         for tile_key in static_changed_tiles:
             navmesh_tile_revision_by_key[tile_key] = static_snapshot_revision
+    if terrain_changed:
+        # Terrain projection/height facts are derived from terrain authority and
+        # must be queried fresh. The completed collision inventory remains valid:
+        # a terrain edit cannot create, remove or transform a registered block,
+        # prop or door body.
+        height_cache = {}
+        terrain_projection_cache = {}
+        if terrain_changed_tiles.is_empty():
+            terrain_revision_clock = maxi(terrain_revision_clock + 1, last_event_revision)
+            terrain_global_revision = terrain_revision_clock
+            navmesh_tile_terrain_revision_by_key.clear()
+            _clear_navmesh_tile_snapshot_cache()
+        else:
+            # Every tile capture includes a one-cell seam halo. Advance one
+            # shared edit revision for all captures intersecting the changed
+            # cells so cached, active and accepted source identities cannot
+            # retain a stale seam independently of the edit's owning tile.
+            terrain_revision_clock = maxi(terrain_revision_clock + 1, last_event_revision)
+            var affected_tile_keys: Array = terrain_changed_tiles.keys()
+            affected_tile_keys.sort()
+            for tile_key_value in affected_tile_keys:
+                var tile_key := String(tile_key_value)
+                navmesh_tile_terrain_revision_by_key[tile_key] = terrain_revision_clock
+                _clear_navmesh_tile_snapshot_cache_for_tile(tile_key)
     if dynamic_changed:
         dynamic_revision = maxi(dynamic_revision + 1, last_event_revision)
     if semantic_changed:
@@ -206,6 +252,7 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
     return {
         "revision": revision_id,
         "staticSnapshotRevision": static_snapshot_revision,
+		"terrainRevision": terrain_revision_clock,
         "dynamicRevision": dynamic_revision,
         "semanticRevision": semantic_revision,
         "doorStateRevision": door_state_revision,
@@ -226,10 +273,13 @@ func build_snapshot(entry: Dictionary, allow_outside := false, moving_home := fa
     }
 
 func revision() -> String:
-    return "%d:%d:%d:%d" % [static_snapshot_revision, dynamic_revision, semantic_revision, door_state_revision]
+    return "%d:%d:%d:%d:%d" % [static_snapshot_revision, dynamic_revision, semantic_revision, door_state_revision, terrain_revision_clock]
 
 func navmesh_tile_source_key() -> String:
-    return "%d:%d:%d" % [static_snapshot_revision, semantic_revision, door_state_revision]
+    var key := "%d:%d:%d" % [static_snapshot_revision, semantic_revision, door_state_revision]
+    if terrain_global_revision > 0:
+        key += "|terrain:%d" % terrain_global_revision
+    return key
 
 func navmesh_tile_source_key_for_tile(tile_key: String) -> String:
     if tile_key == "":
@@ -257,6 +307,9 @@ func _navmesh_tile_source_key_from_building_sources(tile_key: String, structures
     var key := "%d:%d:%d" % [tile_revision, tile_semantic_revision, tile_door_revision]
     if navmesh_tile_load_revision_by_key.has(tile_key):
         key += "|chunk-load:%d" % int(navmesh_tile_load_revision_by_key[tile_key])
+    var terrain_revision := int(navmesh_tile_terrain_revision_by_key.get(tile_key, terrain_global_revision))
+    if terrain_revision > 0:
+        key += "|terrain:%d" % terrain_revision
     if structures.get("status")!="ready": return key+"|structure:"+String(structures.get("reason","pending"))
     for source: Dictionary in structures.get("sources",[]):
         key += "|%s:%d" % [source.binding.sourceKey,int(source.binding.generation)]
@@ -281,7 +334,7 @@ func navigation_tile_terrain_readiness(tile_key: String) -> Dictionary:
         return {"status":"ready","reason":"external_terrain_authority"}
     var tile := _parse_tile_key(tile_key)
     return main.navigation_terrain_publication_readiness(
-        Rect2i(tile*NAV_TILE_CELL_SIZE,Vector2i.ONE*NAV_TILE_CELL_SIZE))
+        Rect2i(tile*NAV_TILE_CELL_SIZE,Vector2i.ONE*NAV_TILE_CELL_SIZE).grow(1))
 
 func route_navmesh_tile_keys(entry: Dictionary, start: Vector3, target: Vector3, allow_outside := false, moving_home := false, margin_cells := ROUTE_NAVMESH_MARGIN_CELLS) -> Array[String]:
     var start_cell := world_cell(start)
@@ -937,6 +990,7 @@ func cached_static_tile_snapshot(allow_outside := false, moving_home := false) -
     return {
         "revision": revision(),
         "staticSnapshotRevision": static_snapshot_revision,
+		"terrainRevision": terrain_revision_clock,
         "dynamicRevision": dynamic_revision,
         "semanticRevision": semantic_revision,
         "doorStateRevision": door_state_revision,
@@ -969,6 +1023,7 @@ func cached_validation_snapshot(entry: Dictionary, allow_outside := false, movin
     return {
         "revision": revision(),
         "staticSnapshotRevision": static_snapshot_revision,
+		"terrainRevision": terrain_revision_clock,
         "dynamicRevision": dynamic_revision,
         "semanticRevision": semantic_revision,
         "doorStateRevision": door_state_revision,
@@ -994,7 +1049,6 @@ func _event_changes_static_snapshot(kinds: Array) -> bool:
         if kind in [
             NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED,
             NpcEnumsScript.CHANGE_KIND_BLOCK_REMOVED,
-            NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT,
             NpcEnumsScript.CHANGE_KIND_PROP_CREATED,
             NpcEnumsScript.CHANGE_KIND_PROP_REMOVED,
             NpcEnumsScript.CHANGE_KIND_DOOR_REGISTERED,
@@ -1089,6 +1143,61 @@ func _event_changes_semantic_state(kinds: Array) -> bool:
         if StringName(kind_value) == NpcEnumsScript.CHANGE_KIND_SEMANTIC_CHANGED:
             return true
     return false
+
+func _terrain_capture_tile_keys_for_event(event: Dictionary) -> Array[String]:
+    var edit_cell_bounds := _terrain_event_cell_bounds(event)
+    if edit_cell_bounds.size.x <= 0 or edit_cell_bounds.size.y <= 0:
+        return []
+    # Candidate cores can only be one tile beyond the edit's own cells because
+    # the authoritative capture/readiness footprint grows each core by one cell.
+    var candidate_cells := edit_cell_bounds.grow(1)
+    var last_candidate := candidate_cells.end - Vector2i.ONE
+    var min_tile := Vector2i(
+        floori(float(candidate_cells.position.x) / float(NAV_TILE_CELL_SIZE)),
+        floori(float(candidate_cells.position.y) / float(NAV_TILE_CELL_SIZE)))
+    var max_tile := Vector2i(
+        floori(float(last_candidate.x) / float(NAV_TILE_CELL_SIZE)),
+        floori(float(last_candidate.y) / float(NAV_TILE_CELL_SIZE)))
+    var result: Array[String] = []
+    for tile_z in range(min_tile.y, max_tile.y + 1):
+        for tile_x in range(min_tile.x, max_tile.x + 1):
+            var tile := Vector2i(tile_x, tile_z)
+            var capture_bounds := Rect2i(
+                tile * NAV_TILE_CELL_SIZE,
+                Vector2i.ONE * NAV_TILE_CELL_SIZE).grow(1)
+            if capture_bounds.intersects(edit_cell_bounds):
+                result.append("%d,%d" % [tile_x, tile_z])
+    result.sort()
+    return result
+
+func _terrain_event_cell_bounds(event: Dictionary) -> Rect2i:
+    var bounds_value = event.get("bounds")
+    if bounds_value is AABB:
+        var bounds: AABB = bounds_value
+        if bounds.size.x > 0.0 and bounds.size.z > 0.0:
+            var bounds_end := bounds.position + bounds.size
+            # Terrain edit events describe cell volumes centered on integer
+            # cells. Convert the half-cell world extents back to an inclusive
+            # cell range without treating merely touching neighbor faces as edits.
+            var epsilon := 0.0001
+            var min_cell := Vector2i(
+                floori(bounds.position.x / NpcConstantsScript.CELL_SIZE - 0.5 + epsilon) + 1,
+                floori(bounds.position.z / NpcConstantsScript.CELL_SIZE - 0.5 + epsilon) + 1)
+            var max_cell := Vector2i(
+                ceili(bounds_end.x / NpcConstantsScript.CELL_SIZE + 0.5 - epsilon) - 1,
+                ceili(bounds_end.z / NpcConstantsScript.CELL_SIZE + 0.5 - epsilon) - 1)
+            if max_cell.x >= min_cell.x and max_cell.y >= min_cell.y:
+                return Rect2i(min_cell, max_cell - min_cell + Vector2i.ONE)
+    # Legacy/synthetic callers without bounds cannot prove where inside their
+    # tile the edit landed. Treat the whole core as edited, conservatively
+    # invalidating all captures whose halo overlaps it.
+    var tile_key := String(event.get("tileKey", ""))
+    if tile_key == "":
+        return Rect2i()
+    var tile := _parse_tile_key(tile_key)
+    if tile_key != "%d,%d" % [tile.x, tile.y]:
+        return Rect2i()
+    return Rect2i(tile * NAV_TILE_CELL_SIZE, Vector2i.ONE * NAV_TILE_CELL_SIZE)
 
 func rebuild_static_cells() -> int:
     collision_source_errors.clear()
@@ -2351,6 +2460,174 @@ func approach_cells_for_target(entry: Dictionary, target_position: Vector3, allo
     return result
 
 
+# Resumable first-match form used by high-level selectors that need only the
+# first cell from the exact ordered approach set. Partial work is invisible and
+# one admission validates a fixed number of cells against one coherent captured
+# snapshot. Static/semantic/door/terrain changes reject the retained job; live
+# occupancy is rechecked immediately before a cell becomes visible.
+func advance_first_approach_cell(entry: Dictionary, target_position: Vector3, allow_outside := true, request_identity := "", validations_per_call := APPROACH_CERTIFICATION_VALIDATIONS_PER_CALL) -> Dictionary:
+    var actor_key := _approach_actor_key(entry)
+    var target_cell := world_cell(target_position)
+    var input_identity := _approach_input_identity(entry)
+    var job_key := "%s|%s|%d,%d|%s" % [actor_key, request_identity, target_cell.x, target_cell.y, str(allow_outside)]
+    var previous_key := String(active_approach_certification_by_actor.get(actor_key, ""))
+    if previous_key != "" and previous_key != job_key:
+        approach_certification_jobs.erase(previous_key)
+    active_approach_certification_by_actor[actor_key] = job_key
+    var job: Dictionary = approach_certification_jobs.get(job_key, {}) if approach_certification_jobs.get(job_key, {}) is Dictionary else {}
+    var source_tiles: Array = job.get("sourceTiles", []) if job.get("sourceTiles", []) is Array else []
+    var source_identity := _approach_source_identity_for_tiles(source_tiles) if not job.is_empty() else ""
+    if not job.is_empty() and (String(job.get("sourceIdentity", "")) != source_identity or String(job.get("inputIdentity", "")) != input_identity):
+        approach_certification_jobs.erase(job_key)
+        active_approach_certification_by_actor.erase(actor_key)
+        return {"status":"invalidated", "reason":"approach_source_changed", "cell":INVALID_CELL, "validatedThisCall":0}
+    if job.is_empty():
+        var candidate_cells := approach_candidate_cells_for_target(entry, target_position, allow_outside)
+        source_tiles = _approach_source_tiles(candidate_cells)
+        source_identity = _approach_source_identity_for_tiles(source_tiles)
+        job = {
+            "actorKey":actor_key,
+            "requestIdentity":request_identity,
+            "sourceIdentity":source_identity,
+            "inputIdentity":input_identity,
+            "targetCell":target_cell,
+            "allowOutside":allow_outside,
+            "cells":candidate_cells,
+            "sourceTiles":source_tiles,
+            "snapshot":cached_validation_snapshot(entry, allow_outside, false).duplicate(false),
+            "cursor":0,
+            "validated":0
+        }
+        approach_certification_jobs[job_key] = job
+    var cells: Array = job.get("cells", []) if job.get("cells", []) is Array else []
+    var cursor := clampi(int(job.get("cursor", 0)), 0, cells.size())
+    var validated_this_call := 0
+    var validation_limit := maxi(1, int(validations_per_call))
+    var captured_snapshot: Dictionary = job.get("snapshot", {}) if job.get("snapshot", {}) is Dictionary else {}
+    while cursor < cells.size() and validated_this_call < validation_limit:
+        var cell_value = cells[cursor]
+        cursor += 1
+        validated_this_call += 1
+        job["cursor"] = cursor
+        job["validated"] = int(job.get("validated", 0)) + 1
+        if not (cell_value is Vector2i):
+            continue
+        var cell: Vector2i = cell_value
+        if not cell_is_standable_goal_in_snapshot(entry, captured_snapshot, cell, allow_outside, false):
+            continue
+        if _approach_source_identity_for_tiles(source_tiles) != source_identity:
+            approach_certification_jobs.erase(job_key)
+            active_approach_certification_by_actor.erase(actor_key)
+            return {"status":"invalidated", "reason":"approach_source_changed", "cell":INVALID_CELL, "validatedThisCall":validated_this_call}
+        var live_snapshot := cached_validation_snapshot(entry, allow_outside, false)
+        if not cell_is_standable_goal_in_snapshot(entry, live_snapshot, cell, allow_outside, false):
+            continue
+        approach_certification_jobs.erase(job_key)
+        active_approach_certification_by_actor.erase(actor_key)
+        return {
+            "status":"ready", "reason":"first_standable_approach", "cell":cell,
+            "validatedThisCall":validated_this_call, "validatedTotal":int(job.get("validated", 0))
+        }
+    approach_certification_jobs[job_key] = job
+    if cursor < cells.size():
+        return {
+            "status":"pending", "reason":"approach_certification_pending", "cell":INVALID_CELL,
+            "validatedThisCall":validated_this_call, "validatedTotal":int(job.get("validated", 0)), "total":cells.size()
+        }
+    approach_certification_jobs.erase(job_key)
+    active_approach_certification_by_actor.erase(actor_key)
+    return {
+        "status":"exhausted", "reason":"no_standable_approach", "cell":INVALID_CELL,
+        "validatedThisCall":validated_this_call, "validatedTotal":int(job.get("validated", 0)), "total":cells.size()
+    }
+
+
+func cancel_approach_cell_certification(entry_or_actor_key, request_identity := "") -> int:
+    var actor_key := _approach_actor_key(entry_or_actor_key) if entry_or_actor_key is Dictionary else String(entry_or_actor_key)
+    if actor_key == "":
+        return 0
+    var job_key := String(active_approach_certification_by_actor.get(actor_key, ""))
+    if job_key == "":
+        return 0
+    var job: Dictionary = approach_certification_jobs.get(job_key, {}) if approach_certification_jobs.get(job_key, {}) is Dictionary else {}
+    if request_identity != "" and String(job.get("requestIdentity", "")) != request_identity:
+        return 0
+    var removed := 0
+    if approach_certification_jobs.has(job_key):
+        approach_certification_jobs.erase(job_key)
+        removed = 1
+    active_approach_certification_by_actor.erase(actor_key)
+    return removed
+
+
+func approach_certification_census() -> Dictionary:
+    return {"jobCount":approach_certification_jobs.size(), "actorCount":active_approach_certification_by_actor.size()}
+
+
+func _approach_actor_key(entry: Dictionary) -> String:
+    var actor_id := String(entry.get("id", entry.get("actorId", "")))
+    if actor_id != "":
+        return actor_id
+    var body = entry.get("body")
+    if body is Object and is_instance_valid(body):
+        return "instance:%d" % (body as Object).get_instance_id()
+    return "entry:%d" % entry.hash()
+
+
+func _approach_source_tiles(cells: Array) -> Array[String]:
+    var lookup := {}
+    for cell_value in cells:
+        if cell_value is Vector2i:
+            lookup[tile_key_for_cell(cell_value)] = true
+    var result: Array[String] = []
+    for key_value in lookup.keys():
+        result.append(String(key_value))
+    result.sort()
+    return result
+
+
+func _approach_source_identity_for_tiles(tile_keys: Array) -> String:
+    var private_interior_revision := 0
+    var structure_system = main.get("structure_system") if main != null else null
+    if structure_system != null and structure_system.has_method("private_interior_records_revision"):
+        private_interior_revision = int(structure_system.private_interior_records_revision())
+    var parts: Array[String] = ["private:%d" % private_interior_revision]
+    for key_value in tile_keys:
+        var tile_key := String(key_value)
+        if not navmesh_tile_revision_by_key.has(tile_key):
+            navmesh_tile_revision_by_key[tile_key] = static_snapshot_revision
+        if not navmesh_tile_semantic_revision_by_key.has(tile_key):
+            navmesh_tile_semantic_revision_by_key[tile_key] = semantic_revision
+        if not navmesh_tile_door_revision_by_key.has(tile_key):
+            navmesh_tile_door_revision_by_key[tile_key] = door_state_revision
+        var terrain_revision := int(navmesh_tile_terrain_revision_by_key.get(tile_key, terrain_global_revision))
+        parts.append("%s:%d:%d:%d:%d" % [
+            tile_key,
+            int(navmesh_tile_revision_by_key.get(tile_key, static_snapshot_revision)),
+            int(navmesh_tile_semantic_revision_by_key.get(tile_key, semantic_revision)),
+            int(navmesh_tile_door_revision_by_key.get(tile_key, door_state_revision)),
+            terrain_revision
+        ])
+    return "|".join(parts)
+
+
+func _approach_input_identity(entry: Dictionary) -> String:
+    var body = entry.get("body")
+    var body_id := (body as Object).get_instance_id() if body is Object and is_instance_valid(body) else 0
+    return "%d|%s|%s|%s|%s|%s|%s|%s|%s|%s" % [
+        body_id,
+        str(entry.get("townCenter", Vector2i.ZERO)),
+        str(entry.get("townRadius", 18)),
+        String(entry.get("townKey", "")),
+        String(entry.get("homeStableId", "")),
+        str(entry.get("homeKey", "")),
+        str(entry.get("homeCell", Vector2i.ZERO)),
+        str(entry.get("porchCell", Vector2i.ZERO)),
+        str(entry.get("interiorMinCell", entry.get("homeInteriorMinCell", Vector2i.ZERO))),
+        str(entry.get("interiorMaxCell", entry.get("homeInteriorMaxCell", Vector2i.ZERO)))
+    ]
+
+
 # Raw geometry only. Collision-backed consumers validate these poses through their
 # own snapshot so that validation can be scheduled under the route budget.
 func approach_candidate_cells_for_target(_entry: Dictionary, target_position: Vector3, _allow_outside := true) -> Array[Vector2i]:
@@ -2368,6 +2645,16 @@ func approach_candidate_cells_for_target(_entry: Dictionary, target_position: Ve
     return result
 
 func cell_is_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
+    return cell_is_standable_goal_in_snapshot(
+        entry,
+        cached_validation_snapshot(entry, allow_outside, moving_home),
+        cell,
+        allow_outside,
+        moving_home
+    )
+
+
+func cell_is_standable_goal_in_snapshot(entry: Dictionary, snapshot: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
     if not cell_allowed_area(entry, cell, allow_outside, moving_home):
         return false
     if private_interior_blocks_entry(entry, cell):
@@ -2375,7 +2662,6 @@ func cell_is_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := 
     var terrain := terrain_allows_step(cell, cell, moving_home)
     if not bool(terrain.get("ok", false)):
         return false
-    var snapshot := cached_validation_snapshot(entry, allow_outside, moving_home)
     var door := door_at(snapshot, cell)
     if door != null and not door_allows_route_for_entry(entry, door, cell, moving_home):
         return false
@@ -2390,6 +2676,16 @@ func cell_is_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := 
     return true
 
 func cell_is_static_standable_goal(entry: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
+    return cell_is_static_standable_goal_in_snapshot(
+        entry,
+        static_validation_snapshot(entry, allow_outside, moving_home),
+        cell,
+        allow_outside,
+        moving_home
+    )
+
+
+func cell_is_static_standable_goal_in_snapshot(entry: Dictionary, snapshot: Dictionary, cell: Vector2i, allow_outside := false, moving_home := false) -> bool:
     if not cell_allowed_area(entry, cell, allow_outside, moving_home):
         return false
     if private_interior_blocks_entry(entry, cell):
@@ -2397,7 +2693,6 @@ func cell_is_static_standable_goal(entry: Dictionary, cell: Vector2i, allow_outs
     var terrain := terrain_allows_step(cell, cell, moving_home)
     if not bool(terrain.get("ok", false)):
         return false
-    var snapshot := static_validation_snapshot(entry, allow_outside, moving_home)
     var door := door_at(snapshot, cell)
     if door != null and not door_allows_route_for_entry(entry, door, cell, moving_home):
         return false
@@ -2416,6 +2711,7 @@ func static_validation_snapshot(entry: Dictionary, allow_outside := false, movin
     return {
         "revision": revision(),
         "staticSnapshotRevision": static_snapshot_revision,
+		"terrainRevision": terrain_revision_clock,
         "dynamicRevision": dynamic_revision,
         "semanticRevision": semantic_revision,
         "doorStateRevision": door_state_revision,

@@ -268,6 +268,13 @@ func instantiate_asset(asset_id: String) -> Node3D:
     var scene := scene_cache.get(asset_id) as PackedScene
     if scene == null:
         return null
+    # Imported GLB meshes are renderer presentation, not world or collision
+    # authority. Godot's dummy renderer can load and retain the importer-owned
+    # PackedScene, but hydrating that scene may hand an imported ArrayMesh RID to
+    # an incompatible dummy mesh owner. Preserve deterministic asset selection
+    # and source identity headlessly without asking the renderer to publish it.
+    if not imported_scene_visual_publication_supported(DisplayServer.get_name()):
+        return headless_imported_scene_proxy(asset_id, scene)
     var instance := scene.instantiate()
     var node := instance as Node3D
     if node == null:
@@ -279,6 +286,20 @@ func instantiate_asset(asset_id: String) -> Node3D:
     if not bool(node.get_meta("render_policy_preapplied", false)):
         apply_render_policy(node, asset_id)
     return node
+
+static func imported_scene_visual_publication_supported(display_server_name: String) -> bool:
+    return display_server_name.strip_edges().to_lower() != "headless"
+
+func headless_imported_scene_proxy(asset_id: String, scene: PackedScene) -> Node3D:
+    var proxy := Node3D.new()
+    proxy.name = "HeadlessImportedVisualProxy"
+    proxy.set_meta("visual_source", "generated_asset")
+    proxy.set_meta("visual_asset_id", asset_id)
+    proxy.set_meta("headless_visual_proxy", true)
+    proxy.set_meta("visual_publication", "headless_imported_scene_proxy")
+    proxy.set_meta("imported_scene_resource_path", scene.resource_path if scene != null else "")
+    apply_render_policy(proxy, asset_id)
+    return proxy
 
 func apply_render_policy(node: Node3D, asset_id: String) -> void:
     var asset: Dictionary = assets_by_id.get(asset_id, {})

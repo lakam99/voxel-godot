@@ -227,6 +227,13 @@ func take_result(token: int) -> Dictionary:
 		return {"status":"pending","token":token}
 	return {"status":"stale_token","token":token}
 
+## A started source build has already claimed the queue's sole worker slot. A
+## camera/view-priority reversal may alter which *new* source is desirable, but
+## must not repeatedly discard this immutable build only to submit the same
+## source again on the next view refresh.
+func is_active_token(token: int) -> bool:
+	return token > 0 and int(_active.get("token", 0)) == token and int(_active.get("epoch", 0)) == _epoch
+
 func cancel(token: int) -> bool:
 	for index in range(_pending.size()):
 		if _pending[index].token == token:

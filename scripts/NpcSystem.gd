@@ -88,6 +88,8 @@ var npc_motion_cursor := 0
 var npc_prefetch_cursor := 0
 var npc_update_active := false
 var external_move_budget_physics_frame := -1
+var cached_visual_player: Node3D = null
+var cached_visual_camera: Camera3D = null
 var published_navigation_semantics := {}
 var metadata_key_sanitizer: RegEx = null
 var navigation_change_flush_pending := false
@@ -191,6 +193,7 @@ func shutdown_for_process_exit() -> Dictionary:
 func clear() -> void:
     cleanup_pathing_agents()
     for entry in npcs:
+        clear_npc_visual_cache(entry)
         var body := entry.get("body") as Node
         if body and is_instance_valid(body) and bool(body.get_meta("npc_owned_by_system", false)):
             body.queue_free()
@@ -205,6 +208,8 @@ func clear() -> void:
     published_navigation_semantics.clear()
     pending_saved_npc_facts.clear()
     focused_dialogue_body = null
+    cached_visual_player = null
+    cached_visual_camera = null
     if autonomy_system:
         autonomy_system.clear()
     if combat:
@@ -238,6 +243,7 @@ func unregister_npc(body: Node) -> void:
         focused_dialogue_body = null
     for entry in npcs.duplicate():
         if entry.get("body") == body:
+            clear_npc_visual_cache(entry)
             npcs.erase(entry)
 
 func focus_dialogue_npc(body: Node, player_position: Vector3) -> void:
@@ -631,6 +637,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
         "weaponId": weapon_for_profile(profile, role, can_fight),
         "heldAnchor": null,
         "heldVisual": null,
+        "_npcHeldAtRest": true,
         "useAnim": 0.0,
         "useAction": "",
         "useDuration": 0.0,
@@ -707,6 +714,7 @@ func register_npc(body: Node3D, profile: Dictionary) -> Dictionary:
     set_npc_speed_mode(entry, NPC_SPEED_MODE_WALKING, "spawn")
     publish_navigation_profile_semantics(entry)
     ensure_npc_held_item(entry)
+    cache_npc_visual_handles(entry)
     npcs.append(entry)
     npc_by_id[body.get_instance_id()] = entry
     return entry
@@ -1158,6 +1166,7 @@ func update_npcs(delta: float, day_factor: float) -> void:
         var entry: Dictionary = entry_value
         var body := entry.get("body") as Node3D
         if body == null or not is_instance_valid(body):
+            clear_npc_visual_cache(entry)
             npcs.erase(entry)
             continue
         var lod_state := "active"
@@ -1245,24 +1254,27 @@ func update_npcs(delta: float, day_factor: float) -> void:
     if monitor != null:
         monitor.end_section("npc_brain_updates", brain_start)
     var motion_start: int = monitor.begin_section("npc_motion_and_visuals") if monitor != null else 0
-    var motion_entries := select_motion_entries(active_entries, delta)
+    var motion_plan := select_motion_plan(active_entries, delta)
+    var selected_actor_ids: Dictionary = motion_plan.get("selectedActorIds", {})
+    var delegated_actor_ids: Dictionary = motion_plan.get("delegatedActorIds", {})
+    var immediate_actor_ids: Dictionary = motion_plan.get("immediateActorIds", {})
     var motion_frame_start := Time.get_ticks_usec()
     var motion_processed := 0
+    var motion_skipped := 0
     for entry in active_entries:
-        if autonomy_system != null and autonomy_system.has_method("physics_route_service_owns_motion") and bool(autonomy_system.physics_route_service_owns_motion(entry)):
-            if autonomy_system.has_method("record_motion_skipped"):
-                autonomy_system.record_motion_skipped(entry, "physics_route_service")
-            update_npc_visual_state(entry, delta)
+        var body := entry.get("body") as Node
+        var actor_instance_id := body.get_instance_id() if body != null and is_instance_valid(body) else 0
+        if delegated_actor_ids.has(actor_instance_id):
             continue
-        if not motion_entries.has(entry):
+        if not selected_actor_ids.has(actor_instance_id):
             if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
                 autonomy_system.record_motion_skipped(entry, "motion_budget")
-            update_npc_visual_state(entry, delta)
+            motion_skipped += 1
             continue
-        if motion_processed > 0 and not npc_motion_requires_immediate_update(entry) and npc_elapsed_ms(motion_frame_start) >= NPC_MOTION_FRAME_BUDGET_MS:
+        if motion_processed > 0 and not immediate_actor_ids.has(actor_instance_id) and npc_elapsed_ms(motion_frame_start) >= NPC_MOTION_FRAME_BUDGET_MS:
             if autonomy_system != null and autonomy_system.has_method("record_motion_skipped"):
                 autonomy_system.record_motion_skipped(entry, "frame_time_budget")
-            update_npc_visual_state(entry, delta)
+            motion_skipped += 1
             continue
         if autonomy_system != null and autonomy_system.has_method("advance_npc_motion"):
             var accumulated_delta := float(entry.get("npcMotionAccumulatedDelta", delta))
@@ -1270,7 +1282,15 @@ func update_npcs(delta: float, day_factor: float) -> void:
             entry["npcMotionAccumulatedDelta"] = maxf(0.0, accumulated_delta - motion_delta)
             autonomy_system.advance_npc_motion(entry, motion_delta, night_factor)
         motion_processed += 1
-        update_npc_visual_state(entry, delta)
+    record_npc_motion_processing(monitor, motion_processed, motion_skipped)
+    var visual_observer := resolve_npc_visual_observer()
+    update_npc_visuals(
+        active_entries,
+        delta,
+        visual_observer.get("player") as Node3D,
+        visual_observer.get("camera") as Camera3D,
+        monitor
+    )
     if monitor != null:
         monitor.end_section("npc_motion_and_visuals", motion_start)
     npc_update_active = false
@@ -1278,17 +1298,39 @@ func update_npcs(delta: float, day_factor: float) -> void:
 func npc_elapsed_ms(start_usec: int) -> float:
     return float(Time.get_ticks_usec() - start_usec) / 1000.0
 
+func record_npc_motion_processing(monitor, processed: int, skipped: int) -> void:
+    if monitor == null:
+        return
+    monitor.increment_counter("npc_motion_processed_actors", processed)
+    monitor.increment_counter("npc_motion_skipped_actors", skipped)
+
 func select_motion_entries(active_entries: Array, delta: float) -> Array:
+    return select_motion_plan(active_entries, delta).get("selectedEntries", [])
+
+func select_motion_plan(active_entries: Array, delta: float) -> Dictionary:
+    var monitor = performance_monitor()
+    var selection_start: int = monitor.begin_section("npc_motion_selection") if monitor != null else 0
     var selected: Array = []
     var budgeted: Array = []
+    var selected_actor_ids := {}
+    var delegated_actor_ids := {}
+    var immediate_actor_ids := {}
     var motion_budget: int = npc_motion_budget(active_entries.size())
+    var can_classify_physics: bool = autonomy_system != null \
+        and autonomy_system.has_method("physics_route_service_owns_motion")
     for entry in active_entries:
         entry["npcMotionAccumulatedDelta"] = minf(
             float(entry.get("npcMotionAccumulatedDelta", 0.0)) + delta,
             delta * NPC_MOTION_ACCUMULATED_DELTA_CAP
         )
+        var body := entry.get("body") as Node
+        var actor_instance_id := body.get_instance_id() if body != null and is_instance_valid(body) else 0
+        if can_classify_physics and bool(autonomy_system.physics_route_service_owns_motion(entry)):
+            delegated_actor_ids[actor_instance_id] = true
+            continue
         if npc_motion_requires_immediate_update(entry):
             selected.append(entry)
+            immediate_actor_ids[actor_instance_id] = true
         else:
             budgeted.append(entry)
     var remaining_budget: int = maxi(0, motion_budget - selected.size())
@@ -1301,11 +1343,28 @@ func select_motion_entries(active_entries: Array, delta: float) -> Array:
             scanned += 1
             processed += 1
         npc_motion_cursor = (npc_motion_cursor + max(1, scanned)) % max(1, budgeted.size())
-    var monitor = performance_monitor()
+    for entry in selected:
+        var body := entry.get("body") as Node
+        if body != null and is_instance_valid(body):
+            selected_actor_ids[body.get_instance_id()] = true
     if monitor != null:
         monitor.increment_counter("npc_motion_budget_selected", selected.size())
-        monitor.increment_counter("npc_motion_budget_skipped", max(0, active_entries.size() - selected.size()))
-    return selected
+        monitor.increment_counter("npc_motion_physics_delegated", delegated_actor_ids.size())
+        monitor.increment_counter("npc_motion_budget_skipped",
+            max(0, active_entries.size() - delegated_actor_ids.size() - selected.size()))
+        monitor.increment_counter("npc_motion_active_actors", active_entries.size())
+        monitor.increment_counter("npc_motion_delegated_actors", delegated_actor_ids.size())
+        monitor.increment_counter("npc_motion_immediate_actors", immediate_actor_ids.size())
+        monitor.increment_counter("npc_motion_budgeted_actors", budgeted.size())
+        monitor.increment_counter("npc_motion_selected_actors", selected.size())
+        monitor.end_section("npc_motion_selection", selection_start)
+    return {
+        "selectedEntries": selected,
+        "selectedActorIds": selected_actor_ids,
+        "delegatedActorIds": delegated_actor_ids,
+        "immediateActorIds": immediate_actor_ids,
+        "budgetedCount": budgeted.size()
+    }
 
 func npc_motion_budget(active_count: int) -> int:
     if active_count > NPC_MOTION_BUDGET_VERY_CROWDED_THRESHOLD:
@@ -1571,16 +1630,104 @@ func valid_hostile_node(value) -> Node3D:
     return value as Node3D
 
 func update_npc_visual_state(entry: Dictionary, delta: float) -> void:
-    entry["detourTimer"] = maxf(0.0, float(entry.get("detourTimer", 0.0)) - delta)
-    if float(entry.get("detourTimer", 0.0)) <= 0.0:
-        entry["detourTarget"] = NO_DETOUR
-    entry["pathRefreshTimer"] = maxf(0.0, float(entry.get("pathRefreshTimer", 0.0)) - delta)
-    entry["jumpIntentTime"] = maxf(0.0, float(entry.get("jumpIntentTime", 0.0)) - delta)
-    var body := entry.get("body") as Node
-    if body and float(entry.get("jumpIntentTime", 0.0)) <= 0.0:
-        body.set_meta("npc_jump_intent", false)
-    update_name_label_visibility(entry)
+    var observer := resolve_npc_visual_observer()
+    update_npc_visuals(
+        [entry],
+        delta,
+        observer.get("player") as Node3D,
+        observer.get("camera") as Camera3D
+    )
+
+func update_npc_visuals(active_entries: Array, delta: float, player_body: Node3D, camera: Camera3D, monitor = null) -> void:
+    if monitor == null:
+        monitor = performance_monitor()
+    var label_start: int = monitor.begin_section("npc_visual_label") if monitor != null else 0
+    for entry_value in active_entries:
+        var entry: Dictionary = entry_value
+        advance_npc_visual_timers(entry, delta)
+        update_name_label_visibility(entry, player_body, camera)
+    if monitor != null:
+        monitor.end_section("npc_visual_label", label_start)
+    var held_start: int = monitor.begin_section("npc_visual_held") if monitor != null else 0
+    for entry_value in active_entries:
+        var entry: Dictionary = entry_value
+        update_npc_held_animation(entry, delta)
+    if monitor != null:
+        monitor.end_section("npc_visual_held", held_start)
+
+func advance_npc_visual_timers(entry: Dictionary, delta: float) -> void:
+    var detour_timer := float(entry.get("detourTimer", 0.0))
+    if detour_timer > 0.0:
+        detour_timer = maxf(0.0, detour_timer - delta)
+        entry["detourTimer"] = detour_timer
+        if detour_timer <= 0.0 and entry.get("detourTarget", NO_DETOUR) != NO_DETOUR:
+            entry["detourTarget"] = NO_DETOUR
+    var path_refresh_timer := float(entry.get("pathRefreshTimer", 0.0))
+    if path_refresh_timer > 0.0:
+        entry["pathRefreshTimer"] = maxf(0.0, path_refresh_timer - delta)
+    var jump_intent_time := float(entry.get("jumpIntentTime", 0.0))
+    if jump_intent_time <= 0.0:
+        return
+    jump_intent_time = maxf(0.0, jump_intent_time - delta)
+    entry["jumpIntentTime"] = jump_intent_time
+    if jump_intent_time <= 0.0:
+        var body := entry.get("body") as Node
+        if body != null and is_instance_valid(body):
+            body.set_meta("npc_jump_intent", false)
+
+func update_npc_held_animation(entry: Dictionary, delta: float) -> bool:
+    if visual_factory == null:
+        return false
+    var anchor_value = entry.get("heldAnchor")
+    if anchor_value == null or not is_instance_valid(anchor_value) or not (anchor_value is Node3D):
+        return false
+    var anchor := anchor_value as Node3D
+    var animation_active := float(entry.get("useAnim", 0.0)) > 0.0
+    if not animation_active and bool(entry.get("_npcHeldAtRest", false)):
+        return false
     visual_factory.update_held_animation(entry, delta)
+    entry["_npcHeldAtRest"] = float(entry.get("useAnim", 0.0)) <= 0.0
+    return true
+
+func resolve_npc_visual_observer() -> Dictionary:
+    var player_value = main.get("player") if main != null else null
+    if player_value == null or not is_instance_valid(player_value) or not (player_value is Node3D):
+        cached_visual_player = null
+        cached_visual_camera = null
+        return {"player": null, "camera": null}
+    var current_player := player_value as Node3D
+    if cached_visual_player != current_player or not is_instance_valid(cached_visual_player):
+        cached_visual_player = current_player
+        cached_visual_camera = null
+    var camera_value = current_player.get("camera")
+    if camera_value == null or not is_instance_valid(camera_value) or not (camera_value is Camera3D):
+        cached_visual_camera = null
+    else:
+        var current_camera := camera_value as Camera3D
+        if cached_visual_camera != current_camera or not is_instance_valid(cached_visual_camera):
+            cached_visual_camera = current_camera
+    return {"player": cached_visual_player, "camera": cached_visual_camera}
+
+func cache_npc_visual_handles(entry: Dictionary) -> void:
+    var body := entry.get("body") as Node3D
+    if body == null or not is_instance_valid(body):
+        clear_npc_visual_cache(entry)
+        return
+    entry["_npcNameLabel"] = body.get_node_or_null("NpcNameLabel") as Label3D
+
+func cached_npc_name_label(entry: Dictionary, body: Node3D) -> Label3D:
+    var cached_value = entry.get("_npcNameLabel")
+    if cached_value != null and is_instance_valid(cached_value) and cached_value is Label3D:
+        var valid_cached_label := cached_value as Label3D
+        if valid_cached_label.get_parent() == body:
+            return valid_cached_label
+    var cached_label := body.get_node_or_null("NpcNameLabel") as Label3D
+    entry["_npcNameLabel"] = cached_label
+    return cached_label
+
+func clear_npc_visual_cache(entry: Dictionary) -> void:
+    entry.erase("_npcNameLabel")
+    entry.erase("_npcHeldAtRest")
 
 func update_npc_needs(entry: Dictionary, delta: float, night_factor: float) -> void:
     var max_hunger := float(entry.get("maxHunger", 100.0))
@@ -1603,29 +1750,35 @@ func update_npc_needs(entry: Dictionary, delta: float, night_factor: float) -> v
                 body.set_meta("npc_hunger", hunger)
             last_message = "%s ate %s" % [String(entry.get("name", "NPC")), ItemCatalogScript.label(item_id)]
 
-func update_name_label_visibility(entry: Dictionary) -> void:
+func update_name_label_visibility(entry: Dictionary, player_body: Node3D = null, camera: Camera3D = null) -> bool:
     var body := entry.get("body") as Node3D
     if body == null or not is_instance_valid(body):
-        return
-    var label := body.get_node_or_null("NpcNameLabel") as Label3D
+        return false
+    var label := cached_npc_name_label(entry, body)
     if label == null:
-        return
+        return false
     var show := bool(body.get_meta("npc_dialogue_focused", false))
-    var player_body := main.get("player") as Node3D if main != null else null
-    if player_body != null:
-        var distance := body.global_position.distance_to(player_body.global_position)
-        if distance <= CELL * 5.25:
+    if not show and player_body != null and is_instance_valid(player_body):
+        var distance_squared := body.global_position.distance_squared_to(player_body.global_position)
+        if distance_squared <= (CELL * 5.25) * (CELL * 5.25):
             show = true
-        elif npc_is_targeted_by_camera(body, player_body, distance):
+        elif npc_is_targeted_by_camera(body, player_body, sqrt(distance_squared), camera):
             show = true
-    label.visible = show
-    label.no_depth_test = false
+    var changed := false
+    if label.visible != show:
+        label.visible = show
+        changed = true
+    if label.no_depth_test:
+        label.no_depth_test = false
+        changed = true
+    return changed
 
-func npc_is_targeted_by_camera(body: Node3D, player_body: Node, distance: float) -> bool:
+func npc_is_targeted_by_camera(body: Node3D, player_body: Node, distance: float, camera: Camera3D = null) -> bool:
     if distance > CELL * 10.0 or player_body == null:
         return false
-    var camera := player_body.get("camera") as Camera3D
-    if camera == null:
+    if camera == null and is_instance_valid(player_body):
+        camera = player_body.get("camera") as Camera3D
+    if camera == null or not is_instance_valid(camera):
         return false
     var to_label := (body.global_position + Vector3(0.0, 1.20, 0.0)) - camera.global_position
     if to_label.length_squared() <= 0.001:
@@ -1637,6 +1790,7 @@ func play_npc_use(entry: Dictionary, action: String) -> void:
     entry["useAction"] = action
     entry["useDuration"] = 0.34 if action == "shoot" else 0.28
     entry["useAnim"] = float(entry["useDuration"])
+    entry["_npcHeldAtRest"] = false
     npc_use_animations += 1
 
 func face_position(body: Node3D, target: Vector3) -> void:
@@ -1743,13 +1897,50 @@ func find_forage_target(entry: Dictionary) -> Node3D:
     if monitor != null:
         monitor.increment_counter("forage_scan_nodes", scanned_nodes)
         monitor.end_section("job_forage_scan", scan_start)
-    var chosen: Node3D = null
-    if pathing != null and pathing.has_method("choose_forage_target"):
-        chosen = pathing.choose_forage_target(entry, candidates)
-    else:
-        chosen = candidates[0] if not candidates.is_empty() else null
+    # Resource selection is advisory. Do not synchronously route-score every
+    # forage candidate here: the unchanged V2 route authority proves or rejects
+    # the selected target when the worker submits its movement intent. Invalid
+    # targets then progress through the existing unreachable/cooldown retarget
+    # flow. Stable distance + source identity keeps this choice deterministic.
+    var chosen: Node3D = deterministic_forage_candidate(candidates, body.global_position)
+    if monitor != null:
+        monitor.increment_counter("forage_advisory_candidates_considered", candidates.size())
     remember_cached_resource_target(entry, "forage", chosen)
     return chosen
+
+static func deterministic_forage_candidate(candidates: Array[Node3D], origin: Vector3) -> Node3D:
+    var ranked: Array[Dictionary] = []
+    for candidate in candidates:
+        if candidate == null or not is_instance_valid(candidate):
+            continue
+        var candidate_position := candidate.global_position if candidate.is_inside_tree() else candidate.position
+        ranked.append({
+            "node": candidate,
+            "distanceSquared": candidate_position.distance_squared_to(origin),
+            "stableKey": forage_candidate_stable_key(candidate)
+        })
+    ranked.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        var a_distance := float(a.get("distanceSquared", INF))
+        var b_distance := float(b.get("distanceSquared", INF))
+        if not is_equal_approx(a_distance, b_distance):
+            return a_distance < b_distance
+        return String(a.get("stableKey", "")) < String(b.get("stableKey", ""))
+    )
+    return ranked[0].get("node") as Node3D if not ranked.is_empty() else null
+
+static func forage_candidate_stable_key(node: Node) -> String:
+    if node == null or not is_instance_valid(node):
+        return ""
+    if node.has_meta("prop_id"):
+        return "prop:%s" % String(node.get_meta("prop_id"))
+    if node.has_meta("cell"):
+        var cell = node.get_meta("cell")
+        var block_type := String(node.get_meta("block_type", node.name))
+        if cell is Vector3i:
+            return "block:%d,%d,%d:%s" % [cell.x, cell.y, cell.z, block_type]
+    if node.is_inside_tree():
+        return "path:%s" % String(node.get_path())
+    return "name:%s" % String(node.name)
 
 func filter_forage_candidates(entry: Dictionary, candidates: Array[Node3D]) -> Array[Node3D]:
     var filtered: Array[Node3D] = []
@@ -2387,6 +2578,8 @@ func complete_station_use(entry: Dictionary, action: String) -> bool:
 func find_trader_stall(entry: Dictionary) -> Node3D:
     if main == null:
         return null
+    var monitor = performance_monitor()
+    var total_start: int = monitor.begin_section("npc_find_trader_stall") if monitor != null else 0
     var body := entry.get("body") as Node3D
     var origin: Vector3 = body.global_position if body != null else entry.get("porchPosition", Vector3.ZERO)
     var best: Node3D = null
@@ -2405,6 +2598,7 @@ func find_trader_stall(entry: Dictionary) -> Node3D:
             if String(block.get_meta("block_type", "")) != "traderStall":
                 continue
             stalls.append(block)
+    var select_start: int = monitor.begin_section("npc_find_trader_stall_select") if monitor != null else 0
     for block in stalls:
         if block == null or not is_instance_valid(block):
             continue
@@ -2419,6 +2613,9 @@ func find_trader_stall(entry: Dictionary) -> Node3D:
         if score < best_score:
             best = block
             best_score = score
+    if monitor != null:
+        monitor.end_section("npc_find_trader_stall_select", select_start)
+        monitor.end_section("npc_find_trader_stall", total_start)
     return best
 
 func release_job_reservation(entry: Dictionary, reason := "released") -> void:
@@ -2871,6 +3068,10 @@ func cleanup_npc_route_state(actor_id: String, entry := {}, reason := "cleanup")
             "activeDoorTrafficGroupId",
             "jobReservationId",
             "jobApproachSlotId",
+			"_traderFallbackSelection",
+			"traderFallbackSelectionPending",
+			"traderFallbackRequestId",
+			"traderFallbackRequestSerial",
             "trafficWaitReason",
             "_yieldRetreatTicks",
             "_yieldRetreatDirection",
@@ -3237,6 +3438,26 @@ func choose_day_target(entry: Dictionary) -> Vector3:
         return entry.get("porchPosition", Vector3.ZERO)
     return pathing.choose_day_target(entry)
 
+func advance_trader_fallback_target(entry: Dictionary, request_id: String) -> Dictionary:
+    if pathing == null:
+        return {"status":"exhausted", "reason":"missing_pathing"}
+    var goal_planner = pathing.get("goal_planner")
+    if goal_planner == null or not goal_planner.has_method("advance_trader_fallback_target"):
+        return {"status":"exhausted", "reason":"missing_trader_fallback_selector"}
+    return goal_planner.advance_trader_fallback_target(entry, request_id)
+
+func clear_trader_fallback_target_selection(entry: Dictionary, reason := "cancelled") -> void:
+    if pathing == null:
+        entry.erase("_traderFallbackSelection")
+        entry.erase("traderFallbackSelectionPending")
+        return
+    var goal_planner = pathing.get("goal_planner")
+    if goal_planner != null and goal_planner.has_method("clear_trader_fallback_target_selection"):
+        goal_planner.clear_trader_fallback_target_selection(entry, reason)
+    else:
+        entry.erase("_traderFallbackSelection")
+        entry.erase("traderFallbackSelectionPending")
+
 func choose_job_target(entry: Dictionary) -> Vector3:
     if pathing == null:
         return entry.get("porchPosition", Vector3.ZERO)
@@ -3301,6 +3522,7 @@ func npc_weapon_is_melee(weapon_id: String) -> bool:
 
 func ensure_npc_held_item(entry: Dictionary) -> void:
     visual_factory.ensure_held_item(entry)
+    entry["_npcHeldAtRest"] = true
 
 func add_npc_collider(parent: Node3D) -> void:
     visual_factory.add_collider(parent)

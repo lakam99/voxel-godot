@@ -54,10 +54,10 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 			"completedSamples": 0
 		})
 	var start_overlap_escape_colliders := _current_overlap_escape_colliders(entry, body, shape, route)
-	var terrain_motion_from := _grounded_sample(body.global_position)
+	var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
+	var terrain_motion_from := _probe_resume_grounded_sample(body.global_position, cursor)
 	var sample_count := 0
 	var max_samples := int(options.get("maxSamples", MAX_ROUTE_PROBE_SAMPLES))
-	var cursor: Dictionary = options.get("cursor", {}) if options.get("cursor", {}) is Dictionary else {}
 	var start_segment := maxi(0, int(cursor.get("segmentIndex", 0)))
 	var start_sample := maxi(1, int(cursor.get("sampleIndex", 1)))
 	var completed_before := maxi(0, int(cursor.get("completedSamples", 0)))
@@ -78,7 +78,8 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 					"cursor": {
 						"segmentIndex": index,
 						"sampleIndex": sample_index,
-						"completedSamples": completed_before + sample_count
+						"completedSamples": completed_before + sample_count,
+						"previousGroundedSample": terrain_motion_from
 					}
 				})
 			sample_count += 1
@@ -109,6 +110,12 @@ func probe_route(entry: Dictionary, route: Dictionary, intent: Dictionary, optio
 		"terrainMotionMask": terrain_motion_collision_mask(body),
 		"completedSamples": completed_before + sample_count
 	})
+
+func _probe_resume_grounded_sample(body_position: Vector3, cursor: Dictionary) -> Vector3:
+	var previous = cursor.get("previousGroundedSample", null)
+	if previous is Vector3:
+		return previous
+	return _grounded_sample(body_position)
 
 func _flat_points_close(a: Vector3, b: Vector3) -> bool:
 	return Vector2(a.x - b.x, a.z - b.z).length() <= DUPLICATE_WAYPOINT_EPSILON

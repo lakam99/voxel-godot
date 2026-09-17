@@ -4,6 +4,7 @@ const NavigationBackendConfigScript := preload("res://scripts/npc_ai/navigation/
 const NavigationBakeDescriptorScript := preload("res://scripts/npc_ai/contracts/NavigationBakeDescriptor.gd")
 const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
 const NpcAutonomySystemScript := preload("res://scripts/npc_ai/NpcAutonomySystem.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const BuildingClearanceScript := preload("res://scripts/buildings/layout/BuildingLayoutClearance.gd")
 const RoutePublicationAdapter := preload("res://scripts/npc_ai/routing/NpcRouteCoordinatorAdapter.gd")
 const NavigationPublicationWorkerScript := preload("res://scripts/npc_ai/navigation/NavigationPublicationWorker.gd")
@@ -2515,15 +2516,30 @@ func verify_capture_retirement_publication_handoff() -> void:
 	# The old prepared descriptor stays dirty until the normal publisher installs
 	# the fresh source; it must not make the current request permanently invalid.
 	var original_key: String = adapter.navmesh_tile_source_key_for_tile("0,0")
+	var unaffected_key: String = adapter.navmesh_tile_source_key_for_tile("1,0")
+	var static_revision_before_terrain := adapter.static_snapshot_revision
+	var collision_inventory_before_terrain := adapter.cached_static_collision_records.duplicate(true)
 	var previous: Dictionary = service.accepted_tile_state("0,0",original_key,world.seed_text,adapter)
 	var previous_serial: int = int(previous.acceptedSerial)
 	previous = {}
-	var source_event := {"tileKey":"0,0","changeKinds":["terrain_edit"],"revision":adapter.static_snapshot_revision+1}
+	var terrain_cell_size: float = NpcConstantsScript.CELL_SIZE
+	var source_event := {"tileKey":"0,0","changeKinds":["terrain_edit"],"revision":adapter.static_snapshot_revision+1,
+		"bounds":AABB(Vector3(6.5*terrain_cell_size,-terrain_cell_size,6.5*terrain_cell_size),
+			Vector3(terrain_cell_size,terrain_cell_size*2.0,terrain_cell_size))}
 	service.apply_navigation_events([source_event])
 	adapter.apply_navigation_events([source_event])
 	var replacement_key: String = adapter.navmesh_tile_source_key_for_tile("0,0")
+	var unaffected_replacement_key: String = adapter.navmesh_tile_source_key_for_tile("1,0")
 	var replacement_state: Dictionary = service.accepted_tile_state("0,0",replacement_key,world.seed_text,adapter)
 	var stale_state: Dictionary = service.accepted_tile_state("0,0",original_key,world.seed_text,adapter)
+	add_result("capture_handoff_terrain_edit_revises_local_surface_without_global_collision_rebuild",replacement_key!=original_key \
+		and adapter.static_snapshot_revision==static_revision_before_terrain \
+		and unaffected_replacement_key==unaffected_key \
+		and adapter.cached_static_collision_records==collision_inventory_before_terrain,{
+		"originalKey":original_key,"replacementKey":replacement_key,
+		"unaffectedKey":unaffected_key,"unaffectedReplacementKey":unaffected_replacement_key,
+		"staticRevision":adapter.static_snapshot_revision,
+		"collisionCount":adapter.cached_static_collision_records.size()})
 	add_result("capture_handoff_fresh_source_is_retryable_while_predecessor_dirty",replacement_key!=original_key
 		and service.dirty_regions_by_region.has("region:chunk:0,0") and replacement_state.status=="absent"
 		and replacement_state.reason=="navigation_accepted_source_obsolete" and not replacement_state.sourceOwned

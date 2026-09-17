@@ -331,7 +331,15 @@ func pending_job_count() -> int:
 func completed_job_count() -> int:
 	return completed_jobs.size()
 
-func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 999999)) -> Dictionary:
+func process_jobs(
+	max_jobs := 1,
+	budget_ms := 3.0,
+	center := Vector2i(999999, 999999),
+	payload_max_cells := ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME,
+	publication_deadline_usec := 0,
+	total_payload_max_cells := 0
+) -> Dictionary:
+	var call_started_usec := Time.get_ticks_usec()
 	var collect_started_usec := Time.get_ticks_usec()
 	collect_retired_worker_tasks(false)
 	advance_retired_payload_cleanup(false)
@@ -416,7 +424,24 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 			"elapsedMs": elapsed_ms(started_usec)
 		}
 	if can_process_native_section_jobs_async():
-		var started := start_next_async_native_job(center, budget_ms)
+		var payload_deadline_usec := int(publication_deadline_usec)
+		if payload_deadline_usec > 0:
+			payload_deadline_usec = mini(
+				payload_deadline_usec,
+				call_started_usec + maxi(100, roundi(maxf(0.1, float(budget_ms)) * 1000.0))
+			)
+		var started := {}
+		# Collection and completed-worker hydration happen before this point. Do
+		# not enter the payload state machine when they consumed the gameplay
+		# slice; pending and active jobs remain owned by their current queues.
+		if payload_stage_budget_ms(budget_ms, payload_deadline_usec) > 0.0:
+			started = start_next_async_native_job(
+				center,
+				budget_ms,
+				payload_max_cells,
+				payload_deadline_usec,
+				total_payload_max_cells
+			)
 		return {
 			"processed": int(started.get("processed", 0)),
 			"dropped": int(started.get("dropped", 0)),
@@ -494,7 +519,13 @@ func process_jobs(max_jobs := 1, budget_ms := 3.0, center := Vector2i(999999, 99
 		"elapsedMs": elapsed_ms(started_usec)
 	}
 
-func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictionary:
+func start_next_async_native_job(
+	center: Vector2i,
+	budget_ms := 2.0,
+	payload_max_cells := ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME,
+	publication_deadline_usec := 0,
+	total_payload_max_cells := 0
+) -> Dictionary:
 	var result := {
 		"started": false,
 		"dropped": 0,
@@ -521,6 +552,11 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		"requestedSignature": "",
 		"currentSignature": ""
 	}
+	# process_jobs normally performs the first admission check, but this method
+	# remains callable by focused services. Guard before its duplicated cleanup
+	# so no later stage starts from an already exhausted gameplay slice.
+	if payload_stage_budget_ms(budget_ms, publication_deadline_usec) <= 0.0:
+		return result
 	var retired_payload_cleanup_started_usec := Time.get_ticks_usec()
 	advance_retired_payload_cleanup(false)
 	result["retiredPayloadCleanupMs"] = elapsed_ms(retired_payload_cleanup_started_usec)
@@ -533,6 +569,10 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	if not retired_worker_tasks.is_empty():
 		return result
 	if async_payload_job.is_empty():
+		# Cleanup may have consumed the remaining slice. Keep the request in
+		# pending_jobs rather than selecting/promoting it without time to advance.
+		if payload_stage_budget_ms(budget_ms, publication_deadline_usec) <= 0.0:
+			return result
 		var payload_begin_started_usec := Time.get_ticks_usec()
 		var began := begin_next_async_payload_job(center)
 		result["payloadBeginMs"] = elapsed_ms(payload_begin_started_usec)
@@ -564,6 +604,8 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		result["dropped"] = 1
 		return result
 	var fluid_only := bool(async_payload_job.get("fluidOnly", false))
+	var terrain_payload_cell_cap := maxi(1, int(payload_max_cells))
+	var remaining_payload_cells := maxi(0, int(total_payload_max_cells))
 	var terrain_state: Dictionary = async_payload_job.get("terrainState", {}) if async_payload_job.get("terrainState", {}) is Dictionary else {}
 	if terrain_state.is_empty():
 		var bounds_state: Dictionary = async_payload_job.get("boundsState", {}) if async_payload_job.get("boundsState", {}) is Dictionary else {}
@@ -572,17 +614,25 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 			result["dropped"] = 1
 			result["dropReason"] = "terrain_bounds_state_unavailable"
 			return result
+		var bounds_budget_ms := payload_stage_budget_ms(budget_ms, publication_deadline_usec)
+		if bounds_budget_ms <= 0.0:
+			return result
 		var bounds_advanced_value = world_generation.call(
 			"advance_terrain_meshing_bounds_state",
 			bounds_state,
-			maxf(0.1, float(budget_ms)),
-			ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME
+			bounds_budget_ms,
+			terrain_payload_cell_cap
 		)
 		var bounds_advanced: Dictionary = bounds_advanced_value if bounds_advanced_value is Dictionary else {}
 		async_payload_job["boundsState"] = bounds_advanced.get("state", bounds_state)
 		result["boundsPrepMs"] = float(bounds_advanced.get("elapsedMs", 0.0))
 		result["boundsColumns"] = int(bounds_advanced.get("columnsProcessed", 0))
 		if not bool(bounds_advanced.get("complete", false)):
+			return result
+		# A final bounds unit may cooperatively cross the deadline. Persist its
+		# completed cursor, but do not launch terrain/exact-fluid state creation
+		# until a later admitted slice.
+		if payload_stage_budget_ms(budget_ms, publication_deadline_usec) <= 0.0:
 			return result
 		var bounds: Dictionary = bounds_advanced.get("bounds", {}) if bounds_advanced.get("bounds", {}) is Dictionary else {}
 		var terrain_state_started_usec := Time.get_ticks_usec()
@@ -621,16 +671,26 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		async_payload_job["terrainPayload"] = payload
 	elif payload.is_empty():
 		terrain_state = async_payload_job.get("terrainState", {}) if async_payload_job.get("terrainState", {}) is Dictionary else {}
+		var terrain_budget_ms := payload_stage_budget_ms(budget_ms, publication_deadline_usec)
+		if terrain_budget_ms <= 0.0:
+			return result
+		var terrain_cell_cap := terrain_payload_cell_cap
+		if int(total_payload_max_cells) > 0:
+			if remaining_payload_cells <= 0:
+				return result
+			terrain_cell_cap = mini(terrain_cell_cap, remaining_payload_cells)
 		var terrain_advanced_value = world_generation.call(
 			"advance_section_payload_state",
 			terrain_state,
-			maxf(0.1, float(budget_ms)),
-			ASYNC_PAYLOAD_PREP_MAX_CELLS_PER_FRAME
+			terrain_budget_ms,
+			terrain_cell_cap
 		)
 		var terrain_advanced: Dictionary = terrain_advanced_value if terrain_advanced_value is Dictionary else {}
 		async_payload_job["terrainState"] = terrain_advanced.get("state", terrain_state)
 		result["payloadPrepMs"] = float(terrain_advanced.get("elapsedMs", 0.0))
 		result["payloadCells"] = int(terrain_advanced.get("cellsProcessed", 0))
+		if int(total_payload_max_cells) > 0:
+			remaining_payload_cells = maxi(0, remaining_payload_cells - int(result["payloadCells"]))
 		result["preparedSections"] = int(terrain_advanced.get("preparedSections", 0))
 		if not bool(terrain_advanced.get("complete", false)):
 			return result
@@ -644,11 +704,20 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		result["terrainPayloadPublishMs"] = elapsed_ms(terrain_payload_publish_started_usec)
 	var fluid_state: Dictionary = async_payload_job.get("fluidState", {}) if async_payload_job.get("fluidState", {}) is Dictionary else {}
 	var fluid_budget_ms := maxf(0.1, float(budget_ms) - float(result.get("payloadPrepMs", 0.0)))
+	if int(publication_deadline_usec) > 0:
+		fluid_budget_ms = payload_stage_budget_ms(budget_ms, publication_deadline_usec)
+		if fluid_budget_ms <= 0.0:
+			return result
+	var fluid_cell_cap := ASYNC_EXACT_FLUID_PAYLOAD_MAX_CELLS_PER_FRAME
+	if int(total_payload_max_cells) > 0:
+		if remaining_payload_cells <= 0:
+			return result
+		fluid_cell_cap = mini(fluid_cell_cap, remaining_payload_cells)
 	var fluid_advanced_value = world_generation.call(
 		"advance_exact_fluid_payload_state",
 		fluid_state,
 		fluid_budget_ms,
-		ASYNC_EXACT_FLUID_PAYLOAD_MAX_CELLS_PER_FRAME
+		fluid_cell_cap
 	)
 	var fluid_advanced: Dictionary = fluid_advanced_value if fluid_advanced_value is Dictionary else {}
 	async_payload_job["fluidState"] = fluid_advanced.get("state", fluid_state)
@@ -671,6 +740,8 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 		result["dropped"] = 1
 		result["dropReason"] = "exact_fluid_payload_empty"
 		return result
+	if payload_stage_budget_ms(budget_ms, publication_deadline_usec) <= 0.0:
+		return result
 	var fluid_payload_publish_started_usec := Time.get_ticks_usec()
 	payload["fluidPayload"] = fluid_payload
 	payload["hasFluid"] = bool(fluid_payload.get("hasFluid", false))
@@ -682,12 +753,22 @@ func start_next_async_native_job(center: Vector2i, budget_ms := 2.0) -> Dictiona
 	# retire the allocation graph on the gameplay frame.
 	var handoff_prepare_started_usec := Time.get_ticks_usec()
 	var payload_job_to_retire := async_payload_job
-	async_payload_job = {}
 	result["payloadHandoffPrepMs"] = elapsed_ms(handoff_prepare_started_usec)
+	if payload_stage_budget_ms(budget_ms, publication_deadline_usec) <= 0.0:
+		return result
+	async_payload_job = {}
 	var worker_handoff_started_usec := Time.get_ticks_usec()
 	result = start_async_worker_from_payload(key, requested_signature, payload, include_collision, fluid_only, result, payload_job_to_retire)
 	result["workerHandoffMs"] = elapsed_ms(worker_handoff_started_usec)
 	return result
+
+func payload_stage_budget_ms(requested_budget_ms: float, publication_deadline_usec: int) -> float:
+	if publication_deadline_usec <= 0:
+		return maxf(0.1, requested_budget_ms)
+	var remaining_usec := publication_deadline_usec - Time.get_ticks_usec()
+	if remaining_usec < 100:
+		return 0.0
+	return minf(maxf(0.1, requested_budget_ms), float(remaining_usec) / 1000.0)
 
 func begin_next_async_payload_job(center: Vector2i) -> Dictionary:
 	var result := {

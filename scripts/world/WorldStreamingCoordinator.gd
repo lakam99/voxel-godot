@@ -14,6 +14,8 @@ const MAX_SOURCE_BINDINGS := 16
 const MAX_SOURCE_GROUPS := 30000
 const RELEASE_HYSTERESIS_MS := 10000
 const MAX_EXPIRY_TRANSACTIONS_PER_FRAME := 1
+const SOURCE_SNAPSHOT_SLICE_USEC := 750
+const SOURCE_SNAPSHOT_UNIT_CAP := 96
 const FOREGROUND_PRIORITY := 0
 const REQUIRED_DOMAINS := ["terrain", "structures", "navigation"]
 const RETAINED_DOMAINS := ["terrain", "render", "navigation", "discovery"]
@@ -35,6 +37,14 @@ var _expiry_cursor := 0
 var _last_advance_frame := -1
 var max_advance_usec := 0
 var _navigation_turn := false
+var _source_compile_generation := 0
+var _source_manifest_revision := 0
+var _source_snapshot_dirty := true
+var _source_compile_job: Dictionary = {}
+var _retained_source_snapshot: Array[Dictionary] = []
+var _retained_source_snapshot_identity := PackedByteArray()
+var _source_compile_metrics := {"ownerUnits":0,"admissionUnits":0,"navigationUnits":0,
+	"bindingUnits":0,"groupUnits":0,"phase":"idle","restarts":0}
 
 func configure(seed_text: String, providers: Dictionary = {}) -> void:
 	# IDs never restart: a release from an old world cannot release its successor.
@@ -51,6 +61,15 @@ func configure(seed_text: String, providers: Dictionary = {}) -> void:
 	_expiry_cursor = 0
 	_last_advance_frame = -1
 	_navigation_turn = false
+	_source_compile_generation += 1
+	_source_snapshot_dirty = true
+	_source_compile_job = {}
+	var had_source_snapshot:=not _retained_source_snapshot.is_empty()
+	_retained_source_snapshot = []
+	var empty_hasher:=HashingContext.new()
+	empty_hasher.start(HashingContext.HASH_SHA256)
+	_retained_source_snapshot_identity=empty_hasher.finish()
+	if had_source_snapshot: _source_manifest_revision += 1
 	_view_revision += 1
 	_rebuild()
 
@@ -165,7 +184,7 @@ func release_region(request_id: int) -> void:
 	if not _requests.has(request_id) or int(_requests[request_id].releaseAt) >= 0:
 		return
 	_requests[request_id].releaseAt = Time.get_ticks_msec() + RELEASE_HYSTERESIS_MS
-	_rebuild()
+	_rebuild(false)
 
 func advance(now_ms := -1, budget_usec := 4000) -> void:
 	var started := Time.get_ticks_usec()
@@ -173,6 +192,7 @@ func advance(now_ms := -1, budget_usec := 4000) -> void:
 	var monitor = structures.performance_monitor() if is_instance_valid(structures) and structures.has_method("performance_monitor") else null
 	var now: int = Time.get_ticks_msec() if now_ms < 0 else now_ms
 	var changed := false
+	var source_manifest_changed := false
 	var expiry_ids: Array = _requests.keys()
 	expiry_ids.sort()
 	if not expiry_ids.is_empty(): _expiry_cursor %= expiry_ids.size()
@@ -192,6 +212,7 @@ func advance(now_ms := -1, budget_usec := 4000) -> void:
 			if monitor != null: monitor.observe_duration("streaming_expiry_release",float(Time.get_ticks_usec()-release_started)/1000.0)
 			_requests.erase(id)
 			changed = true
+			source_manifest_changed = true
 			break
 		var expiry_started := Time.get_ticks_usec()
 		var candidate: Dictionary = _expire_members(request,now)
@@ -211,11 +232,13 @@ func advance(now_ms := -1, budget_usec := 4000) -> void:
 			var expiry_admitted := _admit_navigation(candidate)
 			if monitor != null: monitor.observe_duration("streaming_expiry_navigation_admission",float(Time.get_ticks_usec()-expiry_admission_started)/1000.0)
 			if not expiry_admitted: break
+		source_manifest_changed = bool(candidate.get("_sourceManifestChanged",false))
+		candidate.erase("_sourceManifestChanged")
 		request.clear()
 		request.merge(candidate)
 		changed = true
 		break
-	if changed: _rebuild()
+	if changed: _rebuild(source_manifest_changed)
 	var frame := Engine.get_process_frames()
 	if _last_advance_frame == frame: return
 	_last_advance_frame = frame
@@ -529,9 +552,10 @@ static func _source_members(sites: Variant) -> Dictionary:
 		# An encoded tuple keeps revisions distinct without hash collisions or
 		# ambiguous separators in source IDs.
 		var key: String = var_to_str([binding.siteId,binding.sourceKey,binding.generation])
-		if not result.has(key): result[key] = {"binding":binding.duplicate(),"expiresAt":-1,"groups":{}}
+		if not result.has(key): result[key] = {"binding":binding.duplicate(),"expiresAt":-1,"groups":{},"groupIds":[]}
 		for id in site.groupIds:
 			if not id is String or id.is_empty(): return {"status":"failed","reason":"invalid_source_retention"}
+			if not result[key].groups.has(id): result[key].groupIds.append(id)
 			result[key].groups[id] = -1
 	if not _source_members_fit(result): return {"status":"pending","reason":"region_source_capacity"}
 	return {"status":"ready","members":result}
@@ -553,11 +577,21 @@ static func _transition_sources(previous: Dictionary, current: Dictionary, now: 
 		var deadline: int = int(old.expiresAt)
 		if not next.is_empty(): deadline = -1
 		elif deadline<0: deadline = now+hysteresis_ms if hysteresis_ms>0 else now
-		result[key] = {"binding":old.binding,"expiresAt":deadline,
-			"groups":_transition_members(old.groups,next.get("groups",{}),now,hysteresis_ms)}
+		var groups: Dictionary=_transition_members(old.groups,next.get("groups",{}),now,hysteresis_ms)
+		var ordered: Array[String]=[]
+		var ordered_seen: Dictionary={}
+		var old_order: Array=old.groupIds if old.has("groupIds") else old.groups.keys()
+		for id: String in old_order:
+			if groups.has(id): ordered.append(id); ordered_seen[id]=true
+		var next_order: Array=next.groupIds if next.has("groupIds") else next.get("groups",{}).keys()
+		for id: String in next_order:
+			if groups.has(id) and not ordered_seen.has(id): ordered.append(id); ordered_seen[id]=true
+		result[key] = {"binding":old.binding,"expiresAt":deadline,"groups":groups,"groupIds":ordered}
 	for key: String in current:
 		if not result.has(key):
-			result[key] = {"binding":current[key].binding,"expiresAt":-1,"groups":current[key].groups.duplicate()}
+			var current_order: Array=current[key].groupIds if current[key].has("groupIds") else current[key].groups.keys()
+			result[key] = {"binding":current[key].binding,"expiresAt":-1,"groups":current[key].groups.duplicate(),
+				"groupIds":current_order.duplicate()}
 	return result
 
 static func _earliest_expiry(request: Dictionary) -> int:
@@ -577,12 +611,14 @@ func _expire_members(request: Dictionary, now: int) -> Dictionary:
 	var candidate: Dictionary = request.duplicate()
 	candidate.members = {}
 	var changed: bool = false
+	var source_manifest_changed := false
 	for domain: String in RETAINED_DOMAINS:
 		var retained: Dictionary = request.members[domain].duplicate()
 		for key in retained.keys():
 			if int(retained[key])>=0 and now>=int(retained[key]):
 				retained.erase(key)
 				changed = true
+				if domain=="discovery" or domain=="navigation": source_manifest_changed = true
 		candidate.members[domain] = retained
 	candidate.sourceMembers = {}
 	for key: String in request.sourceMembers:
@@ -592,13 +628,21 @@ func _expire_members(request: Dictionary, now: int) -> Dictionary:
 			if int(groups[id])>=0 and now>=int(groups[id]):
 				groups.erase(id)
 				changed = true
+				source_manifest_changed = true
 		if int(site.expiresAt)>=0 and now>=int(site.expiresAt) and groups.is_empty():
 			changed = true
+			source_manifest_changed = true
 			continue
-		candidate.sourceMembers[key] = {"binding":site.binding,"expiresAt":site.expiresAt,"groups":groups}
+		var ordered_groups: Array[String]=[]
+		var site_order: Array=site.groupIds if site.has("groupIds") else groups.keys()
+		for id: String in site_order:
+			if groups.has(id): ordered_groups.append(id)
+		candidate.sourceMembers[key] = {"binding":site.binding,"expiresAt":site.expiresAt,
+			"groups":groups,"groupIds":ordered_groups}
 	if not changed: return {}
 	candidate.nextExpiryAt = _earliest_expiry(candidate)
 	candidate.providerRequests = request.providerRequests.duplicate()
+	candidate["_sourceManifestChanged"] = source_manifest_changed
 	return candidate
 
 func _compile_sets(requirements: Dictionary, bounds: Rect2i, peripheral_margin_cells := RENDER_CELL_SIZE) -> Dictionary:
@@ -657,38 +701,190 @@ static func _envelope(regions: Array, initial: Rect2i) -> Rect2i:
 func retained_cell_bounds() -> Array[Rect2i]:
 	return _bounds.duplicate()
 
+func source_manifest_revision() -> int:
+	return _source_manifest_revision
+
+func source_snapshot_ready() -> bool:
+	return not _source_snapshot_dirty
+
+func source_snapshot_compile_metrics() -> Dictionary:
+	return _source_compile_metrics.duplicate(true)
+
+## Internal immutable borrow. The coordinator never mutates a completed array;
+## callers that retain it see that revision even after a later atomic swap.
+func borrow_retained_source_snapshot() -> Array[Dictionary]:
+	return _retained_source_snapshot
+
 func retained_source_requests() -> Array[Dictionary]:
-	var result: Array[Dictionary] = []
-	for id: int in _requests:
-		var request: Dictionary = _requests[id]
-		var admission_keys: Array[Vector2i] = []
-		for key: Vector2i in request.members.discovery: admission_keys.append(key)
-		admission_keys.sort_custom(func(a: Vector2i,b: Vector2i): return a.y<b.y if a.y!=b.y else a.x<b.x)
-		var sites: Array[Dictionary] = []
-		for site: Dictionary in request.sourceMembers.values():
-			var groups: Array[String] = []
-			for group: String in site.groups: groups.append(group)
-			var source_request := {"binding":site.binding.duplicate(),"groupIds":groups}
-			var foreground_groups: Array[String] = []
-			var foreground_key: String = var_to_str([site.binding.siteId,site.binding.sourceKey,site.binding.generation])
-			var foreground_site: Dictionary = request.get("foregroundSourceMembers",{}).get(foreground_key,{})
-			for group: String in foreground_site.get("groups",{}): foreground_groups.append(group)
-			foreground_groups.sort()
-			if not foreground_site.is_empty(): source_request["foregroundGroupIds"] = foreground_groups
-			var foreground: Array[String] = _string_keys(request.get("foregroundNavigationTiles",{}))
-			if not foreground.is_empty(): source_request["foregroundNavigationTileKeys"] = foreground
-			sites.append(source_request)
-		var navigation_priorities := {}
-		var background: Dictionary = request.get("providerRequests",{}).get("navigationBackground",{})
-		for key: Vector2i in _held_keys(request,"navigation"):
-			navigation_priorities["%d,%d" % [key.x,key.y]] = int(background.get("priority",request.priority)) if background.get("keys",{}).has(key) else int(request.priority)
-		var retained_request := {"ownerId":id,"bounds":request.bounds,"priority":request.priority,
-			"admissionKeys":admission_keys,"navigationTileKeys":_string_keys(_held_keys(request,"navigation")),
-			"navigationTilePriorities":navigation_priorities,"sites":sites}
-		if not request.get("viewIntent",{}).is_empty():
-			retained_request["viewIntent"] = request.viewIntent.duplicate(true)
-		result.append(retained_request)
+	while not advance_retained_source_snapshot(1000000,2147483647): pass
+	return _retained_source_snapshot.duplicate(true)
+
+func advance_retained_source_snapshot(budget_usec := SOURCE_SNAPSHOT_SLICE_USEC,
+		unit_cap := SOURCE_SNAPSHOT_UNIT_CAP) -> bool:
+	if not _source_snapshot_dirty: return true
+	if _source_compile_job.is_empty() or int(_source_compile_job.get("generation",-1))!=_source_compile_generation:
+		if not _source_compile_job.is_empty(): _source_compile_metrics.restarts += 1
+		var ids: Array = _requests.keys()
+		ids.sort()
+		var hasher:=HashingContext.new()
+		hasher.start(HashingContext.HASH_SHA256)
+		_source_compile_job = {"generation":_source_compile_generation,"ids":ids,"ownerIndex":0,
+			"phase":"owner","result":[],"current":{},"keys":[],"index":0,"siteKeys":[],"siteIndex":0,
+			"groupKeys":[],"groupHeapIndex":-1,"foregroundGroupKeys":[],"foregroundGroupHeapIndex":-1,
+			"hasher":hasher}
+	var started := Time.get_ticks_usec()
+	var units := 0
+	while units<maxi(1,unit_cap) and Time.get_ticks_usec()-started<maxi(1,budget_usec):
+		if int(_source_compile_job.generation)!=_source_compile_generation: return false
+		if _advance_source_snapshot_unit():
+			var completed: Array[Dictionary] = []
+			completed.assign(_source_compile_job.result)
+			completed.make_read_only()
+			var identity: PackedByteArray = _source_compile_job.hasher.finish()
+			if identity!=_retained_source_snapshot_identity:
+				_retained_source_snapshot = completed
+				_retained_source_snapshot_identity = identity
+				_source_manifest_revision += 1
+			_source_compile_job = {}
+			_source_snapshot_dirty = false
+			_source_compile_metrics.phase = "ready"
+			return true
+		units += 1
+	return false
+
+func _advance_source_snapshot_unit() -> bool:
+	var job := _source_compile_job
+	_source_compile_metrics.phase = job.phase
+	if job.phase=="owner":
+		if int(job.ownerIndex)>=job.ids.size(): return true
+		var id: int = int(job.ids[job.ownerIndex])
+		var request: Dictionary = _requests.get(id,{})
+		if request.is_empty():
+			_source_compile_generation += 1
+			return false
+		job.current = {"ownerId":id,"bounds":request.bounds,"priority":request.priority,
+			"admissionKeys":[],"navigationTileKeys":[],"navigationTilePriorities":{},"sites":[]}
+		_source_snapshot_hash(job,["owner",id,request.bounds,request.priority])
+		job.keys = request.members.discovery.keys()
+		job.keys.sort_custom(func(a: Vector2i,b: Vector2i): return a.y<b.y if a.y!=b.y else a.x<b.x)
+		job.index = 0
+		job.phase = "admission"
+		_source_compile_metrics.ownerUnits += 1
+		return false
+	if job.phase=="admission":
+		if int(job.index)<job.keys.size():
+			job.current.admissionKeys.append(job.keys[job.index]); job.index += 1
+			_source_snapshot_hash(job,["admission",job.current.admissionKeys.back()])
+			_source_compile_metrics.admissionUnits += 1
+			return false
+		var request: Dictionary = _requests[int(job.ids[job.ownerIndex])]
+		job.keys = _held_keys(request,"navigation").keys()
+		job.keys.sort_custom(func(a: Vector2i,b: Vector2i): return a.y<b.y if a.y!=b.y else a.x<b.x)
+		job.index = 0; job.phase = "navigation"
+		return false
+	if job.phase=="navigation":
+		if int(job.index)<job.keys.size():
+			var request: Dictionary = _requests[int(job.ids[job.ownerIndex])]
+			var key: Vector2i = job.keys[job.index]
+			var text := "%d,%d" % [key.x,key.y]
+			var background: Dictionary = request.get("providerRequests",{}).get("navigationBackground",{})
+			var priority := int(background.get("priority",request.priority)) if background.get("keys",{}).has(key) else int(request.priority)
+			job.current.navigationTileKeys.append(text)
+			job.current.navigationTilePriorities[text] = priority
+			job.index += 1; _source_compile_metrics.navigationUnits += 1
+			return false
+		job.current.navigationTileKeys.sort()
+		job.index=0; job.phase="navigation_hash"
+		return false
+	if job.phase=="navigation_hash":
+		if int(job.index)<job.current.navigationTileKeys.size():
+			var text: String=job.current.navigationTileKeys[job.index]
+			_source_snapshot_hash(job,["navigation",text,job.current.navigationTilePriorities[text]])
+			job.index+=1; return false
+		var request: Dictionary = _requests[int(job.ids[job.ownerIndex])]
+		job.siteKeys = request.sourceMembers.keys()
+		job.siteKeys.sort()
+		job.siteIndex = 0; job.phase = "site"
+		return false
+	if job.phase=="site":
+		if int(job.siteIndex)>=job.siteKeys.size():
+			job.current.admissionKeys.make_read_only()
+			job.current.navigationTileKeys.make_read_only()
+			job.current.navigationTilePriorities.make_read_only()
+			job.current.sites.make_read_only()
+			job.current.make_read_only()
+			job.result.append(job.current)
+			job.ownerIndex += 1; job.phase = "owner"
+			return false
+		var request: Dictionary = _requests[int(job.ids[job.ownerIndex])]
+		var site: Dictionary = request.sourceMembers[job.siteKeys[job.siteIndex]]
+		job.currentSite = {"binding":site.binding.duplicate(),"groupIds":[]}
+		_source_snapshot_hash(job,["binding",job.currentSite.binding])
+		job.groupKeys = site.groupIds
+		job.groupIndex = 0
+		var foreground_key: String = var_to_str([site.binding.siteId,site.binding.sourceKey,site.binding.generation])
+		var foreground_site: Dictionary = request.get("foregroundSourceMembers",{}).get(foreground_key,{})
+		job.foregroundGroupKeys = foreground_site.get("groupIds",[])
+		job.foregroundGroupIndex = 0
+		if not foreground_site.is_empty(): job.currentSite["foregroundGroupIds"] = []
+		var foreground: Array[String] = _string_keys(request.get("foregroundNavigationTiles",{}))
+		if not foreground.is_empty(): job.currentSite["foregroundNavigationTileKeys"] = foreground
+		_source_snapshot_hash(job,["foregroundNavigation",foreground,"hasForeground",not foreground_site.is_empty()])
+		job.phase = "groups"; _source_compile_metrics.bindingUnits += 1
+		return false
+	if job.phase=="groups":
+		if int(job.groupIndex)<job.groupKeys.size():
+			job.currentSite.groupIds.append(job.groupKeys[job.groupIndex])
+			job.groupIndex+=1
+			_source_snapshot_hash(job,["group",job.currentSite.groupIds.back()])
+			_source_compile_metrics.groupUnits += 1
+			return false
+		job.phase="foreground_groups"
+		return false
+	if job.phase=="foreground_groups":
+		if int(job.foregroundGroupIndex)<job.foregroundGroupKeys.size():
+			job.currentSite.foregroundGroupIds.append(job.foregroundGroupKeys[job.foregroundGroupIndex])
+			job.foregroundGroupIndex+=1
+			_source_snapshot_hash(job,["foregroundGroup",job.currentSite.foregroundGroupIds.back()])
+			_source_compile_metrics.groupUnits += 1
+			return false
+		job.currentSite.binding.make_read_only()
+		job.currentSite.groupIds.make_read_only()
+		if job.currentSite.has("foregroundGroupIds"): job.currentSite.foregroundGroupIds.make_read_only()
+		if job.currentSite.has("foregroundNavigationTileKeys"): job.currentSite.foregroundNavigationTileKeys.make_read_only()
+		job.currentSite.make_read_only()
+		job.current.sites.append(job.currentSite)
+		job.siteIndex += 1; job.phase = "site"
+	return false
+
+static func _string_heap_sift_down(values: Array, start: int, end: int) -> void:
+	var root:=start
+	while root*2+1<end:
+		var child:=root*2+1
+		if child+1<end and String(values[child+1])<String(values[child]): child+=1
+		if String(values[root])<=String(values[child]): return
+		var swap_value=values[root]; values[root]=values[child]; values[child]=swap_value
+		root=child
+
+static func _string_heap_push(values: Array, value: String) -> void:
+	values.append(value)
+	var child:=values.size()-1
+	while child>0:
+		var parent: int=(child-1)/2
+		if String(values[parent])<=String(values[child]): return
+		var swap_value=values[parent]; values[parent]=values[child]; values[child]=swap_value
+		child=parent
+
+static func _string_heap_pop(values: Array) -> String:
+	var result:=String(values[0])
+	var tail=values.pop_back()
+	if not values.is_empty():
+		values[0]=tail
+		_string_heap_sift_down(values,0,values.size())
 	return result
+
+static func _source_snapshot_hash(job: Dictionary, value: Variant) -> void:
+	job.hasher.update(var_to_bytes(value))
 
 ## View intent changes scheduling only.  It never replaces the retained region,
 ## reacquires a provider handle, or invalidates an acknowledged source closure.
@@ -774,8 +970,14 @@ func _region_readiness(bounds: Rect2i, request_id: int, required_domains: Array,
 		var candidate: Dictionary = _requests[id]
 		# Historical members retain publication work, never current-query authority.
 		if int(candidate.releaseAt)>=0 or not candidate.bounds.encloses(bounds): continue
-		var admitted: bool = candidate.closureStatus!="failed" and int(candidate.admittedSequence)>0 \
-			and int(candidate.admittedSequence)==int(candidate.sequence)
+		# A previously admitted broad owner can retain a clean smaller foreground
+		# window while another part of its wider closure fails. Do not let that
+		# unrelated failure revoke the local query before this function verifies the
+		# local source closure, retained membership and live owner receipts below.
+		# Same-size and broader queries still observe the stored failure directly.
+		var retained_local_query: bool = candidate.bounds.get_area()>bounds.get_area()
+		var admitted: bool = int(candidate.admittedSequence)>0 and int(candidate.admittedSequence)==int(candidate.sequence) \
+			and (candidate.closureStatus!="failed" or retained_local_query)
 		if admitted:
 			if ready_request.is_empty() or candidate.bounds.get_area()<ready_request.bounds.get_area():
 				ready_request = candidate
@@ -788,7 +990,9 @@ func _region_readiness(bounds: Rect2i, request_id: int, required_domains: Array,
 		result.status = "pending"; result.reason = "region_not_requested"
 		result.missing.append({"domain":"demand","reason":result.reason})
 		return result
-	if int(request.admittedSequence)<=0 or int(request.admittedSequence)!=int(request.sequence) or request.closureStatus=="failed":
+	var admitted_current: bool = int(request.admittedSequence)>0 and int(request.admittedSequence)==int(request.sequence)
+	var retained_local_query: bool = request.bounds.get_area()>bounds.get_area()
+	if not admitted_current or (request.closureStatus=="failed" and not retained_local_query):
 		result.status = "failed" if request.closureStatus=="failed" else "pending"
 		result.reason = request.closureReason
 		result.missing.append({"domain":"dependencies","reason":result.reason})
@@ -889,7 +1093,12 @@ static func _navigation_readiness_accepts_collective_handles(provider) -> bool:
 		if method.get("name","") == "tiles_publication_readiness": return method.get("args",[]).size() >= 4
 	return false
 
-func _rebuild() -> void:
+func _rebuild(source_may_have_changed := true) -> void:
+	if source_may_have_changed:
+		if not _source_compile_job.is_empty(): _source_compile_metrics.restarts += 1
+		_source_compile_generation += 1
+		_source_snapshot_dirty = true
+		_source_compile_job = {}
 	_bounds.clear()
 	_chunks.clear()
 	var ids := _requests.keys()

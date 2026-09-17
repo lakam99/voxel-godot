@@ -8,6 +8,7 @@ const Player = preload("res://scripts/PlayerController.gd")
 const Survival = preload("res://scripts/SurvivalSystem.gd")
 const PropHost = preload("res://scripts/Main.gd")
 const PropStructures = preload("res://scripts/StructureSystem.gd")
+const CITADEL_PUBLICATION_BUDGET_USEC := PropStructures.CITADEL_PUBLICATION_BUDGET_USEC
 
 class RuntimeContext extends "res://scripts/terrain/VoxelWorldGenerationContext.gd":
 	var world_generation_system
@@ -381,9 +382,9 @@ func _player_containment() -> void:
 	root.add_child(player)
 	player.set_physics_process(false)
 	admitted.blocked = Gate.footprint(start,80)
-	runtime.last_site_wait_message_usec = -1000000
 	var initialized: Dictionary = runtime.setup(context)
 	check("player_runtime_setup",initialized.ok)
+	var retained_backpressure: Dictionary = _retained_group_collision_backpressure(runtime,context)
 	for chunk_key: Vector2i in runtime._motion_gameplay_chunks(start,start+Vector3.RIGHT*6.0,0.42):
 		runtime.request_gameplay_chunk_publication(chunk_key)
 	# This headless phase proves collision/motor containment, not rendering.
@@ -392,7 +393,7 @@ func _player_containment() -> void:
 	player.set_physics_process(true)
 	await _frames(4)
 	check("real_player_held_while_source_pending",player.global_position==start and player.velocity==Vector3.ZERO and player.terrain_collision_hold_frames>=4)
-	check("player_wait_message_emitted",not host.messages.is_empty() and String(host.messages[0]).contains("Waiting for terrain collision"))
+	check("ordinary_source_wait_does_not_emit_action_status",host.messages.is_empty())
 	check("ordinary_source_wait_never_opens_modal_overlay",host.overlay_shows.is_empty())
 	var stamina_before := float(player.survival.stamina)
 	check("pending_source_rejects_real_dodge",not player.request_dodge(Vector3.RIGHT) and player.player_defense.last_reason=="terrain_unready")
@@ -415,7 +416,6 @@ func _player_containment() -> void:
 	check("accepted_dodge_uses_real_physics",player.global_position.x>before_dodge.x and player.global_position.y>-0.1)
 	var before_admission_failure: Vector3 = player.global_position
 	admitted.failure = "synthetic_site_preparation_failed"
-	runtime.last_site_wait_message_usec = -1000000
 	await _frames(4)
 	check("admission_failure_does_not_rescan_or_stop_published_local_motion",player.global_position.x>before_admission_failure.x
 		and player.last_terrain_collision_proof.get("passed",false) and structure_owner.physical_requests==0)
@@ -424,7 +424,7 @@ func _player_containment() -> void:
 	player.set_physics_process(false)
 	player_evidence = {"start":start,"end":player.global_position,"holdFrames":player.terrain_collision_hold_frames,
 		"messages":host.messages,"lastProof":player.last_terrain_collision_proof,
-		"physicalPublication":physical_evidence,
+		"physicalPublication":physical_evidence,"retainedBackpressure":retained_backpressure,
 		"fixture":"Production PlayerController/motor/defense/physics, synthetic flat native density and controllable admission; no act-phase position writes. Message emission recorded by synthetic host, not visible HUD validation."}
 	runtime.begin_shutdown()
 	var shutdown: Dictionary = await runtime.wait_for_seed_reset_task_drain()
@@ -435,6 +435,27 @@ func _player_containment() -> void:
 	await _frames(4)
 	context.world_generation_system = null
 	context.message_host = null
+
+func _retained_group_collision_backpressure(runtime: ObservedRuntime, context: RuntimeContext) -> Dictionary:
+	# First attached retained group has submitted no collision receipt. Its work
+	# must settle before the scheduler may attach another broad native viewer.
+	# This is a receipt-ownership contract; the production scheduler consumes it
+	# before admission, and this fixture deliberately adds no extra VoxelViewer.
+	var first_key := Vector2i(72,-72)
+	var second_key := Vector2i(76,-72)
+	var first_group := Vector2i(floori(float(first_key.x)/2.0),floori(float(first_key.y)/2.0))
+	var second_group := Vector2i(floori(float(second_key.x)/2.0),floori(float(second_key.y)/2.0))
+	var old_chunks: Dictionary = runtime.retained_gameplay_chunks.duplicate()
+	var old_groups: Dictionary = runtime.retained_viewer_groups.duplicate(true)
+	runtime.retained_gameplay_chunks = {first_key:true,second_key:true}
+	runtime.retained_viewer_groups = {first_group:[first_key],second_group:[second_key]}
+	var pending := runtime.retained_group_collision_receipts_pending(first_group)
+	check("retained_group_detects_pending_collision_before_next_admission",pending)
+	var evidence := {"firstGroup":first_group,"secondGroup":second_group,
+		"pending":pending,"secondGroupWouldRemainUnadmitted":not runtime.retained_chunk_viewers.has(second_group)}
+	runtime.retained_gameplay_chunks = old_chunks
+	runtime.retained_viewer_groups = old_groups
+	return evidence
 
 func _physical_publication_controls(runtime: ObservedRuntime, player, structures: Structures, host: PlayerHost) -> Dictionary:
 	# The native plane is already published. Synthetic structure receipts change

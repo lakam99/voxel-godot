@@ -53,14 +53,33 @@ func _run() -> void:
 	var invalid_reservations: Dictionary = Batch.plan(b, groups, fixed_callback, invalid_fixed)
 	checks.append({"name": "invalid_fixed_reservation_rejected", "passed": not invalid_reservations.ready and invalid_reservations.reason == "invalid_fixed_reservations" and seen_fixed[1] == 4})
 	var geometry := _real_geometry_reservation_case()
-	var passed: bool = checks.all(func(row): return row.passed) and bool(geometry.get("passed", false))
+	var spatial_budget := _spatial_index_budget_case()
+	var passed: bool = checks.all(func(row): return row.passed) and bool(geometry.get("passed", false)) and bool(spatial_budget.get("passed", false))
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
 		quit(2)
 		return
-	file.store_string(JSON.stringify({"passed": passed, "checks": checks, "callbackEvidenceLevel": "synthetic_callback_unit_contract", "geometryReservation": geometry, "evidenceLevel": "synthetic_unit_and_geometry_source_service_contract", "doesNotProve": "Geometry case uses real placement services on synthetic paving/household/furniture volumes. No generated-citadel acceptance, publication, visuals, live physics, navigation or gameplay."}, "\t"))
+	file.store_string(JSON.stringify({"passed": passed, "checks": checks, "callbackEvidenceLevel": "synthetic_callback_unit_contract", "geometryReservation": geometry, "spatialIndexBudget": spatial_budget, "evidenceLevel": "synthetic_unit_and_geometry_source_service_contract", "doesNotProve": "Geometry case uses real placement services on synthetic paving/household/furniture volumes. No generated-citadel acceptance, publication, visuals, live physics, navigation or gameplay."}, "\t"))
 	file.close()
 	quit(0 if passed else 1)
+
+
+func _spatial_index_budget_case() -> Dictionary:
+	var influence := Rect2(-8.0, -8.0, 16.0, 16.0)
+	var huge := Rect2(-1.0e20, -1.0e20, 2.0e20, 2.0e20)
+	var huge_rectangles: Array[Rect2] = [huge]
+	var exact_meter := {"used":0, "remaining":Layout.MAX_WORK}
+	var exact := Layout._spatial_index(huge_rectangles, influence, exact_meter)
+	var constrained_meter := {"used":0, "remaining":4}
+	var constrained := Layout._spatial_index(huge_rectangles, influence, constrained_meter)
+	var query_meter := {"used":0, "remaining":1}
+	var query := Layout._spatial_candidates(exact, influence, query_meter)
+	var checks := {
+		"huge_source_is_clipped_to_bounded_influence": exact.get("ready", false) and (exact.get("cells", {}) as Dictionary).size() <= 25 and int(exact_meter.used) <= Layout.MAX_WORK,
+		"index_allocation_is_preflight_rejected_by_work_budget": not constrained.get("ready", true) and constrained.get("reason") == "work_limit_exceeded" and constrained_meter.get("exhausted", false),
+		"cell_lookup_and_candidate_collection_are_metered": query.is_empty() and query_meter.get("exhausted", false) and int(query_meter.used) > int(query_meter.remaining)}
+	return {"passed":checks.values().all(func(value):return bool(value)), "checks":checks,
+		"exactMeter":exact_meter, "constrainedMeter":constrained_meter, "queryMeter":query_meter}
 
 
 func _geometry_source(with_alternate: bool):

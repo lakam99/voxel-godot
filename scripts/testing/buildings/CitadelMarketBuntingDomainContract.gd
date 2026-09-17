@@ -23,6 +23,7 @@ func _run() -> void:
 	var started := Time.get_ticks_msec()
 	var hashes: Dictionary = _hashes()
 	_exercise()
+	_sampled_recipe_variants()
 	var after: Dictionary = _hashes()
 	checks["valid_source_hashes"] = hashes.values().all(func(value: Variant) -> bool: return String(value).length() == 64)
 	checks["source_hashes_unchanged"] = hashes == after
@@ -47,8 +48,9 @@ func _source():
 	var right_foundation: AABB = source.transformed_part_bounds(_part(source, RIGHT+"_foundation"))
 	var plaza_top: float = maxf(left_foundation.end.y, right_foundation.end.y)
 	var plaza_thickness := 0.1
-	source.add_part({"id": PLAZA, "kind": "foundation", "semantic": "citadel_market_plaza", "material": "cobblestone",
-		"collision": true, "position": Vector3(0,plaza_top-plaza_thickness*0.5,0), "size": Vector3(20,plaza_thickness,6)})
+	source.add_part({"id": PLAZA, "kind": "ground_patch", "semantic": "citadel_market_plaza", "material": "cobblestone",
+		"collision": false, "position": Vector3(0,plaza_top-plaza_thickness*0.5,0), "size": Vector3(20,plaza_thickness,6),
+		"recipe":{"physicalIntent":"visual_detail", "pavingRegion":"citadel_courtyard"}})
 	source.add_part({"id":"a_rope", "kind":"beam", "semantic":"citadel_bunting_rope", "collision":false,
 		"position":Vector3(0,5,0), "size":Vector3(8,0.035,0.035)})
 	source.add_part({"id":"a_flag", "kind":"pennant", "semantic":"citadel_bunting", "collision":false,
@@ -95,7 +97,8 @@ func _exercise() -> void:
 	for mode: String in ["missing_manifest","malformed_record","wrong_record_identity","wrong_room_link","missing_room","duplicate_room","bad_room_bounds",
 		"bad_room_flag","wrong_door_link","door_wrong_room","door_faces_away","missing_facades","duplicate_facade_key","foreign_facade_key",
 		"stale_geometry","wrong_facade_kind","noncolliding_facade","rotated_facade","nonfinite_facade","wrong_domain","duplicate_part","null_part",
-		"plaza_too_narrow","plaza_no_z_overlap","plaza_above_facades","plaza_nonfinite","plaza_noncolliding","plaza_wrong_semantic","active_cache"]:
+		"plaza_too_narrow","plaza_no_z_overlap","plaza_above_facades","plaza_nonfinite","plaza_colliding","plaza_wrong_kind",
+		"plaza_wrong_intent","plaza_wrong_region","plaza_wrong_semantic","active_cache"]:
 		_negative(mode)
 	# Rooms beyond the two associated houses are still protected, without adding
 	# any extra facade/chimney candidates or borrowing a caller's mutable array.
@@ -105,6 +108,32 @@ func _exercise() -> void:
 	var extra_result: Dictionary = Domain.build(extra,LEFT,RIGHT,PLAZA)
 	checks["all_urban_rooms_protected"] = extra_result.get("ready",false) and extra_result.protectedRooms.size() == 3 and extra_result.protectedRooms.has(other_room)
 	_augmented_declaration_controls()
+
+func _sampled_recipe_variants() -> void:
+	# The production failure was seed-specific only because the chimney preflight
+	# can omit optional bunting. Exercise the exact recipe seed and its immediate
+	# layout neighbours at the producer/domain boundary so a stale plaza-type
+	# assumption cannot hide behind that optional emission again.
+	var rows: Array = []
+	for seed: int in [2100258698, 2100258699, 2100258700, 2100258701, 2100258702]:
+		var source = Blueprint.new("sampled_market_%d" % seed, seed, "masonry")
+		var grammar := {"courtyardWidth":104.0, "courtyardDepth":84.0}
+		source.set_recipe({"castleGrammar":grammar})
+		var reset: Dictionary = Urban.reset_street_house_structural_manifest(source)
+		var front_z := -42.0
+		var keep_front_z := 8.0
+		var base_y := 0.62
+		var layout: Dictionary = Urban.sample_urban_layout(seed,grammar,front_z,keep_front_z,base_y)
+		var sequence: Dictionary = Urban.add_street_sequence(source,front_z,keep_front_z,base_y,0.0,layout) if reset.get("ready",false) else {"ready":false,"reason":"manifest_reset_failed"}
+		var pair: Dictionary = source.recipe.get("citadelMarketHousePair",{}) as Dictionary
+		var result: Dictionary = Domain.build(source,String(pair.get("leftHouseId","")),String(pair.get("rightHouseId","")),String(pair.get("plazaPartId",""))) if sequence.get("ready",false) else {"ready":false,"reason":sequence.get("reason","")}
+		var plaza = _part(source,String(pair.get("plazaPartId","")))
+		var passed: bool = result.get("ready",false) and plaza != null and not plaza.collision_enabled \
+			and plaza.kind == "ground_patch" and plaza.physical_intent == "visual_detail"
+		checks["sampled_recipe_%d_visual_plaza_domain_ready" % seed] = passed
+		rows.append({"seed":seed,"passed":passed,"sequence":sequence,"domain":result,
+			"plaza":plaza.snapshot() if plaza != null else {}})
+	evidence["sampledRecipeVariants"] = rows
 
 func _augmented_declaration_controls() -> void:
 	var source = _source()
@@ -195,7 +224,12 @@ func _negative(mode: String) -> void:
 		"plaza_no_z_overlap": plaza.position.z = 100.0
 		"plaza_above_facades": plaza.position.y = 100.0
 		"plaza_nonfinite": plaza.position.x = INF
-		"plaza_noncolliding": plaza.collision_enabled = false
+		"plaza_colliding": plaza.collision_enabled = true
+		"plaza_wrong_kind": plaza.kind = "foundation"
+		"plaza_wrong_intent":
+			plaza.physical_intent = "walkable_surface"
+			plaza.recipe.physicalIntent = "walkable_surface"
+		"plaza_wrong_region": plaza.recipe.pavingRegion = "another_region"
 		"plaza_wrong_semantic": plaza.semantic = "unrelated_paving"
 		"active_cache": source._validation_cache_active = true
 	if reseal:

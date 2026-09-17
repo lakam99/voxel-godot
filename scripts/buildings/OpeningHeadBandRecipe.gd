@@ -413,7 +413,15 @@ static func _first_full_head_row(panels: Array) -> Dictionary:
 		if row.any(func(panel): return absf(panel.position.y - panel.size.y * 0.5 - edges[index]) > EDGE_EPS): continue
 		return {"ready": true, "bottom": edges[index], "near": near, "far": far, "panelIds": row.map(func(p): return p.id),
 			"openingRowBottom": edges[index - 1], "openingSpans": voids, "edgeGroupingArithmetic": EDGE_EPS}
-	return _fail("no_full_solid_opening_head_row")
+	var panel_bounds: Array = []
+	for panel in panels:
+		panel_bounds.append({"id": panel.id,
+			"bottom": panel.position.y - panel.size.y * 0.5,
+			"top": panel.position.y + panel.size.y * 0.5,
+			"near": panel.position.z - panel.size.z * 0.5,
+			"far": panel.position.z + panel.size.z * 0.5})
+	return {"ready": false, "reason": "no_full_solid_opening_head_row",
+		"panels": panel_bounds, "edgeGroupingArithmetic": EDGE_EPS}
 
 static func _row_at(panels: Array, y: float) -> Array:
 	var row := panels.filter(func(p): return y > p.position.y - p.size.y * 0.5 and y < p.position.y + p.size.y * 0.5)

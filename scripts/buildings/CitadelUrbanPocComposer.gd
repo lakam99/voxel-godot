@@ -32,6 +32,7 @@ const FacadeBearingRecipeScript := preload("res://scripts/buildings/FacadeOpenin
 const FacadeApertureDeclarationScript := preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
 const StreetHouseStructuralManifestScript := preload("res://scripts/buildings/CitadelStreetHouseStructuralManifest.gd")
 const StructuralCompletionRecipeScript := preload("res://scripts/buildings/CitadelStructuralCompletionRecipe.gd")
+const ChimneyBearingRecipeScript := preload("res://scripts/buildings/ChimneyBearingRecipe.gd")
 const BuntingManifest := preload("res://scripts/buildings/CitadelBuntingAssemblyManifest.gd")
 const ExteriorBunting := preload("res://scripts/buildings/CitadelExteriorBuntingDomain.gd")
 const RetainedBearingRecipeScript := preload("res://scripts/buildings/RetainedSurfaceBearingRecipe.gd")
@@ -193,7 +194,25 @@ static func plan_courtyard_household(blueprint, member_ids: Array, front: Vector
 	var grammar: Dictionary = blueprint.recipe.castleGrammar
 	if not _layout_radius_valid(grammar.get("courtyardWidth")) or not _layout_radius_valid(grammar.get("courtyardDepth")):
 		return {"ready": false, "reason": "missing_courtyard_extent"}
-	return plan_household_on_paving(blueprint, member_ids, front, reservations, 20.0, 1.8, Callable(), 0.5)
+	# The sampled civic infill can consume the nearer half of this public square.
+	# Keep the search local and bounded, but include the opposite side of the
+	# market court so every declared stall household can still claim a real,
+	# same-grade paving footprint after that infill is placed.
+	var public_course_eligibility := func(id: String) -> Dictionary:
+		var support = null
+		for part in blueprint.parts:
+			if part != null and String(part.id) == id:
+				support = part
+				break
+		if support == null:
+			return {"ready": false, "reason": "invalid_public_course_source"}
+		# A terminal-shop foundation is valid paving for that building only. Mobile
+		# market households must remain on the immutable continuous courtyard course
+		# because terminal preparation can relocate or omit its complete foundation.
+		if support.recipe.get("continuousGroundCourse") != true or String(support.recipe.get("pavingRegion", "")) != "citadel_courtyard":
+			return {"ready": false, "reason": "incomplete_rooted_support_coverage"}
+		return {"ready": true}
+	return plan_household_on_paving(blueprint, member_ids, front, reservations, 30.0, 1.8, public_course_eligibility, 0.5)
 
 
 static func compose(blueprint, seed: int):
@@ -348,7 +367,11 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		if landscape_cancel.stopped:
 			handoff["reason"] = "cancelled"
 			return null
-		tree_records = retain_home_clear_tree_records(blueprint, tree_records)
+		# Civic infill has an exact, rebuilt geometry receipt.  Keep its terminal
+		# envelope in the tree reservation input rather than inferring it from an
+		# interior room or the earlier design-time home metadata.
+		var civic_infill: Dictionary = civic_quarter.get("infill", {}) as Dictionary
+		tree_records = retain_home_clear_tree_records(blueprint, tree_records, civic_infill.get("receipts", []) as Array, float(civic_infill.get("clearance", 0.40)))
 		urban_layout["treePlacements"] = tree_records
 		recipe["urbanPoc"] = urban_layout
 		recipe["landscapeTrees"] = urban_layout["treePlacements"]
@@ -489,7 +512,11 @@ static func _compose(blueprint, seed: int, handoff: Dictionary, diagnostic_callb
 		failure_evidence.erase("afterSnapshot")
 		handoff["reason"] = "citadel_structural_completion_failed"
 		handoff["structuralCompletionFailure"] = failure_evidence
-		push_error("Citadel structural completion failed: %s" % String(structural_completion.get("reason", "incomplete")))
+		# A rejected generated candidate is expected to remain unpublished while
+		# discovery advances to another deterministic candidate. Preserve the
+		# full structured failure for its owner, but do not report a recoverable
+		# source rejection as an engine diagnostic that aborts unrelated gameplay.
+		print("Citadel structural source rejected: %s" % String(structural_completion.get("reason", "incomplete")))
 		return null
 	if not _emit_compose_diagnostic(diagnostic_callback, "structural_completion_prepare_completed"):
 		return null
@@ -821,11 +848,26 @@ static func build_tree_placement_records(sites: Array, seed: int, continuation: 
 	return records
 
 
-static func retain_home_clear_tree_records(blueprint, records: Array) -> Array:
+static func retain_home_clear_tree_records(blueprint, records: Array, reserved_building_receipts: Array = [], clearance: float = 0.40) -> Array:
 	# Candidate selection uses a cheap trunk-scale index.  Acceptance uses the
 	# generated recipe's actual canopy radius, so a large seeded tree cannot be
 	# retained through a house envelope or another retained canopy.
+	# Civic infill may move a house after its initial recipe metadata was
+	# authored. Its receipt carries the actual rebuilt building envelope, which
+	# is the same geometry consumed by terminal civic-clearance validation.
+	# Ordinary home metadata remains useful for non-civic houses.
 	var homes: Array = blueprint.recipe.get("citadelUrbanHomes", []) as Array
+	var reserved_building_footprints: Array[Rect2] = []
+	for receipt_value in reserved_building_receipts:
+		if not receipt_value is Dictionary:
+			continue
+		var receipt: Dictionary = receipt_value as Dictionary
+		if not receipt.get("actualBounds") is AABB:
+			continue
+		var bounds: AABB = receipt.actualBounds
+		if not bounds.position.is_finite() or not bounds.end.is_finite() or bounds.size.x <= 0.0 or bounds.size.z <= 0.0:
+			continue
+		reserved_building_footprints.append(Rect2(Vector2(bounds.position.x, bounds.position.z), Vector2(bounds.size.x, bounds.size.z)))
 	var retained: Array = []
 	for record_value in records:
 		if not record_value is Dictionary:
@@ -836,6 +878,28 @@ static func retain_home_clear_tree_records(blueprint, records: Array) -> Array:
 		if not position.is_finite() or radius <= 0.0:
 			continue
 		var home_clear := true
+		# Match CivicInfill's conservative XZ envelope rule exactly. A radial
+		# distance check would leave a corner case where the tree's declared square
+		# canopy overlaps a rebuilt civic house even though its centre is farther
+		# than the circular approximation.
+		var tree_footprint := Rect2(Vector2(position.x, position.z) - Vector2.ONE * radius, Vector2.ONE * radius * 2.0)
+		for root_value in record.get("rootButtressFootprints", []) as Array:
+			if not root_value is Dictionary:
+				continue
+			var root: Dictionary = root_value as Dictionary
+			if not root.get("start") is Vector3 or not root.get("end") is Vector3:
+				continue
+			var root_start: Vector3 = root.start as Vector3
+			var root_end: Vector3 = root.end as Vector3
+			var root_radius := maxf(float(root.get("radiusStart", 0.0)), float(root.get("radiusEnd", 0.0)))
+			if root_start.is_finite() and root_end.is_finite() and root_radius > 0.0:
+				tree_footprint = tree_footprint.merge(Rect2(Vector2(root_start.x, root_start.z), Vector2.ZERO).expand(Vector2(root_end.x, root_end.z)).grow(root_radius))
+		for footprint: Rect2 in reserved_building_footprints:
+			if footprint.grow(clearance).intersects(tree_footprint):
+				home_clear = false
+				break
+		if not home_clear:
+			continue
 		for home_value in homes:
 			if not home_value is Dictionary:
 				continue
@@ -951,7 +1015,10 @@ static func _tree_sample_blocker(part) -> bool:
 
 
 static func is_primary_tree_paving(part) -> bool:
-	if part == null or String(part.kind) != "foundation" or String(part.material_id) not in ["cobblestone", "worn_cobble"]:
+	# Tree roots and household placement may only derive a standing datum from
+	# the authoritative collision course. Thin decorative finishes can share its
+	# material and semantic, but must never become a second elevated authority.
+	if part == null or not part.collision_enabled or String(part.kind) != "foundation" or String(part.material_id) not in ["cobblestone", "worn_cobble"]:
 		return false
 	return String(part.semantic) in ["castle_courtyard_paving", "citadel_market_plaza", "citadel_perimeter_alley", "citadel_terminal_shop_foundation"]
 
@@ -1358,7 +1425,14 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 			var center_x := _street_row_house_x(row_index, side, lane_x, width)
 			var material := palette[(row_index * 2 + (1 if side > 0 else 0)) % palette.size()]
 			if not add_street_house(blueprint, "urban_row_%02d_%s" % [row_index, "right" if side > 0 else "left"], Vector3(center_x, 0.0, row_z), width, row_depth, wall_height, float(-side), elevations[row_index], material, prepared_variation + float(row_index) * 0.012):
-				return {"ready": false, "reason": "street_house_opening_layout_failed"}
+				# Preserve the source rejection, but include the concrete sampled
+				# geometry so a fresh seed failure can be repaired at its generator
+				# authority rather than guessed from a later missing-landmark symptom.
+				return {"ready": false, "reason": "street_house_opening_layout_failed", "rowIndex": row_index,
+					"side": side, "rowDepth": row_depth, "wallHeight": wall_height,
+					"openingLayout": StreetOpeningLayout.prepare(row_depth, wall_height),
+					"minimumDepth": StreetOpeningLayout.minimum_depth(wall_height),
+					"houseFailure": blueprint.recipe.get("citadelStreetHouseFailure", {})}
 	var plaza_z := centers[2]
 	var market_y := elevations[2]
 	# The same row selected for the market owns its opposing house association.
@@ -1367,7 +1441,8 @@ static func add_street_sequence(blueprint, front_z: float, keep_front_z: float, 
 		"rightHouseId":"urban_row_%02d_right"%2,"plazaPartId":"urban_market_plaza"}
 	# The plaza is a thin finish over the shared ground, never a collision or
 	# grading authority. Terrain/courtyard paving remains the walkable surface.
-	add_part(blueprint, "urban_market_plaza", "ground_patch", "cobblestone", Vector3(lane_centers[2], market_y + 0.15, plaza_z), Vector3(17.88, 0.02, segment_depth * 0.80), {"collision": false, "variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x", "physicalIntent": "visual_detail"})
+	var plaza_thickness := 0.02
+	add_part(blueprint, "urban_market_plaza", "ground_patch", "cobblestone", Vector3(lane_centers[2], PUBLIC_GROUND_SURFACE_Y - plaza_thickness * 0.5, plaza_z), Vector3(17.88, plaza_thickness, segment_depth * 0.80), {"collision": false, "variation": prepared_variation - 0.04, "semantic": "citadel_market_plaza", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x", "physicalIntent": "visual_detail"})
 	add_market_stalls(blueprint, Vector3(float(lane_centers[2]), market_y + 0.14, plaza_z), prepared_variation, prepared.marketStalls as Array)
 	var terminal_center := Vector3(float(lane_centers[2]), market_y + 0.14, plaza_z + segment_depth * 0.34)
 	add_terminal_shop_row(blueprint, terminal_center, prepared_variation)
@@ -1420,9 +1495,13 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		for window_index in [-1, 1]:
 			upper_openings.append({"centerY": opening_y, "height": 1.46, "centerZ": center.z + float(window_index) * window_offset, "width": STREET_WINDOW_WIDTH})
 	var stone_mass := add_recessed_facade_mass(blueprint, "%s_stone" % prefix, center.x, center.z, width, depth, ground_y, ground_y + base_height, street_side, "stone_foundation", variation, [{"centerY": ground_y + 1.25, "height": 2.5, "centerZ": center.z, "width": StreetOpeningLayout.DOOR_WIDTH}], "citadel_urban_stone_base")
-	if not stone_mass.ready: return false
+	if not stone_mass.ready:
+		blueprint.recipe["citadelStreetHouseFailure"] = {"prefix": prefix, "stage": "stone_facade", "detail": stone_mass.duplicate(true)}
+		return false
 	var upper_mass := add_recessed_facade_mass(blueprint, "%s_upper" % prefix, upper_center_x, center.z, upper_width, depth, ground_y + base_height, ground_y + wall_height, street_side, material, variation, upper_openings, "citadel_urban_facade")
-	if not upper_mass.ready: return false
+	if not upper_mass.ready:
+		blueprint.recipe["citadelStreetHouseFailure"] = {"prefix": prefix, "stage": "upper_facade", "detail": upper_mass.duplicate(true)}
+		return false
 	for floor_index in range(1, floor_count):
 		var floor_y := ground_y + float(floor_index) * 2.75
 		for window_index in [-1, 1]:
@@ -1561,7 +1640,11 @@ static func add_street_house(blueprint, prefix: String, center: Vector3, width: 
 		"signAssembly": sign_assembly
 	})
 	if not declaration.ready:
-		push_error("Citadel street-house declaration failed for %s: %s" % [prefix, String(declaration.get("reason", "unknown"))])
+		# This is an unaccepted source only. Retain its exact generator diagnosis
+		# for the caller's rejection receipt; do not emit a runtime error or let a
+		# failed partial house become an authority.
+		blueprint.recipe["citadelStreetHouseFailure"] = {"prefix": prefix, "reason": declaration.get("reason", "unknown"),
+			"detail": declaration.duplicate(true)}
 	else:
 		var homes: Array = blueprint.recipe.get("citadelUrbanHomes", []) as Array
 		homes.append({
@@ -1670,7 +1753,11 @@ static func add_partitioned_street_facade(blueprint, prefix: String, facade_x: f
 			var vertical := FacadePartition.interval(bounds_low_y, bounds_high_y)
 			var lateral := FacadePartition.interval(bounds_low_z, bounds_high_z)
 			if not vertical.ready or not lateral.ready:
-				return {"ready": false, "reason": "unrepresentable_facade_partition", "panelIndex": panel_index, "vertical": vertical, "lateral": lateral}
+				return {"ready": false, "reason": "unrepresentable_facade_partition", "panelIndex": panel_index,
+					"vertical": vertical, "lateral": lateral, "cellY": Vector2(cell_bottom, cell_top),
+					"cellZ": Vector2(cell_near, cell_far), "boundsY": Vector2(bounds_low_y, bounds_high_y),
+					"boundsZ": Vector2(bounds_low_z, bounds_high_z), "wallZ": Vector2(z_edges.front(), z_edges.back()),
+					"openings": declared_openings.duplicate(true)}
 			add_part(staged, "%s_%03d" % [prefix, panel_index], "wall", material, Vector3(facade_x, vertical.center, lateral.center), Vector3(thickness, vertical.size, lateral.size), {"variation": variation + float(posmod(panel_index, 5) - 2) * 0.004, "semantic": semantic})
 			var part = staged.parts.back()
 			var actual: AABB = staged.transformed_part_bounds(part)
@@ -1870,9 +1957,13 @@ static func _add_civic_house(blueprint, house: Dictionary, base_y: float, variat
 	return add_street_house(blueprint,String(house.id),house.center,float(house.width),float(house.depth),float(house.height),-1.0,base_y,String(house.material),variation+float(String(house.id).hash()%17)*0.003,float(house.get("roofRise",-1.0)))
 
 static func civic_house_specs(keep_front_z: float) -> Array:
+	# This compact civic home belongs in the open east commons pocket between
+	# the market and service yard. The previous pair tried to pack a second home
+	# against the curtain wall; it was either unplaceable or structurally
+	# incomplete. The quarter's service yard already owns that wall-side role.
+	# Keep the planner as the authority for small seed-derived clearance changes.
 	var houses := [
-		{"id": "urban_civic_house_east", "center": Vector3(43.0, 0.0, keep_front_z - 2.5), "width": 10.2, "depth": 12.0, "height": 9.3, "material": "painted_brick_ochre"},
-		{"id": "urban_civic_house_wall", "center": Vector3(56.0, 0.0, keep_front_z - 14.0), "width": 8.8, "depth": 10.4, "height": 7.2, "material": "painted_brick_sage"}
+		{"id": "urban_civic_house_east", "center": Vector3(35.0, 0.0, keep_front_z - 0.4), "width": 8.0, "depth": 8.0, "height": 8.4, "material": "painted_brick_ochre"}
 	]
 	for house: Dictionary in houses: house["roofRise"]=street_house_roof_rise(house.center)
 	return houses
@@ -1898,7 +1989,10 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 	if not supported_paving.ready: return supported_paving
 	var paving_rect: Rect2 = supported_paving.bounds
 	var paving_size := Vector3(paving_rect.size.x,0.08,paving_rect.size.y)
-	var paving_position := Vector3(paving_rect.get_center().x,base_y+0.18,paving_rect.get_center().y)
+	# This is a decorative finish over the continuous courtyard course. Its top
+	# must equal the collision-backed public grade; civic buildings retain their
+	# own generated foundations at base_y.
+	var paving_position := Vector3(paving_rect.get_center().x,PUBLIC_GROUND_SURFACE_Y-paving_size.y*0.5,paving_rect.get_center().y)
 	var houses := civic_house_specs(keep_front_z)
 	for house: Dictionary in houses:
 		if not StreetOpeningLayout.prepare(float(house.depth),float(house.height)).ready:
@@ -1917,7 +2011,7 @@ static func add_civic_quarter(blueprint, front_z: float, keep_front_z: float, ba
 		var terrace_commit := CivicInfill.Terraces.commit(blueprint,infill.terraceOriginals,infill.terraceReplacements)
 		if not terrace_commit.ready: return terrace_commit
 		houses=infill.specs
-	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", paving_position, paving_size, {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
+	add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", paving_position, paving_size, {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x", "gradeSurfaceY":PUBLIC_GROUND_SURFACE_Y, "physicalIntent":"visual_detail"})
 	for house_value in houses:
 		var house: Dictionary = house_value as Dictionary
 		if not _add_civic_house(blueprint,house,base_y,variation):
@@ -2099,48 +2193,93 @@ static func add_bunting_lines(blueprint, front_z: float, keep_front_z: float, ba
 	var market_lane_x := float(urban_layout.get("marketLaneX", MARKET_LANE_X))
 	var market_terrace_rise := float(urban_layout.get("marketTerraceRise", MARKET_TERRACE_RISE))
 	var lines := [
-		{"start": -4.2, "end": 5.8, "z": front_z + 20.0, "y": base_y + 5.8},
-		{"start": market_lane_x - 8.0, "end": market_lane_x + 8.0, "z": front_z + 33.5, "y": base_y + market_terrace_rise + 6.0},
-		{"start": 3.0, "end": 20.0, "z": keep_front_z - 9.0, "y": base_y + market_terrace_rise * 2.0 + 5.4}
+		{"sourceIndex":1, "role":"market", "start": market_lane_x - 8.0, "end": market_lane_x + 8.0, "z": front_z + 33.5, "y": base_y + market_terrace_rise + 6.0},
+		{"sourceIndex":2, "role":"exterior", "start": 3.0, "end": 20.0, "z": keep_front_z - 9.0, "y": base_y + market_terrace_rise * 2.0 + 5.4}
 	]
-	# The third line is optional exterior dressing.  Its old fixed coordinates
+	# Civic bunting used to include a first line at hard-coded coordinates. It
+	# was neither tied to a generated owner pair nor high enough for an existing
+	# rooted structural member, so some normal seeds produced an unmountable
+	# assembly. Keep only the market-owned and explicitly-owned exterior lines.
+	# The exterior line is optional dressing. Its old fixed coordinates
 	# can describe a different forecourt after deterministic layout variation;
 	# do not publish an unowned, unmountable string and make it a structural
 	# loading requirement.  Final socket and clearance proof still occurs after
 	# all source geometry is assembled.
-	var exterior_line: Dictionary = lines[2]
+	var exterior_line: Dictionary = lines[1]
 	var exterior_center := Vector3((float(exterior_line.start)+float(exterior_line.end))*0.5,
 		float(exterior_line.y)+0.33,float(exterior_line.z))
 	var exterior_emittable := ExteriorBunting.accepts_authored_center(blueprint,exterior.owners,exterior_center)
 	var cloth_materials: Array[String] = ["wool_rust", "linen", "wool_moss"]
 	var assemblies: Array = []
 	for line_index in range(lines.size()):
-		if line_index == 2 and not exterior_emittable:
-			continue
 		var line: Dictionary = lines[line_index] as Dictionary
-		var start_x := float(line.get("start", 0.0))
-		var end_x := float(line.get("end", 0.0))
-		var line_y := float(line.get("y", base_y + 5.5))
-		var line_z := float(line.get("z", front_z))
-		var rope_id := "urban_bunting_rope_%02d" % line_index
-		add_part(blueprint, rope_id, "beam", "ironwork", Vector3((start_x + end_x) * 0.5, line_y + 0.33, line_z), Vector3(end_x - start_x, 0.035, 0.035), {"collision": false, "variation": variation, "semantic": "citadel_bunting_rope"})
-		if line_index == 1:
-			blueprint.parts.back().recipe["buntingMarketOwners"] = blueprint.recipe.get("citadelMarketHousePair",{}).duplicate(true)
-		if line_index == 2:
-			blueprint.parts.back().recipe[ExteriorBunting.OWNERS] = exterior.owners.duplicate(true)
-		var members: Array = []
-		var pennant_count := 9 if line_index == 0 else 13
-		for pennant_index in range(pennant_count):
-			var ratio := (float(pennant_index) + 0.5) / float(pennant_count)
-			var pennant_x := lerpf(start_x, end_x, ratio)
-			var sag := sin(ratio * PI) * 0.28
-			var material := cloth_materials[(line_index + pennant_index) % cloth_materials.size()]
-			add_part(blueprint, "urban_bunting_%02d_%02d" % [line_index, pennant_index], "pennant", material, Vector3(pennant_x, line_y - sag, line_z), Vector3(maxf(0.38, (end_x - start_x) / float(pennant_count) * 0.56), 0.68, 0.055), {"rotation": Vector3(0.0, 0.0, deg_to_rad(-8.0 if pennant_index % 2 == 0 else 8.0)), "collision": false, "variation": variation + float(pennant_index) * 0.006, "semantic": "citadel_bunting"})
-			members.append(blueprint.parts.back().id)
-		var assembly := {"ropeId":rope_id,"pennantIds":members}
-		if line_index == 2: assembly["mounting"] = "exterior"
+		var role := String(line.get("role", ""))
+		var source_index := int(line.get("sourceIndex", -1))
+		if source_index < 0:
+			return false
+		if role == "exterior" and not exterior_emittable:
+			continue
+		# Bunting is optional visual dressing, but its full non-collision volume
+		# remains source occupancy for later chimney bearer proof.  Preflight a
+		# private exact candidate so a decorative line never turns a viable house
+		# into an unresolved structural recipe after publication has begun.
+		var candidate: Variant = _copy_blueprint_for_bunting_probe(blueprint)
+		_append_bunting_line(candidate, source_index, line, variation, cloth_materials, exterior.owners)
+		if not _preserves_street_house_chimney_bearings(blueprint, candidate):
+			continue
+		var assembly := _append_bunting_line(blueprint, source_index, line, variation, cloth_materials, exterior.owners)
 		assemblies.append(assembly)
 	return BuntingManifest.declare(blueprint,assemblies).ready
+
+
+static func _copy_blueprint_for_bunting_probe(source):
+	var copy := FacadeBlueprint.new(source.id, source.seed, source.style)
+	copy.set_recipe(source.recipe)
+	copy.set_room_records(source.rooms)
+	for part in source.parts:
+		copy.add_part(part.snapshot())
+	return copy
+
+
+static func _append_bunting_line(target, source_index: int, line: Dictionary, variation: float, cloth_materials: Array[String], exterior_owners: Dictionary) -> Dictionary:
+	var role := String(line.get("role", ""))
+	var start_x := float(line.get("start", 0.0))
+	var end_x := float(line.get("end", 0.0))
+	var line_y := float(line.get("y", 0.0))
+	var line_z := float(line.get("z", 0.0))
+	var rope_id := "urban_bunting_rope_%02d" % source_index
+	add_part(target, rope_id, "beam", "ironwork", Vector3((start_x + end_x) * 0.5, line_y + 0.33, line_z), Vector3(end_x - start_x, 0.035, 0.035), {"collision": false, "variation": variation, "semantic": "citadel_bunting_rope"})
+	if role == "market":
+		target.parts.back().recipe["buntingMarketOwners"] = target.recipe.get("citadelMarketHousePair",{}).duplicate(true)
+	if role == "exterior":
+		target.parts.back().recipe[ExteriorBunting.OWNERS] = exterior_owners.duplicate(true)
+	var members: Array = []
+	var pennant_count := 13
+	for pennant_index in range(pennant_count):
+		var ratio := (float(pennant_index) + 0.5) / float(pennant_count)
+		var pennant_x := lerpf(start_x, end_x, ratio)
+		var sag := sin(ratio * PI) * 0.28
+		var material := cloth_materials[(source_index + pennant_index) % cloth_materials.size()]
+		add_part(target, "urban_bunting_%02d_%02d" % [source_index, pennant_index], "pennant", material, Vector3(pennant_x, line_y - sag, line_z), Vector3(maxf(0.38, (end_x - start_x) / float(pennant_count) * 0.56), 0.68, 0.055), {"rotation": Vector3(0.0, 0.0, deg_to_rad(-8.0 if pennant_index % 2 == 0 else 8.0)), "collision": false, "variation": variation + float(pennant_index) * 0.006, "semantic": "citadel_bunting"})
+		members.append(target.parts.back().id)
+	var assembly := {"ropeId":rope_id,"pennantIds":members}
+	if role == "exterior": assembly["mounting"] = "exterior"
+	return assembly
+
+
+static func _preserves_street_house_chimney_bearings(baseline, candidate) -> bool:
+	var manifest := StreetHouseStructuralManifestScript.read(baseline)
+	if not manifest.ready:
+		return false
+	for record: Dictionary in manifest.records:
+		var chimney: Dictionary = record.chimney as Dictionary
+		var before := ChimneyBearingRecipeScript.plan(baseline, String(chimney.id), chimney.gableIds, chimney.upstreamIds)
+		if not before.ready:
+			continue
+		var after := ChimneyBearingRecipeScript.plan(candidate, String(chimney.id), chimney.gableIds, chimney.upstreamIds)
+		if not after.ready:
+			return false
+	return true
 
 
 static func add_traffic_wear(blueprint, prefix: String, center: Vector3, span: Vector2, heading: float, variation: float, semantic: String) -> void:

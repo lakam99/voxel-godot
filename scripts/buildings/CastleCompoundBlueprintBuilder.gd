@@ -26,6 +26,7 @@ const COURTYARD_GRADE_SURFACE_Y := COURTYARD_GRADE_BED_HEIGHT + COURTYARD_GRADE_
 # 21-22 m across, far smaller than the complete courtyard footprint.
 const COURTYARD_GRADE_PAVING_MAX_SPAN := 22.0
 const GATEHOUSE_STAIR_ENTRY_LATERAL_OFFSET := -0.48
+const KEEP_REAR_STAIR_LANE_MARGIN := 0.69
 
 
 static func build(seed: int, raw_context: Dictionary = {}):
@@ -179,7 +180,9 @@ static func build_from_compound(compound: Dictionary, diagnostics: Dictionary = 
 	if placement_cancel.stopped: return null
 	if not _continue_compound(continuation, diagnostics, "compound_courtyard_placement_completed"): return null
 	if courtyard_buildings.size() != courtyard_program.size():
-		push_error("Castle seed %d could not publish its complete sampled courtyard program" % seed)
+		if not diagnostics.has("failureReason"):
+			diagnostics["failureReason"] = "incomplete_courtyard_program"
+			report_source_rejection(seed, String(diagnostics["failureReason"]))
 		return null
 	blueprint.set_recipe({
 		"schemaVersion": int(compound.get("schemaVersion", 1)),
@@ -314,34 +317,37 @@ static func append_declared_interior_program_rooms(records: Array, parts: Array)
 
 
 static func keep_stairwell_layout(center: Vector3, width: float, depth: float, parts: Array) -> Dictionary:
-	# The stairwell sits in the rear-right quarter of the keep.  It is wide enough
-	# for a true two-flight stair, remains inside the structural walls, and leaves
-	# the entry axis and great hall clear for normal play.
+	# Prefer the established rear-right stairwell. A sampled palace wing can own
+	# that exact quarter, however, and rejecting the entire Citadel then turns a
+	# valid deterministic source into a missing landmark. The rear-left slot is a
+	# mirrored structural option. If both side bays are occupied, the paired rear
+	# wings intentionally leave a central rear-hall/portico bay for the same
+	# shared stair construction. Each choice is tested against the actual
+	# collision envelopes rather than nominal recipe dimensions.
 	var stair_width := clampf(width * 0.22, 3.10, 4.30)
-	var stair_depth := clampf(depth * 0.38, 4.80, 6.40)
-	var interior_right := center.x + width * 0.5 - 0.76
-	var interior_back := center.z + depth * 0.5 - 0.76
-	var interior_front := center.z - depth * 0.5 + 0.76
-	var stair_x := interior_right - stair_width * 0.5
-	# The existing palace and rear wings own their geometry. Fit circulation
-	# between their actual collision envelopes, including roof overhangs, before
-	# producing the shared floor openings and room access reservations.
-	for part in parts:
-		if not part.collision_enabled: continue
-		var front_wing: bool = part.id.begins_with("castle_keep_palace_wing")
-		var rear_wing: bool = part.id.begins_with("castle_keep_rear_cross_wing") or part.id.begins_with("castle_keep_rear_service")
-		if not front_wing and not rear_wing: continue
-		var bounds: AABB = Transform3D(Basis.from_euler(part.rotation),part.position) * AABB(-part.size*0.5,part.size)
-		if bounds.end.x < stair_x-stair_width*0.5 or bounds.position.x > stair_x+stair_width*0.5: continue
-		if front_wing: interior_front=maxf(interior_front,bounds.end.z+0.60)
-		if rear_wing: interior_back=minf(interior_back,bounds.position.z-0.60)
-	stair_depth=minf(stair_depth,interior_back-interior_front)
-	return {
-		"ready": stair_depth >= 2.14,
-		"center": Vector3(stair_x, 0.0, interior_back - stair_depth * 0.5),
-		"width": stair_width,
-		"depth": stair_depth
-	}
+	var preferred_x := center.x + width * 0.5 - 0.76 - stair_width * 0.5
+	var mirrored_x := center.x - width * 0.5 + 0.76 + stair_width * 0.5
+	var strongest: Dictionary = {"ready": false, "center": Vector3(preferred_x, 0.0, center.z), "width": stair_width, "depth": 0.0}
+	for stair_x in [preferred_x, mirrored_x, center.x]:
+		var interior_back := center.z + depth * 0.5 - 0.76
+		var interior_front := center.z - depth * 0.5 + 0.76
+		# The existing palace and rear wings own their geometry. Fit circulation
+		# between their actual collision envelopes, including roof overhangs,
+		# before producing the shared floor openings and room access reservations.
+		for part in parts:
+			if not part.collision_enabled: continue
+			var front_wing: bool = part.id.begins_with("castle_keep_palace_wing")
+			var rear_wing: bool = part.id.begins_with("castle_keep_rear_cross_wing") or part.id.begins_with("castle_keep_rear_service")
+			if not front_wing and not rear_wing: continue
+			var bounds: AABB = Transform3D(Basis.from_euler(part.rotation),part.position) * AABB(-part.size*0.5,part.size)
+			if bounds.end.x < stair_x-stair_width*0.5 or bounds.position.x > stair_x+stair_width*0.5: continue
+			if front_wing: interior_front=maxf(interior_front,bounds.end.z+0.60)
+			if rear_wing: interior_back=minf(interior_back,bounds.position.z-0.60)
+		var stair_depth := minf(clampf(depth * 0.38, 4.80, 6.40),interior_back-interior_front)
+		var layout := {"ready": stair_depth >= 2.14, "center": Vector3(stair_x, 0.0, interior_back - stair_depth * 0.5), "width": stair_width, "depth": stair_depth}
+		if bool(layout.ready): return layout
+		if float(layout.depth) > float(strongest.depth): strongest = layout
+	return strongest
 
 
 static func member_recipe(members: Array, family: String) -> Dictionary:
@@ -514,7 +520,7 @@ static func planned_district_courtyard_building_specs(program: Array, lot_pairs:
 	if String(plan.get("status", "")) != "ready" or not bool((plan.get("validation", {}) as Dictionary).get("passed", false)):
 		diagnostics["failureReason"] = "district_placement_infeasible"
 		diagnostics["pairDiagnostics"] = {"mode": "post_geometry_exact", "attemptCount": 0, "fallback": false, "terminalReason": String(plan.get("phase", "infeasible")), "pairIndex": -1, "rejections": (plan.get("rejections", []) as Array).duplicate(true)}
-		push_error("Castle seed %d post-geometry district placement is infeasible" % seed)
+		report_source_rejection(seed, "%s:%s" % [String(diagnostics["failureReason"]), String(plan.get("phase", "infeasible"))])
 		return []
 	var placements_value = plan.get("placements", null)
 	if not placements_value is Array or (placements_value as Array).size() != program.size():
@@ -593,8 +599,15 @@ static func reject_post_geometry_district(diagnostics: Dictionary, seed: int, pa
 	diagnostics["failureReason"] = "invalid_post_geometry_district_program"
 	diagnostics["pairId"] = pair_id
 	diagnostics["pairDiagnostics"] = {"mode": "post_geometry_exact", "attemptCount": 0, "fallback": false, "terminalReason": terminal_reason, "pairIndex": pair_index}
-	push_error("Castle seed %d post-geometry district source rejected at pair %d: %s" % [seed, pair_index, terminal_reason])
+	report_source_rejection(seed, "%s:pair_%d:%s" % [String(diagnostics["failureReason"]), pair_index, terminal_reason])
 	return []
+
+
+static func report_source_rejection(seed: int, reason: String) -> void:
+	# A sampled Citadel that cannot satisfy its complete physical program is a
+	# normal candidate rejection. The typed diagnostic keeps it unpublishable;
+	# this log must not turn expected discovery into a global engine failure.
+	print("Citadel castle source rejected: seed=%d reason=%s" % [seed, reason])
 
 
 static func sampled_district_lot_binding_valid(source: Dictionary, lot_pair: Dictionary, side: String) -> bool:
@@ -1137,14 +1150,17 @@ static func footprint_overlaps(first_center: Vector3, first_width: float, first_
 
 
 static func add_district_streets(blueprint, grammar: Dictionary, foundation_height: float, variation: float) -> void:
-	# Streets are part of the compound grammar, not omitted ground between a
-	# collection of homes. Every route receives one continuous collision-bearing
-	# roadbed whose top is aligned with the decorative paving layered over it.
+	# Street records remain the deterministic district/routing description. A
+	# terraced grammar needs explicit collision-bearing roadbeds; the current
+	# natural-ground grammar already has one continuous public collision course,
+	# so its streets add only flush visual dressing over that authority.
 	var grid: Dictionary = grammar.get("courtyardGrid", {}) as Dictionary
 	if String(grid.get("mode", "")) != "district_grid":
 		return
 	var street_records: Array = grid.get("streetRecords", []) as Array
-	add_raised_route_junctions(blueprint, street_records, foundation_height, variation)
+	var natural_ground := district_grid_uses_natural_ground(grid)
+	if not natural_ground:
+		add_raised_route_junctions(blueprint, street_records, foundation_height, variation)
 	var protected_route_supports := raised_route_existing_support_bounds(blueprint)
 	var route_coverage_records: Array = []
 	for record_value in street_records:
@@ -1158,13 +1174,14 @@ static func add_district_streets(blueprint, grammar: Dictionary, foundation_heig
 		var street_elevation := float(record.get("elevation", citadel_terrace_elevation_at_z(grid, float(record.get("z", 0.0)))))
 		var street_id := String(record.get("id", "street"))
 		var street_center := Vector3(float(record.get("x", 0.0)), 0.0, float(record.get("z", 0.0)))
-		if not bool(record.get("transitionOwned", false)):
+		if not natural_ground and not bool(record.get("transitionOwned", false)):
 			add_elevated_street_roadbed(blueprint, street_id, street_center, width, depth, foundation_height, street_elevation, variation)
-		var route_coverage := raised_route_record_coverage(blueprint, street_id, street_center, width, depth, foundation_height, street_elevation, false, record.get("allowedTransitionOwnerIds", []) as Array, float(record.get("handoffSeamZ", INF)), String(record.get("handoffTransitionOwnerId", "")), String(record.get("handoffTransitionSemantic", "")), String(record.get("handoffSourceOwnerId", "")), String(record.get("handoffSourceSemantic", "castle_route_terrace_walkway")), bool(record.get("transitionOwned", false)))
+		var route_coverage := {"passed": true, "applicability": "natural_ground"} if natural_ground else raised_route_record_coverage(blueprint, street_id, street_center, width, depth, foundation_height, street_elevation, false, record.get("allowedTransitionOwnerIds", []) as Array, float(record.get("handoffSeamZ", INF)), String(record.get("handoffTransitionOwnerId", "")), String(record.get("handoffTransitionSemantic", "")), String(record.get("handoffSourceOwnerId", "")), String(record.get("handoffSourceSemantic", "castle_route_terrace_walkway")), bool(record.get("transitionOwned", false)))
 		route_coverage_records.append(route_coverage)
 		if not bool(route_coverage.get("passed", false)):
 			continue
-		var center := Vector3(float(record.get("x", 0.0)), foundation_height + street_elevation + 0.155, float(record.get("z", 0.0)))
+		var visual_surface_y := COURTYARD_GRADE_SURFACE_Y if natural_ground else foundation_height + street_elevation + 0.20
+		var center := Vector3(float(record.get("x", 0.0)), visual_surface_y, float(record.get("z", 0.0)))
 		var runs_along_z := depth >= width
 		var longitudinal_span := depth if runs_along_z else width
 		var available_cross_span := width if runs_along_z else depth
@@ -1177,23 +1194,32 @@ static func add_district_streets(blueprint, grammar: Dictionary, foundation_heig
 			var module_cross_span := clampf(base_channel_span + width_bias, base_channel_span * 0.86, available_cross_span * 0.68)
 			var lateral_offset := sin(float(module_index) * 1.73 + float(street_id.hash() % 11)) * 0.12
 			var longitudinal_offset := -longitudinal_span * 0.5 + module_run * (float(module_index) + 0.5)
-			var module_center := center + (Vector3(lateral_offset, 0.008 + absf(lateral_offset) * 0.02, longitudinal_offset) if runs_along_z else Vector3(longitudinal_offset, 0.008 + absf(lateral_offset) * 0.02, lateral_offset))
 			var module_size := Vector3(module_cross_span, 0.07, module_run + 0.035) if runs_along_z else Vector3(module_run + 0.035, 0.07, module_cross_span)
+			var module_center := center + (Vector3(lateral_offset, 0.0, longitudinal_offset) if runs_along_z else Vector3(longitudinal_offset, 0.0, lateral_offset))
+			module_center.y = visual_surface_y - module_size.y * 0.5
 			if not route_visual_overlaps_protected_support(module_center, module_size, protected_route_supports):
 				add_part(blueprint, "castle_district_%s_cobble_%03d" % [street_id, module_index], "foundation", "cobblestone", module_center, module_size, {"variation": variation - 0.035 + width_bias * 0.4, "collision": false, "semantic": "castle_route_cobbled_module", "pavingFamily": "lane_cobbles", "pavingRegion": "castle_route_%s" % street_id, "pavingHeading": "z" if runs_along_z else "x"})
 		var cross_span := width if runs_along_z else depth
 		var margin_span := maxf(0.34, (cross_span - base_channel_span) * 0.5)
 		for side in [-1.0, 1.0]:
 			var margin_offset: float = side * (base_channel_span * 0.5 + margin_span * 0.5)
-			var margin_center := center + (Vector3(margin_offset, 0.012, 0.0) if runs_along_z else Vector3(0.0, 0.012, margin_offset))
 			var margin_size := Vector3(margin_span, 0.045, depth) if runs_along_z else Vector3(width, 0.045, margin_span)
+			var margin_center := center + (Vector3(margin_offset, 0.0, 0.0) if runs_along_z else Vector3(0.0, 0.0, margin_offset))
+			margin_center.y = visual_surface_y - margin_size.y * 0.5
 			if not route_visual_overlaps_protected_support(margin_center, margin_size, protected_route_supports):
 				add_part(blueprint, "castle_district_%s_margin_%d" % [street_id, int(side)], "foundation", "stone_foundation", margin_center, margin_size, {"variation": variation + 0.035 + side * 0.006, "collision": false, "semantic": "castle_route_pedestrian_margin"})
 		var drain_offset := base_channel_span * 0.5 + 0.16
-		var drain_center := center + (Vector3(drain_offset, 0.022, 0.0) if runs_along_z else Vector3(0.0, 0.022, drain_offset))
 		var drain_size := Vector3(0.28, 0.055, depth) if runs_along_z else Vector3(width, 0.055, 0.28)
+		var drain_center := center + (Vector3(drain_offset, 0.0, 0.0) if runs_along_z else Vector3(0.0, 0.0, drain_offset))
+		drain_center.y = visual_surface_y - drain_size.y * 0.5
 		if not route_visual_overlaps_protected_support(drain_center, drain_size, protected_route_supports):
 			add_part(blueprint, "castle_district_%s_drain" % street_id, "foundation", "stone_foundation", drain_center, drain_size, {"collision": false, "variation": variation - 0.08, "semantic": "castle_route_constructed_gutter"})
+
+
+static func district_grid_uses_natural_ground(grid: Dictionary) -> bool:
+	return String(grid.get("mode", "")) == "district_grid" \
+		and float(grid.get("terraceStepHeight", 0.0)) <= 0.0001 \
+		and (grid.get("processionalTransitions", []) as Array).is_empty()
 
 
 static func add_elevated_street_roadbed(blueprint, street_id: String, center: Vector3, width: float, depth: float, foundation_height: float, street_elevation: float, variation: float) -> void:
@@ -1818,6 +1844,13 @@ static func _validate_raised_route_coverage(blueprint, _route_control: _RouteDia
 	else:
 		if not blueprint.resolve_physical_contracts_cancellable(_route_control.poll):
 			return _cancelled_route_diagnostic()
+	if district_grid_uses_natural_ground(grid):
+		var unexpected: Array[String] = []
+		for part in blueprint.parts:
+			if part != null and bool(part.collision_enabled) and String(part.semantic) in ["castle_route_terrace_walkway", "castle_route_junction", "castle_inhabited_terrace_block", "castle_processional_step"]:
+				unexpected.append(String(part.id))
+		return {"passed": unexpected.is_empty(), "applicability": "natural_ground", "records": [],
+			"violations": unexpected.map(func(id): return "Natural-ground district contains artificial raised route collision %s" % id)}
 	var foundation_height := float((blueprint.recipe as Dictionary).get("foundationHeight", 0.62))
 	var records: Array[Dictionary] = []
 	var violations: Array[String] = []
@@ -3474,8 +3507,17 @@ static func add_keep_palace_wings(blueprint, center: Vector3, width: float, dept
 	var core_front_z := core_center.z - core_depth * 0.5
 	var core_back_z := core_center.z + core_depth * 0.5
 	var wing_front_z := core_front_z + core_depth * 0.46
-	var rear_limit_z := center.z + depth * 0.5 - 3.8
-	var available_depth := maxf(12.0, rear_limit_z - wing_front_z)
+	# The palace wings stop before a real rear stair lane. The stairwell is part
+	# of the keep's primary circulation, so wing proportions must fit around it
+	# rather than allowing a sampled wing to consume the only vertical route and
+	# reject the whole Citadel source. This reserves the stair's full deepest
+	# footprint, the inside wall inset, and the same collision clearance used by
+	# keep_stairwell_layout below.
+	var stair_lane_depth := clampf(depth * 0.38, 4.80, 6.40)
+	var rear_limit_z := center.z + depth * 0.5 - 0.76 - stair_lane_depth - KEEP_REAR_STAIR_LANE_MARGIN
+	var available_depth := rear_limit_z - wing_front_z
+	if available_depth < 4.80:
+		return
 	var requested_depth := depth * clampf(float(palace_grammar.get("wingDepthRatio", 0.68)) * 0.56, 0.28, 0.42)
 	var base_wing_depth := minf(requested_depth, available_depth)
 	var side_clearance := maxf(5.8, width * 0.5 - core_width * 0.5)
@@ -3483,7 +3525,7 @@ static func add_keep_palace_wings(blueprint, center: Vector3, width: float, dept
 	for side in [-1.0, 1.0]:
 		var is_dominant: bool = side == dominant_side
 		var depth_bias := float(palace_grammar.get("dominantWingDepthBias", 0.0)) if is_dominant else float(palace_grammar.get("secondaryWingDepthBias", 0.0))
-		var wing_depth := clampf(base_wing_depth * (1.0 + depth_bias), 10.0, available_depth)
+		var wing_depth := clampf(base_wing_depth * (1.0 + depth_bias), 4.80, available_depth)
 		var wing_width := clampf(base_wing_width * (1.04 if is_dominant else 0.88), 5.4, side_clearance - 0.30)
 		var wing_height := minf(hall_height * clampf(float(palace_grammar.get("wingHeightRatio", 0.74)) * 0.72, 0.42, 0.60), core_eave_y - foundation_height - 3.20)
 		var wing_x: float = core_center.x + side * (core_width * 0.5 + wing_width * 0.5 + 0.06)
@@ -3815,8 +3857,8 @@ static func add_keep_storey_floor_with_stairwell(blueprint, storey_index: int, c
 		trim_back_facts.append({"seatId": String((trim_supports["back"] as Array)[support_index]), "loadDirection": "world_down", "localPatchCenter": Vector3(support_x - center.x, -0.15, 0.0), "localPatchHalfExtents": Vector2(0.08, 0.08), "seatFace": "max_y"})
 	add_part(blueprint, trim_front_id, "beam", "stone_foundation", Vector3(center.x, ledger_y, hole_min_z - 0.18), Vector3(max_x - min_x, 0.30, 0.36), {"variation": variation - 0.018, "semantic": "castle_keep_stairwell_trim_girder", "physicalAssemblyRole": "stairwell_trim_girder", "physicalRequiredSeatPartIds": trim_supports["front"], "physicalRequiredSeatFacts": trim_front_facts})
 	add_part(blueprint, trim_back_id, "beam", "stone_foundation", Vector3(center.x, ledger_y, hole_max_z + 0.18), Vector3(max_x - min_x, 0.30, 0.36), {"variation": variation - 0.018, "semantic": "castle_keep_stairwell_trim_girder", "physicalAssemblyRole": "stairwell_trim_girder", "physicalRequiredSeatPartIds": trim_supports["back"], "physicalRequiredSeatFacts": trim_back_facts})
-	# Four panels surround the stairwell on the exact same elevation.  The rear
-	# right well is intentionally open, while all other floor area stays real
+	# Four panels surround the selected rear stairwell on the exact same
+	# elevation. The well is intentionally open, while all other floor area stays real
 	# collision-backed stone.
 	add_keep_floor_panel(blueprint, "%s_floor_front" % prefix, min_x, max_x, min_z, hole_min_z, floor_y, variation, "x", left_ledger_id, right_ledger_id)
 	add_keep_floor_panel(blueprint, "%s_floor_back" % prefix, min_x, max_x, hole_max_z, max_z, floor_y, variation, "x", left_ledger_id, right_ledger_id)
@@ -3894,10 +3936,14 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 	# the housed contact plane. Centre that asymmetric envelope in the opening
 	# instead of steepening both flights to make room beneath the rear trim.
 	center.z -= 0.14 * sin(angle)
-	var ramp_width := clampf(span_width * 0.30, 0.70, 1.10)
+	# Collision follows the real NPC circulation lane, never a decorative tread
+	# width.  The production capsule is 0.84 m across, so a 0.70 m carriage can
+	# certify an endpoint while remaining physically untraversable between them.
+	var ramp_width := clampf(span_width * 0.30, 0.86, 1.10)
 	var lateral_offset := minf(span_width * 0.20, maxf(0.34, span_width * 0.5 - ramp_width * 0.60))
 	var left_x := center.x - lateral_offset
 	var right_x := center.x + lateral_offset
+	var landing_turn_offset := 0.34
 	var tread_count := maxi(7, ceili(half_rise / 0.24))
 	var tread_run := run / float(tread_count)
 	var tread_rise := half_rise / float(tread_count)
@@ -3925,30 +3971,30 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 			# exits; otherwise its bearing shoe protrudes above the surrounding floor.
 			add_part(blueprint, "%s_base_landing" % prefix, "floor", material, Vector3(center.x, level_base_y, center.z - run * 0.5), Vector3(span_width - 0.18, 0.20, STAIR_LANDING_DEPTH), {"variation": variation, "semantic": "%s_landing" % semantic})
 		var up_assembly_id := "%s_up_%02d" % [prefix, level]
-		var up_lower_shoe_center := Vector3(left_x, level_base_y - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5)
-		var up_upper_shoe_center := Vector3(left_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5)
+		var up_lower_shoe_center := Vector3(left_x, level_base_y - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5 - landing_turn_offset)
+		var up_upper_shoe_center := Vector3(left_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5 - landing_turn_offset)
 		var up_geometry := stair_housed_geometry(up_lower_shoe_center, up_upper_shoe_center, 0.18)
 		add_part(blueprint, "%s_up_carriage_%02d" % [prefix, level], "ramp", material, up_geometry.get("center", Vector3.ZERO) as Vector3, Vector3(ramp_width, 0.18, float(up_geometry.get("length", run))), {"rotation": up_geometry.get("rotation", Vector3.ZERO) as Vector3, "variation": variation - 0.025, "semantic": "%s_visible_stair_carriage" % semantic, "physicalIntent": "structural_mass", "physicalAssemblyRole": "stair_sloped_span", "physicalStairAssemblyId": up_assembly_id, "physicalRequiredAssemblyBearingBlockIds": [up_lower_shoe_id, up_upper_shoe_id], "physicalRequiredSeatPartIds": [up_lower_shoe_id, up_upper_shoe_id], "physicalRequiredSeatFacts": [stair_housed_joint_fact(up_lower_shoe_id, -1.0, up_geometry), stair_housed_joint_fact(up_upper_shoe_id, 1.0, up_geometry)]})
 		var up_carriage = blueprint.parts.back()
 		up_carriage.recipe.navigationStartSupportPartId = "%s_base_landing" % prefix if level == 0 else "%s_exit_%02d" % [prefix, level - 1]
 		up_carriage.recipe.navigationEndSupportPartId = "%s_landing_%02d" % [prefix, level]
 		for tread_index in range(tread_count):
-			var up_z := center.z - run * 0.5 + tread_run * (float(tread_index) + 0.5)
+			var up_z := up_lower_shoe_center.z + tread_run * (float(tread_index) + 0.5)
 			var up_y := level_base_y + tread_rise * float(tread_index + 1) - 0.055
 			add_part(blueprint, "%s_up_tread_%02d_%02d" % [prefix, level, tread_index], "stair_tread", material, Vector3(left_x, up_y, up_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "%s_tread" % semantic, "physicalIntent": "visual_detail"})
 		var landing_y := level_base_y + half_rise
 		var landing_center := Vector3(center.x, landing_y, center.z + run * 0.5)
 		add_part(blueprint, "%s_landing_%02d" % [prefix, level], "floor", material, landing_center, Vector3(span_width - 0.18, 0.20, STAIR_LANDING_DEPTH), {"variation": variation, "semantic": "%s_landing" % semantic})
 		var return_assembly_id := "%s_return_%02d" % [prefix, level]
-		var return_lower_shoe_center := Vector3(right_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5)
-		var return_upper_shoe_center := Vector3(right_x, level_base_y + rise_per_level - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5)
+		var return_lower_shoe_center := Vector3(right_x, level_base_y + half_rise - 0.10 + shoe_thickness * 0.5, center.z + run * 0.5 + landing_turn_offset)
+		var return_upper_shoe_center := Vector3(right_x, level_base_y + rise_per_level - 0.10 + shoe_thickness * 0.5, center.z - run * 0.5 + landing_turn_offset)
 		var return_geometry := stair_housed_geometry(return_lower_shoe_center, return_upper_shoe_center, 0.18)
 		add_part(blueprint, "%s_return_carriage_%02d" % [prefix, level], "ramp", material, return_geometry.get("center", Vector3.ZERO) as Vector3, Vector3(ramp_width, 0.18, float(return_geometry.get("length", run))), {"rotation": return_geometry.get("rotation", Vector3.ZERO) as Vector3, "variation": variation - 0.025, "semantic": "%s_visible_stair_carriage" % semantic, "physicalIntent": "structural_mass", "physicalAssemblyRole": "stair_sloped_span", "physicalStairAssemblyId": return_assembly_id, "physicalRequiredAssemblyBearingBlockIds": [return_lower_shoe_id, return_upper_shoe_id], "physicalRequiredSeatPartIds": [return_lower_shoe_id, return_upper_shoe_id], "physicalRequiredSeatFacts": [stair_housed_joint_fact(return_lower_shoe_id, -1.0, return_geometry), stair_housed_joint_fact(return_upper_shoe_id, 1.0, return_geometry)]})
 		var return_carriage = blueprint.parts.back()
 		return_carriage.recipe.navigationStartSupportPartId = "%s_landing_%02d" % [prefix, level]
 		return_carriage.recipe.navigationEndSupportPartId = "%s_exit_%02d" % [prefix, level]
 		for tread_index in range(tread_count):
-			var return_z := center.z + run * 0.5 - tread_run * (float(tread_index) + 0.5)
+			var return_z := return_lower_shoe_center.z - tread_run * (float(tread_index) + 0.5)
 			var return_y := level_base_y + half_rise + tread_rise * float(tread_index + 1) - 0.055
 			add_part(blueprint, "%s_return_tread_%02d_%02d" % [prefix, level, tread_index], "stair_tread", material, Vector3(right_x, return_y, return_z), Vector3(ramp_width, 0.11, tread_run + 0.025), {"collision": false, "variation": variation, "semantic": "%s_tread" % semantic, "physicalIntent": "visual_detail"})
 		var exit_y := level_base_y + rise_per_level
@@ -3960,6 +4006,25 @@ static func add_switchback_stair_flights(blueprint, prefix: String, center: Vect
 		add_stair_carriage_shoe(blueprint, return_upper_shoe_id, return_upper_shoe_center, ramp_width, shoe_thickness, exit_underframe_id, return_assembly_id, material, variation, semantic)
 
 
+## A standing capsule may touch the collision ramp it is about to enter or has
+## just left. That contact is circulation support, not an obstruction, only when
+## the generated carriage explicitly names this exact landing as one endpoint.
+## Keep this test at the recipe owner so diagnostics do not infer adjacency from
+## naming, proximity, or navigation state.
+static func stair_transition_connects_support(part: Variant, support_id: String) -> bool:
+	if support_id.is_empty() or support_id != support_id.strip_edges() or part == null:
+		return false
+	var kind := String(part.get("kind", "")) if part is Dictionary else String(part.kind)
+	var collision := bool(part.get("collision", false)) if part is Dictionary else bool(part.collision_enabled)
+	var recipe_value: Variant = part.get("recipe", {}) if part is Dictionary else part.recipe
+	if kind != "ramp" or not collision or not recipe_value is Dictionary:
+		return false
+	var recipe: Dictionary = recipe_value as Dictionary
+	if String(recipe.get("physicalAssemblyRole", "")) != "stair_sloped_span":
+		return false
+	return support_id in [String(recipe.get("navigationStartSupportPartId", "")), String(recipe.get("navigationEndSupportPartId", ""))]
+
+
 static func add_stair_landing_frame(blueprint, frame_id: String, pier_prefix: String, center: Vector3, deck_y: float, width: float, material: String, variation: float, semantic: String) -> void:
 	# Edge posts carry the transverse frame without filling the lower-level
 	# landing with a full-width pier. Both real seats are declared explicitly.
@@ -3967,12 +4032,20 @@ static func add_stair_landing_frame(blueprint, frame_id: String, pier_prefix: St
 	var seats: Array[String] = []
 	var facts: Array[Dictionary] = []
 	for side in [-1.0, 1.0]:
-		var offset: float = side * (width * 0.5 + 0.06)
+		# Keep each rooted bearing post outside the certified standing lane of the
+		# preceding switchback flight.  The old 0.06 m overlap put the next
+		# storey's full-height post within the 0.52 m endpoint capsule, making a
+		# physically solid lower landing unusable.  This remains a seated,
+		# collision-backed support; it merely terminates at the landing edge rather
+		# than through its walkable surface.
+		var offset: float = side * (width * 0.5 + 0.14)
 		var seat_id := "%s_%d" % [pier_prefix, int(side)]
 		seats.append(seat_id)
 		add_part(blueprint, seat_id, "foundation", "stone_foundation", Vector3(center.x + offset, height * 0.5, center.z), Vector3(0.24, height, 0.30), {"variation": variation - 0.028, "semantic": "%s_stair_bearing_pier" % semantic, "physicalAssemblyRole": "stair_bearing_pier"})
 		facts.append({"seatId": seat_id, "loadDirection": "world_down", "localPatchCenter": Vector3(offset, -0.09, 0.0), "localPatchHalfExtents": Vector2(0.06, 0.08), "seatFace": "max_y"})
-	add_part(blueprint, frame_id, "beam", material, Vector3(center.x, deck_y - 0.19, center.z), Vector3(width + 0.36, 0.18, STAIR_LANDING_DEPTH), {"variation": variation - 0.022, "semantic": "%s_underframe" % semantic, "physicalAssemblyRole": "two_post_landing_underframe", "physicalRequiredSeatPartIds": seats, "physicalRequiredSeatFacts": facts})
+	# The frame projects far enough to seat the edge posts without pulling their
+	# collision back into the circulation lane.
+	add_part(blueprint, frame_id, "beam", material, Vector3(center.x, deck_y - 0.19, center.z), Vector3(width + 0.52, 0.18, STAIR_LANDING_DEPTH), {"variation": variation - 0.022, "semantic": "%s_underframe" % semantic, "physicalAssemblyRole": "two_post_landing_underframe", "physicalRequiredSeatPartIds": seats, "physicalRequiredSeatFacts": facts})
 
 
 static func add_stair_carriage_shoe(blueprint, part_id: String, center: Vector3, width: float, thickness: float, underframe_id: String, assembly_id: String, material: String, variation: float, semantic: String) -> void:

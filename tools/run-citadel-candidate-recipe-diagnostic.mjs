@@ -7,7 +7,7 @@ const runner = 'tools/run-citadel-candidate-recipe-diagnostic.mjs';
 const script = 'res://scripts/testing/buildings/CitadelCandidateRecipeDiagnostic.gd';
 export function recipeVerification(o, report, changed, payloadExists, run) {
   let verified = changed.length === 0 && report.diagnosticCompleted === true && report.expectedFailureReproduced === true && report.passed === false;
-  let recipePassed = false, payload = 'failure.json', expectedErrors = [o.expectedError];
+	let recipePassed = false, payload = 'failure.json', expectedErrors = [];
   if (o.captureBlueprint) {
     payload = 'caller-blueprint.bin'; expectedErrors = [];
     verified = changed.length === 0 && report.diagnosticCompleted === true && report.captureCompleted === true && report.recipePassed === false && report.passed === false && report.receipt?.contextUnchanged === true && report.receipt?.sourceWithinDeadline === true && payloadExists;
@@ -43,7 +43,7 @@ export async function runRecipeDiagnostic(input, dependencies = {}) {
         prefix: phase === 'parse' ? 'parse-' : '', timeoutSeconds: phase === 'parse' ? 15 : o.runSeconds,
         args: ['--headless', '--path', project, '--script', script, ...(phase === 'parse' ? ['--check-only'] : [])] });
       if (!ownedPassed(result.summary) || result.watcherFailed || result.stopRequested) throw new Error(`${phase} failed; retain ${result.summaryPath} and logs`);
-      validateRecipeErrors(await engineErrors([result.stdoutPath, result.stderrPath]), allowed, phase === 'run' && !o.expectReady && !o.captureBlueprint);
+      validateRecipeErrors(await engineErrors([result.stdoutPath, result.stderrPath]), allowed, false);
     }
     const audit = await auditSources(project, hashes);
     const changed = [...audit.changedSources.map(row => row.path), ...audit.readErrors.map(row => row.path)];

@@ -49,6 +49,8 @@ const SCENE_UNIT_SAMPLE_CAPACITY := 4096
 # Leave headroom for the scene job's final bounded atomic unit and scheduler
 # jitter inside the public 4 ms gameplay-thread ceiling.
 const SCENE_JOB_SLICE_USEC := 1500
+const RETAINED_SOURCE_SLICE_USEC := 750
+const RETAINED_SOURCE_UNIT_CAP := 96
 const FIRST_USEFUL_HOME_COUNT := 2
 const FIRST_USEFUL_HOME_ARCHETYPES: Array[String] = ["bed","chair","hearth","table"]
 const FIRST_USEFUL_STRUCTURAL_SEMANTICS: Array[String] = [
@@ -74,6 +76,13 @@ var _retained_consumers: Array[Dictionary] = []
 var _retained_navigation_priorities: Dictionary = {}
 var _retained_binding_priorities: Dictionary = {}
 var _retained_discovery_priorities: Dictionary = {}
+var _retained_source_compile_job: Dictionary = {}
+var _retained_source_committed_revision := -1
+var _retained_source_request_serial := -1
+var _retained_source_identity := PackedByteArray()
+var _retained_source_rejection: Dictionary = {}
+var _retained_source_compile_metrics := {"ownerUnits":0,"admissionUnits":0,"navigationUnits":0,
+	"bindingUnits":0,"groupUnits":0,"phase":"idle","restarts":0,"rejections":0}
 var _observer_region_bounds := Rect2i()
 var _observer_bounds_rejected := false
 var _prefetch_regions: Array[Vector2i] = []
@@ -240,6 +249,11 @@ func configure(admission) -> void:
 	_desired = {}
 	_retained_region_bounds = []
 	_retained_consumers = []
+	_retained_source_compile_job = {}
+	_retained_source_committed_revision = -1
+	_retained_source_request_serial = -1
+	_retained_source_identity = PackedByteArray()
+	_retained_source_rejection = {}
 	_clear_retained_priorities()
 	_observer_region_bounds = Rect2i()
 	_prefetch_regions.clear()
@@ -262,6 +276,7 @@ func configure(admission) -> void:
 ## is atomic and privately copied; this service owns only publication demand.
 func set_retained_region_bounds(bounds: Array) -> bool:
 	if _closing or bounds.size() > MAX_RETAINED_BOUNDS: return false
+	_retained_source_compile_job = {}
 	var owned: Array[Rect2i] = []
 	for rectangle in bounds:
 		if not rectangle is Rect2i or not _bounded_region_rectangle(rectangle): return false
@@ -269,6 +284,9 @@ func set_retained_region_bounds(bounds: Array) -> bool:
 	if bounds == _retained_region_bounds and _retained_consumers.is_empty(): return true
 	_retained_region_bounds = owned
 	_retained_consumers = []
+	_retained_source_identity = PackedByteArray()
+	_retained_source_committed_revision = -1
+	_retained_source_rejection = {}
 	_clear_retained_priorities()
 	_demand_revision += 1
 	return true
@@ -276,160 +294,314 @@ func set_retained_region_bounds(bounds: Array) -> bool:
 ## One logical consumer owns its current query and trailing source pins.
 ## Discovery keys come only from original queries, never dependency envelopes.
 func set_retained_source_requests(requests: Array) -> bool:
-	if _closing or requests.size()>MAX_RETAINED_BOUNDS: return false
-	var owned: Array[Dictionary] = []
-	var discovery: Dictionary = {}
-	var navigation_priorities: Dictionary = {}
-	var binding_priorities: Dictionary = {}
-	var discovery_priorities: Dictionary = {}
-	var ids: Dictionary = {}
-	for value in requests:
-		if not value is Dictionary or not value.get("ownerId") is int or int(value.ownerId)<=0 or ids.has(value.ownerId): return false
-		if not value.get("bounds") is Rect2i or not DemandSet.valid_bounds(value.bounds): return false
-		if not value.get("priority") is int or int(value.priority)<0 or int(value.priority)>4 or not value.get("sites",[]) is Array: return false
-		if not value.get("admissionKeys") is Array or value.admissionKeys.is_empty() or value.admissionKeys.size()>MAX_DISCOVERY_CHUNKS: return false
-		if not value.get("navigationTileKeys") is Array or value.navigationTileKeys.is_empty() \
-			or value.navigationTileKeys.size()>MAX_PENDING_NAVIGATION_TILES: return false
-		if value.has("navigationTilePriorities") and not value.navigationTilePriorities is Dictionary: return false
-		var raw_view_intent: Variant = value.get("viewIntent",{})
-		if not raw_view_intent is Dictionary: return false
-		var view_intent: Dictionary = ViewPriority.normalize(raw_view_intent)
-		if not raw_view_intent.is_empty() and view_intent.is_empty(): return false
-		if value.get("sites",[]).size()>MAX_REGIONS: return false
-		ids[value.ownerId] = true
-		var consumer_keys: Dictionary = {}
-		for key in value.admissionKeys:
-			# Validate before multiplying int32 grid coordinates. Edge chunks are
-			# clipped to the same legal terrain domain after exact compression.
-			if not key is Vector2i or key.x < -35715 or key.x > 35714 or key.y < -35715 or key.y > 35714: return false
-			consumer_keys[key] = true
-			discovery[key] = true
-			if discovery.size()>MAX_DISCOVERY_CHUNKS: return false
-		var required: Dictionary = DemandSet.from_regions([value.bounds],DISCOVERY_CHUNK_SIZE,MAX_DISCOVERY_CHUNKS,32)
-		if required.status!="ready" or not DemandSet.contains(consumer_keys,required.keys): return false
-		var navigation_members: Dictionary = {}
-		var navigation_keys: Array[String] = []
-		var declared_tile_priorities: Dictionary = value.get("navigationTilePriorities",{})
-		for raw_key in value.navigationTileKeys:
-			if not raw_key is String or raw_key.length()>23: return false
-			var coordinates: PackedStringArray = raw_key.split(",",true)
-			if coordinates.size()!=2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int(): return false
-			var x: int = int(coordinates[0])
-			var z: int = int(coordinates[1])
-			# Same finite cell domain as the regional navigation owner. Validate
-			# scalar coordinates before Vector2i multiplication can overflow.
-			if x < -62500 or x > 62499 or z < -62500 or z > 62499 or raw_key!="%d,%d" % [x,z]: return false
-			var tile := Vector2i(x,z)
-			if not navigation_members.has(tile): navigation_keys.append(raw_key)
-			navigation_members[tile] = true
-			var tile_priority: int = int(declared_tile_priorities.get(raw_key,value.priority))
-			if tile_priority<0 or tile_priority>4: return false
-			navigation_priorities[raw_key] = mini(int(navigation_priorities.get(raw_key,4)),tile_priority)
-			if navigation_priorities.size()>MAX_PENDING_NAVIGATION_TILES: return false
-		var required_navigation: Dictionary = DemandSet.from_regions([value.bounds],NAVIGATION_TILE_CELLS,MAX_PENDING_NAVIGATION_TILES)
-		if required_navigation.status!="ready" or not DemandSet.contains(navigation_members,required_navigation.keys): return false
-		navigation_keys.sort()
-		var admission_keys: Array[Vector2i] = []
-		for key: Vector2i in consumer_keys:
-			admission_keys.append(key)
-			var chunk_bounds := Rect2i(key*DISCOVERY_CHUNK_SIZE,Vector2i.ONE*DISCOVERY_CHUNK_SIZE)
-			var low: Vector2i = Field.region_for_cell(chunk_bounds.position)
-			var high: Vector2i = Field.region_for_cell(chunk_bounds.end-Vector2i.ONE)
-			for z: int in range(low.y,high.y+1):
-				for x: int in range(low.x,high.x+1):
-					var region := Vector2i(x,z)
-					if not discovery_priorities.has(region): discovery_priorities[region] = {}
-					discovery_priorities[region][key] = mini(int(discovery_priorities[region].get(key,4)),int(value.priority))
-		admission_keys.sort_custom(func(a: Vector2i,b: Vector2i): return a.y<b.y if a.y!=b.y else a.x<b.x)
-		var sites: Array[Dictionary] = []
-		var site_bindings: Array[Dictionary] = []
-		var total_group_ids := 0
-		for site in value.get("sites",[]):
-			if not site is Dictionary: return false
-			if not site.has("groupIds"): continue # Source still pending; retain original area.
-			if not site.get("binding") is Dictionary or not site.groupIds is Array or site.groupIds.size()>30000: return false
-			var binding: Dictionary = site.binding
-			if binding.size()!=3 or not binding.get("siteId") is String or binding.siteId.is_empty() \
-					or not binding.get("sourceKey") is String or binding.sourceKey.is_empty() \
-					or not binding.get("generation") is int or int(binding.generation)<=0: return false
-			# Keep historical revisions distinct. Exact duplicate bindings would
-			# issue competing orders to one scene; old IDs must not migrate to a
-			# newer binding merely because the site's name is unchanged.
-			if site_bindings.has(binding): return false
-			site_bindings.append(binding)
-			var group_ids: Array[String] = []
-			var seen_groups: Dictionary = {}
-			for id in site.groupIds:
-				if not id is String or id.is_empty(): return false
-				if seen_groups.has(id): continue
-				seen_groups[id] = true
-				group_ids.append(id)
-			total_group_ids += group_ids.size()
-			if total_group_ids > 30000: return false
-			var foreground_keys: Array[String] = []
-			var foreground_seen: Dictionary = {}
-			if site.has("foregroundNavigationTileKeys"):
-				if not site.foregroundNavigationTileKeys is Array or site.foregroundNavigationTileKeys.size()>MAX_PENDING_NAVIGATION_TILES: return false
-				for raw_key in site.foregroundNavigationTileKeys:
-					if not raw_key is String or raw_key.length()>23: return false
-					var coordinates: PackedStringArray = raw_key.split(",",true)
-					if coordinates.size()!=2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int(): return false
-					var tile := Vector2i(int(coordinates[0]),int(coordinates[1]))
-					if tile.x < -62500 or tile.x > 62499 or tile.y < -62500 or tile.y > 62499 \
-							or raw_key!="%d,%d" % [tile.x,tile.y] or not navigation_members.has(tile): return false
-					if not foreground_seen.has(raw_key): foreground_keys.append(raw_key)
-					foreground_seen[raw_key] = true
-			foreground_keys.sort()
-			var foreground_groups: Array[String] = []
-			var foreground_group_seen: Dictionary = {}
-			if site.has("foregroundGroupIds"):
-				if not site.foregroundGroupIds is Array or site.foregroundGroupIds.size()>30000: return false
-				for id in site.foregroundGroupIds:
-					if not id is String or id.is_empty() or not seen_groups.has(id): return false
-					if not foreground_group_seen.has(id): foreground_groups.append(id)
-					foreground_group_seen[id] = true
-			foreground_groups.sort()
-			var retained_site := {"binding":site.binding.duplicate(),"groupIds":group_ids,"foregroundNavigationTileKeys":foreground_keys}
-			# Empty is meaningful only when the coordinator explicitly supplied the
-			# capsule closure. Legacy/direct callers omit the field and retain their
-			# established tile-derived packet request.
-			if site.has("foregroundGroupIds"):
-				retained_site["foregroundGroupIds"] = foreground_groups
-				# Validate the worker eligibility once when ownership crosses into this
-				# service. A matching immutable plan signature lets demand planning
-				# reuse the typed closure without another per-ID scan.
-				var source_plan = _publication_plan_for_binding(binding)
-				var plan_eligible := source_plan!=null
-				if source_plan!=null:
-					for group_id: String in foreground_groups:
-						if not source_plan.eligible_group_ids.has(group_id):
-							plan_eligible=false
-							break
-				if plan_eligible: retained_site["foregroundPlanSignature"]=source_plan.output_signature
-			sites.append(retained_site)
-			var binding_key := _priority_binding_key(binding)
-			binding_priorities[binding_key] = mini(int(binding_priorities.get(binding_key,4)),int(value.priority))
-		var retained_tile_priorities := {}
-		for key: String in navigation_keys: retained_tile_priorities[key] = int(declared_tile_priorities.get(key,value.priority))
-		var retained_consumer := {"ownerId":value.ownerId,"bounds":value.bounds,"priority":value.priority,
-			"admissionKeys":admission_keys,"navigationTileKeys":navigation_keys,"navigationTilePriorities":retained_tile_priorities,"sites":sites}
-		if not view_intent.is_empty(): retained_consumer["viewIntent"] = view_intent
-		owned.append(retained_consumer)
-	var bounds: Array[Rect2i] = []
-	var world_bounds := Rect2i(-1000000,-1000000,2000000,2000000)
-	for rectangle: Rect2i in DemandSet.rectangles(discovery,DISCOVERY_CHUNK_SIZE):
-		var clipped: Rect2i = rectangle.intersection(world_bounds)
-		if not _bounded_region_rectangle(clipped): return false
-		bounds.append(clipped)
-	if owned==_retained_consumers and bounds==_retained_region_bounds: return true
-	_retained_consumers = owned
-	_retained_region_bounds = bounds
-	_retained_navigation_priorities = navigation_priorities
-	_retained_binding_priorities = binding_priorities
-	_retained_discovery_priorities = discovery_priorities
-	_demand_revision += 1
+	_retained_source_request_serial=maxi(_retained_source_request_serial,_retained_source_committed_revision)+1
+	var revision := _retained_source_request_serial
+	if not request_retained_source_requests(revision,requests,true): return false
+	while true:
+		var state := advance_retained_source_requests(1000000,2147483647)
+		if state.status=="ready": return true
+		if state.status=="failed": return false
+	return false
+
+func request_retained_source_requests(source_revision: int, requests: Array,
+		allow_synchronous_mutable_input := false) -> bool:
+	_retained_source_request_serial=maxi(_retained_source_request_serial,source_revision)
+	var active_revision:=int(_retained_source_compile_job.get("revision",-1))
+	if source_revision<_retained_source_committed_revision or (active_revision>=0 and source_revision<active_revision):
+		return false
+	if not allow_synchronous_mutable_input and not requests.is_read_only():
+		_retained_source_rejection={"status":"failed","reason":"mutable_retained_source_manifest","revision":source_revision}
+		return false
+	if int(_retained_source_rejection.get("revision",-1))==source_revision: return false
+	if int(_retained_source_compile_job.get("revision",-1))==source_revision \
+			or (_retained_source_committed_revision==source_revision and _retained_source_compile_job.is_empty()): return true
+	if not _retained_source_compile_job.is_empty(): _retained_source_compile_metrics.restarts += 1
+	_retained_source_rejection = {}
+	var hasher:=HashingContext.new()
+	hasher.start(HashingContext.HASH_SHA256)
+	_retained_source_compile_job = {"revision":source_revision,"requests":requests,"phase":"owner","ownerIndex":0,
+		"owned":[],"discovery":{},"navigationPriorities":{},"bindingPriorities":{},"discoveryPriorities":{},
+		"ids":{},"current":{},"index":0,"siteIndex":0,"totalGroups":0,"failed":"","hasher":hasher,
+		"requireImmutable":not allow_synchronous_mutable_input}
 	return true
 
+func cancel_retained_source_request_compile() -> void:
+	_retained_source_compile_job = {}
+	_retained_source_rejection = {}
+
+func retained_source_request_compile_metrics() -> Dictionary:
+	return _retained_source_compile_metrics.duplicate(true)
+
+func retained_source_committed_revision() -> int:
+	return _retained_source_committed_revision
+
+func advance_retained_source_requests(budget_usec := RETAINED_SOURCE_SLICE_USEC,
+		unit_cap := RETAINED_SOURCE_UNIT_CAP) -> Dictionary:
+	if _closing: return {"status":"failed","reason":"service_closing"}
+	if _retained_source_compile_job.is_empty():
+		if not _retained_source_rejection.is_empty(): return _retained_source_rejection.duplicate(true)
+		return {"status":"ready","revision":_retained_source_committed_revision}
+	var started := Time.get_ticks_usec()
+	var units := 0
+	while units<maxi(1,unit_cap) and Time.get_ticks_usec()-started<maxi(1,budget_usec):
+		var status := _advance_retained_source_request_unit()
+		if status!="pending":
+			if status=="failed":
+				var reason: String = _retained_source_compile_job.get("failed","invalid_retained_source_manifest")
+				var rejected_revision:=int(_retained_source_compile_job.get("revision",-1))
+				_retained_source_compile_job = {}
+				_retained_source_compile_metrics.rejections += 1
+				_retained_source_rejection = {"status":"failed","reason":reason,"revision":rejected_revision}
+				return _retained_source_rejection.duplicate(true)
+			var job := _retained_source_compile_job
+			var bounds: Array[Rect2i] = []
+			var world_bounds := Rect2i(-1000000,-1000000,2000000,2000000)
+			for rectangle: Rect2i in DemandSet.rectangles(job.discovery,DISCOVERY_CHUNK_SIZE):
+				var clipped := rectangle.intersection(world_bounds)
+				if not _bounded_region_rectangle(clipped):
+					var rejected_revision:=int(job.revision)
+					_retained_source_compile_job = {}
+					_retained_source_compile_metrics.rejections += 1
+					_retained_source_rejection={"status":"failed","reason":"invalid_retained_bounds","revision":rejected_revision}
+					return _retained_source_rejection.duplicate(true)
+				bounds.append(clipped)
+			var identity: PackedByteArray=job.hasher.finish()
+			if identity!=_retained_source_identity:
+				var completed_consumers: Array[Dictionary] = []
+				completed_consumers.assign(job.owned)
+				_retained_consumers = completed_consumers
+				_retained_region_bounds = bounds
+				_retained_navigation_priorities = job.navigationPriorities
+				_retained_binding_priorities = job.bindingPriorities
+				_retained_discovery_priorities = job.discoveryPriorities
+				_retained_source_identity = identity
+				_demand_revision += 1
+			_retained_source_committed_revision = int(job.revision)
+			_retained_source_compile_job = {}
+			_retained_source_compile_metrics.phase = "ready"
+			return {"status":"ready","revision":_retained_source_committed_revision}
+		units += 1
+	return {"status":"pending","revision":int(_retained_source_compile_job.revision)}
+
+func _retained_compile_fail(reason: String) -> String:
+	_retained_source_compile_job.failed = reason
+	return "failed"
+
+static func _retained_consumer_hash(job: Dictionary, value: Variant) -> void:
+	job.hasher.update(var_to_bytes(value))
+
+func _advance_retained_source_request_unit() -> String:
+	var job := _retained_source_compile_job
+	_retained_source_compile_metrics.phase = job.phase
+	var requests: Array = job.requests
+	if job.phase=="owner":
+		if requests.size()>MAX_RETAINED_BOUNDS: return _retained_compile_fail("retained_consumer_capacity")
+		if int(job.ownerIndex)>=requests.size(): return "ready"
+		var value = requests[job.ownerIndex]
+		if not value is Dictionary or not value.get("ownerId") is int or int(value.ownerId)<=0 or job.ids.has(value.ownerId): return _retained_compile_fail("invalid_owner")
+		if not value.get("bounds") is Rect2i or not DemandSet.valid_bounds(value.bounds): return _retained_compile_fail("invalid_bounds")
+		if not value.get("priority") is int or int(value.priority)<0 or int(value.priority)>4: return _retained_compile_fail("invalid_priority")
+		if not value.get("sites",[]) is Array or value.sites.size()>MAX_REGIONS: return _retained_compile_fail("invalid_sites")
+		if not value.get("admissionKeys") is Array or value.admissionKeys.is_empty() or value.admissionKeys.size()>MAX_DISCOVERY_CHUNKS: return _retained_compile_fail("invalid_admission_keys")
+		if not value.get("navigationTileKeys") is Array or value.navigationTileKeys.is_empty() or value.navigationTileKeys.size()>MAX_PENDING_NAVIGATION_TILES: return _retained_compile_fail("invalid_navigation_keys")
+		if value.has("navigationTilePriorities") and not value.navigationTilePriorities is Dictionary: return _retained_compile_fail("invalid_navigation_priorities")
+		if bool(job.requireImmutable) and (not value.is_read_only() or not value.admissionKeys.is_read_only()
+				or not value.navigationTileKeys.is_read_only() or not value.sites.is_read_only()
+				or (value.has("navigationTilePriorities") and not value.navigationTilePriorities.is_read_only())):
+			return _retained_compile_fail("mutable_retained_source_manifest")
+		job.ids[value.ownerId] = true
+		job.current = {"value":value,"consumerKeys":{},"navigationMembers":{},"navigationKeys":[],"navigationDeclaredPriorities":{},
+			"admissionKeys":[],"sites":[],"siteBindings":[],"totalGroups":0,"retainedTilePriorities":{}}
+		job.index=0; job.phase="admission"; _retained_source_compile_metrics.ownerUnits += 1
+		_retained_consumer_hash(job,["owner",value.ownerId,value.bounds,value.priority])
+		return "pending"
+	var current: Dictionary = job.current
+	var value: Dictionary = current.value
+	if job.phase=="admission":
+		if int(job.index)<value.admissionKeys.size():
+			var key = value.admissionKeys[job.index]
+			if not key is Vector2i or key.x < -35715 or key.x > 35714 or key.y < -35715 or key.y > 35714: return _retained_compile_fail("invalid_admission_key")
+			current.consumerKeys[key]=true; job.discovery[key]=true
+			if job.discovery.size()>MAX_DISCOVERY_CHUNKS: return _retained_compile_fail("discovery_capacity")
+			job.index+=1; _retained_source_compile_metrics.admissionUnits += 1
+			return "pending"
+		var required := DemandSet.from_regions([value.bounds],DISCOVERY_CHUNK_SIZE,MAX_DISCOVERY_CHUNKS,32)
+		if required.status!="ready" or not DemandSet.contains(current.consumerKeys,required.keys): return _retained_compile_fail("incomplete_admission_keys")
+		job.index=0; job.phase="navigation"; return "pending"
+	if job.phase=="navigation":
+		if int(job.index)<value.navigationTileKeys.size():
+			var raw_key = value.navigationTileKeys[job.index]
+			if not raw_key is String or raw_key.length()>23: return _retained_compile_fail("invalid_navigation_key")
+			var coordinates: PackedStringArray = raw_key.split(",",true)
+			if coordinates.size()!=2 or not coordinates[0].is_valid_int() or not coordinates[1].is_valid_int(): return _retained_compile_fail("invalid_navigation_key")
+			var x:=int(coordinates[0]); var z:=int(coordinates[1])
+			if x < -62500 or x > 62499 or z < -62500 or z > 62499 or raw_key!="%d,%d" % [x,z]: return _retained_compile_fail("invalid_navigation_key")
+			var tile:=Vector2i(x,z)
+			var first_tile: bool=not current.navigationMembers.has(tile)
+			if first_tile: current.navigationKeys.append(raw_key)
+			current.navigationMembers[tile]=true
+			var declared: Dictionary=value.get("navigationTilePriorities",{})
+			var priority:=int(declared.get(raw_key,value.priority))
+			if priority<0 or priority>4: return _retained_compile_fail("invalid_navigation_priority")
+			current.navigationDeclaredPriorities[raw_key]=priority
+			job.navigationPriorities[raw_key]=mini(int(job.navigationPriorities.get(raw_key,4)),priority)
+			if job.navigationPriorities.size()>MAX_PENDING_NAVIGATION_TILES: return _retained_compile_fail("navigation_capacity")
+			job.index+=1; _retained_source_compile_metrics.navigationUnits += 1
+			return "pending"
+		var required_nav:=DemandSet.from_regions([value.bounds],NAVIGATION_TILE_CELLS,MAX_PENDING_NAVIGATION_TILES)
+		if required_nav.status!="ready" or not DemandSet.contains(current.navigationMembers,required_nav.keys): return _retained_compile_fail("incomplete_navigation_keys")
+		current.navigationKeys.sort()
+		job.index=0; job.phase="navigation_hash"; return "pending"
+	if job.phase=="navigation_hash":
+		if int(job.index)<current.navigationKeys.size():
+			var key: String=current.navigationKeys[job.index]
+			_retained_consumer_hash(job,["navigation",key,current.navigationDeclaredPriorities[key]])
+			job.index+=1; return "pending"
+		job.index=0; job.phase="discovery_priority"; return "pending"
+	if job.phase=="discovery_priority":
+		var keys: Array=current.consumerKeys.keys()
+		if int(job.index)<keys.size():
+			var key: Vector2i=keys[job.index]
+			current.admissionKeys.append(key)
+			var chunk_bounds:=Rect2i(key*DISCOVERY_CHUNK_SIZE,Vector2i.ONE*DISCOVERY_CHUNK_SIZE)
+			var low:=Field.region_for_cell(chunk_bounds.position); var high:=Field.region_for_cell(chunk_bounds.end-Vector2i.ONE)
+			for z in range(low.y,high.y+1):
+				for x in range(low.x,high.x+1):
+					var region:=Vector2i(x,z)
+					if not job.discoveryPriorities.has(region): job.discoveryPriorities[region]={}
+					job.discoveryPriorities[region][key]=mini(int(job.discoveryPriorities[region].get(key,4)),int(value.priority))
+			job.index+=1; _retained_source_compile_metrics.admissionUnits += 1
+			return "pending"
+		current.admissionKeys.sort_custom(func(a:Vector2i,b:Vector2i):return a.y<b.y if a.y!=b.y else a.x<b.x)
+		job.index=0; job.phase="admission_hash"; return "pending"
+	if job.phase=="admission_hash":
+		if int(job.index)<current.admissionKeys.size():
+			_retained_consumer_hash(job,["admission",current.admissionKeys[job.index]])
+			job.index+=1; return "pending"
+		job.siteIndex=0; job.phase="site"; return "pending"
+	if job.phase=="site":
+		if int(job.siteIndex)>=value.sites.size():
+			for key: String in current.navigationKeys: current.retainedTilePriorities[key]=int(value.get("navigationTilePriorities",{}).get(key,value.priority))
+			var retained := {"ownerId":value.ownerId,"bounds":value.bounds,"priority":value.priority,
+				"admissionKeys":current.admissionKeys,"navigationTileKeys":current.navigationKeys,
+				"navigationTilePriorities":current.retainedTilePriorities,"sites":current.sites}
+			job.owned.append(retained); job.ownerIndex+=1; job.phase="owner"
+			return "pending"
+		var site=value.sites[job.siteIndex]
+		if not site is Dictionary: return _retained_compile_fail("invalid_site")
+		if bool(job.requireImmutable) and not site.is_read_only(): return _retained_compile_fail("mutable_retained_source_manifest")
+		if not site.has("groupIds"): job.siteIndex+=1; return "pending"
+		if not site.get("binding") is Dictionary or not site.groupIds is Array or site.groupIds.size()>30000: return _retained_compile_fail("invalid_binding")
+		if bool(job.requireImmutable) and (not site.binding.is_read_only() or not site.groupIds.is_read_only()
+				or (site.has("foregroundGroupIds") and not site.foregroundGroupIds.is_read_only())
+				or (site.has("foregroundNavigationTileKeys") and not site.foregroundNavigationTileKeys.is_read_only())):
+			return _retained_compile_fail("mutable_retained_source_manifest")
+		var binding:Dictionary=site.binding
+		if binding.size()!=3 or not binding.get("siteId") is String or binding.siteId.is_empty() or not binding.get("sourceKey") is String or binding.sourceKey.is_empty() or not binding.get("generation") is int or int(binding.generation)<=0: return _retained_compile_fail("invalid_binding")
+		if current.siteBindings.has(binding): return _retained_compile_fail("duplicate_binding")
+		current.siteBindings.append(binding.duplicate())
+		_retained_consumer_hash(job,["binding",binding])
+		# Presence is semantic: an explicitly empty foreground group closure says
+		# dependency discovery completed with no urgent groups, while omission says
+		# the source is still on the legacy/tile-derived path.
+		_retained_consumer_hash(job,["sitePresence",site.has("foregroundGroupIds")])
+		job.currentSite={"raw":site,"binding":binding.duplicate(),"groupIds":[],"seen":{},"foregroundNavigationTileKeys":[],"foregroundSeen":{},"foregroundGroupIds":[],"foregroundGroupSeen":{}}
+		job.index=0; job.phase="groups"; _retained_source_compile_metrics.bindingUnits += 1
+		return "pending"
+	var current_site:Dictionary=job.currentSite
+	var raw_site:Dictionary=current_site.raw
+	if job.phase=="groups":
+		if int(job.index)<raw_site.groupIds.size():
+			var id=raw_site.groupIds[job.index]
+			if not id is String or id.is_empty(): return _retained_compile_fail("invalid_group")
+			if not current_site.seen.has(id):
+				current_site.seen[id]=true; current_site.groupIds.append(id); current.totalGroups+=1
+				_retained_consumer_hash(job,["group",id])
+			if int(current.totalGroups)>30000: return _retained_compile_fail("group_capacity")
+			job.index+=1; _retained_source_compile_metrics.groupUnits += 1
+			return "pending"
+		job.index=0; job.phase="foreground_navigation"; return "pending"
+	if job.phase=="foreground_navigation":
+		if raw_site.has("foregroundNavigationTileKeys"):
+			if not raw_site.foregroundNavigationTileKeys is Array or raw_site.foregroundNavigationTileKeys.size()>MAX_PENDING_NAVIGATION_TILES: return _retained_compile_fail("invalid_foreground_navigation")
+			if int(job.index)<raw_site.foregroundNavigationTileKeys.size():
+				var raw_key=raw_site.foregroundNavigationTileKeys[job.index]
+				if not raw_key is String or not value.navigationTileKeys.has(raw_key): return _retained_compile_fail("invalid_foreground_navigation")
+				if not current_site.foregroundSeen.has(raw_key):
+					current_site.foregroundSeen[raw_key]=true; current_site.foregroundNavigationTileKeys.append(raw_key)
+				job.index+=1; _retained_source_compile_metrics.navigationUnits += 1; return "pending"
+		current_site.foregroundNavigationTileKeys.sort(); job.index=0; job.phase="foreground_navigation_hash"; return "pending"
+	if job.phase=="foreground_navigation_hash":
+		if int(job.index)<current_site.foregroundNavigationTileKeys.size():
+			_retained_consumer_hash(job,["foregroundNavigation",current_site.foregroundNavigationTileKeys[job.index]])
+			job.index+=1; return "pending"
+		job.index=0; job.phase="foreground_groups"; return "pending"
+	if job.phase=="foreground_groups":
+		if raw_site.has("foregroundGroupIds"):
+			if not raw_site.foregroundGroupIds is Array or raw_site.foregroundGroupIds.size()>30000: return _retained_compile_fail("invalid_foreground_groups")
+			if int(job.index)<raw_site.foregroundGroupIds.size():
+				var id=raw_site.foregroundGroupIds[job.index]
+				if not id is String or id.is_empty() or not current_site.seen.has(id): return _retained_compile_fail("invalid_foreground_group")
+				if not current_site.foregroundGroupSeen.has(id):
+					current_site.foregroundGroupSeen[id]=true; current_site.foregroundGroupIds.append(id)
+				job.index+=1; _retained_source_compile_metrics.groupUnits += 1; return "pending"
+		job.foregroundHeap=current_site.foregroundGroupIds
+		current_site.foregroundGroupIds=[]
+		job.heapIndex=floori(float(job.foregroundHeap.size())/2.0)-1
+		job.phase="foreground_group_heap"
+		return "pending"
+	if job.phase=="foreground_group_heap":
+		if int(job.heapIndex)>=0:
+			_retained_string_heap_sift_down(job.foregroundHeap,int(job.heapIndex),job.foregroundHeap.size())
+			job.heapIndex-=1
+			return "pending"
+		job.phase="foreground_group_order"; return "pending"
+	if job.phase=="foreground_group_order":
+		if not job.foregroundHeap.is_empty():
+			var id:=_retained_string_heap_pop(job.foregroundHeap)
+			current_site.foregroundGroupIds.append(id)
+			_retained_consumer_hash(job,["foregroundGroup",id])
+			_retained_source_compile_metrics.groupUnits += 1
+			return "pending"
+		job.sourcePlan=_publication_plan_for_binding(current_site.binding) if raw_site.has("foregroundGroupIds") else null
+		job.planEligible=job.sourcePlan!=null
+		job.eligibilityIndex=0
+		job.phase="foreground_eligibility"
+		return "pending"
+	if job.phase=="foreground_eligibility":
+		if bool(job.planEligible) and int(job.eligibilityIndex)<current_site.foregroundGroupIds.size():
+			if not job.sourcePlan.eligible_group_ids.has(current_site.foregroundGroupIds[job.eligibilityIndex]): job.planEligible=false
+			job.eligibilityIndex+=1
+			_retained_source_compile_metrics.groupUnits += 1
+			return "pending"
+		var retained_site:={"binding":current_site.binding,"groupIds":current_site.groupIds,
+			"foregroundNavigationTileKeys":current_site.foregroundNavigationTileKeys}
+		if raw_site.has("foregroundGroupIds"):
+			retained_site["foregroundGroupIds"]=current_site.foregroundGroupIds
+			if bool(job.planEligible): retained_site["foregroundPlanSignature"]=job.sourcePlan.output_signature
+		_retained_consumer_hash(job,["siteEnd",retained_site.get("foregroundPlanSignature","")])
+		current.sites.append(retained_site)
+		var binding_key:=_priority_binding_key(current_site.binding)
+		job.bindingPriorities[binding_key]=mini(int(job.bindingPriorities.get(binding_key,4)),int(value.priority))
+		job.siteIndex+=1; job.phase="site"; return "pending"
+	return _retained_compile_fail("invalid_compile_phase")
+
+static func _retained_string_heap_sift_down(values: Array, start: int, end: int) -> void:
+	var root:=start
+	while root*2+1<end:
+		var child:=root*2+1
+		if child+1<end and String(values[child+1])<String(values[child]): child+=1
+		if String(values[root])<=String(values[child]): return
+		var swap_value=values[root]; values[root]=values[child]; values[child]=swap_value
+		root=child
+
+static func _retained_string_heap_pop(values: Array) -> String:
+	var result:=String(values[0])
+	var tail=values.pop_back()
+	if not values.is_empty():
+		values[0]=tail
+		_retained_string_heap_sift_down(values,0,values.size())
+	return result
 
 func _publication_plan_for_binding(binding: Dictionary):
 	for region: Vector2i in _scenes:
@@ -595,6 +767,15 @@ func _refresh_demand(bounds: Rect2i) -> Dictionary:
 			if influence.intersects(rectangle): matching.append(rectangle)
 		if matching.is_empty(): continue
 		var source: Dictionary = _admission.source_state(region)
+		# A retained gameplay window is durable physical demand.  Camera prefetch
+		# may prepare a different, view-ranked region, but it must never be the
+		# sole path that starts the exact region whose declared influence the
+		# player now occupies.  Promotion happens through the existing admission
+		# owner and is retained across later view reversals.
+		if source.get("status") not in ["ready", "prepared"]:
+			_admission.request_bounds(matching.front(), true)
+			desired[region] = true
+			continue
 		if source.get("status") in ["ready","prepared"]:
 			var intersects := false
 			for rectangle: Rect2i in matching:
@@ -1790,6 +1971,7 @@ func world_reset_ready() -> bool:
 
 func request_shutdown() -> void:
 	_closing = true
+	_retained_source_compile_job = {}
 	_retained_region_bounds = []
 	_retained_consumers = []
 	_clear_retained_priorities()

@@ -13,9 +13,37 @@ const SEGMENT_PAUSE_SECONDS := 0.65
 const JUMP_INTERVAL_FRAMES := 150
 const MIN_RUNTIME_TRAVEL_DISTANCE := 45.0
 const MAX_ALLOWED_BELOW_COLLISION := 1.35
+const GATE5_MEASURED_GAMEPLAY_SECONDS := 300.0
+const GATE5_PRESENTATION_P99_MS := 33.0
+const GATE5_PRESENTATION_MAX_MS := 100.0
+const GATE5_STREAMING_MATERIAL_MS := 4.0
+const GATE5_EVIDENCE_OBSERVER_MAX_MS := 2.0
 const SCENARIO_SPRINT_TRAVERSAL := "NormalSprintTraversal"
 const SCENARIO_TUTORIAL_TOWN_GUARD_ACTIVATION := "NormalTutorialTownGuardActivation"
 const SCENARIO_WORLD_EDIT_LATENCY := "NormalWorldEditLatency"
+const TOP_LEVEL_FRAME_DOMAIN_BY_SECTION := {
+    "chunk": "world_streaming",
+    "water_surface": "world_simulation",
+    "world_edit_followup": "world_edit",
+    "sky": "presentation",
+    "sleep_transition": "gameplay",
+    "utility": "gameplay",
+    "pickups": "gameplay",
+    "wildlife": "world_simulation",
+    "survival": "gameplay",
+    "hostiles": "world_simulation",
+    "update_npcs": "npc",
+    "aftermath_collapse": "world_simulation",
+    "beacon": "gameplay",
+    "autosave": "save",
+    "break": "gameplay",
+    "hud": "presentation",
+    "performance_overlay": "presentation"
+}
+const AUTHORITATIVE_STREAMING_OVERRUN_COUNTERS := [
+    "gameplay_publication_budget_overrun",
+    "gameplay_publication_citadel_overrun"
+]
 
 var report_path := ""
 var progress_path := ""
@@ -60,6 +88,10 @@ var terrain_collision_hold_frames := 0
 var terrain_collision_hold_reasons := {}
 var terrain_hold_samples: Array[Dictionary] = []
 var last_hold_sample_msec := -1000
+var modal_loading_frames := 0
+var modal_loading_samples: Array[Dictionary] = []
+var player_collision_hold_baseline := 0
+var player_collision_hold_delta := 0
 var last_segment_index := -1
 var segment_visit_counts := {}
 var samples := []
@@ -81,6 +113,7 @@ func _ready() -> void:
         get_tree().root.size = Vector2i(int(dimensions[0]), int(dimensions[1]))
     render_observation = RenderObservationScript.new()
     add_child(render_observation)
+    render_observation.set_provenance_provider(_runtime_cadence_provenance)
     render_observation.start(get_viewport())
     write_progress("start")
     call_deferred("run")
@@ -118,6 +151,12 @@ func configure_from_environment() -> void:
 func run() -> void:
     var started_utc := Time.get_datetime_string_from_system(true)
     var result := await run_normal_runtime_scenario()
+    var evidence_classification := gate5_evidence_classification(scenario, duration_seconds)
+    result["evidenceClassification"] = evidence_classification.get("classification", "diagnostic")
+    result["gate5PresentationAcceptanceEligible"] = bool(evidence_classification.get("eligible", false))
+    result["gate5PresentationAcceptancePassed"] = bool(evidence_classification.get("eligible", false)) \
+        and bool(result.get("passed", false))
+    result["gate5PresentationAcceptanceIneligibilityReasons"] = evidence_classification.get("reasons", []).duplicate()
     var failure_count := 0 if bool(result.get("passed", false)) else 1
     var report := {
         "schemaVersion": 1,
@@ -125,6 +164,11 @@ func run() -> void:
         "suite": "normal_runtime_performance",
         "evidenceLevel": "integration",
         "scenario": scenario,
+        "evidenceClassification": evidence_classification.get("classification", "diagnostic"),
+        "gate5PresentationAcceptanceEligible": bool(evidence_classification.get("eligible", false)),
+        "gate5PresentationAcceptancePassed": bool(evidence_classification.get("eligible", false)) \
+            and bool(result.get("passed", false)),
+        "gate5PresentationAcceptanceIneligibilityReasons": evidence_classification.get("reasons", []).duplicate(),
         "requestedTestSeed": OS.get_environment("VOXEL_TEST_SEED").strip_edges(),
         "seed": String(main.get("seed_text")) if main != null else "",
         "runToken": run_token,
@@ -172,6 +216,7 @@ func run_normal_runtime_scenario() -> Dictionary:
         failure["traversalEntry"] = traversal_entry
         return failure
     await warmup()
+    capture_player_collision_hold_baseline()
     reset_runtime_performance_monitor()
     measurement_start = player_position()
     last_travel_position = measurement_start
@@ -189,6 +234,8 @@ func run_normal_runtime_scenario() -> Dictionary:
     terrain_collision_hold_reasons.clear()
     terrain_hold_samples.clear()
     last_hold_sample_msec = -1000
+    modal_loading_frames = 0
+    modal_loading_samples.clear()
     last_segment_index = -1
     segment_visit_counts.clear()
     samples.clear()
@@ -207,15 +254,22 @@ func run_normal_runtime_scenario() -> Dictionary:
         if frame % 120 == 0:
             write_progress("measure_frame:%d" % frame)
         frame += 1
+    var measured_gameplay_seconds := float(Time.get_ticks_msec() - started_msec) / 1000.0
+    refresh_player_collision_hold_delta()
     measurement_end = player_position()
     stop_player_automation()
+    if is_instance_valid(render_observation):
+        render_observation.phase = "post_measurement"
     if screenshot_path != "":
         write_progress("capture_screenshot")
         await capture_screenshot()
         write_progress("capture_screenshot_done")
     var metrics: Dictionary = metrics_helper.call("summarize_samples", samples)
     append_normal_metrics(metrics, frame)
-    var failures: Array = metrics_helper.call("performance_failures", metrics)
+    metrics["measuredGameplaySeconds"] = measured_gameplay_seconds
+    append_presentation_cadence_metrics(metrics)
+    var failures: Array = normal_runtime_work_budget_failures(metrics)
+    failures.append_array(presentation_acceptance_failures(metrics))
     if samples.is_empty():
         failures.append("no performance samples captured")
     if float(metrics.get("playerTravelDistance", 0.0)) < MIN_RUNTIME_TRAVEL_DISTANCE:
@@ -228,8 +282,6 @@ func run_normal_runtime_scenario() -> Dictionary:
         failures.append("normal runtime traversal captured no voxel collision-surface samples")
     elif float(metrics.get("maximumBelowVoxelCollision", 0.0)) > MAX_ALLOWED_BELOW_COLLISION:
         failures.append("player moved %.3f below the VoxelTerrain collision surface" % float(metrics.get("maximumBelowVoxelCollision", 0.0)))
-    if terrain_collision_hold_frames > 0:
-        failures.append("terrain streaming interrupted traversal for %d observed frames" % terrain_collision_hold_frames)
     var passed := failures.is_empty()
     flush_async_save()
     return {
@@ -704,6 +756,16 @@ func observe_player_travel() -> void:
         accumulated_travel_distance += delta.length()
     last_travel_position = current
     var player_body := main.get("player") as CharacterBody3D if main != null else null
+    if modal_loading_visible():
+        modal_loading_frames += 1
+        if modal_loading_samples.size() < 16:
+            modal_loading_samples.append({
+                "processMsec": Time.get_ticks_msec(),
+                "position": vec3(current),
+                "streamingActive": bool(main.get("streaming_loading_overlay_active")),
+                "streamingHolds": main.get("streaming_loading_overlay_holds").duplicate(true) \
+                    if main.get("streaming_loading_overlay_holds") is Dictionary else {}
+            })
     if player_body != null:
         if bool(player_body.get("jumped_this_frame")):
             jump_observed_count += 1
@@ -725,6 +787,18 @@ func observe_player_travel() -> void:
         var clearance := current.y - surface_y
         minimum_surface_clearance = minf(minimum_surface_clearance, clearance)
         maximum_below_surface = maxf(maximum_below_surface, -clearance)
+
+func capture_player_collision_hold_baseline() -> void:
+    var player_body := main.get("player") as CharacterBody3D if main != null else null
+    player_collision_hold_baseline = int(player_body.get("terrain_collision_hold_frames")) \
+        if player_body != null else 0
+    player_collision_hold_delta = 0
+
+func refresh_player_collision_hold_delta() -> void:
+    var player_body := main.get("player") as CharacterBody3D if main != null else null
+    var current := int(player_body.get("terrain_collision_hold_frames")) \
+        if player_body != null else player_collision_hold_baseline
+    player_collision_hold_delta = cumulative_collision_hold_delta(player_collision_hold_baseline, current)
 
 func observe_voxel_collision_clearance(player_body: CharacterBody3D, current: Vector3) -> void:
     var motion_proof = player_body.get("last_terrain_collision_proof")
@@ -840,9 +914,21 @@ func append_normal_metrics(metrics: Dictionary, frame_count: int) -> void:
     metrics["minimumVoxelCollisionClearance"] = minimum_collision_clearance if minimum_collision_clearance != INF else 0.0
     metrics["maximumBelowVoxelCollision"] = maximum_below_collision
     metrics["collisionSurfaceSamples"] = collision_surface_samples
-    metrics["terrainCollisionHoldFrames"] = terrain_collision_hold_frames
+    metrics["terrainCollisionHoldFrames"] = player_collision_hold_delta
+    metrics["terrainCollisionHoldObservedProcessFrames"] = terrain_collision_hold_frames
+    metrics["terrainCollisionHoldCounterBaseline"] = player_collision_hold_baseline
     metrics["terrainCollisionHoldReasons"] = terrain_collision_hold_reasons.duplicate(true)
     metrics["terrainCollisionHoldSamples"] = terrain_hold_samples.duplicate(true)
+    metrics["modalLoadingVisibleFrames"] = modal_loading_frames
+    metrics["modalLoadingSamples"] = modal_loading_samples.duplicate(true)
+    # Keep the native secondary-viewer scheduler observable in the same real
+    # menu/New Game sprint that measures player-visible cadence. A final sample
+    # is not a peak substitute: the runtime owns and reports its own peak.
+    var terrain_runtime = main.get("voxel_terrain_runtime") if main != null and is_instance_valid(main) else null
+    metrics["terrainRuntime"] = terrain_runtime.call("stats") \
+            if terrain_runtime != null and is_instance_valid(terrain_runtime) and terrain_runtime.has_method("stats") else {}
+    metrics["terrainNativeTasks"] = terrain_runtime.call("voxel_engine_task_stats") \
+            if terrain_runtime != null and is_instance_valid(terrain_runtime) and terrain_runtime.has_method("voxel_engine_task_stats") else {}
     metrics["segmentVisitCounts"] = segment_visit_counts.duplicate(true)
     metrics["routineRouteV2PlanningProfiles"] = routine_v2_planning_profiles(measurement_start_physics_frame)
     if measurement_start == Vector3.INF or measurement_end == Vector3.INF:
@@ -861,6 +947,217 @@ func capture_performance_sample() -> void:
     var elapsed_usec := Time.get_ticks_usec() - started_usec
     performance_sample_total_usec += elapsed_usec
     performance_sample_max_usec = maxi(performance_sample_max_usec, elapsed_usec)
+
+func append_presentation_cadence_metrics(metrics: Dictionary) -> void:
+    var observation: Dictionary = render_observation.summary() if is_instance_valid(render_observation) else {}
+    var phases: Dictionary = observation.get("phases", {}) if observation.get("phases", {}) is Dictionary else {}
+    var measured_phase: Dictionary = phases.get(scenario, {}) if phases.get(scenario, {}) is Dictionary else {}
+    var cadence: Dictionary = measured_phase.get("cadence", {}) if measured_phase.get("cadence", {}) is Dictionary else {}
+    var observer_max_ms := float(measured_phase.get("observerMaxUsec", 0)) / 1000.0
+    var provenance_max_ms := float(measured_phase.get("provenanceMaxUsec", 0)) / 1000.0
+    var debug_sample_max_ms := float(metrics.get("performanceObserverSampleMaxMs", 0.0))
+    var evidence_validity_reasons: Array[String] = []
+    if observer_max_ms > GATE5_EVIDENCE_OBSERVER_MAX_MS:
+        evidence_validity_reasons.append("render observer exceeded the 2ms evidence-overhead ceiling")
+    if provenance_max_ms > GATE5_EVIDENCE_OBSERVER_MAX_MS:
+        evidence_validity_reasons.append("cadence provenance observer exceeded the 2ms evidence-overhead ceiling")
+    if debug_sample_max_ms > GATE5_EVIDENCE_OBSERVER_MAX_MS:
+        evidence_validity_reasons.append("performance snapshot observer exceeded the 2ms evidence-overhead ceiling")
+    metrics["gameplayPresentationCadence"] = {
+        "phase": scenario,
+        "samples": int(cadence.get("samples", 0)),
+        "observedSpanMs": float(measured_phase.get("observedSpanMs", 0.0)),
+        "p50Ms": cadence.get("p50Ms"),
+        "p95Ms": cadence.get("p95Ms"),
+        "p99Ms": cadence.get("p99Ms"),
+        "maxMs": cadence.get("maxMs"),
+        "over33ms": int(cadence.get("over33ms", 0)),
+        "over100ms": int(cadence.get("over100ms", 0)),
+        "streamingStallsOver33ms": int(measured_phase.get("streamingStallsOver33ms", 0)),
+        "streamingStallOwnerCounts": measured_phase.get("streamingStallOwnerCounts", {}).duplicate(true) \
+            if measured_phase.get("streamingStallOwnerCounts", {}) is Dictionary else {},
+        "streamingOwnerOverflowCount": int(measured_phase.get("streamingOwnerOverflowCount", 0)),
+        "recurringStreamingStallsOver33ms": int(measured_phase.get("recurringStreamingStallsOver33ms", 0)),
+        "observerMaxMs": observer_max_ms,
+        "provenanceMaxMs": provenance_max_ms,
+        "performanceSnapshotObserverMaxMs": debug_sample_max_ms,
+        "available": bool(observation.get("available", false)),
+        "scope": "frame_post_draw cadence for the measured gameplay phase only; startup, phase boundaries, and screenshot capture are excluded"
+    }
+    metrics["gate5EvidenceValidity"] = {
+        "valid": evidence_validity_reasons.is_empty(),
+        "reasons": evidence_validity_reasons,
+        "observerMaxMsMaximum": GATE5_EVIDENCE_OBSERVER_MAX_MS,
+        "policy": "Observer overhead invalidates evidence; cadence time is never subtracted."
+    }
+    metrics["gate5PresentationAcceptanceCriteria"] = {
+        "measuredGameplaySecondsMinimum": GATE5_MEASURED_GAMEPLAY_SECONDS,
+        "p99MsMaximum": GATE5_PRESENTATION_P99_MS,
+        "maxMsMaximum": GATE5_PRESENTATION_MAX_MS,
+        "over100msMaximum": 0,
+        "recurringStreamingStallsOver33msMaximum": 0,
+        "modalLoadingVisibleFramesMaximum": 0,
+        "terrainCollisionHoldFramesMaximum": 0,
+        "observerMaxMsMaximum": GATE5_EVIDENCE_OBSERVER_MAX_MS
+    }
+
+func normal_runtime_work_budget_failures(metrics: Dictionary) -> Array:
+    var failures: Array = metrics_helper.call("performance_failures", metrics)
+    # This runner's release cadence is the presentation interval below. The
+    # shared helper's Main-only 22/33ms checks remain appropriate to its older
+    # 32-NPC suite, but are not total-frame latency and cannot substitute here.
+    failures.erase("p99 frame time exceeds 22ms tolerated threshold")
+    failures.erase("max frame time exceeds 33ms threshold")
+    return failures
+
+func presentation_acceptance_failures(metrics: Dictionary) -> Array[String]:
+    var failures: Array[String] = []
+    var cadence: Dictionary = metrics.get("gameplayPresentationCadence", {}) \
+        if metrics.get("gameplayPresentationCadence", {}) is Dictionary else {}
+    if float(metrics.get("measuredGameplaySeconds", 0.0)) < GATE5_MEASURED_GAMEPLAY_SECONDS:
+        failures.append("measured gameplay duration is below the 300s Gate 5 acceptance minimum")
+    if not bool(cadence.get("available", false)):
+        failures.append("presentation cadence observation is unavailable")
+    elif int(cadence.get("samples", 0)) <= 0:
+        failures.append("measured gameplay phase captured no presentation cadence samples")
+    else:
+        if float(cadence.get("observedSpanMs", 0.0)) < (GATE5_MEASURED_GAMEPLAY_SECONDS - 1.0) * 1000.0:
+            failures.append("presentation cadence observation does not span the 300s measured gameplay window")
+        var p99_value = cadence.get("p99Ms")
+        var max_value_ms = cadence.get("maxMs")
+        if p99_value == null or float(p99_value) > GATE5_PRESENTATION_P99_MS:
+            failures.append("measured gameplay presentation p99 exceeds 33ms")
+        if max_value_ms == null or float(max_value_ms) > GATE5_PRESENTATION_MAX_MS:
+            failures.append("measured gameplay presentation max exceeds 100ms")
+        if int(cadence.get("over100ms", 0)) > 0:
+            failures.append("measured gameplay contains presentation intervals over 100ms")
+        if int(cadence.get("recurringStreamingStallsOver33ms", 0)) > 0:
+            failures.append("measured gameplay contains recurring streaming-attributed presentation stalls over 33ms")
+    var evidence_validity: Dictionary = metrics.get("gate5EvidenceValidity", {}) \
+        if metrics.get("gate5EvidenceValidity", {}) is Dictionary else {}
+    if not bool(evidence_validity.get("valid", false)):
+        for reason_value in evidence_validity.get("reasons", []):
+            failures.append("performance evidence invalid: %s" % String(reason_value))
+    if player_collision_hold_delta > 0:
+        failures.append("terrain streaming interrupted traversal for %d physics ticks" % player_collision_hold_delta)
+    if modal_loading_frames > 0:
+        failures.append("modal loading interrupted measured gameplay for %d observed frames" % modal_loading_frames)
+    return failures
+
+func _runtime_cadence_provenance() -> Dictionary:
+    var monitor = main.get("runtime_perf_monitor") if main != null and is_instance_valid(main) else null
+    if monitor == null:
+        return {"processFrame": Engine.get_process_frames(), "streamingAttributed": false}
+    var frame_ms := float(monitor.get("last_frame_ms"))
+    var sections: Dictionary = monitor.get("last_frame_sections") if monitor.get("last_frame_sections") is Dictionary else {}
+    var counters: Dictionary = monitor.get("last_frame_counters") if monitor.get("last_frame_counters") is Dictionary else {}
+    var process_frame := Engine.get_process_frames()
+    var provenance := classify_streaming_cadence_provenance(
+        frame_ms, sections, counters, process_frame, process_frame
+    )
+    provenance["terrainCollisionHold"] = current_player_collision_hold_delta() > 0
+    provenance["modalLoadingVisible"] = modal_loading_visible()
+    return provenance
+
+static func classify_streaming_cadence_provenance(
+        frame_ms: float,
+        sections: Dictionary,
+        counters: Dictionary,
+        provider_process_frame: int,
+        expected_process_frame: int
+    ) -> Dictionary:
+    var domain_totals: Dictionary = {}
+    var streaming_owner := ""
+    var streaming_owner_ms := 0.0
+    var top_sections: Array[Dictionary] = []
+    for key_value in sections.keys():
+        var key := String(key_value)
+        var elapsed_ms := float(sections.get(key_value, 0.0))
+        top_sections.append({"name": key, "ms": elapsed_ms})
+        if not TOP_LEVEL_FRAME_DOMAIN_BY_SECTION.has(key):
+            continue
+        var domain := String(TOP_LEVEL_FRAME_DOMAIN_BY_SECTION[key])
+        domain_totals[domain] = float(domain_totals.get(domain, 0.0)) + elapsed_ms
+        if domain == "world_streaming" and elapsed_ms > streaming_owner_ms:
+            streaming_owner = key
+            streaming_owner_ms = elapsed_ms
+    top_sections.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return float(a.get("ms", 0.0)) > float(b.get("ms", 0.0))
+    )
+    if top_sections.size() > 8:
+        top_sections.resize(8)
+    var domain_rows: Array[Dictionary] = []
+    for domain_value in domain_totals.keys():
+        domain_rows.append({
+            "domain": String(domain_value),
+            "ms": float(domain_totals.get(domain_value, 0.0))
+        })
+    domain_rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+        return float(a.get("ms", 0.0)) > float(b.get("ms", 0.0))
+    )
+    var dominant_domain := String(domain_rows[0].get("domain", "")) if not domain_rows.is_empty() else ""
+    var streaming_domain_ms := float(domain_totals.get("world_streaming", 0.0))
+    var authoritative_overruns: Array[String] = []
+    for counter_name in AUTHORITATIVE_STREAMING_OVERRUN_COUNTERS:
+        if int(counters.get(counter_name, 0)) > 0:
+            authoritative_overruns.append(counter_name)
+    var frame_identity_matched := provider_process_frame == expected_process_frame
+    var material_dominant_streaming := dominant_domain == "world_streaming" \
+        and streaming_domain_ms >= GATE5_STREAMING_MATERIAL_MS
+    var attributed := frame_identity_matched \
+        and (material_dominant_streaming or not authoritative_overruns.is_empty())
+    if not material_dominant_streaming and not authoritative_overruns.is_empty():
+        streaming_owner = "overrun:%s" % authoritative_overruns[0]
+    return {
+        "processFrame": provider_process_frame,
+        "expectedProcessFrame": expected_process_frame,
+        "frameIdentityMatched": frame_identity_matched,
+        "mainFrameMs": frame_ms,
+        "mainTopSections": top_sections,
+        "topLevelDomains": domain_rows,
+        "dominantTopLevelDomain": dominant_domain,
+        "streamingDomainMs": streaming_domain_ms,
+        "streamingMaterialThresholdMs": GATE5_STREAMING_MATERIAL_MS,
+        "authoritativeStreamingOverruns": authoritative_overruns,
+        "streamingAttributed": attributed,
+        "streamingOwner": streaming_owner if attributed else ""
+    }
+
+static func gate5_evidence_classification(scenario_value: String, configured_duration_seconds: float) -> Dictionary:
+    var reasons: Array[String] = []
+    if scenario_value != SCENARIO_SPRINT_TRAVERSAL:
+        reasons.append("scenario is a focused diagnostic, not the Gate 5 sprint traversal")
+    if configured_duration_seconds < GATE5_MEASURED_GAMEPLAY_SECONDS:
+        reasons.append("configured duration is below the 300s Gate 5 minimum")
+    return {
+        "eligible": reasons.is_empty(),
+        "classification": "gate5_presentation_acceptance" if reasons.is_empty() else "diagnostic",
+        "reasons": reasons
+    }
+
+func current_player_collision_hold_delta() -> int:
+    var player_body := main.get("player") as CharacterBody3D if main != null else null
+    if player_body == null:
+        return player_collision_hold_delta
+    return cumulative_collision_hold_delta(
+        player_collision_hold_baseline,
+        int(player_body.get("terrain_collision_hold_frames"))
+    )
+
+static func cumulative_collision_hold_delta(baseline: int, current: int) -> int:
+    return maxi(0, current - baseline)
+
+func modal_loading_visible() -> bool:
+    if main == null or not is_instance_valid(main):
+        return false
+    if bool(main.get("streaming_loading_overlay_active")):
+        return true
+    var hud_value = main.get("hud")
+    if hud_value != null and is_instance_valid(hud_value):
+        var overlay = hud_value.get("loading_overlay")
+        if overlay is CanvasItem and (overlay as CanvasItem).visible:
+            return true
+    return false
 
 func routine_v2_planning_profiles(after_physics_frame := -1) -> Array:
     if main == null:

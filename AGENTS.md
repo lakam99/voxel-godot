@@ -472,6 +472,79 @@ Use random seeds for broad tutorial or generated-town playtests unless replaying
 - When modifying this boundary, audit New Game and Continue, old saves, random seeds, generated-home variation, dialogue close paths, immediate command acceptance, eventual strict-home arrival, door clearance/close, and normal non-tutorial NPC behavior.
 - Acceptance must include a real main-menu -> New Game headed run with no gameplay-affecting flags. Prove the command is accepted promptly after the visible interaction and that the NPC completes the same generic go-home flow; a synthetic direct `go_home` call is contract evidence only.
 
+## Backlog
+
+### Deterministic terrain-collision tile pipeline
+
+The current `VoxelTerrainRuntime` obtains player terrain collision as a side
+effect of moving broad `VoxelViewer` footprints. This remains acceptable as a
+temporary implementation, but it is not a bounded long-term streaming design.
+The existing native-task threshold is an admission check only: one accepted
+80–96 m viewer can independently enqueue hundreds of Voxel Tools jobs.
+
+Focused normal-runtime evidence is retained at
+`artifacts/world-streaming-maturity/g5/focused-sprint-viewer-workload-attribution-01/report.json`.
+That menu → New Game → ordinary-input run travelled 533.75 m with zero collision
+holds and good measured cadence (12.776 ms p99, 22.608 ms maximum), but startup
+took 103.159 s and native work peaked at 708 queued tasks. Per-request telemetry
+recorded individual viewer peaks from roughly 214 to 708 tasks. A short smooth
+run therefore does not prove that sustained wilderness/Citadel travel has a
+bounded backlog; do not describe the 8-task admission threshold as a hard cap.
+
+The intended replacement is:
+
+```text
+seed + durable edits
+  -> authoritative terrain density/material volume
+  -> deterministic, revisioned collision tiles aligned to native mesh blocks
+  -> bounded collision build/install queue and exact physics receipt
+  -> player/NPC collision consumers
+
+authoritative terrain volume
+  -> independently scheduled render-mesh publication
+```
+
+- Keep terrain volume as the sole authority. Collision tiles and render meshes
+  are derived artifacts, not competing terrain implementations.
+- Prefer 16-cell collision tiles aligned to the current native mesh-block grid.
+  Player motion should request only the tiles intersecting its bounded swept
+  volume, with a hard cap on builds/installations in flight.
+- Key receipts by world/generator identity, tile coordinate, durable edit
+  revision and collision-builder revision. A terrain edit invalidates its tile
+  and required seam neighbours only.
+- Build and compare the new tile path in diagnostic shadow mode first. After
+  source/shape/seam parity and live collision are proven, migrate player motion
+  proof and startup readiness, then disable VoxelTerrain-generated collision so
+  two physical authorities never coexist in production.
+- Preserve generated-structure collision ownership, the protected route/motor/
+  door stack, and navigation publication contracts. Navigation may consume the
+  revisioned terrain artifact but must not gain a second topology authority.
+- Implement the architecture in GDScript first. Move only a measured, pure,
+  deterministic tile-extraction kernel to the existing C++/GDExtension pipeline
+  if profiling shows that extraction remains material after work is localized.
+
+The user explicitly deferred this architectural replacement until after Gate 5.
+The unbounded native-task count and its loading cost are therefore recorded
+technical debt, not a Gate 5 blocker by themselves. This decision does not waive
+physical safety, terrain solidity, clean shutdown, or the requirement to report
+player-visible collision holds honestly during the headed journey. Gate 5 may
+proceed on the current implementation, with the deferred architecture and its
+measured limitations carried into the final handoff.
+
+### Route-finalization occupancy scalability
+
+Gate 5's 32-NPC workload uses a 48-step cheap-work slice for incremental route
+planning while retaining two collision-backed validation calls per admitted
+planner call. This bounds the measured workload, but the current unversioned
+dynamic-occupancy signature is still collected atomically. More than 48 relevant
+occupied cells can therefore defer finalization without progress. The defined
+32-NPC acceptance workload remains viable, but larger populations or concurrent
+hostile occupancy require an incremental or revisioned occupancy artifact rather
+than another larger per-frame allowance. Also treat `cheapStepsThisCall` as a
+logical-work counter: deferred-frontier selection can scan multiple records in
+one counted step, so headed timing—not the counter alone—must prove the 2 ms atom
+criterion.
+
 ## Known Bugs
 
 - Tutorial town perimeter gate/fence: the game can destroy the perimeter gate, which causes the entire bridge to appear as pickup material. This breaks the perimeter fence repair quest because there is no intact fence/gate structure left for the player to repair. Future fixes should preserve tutorial-town gate, fence, and bridge structures from unintended destruction, cleanup, or resource-drop conversion during the tutorial flow.

@@ -156,6 +156,7 @@ func _prefetch_lifecycle() -> void:
 	var second: Vector2i = regions[1]
 	var third: Vector2i = regions[2]
 	var a = _admission()
+	check("unrequested_source_is_explicit_absence",a.source_state(first)=={"status":"absent","reason":"source_not_requested"})
 	check("prefetch_two_regions_retained",a.set_prefetch_regions([second,first]) and a.stats().prefetchRegions==[first,second] \
 		and a.stats().prefetchPending==2 and a._requests[first].prefetch and not a._requests[first].priority)
 	check("prefetch_capacity_rejected_without_mutation",not a.set_prefetch_regions([first,second,third]) \
@@ -172,8 +173,8 @@ func _prefetch_lifecycle() -> void:
 	while gated._queue._state != null and gated._queue._state.snapshot().stage!="synthetic_wait" and Time.get_ticks_msec()<deadline: await process_frame
 	var token := int(gated._requests.get(first,{}).get("receipt",{}).get("token",0))
 	check("prefetch_active_worker_entered",token>0 and gated._queue._state!=null and gated._queue._state.snapshot().stage=="synthetic_wait")
-	check("prefetch_reversal_cancels_only_speculative",gated.set_prefetch_regions([]) and not gated._requests.has(first) \
-		and gated._queue.cancelled_tokens.has(token) and gated._decisions.is_empty())
+	check("prefetch_reversal_keeps_active_immutable_source",gated.set_prefetch_regions([]) and gated._requests.has(first) \
+		and gated._requests[first].drainingPrefetch and not gated._queue.cancelled_tokens.has(token) and gated._decisions.is_empty())
 	gated._queue.gate.post()
 	deadline=Time.get_ticks_msec()+4000
 	var queue_status: Dictionary = gated.advance().queue
@@ -181,8 +182,8 @@ func _prefetch_lifecycle() -> void:
 			or int(queue_status.get("completedToken",0))!=0) and Time.get_ticks_msec()<deadline:
 		await process_frame
 		queue_status=gated.advance().queue
-	check("prefetch_cancel_has_no_failure_decision",gated._decisions.is_empty() and gated.profile_store.snapshot().is_empty())
-	await _drain(gated,"prefetch_cancel")
+	check("prefetch_drainer_reaches_terminal_absence",gated._decisions.get(first,{}).get("status")=="absent" and gated.profile_store.snapshot().is_empty())
+	await _drain(gated,"prefetch_drainer")
 func _bounds_and_pressure() -> void:
 	var a = _admission(); var first: Vector2i = regions[0]
 	var declared := Admission.declared_influence(_candidate(first))

@@ -270,11 +270,13 @@ func _column_pruning() -> void:
 	# fixed-X implementation, but repeated fit receives ALL originals. Only its
 	# work charge differs; final source scan and every geometric check remain.
 	var source := FileAccess.get_file_as_string("res://scripts/buildings/BoundaryInfillPlacement.gd")
-	var call_site := "fit(column,allowed,relevant,clearance,proceed)"
-	var charge := "128+relevant.size()*(64+8*int(ceil(log(float(2*relevant.size()+4))/log(2.0))))"
-	_check("pruning:oracle_exact_patch_sites",source.count(call_site)==1 and source.count(charge)==1)
+	var column_filter := "var column_relevant := _column_relevant(column,relevant,clearance,proceed)"
+	var column_boxes := "var column_boxes: Array = column_relevant.boxes"
+	var call_site := "fit(column,allowed,column_boxes,clearance,proceed)"
+	var charge := "128+relevant.size()+column_boxes.size()*(64+8*int(ceil(log(float(2*column_boxes.size()+4))/log(2.0))))"
+	_check("pruning:oracle_exact_patch_sites",source.count(column_filter)==1 and source.count(column_boxes)==1 and source.count(call_site)==1 and source.count(charge)==1)
 	var oracle = GDScript.new()
-	oracle.source_code=source.replace(call_site,"fit(column,allowed,source,clearance,proceed)").replace(charge,"128+source.size()*(64+8*int(ceil(log(float(2*source.size()+4))/log(2.0))))")
+	oracle.source_code=source.replace(column_filter,"var column_relevant := {\"ready\":true,\"boxes\":relevant}").replace(column_boxes,"var column_boxes: Array = relevant").replace(charge,"128+relevant.size()+relevant.size()*(64+8*int(ceil(log(float(2*relevant.size()+4))/log(2.0))))")
 	var error: int = oracle.reload()
 	_check("pruning:oracle_compiles",error==OK)
 	if error!=OK: return

@@ -6,6 +6,10 @@ const TitleMenuScript := preload("res://scripts/TitleMenu.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
 const TownRuntimeManifestScript := preload("res://scripts/world/TownRuntimeManifest.gd")
 const NavmeshWorldServiceScript := preload("res://scripts/npc_ai/navigation/NavmeshWorldService.gd")
+const StructureSystemScript := preload("res://scripts/StructureSystem.gd")
+const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
+const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
+const CITADEL_PUBLICATION_BUDGET_USEC := StructureSystemScript.CITADEL_PUBLICATION_BUDGET_USEC
 
 class SyntheticStartupMain extends MainCoreScript:
 	var voxel_terrain_runtime: Node
@@ -28,6 +32,19 @@ class SyntheticTileWorld extends RefCounted:
 class SyntheticPlayerCollisionRuntime extends Node:
 	func collision_mesh_ready_for_body_position(_position: Vector3, _radius: float) -> Dictionary:
 		return {"passed":true,"reason":"synthetic_collision_ready"}
+
+class SyntheticFailedAuxiliaryTerrainRuntime extends Node:
+	var configured := false
+	var failure := {"status":"failed","reason":"synthetic_auxiliary_site_failure",
+		"kind":"startup","stage":"cells"}
+	func configure_startup_collision_bounds(_chunk_keys: Array, _auxiliary_chunk_keys: Array = []) -> void:
+		configured = true
+	func gameplay_chunks_published(_chunk_keys: Array) -> bool:
+		return true
+	func published_gameplay_chunk_count(chunk_keys: Array) -> int:
+		return chunk_keys.size()
+	func secondary_viewer_admission_failure() -> Dictionary:
+		return failure.duplicate(true)
 
 class SyntheticLoadingHud extends RefCounted:
 	var visible := false
@@ -266,6 +283,16 @@ class FakeNpcSystem:
 	extends RefCounted
 	var npcs: Array = []
 	var autonomy_system = null
+	var pathing = null
+
+class SyntheticStartupNavigationWorld extends RefCounted:
+	var route_keys: Array[String] = ["15,-1"]
+	func route_navmesh_tile_keys(_entry: Dictionary, _start: Vector3, _target: Vector3,
+			_allow_outside := false, _moving_home := false, _margin_cells := 0) -> Array[String]:
+		return route_keys.duplicate()
+
+class SyntheticStartupPathing extends RefCounted:
+	var navigation_world
 
 class FakeMain:
 	extends Node
@@ -306,6 +333,8 @@ func run() -> void:
 	test_scenario_requirements_are_semantic()
 	test_streaming_loading_overlay_ownership()
 	test_stationary_abstract_npc_does_not_own_initial_physical_chunks()
+	test_startup_navigation_terrain_covers_full_primed_tile_halo()
+	await test_terminal_auxiliary_terrain_failure_stops_startup_immediately()
 	await test_player_foreground_streaming_intent()
 	await test_player_collision_dispatches_live_capsule_foreground()
 	test_streaming_forecast_and_navigation_terrain_gate()
@@ -325,6 +354,26 @@ func run() -> void:
 	await test_startup_requires_revision_matched_navigation()
 	await test_forced_manifest_failure_keeps_gameplay_disabled_and_visible()
 	finish()
+
+func test_terminal_auxiliary_terrain_failure_stops_startup_immediately() -> void:
+	# Synthetic terrain owner and production Main startup consumer. The required
+	# gameplay chunks are already marked ready so only the auxiliary terminal
+	# failure decides the result; no timeout, native terrain, or gameplay is used.
+	var main := SyntheticStartupMain.new()
+	var runtime := SyntheticFailedAuxiliaryTerrainRuntime.new()
+	main.voxel_terrain_runtime = runtime
+	root.add_child(main)
+	main.add_child(runtime)
+	var result: Dictionary = await main.wait_for_initial_voxel_collision_publication([Vector2i.ZERO])
+	var failure: Dictionary = result.get("metrics", {}).get("admissionFailure", {})
+	add_result("terminal_auxiliary_terrain_admission_failure_stops_startup_without_timeout",
+		runtime.configured
+		and result.get("status") == "failed"
+		and result.get("reason") == "startup_auxiliary_terrain_admission_failed"
+		and failure.get("reason") == "synthetic_auxiliary_site_failure",
+		{"result":result,"evidenceLevel":"synthetic_startup_consumer_contract",
+			"doesNotProve":"No native terrain admission, collision publication, or live loading UI."})
+	main.free()
 
 func test_stationary_abstract_npc_does_not_own_initial_physical_chunks() -> void:
 	var main := SyntheticStartupMain.new()
@@ -379,6 +428,54 @@ func test_stationary_abstract_npc_does_not_own_initial_physical_chunks() -> void
 	mismatched_body.free()
 	main.free()
 
+func test_startup_navigation_terrain_covers_full_primed_tile_halo() -> void:
+	# Tile 15,-1 straddles both the 28-cell gameplay-chunk grid and the zero seam
+	# once navigation's one-cell capture halo is applied. Endpoint-only retention
+	# would keep just chunk 9,-1 and leave startup publication permanently pending.
+	var main := SyntheticStartupMain.new()
+	var body := Node3D.new()
+	root.add_child(body)
+	body.global_position = Vector3(256.0 * main.CELL, 0.0, -1.0 * main.CELL)
+	var navigation_world := SyntheticStartupNavigationWorld.new()
+	var pathing := SyntheticStartupPathing.new()
+	pathing.navigation_world = navigation_world
+	var fake_npcs := FakeNpcSystem.new()
+	fake_npcs.pathing = pathing
+	fake_npcs.npcs = [{
+		"id":"seam_npc",
+		"body":body,
+		"homePosition":body.global_position
+	}]
+	main.npc_system = fake_npcs
+	var primed_tiles := {}
+	main.prime_navigation_tiles_for_entry(navigation_world, fake_npcs.npcs[0], primed_tiles)
+	var retained_chunks: Array[Vector2i] = main.initial_navigation_terrain_chunk_keys()
+	var tile := Vector2i(15, -1)
+	var capture_bounds := Rect2i(
+		tile * NpcConstantsScript.NAV_TILE_CELL_SIZE,
+		Vector2i.ONE * NpcConstantsScript.NAV_TILE_CELL_SIZE
+	).grow(1)
+	var required_chunks := WorldStreamingCoordinatorScript.chunks_for_bounds(capture_bounds)
+	var expected_chunks: Array[Vector2i] = [
+		Vector2i(8,-1), Vector2i(9,-1), Vector2i(8,0), Vector2i(9,0)
+	]
+	add_result("startup_navigation_terrain_covers_full_primed_tile_halo",
+		primed_tiles.keys() == ["15,-1"] \
+		and required_chunks == expected_chunks \
+		and required_chunks.all(func(key: Vector2i): return retained_chunks.has(key)), {
+			"evidenceLevel":"synthetic_startup_coverage_contract",
+			"primedTiles":primed_tiles.keys(),
+			"captureBounds":capture_bounds,
+			"requiredChunks":required_chunks,
+			"retainedChunks":retained_chunks,
+			"doesNotProve":"Native terrain generation, collision installation, or live navigation publication."
+		})
+	fake_npcs.npcs.clear()
+	fake_npcs.pathing = null
+	main.npc_system = null
+	body.free()
+	main.free()
+
 func test_streaming_loading_overlay_ownership() -> void:
 	var main := SyntheticStartupMain.new()
 	var loading_hud := SyntheticLoadingHud.new()
@@ -413,7 +510,9 @@ func test_streaming_forecast_and_navigation_terrain_gate() -> void:
 	add_result("navigation_capture_waits_for_published_terrain_tile",
 		pending.get("publicationStatus")=="pending"
 		and pending.get("reason")=="synthetic_terrain_publication_pending"
-		and terrain_main.queries==[Rect2i(32,-48,16,16)]
+		# Navigation capture owns an exact one-cell terrain halo so a native mesh
+		# receipt cannot change underneath a just-started tile capture.
+		and terrain_main.queries==[Rect2i(31,-49,18,18)]
 		and adapter._navigation_capture==null,{
 			"evidenceLevel":"synthetic_ordering_contract","result":pending,"queries":terrain_main.queries,
 			"doesNotProve":"No native terrain, navigation worker, or NavigationServer installation is exercised."})
@@ -716,12 +815,27 @@ func test_regional_subregion_readiness() -> void:
 	var regions := Regions.new()
 	regions.configure("synthetic-local-query",{"terrain":terrain,"structures":structures,"navigation":navigation})
 	var full := Rect2i(0,0,32,32)
-	regions.request_region(full,0,"player")
+	var player_request := regions.request_region(full,0,"player")
 	for frame in range(3):
 		await process_frame
 		regions.advance()
 	add_result("regional_local_query_does_not_wait_for_unrelated_tiles",regions.region_readiness(full).status=="pending"
 		and regions.region_readiness(Rect2i(0,0,8,8)).status=="ready",{})
+	# A failed wide closure cannot turn an already admitted, clean local window
+	# into a false failure. The local query still executes its exact source and
+	# receipt checks; the original wide query remains failed.
+	regions._requests[player_request].closureStatus="failed"
+	regions._requests[player_request].closureReason="synthetic_wide_crossing_failure"
+	var clean_local_after_wide_failure := regions.region_readiness(Rect2i(0,0,8,8))
+	var failed_wide_after_failure := regions.region_readiness(full)
+	add_result("regional_clean_subregion_survives_unrelated_failed_wide_closure",
+		clean_local_after_wide_failure.status=="ready" and failed_wide_after_failure.status=="failed"
+		and failed_wide_after_failure.reason=="synthetic_wide_crossing_failure",{
+			"local":clean_local_after_wide_failure,"wide":failed_wide_after_failure,
+			"evidenceLevel":"synthetic_streaming_readiness_contract",
+			"doesNotProve":"Live terrain, structure or navigation publication."})
+	regions._requests[player_request].closureStatus="ready"
+	regions._requests[player_request].closureReason=""
 	add_result("regional_local_query_requires_its_own_acknowledgement",regions.region_readiness(Rect2i(20,20,8,8)).status=="pending",{})
 	var navigation_queries_before := navigation.readiness_queries.size()
 	var traversal: Dictionary = regions.player_traversal_readiness(Rect2i(20,20,8,8))
@@ -795,12 +909,14 @@ func test_regional_cached_navigation_proof_precedes_publisher() -> void:
 	var nav_index := owners.calls.rfind("nav_advance")
 	var pump_index := owners.calls.find("publisher_pump")
 	var competing_enqueue_index := owners.calls.find("enqueue:1,0")
+	# The neighbouring source starts retained by the shared publisher. Regional
+	# demand must preserve that work without re-enqueuing and re-sorting it.
 	add_result("synthetic_regional_cached_proof_precedes_busy_publisher",configured and request>0
 		and before.status=="pending" and ready.status=="ready" and owners.accepted_proofs>0
-		and proof_index>=0 and competing_enqueue_index>proof_index and nav_index>proof_index and pump_index>nav_index
+		and proof_index>=0 and competing_enqueue_index<0 and nav_index>proof_index and pump_index>nav_index
 		and owners.pump_budgets.all(func(budget: int):return budget>0 and budget<=4000)
-		and owners.enqueue_calls==2 and owners.calls.count("enqueue:0,0")==1
-		and owners.calls.count("enqueue:1,0")==1 and owners.build_calls==0
+		and owners.enqueue_calls==1 and owners.calls.count("enqueue:0,0")==1
+		and owners.calls.count("enqueue:1,0")==0 and owners.build_calls==0
 		and publication.region_publication_readiness(full_bounds).status=="pending",
 		{"evidenceLevel":"synthetic_contract","ready":ready,"calls":owners.calls.duplicate(),
 		"pumpBudgetsUsec":owners.pump_budgets.duplicate(),"enqueueCalls":owners.enqueue_calls,"buildCalls":owners.build_calls})

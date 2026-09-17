@@ -28,17 +28,17 @@ func _initialize() -> void:
 		Urban.add_civic_quarter(source, front_z, keep_front_z, foundation_height, 0.0, layout)
 		var declarations: Dictionary = source.recipe.get("facadeApertures", {})
 		var terrace: Dictionary = declarations.get("urban_row_03_right_upper_facade", {})
-		var civic: Dictionary = declarations.get("urban_civic_house_wall_upper_facade", {})
+		var civic: Dictionary = declarations.get("urban_civic_house_east_upper_facade", {})
 		var terrace_bottom := float((terrace.get("wallDomain", AABB()) as AABB).position.y)
 		var civic_bottom := float((civic.get("wallDomain", AABB()) as AABB).position.y)
 		var terrace_ground := _foundation_top(source, "urban_row_03_right_foundation")
-		var civic_ground := _foundation_top(source, "urban_civic_house_wall_foundation")
+		var civic_ground := _foundation_top(source, "urban_civic_house_east_foundation")
 		var sill_height := 2.75 - 1.46 * 0.5
 		var terrace_local_height := terrace_bottom - terrace_ground
 		var civic_local_height := civic_bottom - civic_ground
 		var checks := {
 			"terrace_party_wall_course_retained": not terrace.is_empty() and terrace_local_height < sill_height - 0.01,
-			"standalone_short_house_course_raised_to_sill": not civic.is_empty() and is_equal_approx(civic_local_height, sill_height),
+			"standalone_civic_home_keeps_regular_base_course": not civic.is_empty() and civic_local_height > sill_height + 0.01,
 			"producer_manifest_remains_valid": Manifest.read(source).get("ready", false),
 			"malformed_late_commit_record_rejected_atomically": _late_record_rejected_atomically()}
 		report = {"passed": checks.values().all(func(value): return value == true), "checks": checks,

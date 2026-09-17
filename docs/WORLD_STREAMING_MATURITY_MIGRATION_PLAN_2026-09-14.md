@@ -200,6 +200,14 @@ git rev-parse HEAD
 
 ### G5 — Maturity acceptance and merge-ready handoff
 
+**Product decision, 2026-09-16:** the deterministic terrain-collision tile
+replacement described in `AGENTS.md` is deferred until after this gate. The
+current broad-viewer architecture's native-task backlog and loading cost must
+remain measured and disclosed, but do not block Gate 5 solely by their task
+count. Continue to require real terrain solidity, safe fail-closed movement,
+honest collision-hold reporting and clean lifecycle evidence; do not claim that
+the current admission threshold is a hard native-work cap.
+
 - Execute the matrix in §6 with frozen source/binary hashes and preserved input saves. Full gameplay acceptance starts at the actual menu and uses normal runtime settings, collision and input. Extend existing headed fixtures where necessary; no teleport/helper-driven act phase, forced safe movement, bypassed interactions, or metadata-only success.
 - Validate New Game and Continue initial readiness, tutorial town/actors, wilderness sprint, Citadel approach from gate and side, rapid turns/reversals, interior furnishings, gate/door/stair passage, nearby NPC behavior, edit/dig/build/harvest, combat/survival, autosave/manual save, reload during pending work, exit/cancel during preparation/installation/sync, and later revisit. Use established broad/NPC/terrain/save fixtures; inspect their reports and actual visuals.
 - Resolve failures within authorized ownership. A green boolean cannot waive an engine error, unsafe collision, missing required crossing, source mismatch, missing demanded content or visible stutter. Baseline defects remain listed and separately attributed; a defect blocking this plan's ordinary flow must be resolved before acceptance, even if inherited. Request additional scope only for a needed protected route/motor/door-behavior change.
@@ -276,7 +284,7 @@ Each completion entry must record commit, source/binary hashes, exact commands, 
 | G2 profile/decisions | COMPLETE | Corrected three-run source profile, moving-player headed stage profile, autosave ownership, loading comparator and native decision recorded in `docs/WORLD_STREAMING_MATURITY_G2_PROFILE_AND_NATIVE_DECISION_2026-09-14.md`; no native kernel selected; performance remains pending |
 | G3 progressive preparation/native | COMPLETE | Timing-free immutable plan/spatial/dependency index, locality-sealed rolling packets, ahead-of-player preparation, semantic milestones, incremental save delta snapshot, deterministic lifecycle coverage, and a 1.528 km ordinary-input headed pass are recorded in `docs/WORLD_STREAMING_MATURITY_G3_PROGRESSIVE_PREPARATION_2026-09-14.md`; no native kernel selected |
 | G4 scale/retirement | COMPLETE | This Gate 4 commit: continuous ground-course Citadel platform (no artificial terraces or holes), source/packet resource caps, repeated retirement/revisit proof and a 34.68-minute headed autosave soak passed. Exact commands, source hash, captures, resource evidence and scope limits: `docs/WORLD_STREAMING_MATURITY_G4_SCALE_RETIREMENT_2026-09-16.md` |
-| G5 acceptance/handoff | NOT STARTED | Full matrix, final commits, clean status, ready-for-merge report; DO NOT MERGE |
+| G5 acceptance/handoff | IN PROGRESS | The deferred deterministic collision-tile architecture is recorded in `AGENTS.md` and is not itself a gate blocker. The protected route-performance tranche is independently reviewed, compile-stable, and contract-green (190/190 route and 83/83 behavior): exact deferred ordering, bounded restart-safe final certification, LOD eviction/cancellation, and resumable approach certification preserve route/motor/door/traffic semantics. The minimal-gauge 1080p diagnostic `artifacts/performance/gate5-32npc-route-reviewed-minimal-1080p-10s-120warmup-06/report.json` proves route compliance at 0.781 ms p99 / 1.427 ms measurement max, 48/48 cheap steps, 2/2 validator calls, no periodic 2–7 s pairs, and clean owned-process drain. Gate 5 still fails: Main p99 is 27.548 ms and presentation p99/max is 47.6/52.885 ms; exact tail frames retain 5–6 ms trader reservation/scope rebuilding, while aggregate physical route service is 8.884 ms p99. Runner provenance hardening is independently GO with 41/41 adversarial checks, transactional New Game/Continue evidence, complete source/binary hashing, and fail-closed unresolved loading duration policy. The full five-minute 1080p matrix, continuous journey, loading comparator/matrix, tutorial perimeter destruction fix, current-source long session, broad gameplay, known plus two fresh deterministic seeds, final commit, clean status and ready-for-merge report remain required. DO NOT MERGE |
 
 ## 8. Engine references — implementation constraints, not rewrite mandates
 

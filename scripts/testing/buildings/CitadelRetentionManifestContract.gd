@@ -29,6 +29,23 @@ func _covers(service, point: Vector2i) -> bool:
 		if bounds.has_point(point): return true
 	return false
 
+func _immutable_manifest(request: Dictionary) -> Array:
+	var owned: Dictionary=request.duplicate(true)
+	for site: Dictionary in owned.get("sites",[]):
+		if site.has("binding"): site.binding.make_read_only()
+		if site.has("groupIds"): site.groupIds.make_read_only()
+		if site.has("foregroundGroupIds"): site.foregroundGroupIds.make_read_only()
+		if site.has("foregroundNavigationTileKeys"): site.foregroundNavigationTileKeys.make_read_only()
+		site.make_read_only()
+	owned.admissionKeys.make_read_only()
+	owned.navigationTileKeys.make_read_only()
+	owned.sites.make_read_only()
+	if owned.has("navigationTilePriorities"): owned.navigationTilePriorities.make_read_only()
+	owned.make_read_only()
+	var result: Array=[owned]
+	result.make_read_only()
+	return result
+
 func _shutdown(service, label: String) -> void:
 	service.request_shutdown()
 	var state: Dictionary = service.advance(Rect2i(),false,2500)
@@ -259,6 +276,106 @@ func _view_intent_is_separate_scheduling_state() -> void:
 		and var_to_bytes([service._retained_consumers,service._view_revision,service._demand_revision])==before_invalid)
 	_shutdown(service,"view_intent_shutdown_balanced")
 
+func _incremental_atomic_compiler() -> void:
+	var service = Service.new()
+	var baseline := _consumer(1)
+	_check("incremental_baseline_admitted",service.set_retained_source_requests([baseline]))
+	var baseline_snapshot := _snapshot(service)
+	var large := _consumer(2)
+	var groups: Array[String] = []
+	for index in range(30000): groups.append("bounded-%05d" % index)
+	large.sites = [{"binding":{"siteId":"bounded","sourceKey":"groups","generation":1},"groupIds":groups}]
+	service.request_retained_source_requests(100,[large],true)
+	var first: Dictionary = service.advance_retained_source_requests(1,1)
+	_check("partial_compile_is_pending_and_invisible",first.status=="pending" and _snapshot(service)==baseline_snapshot)
+	var slices: int = 1
+	var state: Dictionary = first
+	while state.status=="pending" and slices<40000:
+		state=service.advance_retained_source_requests(1000000,64)
+		slices+=1
+	_check("thirty_thousand_group_compile_makes_bounded_progress",state.status=="ready"
+		and service._retained_consumers[0].sites[0].groupIds.size()==30000 and slices>1)
+	var accepted_snapshot: PackedByteArray=_snapshot(service)
+	var invalid: Dictionary=large.duplicate(true)
+	invalid.sites[0].groupIds[29999]=""
+	service.request_retained_source_requests(101,[invalid],true)
+	state={"status":"pending"}
+	while state.status=="pending": state=service.advance_retained_source_requests(1000000,128)
+	_check("invalid_final_input_rejects_without_losing_last_snapshot",state.status=="failed" and _snapshot(service)==accepted_snapshot)
+	var demand_revision: int=service._demand_revision
+	service.request_retained_source_requests(102,service._retained_consumers.duplicate(true),true)
+	state={"status":"pending"}
+	while state.status=="pending": state=service.advance_retained_source_requests(1000000,128)
+	_check("identical_normalized_async_commit_is_revision_noop",state.status=="ready" and service._demand_revision==demand_revision)
+	service.request_retained_source_requests(103,[baseline],true)
+	service.advance_retained_source_requests(1,1)
+	service.cancel_retained_source_request_compile()
+	_check("explicit_cancel_discards_partial_compile",service._retained_source_compile_job.is_empty() and _snapshot(service)==accepted_snapshot)
+	metrics["incrementalSlices"]=slices
+	metrics["incrementalUnits"]=service.retained_source_request_compile_metrics()
+	_shutdown(service,"incremental_compiler_shutdown_balanced")
+
+func _foreground_group_presence_identity() -> void:
+	var service=Service.new()
+	var omitted:=_consumer(1)
+	omitted.sites=[{"binding":{"siteId":"presence","sourceKey":"closure","generation":1},"groupIds":["floor"]}]
+	_check("foreground_presence_omitted_fixture_admitted",service.set_retained_source_requests([omitted]))
+	var omitted_revision:int=service._demand_revision
+	_check("foreground_presence_omitted_remains_omitted",
+		not service._retained_consumers[0].sites[0].has("foregroundGroupIds"))
+	var explicit_empty:=omitted.duplicate(true)
+	explicit_empty.sites[0]["foregroundGroupIds"]=[]
+	_check("foreground_presence_explicit_empty_changes_normalized_identity",
+		service.set_retained_source_requests([explicit_empty])
+		and service._demand_revision==omitted_revision+1
+		and service._retained_consumers[0].sites[0].has("foregroundGroupIds")
+		and service._retained_consumers[0].sites[0].foregroundGroupIds.is_empty())
+	var explicit_revision:int=service._demand_revision
+	_check("foreground_presence_exact_explicit_empty_is_noop",
+		service.set_retained_source_requests([explicit_empty.duplicate(true)])
+		and service._demand_revision==explicit_revision)
+	_check("foreground_presence_reverse_to_omitted_changes_identity",
+		service.set_retained_source_requests([omitted.duplicate(true)])
+		and service._demand_revision==explicit_revision+1
+		and not service._retained_consumers[0].sites[0].has("foregroundGroupIds"))
+	_shutdown(service,"foreground_presence_identity_shutdown_balanced")
+
+func _async_revision_and_input_ownership() -> void:
+	var service=Service.new()
+	var baseline:=_consumer(1)
+	_check("async_revision_baseline_admitted",service.set_retained_source_requests([baseline]))
+	var committed:int=service.retained_source_committed_revision()
+	_check("async_mutable_input_rejected_before_compile",
+		not service.request_retained_source_requests(committed+1,[baseline.duplicate(true)]))
+	var rejected: Dictionary=service.advance_retained_source_requests(1,1)
+	_check("async_mutable_rejection_is_latched_and_exact",rejected.status=="failed"
+		and int(rejected.revision)==committed+1 and service.advance_retained_source_requests(1,1)==rejected
+		and service.retained_source_committed_revision()==committed)
+	service.cancel_retained_source_request_compile()
+	var next_revision:=committed+2
+	var immutable: Array=_immutable_manifest(baseline)
+	_check("async_immutable_input_accepted",service.request_retained_source_requests(next_revision,immutable))
+	var pending: Dictionary=service.advance_retained_source_requests(1,1)
+	_check("async_new_revision_starts_pending",pending.status=="pending" and int(pending.revision)==next_revision)
+	_check("async_stale_revision_cannot_replace_newer_compile",
+		not service.request_retained_source_requests(next_revision-1,immutable)
+		and int(service._retained_source_compile_job.revision)==next_revision)
+	var state:=pending
+	while state.status=="pending": state=service.advance_retained_source_requests(1000000,128)
+	_check("async_commit_acknowledges_exact_requested_revision",state.status=="ready"
+		and int(state.revision)==next_revision and service.retained_source_committed_revision()==next_revision)
+	var invalid:=baseline.duplicate(true); invalid.ownerId=0
+	var invalid_manifest:Array=_immutable_manifest(invalid)
+	_check("async_invalid_immutable_revision_admitted_for_bounded_validation",
+		service.request_retained_source_requests(next_revision+1,invalid_manifest))
+	state={"status":"pending"}
+	while state.status=="pending": state=service.advance_retained_source_requests(1000000,128)
+	var repeated:Dictionary=service.advance_retained_source_requests(1,1)
+	_check("async_invalid_revision_never_becomes_old_ready_commit",state.status=="failed"
+		and int(state.revision)==next_revision+1 and repeated==state
+		and service.retained_source_committed_revision()==next_revision)
+	_shutdown(service,"async_revision_ownership_shutdown_balanced")
+
 func _run() -> void:
 	_ownership_and_schema()
 	_invalid_atomic_inputs()
@@ -266,6 +383,9 @@ func _run() -> void:
 	_group_capacity()
 	_navigation_priority_contract()
 	_view_intent_is_separate_scheduling_state()
+	_incremental_atomic_compiler()
+	_foreground_group_presence_identity()
+	_async_revision_and_input_ownership()
 	var report := {"schema":"citadel-retention-manifest-contract/v1","complete":true,
 		"passed":not checks.values().has(false),"checks":checks,"metrics":metrics,
 		"evidenceLevel":"synthetic_service_input_ownership_contract",

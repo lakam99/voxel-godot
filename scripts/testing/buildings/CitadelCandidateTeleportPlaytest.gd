@@ -1,18 +1,38 @@
 extends SceneTree
-## Headed teleport-assisted diagnostic, never continuous-travel/NPC acceptance.
-## Two bounded setup placements are supported; all generated content is ordinary.
+## Headed Citadel diagnostic. The default fixture is teleport-assisted; the
+## explicit menu-journey mode has no setup placement and drives normal input.
 const MainScene = preload("res://scenes/Main.tscn")
+const MainMenuScene = preload("res://scenes/MainMenu.tscn")
 const Field = preload("res://scripts/world/CitadelSiteField.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const Gate = preload("res://scripts/terrain/VoxelTerrainSiteGate.gd")
 const Clearance = preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const RenderObservation = preload("res://scripts/perf/RuntimeRenderObservation.gd")
 const Streaming = preload("res://scripts/world/WorldStreamingCoordinator.gd")
+const Castle = preload("res://scripts/buildings/CastleCompoundBlueprintBuilder.gd")
 const SurvivalPolicy = preload("res://scripts/testing/PlaytestSurvivalPolicy.gd")
 const SEARCH_RING := 2
 const VIEW_CELLS := 112
 const MAX_SETUP_WRITES := 2
 const FAR_SOURCE_DISCOVERY_APPROACH_METERS := 800.0
+const DISCOVERY_DETOUR_DISTANCE_METERS := 48.0
+const DISCOVERY_DETOUR_MSEC := 6000
+const DISCOVERY_REVERSE_MSEC := 1400
+const DISCOVERY_WALL_FOLLOW_WAYPOINT_METERS := 14.0
+const DISCOVERY_WALL_FOLLOW_PROBE_METERS := 7.0
+const DISCOVERY_WALL_FOLLOW_REFRESH_MSEC := 2500
+const DISCOVERY_WALL_FOLLOW_CLEAR_SAMPLES := 2
+const DISCOVERY_PROGRESS_WINDOW_MSEC := 4000
+const DISCOVERY_MIN_PROGRESS_METERS := 1.5
+const DISCOVERY_CONTACT_MISS_RETRY_METERS := 7.0
+const DISCOVERY_CONTACT_MISS_RETRY_MSEC := 1800
+const DISCOVERY_CONTACT_MISS_RETRY_LIMIT := 4
+const DISCOVERY_WALL_STATIONARY_SAMPLE_LIMIT := 2
+const DISCOVERY_WALL_FOLLOW_MAX_MSEC := 20000
+const DISCOVERY_ESCAPE_HEADING_OFFSETS := [PI, PI*0.75, -PI*0.75, PI*0.5, -PI*0.5, PI*0.25, -PI*0.25]
+const LOOK_CONVERGENCE_STEPS := 40
+const READY_LOOK_RETRY_WINDOWS := 3
+const DISCOVERY_RETRYABLE_SOURCE_ABSENCES := ["ordinary_structure_overlap", "town_reservation_overlap", "terrain_relief_exceeds_supported_apron"]
 const SCALE_SOAK_CYCLES := 3
 const SCALE_SOAK_AWAY_METERS := 460.0
 const SCALE_SOAK_SAMPLE_MSEC := 10000
@@ -100,6 +120,9 @@ var startup_messages: Array[Dictionary] = []
 var startup_message_index: Dictionary = {}
 var startup_message_count := 0
 var startup_message_overflow := 0
+var startup_navigation_samples: Array[Dictionary] = []
+var next_startup_navigation_sample := 0
+var next_startup_progress := 0
 var checks: Dictionary = {}
 var evidence: Dictionary = {}
 var next_progress := 0
@@ -111,13 +134,20 @@ var finished := false
 var manual_seconds := 0
 var scale_soak_seconds := 0
 var player_inspection_only := false
+var menu_journey := false
+var menu_continue_journey := false
+var menu: Node
 var last_timeline_state := ""
 var evidence_error: Dictionary = {}
 var accepted_owners: Dictionary = {} # Weak identity pins, never scene ownership.
 var worker_samples: Array[Dictionary] = []
 var worker_samples_dropped := 0
+var terrain_collision_hold_frames := 0
+var terrain_collision_hold_reasons: Dictionary = {}
+var terrain_collision_hold_samples: Array[Dictionary] = []
 var navigation_demand_samples: Array[Dictionary] = []
 var navigation_demand_samples_dropped := 0
+var journey_motion_progress: Dictionary = {}
 
 func _initialize() -> void:
 	call_deferred("_run")
@@ -137,12 +167,18 @@ func _run() -> void:
 	manual_seconds=int(OS.get_environment("CITADEL_CANDIDATE_MANUAL_SECONDS"))
 	scale_soak_seconds=int(OS.get_environment("CITADEL_CANDIDATE_SCALE_SOAK_SECONDS"))
 	player_inspection_only=OS.get_environment("CITADEL_CANDIDATE_PLAYER_INSPECTION_ONLY")=="1"
+	menu_journey=OS.get_environment("CITADEL_CANDIDATE_MENU_JOURNEY")=="1"
+	menu_continue_journey=OS.get_environment("CITADEL_CANDIDATE_MENU_CONTINUE_JOURNEY")=="1"
+	if menu_continue_journey and not menu_journey:
+		printerr("Continue journey requires menu journey mode"); quit(2); return
+	if menu_journey and (not spawn_cell.is_empty() or not requested_region.is_empty()):
+		printerr("Menu journey cannot select an initial spawn or Citadel region"); quit(2); return
 	if manual_seconds not in [0,1800]:
 		printerr("Invalid manual inspection allowance"); quit(2); return
 	if (scale_soak_seconds!=0 and (scale_soak_seconds<180 or scale_soak_seconds>1800)) \
 			or (manual_seconds>0 and scale_soak_seconds>0) or (player_inspection_only and (manual_seconds>0 or scale_soak_seconds>0)):
 		printerr("Invalid scale soak allowance"); quit(2); return
-	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 1200 or startup_limit < 15 or startup_limit > 180:
+	if output.is_empty() or not output.is_absolute_path() or limit < 90 or limit > 2400 or startup_limit < 15 or startup_limit > 360:
 		printerr("Missing/invalid owned runner output or deadline"); quit(2); return
 	started = Time.get_ticks_msec()
 	deadline = started + startup_limit*1000
@@ -153,28 +189,57 @@ func _run() -> void:
 	if resolution not in ["1280x720", "1920x1080"]:
 		printerr("Invalid diagnostic resolution"); quit(2); return
 	var dimensions := resolution.split("x")
-	root.size = Vector2i(int(dimensions[0]),int(dimensions[1]))
+	var requested_viewport := Vector2i(int(dimensions[0]),int(dimensions[1]))
+	# --resolution selects the initial window, but the desktop host may retain a
+	# previous size. Set both the native window and the root viewport before the
+	# menu is instantiated so screenshots and render observations really use the
+	# requested 1080p path.
+	DisplayServer.window_set_size(requested_viewport)
+	root.size = requested_viewport
+	await process_frame
+	var actual_viewport := Vector2i(roundi(root.get_visible_rect().size.x),roundi(root.get_visible_rect().size.y))
+	var actual_window := DisplayServer.window_get_size()
+	# project.godot deliberately keeps a 1280x720 logical canvas and stretches it
+	# to the native window. The user-visible renderer must therefore be checked
+	# at the native 1080p window, while captures retain their truthful logical
+	# canvas dimensions instead of falsely relabelling them as 1080p images.
+	evidence.renderResolution = {"requested":[requested_viewport.x,requested_viewport.y],
+		"window":[actual_window.x,actual_window.y],"viewport":[actual_viewport.x,actual_viewport.y],
+		"policy":"native window is the performance/render target; project logical canvas remains 1280x720"}
+	checks.requested_render_resolution = actual_window == requested_viewport
+	if not checks.requested_render_resolution:
+		await _finish("failed","requested_render_resolution_unavailable"); return
 	render_observation = RenderObservation.new()
 	root.add_child(render_observation)
 	checks.render_observation_started = render_observation.start(root)
-	main = MainScene.instantiate() as Node3D
-	main.set_script(SeededMain)
-	evidence.seedSelection = {"mechanism":"fixture-only script replacement with subclass overriding random_world_seed",
-		"originalScript":"res://scripts/Main.gd","inheritedStartupMode":"new_game","requestedSeed":requested_seed,
-		"excludeSeedDeliberatelyIgnored":true,"voxelTestSeedEnvironmentUsed":false,"globalRngSeedOverride":false,
-		"notEquivalentToExistingTestSeedMode":"VOXEL_TEST_SEED also seeds the global RNG; deterministic sequence additionally requires a test/performance token. Neither mechanism is enabled here."}
-	main.set("diagnostic_seed",requested_seed)
-	main.set("diagnostic_spawn_cell",spawn_cell)
-	main.set("startup_mode","new_game")
-	main.connect("startup_loading_completed",_startup_completed)
-	main.connect("startup_loading_failed",_startup_failed)
-	main.connect("startup_loading_step",_startup_step)
-	root.add_child(main)
-	current_scene = main
-	phase = "ordinary_new_game_startup"
-	while not startup_ready and startup_failure.is_empty() and _within_deadline():
-		await _frame()
+	if menu_journey:
+		evidence.seedSelection = {"mechanism":"visible MainMenu Continue viewport input" if menu_continue_journey else "visible MainMenu New Game viewport input",
+			"requestedSeed":"loaded from copied ordinary save" if menu_continue_journey else "selected by production New Game",
+			"voxelTestSeedEnvironmentUsed":false,"globalRngSeedOverride":false,"setupTeleportCount":0}
+		if not await _launch_main_from_menu():
+			await _finish("failed",startup_failure if not startup_failure.is_empty() else ("menu_continue_startup_timeout" if menu_continue_journey else "menu_new_game_startup_timeout")); return
+		requested_seed=String(main.get("seed_text"))
+	else:
+		main = MainScene.instantiate() as Node3D
+		main.set_script(SeededMain)
+		evidence.seedSelection = {"mechanism":"fixture-only script replacement with subclass overriding random_world_seed",
+			"originalScript":"res://scripts/Main.gd","inheritedStartupMode":"new_game","requestedSeed":requested_seed,
+			"excludeSeedDeliberatelyIgnored":true,"voxelTestSeedEnvironmentUsed":false,"globalRngSeedOverride":false,
+			"notEquivalentToExistingTestSeedMode":"VOXEL_TEST_SEED also seeds the global RNG; deterministic sequence additionally requires a test/performance token. Neither mechanism is enabled here."}
+		main.set("diagnostic_seed",requested_seed)
+		main.set("diagnostic_spawn_cell",spawn_cell)
+		main.set("startup_mode","new_game")
+		main.connect("startup_loading_completed",_startup_completed)
+		main.connect("startup_loading_failed",_startup_failed)
+		main.connect("startup_loading_step",_startup_step)
+		root.add_child(main)
+		current_scene = main
+		phase = "ordinary_new_game_startup"
+		while not startup_ready and startup_failure.is_empty() and _within_deadline():
+			await _frame()
 	checks.startup_completed = startup_ready and startup_failure.is_empty()
+	checks.menu_new_game_input = not menu_journey or menu_continue_journey or (is_instance_valid(menu) and is_instance_valid(main))
+	checks.menu_continue_input = not menu_continue_journey or (is_instance_valid(menu) and is_instance_valid(main))
 	if not checks.startup_completed:
 		await _finish("failed",startup_failure if not startup_failure.is_empty() else "startup_timeout"); return
 	startup_elapsed = _elapsed()
@@ -205,6 +270,18 @@ func _run() -> void:
 			and evidence.scaleSoakSurvivalPolicy.get("scope","")=="player_survival_damage_only"
 		if not checks.scale_soak_survival_policy:
 			await _finish("failed",String(evidence.scaleSoakSurvivalPolicy.get("failure","scale_soak_survival_policy_failed"))); return
+	elif menu_journey:
+		# The Gate 5 journey is deliberately long enough to cross hostile wilderness.
+		# The user authorized player god mode for this diagnostic. It protects only
+		# survival damage; real player collision, ordinary input, terrain, world time,
+		# weather, hostiles and streaming all remain live. A death/respawn would make
+		# continuous-travel evidence invalid rather than demonstrating a route.
+		evidence.menuJourneySurvivalPolicy=SurvivalPolicy.enable_player_god_mode(main,"citadel_menu_journey")
+		checks.menu_journey_survival_policy=evidence.menuJourneySurvivalPolicy.get("enabled",false) \
+			and evidence.menuJourneySurvivalPolicy.get("reason","")=="citadel_menu_journey" \
+			and evidence.menuJourneySurvivalPolicy.get("scope","")=="player_survival_damage_only"
+		if not checks.menu_journey_survival_policy:
+			await _finish("failed",String(evidence.menuJourneySurvivalPolicy.get("failure","menu_journey_survival_policy_failed"))); return
 	if not spawn_cell.is_empty():
 		var initial_readiness := _initial_spawn_physical_readiness()
 		evidence.initialSpawnPhysicalReadiness = initial_readiness
@@ -228,33 +305,77 @@ func _run() -> void:
 		checks.initial_spawn_horizontal_position_preserved = Vector2(original_position.x,original_position.z).distance_to(Vector2(selected_position.x,selected_position.z))<0.1
 		if not checks.initial_spawn_selected_before_attachment or not checks.initial_spawn_tutorial_disabled or not checks.initial_spawn_horizontal_position_preserved:
 			await _finish("failed","initial_spawn_contract_failed"); return
-	if not await _capture("preteleport" if spawn_cell.is_empty() else "initial_spawn_ready"):
+	if not await _capture(("menu_continue_ready" if menu_continue_journey else "menu_new_game_ready") if menu_journey else ("preteleport" if spawn_cell.is_empty() else "initial_spawn_ready")):
 		await _finish("failed","preteleport_capture_failed"); return
+	if menu_journey and not menu_continue_journey:
+		evidence.tutorialDeparture = await _leave_tutorial_starter_house()
+		checks.tutorial_departure_via_generated_door = evidence.tutorialDeparture.get("passed",false)
+		if not checks.tutorial_departure_via_generated_door:
+			await _finish("failed",String(evidence.tutorialDeparture.get("reason","tutorial_departure_failed"))); return
+	elif menu_continue_journey:
+		evidence.continueRestoration = {"playerPosition":player.global_position,"seed":requested_seed,
+			"scope":"Observed after production Continue startup; outer runner compares both fields to the immutable copied save."}
+		checks.menu_continue_restoration_observed = requested_seed.length()>0 and player.global_position.is_finite()
 	search = _nearest_candidate(original_position)
 	candidate = search.get("selected",{})
 	if candidate.is_empty():
 		await _finish("absent","no_candidate_in_bounded_ring" if requested_region.is_empty() else "requested_candidate_not_in_bounded_field"); return
 	region = candidate.region
 	declared = Admission.declared_influence(candidate)
-	if spawn_cell.is_empty() and main.has_method("show_streaming_loading_overlay"):
-		main.show_streaming_loading_overlay("Preparing Citadel region…","citadel_fixture")
-	if spawn_cell.is_empty() and not _place_outside(declared,"declared_influence_exterior"):
+	# The act phase measures whether ordinary streaming displays a modal overlay.
+	# This diagnostic must not manufacture one before that observation.
+	if spawn_cell.is_empty() and not menu_journey and not _place_outside(declared,"declared_influence_exterior"):
 		await _finish("failed","initial_staging_invalid"); return
 	if not await _capture("pending"):
 		await _finish("failed","pending_capture_failed"); return
 	phase = "ordinary_source_discovery"
-	var discovery_motion := not spawn_cell.is_empty() and float(search.get("selectedDistanceWorld",0.0))>FAR_SOURCE_DISCOVERY_APPROACH_METERS
+	# A menu journey has no fixture placement: it must always keep issuing normal
+	# approach input until the selected source enters the retained demand window.
+	# Treating a merely-near candidate as already discovered leaves an ordinary
+	# run parked in source_not_requested after one look sample.
+	var discovery_motion := menu_journey or (not spawn_cell.is_empty() \
+		and float(search.get("selectedDistanceWorld",0.0))>FAR_SOURCE_DISCOVERY_APPROACH_METERS)
 	var discovery_started := Time.get_ticks_msec()
 	var discovery_from := player.global_position
 	var discovery_samples: Array=[]
+	var discovery_samples_dropped := 0
 	var discovery_next_sample := discovery_started
 	var discovery_modal_frames := 0
 	var discovery_previous := discovery_from
 	var discovery_recovery_count := 0
+	var discovery_strafe_count := 0
+	var discovery_recovery_mode := "forward"
 	var discovery_strafe_until := 0
 	var discovery_jump_until := 0
-	var discovery_look_ready := true
-	if discovery_motion: discovery_look_ready=await _look_toward_candidate()
+	var discovery_reverse_until := 0
+	var discovery_detour_until := 0
+	var discovery_detour_target := Vector3.INF
+	var discovery_candidate_index := 0
+	var discovery_candidate_rejections: Array[Dictionary] = []
+	var discovery_best_distance := INF
+	var discovery_aim_state: Dictionary = {}
+	var discovery_steering_source := "direct_candidate"
+	var discovery_steering_contact_count := 0
+	var discovery_wall_follow_active := false
+	var discovery_wall_follow_side := 0
+	var discovery_wall_follow_outward := Vector2.ZERO
+	var discovery_wall_follow_direction := Vector2.ZERO
+	var discovery_wall_follow_clear_samples := 0
+	var discovery_wall_follow_entry_distance := INF
+	var discovery_wall_follow_started := 0
+	var discovery_wall_follow_clearance := {"entryLeft":0.0,"entryRight":0.0,"direct":0.0}
+	var discovery_last_wall_side := 0
+	var discovery_last_wall_outward := Vector2.ZERO
+	var discovery_last_wall_direction := Vector2.ZERO
+	var discovery_contact_miss_retry_count := 0
+	var discovery_wall_stationary_samples := 0
+	var discovery_progress_window: Array=[]
+	# Source prefetch is intentionally derived from the real player view.  Even
+	# a nearby candidate needs ordinary look input before its view corridor can
+	# express that demand; otherwise the fixture can wait for a source it never
+	# asked normal gameplay to discover.
+	var discovery_look_ready := await _look_toward_candidate()
+	discovery_aim_state=next_discovery_aim_state(discovery_aim_state,discovery_look_ready)
 	if discovery_motion and discovery_look_ready:
 		_movement_key(KEY_W,true)
 		_movement_key(KEY_SHIFT,true)
@@ -264,24 +385,316 @@ func _run() -> void:
 		if discovery_motion:
 			if _modal_loading_visible(): discovery_modal_frames+=1
 			var discovery_now := Time.get_ticks_msec()
-			_movement_key(KEY_SPACE,discovery_now<discovery_jump_until)
-			_movement_key(KEY_W,discovery_now>=discovery_strafe_until)
-			_movement_key(KEY_A,discovery_now<discovery_strafe_until and discovery_recovery_count%4==2)
-			_movement_key(KEY_D,discovery_now<discovery_strafe_until and discovery_recovery_count%4==0)
-			if discovery_now>=discovery_next_sample:
+			var discovery_aim_target := _candidate_world_target()
+			if not discovery_wall_follow_active and discovery_detour_target.is_finite() \
+					and player.global_position.distance_to(discovery_detour_target)<=2.0:
+				# A timed 48m detour could run for almost twice its intended length at
+				# sprint speed. Stop at the ordinary waypoint, then reacquire the
+				# selected source before pressing forward again.
+				discovery_detour_until=0
+				discovery_detour_target=Vector3.INF
+				discovery_look_ready=false
+				_movement_key(KEY_W,false)
+			if discovery_now < discovery_detour_until and discovery_detour_target.is_finite():
+				discovery_aim_target = discovery_detour_target
+			_movement_key(KEY_SPACE,discovery_look_ready and discovery_now<discovery_jump_until)
+			_movement_key(KEY_W,discovery_look_ready and discovery_now>=discovery_strafe_until \
+				and discovery_now>=discovery_reverse_until)
+			_movement_key(KEY_S,discovery_look_ready and discovery_now<discovery_reverse_until)
+			# The four-stage recovery cadence cannot use the all-recovery counter
+			# to select a strafe side: every other strafe would
+			# otherwise release W without pressing A or D.  Count only actual strafe
+			# requests so every recovery window remains ordinary player input.
+			var discovery_turning := discovery_now<discovery_strafe_until or discovery_now<discovery_reverse_until
+			_movement_key(KEY_A,discovery_look_ready and discovery_turning and discovery_strafe_count%2==1)
+			_movement_key(KEY_D,discovery_look_ready and discovery_turning and discovery_strafe_count%2==0)
+			if discovery_look_ready and discovery_now>=discovery_next_sample:
 				discovery_next_sample=discovery_now+1000
-				if discovery_now-discovery_started>1000 and player.global_position.distance_to(discovery_previous)<0.30 \
-						and discovery_now>=discovery_strafe_until:
+				# Candidate progress remains tied to the selected production source, not
+				# to a short-lived recovery waypoint. This keeps a successful local
+				# obstacle detour from looking like a false 10 m source approach.
+				var candidate_world_target:=_candidate_world_target()
+				var candidate_direction:=Vector2(candidate_world_target.x-player.global_position.x,
+					candidate_world_target.z-player.global_position.z)
+				var candidate_distance:=candidate_direction.length()
+				discovery_best_distance=minf(discovery_best_distance,candidate_distance)
+				var discovery_motion_snapshot:=_approach_motion_snapshot()
+				var contact_normals:=discovery_contact_normals(discovery_motion_snapshot.get("contacts",[]),
+					player.floor_max_angle)
+				discovery_steering_contact_count=contact_normals.size()
+				var progress_state:=next_discovery_progress_state(discovery_progress_window,discovery_now,
+					candidate_distance,DISCOVERY_PROGRESS_WINDOW_MSEC,DISCOVERY_MIN_PROGRESS_METERS)
+				discovery_progress_window=progress_state.samples
+				var discovery_sample_displacement:=player.global_position.distance_to(discovery_previous)
+				if not discovery_wall_follow_active and contact_normals.is_empty() \
+						and bool(progress_state.get("mature",false)) \
+						and float(progress_state.get("progressMeters",0.0))>=DISCOVERY_MIN_PROGRESS_METERS*2.0:
+					discovery_last_wall_side=0
+					discovery_last_wall_outward=Vector2.ZERO
+					discovery_last_wall_direction=Vector2.ZERO
+					discovery_contact_miss_retry_count=0
+				if discovery_wall_follow_active:
+					discovery_wall_stationary_samples = discovery_wall_stationary_samples+1 \
+						if discovery_sample_displacement<0.15 else 0
+					var direct_clearance:=_discovery_local_physics_clearance(candidate_direction,
+						discovery_wall_follow_outward,DISCOVERY_WALL_FOLLOW_PROBE_METERS)
+					discovery_wall_follow_clearance["direct"]=direct_clearance
+					if contact_normals.is_empty() and direct_clearance>=DISCOVERY_WALL_FOLLOW_PROBE_METERS*0.9:
+						discovery_wall_follow_clear_samples+=1
+					else:
+						discovery_wall_follow_clear_samples=0
+					if discovery_wall_follow_clear_samples>=DISCOVERY_WALL_FOLLOW_CLEAR_SAMPLES:
+						discovery_wall_follow_active=false
+						discovery_wall_follow_side=0
+						discovery_wall_follow_outward=Vector2.ZERO
+						discovery_wall_follow_direction=Vector2.ZERO
+						discovery_detour_until=0
+						discovery_detour_target=Vector3.INF
+						discovery_wall_stationary_samples=0
+						discovery_wall_follow_started=0
+						discovery_recovery_mode="forward_reacquired"
+						discovery_steering_source="direct_candidate"
+					elif should_release_stalled_wall_follow(discovery_wall_follow_active,progress_state,
+							discovery_wall_stationary_samples,DISCOVERY_WALL_STATIONARY_SAMPLE_LIMIT,
+							discovery_now-discovery_wall_follow_started,DISCOVERY_WALL_FOLLOW_MAX_MSEC):
+						# A wall-follow waypoint must not suppress every other recovery forever
+						# when ordinary input has produced no movement. Preserve the handed
+						# contact memory for a short outward retry, but release the active
+						# mode so the bounded recovery cadence can advance.
+						discovery_wall_follow_active=false
+						discovery_wall_follow_side=0
+						discovery_wall_follow_outward=Vector2.ZERO
+						discovery_wall_follow_direction=Vector2.ZERO
+						discovery_wall_follow_clear_samples=0
+						discovery_wall_stationary_samples=0
+						discovery_wall_follow_started=0
+						discovery_detour_until=0
+						discovery_detour_target=Vector3.INF
+						discovery_recovery_mode="wall_follow_stalled"
+						discovery_steering_source="bounded_wall_follow_release"
+					else:
+						var wall_decision:=discovery_wall_follow_decision(candidate_direction,contact_normals,
+							discovery_wall_follow_side,float(discovery_wall_follow_clearance.entryLeft),
+							float(discovery_wall_follow_clearance.entryRight),discovery_wall_follow_outward)
+						if not wall_decision.is_empty():
+							discovery_wall_follow_side=int(wall_decision.side)
+							discovery_wall_follow_outward=wall_decision.outward
+							discovery_wall_follow_direction=wall_decision.direction
+							discovery_last_wall_side=discovery_wall_follow_side
+							discovery_last_wall_outward=discovery_wall_follow_outward
+							discovery_last_wall_direction=discovery_wall_follow_direction
+							discovery_detour_target=player.global_position+Vector3(
+								discovery_wall_follow_direction.x,0.0,discovery_wall_follow_direction.y) \
+								* DISCOVERY_WALL_FOLLOW_WAYPOINT_METERS
+							discovery_detour_until=discovery_now+DISCOVERY_WALL_FOLLOW_REFRESH_MSEC
+							discovery_aim_target=discovery_detour_target
+							discovery_recovery_mode="wall_follow"
+							discovery_steering_source="local_published_collision_wall_follow"
+				var discovery_recovery_active := discovery_now<discovery_strafe_until \
+					or discovery_now<discovery_reverse_until or discovery_now<discovery_detour_until \
+					or discovery_wall_follow_active
+				if discovery_now-discovery_started>DISCOVERY_PROGRESS_WINDOW_MSEC \
+						and bool(progress_state.get("stalled",false)) \
+						and not discovery_recovery_active:
 					discovery_recovery_count+=1
-					if discovery_recovery_count%2==1: discovery_jump_until=discovery_now+250
-					else: discovery_strafe_until=discovery_now+1500
-				if discovery_samples.size()<96:
-					discovery_samples.append({"elapsedMsec":discovery_now-discovery_started,"position":player.global_position,
-						"distanceMoved":player.global_position.distance_to(discovery_from),"ordinaryWPressed":Input.is_key_pressed(KEY_W),
-						"sprinting":player.get("is_sprinting"),"recoveryCount":discovery_recovery_count,"motion":_approach_motion_snapshot()})
+					if not contact_normals.is_empty():
+						# Commit to one side of the contacted obstacle. Both tangent probes
+						# use only the currently published physics space and the side remains
+						# stable until two direct, contact-free samples prove the obstacle clear.
+						var frame:=discovery_wall_contact_frame(contact_normals,Vector2.ZERO)
+						if not frame.is_empty():
+							var left_clearance:=_discovery_local_physics_clearance(frame.left,frame.outward,
+								DISCOVERY_WALL_FOLLOW_PROBE_METERS)
+							var right_clearance:=_discovery_local_physics_clearance(frame.right,frame.outward,
+								DISCOVERY_WALL_FOLLOW_PROBE_METERS)
+							var wall_decision:=discovery_wall_follow_decision(candidate_direction,contact_normals,0,
+								left_clearance,right_clearance,frame.outward)
+							if not wall_decision.is_empty():
+								discovery_wall_follow_active=true
+								discovery_wall_follow_side=int(wall_decision.side)
+								discovery_wall_follow_outward=wall_decision.outward
+								discovery_wall_follow_direction=wall_decision.direction
+								discovery_last_wall_side=discovery_wall_follow_side
+								discovery_last_wall_outward=discovery_wall_follow_outward
+								discovery_last_wall_direction=discovery_wall_follow_direction
+								discovery_contact_miss_retry_count=0
+								discovery_wall_follow_clear_samples=0
+								discovery_wall_follow_entry_distance=candidate_distance
+								discovery_wall_follow_started=discovery_now
+								discovery_wall_follow_clearance={"entryLeft":left_clearance,"entryRight":right_clearance,"direct":0.0}
+								discovery_detour_target=player.global_position+Vector3(
+									discovery_wall_follow_direction.x,0.0,discovery_wall_follow_direction.y) \
+									* DISCOVERY_WALL_FOLLOW_WAYPOINT_METERS
+								discovery_detour_until=discovery_now+DISCOVERY_WALL_FOLLOW_REFRESH_MSEC
+								discovery_aim_target=discovery_detour_target
+								discovery_jump_until=discovery_now+250
+								discovery_recovery_mode="wall_follow"
+								discovery_steering_source="local_published_collision_wall_follow"
+					if not discovery_wall_follow_active and contact_normals.is_empty() \
+							and discovery_last_wall_side in [-1,1]:
+						discovery_contact_miss_retry_count+=1
+						if discovery_contact_miss_retry_count<=DISCOVERY_CONTACT_MISS_RETRY_LIMIT:
+							var retry_direction:=discovery_contact_miss_retry_direction(candidate_direction,
+								discovery_last_wall_outward,discovery_last_wall_side,
+								discovery_contact_miss_retry_count,discovery_last_wall_direction)
+							if retry_direction.length()>0.01:
+								discovery_last_wall_direction=retry_direction
+								discovery_detour_target=player.global_position+Vector3(retry_direction.x,0.0,retry_direction.y) \
+									* DISCOVERY_CONTACT_MISS_RETRY_METERS
+								discovery_detour_until=discovery_now+DISCOVERY_CONTACT_MISS_RETRY_MSEC
+								discovery_aim_target=discovery_detour_target
+								discovery_recovery_mode="wall_follow_contact_miss_retry"
+								discovery_steering_source="retained_local_contact_wall_follow"
+								discovery_jump_until=discovery_now+250
+						else:
+							# If the same short retry also cannot move the player, discard
+							# stale contact memory and let the existing jump/strafe/reverse/
+							# sweep sequence continue. This is still ordinary player input.
+							discovery_last_wall_side=0
+							discovery_last_wall_outward=Vector2.ZERO
+							discovery_last_wall_direction=Vector2.ZERO
+							discovery_contact_miss_retry_count=0
+							discovery_recovery_mode="wall_follow_retry_exhausted"
+							discovery_steering_source="deterministic_heading_sweep"
+					if not discovery_wall_follow_active and discovery_now>=discovery_detour_until \
+							and discovery_recovery_count%4==1:
+						discovery_recovery_mode="jump"
+						discovery_jump_until=discovery_now+250
+					elif not discovery_wall_follow_active and discovery_now>=discovery_detour_until \
+							and discovery_recovery_count%4==2:
+						discovery_recovery_mode="strafe"
+						discovery_strafe_count+=1
+						discovery_strafe_until=discovery_now+1500
+					elif not discovery_wall_follow_active and discovery_now>=discovery_detour_until \
+							and discovery_recovery_count%4==3:
+						# Back out of concave terrain/prop contacts before choosing a new
+						# forward line. This remains ordinary S plus lateral input through
+						# the production player controller; no transform is written.
+						discovery_recovery_mode="reverse_turn"
+						discovery_strafe_count+=1
+						discovery_reverse_until=discovery_now+DISCOVERY_REVERSE_MSEC
+					elif not discovery_wall_follow_active and discovery_now>=discovery_detour_until:
+						discovery_recovery_mode="escape_sweep"
+						# Generated trees, rocks and slopes can form a concave pocket. A
+						# repeated +/-90-degree sidestep cannot leave every such pocket, so
+						# give each ordinary-input attempt its own deterministic heading.
+						# The production player controller still owns all movement/collision.
+						var escape_index := floori(float(discovery_recovery_count)/4.0)-1
+						discovery_steering_source="local_published_collision_contacts" if not contact_normals.is_empty() else "deterministic_heading_sweep"
+						discovery_detour_target=discovery_escape_waypoint(player.global_position,
+							_candidate_world_target(),escape_index,DISCOVERY_DETOUR_DISTANCE_METERS,contact_normals)
+						if discovery_detour_target.is_finite():
+							discovery_jump_until=discovery_now+250
+							discovery_detour_until=discovery_now+DISCOVERY_DETOUR_MSEC
+				if discovery_samples.size()>=192:
+					# Preserve both the first 96 and the most recent 96 samples. Long
+					# discoveries otherwise retained only startup and silently discarded
+					# the candidate switch/recovery/completion trajectory under review.
+					discovery_samples.remove_at(96)
+					discovery_samples_dropped+=1
+				discovery_samples.append({"elapsedMsec":discovery_now-discovery_started,"position":player.global_position,
+						"distanceMoved":player.global_position.distance_to(discovery_from),"distanceToCandidate":candidate_distance,
+						"bestDistanceToCandidate":discovery_best_distance,"ordinaryWPressed":Input.is_key_pressed(KEY_W),
+						"sprinting":player.get("is_sprinting"),"recoveryCount":discovery_recovery_count,"recoveryMode":discovery_recovery_mode,
+						"strafeCount":discovery_strafe_count,"steeringSource":discovery_steering_source,
+						"steeringContactCount":discovery_steering_contact_count,"wallFollowSide":discovery_wall_follow_side,
+						"wallFollowClearance":discovery_wall_follow_clearance.duplicate(true),
+						"wallFollowEntryDistance":discovery_wall_follow_entry_distance,
+						"candidateProgress":progress_state.duplicate(true),"aim":discovery_aim_state.duplicate(true),
+						"motion":discovery_motion_snapshot})
 				discovery_previous=player.global_position
-			if not await _look_toward_candidate(): discovery_look_ready=false; break
+				journey_motion_progress={"elapsedMsec":discovery_now-discovery_started,
+					"position":player.global_position,"candidateRegion":region,
+					"distanceToCandidate":candidate_distance,"bestDistanceToCandidate":discovery_best_distance,
+					"lookReady":discovery_look_ready,"playerYaw":player.global_rotation.y,
+					"recoveryCount":discovery_recovery_count,"recoveryMode":discovery_recovery_mode,
+					"reverseActive":discovery_now<discovery_reverse_until,"strafeActive":discovery_now<discovery_strafe_until,
+					"steeringSource":discovery_steering_source,"steeringContactCount":discovery_steering_contact_count,
+					"wallFollowActive":discovery_wall_follow_active,"wallFollowSide":discovery_wall_follow_side,
+					"wallFollowClearance":discovery_wall_follow_clearance.duplicate(true),
+					"candidateProgress":progress_state.duplicate(true),
+					"aim":discovery_aim_state.duplicate(true),"motion":discovery_motion_snapshot}
+			# Input motion and ordinary terrain collision can move the player between
+			# viewport frames. A bounded mouse correction may therefore need another
+			# frame to converge; retain the already-proven ordinary look channel and
+			# keep issuing only normal look/input rather than falsely aborting the
+			# journey on one transient calibration miss.
+			discovery_look_ready = await _look_toward_world_xz(discovery_aim_target)
+			discovery_aim_state=next_discovery_aim_state(discovery_aim_state,discovery_look_ready)
+			var live_aim := discovery_aim_target-player.global_position
+			var live_yaw_error := wrapf(atan2(-live_aim.x,-live_aim.z)-player.global_rotation.y,-PI,PI)
+			journey_motion_progress.merge({"elapsedMsec":discovery_now-discovery_started,
+				"position":player.global_position,"candidateRegion":region,
+				"lookReady":discovery_look_ready,"playerYaw":player.global_rotation.y,
+				"yawError":live_yaw_error,"recoveryCount":discovery_recovery_count,
+				"recoveryMode":discovery_recovery_mode,"reverseActive":discovery_now<discovery_reverse_until,
+				"strafeActive":discovery_now<discovery_strafe_until,
+				"steeringSource":discovery_steering_source,"steeringContactCount":discovery_steering_contact_count,
+				"aim":discovery_aim_state.duplicate(true)},true)
 		var source := _source_summary()
+		var absence_reason := String(source.get("reason", ""))
+		# `source_not_requested` is the explicit non-enqueuing state before this
+		# ordinary player approach enters the retained demand window.  Continue
+		# real input/view discovery; the fixture must not mistake that pre-demand
+		# observation for a generated-site rejection or request the source itself.
+		if source.get("status") == "absent" and absence_reason == "source_not_requested":
+			continue
+		if source.get("status") == "absent" and menu_journey and requested_region.is_empty() \
+				and (absence_reason in DISCOVERY_RETRYABLE_SOURCE_ABSENCES or absence_reason.begins_with("excluded_biome:")):
+			var next_candidate := _nearest_untried_discovery_candidate(player.global_position,discovery_candidate_rejections)
+			if not next_candidate.is_empty():
+				discovery_candidate_rejections.append({"candidate":candidate.duplicate(true),"region":region,
+					"source":source.duplicate(true),"selectionIndex":discovery_candidate_index,
+					"aim":discovery_aim_state.duplicate(true),
+					"nextSelection":{"policy":"nearest_untried_at_current_position","playerPosition":player.global_position,
+						"candidate":next_candidate.candidate.duplicate(true),"distanceWorld":next_candidate.distanceWorld}})
+				discovery_candidate_index=int(next_candidate.index)
+				candidate=next_candidate.candidate
+				region=candidate.region
+				declared=Admission.declared_influence(candidate)
+				search["selected"]=candidate.duplicate(true)
+				search["selectedDistanceWorld"]=float(next_candidate.distanceWorld)
+				# A rejected candidate can be behind or beside the player. A fresh leg
+				# therefore must release every movement key, discard recovery state and
+				# prove a new viewport aim before ordinary W/Shift resumes. This is
+				# fixture orchestration only; PlayerController still owns all motion.
+				_release_approach_keys()
+				await physics_frame
+				await _frame()
+				discovery_detour_until=0
+				discovery_detour_target=Vector3.INF
+				discovery_strafe_until=0
+				discovery_jump_until=0
+				discovery_reverse_until=0
+				discovery_recovery_count=0
+				discovery_strafe_count=0
+				discovery_previous=player.global_position
+				discovery_best_distance=INF
+				discovery_recovery_mode="candidate_switch"
+				discovery_look_ready=false
+				discovery_aim_state={}
+				discovery_steering_source="direct_candidate"
+				discovery_steering_contact_count=0
+				discovery_wall_follow_active=false
+				discovery_wall_follow_side=0
+				discovery_wall_follow_outward=Vector2.ZERO
+				discovery_wall_follow_direction=Vector2.ZERO
+				discovery_wall_follow_clear_samples=0
+				discovery_wall_follow_entry_distance=INF
+				discovery_wall_follow_started=0
+				discovery_wall_follow_clearance={"entryLeft":0.0,"entryRight":0.0,"direct":0.0}
+				discovery_last_wall_side=0
+				discovery_last_wall_outward=Vector2.ZERO
+				discovery_last_wall_direction=Vector2.ZERO
+				discovery_contact_miss_retry_count=0
+				discovery_wall_stationary_samples=0
+				discovery_progress_window=[]
+				discovery_look_ready = await _look_toward_candidate()
+				discovery_aim_state=next_discovery_aim_state(discovery_aim_state,discovery_look_ready)
+				if discovery_look_ready:
+					_movement_key(KEY_W,true)
+					_movement_key(KEY_SHIFT,true)
+				continue
 		if source.get("status") in ["failed","absent"]:
 			if discovery_motion: _release_approach_keys()
 			await _finish(String(source.status),String(source.get("reason","source_rejected"))); return
@@ -298,27 +711,50 @@ func _run() -> void:
 		"elapsedMsec":Time.get_ticks_msec()-discovery_started,"from":discovery_from,"to":player.global_position,
 		"distanceMoved":player.global_position.distance_to(discovery_from),"modalLoadingVisibleFrames":discovery_modal_frames,
 		"completionMode":"ahead_of_travel" if player.global_position.distance_to(discovery_from)<100.0 else "sustained_moving_preparation",
-		"samples":discovery_samples,"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_SHIFT),
-		"scope":"Ordinary W/Shift and viewport look while production ahead-of-player source preparation runs; no transform write or generated-artifact prewarm."}
+		"samples":discovery_samples,"samplesDropped":discovery_samples_dropped,
+		"sampleRetention":"first 96 plus most recent 96" if discovery_samples_dropped>0 else "all samples",
+		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_SHIFT),
+		"candidateSelectionIndex":discovery_candidate_index,"rejectedCandidates":discovery_candidate_rejections,
+		"aim":discovery_aim_state.duplicate(true),"steeringSource":discovery_steering_source,
+		"steeringContactCount":discovery_steering_contact_count,"wallFollowActive":discovery_wall_follow_active,
+		"wallFollowSide":discovery_wall_follow_side,"wallFollowClearance":discovery_wall_follow_clearance.duplicate(true),
+		"scope":"Ordinary W/Shift/jump and viewport look while production ahead-of-player source preparation runs. Recovery steering reads only current CharacterBody slide-contact normals and bounded rays in the currently published local physics space; no generator sampling, route command, transform write or generated-artifact prewarm."}
 	var discovery_elapsed:=Time.get_ticks_msec()-discovery_started
 	var preparation_overlapped_motion: bool=discovery_samples.any(func(row: Dictionary): return row.get("ordinaryWPressed",false)) \
 		and (discovery_elapsed<2000 or player.global_position.distance_to(discovery_from)>5.0 and discovery_samples.size()>=2)
-	checks.source_discovery_approach = not discovery_motion or discovery_look_ready and discovery_modal_frames==0 \
-		and preparation_overlapped_motion
-	if not checks.source_discovery_approach:
-		await _finish("failed","source_discovery_approach_failed"); return
-	if reservation.size.x <= 0 or reservation.size.y <= 0:
-		await _finish("timeout","ordinary_source_not_accepted"); return
+	var discovery_source_accepted:=reservation.size.x>0 and reservation.size.y>0
+	var discovery_completion_reason:=classify_discovery_completion(discovery_motion,discovery_source_accepted,
+		discovery_aim_state,discovery_modal_frames,preparation_overlapped_motion)
+	evidence.sourceDiscoveryApproach["completionClassification"]=discovery_completion_reason
+	evidence.sourceDiscoveryApproach["sourceAccepted"]=discovery_source_accepted
+	checks.source_discovery_aim_ever = not discovery_motion or bool(discovery_aim_state.get("ever",false))
+	checks.source_discovery_aim_sustained = not discovery_motion or int(discovery_aim_state.get("maxConsecutive",0))>=2
+	checks.source_discovery_approach = not discovery_motion or discovery_modal_frames==0 and preparation_overlapped_motion \
+		and checks.source_discovery_aim_ever and checks.source_discovery_aim_sustained
+	if discovery_completion_reason=="ordinary_source_not_accepted":
+		await _finish("timeout",discovery_completion_reason); return
+	if not discovery_completion_reason.is_empty():
+		await _finish("failed",discovery_completion_reason); return
 	if not _pin_accepted_owners():
 		await _finish("failed","accepted_source_owners_missing"); return
 	checks.accepted_reservation_within_declared = declared.encloses(reservation)
 	checks.initial_capsule_outside_accepted_reservation = _outside(reservation)
 	if not checks.accepted_reservation_within_declared or not checks.initial_capsule_outside_accepted_reservation:
 		await _finish("failed","accepted_reservation_boundary_mismatch"); return
-	# No long scripted walk or source prewarm. The second explicitly reported
-	# setup placement is derived ONLY from the now accepted production manifest.
-	if spawn_cell.is_empty() and not _place_outside(reservation,"accepted_reservation_exterior"):
+	# The default diagnostic stages outside the immutable reservation.  A menu
+	# journey instead walks there through the real player controller.
+	if spawn_cell.is_empty() and not menu_journey and not _place_outside(reservation,"accepted_reservation_exterior"):
 		await _finish("failed","accepted_staging_invalid"); return
+	if menu_journey:
+		var exterior := _accepted_gate_exterior_cell(reservation,ceili(_capsule_radius()/float(main.CELL))+3)
+		if exterior.is_empty():
+			await _finish("failed","menu_journey_gate_exterior_missing"); return
+		var exterior_cell: Vector2i = exterior.cell
+		var exterior_target := Vector3(exterior_cell.x*float(main.CELL),player.global_position.y,exterior_cell.y*float(main.CELL))
+		evidence.menuJourneyExterior = await _ordinary_move_to(exterior_target,360000,3.0,"ordinary_input_menu_to_citadel_exterior",true,true)
+		checks.menu_journey_exterior_reached = evidence.menuJourneyExterior.get("passed",false)
+		if not checks.menu_journey_exterior_reached:
+			await _finish("failed",String(evidence.menuJourneyExterior.get("reason","menu_journey_exterior_unreached"))); return
 	if not await _capture("pending_publication"):
 		await _finish("failed","publication_capture_failed"); return
 	phase = "native_collision_and_capsule_clearance"
@@ -392,7 +828,8 @@ func _run() -> void:
 	checks.urban_home_interiors_live = evidence.sceneAudit.get("urbanHomeInteriorReady",false)
 	evidence.structuralClearance = _audit_stair_clearance()
 	checks.structural_clearance = evidence.structuralClearance.passed
-	checks.camera_facing_candidate = await _look_toward_candidate()
+	checks.camera_facing_candidate = await _look_toward_candidate_with_retries(
+		READY_LOOK_RETRY_WINDOWS,"ready_scene_before_itinerary")
 	evidence.visibility = _inspect_visibility()
 	if not checks.camera_facing_candidate:
 		await _finish("failed","ordinary_mouse_look_did_not_face_candidate"); return
@@ -428,10 +865,12 @@ func _run() -> void:
 			checks.scale_soak_no_modal=evidence.scaleSoak.get("modalLoadingVisibleFrames",-1)==0
 			if not evidence.scaleSoak.get("passed",false):
 				await _finish("failed",String(evidence.scaleSoak.get("reason","scale_soak_failed"))); return
-		if scale_soak_seconds>0 or player_inspection_only:
+		if requires_player_scale_inspection(menu_journey,scale_soak_seconds,player_inspection_only):
 			evidence.playerScaleInspection=await _run_player_scale_inspection()
-			checks.scale_soak_player_inspection=evidence.playerScaleInspection.get("passed",false)
-			if not checks.scale_soak_player_inspection:
+			var inspection_passed: bool=evidence.playerScaleInspection.get("passed",false)
+			if menu_journey: checks.menu_journey_player_scale_inspection=inspection_passed
+			else: checks.scale_soak_player_inspection=inspection_passed
+			if not inspection_passed:
 				await _finish("failed",String(evidence.playerScaleInspection.get("reason","player_scale_inspection_failed"))); return
 		var navigation_inventory := _navigation_domain_inventory()
 		evidence.navigationInventory = navigation_inventory
@@ -895,8 +1334,98 @@ func _wait_for_citadel_resource_settlement(timeout_msec: int, label: String) -> 
 		"elapsedMsec":Time.get_ticks_msec()-begun,"quietMsec":0 if stable_since<0 else Time.get_ticks_msec()-stable_since,
 		"modalLoadingVisibleFrames":modal_frames,"state":last_state,"samples":samples}
 
+func _leave_tutorial_starter_house() -> Dictionary:
+	# The production tutorial already supplies the player spawn and generated
+	# starter-door location. This fixture merely supplies the same mouse and key
+	# events a player would use; it neither moves the body nor invokes a door API.
+	if not is_instance_valid(main) or not is_instance_valid(player):
+		return {"passed":false,"reason":"missing_tutorial_departure_owners"}
+	var tutorial = main.get("tutorial_system")
+	if tutorial == null or not bool(tutorial.get("started")):
+		return {"passed":false,"reason":"tutorial_not_started"}
+	var start_value: Variant = tutorial.get("start_cell")
+	if not start_value is Vector2i:
+		return {"passed":false,"reason":"tutorial_start_cell_missing"}
+	var start_cell: Vector2i = start_value as Vector2i
+	if start_cell == Vector2i.ZERO:
+		return {"passed":false,"reason":"tutorial_start_cell_missing"}
+	var expected := Vector3(float(start_cell.x)*float(main.CELL),player.global_position.y,float(start_cell.y-3)*float(main.CELL))
+	var door: Node3D = null
+	for value in main.get("blocks").values():
+		if not value is Node3D or not is_instance_valid(value) or String(value.get_meta("block_type",""))!="door":
+			continue
+		var offset: Vector3 = value.global_position-expected
+		if Vector2(offset.x,offset.z).length()<0.7:
+			door=value as Node3D
+			break
+	if door==null:
+		return {"passed":false,"reason":"generated_starter_door_missing","expected":expected}
+	var result := {"passed":false,"reason":"","spawn":player.global_position,"door":door.global_position,
+		"tutorialStarted":true,"approached":false,"rayFoundDoor":false,"opened":false,"exited":false}
+	var interior_target:=door.global_position+Vector3(0.0,0.0,2.0)
+	var approach:=await _ordinary_move_to(interior_target,30000,0.35,"ordinary_input_tutorial_door_approach",true,false,true)
+	result["approach"]=approach
+	result.approached=approach.get("passed",false)
+	if not result.approached:
+		result.reason="tutorial_door_approach_blocked"
+		return result
+	main.capture_mouse_if_no_modal()
+	var camera:=player.get("camera") as Camera3D
+	if camera==null:
+		result.reason="tutorial_player_camera_missing"
+		return result
+	var hit := {}
+	for _frame_index in range(120):
+		var direction := (door.global_position+Vector3(0.0,0.65,0.0)-camera.global_position).normalized()
+		var yaw_delta:=wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
+		var pitch_delta:=atan2(direction.y,Vector2(direction.x,direction.z).length())-float(player.get("pitch"))
+		var motion:=InputEventMouseMotion.new()
+		motion.relative=Vector2(-yaw_delta,-pitch_delta)*0.12/maxf(0.0001,float(player.get("mouse_sensitivity")))
+		if bool(player.get("invert_y")):
+			motion.relative.y=-motion.relative.y
+		root.push_input(motion)
+		await physics_frame
+		hit=main.focused_interaction_hit()
+		if main.interaction_block_from_collider(hit.get("collider"))==door:
+			break
+	result.rayFoundDoor=main.interaction_block_from_collider(hit.get("collider"))==door
+	if not result.rayFoundDoor:
+		result.reason="tutorial_door_not_in_real_interaction_ray"
+		return result
+	for pressed in [true,false]:
+		var click:=InputEventMouseButton.new()
+		click.button_index=MOUSE_BUTTON_RIGHT
+		click.pressed=pressed
+		click.position=root.get_visible_rect().size*0.5
+		click.global_position=click.position
+		root.push_input(click)
+	for _frame_index in range(24):
+		await physics_frame
+	result.opened=bool(door.get_meta("open",false))
+	if not result.opened:
+		result.reason="tutorial_door_did_not_open_after_input"
+		return result
+	var hud=main.get("hud")
+	if hud!=null and hud.has_method("is_dialogue_open") and bool(hud.call("is_dialogue_open")):
+		for pressed in [true,false]:
+			var escape:=InputEventKey.new()
+			escape.keycode=KEY_ESCAPE
+			escape.pressed=pressed
+			root.push_input(escape)
+		await physics_frame
+	var exterior_target:=door.global_position-Vector3(0.0,0.0,3.0)
+	var crossing:=await _ordinary_move_to(exterior_target,30000,0.40,"ordinary_input_tutorial_door_crossing",true,false,true)
+	result["crossing"]=crossing
+	result.exited=crossing.get("passed",false)
+	result["outsidePosition"]=player.global_position
+	result.reason="tutorial_departure_complete" if result.exited else "tutorial_door_crossing_blocked"
+	result.passed=result.approached and result.rayFoundDoor and result.opened and result.exited
+	return result
+
+
 func _ordinary_move_to(target: Vector3, timeout_msec: int, stop_distance: float, phase_name: String,
-		allow_lateral_recovery := true, hold_jump := false, sprint := true) -> Dictionary:
+		allow_lateral_recovery := true, hold_jump := false, sprint := true,
+		vertical_stop_distance := INF, require_grounded_at_target := false) -> Dictionary:
 	phase=phase_name
 	var begun:=Time.get_ticks_msec()
 	var from:=player.global_position
@@ -914,6 +1443,7 @@ func _ordinary_move_to(target: Vector3, timeout_msec: int, stop_distance: float,
 	var discontinuity: Dictionary={}
 	var target_reached_during_motion:=false
 	var minimum_remaining:=INF
+	var minimum_vertical_remaining:=INF
 	if bool(player.get("automated_input")) or not player.is_physics_processing(): return {"passed":false,"reason":"ordinary_player_input_unavailable"}
 	# Turn in place before advancing into the next waypoint leg. Keeping W held
 	# while rotating from a lateral leg into a narrow street makes an artificial
@@ -941,8 +1471,11 @@ func _ordinary_move_to(target: Vector3, timeout_msec: int, stop_distance: float,
 					"startupActive":bool(main.get("startup_loading_active")),
 					"runtimeActive":bool(main.get("runtime_loading_active"))}
 		var planar_distance:=Vector2(player.global_position.x-target.x,player.global_position.z-target.z).length()
+		var vertical_distance:=absf(player.global_position.y-target.y)
 		minimum_remaining=minf(minimum_remaining,planar_distance)
-		if planar_distance<=stop_distance:
+		minimum_vertical_remaining=minf(minimum_vertical_remaining,vertical_distance)
+		if movement_target_reached(planar_distance,vertical_distance,stop_distance,vertical_stop_distance,
+				player.is_on_floor(),require_grounded_at_target):
 			target_reached_during_motion=true
 			break
 		var now:=Time.get_ticks_msec()
@@ -972,13 +1505,18 @@ func _ordinary_move_to(target: Vector3, timeout_msec: int, stop_distance: float,
 	_release_approach_keys()
 	await physics_frame; await _frame()
 	var remaining:=Vector2(player.global_position.x-target.x,player.global_position.z-target.z).length()
-	var reached:=target_reached_during_motion or remaining<=stop_distance
+	var vertical_remaining:=absf(player.global_position.y-target.y)
+	var reached:=target_reached_during_motion or movement_target_reached(remaining,vertical_remaining,
+		stop_distance,vertical_stop_distance,player.is_on_floor(),require_grounded_at_target)
 	var result_reason:="unexpected_player_discontinuity" if not discontinuity.is_empty() else \
 		("modal_loading_during_movement" if modal_frames>0 else ("target_reached" if reached else "movement_timeout"))
 	return {"passed":reached and modal_frames==0 and discontinuity.is_empty(),"reason":result_reason,
 		"elapsedMsec":Time.get_ticks_msec()-begun,"from":from,"to":player.global_position,"target":target,"remainingDistance":remaining,
 		"pathDistance":path_distance,"displacement":player.global_position.distance_to(from),"samples":samples,
-		"minimumRemainingDistance":minimum_remaining,"targetReachedDuringMotion":target_reached_during_motion,
+		"minimumRemainingDistance":minimum_remaining,"verticalRemainingDistance":vertical_remaining,
+		"minimumVerticalRemainingDistance":minimum_vertical_remaining,"verticalStopDistance":vertical_stop_distance,
+		"requireGroundedAtTarget":require_grounded_at_target,"groundedAtCompletion":player.is_on_floor(),
+		"targetReachedDuringMotion":target_reached_during_motion,
 		"discontinuity":discontinuity,
 		"aimConvergenceMisses":aim_convergence_misses,
 		"modalLoadingVisibleFrames":modal_frames,"firstModal":first_modal,
@@ -991,11 +1529,14 @@ func _look_toward_world_xz(target: Vector3) -> bool:
 	var direction:=target-player.global_position
 	var sensitivity:=float(player.get("mouse_sensitivity"))
 	if Vector2(direction.x,direction.z).length()<0.01 or sensitivity<=0.0: return false
-	for attempt in range(12):
+	for attempt in range(LOOK_CONVERGENCE_STEPS):
 		var error:=wrapf(atan2(-direction.x,-direction.z)-player.global_rotation.y,-PI,PI)
 		if absf(error)<0.04: return true
 		var motion:=InputEventMouseMotion.new()
-		motion.relative=Vector2(clampf(-error/sensitivity,-600,600),0.0)
+		# Feed the same bounded look increments as the normal runtime runner.
+		# A full correction can overshoot while input is still being consumed across
+		# frames, causing ordinary W travel to diverge from its selected source.
+		motion.relative=Vector2(clampf(-error*0.12/sensitivity,-600,600),0.0)
 		root.push_input(motion)
 		await _frame()
 		direction=target-player.global_position
@@ -1378,6 +1919,16 @@ func _audit_foreground_navigation_publication(expected_keys: Array) -> Dictionar
 		await _frame()
 	result["regionalReadiness"]=regional_readiness
 	if regional_readiness.get("status")!="ready":
+		# Preserve the authoritative source closure when the coordinator rejects a
+		# live foreground query. The compact coordinator result intentionally
+		# exposes only a domain/reason, which otherwise makes a genuine missing
+		# structure receipt indistinguishable from a Citadel-navigation failure.
+		# This is read-only failure evidence; it neither demands nor publishes work.
+		if main.structure_system!=null and main.structure_system.has_method("region_dependency_requirements"):
+			var requirements: Dictionary=main.structure_system.region_dependency_requirements(foreground.bounds)
+			result["structureRequirements"]={"status":requirements.get("status",""),"reason":requirements.get("reason",""),
+				"missingSourceIds":requirements.get("missingSourceIds",[]),"unresolvedCrossingIds":requirements.get("unresolvedCrossingIds",[]),
+				"sourceRevisionKeys":requirements.get("sourceRevisions",{}).keys()}
 		result["reason"]=regional_readiness.get("reason","foreground_streaming_publication_timeout")
 		return result
 	var readiness: Dictionary=regional_readiness.get("domains",{}).get("navigation",{})
@@ -1887,15 +2438,36 @@ func _run_player_scale_inspection() -> Dictionary:
 	var stair_door_open:=await _toggle_door_with_player_input(stair_door,true,"citadel_gate_stair_open")
 	stages.append({"stage":"gate_stair_door_open","interaction":stair_door_open})
 	if not stair_door_open.get("passed",false): return {"passed":false,"reason":"gate_stair_door_open_failed","stages":stages}
-	var stair_move:=await _ordinary_move_to(stair_target,120000,1.0,"scale_inspection_gate_stair")
-	stages.append({"stage":"gate_stair","movement":stair_move})
-	if not stair_move.get("passed",false): return {"passed":false,"reason":"gate_stair_route_failed","stages":stages}
-	var stair_views:=await _capture_day_night_player_view("gate_stair",stair_target+Vector3.UP*1.0)
+	# A move to the entrance/base landing is not stair traversal. Walk the first
+	# complete generated switchback (base -> half landing -> exit), requiring Y
+	# convergence on every support so an XZ match beneath an elevated landing
+	# cannot satisfy the headed acceptance claim.
+	var stair_landing_sample:=_accepted_structure_pose("castle_gatehouse_wall_stair_landing_00")
+	var stair_exit_sample:=_accepted_structure_pose("castle_gatehouse_wall_stair_exit_00")
+	if stair_landing_sample.is_empty() or stair_exit_sample.is_empty():
+		return {"passed":false,"reason":"source_gate_stair_switchback_missing","stages":stages}
+	var stair_route: Array[Dictionary]=[
+		{"label":"base","sample":stair_sample},
+		{"label":"landing_00","sample":stair_landing_sample},
+		{"label":"exit_00","sample":stair_exit_sample}]
+	var final_stair_target:=stair_target
+	for stair_route_spec: Dictionary in stair_route:
+		var route_sample: Dictionary=stair_route_spec.sample
+		var route_pose: Transform3D=route_sample.transform
+		var route_target:=route_pose*Vector3(0.0,float(route_sample.size.y)*0.5+0.1,0.0)
+		var stair_move:=await _ordinary_move_to(route_target,120000,0.72,
+			"scale_inspection_gate_stair_"+String(stair_route_spec.label),true,true,true,0.58,true)
+		stages.append({"stage":"gate_stair_"+String(stair_route_spec.label),"movement":stair_move,
+			"sourcePoint":route_target})
+		if not stair_move.get("passed",false):
+			return {"passed":false,"reason":"gate_stair_route_failed:"+String(stair_route_spec.label),"stages":stages}
+		final_stair_target=route_target
+	var stair_views:=await _capture_day_night_player_view("gate_stair",final_stair_target+Vector3.UP*1.0)
 	stages.append({"stage":"stair_views","views":stair_views})
 	if not stair_views.get("passed",false): return {"passed":false,"reason":"stair_day_night_capture_failed","stages":stages}
 	return {"passed":true,"reason":"ordinary_player_scale_inspection_complete","stages":stages,
 		"homeId":home.id,"roomBounds":room_bounds,"stairDoorPoseSourceOnly":stair_door_pose_source_only,
-		"scope":"Source-derived perimeter itinerary, ordinary W/Shift/mouse input, production collision and right-click door interactions; no transform, motor or door-authority helper call."}
+		"scope":"Source-derived perimeter/gate/street/furnished-home/stair itinerary with a real leave-and-revisit leg, ordinary W/Shift/mouse input, production collision and right-click door interactions; no transform, motor, route or door-authority helper call."}
 
 
 func _accepted_structure_pose(part_id: String) -> Dictionary:
@@ -2199,7 +2771,7 @@ func _movement_key(key: Key, pressed: bool) -> void:
 	Input.parse_input_event(event)
 
 func _release_approach_keys() -> void:
-	for key: Key in [KEY_W,KEY_A,KEY_D,KEY_SPACE,KEY_SHIFT]: _movement_key(key,false)
+	for key: Key in [KEY_W,KEY_S,KEY_A,KEY_D,KEY_SPACE,KEY_SHIFT]: _movement_key(key,false)
 
 func _approach_motion_snapshot() -> Dictionary:
 	var contacts: Array=[]
@@ -2211,6 +2783,35 @@ func _approach_motion_snapshot() -> Dictionary:
 		"terrainHold":player.get_meta("terrain_collision_hold",false),"terrainProof":player.get("last_terrain_collision_proof"),
 		"groundY":main.ground_y_near_position(player.global_position),"contacts":contacts,
 		"modalLoadingVisible":_modal_loading_visible()}
+
+func _discovery_local_physics_clearance(direction: Vector2, outward: Vector2,
+		max_distance: float) -> float:
+	if not is_instance_valid(player) or direction.length()<=0.01 or max_distance<=0.0:
+		return 0.0
+	var collider:=player.get_node_or_null("PlayerCollider") as CollisionShape3D
+	if collider==null or collider.disabled or not collider.shape is CapsuleShape3D:
+		return 0.0
+	var capsule:=collider.shape as CapsuleShape3D
+	var planar:=direction.normalized()
+	var tangent:=Vector2(-planar.y,planar.x)
+	var radius:=_capsule_radius()
+	var center:=collider.global_position+Vector3(outward.x,0.0,outward.y)*minf(0.12,radius*0.25)
+	var vertical_offset:=maxf(0.12,capsule.height*0.22)
+	var nearest:=max_distance
+	var space:=player.get_world_3d().direct_space_state
+	# Nine short rays cover the capsule centerline and shoulders at three
+	# heights. They inspect only collision already published around the player;
+	# no terrain generator, source reservation or route authority is queried.
+	for height in [-vertical_offset,0.0,vertical_offset]:
+		for shoulder in [-radius*0.55,0.0,radius*0.55]:
+			var start:=center+Vector3(tangent.x*shoulder,height,tangent.y*shoulder)
+			var finish:=start+Vector3(planar.x,0.0,planar.y)*max_distance
+			var query:=PhysicsRayQueryParameters3D.create(start,finish,player.collision_mask,[player.get_rid()])
+			query.collide_with_areas=false
+			query.collide_with_bodies=true
+			var hit: Dictionary=space.intersect_ray(query)
+			if not hit.is_empty(): nearest=minf(nearest,start.distance_to(hit.position))
+	return nearest
 
 func _modal_loading_visible() -> bool:
 	if not is_instance_valid(main): return false
@@ -2386,7 +2987,24 @@ func _approach_scene() -> Dictionary:
 		"elapsedMsec":Time.get_ticks_msec()-begun,"from":start_position,"to":player.global_position,"distanceToVisualBounds":distance,"samples":samples,"capsule":capsule,"identity":identity,
 		"modalLoadingVisibleFrames":modal_loading_visible_frames,
 		"keysReleased":not Input.is_key_pressed(KEY_W) and not Input.is_key_pressed(KEY_A) and not Input.is_key_pressed(KEY_D) and not Input.is_key_pressed(KEY_SPACE) and not Input.is_key_pressed(KEY_SHIFT),
-		"scope":"Ordinary key-input approach from initial spawn; not interior/furniture interaction or NPC acceptance." if not spawn_cell.is_empty() else "Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance."}
+		"scope":("Ordinary Main Menu Continue player-input journey; source save provenance is verified by the outer runner." if menu_continue_journey else "Ordinary Main Menu New Game player-input journey; interior/furniture coverage continues in the same headed fixture.") if menu_journey else ("Ordinary key-input approach from initial spawn; not interior/furniture interaction or NPC acceptance." if not spawn_cell.is_empty() else "Ordinary key-input approach after two setup teleports; not continuous travel from initial spawn, interior/furniture interaction or NPC acceptance.")}
+
+func _candidate_world_target() -> Vector3:
+	return Vector3(candidate.centerCell.x*float(main.CELL),player.global_position.y,candidate.centerCell.y*float(main.CELL))
+
+
+func _nearest_untried_discovery_candidate(position: Vector3, rejected: Array[Dictionary]) -> Dictionary:
+	var rejected_site_ids: Dictionary = {}
+	for record: Dictionary in rejected:
+		var rejected_candidate: Dictionary = record.get("candidate",{}) as Dictionary
+		var site_id := String(rejected_candidate.get("siteId",""))
+		if not site_id.is_empty(): rejected_site_ids[site_id]=true
+	# The fixture only reorders the existing immutable field candidates after an
+	# authoritative production rejection. It neither observes eligibility facts
+	# nor requests/prewarms a source: view-driven runtime demand still decides it.
+	return select_next_discovery_candidate(search.get("candidates",[]),position,rejected_site_ids,
+		String(candidate.get("siteId","")),float(main.CELL))
+
 
 func _nearest_candidate(position: Vector3) -> Dictionary:
 	var cell := Vector2i(floori(position.x/float(main.CELL)),floori(position.z/float(main.CELL)))
@@ -2428,6 +3046,297 @@ static func select_candidate(found: Array[Dictionary], request: String) -> Dicti
 	for row: Dictionary in found:
 		if row.candidate.region==selected_region: return row.candidate
 	return {}
+
+## Pure fixture routing policy after a source has already been rejected by the
+## production admission worker. It cannot admit/reject any site and never
+## mutates the enumerated field records.
+static func select_nearest_untried_candidate(found: Array, position: Vector3, rejected_site_ids: Dictionary, cell_size := 1.0) -> Dictionary:
+	var selected: Dictionary = {}
+	for row_index in range(found.size()):
+		var row_value = found[row_index]
+		if not row_value is Dictionary: continue
+		var row: Dictionary = row_value
+		var candidate_value = row.get("candidate",{})
+		if not candidate_value is Dictionary: continue
+		var candidate: Dictionary = candidate_value
+		var site_id := String(candidate.get("siteId",""))
+		var center_value = candidate.get("centerCell",null)
+		if site_id.is_empty() or not center_value is Vector2i or rejected_site_ids.has(site_id): continue
+		var center: Vector2i = center_value
+		var distance := Vector2(center.x*cell_size-position.x,center.y*cell_size-position.z).length()
+		if selected.is_empty() or distance<float(selected.distanceWorld) \
+				or (is_equal_approx(distance,float(selected.distanceWorld)) and site_id<String(selected.candidate.siteId)):
+			selected={"index":row_index,"candidate":candidate,"distanceWorld":distance,"selectionPolicy":"nearest_untried_at_current_position"}
+	return selected
+
+
+## Exclude the just-rejected current site before choosing another candidate.
+## The rejection record is appended only after a successor exists, so doing this
+## inside the pure selector prevents the same absent site from being retried once.
+static func select_next_discovery_candidate(found: Array, position: Vector3, rejected_site_ids: Dictionary,
+		current_site_id: String, cell_size := 1.0) -> Dictionary:
+	var excluded := rejected_site_ids.duplicate()
+	if not current_site_id.is_empty(): excluded[current_site_id]=true
+	return select_nearest_untried_candidate(found,position,excluded,cell_size)
+
+
+## Immutable aim bookkeeping for one candidate leg. A single late mouse-input
+## miss cannot erase earlier sustained proof, but a never-acquired aim cannot be
+## mistaken for an ordinary source timeout.
+static func next_discovery_aim_state(state: Dictionary, ready: bool) -> Dictionary:
+	var result:=state.duplicate()
+	result["ever"]=bool(result.get("ever",false)) or ready
+	result["successCorrections"]=int(result.get("successCorrections",0))+(1 if ready else 0)
+	result["failedCorrections"]=int(result.get("failedCorrections",0))+(0 if ready else 1)
+	result["currentConsecutive"]=int(result.get("currentConsecutive",0))+1 if ready else 0
+	result["maxConsecutive"]=maxi(int(result.get("maxConsecutive",0)),int(result.currentConsecutive))
+	result["finalReady"]=ready
+	return result
+
+
+## Most ordinary terrain legs intentionally accept natural Y variation. Callers
+## proving an elevated authored support can opt into a finite vertical tolerance.
+static func movement_target_reached(planar_distance: float, vertical_distance: float,
+		planar_stop_distance: float, vertical_stop_distance := INF,
+		grounded := true, require_grounded := false) -> bool:
+	if not is_finite(planar_distance) or not is_finite(vertical_distance): return false
+	if planar_distance>maxf(0.0,planar_stop_distance): return false
+	if is_finite(vertical_stop_distance) and vertical_distance>maxf(0.0,vertical_stop_distance): return false
+	return not require_grounded or grounded
+
+
+## Immutable bookkeeping for bounded ordinary mouse-look retry windows. A miss
+## authorizes another input window only while budget remains; visibility or
+## scene-audit state never participates in this decision.
+static func next_camera_convergence_retry_state(state: Dictionary, attempt: Dictionary,
+		max_windows: int) -> Dictionary:
+	var result:=state.duplicate(true)
+	var windows: Array=result.get("windows",[]) if result.get("windows",[]) is Array else []
+	windows.append(attempt.duplicate(true))
+	result["windows"]=windows
+	result["passed"]=bool(attempt.get("passed",false))
+	result["windowCount"]=windows.size()
+	result["maxWindows"]=maxi(1,max_windows)
+	result["inputEvents"]=int(result.get("inputEvents",0))+int(attempt.get("inputEvents",0))
+	result["retryAvailable"]=not bool(result.passed) and windows.size()<int(result.maxWindows)
+	result["exhausted"]=not bool(result.passed) and not bool(result.retryAvailable)
+	return result
+
+
+static func classify_discovery_completion(active: bool, source_accepted: bool, aim_state: Dictionary,
+		modal_frames: int, preparation_overlapped_motion: bool) -> String:
+	if not active: return ""
+	if modal_frames>0: return "modal_loading_during_source_discovery"
+	if not bool(aim_state.get("ever",false)): return "source_discovery_aim_never_acquired"
+	if int(aim_state.get("maxConsecutive",0))<2: return "source_discovery_aim_not_sustained"
+	if not preparation_overlapped_motion: return "source_discovery_input_not_observed"
+	if not source_accepted: return "ordinary_source_not_accepted"
+	return ""
+
+
+static func requires_player_scale_inspection(is_menu_journey: bool, soak_seconds: int,
+		inspection_only: bool) -> bool:
+	return is_menu_journey or soak_seconds>0 or inspection_only
+
+
+## Extract only obstacle-like planar contacts from the live CharacterBody slide
+## report. Near-up floor contacts are support, not a wall-follow authority.
+static func discovery_contact_normals(contacts: Array, floor_max_angle := PI*0.25) -> Array:
+	var result: Array=[]
+	var floor_dot:=cos(clampf(float(floor_max_angle),0.0,PI*0.5))
+	for contact_value in contacts:
+		var normal_value=contact_value.get("normal",null) if contact_value is Dictionary else contact_value
+		if not normal_value is Vector3: continue
+		var normal: Vector3=normal_value
+		if normal.length()<=0.01: continue
+		normal=normal.normalized()
+		var planar:=Vector2(normal.x,normal.z)
+		if planar.length()<=0.12 or normal.dot(Vector3.UP)>=floor_dot: continue
+		result.append(normal)
+	return result
+
+
+## Maintain a bounded rolling window of true selected-candidate distance. World
+## displacement is deliberately absent: circling a blocker is not progress.
+static func next_discovery_progress_state(samples: Array, now_msec: int,
+		candidate_distance: float, window_msec := DISCOVERY_PROGRESS_WINDOW_MSEC,
+		minimum_progress := DISCOVERY_MIN_PROGRESS_METERS) -> Dictionary:
+	var retained: Array=[]
+	var boundary_sample: Dictionary={}
+	var cutoff:=now_msec-maxi(1,window_msec)
+	for value in samples:
+		if not value is Dictionary: continue
+		var row: Dictionary=value
+		if not is_finite(float(row.get("distance",INF))): continue
+		var clean_row:={"msec":int(row.get("msec",-1)),"distance":float(row.distance)}
+		if int(clean_row.msec)<cutoff:
+			# Keep the most recent sample immediately before the boundary. Real
+			# frame/sampling jitter means an exact cutoff sample usually does not
+			# exist; dropping this row made a 4 s window perpetually only ~3 s old.
+			if boundary_sample.is_empty() or int(clean_row.msec)>int(boundary_sample.msec):
+				boundary_sample=clean_row
+		else:
+			retained.append(clean_row)
+	if not boundary_sample.is_empty(): retained.push_front(boundary_sample)
+	if is_finite(candidate_distance): retained.append({"msec":now_msec,"distance":candidate_distance})
+	while retained.size()>8: retained.pop_front()
+	var mature:=retained.size()>=2 and now_msec-int(retained[0].msec)>=window_msec
+	var first_distance:=float(retained[0].distance) if not retained.is_empty() else candidate_distance
+	var best_distance:=first_distance
+	for row: Dictionary in retained: best_distance=minf(best_distance,float(row.distance))
+	var progress:=first_distance-best_distance
+	return {"samples":retained,"mature":mature,"progressMeters":progress,
+		"stalled":mature and progress<minimum_progress,"firstDistance":first_distance,
+		"bestDistance":best_distance,"currentDistance":candidate_distance}
+
+
+## A persistent wall-follow remains useful while it is physically moving around
+## an obstacle, even if candidate distance temporarily grows. Release it only
+## after the true candidate window is stalled and consecutive world-space samples
+## show that ordinary input is not moving the player at all.
+static func should_release_stalled_wall_follow(active: bool, progress_state: Dictionary,
+		stationary_samples: int, stationary_sample_limit := DISCOVERY_WALL_STATIONARY_SAMPLE_LIMIT,
+		active_msec := 0, maximum_active_msec := DISCOVERY_WALL_FOLLOW_MAX_MSEC) -> bool:
+	return active and bool(progress_state.get("mature",false)) \
+		and bool(progress_state.get("stalled",false)) \
+		and (stationary_samples>=maxi(1,stationary_sample_limit) \
+			or active_msec>=maxi(1,maximum_active_msec))
+
+
+## When a wall contact drops between physics samples but candidate progress is
+## still stalled, retain the same handed tangent and add a small bounded outward
+## and backward bias. Repeated misses never re-enter the rotating 48 m sweep.
+static func discovery_contact_miss_retry_direction(desired: Vector2, outward: Vector2,
+		side: int, attempt: int, previous_direction: Vector2=Vector2.ZERO) -> Vector2:
+	if desired.length()<=0.01 or outward.length()<=0.01 or side not in [-1,1]: return Vector2.ZERO
+	var normal:=outward.normalized()
+	var tangent:=Vector2(-normal.y,normal.x) if side>0 else Vector2(normal.y,-normal.x)
+	var backoff:=-desired.normalized()
+	var backoff_weight:=0.12+0.05*float(clampi(attempt-1,0,3))
+	var direction:=tangent*0.72+normal*0.46+backoff*backoff_weight
+	if previous_direction.length()>0.01 and previous_direction.normalized().dot(tangent)>0.0:
+		direction+=previous_direction.normalized()*0.18
+	return direction.normalized() if direction.length()>0.01 else normal
+
+
+## Build a stable local wall frame from current slide-contact normals. A prior
+## outward vector carries the frame across a brief contact gap around a corner.
+static func discovery_wall_contact_frame(contact_normals: Array,
+		fallback_outward: Vector2=Vector2.ZERO) -> Dictionary:
+	var outward:=Vector2.ZERO
+	var planar_normals: Array[Vector2]=[]
+	for normal_value in contact_normals:
+		if not normal_value is Vector3: continue
+		var normal3:=normal_value as Vector3
+		var planar:=Vector2(normal3.x,normal3.z)
+		if planar.length()<=0.12 or normal3.y>=0.9: continue
+		planar=planar.normalized()
+		planar_normals.append(planar)
+		outward+=planar
+	if outward.length()<=0.08: outward=fallback_outward
+	if outward.length()<=0.08: return {}
+	outward=outward.normalized()
+	return {"outward":outward,"left":Vector2(-outward.y,outward.x),
+		"right":Vector2(outward.y,-outward.x),"normals":planar_normals}
+
+
+## Choose a handed tangent once, then preserve that side while the contact frame
+## bends around the obstacle. Clearance is used only for the initial choice;
+## subsequent calls cannot oscillate merely because two local probes trade rank.
+static func discovery_wall_follow_decision(desired: Vector2, contact_normals: Array,
+		previous_side: int, left_clearance: float, right_clearance: float,
+		fallback_outward: Vector2=Vector2.ZERO) -> Dictionary:
+	if desired.length()<=0.01: return {}
+	var frame:=discovery_wall_contact_frame(contact_normals,fallback_outward)
+	if frame.is_empty(): return {}
+	var toward:=desired.normalized()
+	var left: Vector2=frame.left
+	var right: Vector2=frame.right
+	var side:=previous_side if previous_side in [-1,1] else 0
+	if side==0:
+		var left_progress:=left.dot(toward)
+		var right_progress:=right.dot(toward)
+		# A locally blocked tangent loses even if it points more directly at the
+		# candidate. Otherwise progress dominates and clearance resolves close ties.
+		if left_clearance<0.35 and right_clearance>=0.35:
+			side=-1
+		elif right_clearance<0.35 and left_clearance>=0.35:
+			side=1
+		else:
+			var left_score:=left_progress*4.0+minf(left_clearance,DISCOVERY_WALL_FOLLOW_PROBE_METERS)
+			var right_score:=right_progress*4.0+minf(right_clearance,DISCOVERY_WALL_FOLLOW_PROBE_METERS)
+			side=1 if left_score>=right_score else -1
+	var tangent: Vector2=left if side>0 else right
+	var outward: Vector2=frame.outward
+	# Preserve target progress where collision allows it, but strip every
+	# component that points back into a currently touching surface.
+	var projected:=toward
+	for normal: Vector2 in frame.normals:
+		var into:=projected.dot(normal)
+		if into<0.0: projected-=normal*into
+	var direction:=tangent*0.82+outward*0.34
+	if projected.length()>0.05 and projected.dot(tangent)>=-0.1:
+		direction+=projected.normalized()*0.28
+	for normal: Vector2 in frame.normals:
+		var into:=direction.dot(normal)
+		if into<0.0: direction-=normal*into
+	if direction.length()<=0.05: direction=outward
+	direction=direction.normalized()
+	return {"side":side,"direction":direction,"outward":outward,
+		"left":left,"right":right,"targetProgress":direction.dot(toward),
+		"leftClearance":left_clearance,"rightClearance":right_clearance}
+
+
+## Steer away from the surfaces currently touching the CharacterBody. These are
+## already-published local physics facts; no generator, height or route query is
+## consulted. If the horizontal normals cancel, use one contact deterministically.
+static func discovery_local_steering_direction(desired: Vector2, contact_normals: Array,
+		attempt_index: int) -> Vector2:
+	if desired.length()<=0.01: return Vector2.ZERO
+	var local_normals: Array[Vector2]=[]
+	var outward:=Vector2.ZERO
+	for normal_value in contact_normals:
+		if not normal_value is Vector3: continue
+		var normal3:=normal_value as Vector3
+		var planar:=Vector2(normal3.x,normal3.z)
+		if planar.length()<=0.05: continue
+		planar=planar.normalized()
+		local_normals.append(planar)
+		outward+=planar
+	if local_normals.is_empty(): return Vector2.ZERO
+	var normal_index:=attempt_index%local_normals.size()
+	if normal_index<0: normal_index+=local_normals.size()
+	if outward.length()<=0.05: outward=local_normals[normal_index]
+	else: outward=outward.normalized()
+	var forward:=desired.normalized()
+	# Remove only components that point into a touching surface, then retain an
+	# outward bias so the capsule separates instead of repeatedly scraping it.
+	for normal: Vector2 in local_normals:
+		var into:=forward.dot(normal)
+		if into<0.0: forward-=normal*into
+	var tangent_escape:=(forward.normalized()+outward*0.55).normalized() if forward.length()>0.05 else outward
+	var choices: Array[Vector2]=[outward,tangent_escape,outward.rotated(PI*0.25),
+		outward.rotated(-PI*0.25),outward.rotated(PI*0.5),outward.rotated(-PI*0.5)]
+	var choice_index:=attempt_index%choices.size()
+	if choice_index<0: choice_index+=choices.size()
+	return choices[choice_index]
+
+
+## Produce a deterministic ordinary-input escape waypoint. Successive attempts
+## prefer current local collision normals, then cover the rear hemisphere and
+## both sides when no usable contact fact exists.
+static func discovery_escape_waypoint(position: Vector3, target: Vector3, attempt_index: int,
+		distance := DISCOVERY_DETOUR_DISTANCE_METERS, contact_normals: Array=[]) -> Vector3:
+	var toward := Vector2(target.x-position.x,target.z-position.z)
+	if toward.length()<=0.01 or distance<=0.0: return Vector3.INF
+	var local_direction:=discovery_local_steering_direction(toward,contact_normals,attempt_index)
+	if local_direction.length()>0.01:
+		return position+Vector3(local_direction.x,0.0,local_direction.y)*distance
+	var heading_index := attempt_index%DISCOVERY_ESCAPE_HEADING_OFFSETS.size()
+	if heading_index<0: heading_index+=DISCOVERY_ESCAPE_HEADING_OFFSETS.size()
+	var offset: float=DISCOVERY_ESCAPE_HEADING_OFFSETS[heading_index]
+	var direction := toward.normalized().rotated(offset)
+	return position+Vector3(direction.x,0.0,direction.y)*distance
 
 func _place_outside(bounds: Rect2i,label: String) -> bool:
 	if not spawn_cell.is_empty(): return false # Initial-location mode forbids all fixture transform writes.
@@ -2630,6 +3539,9 @@ func _observe() -> Dictionary:
 	# Read bounded existing loading telemetry; never drive readiness from the
 	# observer. Preserve pending domains even when startup never completes.
 	value["initialRegion"] = main.startup_readiness_domains.get("initial_region",{})
+	var terrain_runtime = main.get("voxel_terrain_runtime")
+	if terrain_runtime != null and terrain_runtime.has_method("stats"):
+		value["terrain"] = terrain_runtime.stats()
 	value["regionalNavigationQueue"] = main.regional_navigation._stats()
 	var navigation_owners: Dictionary = main.regional_navigation._owners(main)
 	if not navigation_owners.is_empty():
@@ -2838,7 +3750,7 @@ func _audit_scene() -> Dictionary:
 							result.collisionMismatchDetails.append({"id":part_id,"reason":"unacknowledged_live_collider","actualTransform":node.global_transform,"actualSize":node.shape.size if node.shape is BoxShape3D else Vector3.ZERO})
 						seen_collisions[part_id]=true
 						var semantic := String(record.get("semantic",""))
-						if semantic in ["castle_keep_stair_exit","castle_keep_stair_landing","castle_gatehouse_wall_stair_exit","castle_gatehouse_wall_stair_landing","citadel_upper_lane"] or part_id in ["urban_row_00_left_door","urban_row_00_right_door","urban_row_03_left_door","urban_row_03_right_door","castle_gatehouse_wall_stair_door","castle_gatehouse_portcullis","castle_keep_rear_secondary_door","urban_civic_house_wall_door"]:
+						if semantic in ["castle_keep_stair_exit","castle_keep_stair_landing","castle_gatehouse_wall_stair_exit","castle_gatehouse_wall_stair_landing","citadel_upper_lane"] or part_id in ["urban_row_00_left_door","urban_row_00_right_door","urban_row_03_left_door","urban_row_03_right_door","castle_gatehouse_wall_stair_door","castle_gatehouse_portcullis","castle_keep_rear_secondary_door","urban_civic_house_east_door"]:
 							result.structureSamples.append({"id":part_id,"kind":record.kind,"semantic":semantic,"transform":node.global_transform,"size":record.size})
 				if result.physicsProbes.size()<8 and node.get_parent() is StaticBody3D:
 					var query := PhysicsShapeQueryParameters3D.new()
@@ -2959,6 +3871,10 @@ func _audit_stair_clearance() -> Dictionary:
 	var observations := []
 	var capsule := CapsuleShape3D.new()
 	capsule.radius=0.42; capsule.height=1.72
+	var accepted_source: Dictionary=main.structure_system.citadel_terrain_admission.prepared_sources().get(region,{})
+	var source_parts := {}
+	for record: Dictionary in accepted_source.get("blueprint",{}).get("parts",[]):
+		source_parts[String(record.get("id",""))]=record
 	for sample: Dictionary in evidence.sceneAudit.get("structureSamples",[]):
 		# Door inspection views are not standing surfaces. Preserve every stair
 		# landing probe when adding other source parts to the capture inventory.
@@ -2970,6 +3886,7 @@ func _audit_stair_clearance() -> Dictionary:
 			var space: PhysicsDirectSpaceState3D = main.get_world_3d().direct_space_state
 			var support := space.intersect_ray(PhysicsRayQueryParameters3D.create(expected+Vector3.UP*0.24,expected-Vector3.UP*0.24,player.collision_mask,[player.get_rid()]))
 			var blockers := []
+			var adjacent_surfaces := []
 			if support.is_empty(): blockers.append("missing_walkable_support")
 			else:
 				var query := PhysicsShapeQueryParameters3D.new()
@@ -2979,9 +3896,51 @@ func _audit_stair_clearance() -> Dictionary:
 				for hit: Dictionary in space.intersect_shape(query,32):
 					var collider: CollisionObject3D=hit.collider
 					var owner: Object=collider.shape_owner_get_owner(collider.shape_find_owner(hit.shape))
-					blockers.append(String(owner.get_meta("building_part_id",str(collider.get_path()))) if owner!=null else str(collider.get_path()))
-			observations.append({"id":sample.id,"offset":offset,"expected":expected,"support":support.get("position"),"blockers":blockers,"passed":blockers.is_empty()})
+					var part_id := String(owner.get_meta("building_part_id",str(collider.get_path()))) if owner!=null else str(collider.get_path())
+					if Castle.stair_transition_connects_support(source_parts.get(part_id),String(sample.id)):
+						adjacent_surfaces.append(part_id)
+					else:
+						blockers.append(part_id)
+			observations.append({"id":sample.id,"offset":offset,"expected":expected,"support":support.get("position"),"adjacentSurfaces":adjacent_surfaces,"blockers":blockers,"passed":blockers.is_empty()})
 	return {"passed":not observations.is_empty() and observations.all(func(row):return row.passed),"observations":observations,"scope":"Actual Main scene physics queries with player-sized capsule; no traversal or interaction claim."}
+
+func _look_toward_candidate_with_retries(max_windows: int, context: String) -> bool:
+	# Keep the proof tied to production mouse-look input. Each window is an
+	# independently recorded convergence attempt; neither visibility nor the
+	# scene audit can turn a missed angular tolerance into success.
+	var retry_state: Dictionary={}
+	for window_index in range(maxi(1,max_windows)):
+		var passed:=await _look_toward_candidate()
+		var attempt: Dictionary=evidence.get("cameraLook",{}).duplicate(true)
+		attempt["windowIndex"]=window_index
+		attempt["context"]=context
+		retry_state=next_camera_convergence_retry_state(retry_state,attempt,max_windows)
+		if passed or not bool(retry_state.get("retryAvailable",false)): break
+		await _frame()
+	var windows: Array=retry_state.get("windows",[])
+	var first_attempt: Dictionary=windows.front() if not windows.is_empty() else {}
+	var final_attempt: Dictionary=windows.back() if not windows.is_empty() else {}
+	evidence.cameraLook={
+		"passed":bool(retry_state.get("passed",false)),
+		"context":context,
+		"windowCount":int(retry_state.get("windowCount",0)),
+		"maxWindows":maxi(1,max_windows),
+		"inputEvents":int(retry_state.get("inputEvents",0)),
+		"retryAvailable":bool(retry_state.get("retryAvailable",false)),
+		"exhausted":bool(retry_state.get("exhausted",false)),
+		"windows":windows,
+		"initialYawErrorRadians":first_attempt.get("initialYawErrorRadians"),
+		"finalYawErrorRadians":final_attempt.get("finalYawErrorRadians"),
+		"finalPitchErrorRadians":final_attempt.get("finalPitchErrorRadians"),
+		"toleranceRadians":final_attempt.get("toleranceRadians",0.03),
+		"ordinaryMouseGuardAccepts":final_attempt.get("ordinaryMouseGuardAccepts",false),
+		"mouseMode":final_attempt.get("mouseMode"),
+		"modalState":final_attempt.get("modalState",{}),
+		"guardBypassed":false,
+		"target":_inspection_target(),
+		"scope":"Bounded ordinary mouse-look convergence only; visibility is observation, not acceptance."
+	}
+	return bool(retry_state.get("passed",false))
 
 func _look_toward_candidate() -> bool:
 	# Camera adjustment uses the ordinary viewport mouse-look consumer. No camera
@@ -2993,14 +3952,14 @@ func _look_toward_candidate() -> bool:
 	await _frame()
 	var attempts := 0
 	var initial_error := _candidate_yaw_error()
-	for attempt in range(12):
+	for attempt in range(LOOK_CONVERGENCE_STEPS):
 		var error := _candidate_yaw_error()
 		var pitch_error := _candidate_pitch_error()
 		if absf(error)<0.03 and absf(pitch_error)<0.03: break
 		var sensitivity := float(player.get("mouse_sensitivity"))
 		if sensitivity<=0.0: break
 		var motion := InputEventMouseMotion.new()
-		motion.relative = Vector2(clampf(-error/sensitivity,-600,600),clampf(-pitch_error/sensitivity,-600,600)*( -1.0 if bool(player.get("invert_y")) else 1.0))
+		motion.relative = Vector2(clampf(-error*0.12/sensitivity,-600,600),clampf(-pitch_error*0.12/sensitivity,-600,600)*( -1.0 if bool(player.get("invert_y")) else 1.0))
 		root.push_input(motion)
 		attempts += 1
 		await _frame()
@@ -3053,6 +4012,79 @@ func _inspect_visibility() -> Dictionary:
 		"projection":camera.get_camera_projection(),"cullMask":camera.cull_mask,"near":camera.near,"far":camera.far,"rootVisible":site.is_visible_in_tree(),"bounds":bounds,"samples":samples,
 		"scope":"Frustum, visibility and collision-ray observations only; screenshot inspection remains required."}
 
+func _launch_main_from_menu() -> bool:
+	var menu_action := "continue" if menu_continue_journey else "new_game"
+	phase="visible_menu_"+menu_action
+	Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+	menu=MainMenuScene.instantiate()
+	if not is_instance_valid(menu):
+		startup_failure="main_menu_instance_missing"
+		return false
+	root.add_child(menu)
+	current_scene=menu
+	for _frame_index in range(4): await process_frame
+	var button := menu.get("continue_button" if menu_continue_journey else "new_game_button") as Button
+	if button==null or button.disabled:
+		startup_failure="main_menu_"+menu_action+"_button_missing_or_disabled"
+		return false
+	var click := InputEventMouseButton.new()
+	click.button_index=MOUSE_BUTTON_LEFT
+	click.position=button.get_global_rect().get_center()
+	click.global_position=click.position
+	click.pressed=true
+	root.push_input(click,true)
+	click.pressed=false
+	root.push_input(click,true)
+	while _within_deadline():
+		await process_frame
+		var active=menu.get("active_main")
+		if active is Node and main==null:
+			main=active
+			main.connect("startup_loading_completed",_startup_completed)
+			main.connect("startup_loading_failed",_startup_failed)
+			main.connect("startup_loading_step",_startup_step)
+		if is_instance_valid(main):
+			var domains: Dictionary=main.get("startup_readiness_domains")
+			_write_menu_startup_progress(domains)
+			if domains.get("gameplay",{}).get("status")=="ready" and not bool(main.get("startup_loading_active")):
+				startup_ready=true
+		if startup_ready or not startup_failure.is_empty(): break
+	if not startup_ready and startup_failure.is_empty(): startup_failure="main_menu_"+menu_action+"_startup_timeout"
+	return startup_ready and startup_failure.is_empty()
+
+func _placement_mode() -> String:
+	if menu_continue_journey: return "menu_continue_journey"
+	if menu_journey: return "menu_journey"
+	return "initial_spawn" if not spawn_cell.is_empty() else "teleport"
+
+func _write_menu_startup_progress(domains: Dictionary) -> void:
+	var now := Time.get_ticks_msec()
+	if now<next_startup_progress: return
+	next_startup_progress=now+1000
+	# Keep the cold-start heartbeat deliberately small. It records existing
+	# readiness state and navigation samples without calling any readiness or
+	# streaming API, so it cannot alter the startup it observes.
+	var loaded_chunk_keys: Array[String] = []
+	var pending_chunk_keys: Array[String] = []
+	if is_instance_valid(main):
+		for key_value in main.chunks.keys(): loaded_chunk_keys.append(str(key_value))
+		for key_value in main.pending_chunk_loads.keys(): pending_chunk_keys.append(str(key_value))
+		loaded_chunk_keys.sort()
+		pending_chunk_keys.sort()
+	var terrain_edit_snapshot := {}
+	if is_instance_valid(main) and is_instance_valid(main.voxel_terrain_runtime):
+		var runtime = main.voxel_terrain_runtime
+		terrain_edit_snapshot={"pendingSections":runtime.pending_edit_section_diagnostics() if runtime.has_method("pending_edit_section_diagnostics") else [],
+			"startupAuxiliaryViewers":runtime.startup_auxiliary_viewer_diagnostics() if runtime.has_method("startup_auxiliary_viewer_diagnostics") else []}
+	_write("progress.json",{"elapsedMsec":_elapsed(),"phase":phase,"placementCount":placements.size(),
+		"menuStartup":true,"startupDomains":domains.duplicate(true),
+		"startupChunkSnapshot":{"loaded":loaded_chunk_keys,"pending":pending_chunk_keys,
+			"playerPosition":main.player.global_position if is_instance_valid(main) and is_instance_valid(main.player) else Vector3.ZERO,
+			"requiredLoading":main.startup_chunk_loading_diagnostics.duplicate(true) if is_instance_valid(main) else {}},
+		"startupTerrainEdits":terrain_edit_snapshot,
+		"startupNavigationSamples":startup_navigation_samples.duplicate(true),
+		"startupMessageCount":startup_message_count})
+
 func _startup_completed() -> void: startup_ready = true
 func _startup_failed(message: String) -> void: startup_failure = message
 func _startup_step(message: String) -> void:
@@ -3060,6 +4092,8 @@ func _startup_step(message: String) -> void:
 	# separately; never spend source/publication transition slots on this stream.
 	startup_message_count += 1
 	var now_usec := Time.get_ticks_usec()
+	if message.begins_with("Preparing NPC route tiles") or message=="Waiting for navigation publication":
+		_capture_startup_navigation_sample()
 	if startup_message_index.has(message):
 		var index: int = startup_message_index[message]
 		startup_messages[index].count += 1
@@ -3072,6 +4106,37 @@ func _startup_step(message: String) -> void:
 	startup_message_index[message]=startup_messages.size()
 	startup_messages.append({"message":message,"count":1,"firstElapsedMsec":_elapsed(),"lastElapsedMsec":_elapsed(),
 		"firstUsec":now_usec,"lastUsec":now_usec})
+
+
+func _capture_startup_navigation_sample() -> void:
+	# Failure-only, bounded telemetry for the production startup gate. It reads
+	# existing queue counters without requesting, advancing, cancelling, or
+	# publishing a tile.
+	var now := Time.get_ticks_msec()
+	if now<next_startup_navigation_sample or startup_navigation_samples.size()>=160:
+		return
+	next_startup_navigation_sample=now+1000
+	if not is_instance_valid(main) or main.get("npc_system")==null:
+		return
+	var pathing=main.npc_system.get("pathing")
+	var coordinator=pathing.get("coordinator") if pathing!=null else null
+	var delegate=coordinator.get("route_delegate") if coordinator!=null else null
+	var navmesh=delegate.get("navmesh_world") if delegate!=null else null
+	var stats: Dictionary=navmesh.stats() if navmesh!=null and navmesh.has_method("stats") else {}
+	var publication: Dictionary=stats.get("publication",{}) as Dictionary
+	var readiness: Dictionary=stats.get("navigationMapReadiness",{}) as Dictionary
+	var regional: Dictionary=main.regional_navigation._stats() if main.get("regional_navigation")!=null else {}
+	var tile_facts: Array[Dictionary]=[]
+	var owners: Dictionary=main.regional_navigation._owners(main) if main.get("regional_navigation")!=null else {}
+	if not owners.is_empty():
+		tile_facts=_navigation_demand_facts(owners)
+	startup_navigation_samples.append({"elapsedMsec":_elapsed(),"queueStatus":publication.get("status",""),
+		"queuePhase":publication.get("phase",""),"queueBinding":publication.get("binding",{}),
+		"queueReason":publication.get("reason",""),"installedRegions":stats.get("installedRegionCount",-1),
+		"dirtyRegions":stats.get("dirtyRegionCount",-1),"mapReadiness":readiness,
+		"regionalStatus":regional.get("status",""),"regionalRequests":regional.get("requests",-1),
+		"regionalTiles":regional.get("tiles",-1),"regionalLastWork":regional.get("lastTileWork",{}),
+		"tileFacts":tile_facts,"queueAttempts":delegate.last_navmesh_tile_queue_debug.duplicate(true) if delegate!=null else []})
 
 func _append_timeline(entry: Dictionary) -> void:
 	if timeline.size()>=256:
@@ -3094,6 +4159,7 @@ func _compact_performance_snapshot() -> Dictionary:
 
 func _frame() -> void:
 	await process_frame
+	_observe_terrain_collision_hold()
 	if Time.get_ticks_msec()>=next_progress:
 		next_progress = Time.get_ticks_msec()+1000
 		var compact_movement_observer := phase.begins_with("ordinary_input_") or phase.begins_with("scale_soak_leave_") or phase.begins_with("scale_soak_revisit_")
@@ -3137,7 +4203,27 @@ func _frame() -> void:
 		if state_key!=last_timeline_state:
 			last_timeline_state=state_key
 			_append_timeline({"elapsedMsec":_elapsed(),"phase":phase,"source":last_observation.get("source",{}),"scene":last_observation.get("scene",{})})
-		_write("progress.json",{"elapsedMsec":_elapsed(),"phase":phase,"placementCount":placements.size(),"observation":last_observation})
+		_write("progress.json",{"elapsedMsec":_elapsed(),"phase":phase,"placementCount":placements.size(),
+			"candidateRegion":candidate.get("region",Vector2i.ZERO),"candidateDistanceWorld":search.get("selectedDistanceWorld",-1.0),
+			"playerPosition":player.global_position if is_instance_valid(player) else Vector3.ZERO,
+			"terrainCollisionHolds":_terrain_collision_hold_observation(),
+			"journeyMotion":journey_motion_progress.duplicate(true),"observation":last_observation})
+
+func _observe_terrain_collision_hold() -> void:
+	if not is_instance_valid(player) or not player.has_meta("terrain_collision_hold") \
+			or not bool(player.get_meta("terrain_collision_hold")):
+		return
+	terrain_collision_hold_frames+=1
+	var reason:=String(player.get_meta("terrain_collision_hold_reason","unknown"))
+	terrain_collision_hold_reasons[reason]=int(terrain_collision_hold_reasons.get(reason,0))+1
+	if terrain_collision_hold_samples.size()<64:
+		terrain_collision_hold_samples.append({"elapsedMsec":_elapsed(),"phase":phase,"reason":reason,
+			"position":player.global_position,"velocity":player.velocity})
+
+func _terrain_collision_hold_observation() -> Dictionary:
+	return {"frames":terrain_collision_hold_frames,"reasons":terrain_collision_hold_reasons.duplicate(true),
+		"samples":terrain_collision_hold_samples.duplicate(true),"samplesDropped":maxi(0,terrain_collision_hold_frames-terrain_collision_hold_samples.size()),
+		"scope":"Production PlayerController terrain-collision fail-closed state observed once per headed process frame."}
 
 func _capture(label: String, camera_kind := "ordinary_player_viewport") -> bool:
 	if DisplayServer.get_name()=="headless":
@@ -3233,10 +4319,10 @@ func _write_approach_checkpoint() -> bool:
 		"checksAtCheckpoint":checks.duplicate(true),"seed":requested_seed,"actualSeed":String(main.seed_text),
 		"candidate":candidate.duplicate(true),"binding":source_binding.duplicate(true),"sourceSignature":source_signature,
 		"reservationCells":reservation,"declaredInfluence":declared,"launchOptions":main.launch_options.duplicate(true),
-		"requestedRegion":requested_region,"requestedSpawnCell":spawn_cell,"placementMode":"initial_spawn" if not spawn_cell.is_empty() else "teleport",
+		"requestedRegion":requested_region,"requestedSpawnCell":spawn_cell,"placementMode":_placement_mode(),
 		"setupPlacementCount":placements.size(),"captures":captures.duplicate(true),"approach":approach_summary,
 		"startupMessages":{"records":startup_messages.duplicate(true),"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow},
-		"synchronousSetupSpans":main.diagnostic_setup_spans.duplicate(true),"renderObservation":render_summary,
+		"synchronousSetupSpans":[] if menu_journey else main.diagnostic_setup_spans.duplicate(true),"renderObservation":render_summary,
 		"runtimePerformance":runtime_summary,"scene":_checkpoint_fields(scene,["status","reason","gameplayReady"]),
 		"publication":_checkpoint_fields(publication,["sceneStartedCount","sceneCompletedCount","sceneMaxStepUsec","maxAdvanceUsec","activeToken","publicationReady"]),
 		# Worker stats contain bounded scalar progress and <=8 selected/pending keys;
@@ -3275,11 +4361,12 @@ func _finish(outcome: String,reason: String) -> void:
 	if finished: return
 	_release_approach_keys()
 	finished = true
-	if not spawn_cell.is_empty() and is_instance_valid(main):
+	if not spawn_cell.is_empty() and not menu_journey and is_instance_valid(main):
 		evidence.initialSpawn = main.diagnostic_spawn_evidence.duplicate(true)
 	if is_instance_valid(main):
-		evidence.synchronousSetupSpans = main.diagnostic_setup_spans.duplicate(true)
-		evidence.synchronousSetupScope = "Fixture-only timing of inherited setup calls; same order and work, no yields. Absolute monotonic clock, first 32 spans."
+		if not menu_journey:
+			evidence.synchronousSetupSpans = main.diagnostic_setup_spans.duplicate(true)
+			evidence.synchronousSetupScope = "Fixture-only timing of inherited setup calls; same order and work, no yields. Absolute monotonic clock, first 32 spans."
 		evidence.startupReadiness = main.startup_readiness_domains.duplicate(true)
 		evidence.startupFailure = main.startup_loading_failure_result.duplicate(true)
 		if main.streaming_request_bounds.has("player"):
@@ -3292,7 +4379,12 @@ func _finish(outcome: String,reason: String) -> void:
 	if outcome!="scene_ready" and evidence_error.is_empty(): await _capture("failed")
 	checks.evidence_writes_succeeded=evidence_error.is_empty()
 	checks.all_captures_saved = not captures.is_empty() and captures.all(func(c):return c.saved)
-	checks.setup_write_limit = placements.is_empty() if not spawn_cell.is_empty() else (placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES)
+	if menu_journey:
+		# A hidden fail-closed hold is still an interruption. The headed journey
+		# reports it explicitly; removing HUD text cannot turn it into acceptance.
+		checks.menu_journey_no_terrain_collision_holds=terrain_collision_hold_frames==0
+		evidence.terrainCollisionHolds=_terrain_collision_hold_observation()
+	checks.setup_write_limit = placements.is_empty() if (not spawn_cell.is_empty() or menu_journey) else (placements.size()==MAX_SETUP_WRITES if outcome=="scene_ready" else placements.size()<=MAX_SETUP_WRITES)
 	if is_instance_valid(main) and main.runtime_perf_monitor != null:
 		evidence.runtimePerformance = main.runtime_perf_monitor.summary()
 	if is_instance_valid(main) and main.structure_system != null \
@@ -3303,20 +4395,26 @@ func _finish(outcome: String,reason: String) -> void:
 		evidence.renderObservation = render_observation.summary()
 		render_observation.stop()
 	var passed := outcome=="scene_ready" and not checks.values().has(false)
+	var god_mode_receipt: Dictionary = evidence.get("menuJourneySurvivalPolicy",{}) if menu_journey else \
+		evidence.get("scaleSoakSurvivalPolicy",{})
 	var report_written := _write("report.json",{"schema":"citadel-candidate-teleport-playtest/v1","passed":passed,"outcome":outcome,"reason":reason,"checks":checks,"evidenceWriteFailure":evidence_error,
 		"seed":requested_seed,"actualSeed":main.get("seed_text") if is_instance_valid(main) else "","elapsedMsec":_elapsed(),"engine":Engine.get_version_info(),
 		"startupElapsedMsec":startup_elapsed if test_started>0 else _elapsed(),"testElapsedMsec":Time.get_ticks_msec()-test_started if test_started>0 else 0,
 		"launchOptions":main.launch_options if is_instance_valid(main) else {},
-		"placementMode":"initial_spawn" if not spawn_cell.is_empty() else "teleport","initialSpawn":evidence.get("initialSpawn",{}),
+		"placementMode":_placement_mode(),"initialSpawn":evidence.get("initialSpawn",{}),
 		"originalPlayerPosition":original_position,"search":search,"candidate":candidate,"declaredInfluence":declared,"acceptedReservation":reservation,
 		"setupPlacements":placements,"captures":captures,"timeline":timeline,"timelineDropped":timeline_dropped,
 		"voxelWorkerSamples":worker_samples,"voxelWorkerSamplesDropped":worker_samples_dropped,
 		"navigationDemandSamples":navigation_demand_samples,"navigationDemandSamplesDropped":navigation_demand_samples_dropped,
+		"startupNavigationSamples":startup_navigation_samples,
 		"startupMessages":{"records":startup_messages,"totalMessages":startup_message_count,"unrecordedMessages":startup_message_overflow,"aggregation":"exact message; count and first/last timestamps, separate from phase timeline"},
 		"evidence":evidence,"finalObservation":_observe(),
-		"evidenceLevel":"headed initial-location New Game diagnostic; title UI bypassed; ordinary observer admission and service publication" if not spawn_cell.is_empty() else "headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication",
-		"fixtureChanges":["Main seed and optional initial spawn selection before attachment; no generated artifact prewarm","zero setup teleports; production startup physics readiness" if not spawn_cell.is_empty() else "up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","bounded ordinary W/Shift approach with brief jumps and lateral recovery","labelled diagnostic inspection cameras after player approach","isolated ordinary save directory"],
-		"doesNotProve":["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
+		"acceptanceClassification":"streaming_and_physical_journey_diagnostic" if menu_journey else "focused_citadel_diagnostic",
+		"godMode":{"enabled":bool(god_mode_receipt.get("enabled",false)),"scope":god_mode_receipt.get("scope",""),
+			"reason":god_mode_receipt.get("reason",""),"notAcceptanceFor":["survival","combat"] if bool(god_mode_receipt.get("enabled",false)) else []},
+		"evidenceLevel":(("headed Main Menu Continue journey from an immutable copied ordinary save" if menu_continue_journey else "headed Main Menu New Game journey from a production-selected seed")+"; continuous ordinary player input through wilderness discovery and the source-derived Citadel gate/street/home/stair/leave-revisit itinerary; production collision and player door interaction; zero setup teleports; pass requires zero observed terrain-collision hold frames") if menu_journey else ("headed initial-location New Game diagnostic; title UI bypassed; ordinary observer admission and service publication" if not spawn_cell.is_empty() else "headed teleport-assisted diagnostic using production New Game systems, ordinary observer admission and service publication"),
+		"fixtureChanges":[("visible Main Menu Continue viewport input; immutable prior save copy; zero setup teleports" if menu_continue_journey else "visible Main Menu New Game viewport input; production-selected seed; zero setup teleports") if menu_journey else "Main seed and optional initial spawn selection before attachment; no generated artifact prewarm","zero setup teleports; production startup physics readiness" if (not spawn_cell.is_empty() or menu_journey) else "up to two counted setup exterior teleports and setup physics freeze","ordinary viewport mouse-look events for player approach","ordinary W/Shift/jump discovery with bounded steering from current published slide contacts and deterministic fallback","source-derived ordinary-input player gate/street/home/stair/leave-revisit itinerary" if menu_journey else "labelled diagnostic inspection cameras after ordinary player approach","isolated ordinary save directory"],
+		"doesNotProve":["player survival or combat acceptance because player-survival god mode is enabled","NPC route planning, schedules, strict-home behavior or NPC door traversal","32-NPC workload acceptance","collision or visual correctness outside the recorded player itinerary","performance acceptance; captures and audits add overhead","unscripted manual exploration"] if menu_journey else ["continuous travel from tutorial town","NPC routing or door traversal","live gameplay acceptance","all geometry collision or visual correctness","performance acceptance; captures and audits add overhead"],
 		"manualInspectionSeconds":manual_seconds,"scaleSoakSeconds":scale_soak_seconds,
 		"playerInspectionOnly":player_inspection_only,
 		"shutdown":"manual inspection follows readiness; user exit or bounded session expiry" if manual_seconds>0 and passed else "ordinary Main.request_graceful_quit requested after report; owned watchdog is cleanup authority"})

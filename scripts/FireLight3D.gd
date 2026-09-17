@@ -17,11 +17,26 @@ var phase := 0.0
 var day_factor := 0.0
 var day_suppressed := false
 var lod_visible := true
+var visual_updates_enabled := false
+var visual_light_cull_mask := 1
+var lod_shadow_enabled := false
 
 const RANDOM_MIN_ENERGY_LOW := 0.01
 const RANDOM_MIN_ENERGY_HIGH := 0.99
 
+func _init() -> void:
+    # Establish renderer capability before configure(), tree entry, or any LOD
+    # setter can be called on a newly constructed FireLight3D.
+    visual_updates_enabled = visual_light_updates_supported(DisplayServer.get_name())
+
 func _ready() -> void:
+    # Godot's dummy headless renderer creates Light3D nodes without a usable
+    # renderer RID.  Keep the logical light/configuration node for generated
+    # world signatures, but never enter the renderer-facing update loop.
+    visual_updates_enabled = visual_light_updates_supported(DisplayServer.get_name())
+    if not visual_updates_enabled:
+        set_process(false)
+        return
     if base_energy <= 0.0:
         base_energy = light_energy
     if base_range <= 0.0:
@@ -44,10 +59,10 @@ func configure(
     light_role := "source",
     local_rig := false
 ) -> void:
+    visual_updates_enabled = visual_light_updates_supported(DisplayServer.get_name())
     base_light_color = color
     dim_light_color = color.lerp(Color(0.98, 0.66, 0.42), 0.28)
     bright_light_color = color.lerp(Color(1.0, 0.98, 0.86), 0.45)
-    light_color = base_light_color
     base_energy = energy
     base_range = light_range
     var randomized_min_scale := randf_range(RANDOM_MIN_ENERGY_LOW, RANDOM_MIN_ENERGY_HIGH) if min_scale < 0.0 else min_scale
@@ -59,12 +74,15 @@ func configure(
     min_range_scale = maxf(0.45, 1.0 - range_amount)
     max_range_scale = 1.0 + range_amount
     phase = randf() * TAU
-    light_energy = energy
-    omni_range = light_range
-    omni_attenuation = attenuation
-    shadow_enabled = shadows
-    shadow_blur = 1.25
-    shadow_bias = 0.030
+    lod_shadow_enabled = shadows
+    if visual_updates_enabled:
+        light_color = base_light_color
+        light_energy = energy
+        omni_range = light_range
+        omni_attenuation = attenuation
+        shadow_enabled = shadows
+        shadow_blur = 1.25
+        shadow_bias = 0.030
     set_meta("visual_role", "light")
     set_meta("fire_light", true)
     set_meta("flicker_amount", flicker_amount)
@@ -74,7 +92,7 @@ func configure(
     set_meta("light_role", light_role)
     set_meta("local_light_rig", local_rig)
     add_to_group("fire_lights")
-    set_process(true)
+    set_process(visual_updates_enabled)
 
 func set_day_suppressed(enabled: bool) -> void:
     day_suppressed = enabled
@@ -87,7 +105,20 @@ func set_lod_visible(enabled: bool) -> void:
     lod_visible = enabled
 
 func set_lod_shadow_enabled(enabled: bool) -> void:
-    shadow_enabled = enabled and bool(get_meta("casts_shadow_when_enabled", false))
+    lod_shadow_enabled = enabled and bool(get_meta("casts_shadow_when_enabled", false))
+    if not visual_updates_enabled:
+        return
+    shadow_enabled = lod_shadow_enabled
+
+func set_visual_light_cull_mask(value: int) -> void:
+    visual_light_cull_mask = value
+    set_meta("light_cull_mask", value)
+    if not visual_updates_enabled:
+        return
+    light_cull_mask = value
+
+static func visual_light_updates_supported(display_server_name: String) -> bool:
+    return display_server_name.strip_edges().to_lower() != "headless"
 
 func daylight_visibility() -> float:
     if not day_suppressed:
@@ -95,6 +126,9 @@ func daylight_visibility() -> float:
     return 1.0 - smoothstep(0.18, 0.58, day_factor)
 
 func _process(delta: float) -> void:
+    if not visual_updates_enabled:
+        set_process(false)
+        return
     phase += delta * flicker_speed
     var wave := (
         sin(phase)

@@ -152,7 +152,7 @@ func _run() -> void:
 	var report := {"schema":"citadel-candidate-recipe-diagnostic/v1","passed":false,"diagnosticCompleted":true,"expectedFailureReproduced":expected,
 		"worldSeed":world_seed,"region":candidate_region,"recipeSeed":expected_recipe,"receipt":receipt,"progress":state.snapshot(),
 		"evidenceLevel":"source-only failing real candidate replay; no site acceptance, terrain publication, rendering or gameplay",
-		"expectedEngineError":"ERROR: Citadel structural completion failed: facade_completion_failed",
+		"expectedEngineError":"",
 		"artifactFormat":"input.bin and failure.bin are FileAccess.store_var(..., false); full failure.json is human-readable, binary preserves types"}
 	report["phaseElapsedUsec"]=timing.phaseElapsedUsec
 	report["captureFailure"]=capture_failure

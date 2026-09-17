@@ -20,17 +20,41 @@ const STARTUP_VIEW_DISTANCE := 80
 const RETAINED_VIEW_DISTANCE := STARTUP_VIEW_DISTANCE
 const RETAINED_ACTIVATION_INTERVAL_SECONDS := 0.5
 const RETAINED_MAX_PENDING_NATIVE_TASKS := 8
+# Every extra VoxelViewer owns a complete native footprint.  The voxel plugin
+# does not expose a per-viewer queue budget, so this runtime is the one owner
+# that admits those footprints.  A retained-only guard is insufficient:
+# startup aids and primary handoff viewers otherwise bypass it completely.
+const SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS := RETAINED_MAX_PENDING_NATIVE_TASKS
+# One primary move creates a broad native footprint. Reissuing it at each
+# 16-cell mesh-block boundary turns ordinary travel into overlapping native
+# generation bursts. Gameplay chunks are the existing semantic collision
+# publication unit; coverage below still forces an immediate move at an edge.
+const PRIMARY_VIEWER_REQUEST_CELL_SIZE := GAME_CHUNK_SIZE
 const VIEW_DISTANCE_EXPANSION_STEP := 16
 const VIEW_DISTANCE_EXPANSION_INTERVAL_SECONDS := 2.0
 const FINAL_EXPANSION_REQUIRED_QUIET_FRAMES := 4
 const STARTUP_VERTICAL_MIN_CELL := -16
 const STARTUP_VERTICAL_MAX_CELL := 48
 const VERTICAL_BOUNDS_EXPANSION_STEP_CELLS := 16
-const SECTION_SIZE := 16
+const NATIVE_MESH_BLOCK_SIZE_CELLS := 16
+const SECTION_SIZE := NATIVE_MESH_BLOCK_SIZE_CELLS
 const EDIT_SECTIONS_PER_FRAME := 1
 const PUBLICATION_PROBES_PER_PHYSICS_FRAME := 2
 const COLLISION_SURFACE_TOLERANCE := CELL * 2.5
 const COLLISION_MESH_VERTICAL_MARGIN_CELLS := 4
+# `is_area_meshed()` requires complete native mesh blocks, not merely the
+# geometric gameplay-chunk footprint. Keep the old seam margin plus one whole
+# native mesh block so a viewer cannot claim a collision chunk it cannot mesh.
+const COLLISION_PUBLICATION_VIEWER_SEAM_MARGIN_CELLS := 4
+const COLLISION_PUBLICATION_VIEWER_HALO_CELLS := NATIVE_MESH_BLOCK_SIZE_CELLS
+const COLLISION_PUBLICATION_VIEWER_MARGIN_CELLS := COLLISION_PUBLICATION_VIEWER_SEAM_MARGIN_CELLS + COLLISION_PUBLICATION_VIEWER_HALO_CELLS
+const GAMEPLAY_CHUNK_COLLISION_PROBE_OFFSETS := [
+	Vector2(0.50, 0.50),
+	Vector2(0.22, 0.22),
+	Vector2(0.78, 0.22),
+	Vector2(0.22, 0.78),
+	Vector2(0.78, 0.78)
+]
 const SEED_RESET_TASK_DRAIN_TIMEOUT_SECONDS := 30.0
 const SEED_RESET_REQUIRED_QUIET_FRAMES := 2
 const SITE_TRAVERSAL_READINESS_POLL_USEC := 100000
@@ -61,6 +85,7 @@ var gameplay_chunk_edit_revisions := {}
 var collision_owner_generation := 0
 var collision_probe_attempts := 0
 var collision_probe_passes := 0
+var collision_priority_promotions := 0
 var view_distance_expansion_elapsed := 0.0
 var view_distance_expansion_requested := false
 var final_expansion_quiet_frames := 0
@@ -77,6 +102,31 @@ var retained_activation_elapsed := 0.0
 var retained_activation_reason := ""
 var retained_last_pending_tasks := 0
 var startup_required_gameplay_chunks: Array = []
+var startup_auxiliary_publication_chunks: Dictionary = {}
+var secondary_viewer_admissions: Dictionary = {}
+var secondary_viewer_admission_sequence := 0
+var secondary_viewer_admission_reason := ""
+var secondary_viewer_peak_pending_tasks := 0
+var secondary_viewer_attach_counts := {"startup": 0, "retained": 0, "handoff": 0}
+var secondary_viewer_runtime_measurement_started := false
+var secondary_viewer_runtime_peak_pending_tasks := 0
+var secondary_viewer_runtime_attach_counts := {"startup": 0, "retained": 0, "handoff": 0}
+var secondary_viewer_terminal_failure: Dictionary = {}
+var primary_viewer_request_cell := Vector2i(2147483000,2147483000)
+var primary_viewer_request_distance := -1
+var primary_unpublished_collision_request_key := ""
+## Main's retained predicted-traversal request is scheduling input only. The
+## primary viewer remains the sole native terrain authority; it may lead only
+## while its same admitted footprint still covers the current player chunk.
+var foreground_collision_current := Vector3.INF
+var foreground_collision_target := Vector3.INF
+var foreground_collision_demand_revision := 0
+# Voxel Tools owns the actual worker queue.  The runtime can only admit
+# whole-viewer footprints, so retain a compact, per-request observation of the
+# native work that each accepted footprint causes.  This is diagnostics only:
+# it neither creates demand nor changes collision authority.
+var native_viewer_workloads: Array[Dictionary] = []
+var active_native_viewer_workload_index := -1
 
 func set_retained_gameplay_chunks(keys: Dictionary) -> void:
 	if keys == retained_gameplay_chunks: return
@@ -94,6 +144,7 @@ func set_retained_gameplay_chunks(keys: Dictionary) -> void:
 		old.queue_free()
 		retained_chunk_viewers.erase(group)
 		retained_viewer_attached_frame.erase(group)
+	_cancel_stale_retained_secondary_admissions(groups)
 	# Pending groups remain here until capacity/admission permits activation.
 	# Repeated identical demand must not reset their retry interval.
 
@@ -105,6 +156,7 @@ func clear_retained_gameplay_chunks() -> void:
 	retained_activation_reason = ""
 	retained_last_pending_tasks = 0
 	startup_required_gameplay_chunks.clear()
+	_cancel_stale_retained_secondary_admissions({})
 
 func advance_retained_viewers(delta: float) -> void:
 	retained_activation_elapsed += maxf(0.0,delta)
@@ -129,18 +181,21 @@ func advance_retained_viewers(delta: float) -> void:
 					and is_instance_valid(viewer) and viewer.is_inside_tree() and _viewer_covers_chunk_at(viewer,key,viewer.global_position):
 				retained_activation_reason = "player_collision_coverage"
 				return
+	var groups := _retained_groups_for_secondary(player_position)
+	_retire_nonlocal_retained_viewers(groups)
+	if groups.is_empty():
+		retained_activation_reason = "primary_covers_local_retained_frontier"
+		return
+	# A retained viewer owns a broad native mesh/collision footprint.  It must
+	# share the one secondary admission lane with startup aids and primary
+	# handoffs; otherwise each path can independently flood native generation.
+	if retained_group_collision_coverage_pending():
+		retained_activation_reason = "retained_group_collision_coverage"
+		return
 	retained_last_pending_tasks = voxel_engine_pending_task_count()
-	if retained_last_pending_tasks > RETAINED_MAX_PENDING_NATIVE_TASKS:
+	if retained_last_pending_tasks > SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS:
 		retained_activation_reason = "native_task_backpressure"
 		return
-	var groups: Array = retained_viewer_groups.keys()
-	groups.sort_custom(func(a: Vector2i,b: Vector2i):
-		var ac := (Vector2(a*2)+Vector2.ONE)*float(GAME_CHUNK_SIZE)*CELL
-		var bc := (Vector2(b*2)+Vector2.ONE)*float(GAME_CHUNK_SIZE)*CELL
-		var observer := Vector2(player_position.x,player_position.z)
-		var ad := ac.distance_squared_to(observer)
-		var bd := bc.distance_squared_to(observer)
-		return ad<bd or ad==bd and (a.x<b.x or a.x==b.x and a.y<b.y))
 	retained_activation_reason = "covered"
 	var world = main.get("world_generation_system")
 	for group: Vector2i in groups:
@@ -149,35 +204,382 @@ func advance_retained_viewers(delta: float) -> void:
 		if spec.is_empty(): continue
 		var position: Vector3 = spec.position
 		var view_distance: int = int(spec.viewDistance)
-		# Do not put a deferred viewer into SiteGate's automatic retry list:
-		# admission completing later must not bypass this activation budget.
-		var admission: Dictionary = site_gate.request_cells(SITE_GATE_SCRIPT.footprint(position,view_distance))
-		if admission.get("status") != "ready":
-			retained_activation_reason = "site_admission_pending"
-			return
 		var auxiliary := VoxelViewer.new()
 		auxiliary.name = "RetainedRegion_%d_%d" % [group.x,group.y]
 		auxiliary.requires_visuals = true
 		auxiliary.requires_collisions = true
-		if not site_gate.request_viewer(auxiliary,position,view_distance):
-			site_gate.remove_viewer(auxiliary)
-			auxiliary.queue_free()
-			retained_activation_reason = "site_admission_pending"
-			return
-		retained_chunk_viewers[group] = auxiliary
-		retained_viewer_attached_frame[group] = Engine.get_physics_frames()
-		retained_activation_reason = "activated_one_group"
+		_stage_secondary_viewer("retained:%d:%d" % [group.x, group.y], "retained", auxiliary,
+				position, view_distance, retained_viewer_groups[group], 2, {"group": group})
+		retained_activation_reason = "retained_group_queued"
 		return
+
+func retained_group_collision_coverage_pending() -> bool:
+	for group_value in retained_chunk_viewers:
+		if not group_value is Vector2i:
+			continue
+		var group: Vector2i = group_value
+		var retained_viewer: VoxelViewer = retained_chunk_viewers[group]
+		if not is_instance_valid(retained_viewer) or not retained_viewer.is_inside_tree():
+			continue
+		if retained_group_collision_receipts_pending(group):
+			return true
+	return false
+
+func retained_group_collision_receipts_pending(group: Vector2i) -> bool:
+	var group_chunks: Array = retained_viewer_groups.get(group, [])
+	for chunk_value in group_chunks:
+		if not chunk_value is Vector2i:
+			continue
+		var chunk_key: Vector2i = chunk_value
+		if not retained_gameplay_chunks.has(chunk_key):
+			continue
+		var receipt: Dictionary = published_gameplay_chunks.get(chunk_key,{}) if published_gameplay_chunks.get(chunk_key,{}) is Dictionary else {}
+		if not _collision_chunk_receipt_current(chunk_key,receipt):
+			return true
+	return false
+
+func _retained_groups_for_secondary(player_position: Vector3) -> Array:
+	var groups: Array = retained_viewer_groups.keys()
+	groups.sort_custom(func(a: Vector2i, b: Vector2i):
+		var ac := (Vector2(a * 2) + Vector2.ONE) * float(GAME_CHUNK_SIZE) * CELL
+		var bc := (Vector2(b * 2) + Vector2.ONE) * float(GAME_CHUNK_SIZE) * CELL
+		var observer := Vector2(player_position.x, player_position.z)
+		var ad := ac.distance_squared_to(observer)
+		var bd := bc.distance_squared_to(observer)
+		return ad < bd or ad == bd and (a.x < b.x or a.x == b.x and a.y < b.y))
+	# Initial loading owns an explicit readiness lifecycle and may keep its full
+	# declared collision set. Once play begins, a broad retained request is
+	# scheduling evidence, not authority to instantiate another native terrain
+	# authority. The primary viewer provides the bounded local collision sweep;
+	# retained source/chunk demand remains retryable for reversals and downstream
+	# consumers without turning every 2x2 group into an overlapping 80m radius.
+	if main != null and (bool(main.get("startup_loading_active")) or bool(main.get("runtime_loading_active"))):
+		return groups
+	return []
+
+func _retire_nonlocal_retained_viewers(active_groups: Array) -> void:
+	var allowed := {}
+	for group_value in active_groups:
+		if group_value is Vector2i:
+			allowed[group_value] = true
+	for group_value in retained_chunk_viewers.keys():
+		if not (group_value is Vector2i) or allowed.has(group_value):
+			continue
+		var auxiliary: VoxelViewer = retained_chunk_viewers[group_value]
+		if is_instance_valid(auxiliary):
+			if site_gate != null:
+				site_gate.remove_viewer(auxiliary)
+			auxiliary.queue_free()
+		retained_chunk_viewers.erase(group_value)
+		retained_viewer_attached_frame.erase(group_value)
+	for identity_value in secondary_viewer_admissions.keys():
+		var identity := String(identity_value)
+		var entry: Dictionary = secondary_viewer_admissions[identity]
+		if String(entry.get("kind", "")) != "retained":
+			continue
+		var metadata: Dictionary = entry.get("metadata", {})
+		var group_value = metadata.get("group")
+		if group_value is Vector2i and allowed.has(group_value):
+			continue
+		var auxiliary_value = entry.get("viewer")
+		if is_instance_valid(auxiliary_value):
+			auxiliary_value.queue_free()
+		secondary_viewer_admissions.erase(identity)
+
+func _stage_secondary_viewer(identity: String, kind: String, auxiliary: VoxelViewer,
+		position: Vector3, view_distance: int, chunks: Array, priority: int, metadata := {}) -> void:
+	if secondary_viewer_admissions.has(identity):
+		if is_instance_valid(auxiliary):
+			auxiliary.queue_free()
+		return
+	secondary_viewer_admission_sequence += 1
+	secondary_viewer_admissions[identity] = {
+		"identity": identity, "kind": kind, "viewer": auxiliary,
+		"position": position, "viewDistance": view_distance, "chunks": chunks.duplicate(),
+		"priority": priority, "sequence": secondary_viewer_admission_sequence,
+		"metadata": metadata.duplicate(true)
+	}
+
+func _mark_secondary_viewer_attached(auxiliary: VoxelViewer, attached_frame: int) -> bool:
+	for index in range(startup_auxiliary_viewers.size()):
+		var record_value = startup_auxiliary_viewers[index]
+		if not record_value is Dictionary:
+			continue
+		var record: Dictionary = record_value
+		if not is_same(record.get("viewer"), auxiliary):
+			continue
+		record["attachedFrame"] = attached_frame
+		startup_auxiliary_viewers[index] = record
+		return true
+	return false
+
+static func secondary_viewer_handoff_mature(record: Dictionary, current_frame: int) -> bool:
+	var attached_frame := int(record.get("attachedFrame", -1))
+	return attached_frame >= 0 and current_frame - attached_frame >= 2
+
+func _cancel_stale_retained_secondary_admissions(groups: Dictionary) -> void:
+	for identity_value in secondary_viewer_admissions.keys():
+		var identity := String(identity_value)
+		var entry: Dictionary = secondary_viewer_admissions[identity]
+		if String(entry.get("kind", "")) != "retained":
+			continue
+		var group_value = entry.get("metadata", {}).get("group") if entry.get("metadata", {}) is Dictionary else null
+		if group_value is Vector2i and groups.has(group_value):
+			continue
+		var auxiliary = entry.get("viewer")
+		if is_instance_valid(auxiliary):
+			auxiliary.queue_free()
+		secondary_viewer_admissions.erase(identity)
+
+func _secondary_viewer_collision_coverage_pending() -> bool:
+	for record_value in startup_auxiliary_viewers:
+		if not (record_value is Dictionary):
+			continue
+		var record: Dictionary = record_value
+		var auxiliary: VoxelViewer = record.get("viewer")
+		if not is_instance_valid(auxiliary) or not auxiliary.is_inside_tree():
+			continue
+		if _secondary_record_collision_receipts_pending(record):
+			return true
+	return retained_group_collision_coverage_pending()
+
+func _secondary_record_collision_receipts_pending(record: Dictionary) -> bool:
+	for chunk_value in record.get("chunks", []):
+		if not (chunk_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = chunk_value
+		# Retired startup/handoff footprints must not block a current owner.
+		if not startup_required_gameplay_chunks.has(chunk_key) \
+				and not startup_auxiliary_publication_chunks.has(chunk_key) \
+				and not retained_gameplay_chunks.has(chunk_key) and not desired_gameplay_chunks.has(chunk_key):
+			continue
+		var receipt: Dictionary = published_gameplay_chunks.get(chunk_key, {}) \
+				if published_gameplay_chunks.get(chunk_key, {}) is Dictionary else {}
+		if not _collision_chunk_receipt_current(chunk_key, receipt):
+			return true
+	return false
+
+
+func release_startup_auxiliary_publication_chunks() -> void:
+	var keys: Array=startup_auxiliary_publication_chunks.keys()
+	startup_auxiliary_publication_chunks.clear()
+	for key_value in keys:
+		if not key_value is Vector2i: continue
+		var key: Vector2i=key_value
+		if desired_gameplay_chunks.has(key) or retained_gameplay_chunks.has(key): continue
+		pending_gameplay_chunks.erase(key)
+		pending_gameplay_chunk_order.erase(key)
+		if published_gameplay_chunks.erase(key): notify_navigation_chunk_unloaded(key)
+	# Navigation has consumed the collision-backed snapshot. Retire the temporary
+	# native viewers only now; view-distance expansion itself is not proof that
+	# their distant town footprints are no longer needed by startup capture.
+	startup_auxiliary_cleanup_requested = true
+	startup_auxiliary_cleanup_frames_remaining = 2
+
+
+func abort_startup_auxiliary_publication_chunks() -> void:
+	# A failed/cancelled load has no navigation consumer left. Drop temporary
+	# demand and its native viewers immediately, while preserving chunks still
+	# owned by ordinary player or retained-region demand.
+	var keys: Array=startup_auxiliary_publication_chunks.keys()
+	startup_auxiliary_publication_chunks.clear()
+	for key_value in keys:
+		if not key_value is Vector2i: continue
+		var key: Vector2i=key_value
+		if desired_gameplay_chunks.has(key) or retained_gameplay_chunks.has(key): continue
+		pending_gameplay_chunks.erase(key)
+		pending_gameplay_chunk_order.erase(key)
+		if published_gameplay_chunks.erase(key): notify_navigation_chunk_unloaded(key)
+	clear_startup_auxiliary_viewers()
+
+func advance_secondary_viewer_admissions() -> void:
+	var pending_tasks := voxel_engine_pending_task_count()
+	secondary_viewer_peak_pending_tasks = maxi(secondary_viewer_peak_pending_tasks, pending_tasks)
+	if main != null and not bool(main.get("startup_loading_active")) and not bool(main.get("runtime_loading_active")):
+		if not secondary_viewer_runtime_measurement_started:
+			secondary_viewer_runtime_measurement_started = true
+			secondary_viewer_runtime_peak_pending_tasks = pending_tasks
+			secondary_viewer_runtime_attach_counts = {"startup": 0, "retained": 0, "handoff": 0}
+		else:
+			secondary_viewer_runtime_peak_pending_tasks = maxi(secondary_viewer_runtime_peak_pending_tasks, pending_tasks)
+	if not secondary_viewer_terminal_failure.is_empty():
+		secondary_viewer_admission_reason = "site_admission_failed"
+		return
+	if secondary_viewer_admissions.is_empty():
+		secondary_viewer_admission_reason = "idle"
+		return
+	if pending_tasks > SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS:
+		secondary_viewer_admission_reason = "native_task_backpressure"
+		return
+	if _secondary_viewer_collision_coverage_pending():
+		secondary_viewer_admission_reason = "secondary_collision_coverage"
+		return
+	var pending: Array = secondary_viewer_admissions.values()
+	pending.sort_custom(func(a: Dictionary, b: Dictionary):
+		return int(a.get("priority", 0)) < int(b.get("priority", 0)) \
+				if int(a.get("priority", 0)) != int(b.get("priority", 0)) \
+				else int(a.get("sequence", 0)) < int(b.get("sequence", 0)))
+	var entry: Dictionary = pending[0]
+	var identity := String(entry.get("identity", ""))
+	var admission: Dictionary = site_gate.request_cells(SITE_GATE_SCRIPT.footprint(
+		entry.get("position", Vector3.ZERO), int(entry.get("viewDistance", STARTUP_VIEW_DISTANCE))))
+	if admission.get("status") == "failed":
+		_record_secondary_viewer_terminal_failure(entry,
+			String(admission.get("reason", "secondary_viewer_site_admission_failed")), "cells")
+		return
+	if admission.get("status") != "ready":
+		secondary_viewer_admission_reason = "site_admission_%s" % String(admission.get("status", "pending"))
+		return
+	# Demand retirement can free a staged viewer between queue selection and
+	# admission. Validate the untyped reference first: assigning a freed Object
+	# to a typed VoxelViewer itself emits an engine error before a guard can run.
+	var auxiliary_value = entry.get("viewer")
+	if not is_instance_valid(auxiliary_value):
+		secondary_viewer_admissions.erase(identity)
+		secondary_viewer_admission_reason = "stale_secondary_viewer_retired"
+		return
+	var auxiliary: VoxelViewer = auxiliary_value
+	if not site_gate.request_viewer(auxiliary,
+			entry.get("position", Vector3.ZERO), int(entry.get("viewDistance", STARTUP_VIEW_DISTANCE))):
+		var site_failure := String(site_gate.failure_reason()) if site_gate.has_method("failure_reason") else ""
+		if not site_failure.is_empty():
+			_record_secondary_viewer_terminal_failure(entry, site_failure, "viewer")
+			return
+		secondary_viewer_admission_reason = "site_viewer_admission_pending"
+		return
+	_mark_secondary_viewer_attached(auxiliary, Engine.get_physics_frames())
+	_record_native_viewer_request(kind_for_secondary_admission(entry),
+			int(entry.get("viewDistance", STARTUP_VIEW_DISTANCE)), entry.get("position", Vector3.ZERO))
+	secondary_viewer_admissions.erase(identity)
+	var kind := String(entry.get("kind", ""))
+	secondary_viewer_attach_counts[kind] = int(secondary_viewer_attach_counts.get(kind, 0)) + 1
+	if secondary_viewer_runtime_measurement_started:
+		secondary_viewer_runtime_attach_counts[kind] = int(secondary_viewer_runtime_attach_counts.get(kind, 0)) + 1
+	if kind == "retained":
+		var metadata: Dictionary = entry.get("metadata", {})
+		var group_value = metadata.get("group")
+		if group_value is Vector2i:
+			retained_chunk_viewers[group_value] = auxiliary
+			retained_viewer_attached_frame[group_value] = Engine.get_physics_frames()
+	secondary_viewer_admission_reason = "%s_attached" % kind
+
+func _record_secondary_viewer_terminal_failure(entry: Dictionary, reason: String, stage: String) -> void:
+	var normalized_reason := reason.strip_edges()
+	if normalized_reason.is_empty():
+		normalized_reason = "secondary_viewer_site_admission_failed"
+	if secondary_viewer_terminal_failure.is_empty():
+		secondary_viewer_terminal_failure = {
+			"status": "failed",
+			"reason": normalized_reason,
+			"stage": stage,
+			"identity": String(entry.get("identity", "")),
+			"kind": String(entry.get("kind", "secondary")),
+			"position": entry.get("position", Vector3.ZERO),
+			"viewDistance": int(entry.get("viewDistance", STARTUP_VIEW_DISTANCE)),
+			"chunks": (entry.get("chunks", []) as Array).duplicate()
+		}
+	var identity := String(entry.get("identity", ""))
+	var auxiliary = entry.get("viewer")
+	if is_instance_valid(auxiliary):
+		if site_gate != null and site_gate.has_method("remove_viewer"):
+			site_gate.remove_viewer(auxiliary)
+		auxiliary.queue_free()
+	secondary_viewer_admissions.erase(identity)
+	secondary_viewer_admission_reason = "site_admission_failed"
+
+func secondary_viewer_admission_failure() -> Dictionary:
+	return secondary_viewer_terminal_failure.duplicate(true)
+
+func kind_for_secondary_admission(entry: Dictionary) -> String:
+	return String(entry.get("kind", "secondary"))
+
+func _record_native_viewer_request(kind: String, view_distance: int, position: Vector3) -> void:
+	# The plugin starts its work asynchronously.  Sampling on later process
+	# frames captures its true peak rather than falsely calling the zero at the
+	# moment of request a budget guarantee.
+	if active_native_viewer_workload_index >= 0 and active_native_viewer_workload_index < native_viewer_workloads.size():
+		var previous := native_viewer_workloads[active_native_viewer_workload_index]
+		if not bool(previous.get("settled", false)):
+			previous["superseded"] = true
+			native_viewer_workloads[active_native_viewer_workload_index] = previous
+	var row := {
+		"kind": kind,
+		"viewDistance": view_distance,
+		"requestMsec": Time.get_ticks_msec(),
+		"position": position,
+		"pendingTasksAtRequest": voxel_engine_pending_task_count(),
+		"peakPendingTasks": 0,
+		"observedWork": false,
+		"settled": false,
+		"settledMsec": 0,
+		"superseded": false
+	}
+	native_viewer_workloads.append(row)
+	if native_viewer_workloads.size() > 48:
+		native_viewer_workloads.pop_front()
+	active_native_viewer_workload_index = native_viewer_workloads.size() - 1
+
+func observe_native_viewer_workload() -> void:
+	if active_native_viewer_workload_index < 0 or active_native_viewer_workload_index >= native_viewer_workloads.size():
+		return
+	var row := native_viewer_workloads[active_native_viewer_workload_index]
+	if bool(row.get("settled", false)):
+		return
+	var pending := voxel_engine_pending_task_count()
+	if pending > 0:
+		row["observedWork"] = true
+		row["peakPendingTasks"] = maxi(int(row.get("peakPendingTasks", 0)), pending)
+		native_viewer_workloads[active_native_viewer_workload_index] = row
+		return
+	if bool(row.get("observedWork", false)):
+		row["settled"] = true
+		row["settledMsec"] = Time.get_ticks_msec()
+		row["drainMs"] = int(row["settledMsec"]) - int(row["requestMsec"])
+		native_viewer_workloads[active_native_viewer_workload_index] = row
+
+func _primary_handoff_pending_or_covering(held: Array) -> bool:
+	for record_value in startup_auxiliary_viewers:
+		if not (record_value is Dictionary):
+			continue
+		var record: Dictionary = record_value
+		if not bool(record.get("primaryHandoff", false)):
+			continue
+		var holder: VoxelViewer = record.get("viewer")
+		if not is_instance_valid(holder):
+			continue
+		if not holder.is_inside_tree():
+			return true
+		if not secondary_viewer_handoff_mature(record, Engine.get_physics_frames()):
+			return true
+		var covers := true
+		for chunk_value in held:
+			if chunk_value is Vector2i and not _viewer_covers_chunk_at(holder, chunk_value, holder.global_position):
+				covers = false
+				break
+		if covers:
+			return true
+	for entry_value in secondary_viewer_admissions.values():
+		var entry: Dictionary = entry_value
+		if String(entry.get("kind", "")) == "handoff":
+			return true
+	return false
 
 func region_publication_readiness(bounds: Rect2i) -> Dictionary:
 	const Regions := preload("res://scripts/world/WorldStreamingCoordinator.gd")
 	var revision := "%s:%d" % [configured_seed,last_volume_revision]
+	if not secondary_viewer_terminal_failure.is_empty():
+		return {"status":"failed","reason":"startup_auxiliary_terrain_admission_failed",
+			"missingChunks":[],"sourceRevision":revision,
+			"admissionFailure":secondary_viewer_terminal_failure.duplicate(true)}
 	if not authority_ready or not generation_context_current():
 		return {"status":"pending","reason":"terrain_generation_pending","missingChunks":[],"sourceRevision":revision}
 	var volume = volume_service()
-	# Reject both edits not yet collected and collected edits awaiting native
-	# publication. Cached chunk keys alone do not acknowledge the new volume.
-	if volume == null or int(volume.get("revision")) != last_volume_revision or not pending_edit_sections.is_empty():
+	# Reject edits awaiting native publication only when their XZ section can
+	# affect this query. A distant structure edit must not deadlock an unrelated
+	# player/navigation tile merely because its native area is not loaded yet.
+	# Callers that need a halo (navigation capture) pass it in their bounds.
+	if volume == null or int(volume.get("revision")) != last_volume_revision \
+			or pending_edit_sections_intersect_bounds(bounds):
 		return {"status":"pending","reason":"terrain_edits_pending","missingChunks":[],"sourceRevision":revision}
 	var keys: Array = Regions.chunks_for_bounds(bounds)
 	if keys.is_empty():
@@ -188,8 +590,50 @@ func region_publication_readiness(bounds: Rect2i) -> Dictionary:
 	return {"status":"ready" if missing.is_empty() else "pending",
 		"reason":"" if missing.is_empty() else "terrain_publication_pending",
 		"missingChunks":missing, "sourceRevision":revision}
+
+func pending_edit_sections_intersect_bounds(bounds: Rect2i) -> bool:
+	if bounds.size.x <= 0 or bounds.size.y <= 0:
+		return false
+	for section_value in pending_edit_sections:
+		if not section_value is Vector3i:
+			# An invalid pending key has no safe locality proof.
+			return true
+		var section: Vector3i = section_value
+		var section_bounds := Rect2i(Vector2i(section.x * SECTION_SIZE, section.z * SECTION_SIZE),
+			Vector2i.ONE * SECTION_SIZE)
+		if section_bounds.intersects(bounds):
+			return true
+	return false
+
+
+func pending_edit_section_diagnostics(limit := 16) -> Array[Dictionary]:
+	var rows: Array[Dictionary] = []
+	var section_keys: Array = pending_edit_sections.keys()
+	section_keys.sort_custom(func(a: Vector3i,b: Vector3i):
+		return a.x < b.x if a.x != b.x else (a.z < b.z if a.z != b.z else a.y < b.y))
+	for section_value in section_keys:
+		if rows.size() >= maxi(0,limit): break
+		if not section_value is Vector3i:
+			rows.append({"section":str(section_value),"valid":false})
+			continue
+		var section: Vector3i = section_value
+		var changes: Dictionary = pending_edit_sections.get(section,{})
+		var min_cell := Vector3i(2147483647,2147483647,2147483647)
+		var max_cell := Vector3i(-2147483647,-2147483647,-2147483647)
+		for cell_value in changes:
+			if not cell_value is Vector3i: continue
+			var cell: Vector3i = cell_value
+			min_cell=Vector3i(mini(min_cell.x,cell.x),mini(min_cell.y,cell.y),mini(min_cell.z,cell.z))
+			max_cell=Vector3i(maxi(max_cell.x,cell.x),maxi(max_cell.y,cell.y),maxi(max_cell.z,cell.z))
+		var has_cells := min_cell.x != 2147483647
+		var size := max_cell-min_cell+Vector3i.ONE if has_cells else Vector3i.ZERO
+		var editable := false
+		if terrain != null and has_cells:
+			editable=bool(terrain.get_voxel_tool().is_area_editable(AABB(Vector3(min_cell),Vector3(size))))
+		rows.append({"section":section,"changeCount":changes.size(),"minCell":min_cell if has_cells else Vector3i.ZERO,
+			"maxCell":max_cell if has_cells else Vector3i.ZERO,"editable":editable})
+	return rows
 var site_traversal_waiting := false
-var last_site_wait_message_usec := 0
 var site_traversal_pending_request := {}
 var site_traversal_last_proof := {}
 var site_traversal_last_poll_usec := 0
@@ -225,7 +669,7 @@ func setup(main_node) -> Dictionary:
 	terrain.generate_collisions = true
 	terrain.collision_layer = TERRAIN_COLLISION_LAYER
 	terrain.collision_mask = 0
-	terrain.mesh_block_size = 16
+	terrain.mesh_block_size = NATIVE_MESH_BLOCK_SIZE_CELLS
 	terrain.max_view_distance = 128
 	apply_startup_vertical_bounds()
 	terrain.scale = Vector3.ONE * CELL
@@ -274,6 +718,7 @@ func reset_for_current_seed_staged() -> Dictionary:
 	var invalidated_chunks := invalidate_gameplay_publication()
 	if site_gate != null: site_gate.stop()
 	clear_startup_auxiliary_viewers()
+	secondary_viewer_terminal_failure.clear()
 	authority_ready = false
 	set_process(false)
 	set_physics_process(false)
@@ -318,6 +763,9 @@ func reset_for_current_seed_staged() -> Dictionary:
 		viewer.requires_visuals = true
 		viewer.requires_collisions = true
 		viewer.view_distance = STARTUP_VIEW_DISTANCE
+	primary_viewer_request_cell = Vector2i(2147483000,2147483000)
+	primary_viewer_request_distance = -1
+	primary_unpublished_collision_request_key = ""
 	view_distance_expansion_elapsed = 0.0
 	view_distance_expansion_requested = false
 	final_expansion_quiet_frames = 0
@@ -458,6 +906,8 @@ func invalidate_gameplay_publication() -> int:
 	pending_gameplay_chunks.clear()
 	pending_gameplay_chunk_order.clear()
 	published_gameplay_chunks.clear()
+	clear_foreground_collision_demand()
+	primary_unpublished_collision_request_key = ""
 	return invalidated
 
 func full_vertical_cell_bounds() -> Vector2i:
@@ -489,32 +939,104 @@ func apply_startup_vertical_bounds() -> void:
 		mini(full_bounds.y, STARTUP_VERTICAL_MAX_CELL)
 	)
 
-func configure_startup_collision_bounds(chunk_keys: Array) -> void:
+static func gameplay_chunk_collision_probe_positions(chunk_key: Vector2i) -> Array[Vector3]:
+	var positions: Array[Vector3] = []
+	var origin_x := float(chunk_key.x * GAME_CHUNK_SIZE) * CELL
+	var origin_z := float(chunk_key.y * GAME_CHUNK_SIZE) * CELL
+	var span := float(GAME_CHUNK_SIZE) * CELL
+	for offset_value in GAMEPLAY_CHUNK_COLLISION_PROBE_OFFSETS:
+		var offset: Vector2 = offset_value
+		positions.append(Vector3(origin_x + span * offset.x, 0.0, origin_z + span * offset.y))
+	return positions
+
+static func startup_collision_surface_cell_bounds(chunk_keys: Array, world_generation, volume) -> Vector2i:
+	var min_surface_cell := 2147483000
+	var max_surface_cell := -2147483000
+	var can_project := false
+	if volume != null:
+		can_project = volume.has_method("terrain_mesh_surface_projection_for_cell")
+	var can_fallback := false
+	if world_generation != null:
+		can_fallback = world_generation.has_method("surface_y_at")
+	for key_value in chunk_keys:
+		if not (key_value is Vector2i):
+			continue
+		var chunk_key: Vector2i = key_value
+		for position in gameplay_chunk_collision_probe_positions(chunk_key):
+			var surface_y: Variant = null
+			if can_project:
+				var cell := Vector3i(floori(position.x / CELL), 0, floori(position.z / CELL))
+				var projection: Dictionary = volume.call("terrain_mesh_surface_projection_for_cell", cell)
+				if bool(projection.get("found", false)):
+					surface_y = float((projection.get("position", Vector3.ZERO) as Vector3).y)
+			if surface_y == null and can_fallback:
+				surface_y = float(world_generation.call("surface_y_at", position))
+			if surface_y == null:
+				continue
+			var surface_cell := floori(float(surface_y) / CELL)
+			min_surface_cell = mini(min_surface_cell, surface_cell)
+			max_surface_cell = maxi(max_surface_cell, surface_cell)
+	return Vector2i(min_surface_cell, max_surface_cell)
+
+func configure_startup_collision_bounds(chunk_keys: Array, auxiliary_chunk_keys: Array = []) -> void:
 	clear_startup_auxiliary_viewers()
+	secondary_viewer_terminal_failure.clear()
 	startup_required_gameplay_chunks = chunk_keys.duplicate()
+	secondary_viewer_peak_pending_tasks = voxel_engine_pending_task_count()
+	secondary_viewer_attach_counts["startup"] = 0
+	secondary_viewer_runtime_measurement_started = false
+	secondary_viewer_runtime_peak_pending_tasks = 0
+	secondary_viewer_runtime_attach_counts = {"startup": 0, "retained": 0, "handoff": 0}
 	if terrain == null or main == null or chunk_keys.is_empty():
 		return
 	var world_generation = main.get("world_generation_system")
 	if world_generation == null or not world_generation.has_method("surface_y_at"):
 		return
-	var min_surface_cell := 2147483000
-	var max_surface_cell := -2147483000
+	var coverage_chunks := {}
 	for key_value in chunk_keys:
-		if not (key_value is Vector2i):
-			continue
-		var chunk_key: Vector2i = key_value
-		var center := Vector3(
-			(float(chunk_key.x * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL,
-			0.0,
-			(float(chunk_key.y * GAME_CHUNK_SIZE) + float(GAME_CHUNK_SIZE) * 0.5) * CELL
-		)
-		var surface_cell := floori(float(world_generation.call("surface_y_at", center)) / CELL)
-		min_surface_cell = mini(min_surface_cell, surface_cell)
-		max_surface_cell = maxi(max_surface_cell, surface_cell)
-	if min_surface_cell > max_surface_cell:
+		if key_value is Vector2i: coverage_chunks[key_value]=true
+	for key_value in auxiliary_chunk_keys:
+		if key_value is Vector2i: coverage_chunks[key_value]=true
+	var publication_chunks := startup_edit_publication_chunks(coverage_chunks.keys())
+	for key_value in publication_chunks:
+		if not key_value is Vector2i: continue
+		startup_auxiliary_publication_chunks[key_value]=true
+		if not published_gameplay_chunks.has(key_value): queue_pending_gameplay_chunk(key_value)
+	# Startup bounds must cover the same authoritative positions used to prove
+	# chunk collision. Sampling only a chunk centre can exclude a steep corner
+	# after native work has already gone idle, leaving a permanent 24/25-ready
+	# startup. The terrain-volume projection remains primary; the generation
+	# facade is retained only for positions without a projected terrain surface.
+	var surface_bounds := startup_collision_surface_cell_bounds(publication_chunks, world_generation, volume_service())
+	if surface_bounds.x > surface_bounds.y:
 		return
-	apply_vertical_cell_bounds(min_surface_cell - 16, max_surface_cell + 16)
-	configure_startup_auxiliary_viewers(chunk_keys, world_generation)
+	apply_vertical_cell_bounds(surface_bounds.x - 16, surface_bounds.y + 16)
+	configure_startup_auxiliary_viewers(publication_chunks, world_generation)
+
+
+func startup_edit_publication_chunks(required_chunks: Array) -> Array:
+	var selected := {}
+	var halo := {}
+	for key_value in required_chunks:
+		if not key_value is Vector2i: continue
+		var key: Vector2i = key_value
+		selected[key]=true
+		for dz in range(-1,2):
+			for dx in range(-1,2): halo[key+Vector2i(dx,dz)]=true
+	var service = volume_service()
+	if service != null:
+		var edits_value = service.get("edited_cells")
+		if edits_value is Dictionary:
+			for cell_value in (edits_value as Dictionary):
+				if not cell_value is Vector3i: continue
+				var state: Dictionary = edits_value[cell_value] if edits_value[cell_value] is Dictionary else {}
+				if not state_affects_terrain_mesh(service,state): continue
+				var edit_chunk := game_chunk_for_cell(cell_value)
+				if halo.has(edit_chunk): selected[edit_chunk]=true
+	var result: Array[Vector2i] = []
+	for key_value in selected: result.append(key_value)
+	result.sort_custom(func(a: Vector2i,b: Vector2i): return a.x < b.x if a.x != b.x else a.y < b.y)
+	return result
 
 
 func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) -> void:
@@ -533,12 +1055,16 @@ func configure_startup_auxiliary_viewers(chunk_keys: Array, world_generation) ->
 			auxiliary.requires_visuals = true
 			auxiliary.requires_collisions = true
 			auxiliary.set_meta("startup_auxiliary", true)
-			site_gate.request_viewer(auxiliary,spec.get("position",Vector3.ZERO),auxiliary.view_distance)
-			startup_auxiliary_viewers.append({
+			var record := {
 				"viewer": auxiliary,
-				"attachedFrame": Engine.get_physics_frames(),
-				"chunks": (spec.get("chunks", []) as Array).duplicate()
-			})
+				"attachedFrame": -1,
+				"requiredDistance": float(spec.get("requiredDistance", auxiliary.view_distance)),
+				"chunks": (spec.get("chunks", []) as Array).duplicate(),
+				"secondaryKind": "startup"
+			}
+			startup_auxiliary_viewers.append(record)
+			_stage_secondary_viewer("startup:%d" % auxiliary.get_instance_id(), "startup", auxiliary,
+				spec.get("position", Vector3.ZERO), auxiliary.view_distance, record.chunks, 1)
 			startup_auxiliary_viewers_created += 1
 
 
@@ -578,7 +1104,7 @@ func connected_gameplay_chunk_components(chunk_keys: Array) -> Array:
 func primary_viewer_covers_component(component: Array) -> bool:
 	if viewer == null or not is_instance_valid(viewer) or not viewer.is_inside_tree() or component.is_empty():
 		return false
-	var available_distance := maxf(0.0, float(viewer.view_distance) - CELL * 4.0)
+	var available_distance := maxf(0.0, float(viewer.view_distance) - CELL * float(COLLISION_PUBLICATION_VIEWER_MARGIN_CELLS))
 	var viewer_xz := Vector2(viewer.global_position.x, viewer.global_position.z)
 	var half_chunk_diagonal := float(GAME_CHUNK_SIZE) * CELL * sqrt(2.0) * 0.5
 	for key_value in component:
@@ -596,9 +1122,7 @@ func primary_viewer_covers_component(component: Array) -> bool:
 func _viewer_covers_chunk_at(native_viewer: VoxelViewer, chunk_key: Vector2i, position: Vector3) -> bool:
 	if not is_instance_valid(native_viewer) or not native_viewer.is_inside_tree() or native_viewer.is_queued_for_deletion(): return false
 	if not native_viewer.requires_collisions or not native_viewer.requires_visuals: return false
-	var center := (Vector2(chunk_key)+Vector2.ONE*0.5)*float(GAME_CHUNK_SIZE)*CELL
-	var distance := Vector2(position.x,position.z).distance_to(center)
-	return distance+float(GAME_CHUNK_SIZE)*CELL*sqrt(2.0)*0.5 <= float(native_viewer.view_distance)-CELL*4.0
+	return viewer_position_covers_gameplay_chunk(chunk_key,position,int(native_viewer.view_distance))
 
 func _retained_viewer_covers_chunk(chunk_key: Vector2i) -> bool:
 	var group := Vector2i(floori(float(chunk_key.x)/2.0),floori(float(chunk_key.y)/2.0))
@@ -609,6 +1133,13 @@ func _retained_viewer_covers_chunk(chunk_key: Vector2i) -> bool:
 
 func _preserve_retained_primary_coverage(next_position: Vector3) -> bool:
 	if not is_instance_valid(viewer) or not viewer.is_inside_tree(): return true
+	# During ordinary play the primary viewer is the single native owner of the
+	# player's local terrain. Retained demand must not clone its complete radius
+	# behind every grid move; the collision proof remains fail-closed until the
+	# primary's current local receipt exists. Startup/replacement loading keeps
+	# its explicit handoff lifecycle below.
+	if main != null and not bool(main.get("startup_loading_active")) and not bool(main.get("runtime_loading_active")):
+		return true
 	var old_position := viewer.global_position
 	if next_position == old_position: return true
 	var held: Array = []
@@ -624,20 +1155,25 @@ func _preserve_retained_primary_coverage(next_position: Vector3) -> bool:
 			if not _viewer_covers_chunk_at(auxiliary,key,auxiliary.global_position): continue
 			# Keep the old primary footprint until its equivalent owner has
 			# participated in two physics frames. No new terrain area is requested.
-			if Engine.get_physics_frames()-int(record.get("attachedFrame",Engine.get_physics_frames())) < 2: return false
+			if not secondary_viewer_handoff_mature(record, Engine.get_physics_frames()): return false
 			covered = true
 			break
 		if not covered: needs_handoff = true
 	if not needs_handoff: return true
+	# The old primary stays authoritative until one bounded secondary handoff is
+	# attached and has survived physics.  Do not clone a 96m viewer on every
+	# rendered movement update while the first clone is still pending.
+	if _primary_handoff_pending_or_covering(held):
+		return false
 	var bridge := VoxelViewer.new()
 	bridge.name = "RetainedPrimaryHandoff"
 	bridge.requires_visuals = true
 	bridge.requires_collisions = true
-	if not site_gate.request_viewer(bridge,old_position,viewer.view_distance):
-		site_gate.remove_viewer(bridge)
-		bridge.queue_free()
-		return false
-	startup_auxiliary_viewers.append({"viewer":bridge,"chunks":held,"attachedFrame":Engine.get_physics_frames(),"primaryHandoff":true})
+	var record := {"viewer": bridge, "chunks": held, "attachedFrame": -1,
+		"primaryHandoff": true, "secondaryKind": "handoff"}
+	startup_auxiliary_viewers.append(record)
+	_stage_secondary_viewer("handoff:%d" % bridge.get_instance_id(), "handoff", bridge,
+		old_position, viewer.view_distance, held, 0)
 	startup_auxiliary_cleanup_requested = true
 	return false
 
@@ -658,6 +1194,11 @@ func auxiliary_viewer_specs_for_component(component: Array, world_generation) ->
 		if not spec.is_empty(): specs.append(spec)
 	return specs
 
+static func collision_publication_view_distance_requirement(center_distance: float) -> int:
+	var half_chunk_diagonal := float(GAME_CHUNK_SIZE) * CELL * sqrt(2.0) * 0.5
+	return ceili(maxf(0.0, center_distance) + half_chunk_diagonal \
+		+ CELL * float(COLLISION_PUBLICATION_VIEWER_MARGIN_CELLS))
+
 func auxiliary_viewer_spec_for_chunks(chunks: Array, world_generation) -> Dictionary:
 	if chunks.is_empty() or world_generation==null: return {}
 	var min_chunk := Vector2i(2147483000,2147483000)
@@ -673,19 +1214,31 @@ func auxiliary_viewer_spec_for_chunks(chunks: Array, world_generation) -> Dictio
 	var minimum := Vector2(float(min_chunk.x * GAME_CHUNK_SIZE) * CELL, float(min_chunk.y * GAME_CHUNK_SIZE) * CELL)
 	var maximum := Vector2(float((max_chunk.x + 1) * GAME_CHUNK_SIZE) * CELL, float((max_chunk.y + 1) * GAME_CHUNK_SIZE) * CELL)
 	var center_xz := (minimum + maximum) * 0.5
-	var half_chunk_diagonal := float(GAME_CHUNK_SIZE)*CELL*sqrt(2.0)*0.5
 	var required_distance := 0.0
 	for chunk_key: Vector2i in valid_chunks:
 		var chunk_center := (Vector2(chunk_key)+Vector2.ONE*0.5)*float(GAME_CHUNK_SIZE)*CELL
-		required_distance = maxf(required_distance,center_xz.distance_to(chunk_center)+half_chunk_diagonal+CELL*4.0)
+		required_distance = maxf(required_distance,
+			float(collision_publication_view_distance_requirement(center_xz.distance_to(chunk_center))))
 	var maximum_view_distance := int(terrain.max_view_distance) if terrain != null else FINAL_VIEW_DISTANCE
 	if required_distance>float(maximum_view_distance): return {}
 	var center_position := Vector3(center_xz.x,0.0,center_xz.y)
 	center_position.y = float(world_generation.call("surface_y_at",center_position))
-	return {"position":center_position,"viewDistance":ceili(required_distance),"chunks":valid_chunks}
+	return {"position":center_position,"viewDistance":ceili(required_distance),"requiredDistance":required_distance,
+		"collisionPublicationViewerMarginCells":COLLISION_PUBLICATION_VIEWER_MARGIN_CELLS,
+		"nativeMeshBlockSizeCells":NATIVE_MESH_BLOCK_SIZE_CELLS,"chunks":valid_chunks}
 
 
 func clear_startup_auxiliary_viewers() -> void:
+	for identity_value in secondary_viewer_admissions.keys():
+		var identity := String(identity_value)
+		var entry: Dictionary = secondary_viewer_admissions[identity]
+		var kind := String(entry.get("kind", ""))
+		if kind != "startup" and kind != "handoff":
+			continue
+		var queued_auxiliary = entry.get("viewer")
+		if is_instance_valid(queued_auxiliary):
+			queued_auxiliary.queue_free()
+		secondary_viewer_admissions.erase(identity)
 	for record_value in startup_auxiliary_viewers:
 		var record: Dictionary = record_value
 		var auxiliary = record.get("viewer")
@@ -696,6 +1249,7 @@ func clear_startup_auxiliary_viewers() -> void:
 		if site_gate != null: site_gate.remove_viewer(auxiliary)
 		auxiliary.queue_free()
 	startup_auxiliary_viewers.clear()
+	startup_auxiliary_publication_chunks.clear()
 	startup_auxiliary_cleanup_requested = false
 	startup_auxiliary_cleanup_frames_remaining = 0
 
@@ -722,6 +1276,16 @@ func prune_startup_auxiliary_viewers() -> void:
 				and holder.global_position == viewer.global_position: continue
 		var covered := true
 		for key: Vector2i in record.get("chunks",[]):
+			var chunk_bounds := Rect2i(key * GAME_CHUNK_SIZE, Vector2i.ONE * GAME_CHUNK_SIZE)
+			if pending_edit_sections_intersect_bounds(chunk_bounds):
+				covered = false
+				break
+			if startup_auxiliary_publication_chunks.has(key):
+				var auxiliary_receipt: Dictionary=published_gameplay_chunks.get(key,{}) \
+					if published_gameplay_chunks.get(key,{}) is Dictionary else {}
+				if not _collision_chunk_receipt_current(key,auxiliary_receipt):
+					covered=false
+					break
 			if not retained_gameplay_chunks.has(key) and not desired_gameplay_chunks.has(key): continue
 			if not published_gameplay_chunks.has(key):
 				covered = false
@@ -748,6 +1312,7 @@ func startup_auxiliary_viewer_diagnostics() -> Array:
 		var auxiliary = record.get("viewer")
 		if auxiliary == null or not is_instance_valid(auxiliary):
 			continue
+		var attached: bool = auxiliary.is_inside_tree()
 		var keys: Array[String] = []
 		var chunks_value = record.get("chunks", [])
 		if chunks_value is Array:
@@ -756,13 +1321,30 @@ func startup_auxiliary_viewer_diagnostics() -> Array:
 					keys.append("%d,%d" % [key_value.x, key_value.y])
 		diagnostics.append({
 			"name": auxiliary.name,
-			"position": auxiliary.global_position,
+			"attached": attached,
+			# A queued secondary viewer may remain in the bounded diagnostic
+			# inventory for one frame after leaving the tree. Reading its global
+			# transform emits an engine error and turns an otherwise retryable
+			# startup observation into a hard failure.
+			"position": auxiliary.global_position if attached else Vector3.ZERO,
 			"viewDistance": int(auxiliary.view_distance),
+			"requiredDistance": float(record.get("requiredDistance", auxiliary.view_distance)),
+			"collisionPublicationViewerMarginCells": COLLISION_PUBLICATION_VIEWER_MARGIN_CELLS,
+			"nativeMeshBlockSizeCells": NATIVE_MESH_BLOCK_SIZE_CELLS,
 			"requiresVisuals": bool(auxiliary.requires_visuals),
 			"requiresCollisions": bool(auxiliary.requires_collisions),
 			"chunks": keys
 		})
 	return diagnostics
+
+func pending_gameplay_chunk_keys() -> Array[String]:
+	var keys: Array[String] = []
+	for key_value in pending_gameplay_chunks:
+		if key_value is Vector2i:
+			var key: Vector2i = key_value
+			keys.append("%d,%d" % [key.x,key.y])
+	keys.sort()
+	return keys
 
 func vertical_cell_bounds() -> Vector2i:
 	if terrain == null:
@@ -803,12 +1385,18 @@ func _process(delta: float) -> void:
 			terrain.automatic_loading_enabled = false
 			return
 		if site_gate != null: site_gate.advance()
+		observe_native_viewer_workload()
 		update_viewer_position()
 		update_viewer_distance(delta)
 		advance_retained_viewers(delta)
-		prune_startup_auxiliary_viewers()
+		advance_secondary_viewer_admissions()
+		# Discover and apply durable edits while the temporary startup viewers
+		# that make their native sections editable are still attached. Retirement
+		# below also checks pending intersections, so an unloaded tutorial-town
+		# section cannot strand navigation publication after Continue far away.
 		collect_volume_edit_changes()
 		process_pending_edit_sections()
+		prune_startup_auxiliary_viewers()
 		poll_site_traversal_readiness()
 
 func _physics_process(_delta: float) -> void:
@@ -827,6 +1415,7 @@ func begin_shutdown() -> void:
 	authority_ready = false
 	clear_site_traversal_wait()
 	clear_retained_gameplay_chunks()
+	clear_foreground_collision_demand()
 	if site_gate != null: site_gate.stop()
 	set_process(false)
 	set_physics_process(false)
@@ -852,8 +1441,6 @@ func request_final_view_distance_expansion() -> void:
 	view_distance_expansion_requested = true
 	view_distance_expansion_elapsed = 0.0
 	final_expansion_quiet_frames = 0
-	startup_auxiliary_cleanup_requested = true
-	startup_auxiliary_cleanup_frames_remaining = 2
 
 func final_view_distance_expansion_state() -> Dictionary:
 	var pending_native_tasks := voxel_engine_pending_task_count()
@@ -885,6 +1472,10 @@ func final_view_distance_expansion_state() -> Dictionary:
 		"quietFrames": final_expansion_quiet_frames,
 		"requiredQuietFrames": FINAL_EXPANSION_REQUIRED_QUIET_FRAMES
 	}
+	if not secondary_viewer_terminal_failure.is_empty():
+		metrics["secondaryViewerAdmissionFailure"] = secondary_viewer_terminal_failure.duplicate(true)
+		return STARTUP_READINESS_RESULT_SCRIPT.failed(
+			"startup_auxiliary_terrain_admission_failed", {}, [], metrics)
 	if not authority_ready or not generation_context_current():
 		return STARTUP_READINESS_RESULT_SCRIPT.failed("terrain_generation_pending", {}, [], metrics)
 	if final_expansion_quiet_frames >= FINAL_EXPANSION_REQUIRED_QUIET_FRAMES:
@@ -918,7 +1509,7 @@ func update_viewer_distance(delta: float) -> void:
 	view_distance_expansion_elapsed = 0.0
 	var next_distance := mini(FINAL_VIEW_DISTANCE,int(viewer.view_distance)+VIEW_DISTANCE_EXPANSION_STEP)
 	if voxel_engine_pending_task_count() > RETAINED_MAX_PENDING_NATIVE_TASKS: return
-	if site_gate.request_viewer(viewer,viewer.global_position,next_distance):
+	if _request_primary_viewer(viewer.global_position, next_distance, true):
 		expand_vertical_bounds_step()
 
 func voxel_engine_task_stats() -> Dictionary:
@@ -941,13 +1532,177 @@ func voxel_engine_pending_task_count() -> int:
 		total += maxi(0, int(tasks.get(key, 0)))
 	return total
 
+## Accept Main's already-retained player corridor as native-view scheduling
+## input. This never creates terrain demand or certifies collision: movement
+## continues to require a fresh mesh receipt from this runtime.
+func set_foreground_collision_demand(current_position: Vector3, predicted_position: Vector3) -> bool:
+	if not current_position.is_finite() or not predicted_position.is_finite():
+		return false
+	var distance := int(viewer.view_distance) if is_instance_valid(viewer) else STARTUP_VIEW_DISTANCE
+	var target := foreground_viewer_target(current_position,predicted_position,distance)
+	foreground_collision_current = current_position
+	foreground_collision_target = target
+	foreground_collision_demand_revision += 1
+	# WorldStreaming has already retained this forecast. Promote only its existing
+	# collision-publication request so the receipt can be certified as soon as
+	# native meshing completes, rather than waiting for locomotion to hit it.
+	# This does not create terrain demand or weaken the fail-closed motion proof.
+	if target != current_position:
+		_promote_pending_gameplay_chunk_for_collision(gameplay_chunk_for_world_position(target))
+	return target != current_position
+
+func clear_foreground_collision_demand() -> void:
+	foreground_collision_current = Vector3.INF
+	foreground_collision_target = Vector3.INF
+	foreground_collision_demand_revision = 0
+
+static func foreground_viewer_target(current_position: Vector3, predicted_position: Vector3, view_distance: int) -> Vector3:
+	if not current_position.is_finite() or not predicted_position.is_finite():
+		return current_position
+	var current_chunk := gameplay_chunk_for_world_position(current_position)
+	var predicted_chunk := gameplay_chunk_for_world_position(predicted_position)
+	if not viewer_position_covers_gameplay_chunk(current_chunk,predicted_position,view_distance) \
+			or not viewer_position_covers_gameplay_chunk(predicted_chunk,predicted_position,view_distance):
+		return current_position
+	return predicted_position
+
+static func gameplay_chunk_for_world_position(position: Vector3) -> Vector2i:
+	return Vector2i(floori(position.x/(GAME_CHUNK_SIZE*CELL)),floori(position.z/(GAME_CHUNK_SIZE*CELL)))
+
+static func viewer_position_covers_gameplay_chunk(chunk_key: Vector2i, position: Vector3, view_distance: int) -> bool:
+	var center := (Vector2(chunk_key)+Vector2.ONE*0.5)*float(GAME_CHUNK_SIZE)*CELL
+	var distance := Vector2(position.x,position.z).distance_to(center)
+	return distance+float(GAME_CHUNK_SIZE)*CELL*sqrt(2.0)*0.5 \
+		<= float(view_distance)-CELL*float(COLLISION_PUBLICATION_VIEWER_MARGIN_CELLS)
+
 func update_viewer_position() -> void:
 	if viewer == null or main == null:
 		return
 	var player_value = main.get("player")
 	if player_value is Node3D and is_instance_valid(player_value):
-		if not _preserve_retained_primary_coverage((player_value as Node3D).global_position): return
-		site_gate.request_viewer(viewer,(player_value as Node3D).global_position,viewer.view_distance)
+		var player_position: Vector3 = (player_value as Node3D).global_position
+		var target_position := foreground_collision_target if foreground_collision_target.is_finite() \
+				and viewer_position_covers_gameplay_chunk(gameplay_chunk_for_world_position(player_position),foreground_collision_target,int(viewer.view_distance)) \
+				else player_position
+		var request_changed := _primary_viewer_request_changed(target_position, int(viewer.view_distance))
+		var primary_covers_player := _primary_viewer_covers_player_chunk(player_position)
+		var primary_covers_foreground := _primary_viewer_covers_player_chunk(target_position)
+		var player_collision_published := _collision_receipt_current_for_world_position(player_position)
+		var foreground_collision_published := _collision_receipt_current_for_world_position(target_position)
+		var unpublished_request_key := _primary_collision_request_key(
+			player_position,target_position,int(viewer.view_distance))
+		if player_collision_published and foreground_collision_published:
+			primary_unpublished_collision_request_key = ""
+		if primary_viewer_request_is_satisfied(request_changed,primary_covers_player,
+				primary_covers_foreground,player_collision_published,foreground_collision_published):
+			return
+		# Force the first request for an unpublished dependency even inside the
+		# current quantization cell, but do not move the raw forecast every rendered
+		# frame while that exact request remains in flight. SiteGate and the native
+		# viewer retain it until the authoritative receipt is published.
+		if primary_unpublished_request_already_inflight(request_changed,
+				player_collision_published,foreground_collision_published,
+				unpublished_request_key,primary_unpublished_collision_request_key):
+			secondary_viewer_admission_reason = "primary_collision_publication_inflight"
+			return
+		# Coalesce normal player motion to native mesh-block cells.  SiteGate keeps
+		# the latest admitted request; sending a new world position every process
+		# turn otherwise gives the voxel engine an unbounded stream of overlapping
+		# primary footprints.
+		# A forecast is a priority hint, never permission to stack another broad
+		# native footprint behind outstanding terrain work. Reissuing the primary
+		# viewer while generation is busy creates a long-lived plugin backlog and
+		# eventually delays the very collision receipt the hint is meant to help.
+		if primary_viewer_request_may_defer(voxel_engine_pending_task_count(),primary_covers_player,
+				primary_covers_foreground,player_collision_published,foreground_collision_published):
+			secondary_viewer_admission_reason = "primary_position_backpressure"
+			return
+		if not _preserve_retained_primary_coverage(target_position):
+			return
+		# A quantized request may be unchanged while the actual viewer has fallen
+		# behind the player. Coverage is the safety authority in that case, not the
+		# quantization cell, so force exactly this replacement request.
+		if _request_primary_viewer(target_position, int(viewer.view_distance), not request_changed):
+			primary_unpublished_collision_request_key = unpublished_request_key \
+				if not player_collision_published or not foreground_collision_published else ""
+
+
+## An unchanged quantized request is complete only when the existing primary
+## viewer owns current collision receipts for both its player and forecast
+## chunks. Geometric radius alone is not publication: native work can still be
+## outstanding inside that footprint.
+static func primary_viewer_request_is_satisfied(request_changed: bool,
+		covers_player: bool, covers_foreground: bool,
+		player_collision_published: bool, foreground_collision_published: bool) -> bool:
+	return not request_changed and covers_player and covers_foreground \
+		and player_collision_published and foreground_collision_published
+
+
+static func primary_unpublished_request_already_inflight(request_changed: bool,
+		player_collision_published: bool, foreground_collision_published: bool,
+		request_key: String, active_request_key: String) -> bool:
+	return not request_changed \
+		and (not player_collision_published or not foreground_collision_published) \
+		and not request_key.is_empty() and request_key == active_request_key
+
+
+## Native backlog may defer an overlapping broad-footprint replacement only
+## while the existing primary viewer covers both the capsule and its already-
+## admitted foreground collision dependency, and both authoritative collision
+## receipts are current. Deferring based on geometric coverage alone leaves an
+## unpublished forecast reactive at the next gameplay-chunk seam.
+static func primary_viewer_request_may_defer(pending_native_tasks: int,
+		covers_player: bool, covers_foreground: bool,
+		player_collision_published: bool, foreground_collision_published: bool) -> bool:
+	return pending_native_tasks > SECONDARY_VIEWER_MAX_PENDING_NATIVE_TASKS \
+		and covers_player and covers_foreground \
+		and player_collision_published and foreground_collision_published
+
+func _primary_viewer_request_cell_for(position: Vector3) -> Vector2i:
+	var span := CELL * float(PRIMARY_VIEWER_REQUEST_CELL_SIZE)
+	return Vector2i(floori(position.x / span), floori(position.z / span))
+
+func _primary_viewer_request_changed(position: Vector3, distance: int) -> bool:
+	return _primary_viewer_request_cell_for(position) != primary_viewer_request_cell \
+			or distance != primary_viewer_request_distance
+
+
+func _primary_collision_request_key(player_position: Vector3, target_position: Vector3,
+		distance: int) -> String:
+	var player_chunk := gameplay_chunk_for_world_position(player_position)
+	var foreground_chunk := gameplay_chunk_for_world_position(target_position)
+	var request_cell := _primary_viewer_request_cell_for(target_position)
+	return "%d,%d|%d,%d|%d,%d|%d" % [
+		player_chunk.x,player_chunk.y,foreground_chunk.x,foreground_chunk.y,
+		request_cell.x,request_cell.y,distance]
+
+func _primary_viewer_covers_player_chunk(position: Vector3) -> bool:
+	# setup() requests the initial footprint before the viewer is attached to the
+	# scene tree.  It has no meaningful world transform at that point, so treat
+	# it as uncovered and let the ordinary initial request establish coverage.
+	if viewer == null or not is_instance_valid(viewer) or not viewer.is_inside_tree():
+		return false
+	var player_chunk := gameplay_chunk_for_world_position(position)
+	return _viewer_covers_chunk_at(viewer, player_chunk, viewer.global_position)
+
+
+func _collision_receipt_current_for_world_position(position: Vector3) -> bool:
+	var chunk_key := gameplay_chunk_for_world_position(position)
+	var receipt: Dictionary = published_gameplay_chunks.get(chunk_key,{}) \
+		if published_gameplay_chunks.get(chunk_key,{}) is Dictionary else {}
+	return _collision_chunk_receipt_current(chunk_key,receipt)
+
+func _request_primary_viewer(position: Vector3, distance: int, force := false) -> bool:
+	if viewer == null or site_gate == null:
+		return false
+	if not force and not _primary_viewer_request_changed(position, distance):
+		return true
+	if not site_gate.request_viewer(viewer, position, distance):
+		return false
+	_record_native_viewer_request("primary", distance, position)
+	primary_viewer_request_cell = _primary_viewer_request_cell_for(position)
+	primary_viewer_request_distance = distance
+	return true
 
 func required_classes_available() -> bool:
 	for class_name_value in ["VoxelTerrain", "VoxelViewer", "VoxelMesherTransvoxel", "VoxelFormat"]:
@@ -961,6 +1716,51 @@ func on_mesh_block_entered(block_position: Vector3i) -> void:
 
 func on_mesh_block_exited(block_position: Vector3i) -> void:
 	published_mesh_blocks.erase(block_position)
+	invalidate_gameplay_publications_for_mesh_block(block_position)
+
+static func native_mesh_block_bounds(block_position: Vector3i) -> AABB:
+	return AABB(Vector3(block_position * NATIVE_MESH_BLOCK_SIZE_CELLS),
+		Vector3.ONE * float(NATIVE_MESH_BLOCK_SIZE_CELLS))
+
+static func gameplay_chunks_for_native_mesh_block(block_position: Vector3i) -> Array[Vector2i]:
+	var first_cell := Vector2i(block_position.x, block_position.z) * NATIVE_MESH_BLOCK_SIZE_CELLS
+	var last_cell := first_cell + Vector2i.ONE * (NATIVE_MESH_BLOCK_SIZE_CELLS - 1)
+	var first_chunk := Vector2i(
+		floori(float(first_cell.x) / float(GAME_CHUNK_SIZE)),
+		floori(float(first_cell.y) / float(GAME_CHUNK_SIZE)))
+	var last_chunk := Vector2i(
+		floori(float(last_cell.x) / float(GAME_CHUNK_SIZE)),
+		floori(float(last_cell.y) / float(GAME_CHUNK_SIZE)))
+	var result: Array[Vector2i] = []
+	for z in range(first_chunk.y, last_chunk.y + 1):
+		for x in range(first_chunk.x, last_chunk.x + 1):
+			result.append(Vector2i(x, z))
+	return result
+
+func invalidate_gameplay_publications_for_mesh_block(block_position: Vector3i) -> Array[Vector2i]:
+	var retired_bounds := native_mesh_block_bounds(block_position)
+	var invalidated: Array[Vector2i] = []
+	# A 16-cell native block overlaps at most four 28-cell gameplay chunks.
+	# Avoid scanning every retained receipt on each streaming exit.
+	for chunk_key in gameplay_chunks_for_native_mesh_block(block_position):
+		if not published_gameplay_chunks.has(chunk_key):
+			continue
+		var receipt_value = published_gameplay_chunks.get(chunk_key, {})
+		if not (receipt_value is Dictionary):
+			continue
+		var receipt: Dictionary = receipt_value
+		var mesh_area_value = receipt.get("meshArea")
+		if not (mesh_area_value is AABB) or not (mesh_area_value as AABB).intersects(retired_bounds):
+			continue
+		published_gameplay_chunks.erase(chunk_key)
+		invalidated.append(chunk_key)
+		notify_navigation_chunk_unloaded(chunk_key)
+		if desired_gameplay_chunks.has(chunk_key) or retained_gameplay_chunks.has(chunk_key) \
+				or startup_auxiliary_publication_chunks.has(chunk_key):
+			queue_pending_gameplay_chunk(chunk_key)
+	invalidated.sort_custom(func(a: Vector2i,b: Vector2i):
+		return a.x < b.x if a.x != b.x else a.y < b.y)
+	return invalidated
 
 func stats() -> Dictionary:
 	return {
@@ -970,6 +1770,14 @@ func stats() -> Dictionary:
 		"retainedActivationReason":retained_activation_reason,
 		"retainedLastPendingNativeTasks":retained_last_pending_tasks,
 		"retainedActivationTaskLimit":RETAINED_MAX_PENDING_NATIVE_TASKS,
+		"secondaryViewerPendingAdmissions":secondary_viewer_admissions.size(),
+		"secondaryViewerAdmissionReason":secondary_viewer_admission_reason,
+		"secondaryViewerPeakPendingNativeTasks":secondary_viewer_peak_pending_tasks,
+		"secondaryViewerAttachCounts":secondary_viewer_attach_counts.duplicate(),
+		"secondaryViewerRuntimeMeasurementStarted":secondary_viewer_runtime_measurement_started,
+		"secondaryViewerRuntimePeakPendingNativeTasks":secondary_viewer_runtime_peak_pending_tasks,
+		"secondaryViewerRuntimeAttachCounts":secondary_viewer_runtime_attach_counts.duplicate(),
+		"secondaryViewerAdmissionFailure":secondary_viewer_terminal_failure.duplicate(true),
 		"retainedActivationIntervalSeconds":RETAINED_ACTIVATION_INTERVAL_SECONDS,
 		"retainedViewDistance":RETAINED_VIEW_DISTANCE,
 		"citadelAdmission":main.structure_system.citadel_terrain_admission.stats() if main != null and main.structure_system != null else {},
@@ -983,9 +1791,17 @@ func stats() -> Dictionary:
 		"desiredGameplayChunks": desired_gameplay_chunks.size(),
 		"pendingGameplayChunks": pending_gameplay_chunks.size(),
 		"pendingGameplayChunkQueue": pending_gameplay_chunk_order.size(),
+		"pendingGameplayChunkKeys": pending_gameplay_chunk_keys(),
 		"publishedGameplayChunks": published_gameplay_chunks.size(),
 		"collisionProbeAttempts": collision_probe_attempts,
 		"collisionProbePasses": collision_probe_passes,
+		"collisionPriorityPromotions": collision_priority_promotions,
+		"primaryViewerRequestCellSize": PRIMARY_VIEWER_REQUEST_CELL_SIZE,
+		"foregroundCollisionDemandRevision": foreground_collision_demand_revision,
+		"foregroundCollisionCurrent": foreground_collision_current,
+		"foregroundCollisionTarget": foreground_collision_target,
+		"foregroundCollisionLeadActive": foreground_collision_target.is_finite() and foreground_collision_target != foreground_collision_current,
+		"nativeViewerWorkloads": native_viewer_workloads.duplicate(true),
 		"startupViewDistance": STARTUP_VIEW_DISTANCE,
 		"currentViewDistance": int(viewer.view_distance) if viewer != null and is_instance_valid(viewer) else 0,
 		"finalViewDistance": FINAL_VIEW_DISTANCE,
@@ -1058,16 +1874,29 @@ func queue_edit_change(cell: Vector3i, state: Dictionary, signature: String) -> 
 	# Invalidate only collision publications whose meshing halo can contain this
 	# edit. This happens when the durable revision is observed, before the native
 	# edit is pasted, so locomotion cannot reuse a stale local receipt.
-	var affected_chunks := {}
-	for dz in [-2, 0, 2]:
-		for dx in [-2, 0, 2]:
-			affected_chunks[game_chunk_for_cell(cell + Vector3i(dx, 0, dz))] = true
-	for chunk_key: Vector2i in affected_chunks:
+	for chunk_key in gameplay_chunks_for_edit_cell(cell):
 		gameplay_chunk_edit_revisions[chunk_key] = int(gameplay_chunk_edit_revisions.get(chunk_key, 0)) + 1
 		if published_gameplay_chunks.erase(chunk_key):
 			notify_navigation_chunk_unloaded(chunk_key)
-		if desired_gameplay_chunks.has(chunk_key):
+		if gameplay_chunk_publication_owned(chunk_key):
 			queue_pending_gameplay_chunk(chunk_key)
+
+func gameplay_chunks_for_edit_cell(cell: Vector3i) -> Array[Vector2i]:
+	var edit_bounds := Rect2i(Vector2i(cell.x, cell.z), Vector2i.ONE)
+	var center_chunk := game_chunk_for_cell(cell)
+	var result: Array[Vector2i] = []
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			var chunk_key := center_chunk + Vector2i(dx, dz)
+			var collision_bounds := Rect2i(
+				chunk_key * GAME_CHUNK_SIZE,
+				Vector2i.ONE * GAME_CHUNK_SIZE
+			).grow(2)
+			if collision_bounds.intersects(edit_bounds):
+				result.append(chunk_key)
+	result.sort_custom(func(a: Vector2i, b: Vector2i):
+		return a.x < b.x if a.x != b.x else a.y < b.y)
+	return result
 
 func process_pending_edit_sections() -> void:
 	if terrain == null or pending_edit_sections.is_empty():
@@ -1122,7 +1951,8 @@ func apply_edit_batch(changes: Dictionary) -> bool:
 	var affected_game_chunks := {}
 	for cell_value in changes.keys():
 		var cell: Vector3i = cell_value
-		affected_game_chunks[game_chunk_for_cell(cell)] = true
+		for chunk_key in gameplay_chunks_for_edit_cell(cell):
+			affected_game_chunks[chunk_key] = true
 	for chunk_value in affected_game_chunks.keys():
 		request_gameplay_chunk_republication(chunk_value)
 	return true
@@ -1133,14 +1963,14 @@ func request_gameplay_chunk_publication(chunk_key: Vector2i) -> void:
 		queue_pending_gameplay_chunk(chunk_key)
 
 func request_gameplay_chunk_republication(chunk_key: Vector2i) -> void:
-	if not desired_gameplay_chunks.has(chunk_key):
+	if not gameplay_chunk_publication_owned(chunk_key):
 		return
 	if published_gameplay_chunks.erase(chunk_key):
 		notify_navigation_chunk_unloaded(chunk_key)
 	queue_pending_gameplay_chunk(chunk_key)
 
 func release_gameplay_chunk(chunk_key: Vector2i) -> void:
-	if retained_gameplay_chunks.has(chunk_key): return
+	if retained_gameplay_chunks.has(chunk_key) or startup_auxiliary_publication_chunks.has(chunk_key): return
 	desired_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunks.erase(chunk_key)
 	pending_gameplay_chunk_order.erase(chunk_key)
@@ -1152,6 +1982,28 @@ func queue_pending_gameplay_chunk(chunk_key: Vector2i) -> void:
 		return
 	pending_gameplay_chunks[chunk_key] = true
 	pending_gameplay_chunk_order.append(chunk_key)
+
+func gameplay_chunk_publication_owned(chunk_key: Vector2i) -> bool:
+	return desired_gameplay_chunks.has(chunk_key) \
+		or retained_gameplay_chunks.has(chunk_key) \
+		or startup_auxiliary_publication_chunks.has(chunk_key)
+
+func _promote_pending_gameplay_chunk_for_collision(chunk_key: Vector2i) -> bool:
+	if not pending_gameplay_chunks.has(chunk_key):
+		return false
+	var index := pending_gameplay_chunk_order.find(chunk_key)
+	if index < 0:
+		# Preserve retryability if a stale queue shell was repaired while the
+		# pending authority remained live. This creates no new terrain demand.
+		pending_gameplay_chunk_order.push_front(chunk_key)
+		collision_priority_promotions += 1
+		return true
+	if index == 0:
+		return false
+	pending_gameplay_chunk_order.remove_at(index)
+	pending_gameplay_chunk_order.push_front(chunk_key)
+	collision_priority_promotions += 1
+	return true
 
 func gameplay_chunks_published(chunk_keys: Array) -> bool:
 	for key_value in chunk_keys:
@@ -1185,7 +2037,7 @@ func gameplay_publication_diagnostics(chunk_keys: Array) -> Dictionary:
 	return {
 		"configuredSeed": configured_seed,
 		"authorityReady": authority_ready,
-		"viewerPosition": viewer.global_position if viewer != null and is_instance_valid(viewer) else Vector3.ZERO,
+		"viewerPosition": viewer.global_position if viewer != null and is_instance_valid(viewer) and viewer.is_inside_tree() else Vector3.ZERO,
 		"viewerRequiresVisuals": bool(viewer.requires_visuals) if viewer != null and is_instance_valid(viewer) else false,
 		"viewerRequiresCollisions": bool(viewer.requires_collisions) if viewer != null and is_instance_valid(viewer) else false,
 		"startupAuxiliaryViewers": startup_auxiliary_viewer_diagnostics(),
@@ -1209,8 +2061,19 @@ func process_pending_gameplay_chunk_publications() -> void:
 		var chunk_key: Vector2i = pending_gameplay_chunk_order.pop_front()
 		if not pending_gameplay_chunks.has(chunk_key):
 			continue
-		if not desired_gameplay_chunks.has(chunk_key):
+		if not gameplay_chunk_publication_owned(chunk_key):
 			pending_gameplay_chunks.erase(chunk_key)
+			continue
+		# Durable edit state invalidates the old receipt before the native voxel
+		# paste is necessarily available. Do not certify collision from that
+		# in-between mesh. The two-cell halo matches queue_edit_change's mesh
+		# invalidation footprint, and the pending entry remains retryable.
+		var chunk_collision_bounds := Rect2i(
+			chunk_key * GAME_CHUNK_SIZE,
+			Vector2i.ONE * GAME_CHUNK_SIZE
+		).grow(2)
+		if pending_edit_sections_intersect_bounds(chunk_collision_bounds):
+			pending_gameplay_chunk_order.append(chunk_key)
 			continue
 		collision_probe_attempts += 1
 		var proof := collision_proof_for_game_chunk(chunk_key)
@@ -1228,16 +2091,7 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 	var volume = volume_service()
 	if volume == null or not volume.has_method("terrain_mesh_surface_projection_for_cell"):
 		return {"passed": false, "reason": "terrain_volume_projection_missing"}
-	var origin_x := float(chunk_key.x * GAME_CHUNK_SIZE) * CELL
-	var origin_z := float(chunk_key.y * GAME_CHUNK_SIZE) * CELL
-	var span := float(GAME_CHUNK_SIZE) * CELL
-	var offsets := [
-		Vector2(0.50, 0.50),
-		Vector2(0.22, 0.22),
-		Vector2(0.78, 0.22),
-		Vector2(0.22, 0.78),
-		Vector2(0.78, 0.78)
-	]
+	var probe_positions := gameplay_chunk_collision_probe_positions(chunk_key)
 	var hits := 0
 	var matched := 0
 	var expected_surfaces := 0
@@ -1245,10 +2099,9 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 	var min_surface_cell_y := 2147483000
 	var max_surface_cell_y := -2147483000
 	var space := get_world_3d().direct_space_state
-	for offset_value in offsets:
-		var offset: Vector2 = offset_value
-		var x := origin_x + span * offset.x
-		var z := origin_z + span * offset.y
+	for probe_position in probe_positions:
+		var x := probe_position.x
+		var z := probe_position.z
 		var cell := Vector3i(floori(x / CELL), 0, floori(z / CELL))
 		var projection: Dictionary = volume.call("terrain_mesh_surface_projection_for_cell", cell)
 		if not bool(projection.get("found", false)):
@@ -1299,14 +2152,14 @@ func collision_proof_for_game_chunk(chunk_key: Vector2i) -> Dictionary:
 		"hits": hits,
 		"expectedTerrainSurfaces": expected_surfaces,
 		"surfaceMatches": matched,
-		"heightfieldComparisonPassed": matched == offsets.size(),
+		"heightfieldComparisonPassed": matched == probe_positions.size(),
 		"collisionAuthority": "VoxelTerrain",
 		"configuredSeed": configured_seed,
 		"collisionOwnerGeneration": collision_owner_generation,
 		"terrainInstanceId": terrain.get_instance_id(),
 		"chunk": chunk_key,
 		"chunkEditRevision": int(gameplay_chunk_edit_revisions.get(chunk_key, 0)),
-		"probeCount": offsets.size(),
+		"probeCount": probe_positions.size(),
 		"samples": samples
 	}
 
@@ -1416,7 +2269,12 @@ func spawn_presentation_state(world_position: Vector3) -> Dictionary:
 	if viewer == null or not viewer.requires_visuals or get_viewport().get_camera_3d() == null:
 		return {"ready":false,"reason":"terrain_visual_view_pending"}
 	var key := Vector2i(floori(world_position.x/(GAME_CHUNK_SIZE*CELL)),floori(world_position.z/(GAME_CHUNK_SIZE*CELL)))
-	if not published_gameplay_chunks.has(key) or pending_gameplay_chunks.has(key) or not pending_edit_sections.is_empty():
+	# Visual readiness is a local proof for the player chunk. Keep its mesh
+	# collision halo conservative, but do not turn a distant edit awaiting native
+	# residency into an indefinite loading screen at the spawn point.
+	var presentation_bounds := Rect2i(key * GAME_CHUNK_SIZE, Vector2i.ONE * GAME_CHUNK_SIZE).grow(1)
+	if not published_gameplay_chunks.has(key) or pending_gameplay_chunks.has(key) \
+			or pending_edit_sections_intersect_bounds(presentation_bounds):
 		return {"ready":false,"reason":"spawn_chunk_publication_pending","chunk":key}
 	var proof := collision_mesh_ready_for_body_position(world_position,0.42)
 	return {"ready":bool(proof.get("passed",false)),"reason":"spawn_mesh_publication","chunk":key,
@@ -1499,7 +2357,7 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 	site_traversal_pending_request = request
 	site_traversal_last_poll_usec = now_usec
 	if not _local_collision_identity_current():
-		var invalid := _retain_site_traversal_wait({"passed":false,"reason":"terrain_collision_owner_stale","sampleCount":0,"chunkCount":0}, "Waiting for terrain collision…")
+		var invalid := _retain_site_traversal_wait({"passed":false,"reason":"terrain_collision_owner_stale","sampleCount":0,"chunkCount":0})
 		_record_motion_proof(monitor,motion_started,0,0,false)
 		return invalid
 	var displacement := to_position - from_position
@@ -1509,7 +2367,7 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 	if sample_segments + 1 > MOTION_PROOF_MAX_SAMPLES:
 		var split := _retain_site_traversal_wait({"passed":false,"reason":"motion_sweep_requires_progression",
 			"sampleCount":0,"chunkCount":0,"requestedSamples":sample_segments+1,
-			"maximumSamples":MOTION_PROOF_MAX_SAMPLES}, "Waiting for terrain collision…")
+			"maximumSamples":MOTION_PROOF_MAX_SAMPLES})
 		_record_motion_proof(monitor,motion_started,0,0,false)
 		return split
 	var chunk_started := Time.get_ticks_usec()
@@ -1518,8 +2376,12 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 	for chunk_key: Vector2i in required_chunks:
 		var receipt: Dictionary = published_gameplay_chunks.get(chunk_key,{}) if published_gameplay_chunks.get(chunk_key,{}) is Dictionary else {}
 		if not _collision_chunk_receipt_current(chunk_key,receipt):
+			# This is an exact authoritative movement dependency, not speculative
+			# prefetch. Keep the fail-closed result, but let its already-retained
+			# collision publication move ahead of unrelated background receipts.
+			_promote_pending_gameplay_chunk_for_collision(chunk_key)
 			var missing := _retain_site_traversal_wait({"passed":false,"reason":"collision_chunk_publication_pending",
-				"missingChunk":chunk_key,"sampleCount":0,"chunkCount":required_chunks.size()}, "Waiting for terrain collision…")
+				"missingChunk":chunk_key,"sampleCount":0,"chunkCount":required_chunks.size()})
 			_record_motion_proof(monitor,motion_started,0,required_chunks.size(),false)
 			return missing
 	var proofs: Array = []
@@ -1546,7 +2408,7 @@ func collision_proof_for_motion(from_position: Vector3, to_position: Vector3, fo
 				"sampleCount": sample_segments + 1,
 				"chunkCount": required_chunks.size(),
 				"proofs": proofs
-			}, "Waiting for terrain collision…")
+			})
 			_record_motion_proof(monitor,motion_started,sample_segments+1,required_chunks.size(),false)
 			return failed
 	clear_site_traversal_wait()
@@ -1598,10 +2460,9 @@ func _record_motion_proof(monitor, started_usec: int, samples: int, chunks: int,
 	monitor.observe_gauge("terrain_motion_proof_last_chunks",float(chunks))
 	monitor.observe_external_duration("terrain_motion_proof",float(Time.get_ticks_usec()-started_usec)/1000.0)
 
-func _retain_site_traversal_wait(proof: Dictionary, message: String) -> Dictionary:
+func _retain_site_traversal_wait(proof: Dictionary) -> Dictionary:
 	site_traversal_waiting = true
 	site_traversal_last_proof = proof.duplicate(true)
-	_site_wait_message(message)
 	return proof
 
 func clear_site_traversal_wait() -> void:
@@ -1617,15 +2478,6 @@ func poll_site_traversal_readiness() -> void:
 	if Time.get_ticks_usec()-site_traversal_last_poll_usec<SITE_TRAVERSAL_READINESS_POLL_USEC: return
 	collision_proof_for_motion(site_traversal_pending_request.from,site_traversal_pending_request.to,
 		float(site_traversal_pending_request.radius))
-
-func _site_wait_message(message: String) -> void:
-	# Ordinary traversal never acquires a modal loading-screen owner.  A true
-	# terrain miss may clamp a step while its retained request advances, but the
-	# player stays in the live world and receives at most a throttled status.
-	var now := Time.get_ticks_usec()
-	if now-last_site_wait_message_usec < 1000000: return
-	last_site_wait_message_usec = now
-	if main != null and main.has_method("show_action_message"): main.show_action_message(message, true)
 
 func voxel_terrain_collider(value) -> bool:
 	if value == null or not is_instance_valid(value):
@@ -1647,12 +2499,16 @@ func notify_navigation_chunk_unloaded(chunk_key: Vector2i) -> void:
 			npc_system.call("notify_navigation_chunk_unloaded", navigation_tile_key)
 
 ## Native terrain publishes 28-cell gameplay chunks, while NPC topology is
-## partitioned into 16-cell navigation tiles. A gameplay chunk can therefore
-## overlap two or three navigation tiles on either axis. Convert through cell
-## bounds so positive, negative and non-aligned chunks invalidate every owner.
+## partitioned into 16-cell navigation tiles whose terrain capture grows one
+## cell beyond the core. Convert the gameplay chunk through that same capture
+## halo so load/unload cannot leave an aligned neighbouring tile stale.
 static func navigation_tile_keys_for_game_chunk(chunk_key: Vector2i) -> Array[Vector2i]:
-	var first_cell := chunk_key * GAME_CHUNK_SIZE
-	var last_cell := first_cell + Vector2i.ONE * (GAME_CHUNK_SIZE - 1)
+	var gameplay_bounds := Rect2i(
+		chunk_key * GAME_CHUNK_SIZE,
+		Vector2i.ONE * GAME_CHUNK_SIZE)
+	var candidate_core_cells := gameplay_bounds.grow(1)
+	var first_cell := candidate_core_cells.position
+	var last_cell := candidate_core_cells.end - Vector2i.ONE
 	var first_tile := Vector2i(
 		floori(float(first_cell.x) / float(NAVIGATION_TILE_CELL_SIZE)),
 		floori(float(first_cell.y) / float(NAVIGATION_TILE_CELL_SIZE))

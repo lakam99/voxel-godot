@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } fro
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { runOwnedProcess } from '../lib/owned-process.mjs';
+import { automatedGodotArguments, runOwnedProcess } from '../lib/owned-process.mjs';
 import { parseWatchdogArguments } from '../run-godot-scene-watchdog.mjs';
 import { requireOwnedWindowsTick } from '../lib/owned-live-clock.mjs';
 import fs from 'node:fs';
@@ -32,6 +32,14 @@ async function until(predicate, milliseconds = 8000) {
 }
 function readJson(file) { try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; } }
 function zero(s) { assert.equal(s.authoritativeZeroProven, true, JSON.stringify(s)); assert.deepEqual(s.finalJobMemberPids, []); }
+
+test('automated Godot launches select the dummy audio driver before project startup', () => {
+  assert.deepEqual(automatedGodotArguments('C:/Godot/Godot_v4.6_console.exe', ['--path', 'project']),
+    ['--audio-driver', 'Dummy', '--path', 'project']);
+  assert.deepEqual(automatedGodotArguments('C:/Godot/Godot.exe', ['--audio-driver', 'WASAPI', '--path', 'project']),
+    ['--audio-driver', 'WASAPI', '--path', 'project']);
+  assert.deepEqual(automatedGodotArguments(process.execPath, ['fixture.mjs']), ['fixture.mjs']);
+});
 
 test('synthetic live replacement contention retries briefly but persistent failure still terminates', { skip: process.platform !== 'win32' }, async () => {
   for (const failures of [2, Infinity]) {

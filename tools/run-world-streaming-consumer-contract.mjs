@@ -7,6 +7,7 @@ cli(async () => {
   prepare(c, 'userdata', false);
   const files = [
     'scripts/testing/buildings/WorldStreamingConsumerContract.gd',
+    'scripts/world/ActorPhysicalStreamingDemand.gd',
     'scripts/world/WorldStreamingCoordinator.gd',
     'scripts/world/GeneratedContentViewPriority.gd',
     'scripts/world/RegionDemandSet.gd',

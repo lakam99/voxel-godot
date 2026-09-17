@@ -3,6 +3,7 @@ extends SceneTree
 const Urban = preload("res://scripts/buildings/CitadelUrbanPocComposer.gd")
 const Blueprint = preload("res://scripts/buildings/BuildingBlueprint.gd")
 const Declaration = preload("res://scripts/buildings/FacadeApertureDeclaration.gd")
+const Math = preload("res://scripts/buildings/ConstructionSeamMath.gd")
 var checks: Dictionary = {}
 func _initialize() -> void: call_deferred("_run")
 func _run() -> void:
@@ -36,9 +37,15 @@ func _run() -> void:
 			var part = a.parts[part_index]
 			identity = identity and part.id == "fixture_%03d" % part_index and part.recipe.variation == 0.108 + float(posmod(part_index, 5) - 2) * 0.004 and part.material_id == "painted_brick_cream" and part.collision_enabled
 		checks["partition_identity_%d" % index] = identity
-	for bounds in [Vector2(7.609762382507324, 8.659762382507324), Vector2(-21.99427, -20.83427), Vector2(0, 1), Vector2(-1, 0)]:
+	# Regression: at Citadel world-scale coordinates the initially rounded
+	# float32 interval may expand both source faces.  A valid inward
+	# representation must still be found without accepting a tolerance.
+	for bounds in [Vector2(7.609762382507324, 8.659762382507324), Vector2(-21.99427, -20.83427), Vector2(-36.42928, -35.68705), Vector2(0, 1), Vector2(-1, 0)]:
 		var result := Urban.FacadePartition.interval(bounds.x, bounds.y)
 		checks["interval_%d" % checks.size()] = result.ready and result.size > 0 and result.center - result.size * 0.5 >= bounds.x and result.center + result.size * 0.5 <= bounds.y
+		if result.ready:
+			var larger := Math.next_float32_up(float(result.size))
+			checks["interval_maximal_for_center_%d" % checks.size()] = not Urban.FacadePartition._fits_source_faces(Vector2(result.center, larger), bounds.x, bounds.y)
 	for invalid in [Vector2(1, 0), Vector2(1, 1), Vector2(NAN, 1), Vector2(0, INF), Vector2(0, 0.019), Vector2(16777216, 16777218)]:
 		checks["invalid_%d" % checks.size()] = not Urban.FacadePartition.interval(invalid.x, invalid.y).ready
 	for recessed in [false, true]:

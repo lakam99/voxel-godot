@@ -329,6 +329,12 @@ func select_dig_column() -> bool:
 				break
 		if not usable:
 			continue
+		# This visual acceptance explicitly proves a material transition below the
+		# surface. A valid homogeneous soil column is ordinary terrain, but cannot
+		# satisfy that narrower evidence claim after only two real digs.
+		var top_material := String(planned[0].get("material", ""))
+		if not planned.slice(1, 4).any(func(entry: Dictionary) -> bool: return String(entry.get("material", "")) != top_material):
+			continue
 		test_column = column
 		top_cell = cell
 		surface_position = cell_center(top_cell + Vector3i(0, 1, 0))

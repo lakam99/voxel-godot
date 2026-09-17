@@ -22,6 +22,7 @@ const STREAM_PATHS := {
 }
 
 var enabled := true
+var automated_playback_muted := false
 var player: AudioStreamPlayer
 var sfx_players: Array[AudioStreamPlayer] = []
 var sfx_cursor := 0
@@ -69,6 +70,9 @@ var stream_build_cancelled := false
 var stream_build_timings: Array[Dictionary] = []
 
 func _ready() -> void:
+    automated_playback_muted = automated_test_playback_muted()
+    if automated_playback_muted:
+        mute_master_bus_for_automated_run()
     set_process(false)
     for i in range(SFX_POOL_SIZE):
         var sfx_player := AudioStreamPlayer.new()
@@ -104,6 +108,29 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
     shutdown_audio()
+
+static func automated_test_playback_muted() -> bool:
+    # Automated runs retain audio state and player activity for behavioral
+    # assertions, but must never produce audible output on the host machine.
+    if OS.get_environment("VOXEL_DISABLE_AUDIO_PLAYBACK").strip_edges() == "1":
+        return true
+    if OS.has_feature("headless") or DisplayServer.get_name().to_lower() == "headless":
+        return true
+    for flag in [
+        "VOXEL_PLAYTEST",
+        "VOXEL_NORMAL_RUNTIME_PERF_RUN_TOKEN",
+        "VOXEL_NPC_TEST_SUITE",
+        "CITADEL_CANDIDATE_TELEPORT_OUTPUT",
+        "CITADEL_CANDIDATE_RECIPE_OUTPUT"
+    ]:
+        if not OS.get_environment(flag).strip_edges().is_empty():
+            return true
+    return false
+
+func mute_master_bus_for_automated_run() -> void:
+    var master_bus := AudioServer.get_bus_index(&"Master")
+    if master_bus >= 0:
+        AudioServer.set_bus_mute(master_bus, true)
 
 func shutdown_audio() -> void:
     set_process(false)
@@ -534,6 +561,7 @@ func update_knock_loop(delta: float) -> void:
 
 func stats() -> Dictionary:
     return {
+        "automatedPlaybackMuted": automated_playback_muted,
         "lastPlayed": last_played,
         "playCount": play_count,
         "playCountsByName": play_counts_by_name.duplicate(),

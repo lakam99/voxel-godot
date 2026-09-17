@@ -2897,15 +2897,16 @@ func test_teleport_system() -> void:
     if hud:
         hud.set_teleport_open(true)
         panel_open = hud.is_teleport_open() and hud.teleport_panel.visible
-    var teleported_xz: bool = bool(main.call("teleport_to", "64 -32"))
+    var teleported_xz: bool = await main.call("teleport_to", "64 -32")
     await wait_physics_frames(4)
     var terrain_y: float = surface_y_at_position(Vector3(64.0, 0.0, -32.0))
     var horizontal_ok := Vector2(player.global_position.x - 64.0, player.global_position.z + 32.0).length() < 0.35
     var safe_y := player.global_position.y >= maxf(terrain_y, WATER_LEVEL) - 0.1
-    var teleported_xyz: bool = bool(main.call("teleport_to", "12 40 -18"))
+    var teleported_xyz: bool = await main.call("teleport_to", "12 40 -18")
     await wait_physics_frames(2)
     var exact_xyz := player.global_position.distance_to(Vector3(12.0, 40.0, -18.0)) < 0.35
-    var rejected_bad: bool = not bool(main.call("teleport_to", "nowhere"))
+    var invalid_teleport: bool = await main.call("teleport_to", "nowhere")
+    var rejected_bad: bool = not invalid_teleport
     if hud:
         hud.set_teleport_open(false)
     player.global_position = original_position

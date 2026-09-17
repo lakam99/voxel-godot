@@ -289,7 +289,7 @@ static func create_light(parent: Node3D, prefix: String, profile_id: String, con
         role,
         true
     )
-    light.light_cull_mask = WORLD_VISUAL_LIGHT_MASK
+    light.set_visual_light_cull_mask(WORLD_VISUAL_LIGHT_MASK)
     if bool(profile.get("day_suppressed", false)) and light.has_method("set_day_suppressed"):
         light.set_day_suppressed(true)
     light.set_meta("local_light_rig", true)
@@ -301,7 +301,7 @@ static func create_light(parent: Node3D, prefix: String, profile_id: String, con
         light.set_meta("rig_lod_distance", float(profile.get("source_lod_distance", 56.0)))
         light.add_to_group("local_light_rig_source")
     else:
-        light.shadow_enabled = false
+        light.set_lod_shadow_enabled(false)
         light.set_meta("ground_fill_light", true)
         light.set_meta("rig_lod_distance", float(profile.get("fill_lod_distance", 56.0)))
         light.add_to_group("local_light_rig_fill")

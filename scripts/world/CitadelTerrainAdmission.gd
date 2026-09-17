@@ -86,9 +86,10 @@ func request_bounds(bounds: Rect2i, priority := true) -> Dictionary:
 			if decision.get("status") in ["prepared", "absent"]: continue
 			waiting = true
 			if not _requests.has(region):
-				_requests[region] = {"priority":priority,"receipt":{},"prefetch":false}
+				_requests[region] = {"priority":priority,"receipt":{},"prefetch":false,"drainingPrefetch":false}
 			else:
 				_requests[region].prefetch = false
+				_requests[region].drainingPrefetch = false
 				if priority: _requests[region].priority = true
 	return _result("pending" if waiting else "ready", "preparing_citadel_terrain" if waiting else "")
 
@@ -100,9 +101,10 @@ func request_source(region: Vector2i, priority := true) -> Dictionary:
 		return source_state(region)
 	var decision: Dictionary = _decisions.get(region,{})
 	if decision.get("status") in ["failed","absent"]: return decision.duplicate()
-	if not _requests.has(region): _requests[region] = {"priority":priority,"receipt":{},"prefetch":false}
+	if not _requests.has(region): _requests[region] = {"priority":priority,"receipt":{},"prefetch":false,"drainingPrefetch":false}
 	else:
 		_requests[region].prefetch = false
+		_requests[region].drainingPrefetch = false
 		if priority: _requests[region].priority = true
 	return _result("pending","preparing_citadel_source")
 
@@ -122,11 +124,20 @@ func set_prefetch_regions(regions: Array[Vector2i]) -> bool:
 		var request: Dictionary = _requests.get(region,{})
 		if request.get("prefetch",false):
 			var token := int(request.get("receipt",{}).get("token",0))
+			# Once an immutable source is running, preserve it across a view reversal.
+			# Cancelling then resubmitting the same multi-second build turns camera
+			# priority churn into CPU contention and gameplay frame spikes. Pending
+			# (not yet running) prefetch remains disposable, so a new urgent source is
+			# never queued behind obsolete work that has not begun.
+			if token>0 and _queue.is_active_token(token):
+				request.drainingPrefetch = true
+				continue
 			_requests.erase(region)
 			if token>0: _queue.cancel(token)
 	for region: Vector2i in ordered:
 		if _decisions.get(region,{}).get("status") in ["prepared","absent","failed"]: continue
-		if not _requests.has(region): _requests[region]={"priority":false,"receipt":{},"prefetch":true}
+		if not _requests.has(region): _requests[region]={"priority":false,"receipt":{},"prefetch":true,"drainingPrefetch":false}
+		else: _requests[region].drainingPrefetch = false
 	_prefetch_regions=ordered
 	return true
 
@@ -137,6 +148,7 @@ func source_state(region: Vector2i) -> Dictionary:
 	if not _fatal.is_empty(): return _result("failed",_fatal)
 	if not _town_inputs_finalized: return _result("failed","citadel_town_inputs_unfinalized")
 	var decision: Dictionary = _decisions.get(region,{})
+	if decision.is_empty(): return _result("absent","source_not_requested")
 	if decision.get("status") != "prepared": return decision.duplicate()
 	var result := {"status":"prepared", "binding":{"siteId":decision.siteId,
 		"sourceKey":decision.sourceKey, "generation":_generation},
@@ -262,6 +274,7 @@ func request_shutdown() -> void:
 func stats() -> Dictionary:
 	return {"generation":_generation,"worldSeed":world_seed,"pendingRegions":_requests.size(),
 		"prefetchRegions":_prefetch_regions.duplicate(),"prefetchPending":_prefetch_pending_count(),
+		"drainingPrefetch":_draining_prefetch_count(),
 		"preparedSites":_sources.size(),"decidedRegions":_decisions.size(),"failure":_fatal,
 		"retiredGenerations":_retired.size(),"maxAdvanceUsec":_max_advance_usec,
 		"shutdownComplete":_closing and _retired.is_empty() and bool(_last_queue_status.get("shutdownComplete",false)),
@@ -276,6 +289,12 @@ func _prefetch_pending_count() -> int:
 	var count := 0
 	for request: Dictionary in _requests.values():
 		if bool(request.get("prefetch",false)): count += 1
+	return count
+
+func _draining_prefetch_count() -> int:
+	var count := 0
+	for request: Dictionary in _requests.values():
+		if bool(request.get("drainingPrefetch",false)): count += 1
 	return count
 
 static func _result(state: String, reason: String) -> Dictionary:

@@ -80,11 +80,21 @@ func run() -> void:
 	var importer_owned_scene := cached_rock_scene != null and not cached_rock_scene.resource_path.is_empty()
 	var rock_mesh_ready := rock_meshes.size() > 0 and rock_meshes.all(func(mesh_instance: MeshInstance3D) -> bool:
 		return mesh_instance.mesh != null and mesh_instance.mesh.get_surface_count() > 0)
-	add_result("runtime_rock_uses_importer_owned_scene_and_instantiates_in_headless_renderer", registry_ready and importer_owned_scene and rock != null and rock_mesh_ready, {
+	var headless_renderer := DisplayServer.get_name().strip_edges().to_lower() == "headless"
+	var headless_proxy_ready := rock != null \
+		and bool(rock.get_meta("headless_visual_proxy", false)) \
+		and String(rock.get_meta("visual_asset_id", "")) == rock_id \
+		and String(rock.get_meta("visual_source", "")) == "generated_asset" \
+		and String(rock.get_meta("imported_scene_resource_path", "")) == (cached_rock_scene.resource_path if cached_rock_scene != null else "") \
+		and rock.get_child_count() == 0 \
+		and rock_meshes.is_empty()
+	add_result("runtime_rock_retains_importer_owned_source_and_uses_renderer_appropriate_publication", registry_ready and importer_owned_scene and rock != null \
+		and (headless_proxy_ready if headless_renderer else rock_mesh_ready), {
 		"renderer": DisplayServer.get_name(),
 		"rockId": rock_id,
 		"cachedResourcePath": cached_rock_scene.resource_path if cached_rock_scene != null else "",
 		"meshCount": rock_meshes.size(),
+		"headlessProxy": headless_proxy_ready,
 		"threadId": OS.get_thread_caller_id(),
 	})
 	if rock != null:

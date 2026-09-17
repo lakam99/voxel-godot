@@ -39,8 +39,14 @@ static func build(source, left_house_id: String, right_house_id: String, plaza_p
 	for id: String in left.ids:
 		if right.ids.has(id): return _fail("shared_market_facade_member")
 	var plaza = by_id.get(plaza_part_id)
-	if (not plaza is Part or not _part_geometry(plaza) or not plaza.collision_enabled or plaza.kind != "foundation"
-			or plaza.semantic != "citadel_market_plaza" or plaza.rotation != Vector3.ZERO):
+	# This source-owned finish describes the market assembly's visible extent;
+	# the continuous courtyard course below it owns public-ground collision.
+	# Requiring (or accepting) a second colliding plaza would recreate the raised
+	# duplicate platform deliberately removed by the single-grade recipe.
+	if (not plaza is Part or not _part_geometry(plaza) or plaza.collision_enabled or plaza.kind != "ground_patch"
+			or plaza.semantic != "citadel_market_plaza" or plaza.rotation != Vector3.ZERO
+			or plaza.physical_intent != "visual_detail"
+			or plaza.recipe.get("pavingRegion") != "citadel_courtyard"):
 		return _fail("invalid_market_plaza")
 	var paving: AABB = source.transformed_part_bounds(plaza)
 	if not _box(paving): return _fail("invalid_market_plaza_bounds")

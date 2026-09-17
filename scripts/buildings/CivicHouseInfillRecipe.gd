@@ -13,8 +13,10 @@ const FurnishingPlan = preload("res://scripts/buildings/FurnishingPlan.gd")
 const Terraces = preload("res://scripts/buildings/ResidentialTerraceCarvingRecipe.gd")
 const Support = preload("res://scripts/buildings/CivicCourtyardSupport.gd")
 const Navigation = preload("res://scripts/buildings/BuildingNavigationManifestBuilder.gd")
+const ConstructionMath = preload("res://scripts/buildings/ConstructionSeamMath.gd")
 const CLEARANCE := 0.25
 const MAX_PARTS := 10000
+const MAX_REBUILD_POSE_RECONCILIATION_STEPS := 4
 
 static func prepare_with_terrace_reconciliation(environment, specs: Array, producer: Callable, paving: Rect2, ground_y: float, continuation: Callable = Callable()) -> Dictionary:
 	if not _valid_source(environment): return _fail("invalid_civic_infill_input")
@@ -66,23 +68,51 @@ static func prepare(environment, specs: Array, producer: Callable, paving: Rect2
 		if not fitted.ready: return {"ready":false,"reason":"civic_infill_search_failed","house":spec.id,"detail":fitted}
 		var moved: Dictionary=spec.duplicate(true)
 		moved.center=spec.center+fitted.translation
-		var rebuilt = Blueprint.new("civic-infill-rebuilt",environment.seed,"masonry")
-		produced = producer.call(rebuilt,moved)
-		if produced is bool and not produced: return {"ready":false,"reason":"civic_house_producer_failed","house":spec.id,"phase":"rebuild"}
-		var actual := _house_geometry(rebuilt)
-		if not actual.ready: return actual
-		# Rebuilding changes stored rounding and coordinate-derived IDs. Validate
-		# the actual result; translated preview bounds cannot authorize it.
-		var proof := Placement.fit(actual.bounds,domain.bounds,obstacles,CLEARANCE,func(): return _continue(continuation))
-		if not proof.ready or proof.translation!=Vector3.ZERO:
+		var planned_center: Vector3=moved.center
+		var rebuilt
+		var actual: Dictionary={}
+		var proof: Dictionary={}
+		var pose_reconciliations: Array=[]
+		for reconciliation_step in range(MAX_REBUILD_POSE_RECONCILIATION_STEPS+1):
+			rebuilt = Blueprint.new("civic-infill-rebuilt",environment.seed,"masonry")
+			produced = producer.call(rebuilt,moved)
+			if produced is bool and not produced: return {"ready":false,"reason":"civic_house_producer_failed","house":spec.id,"phase":"rebuild"}
+			actual = _house_geometry(rebuilt)
+			if not actual.ready: return actual
+			# A preview can differ from its rebuilt float32 envelope by an ULP at a
+			# closed domain edge. Refit the real envelope, then regenerate at that
+			# represented pose. This is a bounded source reconciliation, not a broad
+			# alternative-placement search or a collision-authority override.
+			proof = Placement.fit(actual.bounds,domain.bounds,obstacles,CLEARANCE,func(): return _continue(continuation))
+			if _keeps_actual_pose(proof,actual.bounds): break
+			var correction: Variant=proof.get("translation")
+			var corrected_center: Vector3=_represented_center_after(moved.center,correction)
+			var correction_allowed:=_bounded_represented_pose(planned_center,corrected_center)
+			if not proof.get("ready",false) or reconciliation_step>=MAX_REBUILD_POSE_RECONCILIATION_STEPS \
+					or not correction_allowed:
+				return {"ready":false,"reason":"civic_infill_rebuilt_bounds_rejected","house":spec.id,"detail":proof,
+					"plannedBounds":fitted.placedBounds,"actualBounds":actual.bounds,"rebuiltCenter":moved.center,
+					"actualPoseComparison":_pose_comparison(proof,actual.bounds),"poseReconciliations":pose_reconciliations,
+					"correction":correction,"correctionBytes":var_to_bytes(correction).hex_encode(),"correctedCenter":corrected_center,
+					"plannedCenterBytes":var_to_bytes(planned_center).hex_encode(),"correctedCenterBytes":var_to_bytes(corrected_center).hex_encode(),"correctionAllowed":correction_allowed}
+			var next_center: Vector3=corrected_center
+			if next_center==moved.center:
+				return {"ready":false,"reason":"civic_infill_unrepresentable_pose_reconciliation","house":spec.id,"detail":proof,
+					"actualBounds":actual.bounds,"rebuiltCenter":moved.center,"actualPoseComparison":_pose_comparison(proof,actual.bounds)}
+			pose_reconciliations.append({"step":reconciliation_step+1,"from":moved.center,"translation":proof.translation,"to":next_center,
+				"actualBounds":actual.bounds,"placedBounds":proof.placedBounds})
+			moved.center=next_center
+		if not _keeps_actual_pose(proof,actual.bounds):
 			return {"ready":false,"reason":"civic_infill_rebuilt_bounds_rejected","house":spec.id,"detail":proof,
-				"plannedBounds":fitted.placedBounds,"actualBounds":actual.bounds,"rebuiltCenter":moved.center}
+				"plannedBounds":fitted.placedBounds,"actualBounds":actual.bounds,"rebuiltCenter":moved.center,
+				"actualPoseComparison":_pose_comparison(proof,actual.bounds),"poseReconciliations":pose_reconciliations}
 		resolved.append(moved)
 		var support := Support.bind(environment,rebuilt,spec.id,actual.bounds,ground_y,continuation)
 		if not support.ready: return support
 		support_receipts[spec.id]=support.receipt
 		receipts.append({"id":spec.id,"originalCenter":spec.center,"center":moved.center,"translation":moved.center-spec.center,
-			"originalBounds":geometry.bounds,"actualBounds":actual.bounds,"partCount":rebuilt.parts.size(),"testedCandidates":fitted.get("testedCandidates",0)})
+			"originalBounds":geometry.bounds,"actualBounds":actual.bounds,"partCount":rebuilt.parts.size(),"testedCandidates":fitted.get("testedCandidates",0),
+			"poseReconciliations":pose_reconciliations})
 		obstacles.append(actual.bounds)
 	return {"ready":true,"specs":resolved,"receipts":receipts,"supportReceipts":support_receipts,"domain":domain.bounds,"paving":paving,"clearance":CLEARANCE,"obstacleCount":collected.boxes.size()}
 
@@ -149,7 +179,11 @@ static func validate_composed(source, plan: Dictionary, furniture, ground_y: flo
 			else: obstacles.append(occupied.bounds)
 		var proof := Placement.fit(envelope,domain.bounds,obstacles,CLEARANCE,func(): return _continue(continuation))
 		if proof.get("reason","")=="cancelled":return _fail("cancelled")
-		if not proof.ready or proof.translation!=Vector3.ZERO:
+		# Terminal clearance follows the same exact-pose rule as source infill.
+		# A fit may expose a nonzero delta representation while its returned AABB
+		# is byte/value-identical to the existing envelope; it must not manufacture
+		# a move or reject the already-valid collision source for that artifact.
+		if not _keeps_actual_pose(proof,envelope):
 			var evidence := _clearance_failure_evidence(source,house,furniture,envelope,ground_y,continuation,support.authorized)
 			if evidence.get("cancelled",false):return _fail("cancelled")
 			return {"ready":false,"reason":"composed_civic_clearance_failed","house":spec.id,"bounds":envelope,"detail":proof,"blockingEvidence":evidence}
@@ -192,6 +226,38 @@ static func _clearance_failure_evidence(source, house: Dictionary, furniture, en
 
 static func _clearance_overlap(a: AABB,b: AABB) -> bool:
 	return Placement._axis_overlap(a,b,0,CLEARANCE) and Placement._axis_overlap(a,b,1,0.0) and Placement._axis_overlap(a,b,2,CLEARANCE)
+
+static func _keeps_actual_pose(proof: Dictionary, actual: AABB) -> bool:
+	# Do not use an epsilon here. This admits only a Placement result whose
+	# represented AABB is exactly the source AABB we are about to retain.
+	return proof.get("ready",false) and proof.get("placedBounds") is AABB and proof.placedBounds==actual
+
+static func _pose_comparison(proof: Dictionary, actual: AABB) -> Dictionary:
+	var placed: Variant=proof.get("placedBounds")
+	return {"hasPlacedBounds":placed is AABB,"equal":placed==actual,
+		"actualBytes":var_to_bytes(actual).hex_encode(),
+		"placedBytes":var_to_bytes(placed).hex_encode() if placed is AABB else ""}
+
+static func _bounded_represented_pose(original: Vector3, candidate: Vector3) -> bool:
+	if not original.is_finite() or not candidate.is_finite(): return false
+	for axis in range(3):
+		if not _within_float32_steps(original[axis],candidate[axis],MAX_REBUILD_POSE_RECONCILIATION_STEPS): return false
+	return true
+
+static func _within_float32_steps(origin: float, candidate: float, steps: int) -> bool:
+	if candidate==origin: return true
+	var direction:=1.0 if candidate>origin else -1.0
+	var edge:=origin
+	for step in range(steps): edge=direction*ConstructionMath.next_float32_up(direction*edge)
+	return candidate<=edge if direction>0.0 else candidate>=edge
+
+static func _represented_center_after(center: Vector3, correction: Variant) -> Vector3:
+	if not correction is Vector3 or not center.is_finite() or not correction.is_finite(): return Vector3(NAN,NAN,NAN)
+	var result:=center
+	for axis in range(3):
+		if correction[axis]>0.0: result[axis]=ConstructionMath.next_float32_up(result[axis])
+		elif correction[axis]<0.0: result[axis]=-ConstructionMath.next_float32_up(-result[axis])
+	return result
 
 static func _append_clearance_evidence(result: Dictionary,row: Dictionary, part = null) -> void:
 	result.count+=1
@@ -299,7 +365,9 @@ static func compatible_underlay(part, ground_y: float) -> bool:
 	if courtyard_paving and part.semantic=="castle_courtyard_paving" and part.recipe.get("pavingFamily","")=="courtyard_setts" and part.collision_enabled and part.material_id=="cobblestone":
 		return is_equal_approx(part.position.y,0.06) and is_equal_approx(part.size.y,0.04) and is_equal_approx(float(part.recipe.get("gradeSurfaceY",NAN)),0.08)
 	if part.id=="urban_civic_quarter_paving" and part.semantic=="citadel_civic_quarter_paving" and part.recipe.get("pavingFamily","")=="civic_setts" and not part.collision_enabled:
-		return part.position.y==Vector3(0,ground_y+0.18,0).y and part.size.y==Vector3(0,0.08,0).y
+		var grade_y := float(part.recipe.get("gradeSurfaceY",NAN))
+		return is_equal_approx(grade_y,0.08) and is_equal_approx(part.size.y,0.08) \
+			and is_equal_approx(part.position.y+part.size.y*0.5,grade_y)
 	return false
 
 static func _indexed_id(id: String, prefix: String) -> bool:

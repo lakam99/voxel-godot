@@ -38,6 +38,86 @@ const NpcNavigationCoordinatorScript := preload("res://scripts/npc_ai/routing/Np
 const NpcRouteMovementControllerScript := preload("res://scripts/npc_ai/movement/NpcRouteMovementController.gd")
 const NpcRouteLeaseExecutorScript := preload("res://scripts/npc_ai/movement/NpcRouteLeaseExecutor.gd")
 const NpcAgentScript := preload("res://scripts/npc_ai/NpcAgent.gd")
+const RuntimePerformanceMonitorScript := preload("res://scripts/perf/RuntimePerformanceMonitor.gd")
+
+class FakePhysicsAttributionMain:
+	extends Node
+	var runtime_perf_monitor = null
+
+class FakePhysicsAttributionRouteAuthority:
+	extends RefCounted
+	var calls: Array
+
+	func _init(p_calls: Array) -> void:
+		calls = p_calls
+
+	func begin_frame(_frame: int) -> void:
+		calls.append("begin_frame")
+
+class FakePhysicsAttributionNavigationWorld:
+	extends RefCounted
+	var calls: Array
+
+	func _init(p_calls: Array) -> void:
+		calls = p_calls
+
+	func process_change_bus(max_events: int, max_object_ids: int) -> Array:
+		calls.append("navigation_changes:%d:%d" % [max_events, max_object_ids])
+		return []
+
+	func build_next_tiles(max_jobs: int, hard_slice_usec: int) -> Array:
+		calls.append("tile_build:%d:%d" % [max_jobs, hard_slice_usec])
+		return []
+
+	func stats() -> Dictionary:
+		return {}
+
+class FakePhysicsAttributionBackend:
+	extends RefCounted
+
+	func use_navmesh() -> bool:
+		return true
+
+class FakePhysicsAttributionNavmeshWorld:
+	extends RefCounted
+	var calls: Array
+
+	func _init(p_calls: Array) -> void:
+		calls = p_calls
+
+	func process_dirty_regions(max_jobs: int) -> Array:
+		calls.append("dirty_regions:%d" % max_jobs)
+		return []
+
+class FakePhysicsAttributionTraffic:
+	extends RefCounted
+	var calls: Array
+
+	func _init(p_calls: Array) -> void:
+		calls = p_calls
+
+	func advance(delta: float) -> void:
+		calls.append("traffic:%.6f" % delta)
+
+class FakePhysicsAttributionPlanExecutor:
+	extends RefCounted
+	var calls: Array
+
+	func _init(p_calls: Array) -> void:
+		calls = p_calls
+
+	func physics_route_service_owns_motion(entry: Dictionary) -> bool:
+		var actor_id := String(entry.get("id", ""))
+		calls.append("owns:%s" % actor_id)
+		return bool(entry.get("ownsRouteService", false))
+
+	func advance_physics_route_service(entry: Dictionary, delta: float) -> Dictionary:
+		calls.append("service:%s:%.6f" % [String(entry.get("id", "")), delta])
+		return {"advanced": true, "intentKind": "route"}
+
+class FakePhysicsAttributionNpcSystem:
+	extends Node
+	var npcs: Array = []
 
 class FakeAuthorityRouteDelegate:
 	extends RefCounted
@@ -50,6 +130,20 @@ class FakeAuthorityRouteDelegate:
 
 	func stats() -> Dictionary:
 		return { "calls": calls }
+
+class FakeNavigationTileCapture:
+	extends RefCounted
+	var tile_key := ""
+	var source_key := ""
+	var status := "capturing"
+	var detached := false
+
+	func _init(p_tile_key: String, p_source_key: String) -> void:
+		tile_key = p_tile_key
+		source_key = p_source_key
+
+	func detach_live_records() -> void:
+		detached = true
 
 class FakeCursorCollisionProbe:
 	extends RefCounted
@@ -134,7 +228,11 @@ class FakeProbeRepairSubstrate:
 			"candidateCells": candidate_cells.duplicate(),
 			"failedSource": String(failed_route.get("source", "")),
 			"blockedReason": String(probe_certificate.get("reason", "")),
-			"avoidCells": (options.get("avoidCells", []) as Array).duplicate() if options.get("avoidCells", []) is Array else []
+			"avoidCells": (options.get("avoidCells", []) as Array).duplicate() if options.get("avoidCells", []) is Array else [],
+			"requestIdentity": String(options.get("requestIdentity", "")),
+			"expansionsPerCall": int(options.get("expansionsPerCall", 0)),
+			"validationStepsPerCall": int(options.get("validationStepsPerCall", 0)),
+			"cheapStepsPerCall": int(options.get("cheapStepsPerCall", 0))
 		})
 		return repaired_route.duplicate(true)
 
@@ -512,6 +610,12 @@ func contract_cases() -> Array[Dictionary]:
 			"callable": Callable(self, "test_urgent_brain_admission_is_fair")
 		},
 		{
+			"id": "npc_contract_physics_attribution_preserves_order_and_counts",
+			"suite": "contract",
+			"timeModes": ["day", "night"],
+			"callable": Callable(self, "test_physics_attribution_preserves_order_and_counts")
+		},
+		{
 			"id": "npc_contract_scripted_order_stall_trace_precedes_route_request",
 			"suite": "contract",
 			"timeModes": ["day", "night"],
@@ -670,6 +774,7 @@ func nav_world_cases() -> Array[Dictionary]:
 		["npc_navworld_event_terrain_edit_dirty_exact_tiles", "test_navworld_event_terrain_edit_dirty_exact_tiles"],
 		["npc_navworld_event_chunk_load_unload", "test_navworld_event_chunk_load_unload"],
 		["npc_navworld_tile_source_key_is_tile_stable", "test_navworld_tile_source_key_is_tile_stable"],
+		["npc_navworld_terrain_edit_invalidates_capture_halo_tiles", "test_navworld_terrain_edit_invalidates_capture_halo_tiles"],
 		["npc_navworld_no_scene_scan_revision", "test_navworld_no_scene_scan_revision"],
 		["npc_navworld_multisurface_bridge", "test_navworld_multisurface_bridge"],
 		["npc_navworld_tunnel_headroom", "test_navworld_tunnel_headroom"],
@@ -1879,29 +1984,54 @@ func test_route_authority_v2_repairs_static_probe_block(_mode: String) -> Dictio
 	var entry := { "id": "v2-probe-repair-npc" }
 	var request: Dictionary = authority.submit_request(entry, { "kind": "home", "targetCell": Vector2i(2, 0) }, { "priority": 140 })
 	var request_id := String(request.get("requestId", ""))
-	var ready: Dictionary = authority.commit_route_after_probe(entry, request_id, v2_probe_contract_route(), { "kind": "home", "targetCell": Vector2i(2, 0) }, {
+	var failed_route := v2_probe_contract_route()
+	var intent := { "kind": "home", "targetCell": Vector2i(2, 0) }
+	var repair_options := {
 		"repairSubstrate": repair_substrate,
 		"repairStartCell": Vector2i(0, 0),
 		"repairCandidateCells": [Vector2i(2, 0)],
 		"repairPlanOptions": { "allowOutside": false, "movingHome": true }
-	})
+	}
+	var queued: Dictionary = authority.commit_route_after_probe(entry, request_id, failed_route, intent, repair_options)
+	var queued_runtime: Dictionary = authority.runtime_for_entry(entry)
+	var ready := queued
+	var service_frames := 0
+	for _frame_index in range(4):
+		if String(ready.get("state", "")) == "ready":
+			break
+		service_frames += 1
+		authority.begin_frame()
+		ready = authority.commit_route_after_probe(entry, request_id, failed_route, intent, repair_options)
 	var lease: Dictionary = ready.get("routeLease", {}) if ready.get("routeLease", {}) is Dictionary else {}
 	var route_summary: Dictionary = ready.get("route", {}) if ready.get("route", {}) is Dictionary else {}
 	var repair_summary: Dictionary = route_summary.get("probeRepair", {}) if route_summary.get("probeRepair", {}) is Dictionary else {}
 	var repair_call: Dictionary = repair_substrate.calls[0] if not repair_substrate.calls.is_empty() else {}
 	var avoid_cells: Array = repair_call.get("avoidCells", []) if repair_call.get("avoidCells", []) is Array else []
-	var passed := String(ready.get("state", "")) == "ready" \
+	var queued_avoid_cells: Array = queued_runtime.get("probeRepairAvoidCells", []) if queued_runtime.get("probeRepairAvoidCells", []) is Array else []
+	var queued_failed_goals: Array = queued_runtime.get("probeRepairFailedGoalCells", []) if queued_runtime.get("probeRepairFailedGoalCells", []) is Array else []
+	var passed: bool = String(queued.get("state", "")) == "probing" \
+		and String(queued.get("reason", "")) == "probe_repair_queued" \
+		and queued_avoid_cells == [Vector2i(1, 0)] \
+		and queued_failed_goals == [Vector2i(2, 0)] \
+		and service_frames > 0 \
+		and service_frames <= 4 \
+		and String(ready.get("state", "")) == "ready" \
 		and bool(ready.get("hasLease", false)) \
 		and String(lease.get("source", "")) == "fixture_probe_repair_route" \
 		and probe.calls.size() == 2 \
 		and repair_substrate.calls.size() == 1 \
 		and bool(repair_summary.get("ok", false)) \
-		and avoid_cells.has(Vector2i(1, 0))
+		and avoid_cells == [Vector2i(1, 0)] \
+		and repair_call.get("candidateCells", []) == [Vector2i(2, 0)] \
+		and String(repair_call.get("requestIdentity", "")) == request_id \
+		and int(repair_call.get("expansionsPerCall", 0)) == 2 \
+		and int(repair_call.get("validationStepsPerCall", 0)) == 2 \
+		and int(repair_call.get("cheapStepsPerCall", 0)) == 48
 	return outcome(
 		passed,
-		"ready=%s probeCalls=%s repairCalls=%s" % [JSON.stringify(ready), JSON.stringify(probe.calls), JSON.stringify(repair_substrate.calls)],
-		["v2_static_probe_block_can_repair_before_lease", "v2_repairs_then_reprobes", "v2_repaired_lease_uses_repaired_route"],
-		{ "ready": ready, "probeCalls": probe.calls, "repairCalls": repair_substrate.calls }
+		"frames=%d queued=%s ready=%s probeCalls=%s repairCalls=%s" % [service_frames, JSON.stringify(queued), JSON.stringify(ready), JSON.stringify(probe.calls), JSON.stringify(repair_substrate.calls)],
+		["v2_static_probe_block_queues_bounded_async_repair", "v2_queued_repair_retains_exact_avoid_and_failed_goal", "v2_repair_keeps_original_request_identity", "v2_repair_uses_production_search_validation_and_cheap_caps", "v2_repairs_then_reprobes", "v2_repaired_lease_uses_repaired_route"],
+		{ "serviceFrames": service_frames, "queued": queued, "queuedRuntime": queued_runtime, "ready": ready, "probeCalls": probe.calls, "repairCalls": repair_substrate.calls }
 	)
 
 func test_route_authority_v2_defers_probe_repair_under_budget(_mode: String) -> Dictionary:
@@ -1932,23 +2062,49 @@ func test_route_authority_v2_defers_probe_repair_under_budget(_mode: String) -> 
 	authority.setup(null, null, probe)
 	var entry := { "id": "v2-probe-repair-budget-npc" }
 	var request: Dictionary = authority.submit_request(entry, { "kind": "forage", "targetCell": Vector2i(2, 0) }, { "priority": 90 })
-	var pending: Dictionary = authority.commit_route_after_probe(entry, String(request.get("requestId", "")), v2_probe_contract_route(), { "kind": "forage", "targetCell": Vector2i(2, 0) }, {
+	var request_id := String(request.get("requestId", ""))
+	var failed_route := v2_probe_contract_route()
+	var intent := { "kind": "forage", "targetCell": Vector2i(2, 0) }
+	var repair_options := {
 		"repairSubstrate": repair_substrate,
 		"repairStartCell": Vector2i(0, 0),
 		"repairCandidateCells": [Vector2i(2, 0)],
 		"repairPlanOptions": { "allowOutside": true, "semanticKind": "forage_target" }
-	})
-	var avoid_cells: Array = pending.get("probeRepairAvoidCells", []) if pending.get("probeRepairAvoidCells", []) is Array else []
-	var passed := String(pending.get("state", "")) == "pending_budget" \
+	}
+	var queued: Dictionary = authority.commit_route_after_probe(entry, request_id, failed_route, intent, repair_options)
+	var queued_runtime: Dictionary = authority.runtime_for_entry(entry)
+	var pending := queued
+	var service_frames := 0
+	for _frame_index in range(4):
+		if not repair_substrate.calls.is_empty():
+			break
+		service_frames += 1
+		authority.begin_frame()
+		pending = authority.commit_route_after_probe(entry, request_id, failed_route, intent, repair_options)
+	var pending_runtime: Dictionary = authority.runtime_for_entry(entry)
+	var avoid_cells: Array = pending_runtime.get("probeRepairAvoidCells", []) if pending_runtime.get("probeRepairAvoidCells", []) is Array else []
+	var failed_goals: Array = pending_runtime.get("probeRepairFailedGoalCells", []) if pending_runtime.get("probeRepairFailedGoalCells", []) is Array else []
+	var repair_call: Dictionary = repair_substrate.calls[0] if not repair_substrate.calls.is_empty() else {}
+	var passed: bool = String(queued.get("state", "")) == "probing" \
+		and String(queued.get("reason", "")) == "probe_repair_queued" \
+		and service_frames > 0 \
+		and service_frames <= 4 \
+		and String(pending.get("state", "")) == "probing" \
 		and String(pending.get("reason", "")) == "search_budget_deferred" \
 		and not bool(pending.get("hasLease", true)) \
 		and repair_substrate.calls.size() == 1 \
-		and avoid_cells.has(Vector2i(1, 0))
+		and avoid_cells == [Vector2i(1, 0)] \
+		and failed_goals == [Vector2i(2, 0)] \
+		and repair_call.get("candidateCells", []) == [Vector2i(2, 0)] \
+		and String(repair_call.get("requestIdentity", "")) == request_id \
+		and int(repair_call.get("expansionsPerCall", 0)) == 2 \
+		and int(repair_call.get("validationStepsPerCall", 0)) == 2 \
+		and int(repair_call.get("cheapStepsPerCall", 0)) == 48
 	return outcome(
 		passed,
-		"pending=%s repairCalls=%s" % [JSON.stringify(pending), JSON.stringify(repair_substrate.calls)],
-		["v2_probe_repair_budget_is_pending_not_terminal", "v2_probe_repair_retains_blocked_cell_avoidance"],
-		{ "pending": pending, "repairCalls": repair_substrate.calls }
+		"frames=%d queued=%s pending=%s repairCalls=%s" % [service_frames, JSON.stringify(queued), JSON.stringify(pending), JSON.stringify(repair_substrate.calls)],
+		["v2_probe_repair_budget_stays_probing_not_terminal", "v2_probe_repair_is_serviced_within_bounded_frames", "v2_probe_repair_retains_exact_blocked_cell_and_failed_goal", "v2_probe_repair_keeps_original_request_identity", "v2_probe_repair_uses_production_search_validation_and_cheap_caps"],
+		{ "serviceFrames": service_frames, "queued": queued, "queuedRuntime": queued_runtime, "pending": pending, "pendingRuntime": pending_runtime, "repairCalls": repair_substrate.calls }
 	)
 
 func test_route_authority_v2_probe_pending_budget(_mode: String) -> Dictionary:
@@ -2357,6 +2513,138 @@ func test_urgent_brain_admission_is_fair(_mode: String) -> Dictionary:
 			"second": second_slice,
 			"third": third_slice,
 			"admittedCount": admitted.size()
+		}
+	)
+
+func test_physics_attribution_preserves_order_and_counts(_mode: String) -> Dictionary:
+	var calls: Array = []
+	var monitor = RuntimePerformanceMonitorScript.new()
+	var fake_main := FakePhysicsAttributionMain.new()
+	fake_main.runtime_perf_monitor = monitor
+	var fake_npc_system := FakePhysicsAttributionNpcSystem.new()
+	var route_entry := {"id": "route-a", "ownsRouteService": true}
+	var idle_entry := {"id": "idle-b", "ownsRouteService": false}
+	var held_entry := {
+		"id": "held-c",
+		"ownsRouteService": true,
+		"abstractSimulated": true
+	}
+	fake_npc_system.npcs = [route_entry, idle_entry, held_entry]
+	var autonomy := NpcAutonomySystemScript.new()
+	# Retire the real service constructed by _init before replacing it with the
+	# focused fake, so this synthetic contract does not leak a NavigationServer map.
+	if autonomy.navmesh_world != null:
+		autonomy.navmesh_world.clear()
+	autonomy.main = fake_main
+	autonomy.npc_system = fake_npc_system
+	autonomy.route_authority_v2 = FakePhysicsAttributionRouteAuthority.new(calls)
+	autonomy.navigation_world = FakePhysicsAttributionNavigationWorld.new(calls)
+	autonomy.navigation_backend_config = FakePhysicsAttributionBackend.new()
+	autonomy.navmesh_world = FakePhysicsAttributionNavmeshWorld.new(calls)
+	autonomy.traffic_reservations = FakePhysicsAttributionTraffic.new(calls)
+	autonomy.plan_executor = FakePhysicsAttributionPlanExecutor.new(calls)
+	autonomy.simulation_lod = null
+	autonomy.call("_physics_process", 1.0 / 60.0)
+	route_entry["ownsRouteService"] = false
+	idle_entry["ownsRouteService"] = true
+	held_entry["ownsRouteService"] = false
+	held_entry.erase("abstractSimulated")
+	autonomy.call("_physics_process", 1.0 / 60.0)
+	var first_tick := [
+		"begin_frame",
+		"navigation_changes:%d:%d" % [
+			NpcAutonomySystemScript.NAV_CHANGE_EVENTS_PER_PHYSICS_TICK,
+			NpcAutonomySystemScript.NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK
+		],
+		"tile_build:%d:%d" % [
+			NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK,
+			NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC
+		],
+		"dirty_regions:1",
+		"traffic:0.016667",
+		"owns:route-a",
+		"service:route-a:0.016667",
+		"owns:idle-b",
+		"owns:held-c"
+	]
+	var second_tick := [
+		"begin_frame",
+		"navigation_changes:%d:%d" % [
+			NpcAutonomySystemScript.NAV_CHANGE_EVENTS_PER_PHYSICS_TICK,
+			NpcAutonomySystemScript.NAV_CHANGE_OBJECT_IDS_PER_PHYSICS_TICK
+		],
+		"tile_build:%d:%d" % [
+			NpcConstantsScript.NAV_BUILD_MAX_JOBS_PER_TICK,
+			NpcConstantsScript.NAV_BUILD_HARD_SLICE_USEC
+		],
+		"dirty_regions:1",
+		"traffic:0.016667",
+		"owns:route-a",
+		"owns:idle-b",
+		"service:idle-b:0.016667",
+		"owns:held-c"
+	]
+	var expected_calls: Array = first_tick + second_tick
+	var summary: Dictionary = monitor.summary()
+	var gauges: Dictionary = summary.get("gauges", {})
+	var max_gauges: Dictionary = summary.get("maxGauges", {})
+	var required_sections := [
+		"npc_physics_callback",
+		"npc_physics_navigation_changes",
+		"npc_physics_tile_build",
+		"npc_physics_dirty_regions",
+		"npc_physics_traffic",
+		"npc_physics_route_service"
+	]
+	var exact_section_samples := true
+	for section_name: String in required_sections:
+		exact_section_samples = exact_section_samples \
+			and monitor.section_sample_values(section_name).size() == 2
+	var passed := calls == expected_calls \
+		and int(autonomy.get("_last_route_service_owned_actor_count")) == 1 \
+		and int(autonomy.get("_last_route_service_invocation_count")) == 1 \
+		and monitor.counter_value("npc_physics_callbacks") == 2 \
+		and monitor.counter_value("npc_physics_owned_actor_count") == 3 \
+		and monitor.counter_value("npc_physics_route_service_invocation_count") == 2 \
+		and is_equal_approx(float(gauges.get("npc_physics_owned_actor_count", -1.0)), 1.0) \
+		and is_equal_approx(float(gauges.get("npc_physics_route_service_invocation_count", -1.0)), 1.0) \
+		and is_equal_approx(float(max_gauges.get("npc_physics_owned_actor_count", -1.0)), 2.0) \
+		and is_equal_approx(float(max_gauges.get("npc_physics_route_service_invocation_count", -1.0)), 1.0) \
+		and exact_section_samples
+	# The production owner normally releases these services. The focused fake
+	# deliberately implements only the methods exercised above.
+	autonomy.navmesh_world = null
+	autonomy.navigation_world = null
+	autonomy.route_authority_v2 = null
+	autonomy.plan_executor = null
+	autonomy.traffic_reservations = null
+	autonomy.main = null
+	autonomy.npc_system = null
+	autonomy.free()
+	fake_npc_system.free()
+	fake_main.free()
+	return outcome(
+		passed,
+		"calls=%s counters=%s gauges=%s max=%s samples=%s" % [
+			JSON.stringify(calls),
+			JSON.stringify(summary.get("counters", {})),
+			JSON.stringify(gauges),
+			JSON.stringify(max_gauges),
+			str(exact_section_samples)
+		],
+		[
+			"physics_stage_call_order_unchanged",
+			"route_service_actor_order_unchanged",
+			"physics_stage_duration_samples_exact",
+			"physics_actor_and_service_counts_truthful"
+		],
+		{
+			"calls": calls,
+			"expectedCalls": expected_calls,
+			"counters": summary.get("counters", {}),
+			"gauges": gauges,
+			"maxGauges": max_gauges,
+			"exactSectionSamples": exact_section_samples
 		}
 	)
 
@@ -3191,10 +3479,39 @@ func test_navworld_event_terrain_edit_dirty_exact_tiles(_mode: String) -> Dictio
 	autonomy.setup(null, null)
 	autonomy.notify_terrain_edited(Vector2i(17, 17), 4.0, 2.65)
 	var events: Array = autonomy.process_navigation_changes()
+	# A core-edge edit belongs to tile 0,0, but tile 1,0/0,1/1,1 capture that
+	# same cell through their one-cell seam halo. Exercise the production notifier,
+	# real change bus and NavmeshWorldService consumer together.
+	autonomy.notify_terrain_edited(Vector2i(15, 15), 4.0, 2.65)
+	var halo_events: Array = autonomy.change_bus.flush_frame()
+	var halo_event_tiles: Array[String] = []
+	for halo_event_value in halo_events:
+		if halo_event_value is Dictionary:
+			halo_event_tiles.append(String((halo_event_value as Dictionary).get("tileKey", "")))
+	halo_event_tiles.sort()
+	var navmesh_service := NavmeshWorldServiceScript.new()
+	navmesh_service.apply_navigation_events(halo_events)
+	var dirty_region_ids: Array = navmesh_service.dirty_regions_by_region.keys()
+	dirty_region_ids.sort()
+	var expected_halo_tiles: Array[String] = ["0,0", "0,1", "1,0", "1,1"]
+	var expected_dirty_regions: Array[String] = []
+	for halo_tile in expected_halo_tiles:
+		expected_dirty_regions.append(NavigationBakeDescriptorScript.chunk_region_id(halo_tile))
+	expected_dirty_regions.sort()
+	var negative_bounds := terrain_edit_bounds_for_cell(Vector2i(-1, -1))
+	var negative_halo_tiles := NavigationChangeBusScript.terrain_capture_tile_keys_for_bounds(negative_bounds)
+	var expected_negative_halo_tiles: Array[String] = ["-1,-1", "-1,0", "0,-1", "0,0"]
+	navmesh_service.clear()
 	autonomy.free()
 	var event: Dictionary = events[0] if events.size() > 0 else {}
-	var passed := events.size() == 1 and String(event.get("tileKey", "")) == "1,1" and (event.get("changeKinds", []) as Array).has(String(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT))
-	return outcome(passed, "events=%s" % JSON.stringify(events), ["terrain_edit_exact_tile_dirty", "terrain_edit_change_kind"], { "events": events })
+	var passed := events.size() == 1 and String(event.get("tileKey", "")) == "1,1" \
+		and (event.get("changeKinds", []) as Array).has(String(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT)) \
+		and halo_event_tiles == expected_halo_tiles and dirty_region_ids == expected_dirty_regions \
+		and negative_halo_tiles == expected_negative_halo_tiles
+	return outcome(passed, "events=%s halo=%s dirty=%s negative=%s" % [JSON.stringify(events), JSON.stringify(halo_event_tiles), JSON.stringify(dirty_region_ids), JSON.stringify(negative_halo_tiles)],
+		["terrain_edit_exact_tile_dirty", "terrain_edit_change_kind", "terrain_edit_capture_halo_reaches_navmesh_service", "terrain_edit_capture_halo_uses_negative_floor_division"],
+		{ "events": events, "haloEventTiles": halo_event_tiles, "dirtyRegionIds": dirty_region_ids,
+			"negativeHaloTiles": negative_halo_tiles })
 
 func test_navworld_event_chunk_load_unload(_mode: String) -> Dictionary:
 	var setup := nav_event_setup()
@@ -3225,7 +3542,8 @@ func test_navworld_tile_source_key_is_tile_stable(_mode: String) -> Dictionary:
 	adapter.apply_navigation_events([{
 		"tileKey": tile_key,
 		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT)],
-		"revision": 11
+		"revision": 11,
+		"bounds": terrain_edit_bounds_for_cell(Vector2i(70, 70))
 	}])
 	var after_related_key := adapter.navmesh_tile_source_key_for_tile(tile_key)
 	var door_adapter := GeneratedWorldNavigationAdapterScript.new()
@@ -3259,6 +3577,68 @@ func test_navworld_tile_source_key_is_tile_stable(_mode: String) -> Dictionary:
 			"afterRelatedDoorKey": after_related_door_key
 		}
 	)
+
+func test_navworld_terrain_edit_invalidates_capture_halo_tiles(_mode: String) -> Dictionary:
+	var adapter := GeneratedWorldNavigationAdapterScript.new()
+	var affected_tiles := ["0,0", "0,1", "1,0", "1,1"]
+	var untouched_tile := "2,2"
+	var initial_keys := {}
+	for tile_key: String in affected_tiles + [untouched_tile]:
+		initial_keys[tile_key] = adapter.navmesh_tile_source_key_for_tile(tile_key)
+		var cache_key := "%s|synthetic" % tile_key
+		adapter.navmesh_tile_snapshot_cache[cache_key] = {"tileKey": tile_key}
+		adapter.navmesh_tile_snapshot_cache_order.append(cache_key)
+	var capture := FakeNavigationTileCapture.new("0,0", String(initial_keys["0,0"]))
+	adapter._navigation_capture = capture
+	adapter.apply_navigation_events([{
+		"tileKey": "1,1",
+		"changeKinds": [String(NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT)],
+		"revision": 23,
+		"bounds": terrain_edit_bounds_for_cell(Vector2i(16, 16))
+	}])
+	var changed_source_keys := true
+	var equal_revision := true
+	var affected_revision := -1
+	var affected_caches_cleared := true
+	for tile_key: String in affected_tiles:
+		changed_source_keys = changed_source_keys \
+			and adapter.navmesh_tile_source_key_for_tile(tile_key) != String(initial_keys[tile_key])
+		var revision := int(adapter.navmesh_tile_terrain_revision_by_key.get(tile_key, -1))
+		if affected_revision < 0:
+			affected_revision = revision
+		else:
+			equal_revision = equal_revision and revision == affected_revision
+		affected_caches_cleared = affected_caches_cleared \
+			and not adapter.navmesh_tile_snapshot_cache.has("%s|synthetic" % tile_key)
+	var untouched_stable := adapter.navmesh_tile_source_key_for_tile(untouched_tile) == String(initial_keys[untouched_tile]) \
+		and adapter.navmesh_tile_snapshot_cache.has("%s|synthetic" % untouched_tile) \
+		and not adapter.navmesh_tile_terrain_revision_by_key.has(untouched_tile)
+	var revised_tiles: Array = adapter.navmesh_tile_terrain_revision_by_key.keys()
+	revised_tiles.sort()
+	var passed := revised_tiles == affected_tiles \
+		and changed_source_keys and equal_revision and affected_revision == 23 \
+		and affected_caches_cleared and untouched_stable \
+		and adapter._navigation_capture == null and capture.detached
+	return outcome(
+		passed,
+		"revised=%s revision=%d cache=%s captureDetached=%s untouched=%s" % [
+			JSON.stringify(revised_tiles), affected_revision,
+			JSON.stringify(adapter.navmesh_tile_snapshot_cache.keys()), capture.detached, untouched_stable],
+		["terrain_edit_capture_halo_tiles_revised", "terrain_edit_capture_halo_cache_evicted", "terrain_edit_capture_halo_active_capture_retired", "terrain_edit_unrelated_tile_stable"],
+		{
+			"revisedTiles": revised_tiles,
+			"affectedRevision": affected_revision,
+			"remainingCacheKeys": adapter.navmesh_tile_snapshot_cache.keys(),
+			"captureDetached": capture.detached,
+			"untouchedStable": untouched_stable
+		}
+	)
+
+func terrain_edit_bounds_for_cell(cell: Vector2i) -> AABB:
+	var cell_size := NpcConstantsScript.CELL_SIZE
+	return AABB(
+		Vector3((float(cell.x) - 0.5) * cell_size, -cell_size, (float(cell.y) - 0.5) * cell_size),
+		Vector3(cell_size, cell_size * 2.0, cell_size))
 
 func test_navworld_no_scene_scan_revision(_mode: String) -> Dictionary:
 	var service_text := read_text("res://scripts/npc_ai/navigation/NavigationWorldService.gd")

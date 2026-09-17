@@ -5,6 +5,7 @@ extends SceneTree
 ## Direct closure calls isolate demand state; no engine frame or live proof claim.
 const Coordinator = preload("res://scripts/world/WorldStreamingCoordinator.gd")
 const ViewPriority = preload("res://scripts/world/GeneratedContentViewPriority.gd")
+const ActorDemand = preload("res://scripts/world/ActorPhysicalStreamingDemand.gd")
 const A := Rect2i(0,0,1,1)
 const B := Rect2i(112,0,1,1)
 const C := Rect2i(224,0,1,1)
@@ -359,6 +360,71 @@ func _consumer_capacity_and_release() -> void:
 		and int(context.coordinator._requests.get(successor,{}).get("releaseAt",0))<0)
 	_cleanup(context,"consumer_capacity_release_cleanup_balanced")
 
+func _actor_physical_demand_composition_and_release() -> void:
+	var same_chunk: Dictionary = ActorDemand.aggregate([
+		{"actorId":"zeta","bodyInstanceId":7,"chunk":Vector2i(2,-1)},
+		{"actorId":"alpha","bodyInstanceId":3,"chunk":Vector2i(2,-1)},
+		# Duplicate body observations cannot widen the authoritative body union.
+		{"actorId":"duplicate","bodyInstanceId":7,"chunk":Vector2i(9,9)}
+	])
+	var same_groups: Array = same_chunk.get("groups",[])
+	_check("same_chunk_actors_share_one_deterministic_owner",
+		same_chunk.get("actorCount")==2 and same_chunk.get("ownerCount")==1
+		and same_groups.size()==1 and same_groups[0].owner=="actor_chunk:2,-1"
+		and same_groups[0].actorIds==["alpha","zeta"]
+		and same_groups[0].bodyInstanceIds==[3,7])
+	var different_chunks: Dictionary = ActorDemand.aggregate([
+		{"actorId":"east","bodyInstanceId":12,"chunk":Vector2i(1,0)},
+		{"actorId":"north","bodyInstanceId":10,"chunk":Vector2i(2,-1)},
+		{"actorId":"west","bodyInstanceId":11,"chunk":Vector2i(-3,0)}
+	])
+	var different_groups: Array = different_chunks.get("groups",[])
+	_check("different_chunks_preserve_exact_union_and_stable_order",
+		different_chunks.get("actorCount")==3 and different_chunks.get("ownerCount")==3
+		and different_groups.map(func(group: Dictionary): return group.chunk)==[
+			Vector2i(2,-1),Vector2i(-3,0),Vector2i(1,0)]
+		and different_groups.map(func(group: Dictionary): return group.bodyInstanceIds)==[[10],[11],[12]])
+
+	# Exercise the same owner lifecycle MainCore uses: absent chunk owners enter
+	# the coordinator's ordinary release hysteresis while unchanged owners keep
+	# their original request and provider handle.
+	var context := _context()
+	var initial: Dictionary = ActorDemand.aggregate([
+		{"actorId":"one","bodyInstanceId":21,"chunk":Vector2i(0,0)},
+		{"actorId":"two","bodyInstanceId":22,"chunk":Vector2i(1,0)}
+	])
+	var owner_requests := {}
+	for group: Dictionary in initial.groups:
+		var chunk: Vector2i = group.chunk
+		var request_id := _request(context,Rect2i(chunk*28,Vector2i.ONE*28),"actor_owner_setup_%s" % group.owner)
+		if request_id>0: owner_requests[group.owner]=request_id
+	var removed_owner := ActorDemand.owner_for_chunk(Vector2i(0,0))
+	var retained_owner := ActorDemand.owner_for_chunk(Vector2i(1,0))
+	var removed_id := int(owner_requests.get(removed_owner,0))
+	var retained_id := int(owner_requests.get(retained_owner,0))
+	var retained_handle := _nav_id(context,retained_id)
+	var next: Dictionary = ActorDemand.aggregate([
+		{"actorId":"two","bodyInstanceId":22,"chunk":Vector2i(1,0)}
+	])
+	var next_owners := {}
+	for group: Dictionary in next.groups: next_owners[group.owner]=true
+	for owner: String in owner_requests.keys():
+		if not next_owners.has(owner): context.coordinator.release_region(owner_requests[owner])
+	var deadline := int(context.coordinator._requests.get(removed_id,{}).get("releaseAt",-1))
+	_check("removed_chunk_owner_enters_release_hysteresis",
+		removed_id>0 and retained_id>0 and deadline>=Time.get_ticks_msec()
+		and context.coordinator._requests.has(removed_id))
+	context.coordinator.advance(deadline-1)
+	_check("removed_chunk_owner_remains_until_deadline",
+		context.coordinator._requests.has(removed_id) and _nav_id(context,retained_id)==retained_handle)
+	context.coordinator.advance(deadline)
+	_check("removed_chunk_owner_releases_without_churning_survivor",
+		not context.coordinator._requests.has(removed_id)
+		and context.coordinator._requests.has(retained_id) and _nav_id(context,retained_id)==retained_handle)
+	metrics["actorDemandSameChunkOwners"] = int(same_chunk.get("ownerCount",0))
+	metrics["actorDemandDifferentChunkOwners"] = int(different_chunks.get("ownerCount",0))
+	_cleanup(context,"actor_owner_release_cleanup_balanced")
+
 func _navigation_union_capacity() -> void:
 	var context := _context()
 	context.structures.domains[A] = {"navigation":[Rect2i(0,0,512,256)]}
@@ -559,11 +625,13 @@ func _view_intent_is_stable_scheduling_input() -> void:
 		and context.coordinator.view_revision()==view_revision_before+1 and _nav_id(context,id)==navigation_id
 		and context.navigation.replacement_calls==provider_replacements)
 	var normalized: Dictionary = ViewPriority.normalize(raw)
-	var manifest: Dictionary = context.coordinator.retained_source_requests()[0]
-	_check("view_intent_manifest_is_normalized_and_private",manifest.get("viewIntent",{})==normalized)
-	manifest.viewIntent.origin = Vector3(900,0,900)
+	var source_manifest: Dictionary = context.coordinator.retained_source_requests()[0]
+	var view_manifest: Dictionary = context.coordinator.retained_view_intents()[0]
+	_check("source_manifest_excludes_scheduling_only_view_intent",not source_manifest.has("viewIntent"))
+	_check("view_intent_manifest_is_normalized_and_private",view_manifest.get("viewIntent",{})==normalized)
+	view_manifest.viewIntent.origin = Vector3(900,0,900)
 	_check("view_intent_manifest_mutation_cannot_change_owner",
-		context.coordinator.retained_source_requests()[0].viewIntent==normalized)
+		context.coordinator.retained_view_intents()[0].viewIntent==normalized)
 	var jittered := raw.duplicate(true)
 	jittered.origin += Vector3(0.2,0.2,0.2)
 	jittered.predictedOrigin += Vector3(0.2,0.2,0.2)
@@ -600,6 +668,50 @@ func _view_intent_is_stable_scheduling_input() -> void:
 		and rank_by_id.background.priority==4)
 	_cleanup(context,"view_intent_cleanup_balanced")
 
+func _incremental_source_snapshot_revision() -> void:
+	var context:=_context()
+	var first:=_request(context,A,"source_snapshot_first_setup")
+	if first<=0: _cleanup(context,"source_snapshot_failed_setup_cleanup"); return
+	var initial:Array=context.coordinator.retained_source_requests()
+	var initial_revision:int=context.coordinator.source_manifest_revision()
+	context.coordinator._rebuild(false)
+	while not context.coordinator.advance_retained_source_snapshot(1000000,128): pass
+	_check("broad_unrelated_rebuild_is_source_revision_noop",
+		context.coordinator.source_manifest_revision()==initial_revision
+		and context.coordinator.borrow_retained_source_snapshot()==initial)
+	var ready_units: Dictionary=context.coordinator.source_snapshot_compile_metrics()
+	for ignored in range(8): _check("completed_source_snapshot_remains_ready_%d" % ignored,context.coordinator.advance_retained_source_snapshot(1,1))
+	_check("completed_source_snapshot_does_not_recompile",context.coordinator.source_snapshot_compile_metrics()==ready_units)
+	context.coordinator.release_region(first)
+	while not context.coordinator.advance_retained_source_snapshot(1000000,128): pass
+	_check("release_hysteresis_does_not_change_emitted_source_manifest",
+		context.coordinator.source_manifest_revision()==initial_revision)
+	context.coordinator.advance_retained_source_snapshot(1,1)
+	var second:=_request(context,B,"source_snapshot_second_setup")
+	var pending_invisible: bool=context.coordinator.borrow_retained_source_snapshot()==initial
+	while not context.coordinator.advance_retained_source_snapshot(1000000,128): pass
+	var completed: Array[Dictionary]=context.coordinator.borrow_retained_source_snapshot()
+	_check("mid_compile_revision_replacement_discards_partial_snapshot",
+		second>0 and pending_invisible and completed.size()==2
+		and context.coordinator.source_manifest_revision()==initial_revision+1)
+	_check("published_source_snapshot_is_deeply_immutable",completed.is_read_only()
+		and completed[0].is_read_only() and completed[0].admissionKeys.is_read_only()
+		and completed[0].sites.is_read_only())
+	context.coordinator._rebuild(true)
+	context.coordinator.advance_retained_source_snapshot(1,1)
+	var restart_before: int=int(context.coordinator.source_snapshot_compile_metrics().restarts)
+	context.coordinator.release_region(second)
+	_check("release_hysteresis_does_not_restart_partial_source_compile",
+		int(context.coordinator.source_snapshot_compile_metrics().restarts)==restart_before)
+	while not context.coordinator.advance_retained_source_snapshot(1000000,128): pass
+	_check("release_during_compile_preserves_source_revision",context.coordinator.source_manifest_revision()==initial_revision+1)
+	var borrowed: Array[Dictionary]=context.coordinator.retained_source_requests()
+	borrowed[0].admissionKeys.clear()
+	_check("completed_source_snapshot_returns_private_copy",
+		not context.coordinator.borrow_retained_source_snapshot()[0].admissionKeys.is_empty())
+	metrics["sourceSnapshotUnits"]=context.coordinator.source_snapshot_compile_metrics()
+	_cleanup(context,"source_snapshot_incremental_cleanup_balanced")
+
 func _run() -> void:
 	var probe = Coordinator.new()
 	var available: bool = probe.has_method("replace_region")
@@ -611,6 +723,7 @@ func _run() -> void:
 		_pending_history_and_readiness()
 		_transaction_and_candidate_identity()
 		_consumer_capacity_and_release()
+		_actor_physical_demand_composition_and_release()
 		_navigation_union_capacity()
 		_declared_crossing_navigation_closure()
 		_foreground_navigation_tiles()
@@ -618,6 +731,7 @@ func _run() -> void:
 		_live_acceptance_under_scheduling_churn()
 		_foreground_admission_preempts_ready_backlog()
 		_view_intent_is_stable_scheduling_input()
+		_incremental_source_snapshot_revision()
 	var report := {"schema":"world-streaming-consumer-contract/v1","complete":true,
 		"passed":not checks.values().has(false),"checks":checks,"metrics":metrics,
 		"evidenceLevel":"synthetic_retained_consumer_contract",

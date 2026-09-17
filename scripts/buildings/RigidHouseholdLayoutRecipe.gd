@@ -9,6 +9,7 @@ const MAX_SURFACES := 64
 const MAX_CANDIDATES := 500000
 const MAX_COLLECTION := 4096
 const MAX_WORK := 5000000
+const SPATIAL_INDEX_CELL_SIZE := 4.0
 
 static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary:
 	var started := Time.get_ticks_usec()
@@ -153,6 +154,19 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 				approach_obstacles.append(rect.grow(spacing))
 			if bounds.end.y > floor_y + 0.1 and bounds.position.y < floor_y + 2.0:
 				low.append(rect)
+		# The candidate lattice can be dense while the Citadel source contains
+		# thousands of distant collision rectangles. Index each immutable obstacle
+		# collection once per paving source; every query still uses Rect2.intersects
+		# on the original records, so this only eliminates proven-disjoint work.
+		var index_meter := {"used": 0, "remaining": MAX_WORK - work}
+		var solid_index := _spatial_index(solid, candidate_influence, index_meter)
+		var fixed_index := _spatial_index(fixed, candidate_influence, index_meter)
+		var approach_index := _spatial_index(approach_obstacles, candidate_influence, index_meter)
+		var low_index := _spatial_index(low, candidate_influence, index_meter)
+		work += int(index_meter.used)
+		if work > MAX_WORK or [solid_index, fixed_index, approach_index, low_index].any(func(index): return not bool(index.get("ready", false))):
+			return {"ready": false, "reason": "work_limit_exceeded", "visitedCandidates": visited,
+				"eligibleImprovements": eligible, "workUpperBound": work}
 		for quarter in range(4):
 			var turn := _quarter_turn(quarter)
 			var rotated := AABB()
@@ -231,7 +245,7 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 					if not allowed.encloses(circulation_area) or not allowed.encloses(approach):
 						continue
 					var meter := {"used": 0, "remaining": MAX_WORK - work}
-					var blocked := _intersects_any(area, solid, meter) or _intersects_any(area, fixed, meter) or _intersects_any(approach, approach_obstacles, meter) or _intersects_any(approach, fixed, meter) or _intersects_any(circulation_area, fixed, meter) or _intersects_any(circulation_area, low, meter)
+					var blocked := _intersects_any(area, _spatial_candidates(solid_index, area, meter), meter) or _intersects_any(area, _spatial_candidates(fixed_index, area, meter), meter) or _intersects_any(approach, _spatial_candidates(approach_index, approach, meter), meter) or _intersects_any(approach, _spatial_candidates(fixed_index, approach, meter), meter) or _intersects_any(circulation_area, _spatial_candidates(fixed_index, circulation_area, meter), meter) or _intersects_any(circulation_area, _spatial_candidates(low_index, circulation_area, meter), meter)
 					work += int(meter.used)
 					if work > MAX_WORK:
 						return {"ready": false, "reason": "work_limit_exceeded", "visitedCandidates": visited,
@@ -266,7 +280,7 @@ static func plan(blueprint, member_ids: Array, policy: Dictionary) -> Dictionary
 					circulation_area = area.grow(circulation)
 					if not allowed.encloses(circulation_area) or not allowed.encloses(approach): continue
 					meter = {"used": 0, "remaining": MAX_WORK - work}
-					blocked = _intersects_any(area, solid, meter) or _intersects_any(area, fixed, meter) or _intersects_any(approach, approach_obstacles, meter) or _intersects_any(approach, fixed, meter) or _intersects_any(circulation_area, fixed, meter) or _intersects_any(circulation_area, low, meter)
+					blocked = _intersects_any(area, _spatial_candidates(solid_index, area, meter), meter) or _intersects_any(area, _spatial_candidates(fixed_index, area, meter), meter) or _intersects_any(approach, _spatial_candidates(approach_index, approach, meter), meter) or _intersects_any(approach, _spatial_candidates(fixed_index, approach, meter), meter) or _intersects_any(circulation_area, _spatial_candidates(fixed_index, circulation_area, meter), meter) or _intersects_any(circulation_area, _spatial_candidates(low_index, circulation_area, meter), meter)
 					work += int(meter.used)
 					if work > MAX_WORK: return _failure("work_limit_exceeded")
 					if blocked: continue
@@ -351,6 +365,82 @@ static func _intersects_any(area: Rect2, obstacles: Array[Rect2], meter: Diction
 		if area.intersects(rect):
 			return true
 	return false
+
+static func _spatial_index(rectangles: Array[Rect2], influence: Rect2, meter: Dictionary) -> Dictionary:
+	# The planner examines many nearby grid positions against a stable, usually
+	# large set of recipe envelopes.  Indexing only chooses which provably
+	# non-disjoint envelopes reach the exact Rect2 test below; it does not change
+	# footprint, clearance, ordering, or the deterministic tie policy.
+	var cells := {}
+	for rect_index in range(rectangles.size()):
+		if not _charge_meter(meter, 1.0):
+			return {"ready": false, "reason": "work_limit_exceeded"}
+		var rect := rectangles[rect_index].intersection(influence)
+		if not _valid_rect(rect):
+			continue
+		var minimum_x := floori(rect.position.x / SPATIAL_INDEX_CELL_SIZE)
+		var maximum_x := floori(rect.end.x / SPATIAL_INDEX_CELL_SIZE)
+		var minimum_z := floori(rect.position.y / SPATIAL_INDEX_CELL_SIZE)
+		var maximum_z := floori(rect.end.y / SPATIAL_INDEX_CELL_SIZE)
+		var cell_count := float(maximum_x - minimum_x + 1) * float(maximum_z - minimum_z + 1)
+		# Reserve the complete membership loop before allocating any cells. A huge
+		# but finite source rectangle therefore fails under the ordinary work limit
+		# instead of creating an unbounded dictionary first.
+		if not _charge_meter(meter, cell_count):
+			return {"ready": false, "reason": "work_limit_exceeded"}
+		for cell_x in range(minimum_x, maximum_x + 1):
+			for cell_z in range(minimum_z, maximum_z + 1):
+				var key := Vector2i(cell_x, cell_z)
+				if not cells.has(key):
+					cells[key] = []
+				cells[key].append(rect_index)
+	return {"ready": true, "rectangles": rectangles, "cells": cells}
+
+static func _spatial_candidates(index: Dictionary, area: Rect2, meter: Dictionary) -> Array[Rect2]:
+	if not bool(index.get("ready", false)) or not _valid_rect(area):
+		return []
+	var rectangles: Array[Rect2] = index.get("rectangles", [])
+	var cells: Dictionary = index.get("cells", {})
+	var seen := {}
+	var minimum_x := floori(area.position.x / SPATIAL_INDEX_CELL_SIZE)
+	var maximum_x := floori(area.end.x / SPATIAL_INDEX_CELL_SIZE)
+	var minimum_z := floori(area.position.y / SPATIAL_INDEX_CELL_SIZE)
+	var maximum_z := floori(area.end.y / SPATIAL_INDEX_CELL_SIZE)
+	var cell_count := float(maximum_x - minimum_x + 1) * float(maximum_z - minimum_z + 1)
+	if not _charge_meter(meter, cell_count):
+		return []
+	for cell_x in range(minimum_x, maximum_x + 1):
+		for cell_z in range(minimum_z, maximum_z + 1):
+			for rect_index in cells.get(Vector2i(cell_x, cell_z), []):
+				if not _charge_meter(meter, 1.0):
+					return []
+				seen[rect_index] = true
+	var ordered_indices: Array = seen.keys()
+	var sort_work := float(ordered_indices.size()) * maxf(1.0, ceil(log(float(ordered_indices.size()) + 1.0) / log(2.0)))
+	if not _charge_meter(meter, sort_work):
+		return []
+	ordered_indices.sort()
+	var candidates: Array[Rect2] = []
+	for rect_index in ordered_indices:
+		if not _charge_meter(meter, 1.0):
+			return []
+		var rect := rectangles[int(rect_index)]
+		# Rect2.intersects is still the authoritative exact predicate.  The
+		# cell membership merely avoids checking envelopes that cannot overlap.
+		if rect.intersects(area):
+			candidates.append(rect)
+	return candidates
+
+
+static func _charge_meter(meter: Dictionary, amount: float) -> bool:
+	var remaining := int(meter.get("remaining", 0))
+	var used := int(meter.get("used", 0))
+	if not is_finite(amount) or amount < 0.0 or amount > float(remaining - used):
+		meter["used"] = remaining + 1
+		meter["exhausted"] = true
+		return false
+	meter["used"] = used + int(amount)
+	return true
 
 static func _bounds(transform: Transform3D, size: Vector3) -> AABB:
 	var half := size * 0.5

@@ -16,9 +16,9 @@ const TOWER_HEIGHT := 17.0
 const EPSILON := 0.025
 const STRUCTURAL_RECIPES_KEY := "citadelStreetHouseStructuralRecipes"
 const CIVIC_DECLARATION_ADDITIONS := {
-	"facadeApertures": ["urban_civic_house_east_stone_facade", "urban_civic_house_east_upper_facade", "urban_civic_house_wall_stone_facade", "urban_civic_house_wall_upper_facade"],
-	STRUCTURAL_RECIPES_KEY: ["urban_civic_house_east", "urban_civic_house_wall"],
-	"citadelUrbanHomes": ["urban_civic_house_east", "urban_civic_house_wall"]}
+	"facadeApertures": ["urban_civic_house_east_stone_facade", "urban_civic_house_east_upper_facade"],
+	STRUCTURAL_RECIPES_KEY: ["urban_civic_house_east"],
+	"citadelUrbanHomes": ["urban_civic_house_east"]}
 const COMMONS_LOCAL_GEOMETRY_SIGNATURE := "4bc2d90341fb68a868def72131d3efd03b7fe421213774e0cd24dbbb9f1ea315"
 const COMMONS_MEMBER_ORDER := [
 	"urban_civic_commons_stone_00", "urban_civic_commons_stone_01", "urban_civic_commons_stone_02", "urban_civic_commons_stone_03",
@@ -67,6 +67,8 @@ func run() -> void:
 		check(field, layout_audits.all(func(audit): return bool(audit.get(field, false))))
 	var clear_layout_audit := audit_ground_level_street_policy()
 	check("street_layout_has_no_recipe_authored_exterior_terraces", bool(clear_layout_audit.get("passed", false)))
+	var bunting_id_audit := audit_stable_bunting_source_ids()
+	check("remaining_bunting_roles_keep_stable_historical_source_ids", bool(bunting_id_audit.get("passed", false)))
 	check("shared_street_row_geometry_is_deterministic_and_malformed_input_fails_closed", audit_street_row_geometry_contract())
 	check("commons_recipe_tracks_generated_row_and_clears_two_seed_layouts", layout_audits.all(func(audit): return bool(audit.get("passed", false))))
 	check("commons_fourteen_piece_local_geometry_is_seed_independent", layout_audits.size() == 2 and layout_audits[0].get("localGeometrySignature") == COMMONS_LOCAL_GEOMETRY_SIGNATURE and layout_audits[1].get("localGeometrySignature") == COMMONS_LOCAL_GEOMETRY_SIGNATURE)
@@ -82,7 +84,7 @@ func run() -> void:
 	check("missing_seat_fails_closed", not bool(audit_civic_parts(missing_seat).get("passed", true)))
 	check("missing_roof_half_fails_closed", not bool(audit_civic_parts(missing_roof).get("passed", true)))
 	var passed := checks.all(func(row): return bool(row.passed))
-	var report := {"passed": passed, "checks": checks, "forwardAudit": forward_audit, "reversedAudit": reversed_audit, "layoutOverlapAudits": layout_audits, "groundLevelStreetPolicyAudit": clear_layout_audit, "commonsPhysicalIntentAudit": commons_intent_audit, "unsupportedBeamControls": unsupported_controls, "physicalRoofAudit": {"passed": physical_report.get("passed", false), "failedCivicRoofIds": failed_civic_roof_ids, "violations": physical_report.get("violations", [])}, "civicSignature": civic_signature(forward_parts), "evidenceLevel": "procedural_recipe_geometry_contract", "doesNotProve": "No scene publication, rendered image, gameplay, NPC or navigation acceptance."}
+	var report := {"passed": passed, "checks": checks, "forwardAudit": forward_audit, "reversedAudit": reversed_audit, "layoutOverlapAudits": layout_audits, "groundLevelStreetPolicyAudit": clear_layout_audit, "stableBuntingIdAudit": bunting_id_audit, "commonsPhysicalIntentAudit": commons_intent_audit, "unsupportedBeamControls": unsupported_controls, "physicalRoofAudit": {"passed": physical_report.get("passed", false), "failedCivicRoofIds": failed_civic_roof_ids, "violations": physical_report.get("violations", [])}, "civicSignature": civic_signature(forward_parts), "evidenceLevel": "procedural_recipe_geometry_contract", "doesNotProve": "No scene publication, rendered image, gameplay, NPC or navigation acceptance."}
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	var file := FileAccess.open(report_path, FileAccess.WRITE)
 	if file == null:
@@ -347,12 +349,13 @@ func audit_commons_layout_overlap(seed: int) -> Dictionary:
 	var expected_paving_north_z := keep_front_z + 8.0
 	var expected_paving_south_z := minf(keep_front_z - 24.0, commons_footprint.position.z - paving_margin)
 	var paving_formula_ok := is_equal_approx(paving_bounds.position.x, 19.0) and is_equal_approx(paving_bounds.size.x, 48.0) and absf(paving_bounds.end.z - expected_paving_north_z) <= EPSILON and absf(paving_bounds.position.z - expected_paving_south_z) <= EPSILON and absf(float(paving.size.z) - (expected_paving_north_z - expected_paving_south_z)) <= EPSILON and absf(float(paving.position.z) - (expected_paving_north_z + expected_paving_south_z) * 0.5) <= EPSILON
+	var paving_grade_ok: bool = not paving.collision_enabled and is_equal_approx(paving_bounds.end.y, Composer.PUBLIC_GROUND_SURFACE_Y) and not Composer.is_primary_tree_paving(paving)
 	var contained_by_paving := aabb_contains_aabb_xz_with_margin(paving_bounds, commons_footprint, paving_margin)
 	var five_ray_corridor_clear := commons_approach_corridor_clear(commons, commons_center)
 	var local_geometry_signature := commons_local_geometry_signature(commons, commons_center)
 	var quarter_nonpaving_byte_exact := audit_civic_quarter_nonpaving_parity(front_z, keep_front_z, foundation_height, variation, layout)
-	var passed := seating.size() == 6 and commons.size() == 14 and new_overlaps.is_empty() and edge_clearance_ok and not boundary_overlaps.is_empty() and contained_by_paving and paving_formula_ok and five_ray_corridor_clear and street_byte_exact and quarter_nonpaving_byte_exact and not local_geometry_signature.is_empty()
-	return {"passed": passed, "seed": seed, "seatingCount": seating.size(), "commonsCount": commons.size(), "memberOrder": commons.map(func(part): return String(part.id)), "newOverlapIds": new_overlaps, "boundaryOverlapIds": boundary_overlaps, "negativeControlAuthority": "boundary_clone_at_generated_house_foundation", "envelopeCount": envelopes.size(), "frontZ": front_z, "keepFrontZ": keep_front_z, "rowTwoFoundationSouthZ": row_two_foundation_south_z, "measuredFoundationSouthZ": measured_foundation_south_z, "measuredBackNorthZ": measured_back_north_z, "edgeClearance": measured_foundation_south_z - measured_back_north_z, "edgeClearanceOk": edge_clearance_ok, "commonsHub": commons_center, "commonsFootprint": commons_footprint, "containedByCivicPaving": contained_by_paving, "pavingFormulaOk": paving_formula_ok, "pavingBounds": paving_bounds, "fiveRayApproachCorridorClear": five_ray_corridor_clear, "streetRecordsByteExact": street_byte_exact, "streetPartsByteExact": street_parts_exact, "streetRoomsByteExact": street_rooms_exact, "streetRecipeRecordsByteExact": street_recipe_exact, "streetRecipePreservationFailure": street_recipe_reason, "changedExistingDeclarationRejected": changed_existing_rejected, "unexpectedDeclarationAdditionRejected": extra_declaration_rejected, "expectedDeclarationAdditions": CIVIC_DECLARATION_ADDITIONS, "streetParityAuthority": "current_before_after_civic_insertion", "quarterNonpavingByteExact": quarter_nonpaving_byte_exact, "localGeometrySignature": local_geometry_signature}
+	var passed: bool = seating.size() == 6 and commons.size() == 14 and new_overlaps.is_empty() and edge_clearance_ok and not boundary_overlaps.is_empty() and contained_by_paving and paving_formula_ok and paving_grade_ok and five_ray_corridor_clear and street_byte_exact and quarter_nonpaving_byte_exact and not local_geometry_signature.is_empty()
+	return {"passed": passed, "seed": seed, "seatingCount": seating.size(), "commonsCount": commons.size(), "memberOrder": commons.map(func(part): return String(part.id)), "newOverlapIds": new_overlaps, "boundaryOverlapIds": boundary_overlaps, "negativeControlAuthority": "boundary_clone_at_generated_house_foundation", "envelopeCount": envelopes.size(), "frontZ": front_z, "keepFrontZ": keep_front_z, "rowTwoFoundationSouthZ": row_two_foundation_south_z, "measuredFoundationSouthZ": measured_foundation_south_z, "measuredBackNorthZ": measured_back_north_z, "edgeClearance": measured_foundation_south_z - measured_back_north_z, "edgeClearanceOk": edge_clearance_ok, "commonsHub": commons_center, "commonsFootprint": commons_footprint, "containedByCivicPaving": contained_by_paving, "pavingFormulaOk": paving_formula_ok, "pavingGradeOk": paving_grade_ok, "pavingBounds": paving_bounds, "fiveRayApproachCorridorClear": five_ray_corridor_clear, "streetRecordsByteExact": street_byte_exact, "streetPartsByteExact": street_parts_exact, "streetRoomsByteExact": street_rooms_exact, "streetRecipeRecordsByteExact": street_recipe_exact, "streetRecipePreservationFailure": street_recipe_reason, "changedExistingDeclarationRejected": changed_existing_rejected, "unexpectedDeclarationAdditionRejected": extra_declaration_rejected, "expectedDeclarationAdditions": CIVIC_DECLARATION_ADDITIONS, "streetParityAuthority": "current_before_after_civic_insertion", "quarterNonpavingByteExact": quarter_nonpaving_byte_exact, "localGeometrySignature": local_geometry_signature}
 
 
 func dictionary_preserves_existing_records(before: Dictionary, after: Dictionary) -> bool:
@@ -432,7 +435,8 @@ func audit_ground_level_street_policy() -> Dictionary:
 	var foundations_preserved := foundation_parts.size() == 8
 	var foundations_at_datum := foundation_parts.all(func(part): return is_equal_approx(part.position.y + part.size.y * 0.5, BASE_Y))
 	var no_forbidden_parts := forbidden_parts.is_empty()
-	var plaza_is_visual_ground_patch: bool = plaza != null and not plaza.collision_enabled and String(plaza.kind) == "ground_patch"
+	var plaza_is_visual_ground_patch: bool = plaza != null and not plaza.collision_enabled and String(plaza.kind) == "ground_patch" \
+		and is_equal_approx(plaza.position.y + plaza.size.y * 0.5, Composer.PUBLIC_GROUND_SURFACE_Y) and not Composer.is_primary_tree_paving(plaza)
 	var policy: bool = foundations_preserved and foundations_at_datum and no_forbidden_parts and plaza_is_visual_ground_patch
 	return {"passed": clear and bool(outcome.get("ready", false)) and policy,
 		"evidenceLevel": "synthetic_explicit_spacing_actual_recipe_boxes", "layout": layout,"frontZ":spacious_front,"keepFrontZ":KEEP_FRONT_Z,
@@ -444,6 +448,30 @@ func audit_ground_level_street_policy() -> Dictionary:
 		"plazaFound": plaza != null, "plazaKind": String(plaza.kind) if plaza != null else "",
 		"plazaCollisionEnabled": bool(plaza.collision_enabled) if plaza != null else true,
 		"plazaIsVisualGroundPatch": plaza_is_visual_ground_patch, "policyPassed":policy}
+
+
+func audit_stable_bunting_source_ids() -> Dictionary:
+	var fixture = Blueprint.new("stable_bunting_ids", 208159, "civic")
+	fixture.set_recipe({"citadelMarketHousePair": {"leftHouseId":"left", "rightHouseId":"right", "plazaPartId":"plaza"}})
+	var cloth: Array[String] = ["wool_rust", "linen", "wool_moss"]
+	# Reverse declaration order deliberately: identity belongs to the source role,
+	# never to its current position in a compacted array.
+	var declarations := [
+		{"sourceIndex":2, "role":"exterior", "start":3.0, "end":20.0, "z":-9.0, "y":6.0},
+		{"sourceIndex":1, "role":"market", "start":-8.0, "end":8.0, "z":33.5, "y":6.0}]
+	var assemblies: Array = []
+	for line: Dictionary in declarations:
+		assemblies.append(Composer._append_bunting_line(fixture, int(line.sourceIndex), line, 0.0, cloth, {"left":"a", "right":"b", "courtyard":"c"}))
+	var rope_ids: Array = assemblies.map(func(row): return String(row.ropeId))
+	var first_pennant_ids: Array = assemblies.map(func(row): return String((row.pennantIds as Array).front()))
+	var first_materials: Array = assemblies.map(func(row):
+		var id := String((row.pennantIds as Array).front())
+		var matches: Array = fixture.parts.filter(func(part): return String(part.id) == id)
+		return String(matches.front().material_id) if matches.size() == 1 else "")
+	return {"passed": rope_ids == ["urban_bunting_rope_02", "urban_bunting_rope_01"] \
+		and first_pennant_ids == ["urban_bunting_02_00", "urban_bunting_01_00"] \
+		and first_materials == ["wool_moss", "linen"], "ropeIds":rope_ids,
+		"firstPennantIds":first_pennant_ids, "firstMaterials":first_materials}
 
 
 func audit_commons_physical_intent_recipe() -> Dictionary:
@@ -598,11 +626,8 @@ func audit_civic_quarter_nonpaving_parity(front_z: float, keep_front_z: float, b
 
 
 func add_legacy_civic_quarter(blueprint, keep_front_z: float, base_y: float, variation: float) -> void:
-	Composer.add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, base_y + 0.18, keep_front_z - 8.0), Vector3(48.0, 0.08, 32.0), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x"})
-	var houses := [
-		{"id": "urban_civic_house_east", "center": Vector3(43.0, 0.0, keep_front_z - 2.5), "width": 10.2, "depth": 12.0, "height": 9.3, "material": "painted_brick_ochre"},
-		{"id": "urban_civic_house_wall", "center": Vector3(56.0, 0.0, keep_front_z - 14.0), "width": 8.8, "depth": 10.4, "height": 7.2, "material": "painted_brick_sage"}
-	]
+	Composer.add_part(blueprint, "urban_civic_quarter_paving", "foundation", "cobblestone", Vector3(43.0, Composer.PUBLIC_GROUND_SURFACE_Y - 0.04, keep_front_z - 8.0), Vector3(48.0, 0.08, 32.0), {"collision": false, "variation": variation - 0.025, "semantic": "citadel_civic_quarter_paving", "pavingFamily": "civic_setts", "pavingRegion": "citadel_courtyard", "pavingHeading": "x", "gradeSurfaceY":Composer.PUBLIC_GROUND_SURFACE_Y, "physicalIntent":"visual_detail"})
+	var houses := Composer.civic_house_specs(keep_front_z)
 	for house_value in houses:
 		var house: Dictionary = house_value as Dictionary
 		Composer.add_street_house(blueprint, String(house.get("id", "urban_civic_house")), house.get("center", Vector3.ZERO) as Vector3, float(house.get("width", 8.0)), float(house.get("depth", 9.0)), float(house.get("height", 7.0)), -1.0, base_y, String(house.get("material", "painted_brick_cream")), variation + float(String(house.get("id", "house")).hash() % 17) * 0.003)
