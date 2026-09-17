@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFile as execFileCallback } from 'node:child_process';
 import { constants as fsConstants } from 'node:fs';
 import { access, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { promisify } from 'node:util';
 import { runOwnedProcess } from './owned-process.mjs';
 import { findGodot, parseArguments, projectRoot as defaultProjectRoot } from './voxel-tool-runtime.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const execFile = promisify(execFileCallback);
 export const receiptSchema = 'n2-native-world-vertical-slice-receipt/v1';
 export const fixtureSchema = 'n2-native-world-vertical-slice-fixture/v1';
 export const expectedNativeMethod = 'n2_prepare_vertical_slice';
@@ -98,6 +101,11 @@ async function exists(path) {
 
 async function sha256(path) {
   return createHash('sha256').update(await readFile(path)).digest('hex');
+}
+
+async function gitText(project, args) {
+  const result = await execFile('git', args, { cwd: project, windowsHide: true, encoding: 'utf8' });
+  return result.stdout.trim();
 }
 
 async function fileReceipt(project, configured) {
@@ -250,6 +258,8 @@ export async function runN2NativeWorldVerticalSlice(argv = process.argv.slice(2)
   const stdoutPath = join(output, 'godot.stdout.log');
   const stderrPath = join(output, 'godot.stderr.log');
   const summaryPath = join(output, 'godot.watchdog.json');
+  const gitBefore = { commit: await gitText(project, ['rev-parse', 'HEAD']), branch: await gitText(project, ['branch', '--show-current']),
+    status: await gitText(project, ['status', '--short']) };
   const inputsBefore = await inventory(project, inputPaths);
   const binaries = await inventory(project, binaryPaths);
   const nativeBuildReportPath = options.nativeBuildReport ? resolve(project, String(options.nativeBuildReport)) : null;
@@ -273,10 +283,14 @@ export async function runN2NativeWorldVerticalSlice(argv = process.argv.slice(2)
   const validation = validateFixtureReport(fixture);
   const inputsAfter = await inventory(project, inputPaths);
   const inputsUnchanged = inputsBefore.aggregateSha256 === inputsAfter.aggregateSha256;
+  const gitAfter = { commit: await gitText(project, ['rev-parse', 'HEAD']), branch: await gitText(project, ['branch', '--show-current']),
+    status: await gitText(project, ['status', '--short']) };
+  const gitCleanAndStable = gitBefore.commit === gitAfter.commit && gitBefore.branch === gitAfter.branch
+    && gitBefore.status === '' && gitAfter.status === '';
   const ownedClean = summary.cleanupPassed && summary.authoritativeZeroProven && !summary.forcedCleanup;
   const stderrText = await readFile(stderrPath, 'utf8');
   const screenshotPresent = await exists(screenshotPath) && (await stat(screenshotPath)).size > 0;
-  const passed = fixture?.passed === true && validation.valid && nativeBuildValidation.valid && inputsUnchanged && ownedClean
+  const passed = fixture?.passed === true && validation.valid && nativeBuildValidation.valid && inputsUnchanged && gitCleanAndStable && ownedClean
     && summary.functionalExitCode === 0 && stderrText.length === 0 && screenshotPresent;
   const blockedOnNativeApi = validation.valid && fixture?.passed === false && String(fixture?.reason ?? '').startsWith('missing_native_')
     && inputsUnchanged && ownedClean && stderrText.length === 0;
@@ -285,6 +299,7 @@ export async function runN2NativeWorldVerticalSlice(argv = process.argv.slice(2)
     status: passed ? 'passed' : blockedOnNativeApi ? 'blocked_native_api' : 'failed',
     runName,
     evidenceLevel: 'N2-only headed lattice parity and one-authority fixture; no production, NPC, navigation, or gameplay acceptance claim.',
+    git: { before: gitBefore, after: gitAfter, cleanAndStable: gitCleanAndStable },
     expectedNativeApi: fixture?.evidence?.expectedNativeApi ?? { class: 'TerrainMeshingBackend', method: expectedNativeMethod },
     fixture: fixture ? { path: relative(project, reportPath).replaceAll('\\', '/'), sha256: await sha256(reportPath), value: fixture } : null,
     screenshot: screenshotPresent ? { path: relative(project, screenshotPath).replaceAll('\\', '/'), sha256: await sha256(screenshotPath) } : null,

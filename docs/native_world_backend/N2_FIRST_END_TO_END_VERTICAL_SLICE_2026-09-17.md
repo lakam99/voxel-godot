@@ -95,15 +95,16 @@ Result: 14/14 passed.
 Command:
 
 ```powershell
-node tools/run-n2-native-world-vertical-slice.mjs --run-name n2-vertical-slice-11-final --native-build-report artifacts/native-world-backend/n2-native-build-07/report.json
+node tools/run-n2-native-world-vertical-slice.mjs --run-name n2-vertical-slice-12-final-clean --native-build-report artifacts/native-world-backend/n2-native-build-07/report.json
 ```
 
 Evidence:
 
-- receipt: `artifacts/native-world-backend/n2-vertical-slice-11-final/receipt.json`;
-- fixture report: `artifacts/native-world-backend/n2-vertical-slice-11-final/fixture-report.json`;
-- screenshot: `artifacts/native-world-backend/n2-vertical-slice-11-final/fixture.png`;
+- receipt: `artifacts/native-world-backend/n2-vertical-slice-12-final-clean/receipt.json`;
+- fixture report: `artifacts/native-world-backend/n2-vertical-slice-12-final-clean/fixture-report.json`;
+- screenshot: `artifacts/native-world-backend/n2-vertical-slice-12-final-clean/fixture.png`;
 - status passed, empty stderr, functional exit 0, and natural owned-process zero;
+- Git commit/branch were stable and the worktree was clean before and after;
 - 33,915 baseline and edited samples matched ordered typed oracle data;
 - both seam tile geometry hashes changed after the four serialized edits;
 - exactly one project-owned terrain body and three installed shapes remained;
