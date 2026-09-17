@@ -3,6 +3,7 @@
 #include "../core/world_delta_store.hpp"
 
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -239,6 +240,108 @@ VWB_TEST(world_delta_store_rejects_invalid_limits_and_unknown_enums) {
     expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:unknown-kind", 0, {
         {WorldDeltaNamespace::terrain_override, {0, 0, 0}, static_cast<WorldDeltaOperationKind>(255U), std::nullopt},
     }), store);
+}
+
+VWB_TEST(world_delta_store_validates_all_typed_state_and_transaction_boundaries) {
+    WorldDeltaStore store;
+    const CellCoord target{0, 0, 0};
+    expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:missing-state", 0, {
+        {WorldDeltaNamespace::terrain_override, target, WorldDeltaOperationKind::set, std::nullopt},
+    }), store);
+    expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:no-ops", 0, {}), store);
+    expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction(std::string("delta\0nul", 9), 0, {
+        set(WorldDeltaNamespace::terrain_override, target, stone()),
+    }), store);
+
+    std::vector<WorldDeltaState> invalid_states;
+    WorldDeltaState invalid = stone(); invalid.density = std::numeric_limits<double>::infinity(); invalid_states.push_back(invalid);
+    invalid = stone(); invalid.material = static_cast<TerrainMaterialId>(255U); invalid_states.push_back(invalid);
+    invalid = stone(); invalid.resolved_biome = static_cast<TerrainBiomeId>(255U); invalid_states.push_back(invalid);
+    invalid = stone(); invalid.fluid = static_cast<TerrainFluidId>(255U); invalid_states.push_back(invalid);
+    invalid = stone(); invalid.material = TerrainMaterialId::air; invalid_states.push_back(invalid);
+    invalid = stone(); invalid.density = -1.0; invalid.solid = false; invalid.material = TerrainMaterialId::dirt; invalid_states.push_back(invalid);
+    invalid = stone(); invalid.density = -1.0; invalid.solid = false; invalid.material = TerrainMaterialId::air;
+    invalid.fluid = TerrainFluidId::water; invalid_states.push_back(invalid);
+    for (std::size_t index = 0; index < invalid_states.size(); ++index) {
+        expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:bad-state:" + std::to_string(index), 0, {
+            set(WorldDeltaNamespace::terrain_override, target, invalid_states[index]),
+        }), store);
+    }
+    VWB_EXPECT_EQ(0ULL, store.revision());
+}
+
+VWB_TEST(world_delta_store_value_types_have_strict_field_equality) {
+    const WorldDeltaState base = stone();
+    VWB_EXPECT(base == base);
+    for (unsigned field = 0; field < 5U; ++field) {
+        WorldDeltaState changed = base;
+        if (field == 0U) changed.density += 1.0;
+        if (field == 1U) changed.solid = false;
+        if (field == 2U) changed.material = TerrainMaterialId::dirt;
+        if (field == 3U) changed.resolved_biome = TerrainBiomeId::forest;
+        if (field == 4U) changed.fluid = TerrainFluidId::water;
+        VWB_EXPECT(!(base == changed));
+    }
+    const WorldDeltaRecord record{WorldDeltaNamespace::terrain_override, {1, 2, 3}, base, 5};
+    VWB_EXPECT(record == record);
+    for (unsigned field = 0; field < 4U; ++field) {
+        WorldDeltaRecord changed = record;
+        if (field == 0U) changed.name_space = WorldDeltaNamespace::scene_overlay;
+        if (field == 1U) ++changed.coordinate.x;
+        if (field == 2U) changed.state = air();
+        if (field == 3U) ++changed.revision;
+        VWB_EXPECT(!(record == changed));
+    }
+    const WorldDeltaSectionKey section{{1, 2, 3}};
+    VWB_EXPECT(section == section);
+    VWB_EXPECT(!(section == WorldDeltaSectionKey{{1, 2, 4}}));
+    const WorldDeltaCommitReceipt receipt{WorldDeltaCommitStatus::committed, "delta:receipt", 5, {section}};
+    VWB_EXPECT(receipt == receipt);
+    for (unsigned field = 0; field < 4U; ++field) {
+        WorldDeltaCommitReceipt changed = receipt;
+        if (field == 0U) changed.status = WorldDeltaCommitStatus::no_change;
+        if (field == 1U) changed.transaction_id += ":other";
+        if (field == 2U) ++changed.revision;
+        if (field == 3U) changed.affected_sections.push_back({{9, 9, 9}});
+        VWB_EXPECT(!(receipt == changed));
+    }
+    const WorldDeltaRejected unknown(static_cast<WorldDeltaRejectReason>(255U));
+    VWB_EXPECT_EQ(static_cast<WorldDeltaRejectReason>(255U), unknown.reason());
+    VWB_EXPECT_EQ(std::string("unknown world delta rejection"), std::string(unknown.what()));
+}
+
+VWB_TEST(world_delta_store_uses_stable_namespace_cell_and_section_ordering) {
+    WorldDeltaStore store;
+    const auto receipt = store.commit(transaction("delta:ordering", 0, {
+        set(WorldDeltaNamespace::scene_overlay, {16, 16, 0}, air()),
+        set(WorldDeltaNamespace::terrain_override, {16, 0, 16}, stone()),
+        set(WorldDeltaNamespace::terrain_override, {16, 0, 0}, water()),
+        set(WorldDeltaNamespace::terrain_override, {16, 16, 0}, stone()),
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, air()),
+    }));
+    VWB_EXPECT_EQ(4U, receipt.affected_sections.size());
+    VWB_EXPECT((receipt.affected_sections[0].section == CellCoord{0, 0, 0}));
+    VWB_EXPECT((receipt.affected_sections[1].section == CellCoord{1, 0, 0}));
+    VWB_EXPECT((receipt.affected_sections[2].section == CellCoord{1, 0, 1}));
+    VWB_EXPECT((receipt.affected_sections[3].section == CellCoord{1, 1, 0}));
+    const auto records = store.pin().records();
+    VWB_EXPECT_EQ(5U, records.size());
+    VWB_EXPECT_EQ(WorldDeltaNamespace::terrain_override, records[0].name_space);
+    VWB_EXPECT((records[0].coordinate == CellCoord{0, 0, 0}));
+    VWB_EXPECT((records[1].coordinate == CellCoord{16, 0, 0}));
+    VWB_EXPECT((records[2].coordinate == CellCoord{16, 0, 16}));
+    VWB_EXPECT((records[3].coordinate == CellCoord{16, 16, 0}));
+    VWB_EXPECT_EQ(WorldDeltaNamespace::scene_overlay, records[4].name_space);
+}
+
+VWB_TEST(world_delta_store_imported_max_revision_refuses_an_overflowing_commit) {
+    WorldDeltaStore store({1, 1, std::numeric_limits<std::uint64_t>::max()});
+    VWB_EXPECT_EQ(std::numeric_limits<std::uint64_t>::max(), store.pin().revision());
+    expect_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        transaction("delta:max-revision", std::numeric_limits<std::uint64_t>::max(), {
+            set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
+        }), store);
+    VWB_EXPECT(store.pin().records().empty());
 }
 
 } // namespace voxel::world_backend::tests

@@ -143,10 +143,10 @@ std::vector<WorldDeltaOperation> sorted_operations(const WorldDeltaTransaction &
 }
 
 WorldDeltaSectionKey section_key_for(const CellCoord &coordinate) {
-    const auto address = split_cell(coordinate, WorldDeltaStore::SECTION_SIZE);
-    // SECTION_SIZE is fixed and positive, so failure would be an internal bug.
-    if (!address) throw std::logic_error("world delta fixed section split failed");
-    return {address->section};
+    // SECTION_SIZE is a positive compile-time constant, so split_cell cannot
+    // reject this request. The optional is only part of the generic coordinate
+    // helper's public contract for caller-supplied divisors.
+    return {split_cell(coordinate, WorldDeltaStore::SECTION_SIZE).value().section};
 }
 
 const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
@@ -227,7 +227,9 @@ WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits) : limits_(l
     if (limits_.max_records == 0U || limits_.max_transactions == 0U) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
-    state_ = std::make_shared<WorldDeltaSnapshotState>();
+    auto initial = std::make_shared<WorldDeltaSnapshotState>();
+    initial->revision = limits_.initial_revision;
+    state_ = std::move(initial);
 }
 
 WorldDeltaStore::~WorldDeltaStore() = default;

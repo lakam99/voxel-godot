@@ -100,6 +100,9 @@ struct WorldDeltaStoreLimits {
     // transaction would invalidate its idempotency contract.
     std::size_t max_records = 65536;
     std::size_t max_transactions = 65536;
+    // Imported save state may resume a nonzero global revision. It is part of
+    // the immutable first pin, never a post-construction mutable setting.
+    std::uint64_t initial_revision = 0;
 };
 
 struct WorldDeltaSnapshotState;
