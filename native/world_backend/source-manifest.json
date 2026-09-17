@@ -11,7 +11,8 @@
     "core/terrain_snapshot.cpp",
     "core/terrain_source.cpp",
     "core/world_delta_store.cpp",
-    "core/world_identity.cpp"
+    "core/world_identity.cpp",
+    "core/world_source.cpp"
   ],
   "coreHeaders": [
     "core/authority.hpp",
@@ -25,7 +26,8 @@
     "core/terrain_source.hpp",
     "core/world_delta_store.hpp",
     "core/thirdparty/fast_noise_lite/FastNoiseLite.h",
-    "core/world_identity.hpp"
+    "core/world_identity.hpp",
+    "core/world_source.hpp"
   ],
   "testSources": [
     "tests/biome_region_field_tests.cpp",
@@ -33,7 +35,8 @@
     "tests/terrain_meshing_tests.cpp",
     "tests/terrain_source_tests.cpp",
     "tests/world_delta_store_tests.cpp",
-    "tests/world_backend_core_tests.cpp"
+    "tests/world_backend_core_tests.cpp",
+    "tests/world_source_tests.cpp"
   ],
   "testHeaders": [
     "tests/test_harness.hpp"
