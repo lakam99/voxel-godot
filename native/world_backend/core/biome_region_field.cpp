@@ -9,21 +9,19 @@
 namespace voxel::world_backend {
 namespace {
 
-constexpr std::uint32_t FNV_OFFSET = 2166136261U;
-constexpr std::uint32_t FNV_PRIME = 16777619U;
 constexpr double UNIT_DENOMINATOR = 2147483647.0;
 
-bool is_whitespace(const std::uint32_t value) noexcept {
-    // Godot's String::strip_edges() uses Unicode whitespace rather than
-    // byte-oriented trimming. These are the Unicode White_Space code points
-    // accepted by the engine's character classification.
-    return (value >= 0x0009U && value <= 0x000dU) || value == 0x0020U
-        || value == 0x0085U || value == 0x00a0U || value == 0x1680U
-        || (value >= 0x2000U && value <= 0x200aU) || value == 0x2028U
-        || value == 0x2029U || value == 0x202fU || value == 0x205fU || value == 0x3000U;
+bool is_strip_edge_character(const std::uint32_t value) noexcept {
+    // Godot String::strip_edges() is deliberately not a Unicode White_Space
+    // normalizer. The engine checks the code point directly and trims only
+    // scalar values through U+0020.
+    return value <= 0x0020U;
 }
 
 std::vector<std::uint32_t> decode_utf8(const std::string &text) {
+    if (text.find('\0') != std::string::npos) {
+        throw std::invalid_argument("biome seed presentation must not contain NUL");
+    }
     std::vector<std::uint32_t> result;
     const auto *bytes = reinterpret_cast<const std::uint8_t *>(text.data());
     for (std::size_t index = 0; index < text.size();) {
@@ -91,9 +89,9 @@ std::string encode_utf8(const std::vector<std::uint32_t> &code_points) {
 
 std::vector<std::uint32_t> trim_edges(std::vector<std::uint32_t> code_points) {
     std::size_t begin = 0;
-    while (begin < code_points.size() && is_whitespace(code_points[begin])) ++begin;
+    while (begin < code_points.size() && is_strip_edge_character(code_points[begin])) ++begin;
     std::size_t end = code_points.size();
-    while (end > begin && is_whitespace(code_points[end - 1U])) --end;
+    while (end > begin && is_strip_edge_character(code_points[end - 1U])) --end;
     return {code_points.begin() + static_cast<std::ptrdiff_t>(begin),
         code_points.begin() + static_cast<std::ptrdiff_t>(end)};
 }
@@ -192,8 +190,9 @@ bool BiomeVec2::operator==(const BiomeVec2 &other) const noexcept {
 }
 
 bool BiomeRegionSample::operator==(const BiomeRegionSample &other) const noexcept {
-    return region == other.region && region_id == other.region_id && site_position == other.site_position
+    return version == other.version && region == other.region && region_id == other.region_id && site_position == other.site_position
         && biome == other.biome && temperature == other.temperature && moisture == other.moisture
+        && second_distance_meters == other.second_distance_meters
         && edge_distance_meters == other.edge_distance_meters && ecotone_weight == other.ecotone_weight
         && minimum_core_radius_meters == other.minimum_core_radius_meters
         && minimum_core_diameter_meters == other.minimum_core_diameter_meters;
@@ -322,8 +321,8 @@ BiomeRegionSample BiomeRegionField::sample(const AdmittedBiomeSeed &seed, const 
     const double temperature = climate_channel(seed, nearest_region, "temperature");
     const double moisture = climate_channel(seed, nearest_region, "moisture");
     const double edge_distance = std::fmax(0.0, (second_distance - nearest_distance) * 0.5);
-    return {nearest_region, region_id(seed, nearest_region), nearest_site,
-        biome_for_climate(temperature, moisture), temperature, moisture, edge_distance,
+    return {FIELD_VERSION, nearest_region, region_id(seed, nearest_region), nearest_site,
+        biome_for_climate(temperature, moisture), temperature, moisture, second_distance, edge_distance,
         1.0 - smoothstep_range(edge_distance, 0.0, ECOTONE_WIDTH_METERS),
         MINIMUM_CORE_RADIUS_METERS, MINIMUM_CORE_DIAMETER_METERS};
 }

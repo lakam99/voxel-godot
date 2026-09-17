@@ -37,12 +37,18 @@ struct BiomeVec2 {
 struct BiomeRegionSample {
     static constexpr std::uint32_t FIELD_VERSION = 2;
 
+    // `version` is script-visible in BiomeRegionField.sample(). Keep it in the
+    // typed record rather than asking an adapter to synthesize a second value.
+    std::uint32_t version = FIELD_VERSION;
     BiomeRegion region;
     std::string region_id;
     BiomeVec2 site_position;
     std::string biome;
     double temperature = 0.0;
     double moisture = 0.0;
+    // GDScript uses this transiently to derive edge distance. N3 consumers
+    // need the raw second-nearest fact for typed differential verification.
+    double second_distance_meters = 0.0;
     double edge_distance_meters = 0.0;
     double ecotone_weight = 0.0;
     double minimum_core_radius_meters = 2680.0;

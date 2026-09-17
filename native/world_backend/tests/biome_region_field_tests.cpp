@@ -28,16 +28,28 @@ const AdmittedBiomeSeed &atlas() {
 } // namespace
 
 VWB_TEST(biome_region_field_admits_unicode_seeds_by_code_point_and_matches_strip_default_boundary) {
-    const AdmittedBiomeSeed default_seed = BiomeRegionField::admit_utf8_seed(" \t\r\n ");
+    const AdmittedBiomeSeed default_seed = BiomeRegionField::admit_utf8_seed("\x01\x09\x1f \r\n\x20");
     VWB_EXPECT_EQ(std::string("default"), default_seed.utf8);
     VWB_EXPECT_EQ(code_points({'d', 'e', 'f', 'a', 'u', 'l', 't'}), default_seed.code_points);
 
-    const AdmittedBiomeSeed unicode = BiomeRegionField::admit_utf8_seed("\xC2\xA0  seed-\xF0\x9F\x8C\xB2  \xE3\x80\x80");
-    VWB_EXPECT_EQ(std::string("seed-\xF0\x9F\x8C\xB2"), unicode.utf8);
-    VWB_EXPECT_EQ(code_points({'s', 'e', 'e', 'd', '-', 0x1f332U}), unicode.code_points);
-    VWB_EXPECT_EQ(unicode, BiomeRegionField::validate_admitted_seed(unicode.code_points, unicode.utf8));
+    const AdmittedBiomeSeed ascii_controls = BiomeRegionField::admit_utf8_seed("\x01\x1f  seed-\xF0\x9F\x8C\xB2\x20\x1e");
+    VWB_EXPECT_EQ(std::string("seed-\xF0\x9F\x8C\xB2"), ascii_controls.utf8);
+    VWB_EXPECT_EQ(code_points({'s', 'e', 'e', 'd', '-', 0x1f332U}), ascii_controls.code_points);
+
+    // U+00A0 and U+3000 are not strip_edges characters. Their presence at an
+    // edge prevents any following ASCII control/space from being trimmed.
+    const AdmittedBiomeSeed nbsp = BiomeRegionField::admit_utf8_seed("\x1f \xC2\xA0seed\x20");
+    VWB_EXPECT_EQ(std::string("\xC2\xA0seed"), nbsp.utf8);
+    VWB_EXPECT_EQ(code_points({0x00a0U, 's', 'e', 'e', 'd'}), nbsp.code_points);
+    const AdmittedBiomeSeed ideographic = BiomeRegionField::admit_utf8_seed("seed\x20\xE3\x80\x80");
+    VWB_EXPECT_EQ(std::string("seed\x20\xE3\x80\x80"), ideographic.utf8);
+    VWB_EXPECT_EQ(code_points({'s', 'e', 'e', 'd', 0x20U, 0x3000U}), ideographic.code_points);
+    VWB_EXPECT_EQ(ascii_controls,
+        BiomeRegionField::validate_admitted_seed(ascii_controls.code_points, ascii_controls.utf8));
 
     VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::admit_utf8_seed("\xC0\x80"));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        BiomeRegionField::admit_utf8_seed(std::string("seed\0suffix", 11)));
     VWB_EXPECT_THROW(std::invalid_argument,
         BiomeRegionField::validate_admitted_seed(code_points({'a'}), "b"));
     VWB_EXPECT_THROW(std::invalid_argument,
@@ -63,10 +75,12 @@ VWB_TEST(biome_region_field_fixed_atlas_sample_matches_script_golden) {
     VWB_EXPECT_EQ((BiomeRegion{2, -2}), sample.region);
     VWB_EXPECT_EQ(std::string("biome-v2:atlas-1492:2,-2"), sample.region_id);
     VWB_EXPECT_EQ(std::string("plains"), sample.biome);
+    VWB_EXPECT_EQ(2U, sample.version);
     VWB_EXPECT(near(14911.9013671875, sample.site_position.x, 1.0e-12));
     VWB_EXPECT(near(-9096.15234375, sample.site_position.z, 1.0e-12));
     VWB_EXPECT(near(0.646733634051165, sample.temperature, 1.0e-12));
     VWB_EXPECT(near(0.584567430750002, sample.moisture, 1.0e-12));
+    VWB_EXPECT(near(5146.0498046875, sample.second_distance_meters, 1.0e-6));
     VWB_EXPECT(near(2212.86477661133, sample.edge_distance_meters, 1.0e-8));
     VWB_EXPECT_EQ(0.0, sample.ecotone_weight);
     VWB_EXPECT_EQ(2680.0, sample.minimum_core_radius_meters);
@@ -100,6 +114,7 @@ VWB_TEST(biome_region_field_ecotone_nearest_second_nearest_and_bounds_are_explic
         static_cast<float>((left_site.x + right_site.x) * 0.5F),
         static_cast<float>((left_site.z + right_site.z) * 0.5F)};
     const BiomeRegionSample edge = BiomeRegionField::sample(atlas(), boundary);
+    VWB_EXPECT(near(3041.38623046875, edge.second_distance_meters, 1.0e-6));
     VWB_EXPECT(edge.edge_distance_meters <= 0.001);
     VWB_EXPECT(edge.ecotone_weight >= 0.999999);
 
@@ -108,9 +123,34 @@ VWB_TEST(biome_region_field_ecotone_nearest_second_nearest_and_bounds_are_explic
     VWB_EXPECT_EQ(0.0, core.ecotone_weight);
     for (const BiomeVec2 point : std::vector<BiomeVec2>{{-13700.0, -22100.0}, {-1.0, -1.0}, {0.0, 0.0}, {7200.0, 9200.0}}) {
         const BiomeRegionSample sample = BiomeRegionField::sample(atlas(), point);
+        VWB_EXPECT(sample.second_distance_meters >= sample.edge_distance_meters);
         VWB_EXPECT(sample.edge_distance_meters >= 0.0);
         VWB_EXPECT(sample.ecotone_weight >= 0.0 && sample.ecotone_weight <= 1.0);
     }
+}
+
+VWB_TEST(biome_region_field_exact_ties_keep_z_then_x_winner_and_second_candidate_order) {
+    // At this supported global-coordinate magnitude Godot Vector2 float32
+    // storage coalesces the nine jittered 6km sites. Every candidate is an
+    // exact distance tie, making the script's loop order observable: z outer
+    // then x inner, with strict `<` preserving the first and second entries.
+    const BiomeVec2 far_point{6000000000000.0F, 6000000000000.0F};
+    const std::int32_t grid_x = static_cast<std::int32_t>(std::floor(
+        static_cast<double>(far_point.x) / BiomeRegionField::REGION_SPACING_METERS));
+    const std::int32_t grid_z = static_cast<std::int32_t>(std::floor(
+        static_cast<double>(far_point.z) / BiomeRegionField::REGION_SPACING_METERS));
+    const BiomeRegion first_candidate{grid_x - 1, grid_z - 1};
+    const BiomeRegion second_candidate{grid_x, grid_z - 1};
+    const BiomeVec2 first_site = BiomeRegionField::site_position(atlas(), first_candidate);
+    const BiomeVec2 second_site = BiomeRegionField::site_position(atlas(), second_candidate);
+    const BiomeRegionSample tied = BiomeRegionField::sample(atlas(), far_point);
+    VWB_EXPECT_EQ(first_candidate, tied.region);
+    VWB_EXPECT_EQ(first_site, tied.site_position);
+    VWB_EXPECT_EQ(first_site, second_site);
+    const float dx = far_point.x - second_site.x;
+    const float dz = far_point.z - second_site.z;
+    VWB_EXPECT_EQ(static_cast<double>(std::sqrt(dx * dx + dz * dz)), tied.second_distance_meters);
+    VWB_EXPECT_EQ(0.0, tied.edge_distance_meters);
 }
 
 VWB_TEST(biome_region_field_climate_and_biome_thresholds_match_script_inequalities) {
