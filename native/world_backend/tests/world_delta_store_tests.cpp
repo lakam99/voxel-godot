@@ -24,6 +24,10 @@ WorldDeltaState water() {
     return {-0.25, false, TerrainMaterialId::water, TerrainBiomeId::ocean, TerrainFluidId::water};
 }
 
+WorldDeltaState lava() {
+    return {-0.25, false, TerrainMaterialId::lava, TerrainBiomeId::underground, TerrainFluidId::lava};
+}
+
 WorldDeltaOperation set(const WorldDeltaNamespace name_space, const CellCoord coordinate, const WorldDeltaState state) {
     return {name_space, coordinate, WorldDeltaOperationKind::set, state};
 }
@@ -117,6 +121,19 @@ VWB_TEST(world_delta_store_scene_overlay_wins_only_while_it_exists) {
     const WorldDeltaPinnedSnapshot restored = store.pin();
     VWB_EXPECT(!restored.value_at(WorldDeltaNamespace::scene_overlay, target));
     VWB_EXPECT_EQ(stone(), restored.effective_value_at(target)->state);
+}
+
+VWB_TEST(world_delta_store_commits_lava_as_a_typed_delta_state) {
+    WorldDeltaStore store;
+    const CellCoord target{-16, -1, 16};
+    const auto receipt = store.commit(transaction("delta:lava", 0, {
+        set(WorldDeltaNamespace::terrain_override, target, lava()),
+    }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, receipt.status);
+    VWB_EXPECT_EQ(1ULL, receipt.revision);
+    const auto value = store.pin().effective_value_at(target);
+    VWB_EXPECT(value.has_value());
+    VWB_EXPECT_EQ(lava(), value->state);
 }
 
 VWB_TEST(world_delta_store_clear_removes_the_named_namespace_and_revision_bumps_once) {
@@ -269,6 +286,8 @@ VWB_TEST(world_delta_store_validates_all_typed_state_and_transaction_boundaries)
     invalid = stone(); invalid.density = -1.0; invalid.solid = false; invalid.material = TerrainMaterialId::dirt; invalid_states.push_back(invalid);
     invalid = stone(); invalid.density = -1.0; invalid.solid = false; invalid.material = TerrainMaterialId::air;
     invalid.fluid = TerrainFluidId::water; invalid_states.push_back(invalid);
+    invalid = lava(); invalid.material = TerrainMaterialId::water; invalid_states.push_back(invalid);
+    invalid = water(); invalid.material = TerrainMaterialId::lava; invalid_states.push_back(invalid);
     for (std::size_t index = 0; index < invalid_states.size(); ++index) {
         expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:bad-state:" + std::to_string(index), 0, {
             set(WorldDeltaNamespace::terrain_override, target, invalid_states[index]),

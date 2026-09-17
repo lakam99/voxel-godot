@@ -83,14 +83,17 @@ bool valid_kind(const WorldDeltaOperationKind value) noexcept {
 bool valid_state(const WorldDeltaState &state) noexcept {
     const auto material = static_cast<std::uint8_t>(state.material);
     const auto biome = static_cast<std::uint8_t>(state.resolved_biome);
-    const bool material_valid = material <= static_cast<std::uint8_t>(TerrainMaterialId::water);
+    const bool material_valid = material <= static_cast<std::uint8_t>(TerrainMaterialId::lava);
     const bool biome_valid = biome <= static_cast<std::uint8_t>(TerrainBiomeId::alpine);
-    const bool fluid_valid = state.fluid == TerrainFluidId::none || state.fluid == TerrainFluidId::water;
+    const bool fluid_valid = state.fluid == TerrainFluidId::none || state.fluid == TerrainFluidId::water
+        || state.fluid == TerrainFluidId::lava;
     return std::isfinite(state.density) && state.solid == (state.density >= 0.0)
         && material_valid && biome_valid && fluid_valid
         && (!state.solid || state.material != TerrainMaterialId::air)
-        && (state.solid || state.material == TerrainMaterialId::air || state.material == TerrainMaterialId::water)
-        && (state.fluid != TerrainFluidId::water || state.material == TerrainMaterialId::water);
+        && (state.solid || state.material == TerrainMaterialId::air || state.material == TerrainMaterialId::water
+            || state.material == TerrainMaterialId::lava)
+        && (state.fluid != TerrainFluidId::water || state.material == TerrainMaterialId::water)
+        && (state.fluid != TerrainFluidId::lava || state.material == TerrainMaterialId::lava);
 }
 
 void validate_operation(const WorldDeltaOperation &operation) {
