@@ -40,13 +40,13 @@ private:
 };
 
 bool enum_valid(const TerrainMaterialId value) noexcept {
-    return static_cast<std::uint8_t>(value) <= static_cast<std::uint8_t>(TerrainMaterialId::water);
+    return static_cast<std::uint8_t>(value) <= static_cast<std::uint8_t>(TerrainMaterialId::lava);
 }
 bool enum_valid(const TerrainBiomeId value) noexcept {
     return static_cast<std::uint8_t>(value) <= static_cast<std::uint8_t>(TerrainBiomeId::alpine);
 }
 bool enum_valid(const TerrainFluidId value) noexcept {
-    return value == TerrainFluidId::none || value == TerrainFluidId::water;
+    return value == TerrainFluidId::none || value == TerrainFluidId::water || value == TerrainFluidId::lava;
 }
 bool enum_valid(const TerrainProvenanceKind value) noexcept {
     return value == TerrainProvenanceKind::generated || value == TerrainProvenanceKind::typed_delta;
@@ -104,7 +104,8 @@ void validate_cell(const TerrainCell &cell) {
     if (!nonempty_text(cell.provenance_id) || cell.provenance_revision == 0U) {
         throw std::invalid_argument("terrain cell provenance must have a nonempty ID and nonzero revision");
     }
-    if (!cell.solid && cell.material != TerrainMaterialId::air && cell.material != TerrainMaterialId::water) {
+    if (!cell.solid && cell.material != TerrainMaterialId::air && cell.material != TerrainMaterialId::water
+        && cell.material != TerrainMaterialId::lava) {
         throw std::invalid_argument("nonsolid terrain cell has a solid material");
     }
     if (cell.solid && cell.material == TerrainMaterialId::air) {
@@ -112,6 +113,9 @@ void validate_cell(const TerrainCell &cell) {
     }
     if (cell.fluid == TerrainFluidId::water && cell.material != TerrainMaterialId::water) {
         throw std::invalid_argument("water fluid requires water material");
+    }
+    if (cell.fluid == TerrainFluidId::lava && cell.material != TerrainMaterialId::lava) {
+        throw std::invalid_argument("lava fluid requires lava material");
     }
 }
 
@@ -264,7 +268,7 @@ const TerrainCell &TerrainSnapshot::at_index(const std::size_t index) const {
 
 const char *terrain_material_name(const TerrainMaterialId material) noexcept {
     static constexpr const char *NAMES[] = {"air", "grass", "dirt", "stone", "sand", "snow", "deepStone", "bedrock",
-        "clay", "gravel", "coalOre", "ironOre", "crystalOre", "copperOre", "mud", "water"};
+        "clay", "gravel", "coalOre", "ironOre", "crystalOre", "copperOre", "mud", "water", "lava"};
     const auto index = static_cast<std::size_t>(material);
     return index < std::size(NAMES) ? NAMES[index] : "unknown";
 }

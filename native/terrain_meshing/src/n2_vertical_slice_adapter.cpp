@@ -37,15 +37,15 @@ constexpr std::size_t SAMPLE_COUNT = 33915U;
 constexpr std::size_t PREPARED_BYTE_CAP = 4194304U;
 constexpr std::size_t COLLISION_TRIANGLE_CAP = 200000U;
 
-const std::array<const char *, 16> MATERIAL_NAMES = {{
+const std::array<const char *, 17> MATERIAL_NAMES = {{
 	"air", "grass", "dirt", "stone", "sand", "snow", "deepStone", "bedrock",
-	"clay", "gravel", "coalOre", "ironOre", "crystalOre", "copperOre", "mud", "water",
+	"clay", "gravel", "coalOre", "ironOre", "crystalOre", "copperOre", "mud", "water", "lava",
 }};
 const std::array<const char *, 15> BIOME_NAMES = {{
 	"plains", "forest", "swamp", "desert", "savanna", "snow", "taiga", "tundra",
 	"ocean", "beach", "town", "underground", "deep_underground", "underground_air", "alpine",
 }};
-const std::array<const char *, 2> FLUID_NAMES = {{"", "water"}};
+const std::array<const char *, 3> FLUID_NAMES = {{"", "water", "lava"}};
 const std::array<const char *, 2> SOURCE_KIND_NAMES = {{"generated", "typed_delta"}};
 
 std::string utf8(const String &value) {

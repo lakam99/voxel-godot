@@ -226,7 +226,7 @@ TerrainMaterialId select_surface_material(
     for (std::size_t index = 0; index < solid_count; ++index) {
         const TerrainMaterialId material = samples[solid_indices[index]]->material;
         // Snapshot validation prevents a solid sample from using air.
-        if (material != TerrainMaterialId::water) {
+        if (material != TerrainMaterialId::water && material != TerrainMaterialId::lava) {
             return material;
         }
     }

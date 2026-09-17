@@ -27,6 +27,8 @@ enum class TerrainMaterialId : std::uint8_t {
     copper_ore = 13,
     mud = 14,
     water = 15,
+    // Append-only IDs: persisted typed terrain payloads already use 0..15.
+    lava = 16,
 };
 
 enum class TerrainBiomeId : std::uint8_t {
@@ -50,6 +52,8 @@ enum class TerrainBiomeId : std::uint8_t {
 enum class TerrainFluidId : std::uint8_t {
     none = 0,
     water = 1,
+    // Append-only for the same durable-payload reason as TerrainMaterialId.
+    lava = 2,
 };
 
 enum class TerrainProvenanceKind : std::uint8_t {

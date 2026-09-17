@@ -256,13 +256,13 @@ private:
 };
 
 bool valid_material(const TerrainMaterialId value) noexcept {
-    return static_cast<std::uint8_t>(value) <= static_cast<std::uint8_t>(TerrainMaterialId::water);
+    return static_cast<std::uint8_t>(value) <= static_cast<std::uint8_t>(TerrainMaterialId::lava);
 }
 bool valid_biome(const TerrainBiomeId value) noexcept {
     return static_cast<std::uint8_t>(value) <= static_cast<std::uint8_t>(TerrainBiomeId::alpine);
 }
 bool valid_fluid(const TerrainFluidId value) noexcept {
-    return value == TerrainFluidId::none || value == TerrainFluidId::water;
+    return value == TerrainFluidId::none || value == TerrainFluidId::water || value == TerrainFluidId::lava;
 }
 
 void validate_delta(const TerrainDelta &delta) {
@@ -275,7 +275,8 @@ void validate_delta(const TerrainDelta &delta) {
     if (!valid_material(delta.state.material) || !valid_biome(delta.state.resolved_biome) || !valid_fluid(delta.state.fluid)) {
         throw std::invalid_argument("terrain delta contains an unknown typed value");
     }
-    if (!delta.state.solid && delta.state.material != TerrainMaterialId::air && delta.state.material != TerrainMaterialId::water) {
+    if (!delta.state.solid && delta.state.material != TerrainMaterialId::air && delta.state.material != TerrainMaterialId::water
+        && delta.state.material != TerrainMaterialId::lava) {
         throw std::invalid_argument("nonsolid terrain delta has a solid material");
     }
     if (delta.state.solid && delta.state.material == TerrainMaterialId::air) {
@@ -283,6 +284,9 @@ void validate_delta(const TerrainDelta &delta) {
     }
     if (delta.state.fluid == TerrainFluidId::water && delta.state.material != TerrainMaterialId::water) {
         throw std::invalid_argument("water terrain delta requires water material");
+    }
+    if (delta.state.fluid == TerrainFluidId::lava && delta.state.material != TerrainMaterialId::lava) {
+        throw std::invalid_argument("lava terrain delta requires lava material");
     }
 }
 

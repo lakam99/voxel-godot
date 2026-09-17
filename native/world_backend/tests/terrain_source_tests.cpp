@@ -109,11 +109,16 @@ std::vector<std::uint8_t> noncanonical_delta_bytes(const std::vector<TerrainDelt
 VWB_TEST(terrain_typed_ids_and_names_are_frozen) {
     VWB_EXPECT_EQ(0U, static_cast<unsigned>(TerrainMaterialId::air));
     VWB_EXPECT_EQ(15U, static_cast<unsigned>(TerrainMaterialId::water));
+    VWB_EXPECT_EQ(16U, static_cast<unsigned>(TerrainMaterialId::lava));
+    VWB_EXPECT_EQ(0U, static_cast<unsigned>(TerrainFluidId::none));
+    VWB_EXPECT_EQ(1U, static_cast<unsigned>(TerrainFluidId::water));
+    VWB_EXPECT_EQ(2U, static_cast<unsigned>(TerrainFluidId::lava));
     VWB_EXPECT_EQ(0U, static_cast<unsigned>(TerrainBiomeId::plains));
     VWB_EXPECT_EQ(2U, static_cast<unsigned>(TerrainBiomeId::swamp));
     VWB_EXPECT_EQ(13U, static_cast<unsigned>(TerrainBiomeId::underground_air));
     VWB_EXPECT_EQ(14U, static_cast<unsigned>(TerrainBiomeId::alpine));
     VWB_EXPECT_EQ(std::string("deepStone"), std::string(terrain_material_name(TerrainMaterialId::deep_stone)));
+    VWB_EXPECT_EQ(std::string("lava"), std::string(terrain_material_name(TerrainMaterialId::lava)));
     VWB_EXPECT_EQ(std::string("underground_air"), std::string(terrain_biome_name(TerrainBiomeId::underground_air)));
     VWB_EXPECT_EQ(std::string("alpine"), std::string(terrain_biome_name(TerrainBiomeId::alpine)));
 }
@@ -467,12 +472,21 @@ VWB_TEST(delta_validation_rejects_every_invalid_typed_state) {
     delta = seam_air_deltas().front();
     delta.state = {-1.0, false, TerrainMaterialId::air, TerrainBiomeId::underground_air, TerrainFluidId::water};
     VWB_EXPECT_THROW(std::invalid_argument, serialize_terrain_deltas({delta}));
+    delta = seam_air_deltas().front();
+    delta.state = {-1.0, false, TerrainMaterialId::water, TerrainBiomeId::ocean, TerrainFluidId::lava};
+    VWB_EXPECT_THROW(std::invalid_argument, serialize_terrain_deltas({delta}));
 
     delta = seam_air_deltas().front();
     delta.state = {1.0, true, TerrainMaterialId::stone, TerrainBiomeId::underground, TerrainFluidId::none};
     VWB_EXPECT(!serialize_terrain_deltas({delta}).empty());
     delta.state = {-1.0, false, TerrainMaterialId::water, TerrainBiomeId::ocean, TerrainFluidId::water};
     VWB_EXPECT(!serialize_terrain_deltas({delta}).empty());
+    delta.state = {-1.0, false, TerrainMaterialId::lava, TerrainBiomeId::underground, TerrainFluidId::lava};
+    const auto lava_bytes = serialize_terrain_deltas({delta});
+    const auto lava_round_trip = deserialize_terrain_deltas(lava_bytes);
+    VWB_EXPECT_EQ(1U, lava_round_trip.size());
+    VWB_EXPECT_EQ(TerrainMaterialId::lava, lava_round_trip.front().state.material);
+    VWB_EXPECT_EQ(TerrainFluidId::lava, lava_round_trip.front().state.fluid);
 }
 
 VWB_TEST(delta_deserialization_rejects_bad_envelopes_and_noncanonical_order) {
@@ -609,6 +623,11 @@ VWB_TEST(snapshot_validation_rejects_invalid_descriptor_cells_and_blockers) {
     cell = valid_cell();
     cell.fluid = TerrainFluidId::water;
     VWB_EXPECT_THROW(std::invalid_argument, TerrainSnapshot::create(descriptor, {cell}));
+    cell = valid_cell();
+    cell.density = -1.0; cell.solid = false;
+    cell.material = TerrainMaterialId::water;
+    cell.fluid = TerrainFluidId::lava;
+    VWB_EXPECT_THROW(std::invalid_argument, TerrainSnapshot::create(descriptor, {cell}));
 
     const DeclaredFeatureBlocker valid{"b", {0.0, 0.0, 0.0}, {1.0, 1.0, 1.0}, "fixture", "blocker"};
     DeclaredFeatureBlocker invalid = valid;
@@ -647,6 +666,15 @@ VWB_TEST(snapshot_sorts_blockers_and_exposes_digest_hex_and_unknown_names) {
     water.fluid = TerrainFluidId::water;
     VWB_EXPECT_EQ(TerrainMaterialId::water,
         TerrainSnapshot::create(one_cell_descriptor(), {water}).at_index(0).material);
+
+    TerrainCell lava = valid_cell();
+    lava.density = -1.0;
+    lava.solid = false;
+    lava.material = TerrainMaterialId::lava;
+    lava.resolved_biome = TerrainBiomeId::underground;
+    lava.fluid = TerrainFluidId::lava;
+    VWB_EXPECT_EQ(TerrainMaterialId::lava,
+        TerrainSnapshot::create(one_cell_descriptor(), {lava}).at_index(0).material);
 }
 
 VWB_TEST(snapshot_value_equality_and_each_contains_boundary_are_explicit) {

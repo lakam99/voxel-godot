@@ -727,27 +727,31 @@ VWB_TEST(terrain_meshing_incomplete_halo_fails_closed_on_each_boundary) {
     }
 }
 
-VWB_TEST(terrain_meshing_uses_plain_air_and_stone_fallback_for_water_solid) {
+VWB_TEST(terrain_meshing_uses_plain_air_and_stone_fallback_for_fluid_solids) {
     const CellCoord corner0{0, 0, 0};
     std::vector<TerrainCell> cells = cells_for(
         unit_sample_region(), authority(),
         [corner0](const CellCoord &cell) { return cell == corner0 ? 1.0 : -1.0; });
-    for (TerrainCell &cell : cells) {
-        if (cell.solid) {
-            cell.material = TerrainMaterialId::water;
-        } else {
-            cell.resolved_biome = TerrainBiomeId::plains;
+    for (const TerrainMaterialId fluid_material : std::array<TerrainMaterialId, 2>{{
+             TerrainMaterialId::water, TerrainMaterialId::lava}}) {
+        std::vector<TerrainCell> fluid_cells = cells;
+        for (TerrainCell &cell : fluid_cells) {
+            if (cell.solid) {
+                cell.material = fluid_material;
+            } else {
+                cell.resolved_biome = TerrainBiomeId::plains;
+            }
         }
-    }
-    const TerrainSnapshot snapshot = TerrainSnapshot::create(
-        descriptor(unit_sample_region()), std::move(cells), {});
-    const TerrainTileGeometry geometry = build_terrain_tile_geometry(
-        snapshot, request_for(unit_cube_region()));
-    VWB_EXPECT(geometry.ready());
-    VWB_EXPECT(!geometry.render.vertices.empty());
-    for (const TerrainRenderVertex &vertex : geometry.render.vertices) {
-        VWB_EXPECT_EQ(TerrainMaterialId::stone, vertex.material);
-        VWB_EXPECT_EQ(TerrainBiomeId::plains, vertex.air_biome);
+        const TerrainSnapshot snapshot = TerrainSnapshot::create(
+            descriptor(unit_sample_region()), std::move(fluid_cells), {});
+        const TerrainTileGeometry geometry = build_terrain_tile_geometry(
+            snapshot, request_for(unit_cube_region()));
+        VWB_EXPECT(geometry.ready());
+        VWB_EXPECT(!geometry.render.vertices.empty());
+        for (const TerrainRenderVertex &vertex : geometry.render.vertices) {
+            VWB_EXPECT_EQ(TerrainMaterialId::stone, vertex.material);
+            VWB_EXPECT_EQ(TerrainBiomeId::plains, vertex.air_biome);
+        }
     }
 }
 
