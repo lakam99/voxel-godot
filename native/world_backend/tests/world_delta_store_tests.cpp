@@ -326,9 +326,11 @@ VWB_TEST(world_delta_store_uses_stable_namespace_cell_and_section_ordering) {
         set(WorldDeltaNamespace::terrain_override, {16, 16, 0}, stone()),
         set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, air()),
     }));
-    VWB_EXPECT_EQ(64U, receipt.affected_sections.size());
+    // The four owner sections have an asymmetric overlap: z=-1/0/1 each
+    // contribute 15 keys, while the z=2 halo slice contributes 9 (54 total).
+    VWB_EXPECT_EQ(54U, receipt.affected_sections.size());
     VWB_EXPECT((receipt.affected_sections.front().section == CellCoord{-1, -1, -1}));
-    VWB_EXPECT((receipt.affected_sections.back().section == CellCoord{2, 2, 2}));
+    VWB_EXPECT((receipt.affected_sections.back().section == CellCoord{2, 1, 2}));
     const auto records = store.pin().records();
     VWB_EXPECT_EQ(5U, records.size());
     VWB_EXPECT_EQ(WorldDeltaNamespace::terrain_override, records[0].name_space);
