@@ -2,6 +2,7 @@
   "schema": "native-world-backend-source-manifest/v1",
   "coreSources": [
     "core/authority.cpp",
+    "core/biome_region_field.cpp",
     "core/coordinates.cpp",
     "core/fast_noise_compat.cpp",
     "core/legacy_seed_hash.cpp",
@@ -14,6 +15,7 @@
   ],
   "coreHeaders": [
     "core/authority.hpp",
+    "core/biome_region_field.hpp",
     "core/coordinates.hpp",
     "core/fast_noise_compat.hpp",
     "core/legacy_seed_hash.hpp",
@@ -26,6 +28,7 @@
     "core/world_identity.hpp"
   ],
   "testSources": [
+    "tests/biome_region_field_tests.cpp",
     "tests/test_main.cpp",
     "tests/terrain_meshing_tests.cpp",
     "tests/terrain_source_tests.cpp",
