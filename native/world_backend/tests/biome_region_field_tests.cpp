@@ -157,6 +157,12 @@ VWB_TEST(biome_region_field_public_validation_and_coordinate_error_paths_are_str
         BiomeRegionField::value_noise(seed, {0.0F, std::numeric_limits<float>::infinity()}, "x"));
     VWB_EXPECT_THROW(std::invalid_argument,
         BiomeRegionField::value_noise(seed, {-std::numeric_limits<float>::max(), 0.0F}, "x"));
+    // INT32_MIN remains a valid lattice origin: its required successor is
+    // representable. INT32_MAX remains rejected by the max-exclusive contract.
+    VWB_EXPECT(BiomeRegionField::value_noise(seed,
+        {static_cast<float>(std::numeric_limits<std::int32_t>::min()), 0.0F}, "x") >= 0.0);
+    VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::value_noise(seed,
+        {static_cast<float>(std::numeric_limits<std::int32_t>::max()), 0.0F}, "x"));
     VWB_EXPECT_THROW(std::invalid_argument,
         BiomeRegionField::sample(seed, {0.0F, std::numeric_limits<float>::infinity()}));
     VWB_EXPECT_THROW(std::invalid_argument,

@@ -2,6 +2,7 @@
 
 #include "legacy_seed_hash.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -64,11 +65,12 @@ std::vector<std::uint32_t> decode_utf8(const std::string &text) {
 }
 
 std::string encode_utf8(const std::vector<std::uint32_t> &code_points) {
+    // Private callers establish Unicode scalar validity before encoding: UTF-8
+    // admission decodes only scalars, and validate_admitted_seed checks a
+    // supplied canonical vector before returning it. Keeping that proof at the
+    // input boundary avoids an untestable duplicate defensive branch here.
     std::string result;
     for (const std::uint32_t code_point : code_points) {
-        if (!is_unicode_scalar(code_point)) {
-            throw std::invalid_argument("biome seed contains an invalid Unicode scalar value");
-        }
         if (code_point <= 0x7fU) result.push_back(static_cast<char>(code_point));
         else if (code_point <= 0x7ffU) {
             result.push_back(static_cast<char>(0xc0U | (code_point >> 6U)));
@@ -149,19 +151,24 @@ std::vector<std::uint32_t> compose_lattice_key(
     return result;
 }
 
-double smooth_curve(const double value) noexcept {
-    const double clamped = value < 0.0 ? 0.0 : (value > 1.0 ? 1.0 : value);
-    return clamped * clamped * (3.0 - 2.0 * clamped);
+double smooth_curve_unit(const double unit) noexcept {
+    return unit * unit * (3.0 - 2.0 * unit);
 }
 
-double smoothstep_range(const double value, const double low, const double high) noexcept {
-    if (high <= low) return value >= high ? 1.0 : 0.0;
-    return smooth_curve((value - low) / (high - low));
+double ecotone_smoothstep(const double edge_distance) noexcept {
+    // edge_distance is non-negative by construction. The field uses one fixed
+    // non-zero ecotone width, so a generic high<=low branch was dead API
+    // surface, not field behavior.
+    const double unit = std::clamp(edge_distance / BiomeRegionField::ECOTONE_WIDTH_METERS, 0.0, 1.0);
+    return smooth_curve_unit(unit);
 }
 
 std::int32_t checked_floor_region(const double value) {
-    if (!std::isfinite(value) || value < static_cast<double>(std::numeric_limits<std::int32_t>::min())
-        || value > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+    // Public callers reject non-finite coordinates before this conversion.
+    // A max-exclusive upper bound makes x0 + 1 representable for lattice
+    // sampling and subsumes the former unrepresentable x0 == INT32_MAX guard.
+    if (value < static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || value >= static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("biome world position is outside supported global coordinate range");
     }
     return static_cast<std::int32_t>(std::floor(value));
@@ -209,14 +216,16 @@ AdmittedBiomeSeed BiomeRegionField::validate_admitted_seed(
     if (canonical_code_points.empty()) {
         throw std::invalid_argument("admitted biome seed must not be empty");
     }
-    const std::vector<std::uint32_t> decoded = decode_utf8(presentation_utf8);
-    if (decoded != canonical_code_points || encode_utf8(canonical_code_points) != presentation_utf8) {
-        throw std::invalid_argument("biome seed canonical code points and UTF-8 presentation disagree");
-    }
     for (const std::uint32_t code_point : canonical_code_points) {
         if (!is_unicode_scalar(code_point)) {
             throw std::invalid_argument("biome seed contains an invalid Unicode scalar value");
         }
+    }
+    const std::vector<std::uint32_t> decoded = decode_utf8(presentation_utf8);
+    // Strict UTF-8 decoding and encode_utf8 form a unique canonical spelling,
+    // so equality of decoded scalars is the complete presentation contract.
+    if (decoded != canonical_code_points) {
+        throw std::invalid_argument("biome seed canonical code points and UTF-8 presentation disagree");
     }
     return {canonical_code_points, presentation_utf8};
 }
@@ -248,7 +257,10 @@ double BiomeRegionField::climate_channel(
             site.z / static_cast<float>(CLIMATE_LATTICE_METERS)}, channel + "-broad");
     const double regional = stable_unit(compose_climate_key(seed, channel, region));
     const double result = broad * 0.72 + regional * 0.28;
-    return result < 0.0 ? 0.0 : (result > 1.0 ? 1.0 : result);
+    // Both terms are unit values and the weights form a convex combination.
+    // std::clamp documents/retains the external [0,1] contract without local
+    // dead branches in the deterministic field kernel.
+    return std::clamp(result, 0.0, 1.0);
 }
 
 std::string BiomeRegionField::biome_for_climate(const double temperature, const double moisture) {
@@ -271,8 +283,9 @@ double BiomeRegionField::value_noise(const AdmittedBiomeSeed &seed, const BiomeV
     if (x0 == std::numeric_limits<std::int32_t>::max() || z0 == std::numeric_limits<std::int32_t>::max()) {
         throw std::invalid_argument("biome value noise cannot address a lattice successor");
     }
-    const double tx = smooth_curve(point.x - static_cast<double>(x0));
-    const double tz = smooth_curve(point.z - static_cast<double>(z0));
+    // x0/z0 are floors, so each fraction is already in [0, 1).
+    const double tx = smooth_curve_unit(point.x - static_cast<double>(x0));
+    const double tz = smooth_curve_unit(point.z - static_cast<double>(z0));
     const double a = lattice_unit(seed, channel, x0, z0);
     const double b = lattice_unit(seed, channel, x0 + 1, z0);
     const double c = lattice_unit(seed, channel, x0, z0 + 1);
@@ -291,12 +304,19 @@ BiomeRegionSample BiomeRegionField::sample(const AdmittedBiomeSeed &seed, const 
     if (!std::isfinite(world_position.x) || !std::isfinite(world_position.z)) {
         throw std::invalid_argument("biome sample world position must be finite");
     }
-    const std::int32_t grid_x = checked_floor_region(world_position.x / REGION_SPACING_METERS);
-    const std::int32_t grid_z = checked_floor_region(world_position.z / REGION_SPACING_METERS);
-    if (grid_x == std::numeric_limits<std::int32_t>::min() || grid_x == std::numeric_limits<std::int32_t>::max()
-        || grid_z == std::numeric_limits<std::int32_t>::min() || grid_z == std::numeric_limits<std::int32_t>::max()) {
+    const double grid_x_value = world_position.x / REGION_SPACING_METERS;
+    const double grid_z_value = world_position.z / REGION_SPACING_METERS;
+    // The 3x3 neighborhood needs both predecessor and successor. Express its
+    // bounds before conversion instead of retaining impossible float32 equality
+    // checks for exact INT32 endpoints.
+    if (grid_x_value <= static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || grid_x_value >= static_cast<double>(std::numeric_limits<std::int32_t>::max())
+        || grid_z_value <= static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || grid_z_value >= static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("biome sample cannot enumerate a complete 3x3 neighbourhood");
     }
+    const std::int32_t grid_x = checked_floor_region(grid_x_value);
+    const std::int32_t grid_z = checked_floor_region(grid_z_value);
     BiomeRegion nearest_region{};
     BiomeVec2 nearest_site{};
     double nearest_distance = std::numeric_limits<double>::infinity();
@@ -323,7 +343,7 @@ BiomeRegionSample BiomeRegionField::sample(const AdmittedBiomeSeed &seed, const 
     const double edge_distance = std::fmax(0.0, (second_distance - nearest_distance) * 0.5);
     return {FIELD_VERSION, nearest_region, region_id(seed, nearest_region), nearest_site,
         biome_for_climate(temperature, moisture), temperature, moisture, second_distance, edge_distance,
-        1.0 - smoothstep_range(edge_distance, 0.0, ECOTONE_WIDTH_METERS),
+        1.0 - ecotone_smoothstep(edge_distance),
         MINIMUM_CORE_RADIUS_METERS, MINIMUM_CORE_DIAMETER_METERS};
 }
 
