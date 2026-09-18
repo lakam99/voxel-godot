@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <initializer_list>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -28,6 +30,8 @@ using namespace voxel::world_backend;
 namespace {
 
 constexpr const char *ADAPTER_SCHEMA = "n3-native-world-backend-adapter/v1";
+constexpr const char *INITIALIZE_SCHEMA = "n3-native-world-backend-initialize/v1";
+constexpr const char *INITIALIZE_FROM_SAVE_V2_SCHEMA = "n3-native-world-backend-initialize-from-save-v2/v1";
 constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request/v1";
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
@@ -48,6 +52,7 @@ constexpr std::size_t MAX_SHAPING_REASON_BYTES = 1024U;
 constexpr std::int32_t MAX_PROFILE_ABS_CELL = 1000000;
 constexpr std::int32_t SOURCE_REGION_CELLS = 2048;
 constexpr std::int32_t SOURCE_REGION_GUARD_CELLS = 1;
+constexpr std::uint64_t MAX_V2_JSON_INTEGER = 9007199254740992ULL;
 
 const char *const MATERIAL_NAMES[] = {
 	"air", "grass", "dirt", "stone", "sand", "snow", "deepStone", "bedrock",
@@ -88,6 +93,18 @@ Dictionary require_dictionary(const Variant &p_value, const char *p_field) {
 		throw std::invalid_argument(std::string(p_field) + " must be a Dictionary");
 	}
 	return Dictionary(p_value);
+}
+
+void require_exact_keys(const Dictionary &p_value, const std::initializer_list<const char *> p_keys,
+		const char *p_field) {
+	if (p_value.size() != static_cast<int64_t>(p_keys.size())) {
+		throw std::invalid_argument(std::string(p_field) + " has an unsupported field set");
+	}
+	for (const char *key : p_keys) {
+		if (!p_value.has(key)) {
+			throw std::invalid_argument(std::string(p_field) + " has an unsupported field set");
+		}
+	}
 }
 
 Array require_array(const Variant &p_value, const char *p_field) {
@@ -179,6 +196,42 @@ std::uint64_t require_u64(const Variant &p_value, const char *p_field) {
 	const std::int64_t value = require_i64(p_value, p_field);
 	if (value < 0) throw std::out_of_range(std::string(p_field) + " must be nonnegative");
 	return static_cast<std::uint64_t>(value);
+}
+
+std::int64_t require_save_i64(const Variant &p_value, const char *p_field) {
+	if (p_value.get_type() == Variant::INT) {
+		const std::int64_t value = static_cast<std::int64_t>(p_value);
+		if (value < -static_cast<std::int64_t>(MAX_V2_JSON_INTEGER)
+				|| value > static_cast<std::int64_t>(MAX_V2_JSON_INTEGER)) {
+			throw std::out_of_range(std::string(p_field) + " exceeds exact JSON integer range");
+		}
+		return value;
+	}
+	if (p_value.get_type() != Variant::FLOAT) {
+		throw std::invalid_argument(std::string(p_field) + " must be an integer or exact whole-number float");
+	}
+	const double value = static_cast<double>(p_value);
+	if (!std::isfinite(value) || std::floor(value) != value
+			|| value < -static_cast<double>(MAX_V2_JSON_INTEGER)
+			|| value > static_cast<double>(MAX_V2_JSON_INTEGER)) {
+		throw std::out_of_range(std::string(p_field) + " is not an exact JSON integer");
+	}
+	return static_cast<std::int64_t>(value);
+}
+
+std::uint64_t require_save_u64(const Variant &p_value, const char *p_field) {
+	const std::int64_t value = require_save_i64(p_value, p_field);
+	if (value < 0) throw std::out_of_range(std::string(p_field) + " must be nonnegative");
+	return static_cast<std::uint64_t>(value);
+}
+
+std::int32_t require_save_i32(const Variant &p_value, const char *p_field) {
+	const std::int64_t value = require_save_i64(p_value, p_field);
+	if (value < std::numeric_limits<std::int32_t>::min()
+			|| value > std::numeric_limits<std::int32_t>::max()) {
+		throw std::out_of_range(std::string(p_field) + " exceeds int32");
+	}
+	return static_cast<std::int32_t>(value);
 }
 
 Vector2i require_vector2i(const Variant &p_value, const char *p_field) {
@@ -543,6 +596,246 @@ Dictionary state_dictionary(const NativeCellState &p_state) {
 	return result;
 }
 
+bool save_coordinate_less(const CellCoord &p_left, const CellCoord &p_right) {
+	if (p_left.z != p_right.z) return p_left.z < p_right.z;
+	if (p_left.y != p_right.y) return p_left.y < p_right.y;
+	return p_left.x < p_right.x;
+}
+
+Array save_coordinate_array(const CellCoord p_value) {
+	Array result;
+	result.append(static_cast<int64_t>(p_value.x));
+	result.append(static_cast<int64_t>(p_value.y));
+	result.append(static_cast<int64_t>(p_value.z));
+	return result;
+}
+
+CellCoord parse_save_coordinate(const Variant &p_value, const char *p_field) {
+	const Array values = require_array(p_value, p_field);
+	if (values.size() != 3) {
+		throw std::invalid_argument(std::string(p_field) + " must contain exactly three coordinates");
+	}
+	return {
+		require_save_i32(values[0], p_field),
+		require_save_i32(values[1], p_field),
+		require_save_i32(values[2], p_field),
+	};
+}
+
+TerrainMaterialId save_material(const Variant &p_value) {
+	const std::string value = require_bounded_utf8(p_value, "terrainVolume.state.material", 32U, false);
+	for (std::size_t index = 0U; index < std::size(MATERIAL_NAMES); ++index) {
+		if (value == MATERIAL_NAMES[index]) return static_cast<TerrainMaterialId>(index);
+	}
+	throw std::invalid_argument("terrainVolume state material is unsupported");
+}
+
+TerrainBiomeId save_biome(const Variant &p_value) {
+	const std::string value = require_bounded_utf8(p_value, "terrainVolume.state.biome", 32U, false);
+	for (std::size_t index = 0U; index < std::size(BIOME_NAMES); ++index) {
+		if (value == BIOME_NAMES[index]) return static_cast<TerrainBiomeId>(index);
+	}
+	throw std::invalid_argument("terrainVolume state biome is unsupported");
+}
+
+TerrainFluidId save_fluid(const Variant &p_value) {
+	const std::string value = require_bounded_utf8(p_value, "terrainVolume.state.fluid", 16U);
+	for (std::size_t index = 0U; index < std::size(FLUID_NAMES); ++index) {
+		if (value == FLUID_NAMES[index]) return static_cast<TerrainFluidId>(index);
+	}
+	throw std::invalid_argument("terrainVolume state fluid is unsupported");
+}
+
+NativeCellState parse_save_state(const Dictionary &p_value, const CellCoord p_cell,
+		const CellCoord p_section, const CellCoord p_local) {
+	require_exact_keys(p_value, {"cell", "sectionKey", "localCell", "blockId", "material", "biome",
+		"solid", "density", "fluid", "light", "metadata", "editReason", "generated", "edited"},
+		"terrainVolume.state");
+	if (!(parse_save_coordinate(p_value.get("cell", Variant()), "terrainVolume.state.cell") == p_cell)
+			|| !(parse_save_coordinate(p_value.get("sectionKey", Variant()), "terrainVolume.state.sectionKey") == p_section)
+			|| !(parse_save_coordinate(p_value.get("localCell", Variant()), "terrainVolume.state.localCell") == p_local)) {
+		throw std::invalid_argument("terrainVolume state redundant coordinates do not match");
+	}
+	const Dictionary light = require_dictionary(p_value.get("light", Variant()), "terrainVolume.state.light");
+	require_exact_keys(light, {"sky", "block"}, "terrainVolume.state.light");
+	const std::int64_t sky = require_save_i64(light.get("sky", Variant()), "terrainVolume.state.light.sky");
+	const std::int64_t block_light = require_save_i64(light.get("block", Variant()), "terrainVolume.state.light.block");
+	if (sky < 0 || sky > 15 || block_light < 0 || block_light > 15) {
+		throw std::out_of_range("terrainVolume state light channel exceeds [0, 15]");
+	}
+	const Dictionary metadata = require_dictionary(p_value.get("metadata", Variant()), "terrainVolume.state.metadata");
+	if (metadata.has("saveDelta") && metadata.get("saveDelta", Variant()).get_type() == Variant::BOOL
+			&& !static_cast<bool>(metadata.get("saveDelta", Variant()))) {
+		throw std::invalid_argument("terrainVolume durable state explicitly disables saveDelta");
+	}
+	NativeCellStateInput input;
+	input.cell = p_cell;
+	input.block_id = NativeBlockIdentity::create(require_bounded_utf8(
+		p_value.get("blockId", Variant()), "terrainVolume.state.blockId", MAX_BLOCK_ID_BYTES, false));
+	input.material = save_material(p_value.get("material", Variant()));
+	input.biome = save_biome(p_value.get("biome", Variant()));
+	input.solid = require_bool(p_value.get("solid", Variant()), "terrainVolume.state.solid");
+	input.density = require_number(p_value.get("density", Variant()), "terrainVolume.state.density");
+	input.fluid = save_fluid(p_value.get("fluid", Variant()));
+	input.light = {static_cast<std::uint8_t>(sky), static_cast<std::uint8_t>(block_light)};
+	input.metadata = parse_native_value(metadata, "terrainVolume.state.metadata");
+	input.edit_reason = require_bounded_utf8(
+		p_value.get("editReason", Variant()), "terrainVolume.state.editReason", MAX_EDIT_REASON_BYTES);
+	input.generated = require_bool(p_value.get("generated", Variant()), "terrainVolume.state.generated");
+	input.edited = require_bool(p_value.get("edited", Variant()), "terrainVolume.state.edited");
+	if (input.generated || !input.edited) {
+		throw std::invalid_argument("terrainVolume may contain only durable edited states");
+	}
+	return make_native_cell_state(input, NativeCellStateNamespace::durable_terrain);
+}
+
+NativeTerrainVolumeV2 parse_terrain_volume_v2(const Variant &p_value) {
+	const Dictionary root = require_dictionary(p_value, "terrainVolume");
+	require_exact_keys(root, {"schemaVersion", "sectionSize", "revision", "sections"}, "terrainVolume");
+	if (require_save_u64(root.get("schemaVersion", Variant()), "terrainVolume.schemaVersion") != 1U
+			|| require_save_u64(root.get("sectionSize", Variant()), "terrainVolume.sectionSize") != 16U) {
+		throw std::invalid_argument("unsupported terrainVolume v2 structure");
+	}
+	const Array sections = require_array(root.get("sections", Variant()), "terrainVolume.sections");
+	if (static_cast<std::size_t>(sections.size()) > NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS) {
+		throw std::length_error("terrainVolume section count exceeds durable record capacity");
+	}
+
+	// Preflight every container size before reserving or copying any save-owned
+	// record. A nonempty section owns at least one record, so proving the summed
+	// record count also proves section revisions cannot outnumber records.
+	std::size_t record_count = 0U;
+	for (int64_t section_index = 0; section_index < sections.size(); ++section_index) {
+		const Dictionary section = require_dictionary(sections[section_index], "terrainVolume.sections[]");
+		require_exact_keys(section, {"schemaVersion", "sectionKey", "originCell", "revision", "cells"},
+			"terrainVolume.sections[]");
+		const Array cells = require_array(section.get("cells", Variant()), "terrainVolume.sections[].cells");
+		const std::size_t count = static_cast<std::size_t>(cells.size());
+		if (count == 0U || count > NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION) {
+			throw std::length_error("terrainVolume section cell count is outside current-v2 bounds");
+		}
+		if (record_count > NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS - count) {
+			throw std::length_error("terrainVolume exceeds durable record capacity");
+		}
+		record_count += count;
+	}
+	if (static_cast<std::size_t>(sections.size()) > record_count) {
+		throw std::length_error("terrainVolume section revisions exceed durable records");
+	}
+
+	std::vector<NativeTypedWorldStateRecord> records;
+	std::vector<NativeTerrainVolumeV2SectionRevision> revisions;
+	records.reserve(record_count);
+	revisions.reserve(static_cast<std::size_t>(sections.size()));
+	CellCoord previous_section{};
+	bool has_previous_section = false;
+	for (int64_t section_index = 0; section_index < sections.size(); ++section_index) {
+		const Dictionary section = Dictionary(sections[section_index]);
+		if (require_save_u64(section.get("schemaVersion", Variant()), "terrainVolume.sections[].schemaVersion") != 1U) {
+			throw std::invalid_argument("unsupported terrainVolume section schema");
+		}
+		const CellCoord section_key = parse_save_coordinate(
+			section.get("sectionKey", Variant()), "terrainVolume.sections[].sectionKey");
+		const auto origin = section_origin(section_key, NativeCellState::SECTION_SIZE);
+		if (!origin.has_value() || !(parse_save_coordinate(
+			section.get("originCell", Variant()), "terrainVolume.sections[].originCell") == *origin)) {
+			throw std::invalid_argument("terrainVolume section origin does not match sectionKey");
+		}
+		if (has_previous_section && !save_coordinate_less(previous_section, section_key)) {
+			throw std::invalid_argument("terrainVolume sections are not in canonical order");
+		}
+		previous_section = section_key;
+		has_previous_section = true;
+		revisions.push_back({section_key,
+			require_save_u64(section.get("revision", Variant()), "terrainVolume.sections[].revision")});
+
+		const Array cells = Array(section.get("cells", Variant()));
+		CellCoord previous_cell{};
+		bool has_previous_cell = false;
+		for (int64_t cell_index = 0; cell_index < cells.size(); ++cell_index) {
+			const Dictionary cell_value = require_dictionary(cells[cell_index], "terrainVolume.sections[].cells[]");
+			require_exact_keys(cell_value, {"cell", "local", "state"}, "terrainVolume.sections[].cells[]");
+			const CellCoord cell = parse_save_coordinate(
+				cell_value.get("cell", Variant()), "terrainVolume.sections[].cells[].cell");
+			const CellCoord local = parse_save_coordinate(
+				cell_value.get("local", Variant()), "terrainVolume.sections[].cells[].local");
+			const auto split = split_cell(cell, NativeCellState::SECTION_SIZE);
+			if (!split.has_value() || !(split->section == section_key) || !(split->local == local)) {
+				throw std::invalid_argument("terrainVolume cell address does not match section/local decomposition");
+			}
+			if (has_previous_cell && !save_coordinate_less(previous_cell, cell)) {
+				throw std::invalid_argument("terrainVolume cells are not in canonical order");
+			}
+			previous_cell = cell;
+			has_previous_cell = true;
+			records.push_back({NativeCellStateNamespace::durable_terrain,
+				NativeTypedWorldStatePersistence::durable,
+				parse_save_state(require_dictionary(cell_value.get("state", Variant()),
+					"terrainVolume.sections[].cells[].state"), cell, section_key, local)});
+		}
+	}
+	NativeTerrainVolumeV2 volume;
+	volume.revision = require_save_u64(root.get("revision", Variant()), "terrainVolume.revision");
+	volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+	volume.section_revisions = std::move(revisions);
+	return validate_native_terrain_volume_v2(volume);
+}
+
+Dictionary save_state_dictionary(const NativeCellState &p_state) {
+	Dictionary light;
+	light["sky"] = static_cast<int64_t>(p_state.light.sky);
+	light["block"] = static_cast<int64_t>(p_state.light.block);
+	Dictionary result;
+	result["cell"] = save_coordinate_array(p_state.cell);
+	result["sectionKey"] = save_coordinate_array(p_state.section);
+	result["localCell"] = save_coordinate_array(p_state.local_cell);
+	result["blockId"] = text(p_state.block_id->value());
+	result["material"] = MATERIAL_NAMES[static_cast<std::uint8_t>(p_state.material)];
+	result["biome"] = BIOME_NAMES[static_cast<std::uint8_t>(p_state.biome)];
+	result["solid"] = p_state.solid;
+	result["density"] = p_state.density;
+	result["fluid"] = FLUID_NAMES[static_cast<std::uint8_t>(p_state.fluid)];
+	result["light"] = light;
+	result["metadata"] = native_value_variant(p_state.metadata);
+	result["editReason"] = text(*p_state.edit_reason);
+	result["generated"] = false;
+	result["edited"] = true;
+	return result;
+}
+
+Dictionary terrain_volume_dictionary(const NativeTerrainVolumeV2 &p_volume) {
+	Dictionary root;
+	root["schemaVersion"] = static_cast<int64_t>(1);
+	root["sectionSize"] = static_cast<int64_t>(NativeCellState::SECTION_SIZE);
+	root["revision"] = static_cast<int64_t>(p_volume.revision);
+	Array sections;
+	const auto &records = p_volume.durable_snapshot.records();
+	std::size_t record_index = 0U;
+	for (const NativeTerrainVolumeV2SectionRevision &revision : p_volume.section_revisions) {
+		Dictionary section;
+		section["schemaVersion"] = static_cast<int64_t>(1);
+		section["sectionKey"] = save_coordinate_array(revision.section);
+		const auto origin = section_origin(revision.section, NativeCellState::SECTION_SIZE);
+		if (!origin.has_value()) throw std::logic_error("admitted terrainVolume has invalid section origin");
+		section["originCell"] = save_coordinate_array(*origin);
+		section["revision"] = static_cast<int64_t>(revision.revision);
+		Array cells;
+		while (record_index < records.size() && records[record_index].state.section == revision.section) {
+			const NativeCellState &state = records[record_index++].state;
+			Dictionary cell;
+			cell["cell"] = save_coordinate_array(state.cell);
+			cell["local"] = save_coordinate_array(state.local_cell);
+			cell["state"] = save_state_dictionary(state);
+			cells.append(cell);
+		}
+		section["cells"] = cells;
+		sections.append(section);
+	}
+	if (record_index != records.size()) throw std::logic_error("admitted terrainVolume records are not section-bijective");
+	root["sections"] = sections;
+	return root;
+}
+
 Dictionary numeric_dictionary(const NativeEffectiveNumericFacts &p_facts) {
 	Dictionary result;
 	result["requestedCell"] = vector3i(p_facts.requested_cell);
@@ -571,8 +864,8 @@ Dictionary query_dictionary(const Vector2i &p_coordinate, const WorldQueryIntent
 	return result;
 }
 
-WorldSourceDescriptor parse_source_descriptor(const Dictionary &p_request) {
-	if (require_protocol_string(p_request.get("schema", Variant()), "schema") != "n3-native-world-backend-initialize/v1") {
+WorldSourceDescriptor parse_source_descriptor(const Dictionary &p_request, const char *p_expected_schema) {
+	if (require_protocol_string(p_request.get("schema", Variant()), "schema") != p_expected_schema) {
 		throw std::invalid_argument("unsupported native world backend initialization schema");
 	}
 	const String seed_text = require_string(p_request.get("seedText", Variant()), "seedText");
@@ -907,6 +1200,8 @@ Dictionary NativeEffectiveTerrainPage::sample_batch(const Dictionary &p_request)
 
 void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("initialize", "request"), &NativeWorldBackend::initialize);
+	ClassDB::bind_method(D_METHOD("initialize_from_save_v2", "request"), &NativeWorldBackend::initialize_from_save_v2);
+	ClassDB::bind_method(D_METHOD("export_terrain_volume_v2"), &NativeWorldBackend::export_terrain_volume_v2);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
 	ClassDB::bind_method(D_METHOD("apply_shaping_resolutions", "resolutions"), &NativeWorldBackend::apply_shaping_resolutions);
@@ -919,7 +1214,7 @@ Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 	if (initialization_attempted_) return envelope("initialize", "failed", "initialization_is_one_shot");
 	initialization_attempted_ = true;
 	try {
-		WorldSourceDefinition definition(parse_source_descriptor(p_request));
+		WorldSourceDefinition definition(parse_source_descriptor(p_request, INITIALIZE_SCHEMA));
 		const Dictionary policy = require_dictionary(p_request.get("sitePolicy", Variant()), "sitePolicy");
 		std::vector<NativeTownRegionOverride> towns = parse_town_overrides(
 			require_array(policy.get("townOverrides", Variant()), "sitePolicy.townOverrides"));
@@ -933,6 +1228,68 @@ Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 	} catch (const std::exception &error) {
 		initialization_failure_ = error.what();
 		return failure("initialize", error);
+	}
+}
+
+Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_request) {
+	if (initialization_attempted_) {
+		return envelope("initialize_from_save_v2", "failed", "initialization_is_one_shot");
+	}
+	initialization_attempted_ = true;
+	try {
+		WorldSourceDefinition definition(parse_source_descriptor(p_request, INITIALIZE_FROM_SAVE_V2_SCHEMA));
+		const String save_seed_text = require_string(p_request.get("saveSeedText", Variant()), "saveSeedText");
+		if (static_cast<std::size_t>(save_seed_text.length()) > MAX_SEED_CODE_POINTS) {
+			throw std::length_error("saveSeedText exceeds adapter code point limit");
+		}
+		const std::string save_seed = bounded_utf8(
+			save_seed_text, MAX_SEED_TEXT_BYTES, "saveSeedText", false);
+		if (save_seed != definition.raw_terrain_seed().utf8) {
+			throw std::invalid_argument("saveSeedText does not match the native world source seed");
+		}
+		const Dictionary policy = require_dictionary(p_request.get("sitePolicy", Variant()), "sitePolicy");
+		std::vector<NativeTownRegionOverride> towns = parse_town_overrides(
+			require_array(policy.get("townOverrides", Variant()), "sitePolicy.townOverrides"));
+		NativeSiteSourcePolicy site_policy = parse_site_policy(p_request, towns);
+		NativeTerrainVolumeV2 terrain_volume = parse_terrain_volume_v2(
+			p_request.get("terrainVolume", Variant()));
+
+		NativeWorldBackendInitialSnapshot initial;
+		initial.source_identity = definition.physical_content_identity();
+		// Persisted terrain revisions remain save-domain facts. The native global
+		// mutation sequence deliberately begins at zero for this new owner.
+		initial.deltas.revision = 0U;
+		initial.deltas.terrain_volume = std::move(terrain_volume);
+		auto state = std::make_unique<NativeWorldBackendState>(definition, std::move(initial));
+		auto registry = std::make_unique<NativeTerrainShapingRegistry>(definition, std::move(site_policy));
+
+		// Publish only after the source, policy, complete save payload, state, and
+		// shaping registry have all validated and constructed successfully.
+		town_overrides_ = std::move(towns);
+		state_ = std::move(state);
+		shaping_registry_ = std::move(registry);
+		return status();
+	} catch (const std::exception &error) {
+		initialization_failure_ = error.what();
+		return failure("initialize_from_save_v2", error);
+	}
+}
+
+Dictionary NativeWorldBackend::export_terrain_volume_v2() const {
+	if (!state_ || !shaping_registry_) {
+		return envelope("export_terrain_volume_v2", "failed", "backend_not_ready");
+	}
+	try {
+		const NativeTerrainVolumeV2 terrain_volume = state_->export_terrain_volume_v2();
+		Dictionary result = envelope("export_terrain_volume_v2", "ready");
+		result["saveSeedText"] = text(state_->definition().raw_terrain_seed().utf8);
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["terrainDeltaRevision"] = static_cast<int64_t>(state_->terrain_delta_revision());
+		result["persistedRevision"] = static_cast<int64_t>(terrain_volume.revision);
+		result["terrainVolume"] = terrain_volume_dictionary(terrain_volume);
+		return result;
+	} catch (const std::exception &error) {
+		return failure("export_terrain_volume_v2", error);
 	}
 }
 
@@ -976,6 +1333,8 @@ Dictionary NativeWorldBackend::status() const {
 	result["sceneOverlayTransactionsSupported"] = true;
 	result["sceneOverlaySavePersistence"] = false;
 	result["preparedShapingResolutionsSupported"] = true;
+	result["saveV2InitializationSupported"] = true;
+	result["terrainVolumeV2ExportSupported"] = true;
 	return result;
 }
 

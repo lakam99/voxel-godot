@@ -39,6 +39,8 @@ protected:
 
 public:
 	godot::Dictionary initialize(const godot::Dictionary &p_request);
+	godot::Dictionary initialize_from_save_v2(const godot::Dictionary &p_request);
+	godot::Dictionary export_terrain_volume_v2() const;
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;
 	godot::Dictionary apply_shaping_resolutions(const godot::Array &p_resolutions);
