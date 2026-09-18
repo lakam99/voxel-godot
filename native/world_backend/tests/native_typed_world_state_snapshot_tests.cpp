@@ -2,6 +2,7 @@
 
 #include "../core/native_typed_world_state_snapshot.hpp"
 
+#include <limits>
 #include <vector>
 
 using namespace voxel::world_backend;
@@ -88,6 +89,9 @@ VWB_TEST(native_typed_world_state_snapshot_rejects_overlay_generated_and_duplica
     NativeTypedWorldStateRecord invalid_metadata = durable_record({2, 3, 4});
     invalid_metadata.state.metadata = NativeValue::null();
     VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({invalid_metadata}));
+    NativeTypedWorldStateRecord nonfinite_density = durable_record({3, 4, 5});
+    nonfinite_density.state.density = std::numeric_limits<double>::quiet_NaN();
+    VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({nonfinite_density}));
 }
 
 VWB_TEST(native_typed_world_state_record_equality_includes_namespace_policy_and_full_cell_state) {
