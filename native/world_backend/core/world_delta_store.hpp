@@ -3,7 +3,6 @@
 #include "coordinates.hpp"
 #include "native_feature_delta.hpp"
 #include "native_typed_world_state_snapshot.hpp"
-#include "terrain_snapshot.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,40 +14,26 @@
 
 namespace voxel::world_backend {
 
-// Durable terrain edits and transient scene overlays deliberately live in
-// separate namespaces. A caller must name the namespace it intends to alter;
-// an overlay never silently becomes a durable world delta.
-enum class WorldDeltaNamespace : std::uint8_t {
-    terrain_override = 1,
-    scene_overlay = 2,
-};
-
-enum class WorldDeltaOperationKind : std::uint8_t {
+// An operation changes one named layer in the canonical typed cell snapshot.
+// `clear` removes the named-layer record, revealing the lower layer/baseline
+// to a resolver.  It is deliberately distinct from setting an explicit air
+// NativeCellState, which remains an owned edit record.
+enum class WorldTypedCellOperationKind : std::uint8_t {
     set = 1,
     clear = 2,
 };
 
-struct WorldDeltaState {
-    double density = -1.35;
-    bool solid = false;
-    TerrainMaterialId material = TerrainMaterialId::air;
-    TerrainBiomeId resolved_biome = TerrainBiomeId::underground_air;
-    TerrainFluidId fluid = TerrainFluidId::none;
-
-    bool operator==(const WorldDeltaState &other) const noexcept;
+struct WorldTypedCellOperation {
+    NativeCellStateNamespace name_space = NativeCellStateNamespace::durable_terrain;
+    CellCoord cell;
+    WorldTypedCellOperationKind kind = WorldTypedCellOperationKind::set;
+    std::optional<NativeCellState> state;
 };
 
-struct WorldDeltaOperation {
-    WorldDeltaNamespace name_space = WorldDeltaNamespace::terrain_override;
-    CellCoord coordinate;
-    WorldDeltaOperationKind kind = WorldDeltaOperationKind::set;
-    std::optional<WorldDeltaState> state;
-};
-
-struct WorldDeltaTransaction {
+struct WorldTypedCellTransaction {
     std::string transaction_id;
     std::uint64_t expected_revision = 0;
-    std::vector<WorldDeltaOperation> operations;
+    std::vector<WorldTypedCellOperation> operations;
 };
 
 // A typed v2-state replacement belongs to the same immutable world snapshot
@@ -71,15 +56,6 @@ struct WorldFeatureDeltaAdmission {
     std::string transaction_id;
     std::uint64_t expected_revision = 0;
     NativeFeatureDeltaSnapshot snapshot = NativeFeatureDeltaSnapshot::create({}, {});
-};
-
-struct WorldDeltaRecord {
-    WorldDeltaNamespace name_space = WorldDeltaNamespace::terrain_override;
-    CellCoord coordinate;
-    WorldDeltaState state;
-    std::uint64_t revision = 0;
-
-    bool operator==(const WorldDeltaRecord &other) const noexcept;
 };
 
 struct WorldDeltaSectionKey {
@@ -140,20 +116,13 @@ struct WorldDeltaSnapshotState;
 class WorldDeltaPinnedSnapshot final {
 public:
     std::uint64_t revision() const noexcept;
-    std::optional<WorldDeltaRecord> value_at(
-        WorldDeltaNamespace name_space, const CellCoord &coordinate) const;
-    std::optional<WorldDeltaRecord> effective_value_at(const CellCoord &coordinate) const;
-    std::vector<WorldDeltaRecord> records() const;
-
-    // These are attached to this exact delta pin.  There is intentionally no
-    // cross-model "effective" lookup yet: production query resolution must
-    // make its precedence explicit at cutover rather than silently merging
-    // legacy deltas and typed v2 state here.
-    const NativeTypedWorldStateSnapshot &typed_durable_snapshot() const noexcept;
-    const std::vector<NativeTypedWorldStateRecord> &typed_transient_overlays() const noexcept;
-    std::optional<NativeCellState> typed_durable_value_at(const CellCoord &coordinate) const;
-    std::optional<NativeCellState> typed_transient_overlay_at(const CellCoord &coordinate) const;
-    std::optional<NativeCellState> typed_effective_value_at(const CellCoord &coordinate) const;
+    const NativeTypedWorldStateSnapshot &durable_terrain_snapshot() const noexcept;
+    const std::vector<NativeTypedWorldStateRecord> &scene_overlays() const noexcept;
+    std::optional<NativeCellState> durable_terrain_at(const CellCoord &cell) const;
+    std::optional<NativeCellState> scene_overlay_at(const CellCoord &cell) const;
+    // This resolves only the two typed edit layers. Generated terrain and
+    // feature precedence remain the owning source resolver's responsibility.
+    std::optional<NativeCellState> effective_typed_cell_at(const CellCoord &cell) const;
 
     // This canonical feature snapshot is pinned beside terrain records and
     // typed cells.  Consumers must still define their own terrain/feature
@@ -180,11 +149,11 @@ public:
     // Strong exception guarantee: validation, replacement-state construction,
     // receipt allocation, and durable transaction journaling all complete
     // before the immutable state pointer is published.
-    WorldDeltaCommitReceipt commit(const WorldDeltaTransaction &transaction);
+    WorldDeltaCommitReceipt commit_typed_cells(const WorldTypedCellTransaction &transaction);
 
     // Atomically replaces both typed portions of the current immutable state.
     // It shares revision, pinning, journal-ID conflict handling, capacity, and
-    // conservative invalidation semantics with `commit`.
+    // conservative invalidation semantics with `commit_typed_cells`.
     WorldDeltaCommitReceipt admit_typed_state(const WorldTypedStateAdmission &admission);
 
     // Atomically replaces feature-delta state in the same revision, pin,

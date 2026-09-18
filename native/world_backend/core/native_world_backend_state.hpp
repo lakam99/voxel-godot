@@ -7,14 +7,14 @@
 
 namespace voxel::world_backend {
 
-// A typed write request binds an otherwise ordinary delta transaction to the
+// A typed write request binds a canonical typed-cell transaction to the
 // immutable physical world source it was prepared against.  Request ownership
 // (cancellation, caller generation, and publication routing) is deliberately
 // absent: it belongs to WorldSourceRequestScope beside a pin, not in durable
 // content identity or a terrain edit.
 struct NativeWorldBackendTransaction {
     WorldPhysicalContentIdentity source_identity;
-    WorldDeltaTransaction deltas;
+    WorldTypedCellTransaction deltas;
 };
 
 enum class NativeWorldBackendRejectReason : std::uint8_t {

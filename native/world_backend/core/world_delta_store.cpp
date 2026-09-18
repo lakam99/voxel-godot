@@ -1,10 +1,8 @@
 #include "world_delta_store.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstring>
 #include <limits>
-#include <map>
 #include <set>
 #include <type_traits>
 #include <utility>
@@ -12,16 +10,16 @@
 namespace voxel::world_backend {
 namespace {
 
-struct NamespaceCellKey {
-    WorldDeltaNamespace name_space;
-    CellCoord coordinate;
+struct TypedNamespaceCellKey {
+    NativeCellStateNamespace name_space;
+    CellCoord cell;
 };
 
-struct NamespaceCellKeyLess {
-    bool operator()(const NamespaceCellKey &left, const NamespaceCellKey &right) const noexcept {
-        if (left.coordinate.z != right.coordinate.z) return left.coordinate.z < right.coordinate.z;
-        if (left.coordinate.y != right.coordinate.y) return left.coordinate.y < right.coordinate.y;
-        if (left.coordinate.x != right.coordinate.x) return left.coordinate.x < right.coordinate.x;
+struct TypedNamespaceCellKeyLess {
+    bool operator()(const TypedNamespaceCellKey &left, const TypedNamespaceCellKey &right) const noexcept {
+        if (left.cell.z != right.cell.z) return left.cell.z < right.cell.z;
+        if (left.cell.y != right.cell.y) return left.cell.y < right.cell.y;
+        if (left.cell.x != right.cell.x) return left.cell.x < right.cell.x;
         return static_cast<std::uint8_t>(left.name_space) < static_cast<std::uint8_t>(right.name_space);
     }
 };
@@ -66,18 +64,12 @@ public:
         u64(static_cast<std::uint64_t>(value.size()));
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
-    void operation(const WorldDeltaOperation &operation) {
+    void typed_cell_operation(const WorldTypedCellOperation &operation) {
         u8(static_cast<std::uint8_t>(operation.name_space));
-        i32(operation.coordinate.x); i32(operation.coordinate.y); i32(operation.coordinate.z);
+        i32(operation.cell.x); i32(operation.cell.y); i32(operation.cell.z);
         u8(static_cast<std::uint8_t>(operation.kind));
         u8(operation.state.has_value() ? 1U : 0U);
-        if (operation.state) {
-            binary64(operation.state->density);
-            u8(operation.state->solid ? 1U : 0U);
-            u8(static_cast<std::uint8_t>(operation.state->material));
-            u8(static_cast<std::uint8_t>(operation.state->resolved_biome));
-            u8(static_cast<std::uint8_t>(operation.state->fluid));
-        }
+        if (operation.state) native_cell_state(*operation.state);
     }
     void native_cell_state(const NativeCellState &state) {
         i32(state.cell.x); i32(state.cell.y); i32(state.cell.z);
@@ -89,10 +81,8 @@ public:
         binary64(state.density);
         u8(static_cast<std::uint8_t>(state.fluid));
         u8(state.light.sky); u8(state.light.block);
-        // Typed admissions reject any record other than an edited,
-        // non-generated state before reaching the journal.  Encoding the
-        // invariant directly avoids coverage-only impossible states while
-        // retaining the full canonical record shape.
+        // Every public mutation endpoint validates the non-generated edited
+        // invariant before journaling, so its canonical form has one shape.
         u8(0U); u8(1U);
         // Metadata has its own self-describing canonical encoding.  The
         // outer length keeps the typed journal unambiguous without inventing
@@ -113,36 +103,39 @@ private:
     std::vector<std::uint8_t> bytes_;
 };
 
-bool valid_namespace(const WorldDeltaNamespace value) noexcept {
-    return value == WorldDeltaNamespace::terrain_override || value == WorldDeltaNamespace::scene_overlay;
+bool valid_namespace(const NativeCellStateNamespace value) noexcept {
+    return value == NativeCellStateNamespace::durable_terrain || value == NativeCellStateNamespace::scene_overlay;
 }
 
-bool valid_kind(const WorldDeltaOperationKind value) noexcept {
-    return value == WorldDeltaOperationKind::set || value == WorldDeltaOperationKind::clear;
+bool valid_kind(const WorldTypedCellOperationKind value) noexcept {
+    return value == WorldTypedCellOperationKind::set || value == WorldTypedCellOperationKind::clear;
 }
 
-bool valid_state(const WorldDeltaState &state) noexcept {
-    const auto material = static_cast<std::uint8_t>(state.material);
-    const auto biome = static_cast<std::uint8_t>(state.resolved_biome);
-    const bool material_valid = material <= static_cast<std::uint8_t>(TerrainMaterialId::lava);
-    const bool biome_valid = biome <= static_cast<std::uint8_t>(TerrainBiomeId::alpine);
-    const bool fluid_valid = state.fluid == TerrainFluidId::none || state.fluid == TerrainFluidId::water
-        || state.fluid == TerrainFluidId::lava;
-    return std::isfinite(state.density) && state.solid == (state.density >= 0.0)
-        && material_valid && biome_valid && fluid_valid
-        && (!state.solid || state.material != TerrainMaterialId::air)
-        && (state.solid || state.material == TerrainMaterialId::air || state.material == TerrainMaterialId::water
-            || state.material == TerrainMaterialId::lava)
-        && (state.fluid != TerrainFluidId::water || state.material == TerrainMaterialId::water)
-        && (state.fluid != TerrainFluidId::lava || state.material == TerrainMaterialId::lava);
+NativeTypedWorldStateRecord typed_record_for(const WorldTypedCellOperation &operation) {
+    return {operation.name_space,
+        operation.name_space == NativeCellStateNamespace::durable_terrain
+            ? NativeTypedWorldStatePersistence::durable
+            : NativeTypedWorldStatePersistence::transient,
+        *operation.state};
 }
 
-void validate_operation(const WorldDeltaOperation &operation) {
+void validate_operation(const WorldTypedCellOperation &operation) {
     if (!valid_namespace(operation.name_space) || !valid_kind(operation.kind)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
-    if (operation.kind == WorldDeltaOperationKind::set) {
-        if (!operation.state || !valid_state(*operation.state)) {
+    if (operation.kind == WorldTypedCellOperationKind::set) {
+        if (!operation.state || !(operation.state->cell == operation.cell)) {
+            throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+        }
+        try {
+            NativeTypedWorldStateStore validator;
+            const NativeTypedWorldStateRecord record = typed_record_for(operation);
+            if (operation.name_space == NativeCellStateNamespace::durable_terrain) {
+                validator.admit_durable_records({record});
+            } else {
+                validator.replace_transient_overlays({record});
+            }
+        } catch (const std::invalid_argument &) {
             throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
         }
     } else if (operation.state) {
@@ -150,29 +143,29 @@ void validate_operation(const WorldDeltaOperation &operation) {
     }
 }
 
-std::vector<std::uint8_t> canonical_transaction(const WorldDeltaTransaction &transaction) {
+std::vector<std::uint8_t> canonical_transaction(const WorldTypedCellTransaction &transaction) {
     if (transaction.transaction_id.empty() || transaction.transaction_id.find('\0') != std::string::npos
         || transaction.operations.empty()) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
-    std::vector<WorldDeltaOperation> operations = transaction.operations;
-    std::sort(operations.begin(), operations.end(), [](const WorldDeltaOperation &left, const WorldDeltaOperation &right) {
-        const NamespaceCellKeyLess less;
-        return less({left.name_space, left.coordinate}, {right.name_space, right.coordinate});
+    std::vector<WorldTypedCellOperation> operations = transaction.operations;
+    std::sort(operations.begin(), operations.end(), [](const WorldTypedCellOperation &left, const WorldTypedCellOperation &right) {
+        const TypedNamespaceCellKeyLess less;
+        return less({left.name_space, left.cell}, {right.name_space, right.cell});
     });
     for (std::size_t index = 0; index < operations.size(); ++index) {
         validate_operation(operations[index]);
         if (index != 0U && operations[index - 1U].name_space == operations[index].name_space
-            && operations[index - 1U].coordinate == operations[index].coordinate) {
+            && operations[index - 1U].cell == operations[index].cell) {
             throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
         }
     }
     CanonicalWriter writer;
-    writer.u8('W'); writer.u8('D'); writer.u8('T'); writer.u8('X');
+    writer.u8('W'); writer.u8('T'); writer.u8('C'); writer.u8('1');
     writer.text(transaction.transaction_id);
     writer.u64(transaction.expected_revision);
     writer.u64(static_cast<std::uint64_t>(operations.size()));
-    for (const WorldDeltaOperation &operation : operations) writer.operation(operation);
+    for (const WorldTypedCellOperation &operation : operations) writer.typed_cell_operation(operation);
     return writer.finish();
 }
 
@@ -250,11 +243,11 @@ std::vector<std::uint8_t> canonical_feature_admission(
     return writer.finish();
 }
 
-std::vector<WorldDeltaOperation> sorted_operations(const WorldDeltaTransaction &transaction) {
-    std::vector<WorldDeltaOperation> operations = transaction.operations;
-    std::sort(operations.begin(), operations.end(), [](const WorldDeltaOperation &left, const WorldDeltaOperation &right) {
-        const NamespaceCellKeyLess less;
-        return less({left.name_space, left.coordinate}, {right.name_space, right.coordinate});
+std::vector<WorldTypedCellOperation> sorted_operations(const WorldTypedCellTransaction &transaction) {
+    std::vector<WorldTypedCellOperation> operations = transaction.operations;
+    std::sort(operations.begin(), operations.end(), [](const WorldTypedCellOperation &left, const WorldTypedCellOperation &right) {
+        const TypedNamespaceCellKeyLess less;
+        return less({left.name_space, left.cell}, {right.name_space, right.cell});
     });
     return operations;
 }
@@ -364,7 +357,6 @@ const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
 
 struct WorldDeltaSnapshotState {
     std::uint64_t revision = 0;
-    std::map<NamespaceCellKey, WorldDeltaRecord, NamespaceCellKeyLess> records;
     NativeTypedWorldStateSnapshot typed_durable_snapshot = NativeTypedWorldStateSnapshot::create({});
     std::vector<NativeTypedWorldStateRecord> typed_transient_overlays;
     NativeFeatureDeltaSnapshot feature_delta_snapshot = NativeFeatureDeltaSnapshot::create({}, {});
@@ -373,15 +365,13 @@ struct WorldDeltaSnapshotState {
 namespace {
 
 bool fits_record_capacity(const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept {
-    const std::size_t delta_count = state.records.size();
     const std::size_t durable_count = state.typed_durable_snapshot.records().size();
     const std::size_t overlay_count = state.typed_transient_overlays.size();
     const std::size_t feature_count = state.feature_delta_snapshot.tombstones().size()
         + state.feature_delta_snapshot.player_created_instances().size();
-    if (delta_count > limits.max_records) return false;
-    if (durable_count > limits.max_records - delta_count) return false;
-    if (overlay_count > limits.max_records - delta_count - durable_count) return false;
-    return feature_count <= limits.max_records - delta_count - durable_count - overlay_count;
+    if (durable_count > limits.max_records) return false;
+    if (overlay_count > limits.max_records - durable_count) return false;
+    return feature_count <= limits.max_records - durable_count - overlay_count;
 }
 
 std::optional<NativeCellState> typed_value_at(
@@ -404,16 +394,6 @@ struct WorldDeltaStore::TransactionRecord {
 
 static_assert(std::is_nothrow_move_assignable_v<std::shared_ptr<const WorldDeltaSnapshotState>>);
 
-bool WorldDeltaState::operator==(const WorldDeltaState &other) const noexcept {
-    return density == other.density && solid == other.solid && material == other.material
-        && resolved_biome == other.resolved_biome && fluid == other.fluid;
-}
-
-bool WorldDeltaRecord::operator==(const WorldDeltaRecord &other) const noexcept {
-    return name_space == other.name_space && coordinate == other.coordinate && state == other.state
-        && revision == other.revision;
-}
-
 bool WorldDeltaSectionKey::operator==(const WorldDeltaSectionKey &other) const noexcept {
     return section == other.section;
 }
@@ -433,47 +413,25 @@ WorldDeltaPinnedSnapshot::WorldDeltaPinnedSnapshot(std::shared_ptr<const WorldDe
 
 std::uint64_t WorldDeltaPinnedSnapshot::revision() const noexcept { return state_->revision; }
 
-std::optional<WorldDeltaRecord> WorldDeltaPinnedSnapshot::value_at(
-    const WorldDeltaNamespace name_space, const CellCoord &coordinate) const {
-    const auto found = state_->records.find({name_space, coordinate});
-    if (found == state_->records.end()) return std::nullopt;
-    return found->second;
-}
-
-std::optional<WorldDeltaRecord> WorldDeltaPinnedSnapshot::effective_value_at(const CellCoord &coordinate) const {
-    if (const auto overlay = value_at(WorldDeltaNamespace::scene_overlay, coordinate)) return overlay;
-    return value_at(WorldDeltaNamespace::terrain_override, coordinate);
-}
-
-std::vector<WorldDeltaRecord> WorldDeltaPinnedSnapshot::records() const {
-    std::vector<WorldDeltaRecord> result;
-    result.reserve(state_->records.size());
-    for (const auto &[key, record] : state_->records) {
-        static_cast<void>(key);
-        result.push_back(record);
-    }
-    return result;
-}
-
-const NativeTypedWorldStateSnapshot &WorldDeltaPinnedSnapshot::typed_durable_snapshot() const noexcept {
+const NativeTypedWorldStateSnapshot &WorldDeltaPinnedSnapshot::durable_terrain_snapshot() const noexcept {
     return state_->typed_durable_snapshot;
 }
 
-const std::vector<NativeTypedWorldStateRecord> &WorldDeltaPinnedSnapshot::typed_transient_overlays() const noexcept {
+const std::vector<NativeTypedWorldStateRecord> &WorldDeltaPinnedSnapshot::scene_overlays() const noexcept {
     return state_->typed_transient_overlays;
 }
 
-std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_durable_value_at(const CellCoord &coordinate) const {
-    return typed_value_at(state_->typed_durable_snapshot.records(), coordinate);
+std::optional<NativeCellState> WorldDeltaPinnedSnapshot::durable_terrain_at(const CellCoord &cell) const {
+    return typed_value_at(state_->typed_durable_snapshot.records(), cell);
 }
 
-std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_transient_overlay_at(const CellCoord &coordinate) const {
-    return typed_value_at(state_->typed_transient_overlays, coordinate);
+std::optional<NativeCellState> WorldDeltaPinnedSnapshot::scene_overlay_at(const CellCoord &cell) const {
+    return typed_value_at(state_->typed_transient_overlays, cell);
 }
 
-std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_effective_value_at(const CellCoord &coordinate) const {
-    if (const auto overlay = typed_transient_overlay_at(coordinate)) return overlay;
-    return typed_durable_value_at(coordinate);
+std::optional<NativeCellState> WorldDeltaPinnedSnapshot::effective_typed_cell_at(const CellCoord &cell) const {
+    if (const auto overlay = scene_overlay_at(cell)) return overlay;
+    return durable_terrain_at(cell);
 }
 
 const NativeFeatureDeltaSnapshot &WorldDeltaPinnedSnapshot::feature_delta_snapshot() const noexcept {
@@ -498,7 +456,7 @@ std::uint64_t WorldDeltaStore::revision() const noexcept { return state_->revisi
 
 WorldDeltaPinnedSnapshot WorldDeltaStore::pin() const { return WorldDeltaPinnedSnapshot(state_); }
 
-WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &transaction) {
+WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCellTransaction &transaction) {
     static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
     static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
     std::vector<std::uint8_t> canonical = canonical_transaction(transaction);
@@ -519,40 +477,55 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &tra
     }
 
     auto next = std::make_shared<WorldDeltaSnapshotState>(*state_);
-    std::vector<NamespaceCellKey> changed_records;
-    bool changed = false;
-    std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
-    for (const WorldDeltaOperation &operation : sorted_operations(transaction)) {
-        const NamespaceCellKey key{operation.name_space, operation.coordinate};
-        const auto found = next->records.find(key);
-        if (operation.kind == WorldDeltaOperationKind::set) {
-            if (found == next->records.end() || !(found->second.state == *operation.state)) {
-                next->records[key] = {operation.name_space, operation.coordinate, *operation.state, 0};
-                changed_records.push_back(key);
-                changed = true;
-                add_conservative_invalidation_neighborhood(section_key_for(operation.coordinate), affected);
+    std::vector<NativeTypedWorldStateRecord> durable = state_->typed_durable_snapshot.records();
+    std::vector<NativeTypedWorldStateRecord> overlays = state_->typed_transient_overlays;
+    for (const WorldTypedCellOperation &operation : sorted_operations(transaction)) {
+        std::vector<NativeTypedWorldStateRecord> &records = operation.name_space == NativeCellStateNamespace::durable_terrain
+            ? durable : overlays;
+        const auto found = std::lower_bound(records.begin(), records.end(), operation.cell,
+            [](const NativeTypedWorldStateRecord &record, const CellCoord &cell) {
+                return CellCoordLess{}(record.state.cell, cell);
+            });
+        const bool exists = found != records.end() && found->state.cell == operation.cell;
+        if (operation.kind == WorldTypedCellOperationKind::set) {
+            const NativeTypedWorldStateRecord replacement = typed_record_for(operation);
+            if (!exists) {
+                records.insert(found, replacement);
+            } else if (!(*found == replacement)) {
+                *found = replacement;
             }
-        } else if (found != next->records.end()) {
-            next->records.erase(found);
-            changed = true;
-            add_conservative_invalidation_neighborhood(section_key_for(operation.coordinate), affected);
+        } else if (exists) {
+            records.erase(found);
         }
     }
+    // Every operation was re-admitted before this candidate was built; this
+    // final canonical construction cannot introduce a new validation branch.
+    next->typed_durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(durable));
+    NativeTypedWorldStateStore validator;
+    validator.replace_transient_overlays(std::move(overlays));
+    next->typed_transient_overlays = validator.transient_overlays();
     if (!fits_record_capacity(*next, limits_)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
     }
 
+    std::set<CellCoord, CellCoordLess> changed_cells;
+    add_changed_typed_cells(state_->typed_durable_snapshot.records(), next->typed_durable_snapshot.records(), changed_cells);
+    add_changed_typed_cells(state_->typed_transient_overlays, next->typed_transient_overlays, changed_cells);
+
     WorldDeltaCommitReceipt receipt;
     receipt.transaction_id = transaction.transaction_id;
     receipt.revision = state_->revision;
-    if (!changed) {
+    if (changed_cells.empty()) {
         receipt.status = WorldDeltaCommitStatus::no_change;
     } else {
         if (state_->revision == std::numeric_limits<std::uint64_t>::max()) {
             throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
         }
         next->revision = state_->revision + 1U;
-        for (const NamespaceCellKey &key : changed_records) next->records.at(key).revision = next->revision;
+        std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
+        for (const CellCoord &cell : changed_cells) {
+            add_conservative_invalidation_neighborhood(section_key_for(cell), affected);
+        }
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
         receipt.affected_sections.assign(affected.begin(), affected.end());
@@ -562,7 +535,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &tra
     // above make this move append nonthrowing.
     TransactionRecord journal{transaction.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));
-    if (changed) state_ = std::move(next);
+    if (!changed_cells.empty()) state_ = std::move(next);
     return std::move(receipt);
 }
 

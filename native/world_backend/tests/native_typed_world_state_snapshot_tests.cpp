@@ -85,6 +85,9 @@ VWB_TEST(native_typed_world_state_snapshot_rejects_overlay_generated_and_duplica
     NativeTypedWorldStateRecord invalid_edit_reason = durable_record({1, 2, 3});
     invalid_edit_reason.state.edit_reason = std::string("bad\xC0\x80", 5);
     VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({invalid_edit_reason}));
+    NativeTypedWorldStateRecord invalid_metadata = durable_record({2, 3, 4});
+    invalid_metadata.state.metadata = NativeValue::null();
+    VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({invalid_metadata}));
 }
 
 VWB_TEST(native_typed_world_state_record_equality_includes_namespace_policy_and_full_cell_state) {

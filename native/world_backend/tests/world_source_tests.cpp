@@ -25,8 +25,12 @@ WorldSourceDescriptor atlas_descriptor() {
     d.revisions.surface_column_query_revision = 5;
     return d;
 }
-WorldDeltaState stone_override() {
-    WorldDeltaState state; state.density = 1.0; state.solid = true; state.material = TerrainMaterialId::stone; state.resolved_biome = TerrainBiomeId::plains; return state;
+NativeCellState stone_override(const CellCoord cell) {
+    NativeCellStateInput state; state.cell = cell; state.density = 1.0; state.solid = true;
+    state.material = TerrainMaterialId::stone; state.biome = TerrainBiomeId::plains; state.light = {0, 0};
+    state.metadata = NativeValue::object({}); state.block_id = NativeBlockIdentity::create("stone");
+    state.edit_reason = "source-test"; state.generated = false; state.edited = true;
+    return make_native_cell_state(state);
 }
 std::uint32_t float32_bits(const float value) {
     std::uint32_t result = 0;
@@ -144,12 +148,12 @@ VWB_TEST(world_source_definition_digest_tracks_physical_facts_not_request_author
 
 VWB_TEST(world_source_pin_is_immutable_at_its_delta_revision) {
     WorldDeltaStore store; const WorldSourceDefinition definition(atlas_descriptor()); const WorldSourcePin before(definition, store.pin());
-    WorldDeltaTransaction tx; tx.transaction_id = "source-pin-edit"; tx.expected_revision = 0;
-    tx.operations.push_back({WorldDeltaNamespace::terrain_override, {17, -3, -18}, WorldDeltaOperationKind::set, stone_override()});
-    VWB_EXPECT_EQ(1ULL, store.commit(tx).revision);
+    WorldTypedCellTransaction tx; tx.transaction_id = "source-pin-edit"; tx.expected_revision = 0;
+    tx.operations.push_back({NativeCellStateNamespace::durable_terrain, {17, -3, -18}, WorldTypedCellOperationKind::set, stone_override({17, -3, -18})});
+    VWB_EXPECT_EQ(1ULL, store.commit_typed_cells(tx).revision);
     const WorldSourcePin after(definition, store.pin());
     VWB_EXPECT_EQ(0ULL, before.terrain_delta_revision()); VWB_EXPECT_EQ(1ULL, after.terrain_delta_revision());
-    VWB_EXPECT(!before.deltas().effective_value_at({17, -3, -18}).has_value()); VWB_EXPECT(after.deltas().effective_value_at({17, -3, -18}).has_value());
+    VWB_EXPECT(!before.deltas().effective_typed_cell_at({17, -3, -18}).has_value()); VWB_EXPECT(after.deltas().effective_typed_cell_at({17, -3, -18}).has_value());
     VWB_EXPECT(!(before.physical_content_identity() == after.physical_content_identity()));
     VWB_EXPECT_EQ(definition.physical_content_identity(), after.definition().physical_content_identity());
 }

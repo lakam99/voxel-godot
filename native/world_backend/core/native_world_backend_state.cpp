@@ -33,7 +33,7 @@ WorldDeltaCommitReceipt NativeWorldBackendState::commit(const NativeWorldBackend
     if (!(transaction.source_identity == source_identity())) {
         throw NativeWorldBackendRejected(NativeWorldBackendRejectReason::source_identity_mismatch);
     }
-    return deltas_.commit(transaction.deltas);
+    return deltas_.commit_typed_cells(transaction.deltas);
 }
 
 } // namespace voxel::world_backend

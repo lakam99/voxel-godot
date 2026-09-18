@@ -25,24 +25,31 @@ WorldSourceDescriptor state_descriptor(const char *seed = "backend-state-seed") 
     return descriptor;
 }
 
-WorldDeltaState stone_state() {
-    WorldDeltaState state;
+NativeCellState stone_state(const CellCoord cell) {
+    NativeCellStateInput state;
+    state.cell = cell;
     state.density = 1.0;
     state.solid = true;
     state.material = TerrainMaterialId::stone;
-    state.resolved_biome = TerrainBiomeId::plains;
-    return state;
+    state.biome = TerrainBiomeId::plains;
+    state.light = {0, 4};
+    state.metadata = NativeValue::object({{"source", NativeValue::string("test")}});
+    state.block_id = NativeBlockIdentity::create("stone");
+    state.edit_reason = "test";
+    state.generated = false;
+    state.edited = true;
+    return make_native_cell_state(state);
 }
 
 NativeWorldBackendTransaction set_transaction(
     const NativeWorldBackendState &state, const char *id, const std::uint64_t expected_revision,
-    const CellCoord coordinate, const WorldDeltaState &value) {
+    const CellCoord coordinate) {
     NativeWorldBackendTransaction transaction;
     transaction.source_identity = state.source_identity();
     transaction.deltas.transaction_id = id;
     transaction.deltas.expected_revision = expected_revision;
     transaction.deltas.operations.push_back({
-        WorldDeltaNamespace::terrain_override, coordinate, WorldDeltaOperationKind::set, value,
+        NativeCellStateNamespace::durable_terrain, coordinate, WorldTypedCellOperationKind::set, stone_state(coordinate),
     });
     return transaction;
 }
@@ -70,24 +77,24 @@ VWB_TEST(native_world_backend_state_owns_an_immutable_definition_and_empty_first
     const WorldSourcePin first = state.pin();
     VWB_EXPECT_EQ(state.source_identity(), first.definition().physical_content_identity());
     VWB_EXPECT_EQ(0ULL, first.terrain_delta_revision());
-    VWB_EXPECT(first.deltas().records().empty());
+    VWB_EXPECT(first.deltas().durable_terrain_snapshot().records().empty());
 }
 
 VWB_TEST(native_world_backend_state_commits_only_transactions_for_its_source) {
     NativeWorldBackendState state{WorldSourceDefinition(state_descriptor())};
     NativeWorldBackendState other{WorldSourceDefinition(state_descriptor("different-source"))};
-    NativeWorldBackendTransaction mismatch = set_transaction(other, "state:wrong-source", 0, {1, 2, 3}, stone_state());
+    NativeWorldBackendTransaction mismatch = set_transaction(other, "state:wrong-source", 0, {1, 2, 3});
 
     expect_backend_rejection(NativeWorldBackendRejectReason::source_identity_mismatch, mismatch, state);
     VWB_EXPECT_EQ(0ULL, state.terrain_delta_revision());
-    VWB_EXPECT(state.pin().deltas().records().empty());
+    VWB_EXPECT(state.pin().deltas().durable_terrain_snapshot().records().empty());
 }
 
 VWB_TEST(native_world_backend_state_returns_the_delta_store_receipt_and_preserves_prior_pins) {
     NativeWorldBackendState state{WorldSourceDefinition(state_descriptor())};
     const WorldSourcePin before = state.pin();
     const NativeWorldBackendTransaction transaction =
-        set_transaction(state, "state:commit", 0, {-17, 4, 18}, stone_state());
+        set_transaction(state, "state:commit", 0, {-17, 4, 18});
 
     const WorldDeltaCommitReceipt receipt = state.commit(transaction);
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, receipt.status);
@@ -98,16 +105,16 @@ VWB_TEST(native_world_backend_state_returns_the_delta_store_receipt_and_preserve
 
     const WorldSourcePin after = state.pin();
     VWB_EXPECT_EQ(0ULL, before.terrain_delta_revision());
-    VWB_EXPECT(!before.deltas().effective_value_at({-17, 4, 18}));
+    VWB_EXPECT(!before.deltas().effective_typed_cell_at({-17, 4, 18}));
     VWB_EXPECT_EQ(1ULL, after.terrain_delta_revision());
-    VWB_EXPECT_EQ(stone_state(), after.deltas().effective_value_at({-17, 4, 18})->state);
+    VWB_EXPECT_EQ(stone_state({-17, 4, 18}), after.deltas().effective_typed_cell_at({-17, 4, 18}).value());
     VWB_EXPECT_EQ(state.source_identity(), after.definition().physical_content_identity());
 }
 
 VWB_TEST(native_world_backend_state_delegates_revision_and_transaction_id_checks_to_delta_store) {
     NativeWorldBackendState state{WorldSourceDefinition(state_descriptor())};
     const NativeWorldBackendTransaction first =
-        set_transaction(state, "state:stable", 0, {0, 0, 0}, stone_state());
+        set_transaction(state, "state:stable", 0, {0, 0, 0});
     const WorldDeltaCommitReceipt committed = state.commit(first);
     const WorldDeltaCommitReceipt replay = state.commit(first);
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::idempotent_replay, replay.status);
@@ -115,7 +122,7 @@ VWB_TEST(native_world_backend_state_delegates_revision_and_transaction_id_checks
     VWB_EXPECT_EQ(committed.affected_sections, replay.affected_sections);
 
     const NativeWorldBackendTransaction stale =
-        set_transaction(state, "state:stale", 0, {1, 0, 0}, stone_state());
+        set_transaction(state, "state:stale", 0, {1, 0, 0});
     try {
         static_cast<void>(state.commit(stale));
     } catch (const WorldDeltaRejected &error) {
