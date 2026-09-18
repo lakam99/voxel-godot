@@ -27,6 +27,11 @@ struct NativeTerrainPageKey {
     bool operator==(const NativeTerrainPageKey &other) const noexcept;
 };
 
+// Shared page-domain admission. Registry completeness and the immutable page
+// snapshot must use one implementation so an edge page cannot be accepted by
+// one owner and rejected by the other.
+std::optional<NativeHorizontalRect> native_terrain_page_bounds(NativeTerrainPageKey key) noexcept;
+
 struct NativeTownTerrainProfile {
     std::int32_t region_x = 0;
     std::int32_t region_z = 0;
@@ -112,7 +117,10 @@ public:
     const WorldPhysicalContentIdentity &source_definition_identity() const noexcept;
     const Sha256Digest &full_profile_digest() const noexcept;
     const std::string &site_id() const noexcept;
+    const std::string &source_signature() const noexcept;
+    NativeHorizontalRect reservation_cells() const noexcept;
     NativeHorizontalRect envelope_cells() const noexcept;
+    WorldFloat32Position origin() const noexcept;
     double level_meters() const noexcept;
     std::int32_t apron_cells() const noexcept;
     const std::vector<std::uint8_t> &support_mask() const noexcept;
@@ -152,7 +160,11 @@ public:
     static constexpr std::size_t PAGE_SAMPLE_CAPACITY = static_cast<std::size_t>(PAGE_CELLS) * PAGE_CELLS;
     static constexpr std::size_t MAX_TOWN_DEPENDENCIES = 9;
     static constexpr std::size_t MAX_SITE_SAMPLES = 262144;
-    static constexpr std::size_t MAX_SITE_ID_BYTES = 2048;
+    // Queue admission allows 1024 Unicode scalars. A valid astral-only seed
+    // therefore needs over 4 KiB once the canonical site prefix/region suffix
+    // are included. Source signatures retain their separate smaller bound.
+    static constexpr std::size_t MAX_SITE_ID_BYTES = 4224;
+    static constexpr std::size_t MAX_SOURCE_SIGNATURE_BYTES = 2048;
     static constexpr std::size_t MAX_GROUND_ROOT_POINTS = 80000;
     static constexpr std::int32_t MAX_TOWN_APRON_CELLS = 128;
 

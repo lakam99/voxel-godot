@@ -193,6 +193,10 @@ bool NativeHorizontalRect::operator==(const NativeHorizontalRect &other) const n
 }
 bool NativeTerrainPageKey::operator==(const NativeTerrainPageKey &other) const noexcept { return x == other.x && z == other.z; }
 
+std::optional<NativeHorizontalRect> native_terrain_page_bounds(const NativeTerrainPageKey key) noexcept {
+    return page_bounds_for(key);
+}
+
 NativeTerrainShapingAdmissionError::NativeTerrainShapingAdmissionError(const NativeTerrainShapingAdmissionFailure failure)
     : std::runtime_error("native terrain shaping page admission failed"), failure_(failure) {}
 NativeTerrainShapingAdmissionFailure NativeTerrainShapingAdmissionError::failure() const noexcept { return failure_; }
@@ -209,7 +213,10 @@ const WorldPhysicalContentIdentity &NativeAdmittedSiteTerrainProfile::source_def
 }
 const Sha256Digest &NativeAdmittedSiteTerrainProfile::full_profile_digest() const noexcept { return full_profile_digest_; }
 const std::string &NativeAdmittedSiteTerrainProfile::site_id() const noexcept { return profile_.site_id; }
+const std::string &NativeAdmittedSiteTerrainProfile::source_signature() const noexcept { return profile_.source_signature; }
+NativeHorizontalRect NativeAdmittedSiteTerrainProfile::reservation_cells() const noexcept { return profile_.reservation_cells; }
 NativeHorizontalRect NativeAdmittedSiteTerrainProfile::envelope_cells() const noexcept { return profile_.envelope_cells; }
+WorldFloat32Position NativeAdmittedSiteTerrainProfile::origin() const noexcept { return profile_.origin; }
 double NativeAdmittedSiteTerrainProfile::level_meters() const noexcept { return profile_.level_meters; }
 std::int32_t NativeAdmittedSiteTerrainProfile::apron_cells() const noexcept { return profile_.apron_cells; }
 const std::vector<std::uint8_t> &NativeAdmittedSiteTerrainProfile::support_mask() const noexcept { return profile_.support_mask; }
@@ -219,7 +226,7 @@ NativeAdmittedSiteTerrainProfileHandle admit_native_site_terrain_profile(
     const WorldSourceDefinition &definition, NativeSiteTerrainProfile profile) {
     if (profile.version != 1 || profile.site_id.empty()
         || profile.site_id.size() > NativeTerrainShapingSnapshot::MAX_SITE_ID_BYTES
-        || profile.source_signature.empty() || profile.source_signature.size() > NativeTerrainShapingSnapshot::MAX_SITE_ID_BYTES
+        || profile.source_signature.empty() || profile.source_signature.size() > NativeTerrainShapingSnapshot::MAX_SOURCE_SIGNATURE_BYTES
         || !valid_utf8(profile.site_id) || !valid_utf8(profile.source_signature)
         || profile.world_seed_utf8 != definition.raw_terrain_seed().utf8
         || profile.cell_size_meters != definition.constants().cell_size_meters

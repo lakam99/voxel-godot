@@ -194,7 +194,7 @@ VWB_TEST(native_shaping_page_rejects_each_noncanonical_site_scalar_rectangle_and
     value = small_site("valid", 0, 0); value.site_id.clear(); reject_site(value);
     value = small_site("valid", 0, 0); value.site_id.assign(NativeTerrainShapingSnapshot::MAX_SITE_ID_BYTES + 1, 'x'); reject_site(value);
     value = small_site("valid", 0, 0); value.source_signature.clear(); reject_site(value);
-    value = small_site("valid", 0, 0); value.source_signature.assign(NativeTerrainShapingSnapshot::MAX_SITE_ID_BYTES + 1, 'x'); reject_site(value);
+    value = small_site("valid", 0, 0); value.source_signature.assign(NativeTerrainShapingSnapshot::MAX_SOURCE_SIGNATURE_BYTES + 1, 'x'); reject_site(value);
     value = small_site("valid", 0, 0); value.site_id = std::string("\xC3\x28", 2); reject_site(value);
     value = small_site("valid", 0, 0); value.source_signature = std::string("\xC3\x28", 2); reject_site(value);
     value = small_site("valid", 0, 0); value.world_seed_utf8 = "wrong"; reject_site(value);
