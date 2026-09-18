@@ -501,6 +501,30 @@ std::optional<NativeCellState> typed_value_at(
     return found->state;
 }
 
+bool cell_inside_horizontal_bounds(
+    const CellCoord &cell, const WorldDeltaHorizontalBounds bounds) noexcept {
+    const std::int64_t end_x = static_cast<std::int64_t>(bounds.x) + bounds.width;
+    const std::int64_t end_z = static_cast<std::int64_t>(bounds.z) + bounds.depth;
+    return static_cast<std::int64_t>(cell.x) >= bounds.x
+        && static_cast<std::int64_t>(cell.x) < end_x
+        && static_cast<std::int64_t>(cell.z) >= bounds.z
+        && static_cast<std::int64_t>(cell.z) < end_z;
+}
+
+void write_projected_records(
+    CanonicalWriter &writer,
+    const std::vector<NativeTypedWorldStateRecord> &records,
+    const WorldDeltaHorizontalBounds bounds) {
+    const std::size_t count = static_cast<std::size_t>(std::count_if(
+        records.begin(), records.end(), [bounds](const NativeTypedWorldStateRecord &record) {
+            return cell_inside_horizontal_bounds(record.state.cell, bounds);
+        }));
+    writer.u64(static_cast<std::uint64_t>(count));
+    for (const NativeTypedWorldStateRecord &record : records) {
+        if (cell_inside_horizontal_bounds(record.state.cell, bounds)) writer.typed_record(record);
+    }
+}
+
 } // namespace
 
 struct WorldDeltaStore::TransactionRecord {
@@ -561,6 +585,21 @@ const NativeFeatureDeltaSnapshot &WorldDeltaPinnedSnapshot::feature_delta_snapsh
 
 const Sha256Digest &WorldDeltaPinnedSnapshot::content_digest() const noexcept {
     return state_->content_digest;
+}
+
+Sha256Digest WorldDeltaPinnedSnapshot::typed_projection_digest(
+    const WorldDeltaHorizontalBounds bounds) const {
+    if (bounds.width <= 0 || bounds.depth <= 0
+        || static_cast<std::int64_t>(bounds.x) + bounds.width > std::numeric_limits<std::int32_t>::max()
+        || static_cast<std::int64_t>(bounds.z) + bounds.depth > std::numeric_limits<std::int32_t>::max()) {
+        throw std::invalid_argument("world delta projection bounds are invalid");
+    }
+    CanonicalWriter writer;
+    writer.u8('W'); writer.u8('D'); writer.u8('P'); writer.u8('1');
+    writer.i32(bounds.x); writer.i32(bounds.z); writer.i32(bounds.width); writer.i32(bounds.depth);
+    write_projected_records(writer, state_->terrain_volume.durable_snapshot.records(), bounds);
+    write_projected_records(writer, state_->typed_transient_overlays, bounds);
+    return sha256(writer.finish());
 }
 
 WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits, WorldDeltaInitialSnapshot initial) : limits_(limits) {

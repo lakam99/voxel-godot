@@ -1,5 +1,6 @@
 #pragma once
 
+#include "native_world_deltas_v2_codec.hpp"
 #include "world_source.hpp"
 
 #include <cstdint>
@@ -27,6 +28,8 @@ struct NativeWorldBackendInitialSnapshot {
 
 enum class NativeWorldBackendRejectReason : std::uint8_t {
     source_identity_mismatch = 1,
+    shaping_pin_not_ready = 2,
+    shaping_pin_source_mismatch = 3,
 };
 
 class NativeWorldBackendRejected final : public std::runtime_error {
@@ -60,11 +63,14 @@ public:
     const WorldSourceDefinition &definition() const noexcept;
     const WorldPhysicalContentIdentity &source_identity() const noexcept;
     std::uint64_t terrain_delta_revision() const noexcept;
-    WorldSourcePin pin() const;
-    // Captures one immutable pin internally and exports only its terrain
-    // persistence value.  Save orchestration must not combine this with
-    // records read from a later mutable state.
+    WorldSourcePin pin_effective_page(
+        NativeTerrainPageKey primary_page,
+        const std::vector<NativeTerrainShapingPagePin> &shaping_pages) const;
+    // Save export is intentionally independent from production page shaping.
+    // It captures one immutable delta pin and exports only its terrain value.
     NativeTerrainVolumeV2 export_terrain_volume_v2() const;
+    NativeWorldDeltasV2Payload export_world_deltas_v2(
+        const NativePlayerBlocksV2Catalog &catalog) const;
     WorldDeltaCommitReceipt commit(const NativeWorldBackendTransaction &transaction);
 
 private:

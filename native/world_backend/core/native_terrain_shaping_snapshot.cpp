@@ -427,7 +427,9 @@ std::int32_t NativeTerrainShapingSnapshot::town_slope_apron_cells(
     constexpr float directions[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{diagonal,diagonal},{-diagonal,diagonal},{diagonal,-diagonal},{-diagonal,-diagonal}};
     for (unsigned pass = 0; pass < 3; ++pass) {
         double max_difference = 0.0;
-        const float sample_distance = static_cast<float>(town.radius_cells) + static_cast<float>(apron);
+        // GDScript scalar `float` is binary64. Vector2 direction components
+        // remain float32, then promote for the scalar multiplication.
+        const double sample_distance = static_cast<double>(town.radius_cells) + apron;
         for (const auto &direction : directions) {
             const auto x = checked_offset(town.center_x, direction[0] * sample_distance);
             const auto z = checked_offset(town.center_z, direction[1] * sample_distance);
@@ -464,7 +466,7 @@ double NativeTerrainShapingSnapshot::surface_y(
         const std::int32_t apron = town_slope_apron_cells(*town, natural_surface);
         const float dx = static_cast<float>(static_cast<std::int64_t>(cell_x) - town->center_x);
         const float dz = static_cast<float>(static_cast<std::int64_t>(cell_z) - town->center_z);
-        const float sample_distance = static_cast<float>(town->radius_cells + apron);
+        const double sample_distance = static_cast<double>(town->radius_cells) + apron;
         const auto outer_x = checked_offset(town->center_x, dx / static_cast<float>(distance) * sample_distance);
         const auto outer_z = checked_offset(town->center_z, dz / static_cast<float>(distance) * sample_distance);
         const double outer = natural_surface(outer_x, outer_z);

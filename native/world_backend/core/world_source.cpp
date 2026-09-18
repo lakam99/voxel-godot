@@ -1,5 +1,7 @@
 #include "world_source.hpp"
+#include "native_terrain_shaping_registry.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -83,16 +85,65 @@ std::vector<std::uint32_t> decode_utf8_scalars(const std::string &value) {
 
 WorldPhysicalContentIdentity pinned_identity(
     const WorldPhysicalContentIdentity &definition,
-    const std::uint64_t delta_revision,
-    const Sha256Digest &delta_content_digest) {
+    const NativeHorizontalRect page_bounds,
+    const std::vector<std::shared_ptr<const NativeTerrainShapingSnapshot>> &shaping_pages,
+    const Sha256Digest &typed_page_projection_digest) {
     Writer writer;
-    // A numeric revision is only unique within one live store. Restored
-    // checkpoints from different saves can have the same revision yet
-    // different terrain/features, so physical identity binds canonical pinned
-    // content as well as the sequencing value.
-    writer.magic("VWPP"); writer.u32(2); writer.digest(definition.digest); writer.u64(delta_revision);
-    writer.digest(delta_content_digest);
+    // v3 is page-physical identity. Registry/delta sequence values and global
+    // digests are provenance; only the exact page projection participates.
+    writer.magic("VWPP"); writer.u32(3); writer.digest(definition.digest);
+    writer.i32(page_bounds.x); writer.i32(page_bounds.z);
+    writer.i32(page_bounds.width); writer.i32(page_bounds.depth);
+    writer.u64(static_cast<std::uint64_t>(shaping_pages.size()));
+    for (const auto &shaping : shaping_pages) {
+        const NativeTerrainPageKey key = shaping->page_key();
+        const NativeHorizontalRect bounds = shaping->page_bounds();
+        writer.i32(key.x); writer.i32(key.z);
+        writer.i32(bounds.x); writer.i32(bounds.z); writer.i32(bounds.width); writer.i32(bounds.depth);
+        writer.digest(shaping->physical_content_identity().digest);
+    }
+    writer.digest(typed_page_projection_digest);
     return {sha256(writer.finish())};
+}
+
+std::int32_t floor_page(const std::int32_t cell) noexcept {
+    std::int32_t result = cell / NativeTerrainShapingSnapshot::PAGE_CELLS;
+    if (cell % NativeTerrainShapingSnapshot::PAGE_CELLS < 0) --result;
+    return result;
+}
+
+std::int32_t checked_remapped_cell(const float position, const double cell_size_meters) {
+    if (!std::isfinite(position)) {
+        throw std::invalid_argument("world effective shaping position is not finite");
+    }
+    const double floored = std::floor(static_cast<double>(position) / cell_size_meters);
+    if (floored < static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || floored > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+        throw std::invalid_argument("world effective shaping source cell is outside int32");
+    }
+    return static_cast<std::int32_t>(floored);
+}
+
+std::int32_t remapped_lattice_cell(
+    const std::int32_t cell, const double cell_size_meters) {
+    const float position = static_cast<float>(cell) * static_cast<float>(cell_size_meters);
+    // native_terrain_page_bounds admits a deliberately narrower page-key
+    // domain than int32 cell space, including enough edge margin for this
+    // float32 round-trip. No clamp or saturating conversion is permitted.
+    return checked_remapped_cell(position, cell_size_meters);
+}
+
+std::int32_t remapped_center_cell(
+    const std::int32_t cell,
+    const double offset_cells,
+    const double cell_size_meters) {
+    const float position = static_cast<float>(
+        (static_cast<double>(cell) + offset_cells) * cell_size_meters);
+    return checked_remapped_cell(position, cell_size_meters);
+}
+
+bool page_key_less(const NativeTerrainPageKey left, const NativeTerrainPageKey right) noexcept {
+    return left.z != right.z ? left.z < right.z : left.x < right.x;
 }
 
 void validate_intent(const WorldQueryIntent intent) {
@@ -174,20 +225,122 @@ WorldResolvedSurfaceColumnQuery resolve_world_query(const WorldSourceDefinition 
     validate_world_query(query);
     const double cell_size = definition.constants().cell_size_meters;
     return {query.x, query.z, {
-        godot_lattice_component(query.x, cell_size),
-        godot_lattice_component(query.z, cell_size),
+        static_cast<float>(static_cast<double>(query.x) * cell_size),
+        static_cast<float>(static_cast<double>(query.z) * cell_size),
     }, query.intent};
 }
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldLatticeQuery &) noexcept { return definition.revisions().lattice_query_revision; }
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldCellCenterQuery &) noexcept { return definition.revisions().cell_center_query_revision; }
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &) noexcept { return definition.revisions().surface_column_query_revision; }
 
-WorldSourcePin::WorldSourcePin(WorldSourceDefinition definition, WorldDeltaPinnedSnapshot deltas) : definition_(std::move(definition)), deltas_(std::move(deltas)) {
+std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
+    const WorldSourceDefinition &definition, const NativeTerrainPageKey primary_page) {
+    const auto bounds = native_terrain_page_bounds(primary_page);
+    if (!bounds) throw std::invalid_argument("world effective primary page is invalid");
+    std::vector<std::int32_t> lattice_pages_x;
+    std::vector<std::int32_t> lattice_pages_z;
+    std::vector<std::int32_t> center_pages_x;
+    std::vector<std::int32_t> center_pages_z;
+    const auto append_axis = [&](const std::int32_t start,
+        std::vector<std::int32_t> &lattice_pages,
+        std::vector<std::int32_t> &center_pages) {
+        for (std::int32_t offset = 0; offset < NativeTerrainShapingSnapshot::PAGE_CELLS; ++offset) {
+            const std::int32_t source = remapped_lattice_cell(
+                start + offset, definition.constants().cell_size_meters);
+            const std::int32_t center_source = remapped_center_cell(
+                start + offset, definition.constants().cell_center_offset_cells,
+                definition.constants().cell_size_meters);
+            const std::int32_t lattice_page = floor_page(source);
+            const std::int32_t center_page = floor_page(center_source);
+            if (std::find(lattice_pages.begin(), lattice_pages.end(), lattice_page) == lattice_pages.end())
+                lattice_pages.push_back(lattice_page);
+            if (std::find(center_pages.begin(), center_pages.end(), center_page) == center_pages.end())
+                center_pages.push_back(center_page);
+        }
+        std::sort(lattice_pages.begin(), lattice_pages.end());
+        std::sort(center_pages.begin(), center_pages.end());
+    };
+    append_axis(bounds->x, lattice_pages_x, center_pages_x);
+    append_axis(bounds->z, lattice_pages_z, center_pages_z);
+    std::vector<NativeTerrainPageKey> result;
+    result.push_back(primary_page);
+    const auto append_product = [&](const std::vector<std::int32_t> &pages_x,
+        const std::vector<std::int32_t> &pages_z) {
+        for (const std::int32_t z : pages_z) {
+            for (const std::int32_t x : pages_x) result.push_back({x, z});
+        }
+    };
+    append_product(lattice_pages_x, lattice_pages_z);
+    append_product(center_pages_x, center_pages_z);
+    std::sort(result.begin(), result.end(), page_key_less);
+    result.erase(std::unique(result.begin(), result.end()), result.end());
+    return result;
+}
+
+WorldSourcePin::WorldSourcePin(
+    WorldSourceDefinition definition,
+    WorldDeltaPinnedSnapshot deltas,
+    const NativeTerrainPageKey primary_page,
+    const std::vector<NativeTerrainShapingPagePin> &shaping_pages)
+    : definition_(std::move(definition)), deltas_(std::move(deltas)) {
+    const std::vector<NativeTerrainPageKey> required =
+        world_effective_shaping_dependencies(definition_, primary_page);
+    std::vector<const NativeTerrainShapingPagePin *> canonical;
+    canonical.reserve(shaping_pages.size());
+    for (const NativeTerrainShapingPagePin &shaping : shaping_pages) canonical.push_back(&shaping);
+    std::sort(canonical.begin(), canonical.end(), [](const auto *left, const auto *right) {
+        return page_key_less(left->page_key(), right->page_key());
+    });
+    if (canonical.size() != required.size()) {
+        throw std::invalid_argument("world source pin shaping dependency set is incomplete");
+    }
+    for (std::size_t index = 0; index < canonical.size(); ++index) {
+        const NativeTerrainShapingPagePin &shaping = *canonical[index];
+        if (!(shaping.page_key() == required[index])) {
+            throw std::invalid_argument("world source pin shaping dependency set is invalid");
+        }
+        if (shaping.readiness() != NativeTerrainShapingPageReadiness::ready) {
+            throw std::invalid_argument("world source pin requires ready terrain shaping");
+        }
+        if (!(shaping.snapshot()->definition().physical_content_identity()
+                == definition_.physical_content_identity())) {
+            throw std::invalid_argument("world source pin terrain shaping does not match source");
+        }
+        if (index == 0U) {
+            shaping_registry_revision_ = shaping.registry_revision();
+            shaping_registry_content_identity_ = shaping.registry_content_identity();
+        } else if (shaping.registry_revision() != shaping_registry_revision_
+            || !(shaping.registry_content_identity() == shaping_registry_content_identity_)) {
+            throw std::invalid_argument("world source pin mixes terrain shaping registry snapshots");
+        }
+        terrain_shaping_pages_.push_back(shaping.snapshot());
+        if (shaping.page_key() == primary_page) primary_terrain_shaping_ = shaping.snapshot();
+    }
+    const NativeHorizontalRect bounds = primary_terrain_shaping_->page_bounds();
+    typed_page_projection_digest_ = deltas_.typed_projection_digest(
+        {bounds.x, bounds.z, bounds.width, bounds.depth});
     physical_content_identity_ = pinned_identity(
-        definition_.physical_content_identity(), deltas_.revision(), deltas_.content_digest());
+        definition_.physical_content_identity(), bounds, terrain_shaping_pages_,
+        typed_page_projection_digest_);
 }
 const WorldSourceDefinition &WorldSourcePin::definition() const noexcept { return definition_; }
 const WorldDeltaPinnedSnapshot &WorldSourcePin::deltas() const noexcept { return deltas_; }
+const NativeTerrainShapingSnapshot &WorldSourcePin::primary_terrain_shaping() const noexcept { return *primary_terrain_shaping_; }
+const NativeTerrainShapingSnapshot &WorldSourcePin::terrain_shaping_for_page(
+    const NativeTerrainPageKey page) const {
+    const auto found = std::lower_bound(terrain_shaping_pages_.begin(), terrain_shaping_pages_.end(), page,
+        [](const auto &snapshot, const NativeTerrainPageKey key) {
+            return page_key_less(snapshot->page_key(), key);
+        });
+    if (found == terrain_shaping_pages_.end() || !((*found)->page_key() == page)) {
+        throw std::out_of_range("terrain shaping page is not pinned");
+    }
+    return **found;
+}
+std::size_t WorldSourcePin::terrain_shaping_page_count() const noexcept { return terrain_shaping_pages_.size(); }
 std::uint64_t WorldSourcePin::terrain_delta_revision() const noexcept { return deltas_.revision(); }
+std::uint64_t WorldSourcePin::shaping_registry_revision() const noexcept { return shaping_registry_revision_; }
+const WorldPhysicalContentIdentity &WorldSourcePin::shaping_registry_content_identity() const noexcept { return shaping_registry_content_identity_; }
+const Sha256Digest &WorldSourcePin::typed_page_projection_digest() const noexcept { return typed_page_projection_digest_; }
 const WorldPhysicalContentIdentity &WorldSourcePin::physical_content_identity() const noexcept { return physical_content_identity_; }
 } // namespace voxel::world_backend

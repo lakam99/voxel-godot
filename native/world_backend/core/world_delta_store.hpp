@@ -124,6 +124,13 @@ struct WorldDeltaStoreLimits {
 
 struct WorldDeltaSnapshotState;
 
+struct WorldDeltaHorizontalBounds {
+    std::int32_t x = 0;
+    std::int32_t z = 0;
+    std::int32_t width = 0;
+    std::int32_t depth = 0;
+};
+
 // A pin owns an immutable store revision. Later commits replace the store's
 // state rather than mutating this snapshot, so section builders can retain it
 // without observing a mixed revision.
@@ -151,6 +158,11 @@ public:
     // rather than process-sequence, identity and is required when pins from
     // independently restored saves have equal numeric revisions.
     const Sha256Digest &content_digest() const noexcept;
+    // Canonical physical identity of only the typed terrain and scene-overlay
+    // records whose X/Z coordinates are owned by these exact bounds. Global
+    // store revision, terrain root/section revisions, feature deltas, and
+    // records on other pages are deliberately excluded.
+    Sha256Digest typed_projection_digest(WorldDeltaHorizontalBounds bounds) const;
 
 private:
     friend class WorldDeltaStore;

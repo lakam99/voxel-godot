@@ -47,8 +47,28 @@ std::int32_t floor_cell(const float position, const double cell_size) {
 CellCoord source_cell(const WorldFloat32Position &position, const double cell_size) {
     return {floor_cell(position.x, cell_size), floor_cell(position.y, cell_size), floor_cell(position.z, cell_size)};
 }
-std::int32_t script_floor_divide(const std::int32_t value, const std::int32_t divisor) {
-    return floor_cell(static_cast<float>(value) / static_cast<float>(divisor), 1.0);
+constexpr std::int32_t script_floor_divide(const std::int32_t value, const std::int32_t divisor) noexcept {
+    // GDScript's `float(cell.x) / 2.0` is binary64 arithmetic even though the
+    // resulting world Vector types use real_t. Every int32 and these positive
+    // integer divisors are exactly representable in binary64, so exact signed
+    // integer floor division preserves the script result without narrowing.
+    const std::int32_t quotient = value / divisor;
+    return value % divisor < 0 ? quotient - 1 : quotient;
+}
+static_assert(script_floor_divide(16777219, 2) == 8388609);
+static_assert(script_floor_divide(16777225, 5) == 3355445);
+static_assert(script_floor_divide(-1, 2) == -1);
+
+WorldFloat32HorizontalPosition regional_biome_position(
+    const std::int32_t x, const std::int32_t z, const double cell_size) noexcept {
+    // `Vector2(float(cell.x) * cell_size(), ...)` evaluates each scalar
+    // expression in GDScript's binary64 `float`, then crosses the Vector2
+    // real_t boundary once.  This is intentionally different from the
+    // two-float-boundary `Vector3(cell) * CELL` meshing lattice convention.
+    return {
+        static_cast<float>(static_cast<double>(x) * cell_size),
+        static_cast<float>(static_cast<double>(z) * cell_size),
+    };
 }
 TerrainBiomeId regional_biome_id(const std::string &value) {
     if (value == "plains") return TerrainBiomeId::plains;
@@ -144,7 +164,7 @@ TerrainBiomeId NativeNaturalTerrainSource::natural_surface_biome(const std::int3
     const double surface = natural_surface_y(x, z);
     if (surface < definition_.constants().water_level_meters + 0.3) return TerrainBiomeId::ocean;
     if (surface < definition_.constants().water_level_meters + 1.7) return TerrainBiomeId::beach;
-    const auto position = resolve_world_query(definition_, WorldSurfaceColumnQuery{x, z, WorldQueryIntent::gameplay}).lattice_position;
+    const auto position = regional_biome_position(x, z, definition_.constants().cell_size_meters);
     return regional_biome_id(BiomeRegionField::sample(definition_.admitted_biome_seed(), {position.x, position.z}).biome);
 }
 
@@ -191,14 +211,13 @@ NativeNaturalTerrainSource::GeneratedSample NativeNaturalTerrainSource::sample_g
 }
 
 NativeSurfaceColumnFacts NativeNaturalTerrainSource::sample_surface_column(const WorldSurfaceColumnQuery &query) const {
-    const auto resolved = resolve_world_query(definition_, query);
-    const CellCoord source = source_cell({resolved.lattice_position.x, 0.0F, resolved.lattice_position.z}, definition_.constants().cell_size_meters);
-    const double surface = natural_surface_y(source.x, source.z); return {query.x, query.z, surface, surface};
+    validate_world_query(query);
+    const double surface = natural_surface_y(query.x, query.z);
+    return {query.x, query.z, surface, surface};
 }
 TerrainBiomeId NativeNaturalTerrainSource::sample_surface_biome(const WorldSurfaceColumnQuery &query) const {
-    const auto resolved = resolve_world_query(definition_, query);
-    const CellCoord source = source_cell({resolved.lattice_position.x, 0.0F, resolved.lattice_position.z}, definition_.constants().cell_size_meters);
-    return natural_surface_biome(source.x, source.z);
+    validate_world_query(query);
+    return natural_surface_biome(query.x, query.z);
 }
 NativeLatticeNumericFacts NativeNaturalTerrainSource::sample_lattice_numeric(const WorldLatticeQuery &query) const {
     const auto resolved = resolve_world_query(definition_, query); const auto generated = sample_generated_at_position(resolved.lattice_position, query.coordinate);

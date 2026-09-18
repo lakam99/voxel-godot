@@ -441,3 +441,32 @@ VWB_TEST(native_shaping_page_fails_closed_on_missing_nonfinite_and_out_of_domain
     };
     VWB_EXPECT_THROW(std::invalid_argument, town.surface_y(40, 10, outer_invalid));
 }
+
+VWB_TEST(native_shaping_page_promotes_float32_directions_for_binary64_scalar_sampling) {
+    auto request = request_for();
+    for (std::int32_t z = -1; z <= 1; ++z) {
+        for (std::int32_t x = -1; x <= 1; ++x) {
+            request.town_overrides.push_back(x == 1 && z == 0
+                ? town_override(1, 0, 30, 10.0) : empty_town_override(x, z));
+        }
+    }
+    const auto snapshot = snapshot_for(std::move(request));
+    std::vector<std::pair<std::int32_t, std::int32_t>> samples;
+    const auto natural = [&](const std::int32_t x, const std::int32_t z) {
+        samples.emplace_back(x, z);
+        return x == 148 && z == 12 ? 50.0 : 78.0;
+    };
+    const double shaped = snapshot.surface_y(165, 10, natural);
+    VWB_EXPECT(std::isfinite(shaped));
+    VWB_EXPECT(std::find(samples.begin(), samples.end(), std::pair<std::int32_t, std::int32_t>{148, 12}) != samples.end());
+    VWB_EXPECT(std::find(samples.begin(), samples.end(), std::pair<std::int32_t, std::int32_t>{147, 12}) == samples.end());
+
+    samples.clear();
+    const NativeTownTerrainProfile diagonal_town{0, 0, 0, 0, 30, 10.0};
+    VWB_EXPECT_EQ(18, snapshot.town_slope_apron_cells(diagonal_town,
+        [&](const std::int32_t x, const std::int32_t z) { samples.emplace_back(x, z); return 10.0; }));
+    for (const auto expected : {
+        std::pair<std::int32_t, std::int32_t>{34, 34}, {-34, 34}, {34, -34}, {-34, -34}}) {
+        VWB_EXPECT(std::find(samples.begin(), samples.end(), expected) != samples.end());
+    }
+}

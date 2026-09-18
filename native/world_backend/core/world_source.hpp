@@ -6,12 +6,16 @@
 #include "world_delta_store.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace voxel::world_backend {
 
 class WorldSourceDefinition;
+class NativeTerrainShapingPagePin;
+class NativeTerrainShapingSnapshot;
+struct NativeTerrainPageKey;
 
 // Terrain generation hashes the raw Godot seed text; it does not use the
 // BiomeRegionField's strip_edges/default admission.  Keeping this type apart
@@ -180,23 +184,47 @@ std::uint32_t query_revision(const WorldSourceDefinition &definition, const Worl
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldCellCenterQuery &query) noexcept;
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &query) noexcept;
 
-// A pin retains both immutable source definition and immutable delta-store
-// snapshot; later delta commits cannot alter its revision or content identity.
+// Complete canonical shaping-page dependency set for effective terrain
+// sampling across one primary integer page. Godot's distinct float32 lattice
+// and cell-center round-trips can each select a source cell in a neighbouring
+// page, so the exact Cartesian dependency set for each convention participates
+// in this bounded union without inventing cross-convention combinations.
+std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
+    const WorldSourceDefinition &definition, NativeTerrainPageKey primary_page);
+
+// A production pin is page-scoped and requires the complete canonical set of
+// ready shaping dependencies. It retains immutable source, shaping, and delta
+// snapshots; later registry or delta changes cannot alter it.
 class WorldSourcePin final {
 public:
-    WorldSourcePin(WorldSourceDefinition definition, WorldDeltaPinnedSnapshot deltas);
+    WorldSourcePin(
+        WorldSourceDefinition definition,
+        WorldDeltaPinnedSnapshot deltas,
+        NativeTerrainPageKey primary_page,
+        const std::vector<NativeTerrainShapingPagePin> &shaping_pages);
     WorldSourcePin(const WorldSourcePin &) = default;
     WorldSourcePin(WorldSourcePin &&) = default;
     WorldSourcePin &operator=(const WorldSourcePin &) = delete;
     WorldSourcePin &operator=(WorldSourcePin &&) = delete;
     const WorldSourceDefinition &definition() const noexcept;
     const WorldDeltaPinnedSnapshot &deltas() const noexcept;
+    const NativeTerrainShapingSnapshot &primary_terrain_shaping() const noexcept;
+    const NativeTerrainShapingSnapshot &terrain_shaping_for_page(NativeTerrainPageKey page) const;
+    std::size_t terrain_shaping_page_count() const noexcept;
     std::uint64_t terrain_delta_revision() const noexcept;
+    std::uint64_t shaping_registry_revision() const noexcept;
+    const WorldPhysicalContentIdentity &shaping_registry_content_identity() const noexcept;
+    const Sha256Digest &typed_page_projection_digest() const noexcept;
     const WorldPhysicalContentIdentity &physical_content_identity() const noexcept;
 
 private:
     WorldSourceDefinition definition_;
     WorldDeltaPinnedSnapshot deltas_;
+    std::shared_ptr<const NativeTerrainShapingSnapshot> primary_terrain_shaping_;
+    std::vector<std::shared_ptr<const NativeTerrainShapingSnapshot>> terrain_shaping_pages_;
+    std::uint64_t shaping_registry_revision_ = 0;
+    WorldPhysicalContentIdentity shaping_registry_content_identity_;
+    Sha256Digest typed_page_projection_digest_{};
     WorldPhysicalContentIdentity physical_content_identity_;
 };
 

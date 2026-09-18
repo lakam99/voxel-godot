@@ -37,7 +37,7 @@ void append_ascii(std::vector<std::uint32_t> &target, const std::string &value) 
     for (const unsigned char character : value) target.push_back(character);
 }
 std::int32_t script_floor_divide(const std::int32_t value, const std::int32_t divisor) {
-    return static_cast<std::int32_t>(std::floor(static_cast<float>(value) / static_cast<float>(divisor)));
+    return static_cast<std::int32_t>(std::floor(static_cast<double>(value) / static_cast<double>(divisor)));
 }
 double lava_salt01(const AdmittedTerrainSeed &seed, const CellCoord cell, const bool incorrectly_utf8_bytes) {
     std::vector<std::uint32_t> key = seed.code_points;
@@ -182,6 +182,33 @@ VWB_TEST(native_natural_terrain_query_types_do_not_collapse_to_cell_state) {
     VWB_EXPECT_EQ(cell.x, column.cell_x); VWB_EXPECT_EQ(cell.z, column.cell_z);
     VWB_EXPECT(lattice.density != state.density);
     VWB_EXPECT(near(column.reference_surface_y, column.deformed_surface_y));
+}
+
+VWB_TEST(native_natural_terrain_surface_columns_keep_integer_identity_and_one_boundary_biome_position) {
+    const NativeNaturalTerrainSource source(atlas_definition());
+    const auto direct = source.sample_surface_column({-1, -2000, WorldQueryIntent::terrain_collision});
+    const auto formerly_aliased = source.sample_surface_column({-2, -2000, WorldQueryIntent::terrain_collision});
+    // Fixed GDScript natural_surface_y_for_cell goldens. A float32 lattice
+    // round-trip incorrectly changed the first query's source x from -1 to -2.
+    VWB_EXPECT(near(25.088331637806284, direct.reference_surface_y));
+    VWB_EXPECT(near(25.111184615739269, formerly_aliased.reference_surface_y));
+    VWB_EXPECT(!near(direct.reference_surface_y, formerly_aliased.reference_surface_y));
+
+    const double cell_size = source.definition().constants().cell_size_meters;
+    const float one_boundary_x = static_cast<float>(9.0 * cell_size);
+    const float lattice_x = static_cast<float>(9) * static_cast<float>(cell_size);
+    VWB_EXPECT_EQ(0x41426666U, bits(one_boundary_x));
+    VWB_EXPECT_EQ(0x41426667U, bits(lattice_x));
+    VWB_EXPECT_EQ(TerrainBiomeId::swamp,
+        source.sample_surface_biome({9, -1, WorldQueryIntent::gameplay}));
+}
+
+VWB_TEST(native_natural_terrain_fluid_hash_floor_division_matches_gdscript_binary64) {
+    // These cells straddle float32's consecutive-integer limit. The old C++
+    // float narrowing produced 8,388,610 and 3,355,444 respectively.
+    VWB_EXPECT_EQ(8388609, script_floor_divide(16777219, 2));
+    VWB_EXPECT_EQ(3355445, script_floor_divide(16777225, 5));
+    VWB_EXPECT_EQ(-1, script_floor_divide(-1, 2));
 }
 
 // GDScript goldens were captured from the existing
