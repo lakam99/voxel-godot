@@ -108,6 +108,28 @@ void expect_typed_rejection(const WorldDeltaRejectReason expected, const WorldTy
     fail("typed world delta rejection", __FILE__, __LINE__, "expected WorldDeltaRejected");
 }
 
+NativePlayerCreatedInstance feature_instance(const std::string &id, const CellCoord cell) {
+    return {id, cell, 3.5, 0.25, NativeBlockIdentity::create("crate.oak"),
+        NativeValue::object({{"open", NativeValue::boolean(false)}})};
+}
+
+WorldFeatureDeltaAdmission feature_admission(const std::string &id, const std::uint64_t expected,
+    std::vector<NativeFeatureTombstone> tombstones = {},
+    std::vector<NativePlayerCreatedInstance> instances = {}) {
+    return {id, expected, NativeFeatureDeltaSnapshot::create(std::move(tombstones), std::move(instances))};
+}
+
+void expect_feature_rejection(const WorldDeltaRejectReason expected, const WorldFeatureDeltaAdmission &value,
+    WorldDeltaStore &store) {
+    try {
+        static_cast<void>(store.admit_feature_deltas(value));
+    } catch (const WorldDeltaRejected &error) {
+        VWB_EXPECT_EQ(expected, error.reason());
+        return;
+    }
+    fail("feature world delta rejection", __FILE__, __LINE__, "expected WorldDeltaRejected");
+}
+
 } // namespace
 
 VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
@@ -121,6 +143,173 @@ VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
     VWB_EXPECT(first.typed_durable_snapshot().records().empty());
     VWB_EXPECT(first.typed_transient_overlays().empty());
     VWB_EXPECT(!first.typed_effective_value_at({0, 0, 0}));
+    VWB_EXPECT(first.feature_delta_snapshot().tombstones().empty());
+    VWB_EXPECT(first.feature_delta_snapshot().player_created_instances().empty());
+}
+
+VWB_TEST(world_delta_store_pins_feature_deltas_in_the_same_immutable_revision_as_cells) {
+    WorldDeltaStore store;
+    const WorldDeltaPinnedSnapshot before = store.pin();
+    const WorldDeltaCommitReceipt admitted = store.admit_feature_deltas(feature_admission("feature:initial", 0,
+        {}, {feature_instance("player:crate:1", {-16, 0, 0})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    VWB_EXPECT_EQ(1ULL, admitted.revision);
+    VWB_EXPECT_EQ(27U, admitted.affected_sections.size());
+    VWB_EXPECT(before.feature_delta_snapshot().tombstones().empty());
+    VWB_EXPECT(before.feature_delta_snapshot().player_created_instances().empty());
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    VWB_EXPECT_EQ(1ULL, pin.revision());
+    VWB_EXPECT_EQ(std::string("player:crate:1"),
+        pin.feature_delta_snapshot().player_created_instances()[0].instance_id);
+    VWB_EXPECT((pin.feature_delta_snapshot().player_created_instances()[0].cell == CellCoord{-16, 0, 0}));
+
+    const WorldDeltaCommitReceipt terrain = store.commit(transaction("delta:after-feature", 1, {
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
+    }));
+    VWB_EXPECT_EQ(2ULL, terrain.revision);
+    VWB_EXPECT_EQ(1ULL, pin.revision());
+    VWB_EXPECT_EQ(2ULL, store.pin().revision());
+    VWB_EXPECT_EQ(1U, store.pin().feature_delta_snapshot().player_created_instances().size());
+}
+
+VWB_TEST(world_delta_store_feature_replacement_invalidates_old_new_and_removed_instance_cells) {
+    WorldDeltaStore store;
+    static_cast<void>(store.admit_feature_deltas(feature_admission("feature:first", 0, {}, {
+        feature_instance("player:crate:1", {-16, 0, 0}),
+    })));
+    NativePlayerCreatedInstance moved = feature_instance("player:crate:1", {32, 0, 0});
+    moved.runtime_state = NativeValue::object({{"open", NativeValue::boolean(true)}});
+    const WorldDeltaCommitReceipt moved_receipt = store.admit_feature_deltas(feature_admission("feature:moved", 1,
+        {}, {moved}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, moved_receipt.status);
+    VWB_EXPECT_EQ(2ULL, moved_receipt.revision);
+    // Old section -1 and new section 2 yield full x=-2..3 halos.
+    VWB_EXPECT_EQ(54U, moved_receipt.affected_sections.size());
+    for (std::int32_t z = -1; z <= 1; ++z) {
+        for (std::int32_t y = -1; y <= 1; ++y) {
+            for (std::int32_t x = -2; x <= 3; ++x) {
+                VWB_EXPECT(std::find(moved_receipt.affected_sections.begin(), moved_receipt.affected_sections.end(),
+                    WorldDeltaSectionKey{{x, y, z}}) != moved_receipt.affected_sections.end());
+            }
+        }
+    }
+    const WorldDeltaCommitReceipt removed = store.admit_feature_deltas(feature_admission("feature:removed", 2));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, removed.status);
+    VWB_EXPECT_EQ(3ULL, removed.revision);
+    VWB_EXPECT_EQ(27U, removed.affected_sections.size());
+    VWB_EXPECT(store.pin().feature_delta_snapshot().player_created_instances().empty());
+
+}
+
+VWB_TEST(world_delta_store_rejects_tombstones_until_a_native_feature_footprint_catalog_exists) {
+    WorldDeltaStore store;
+    const WorldDeltaPinnedSnapshot before = store.pin();
+    // An ID-only removedProps entry cannot safely invalidate the generated
+    // feature's unknown collision/render/navigation footprint.
+    expect_feature_rejection(WorldDeltaRejectReason::invalid_transaction,
+        feature_admission("feature:tombstone-only", 0, {{"generated:ruin:1"}}), store);
+    expect_feature_rejection(WorldDeltaRejectReason::invalid_transaction,
+        feature_admission("feature:mixed", 0, {{"generated:ruin:1"}}, {
+            feature_instance("player:crate:1", {0, 0, 0}),
+        }), store);
+    VWB_EXPECT_EQ(0ULL, store.revision());
+    VWB_EXPECT_EQ(0ULL, before.revision());
+    VWB_EXPECT(store.pin().feature_delta_snapshot().tombstones().empty());
+    VWB_EXPECT(store.pin().feature_delta_snapshot().player_created_instances().empty());
+
+    // Player instances do carry a cell, so they remain safe to admit now.
+    const WorldDeltaCommitReceipt player_only = store.admit_feature_deltas(feature_admission("feature:player-only", 0, {}, {
+        feature_instance("player:crate:1", {0, 0, 0}),
+    }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, player_only.status);
+    VWB_EXPECT_EQ(27U, player_only.affected_sections.size());
+}
+
+VWB_TEST(world_delta_store_feature_admissions_are_idempotent_kind_strict_and_capacity_bounded) {
+    WorldDeltaStore store;
+    const WorldFeatureDeltaAdmission first = feature_admission("shared:feature", 0, {}, {
+        feature_instance("player:crate:1", {0, 0, 0}),
+    });
+    const WorldDeltaCommitReceipt committed = store.admit_feature_deltas(first);
+    const WorldDeltaCommitReceipt replay = store.admit_feature_deltas(first);
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::idempotent_replay, replay.status);
+    VWB_EXPECT_EQ(committed.revision, replay.revision);
+    expect_rejection(WorldDeltaRejectReason::transaction_conflict, transaction("shared:feature", 1, {
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
+    }), store);
+    expect_typed_rejection(WorldDeltaRejectReason::transaction_conflict,
+        typed_admission("shared:feature", 1, {typed_durable({0, 0, 0})}), store);
+    expect_feature_rejection(WorldDeltaRejectReason::transaction_conflict, feature_admission("shared:feature", 1, {}, {
+        feature_instance("player:crate:1", {1, 0, 0}),
+    }), store);
+    expect_feature_rejection(WorldDeltaRejectReason::invalid_transaction,
+        feature_admission("", 1), store);
+    expect_feature_rejection(WorldDeltaRejectReason::invalid_transaction,
+        feature_admission(std::string("feature\0nul", 10), 1), store);
+    expect_feature_rejection(WorldDeltaRejectReason::revision_conflict,
+        feature_admission("feature:stale", 0), store);
+
+    WorldDeltaStore combined_capacity({2, 4});
+    static_cast<void>(combined_capacity.admit_typed_state(
+        typed_admission("typed:capacity", 0, {typed_durable({0, 0, 0})})));
+    expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        feature_admission("feature:over-capacity", 1, {}, {
+            feature_instance("player:crate:2", {1, 0, 0}),
+            feature_instance("player:crate:3", {2, 0, 0}),
+        }), combined_capacity);
+    VWB_EXPECT_EQ(1ULL, combined_capacity.revision());
+
+    WorldDeltaStore transaction_capacity({4, 1});
+    static_cast<void>(transaction_capacity.admit_feature_deltas(feature_admission("feature:journal", 0)));
+    expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        feature_admission("feature:journal-full", 0), transaction_capacity);
+
+    WorldDeltaStore overflow({4, 4, std::numeric_limits<std::uint64_t>::max()});
+    expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        feature_admission("feature:max-revision", std::numeric_limits<std::uint64_t>::max(), {}, {
+            feature_instance("player:crate:max", {0, 0, 0}),
+        }), overflow);
+    VWB_EXPECT(overflow.pin().feature_delta_snapshot().player_created_instances().empty());
+}
+
+VWB_TEST(world_delta_store_feature_no_change_keeps_revision_and_pinned_snapshot_immutable) {
+    WorldDeltaStore store;
+    const WorldFeatureDeltaAdmission first = feature_admission("feature:first", 0, {}, {
+        feature_instance("player:crate:1", {0, 0, 0}),
+    });
+    static_cast<void>(store.admit_feature_deltas(first));
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    const WorldDeltaCommitReceipt no_change = store.admit_feature_deltas(feature_admission("feature:no-change", 1,
+        {}, {feature_instance("player:crate:1", {0, 0, 0})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::no_change, no_change.status);
+    VWB_EXPECT_EQ(1ULL, no_change.revision);
+    VWB_EXPECT(no_change.affected_sections.empty());
+    VWB_EXPECT_EQ(1ULL, pin.revision());
+    VWB_EXPECT_EQ(1U, pin.feature_delta_snapshot().player_created_instances().size());
+}
+
+VWB_TEST(world_delta_store_feature_instance_merge_compares_canonical_ids_without_cell_order_assumptions) {
+    WorldDeltaStore store;
+    static_cast<void>(store.admit_feature_deltas(feature_admission("feature:merge-first", 0, {}, {
+        feature_instance("player:bravo", {0, 0, 0}),
+        feature_instance("player:zulu", {64, 0, 0}),
+    })));
+    // The old/new walk encounters old-ID < new-ID, then new-ID < old-ID,
+    // then an unchanged shared ID. It is intentionally independent of the
+    // cells' z/y/x storage order.
+    const WorldDeltaCommitReceipt receipt = store.admit_feature_deltas(feature_admission("feature:merge-second", 1, {}, {
+        feature_instance("player:charlie", {16, 0, 0}),
+        feature_instance("player:zulu", {64, 0, 0}),
+    }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, receipt.status);
+    VWB_EXPECT_EQ(2ULL, receipt.revision);
+    // Only sections 0 (removed bravo) and 1 (added charlie) changed; the
+    // unchanged zulu instance must not expand the invalidation neighborhood.
+    VWB_EXPECT_EQ(36U, receipt.affected_sections.size());
+    VWB_EXPECT(std::find(receipt.affected_sections.begin(), receipt.affected_sections.end(),
+        WorldDeltaSectionKey{{-1, -1, -1}}) != receipt.affected_sections.end());
+    VWB_EXPECT(std::find(receipt.affected_sections.begin(), receipt.affected_sections.end(),
+        WorldDeltaSectionKey{{2, 1, 1}}) != receipt.affected_sections.end());
 }
 
 VWB_TEST(world_delta_store_admits_typed_state_in_the_same_immutable_revision_as_deltas) {

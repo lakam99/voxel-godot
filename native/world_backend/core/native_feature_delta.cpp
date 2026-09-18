@@ -131,27 +131,6 @@ std::vector<NativePlayerCreatedInstance> canonical_instances(std::vector<NativeP
     return instances;
 }
 
-void reject_cross_domain_id_collision(
-    const std::vector<NativeFeatureTombstone> &tombstones,
-    const std::vector<NativePlayerCreatedInstance> &instances) {
-    // Both inputs are already canonical unsigned-UTF-8 order. A feature ID
-    // occupies one durable snapshot namespace regardless of whether its
-    // current representation is a removed generated feature or a player
-    // creation; permitting a cross-domain alias would make lookup ambiguous.
-    std::size_t tombstone_index = 0U;
-    std::size_t instance_index = 0U;
-    while (tombstone_index < tombstones.size() && instance_index < instances.size()) {
-        const std::string &tombstone_id = tombstones[tombstone_index].feature_id;
-        const std::string &instance_id = instances[instance_index].instance_id;
-        if (tombstone_id == instance_id) reject();
-        if (utf8_byte_less(tombstone_id, instance_id)) {
-            ++tombstone_index;
-        } else {
-            ++instance_index;
-        }
-    }
-}
-
 } // namespace
 
 NativeFeatureDeltaRejected::NativeFeatureDeltaRejected()
@@ -176,7 +155,6 @@ NativeFeatureDeltaSnapshot NativeFeatureDeltaSnapshot::create(
     std::vector<NativePlayerCreatedInstance> player_created_instances) {
     std::vector<NativeFeatureTombstone> canonical_tombstones_value = canonical_tombstones(std::move(tombstones));
     std::vector<NativePlayerCreatedInstance> canonical_instances_value = canonical_instances(std::move(player_created_instances));
-    reject_cross_domain_id_collision(canonical_tombstones_value, canonical_instances_value);
     return NativeFeatureDeltaSnapshot(std::move(canonical_tombstones_value), std::move(canonical_instances_value));
 }
 
@@ -193,7 +171,6 @@ std::vector<std::uint8_t> NativeFeatureDeltaSnapshot::canonical_binary() const {
     // keep a future deserializer or memory-corruption path fail-closed.
     const std::vector<NativeFeatureTombstone> tombstones = canonical_tombstones(tombstones_);
     const std::vector<NativePlayerCreatedInstance> instances = canonical_instances(player_created_instances_);
-    reject_cross_domain_id_collision(tombstones, instances);
     std::vector<std::uint8_t> result = {'F', 'D', '1'};
     append_u32(result, static_cast<std::uint32_t>(tombstones.size()));
     for (const NativeFeatureTombstone &tombstone : tombstones) {

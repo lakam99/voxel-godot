@@ -89,13 +89,33 @@ VWB_TEST(native_feature_delta_rejects_bad_ids_duplicate_ids_and_duplicate_instan
     VWB_EXPECT_THROW(NativeFeatureDeltaRejected,
         NativeFeatureDeltaSnapshot::create({{"same"}, {"same"}}, {}));
     VWB_EXPECT_THROW(NativeFeatureDeltaRejected,
-        NativeFeatureDeltaSnapshot::create({{"same"}}, {instance("same")}));
-    VWB_EXPECT_THROW(NativeFeatureDeltaRejected,
         NativeFeatureDeltaSnapshot::create({}, {instance("same"), instance("same", {7, 8, 9})}));
     VWB_EXPECT_THROW(NativeFeatureDeltaRejected,
         NativeFeatureDeltaSnapshot::create({}, {instance("first"), instance("second", {4, 5, 6})}));
     VWB_EXPECT_THROW(NativeFeatureDeltaRejected,
         NativeFeatureDeltaSnapshot::create({}, {instance(std::string("bad\xf5", 4))}));
+}
+
+VWB_TEST(native_feature_delta_admits_same_text_key_in_distinct_v2_domains_with_tagged_fd1_records) {
+    const NativePlayerCreatedInstance placed{
+        "same", {0, 0, 0}, 0.0, 0.0, NativeBlockIdentity::create("b"), NativeValue::object({})};
+    const NativeFeatureDeltaSnapshot snapshot = NativeFeatureDeltaSnapshot::create({{"same"}}, {placed});
+    VWB_EXPECT_EQ(std::string("same"), snapshot.tombstones()[0].feature_id);
+    VWB_EXPECT_EQ(std::string("same"), snapshot.player_created_instances()[0].instance_id);
+    VWB_EXPECT_EQ(std::vector<std::uint8_t>({
+        'F', 'D', '1',
+        0x00U, 0x00U, 0x00U, 0x01U,
+        0x01U, 0x00U, 0x00U, 0x00U, 0x04U, 's', 'a', 'm', 'e',
+        0x00U, 0x00U, 0x00U, 0x01U,
+        0x02U, 0x00U, 0x00U, 0x00U, 0x04U, 's', 'a', 'm', 'e',
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U,
+        0x00U, 0x00U, 0x00U, 0x01U, 'b',
+        0x00U, 0x00U, 0x00U, 0x08U, 'N', 'V', '1', 0x06U,
+        0x00U, 0x00U, 0x00U, 0x00U,
+    }), snapshot.canonical_binary());
 }
 
 VWB_TEST(native_feature_delta_enforces_explicit_id_and_record_count_limits_before_storage) {

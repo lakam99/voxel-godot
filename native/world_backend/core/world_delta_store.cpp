@@ -179,6 +179,11 @@ struct ValidatedTypedAdmission {
     std::vector<NativeTypedWorldStateRecord> transient_overlays;
 };
 
+struct ValidatedFeatureAdmission {
+    NativeFeatureDeltaSnapshot snapshot = NativeFeatureDeltaSnapshot::create({}, {});
+    std::vector<std::uint8_t> canonical_snapshot;
+};
+
 ValidatedTypedAdmission validate_typed_admission(const WorldTypedStateAdmission &admission) {
     if (admission.transaction_id.empty() || admission.transaction_id.find('\0') != std::string::npos) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
@@ -207,6 +212,38 @@ std::vector<std::uint8_t> canonical_typed_admission(
     for (const NativeTypedWorldStateRecord &record : validated.durable_snapshot.records()) writer.typed_record(record);
     writer.u64(static_cast<std::uint64_t>(validated.transient_overlays.size()));
     for (const NativeTypedWorldStateRecord &record : validated.transient_overlays) writer.typed_record(record);
+    return writer.finish();
+}
+
+ValidatedFeatureAdmission validate_feature_admission(const WorldFeatureDeltaAdmission &admission) {
+    if (admission.transaction_id.empty() || admission.transaction_id.find('\0') != std::string::npos) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+    // A removedProps tombstone changes generated geometry, but FD1 records
+    // only its stable ID. Until a native baseline feature-footprint catalog
+    // can resolve that ID to all affected cells, publishing this replacement
+    // would let collision, render, and navigation retain stale geometry.
+    // Reject it at the WDS boundary rather than pretending an empty section
+    // receipt is safe. NativeFeatureDeltaSnapshot still retains tombstones as
+    // persistence groundwork for that catalog-backed admission later.
+    if (!admission.snapshot.tombstones().empty()) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+    // NativeFeatureDeltaSnapshot is immutable at its public boundary; FD1
+    // repeats its own feature validation before producing the journal payload.
+    // There is therefore no raw, unvalidated feature value to translate here.
+    return {admission.snapshot, admission.snapshot.canonical_binary()};
+}
+
+std::vector<std::uint8_t> canonical_feature_admission(
+    const WorldFeatureDeltaAdmission &admission, const ValidatedFeatureAdmission &validated) {
+    CanonicalWriter writer;
+    // WFD1 is distinct from WDTX and WTY2: one transaction ID can identify
+    // exactly one native world-state mutation kind.
+    writer.u8('W'); writer.u8('F'); writer.u8('D'); writer.u8('1');
+    writer.text(admission.transaction_id);
+    writer.u64(admission.expected_revision);
+    writer.binary(validated.canonical_snapshot);
     return writer.finish();
 }
 
@@ -267,6 +304,48 @@ void add_changed_typed_cells(
     }
 }
 
+bool utf8_byte_less(const std::string &left, const std::string &right) noexcept {
+    return std::lexicographical_compare(left.begin(), left.end(), right.begin(), right.end(),
+        [](const char left_byte, const char right_byte) noexcept {
+            return static_cast<std::uint8_t>(static_cast<unsigned char>(left_byte))
+                < static_cast<std::uint8_t>(static_cast<unsigned char>(right_byte));
+        });
+}
+
+void add_changed_feature_instance_cells(
+    const NativeFeatureDeltaSnapshot &before,
+    const NativeFeatureDeltaSnapshot &after,
+    std::set<CellCoord, CellCoordLess> &changed_cells) {
+    const auto &old_instances = before.player_created_instances();
+    const auto &new_instances = after.player_created_instances();
+    std::size_t old_index = 0;
+    std::size_t new_index = 0;
+    while (old_index < old_instances.size() || new_index < new_instances.size()) {
+        if (old_index == old_instances.size()) {
+            changed_cells.insert(new_instances[new_index++].cell);
+        } else if (new_index == new_instances.size()) {
+            changed_cells.insert(old_instances[old_index++].cell);
+        } else {
+            const NativePlayerCreatedInstance &old_instance = old_instances[old_index];
+            const NativePlayerCreatedInstance &new_instance = new_instances[new_index];
+            if (utf8_byte_less(old_instance.instance_id, new_instance.instance_id)) {
+                changed_cells.insert(old_instance.cell);
+                ++old_index;
+            } else if (utf8_byte_less(new_instance.instance_id, old_instance.instance_id)) {
+                changed_cells.insert(new_instance.cell);
+                ++new_index;
+            } else {
+                if (!(old_instance == new_instance)) {
+                    changed_cells.insert(old_instance.cell);
+                    changed_cells.insert(new_instance.cell);
+                }
+                ++old_index;
+                ++new_index;
+            }
+        }
+    }
+}
+
 bool fits_record_capacity(
     const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept;
 
@@ -285,6 +364,7 @@ struct WorldDeltaSnapshotState {
     std::map<NamespaceCellKey, WorldDeltaRecord, NamespaceCellKeyLess> records;
     NativeTypedWorldStateSnapshot typed_durable_snapshot = NativeTypedWorldStateSnapshot::create({});
     std::vector<NativeTypedWorldStateRecord> typed_transient_overlays;
+    NativeFeatureDeltaSnapshot feature_delta_snapshot = NativeFeatureDeltaSnapshot::create({}, {});
 };
 
 namespace {
@@ -293,9 +373,12 @@ bool fits_record_capacity(const WorldDeltaSnapshotState &state, const WorldDelta
     const std::size_t delta_count = state.records.size();
     const std::size_t durable_count = state.typed_durable_snapshot.records().size();
     const std::size_t overlay_count = state.typed_transient_overlays.size();
+    const std::size_t feature_count = state.feature_delta_snapshot.tombstones().size()
+        + state.feature_delta_snapshot.player_created_instances().size();
     if (delta_count > limits.max_records) return false;
     if (durable_count > limits.max_records - delta_count) return false;
-    return overlay_count <= limits.max_records - delta_count - durable_count;
+    if (overlay_count > limits.max_records - delta_count - durable_count) return false;
+    return feature_count <= limits.max_records - delta_count - durable_count - overlay_count;
 }
 
 std::optional<NativeCellState> typed_value_at(
@@ -388,6 +471,10 @@ std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_transient_overlay
 std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_effective_value_at(const CellCoord &coordinate) const {
     if (const auto overlay = typed_transient_overlay_at(coordinate)) return overlay;
     return typed_durable_value_at(coordinate);
+}
+
+const NativeFeatureDeltaSnapshot &WorldDeltaPinnedSnapshot::feature_delta_snapshot() const noexcept {
+    return state_->feature_delta_snapshot;
 }
 
 WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits) : limits_(limits) {
@@ -530,6 +617,64 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
     TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));
     if (!changed_cells.empty()) state_ = std::move(next);
+    return receipt;
+}
+
+WorldDeltaCommitReceipt WorldDeltaStore::admit_feature_deltas(const WorldFeatureDeltaAdmission &admission) {
+    static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
+    static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
+    const ValidatedFeatureAdmission validated = validate_feature_admission(admission);
+    std::vector<std::uint8_t> canonical = canonical_feature_admission(admission, validated);
+    const auto replay = std::find_if(transactions_.begin(), transactions_.end(), [&](const TransactionRecord &record) {
+        return record.transaction_id == admission.transaction_id;
+    });
+    if (replay != transactions_.end()) {
+        if (replay->canonical != canonical) throw WorldDeltaRejected(WorldDeltaRejectReason::transaction_conflict);
+        WorldDeltaCommitReceipt receipt = replay->receipt;
+        receipt.status = WorldDeltaCommitStatus::idempotent_replay;
+        return receipt;
+    }
+    if (admission.expected_revision != state_->revision) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::revision_conflict);
+    }
+    if (transactions_.size() >= limits_.max_transactions) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+    }
+
+    auto next = std::make_shared<WorldDeltaSnapshotState>(*state_);
+    next->feature_delta_snapshot = validated.snapshot;
+    if (!fits_record_capacity(*next, limits_)) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+    }
+
+    const bool changed = !(state_->feature_delta_snapshot == next->feature_delta_snapshot);
+    std::set<CellCoord, CellCoordLess> changed_cells;
+    if (changed) {
+        add_changed_feature_instance_cells(
+            state_->feature_delta_snapshot, next->feature_delta_snapshot, changed_cells);
+    }
+
+    WorldDeltaCommitReceipt receipt;
+    receipt.transaction_id = admission.transaction_id;
+    receipt.revision = state_->revision;
+    if (!changed) {
+        receipt.status = WorldDeltaCommitStatus::no_change;
+    } else {
+        if (state_->revision == std::numeric_limits<std::uint64_t>::max()) {
+            throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+        }
+        next->revision = state_->revision + 1U;
+        std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
+        for (const CellCoord &cell : changed_cells) {
+            add_conservative_invalidation_neighborhood(section_key_for(cell), affected);
+        }
+        receipt.status = WorldDeltaCommitStatus::committed;
+        receipt.revision = next->revision;
+        receipt.affected_sections.assign(affected.begin(), affected.end());
+    }
+    TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
+    transactions_.push_back(std::move(journal));
+    if (changed) state_ = std::move(next);
     return receipt;
 }
 

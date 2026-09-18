@@ -54,9 +54,11 @@ struct NativePlayerCreatedInstance final {
     bool operator==(const NativePlayerCreatedInstance &other) const noexcept;
 };
 
-// A canonical, immutable-at-the-API-boundary feature snapshot.  Admission
-// validates every supplied record before sorting or storing it; consequently
-// equality and serialization have one deterministic ID/cell ordering.
+// A canonical, immutable-at-the-API-boundary feature snapshot.  Tombstone
+// feature IDs and player-instance IDs are separate v2 persistence-domain
+// keys: equal text across those domains is valid. Admission validates and
+// orders each domain independently before storing it; FD1's distinct record
+// tags and separate counts keep the two domains unambiguous on the wire.
 class NativeFeatureDeltaSnapshot final {
 public:
     static NativeFeatureDeltaSnapshot create(

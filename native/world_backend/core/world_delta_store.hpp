@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coordinates.hpp"
+#include "native_feature_delta.hpp"
 #include "native_typed_world_state_snapshot.hpp"
 #include "terrain_snapshot.hpp"
 
@@ -60,6 +61,16 @@ struct WorldTypedStateAdmission {
     std::uint64_t expected_revision = 0;
     NativeTypedWorldStateSnapshot durable_snapshot = NativeTypedWorldStateSnapshot::create({});
     std::vector<NativeTypedWorldStateRecord> transient_overlays;
+};
+
+// Durable generated-feature removals and player-created feature instances are
+// admitted as one replacement snapshot.  This owns only persistence facts;
+// it deliberately does not infer doors, inventory, navigation, or scene-node
+// behavior from the v2 feature payload.
+struct WorldFeatureDeltaAdmission {
+    std::string transaction_id;
+    std::uint64_t expected_revision = 0;
+    NativeFeatureDeltaSnapshot snapshot = NativeFeatureDeltaSnapshot::create({}, {});
 };
 
 struct WorldDeltaRecord {
@@ -144,6 +155,12 @@ public:
     std::optional<NativeCellState> typed_transient_overlay_at(const CellCoord &coordinate) const;
     std::optional<NativeCellState> typed_effective_value_at(const CellCoord &coordinate) const;
 
+    // This canonical feature snapshot is pinned beside terrain records and
+    // typed cells.  Consumers must still define their own terrain/feature
+    // precedence at production cutover; a feature instance is not silently
+    // coerced into a terrain override here.
+    const NativeFeatureDeltaSnapshot &feature_delta_snapshot() const noexcept;
+
 private:
     friend class WorldDeltaStore;
     explicit WorldDeltaPinnedSnapshot(std::shared_ptr<const WorldDeltaSnapshotState> state);
@@ -169,6 +186,12 @@ public:
     // It shares revision, pinning, journal-ID conflict handling, capacity, and
     // conservative invalidation semantics with `commit`.
     WorldDeltaCommitReceipt admit_typed_state(const WorldTypedStateAdmission &admission);
+
+    // Atomically replaces feature-delta state in the same revision, pin,
+    // journal, capacity, and invalidation model as all other native world
+    // state.  The old and new player-instance cells both invalidate so a
+    // removal cannot leave an occupied section cached.
+    WorldDeltaCommitReceipt admit_feature_deltas(const WorldFeatureDeltaAdmission &admission);
 
 private:
     WorldDeltaStoreLimits limits_;
