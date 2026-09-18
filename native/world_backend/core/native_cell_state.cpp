@@ -64,7 +64,9 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
     if ((input.fluid == TerrainFluidId::water && input.material != TerrainMaterialId::water)
         || (input.fluid == TerrainFluidId::lava && input.material != TerrainMaterialId::lava)
         || (input.fluid == TerrainFluidId::none && (input.material == TerrainMaterialId::water || input.material == TerrainMaterialId::lava))
-        || (input.solid && (input.material == TerrainMaterialId::air || input.material == TerrainMaterialId::water || input.material == TerrainMaterialId::lava))) {
+        // Water/lava are already rejected above for either fluid value; air is
+        // the only remaining nonsolid material a solid state could carry.
+        || (input.solid && input.material == TerrainMaterialId::air)) {
         throw NativeCellStateRejected();
     }
     // Both edit namespaces are transient in memory, but only durable terrain
@@ -72,14 +74,13 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
     if (name_space != NativeCellStateNamespace::durable_terrain && name_space != NativeCellStateNamespace::scene_overlay) {
         throw NativeCellStateRejected();
     }
-    if (name_space == NativeCellStateNamespace::scene_overlay && (input.generated || !input.edited)) {
+    // `generated != edited` was validated above, so a non-generated overlay
+    // is necessarily edited; testing edited again would be unreachable.
+    if (name_space == NativeCellStateNamespace::scene_overlay && input.generated) {
         throw NativeCellStateRejected();
     }
     validate_metadata(input.metadata);
     const auto address = split_cell(input.cell, NativeCellState::SECTION_SIZE);
-    if (!address) {
-        throw NativeCellStateRejected();
-    }
     NativeCellState result;
     result.cell = input.cell;
     result.section = address->section;

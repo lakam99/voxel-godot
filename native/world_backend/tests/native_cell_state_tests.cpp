@@ -143,9 +143,14 @@ VWB_TEST(native_cell_state_rejects_malformed_density_solid_fluid_and_light_combi
     invalid = stone({0, 0, 0});
     invalid.material = TerrainMaterialId::air;
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
-    invalid = stone({0, 0, 0});
-    invalid.material = TerrainMaterialId::lava;
+    invalid = air();
+    invalid.fluid = TerrainFluidId::water;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
     invalid.fluid = TerrainFluidId::lava;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+    invalid = air();
+    invalid.material = TerrainMaterialId::lava;
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
     NativeCellStateInput water = air();
     water.material = TerrainMaterialId::water;
