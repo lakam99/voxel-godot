@@ -3,6 +3,11 @@ class_name N3EffectiveTerrainOracle
 
 const ContextScript := preload("res://scripts/terrain/VoxelWorldGenerationContext.gd")
 const WorldScript := preload("res://scripts/WorldGenerationSystem.gd")
+const CitadelSiteFieldScript := preload("res://scripts/world/CitadelSiteField.gd")
+const CitadelSitePreparationScript := preload("res://scripts/world/CitadelSitePreparation.gd")
+const BuildingSiteManifestBuilderScript := preload("res://scripts/buildings/BuildingSiteManifestBuilder.gd")
+const BuildingBlueprintScript := preload("res://scripts/buildings/BuildingBlueprint.gd")
+const FurnishingPlanScript := preload("res://scripts/buildings/FurnishingPlan.gd")
 
 const SCHEMA := "n3-effective-terrain-oracle/v1"
 const GOLDENS_SCHEMA := "n3-effective-terrain-goldens/v1"
@@ -98,50 +103,77 @@ static func site_profiles_from_goldens(goldens: Dictionary) -> Array:
 	if not specs is Array:
 		return profiles
 	for value in specs:
-		if not value is Dictionary:
+		if not value is Dictionary or not value.get("candidateRegion") is Array \
+				or value.candidateRegion.size() != 2 or not value.get("manifestFixture") is Dictionary:
+			push_error("N3 oracle site profile spec is invalid")
 			continue
-		var core_values = value.get("coreCells", [])
-		if not core_values is Array or core_values.size() != 4:
+		var world_spec: Dictionary = goldens.get("world", {})
+		var seed := String(world_spec.get("seed", ""))
+		var region := _cell2(value.candidateRegion)
+		var candidate: Dictionary = CitadelSiteFieldScript.candidate_for_region(seed, region)
+		if candidate.is_empty() or String(candidate.get("siteId", "")) != String(value.get("siteId", "")) \
+				or int(candidate.get("recipeSeed", -1)) != int(value.get("recipeSeed", -2)) \
+				or candidate.get("centerCell", Vector2i.ZERO) != _cell2(value.get("centerCell", [])):
+			push_error("N3 oracle CitadelSiteField candidate identity mismatch: actual=%s expected=%s" % [candidate, value])
 			continue
-		var core := Rect2i(int(core_values[0]), int(core_values[1]), int(core_values[2]), int(core_values[3]))
-		var apron := int(value.get("apronCells", 0))
-		var envelope := core.grow(apron)
-		var support: Array = []
-		var distances: Array = []
-		for z in range(envelope.position.y, envelope.end.y):
-			for x in range(envelope.position.x, envelope.end.x):
-				var inside := core.has_point(Vector2i(x, z))
-				support.append(1 if inside else 0)
-				var dx := maxi(core.position.x - x, maxi(0, x - (core.end.x - 1)))
-				var dz := maxi(core.position.y - z, maxi(0, z - (core.end.y - 1)))
-				distances.append(float(Vector2(float(dx), float(dz)).length()))
-		var level := float(value.get("level", 0.0))
-		# Keep the synthetic root strictly inside the accepted cell-coordinate
-		# bounds. Vector3 narrows to real_t while validation compares against the
-		# binary64 cell product, so an exact mathematical edge can fall one ULP out.
-		var low_x := float(core.position.x) * CELL + 0.01
-		var low_z := float(core.position.y) * CELL + 0.01
-		var high_x := float(core.end.x - 1) * CELL - 0.01
-		var high_z := float(core.end.y - 1) * CELL - 0.01
-		profiles.append({
-			"version": 1,
-			"worldSeed": String((goldens.get("world", {}) as Dictionary).get("seed", "")),
-			"siteId": String(value.get("siteId", "")),
-			"sourceSignature": String(value.get("sourceSignature", "")),
-			"cellSize": CELL,
-			"coreCells": core,
-			"envelopeCells": envelope,
-			"reservationCells": core,
-			"origin": Vector3(low_x, level, low_z),
-			"level": level,
-			"apronCells": apron,
-			"supportMask": support,
-			"distanceCells": distances,
-			"groundRootPoints": [
-				Vector3(low_x, level, low_z), Vector3(high_x, level, low_z),
-				Vector3(high_x, level, high_z), Vector3(low_x, level, high_z),
-			],
-		})
+		var fixture: Dictionary = value.manifestFixture
+		var blueprint = BuildingBlueprintScript.new(
+			String(fixture.get("blueprintId", "")), int(candidate.recipeSeed), String(fixture.get("style", "citadel")))
+		var part_values = fixture.get("parts", [])
+		if not part_values is Array or part_values.is_empty():
+			push_error("N3 oracle manifest fixture has no parts")
+			continue
+		for part_value in part_values:
+			if not part_value is Dictionary or not part_value.get("position") is Array \
+					or not part_value.get("size") is Array:
+				blueprint = null
+				break
+			var part: Dictionary = part_value.duplicate(true)
+			part["position"] = _position(part_value.position)
+			part["size"] = _position(part_value.size)
+			blueprint.add_part(part)
+		if blueprint == null:
+			push_error("N3 oracle manifest fixture part is invalid")
+			continue
+		var furnishing = FurnishingPlanScript.new(
+			String(fixture.get("furnishingPlanId", "")), int(candidate.recipeSeed), blueprint.id)
+		var manifest: Dictionary = BuildingSiteManifestBuilderScript.build(blueprint, furnishing, CELL)
+		if not bool(manifest.get("ready", false)) \
+				or String(manifest.get("sourceSignature", "")) != String(value.get("sourceSignature", "")):
+			push_error("N3 oracle production manifest mismatch: %s" % [manifest])
+			continue
+		var policy_values: Dictionary = world_spec.get("ordinaryStructurePolicy", {})
+		var policy := {
+			"regionCells": int(policy_values.get("regionCells", 0)),
+			"spawnChance": float(policy_values.get("spawnChance", NAN)),
+		}
+		var terrain: Dictionary = CitadelSitePreparationScript.prepare_terrain(
+			manifest, candidate, town_overrides_from_goldens(goldens),
+			float(value.get("initialLevel", 0.0)), policy)
+		if String(terrain.get("status", "")) != "prepared":
+			push_error("N3 oracle production terrain preparation failed: %s" % [terrain])
+			continue
+		var profile: Dictionary = terrain.profile
+		if String(profile.get("siteId", "")) != String(value.get("siteId", "")) \
+				or String(profile.get("sourceSignature", "")) != String(value.get("sourceSignature", "")) \
+				or _f64_bits(float(profile.get("level", NAN))) != String(value.get("levelBits", "")) \
+				or int(profile.get("apronCells", -1)) != int(value.get("apronCells", -2)) \
+				or _rect(profile.get("coreCells")) != _rect_values(value.get("coreCells", [])) \
+				or _rect(profile.get("envelopeCells")) != _rect_values(value.get("envelopeCells", [])) \
+				or _rect(profile.get("reservationCells")) != _rect_values(value.get("reservationCells", [])):
+			push_error("N3 oracle prepared profile identity mismatch: %s" % [{
+				"siteId": profile.get("siteId", ""), "sourceSignature": profile.get("sourceSignature", ""),
+				"level": profile.get("level"), "apronCells": profile.get("apronCells"),
+				"coreCells": _rect(profile.get("coreCells")), "envelopeCells": _rect(profile.get("envelopeCells")),
+				"reservationCells": _rect(profile.get("reservationCells")),
+				"levelBits": _f64_bits(float(profile.get("level", NAN))),
+				"expectedLevelBits": value.get("levelBits", ""),
+				"expectedCoreCells": _rect_values(value.get("coreCells", [])),
+				"expectedEnvelopeCells": _rect_values(value.get("envelopeCells", [])),
+				"expectedReservationCells": _rect_values(value.get("reservationCells", [])),
+			}])
+			continue
+		profiles.append(profile)
 	return profiles
 
 
@@ -426,6 +458,18 @@ static func _position(value) -> Vector3:
 
 static func _v3i(value: Vector3i) -> Array:
 	return [value.x, value.y, value.z]
+
+
+static func _rect(value) -> Array:
+	if not value is Rect2i:
+		return []
+	return [value.position.x, value.position.y, value.size.x, value.size.y]
+
+
+static func _rect_values(value) -> Array:
+	if not value is Array or value.size() != 4:
+		return []
+	return [int(value[0]), int(value[1]), int(value[2]), int(value[3])]
 
 
 static func _f64_bits(value: float) -> String:

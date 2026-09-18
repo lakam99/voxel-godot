@@ -336,6 +336,7 @@ test('toolchain lock and native receipt changes during Godot execution are rejec
 test('real authoritative inventory refuses missing N3 fixture, oracle, or goldens', async t => {
   const required = [
     'scripts/testing/native_world/N3EffectiveTerrainAdapterFixture.gd',
+    'scripts/testing/native_world/N3EffectiveTerrainOracleContract.gd',
     'scripts/testing/native_world/N3EffectiveTerrainOracle.gd',
     'scripts/testing/native_world/N3EffectiveTerrainGoldens.json',
   ];
@@ -364,6 +365,16 @@ test('authoritative inventory includes transitive production oracle dependencies
     'scripts/world/BiomeRegionField.gd',
     'scripts/world/BuildingTerrainProfile.gd',
     'scripts/world/BuildingGroundMask.gd',
+    'scripts/world/CitadelSiteField.gd',
+    'scripts/world/CitadelSitePreparation.gd',
+    'scripts/world/CitadelSiteSurvey.gd',
+    'scripts/world/StandaloneStructureCandidate.gd',
+    'scripts/buildings/BuildingSiteManifestBuilder.gd',
+    'scripts/buildings/BuildingBlueprint.gd',
+    'scripts/buildings/BuildingPart.gd',
+    'scripts/buildings/FurnishingPlan.gd',
+    'scripts/buildings/FurnishingPart.gd',
+    'scripts/buildings/layout/BuildingLayoutConstants.gd',
   ]) assert(authoritativeStaticPaths.includes(path), path);
 });
 
