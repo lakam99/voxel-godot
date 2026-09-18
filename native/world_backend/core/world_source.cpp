@@ -41,11 +41,10 @@ bool valid_constants(const WorldSourceConstants &c) noexcept {
 }
 
 WorldPhysicalContentIdentity definition_identity(const AdmittedBiomeSeed &seed, const WorldSourceRevisionDescriptor &r, const WorldSourceConstants &c) {
-    if (seed.code_points.size() > std::numeric_limits<std::uint32_t>::max()) {
-        throw std::length_error("world source seed exceeds canonical length");
-    }
     Writer writer;
-    writer.magic("VWPD"); writer.u32(1); writer.u32(static_cast<std::uint32_t>(seed.code_points.size()));
+    // Version 2 records the full size_t domain as an explicit uint64 rather
+    // than silently imposing a 32-bit seed-length ceiling on a new format.
+    writer.magic("VWPD"); writer.u32(2); writer.u64(static_cast<std::uint64_t>(seed.code_points.size()));
     for (const std::uint32_t cp : seed.code_points) writer.u32(cp);
     writer.u32(r.source_schema_revision); writer.u32(r.terrain_generator_revision); writer.u32(r.biome_region_field_revision);
     writer.u32(r.lattice_query_revision); writer.u32(r.cell_center_query_revision); writer.u32(r.surface_column_query_revision);
