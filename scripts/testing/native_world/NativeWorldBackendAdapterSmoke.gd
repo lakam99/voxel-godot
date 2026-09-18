@@ -10,6 +10,9 @@ func run() -> void:
 		"schema": "native-world-backend-adapter-smoke-report/v1",
 		"engineVersion": engine_version,
 		"classExists": ClassDB.class_exists("TerrainMeshingBackend"),
+		"n3OwnerClassExists": ClassDB.class_exists("NativeWorldBackend"),
+		"n3PageClassExists": ClassDB.class_exists("NativeEffectiveTerrainPage"),
+		"n3OwnerStatus": {},
 		"instantiated": false,
 		"core": {},
 		"passed": false
@@ -35,6 +38,18 @@ func run() -> void:
 					and String(engine_version.get("hash", "")) == "14d19694e0c88a3f9e82d899a0400f27a24c176e"
 				)
 		backend = null
+	var n3_owner = ClassDB.instantiate("NativeWorldBackend") if bool(report.n3OwnerClassExists) else null
+	if n3_owner != null and n3_owner.has_method("status"):
+		report.n3OwnerStatus = n3_owner.status()
+		report.passed = bool(report.passed) \
+			and bool(report.n3PageClassExists) \
+			and String(report.n3OwnerStatus.get("schema", "")) == "n3-native-world-backend-adapter/v1" \
+			and String(report.n3OwnerStatus.get("status", "")) == "uninitialized" \
+			and bool(report.n3OwnerStatus.get("shadowOnly", false)) \
+			and not bool(report.n3OwnerStatus.get("productionCutover", true))
+	else:
+		report.passed = false
+	n3_owner = null
 	await process_frame
 	if report_path != "":
 		var file := FileAccess.open(report_path, FileAccess.WRITE)

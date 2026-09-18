@@ -83,6 +83,12 @@ kernel_env.Append(CXXFLAGS=["/fp:strict"] if env["platform"] == "windows" and en
 kernel_sources = [source for source in sources if str(source).endswith("building_support_kernel.cpp")]
 sources = [source for source in sources if source not in kernel_sources]
 sources += kernel_env.SharedObject(kernel_sources)
+adapter_env = env.Clone()
+if adapter_env["platform"] == "windows" and adapter_env.get("is_msvc", False):
+    adapter_env.AppendUnique(CXXFLAGS=["/EHsc"])
+adapter_sources = [source for source in sources if str(source).endswith("native_world_backend_adapter.cpp")]
+sources = [source for source in sources if source not in adapter_sources]
+sources += adapter_env.SharedObject(adapter_sources)
 target_name = "terrain_meshing_backend{}{}".format(env["suffix"], env["SHLIBSUFFIX"])
 world_backend_root = os.path.normpath(os.path.join(Dir(".").abspath, "..", "world_backend"))
 world_backend_manifest_path = os.path.join(world_backend_root, "source-manifest.json")
