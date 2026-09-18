@@ -20,6 +20,15 @@ struct NativeEffectiveNumericFacts {
     bool edited = false;
 };
 
+// A cell state remains keyed by the requested integer coordinate for typed
+// edit precedence and persistence. source_cell separately records the cell
+// selected by the float32 center-position round trip for generated sampling.
+struct NativeEffectiveCellStateFacts {
+    CellCoord requested_cell;
+    CellCoord source_cell;
+    NativeCellState state;
+};
+
 // Surface projection uses `Vector3(float(cell) * s)`: one binary64 scalar
 // product followed by Vector3's float32 storage boundary. It is not the
 // two-float-boundary VoxelTerrainGenerator lattice convention.
@@ -47,6 +56,7 @@ public:
 
     NativeSurfaceColumnFacts sample_surface_column(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId sample_surface_biome(const WorldSurfaceColumnQuery &query) const;
+    NativeEffectiveCellStateFacts sample_cell_state_facts(const WorldCellCenterQuery &query) const;
     NativeCellState sample_cell_state(const WorldCellCenterQuery &query) const;
 
     // VoxelTerrainGenerator semantics: a durable edit is keyed by the original

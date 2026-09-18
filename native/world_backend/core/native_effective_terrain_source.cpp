@@ -269,13 +269,25 @@ NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_surface_project
         const double requested_surface = shaped_surface(query.coordinate.x, query.coordinate.z);
         return edited_numeric(query.coordinate, source, state, requested_surface);
     }
-    return generated_numeric(query.coordinate, resolved.position, query.coordinate, query.coordinate);
+    // WorldGenerationSystem.generate_sample_without_volume derives its
+    // material/biome cell from world_to_cell3(position). At float32 precision
+    // boundaries that cell can differ from the requested grid coordinate.
+    return generated_numeric(query.coordinate, resolved.position, source, source);
 }
 
-NativeCellState NativeEffectiveTerrainSource::sample_cell_state(const WorldCellCenterQuery &query) const {
+NativeEffectiveCellStateFacts NativeEffectiveTerrainSource::sample_cell_state_facts(
+    const WorldCellCenterQuery &query) const {
     validate_world_query(query);
     require_primary_page_query(pin_, query.coordinate.x, query.coordinate.z);
-    return sample_cell_state_in_pinned_page(query);
+    const auto resolved = resolve_world_query(pin_.definition(), query);
+    const CellCoord source = position_cell(
+        resolved.center_position, pin_.definition().constants().cell_size_meters);
+    return {query.coordinate, source, sample_cell_state_in_pinned_page(query)};
+}
+
+NativeCellState NativeEffectiveTerrainSource::sample_cell_state(
+    const WorldCellCenterQuery &query) const {
+    return sample_cell_state_facts(query).state;
 }
 
 NativeCellState NativeEffectiveTerrainSource::sample_cell_state_in_pinned_page(
