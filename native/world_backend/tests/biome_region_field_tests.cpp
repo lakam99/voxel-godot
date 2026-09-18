@@ -87,6 +87,8 @@ VWB_TEST(biome_region_field_utf8_validation_covers_all_scalar_encodings_and_reje
     // coverage observes the F0 overlong-prefix rejection edge directly.
     const std::string overlong_four_byte("\xF0\x80\x80\x80", 4);
     VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::admit_utf8_seed(overlong_four_byte));
+    const std::string above_unicode_limit("\xF5", 1);
+    VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::admit_utf8_seed(above_unicode_limit));
     VWB_EXPECT_EQ(code_points({0x0800U}), BiomeRegionField::admit_utf8_seed("\xE0\xA0\x80").code_points);
     VWB_EXPECT_EQ(code_points({0xd7ffU}), BiomeRegionField::admit_utf8_seed("\xED\x9F\xBF").code_points);
     VWB_EXPECT_EQ(code_points({0x10000U}), BiomeRegionField::admit_utf8_seed("\xF0\x90\x80\x80").code_points);
