@@ -167,6 +167,15 @@ VWB_TEST(biome_region_field_public_validation_and_coordinate_error_paths_are_str
         BiomeRegionField::sample(seed, {0.0F, std::numeric_limits<float>::infinity()}));
     VWB_EXPECT_THROW(std::invalid_argument,
         BiomeRegionField::sample(seed, {-std::numeric_limits<float>::max(), 0.0F}));
+    // Sampling needs the complete predecessor/current/successor z row. Both
+    // extrema therefore reject before the floor-to-int32 conversion, just as
+    // the established x-bound checks do for value noise.
+    VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::sample(seed,
+        {0.0F, static_cast<float>(static_cast<double>(std::numeric_limits<std::int32_t>::min())
+                    * BiomeRegionField::REGION_SPACING_METERS)}));
+    VWB_EXPECT_THROW(std::invalid_argument, BiomeRegionField::sample(seed,
+        {0.0F, static_cast<float>(static_cast<double>(std::numeric_limits<std::int32_t>::max())
+                    * BiomeRegionField::REGION_SPACING_METERS)}));
 }
 
 VWB_TEST(biome_region_field_fixed_atlas_sample_matches_script_golden) {
