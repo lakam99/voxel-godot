@@ -1,4 +1,5 @@
 #include "test_harness.hpp"
+#include "native_value_test_access.hpp"
 
 #include "../core/native_value.hpp"
 
@@ -9,21 +10,6 @@
 #include <vector>
 
 using namespace voxel::world_backend;
-
-namespace voxel::world_backend {
-
-struct NativeValueTestAccess final {
-    static bool force_valueless_by_exception(NativeValue &value) {
-        try {
-            value.storage_.template emplace<std::string>(std::numeric_limits<std::size_t>::max(), 'x');
-        } catch (const std::length_error &) {
-            return value.storage_.valueless_by_exception();
-        }
-        return false;
-    }
-};
-
-} // namespace voxel::world_backend
 
 namespace {
 

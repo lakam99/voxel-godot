@@ -1,4 +1,5 @@
 #include "test_harness.hpp"
+#include "native_value_test_access.hpp"
 
 #include "../core/native_feature_delta.hpp"
 
@@ -11,21 +12,6 @@
 using namespace voxel::world_backend;
 
 namespace voxel::world_backend {
-
-// NativeValue exposes no public malformed state.  This test-only friend
-// reproduces its existing exceptional-state seam so the public feature-delta
-// factory can prove that a corrupt decoded runtime object is translated to its
-// own fail-closed rejection rather than leaking a lower-layer exception.
-struct NativeValueTestAccess final {
-    static bool force_valueless_by_exception(NativeValue &value) {
-        try {
-            value.storage_.template emplace<std::string>(std::numeric_limits<std::size_t>::max(), 'x');
-        } catch (const std::length_error &) {
-            return value.storage_.valueless_by_exception();
-        }
-        return false;
-    }
-};
 
 struct NativeBlockIdentityTestAccess final {
     static void force_empty(NativeBlockIdentity &identity) {

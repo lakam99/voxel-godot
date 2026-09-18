@@ -9,6 +9,9 @@
     "core/legacy_seed_hash.cpp",
     "core/native_cell_state.cpp",
     "core/native_natural_terrain_source.cpp",
+    "core/native_player_blocks_v2_codec.cpp",
+    "core/native_removed_props_v2_codec.cpp",
+    "core/native_terrain_shaping_snapshot.cpp",
     "core/native_terrain_volume_v2_codec.cpp",
     "core/native_typed_world_state_snapshot.cpp",
     "core/native_value.cpp",
@@ -30,6 +33,9 @@
     "core/legacy_seed_hash.hpp",
     "core/native_cell_state.hpp",
     "core/native_natural_terrain_source.hpp",
+    "core/native_player_blocks_v2_codec.hpp",
+    "core/native_removed_props_v2_codec.hpp",
+    "core/native_terrain_shaping_snapshot.hpp",
     "core/native_terrain_volume_v2_codec.hpp",
     "core/native_typed_world_state_snapshot.hpp",
     "core/native_value.hpp",
@@ -49,6 +55,9 @@
     "tests/native_world_backend_state_tests.cpp",
     "tests/native_cell_state_tests.cpp",
     "tests/native_natural_terrain_source_tests.cpp",
+    "tests/native_player_blocks_v2_codec_tests.cpp",
+    "tests/native_removed_props_v2_codec_tests.cpp",
+    "tests/native_terrain_shaping_snapshot_tests.cpp",
     "tests/native_terrain_volume_v2_codec_tests.cpp",
     "tests/native_typed_world_state_snapshot_tests.cpp",
     "tests/native_value_tests.cpp",
@@ -60,6 +69,7 @@
     "tests/world_source_tests.cpp"
   ],
   "testHeaders": [
+    "tests/native_value_test_access.hpp",
     "tests/test_harness.hpp"
   ]
 }
