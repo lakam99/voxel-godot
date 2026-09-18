@@ -10,6 +10,8 @@
 
 namespace voxel::world_backend {
 
+class WorldSourceDefinition;
+
 // Generated physical content is deliberately distinct from request ownership:
 // cancellation and publication authority never change this definition.
 struct WorldSourceRevisionDescriptor {
@@ -65,6 +67,48 @@ struct WorldSurfaceColumnQuery {
     WorldQueryIntent intent = WorldQueryIntent::gameplay;
 };
 
+// These are the values after Godot's ordinary single-precision Vector3 / Vector2
+// storage boundary.  Keep them distinct from the int32 cell domain: callers
+// must not reconstruct a cell by rounding one of these lossy coordinates.
+struct WorldFloat32Position {
+    float x = 0.0F;
+    float y = 0.0F;
+    float z = 0.0F;
+};
+
+struct WorldFloat32HorizontalPosition {
+    float x = 0.0F;
+    float z = 0.0F;
+};
+
+// A lattice result intentionally retains a full cell coordinate and a
+// Vector3(cell) * CELL location.  It is for the numeric meshing lattice, not
+// a cell-state lookup at the center of that cell.
+struct WorldResolvedLatticeQuery {
+    CellCoord lattice_cell;
+    WorldFloat32Position lattice_position;
+    WorldQueryIntent intent = WorldQueryIntent::terrain_mesh;
+};
+
+// A center result retains the same integer cell identity but has a different
+// physical location: (cell + 0.5) * CELL.  It cannot be substituted for a
+// lattice numeric query just because both name the same cell.
+struct WorldResolvedCellCenterQuery {
+    CellCoord cell;
+    WorldFloat32Position center_position;
+    WorldQueryIntent intent = WorldQueryIntent::gameplay;
+};
+
+// A surface column has no vertical cell coordinate.  Representing it as an
+// X/Z location rather than a CellCoord{ x, 0, z } prevents accidental claims
+// that its sample is a Y=0 lattice query.
+struct WorldResolvedSurfaceColumnQuery {
+    std::int32_t lattice_x = 0;
+    std::int32_t lattice_z = 0;
+    WorldFloat32HorizontalPosition lattice_position;
+    WorldQueryIntent intent = WorldQueryIntent::gameplay;
+};
+
 WorldQueryKind query_kind(const WorldLatticeQuery &query) noexcept;
 WorldQueryKind query_kind(const WorldCellCenterQuery &query) noexcept;
 WorldQueryKind query_kind(const WorldSurfaceColumnQuery &query) noexcept;
@@ -72,6 +116,13 @@ bool is_valid_world_query_intent(WorldQueryIntent intent) noexcept;
 void validate_world_query(const WorldLatticeQuery &query);
 void validate_world_query(const WorldCellCenterQuery &query);
 void validate_world_query(const WorldSurfaceColumnQuery &query);
+
+// Resolve explicit query intent into the coordinate convention used by the
+// production GDScript authority.  Each overload validates its intent before
+// returning a typed result.
+WorldResolvedLatticeQuery resolve_world_query(const WorldSourceDefinition &definition, const WorldLatticeQuery &query);
+WorldResolvedCellCenterQuery resolve_world_query(const WorldSourceDefinition &definition, const WorldCellCenterQuery &query);
+WorldResolvedSurfaceColumnQuery resolve_world_query(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &query);
 
 struct WorldPhysicalContentIdentity {
     Sha256Digest digest{};

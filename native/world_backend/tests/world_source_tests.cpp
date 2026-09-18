@@ -1,6 +1,8 @@
 #include "test_harness.hpp"
 #include "../core/world_source.hpp"
 
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -23,6 +25,11 @@ WorldSourceDescriptor atlas_descriptor() {
 }
 WorldDeltaState stone_override() {
     WorldDeltaState state; state.density = 1.0; state.solid = true; state.material = TerrainMaterialId::stone; state.resolved_biome = TerrainBiomeId::plains; return state;
+}
+std::uint32_t float32_bits(const float value) {
+    std::uint32_t result = 0;
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
 }
 } // namespace
 
@@ -107,4 +114,48 @@ VWB_TEST(world_source_query_types_keep_lattice_center_column_and_intent_distinct
     VWB_EXPECT_THROW(std::invalid_argument, validate_world_query(invalid_center));
     WorldSurfaceColumnQuery invalid_column{0, 0, static_cast<WorldQueryIntent>(99)};
     VWB_EXPECT_THROW(std::invalid_argument, validate_world_query(invalid_column));
+}
+
+VWB_TEST(world_source_resolves_lattice_center_and_column_at_their_godot_float32_boundaries) {
+    const WorldSourceDefinition definition(atlas_descriptor());
+    const WorldLatticeQuery lattice{{-1, 17, 16777217}, WorldQueryIntent::terrain_mesh};
+    const WorldCellCenterQuery center{{-1, 17, 16777217}, WorldQueryIntent::gameplay};
+    const WorldSurfaceColumnQuery column{16777217, -1, WorldQueryIntent::terrain_collision};
+
+    const WorldResolvedLatticeQuery lattice_result = resolve_world_query(definition, lattice);
+    const WorldResolvedCellCenterQuery center_result = resolve_world_query(definition, center);
+    const WorldResolvedSurfaceColumnQuery column_result = resolve_world_query(definition, column);
+
+    VWB_EXPECT_EQ(lattice.coordinate, lattice_result.lattice_cell);
+    VWB_EXPECT_EQ(center.coordinate, center_result.cell);
+    VWB_EXPECT_EQ(lattice.intent, lattice_result.intent);
+    VWB_EXPECT_EQ(center.intent, center_result.intent);
+    VWB_EXPECT_EQ(column.intent, column_result.intent);
+    // Exact binary32 results distinguish `Vector3(cell) * CELL` from the
+    // center scalar expression before Vector3's storage boundary.
+    VWB_EXPECT_EQ(0xbfaccccdu, float32_bits(lattice_result.lattice_position.x));
+    VWB_EXPECT_EQ(0x41b7999au, float32_bits(lattice_result.lattice_position.y));
+    VWB_EXPECT_EQ(0x4baccccdu, float32_bits(lattice_result.lattice_position.z));
+    VWB_EXPECT_EQ(0xbf2ccccdu, float32_bits(center_result.center_position.x));
+    VWB_EXPECT_EQ(0x41bd0000u, float32_bits(center_result.center_position.y));
+    VWB_EXPECT_EQ(0x4bacccceu, float32_bits(center_result.center_position.z));
+    VWB_EXPECT(float32_bits(lattice_result.lattice_position.z) != float32_bits(center_result.center_position.z));
+
+    // The column's X/Z anchor is lattice-based.  It deliberately has no Y
+    // field, so callers cannot reinterpret it as a Y=0 cell sample.
+    VWB_EXPECT_EQ(16777217, column_result.lattice_x);
+    VWB_EXPECT_EQ(-1, column_result.lattice_z);
+    VWB_EXPECT_EQ(0x4baccccdu, float32_bits(column_result.lattice_position.x));
+    VWB_EXPECT_EQ(0xbfaccccdu, float32_bits(column_result.lattice_position.z));
+}
+
+VWB_TEST(world_source_query_resolution_rejects_invalid_intents_before_coordinate_conversion) {
+    const WorldSourceDefinition definition(atlas_descriptor());
+    const auto invalid_intent = static_cast<WorldQueryIntent>(99);
+    const WorldLatticeQuery invalid_lattice{{-1, -2, -3}, invalid_intent};
+    const WorldCellCenterQuery invalid_center{{-1, -2, -3}, invalid_intent};
+    const WorldSurfaceColumnQuery invalid_column{-1, -3, invalid_intent};
+    VWB_EXPECT_THROW(std::invalid_argument, resolve_world_query(definition, invalid_lattice));
+    VWB_EXPECT_THROW(std::invalid_argument, resolve_world_query(definition, invalid_center));
+    VWB_EXPECT_THROW(std::invalid_argument, resolve_world_query(definition, invalid_column));
 }

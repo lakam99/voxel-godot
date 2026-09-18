@@ -62,6 +62,22 @@ WorldPhysicalContentIdentity pinned_identity(const WorldPhysicalContentIdentity 
 void validate_intent(const WorldQueryIntent intent) {
     if (!is_valid_world_query_intent(intent)) throw std::invalid_argument("world query has an invalid intent");
 }
+
+float godot_lattice_component(const std::int32_t cell_coordinate, const double cell_size_meters) noexcept {
+    // `Vector3(cell) * CELL`: Vector3 first narrows the integer component and
+    // the multiplication overload narrows CELL to real_t before multiplying.
+    // Do not replace this with a binary64 product followed by one cast; the
+    // two differ at ordinary large generated-world cell coordinates.
+    return static_cast<float>(cell_coordinate) * static_cast<float>(cell_size_meters);
+}
+
+float godot_center_component(const std::int32_t cell_coordinate, const double offset_cells, const double cell_size_meters) noexcept {
+    // `Vector3((float(cell.x) + 0.5) * s, ...)`: GDScript evaluates the
+    // scalar expression before Vector3 stores its real_t component.  The
+    // center therefore has exactly one float32 boundary, unlike the lattice
+    // Vector3 scalar multiplication above.
+    return static_cast<float>((static_cast<double>(cell_coordinate) + offset_cells) * cell_size_meters);
+}
 } // namespace
 
 WorldQueryKind query_kind(const WorldLatticeQuery &) noexcept { return WorldQueryKind::lattice_cell; }
@@ -86,6 +102,32 @@ const AdmittedBiomeSeed &WorldSourceDefinition::admitted_biome_seed() const noex
 const WorldSourceRevisionDescriptor &WorldSourceDefinition::revisions() const noexcept { return revisions_; }
 const WorldSourceConstants &WorldSourceDefinition::constants() const noexcept { return constants_; }
 const WorldPhysicalContentIdentity &WorldSourceDefinition::physical_content_identity() const noexcept { return physical_content_identity_; }
+WorldResolvedLatticeQuery resolve_world_query(const WorldSourceDefinition &definition, const WorldLatticeQuery &query) {
+    validate_world_query(query);
+    const double cell_size = definition.constants().cell_size_meters;
+    return {query.coordinate, {
+        godot_lattice_component(query.coordinate.x, cell_size),
+        godot_lattice_component(query.coordinate.y, cell_size),
+        godot_lattice_component(query.coordinate.z, cell_size),
+    }, query.intent};
+}
+WorldResolvedCellCenterQuery resolve_world_query(const WorldSourceDefinition &definition, const WorldCellCenterQuery &query) {
+    validate_world_query(query);
+    const WorldSourceConstants &constants = definition.constants();
+    return {query.coordinate, {
+        godot_center_component(query.coordinate.x, constants.cell_center_offset_cells, constants.cell_size_meters),
+        godot_center_component(query.coordinate.y, constants.cell_center_offset_cells, constants.cell_size_meters),
+        godot_center_component(query.coordinate.z, constants.cell_center_offset_cells, constants.cell_size_meters),
+    }, query.intent};
+}
+WorldResolvedSurfaceColumnQuery resolve_world_query(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &query) {
+    validate_world_query(query);
+    const double cell_size = definition.constants().cell_size_meters;
+    return {query.x, query.z, {
+        godot_lattice_component(query.x, cell_size),
+        godot_lattice_component(query.z, cell_size),
+    }, query.intent};
+}
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldLatticeQuery &) noexcept { return definition.revisions().lattice_query_revision; }
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldCellCenterQuery &) noexcept { return definition.revisions().cell_center_query_revision; }
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &) noexcept { return definition.revisions().surface_column_query_revision; }
