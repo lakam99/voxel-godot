@@ -34,6 +34,14 @@ struct SectionKeyLess {
     }
 };
 
+struct CellCoordLess {
+    bool operator()(const CellCoord &left, const CellCoord &right) const noexcept {
+        if (left.z != right.z) return left.z < right.z;
+        if (left.y != right.y) return left.y < right.y;
+        return left.x < right.x;
+    }
+};
+
 class CanonicalWriter {
 public:
     void u8(const std::uint8_t value) { bytes_.push_back(value); }
@@ -66,6 +74,31 @@ public:
             u8(static_cast<std::uint8_t>(operation.state->resolved_biome));
             u8(static_cast<std::uint8_t>(operation.state->fluid));
         }
+    }
+    void native_cell_state(const NativeCellState &state) {
+        i32(state.cell.x); i32(state.cell.y); i32(state.cell.z);
+        i32(state.section.x); i32(state.section.y); i32(state.section.z);
+        i32(state.local_cell.x); i32(state.local_cell.y); i32(state.local_cell.z);
+        u8(static_cast<std::uint8_t>(state.material));
+        u8(static_cast<std::uint8_t>(state.biome));
+        u8(state.solid ? 1U : 0U);
+        binary64(state.density);
+        u8(static_cast<std::uint8_t>(state.fluid));
+        u8(state.light.sky); u8(state.light.block);
+        // Typed admissions reject any record other than an edited,
+        // non-generated state before reaching the journal.  Encoding the
+        // invariant directly avoids coverage-only impossible states while
+        // retaining the full canonical record shape.
+        u8(0U); u8(1U);
+        u64(static_cast<std::uint64_t>(state.metadata.size()));
+        for (const NativeCellMetadataEntry &entry : state.metadata) {
+            text(entry.key); text(entry.value);
+        }
+    }
+    void typed_record(const NativeTypedWorldStateRecord &record) {
+        u8(static_cast<std::uint8_t>(record.name_space));
+        u8(static_cast<std::uint8_t>(record.persistence));
+        native_cell_state(record.state);
     }
     std::vector<std::uint8_t> finish() { return std::move(bytes_); }
 private:
@@ -135,6 +168,40 @@ std::vector<std::uint8_t> canonical_transaction(const WorldDeltaTransaction &tra
     return writer.finish();
 }
 
+struct ValidatedTypedAdmission {
+    NativeTypedWorldStateSnapshot durable_snapshot = NativeTypedWorldStateSnapshot::create({});
+    std::vector<NativeTypedWorldStateRecord> transient_overlays;
+};
+
+ValidatedTypedAdmission validate_typed_admission(const WorldTypedStateAdmission &admission) {
+    if (admission.transaction_id.empty() || admission.transaction_id.find('\0') != std::string::npos) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+    try {
+        NativeTypedWorldStateStore validator;
+        validator.admit_durable_snapshot(admission.durable_snapshot);
+        validator.replace_transient_overlays(admission.transient_overlays);
+        return {validator.durable_snapshot(), validator.transient_overlays()};
+    } catch (const NativeCellStateRejected &) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+}
+
+std::vector<std::uint8_t> canonical_typed_admission(
+    const WorldTypedStateAdmission &admission, const ValidatedTypedAdmission &validated) {
+    CanonicalWriter writer;
+    // Different discriminator from WDTX means a transaction ID cannot be
+    // replayed across the legacy delta and typed-state APIs.
+    writer.u8('W'); writer.u8('T'); writer.u8('Y'); writer.u8('S');
+    writer.text(admission.transaction_id);
+    writer.u64(admission.expected_revision);
+    writer.u64(static_cast<std::uint64_t>(validated.durable_snapshot.records().size()));
+    for (const NativeTypedWorldStateRecord &record : validated.durable_snapshot.records()) writer.typed_record(record);
+    writer.u64(static_cast<std::uint64_t>(validated.transient_overlays.size()));
+    for (const NativeTypedWorldStateRecord &record : validated.transient_overlays) writer.typed_record(record);
+    return writer.finish();
+}
+
 std::vector<WorldDeltaOperation> sorted_operations(const WorldDeltaTransaction &transaction) {
     std::vector<WorldDeltaOperation> operations = transaction.operations;
     std::sort(operations.begin(), operations.end(), [](const WorldDeltaOperation &left, const WorldDeltaOperation &right) {
@@ -166,6 +233,35 @@ void add_conservative_invalidation_neighborhood(
     }
 }
 
+void add_changed_typed_cells(
+    const std::vector<NativeTypedWorldStateRecord> &before,
+    const std::vector<NativeTypedWorldStateRecord> &after,
+    std::set<CellCoord, CellCoordLess> &changed_cells) {
+    std::size_t before_index = 0;
+    std::size_t after_index = 0;
+    const CellCoordLess less;
+    while (before_index < before.size() || after_index < after.size()) {
+        if (before_index == before.size()) {
+            changed_cells.insert(after[after_index++].state.cell);
+        } else if (after_index == after.size()) {
+            changed_cells.insert(before[before_index++].state.cell);
+        } else if (less(before[before_index].state.cell, after[after_index].state.cell)) {
+            changed_cells.insert(before[before_index++].state.cell);
+        } else if (less(after[after_index].state.cell, before[before_index].state.cell)) {
+            changed_cells.insert(after[after_index++].state.cell);
+        } else {
+            if (!(before[before_index] == after[after_index])) {
+                changed_cells.insert(before[before_index].state.cell);
+            }
+            ++before_index;
+            ++after_index;
+        }
+    }
+}
+
+bool fits_record_capacity(
+    const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept;
+
 const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
     switch (reason) {
     case WorldDeltaRejectReason::invalid_transaction: return "invalid world delta transaction";
@@ -181,7 +277,32 @@ const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
 struct WorldDeltaSnapshotState {
     std::uint64_t revision = 0;
     std::map<NamespaceCellKey, WorldDeltaRecord, NamespaceCellKeyLess> records;
+    NativeTypedWorldStateSnapshot typed_durable_snapshot = NativeTypedWorldStateSnapshot::create({});
+    std::vector<NativeTypedWorldStateRecord> typed_transient_overlays;
 };
+
+namespace {
+
+bool fits_record_capacity(const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept {
+    const std::size_t delta_count = state.records.size();
+    const std::size_t durable_count = state.typed_durable_snapshot.records().size();
+    const std::size_t overlay_count = state.typed_transient_overlays.size();
+    if (delta_count > limits.max_records) return false;
+    if (durable_count > limits.max_records - delta_count) return false;
+    return overlay_count <= limits.max_records - delta_count - durable_count;
+}
+
+std::optional<NativeCellState> typed_value_at(
+    const std::vector<NativeTypedWorldStateRecord> &records, const CellCoord &cell) {
+    const auto found = std::lower_bound(records.begin(), records.end(), cell,
+        [](const NativeTypedWorldStateRecord &record, const CellCoord &coordinate) {
+            return CellCoordLess{}(record.state.cell, coordinate);
+        });
+    if (found == records.end() || !(found->state.cell == cell)) return std::nullopt;
+    return found->state;
+}
+
+} // namespace
 
 struct WorldDeltaStore::TransactionRecord {
     std::string transaction_id;
@@ -242,6 +363,27 @@ std::vector<WorldDeltaRecord> WorldDeltaPinnedSnapshot::records() const {
     return result;
 }
 
+const NativeTypedWorldStateSnapshot &WorldDeltaPinnedSnapshot::typed_durable_snapshot() const noexcept {
+    return state_->typed_durable_snapshot;
+}
+
+const std::vector<NativeTypedWorldStateRecord> &WorldDeltaPinnedSnapshot::typed_transient_overlays() const noexcept {
+    return state_->typed_transient_overlays;
+}
+
+std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_durable_value_at(const CellCoord &coordinate) const {
+    return typed_value_at(state_->typed_durable_snapshot.records(), coordinate);
+}
+
+std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_transient_overlay_at(const CellCoord &coordinate) const {
+    return typed_value_at(state_->typed_transient_overlays, coordinate);
+}
+
+std::optional<NativeCellState> WorldDeltaPinnedSnapshot::typed_effective_value_at(const CellCoord &coordinate) const {
+    if (const auto overlay = typed_transient_overlay_at(coordinate)) return overlay;
+    return typed_durable_value_at(coordinate);
+}
+
 WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits) : limits_(limits) {
     if (limits_.max_records == 0U || limits_.max_transactions == 0U) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
@@ -300,7 +442,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &tra
             add_conservative_invalidation_neighborhood(section_key_for(operation.coordinate), affected);
         }
     }
-    if (next->records.size() > limits_.max_records) {
+    if (!fits_record_capacity(*next, limits_)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
     }
 
@@ -326,6 +468,63 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit(const WorldDeltaTransaction &tra
     transactions_.push_back(std::move(journal));
     if (changed) state_ = std::move(next);
     return std::move(receipt);
+}
+
+WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedStateAdmission &admission) {
+    static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
+    static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
+    const ValidatedTypedAdmission validated = validate_typed_admission(admission);
+    std::vector<std::uint8_t> canonical = canonical_typed_admission(admission, validated);
+    const auto replay = std::find_if(transactions_.begin(), transactions_.end(), [&](const TransactionRecord &record) {
+        return record.transaction_id == admission.transaction_id;
+    });
+    if (replay != transactions_.end()) {
+        if (replay->canonical != canonical) throw WorldDeltaRejected(WorldDeltaRejectReason::transaction_conflict);
+        WorldDeltaCommitReceipt receipt = replay->receipt;
+        receipt.status = WorldDeltaCommitStatus::idempotent_replay;
+        return receipt;
+    }
+    if (admission.expected_revision != state_->revision) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::revision_conflict);
+    }
+    if (transactions_.size() >= limits_.max_transactions) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+    }
+
+    auto next = std::make_shared<WorldDeltaSnapshotState>(*state_);
+    next->typed_durable_snapshot = validated.durable_snapshot;
+    next->typed_transient_overlays = validated.transient_overlays;
+    if (!fits_record_capacity(*next, limits_)) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+    }
+
+    std::set<CellCoord, CellCoordLess> changed_cells;
+    add_changed_typed_cells(
+        state_->typed_durable_snapshot.records(), next->typed_durable_snapshot.records(), changed_cells);
+    add_changed_typed_cells(state_->typed_transient_overlays, next->typed_transient_overlays, changed_cells);
+
+    WorldDeltaCommitReceipt receipt;
+    receipt.transaction_id = admission.transaction_id;
+    receipt.revision = state_->revision;
+    if (changed_cells.empty()) {
+        receipt.status = WorldDeltaCommitStatus::no_change;
+    } else {
+        if (state_->revision == std::numeric_limits<std::uint64_t>::max()) {
+            throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+        }
+        next->revision = state_->revision + 1U;
+        std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
+        for (const CellCoord &cell : changed_cells) {
+            add_conservative_invalidation_neighborhood(section_key_for(cell), affected);
+        }
+        receipt.status = WorldDeltaCommitStatus::committed;
+        receipt.revision = next->revision;
+        receipt.affected_sections.assign(affected.begin(), affected.end());
+    }
+    TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
+    transactions_.push_back(std::move(journal));
+    if (!changed_cells.empty()) state_ = std::move(next);
+    return receipt;
 }
 
 } // namespace voxel::world_backend

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coordinates.hpp"
+#include "native_typed_world_state_snapshot.hpp"
 #include "terrain_snapshot.hpp"
 
 #include <cstddef>
@@ -47,6 +48,18 @@ struct WorldDeltaTransaction {
     std::string transaction_id;
     std::uint64_t expected_revision = 0;
     std::vector<WorldDeltaOperation> operations;
+};
+
+// A typed v2-state replacement belongs to the same immutable world snapshot
+// as ordinary cell deltas.  It is deliberately a replacement admission, not
+// a second mutable store: a pin can therefore never observe a durable typed
+// snapshot, its transient overlays, and its delta revision from different
+// points in time.
+struct WorldTypedStateAdmission {
+    std::string transaction_id;
+    std::uint64_t expected_revision = 0;
+    NativeTypedWorldStateSnapshot durable_snapshot = NativeTypedWorldStateSnapshot::create({});
+    std::vector<NativeTypedWorldStateRecord> transient_overlays;
 };
 
 struct WorldDeltaRecord {
@@ -121,6 +134,16 @@ public:
     std::optional<WorldDeltaRecord> effective_value_at(const CellCoord &coordinate) const;
     std::vector<WorldDeltaRecord> records() const;
 
+    // These are attached to this exact delta pin.  There is intentionally no
+    // cross-model "effective" lookup yet: production query resolution must
+    // make its precedence explicit at cutover rather than silently merging
+    // legacy deltas and typed v2 state here.
+    const NativeTypedWorldStateSnapshot &typed_durable_snapshot() const noexcept;
+    const std::vector<NativeTypedWorldStateRecord> &typed_transient_overlays() const noexcept;
+    std::optional<NativeCellState> typed_durable_value_at(const CellCoord &coordinate) const;
+    std::optional<NativeCellState> typed_transient_overlay_at(const CellCoord &coordinate) const;
+    std::optional<NativeCellState> typed_effective_value_at(const CellCoord &coordinate) const;
+
 private:
     friend class WorldDeltaStore;
     explicit WorldDeltaPinnedSnapshot(std::shared_ptr<const WorldDeltaSnapshotState> state);
@@ -141,6 +164,11 @@ public:
     // receipt allocation, and durable transaction journaling all complete
     // before the immutable state pointer is published.
     WorldDeltaCommitReceipt commit(const WorldDeltaTransaction &transaction);
+
+    // Atomically replaces both typed portions of the current immutable state.
+    // It shares revision, pinning, journal-ID conflict handling, capacity, and
+    // conservative invalidation semantics with `commit`.
+    WorldDeltaCommitReceipt admit_typed_state(const WorldTypedStateAdmission &admission);
 
 private:
     WorldDeltaStoreLimits limits_;

@@ -52,6 +52,61 @@ void expect_rejection(const WorldDeltaRejectReason expected, const WorldDeltaTra
     fail("world delta rejection", __FILE__, __LINE__, "expected WorldDeltaRejected");
 }
 
+NativeCellState typed_air(const CellCoord cell, const NativeCellStateNamespace name_space) {
+    NativeCellStateInput input;
+    input.cell = cell;
+    input.material = TerrainMaterialId::air;
+    input.biome = TerrainBiomeId::underground_air;
+    input.solid = false;
+    input.density = -1.35;
+    input.fluid = TerrainFluidId::none;
+    input.generated = false;
+    input.edited = true;
+    return make_native_cell_state(input, name_space);
+}
+
+NativeTypedWorldStateRecord typed_durable(const CellCoord cell) {
+    return {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
+        typed_air(cell, NativeCellStateNamespace::durable_terrain)};
+}
+
+NativeTypedWorldStateRecord typed_stone(const CellCoord cell) {
+    NativeCellStateInput input;
+    input.cell = cell;
+    input.material = TerrainMaterialId::stone;
+    input.biome = TerrainBiomeId::underground;
+    input.solid = true;
+    input.density = 1.35;
+    input.fluid = TerrainFluidId::none;
+    input.light = {15, 4};
+    input.metadata = {{"key", "value"}};
+    input.generated = false;
+    input.edited = true;
+    return {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
+        make_native_cell_state(input, NativeCellStateNamespace::durable_terrain)};
+}
+
+NativeTypedWorldStateRecord typed_overlay(const CellCoord cell) {
+    return {NativeCellStateNamespace::scene_overlay, NativeTypedWorldStatePersistence::transient,
+        typed_air(cell, NativeCellStateNamespace::scene_overlay)};
+}
+
+WorldTypedStateAdmission typed_admission(const std::string &id, const std::uint64_t expected,
+    std::vector<NativeTypedWorldStateRecord> durable, std::vector<NativeTypedWorldStateRecord> overlays = {}) {
+    return {id, expected, NativeTypedWorldStateSnapshot::create(std::move(durable)), std::move(overlays)};
+}
+
+void expect_typed_rejection(const WorldDeltaRejectReason expected, const WorldTypedStateAdmission &value,
+    WorldDeltaStore &store) {
+    try {
+        static_cast<void>(store.admit_typed_state(value));
+    } catch (const WorldDeltaRejected &error) {
+        VWB_EXPECT_EQ(expected, error.reason());
+        return;
+    }
+    fail("typed world delta rejection", __FILE__, __LINE__, "expected WorldDeltaRejected");
+}
+
 } // namespace
 
 VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
@@ -62,6 +117,151 @@ VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
     VWB_EXPECT(first.records().empty());
     VWB_EXPECT(!first.value_at(WorldDeltaNamespace::terrain_override, {0, 0, 0}));
     VWB_EXPECT(!first.effective_value_at({0, 0, 0}));
+    VWB_EXPECT(first.typed_durable_snapshot().records().empty());
+    VWB_EXPECT(first.typed_transient_overlays().empty());
+    VWB_EXPECT(!first.typed_effective_value_at({0, 0, 0}));
+}
+
+VWB_TEST(world_delta_store_admits_typed_state_in_the_same_immutable_revision_as_deltas) {
+    WorldDeltaStore store;
+    const WorldDeltaPinnedSnapshot before = store.pin();
+    NativeTypedWorldStateRecord durable = typed_stone({-16, 0, 0});
+    NativeTypedWorldStateRecord overlay = typed_overlay({-16, 0, 0});
+    overlay.state.light = {0, 7};
+    const WorldDeltaCommitReceipt admitted = store.admit_typed_state(
+        typed_admission("typed:initial", 0, {durable}, {overlay}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    VWB_EXPECT_EQ(1ULL, admitted.revision);
+    VWB_EXPECT_EQ(27U, admitted.affected_sections.size());
+    VWB_EXPECT_EQ(0ULL, before.revision());
+    VWB_EXPECT(before.typed_durable_snapshot().records().empty());
+    VWB_EXPECT(before.typed_transient_overlays().empty());
+
+    const WorldDeltaPinnedSnapshot typed_pin = store.pin();
+    VWB_EXPECT_EQ(1ULL, typed_pin.revision());
+    VWB_EXPECT_EQ(1U, typed_pin.typed_durable_snapshot().records().size());
+    VWB_EXPECT_EQ(1U, typed_pin.typed_transient_overlays().size());
+    VWB_EXPECT_EQ(15, static_cast<int>(typed_pin.typed_durable_value_at({-16, 0, 0})->light.sky));
+    VWB_EXPECT_EQ(1U, typed_pin.typed_durable_value_at({-16, 0, 0})->metadata.size());
+    VWB_EXPECT_EQ(7, static_cast<int>(typed_pin.typed_effective_value_at({-16, 0, 0})->light.block));
+
+    const WorldDeltaCommitReceipt delta = store.commit(transaction("delta:after-typed", 1, {
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
+    }));
+    VWB_EXPECT_EQ(2ULL, delta.revision);
+    const WorldDeltaPinnedSnapshot after = store.pin();
+    VWB_EXPECT_EQ(2ULL, after.revision());
+    VWB_EXPECT(after.typed_effective_value_at({-16, 0, 0}).has_value());
+    VWB_EXPECT_EQ(1ULL, typed_pin.revision());
+    VWB_EXPECT(!typed_pin.effective_value_at({0, 0, 0}));
+}
+
+VWB_TEST(world_delta_store_typed_replacement_invalidates_the_union_of_old_and_new_owner_cells) {
+    WorldDeltaStore store;
+    static_cast<void>(store.admit_typed_state(typed_admission("typed:first", 0,
+        {typed_durable({0, 0, 0})}, {typed_overlay({16, 0, 0})})));
+    NativeTypedWorldStateRecord changed = typed_durable({0, 0, 0});
+    changed.state.light.sky = 2;
+    const WorldDeltaCommitReceipt replaced = store.admit_typed_state(typed_admission("typed:replace", 1,
+        {changed, typed_durable({32, 0, 0})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, replaced.status);
+    VWB_EXPECT_EQ(2ULL, replaced.revision);
+    // Owners 0, 1, and 2 along X produce the complete x=-1..3 halo.
+    VWB_EXPECT_EQ(45U, replaced.affected_sections.size());
+    for (std::int32_t z = -1; z <= 1; ++z) {
+        for (std::int32_t y = -1; y <= 1; ++y) {
+            for (std::int32_t x = -1; x <= 3; ++x) {
+                VWB_EXPECT(std::find(replaced.affected_sections.begin(), replaced.affected_sections.end(),
+                    WorldDeltaSectionKey{{x, y, z}}) != replaced.affected_sections.end());
+            }
+        }
+    }
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    VWB_EXPECT(!pin.typed_transient_overlay_at({16, 0, 0}));
+    VWB_EXPECT_EQ(2, static_cast<int>(pin.typed_durable_value_at({0, 0, 0})->light.sky));
+    VWB_EXPECT(pin.typed_durable_value_at({32, 0, 0}).has_value());
+}
+
+VWB_TEST(world_delta_store_typed_admission_is_idempotent_and_transaction_kind_strict) {
+    WorldDeltaStore store;
+    const WorldTypedStateAdmission first = typed_admission("shared:id", 0, {typed_durable({0, 0, 0})});
+    const WorldDeltaCommitReceipt committed = store.admit_typed_state(first);
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, committed.status);
+    const WorldDeltaCommitReceipt replay = store.admit_typed_state(first);
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::idempotent_replay, replay.status);
+    VWB_EXPECT_EQ(1ULL, replay.revision);
+    expect_rejection(WorldDeltaRejectReason::transaction_conflict, transaction("shared:id", 1, {
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
+    }), store);
+    expect_typed_rejection(WorldDeltaRejectReason::transaction_conflict,
+        typed_admission("shared:id", 1, {typed_durable({1, 0, 0})}), store);
+    expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,
+        typed_admission("", 1, {typed_durable({1, 0, 0})}), store);
+    expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,
+        typed_admission(std::string("typed\0nul", 9), 1, {typed_durable({1, 0, 0})}), store);
+    expect_typed_rejection(WorldDeltaRejectReason::revision_conflict,
+        typed_admission("typed:stale", 0, {typed_durable({1, 0, 0})}), store);
+    VWB_EXPECT_EQ(1ULL, store.revision());
+}
+
+VWB_TEST(world_delta_store_rejects_typed_capacity_and_malformed_overlay_without_publishing) {
+    WorldDeltaStore store({1, 8});
+    expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        typed_admission("typed:over-capacity", 0, {typed_durable({0, 0, 0})}, {typed_overlay({1, 0, 0})}), store);
+    VWB_EXPECT_EQ(0ULL, store.revision());
+    VWB_EXPECT(store.pin().typed_durable_snapshot().records().empty());
+
+    NativeTypedWorldStateRecord malformed = typed_overlay({0, 0, 0});
+    malformed.persistence = NativeTypedWorldStatePersistence::durable;
+    expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,
+        {"typed:malformed", 0, NativeTypedWorldStateSnapshot::create({}), {malformed}}, store);
+    VWB_EXPECT_EQ(0ULL, store.revision());
+    VWB_EXPECT(store.pin().typed_transient_overlays().empty());
+}
+
+VWB_TEST(world_delta_store_typed_admission_covers_no_change_search_order_capacity_and_overflow) {
+    WorldDeltaStore store;
+    const std::vector<NativeTypedWorldStateRecord> ordered = {
+        typed_durable({0, 0, 1}), typed_durable({0, 2, 0}), typed_durable({0, 0, 0}),
+    };
+    static_cast<void>(store.admit_typed_state(typed_admission("typed:ordered", 0, ordered)));
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    // The missing middle-Y lookup visits both y-order sides; the missing Z
+    // lookup exercises the primary z comparison and end boundary.
+    VWB_EXPECT(!pin.typed_durable_value_at({0, 1, 0}));
+    VWB_EXPECT(!pin.typed_durable_value_at({0, 0, 2}));
+    const WorldDeltaCommitReceipt no_change = store.admit_typed_state(
+        typed_admission("typed:no-change", 1, ordered));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::no_change, no_change.status);
+    VWB_EXPECT(no_change.affected_sections.empty());
+
+    // These replacements force both comparisons in the old/new merge: first
+    // old<new, then new<old. They must still publish only whole halos.
+    static_cast<void>(store.admit_typed_state(typed_admission("typed:before-less", 1,
+        {typed_durable({32, 0, 0})})));
+    static_cast<void>(store.admit_typed_state(typed_admission("typed:after-less", 2,
+        {typed_durable({0, 0, 0})})));
+
+    WorldDeltaStore combined_capacity({2, 8});
+    static_cast<void>(combined_capacity.commit(transaction("delta:capacity-base", 0, {
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
+    })));
+    expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        typed_admission("typed:combined-capacity", 1,
+            {typed_durable({1, 0, 0}), typed_durable({2, 0, 0})}), combined_capacity);
+    VWB_EXPECT_EQ(1ULL, combined_capacity.revision());
+
+    WorldDeltaStore transaction_capacity({8, 1});
+    static_cast<void>(transaction_capacity.admit_typed_state(
+        typed_admission("typed:journal-base", 0, {typed_durable({0, 0, 0})})));
+    expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        typed_admission("typed:journal-full", 1, {typed_durable({1, 0, 0})}), transaction_capacity);
+
+    WorldDeltaStore overflow({8, 8, std::numeric_limits<std::uint64_t>::max()});
+    expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        typed_admission("typed:max-revision", std::numeric_limits<std::uint64_t>::max(),
+            {typed_durable({0, 0, 0})}), overflow);
+    VWB_EXPECT(overflow.pin().typed_durable_snapshot().records().empty());
 }
 
 VWB_TEST(world_delta_store_commits_typed_state_sections_and_preserves_old_pins) {
