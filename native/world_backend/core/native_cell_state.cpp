@@ -99,7 +99,9 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
 
 std::size_t native_cell_state_section_index(const NativeCellState &state) {
     const auto address = split_cell(state.cell, NativeCellState::SECTION_SIZE);
-    if (!address || !(address->section == state.section) || !(address->local == state.local_cell)) {
+    // SECTION_SIZE is a positive compile-time constant, so split_cell cannot
+    // fail here. The contract check is that callers cannot forge its address.
+    if (!(address->section == state.section) || !(address->local == state.local_cell)) {
         throw NativeCellStateRejected();
     }
     const std::size_t size = static_cast<std::size_t>(NativeCellState::SECTION_SIZE);
@@ -111,7 +113,12 @@ NativeCellStatePersistencePolicy native_cell_state_policy(const NativeCellStateN
     if (name_space == NativeCellStateNamespace::scene_overlay) {
         return {name_space, false, false, false};
     }
-    return {NativeCellStateNamespace::durable_terrain, true, true, true};
+    if (name_space == NativeCellStateNamespace::durable_terrain) {
+        return {name_space, true, true, true};
+    }
+    // Unknown ownership is nonpersistent and non-rendering; it must never
+    // gain durable-terrain authority merely because an enum widened.
+    return {name_space, false, false, false};
 }
 
 bool native_cell_state_v2_save_less(const NativeCellState &left, const NativeCellState &right) noexcept {
