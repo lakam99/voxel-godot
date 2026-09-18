@@ -68,6 +68,7 @@ bool NativeCellState::operator==(const NativeCellState &other) const noexcept {
     return cell == other.cell && section == other.section && local_cell == other.local_cell
         && material == other.material && biome == other.biome && solid == other.solid && density == other.density
         && fluid == other.fluid && light == other.light && metadata == other.metadata && block_id == other.block_id
+        && edit_reason == other.edit_reason
         && generated == other.generated && edited == other.edited;
 }
 
@@ -79,7 +80,13 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
         || !valid_biome(input.biome) || !valid_fluid(input.fluid) || input.light.sky > 15 || input.light.block > 15) {
         throw NativeCellStateRejected();
     }
-    if (input.solid != (input.density >= 0.0) || (input.solid && input.fluid != TerrainFluidId::none)) {
+    // v2 terrain edits preserve zero as the fluid surface density while water
+    // and lava remain non-solid. Zero may not become a general non-solid
+    // terrain exception: it is valid only for an actual non-solid fluid.
+    const bool zero_density_fluid = !input.solid && input.density == 0.0
+        && (input.fluid == TerrainFluidId::water || input.fluid == TerrainFluidId::lava);
+    if ((!zero_density_fluid && input.solid != (input.density >= 0.0))
+        || (input.solid && input.fluid != TerrainFluidId::none)) {
         throw NativeCellStateRejected();
     }
     if ((input.fluid == TerrainFluidId::water && input.material != TerrainMaterialId::water)
@@ -101,6 +108,11 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
         throw NativeCellStateRejected();
     }
     validate_metadata(input.metadata);
+    if (input.edit_reason.has_value()) {
+        // The script field is exactly String(reason), including an explicitly
+        // present empty string. NativeValue remains the sole UTF-8 validator.
+        static_cast<void>(NativeValue::string(*input.edit_reason));
+    }
     const auto address = split_cell(input.cell, NativeCellState::SECTION_SIZE);
     NativeCellState result;
     result.cell = input.cell;
@@ -114,6 +126,7 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
     result.light = input.light;
     result.metadata = input.metadata;
     result.block_id = input.block_id;
+    result.edit_reason = input.edit_reason;
     result.generated = input.generated;
     result.edited = input.edited;
     return result;

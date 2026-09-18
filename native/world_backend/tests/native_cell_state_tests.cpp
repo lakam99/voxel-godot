@@ -116,6 +116,8 @@ VWB_TEST(native_cell_state_value_equality_covers_light_metadata_and_every_stored
     changed = original;
     changed.block_id = NativeBlockIdentity::create("door.oak");
     VWB_EXPECT(!(original == changed));
+    changed = original; changed.edit_reason = "other";
+    VWB_EXPECT(!(original == changed));
     changed = original; changed.generated = false;
     VWB_EXPECT(!(original == changed));
     changed = original; changed.edited = true;
@@ -127,6 +129,26 @@ VWB_TEST(native_cell_state_accepts_lava_as_non_solid_typed_fluid) {
     VWB_EXPECT_EQ(TerrainMaterialId::lava, state.material);
     VWB_EXPECT_EQ(TerrainFluidId::lava, state.fluid);
     VWB_EXPECT(!state.solid);
+}
+
+VWB_TEST(native_cell_state_accepts_only_fluid_zero_density_as_a_non_solid_v2_exception) {
+    NativeCellStateInput water = air({2, -55, 3});
+    water.material = TerrainMaterialId::water;
+    water.fluid = TerrainFluidId::water;
+    water.density = 0.0;
+    VWB_EXPECT_EQ(TerrainFluidId::water, make_native_cell_state(water).fluid);
+    NativeCellStateInput lava_zero = water;
+    lava_zero.material = TerrainMaterialId::lava;
+    lava_zero.fluid = TerrainFluidId::lava;
+    VWB_EXPECT_EQ(TerrainFluidId::lava, make_native_cell_state(lava_zero).fluid);
+    NativeCellStateInput air_zero = air();
+    air_zero.density = 0.0;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(air_zero));
+    NativeCellStateInput stone_zero = stone({1, 2, 3});
+    stone_zero.density = 0.0;
+    // The pre-existing solid rule deliberately permits a zero-density solid;
+    // this change admits no additional non-fluid *non-solid* zero state.
+    VWB_EXPECT(make_native_cell_state(stone_zero).solid);
 }
 
 VWB_TEST(native_cell_state_rejects_malformed_density_solid_fluid_and_light_combinations) {
@@ -210,6 +232,20 @@ VWB_TEST(native_cell_state_keeps_block_identity_distinct_from_terrain_material_a
 
     VWB_EXPECT_THROW(NativeCellStateRejected, NativeBlockIdentity::create(""));
     VWB_EXPECT_THROW(NativeValueRejected, NativeBlockIdentity::create(std::string("bad\xC0\x80", 5)));
+}
+
+VWB_TEST(native_cell_state_preserves_optional_edit_reason_including_explicit_empty_string) {
+    NativeCellStateInput input = stone({3, 4, 5});
+    input.edit_reason = "";
+    const NativeCellState explicit_empty = make_native_cell_state(input);
+    VWB_EXPECT(explicit_empty.edit_reason.has_value());
+    VWB_EXPECT_EQ(std::string(""), *explicit_empty.edit_reason);
+    input.edit_reason.reset();
+    const NativeCellState absent = make_native_cell_state(input);
+    VWB_EXPECT(!absent.edit_reason.has_value());
+    VWB_EXPECT(!(explicit_empty == absent));
+    input.edit_reason = std::string("bad\xC0\x80", 5);
+    VWB_EXPECT_THROW(NativeValueRejected, make_native_cell_state(input));
 }
 
 VWB_TEST(native_cell_state_policy_keeps_scene_overlay_out_of_durable_save_and_terrain_projection) {

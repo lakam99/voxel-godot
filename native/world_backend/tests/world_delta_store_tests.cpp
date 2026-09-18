@@ -81,6 +81,7 @@ NativeTypedWorldStateRecord typed_stone(const CellCoord cell) {
     input.light = {15, 4};
     input.metadata = NativeValue::object({{"key", NativeValue::string("value")}});
     input.block_id = NativeBlockIdentity::create("door.oak.closed");
+    input.edit_reason = "player_place";
     input.generated = false;
     input.edited = true;
     return {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
@@ -391,7 +392,9 @@ VWB_TEST(world_delta_store_typed_admission_is_idempotent_and_transaction_kind_st
         {"door", NativeValue::object({{"locked", NativeValue::boolean(true)}})},
     });
     different_value.state.block_id = NativeBlockIdentity::create("door.oak.locked");
-    // The WTY2 journal must distinguish recursive metadata/block identity;
+    different_value.state.edit_reason = "player_place_different";
+    // The WTY3 journal must distinguish recursive metadata, block identity,
+    // and optional edit reason;
     // otherwise a same-ID replay could hide a materially different v2 state.
     expect_typed_rejection(WorldDeltaRejectReason::transaction_conflict,
         typed_admission("shared:id", 1, {different_value}), store);

@@ -17,6 +17,7 @@ NativeCellStateInput input_from(const NativeCellState &state) {
     input.light = state.light;
     input.metadata = state.metadata;
     input.block_id = state.block_id;
+    input.edit_reason = state.edit_reason;
     input.generated = state.generated;
     input.edited = state.edited;
     return input;
@@ -35,7 +36,12 @@ void validate_state_for_namespace(const NativeTypedWorldStateRecord &record, con
         && (record.state.generated || !record.state.edited)) {
         throw NativeCellStateRejected();
     }
-    const NativeCellState rebuilt = make_native_cell_state(input_from(record.state), expected);
+    NativeCellState rebuilt;
+    try {
+        rebuilt = make_native_cell_state(input_from(record.state), expected);
+    } catch (const std::invalid_argument &) {
+        throw NativeCellStateRejected();
+    }
     // Rebuilding proves material/fluid/light/metadata validity. Equality also
     // rejects a forged section/local address and noncanonical metadata order.
     if (!(rebuilt == record.state)) throw NativeCellStateRejected();

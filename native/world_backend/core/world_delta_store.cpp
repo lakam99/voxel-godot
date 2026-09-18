@@ -100,6 +100,8 @@ public:
         binary(state.metadata.canonical_binary());
         u8(state.block_id.has_value() ? 1U : 0U);
         if (state.block_id) text(state.block_id->value());
+        u8(state.edit_reason.has_value() ? 1U : 0U);
+        if (state.edit_reason) text(*state.edit_reason);
     }
     void typed_record(const NativeTypedWorldStateRecord &record) {
         u8(static_cast<std::uint8_t>(record.name_space));
@@ -203,9 +205,10 @@ std::vector<std::uint8_t> canonical_typed_admission(
     CanonicalWriter writer;
     // Different discriminator from WDTX means a transaction ID cannot be
     // replayed across the legacy delta and typed-state APIs.
-    // WTY2 is intentionally distinct from WTY S: native recursive metadata
-    // and optional block identity have a different canonical record schema.
-    writer.u8('W'); writer.u8('T'); writer.u8('Y'); writer.u8('2');
+    // WTY3 is intentionally distinct from WTY2: native recursive metadata,
+    // optional block identity, and optional durable edit reason have a
+    // different canonical record schema.
+    writer.u8('W'); writer.u8('T'); writer.u8('Y'); writer.u8('3');
     writer.text(admission.transaction_id);
     writer.u64(admission.expected_revision);
     writer.u64(static_cast<std::uint64_t>(validated.durable_snapshot.records().size()));
@@ -238,7 +241,7 @@ ValidatedFeatureAdmission validate_feature_admission(const WorldFeatureDeltaAdmi
 std::vector<std::uint8_t> canonical_feature_admission(
     const WorldFeatureDeltaAdmission &admission, const ValidatedFeatureAdmission &validated) {
     CanonicalWriter writer;
-    // WFD1 is distinct from WDTX and WTY2: one transaction ID can identify
+    // WFD1 is distinct from WDTX and WTY3: one transaction ID can identify
     // exactly one native world-state mutation kind.
     writer.u8('W'); writer.u8('F'); writer.u8('D'); writer.u8('1');
     writer.text(admission.transaction_id);

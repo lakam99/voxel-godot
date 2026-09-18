@@ -71,6 +71,10 @@ struct NativeCellStateInput {
     // channel.  The state factory rejects every non-object value.
     NativeValue metadata = NativeValue::object({});
     std::optional<NativeBlockIdentity> block_id;
+    // TerrainVolumeService stamps String(reason) onto every edited state. It
+    // is optional in the general state model because generated/native query
+    // cells have no such field; a v2 durable codec requires its presence.
+    std::optional<std::string> edit_reason;
     bool generated = true;
     bool edited = false;
 };
@@ -89,6 +93,7 @@ struct NativeCellState {
     NativeCellLight light;
     NativeValue metadata = NativeValue::object({});
     std::optional<NativeBlockIdentity> block_id;
+    std::optional<std::string> edit_reason;
     bool generated = true;
     bool edited = false;
 

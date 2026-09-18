@@ -82,6 +82,9 @@ VWB_TEST(native_typed_world_state_snapshot_rejects_overlay_generated_and_duplica
     VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({
         durable_record({-16, -16, -16}), durable_record({-16, -16, -16}),
     }));
+    NativeTypedWorldStateRecord invalid_edit_reason = durable_record({1, 2, 3});
+    invalid_edit_reason.state.edit_reason = std::string("bad\xC0\x80", 5);
+    VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({invalid_edit_reason}));
 }
 
 VWB_TEST(native_typed_world_state_record_equality_includes_namespace_policy_and_full_cell_state) {
@@ -158,12 +161,14 @@ VWB_TEST(native_typed_world_state_snapshot_preserves_exact_typed_fields) {
         {"alpha", NativeValue::array({NativeValue::number(1.0), NativeValue::boolean(true)})},
         {"beta", NativeValue::object({{"nested", NativeValue::string("two")}})},
     });
+    record.state.edit_reason = "player_dig";
     const NativeTypedWorldStateSnapshot snapshot = NativeTypedWorldStateSnapshot::create({record});
     const NativeCellState &state = snapshot.records()[0].state;
     VWB_EXPECT_EQ(15, static_cast<int>(state.light.sky));
     VWB_EXPECT_EQ(4, static_cast<int>(state.light.block));
     VWB_EXPECT_EQ(2U, state.metadata.as_object().size());
     VWB_EXPECT_EQ(NativeValueKind::array, state.metadata.as_object()[0].second.kind());
+    VWB_EXPECT_EQ(std::string("player_dig"), *state.edit_reason);
     VWB_EXPECT((state.section == CellCoord{-2, 1, 1}));
     VWB_EXPECT((state.local_cell == CellCoord{15, 15, 0}));
 }
