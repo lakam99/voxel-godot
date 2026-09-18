@@ -51,6 +51,12 @@ bool record_less(const NativeTypedWorldStateRecord &left, const NativeTypedWorld
     return native_cell_state_v2_save_less(left.state, right.state);
 }
 
+bool coordinate_less(const CellCoord &left, const CellCoord &right) noexcept {
+    if (left.z != right.z) return left.z < right.z;
+    if (left.y != right.y) return left.y < right.y;
+    return left.x < right.x;
+}
+
 std::vector<NativeTypedWorldStateRecord> canonical_records(
     std::vector<NativeTypedWorldStateRecord> records, const NativeCellStateNamespace expected) {
     for (const NativeTypedWorldStateRecord &record : records) validate_state_for_namespace(record, expected);
@@ -63,11 +69,19 @@ std::vector<NativeTypedWorldStateRecord> canonical_records(
 
 std::optional<NativeCellState> value_at(
     const std::vector<NativeTypedWorldStateRecord> &records, const CellCoord &cell) {
-    const auto found = std::lower_bound(records.begin(), records.end(), cell,
-        [](const NativeTypedWorldStateRecord &record, const CellCoord &coordinate) {
-            if (record.state.cell.z != coordinate.z) return record.state.cell.z < coordinate.z;
-            if (record.state.cell.y != coordinate.y) return record.state.cell.y < coordinate.y;
-            return record.state.cell.x < coordinate.x;
+    // SECTION_SIZE is a positive compile-time constant, so split_cell admits
+    // every int32 coordinate. The optional belongs to the generic divisor API.
+    const SectionAddress address = split_cell(cell, NativeCellState::SECTION_SIZE).value();
+    struct V2CellKey {
+        CellCoord section;
+        CellCoord cell;
+    };
+    const V2CellKey key{address.section, cell};
+    const auto found = std::lower_bound(records.begin(), records.end(), key,
+        [](const NativeTypedWorldStateRecord &record, const V2CellKey &coordinate) {
+            if (!(record.state.section == coordinate.section))
+                return coordinate_less(record.state.section, coordinate.section);
+            return coordinate_less(record.state.cell, coordinate.cell);
         });
     if (found == records.end() || !(found->state.cell == cell)) return std::nullopt;
     return found->state;

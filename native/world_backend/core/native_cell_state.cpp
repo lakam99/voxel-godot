@@ -157,6 +157,9 @@ NativeCellStatePersistencePolicy native_cell_state_policy(const NativeCellStateN
 }
 
 bool native_cell_state_v2_save_less(const NativeCellState &left, const NativeCellState &right) noexcept {
+    if (left.section.z != right.section.z) return left.section.z < right.section.z;
+    if (left.section.y != right.section.y) return left.section.y < right.section.y;
+    if (left.section.x != right.section.x) return left.section.x < right.section.x;
     if (left.cell.z != right.cell.z) return left.cell.z < right.cell.z;
     if (left.cell.y != right.cell.y) return left.cell.y < right.cell.y;
     return left.cell.x < right.cell.x;

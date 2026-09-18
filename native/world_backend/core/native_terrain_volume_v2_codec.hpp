@@ -60,8 +60,9 @@ NativeTerrainVolumeV2 validate_native_terrain_volume_v2(
 // Decode/encode the already-decoded NativeValue object for SaveSystem v2's
 // terrainVolume domain. Both directions require precisely schemaVersion 1 and
 // sectionSize 16; unknown fields, generated records, transient overlays, and
-// saveDelta=false records fail closed. Player blocks, removed props, and every
-// other top-level save domain are deliberately out of scope. NativeValue has
+// saveDelta values that are false/zero or invalid for Godot's bool(Variant)
+// conversion fail closed. Player blocks, removed props, and every other
+// top-level save domain are deliberately out of scope. NativeValue has
 // intentionally small generic recursive-container limits, so these overloads
 // are convenience representations rather than the production-size admission
 // path. Production adapters must construct the typed aggregate and call

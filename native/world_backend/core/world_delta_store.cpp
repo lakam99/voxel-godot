@@ -40,6 +40,16 @@ struct CellCoordLess {
     }
 };
 
+struct V2CellCoordLess {
+    bool operator()(const CellCoord &left, const CellCoord &right) const noexcept {
+        const CellCoord left_section = split_cell(left, WorldDeltaStore::SECTION_SIZE).value().section;
+        const CellCoord right_section = split_cell(right, WorldDeltaStore::SECTION_SIZE).value().section;
+        const CellCoordLess less;
+        if (!(left_section == right_section)) return less(left_section, right_section);
+        return less(left, right);
+    }
+};
+
 class CanonicalWriter {
 public:
     void u8(const std::uint8_t value) { bytes_.push_back(value); }
@@ -298,7 +308,7 @@ void add_changed_typed_cells(
     std::set<CellCoord, CellCoordLess> &changed_cells) {
     std::size_t before_index = 0;
     std::size_t after_index = 0;
-    const CellCoordLess less;
+    const V2CellCoordLess less;
     while (before_index < before.size() || after_index < after.size()) {
         if (before_index == before.size()) {
             changed_cells.insert(after[after_index++].state.cell);
@@ -495,7 +505,7 @@ std::optional<NativeCellState> typed_value_at(
     const std::vector<NativeTypedWorldStateRecord> &records, const CellCoord &cell) {
     const auto found = std::lower_bound(records.begin(), records.end(), cell,
         [](const NativeTypedWorldStateRecord &record, const CellCoord &coordinate) {
-            return CellCoordLess{}(record.state.cell, coordinate);
+            return V2CellCoordLess{}(record.state.cell, coordinate);
         });
     if (found == records.end() || !(found->state.cell == cell)) return std::nullopt;
     return found->state;
@@ -656,7 +666,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
             ? durable : overlays;
         const auto found = std::lower_bound(records.begin(), records.end(), operation.cell,
             [](const NativeTypedWorldStateRecord &record, const CellCoord &cell) {
-                return CellCoordLess{}(record.state.cell, cell);
+                return V2CellCoordLess{}(record.state.cell, cell);
             });
         const bool exists = found != records.end() && found->state.cell == operation.cell;
         if (operation.kind == WorldTypedCellOperationKind::set) {

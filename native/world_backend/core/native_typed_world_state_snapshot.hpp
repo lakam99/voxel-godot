@@ -17,9 +17,10 @@ enum class NativeTypedWorldStatePersistence : std::uint8_t {
 // save.  It intentionally cannot represent a generated base cell: a durable
 // snapshot is a collection of player/world deltas, not a second generator.
 //
-// A future v2 importer must explicitly classify raw `saveDelta=false` and
-// scene-block metadata before it constructs this record.  It must not infer a
-// policy from metadata strings or silently fall back to durable authority.
+// A v2 importer must apply TerrainVolumeService's exact bool(Variant)
+// saveDelta policy before it constructs this record: false/zero and invalid
+// conversion kinds cannot become durable terrain. It must not infer a policy
+// from metadata strings or silently fall back to durable authority.
 struct NativeTypedWorldStateRecord {
     NativeCellStateNamespace name_space = NativeCellStateNamespace::durable_terrain;
     NativeTypedWorldStatePersistence persistence = NativeTypedWorldStatePersistence::durable;

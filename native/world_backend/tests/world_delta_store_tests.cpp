@@ -250,6 +250,26 @@ VWB_TEST(world_delta_store_constructor_admits_a_complete_4096_cell_v2_section_wi
     VWB_EXPECT_EQ(volume, pin.terrain_volume());
 }
 
+VWB_TEST(world_delta_store_constructor_preserves_section_grouped_interleaved_v2_cells) {
+    const NativeTerrainVolumeV2 volume = persisted_terrain_volume(11U, {
+        typed_stone({0, 0, 1}),
+        typed_stone({-1, 0, 15}),
+        typed_stone({-16, 0, 0}),
+    }, {
+        {{-1, 0, 0}, 10U}, {{0, 0, 0}, 11U},
+    });
+    WorldDeltaStore store({}, initial_checkpoint(0U, volume));
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    VWB_EXPECT_EQ(volume, pin.terrain_volume());
+    VWB_EXPECT((pin.durable_terrain_snapshot().records()[0].state.cell == CellCoord{-16, 0, 0}));
+    VWB_EXPECT((pin.durable_terrain_snapshot().records()[1].state.cell == CellCoord{-1, 0, 15}));
+    VWB_EXPECT((pin.durable_terrain_snapshot().records()[2].state.cell == CellCoord{0, 0, 1}));
+    VWB_EXPECT(pin.durable_terrain_at({-16, 0, 0}).has_value());
+    VWB_EXPECT(pin.durable_terrain_at({-1, 0, 15}).has_value());
+    VWB_EXPECT(pin.durable_terrain_at({0, 0, 1}).has_value());
+    VWB_EXPECT(!pin.durable_terrain_at({0, 0, 15}).has_value());
+}
+
 VWB_TEST(world_delta_store_constructor_atomically_pins_a_validated_v2_terrain_checkpoint) {
     const NativeTerrainVolumeV2 volume = persisted_terrain_volume(73U, {
         typed_stone({-16, 0, 0}), typed_stone({16, 0, 0}),

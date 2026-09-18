@@ -2,6 +2,7 @@
 
 #include "../core/native_terrain_volume_v2_codec.hpp"
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -184,6 +185,20 @@ NativeTerrainVolumeV2 y_order_volume() {
     return volume;
 }
 
+NativeTerrainVolumeV2 interleaved_section_volume(const bool reverse_input = false) {
+    std::vector<NativeTypedWorldStateRecord> records = {
+        durable_record({0, 0, 1}, "section-zero"),
+        durable_record({-1, 0, 15}, "section-negative-high-z"),
+        durable_record({-16, 0, 0}, "section-negative-low-z"),
+    };
+    if (reverse_input) std::reverse(records.begin(), records.end());
+    NativeTerrainVolumeV2 volume;
+    volume.revision = 11U;
+    volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+    volume.section_revisions = {{{-1, 0, 0}, 10U}, {{0, 0, 0}, 11U}};
+    return volume;
+}
+
 NativeTerrainVolumeV2 bulk_volume(const std::size_t record_count) {
     std::vector<NativeTypedWorldStateRecord> records;
     records.reserve(record_count);
@@ -273,18 +288,65 @@ VWB_TEST(native_terrain_volume_v2_direct_validator_rejects_forged_typed_state_as
     VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected, validate_native_terrain_volume_v2(forged));
 }
 
-VWB_TEST(native_terrain_volume_v2_direct_validator_preserves_exact_save_delta_metadata_semantics) {
-    NativeTerrainVolumeV2 disabled = sample_volume();
-    std::vector<NativeTypedWorldStateRecord> disabled_records = disabled.durable_snapshot.records();
-    disabled_records[0].state.metadata = NativeValue::object({{"saveDelta", NativeValue::boolean(false)}});
-    disabled.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(disabled_records));
-    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected, validate_native_terrain_volume_v2(disabled));
+VWB_TEST(native_terrain_volume_v2_codec_preserves_section_first_order_and_identity) {
+    const NativeTerrainVolumeV2 original = interleaved_section_volume();
+    const NativeTerrainVolumeV2 reordered_input = interleaved_section_volume(true);
+    VWB_EXPECT(original == reordered_input);
+    VWB_EXPECT((original.durable_snapshot.records()[0].state.cell == CellCoord{-16, 0, 0}));
+    VWB_EXPECT((original.durable_snapshot.records()[1].state.cell == CellCoord{-1, 0, 15}));
+    VWB_EXPECT((original.durable_snapshot.records()[2].state.cell == CellCoord{0, 0, 1}));
 
-    NativeTerrainVolumeV2 opaque = sample_volume();
-    std::vector<NativeTypedWorldStateRecord> opaque_records = opaque.durable_snapshot.records();
-    opaque_records[0].state.metadata = NativeValue::object({{"saveDelta", NativeValue::string("false")}});
-    opaque.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(opaque_records));
-    VWB_EXPECT(validate_native_terrain_volume_v2(opaque) == opaque);
+    const NativeTerrainVolumeV2 validated = validate_native_terrain_volume_v2(original);
+    VWB_EXPECT(validated == original);
+    const NativeValue encoded = encode_native_terrain_volume_v2(original);
+    const NativeValue reordered_encoded = encode_native_terrain_volume_v2(reordered_input);
+    VWB_EXPECT(encoded == reordered_encoded);
+    VWB_EXPECT(encoded.canonical_binary() == reordered_encoded.canonical_binary());
+    VWB_EXPECT(decode_native_terrain_volume_v2(encoded) == original);
+}
+
+VWB_TEST(native_terrain_volume_v2_direct_validator_matches_godot_save_delta_bool_conversion) {
+    const auto with_metadata = [](NativeValue metadata) {
+        NativeTerrainVolumeV2 volume = sample_volume();
+        std::vector<NativeTypedWorldStateRecord> records = volume.durable_snapshot.records();
+        records[0].state.metadata = std::move(metadata);
+        volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+        return volume;
+    };
+
+    const NativeTerrainVolumeV2 missing = with_metadata(NativeValue::object({
+        {"source", NativeValue::string("player_dig")},
+    }));
+    VWB_EXPECT(validate_native_terrain_volume_v2(missing) == missing);
+    const NativeTerrainVolumeV2 boolean_true = with_metadata(NativeValue::object({
+        {"saveDelta", NativeValue::boolean(true)},
+    }));
+    VWB_EXPECT(validate_native_terrain_volume_v2(boolean_true) == boolean_true);
+    for (const double truthy : std::array<double, 3>{{1.0, -1.0, 0.5}}) {
+        const NativeTerrainVolumeV2 numeric = with_metadata(NativeValue::object({
+            {"saveDelta", NativeValue::number(truthy)},
+        }));
+        VWB_EXPECT(validate_native_terrain_volume_v2(numeric) == numeric);
+    }
+
+    const std::vector<NativeValue> rejected = {
+        NativeValue::boolean(false),
+        NativeValue::number(0.0),
+        NativeValue::null(),
+        NativeValue::string(""),
+        NativeValue::string("false"),
+        NativeValue::array({}),
+        NativeValue::array({NativeValue::number(1.0)}),
+        NativeValue::object({}),
+        NativeValue::object({{"value", NativeValue::number(1.0)}}),
+    };
+    for (const NativeValue &value : rejected) {
+        const NativeTerrainVolumeV2 invalid = with_metadata(NativeValue::object({
+            {"saveDelta", value},
+        }));
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected,
+            validate_native_terrain_volume_v2(invalid));
+    }
 }
 
 VWB_TEST(native_terrain_volume_v2_codec_round_trips_exact_current_v2_structure) {
@@ -387,11 +449,16 @@ VWB_TEST(native_terrain_volume_v2_codec_rejects_non_durable_and_unrepresentable_
     state_fields[11].second = NativeValue::object(std::move(metadata_fields));
     VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected, decode_native_terrain_volume_v2(
         replace_first_state(encoded, NativeValue::object(std::move(state_fields)))));
-    NativeValue::Object nonboolean_metadata_state = original_state.as_object();
-    nonboolean_metadata_state[11].second = NativeValue::object({{"saveDelta", NativeValue::string("opaque")}});
-    const NativeTerrainVolumeV2 nonboolean_metadata = decode_native_terrain_volume_v2(
-        replace_first_state(encoded, NativeValue::object(std::move(nonboolean_metadata_state))));
-    VWB_EXPECT_EQ(NativeValueKind::string, nonboolean_metadata.durable_snapshot.records()[0].state.metadata.as_object()[0].second.kind());
+    NativeValue::Object invalid_metadata_state = original_state.as_object();
+    invalid_metadata_state[11].second = NativeValue::object({{"saveDelta", NativeValue::string("opaque")}});
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected, decode_native_terrain_volume_v2(
+        replace_first_state(encoded, NativeValue::object(std::move(invalid_metadata_state)))));
+    NativeValue::Object numeric_metadata_state = original_state.as_object();
+    numeric_metadata_state[11].second = NativeValue::object({{"saveDelta", NativeValue::number(1.0)}});
+    const NativeTerrainVolumeV2 numeric_metadata = decode_native_terrain_volume_v2(
+        replace_first_state(encoded, NativeValue::object(std::move(numeric_metadata_state))));
+    VWB_EXPECT_EQ(NativeValueKind::number,
+        numeric_metadata.durable_snapshot.records()[0].state.metadata.as_object()[0].second.kind());
     NativeTerrainVolumeV2 missing_reason = sample_volume();
     std::vector<NativeTypedWorldStateRecord> records = missing_reason.durable_snapshot.records();
     records[0].state.edit_reason.reset();

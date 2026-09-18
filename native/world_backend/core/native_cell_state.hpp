@@ -130,8 +130,10 @@ NativeCellState make_native_cell_state(
 std::size_t native_cell_state_section_index(const NativeCellState &state);
 NativeCellStatePersistencePolicy native_cell_state_policy(NativeCellStateNamespace name_space) noexcept;
 
-// Save v2 has one stable coordinate ordering regardless of in-memory map or
-// section layout: z, then y, then x.  It is intentionally not section order.
+// Save v2 groups records by section key in z/y/x order, then orders cells
+// within each section in z/y/x order. This is intentionally specific to the
+// TerrainVolumeService v2 envelope; other coordinate indexes keep their own
+// lookup order.
 bool native_cell_state_v2_save_less(const NativeCellState &left, const NativeCellState &right) noexcept;
 std::vector<NativeCellState> sort_native_cell_states_v2_for_save(std::vector<NativeCellState> states);
 

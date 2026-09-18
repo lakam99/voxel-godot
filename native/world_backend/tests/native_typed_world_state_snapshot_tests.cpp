@@ -68,6 +68,28 @@ VWB_TEST(native_typed_world_state_snapshot_canonicalizes_durable_records_z_y_x) 
     VWB_EXPECT(snapshot == same);
 }
 
+VWB_TEST(native_typed_world_state_snapshot_groups_interleaved_negative_sections_stably) {
+    const NativeTypedWorldStateSnapshot snapshot = NativeTypedWorldStateSnapshot::create({
+        durable_record({0, 0, 1}), durable_record({-1, 0, 15}), durable_record({-16, 0, 0}),
+    });
+    VWB_EXPECT_EQ(3U, snapshot.records().size());
+    VWB_EXPECT((snapshot.records()[0].state.cell == CellCoord{-16, 0, 0}));
+    VWB_EXPECT((snapshot.records()[1].state.cell == CellCoord{-1, 0, 15}));
+    VWB_EXPECT((snapshot.records()[2].state.cell == CellCoord{0, 0, 1}));
+
+    const NativeTypedWorldStateSnapshot same = NativeTypedWorldStateSnapshot::create({
+        durable_record({-1, 0, 15}), durable_record({-16, 0, 0}), durable_record({0, 0, 1}),
+    });
+    VWB_EXPECT(snapshot == same);
+
+    NativeTypedWorldStateStore store;
+    store.admit_durable_snapshot(snapshot);
+    VWB_EXPECT(store.durable_value_at({-16, 0, 0}).has_value());
+    VWB_EXPECT(store.durable_value_at({-1, 0, 15}).has_value());
+    VWB_EXPECT(store.durable_value_at({0, 0, 1}).has_value());
+    VWB_EXPECT(!store.durable_value_at({0, 0, 15}).has_value());
+}
+
 VWB_TEST(native_typed_world_state_snapshot_rejects_overlay_generated_and_duplicate_persistence) {
     VWB_EXPECT_THROW(NativeCellStateRejected, NativeTypedWorldStateSnapshot::create({overlay_record({0, 0, 0})}));
     NativeTypedWorldStateRecord transient_durable = durable_record({0, 1, 0});

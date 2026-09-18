@@ -286,6 +286,20 @@ VWB_TEST(native_cell_state_v2_save_order_is_z_then_y_then_x_even_across_negative
     VWB_EXPECT((sorted[3].cell == CellCoord{0, 0, 0}));
 }
 
+VWB_TEST(native_cell_state_v2_save_order_groups_sections_before_ordering_cells) {
+    std::vector<NativeCellState> states;
+    states.push_back(make_native_cell_state(air({0, 0, 1})));
+    states.push_back(make_native_cell_state(air({-1, 0, 15})));
+    states.push_back(make_native_cell_state(air({-16, 0, 0})));
+    const std::vector<NativeCellState> sorted = sort_native_cell_states_v2_for_save(std::move(states));
+    VWB_EXPECT((sorted[0].section == CellCoord{-1, 0, 0}));
+    VWB_EXPECT((sorted[0].cell == CellCoord{-16, 0, 0}));
+    VWB_EXPECT((sorted[1].section == CellCoord{-1, 0, 0}));
+    VWB_EXPECT((sorted[1].cell == CellCoord{-1, 0, 15}));
+    VWB_EXPECT((sorted[2].section == CellCoord{0, 0, 0}));
+    VWB_EXPECT((sorted[2].cell == CellCoord{0, 0, 1}));
+}
+
 VWB_TEST(native_cell_state_v2_save_rejects_duplicate_cells) {
     std::vector<NativeCellState> states;
     states.push_back(make_native_cell_state(air({1, 2, 3})));
@@ -294,19 +308,31 @@ VWB_TEST(native_cell_state_v2_save_rejects_duplicate_cells) {
 }
 
 VWB_TEST(native_cell_state_v2_comparator_covers_every_coordinate_tie_break_and_empty_save) {
-    const NativeCellState z_low = make_native_cell_state(air({99, 99, -2}));
-    const NativeCellState z_high = make_native_cell_state(air({-99, -99, -1}));
-    const NativeCellState y_low = make_native_cell_state(air({99, -2, -1}));
-    const NativeCellState y_high = make_native_cell_state(air({-99, -1, -1}));
-    const NativeCellState x_low = make_native_cell_state(air({-2, 0, 0}));
-    const NativeCellState x_high = make_native_cell_state(air({-1, 0, 0}));
-    VWB_EXPECT(native_cell_state_v2_save_less(z_low, z_high));
-    VWB_EXPECT(!native_cell_state_v2_save_less(z_high, z_low));
-    VWB_EXPECT(native_cell_state_v2_save_less(y_low, y_high));
-    VWB_EXPECT(!native_cell_state_v2_save_less(y_high, y_low));
-    VWB_EXPECT(native_cell_state_v2_save_less(x_low, x_high));
-    VWB_EXPECT(!native_cell_state_v2_save_less(x_high, x_low));
-    VWB_EXPECT(!native_cell_state_v2_save_less(x_high, x_high));
+    const NativeCellState section_z_low = make_native_cell_state(air({0, 0, -1}));
+    const NativeCellState section_z_high = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState section_y_low = make_native_cell_state(air({0, -1, 0}));
+    const NativeCellState section_y_high = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState section_x_low = make_native_cell_state(air({-1, 0, 0}));
+    const NativeCellState section_x_high = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState cell_z_low = make_native_cell_state(air({15, 15, 0}));
+    const NativeCellState cell_z_high = make_native_cell_state(air({0, 0, 1}));
+    const NativeCellState cell_y_low = make_native_cell_state(air({15, 0, 0}));
+    const NativeCellState cell_y_high = make_native_cell_state(air({0, 1, 0}));
+    const NativeCellState cell_x_low = make_native_cell_state(air({0, 0, 0}));
+    const NativeCellState cell_x_high = make_native_cell_state(air({1, 0, 0}));
+    VWB_EXPECT(native_cell_state_v2_save_less(section_z_low, section_z_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(section_z_high, section_z_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(section_y_low, section_y_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(section_y_high, section_y_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(section_x_low, section_x_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(section_x_high, section_x_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(cell_z_low, cell_z_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_z_high, cell_z_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(cell_y_low, cell_y_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_y_high, cell_y_low));
+    VWB_EXPECT(native_cell_state_v2_save_less(cell_x_low, cell_x_high));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_x_high, cell_x_low));
+    VWB_EXPECT(!native_cell_state_v2_save_less(cell_x_high, cell_x_high));
     VWB_EXPECT(sort_native_cell_states_v2_for_save({}).empty());
 }
 

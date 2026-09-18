@@ -32,10 +32,16 @@ bool coordinate_less(const CellCoord &left, const CellCoord &right) noexcept {
 
 constexpr std::uint64_t MAX_V2_JSON_INTEGER = 9007199254740992ULL;
 
-bool metadata_explicitly_disables_save(const NativeValue &metadata) {
+bool metadata_rejected_by_save_delta(const NativeValue &metadata) {
     for (const auto &entry : metadata.as_object()) {
-        if (entry.first == "saveDelta" && entry.second.kind() == NativeValueKind::boolean
-            && !entry.second.as_boolean()) return true;
+        if (entry.first != "saveDelta") continue;
+        if (entry.second.kind() == NativeValueKind::boolean) return !entry.second.as_boolean();
+        if (entry.second.kind() == NativeValueKind::number) return entry.second.as_number() == 0.0;
+        // Godot 4.6.1's bool(Variant) constructor accepts only Boolean and
+        // numeric values. Nil, strings, arrays, and dictionaries are invalid
+        // calls in cell_state_saved_in_delta(), so none can be canonical
+        // durable output when explicitly stored under saveDelta.
+        return true;
     }
     return false;
 }
@@ -185,11 +191,11 @@ NativeCellState decode_state(const NativeValue &value, const CellCoord cell, con
     if (sky > 15U || block > 15U) reject();
     const NativeValue &metadata = member(fields, "metadata");
     if (metadata.kind() != NativeValueKind::object) reject();
-    // `saveDelta=false` has an explicit non-durable meaning in the live
-    // service. It cannot enter terrainVolume's durable codec. saveDelta=true
-    // remains ordinary preserved metadata; no metadata string is treated as a
-    // scene-overlay discriminator here.
-    if (metadata_explicitly_disables_save(metadata)) reject();
+    // Match TerrainVolumeService.cell_state_saved_in_delta's exact Godot
+    // bool(Variant) boundary. Boolean true and nonzero finite numbers are
+    // preserved; false/zero and non-convertible Variant kinds cannot enter a
+    // canonical durable terrainVolume snapshot.
+    if (metadata_rejected_by_save_delta(metadata)) reject();
     NativeCellStateInput input;
     input.cell = cell;
     input.block_id = NativeBlockIdentity::create(string(member(fields, "blockId")));
@@ -276,7 +282,7 @@ NativeTerrainVolumeV2 validate_native_terrain_volume_v2(
             while (record_index < records.size() && records[record_index].state.section == section.section) {
                 const NativeCellState &state = records[record_index].state;
                 if (!state.block_id.has_value() || !state.edit_reason.has_value()
-                    || metadata_explicitly_disables_save(state.metadata)) reject();
+                    || metadata_rejected_by_save_delta(state.metadata)) reject();
                 ++record_index;
             }
             // Canonical unique coordinates and fixed 16-cell decomposition
