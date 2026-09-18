@@ -219,7 +219,8 @@ VWB_TEST(world_source_page_pin_identity_tracks_only_local_typed_physical_content
     (void)store.commit_typed_cells(remote);
     const WorldSourcePin after_remote(definition, store.pin(), {-2, -3}, shaping);
     VWB_EXPECT_EQ(empty.physical_content_identity(), after_remote.physical_content_identity());
-    VWB_EXPECT_EQ(empty.typed_page_projection_digest(), after_remote.typed_page_projection_digest());
+    VWB_EXPECT_EQ(empty.typed_projection_digest_for_page({-2, -3}),
+        after_remote.typed_projection_digest_for_page({-2, -3}));
     VWB_EXPECT(empty.terrain_delta_revision() != after_remote.terrain_delta_revision());
 
     WorldTypedCellTransaction local; local.transaction_id = "local"; local.expected_revision = 1;
@@ -327,10 +328,34 @@ VWB_TEST(world_source_effective_pin_canonicalizes_and_binds_float32_dependency_p
     VWB_EXPECT_EQ((NativeTerrainPageKey{6, 0}), canonical.terrain_shaping_for_page({6, 0}).page_key());
     VWB_EXPECT_THROW(std::out_of_range, canonical.terrain_shaping_for_page({99, 99}));
     VWB_EXPECT_THROW(std::out_of_range, canonical.terrain_shaping_for_page({-999, -999}));
+    VWB_EXPECT_THROW(std::out_of_range, canonical.typed_projection_digest_for_page({99, 99}));
+    VWB_EXPECT_THROW(std::out_of_range, canonical.typed_projection_digest_for_page({-999, -999}));
 
     auto reversed = shaping; std::reverse(reversed.begin(), reversed.end());
     const WorldSourcePin reordered(definition, store.pin(), primary, reversed);
     VWB_EXPECT_EQ(canonical.physical_content_identity(), reordered.physical_content_identity());
+
+    WorldTypedCellTransaction dependency_edit;
+    dependency_edit.transaction_id = "dependency-page-edit";
+    dependency_edit.expected_revision = 0;
+    dependency_edit.operations.push_back({NativeCellStateNamespace::durable_terrain, {1959, 4, 0},
+        WorldTypedCellOperationKind::set, stone_override({1959, 4, 0})});
+    (void)store.commit_typed_cells(dependency_edit);
+    const WorldSourcePin after_dependency_edit(definition, store.pin(), primary, shaping);
+    VWB_EXPECT(!(canonical.physical_content_identity() == after_dependency_edit.physical_content_identity()));
+    VWB_EXPECT(!(canonical.typed_projection_digest_for_page({6, 0})
+        == after_dependency_edit.typed_projection_digest_for_page({6, 0})));
+
+    WorldTypedCellTransaction outside_edit;
+    outside_edit.transaction_id = "outside-effective-pages-edit";
+    outside_edit.expected_revision = 1;
+    outside_edit.operations.push_back({NativeCellStateNamespace::durable_terrain, {1000000, 4, 1000000},
+        WorldTypedCellOperationKind::set, stone_override({1000000, 4, 1000000})});
+    (void)store.commit_typed_cells(outside_edit);
+    const WorldSourcePin after_outside_edit(definition, store.pin(), primary, shaping);
+    VWB_EXPECT_EQ(after_dependency_edit.physical_content_identity(), after_outside_edit.physical_content_identity());
+    const WorldSourcePin reordered_after_edits(definition, store.pin(), primary, reversed);
+    VWB_EXPECT_EQ(after_outside_edit.physical_content_identity(), reordered_after_edits.physical_content_identity());
 
     auto duplicate = shaping; duplicate.push_back(shaping.front());
     VWB_EXPECT_THROW(std::invalid_argument,
@@ -349,7 +374,8 @@ VWB_TEST(world_source_effective_pin_canonicalizes_and_binds_float32_dependency_p
     const NativeTerrainPageKey dependency_key = dependency->page_key();
     *dependency = registry.pin_page(dependency_key, {{dependency_key.x, dependency_key.z, false, {}}});
     const WorldSourcePin dependency_changed(definition, store.pin(), primary, changed_dependency);
-    VWB_EXPECT(!(canonical.physical_content_identity() == dependency_changed.physical_content_identity()));
+    VWB_EXPECT(!(after_outside_edit.physical_content_identity()
+        == dependency_changed.physical_content_identity()));
 
     NativeSiteSourceRegionKey remote_region{}; bool found_remote = false;
     for (std::int32_t x = 100; x < 1000 && !found_remote; ++x) {
@@ -445,6 +471,45 @@ VWB_TEST(world_source_effective_pin_includes_extreme_center_only_dependency_iden
     });
     VWB_EXPECT(center_dependency != changed.end());
     *center_dependency = registry.pin_page({44385, 0}, {{44385, 0, false, {}}});
+    const WorldSourcePin after(definition, store.pin(), primary, changed);
+    VWB_EXPECT(!(before.physical_content_identity() == after.physical_content_identity()));
+}
+
+VWB_TEST(world_source_effective_pin_includes_wgs_grid_numeric_dependency_identity) {
+    const WorldSourceDefinition definition(atlas_descriptor());
+    const NativeTerrainPageKey primary{88769, 0};
+    const CellCoord edge_cell{24855320, 0, 0};
+    const auto lattice = resolve_world_query(
+        definition, WorldLatticeQuery{edge_cell, WorldQueryIntent::terrain_mesh});
+    const auto center = resolve_world_query(
+        definition, WorldCellCenterQuery{edge_cell, WorldQueryIntent::gameplay});
+    const float grid_position = static_cast<float>(
+        static_cast<double>(edge_cell.x) * definition.constants().cell_size_meters);
+    const auto remapped_x = [&](const float position) {
+        return static_cast<std::int32_t>(std::floor(
+            static_cast<double>(position) / definition.constants().cell_size_meters));
+    };
+    VWB_EXPECT_EQ(88769, remapped_x(lattice.lattice_position.x) / NativeTerrainShapingSnapshot::PAGE_CELLS);
+    VWB_EXPECT_EQ(88769, remapped_x(center.center_position.x) / NativeTerrainShapingSnapshot::PAGE_CELLS);
+    VWB_EXPECT_EQ(24855318, remapped_x(grid_position));
+    VWB_EXPECT_EQ(88768, remapped_x(grid_position) / NativeTerrainShapingSnapshot::PAGE_CELLS);
+
+    const auto required = world_effective_shaping_dependencies(definition, primary);
+    VWB_EXPECT(std::find(required.begin(), required.end(), NativeTerrainPageKey{88768, 0})
+        != required.end());
+    NativeTerrainShapingRegistry registry(definition, shaping_policy());
+    const auto shaping = ready_shaping(registry, primary);
+    WorldDeltaStore store;
+    const WorldSourcePin before(definition, store.pin(), primary, shaping);
+    VWB_EXPECT_EQ((NativeTerrainPageKey{88768, 0}),
+        before.terrain_shaping_for_page({88768, 0}).page_key());
+
+    auto changed = shaping;
+    const auto grid_dependency = std::find_if(changed.begin(), changed.end(), [](const auto &value) {
+        return value.page_key() == NativeTerrainPageKey{88768, 0};
+    });
+    VWB_EXPECT(grid_dependency != changed.end());
+    *grid_dependency = registry.pin_page({88768, 0}, {{88768, 0, false, {}}});
     const WorldSourcePin after(definition, store.pin(), primary, changed);
     VWB_EXPECT(!(before.physical_content_identity() == after.physical_content_identity()));
 }

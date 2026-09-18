@@ -6,6 +6,7 @@
     "core/coordinates.cpp",
     "core/fast_noise_compat.cpp",
     "core/native_feature_delta.cpp",
+    "core/native_effective_terrain_source.cpp",
     "core/legacy_seed_hash.cpp",
     "core/native_cell_state.cpp",
     "core/native_natural_terrain_source.cpp",
@@ -32,6 +33,7 @@
     "core/coordinates.hpp",
     "core/fast_noise_compat.hpp",
     "core/native_feature_delta.hpp",
+    "core/native_effective_terrain_source.hpp",
     "core/legacy_seed_hash.hpp",
     "core/native_cell_state.hpp",
     "core/native_natural_terrain_source.hpp",
@@ -55,6 +57,7 @@
   ],
   "testSources": [
     "tests/biome_region_field_tests.cpp",
+    "tests/native_effective_terrain_source_tests.cpp",
     "tests/native_feature_delta_tests.cpp",
     "tests/native_world_backend_state_tests.cpp",
     "tests/native_world_deltas_v2_codec_tests.cpp",

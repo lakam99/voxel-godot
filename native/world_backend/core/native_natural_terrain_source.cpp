@@ -128,6 +128,15 @@ TerrainFluidId underground_fluid(const AdmittedTerrainSeed &seed, const CellCoor
 }
 } // namespace
 
+double native_underground_density_from_raw(
+    const double raw_density, const double cell_size, const double depth_cells,
+    const double minimum_overburden_cells) noexcept {
+    if (depth_cells <= minimum_overburden_cells) return cell_size;
+    const double fade = clamp01(smoothstep(depth_cells, minimum_overburden_cells,
+        minimum_overburden_cells + 5.0) * (1.0 - smoothstep(depth_cells, 58.0, 74.0)));
+    return lerp(cell_size, raw_density, fade);
+}
+
 struct NativeNaturalTerrainSource::GeneratedSample {
     CellCoord source_cell; double surface_y = 0.0; double density = 0.0; bool solid = false;
     TerrainBiomeId surface_biome = TerrainBiomeId::plains; TerrainBiomeId biome = TerrainBiomeId::plains;
@@ -164,12 +173,16 @@ TerrainBiomeId NativeNaturalTerrainSource::natural_surface_biome(const std::int3
     const double surface = natural_surface_y(x, z);
     if (surface < definition_.constants().water_level_meters + 0.3) return TerrainBiomeId::ocean;
     if (surface < definition_.constants().water_level_meters + 1.7) return TerrainBiomeId::beach;
+    return regional_surface_biome(x, z);
+}
+
+TerrainBiomeId NativeNaturalTerrainSource::regional_surface_biome(const std::int32_t x, const std::int32_t z) const {
     const auto position = regional_biome_position(x, z, definition_.constants().cell_size_meters);
     return regional_biome_id(BiomeRegionField::sample(definition_.admitted_biome_seed(), {position.x, position.z}).biome);
 }
 
 double NativeNaturalTerrainSource::underground_air_density(const WorldFloat32Position &position, const CellCoord &source,
-    const double /*surface_y*/, const double depth_cells) const {
+    const double /*surface_y*/, const double depth_cells, const double minimum_overburden_cells) const {
     const double cell_size = definition_.constants().cell_size_meters;
     if (static_cast<double>(position.y) <= static_cast<double>(definition_.constants().world_bottom_cell_y + 2) * cell_size) return cell_size;
     const FastNoiseCompat noise(seed_hash_);
@@ -188,10 +201,25 @@ double NativeNaturalTerrainSource::underground_air_density(const WorldFloat32Pos
     const double porous_strength = porous * smoothstep(local, 0.52, 0.82);
     const double chamber_depth = smoothstep(depth_cells, 8.0, 18.0) * (1.0 - smoothstep(depth_cells, 48.0, 64.0));
     const double signal = clamp01(std::max({broad_strength, chamber_strength * 0.96, porous_strength * 0.90}) + chamber_depth * 0.10 + cellular * 0.025);
-    if (depth_cells <= 3.0) return cell_size;
-    const double fade = clamp01(smoothstep(depth_cells, 3.0, 8.0) * (1.0 - smoothstep(depth_cells, 58.0, 74.0)));
     const double strata = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.38 - 1400.0, y * 0.62 + 2500.0, z * 0.38 - 3700.0);
-    return lerp(cell_size, (lerp(0.50, 0.60, strata) - chamber_depth * 0.04 - signal) * cell_size * 4.25, fade);
+    const double raw_density = (lerp(0.50, 0.60, strata) - chamber_depth * 0.04 - signal) * cell_size * 4.25;
+    return native_underground_density_from_raw(
+        raw_density, cell_size, depth_cells, minimum_overburden_cells);
+}
+
+TerrainMaterialId NativeNaturalTerrainSource::solid_material_for(
+    const CellCoord &cell, const double surface_y, const double position_y,
+    const TerrainBiomeId biome, const double density) const {
+    return solid_material(definition_.raw_terrain_seed(), cell, surface_y, position_y, biome, density,
+        definition_.constants().cell_size_meters, definition_.constants().world_bottom_cell_y);
+}
+
+TerrainFluidId NativeNaturalTerrainSource::underground_fluid_for(
+    const CellCoord &cell, const WorldFloat32Position &position, const double depth_cells,
+    const TerrainBiomeId surface_biome) const {
+    return underground_fluid(definition_.raw_terrain_seed(), cell, position, depth_cells, surface_biome,
+        definition_.constants().cell_size_meters, definition_.constants().world_bottom_cell_y,
+        definition_.constants().water_level_meters);
 }
 
 NativeNaturalTerrainSource::GeneratedSample NativeNaturalTerrainSource::sample_generated_at_position(const WorldFloat32Position &position, const CellCoord &coordinate) const {
@@ -233,13 +261,13 @@ NativeCellState NativeNaturalTerrainSource::sample_cell_state(const WorldCellCen
     bool solid = density >= 0.0; const TerrainBiomeId surface_biome = natural_surface_biome(query.coordinate.x, query.coordinate.z);
     TerrainMaterialId material = TerrainMaterialId::air; TerrainBiomeId biome = sample.biome; TerrainFluidId fluid = TerrainFluidId::none;
     if (query.coordinate.y <= definition_.constants().world_bottom_cell_y + 1) { solid = true; density = std::max(density, cell_size * 4.0); material = TerrainMaterialId::bedrock; biome = TerrainBiomeId::deep_underground; }
-    else if (solid) { material = solid_material(definition_.raw_terrain_seed(), query.coordinate, sample.surface_y, resolved.center_position.y, surface_biome, density, cell_size, definition_.constants().world_bottom_cell_y); biome = depth > cell_size * 34.0 ? TerrainBiomeId::deep_underground : depth > cell_size * 3.0 ? TerrainBiomeId::underground : surface_biome; }
+    else if (solid) { material = solid_material_for(query.coordinate, sample.surface_y, resolved.center_position.y, surface_biome, density); biome = depth > cell_size * 34.0 ? TerrainBiomeId::deep_underground : depth > cell_size * 3.0 ? TerrainBiomeId::underground : surface_biome; }
     // A generated surface-water cell is necessarily above its surface, which
     // the same water-level classification already identifies as ocean.  A
     // below-surface void needs over three cells before it can be non-solid and
     // therefore cannot enter this at-most-two-cell water branch.
     else if (resolved.center_position.y <= definition_.constants().water_level_meters && depth <= cell_size * 2.0) { material = TerrainMaterialId::water; biome = surface_biome; fluid = TerrainFluidId::water; }
-    else if (depth > cell_size * 0.35) { biome = TerrainBiomeId::underground_air; fluid = underground_fluid(definition_.raw_terrain_seed(), query.coordinate, resolved.center_position, depth_cells, surface_biome, cell_size, definition_.constants().world_bottom_cell_y, definition_.constants().water_level_meters); material = fluid == TerrainFluidId::water ? TerrainMaterialId::water : fluid == TerrainFluidId::lava ? TerrainMaterialId::lava : TerrainMaterialId::air; }
+    else if (depth > cell_size * 0.35) { biome = TerrainBiomeId::underground_air; fluid = underground_fluid_for(query.coordinate, resolved.center_position, depth_cells, surface_biome); material = fluid == TerrainFluidId::water ? TerrainMaterialId::water : fluid == TerrainFluidId::lava ? TerrainMaterialId::lava : TerrainMaterialId::air; }
     else biome = surface_biome;
     // A non-solid depth above .35 cell is assigned underground_air before this
     // point; water can retain surface biome only above the surface (depth=0).

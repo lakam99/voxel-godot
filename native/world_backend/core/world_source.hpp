@@ -185,10 +185,10 @@ std::uint32_t query_revision(const WorldSourceDefinition &definition, const Worl
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &query) noexcept;
 
 // Complete canonical shaping-page dependency set for effective terrain
-// sampling across one primary integer page. Godot's distinct float32 lattice
-// and cell-center round-trips can each select a source cell in a neighbouring
-// page, so the exact Cartesian dependency set for each convention participates
-// in this bounded union without inventing cross-convention combinations.
+// sampling across one primary integer page. Godot's distinct float32 voxel
+// lattice, one-boundary grid numeric, and cell-center round-trips can each
+// select a source cell in a neighbouring page, so the exact Cartesian
+// dependency set for each convention participates in this bounded union.
 std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
     const WorldSourceDefinition &definition, NativeTerrainPageKey primary_page);
 
@@ -214,7 +214,7 @@ public:
     std::uint64_t terrain_delta_revision() const noexcept;
     std::uint64_t shaping_registry_revision() const noexcept;
     const WorldPhysicalContentIdentity &shaping_registry_content_identity() const noexcept;
-    const Sha256Digest &typed_page_projection_digest() const noexcept;
+    const Sha256Digest &typed_projection_digest_for_page(NativeTerrainPageKey page) const;
     const WorldPhysicalContentIdentity &physical_content_identity() const noexcept;
 
 private:
@@ -222,9 +222,9 @@ private:
     WorldDeltaPinnedSnapshot deltas_;
     std::shared_ptr<const NativeTerrainShapingSnapshot> primary_terrain_shaping_;
     std::vector<std::shared_ptr<const NativeTerrainShapingSnapshot>> terrain_shaping_pages_;
+    std::vector<Sha256Digest> typed_projection_digests_;
     std::uint64_t shaping_registry_revision_ = 0;
     WorldPhysicalContentIdentity shaping_registry_content_identity_;
-    Sha256Digest typed_page_projection_digest_{};
     WorldPhysicalContentIdentity physical_content_identity_;
 };
 
