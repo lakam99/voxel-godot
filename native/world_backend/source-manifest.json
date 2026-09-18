@@ -6,6 +6,7 @@
     "core/coordinates.cpp",
     "core/fast_noise_compat.cpp",
     "core/legacy_seed_hash.cpp",
+    "core/native_world_backend_state.cpp",
     "core/sha256.cpp",
     "core/terrain_meshing.cpp",
     "core/terrain_snapshot.cpp",
@@ -20,6 +21,7 @@
     "core/coordinates.hpp",
     "core/fast_noise_compat.hpp",
     "core/legacy_seed_hash.hpp",
+    "core/native_world_backend_state.hpp",
     "core/sha256.hpp",
     "core/terrain_meshing.hpp",
     "core/terrain_snapshot.hpp",
@@ -31,6 +33,7 @@
   ],
   "testSources": [
     "tests/biome_region_field_tests.cpp",
+    "tests/native_world_backend_state_tests.cpp",
     "tests/test_main.cpp",
     "tests/terrain_meshing_tests.cpp",
     "tests/terrain_source_tests.cpp",
