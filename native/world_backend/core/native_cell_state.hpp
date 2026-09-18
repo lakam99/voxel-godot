@@ -13,6 +13,10 @@
 
 namespace voxel::world_backend {
 
+// Test-only corruption seam, mirroring NativeValueTestAccess. Production code
+// has no API for constructing an invalid block identity.
+struct NativeBlockIdentityTestAccess;
+
 // This model mirrors only TerrainVolumeService's normalized, persisted cell
 // fields.  Surface columns and lattice samples deliberately have their own
 // types below: putting either into NativeCellState would recreate the current
@@ -42,6 +46,7 @@ public:
     bool operator!=(const NativeBlockIdentity &other) const noexcept;
 
 private:
+    friend struct NativeBlockIdentityTestAccess;
     explicit NativeBlockIdentity(std::string value);
 
     std::string value_;
