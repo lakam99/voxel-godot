@@ -36,21 +36,49 @@ bool valid_revisions(const WorldSourceRevisionDescriptor &r) noexcept {
 bool valid_constants(const WorldSourceConstants &c) noexcept {
     return std::isfinite(c.cell_size_meters) && c.cell_size_meters > 0.0
         && std::isfinite(c.cell_center_offset_cells) && c.cell_center_offset_cells > 0.0 && c.cell_center_offset_cells < 1.0
+        && std::isfinite(c.water_level_meters)
         && std::isfinite(c.minimum_surface_meters) && std::isfinite(c.maximum_surface_meters)
         && c.minimum_surface_meters <= c.maximum_surface_meters;
 }
 
-WorldPhysicalContentIdentity definition_identity(const AdmittedBiomeSeed &seed, const WorldSourceRevisionDescriptor &r, const WorldSourceConstants &c) {
+WorldPhysicalContentIdentity definition_identity(const AdmittedTerrainSeed &terrain_seed, const AdmittedBiomeSeed &seed, const WorldSourceRevisionDescriptor &r, const WorldSourceConstants &c) {
     Writer writer;
-    // Version 2 records the full size_t domain as an explicit uint64 rather
-    // than silently imposing a 32-bit seed-length ceiling on a new format.
-    writer.magic("VWPD"); writer.u32(2); writer.u64(static_cast<std::uint64_t>(seed.code_points.size()));
+    // Version 3 records both raw terrain and canonical-biome scalar counts as
+    // explicit uint64 values; neither may silently inherit a 32-bit limit.
+    writer.magic("VWPD"); writer.u32(3); writer.u64(static_cast<std::uint64_t>(terrain_seed.code_points.size()));
+    for (const std::uint32_t cp : terrain_seed.code_points) writer.u32(cp);
+    writer.u64(static_cast<std::uint64_t>(seed.code_points.size()));
     for (const std::uint32_t cp : seed.code_points) writer.u32(cp);
     writer.u32(r.source_schema_revision); writer.u32(r.terrain_generator_revision); writer.u32(r.biome_region_field_revision);
     writer.u32(r.lattice_query_revision); writer.u32(r.cell_center_query_revision); writer.u32(r.surface_column_query_revision);
-    writer.u64(binary64_bits(c.cell_size_meters)); writer.u64(binary64_bits(c.cell_center_offset_cells)); writer.i32(c.world_bottom_cell_y);
+    writer.u64(binary64_bits(c.cell_size_meters)); writer.u64(binary64_bits(c.cell_center_offset_cells)); writer.i32(c.world_bottom_cell_y); writer.u64(binary64_bits(c.water_level_meters));
     writer.u64(binary64_bits(c.minimum_surface_meters)); writer.u64(binary64_bits(c.maximum_surface_meters));
     return {sha256(writer.finish())};
+}
+
+std::vector<std::uint32_t> decode_utf8_scalars(const std::string &value) {
+    std::vector<std::uint32_t> output;
+    for (std::size_t index = 0; index < value.size();) {
+        const std::uint8_t first = static_cast<std::uint8_t>(value[index]);
+        std::uint32_t code_point = 0; std::size_t length = 0;
+        if (first <= 0x7fU) { code_point = first; length = 1; }
+        else if (first >= 0xc2U && first <= 0xdfU && index + 1 < value.size()
+            && (static_cast<std::uint8_t>(value[index + 1]) & 0xc0U) == 0x80U) {
+            code_point = (static_cast<std::uint32_t>(first & 0x1fU) << 6U) | (static_cast<std::uint8_t>(value[index + 1]) & 0x3fU); length = 2;
+        } else if (first >= 0xe0U && first <= 0xefU && index + 2 < value.size()
+            && (static_cast<std::uint8_t>(value[index + 1]) & 0xc0U) == 0x80U && (static_cast<std::uint8_t>(value[index + 2]) & 0xc0U) == 0x80U
+            && !(first == 0xe0U && static_cast<std::uint8_t>(value[index + 1]) < 0xa0U)
+            && !(first == 0xedU && static_cast<std::uint8_t>(value[index + 1]) >= 0xa0U)) {
+            code_point = (static_cast<std::uint32_t>(first & 0x0fU) << 12U) | (static_cast<std::uint32_t>(static_cast<std::uint8_t>(value[index + 1]) & 0x3fU) << 6U) | (static_cast<std::uint8_t>(value[index + 2]) & 0x3fU); length = 3;
+        } else if (first >= 0xf0U && first <= 0xf4U && index + 3 < value.size()
+            && (static_cast<std::uint8_t>(value[index + 1]) & 0xc0U) == 0x80U && (static_cast<std::uint8_t>(value[index + 2]) & 0xc0U) == 0x80U && (static_cast<std::uint8_t>(value[index + 3]) & 0xc0U) == 0x80U
+            && !(first == 0xf0U && static_cast<std::uint8_t>(value[index + 1]) < 0x90U)
+            && !(first == 0xf4U && static_cast<std::uint8_t>(value[index + 1]) >= 0x90U)) {
+            code_point = (static_cast<std::uint32_t>(first & 0x07U) << 18U) | (static_cast<std::uint32_t>(static_cast<std::uint8_t>(value[index + 1]) & 0x3fU) << 12U) | (static_cast<std::uint32_t>(static_cast<std::uint8_t>(value[index + 2]) & 0x3fU) << 6U) | (static_cast<std::uint8_t>(value[index + 3]) & 0x3fU); length = 4;
+        } else throw std::invalid_argument("raw terrain seed must be valid UTF-8");
+        output.push_back(code_point); index += length;
+    }
+    return output;
 }
 
 WorldPhysicalContentIdentity pinned_identity(const WorldPhysicalContentIdentity &definition, const std::uint64_t delta_revision) {
@@ -80,6 +108,18 @@ float godot_center_component(const std::int32_t cell_coordinate, const double of
 }
 } // namespace
 
+bool AdmittedTerrainSeed::operator==(const AdmittedTerrainSeed &other) const noexcept {
+    return code_points == other.code_points && utf8 == other.utf8 && admitted == other.admitted;
+}
+AdmittedTerrainSeed admit_raw_terrain_seed(const std::string &presentation_utf8) {
+    return {decode_utf8_scalars(presentation_utf8), presentation_utf8, true};
+}
+AdmittedTerrainSeed validate_admitted_raw_terrain_seed(const std::vector<std::uint32_t> &code_points,
+    const std::string &presentation_utf8, const bool admitted) {
+    if (!admitted || decode_utf8_scalars(presentation_utf8) != code_points) throw std::invalid_argument("raw terrain seed admission is invalid");
+    return {code_points, presentation_utf8, true};
+}
+
 WorldQueryKind query_kind(const WorldLatticeQuery &) noexcept { return WorldQueryKind::lattice_cell; }
 WorldQueryKind query_kind(const WorldCellCenterQuery &) noexcept { return WorldQueryKind::cell_center; }
 WorldQueryKind query_kind(const WorldSurfaceColumnQuery &) noexcept { return WorldQueryKind::surface_column; }
@@ -94,11 +134,13 @@ WorldSourceDefinition::WorldSourceDefinition(WorldSourceDescriptor descriptor) {
     if (!valid_revisions(descriptor.revisions)) throw std::invalid_argument("world source revisions must be nonzero");
     if (descriptor.revisions.biome_region_field_revision != BiomeRegionField::FIELD_VERSION) throw std::invalid_argument("world source biome field revision is unsupported");
     if (!valid_constants(descriptor.constants)) throw std::invalid_argument("world source constants are invalid");
+    raw_terrain_seed_ = validate_admitted_raw_terrain_seed(descriptor.raw_terrain_seed.code_points, descriptor.raw_terrain_seed.utf8, descriptor.raw_terrain_seed.admitted);
     admitted_biome_seed_ = BiomeRegionField::validate_admitted_seed(descriptor.admitted_biome_seed.code_points, descriptor.admitted_biome_seed.utf8);
     revisions_ = descriptor.revisions; constants_ = descriptor.constants;
-    physical_content_identity_ = definition_identity(admitted_biome_seed_, revisions_, constants_);
+    physical_content_identity_ = definition_identity(raw_terrain_seed_, admitted_biome_seed_, revisions_, constants_);
 }
 const AdmittedBiomeSeed &WorldSourceDefinition::admitted_biome_seed() const noexcept { return admitted_biome_seed_; }
+const AdmittedTerrainSeed &WorldSourceDefinition::raw_terrain_seed() const noexcept { return raw_terrain_seed_; }
 const WorldSourceRevisionDescriptor &WorldSourceDefinition::revisions() const noexcept { return revisions_; }
 const WorldSourceConstants &WorldSourceDefinition::constants() const noexcept { return constants_; }
 const WorldPhysicalContentIdentity &WorldSourceDefinition::physical_content_identity() const noexcept { return physical_content_identity_; }

@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <vector>
 
 using namespace voxel::world_backend;
 static_assert(!std::is_copy_assignable_v<WorldSourceDefinition>);
@@ -16,6 +17,7 @@ static_assert(!std::is_move_assignable_v<WorldSourcePin>);
 namespace {
 WorldSourceDescriptor atlas_descriptor() {
     WorldSourceDescriptor d;
+    d.raw_terrain_seed = admit_raw_terrain_seed("  atlas-1492\t");
     d.admitted_biome_seed = BiomeRegionField::admit_utf8_seed("  atlas-1492\t");
     d.revisions.terrain_generator_revision = 7;
     d.revisions.lattice_query_revision = 3;
@@ -36,12 +38,18 @@ std::uint32_t float32_bits(const float value) {
 VWB_TEST(world_source_definition_admits_validated_seed_and_rejects_boundary_errors) {
     const WorldSourceDefinition definition(atlas_descriptor());
     VWB_EXPECT_EQ(std::string("atlas-1492"), definition.admitted_biome_seed().utf8);
+    VWB_EXPECT_EQ(std::string("  atlas-1492\t"), definition.raw_terrain_seed().utf8);
     VWB_EXPECT_EQ(7U, definition.revisions().terrain_generator_revision);
     VWB_EXPECT_EQ(3U, definition.revisions().lattice_query_revision);
     VWB_EXPECT_EQ(4U, definition.revisions().cell_center_query_revision);
     VWB_EXPECT_EQ(5U, definition.revisions().surface_column_query_revision);
     VWB_EXPECT_EQ(1.35, definition.constants().cell_size_meters);
+    VWB_EXPECT_EQ(11.1, definition.constants().water_level_meters);
     WorldSourceDescriptor invalid = atlas_descriptor(); invalid.admitted_biome_seed.utf8 = "other";
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
+    invalid = atlas_descriptor(); invalid.raw_terrain_seed.admitted = false;
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
+    invalid = atlas_descriptor(); invalid.raw_terrain_seed.utf8 = "other";
     VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.revisions.surface_column_query_revision = 0;
     VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
@@ -73,6 +81,45 @@ VWB_TEST(world_source_definition_admits_validated_seed_and_rejects_boundary_erro
     VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
     invalid = atlas_descriptor(); invalid.constants.maximum_surface_meters = std::numeric_limits<double>::quiet_NaN();
     VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
+    invalid = atlas_descriptor(); invalid.constants.water_level_meters = std::numeric_limits<double>::quiet_NaN();
+    VWB_EXPECT_THROW(std::invalid_argument, WorldSourceDefinition{invalid});
+}
+
+VWB_TEST(world_source_raw_terrain_seed_utf8_admission_preserves_unicode_scalars_and_rejects_malformed_sequences) {
+    const AdmittedTerrainSeed ascii = admit_raw_terrain_seed(std::string("A\0B", 3));
+    const AdmittedTerrainSeed two = admit_raw_terrain_seed(std::string("\xC2\xA2", 2));
+    const AdmittedTerrainSeed three = admit_raw_terrain_seed(std::string("\xE2\x82\xAC", 3));
+    const AdmittedTerrainSeed three_low_boundary = admit_raw_terrain_seed(std::string("\xE0\xA0\x80", 3));
+    const AdmittedTerrainSeed three_high_boundary = admit_raw_terrain_seed(std::string("\xED\x9F\xBF", 3));
+    const AdmittedTerrainSeed four = admit_raw_terrain_seed(std::string("\xF0\x9F\x98\x80", 4));
+    const AdmittedTerrainSeed four_low_boundary = admit_raw_terrain_seed(std::string("\xF0\x90\x80\x80", 4));
+    const AdmittedTerrainSeed four_high_boundary = admit_raw_terrain_seed(std::string("\xF4\x8F\xBF\xBF", 4));
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({'A', 0, 'B'}), ascii.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0x00a2U}), two.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0x20acU}), three.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0x0800U}), three_low_boundary.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0xd7ffU}), three_high_boundary.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0x1f600U}), four.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0x10000U}), four_low_boundary.code_points);
+    VWB_EXPECT_EQ(std::vector<std::uint32_t>({0x10ffffU}), four_high_boundary.code_points);
+    VWB_EXPECT(ascii == admit_raw_terrain_seed(std::string("A\0B", 3)));
+    VWB_EXPECT(!(ascii == two));
+    AdmittedTerrainSeed different_utf8 = ascii; different_utf8.utf8 = "A";
+    VWB_EXPECT(!(ascii == different_utf8));
+    AdmittedTerrainSeed different_admission = ascii; different_admission.admitted = false;
+    VWB_EXPECT(!(ascii == different_admission));
+    VWB_EXPECT_THROW(std::invalid_argument, validate_admitted_raw_terrain_seed({}, "", false));
+    VWB_EXPECT_EQ(admit_raw_terrain_seed(""), validate_admitted_raw_terrain_seed({}, "", true));
+    VWB_EXPECT_THROW(std::invalid_argument, validate_admitted_raw_terrain_seed({0x00e9U}, "e", true));
+    const std::vector<std::string> malformed = {
+        std::string("\x80", 1), std::string("\xc0\x80", 2), std::string("\xc2", 1), std::string("\xc2\x20", 2),
+        std::string("\xe0", 1), std::string("\xe0\xa0", 2), std::string("\xe0\x20\x80", 3), std::string("\xe0\xa0\x20", 3),
+        std::string("\xe0\x80\x80", 3), std::string("\xed\xa0\x80", 3),
+        std::string("\xf0", 1), std::string("\xf0\x90", 2), std::string("\xf0\x20\x80\x80", 4),
+        std::string("\xf0\x90\x20\x80", 4), std::string("\xf0\x90\x80\x20", 4), std::string("\xf0\x80\x80\x80", 4),
+        std::string("\xf4\x90\x80\x80", 4), std::string("\xf5\x80\x80\x80", 4)
+    };
+    for (const std::string &value : malformed) VWB_EXPECT_THROW(std::invalid_argument, admit_raw_terrain_seed(value));
 }
 
 VWB_TEST(world_source_definition_digest_tracks_physical_facts_not_request_authority) {
@@ -84,6 +131,10 @@ VWB_TEST(world_source_definition_digest_tracks_physical_facts_not_request_author
     changed = atlas_descriptor(); changed.revisions.lattice_query_revision = 8;
     VWB_EXPECT(!(WorldSourceDefinition(changed).physical_content_identity() == first.physical_content_identity()));
     changed = atlas_descriptor(); changed.admitted_biome_seed = BiomeRegionField::admit_utf8_seed("atlas-1493");
+    VWB_EXPECT(!(WorldSourceDefinition(changed).physical_content_identity() == first.physical_content_identity()));
+    changed = atlas_descriptor(); changed.raw_terrain_seed = admit_raw_terrain_seed("atlas-1492");
+    VWB_EXPECT(!(WorldSourceDefinition(changed).physical_content_identity() == first.physical_content_identity()));
+    changed = atlas_descriptor(); changed.constants.water_level_meters = 11.2;
     VWB_EXPECT(!(WorldSourceDefinition(changed).physical_content_identity() == first.physical_content_identity()));
     WorldDeltaStore store;
     WorldSourceRequestScope one{WorldSourcePin(first, store.pin()), {}}; WorldSourceRequestScope two{WorldSourcePin(first, store.pin()), {}};

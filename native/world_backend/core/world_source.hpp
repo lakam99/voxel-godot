@@ -7,15 +7,34 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace voxel::world_backend {
 
 class WorldSourceDefinition;
 
+// Terrain generation hashes the raw Godot seed text; it does not use the
+// BiomeRegionField's strip_edges/default admission.  Keeping this type apart
+// from AdmittedBiomeSeed prevents a whitespace-only or non-ASCII terrain seed
+// from being silently rewritten while the macrobiome field remains canonical.
+struct AdmittedTerrainSeed {
+    std::vector<std::uint32_t> code_points;
+    std::string utf8;
+    bool admitted = false;
+
+    bool operator==(const AdmittedTerrainSeed &other) const noexcept;
+};
+
+AdmittedTerrainSeed admit_raw_terrain_seed(const std::string &presentation_utf8);
+AdmittedTerrainSeed validate_admitted_raw_terrain_seed(
+    const std::vector<std::uint32_t> &code_points, const std::string &presentation_utf8, bool admitted);
+
 // Generated physical content is deliberately distinct from request ownership:
 // cancellation and publication authority never change this definition.
 struct WorldSourceRevisionDescriptor {
-    std::uint32_t source_schema_revision = 1;
+    // Raw terrain seed and water-level admission expanded the immutable source
+    // envelope; v1 callers cannot describe this physical content completely.
+    std::uint32_t source_schema_revision = 2;
     std::uint32_t terrain_generator_revision = 1;
     std::uint32_t biome_region_field_revision = BiomeRegionField::FIELD_VERSION;
     std::uint32_t lattice_query_revision = 1;
@@ -29,11 +48,15 @@ struct WorldSourceConstants {
     // acquire lattice/mesh coordinate semantics.
     double cell_center_offset_cells = 0.5;
     std::int32_t world_bottom_cell_y = -64;
+    double water_level_meters = 11.1;
     double minimum_surface_meters = 4.0;
     double maximum_surface_meters = 120.0;
 };
 
 struct WorldSourceDescriptor {
+    // Required independently from admitted_biome_seed.  It preserves the raw
+    // `seed_text` Godot passes to FNL/FNV terrain rules.
+    AdmittedTerrainSeed raw_terrain_seed;
     AdmittedBiomeSeed admitted_biome_seed;
     WorldSourceRevisionDescriptor revisions;
     WorldSourceConstants constants;
@@ -138,11 +161,13 @@ public:
     WorldSourceDefinition &operator=(const WorldSourceDefinition &) = delete;
     WorldSourceDefinition &operator=(WorldSourceDefinition &&) = delete;
     const AdmittedBiomeSeed &admitted_biome_seed() const noexcept;
+    const AdmittedTerrainSeed &raw_terrain_seed() const noexcept;
     const WorldSourceRevisionDescriptor &revisions() const noexcept;
     const WorldSourceConstants &constants() const noexcept;
     const WorldPhysicalContentIdentity &physical_content_identity() const noexcept;
 
 private:
+    AdmittedTerrainSeed raw_terrain_seed_;
     AdmittedBiomeSeed admitted_biome_seed_;
     WorldSourceRevisionDescriptor revisions_;
     WorldSourceConstants constants_;

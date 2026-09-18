@@ -16,6 +16,7 @@ namespace {
 
 WorldSourceDescriptor state_descriptor(const char *seed = "backend-state-seed") {
     WorldSourceDescriptor descriptor;
+    descriptor.raw_terrain_seed = admit_raw_terrain_seed(seed);
     descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed(seed);
     descriptor.revisions.terrain_generator_revision = 7;
     descriptor.revisions.lattice_query_revision = 3;
