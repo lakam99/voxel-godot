@@ -59,11 +59,19 @@ VWB_TEST(native_cell_state_derives_exact_negative_section_address_and_x_y_z_inde
 
 VWB_TEST(native_cell_state_preserves_only_normalized_fields_and_canonicalizes_metadata) {
     NativeCellStateInput input = stone({4, 5, 6});
-    input.metadata = {{"source", "dig"}, {"saveDelta", "true"}};
+    input.metadata = NativeValue::object({
+        {"saveDelta", NativeValue::boolean(true)},
+        {"source", NativeValue::object({
+            {"actor", NativeValue::string("player")},
+            {"kind", NativeValue::string("dig")},
+        })},
+    });
     const NativeCellState state = make_native_cell_state(input);
-    VWB_EXPECT_EQ(2U, state.metadata.size());
-    VWB_EXPECT_EQ(std::string("saveDelta"), state.metadata[0].key);
-    VWB_EXPECT_EQ(std::string("source"), state.metadata[1].key);
+    VWB_EXPECT_EQ(NativeValueKind::object, state.metadata.kind());
+    VWB_EXPECT_EQ(2U, state.metadata.as_object().size());
+    VWB_EXPECT_EQ(std::string("saveDelta"), state.metadata.as_object()[0].first);
+    VWB_EXPECT_EQ(NativeValueKind::boolean, state.metadata.as_object()[0].second.kind());
+    VWB_EXPECT(state.metadata == input.metadata);
     VWB_EXPECT(state.generated);
     VWB_EXPECT(!state.edited);
 }
@@ -73,14 +81,14 @@ VWB_TEST(native_cell_state_value_equality_covers_light_metadata_and_every_stored
     VWB_EXPECT((light == NativeCellLight{14, 3}));
     VWB_EXPECT((!(light == NativeCellLight{13, 3})));
     VWB_EXPECT((!(light == NativeCellLight{14, 2})));
-    const NativeCellMetadataEntry entry{"source", "dig"};
-    VWB_EXPECT((entry == NativeCellMetadataEntry{"source", "dig"}));
-    VWB_EXPECT(!(entry == NativeCellMetadataEntry{"other", "dig"}));
-    VWB_EXPECT(!(entry == NativeCellMetadataEntry{"source", "other"}));
+    const NativeBlockIdentity torch = NativeBlockIdentity::create("torch.wall");
+    VWB_EXPECT(torch == NativeBlockIdentity::create("torch.wall"));
+    VWB_EXPECT(torch != NativeBlockIdentity::create("door.oak"));
 
     NativeCellStateInput input = stone({4, 5, 6});
     input.light = light;
-    input.metadata = {{"source", "dig"}};
+    input.metadata = NativeValue::object({{"source", NativeValue::string("dig")}});
+    input.block_id = torch;
     const NativeCellState original = make_native_cell_state(input);
     NativeCellState changed = original;
     VWB_EXPECT(original == changed);
@@ -102,7 +110,11 @@ VWB_TEST(native_cell_state_value_equality_covers_light_metadata_and_every_stored
     VWB_EXPECT(!(original == changed));
     changed = original; changed.light.block = 2;
     VWB_EXPECT(!(original == changed));
-    changed = original; changed.metadata[0].value = "other";
+    changed = original;
+    changed.metadata = NativeValue::object({{"source", NativeValue::string("other")}});
+    VWB_EXPECT(!(original == changed));
+    changed = original;
+    changed.block_id = NativeBlockIdentity::create("door.oak");
     VWB_EXPECT(!(original == changed));
     changed = original; changed.generated = false;
     VWB_EXPECT(!(original == changed));
@@ -161,10 +173,10 @@ VWB_TEST(native_cell_state_rejects_malformed_density_solid_fluid_and_light_combi
 
 VWB_TEST(native_cell_state_rejects_invalid_metadata_and_generated_edited_ambiguity) {
     NativeCellStateInput invalid = air();
-    invalid.metadata = {{"", "empty"}};
+    invalid.metadata = NativeValue::object({{"", NativeValue::string("empty")}});
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
     invalid = air();
-    invalid.metadata = {{"source", "first"}, {"source", "second"}};
+    invalid.metadata = NativeValue::array({NativeValue::string("not-an-object")});
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
     invalid = air();
     invalid.edited = true;
@@ -186,6 +198,18 @@ VWB_TEST(native_cell_state_rejects_invalid_metadata_and_generated_edited_ambigui
     invalid = air();
     invalid.fluid = static_cast<TerrainFluidId>(255);
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(invalid));
+}
+
+VWB_TEST(native_cell_state_keeps_block_identity_distinct_from_terrain_material_and_rejects_bad_identity_text) {
+    NativeCellStateInput door = stone({3, 4, 5});
+    door.block_id = NativeBlockIdentity::create("door.oak.closed");
+    const NativeCellState state = make_native_cell_state(door);
+    VWB_EXPECT_EQ(TerrainMaterialId::stone, state.material);
+    VWB_EXPECT(state.block_id.has_value());
+    VWB_EXPECT_EQ(std::string("door.oak.closed"), state.block_id->value());
+
+    VWB_EXPECT_THROW(NativeCellStateRejected, NativeBlockIdentity::create(""));
+    VWB_EXPECT_THROW(NativeValueRejected, NativeBlockIdentity::create(std::string("bad\xC0\x80", 5)));
 }
 
 VWB_TEST(native_cell_state_policy_keeps_scene_overlay_out_of_durable_save_and_terrain_projection) {

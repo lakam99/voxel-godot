@@ -1,10 +1,12 @@
 #pragma once
 
 #include "coordinates.hpp"
+#include "native_value.hpp"
 #include "terrain_snapshot.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,18 +22,36 @@ enum class NativeCellStateNamespace : std::uint8_t {
     scene_overlay = 2,
 };
 
+class NativeCellStateRejected final : public std::invalid_argument {
+public:
+    NativeCellStateRejected();
+};
+
+// A block identity is intentionally a separate, optional field rather than
+// an alias for TerrainMaterialId.  For example, a torch or door can be
+// terrain-solid or terrain-air according to the volume state while retaining
+// a distinct gameplay/render identity.  An absent identity preserves the
+// existing material-only terrain state without inventing a block type.
+class NativeBlockIdentity final {
+public:
+    static NativeBlockIdentity create(std::string value);
+
+    const std::string &value() const noexcept;
+
+    bool operator==(const NativeBlockIdentity &other) const noexcept;
+    bool operator!=(const NativeBlockIdentity &other) const noexcept;
+
+private:
+    explicit NativeBlockIdentity(std::string value);
+
+    std::string value_;
+};
+
 struct NativeCellLight {
     std::uint8_t sky = 0;
     std::uint8_t block = 0;
 
     bool operator==(const NativeCellLight &other) const noexcept;
-};
-
-struct NativeCellMetadataEntry {
-    std::string key;
-    std::string value;
-
-    bool operator==(const NativeCellMetadataEntry &other) const noexcept;
 };
 
 struct NativeCellStateInput {
@@ -42,7 +62,10 @@ struct NativeCellStateInput {
     double density = -1.35;
     TerrainFluidId fluid = TerrainFluidId::none;
     NativeCellLight light;
-    std::vector<NativeCellMetadataEntry> metadata;
+    // Metadata is one canonical recursive object, not a flat string-pair
+    // channel.  The state factory rejects every non-object value.
+    NativeValue metadata = NativeValue::object({});
+    std::optional<NativeBlockIdentity> block_id;
     bool generated = true;
     bool edited = false;
 };
@@ -59,7 +82,8 @@ struct NativeCellState {
     double density = -1.35;
     TerrainFluidId fluid = TerrainFluidId::none;
     NativeCellLight light;
-    std::vector<NativeCellMetadataEntry> metadata;
+    NativeValue metadata = NativeValue::object({});
+    std::optional<NativeBlockIdentity> block_id;
     bool generated = true;
     bool edited = false;
 
@@ -88,11 +112,6 @@ struct NativeCellStatePersistencePolicy {
     bool persists_in_save = true;
     bool affects_terrain_mesh = true;
     bool affects_surface_projection = true;
-};
-
-class NativeCellStateRejected final : public std::invalid_argument {
-public:
-    NativeCellStateRejected();
 };
 
 NativeCellState make_native_cell_state(

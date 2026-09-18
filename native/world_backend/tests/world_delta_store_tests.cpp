@@ -79,7 +79,8 @@ NativeTypedWorldStateRecord typed_stone(const CellCoord cell) {
     input.density = 1.35;
     input.fluid = TerrainFluidId::none;
     input.light = {15, 4};
-    input.metadata = {{"key", "value"}};
+    input.metadata = NativeValue::object({{"key", NativeValue::string("value")}});
+    input.block_id = NativeBlockIdentity::create("door.oak.closed");
     input.generated = false;
     input.edited = true;
     return {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
@@ -142,7 +143,8 @@ VWB_TEST(world_delta_store_admits_typed_state_in_the_same_immutable_revision_as_
     VWB_EXPECT_EQ(1U, typed_pin.typed_durable_snapshot().records().size());
     VWB_EXPECT_EQ(1U, typed_pin.typed_transient_overlays().size());
     VWB_EXPECT_EQ(15, static_cast<int>(typed_pin.typed_durable_value_at({-16, 0, 0})->light.sky));
-    VWB_EXPECT_EQ(1U, typed_pin.typed_durable_value_at({-16, 0, 0})->metadata.size());
+    VWB_EXPECT_EQ(1U, typed_pin.typed_durable_value_at({-16, 0, 0})->metadata.as_object().size());
+    VWB_EXPECT(typed_pin.typed_durable_value_at({-16, 0, 0})->block_id.has_value());
     VWB_EXPECT_EQ(7, static_cast<int>(typed_pin.typed_effective_value_at({-16, 0, 0})->light.block));
 
     const WorldDeltaCommitReceipt delta = store.commit(transaction("delta:after-typed", 1, {
@@ -195,6 +197,15 @@ VWB_TEST(world_delta_store_typed_admission_is_idempotent_and_transaction_kind_st
     }), store);
     expect_typed_rejection(WorldDeltaRejectReason::transaction_conflict,
         typed_admission("shared:id", 1, {typed_durable({1, 0, 0})}), store);
+    NativeTypedWorldStateRecord different_value = typed_durable({0, 0, 0});
+    different_value.state.metadata = NativeValue::object({
+        {"door", NativeValue::object({{"locked", NativeValue::boolean(true)}})},
+    });
+    different_value.state.block_id = NativeBlockIdentity::create("door.oak.locked");
+    // The WTY2 journal must distinguish recursive metadata/block identity;
+    // otherwise a same-ID replay could hide a materially different v2 state.
+    expect_typed_rejection(WorldDeltaRejectReason::transaction_conflict,
+        typed_admission("shared:id", 1, {different_value}), store);
     expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,
         typed_admission("", 1, {typed_durable({1, 0, 0})}), store);
     expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,

@@ -62,6 +62,10 @@ public:
         u64(static_cast<std::uint64_t>(value.size()));
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
+    void binary(const std::vector<std::uint8_t> &value) {
+        u64(static_cast<std::uint64_t>(value.size()));
+        bytes_.insert(bytes_.end(), value.begin(), value.end());
+    }
     void operation(const WorldDeltaOperation &operation) {
         u8(static_cast<std::uint8_t>(operation.name_space));
         i32(operation.coordinate.x); i32(operation.coordinate.y); i32(operation.coordinate.z);
@@ -90,10 +94,12 @@ public:
         // invariant directly avoids coverage-only impossible states while
         // retaining the full canonical record shape.
         u8(0U); u8(1U);
-        u64(static_cast<std::uint64_t>(state.metadata.size()));
-        for (const NativeCellMetadataEntry &entry : state.metadata) {
-            text(entry.key); text(entry.value);
-        }
+        // Metadata has its own self-describing canonical encoding.  The
+        // outer length keeps the typed journal unambiguous without inventing
+        // a second recursive metadata serialization here.
+        binary(state.metadata.canonical_binary());
+        u8(state.block_id.has_value() ? 1U : 0U);
+        if (state.block_id) text(state.block_id->value());
     }
     void typed_record(const NativeTypedWorldStateRecord &record) {
         u8(static_cast<std::uint8_t>(record.name_space));
@@ -192,7 +198,9 @@ std::vector<std::uint8_t> canonical_typed_admission(
     CanonicalWriter writer;
     // Different discriminator from WDTX means a transaction ID cannot be
     // replayed across the legacy delta and typed-state APIs.
-    writer.u8('W'); writer.u8('T'); writer.u8('Y'); writer.u8('S');
+    // WTY2 is intentionally distinct from WTY S: native recursive metadata
+    // and optional block identity have a different canonical record schema.
+    writer.u8('W'); writer.u8('T'); writer.u8('Y'); writer.u8('2');
     writer.text(admission.transaction_id);
     writer.u64(admission.expected_revision);
     writer.u64(static_cast<std::uint64_t>(validated.durable_snapshot.records().size()));
@@ -263,12 +271,10 @@ bool fits_record_capacity(
     const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept;
 
 const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
-    switch (reason) {
-    case WorldDeltaRejectReason::invalid_transaction: return "invalid world delta transaction";
-    case WorldDeltaRejectReason::revision_conflict: return "world delta expected revision does not match";
-    case WorldDeltaRejectReason::transaction_conflict: return "world delta transaction ID has different content";
-    case WorldDeltaRejectReason::capacity_exceeded: return "world delta store capacity exceeded";
-    }
+    if (reason == WorldDeltaRejectReason::invalid_transaction) return "invalid world delta transaction";
+    if (reason == WorldDeltaRejectReason::revision_conflict) return "world delta expected revision does not match";
+    if (reason == WorldDeltaRejectReason::transaction_conflict) return "world delta transaction ID has different content";
+    if (reason == WorldDeltaRejectReason::capacity_exceeded) return "world delta store capacity exceeded";
     return "unknown world delta rejection";
 }
 

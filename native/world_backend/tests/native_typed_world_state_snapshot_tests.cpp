@@ -154,12 +154,16 @@ VWB_TEST(native_typed_world_state_store_preserves_prior_snapshot_when_admission_
 VWB_TEST(native_typed_world_state_snapshot_preserves_exact_typed_fields) {
     NativeTypedWorldStateRecord record = durable_record({-17, 31, 16});
     record.state.light = {15, 4};
-    record.state.metadata = {{"alpha", "one"}, {"beta", "two"}};
+    record.state.metadata = NativeValue::object({
+        {"alpha", NativeValue::array({NativeValue::number(1.0), NativeValue::boolean(true)})},
+        {"beta", NativeValue::object({{"nested", NativeValue::string("two")}})},
+    });
     const NativeTypedWorldStateSnapshot snapshot = NativeTypedWorldStateSnapshot::create({record});
     const NativeCellState &state = snapshot.records()[0].state;
     VWB_EXPECT_EQ(15, static_cast<int>(state.light.sky));
     VWB_EXPECT_EQ(4, static_cast<int>(state.light.block));
-    VWB_EXPECT_EQ(2U, state.metadata.size());
+    VWB_EXPECT_EQ(2U, state.metadata.as_object().size());
+    VWB_EXPECT_EQ(NativeValueKind::array, state.metadata.as_object()[0].second.kind());
     VWB_EXPECT((state.section == CellCoord{-2, 1, 1}));
     VWB_EXPECT((state.local_cell == CellCoord{15, 15, 0}));
 }

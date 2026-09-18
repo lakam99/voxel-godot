@@ -16,6 +16,7 @@ NativeCellStateInput input_from(const NativeCellState &state) {
     input.fluid = state.fluid;
     input.light = state.light;
     input.metadata = state.metadata;
+    input.block_id = state.block_id;
     input.generated = state.generated;
     input.edited = state.edited;
     return input;

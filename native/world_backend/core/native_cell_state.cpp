@@ -19,17 +19,18 @@ bool valid_fluid(const TerrainFluidId fluid) noexcept {
     return static_cast<std::uint8_t>(fluid) <= static_cast<std::uint8_t>(TerrainFluidId::lava);
 }
 
-bool metadata_less(const NativeCellMetadataEntry &left, const NativeCellMetadataEntry &right) noexcept {
-    return left.key < right.key;
-}
-
-void validate_metadata(const std::vector<NativeCellMetadataEntry> &metadata) {
-    std::vector<NativeCellMetadataEntry> sorted = metadata;
-    std::sort(sorted.begin(), sorted.end(), metadata_less);
-    for (std::size_t index = 0; index < sorted.size(); ++index) {
-        if (sorted[index].key.empty() || (index > 0 && sorted[index - 1].key == sorted[index].key)) {
-            throw NativeCellStateRejected();
-        }
+void validate_metadata(const NativeValue &metadata) {
+    // Canonical encoding defensively revalidates recursion, finite numeric
+    // leaves, UTF-8, and strict object-key ordering. It is not retained here:
+    // NativeValue itself remains the sole metadata value authority. A corrupt
+    // NativeValue keeps its precise rejection rather than being misreported
+    // as a terrain material/state error.
+    if (metadata.kind() != NativeValueKind::object) throw NativeCellStateRejected();
+    static_cast<void>(metadata.canonical_binary());
+    for (const auto &entry : metadata.as_object()) {
+        // NativeValue admits an empty object key generally; terrain-cell
+        // metadata deliberately preserves its previous nonempty-key contract.
+        if (entry.first.empty()) throw NativeCellStateRejected();
     }
 }
 
@@ -39,14 +40,34 @@ bool NativeCellLight::operator==(const NativeCellLight &other) const noexcept {
     return sky == other.sky && block == other.block;
 }
 
-bool NativeCellMetadataEntry::operator==(const NativeCellMetadataEntry &other) const noexcept {
-    return key == other.key && value == other.value;
+NativeBlockIdentity::NativeBlockIdentity(std::string value) : value_(std::move(value)) {}
+
+NativeBlockIdentity NativeBlockIdentity::create(std::string value) {
+    if (value.empty()) throw NativeCellStateRejected();
+    // Reuse NativeValue's one UTF-8 validator rather than giving block names
+    // a subtly different text contract from recursive metadata. Its precise
+    // NativeValueRejected diagnostic is intentionally retained for invalid
+    // nonempty text; empty identity is a cell-state domain violation above.
+    static_cast<void>(NativeValue::string(value));
+    return NativeBlockIdentity(std::move(value));
+}
+
+const std::string &NativeBlockIdentity::value() const noexcept {
+    return value_;
+}
+
+bool NativeBlockIdentity::operator==(const NativeBlockIdentity &other) const noexcept {
+    return value_ == other.value_;
+}
+
+bool NativeBlockIdentity::operator!=(const NativeBlockIdentity &other) const noexcept {
+    return !(*this == other);
 }
 
 bool NativeCellState::operator==(const NativeCellState &other) const noexcept {
     return cell == other.cell && section == other.section && local_cell == other.local_cell
         && material == other.material && biome == other.biome && solid == other.solid && density == other.density
-        && fluid == other.fluid && light == other.light && metadata == other.metadata
+        && fluid == other.fluid && light == other.light && metadata == other.metadata && block_id == other.block_id
         && generated == other.generated && edited == other.edited;
 }
 
@@ -92,7 +113,7 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
     result.fluid = input.fluid;
     result.light = input.light;
     result.metadata = input.metadata;
-    std::sort(result.metadata.begin(), result.metadata.end(), metadata_less);
+    result.block_id = input.block_id;
     result.generated = input.generated;
     result.edited = input.edited;
     return result;
