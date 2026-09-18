@@ -186,15 +186,22 @@ NativeEffectiveTerrainSource::GeneratedFacts NativeEffectiveTerrainSource::gener
 
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::generated_numeric(
     const CellCoord requested_cell, const WorldFloat32Position position,
-    const CellCoord material_cell, const CellCoord biome_cell) const {
+    const CellCoord material_cell, const CellCoord biome_cell,
+    const GeneratedMaterialSemantics material_semantics) const {
     const GeneratedFacts generated = generated_at(position);
     TerrainMaterialId material = TerrainMaterialId::air;
     if (generated.solid) {
-        if (material_cell.y <= pin_.definition().constants().world_bottom_cell_y + 1)
+        if (material_semantics == GeneratedMaterialSemantics::cell_state
+            && material_cell.y <= pin_.definition().constants().world_bottom_cell_y + 1)
             material = TerrainMaterialId::bedrock;
-        else
-            material = natural_.solid_material_for(material_cell, generated.surface_y, position.y,
-                shaped_surface_biome(biome_cell.x, biome_cell.z), generated.density);
+        else {
+            const TerrainBiomeId biome = shaped_surface_biome(biome_cell.x, biome_cell.z);
+            material = material_semantics == GeneratedMaterialSemantics::world_sample
+                ? natural_.world_sample_material_for(material_cell, generated.surface_y, position.y,
+                    biome, generated.density)
+                : natural_.solid_material_for(material_cell, generated.surface_y, position.y,
+                    biome, generated.density);
+        }
     }
     return {
         requested_cell,
@@ -264,7 +271,8 @@ NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_lattice_numeric
     // This mirrors VoxelTerrainGenerator: density/shaping follows the remapped
     // world position while generated material classification keeps the
     // original lattice cell and its direct-integer biome lookup.
-    return generated_numeric(query.coordinate, resolved.lattice_position, query.coordinate, query.coordinate);
+    return generated_numeric(query.coordinate, resolved.lattice_position, query.coordinate, query.coordinate,
+        GeneratedMaterialSemantics::cell_state);
 }
 
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_world_numeric(
@@ -304,7 +312,8 @@ NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_surface_project
     // WorldGenerationSystem.generate_sample_without_volume derives its
     // material/biome cell from world_to_cell3(position). At float32 precision
     // boundaries that cell can differ from the requested grid coordinate.
-    return generated_numeric(query.coordinate, resolved.position, source, source);
+    return generated_numeric(query.coordinate, resolved.position, source, source,
+        GeneratedMaterialSemantics::world_sample);
 }
 
 NativeEffectiveCellStateFacts NativeEffectiveTerrainSource::sample_cell_state_facts(

@@ -68,6 +68,9 @@ private:
     TerrainMaterialId solid_material_for(
         const CellCoord &cell, double surface_y, double position_y, TerrainBiomeId biome,
         double density) const;
+    TerrainMaterialId world_sample_material_for(
+        const CellCoord &cell, double surface_y, double position_y, TerrainBiomeId biome,
+        double density) const;
     TerrainFluidId underground_fluid_for(
         const CellCoord &cell, const WorldFloat32Position &position, double depth_cells,
         TerrainBiomeId surface_biome) const;

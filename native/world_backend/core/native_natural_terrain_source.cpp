@@ -98,7 +98,8 @@ TerrainMaterialId subsoil_material(const TerrainBiomeId biome) noexcept {
     return TerrainMaterialId::dirt;
 }
 TerrainMaterialId solid_material(const AdmittedTerrainSeed &seed, const CellCoord &cell, const double surface_y,
-    const double position_y, const TerrainBiomeId biome, const double density, const double cell_size, const std::int32_t world_bottom_cell_y) {
+    const double position_y, const TerrainBiomeId biome, const double density, const double cell_size,
+    const std::int32_t world_bottom_cell_y, const bool classify_deep_stone) {
     // The only caller has already selected `solid`, and handles the bottom
     // bedrock cells before entering this material classifier.
     (void)density; (void)world_bottom_cell_y;
@@ -110,7 +111,8 @@ TerrainMaterialId solid_material(const AdmittedTerrainSeed &seed, const CellCoor
     if (depth_cells >= 8.0 && script_hash01(seed, "subsurface-copper:", ":" + cell_text(copper)) > 0.985) return TerrainMaterialId::copper_ore;
     const CellCoord iron{cell.x / 4, cell.y / 4, cell.z / 4};
     if (depth_cells >= 15.0 && script_hash01(seed, "subsurface-iron:", ":" + cell_text(iron)) > 0.992) return TerrainMaterialId::iron_ore;
-    return depth > cell_size * 38.0 ? TerrainMaterialId::deep_stone : TerrainMaterialId::stone;
+    return classify_deep_stone && depth > cell_size * 38.0
+        ? TerrainMaterialId::deep_stone : TerrainMaterialId::stone;
 }
 TerrainFluidId underground_fluid(const AdmittedTerrainSeed &seed, const CellCoord &cell, const WorldFloat32Position &position,
     const double depth_cells, const TerrainBiomeId surface_biome, const double cell_size, const std::int32_t world_bottom_cell_y,
@@ -211,7 +213,17 @@ TerrainMaterialId NativeNaturalTerrainSource::solid_material_for(
     const CellCoord &cell, const double surface_y, const double position_y,
     const TerrainBiomeId biome, const double density) const {
     return solid_material(definition_.raw_terrain_seed(), cell, surface_y, position_y, biome, density,
-        definition_.constants().cell_size_meters, definition_.constants().world_bottom_cell_y);
+        definition_.constants().cell_size_meters, definition_.constants().world_bottom_cell_y, true);
+}
+
+TerrainMaterialId NativeNaturalTerrainSource::world_sample_material_for(
+    const CellCoord &cell, const double surface_y, const double position_y,
+    const TerrainBiomeId biome, const double density) const {
+    // WorldGenerationSystem.material_from_sample_components deliberately ends
+    // with stone after ore classification. Deep-stone is a generated cell
+    // state/lattice rule, not a raw world-position sample rule.
+    return solid_material(definition_.raw_terrain_seed(), cell, surface_y, position_y, biome, density,
+        definition_.constants().cell_size_meters, definition_.constants().world_bottom_cell_y, false);
 }
 
 TerrainFluidId NativeNaturalTerrainSource::underground_fluid_for(

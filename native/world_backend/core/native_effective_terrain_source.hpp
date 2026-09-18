@@ -81,6 +81,10 @@ public:
 
 private:
     struct GeneratedFacts;
+    enum class GeneratedMaterialSemantics : std::uint8_t {
+        cell_state,
+        world_sample,
+    };
 
     const NativeTerrainShapingSnapshot &shaping_for(std::int32_t x, std::int32_t z) const;
     double natural_surface(std::int32_t x, std::int32_t z) const;
@@ -89,7 +93,8 @@ private:
     GeneratedFacts generated_at(WorldFloat32Position position) const;
     NativeEffectiveNumericFacts generated_numeric(
         CellCoord requested_cell, WorldFloat32Position position,
-        CellCoord material_cell, CellCoord biome_cell) const;
+        CellCoord material_cell, CellCoord biome_cell,
+        GeneratedMaterialSemantics material_semantics) const;
     NativeCellState sample_cell_state_in_pinned_page(const WorldCellCenterQuery &query) const;
 
     WorldSourcePin pin_;

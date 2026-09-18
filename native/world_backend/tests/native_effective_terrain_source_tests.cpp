@@ -4,6 +4,7 @@
 #include "../core/native_terrain_shaping_registry.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -429,6 +430,76 @@ VWB_TEST(native_effective_terrain_preserves_material_bedrock_ore_fluid_order) {
     VWB_EXPECT_EQ(TerrainMaterialId::water, surface_water.material);
     VWB_EXPECT_EQ(TerrainFluidId::water, surface_water.fluid);
     VWB_EXPECT(!surface_water.solid);
+}
+
+VWB_TEST(native_effective_surface_projection_uses_world_sample_material_without_changing_cell_materials) {
+    constexpr double cell_size = 1.35;
+    const auto definition = atlas_definition();
+    constexpr CellCoord witness{24855320, -32, 0};
+    NativeEffectiveTerrainSource source(ready_pin(
+        definition, {floor_page(witness.x), floor_page(witness.z)}, empty_deltas()));
+
+    const auto projection = source.sample_surface_projection_numeric(
+        {witness, WorldQueryIntent::terrain_collision});
+    VWB_EXPECT((projection.source_cell == CellCoord{24855318, -33, 0}));
+    VWB_EXPECT(projection.generated && !projection.edited);
+    VWB_EXPECT_EQ(TerrainMaterialId::stone, projection.material);
+
+    // VoxelTerrainGenerator and generated cell-state ownership intentionally
+    // retain generated_solid_material_for_cell's deep-stone stratum.
+    const auto lattice = source.sample_lattice_numeric(
+        {witness, WorldQueryIntent::terrain_mesh});
+    VWB_EXPECT((lattice.source_cell == CellCoord{24855321, -33, 0}));
+    VWB_EXPECT_EQ(TerrainMaterialId::deep_stone, lattice.material);
+    const auto cell = source.sample_cell_state({witness, WorldQueryIntent::gameplay});
+    VWB_EXPECT_EQ(TerrainMaterialId::deep_stone, cell.material);
+
+    // TerrainVolumeService.numeric_sample_world resolves a generated cell
+    // state at the remapped position, so it keeps the same deep-stone rule.
+    const auto position = resolve_native_surface_projection_query(
+        definition, {witness, WorldQueryIntent::terrain_collision}).position;
+    const auto world = source.sample_world_numeric(position);
+    VWB_EXPECT_EQ(projection.source_cell, world.source_cell);
+    VWB_EXPECT_EQ(TerrainMaterialId::deep_stone, world.material);
+
+    // Raw world samples do not apply generate_cell_state's bottom-two-cell
+    // bedrock override. Projection therefore remains stone at both bottom
+    // strata while all cell-state-backed consumers remain bedrock.
+    NativeEffectiveTerrainSource bottom_source(ready_pin(definition, {0, 0}, empty_deltas()));
+    for (const std::int32_t y : std::array<std::int32_t, 2>{{-64, -63}}) {
+        const CellCoord bottom{0, y, 0};
+        const auto bottom_projection = bottom_source.sample_surface_projection_numeric(
+            {bottom, WorldQueryIntent::terrain_collision});
+        VWB_EXPECT_EQ(TerrainMaterialId::stone, bottom_projection.material);
+        VWB_EXPECT_EQ(TerrainMaterialId::bedrock,
+            bottom_source.sample_lattice_numeric({bottom, WorldQueryIntent::terrain_mesh}).material);
+        VWB_EXPECT_EQ(TerrainMaterialId::bedrock,
+            bottom_source.sample_cell_state({bottom, WorldQueryIntent::gameplay}).material);
+        const auto bottom_position = resolve_native_surface_projection_query(
+            definition, {bottom, WorldQueryIntent::terrain_collision}).position;
+        VWB_EXPECT_EQ(TerrainMaterialId::bedrock,
+            bottom_source.sample_world_numeric(bottom_position).material);
+    }
+
+    // The raw world-sample classifier keeps the exact inclusive top/subsoil
+    // boundaries and ore-before-stone ordering from
+    // WorldGenerationSystem.material_from_sample_components.
+    const CellCoord boundary_cell{11, 4, 10};
+    const auto boundary_position = resolve_native_surface_projection_query(
+        definition, {boundary_cell, WorldQueryIntent::terrain_collision}).position;
+    const auto material_at_depth = [&](const double depth_cells) {
+        const double level = static_cast<double>(boundary_position.y) + depth_cells * cell_size;
+        NativeEffectiveTerrainSource boundary(ready_pin(
+            definition, {0, 0}, empty_deltas(), {town(0, 0, 30, level)}));
+        return boundary.sample_surface_projection_numeric(
+            {boundary_cell, WorldQueryIntent::terrain_collision}).material;
+    };
+    VWB_EXPECT_EQ(TerrainMaterialId::grass, material_at_depth(1.20));
+    VWB_EXPECT_EQ(TerrainMaterialId::dirt, material_at_depth(1.20 + 1.0e-6));
+    VWB_EXPECT_EQ(TerrainMaterialId::dirt, material_at_depth(4.65));
+    VWB_EXPECT_EQ(TerrainMaterialId::stone, material_at_depth(4.65 + 1.0e-6));
+    VWB_EXPECT_EQ(TerrainMaterialId::stone, material_at_depth(8.0 - 1.0e-6));
+    VWB_EXPECT_EQ(TerrainMaterialId::copper_ore, material_at_depth(8.0));
 }
 
 VWB_TEST(native_effective_terrain_keeps_gameplay_lattice_world_and_projection_edit_semantics_distinct) {
