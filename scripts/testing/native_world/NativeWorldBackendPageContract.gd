@@ -73,13 +73,53 @@ func valid_identity(value, label: String) -> void:
 		var digest := String(value.get("hex",""))
 		check(value.get("algorithm") == "sha256" and digest.length() == 64 and digest == digest.to_lower(), label + " sha256")
 
+func prepared_profile(request: Dictionary, side := 5, apron := 1, root_count := 4, signature := "a".repeat(64)) -> Dictionary:
+	var center: Vector2i=request.centerCell
+	var envelope:=Rect2i(center-Vector2i(side/2,side/2),Vector2i(side,side))
+	var core:=envelope.grow(-apron)
+	var count:=side*side
+	var support:=[]; support.resize(count); support.fill(0)
+	var distances:=[]; distances.resize(count); distances.fill(1.0)
+	var center_index:=(center.y-envelope.position.y)*side+center.x-envelope.position.x
+	if center_index>=0 and center_index<count:
+		support[center_index]=1; distances[center_index]=0.0
+	var origin:=Vector3(float(center.x)*CELL,12.0,float(center.y)*CELL)
+	var roots:=[]; roots.resize(root_count); roots.fill(origin)
+	return {"version":1,"worldSeed":SEED,"siteId":request.siteId,"sourceSignature":signature,
+		"cellSize":CELL,"coreCells":core,"envelopeCells":envelope,
+		"reservationCells":Rect2i(center-Vector2i.ONE,Vector2i.ONE*3),
+		"origin":origin,"level":12.0,"apronCells":apron,
+		"supportMask":support,"distanceCells":distances,"groundRootPoints":roots}
+
+func prepared_resolution(request: Dictionary, profile := {}) -> Dictionary:
+	if profile.is_empty(): profile=prepared_profile(request)
+	var candidate={"version":1,"siteId":request.siteId,"worldSeed":SEED,"region":request.region,
+		"centerCell":request.centerCell,"recipeSeed":request.recipeSeed,"surfaceOnly":true}
+	return {"region":request.region,"requestIdentity":request.requestIdentity,
+		"workerSourceKey":request.workerSourceKey,"kind":"prepared","reasonCode":"",
+		"candidate":candidate,"manifest":{"ready":true,"sourceSignature":profile.sourceSignature},
+		"reservationCells":profile.envelopeCells.grow(1).merge(profile.reservationCells),"profile":profile}
+
+func first_pending_request(value) -> Dictionary:
+	var found:=find_page(value,"pending")
+	return {} if found.is_empty() else {"page":found.page,"request":found.readiness.requests[0]}
+
+func check_prepared_rejection(mutator: Callable, reason: String, label: String) -> void:
+	var backend=owner(); var pending:=first_pending_request(backend)
+	check(not pending.is_empty(),label+" pending")
+	if pending.is_empty(): return
+	var receipt:=prepared_resolution(pending.request)
+	mutator.call(receipt)
+	failed(backend.apply_shaping_resolutions([receipt]),reason,label)
+	check(backend.shaping_requests(pending.page).get("status") == "pending",label+" atomic pending")
+
 func test_page() -> Dictionary:
 	var report := {}
 	var backend = owner([])
 	var status: Dictionary = backend.status()
 	check(status.get("typedCellTransactionsSupported") == true and status.get("durableCellTransactionsSupported") == true, "typed/durable status")
 	check(status.get("sceneOverlayTransactionsSupported") == true and status.get("sceneOverlaySavePersistence") == false, "overlay status and persistence")
-	check(status.get("preparedShapingResolutionsSupported") == false, "prepared status")
+	check(status.get("preparedShapingResolutionsSupported") == true, "prepared status")
 	var ready := find_page(backend,"ready")
 	check(not ready.is_empty(), "ready page")
 	if ready.is_empty(): return report
@@ -154,8 +194,9 @@ func test_page() -> Dictionary:
 	return report
 
 func test_shaping() -> Dictionary:
-	var report := {"workerSourceKeysChecked":0}
+	var report := {"workerSourceKeysChecked":0,"preparedSampling":{}}
 	var backend = owner()
+	check(backend.status().get("preparedShapingResolutionsSupported") == true, "prepared status")
 	var found := find_page(backend,"pending")
 	check(not found.is_empty(),"pending page")
 	if found.is_empty(): return report
@@ -167,19 +208,52 @@ func test_shaping() -> Dictionary:
 		check(not canonical.is_empty() and canonical.sourceKey == request.workerSourceKey,"workerSourceKey parity")
 		report.workerSourceKeysChecked+=1
 	var first: Dictionary=requests[0]
-	var prepared={"region":first.region,"requestIdentity":first.requestIdentity,"workerSourceKey":first.workerSourceKey,"kind":"prepared","reasonCode":""}
-	failed(backend.apply_shaping_resolutions([prepared]),"prepared shaping resolutions are not supported","prepared rejection")
-	check(backend.shaping_requests(page).get("status") == "pending","prepared leaves pending")
+	var prepared:=prepared_resolution(first)
 	var wrong:=prepared.duplicate(true); wrong.kind="absent"; wrong.reasonCode="absent"; wrong.workerSourceKey="0".repeat(64)
 	failed(backend.apply_shaping_resolutions([wrong]),"canonical request","worker key rejection")
+	wrong=prepared.duplicate(true); wrong.requestIdentity="0".repeat(64)
+	failed(backend.apply_shaping_resolutions([wrong]),"request identity","request identity rejection")
 	var resolutions:=[]
-	for request in requests: resolutions.append({"region":request.region,"requestIdentity":request.requestIdentity,"workerSourceKey":request.workerSourceKey,"kind":"absent","reasonCode":"contract_absent"})
+	resolutions.append(prepared)
+	for request in requests.slice(1): resolutions.append({"region":request.region,"requestIdentity":request.requestIdentity,"workerSourceKey":request.workerSourceKey,"kind":"absent","reasonCode":"contract_absent"})
 	var before: Dictionary=backend.status()
 	var admitted: Dictionary=backend.apply_shaping_resolutions(resolutions)
-	check(admitted.get("commitStatus") == "committed" and admitted.shapingRegistryRevision == before.shapingRegistryRevision+1,"absent commit/revision")
+	check(admitted.get("commitStatus") == "committed" and admitted.shapingRegistryRevision == before.shapingRegistryRevision+1,"prepared commit/revision")
 	check(admitted.shapingRegistryIdentity != before.shapingRegistryIdentity,"shaping identity change")
-	var replay: Dictionary=backend.apply_shaping_resolutions(resolutions)
-	check(replay.get("commitStatus") == "no_change" and backend.pin_effective_page(page).get("status") == "ready","shaping replay/ready")
+	var replay: Dictionary=backend.apply_shaping_resolutions([prepared])
+	check(replay.get("commitStatus") == "no_change" and replay.shapingRegistryRevision == admitted.shapingRegistryRevision,"prepared replay/revision")
+	var candidate_page:=Vector2i(floori(float(first.centerCell.x)/280.0),floori(float(first.centerCell.y)/280.0))
+	var candidate_readiness: Dictionary=backend.shaping_requests(candidate_page)
+	if candidate_readiness.get("status") == "pending":
+		var remaining:=[]
+		for request in candidate_readiness.requests:
+			remaining.append({"region":request.region,"requestIdentity":request.requestIdentity,"workerSourceKey":request.workerSourceKey,"kind":"absent","reasonCode":"contract_absent"})
+		check(backend.apply_shaping_resolutions(remaining).get("status") == "ready","prepared neighbor dependencies")
+	var shaped_pin: Dictionary=backend.pin_effective_page(candidate_page)
+	var shaped_page=shaped_pin.get("page")
+	check(shaped_pin.get("status") == "ready" and shaped_page != null,"prepared pin ready")
+	backend=null
+	if shaped_page != null:
+		var shaped_request:=empty_batch(); shaped_request.surfaceColumns=[{"coordinate":first.centerCell,"intent":"gameplay"}]
+		var shaped: Dictionary=shaped_page.sample_batch(shaped_request)
+		check(shaped.get("status") == "ready" and shaped.surfaceColumns.size() == 1,"prepared pin sample")
+		if shaped.get("status") == "ready" and shaped.surfaceColumns.size() == 1:
+			check(is_equal_approx(float(shaped.surfaceColumns[0].deformedSurfaceY),12.0),"prepared center level")
+			report.preparedSampling={"candidateRegion":first.region,"centerCell":first.centerCell,
+				"registryRevision":admitted.shapingRegistryRevision,"deformedSurfaceY":shaped.surfaceColumns[0].deformedSurfaceY,
+				"ownerReleasedBeforeSample":true}
+
+	check_prepared_rejection(func(value): value.candidate.siteId+="-altered","candidate does not match","altered candidate")
+	check_prepared_rejection(func(value): value.candidate.worldSeed+="-altered","candidate does not match","altered candidate seed")
+	check_prepared_rejection(func(value): value.manifest.ready=false,"manifest is not ready","manifest not ready")
+	check_prepared_rejection(func(value): value.manifest.sourceSignature="b".repeat(64),"manifest signature","signature mismatch")
+	check_prepared_rejection(func(value): value.reservationCells=Rect2i(value.reservationCells.position+Vector2i(385,0),value.reservationCells.size),"source reservation","reservation outside declaration")
+	check_prepared_rejection(func(value): value.profile.siteId+="-altered","profile site ID","profile candidate binding")
+	check_prepared_rejection(func(value): value.profile.origin+=Vector3(CELL,0,0),"native terrain shaping registry rejected","profile origin binding")
+	check_prepared_rejection(func(value): value.profile.origin=Vector3(INF,0,0),"finite","profile finite origin")
+	check_prepared_rejection(func(value): value.profile.coreCells=Rect2i(Vector2i(1000001,0),Vector2i.ONE),"bounded profile rectangle","profile rectangle bound")
+	check_prepared_rejection(func(value): value.profile.distanceCells[0]=INF,"finite","profile finite distance")
+	check_prepared_rejection(func(value): value.profile.distanceCells[12]=-1.0,"terrain profile semantics","profile negative distance")
 	var failure_backend=owner(); var failure_found:=find_page(failure_backend,"pending")
 	check(not failure_found.is_empty(),"failure pending page")
 	if not failure_found.is_empty():
@@ -321,6 +395,64 @@ func test_caps() -> Dictionary:
 		var receipt: Dictionary=reason_over_owner.apply_shaping_resolutions([{"region":request.region,"requestIdentity":request.requestIdentity,"workerSourceKey":request.workerSourceKey,"kind":"absent","reasonCode":"r".repeat(reason_limit+1)}])
 		over_reason_ok=String(receipt.get("reason","")).contains("text limit") and reason_over_owner.shaping_requests(reason_over_found.page).get("status") == "pending"
 	record_cap_pair(completed,"shapingReasonBytes",reason_limit,exact_reason_ok,over_reason_ok)
+
+	var sample_limit:=int(limits.siteProfileSamples)
+	var sample_exact_owner=owner(); var sample_exact_pending:=first_pending_request(sample_exact_owner); var sample_exact_ok:=false
+	if not sample_exact_pending.is_empty():
+		var sample_profile:=prepared_profile(sample_exact_pending.request,512)
+		var receipt: Dictionary=sample_exact_owner.apply_shaping_resolutions([prepared_resolution(sample_exact_pending.request,sample_profile)])
+		sample_exact_ok=receipt.get("status") == "ready" and receipt.get("commitStatus") == "committed" and sample_profile.supportMask.size() == sample_limit
+	var support_over_owner=owner(); var support_over_pending:=first_pending_request(support_over_owner); var support_over_ok:=false
+	if not support_over_pending.is_empty():
+		var support_over_profile:=prepared_profile(support_over_pending.request,512); support_over_profile.supportMask.append(0)
+		var receipt: Dictionary=support_over_owner.apply_shaping_resolutions([prepared_resolution(support_over_pending.request,support_over_profile)])
+		support_over_ok=String(receipt.get("reason","")).contains("supportMask exceeds sample limit")
+	record_cap_pair(completed,"siteProfile.supportMask",sample_limit,sample_exact_ok,support_over_ok)
+	var distance_over_owner=owner(); var distance_over_pending:=first_pending_request(distance_over_owner); var distance_over_ok:=false
+	if not distance_over_pending.is_empty():
+		var distance_over_profile:=prepared_profile(distance_over_pending.request,512); distance_over_profile.distanceCells.append(1.0)
+		var receipt: Dictionary=distance_over_owner.apply_shaping_resolutions([prepared_resolution(distance_over_pending.request,distance_over_profile)])
+		distance_over_ok=String(receipt.get("reason","")).contains("distanceCells exceeds sample limit")
+	record_cap_pair(completed,"siteProfile.distanceCells",sample_limit,sample_exact_ok,distance_over_ok)
+
+	var root_limit:=int(limits.siteProfileRootPoints)
+	var root_exact_owner=owner(); var root_exact_pending:=first_pending_request(root_exact_owner); var root_exact_ok:=false
+	if not root_exact_pending.is_empty():
+		var root_profile:=prepared_profile(root_exact_pending.request,5,1,root_limit)
+		var receipt: Dictionary=root_exact_owner.apply_shaping_resolutions([prepared_resolution(root_exact_pending.request,root_profile)])
+		root_exact_ok=receipt.get("status") == "ready" and receipt.get("commitStatus") == "committed"
+	var root_over_owner=owner(); var root_over_pending:=first_pending_request(root_over_owner); var root_over_ok:=false
+	if not root_over_pending.is_empty():
+		var root_over_profile:=prepared_profile(root_over_pending.request,5,1,root_limit); root_over_profile.groundRootPoints.append(root_over_profile.origin)
+		var receipt: Dictionary=root_over_owner.apply_shaping_resolutions([prepared_resolution(root_over_pending.request,root_over_profile)])
+		root_over_ok=String(receipt.get("reason","")).contains("root point limit")
+	record_cap_pair(completed,"siteProfile.groundRootPoints",root_limit,root_exact_ok,root_over_ok)
+
+	var signature_limit:=int(limits.siteProfileSourceSignatureBytes)
+	var signature_exact_owner=owner(); var signature_exact_pending:=first_pending_request(signature_exact_owner); var signature_exact_ok:=false
+	if not signature_exact_pending.is_empty():
+		var signature_profile:=prepared_profile(signature_exact_pending.request,5,1,4,"s".repeat(signature_limit))
+		var receipt: Dictionary=signature_exact_owner.apply_shaping_resolutions([prepared_resolution(signature_exact_pending.request,signature_profile)])
+		signature_exact_ok=receipt.get("status") == "ready" and receipt.get("commitStatus") == "committed"
+	var signature_over_owner=owner(); var signature_over_pending:=first_pending_request(signature_over_owner); var signature_over_ok:=false
+	if not signature_over_pending.is_empty():
+		var signature_over_profile:=prepared_profile(signature_over_pending.request,5,1,4,"s".repeat(signature_limit+1))
+		var receipt: Dictionary=signature_over_owner.apply_shaping_resolutions([prepared_resolution(signature_over_pending.request,signature_over_profile)])
+		signature_over_ok=String(receipt.get("reason","")).contains("text limit")
+	record_cap_pair(completed,"siteProfile.sourceSignatureBytes",signature_limit,signature_exact_ok,signature_over_ok)
+
+	var apron_limit:=int(limits.siteProfileApronCells)
+	var apron_exact_owner=owner(); var apron_exact_pending:=first_pending_request(apron_exact_owner); var apron_exact_ok:=false
+	if not apron_exact_pending.is_empty():
+		var apron_profile:=prepared_profile(apron_exact_pending.request,apron_limit*2+3,apron_limit)
+		var receipt: Dictionary=apron_exact_owner.apply_shaping_resolutions([prepared_resolution(apron_exact_pending.request,apron_profile)])
+		apron_exact_ok=receipt.get("status") == "ready" and receipt.get("commitStatus") == "committed"
+	var apron_over_owner=owner(); var apron_over_pending:=first_pending_request(apron_over_owner); var apron_over_ok:=false
+	if not apron_over_pending.is_empty():
+		var apron_over_profile:=prepared_profile(apron_over_pending.request,(apron_limit+1)*2+3,apron_limit+1)
+		var receipt: Dictionary=apron_over_owner.apply_shaping_resolutions([prepared_resolution(apron_over_pending.request,apron_over_profile)])
+		apron_over_ok=String(receipt.get("reason","")).contains("native terrain shaping page admission failed")
+	record_cap_pair(completed,"siteProfile.apronCells",apron_limit,apron_exact_ok,apron_over_ok)
 
 	check(backend.status().terrainDeltaRevision == 0 and page.sample_batch(empty_batch()).get("status") == "ready","caps atomic/usable")
 	return {"completed":completed,"completedPairCount":completed.size(),"allCompleted":completed.all(func(value): return value.exactAtLimit and value.plusOneRejected)}

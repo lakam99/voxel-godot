@@ -45,6 +45,9 @@ constexpr std::size_t MAX_TRANSACTION_ID_BYTES = 1024U;
 constexpr std::size_t MAX_BLOCK_ID_BYTES = 1024U;
 constexpr std::size_t MAX_EDIT_REASON_BYTES = 1024U;
 constexpr std::size_t MAX_SHAPING_REASON_BYTES = 1024U;
+constexpr std::int32_t MAX_PROFILE_ABS_CELL = 1000000;
+constexpr std::int32_t SOURCE_REGION_CELLS = 2048;
+constexpr std::int32_t SOURCE_REGION_GUARD_CELLS = 1;
 
 const char *const MATERIAL_NAMES[] = {
 	"air", "grass", "dirt", "stone", "sand", "snow", "deepStone", "bedrock",
@@ -199,6 +202,157 @@ Vector3 require_vector3(const Variant &p_value, const char *p_field) {
 	const Vector3 value = Vector3(p_value);
 	if (!value.is_finite()) throw std::invalid_argument(std::string(p_field) + " must be finite");
 	return value;
+}
+
+NativeHorizontalRect require_profile_rect(const Variant &p_value, const char *p_field) {
+	if (p_value.get_type() != Variant::RECT2I) {
+		throw std::invalid_argument(std::string(p_field) + " must be a Rect2i");
+	}
+	const Rect2i value = Rect2i(p_value);
+	const std::int64_t end_x = static_cast<std::int64_t>(value.position.x) + value.size.x;
+	const std::int64_t end_z = static_cast<std::int64_t>(value.position.y) + value.size.y;
+	if (value.size.x <= 0 || value.size.y <= 0
+			|| std::abs(static_cast<std::int64_t>(value.position.x)) > MAX_PROFILE_ABS_CELL
+			|| std::abs(static_cast<std::int64_t>(value.position.y)) > MAX_PROFILE_ABS_CELL
+			|| end_x > MAX_PROFILE_ABS_CELL || end_z > MAX_PROFILE_ABS_CELL) {
+		throw std::out_of_range(std::string(p_field) + " exceeds the bounded profile rectangle domain");
+	}
+	return {value.position.x, value.position.y, value.size.x, value.size.y};
+}
+
+bool rect_encloses(const NativeHorizontalRect &p_outer, const NativeHorizontalRect &p_inner) {
+	return static_cast<std::int64_t>(p_inner.x) >= p_outer.x
+		&& static_cast<std::int64_t>(p_inner.z) >= p_outer.z
+		&& static_cast<std::int64_t>(p_inner.x) + p_inner.width
+			<= static_cast<std::int64_t>(p_outer.x) + p_outer.width
+		&& static_cast<std::int64_t>(p_inner.z) + p_inner.depth
+			<= static_cast<std::int64_t>(p_outer.z) + p_outer.depth;
+}
+
+bool reservation_fits_source_region(const NativeSiteSourceRegionKey p_region,
+		const NativeHorizontalRect &p_reservation) {
+	const std::int64_t allowed_x = static_cast<std::int64_t>(p_region.x) * SOURCE_REGION_CELLS
+		+ SOURCE_REGION_GUARD_CELLS;
+	const std::int64_t allowed_z = static_cast<std::int64_t>(p_region.z) * SOURCE_REGION_CELLS
+		+ SOURCE_REGION_GUARD_CELLS;
+	const std::int64_t allowed_size = SOURCE_REGION_CELLS - SOURCE_REGION_GUARD_CELLS * 2LL;
+	return static_cast<std::int64_t>(p_reservation.x) >= allowed_x
+		&& static_cast<std::int64_t>(p_reservation.z) >= allowed_z
+		&& static_cast<std::int64_t>(p_reservation.x) + p_reservation.width <= allowed_x + allowed_size
+		&& static_cast<std::int64_t>(p_reservation.z) + p_reservation.depth <= allowed_z + allowed_size;
+}
+
+void verify_worker_candidate(const Dictionary &p_value, const NativeSiteSourceCandidate &p_expected,
+		const WorldSourceDefinition &p_definition) {
+	// CitadelTerrainAdmission compares the complete frozen candidate Dictionary,
+	// not a worker-selected subset. Preserve that exact boundary contract.
+	if (p_value.size() != 7) throw std::invalid_argument("resolution candidate does not match native authority");
+	const String worker_seed = require_string(p_value.get("worldSeed", Variant()), "resolution.candidate.worldSeed");
+	if (static_cast<std::size_t>(worker_seed.length()) > MAX_SEED_CODE_POINTS) {
+		throw std::length_error("resolution.candidate.worldSeed exceeds adapter code point limit");
+	}
+	const std::string worker_seed_utf8 = bounded_utf8(
+		worker_seed, MAX_SEED_TEXT_BYTES, "resolution.candidate.worldSeed", false);
+	if (require_i32(p_value.get("version", Variant()), "resolution.candidate.version") != 1
+			|| require_bounded_utf8(p_value.get("siteId", Variant()), "resolution.candidate.siteId",
+				NativeTerrainShapingSnapshot::MAX_SITE_ID_BYTES, false) != p_expected.site_id
+			|| worker_seed_utf8 != p_definition.raw_terrain_seed().utf8
+			|| require_vector2i(p_value.get("region", Variant()), "resolution.candidate.region")
+				!= Vector2i(p_expected.region.x, p_expected.region.z)
+			|| require_vector2i(p_value.get("centerCell", Variant()), "resolution.candidate.centerCell")
+				!= Vector2i(p_expected.center_x, p_expected.center_z)
+			|| require_i64(p_value.get("recipeSeed", Variant()), "resolution.candidate.recipeSeed")
+				!= static_cast<std::int64_t>(p_expected.recipe_seed)
+			|| !require_bool(p_value.get("surfaceOnly", Variant()), "resolution.candidate.surfaceOnly")) {
+		throw std::invalid_argument("resolution candidate does not match native authority");
+	}
+}
+
+NativeSiteTerrainProfile parse_site_profile(const Dictionary &p_value,
+		const NativeSiteSourceCandidate &p_candidate, const WorldSourceDefinition &p_definition) {
+	NativeSiteTerrainProfile profile;
+	profile.version = require_i32(p_value.get("version", Variant()), "resolution.profile.version");
+	const String seed = require_string(p_value.get("worldSeed", Variant()), "resolution.profile.worldSeed");
+	if (static_cast<std::size_t>(seed.length()) > MAX_SEED_CODE_POINTS) {
+		throw std::length_error("resolution.profile.worldSeed exceeds adapter code point limit");
+	}
+	profile.world_seed_utf8 = bounded_utf8(seed, MAX_SEED_TEXT_BYTES, "resolution.profile.worldSeed", false);
+	if (profile.world_seed_utf8 != p_definition.raw_terrain_seed().utf8) {
+		throw std::invalid_argument("resolution profile world seed does not match native authority");
+	}
+	profile.site_id = require_bounded_utf8(p_value.get("siteId", Variant()), "resolution.profile.siteId",
+		NativeTerrainShapingSnapshot::MAX_SITE_ID_BYTES, false);
+	if (profile.site_id != p_candidate.site_id) {
+		throw std::invalid_argument("resolution profile site ID does not match native candidate");
+	}
+	profile.source_signature = require_bounded_utf8(p_value.get("sourceSignature", Variant()),
+		"resolution.profile.sourceSignature", NativeTerrainShapingSnapshot::MAX_SOURCE_SIGNATURE_BYTES, false);
+	profile.cell_size_meters = require_number(p_value.get("cellSize", Variant()), "resolution.profile.cellSize");
+	profile.core_cells = require_profile_rect(p_value.get("coreCells", Variant()), "resolution.profile.coreCells");
+	profile.envelope_cells = require_profile_rect(p_value.get("envelopeCells", Variant()), "resolution.profile.envelopeCells");
+	profile.reservation_cells = require_profile_rect(p_value.get("reservationCells", Variant()), "resolution.profile.reservationCells");
+	const Vector3 origin = require_vector3(p_value.get("origin", Variant()), "resolution.profile.origin");
+	profile.origin = {static_cast<float>(origin.x), static_cast<float>(origin.y), static_cast<float>(origin.z)};
+	if (!std::isfinite(profile.origin.x) || !std::isfinite(profile.origin.y) || !std::isfinite(profile.origin.z)) {
+		throw std::out_of_range("resolution.profile.origin exceeds float32");
+	}
+	profile.level_meters = require_number(p_value.get("level", Variant()), "resolution.profile.level");
+	profile.apron_cells = require_i32(p_value.get("apronCells", Variant()), "resolution.profile.apronCells");
+
+	const std::uint64_t sample_count = static_cast<std::uint64_t>(profile.envelope_cells.width)
+		* static_cast<std::uint64_t>(profile.envelope_cells.depth);
+	if (sample_count > NativeTerrainShapingSnapshot::MAX_SITE_SAMPLES) {
+		throw std::length_error("resolution profile exceeds sample limit");
+	}
+	const Array support = require_array(p_value.get("supportMask", Variant()), "resolution.profile.supportMask");
+	const Array distances = require_array(p_value.get("distanceCells", Variant()), "resolution.profile.distanceCells");
+	if (static_cast<std::size_t>(support.size()) > NativeTerrainShapingSnapshot::MAX_SITE_SAMPLES) {
+		throw std::length_error("resolution.profile.supportMask exceeds sample limit");
+	}
+	if (static_cast<std::size_t>(distances.size()) > NativeTerrainShapingSnapshot::MAX_SITE_SAMPLES) {
+		throw std::length_error("resolution.profile.distanceCells exceeds sample limit");
+	}
+	if (static_cast<std::uint64_t>(support.size()) != sample_count
+			|| static_cast<std::uint64_t>(distances.size()) != sample_count) {
+		throw std::invalid_argument("resolution profile sample arrays do not match envelope");
+	}
+	profile.support_mask.reserve(static_cast<std::size_t>(sample_count));
+	profile.distance_cells.reserve(static_cast<std::size_t>(sample_count));
+	for (int64_t index = 0; index < support.size(); ++index) {
+		if (support[index].get_type() != Variant::INT) {
+			throw std::invalid_argument("resolution.profile.supportMask values must be integers");
+		}
+		const std::int64_t value = static_cast<std::int64_t>(support[index]);
+		if (value < 0 || value > 1) {
+			throw std::out_of_range("resolution.profile.supportMask values must be 0 or 1");
+		}
+		profile.support_mask.push_back(static_cast<std::uint8_t>(value));
+		if (distances[index].get_type() != Variant::FLOAT) {
+			throw std::invalid_argument("resolution.profile.distanceCells values must be floats");
+		}
+		const double distance = require_number(distances[index], "resolution.profile.distanceCells[]");
+		const float stored_distance = static_cast<float>(distance);
+		if (!std::isfinite(stored_distance) || stored_distance < 0.0F
+				|| (value == 1 && stored_distance != 0.0F)) {
+			throw std::out_of_range("resolution.profile.distanceCells value violates terrain profile semantics");
+		}
+		profile.distance_cells.push_back(stored_distance);
+	}
+
+	const Array roots = require_array(p_value.get("groundRootPoints", Variant()), "resolution.profile.groundRootPoints");
+	if (static_cast<std::size_t>(roots.size()) > NativeTerrainShapingSnapshot::MAX_GROUND_ROOT_POINTS) {
+		throw std::length_error("resolution.profile.groundRootPoints exceeds root point limit");
+	}
+	profile.ground_root_points.reserve(static_cast<std::size_t>(roots.size()));
+	for (int64_t index = 0; index < roots.size(); ++index) {
+		const Vector3 point = require_vector3(roots[index], "resolution.profile.groundRootPoints[]");
+		const WorldFloat32Position stored{static_cast<float>(point.x), static_cast<float>(point.y), static_cast<float>(point.z)};
+		if (!std::isfinite(stored.x) || !std::isfinite(stored.y) || !std::isfinite(stored.z)) {
+			throw std::out_of_range("resolution.profile.groundRootPoints value exceeds float32");
+		}
+		profile.ground_root_points.push_back(stored);
+	}
+	return profile;
 }
 
 CellCoord cell_coord(const Vector3i &p_value) {
@@ -799,6 +953,11 @@ Dictionary NativeWorldBackend::status() const {
 	limits["blockIdBytes"] = static_cast<int64_t>(MAX_BLOCK_ID_BYTES);
 	limits["editReasonBytes"] = static_cast<int64_t>(MAX_EDIT_REASON_BYTES);
 	limits["shapingReasonBytes"] = static_cast<int64_t>(MAX_SHAPING_REASON_BYTES);
+	limits["siteProfileSamples"] = static_cast<int64_t>(NativeTerrainShapingSnapshot::MAX_SITE_SAMPLES);
+	limits["siteProfileRootPoints"] = static_cast<int64_t>(NativeTerrainShapingSnapshot::MAX_GROUND_ROOT_POINTS);
+	limits["siteProfileSourceSignatureBytes"] = static_cast<int64_t>(NativeTerrainShapingSnapshot::MAX_SOURCE_SIGNATURE_BYTES);
+	limits["siteProfileApronCells"] = static_cast<int64_t>(NativeTerrainShapingSnapshot::MAX_TOWN_APRON_CELLS);
+	limits["siteProfileAbsCell"] = static_cast<int64_t>(MAX_PROFILE_ABS_CELL);
 	limits["metadataDepth"] = static_cast<int64_t>(NativeValueLimits::MAX_DEPTH);
 	limits["metadataNodes"] = static_cast<int64_t>(NativeValueLimits::MAX_NODES);
 	limits["metadataStringBytes"] = static_cast<int64_t>(NativeValueLimits::MAX_STRING_BYTES);
@@ -816,7 +975,7 @@ Dictionary NativeWorldBackend::status() const {
 	result["durableCellTransactionsSupported"] = true;
 	result["sceneOverlayTransactionsSupported"] = true;
 	result["sceneOverlaySavePersistence"] = false;
-	result["preparedShapingResolutionsSupported"] = false;
+	result["preparedShapingResolutionsSupported"] = true;
 	return result;
 }
 
@@ -948,10 +1107,32 @@ Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resoluti
 			resolution.reason_code = require_bounded_utf8(value.get("reasonCode", Variant()),
 				"resolution.reasonCode", MAX_SHAPING_REASON_BYTES);
 			if (resolution.kind == NativeSiteSourceResolutionKind::prepared) {
-				// Prepared admission additionally requires the complete worker geometry
-				// manifest to be revalidated at this boundary. Until that typed verifier
-				// exists, rejecting is the only safe alternative to trusting worker data.
-				throw std::invalid_argument("prepared shaping resolutions are not supported by the shadow adapter");
+				if (!resolution.reason_code.empty()) {
+					throw std::invalid_argument("prepared resolution reasonCode must be empty");
+				}
+				const auto candidate = native_site_source_candidate_for_region(state_->definition(), resolution.region);
+				if (!candidate) throw std::invalid_argument("prepared resolution has no native candidate");
+				verify_worker_candidate(require_dictionary(value.get("candidate", Variant()), "resolution.candidate"),
+					*candidate, state_->definition());
+				const Dictionary manifest = require_dictionary(value.get("manifest", Variant()), "resolution.manifest");
+				if (!require_bool(manifest.get("ready", Variant()), "resolution.manifest.ready")) {
+					throw std::invalid_argument("resolution manifest is not ready");
+				}
+				resolution.manifest_source_signature = require_bounded_utf8(
+					manifest.get("sourceSignature", Variant()), "resolution.manifest.sourceSignature",
+					NativeTerrainShapingSnapshot::MAX_SOURCE_SIGNATURE_BYTES, false);
+				resolution.source_reservation_cells = require_profile_rect(
+					value.get("reservationCells", Variant()), "resolution.reservationCells");
+				if (!rect_encloses(candidate->declared_influence_cells, resolution.source_reservation_cells)
+						|| !reservation_fits_source_region(resolution.region, resolution.source_reservation_cells)) {
+					throw std::invalid_argument("resolution source reservation exceeds native candidate bounds");
+				}
+				NativeSiteTerrainProfile profile = parse_site_profile(
+					require_dictionary(value.get("profile", Variant()), "resolution.profile"), *candidate, state_->definition());
+				if (resolution.manifest_source_signature != profile.source_signature) {
+					throw std::invalid_argument("resolution manifest signature does not match terrain profile");
+				}
+				resolution.profile = admit_native_site_terrain_profile(state_->definition(), std::move(profile));
 			}
 			batch.resolutions.push_back(std::move(resolution));
 		}
