@@ -201,6 +201,19 @@ WorldDeltaInitialSnapshot initial_checkpoint(
     return result;
 }
 
+NativeTerrainVolumeV2 complete_section_volume() {
+    std::vector<NativeTypedWorldStateRecord> records;
+    records.reserve(NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION);
+    for (std::int32_t z = 0; z < NativeCellState::SECTION_SIZE; ++z) {
+        for (std::int32_t y = 0; y < NativeCellState::SECTION_SIZE; ++y) {
+            for (std::int32_t x = 0; x < NativeCellState::SECTION_SIZE; ++x) {
+                records.push_back(typed_durable({x, y, z}));
+            }
+        }
+    }
+    return persisted_terrain_volume(11U, std::move(records), {{{0, 0, 0}, 10U}});
+}
+
 void expect_feature_rejection(const WorldDeltaRejectReason expected, const WorldFeatureDeltaAdmission &value,
     WorldDeltaStore &store) {
     try {
@@ -225,6 +238,16 @@ VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
     VWB_EXPECT(first.scene_overlays().empty());
     VWB_EXPECT(first.feature_delta_snapshot().tombstones().empty());
     VWB_EXPECT(first.feature_delta_snapshot().player_created_instances().empty());
+}
+
+VWB_TEST(world_delta_store_constructor_admits_a_complete_4096_cell_v2_section_without_native_value_limits) {
+    const NativeTerrainVolumeV2 volume = complete_section_volume();
+    WorldDeltaStore store({4096U, 8U, 0U}, initial_checkpoint(0U, volume));
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    VWB_EXPECT_EQ(4096U, pin.durable_terrain_snapshot().records().size());
+    VWB_EXPECT_EQ(1U, pin.terrain_volume().section_revisions.size());
+    VWB_EXPECT_EQ(11ULL, pin.terrain_volume().revision);
+    VWB_EXPECT_EQ(volume, pin.terrain_volume());
 }
 
 VWB_TEST(world_delta_store_constructor_atomically_pins_a_validated_v2_terrain_checkpoint) {

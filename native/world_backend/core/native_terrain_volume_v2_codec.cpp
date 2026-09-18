@@ -30,6 +30,16 @@ bool coordinate_less(const CellCoord &left, const CellCoord &right) noexcept {
     return left.x < right.x;
 }
 
+constexpr std::uint64_t MAX_V2_JSON_INTEGER = 9007199254740992ULL;
+
+bool metadata_explicitly_disables_save(const NativeValue &metadata) {
+    for (const auto &entry : metadata.as_object()) {
+        if (entry.first == "saveDelta" && entry.second.kind() == NativeValueKind::boolean
+            && !entry.second.as_boolean()) return true;
+    }
+    return false;
+}
+
 bool same_keys(const NativeValue::Object &object, const std::vector<std::string> &expected) {
     if (object.size() != expected.size()) return false;
     for (std::size_t index = 0; index < expected.size(); ++index) {
@@ -179,9 +189,7 @@ NativeCellState decode_state(const NativeValue &value, const CellCoord cell, con
     // service. It cannot enter terrainVolume's durable codec. saveDelta=true
     // remains ordinary preserved metadata; no metadata string is treated as a
     // scene-overlay discriminator here.
-    for (const auto &entry : metadata.as_object()) {
-        if (entry.first == "saveDelta" && entry.second.kind() == NativeValueKind::boolean && !entry.second.as_boolean()) reject();
-    }
+    if (metadata_explicitly_disables_save(metadata)) reject();
     NativeCellStateInput input;
     input.cell = cell;
     input.block_id = NativeBlockIdentity::create(string(member(fields, "blockId")));
@@ -206,7 +214,6 @@ NativeCellState decode_state(const NativeValue &value, const CellCoord cell, con
 }
 
 NativeValue encode_state(const NativeCellState &state) {
-    if (!state.block_id.has_value() || !state.edit_reason.has_value()) reject();
     return NativeValue::object({
         {"biome", NativeValue::string(biome_to_string(state.biome))},
         {"blockId", NativeValue::string(state.block_id->value())},
@@ -239,6 +246,49 @@ bool NativeTerrainVolumeV2SectionRevision::operator==(const NativeTerrainVolumeV
 
 bool NativeTerrainVolumeV2::operator==(const NativeTerrainVolumeV2 &other) const noexcept {
     return revision == other.revision && durable_snapshot == other.durable_snapshot && section_revisions == other.section_revisions;
+}
+
+NativeTerrainVolumeV2 validate_native_terrain_volume_v2(
+    const NativeTerrainVolumeV2 &volume,
+    const NativeTerrainVolumeV2Limits limits) {
+    try {
+        const std::size_t record_count = volume.durable_snapshot.records().size();
+        if (volume.revision > MAX_V2_JSON_INTEGER
+            || record_count > limits.max_records
+            || volume.section_revisions.size() > record_count) reject();
+
+        NativeTerrainVolumeV2 result;
+        result.revision = volume.revision;
+        result.durable_snapshot = NativeTypedWorldStateSnapshot::create(volume.durable_snapshot.records());
+        result.section_revisions = volume.section_revisions;
+
+        const std::vector<NativeTypedWorldStateRecord> &records = result.durable_snapshot.records();
+        std::size_t record_index = 0U;
+        CellCoord previous_section{};
+        bool has_previous_section = false;
+        for (const NativeTerrainVolumeV2SectionRevision &section : result.section_revisions) {
+            if (section.revision > MAX_V2_JSON_INTEGER
+                || (has_previous_section && !coordinate_less(previous_section, section.section))) reject();
+            previous_section = section.section;
+            has_previous_section = true;
+
+            if (record_index >= records.size() || !(records[record_index].state.section == section.section)) reject();
+            while (record_index < records.size() && records[record_index].state.section == section.section) {
+                const NativeCellState &state = records[record_index].state;
+                if (!state.block_id.has_value() || !state.edit_reason.has_value()
+                    || metadata_explicitly_disables_save(state.metadata)) reject();
+                ++record_index;
+            }
+            // Canonical unique coordinates and fixed 16-cell decomposition
+            // prove this run contains at most MAX_CELLS_PER_SECTION records.
+        }
+        if (record_index != records.size()) reject();
+        return result;
+    } catch (const NativeTerrainVolumeV2Rejected &) {
+        throw;
+    } catch (const std::invalid_argument &) {
+        reject();
+    }
 }
 
 NativeTerrainVolumeV2 decode_native_terrain_volume_v2(const NativeValue &value) {
@@ -286,7 +336,7 @@ NativeTerrainVolumeV2 decode_native_terrain_volume_v2(const NativeValue &value) 
             }
         }
         result.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
-        return result;
+        return validate_native_terrain_volume_v2(result);
     } catch (const NativeTerrainVolumeV2Rejected &) {
         throw;
     } catch (const std::invalid_argument &) {
@@ -296,15 +346,11 @@ NativeTerrainVolumeV2 decode_native_terrain_volume_v2(const NativeValue &value) 
 
 NativeValue encode_native_terrain_volume_v2(const NativeTerrainVolumeV2 &volume) {
     try {
-        // Re-admit before serialization so a corrupted/forged aggregate has
-        // no more authority than a malformed raw NativeValue input.
-        const NativeTypedWorldStateSnapshot snapshot = NativeTypedWorldStateSnapshot::create(volume.durable_snapshot.records());
-        if (volume.section_revisions.empty() != snapshot.records().empty()) reject();
-        std::vector<NativeTerrainVolumeV2SectionRevision> revisions = volume.section_revisions;
-        for (std::size_t index = 0; index < revisions.size(); ++index) {
-            if (revisions[index].revision > 9007199254740992ULL
-                || (index > 0U && !coordinate_less(revisions[index - 1U].section, revisions[index].section))) reject();
-        }
+        // Re-admit through the production-size typed validator before using
+        // NativeValue as this convenience serialization representation.
+        const NativeTerrainVolumeV2 validated = validate_native_terrain_volume_v2(volume);
+        const NativeTypedWorldStateSnapshot &snapshot = validated.durable_snapshot;
+        const std::vector<NativeTerrainVolumeV2SectionRevision> &revisions = validated.section_revisions;
         NativeValue::Array sections;
         std::size_t record_index = 0U;
         for (const NativeTerrainVolumeV2SectionRevision &revision : revisions) {
@@ -320,7 +366,6 @@ NativeValue encode_native_terrain_volume_v2(const NativeTerrainVolumeV2 &volume)
                 }));
                 ++record_index;
             }
-            if (cells.empty()) reject();
             // A nonempty emitted section is proven to contain a re-admitted
             // typed state for this exact section key, so its 16-cell origin
             // is already representable. The raw decoder owns the untrusted
@@ -334,9 +379,8 @@ NativeValue encode_native_terrain_volume_v2(const NativeTerrainVolumeV2 &volume)
                 {"sectionKey", coordinate_value(revision.section)},
             }));
         }
-        if (record_index != snapshot.records().size() || volume.revision > 9007199254740992ULL) reject();
         return NativeValue::object({
-            {"revision", NativeValue::number(static_cast<double>(volume.revision))},
+            {"revision", NativeValue::number(static_cast<double>(validated.revision))},
             {"schemaVersion", NativeValue::number(1.0)},
             {"sectionSize", NativeValue::number(16.0)},
             {"sections", NativeValue::array(std::move(sections))},

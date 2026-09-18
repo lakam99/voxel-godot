@@ -184,7 +184,108 @@ NativeTerrainVolumeV2 y_order_volume() {
     return volume;
 }
 
+NativeTerrainVolumeV2 bulk_volume(const std::size_t record_count) {
+    std::vector<NativeTypedWorldStateRecord> records;
+    records.reserve(record_count);
+    std::vector<NativeTerrainVolumeV2SectionRevision> revisions;
+    revisions.reserve((record_count + NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION - 1U)
+        / NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION);
+    for (std::size_t ordinal = 0U; ordinal < record_count; ++ordinal) {
+        const std::size_t section_z = ordinal / NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION;
+        const std::size_t local = ordinal % NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION;
+        const CellCoord cell = {
+            static_cast<std::int32_t>(local % 16U),
+            static_cast<std::int32_t>((local / 16U) % 16U),
+            static_cast<std::int32_t>(section_z * 16U + local / 256U),
+        };
+        if (local == 0U) revisions.push_back({{0, 0, static_cast<std::int32_t>(section_z)}, 9U});
+        records.push_back(durable_record(cell, "bulk"));
+    }
+    NativeTerrainVolumeV2 volume;
+    volume.revision = 9U;
+    volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+    volume.section_revisions = std::move(revisions);
+    return volume;
+}
+
+NativeTerrainVolumeV2 sparse_section_volume(const std::size_t section_count) {
+    std::vector<NativeTypedWorldStateRecord> records;
+    records.reserve(section_count);
+    std::vector<NativeTerrainVolumeV2SectionRevision> revisions;
+    revisions.reserve(section_count);
+    for (std::size_t ordinal = 0U; ordinal < section_count; ++ordinal) {
+        const std::int32_t section_z = static_cast<std::int32_t>(ordinal);
+        records.push_back(durable_record({0, 0, section_z * 16}, "sparse-section"));
+        revisions.push_back({{0, 0, section_z}, 9U});
+    }
+    NativeTerrainVolumeV2 volume;
+    volume.revision = 9U;
+    volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+    volume.section_revisions = std::move(revisions);
+    return volume;
+}
+
 } // namespace
+
+VWB_TEST(native_terrain_volume_v2_direct_validator_preserves_full_sections_and_production_capacity) {
+    const NativeTerrainVolumeV2 full_section = bulk_volume(
+        NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION);
+    const NativeTerrainVolumeV2 validated_section = validate_native_terrain_volume_v2(full_section);
+    VWB_EXPECT_EQ(4096U, validated_section.durable_snapshot.records().size());
+    VWB_EXPECT_EQ(1U, validated_section.section_revisions.size());
+
+    const NativeTerrainVolumeV2 exact_capacity = bulk_volume(
+        NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS);
+    const NativeTerrainVolumeV2 validated_capacity = validate_native_terrain_volume_v2(exact_capacity);
+    VWB_EXPECT_EQ(65536U, validated_capacity.durable_snapshot.records().size());
+    VWB_EXPECT_EQ(16U, validated_capacity.section_revisions.size());
+    VWB_EXPECT(validated_capacity == exact_capacity);
+
+    VWB_EXPECT(validate_native_terrain_volume_v2(full_section, {4096U}) == full_section);
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected,
+        validate_native_terrain_volume_v2(full_section, {4095U}));
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected,
+        validate_native_terrain_volume_v2(bulk_volume(65537U)));
+
+    const NativeTerrainVolumeV2 exact_sections = sparse_section_volume(
+        NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS);
+    const NativeTerrainVolumeV2 validated_sections = validate_native_terrain_volume_v2(exact_sections);
+    VWB_EXPECT_EQ(65536U, validated_sections.durable_snapshot.records().size());
+    VWB_EXPECT_EQ(65536U, validated_sections.section_revisions.size());
+    VWB_EXPECT(validated_sections == exact_sections);
+
+    NativeTerrainVolumeV2 excessive_sections = exact_sections;
+    excessive_sections.section_revisions.push_back({{0, 0, 65536}, 9U});
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected,
+        validate_native_terrain_volume_v2(excessive_sections));
+
+    NativeTerrainVolumeV2 empty_with_section;
+    empty_with_section.durable_snapshot = NativeTypedWorldStateSnapshot::create({});
+    empty_with_section.section_revisions.push_back({{0, 0, 0}, 0U});
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected,
+        validate_native_terrain_volume_v2(empty_with_section));
+}
+
+VWB_TEST(native_terrain_volume_v2_direct_validator_rejects_forged_typed_state_as_codec_rejection) {
+    NativeTerrainVolumeV2 forged = sample_volume();
+    auto &records = const_cast<std::vector<NativeTypedWorldStateRecord> &>(forged.durable_snapshot.records());
+    records[0].state.material = static_cast<TerrainMaterialId>(255);
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected, validate_native_terrain_volume_v2(forged));
+}
+
+VWB_TEST(native_terrain_volume_v2_direct_validator_preserves_exact_save_delta_metadata_semantics) {
+    NativeTerrainVolumeV2 disabled = sample_volume();
+    std::vector<NativeTypedWorldStateRecord> disabled_records = disabled.durable_snapshot.records();
+    disabled_records[0].state.metadata = NativeValue::object({{"saveDelta", NativeValue::boolean(false)}});
+    disabled.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(disabled_records));
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2Rejected, validate_native_terrain_volume_v2(disabled));
+
+    NativeTerrainVolumeV2 opaque = sample_volume();
+    std::vector<NativeTypedWorldStateRecord> opaque_records = opaque.durable_snapshot.records();
+    opaque_records[0].state.metadata = NativeValue::object({{"saveDelta", NativeValue::string("false")}});
+    opaque.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(opaque_records));
+    VWB_EXPECT(validate_native_terrain_volume_v2(opaque) == opaque);
+}
 
 VWB_TEST(native_terrain_volume_v2_codec_round_trips_exact_current_v2_structure) {
     const NativeTerrainVolumeV2 original = sample_volume();

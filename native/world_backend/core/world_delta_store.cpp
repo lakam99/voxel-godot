@@ -433,11 +433,11 @@ void update_changed_terrain_sections(
 
 NativeTerrainVolumeV2 validate_terrain_volume(const NativeTerrainVolumeV2 &value) {
     try {
-        // The v2 codec is the only owner of raw structural admission.  Its
-        // encode/decode round trip proves the root/section bounds, ordering,
-        // nonempty-section rule, and exact durable-record bijection before a
-        // checkpoint becomes part of immutable store state.
-        return decode_native_terrain_volume_v2(encode_native_terrain_volume_v2(value));
+        // Validate the typed aggregate directly. Routing constructor-time
+        // admission through NativeValue would incorrectly inherit that small
+        // generic value algebra's 1,024-entry/4,096-node convenience limits
+        // instead of the durable store's 65,536-record production capacity.
+        return validate_native_terrain_volume_v2(value);
     } catch (const NativeTerrainVolumeV2Rejected &) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
