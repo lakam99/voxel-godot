@@ -2,7 +2,9 @@
 
 #include "coordinates.hpp"
 #include "native_feature_delta.hpp"
+#include "native_terrain_volume_v2_codec.hpp"
 #include "native_typed_world_state_snapshot.hpp"
+#include "sha256.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -56,6 +58,18 @@ struct WorldFeatureDeltaAdmission {
     std::string transaction_id;
     std::uint64_t expected_revision = 0;
     NativeFeatureDeltaSnapshot snapshot = NativeFeatureDeltaSnapshot::create({}, {});
+};
+
+// This is a constructor-only checkpoint, not a live replacement API.  A v2
+// terrainVolume's numeric revision is legacy persisted terrain metadata; it
+// is deliberately separate from `revision`, the native world-state sequence
+// number.  This prevents a save's terrain-only revision from being confused
+// with feature or transient-overlay mutation sequencing.
+struct WorldDeltaInitialSnapshot {
+    std::uint64_t revision = 0;
+    NativeTerrainVolumeV2 terrain_volume;
+    std::vector<NativeTypedWorldStateRecord> transient_overlays;
+    NativeFeatureDeltaSnapshot feature_delta_snapshot = NativeFeatureDeltaSnapshot::create({}, {});
 };
 
 struct WorldDeltaSectionKey {
@@ -116,6 +130,10 @@ struct WorldDeltaSnapshotState;
 class WorldDeltaPinnedSnapshot final {
 public:
     std::uint64_t revision() const noexcept;
+    // Contains the entire persisted v2 terrainVolume domain from this exact
+    // immutable pin: root revision, durable typed records, and their
+    // bijective nonempty-section revision entries.
+    const NativeTerrainVolumeV2 &terrain_volume() const noexcept;
     const NativeTypedWorldStateSnapshot &durable_terrain_snapshot() const noexcept;
     const std::vector<NativeTypedWorldStateRecord> &scene_overlays() const noexcept;
     std::optional<NativeCellState> durable_terrain_at(const CellCoord &cell) const;
@@ -129,6 +147,10 @@ public:
     // precedence at production cutover; a feature instance is not silently
     // coerced into a terrain override here.
     const NativeFeatureDeltaSnapshot &feature_delta_snapshot() const noexcept;
+    // A canonical digest of all state carried by this pin.  It is content,
+    // rather than process-sequence, identity and is required when pins from
+    // independently restored saves have equal numeric revisions.
+    const Sha256Digest &content_digest() const noexcept;
 
 private:
     friend class WorldDeltaStore;
@@ -141,7 +163,12 @@ class WorldDeltaStore final {
 public:
     static constexpr std::int32_t SECTION_SIZE = 16;
 
-    explicit WorldDeltaStore(WorldDeltaStoreLimits limits = {});
+    // `initial` is accepted only as the first immutable state created by this
+    // constructor.  There is intentionally no post-construction import or
+    // reset endpoint: callers must build a fresh owner before publishing any
+    // pin, so an import cannot expose a mixed old/new world snapshot.
+    explicit WorldDeltaStore(
+        WorldDeltaStoreLimits limits = {}, WorldDeltaInitialSnapshot initial = {});
     ~WorldDeltaStore();
 
     std::uint64_t revision() const noexcept;

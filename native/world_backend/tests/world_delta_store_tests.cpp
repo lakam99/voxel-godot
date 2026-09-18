@@ -46,6 +46,8 @@ NativeCellState typed_from_legacy(const WorldDeltaState &state, const CellCoord 
     input.fluid = state.fluid;
     input.light = {static_cast<std::uint8_t>(state.solid ? 0 : 15), 0};
     input.metadata = NativeValue::object({});
+    input.block_id = NativeBlockIdentity::create("terrain.test");
+    input.edit_reason = "test";
     input.generated = false;
     input.edited = true;
     return make_native_cell_state(input, name_space == WorldDeltaNamespace::terrain_override
@@ -104,6 +106,8 @@ NativeCellState typed_air(const CellCoord cell, const NativeCellStateNamespace n
     input.solid = false;
     input.density = -1.35;
     input.fluid = TerrainFluidId::none;
+    input.block_id = NativeBlockIdentity::create("terrain.air.edited");
+    input.edit_reason = "test";
     input.generated = false;
     input.edited = true;
     return make_native_cell_state(input, name_space);
@@ -137,6 +141,15 @@ NativeTypedWorldStateRecord typed_overlay(const CellCoord cell) {
         typed_air(cell, NativeCellStateNamespace::scene_overlay)};
 }
 
+NativeTypedWorldStateRecord typed_overlay_without_persistence_metadata(const CellCoord cell) {
+    NativeTypedWorldStateRecord record = typed_overlay(cell);
+    // Scene overlays are transient typed state.  Unlike durable terrain v2
+    // records, they do not need a durable block identity or edit reason.
+    record.state.block_id.reset();
+    record.state.edit_reason.reset();
+    return record;
+}
+
 WorldTypedStateAdmission typed_admission(const std::string &id, const std::uint64_t expected,
     std::vector<NativeTypedWorldStateRecord> durable, std::vector<NativeTypedWorldStateRecord> overlays = {}) {
     return {id, expected, NativeTypedWorldStateSnapshot::create(std::move(durable)), std::move(overlays)};
@@ -164,6 +177,30 @@ WorldFeatureDeltaAdmission feature_admission(const std::string &id, const std::u
     return {id, expected, NativeFeatureDeltaSnapshot::create(std::move(tombstones), std::move(instances))};
 }
 
+NativeTerrainVolumeV2 persisted_terrain_volume(
+    const std::uint64_t revision,
+    std::vector<NativeTypedWorldStateRecord> records,
+    std::vector<NativeTerrainVolumeV2SectionRevision> sections) {
+    NativeTerrainVolumeV2 volume;
+    volume.revision = revision;
+    volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+    volume.section_revisions = std::move(sections);
+    return volume;
+}
+
+WorldDeltaInitialSnapshot initial_checkpoint(
+    const std::uint64_t world_revision,
+    NativeTerrainVolumeV2 terrain_volume,
+    std::vector<NativeTypedWorldStateRecord> overlays = {},
+    NativeFeatureDeltaSnapshot features = NativeFeatureDeltaSnapshot::create({}, {})) {
+    WorldDeltaInitialSnapshot result;
+    result.revision = world_revision;
+    result.terrain_volume = std::move(terrain_volume);
+    result.transient_overlays = std::move(overlays);
+    result.feature_delta_snapshot = std::move(features);
+    return result;
+}
+
 void expect_feature_rejection(const WorldDeltaRejectReason expected, const WorldFeatureDeltaAdmission &value,
     WorldDeltaStore &store) {
     try {
@@ -188,6 +225,99 @@ VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
     VWB_EXPECT(first.scene_overlays().empty());
     VWB_EXPECT(first.feature_delta_snapshot().tombstones().empty());
     VWB_EXPECT(first.feature_delta_snapshot().player_created_instances().empty());
+}
+
+VWB_TEST(world_delta_store_constructor_atomically_pins_a_validated_v2_terrain_checkpoint) {
+    const NativeTerrainVolumeV2 volume = persisted_terrain_volume(73U, {
+        typed_stone({-16, 0, 0}), typed_stone({16, 0, 0}),
+    }, {
+        {{-1, 0, 0}, 71U}, {{1, 0, 0}, 72U},
+    });
+    const NativeFeatureDeltaSnapshot features = NativeFeatureDeltaSnapshot::create({}, {
+        feature_instance("player:checkpoint", {0, 0, 0}),
+    });
+    WorldDeltaStore store({64, 64, 19}, initial_checkpoint(19U, volume, {
+        typed_overlay_without_persistence_metadata({0, 0, 0}),
+    }, features));
+    const WorldDeltaPinnedSnapshot first = store.pin();
+    VWB_EXPECT_EQ(19ULL, first.revision());
+    VWB_EXPECT_EQ(volume, first.terrain_volume());
+    VWB_EXPECT_EQ(volume.durable_snapshot, first.durable_terrain_snapshot());
+    VWB_EXPECT_EQ(1U, first.scene_overlays().size());
+    VWB_EXPECT_EQ(features, first.feature_delta_snapshot());
+    VWB_EXPECT(!(first.content_digest() == Sha256Digest{}));
+
+    const WorldDeltaCommitReceipt overlay = store.commit_typed_cells(transaction("checkpoint:overlay", 19, {
+        set(WorldDeltaNamespace::scene_overlay, {0, 0, 0}, air()),
+    }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, overlay.status);
+    VWB_EXPECT_EQ(20ULL, overlay.revision);
+    VWB_EXPECT_EQ(volume, store.pin().terrain_volume());
+    VWB_EXPECT_EQ(19ULL, first.revision());
+    VWB_EXPECT_EQ(volume, first.terrain_volume());
+    VWB_EXPECT(!(first.content_digest() == store.pin().content_digest()));
+}
+
+VWB_TEST(world_delta_store_durable_transactions_advance_only_persisted_terrain_revisions_and_remove_empty_sections) {
+    const NativeTerrainVolumeV2 volume = persisted_terrain_volume(73U, {
+        typed_stone({-16, 0, 0}), typed_stone({16, 0, 0}),
+    }, {
+        {{-1, 0, 0}, 71U}, {{1, 0, 0}, 72U},
+    });
+    WorldDeltaStore store({}, initial_checkpoint(0U, volume));
+    const WorldDeltaCommitReceipt changed = store.commit_typed_cells(transaction("checkpoint:durable", 0, {
+        set(WorldDeltaNamespace::terrain_override, {-16, 0, 0}, water()),
+        set(WorldDeltaNamespace::terrain_override, {32, 0, 0}, stone()),
+    }));
+    VWB_EXPECT_EQ(1ULL, changed.revision);
+    const NativeTerrainVolumeV2 after = store.pin().terrain_volume();
+    VWB_EXPECT_EQ(74ULL, after.revision);
+    VWB_EXPECT_EQ(3U, after.section_revisions.size());
+    VWB_EXPECT_EQ(74ULL, after.section_revisions[0].revision);
+    VWB_EXPECT_EQ(72ULL, after.section_revisions[1].revision);
+    VWB_EXPECT_EQ(74ULL, after.section_revisions[2].revision);
+
+    const WorldDeltaCommitReceipt cleared_receipt = store.commit_typed_cells(transaction("checkpoint:clear", 1, {
+        clear(WorldDeltaNamespace::terrain_override, {-16, 0, 0}),
+    }));
+    VWB_EXPECT_EQ(2ULL, cleared_receipt.revision);
+    const NativeTerrainVolumeV2 cleared = store.pin().terrain_volume();
+    VWB_EXPECT_EQ(75ULL, cleared.revision);
+    VWB_EXPECT_EQ(2U, cleared.section_revisions.size());
+    VWB_EXPECT((cleared.section_revisions[0].section == CellCoord{1, 0, 0}));
+    VWB_EXPECT((cleared.section_revisions[1].section == CellCoord{2, 0, 0}));
+}
+
+VWB_TEST(world_delta_store_rejects_malformed_or_conflicting_constructor_checkpoints_without_a_live_import_endpoint) {
+    const NativeTerrainVolumeV2 valid = persisted_terrain_volume(1U, {
+        typed_stone({0, 0, 0}),
+    }, {{{0, 0, 0}, 1U}});
+    NativeTerrainVolumeV2 malformed = valid;
+    malformed.section_revisions.clear();
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({}, initial_checkpoint(0U, malformed)));
+    malformed = valid;
+    malformed.revision = 9007199254740993ULL;
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({}, initial_checkpoint(0U, malformed)));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({8, 8, 3}, initial_checkpoint(2U, valid)));
+
+    NativeTypedWorldStateRecord malformed_overlay = typed_overlay({0, 0, 0});
+    malformed_overlay.persistence = NativeTypedWorldStatePersistence::durable;
+    VWB_EXPECT_THROW(WorldDeltaRejected,
+        WorldDeltaStore({}, initial_checkpoint(0U, valid, {malformed_overlay})));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({1, 8}, initial_checkpoint(0U, valid, {
+        typed_overlay({1, 0, 0}),
+    })));
+}
+
+VWB_TEST(world_delta_store_rejects_a_durable_mutation_after_the_v2_json_revision_limit) {
+    const NativeTerrainVolumeV2 volume = persisted_terrain_volume(9007199254740992ULL, {
+        typed_stone({0, 0, 0}),
+    }, {{{0, 0, 0}, 9007199254740992ULL}});
+    WorldDeltaStore store({}, initial_checkpoint(0U, volume));
+    expect_rejection(WorldDeltaRejectReason::capacity_exceeded, transaction("checkpoint:exhausted", 0, {
+        set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, water()),
+    }), store);
+    VWB_EXPECT_EQ(volume, store.pin().terrain_volume());
 }
 
 VWB_TEST(world_delta_store_pins_feature_deltas_in_the_same_immutable_revision_as_cells) {
@@ -460,6 +590,12 @@ VWB_TEST(world_delta_store_rejects_typed_capacity_and_malformed_overlay_without_
     malformed.persistence = NativeTypedWorldStatePersistence::durable;
     expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,
         {"typed:malformed", 0, NativeTypedWorldStateSnapshot::create({}), {malformed}}, store);
+
+    NativeTypedWorldStateRecord missing_durable_identity = typed_durable({0, 0, 0});
+    missing_durable_identity.state.block_id.reset();
+    expect_typed_rejection(WorldDeltaRejectReason::invalid_transaction,
+        typed_admission("typed:missing-durable-identity", 0, {missing_durable_identity}), store);
+
     VWB_EXPECT_EQ(0ULL, store.revision());
     VWB_EXPECT(store.pin().scene_overlays().empty());
 }
@@ -749,6 +885,16 @@ VWB_TEST(world_delta_store_validates_all_typed_state_and_transaction_boundaries)
     invalid = typed_from_legacy(stone(), target, WorldDeltaNamespace::terrain_override);
     invalid.density = std::numeric_limits<double>::infinity();
     expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:nonfinite", 0, {
+        {NativeCellStateNamespace::durable_terrain, target, WorldTypedCellOperationKind::set, invalid},
+    }), store);
+    invalid = typed_from_legacy(stone(), target, WorldDeltaNamespace::terrain_override);
+    invalid.block_id.reset();
+    expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:missing-block-id", 0, {
+        {NativeCellStateNamespace::durable_terrain, target, WorldTypedCellOperationKind::set, invalid},
+    }), store);
+    invalid = typed_from_legacy(stone(), target, WorldDeltaNamespace::terrain_override);
+    invalid.edit_reason.reset();
+    expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:missing-edit-reason", 0, {
         {NativeCellStateNamespace::durable_terrain, target, WorldTypedCellOperationKind::set, invalid},
     }), store);
     VWB_EXPECT_EQ(0ULL, store.revision());

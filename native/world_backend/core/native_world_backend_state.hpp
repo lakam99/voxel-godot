@@ -17,6 +17,14 @@ struct NativeWorldBackendTransaction {
     WorldTypedCellTransaction deltas;
 };
 
+// The source identity is explicit because terrainVolume does not serialize a
+// seed.  This constructor-time checkpoint is therefore bound to the selected
+// generated world before it becomes observable through a pin.
+struct NativeWorldBackendInitialSnapshot {
+    WorldPhysicalContentIdentity source_identity;
+    WorldDeltaInitialSnapshot deltas;
+};
+
 enum class NativeWorldBackendRejectReason : std::uint8_t {
     source_identity_mismatch = 1,
 };
@@ -40,6 +48,10 @@ public:
     explicit NativeWorldBackendState(
         WorldSourceDefinition definition,
         WorldDeltaStoreLimits delta_limits = {});
+    NativeWorldBackendState(
+        WorldSourceDefinition definition,
+        NativeWorldBackendInitialSnapshot initial,
+        WorldDeltaStoreLimits delta_limits = {});
     NativeWorldBackendState(const NativeWorldBackendState &) = delete;
     NativeWorldBackendState(NativeWorldBackendState &&) = delete;
     NativeWorldBackendState &operator=(const NativeWorldBackendState &) = delete;
@@ -49,9 +61,15 @@ public:
     const WorldPhysicalContentIdentity &source_identity() const noexcept;
     std::uint64_t terrain_delta_revision() const noexcept;
     WorldSourcePin pin() const;
+    // Captures one immutable pin internally and exports only its terrain
+    // persistence value.  Save orchestration must not combine this with
+    // records read from a later mutable state.
+    NativeTerrainVolumeV2 export_terrain_volume_v2() const;
     WorldDeltaCommitReceipt commit(const NativeWorldBackendTransaction &transaction);
 
 private:
+    static WorldDeltaInitialSnapshot require_initial_source(
+        const WorldSourceDefinition &definition, NativeWorldBackendInitialSnapshot initial);
     WorldSourceDefinition definition_;
     WorldDeltaStore deltas_;
 };

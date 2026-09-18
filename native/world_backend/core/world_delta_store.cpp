@@ -119,6 +119,16 @@ NativeTypedWorldStateRecord typed_record_for(const WorldTypedCellOperation &oper
         *operation.state};
 }
 
+void require_v2_durable_state(const NativeCellState &state) {
+    // `terrainVolume` schema 1 writes these fields for every durable record.
+    // Admitting a durable patch without them would create native state that
+    // cannot be exported through the sole v2 codec, so reject it at mutation
+    // admission instead of deferring the failure until autosave.
+    if (!state.block_id.has_value() || !state.edit_reason.has_value()) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+}
+
 void validate_operation(const WorldTypedCellOperation &operation) {
     if (!valid_namespace(operation.name_space) || !valid_kind(operation.kind)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
@@ -131,6 +141,7 @@ void validate_operation(const WorldTypedCellOperation &operation) {
             NativeTypedWorldStateStore validator;
             const NativeTypedWorldStateRecord record = typed_record_for(operation);
             if (operation.name_space == NativeCellStateNamespace::durable_terrain) {
+                require_v2_durable_state(*operation.state);
                 validator.admit_durable_records({record});
             } else {
                 validator.replace_transient_overlays({record});
@@ -186,8 +197,15 @@ ValidatedTypedAdmission validate_typed_admission(const WorldTypedStateAdmission 
     try {
         NativeTypedWorldStateStore validator;
         validator.admit_durable_snapshot(admission.durable_snapshot);
+        // Keep the immutable snapshot alive while inspecting its records.
+        // `records()` returns a reference, so ranging over it from a temporary
+        // snapshot would otherwise leave a dangling range in C++17.
+        const NativeTypedWorldStateSnapshot durable_snapshot = validator.durable_snapshot();
+        for (const NativeTypedWorldStateRecord &record : durable_snapshot.records()) {
+            require_v2_durable_state(record.state);
+        }
         validator.replace_transient_overlays(admission.transient_overlays);
-        return {validator.durable_snapshot(), validator.transient_overlays()};
+        return {durable_snapshot, validator.transient_overlays()};
     } catch (const NativeCellStateRejected &) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
@@ -357,15 +375,114 @@ const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
 
 struct WorldDeltaSnapshotState {
     std::uint64_t revision = 0;
-    NativeTypedWorldStateSnapshot typed_durable_snapshot = NativeTypedWorldStateSnapshot::create({});
+    NativeTerrainVolumeV2 terrain_volume;
     std::vector<NativeTypedWorldStateRecord> typed_transient_overlays;
     NativeFeatureDeltaSnapshot feature_delta_snapshot = NativeFeatureDeltaSnapshot::create({}, {});
+    Sha256Digest content_digest{};
 };
 
 namespace {
 
+constexpr std::uint64_t MAX_V2_JSON_INTEGER = 9007199254740992ULL;
+
+bool section_less(const CellCoord &left, const CellCoord &right) noexcept {
+    return CellCoordLess{}(left, right);
+}
+
+const NativeTerrainVolumeV2SectionRevision *find_section_revision(
+    const std::vector<NativeTerrainVolumeV2SectionRevision> &revisions, const CellCoord &section) {
+    const auto found = std::lower_bound(revisions.begin(), revisions.end(), section,
+        [](const NativeTerrainVolumeV2SectionRevision &entry, const CellCoord &coordinate) {
+            return section_less(entry.section, coordinate);
+        });
+    if (found == revisions.end() || !(found->section == section)) return nullptr;
+    return &*found;
+}
+
+void update_changed_terrain_sections(
+    NativeTerrainVolumeV2 &terrain_volume,
+    const std::set<CellCoord, CellCoordLess> &changed_durable_cells) {
+    if (changed_durable_cells.empty()) return;
+    if (terrain_volume.revision >= MAX_V2_JSON_INTEGER) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+    }
+    std::set<CellCoord, CellCoordLess> changed_sections;
+    for (const CellCoord &cell : changed_durable_cells) changed_sections.insert(section_key_for(cell).section);
+    const std::uint64_t next_revision = terrain_volume.revision + 1U;
+    std::vector<NativeTerrainVolumeV2SectionRevision> next_sections;
+    const std::vector<NativeTypedWorldStateRecord> &records = terrain_volume.durable_snapshot.records();
+    for (std::size_t record_index = 0U; record_index < records.size();) {
+        const CellCoord section = records[record_index].state.section;
+        do {
+            ++record_index;
+        } while (record_index < records.size() && records[record_index].state.section == section);
+        const NativeTerrainVolumeV2SectionRevision *previous =
+            find_section_revision(terrain_volume.section_revisions, section);
+        const bool changed = changed_sections.find(section) != changed_sections.end();
+        // Constructor-time admission proves every old nonempty section has
+        // exactly one revision. A newly written section is therefore the
+        // only legal missing prior entry and receives this transaction's
+        // terrain revision.
+        const std::uint64_t inherited_revision = previous == nullptr ? next_revision : previous->revision;
+        next_sections.push_back({section,
+            changed ? next_revision : inherited_revision});
+    }
+    terrain_volume.revision = next_revision;
+    terrain_volume.section_revisions = std::move(next_sections);
+}
+
+NativeTerrainVolumeV2 validate_terrain_volume(const NativeTerrainVolumeV2 &value) {
+    try {
+        // The v2 codec is the only owner of raw structural admission.  Its
+        // encode/decode round trip proves the root/section bounds, ordering,
+        // nonempty-section rule, and exact durable-record bijection before a
+        // checkpoint becomes part of immutable store state.
+        return decode_native_terrain_volume_v2(encode_native_terrain_volume_v2(value));
+    } catch (const NativeTerrainVolumeV2Rejected &) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+}
+
+NativeFeatureDeltaSnapshot validate_initial_features(const NativeFeatureDeltaSnapshot &value) {
+    WorldFeatureDeltaAdmission admission;
+    admission.transaction_id = "initial-feature-validation";
+    admission.snapshot = value;
+    return validate_feature_admission(admission).snapshot;
+}
+
+std::vector<NativeTypedWorldStateRecord> validate_initial_overlays(
+    const std::vector<NativeTypedWorldStateRecord> &value) {
+    try {
+        NativeTypedWorldStateStore validator;
+        validator.replace_transient_overlays(value);
+        return validator.transient_overlays();
+    } catch (const NativeCellStateRejected &) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+}
+
+Sha256Digest content_digest(const WorldDeltaSnapshotState &state) {
+    CanonicalWriter writer;
+    writer.u8('W'); writer.u8('D'); writer.u8('S'); writer.u8('1');
+    writer.u64(state.terrain_volume.revision);
+    writer.u64(static_cast<std::uint64_t>(state.terrain_volume.durable_snapshot.records().size()));
+    for (const NativeTypedWorldStateRecord &record : state.terrain_volume.durable_snapshot.records()) writer.typed_record(record);
+    writer.u64(static_cast<std::uint64_t>(state.terrain_volume.section_revisions.size()));
+    for (const NativeTerrainVolumeV2SectionRevision &section : state.terrain_volume.section_revisions) {
+        writer.i32(section.section.x); writer.i32(section.section.y); writer.i32(section.section.z); writer.u64(section.revision);
+    }
+    writer.u64(static_cast<std::uint64_t>(state.typed_transient_overlays.size()));
+    for (const NativeTypedWorldStateRecord &record : state.typed_transient_overlays) writer.typed_record(record);
+    writer.binary(state.feature_delta_snapshot.canonical_binary());
+    return sha256(writer.finish());
+}
+
+void seal_content_digest(WorldDeltaSnapshotState &state) {
+    state.content_digest = content_digest(state);
+}
+
 bool fits_record_capacity(const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept {
-    const std::size_t durable_count = state.typed_durable_snapshot.records().size();
+    const std::size_t durable_count = state.terrain_volume.durable_snapshot.records().size();
     const std::size_t overlay_count = state.typed_transient_overlays.size();
     const std::size_t feature_count = state.feature_delta_snapshot.tombstones().size()
         + state.feature_delta_snapshot.player_created_instances().size();
@@ -413,8 +530,12 @@ WorldDeltaPinnedSnapshot::WorldDeltaPinnedSnapshot(std::shared_ptr<const WorldDe
 
 std::uint64_t WorldDeltaPinnedSnapshot::revision() const noexcept { return state_->revision; }
 
+const NativeTerrainVolumeV2 &WorldDeltaPinnedSnapshot::terrain_volume() const noexcept {
+    return state_->terrain_volume;
+}
+
 const NativeTypedWorldStateSnapshot &WorldDeltaPinnedSnapshot::durable_terrain_snapshot() const noexcept {
-    return state_->typed_durable_snapshot;
+    return state_->terrain_volume.durable_snapshot;
 }
 
 const std::vector<NativeTypedWorldStateRecord> &WorldDeltaPinnedSnapshot::scene_overlays() const noexcept {
@@ -422,7 +543,7 @@ const std::vector<NativeTypedWorldStateRecord> &WorldDeltaPinnedSnapshot::scene_
 }
 
 std::optional<NativeCellState> WorldDeltaPinnedSnapshot::durable_terrain_at(const CellCoord &cell) const {
-    return typed_value_at(state_->typed_durable_snapshot.records(), cell);
+    return typed_value_at(state_->terrain_volume.durable_snapshot.records(), cell);
 }
 
 std::optional<NativeCellState> WorldDeltaPinnedSnapshot::scene_overlay_at(const CellCoord &cell) const {
@@ -438,16 +559,28 @@ const NativeFeatureDeltaSnapshot &WorldDeltaPinnedSnapshot::feature_delta_snapsh
     return state_->feature_delta_snapshot;
 }
 
-WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits) : limits_(limits) {
+const Sha256Digest &WorldDeltaPinnedSnapshot::content_digest() const noexcept {
+    return state_->content_digest;
+}
+
+WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits, WorldDeltaInitialSnapshot initial) : limits_(limits) {
     if (limits_.max_records == 0U || limits_.max_transactions == 0U) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
     // Reserve once so a later journal append cannot allocate after a candidate
     // state exists. Constructor failure leaves no observable store.
     transactions_.reserve(limits_.max_transactions);
-    auto initial = std::make_shared<WorldDeltaSnapshotState>();
-    initial->revision = limits_.initial_revision;
-    state_ = std::move(initial);
+    auto state = std::make_shared<WorldDeltaSnapshotState>();
+    if (initial.revision != 0U && limits_.initial_revision != 0U && initial.revision != limits_.initial_revision) {
+        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+    }
+    state->revision = initial.revision != 0U ? initial.revision : limits_.initial_revision;
+    state->terrain_volume = validate_terrain_volume(initial.terrain_volume);
+    state->typed_transient_overlays = validate_initial_overlays(initial.transient_overlays);
+    state->feature_delta_snapshot = validate_initial_features(initial.feature_delta_snapshot);
+    if (!fits_record_capacity(*state, limits_)) throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+    seal_content_digest(*state);
+    state_ = std::move(state);
 }
 
 WorldDeltaStore::~WorldDeltaStore() = default;
@@ -477,7 +610,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
     }
 
     auto next = std::make_shared<WorldDeltaSnapshotState>(*state_);
-    std::vector<NativeTypedWorldStateRecord> durable = state_->typed_durable_snapshot.records();
+    std::vector<NativeTypedWorldStateRecord> durable = state_->terrain_volume.durable_snapshot.records();
     std::vector<NativeTypedWorldStateRecord> overlays = state_->typed_transient_overlays;
     for (const WorldTypedCellOperation &operation : sorted_operations(transaction)) {
         std::vector<NativeTypedWorldStateRecord> &records = operation.name_space == NativeCellStateNamespace::durable_terrain
@@ -500,7 +633,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
     }
     // Every operation was re-admitted before this candidate was built; this
     // final canonical construction cannot introduce a new validation branch.
-    next->typed_durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(durable));
+    next->terrain_volume.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(durable));
     NativeTypedWorldStateStore validator;
     validator.replace_transient_overlays(std::move(overlays));
     next->typed_transient_overlays = validator.transient_overlays();
@@ -509,8 +642,16 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
     }
 
     std::set<CellCoord, CellCoordLess> changed_cells;
-    add_changed_typed_cells(state_->typed_durable_snapshot.records(), next->typed_durable_snapshot.records(), changed_cells);
+    std::set<CellCoord, CellCoordLess> changed_durable_cells;
+    add_changed_typed_cells(
+        state_->terrain_volume.durable_snapshot.records(), next->terrain_volume.durable_snapshot.records(), changed_durable_cells);
+    changed_cells.insert(changed_durable_cells.begin(), changed_durable_cells.end());
     add_changed_typed_cells(state_->typed_transient_overlays, next->typed_transient_overlays, changed_cells);
+    // A v2 terrainVolume revision changes once per semantically effective
+    // durable-terrain transaction. Transient overlays are deliberately not
+    // persisted by that domain and therefore cannot disturb its root or
+    // per-section revision values.
+    update_changed_terrain_sections(next->terrain_volume, changed_durable_cells);
 
     WorldDeltaCommitReceipt receipt;
     receipt.transaction_id = transaction.transaction_id;
@@ -529,6 +670,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
         receipt.affected_sections.assign(affected.begin(), affected.end());
+        seal_content_digest(*next);
     }
     // All throwing work is deliberately complete before either durable journal
     // or current state becomes observable. reserve() plus the static assertion
@@ -561,16 +703,19 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
     }
 
     auto next = std::make_shared<WorldDeltaSnapshotState>(*state_);
-    next->typed_durable_snapshot = validated.durable_snapshot;
+    next->terrain_volume.durable_snapshot = validated.durable_snapshot;
     next->typed_transient_overlays = validated.transient_overlays;
     if (!fits_record_capacity(*next, limits_)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
     }
 
     std::set<CellCoord, CellCoordLess> changed_cells;
+    std::set<CellCoord, CellCoordLess> changed_durable_cells;
     add_changed_typed_cells(
-        state_->typed_durable_snapshot.records(), next->typed_durable_snapshot.records(), changed_cells);
+        state_->terrain_volume.durable_snapshot.records(), next->terrain_volume.durable_snapshot.records(), changed_durable_cells);
+    changed_cells.insert(changed_durable_cells.begin(), changed_durable_cells.end());
     add_changed_typed_cells(state_->typed_transient_overlays, next->typed_transient_overlays, changed_cells);
+    update_changed_terrain_sections(next->terrain_volume, changed_durable_cells);
 
     WorldDeltaCommitReceipt receipt;
     receipt.transaction_id = admission.transaction_id;
@@ -589,6 +734,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
         receipt.affected_sections.assign(affected.begin(), affected.end());
+        seal_content_digest(*next);
     }
     TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));
@@ -647,6 +793,7 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_feature_deltas(const WorldFeature
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
         receipt.affected_sections.assign(affected.begin(), affected.end());
+        seal_content_digest(*next);
     }
     TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));

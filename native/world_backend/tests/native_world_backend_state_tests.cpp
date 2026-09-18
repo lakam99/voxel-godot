@@ -4,6 +4,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 
 using namespace voxel::world_backend;
 
@@ -52,6 +53,29 @@ NativeWorldBackendTransaction set_transaction(
         NativeCellStateNamespace::durable_terrain, coordinate, WorldTypedCellOperationKind::set, stone_state(coordinate),
     });
     return transaction;
+}
+
+NativeTerrainVolumeV2 imported_volume(const CellCoord cell, const std::uint64_t root_revision = 73U) {
+    NativeTerrainVolumeV2 volume;
+    volume.revision = root_revision;
+    volume.durable_snapshot = NativeTypedWorldStateSnapshot::create({{
+        NativeCellStateNamespace::durable_terrain,
+        NativeTypedWorldStatePersistence::durable,
+        stone_state(cell),
+    }});
+    volume.section_revisions = {{stone_state(cell).section, root_revision - 1U}};
+    return volume;
+}
+
+NativeWorldBackendInitialSnapshot imported_checkpoint(
+    const WorldSourceDefinition &definition,
+    const NativeTerrainVolumeV2 &volume,
+    const std::uint64_t world_revision = 0U) {
+    NativeWorldBackendInitialSnapshot checkpoint;
+    checkpoint.source_identity = definition.physical_content_identity();
+    checkpoint.deltas.revision = world_revision;
+    checkpoint.deltas.terrain_volume = volume;
+    return checkpoint;
 }
 
 void expect_backend_rejection(
@@ -152,4 +176,34 @@ VWB_TEST(native_world_backend_state_rejection_type_is_strict_and_stable) {
     const NativeWorldBackendRejected mismatch(NativeWorldBackendRejectReason::source_identity_mismatch);
     VWB_EXPECT_EQ(NativeWorldBackendRejectReason::source_identity_mismatch, mismatch.reason());
     VWB_EXPECT_EQ(std::string("native world backend source identity mismatch"), std::string(mismatch.what()));
+}
+
+VWB_TEST(native_world_backend_state_binds_a_source_checked_checkpoint_before_its_first_pin_and_exports_one_pin) {
+    const WorldSourceDefinition definition(state_descriptor());
+    const NativeTerrainVolumeV2 volume = imported_volume({-16, 0, 0});
+    NativeWorldBackendState state{definition, imported_checkpoint(definition, volume, 9U)};
+    const WorldSourcePin first = state.pin();
+    VWB_EXPECT_EQ(9ULL, first.terrain_delta_revision());
+    VWB_EXPECT_EQ(volume, first.deltas().terrain_volume());
+    VWB_EXPECT_EQ(volume, state.export_terrain_volume_v2());
+
+    const WorldDeltaCommitReceipt changed = state.commit(set_transaction(state, "state:checkpoint", 9U, {0, 0, 0}));
+    VWB_EXPECT_EQ(10ULL, changed.revision);
+    VWB_EXPECT_EQ(73ULL, first.deltas().terrain_volume().revision);
+    VWB_EXPECT_EQ(74ULL, state.export_terrain_volume_v2().revision);
+}
+
+VWB_TEST(native_world_backend_state_rejects_a_checkpoint_for_another_source_and_content_binds_equal_revisions) {
+    const WorldSourceDefinition definition(state_descriptor());
+    const WorldSourceDefinition other(state_descriptor("other-checkpoint-source"));
+    const NativeTerrainVolumeV2 first_volume = imported_volume({0, 0, 0});
+    NativeWorldBackendInitialSnapshot wrong = imported_checkpoint(other, first_volume);
+    VWB_EXPECT_THROW(NativeWorldBackendRejected, NativeWorldBackendState(definition, std::move(wrong)));
+
+    const NativeTerrainVolumeV2 second_volume = imported_volume({1, 0, 0});
+    NativeWorldBackendState first{definition, imported_checkpoint(definition, first_volume)};
+    NativeWorldBackendState second{definition, imported_checkpoint(definition, second_volume)};
+    VWB_EXPECT_EQ(first.pin().terrain_delta_revision(), second.pin().terrain_delta_revision());
+    VWB_EXPECT(!(first.pin().deltas().content_digest() == second.pin().deltas().content_digest()));
+    VWB_EXPECT(!(first.pin().physical_content_identity() == second.pin().physical_content_identity()));
 }

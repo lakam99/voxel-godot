@@ -81,9 +81,17 @@ std::vector<std::uint32_t> decode_utf8_scalars(const std::string &value) {
     return output;
 }
 
-WorldPhysicalContentIdentity pinned_identity(const WorldPhysicalContentIdentity &definition, const std::uint64_t delta_revision) {
+WorldPhysicalContentIdentity pinned_identity(
+    const WorldPhysicalContentIdentity &definition,
+    const std::uint64_t delta_revision,
+    const Sha256Digest &delta_content_digest) {
     Writer writer;
-    writer.magic("VWPP"); writer.u32(1); writer.digest(definition.digest); writer.u64(delta_revision);
+    // A numeric revision is only unique within one live store. Restored
+    // checkpoints from different saves can have the same revision yet
+    // different terrain/features, so physical identity binds canonical pinned
+    // content as well as the sequencing value.
+    writer.magic("VWPP"); writer.u32(2); writer.digest(definition.digest); writer.u64(delta_revision);
+    writer.digest(delta_content_digest);
     return {sha256(writer.finish())};
 }
 
@@ -175,7 +183,8 @@ std::uint32_t query_revision(const WorldSourceDefinition &definition, const Worl
 std::uint32_t query_revision(const WorldSourceDefinition &definition, const WorldSurfaceColumnQuery &) noexcept { return definition.revisions().surface_column_query_revision; }
 
 WorldSourcePin::WorldSourcePin(WorldSourceDefinition definition, WorldDeltaPinnedSnapshot deltas) : definition_(std::move(definition)), deltas_(std::move(deltas)) {
-    physical_content_identity_ = pinned_identity(definition_.physical_content_identity(), deltas_.revision());
+    physical_content_identity_ = pinned_identity(
+        definition_.physical_content_identity(), deltas_.revision(), deltas_.content_digest());
 }
 const WorldSourceDefinition &WorldSourcePin::definition() const noexcept { return definition_; }
 const WorldDeltaPinnedSnapshot &WorldSourcePin::deltas() const noexcept { return deltas_; }
