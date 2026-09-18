@@ -10,6 +10,13 @@ export const receiptSchema = 'n3-native-effective-terrain-differential-receipt/v
 export const fixtureSchema = 'n3-effective-terrain-differential-report/v1';
 export const evidenceLevel = 'shadow-only/no-production-cutover';
 export const fixtureScript = 'res://scripts/testing/native_world/N3EffectiveTerrainAdapterFixture.gd';
+export const expectedQueryCounts = Object.freeze({
+  surfaceColumns: 10,
+  cellCenters: 11,
+  latticeNumeric: 11,
+  worldNumeric: 6,
+  surfaceProjectionNumeric: 8,
+});
 const debugAdapterBinary = 'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll';
 
 export const pinnedGodot = Object.freeze({
@@ -194,9 +201,9 @@ export function validateFixtureReport(report, expected = {}) {
   if (!exactGodotVersion(report?.godotVersion)) errors.push('fixture_godot_version_invalid');
   if (report?.mismatchCount !== 0) errors.push('fixture_mismatch_count_invalid');
   const queryCounts = report?.queryCounts;
-  if (!queryCounts || ['surfaceColumns', 'cellCenters', 'latticeNumeric', 'worldNumeric',
-    'surfaceProjectionNumeric'].some(channel =>
-    !Number.isInteger(queryCounts[channel]) || queryCounts[channel] <= 0)) {
+  if (!queryCounts || Object.entries(expected.queryCounts ?? {}).length === 0
+      || Object.entries(expected.queryCounts ?? {}).some(([channel, count]) =>
+        !Number.isInteger(queryCounts[channel]) || queryCounts[channel] !== count)) {
     errors.push('fixture_channel_query_counts_invalid');
   }
   const fixtureChecks = report?.checks;
@@ -380,6 +387,7 @@ export async function runN3NativeEffectiveTerrainDifferential(argv = process.arg
   const fixtureExpectations = {
     nativeAdapterIdentity: inputRecord(debugAdapterBinary)?.sha256 ?? null,
     querySetIdentity: inputRecord('scripts/testing/native_world/N3EffectiveTerrainGoldens.json')?.sha256 ?? null,
+    queryCounts: expectedQueryCounts,
   };
   const lockPath = resolve(project, 'native/world_backend/toolchain-lock.json');
   const lockBefore = await snapshotJsonEvidence(deps, project, lockPath, 'toolchain_lock_missing', 'toolchain_lock_json_invalid');

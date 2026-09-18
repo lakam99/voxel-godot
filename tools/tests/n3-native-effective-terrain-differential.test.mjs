@@ -8,6 +8,7 @@ import test from 'node:test';
 import {
   authoritativeStaticPaths,
   evidenceLevel,
+  expectedQueryCounts,
   fixtureSchema,
   fixtureScript,
   pinnedGodot,
@@ -67,13 +68,7 @@ function fixtureReport(overrides = {}) {
     schema: fixtureSchema, finished: true, status: 'passed', passed: true, evidenceLevel,
     godotVersion: { major: 4, minor: 6, patch: 1, status: 'stable', hash: pinnedGodot.engineCommitSha },
     mismatchCount: 0,
-    queryCounts: {
-      surfaceColumns: 5,
-      cellCenters: 5,
-      latticeNumeric: 5,
-      worldNumeric: 5,
-      surfaceProjectionNumeric: 5,
-    },
+    queryCounts: { ...expectedQueryCounts },
     checks: {
       sourceParity: true,
       independentGoldens: true,
@@ -179,6 +174,7 @@ test('fixture and native-build validators reject invalid evidence independently'
   const fixtureExpected = {
     nativeAdapterIdentity: binaryInput.sha256,
     querySetIdentity: goldensInput.sha256,
+    queryCounts: expectedQueryCounts,
   };
   assert.deepEqual(validateFixtureReport(fixture, fixtureExpected), { valid: true, errors: [] });
   fixture.evidenceLevel = 'production';
@@ -201,6 +197,7 @@ test('fixture validator rejects semantic evidence gaps behind a nominal passed s
   const fixtureExpected = {
     nativeAdapterIdentity: binaryInput.sha256,
     querySetIdentity: goldensInput.sha256,
+    queryCounts: expectedQueryCounts,
   };
   const cases = [
     [report => { report.finished = false; }, 'fixture_status_or_completion_invalid'],
