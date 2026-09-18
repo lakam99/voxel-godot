@@ -83,6 +83,17 @@ function fixtureReport(overrides = {}) {
   };
 }
 
+test('fixed denominator includes the bottom-stratum surface projection witness', () => {
+  assert.deepEqual(expectedQueryCounts, {
+    surfaceColumns: 10,
+    cellCenters: 11,
+    latticeNumeric: 11,
+    worldNumeric: 6,
+    surfaceProjectionNumeric: 9,
+  });
+  assert.equal(Object.values(expectedQueryCounts).reduce((sum, count) => sum + count, 0), 47);
+});
+
 async function setup(overrides = {}) {
   const project = await mkdtemp(join(tmpdir(), 'n3-effective-differential-'));
   const output = join(project, 'out');

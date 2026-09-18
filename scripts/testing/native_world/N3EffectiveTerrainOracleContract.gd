@@ -29,7 +29,7 @@ func _run() -> void:
 				"cellCenters": 11,
 				"latticeNumeric": 11,
 				"worldNumeric": 6,
-				"surfaceProjectionNumeric": 8,
+				"surfaceProjectionNumeric": 9,
 			} \
 			and golden_sha_before == FileAccess.get_sha256(Oracle.GOLDENS_PATH),
 		"querySetId": String((goldens.get("querySet", {}) as Dictionary).get("id", "")),

@@ -3,9 +3,9 @@
   "oracleSchema": "n3-effective-terrain-oracle/v1",
   "querySet": {
     "schema": "n3-effective-terrain-query-set/v1",
-    "id": "atlas-1492-effective-terrain-parity-v2-candidate-site"
+    "id": "atlas-1492-effective-terrain-parity-v3-bottom-projection"
   },
-  "description": "Independent fixed Godot production-semantics queries for the N3 native effective-terrain differential, including a CitadelSiteField-valid atlas-1492 candidate whose manifest and terrain profile are rebuilt by the production GDScript builders.",
+  "description": "Independent fixed Godot production-semantics queries for the N3 native effective-terrain differential, including a CitadelSiteField-valid atlas-1492 candidate and a bottom-stratum raw-world projection witness, with manifests, terrain profiles, and expected results rebuilt by production GDScript.",
   "world": {
     "seed": "atlas-1492",
     "cellSize": 1.35,
@@ -2006,6 +2006,44 @@
           "material": "stone",
           "generated": true,
           "edited": false
+        }
+      },
+      {
+        "ordinal": 8,
+        "id": "world-bottom-plus-one-projection-not-bedrock",
+        "input": {
+          "cell": [
+            0,
+            -63,
+            0
+          ]
+        },
+        "expected": {
+          "density": 1.35000002384186,
+          "densityBits": "000000a09999f53f",
+          "edited": false,
+          "generated": true,
+          "marker": "none",
+          "material": "stone",
+          "positionBits": [
+            "00000000",
+            "9a19aac2",
+            "00000000"
+          ],
+          "requestedCell": [
+            0,
+            -63,
+            0
+          ],
+          "solid": true,
+          "sourceCell": [
+            0,
+            -64,
+            0
+          ],
+          "surfaceY": 22.0319995880127,
+          "surfaceYBits": "0000002031083640",
+          "undergroundAirVoid": false
         }
       }
     ]

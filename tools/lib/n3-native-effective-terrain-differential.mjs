@@ -15,7 +15,7 @@ export const expectedQueryCounts = Object.freeze({
   cellCenters: 11,
   latticeNumeric: 11,
   worldNumeric: 6,
-  surfaceProjectionNumeric: 8,
+  surfaceProjectionNumeric: 9,
 });
 const debugAdapterBinary = 'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll';
 
