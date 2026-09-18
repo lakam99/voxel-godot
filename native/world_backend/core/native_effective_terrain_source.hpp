@@ -56,6 +56,11 @@ public:
 
     NativeSurfaceColumnFacts sample_surface_column(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId sample_surface_biome(const WorldSurfaceColumnQuery &query) const;
+    // TerrainVolumeService.column_top_surface_y_for_cell semantics: scan the
+    // effective typed volume, including scene-overlay precedence, and return
+    // the upper face of the highest solid cell. This is deliberately distinct
+    // from the shaped/reference surface carried by sample_surface_column().
+    double sample_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     NativeEffectiveCellStateFacts sample_cell_state_facts(const WorldCellCenterQuery &query) const;
     NativeCellState sample_cell_state(const WorldCellCenterQuery &query) const;
 

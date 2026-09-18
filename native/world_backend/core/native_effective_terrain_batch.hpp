@@ -81,6 +81,7 @@ struct NativeEffectiveSurfaceColumnBatchRecord {
     std::int32_t source_z = 0;
     double reference_surface_y = 0.0;
     double deformed_surface_y = 0.0;
+    double volume_surface_y = 0.0;
     TerrainBiomeId biome = TerrainBiomeId::plains;
 };
 
@@ -120,7 +121,7 @@ struct NativeEffectiveSurfaceProjectionBatchRecord {
 };
 
 struct NativeEffectiveTerrainBatchResult {
-    static constexpr std::uint32_t SCHEMA_REVISION = 1;
+    static constexpr std::uint32_t SCHEMA_REVISION = 2;
     std::uint32_t schema_revision = SCHEMA_REVISION;
     NativeTerrainPageKey primary_page;
     WorldPhysicalContentIdentity definition_physical_identity;

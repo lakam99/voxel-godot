@@ -10,15 +10,18 @@
 namespace voxel::world_backend {
 namespace {
 
-std::int32_t floor_position_cell(const float coordinate, const double cell_size) {
-    const double quotient = static_cast<double>(coordinate) / cell_size;
-    const double floored = std::floor(quotient);
-    if (!std::isfinite(floored)
-        || floored < static_cast<double>(std::numeric_limits<std::int32_t>::min())
-        || floored > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
+std::int32_t checked_cell_coordinate(const double value) {
+    if (!std::isfinite(value)
+        || value < static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        || value > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
         throw std::invalid_argument("native effective terrain position is outside cell domain");
     }
-    return static_cast<std::int32_t>(floored);
+    return static_cast<std::int32_t>(value);
+}
+
+std::int32_t floor_position_cell(const float coordinate, const double cell_size) {
+    return checked_cell_coordinate(
+        std::floor(static_cast<double>(coordinate) / cell_size));
 }
 
 CellCoord position_cell(const WorldFloat32Position &position, const double cell_size) {
@@ -218,6 +221,35 @@ TerrainBiomeId NativeEffectiveTerrainSource::sample_surface_biome(
     validate_world_query(query);
     require_primary_page_query(pin_, query.x, query.z);
     return shaped_surface_biome(query.x, query.z);
+}
+
+double NativeEffectiveTerrainSource::sample_volume_surface_y(
+    const WorldSurfaceColumnQuery &query) const {
+    validate_world_query(query);
+    require_primary_page_query(pin_, query.x, query.z);
+    const auto &constants = pin_.definition().constants();
+    const double cell_size = constants.cell_size_meters;
+    const double reference_y = shaped_surface(query.x, query.z);
+    // Match TerrainVolumeService.world_top_cell_y() and its bounded +16-cell
+    // probe above the reference surface. The source definition has already
+    // admitted finite positive cell size and finite surface bounds.
+    const double world_top = std::ceil(
+        (constants.maximum_surface_meters + cell_size * 4.0) / cell_size);
+    const double reference_probe_top = std::floor(reference_y / cell_size) + 16.0;
+    const std::int32_t top_y = checked_cell_coordinate(
+        std::min(world_top, reference_probe_top));
+    for (std::int64_t scan_y = top_y;
+         scan_y >= static_cast<std::int64_t>(constants.world_bottom_cell_y); --scan_y) {
+        const std::int32_t y = static_cast<std::int32_t>(scan_y);
+        const CellCoord solid_cell{query.x, y, query.z};
+        if (sample_cell_state({solid_cell, WorldQueryIntent::gameplay}).solid) {
+            const CellCoord above_cell{
+                query.x, checked_cell_coordinate(static_cast<double>(y) + 1.0), query.z};
+            if (!sample_cell_state({above_cell, WorldQueryIntent::gameplay}).solid)
+                return static_cast<double>(y + 1) * cell_size;
+        }
+    }
+    return reference_y;
 }
 
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_lattice_numeric(

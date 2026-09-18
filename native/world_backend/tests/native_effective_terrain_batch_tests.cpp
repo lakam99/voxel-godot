@@ -146,6 +146,70 @@ WorldDeltaPinnedSnapshot same_cell_layered_deltas() {
     return store.pin();
 }
 
+WorldDeltaPinnedSnapshot raised_column_deltas(const bool mask_with_scene_air) {
+    WorldDeltaStore store;
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = mask_with_scene_air
+        ? "effective-batch:raised-column-masked"
+        : "effective-batch:raised-column";
+    admission.durable_snapshot = NativeTypedWorldStateSnapshot::create({{
+        NativeCellStateNamespace::durable_terrain,
+        NativeTypedWorldStatePersistence::durable,
+        edit({3, 12, 0}, NativeCellStateNamespace::durable_terrain, 2.0,
+            TerrainMaterialId::stone, TerrainBiomeId::plains,
+            TerrainFluidId::none, {0, 0}),
+    }});
+    if (mask_with_scene_air) {
+        admission.transient_overlays.push_back({
+            NativeCellStateNamespace::scene_overlay,
+            NativeTypedWorldStatePersistence::transient,
+            edit({3, 12, 0}, NativeCellStateNamespace::scene_overlay, -0.5,
+                TerrainMaterialId::air, TerrainBiomeId::plains,
+                TerrainFluidId::none, {15, 0}),
+        });
+    }
+    static_cast<void>(store.admit_typed_state(admission));
+    return store.pin();
+}
+
+WorldDeltaPinnedSnapshot capped_roof_deltas() {
+    std::vector<NativeTypedWorldStateRecord> records;
+    for (const std::int32_t y : {14, 15}) {
+        records.push_back({
+            NativeCellStateNamespace::durable_terrain,
+            NativeTypedWorldStatePersistence::durable,
+            edit({4, y, 0}, NativeCellStateNamespace::durable_terrain, 2.0,
+                TerrainMaterialId::stone, TerrainBiomeId::plains,
+                TerrainFluidId::none, {0, 0}),
+        });
+    }
+    WorldDeltaStore store;
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = "effective-batch:capped-roof";
+    admission.durable_snapshot = NativeTypedWorldStateSnapshot::create(std::move(records));
+    static_cast<void>(store.admit_typed_state(admission));
+    return store.pin();
+}
+
+WorldDeltaPinnedSnapshot all_air_column_deltas() {
+    std::vector<NativeTypedWorldStateRecord> overlays;
+    for (std::int32_t y = -64; y <= 14; ++y) {
+        overlays.push_back({
+            NativeCellStateNamespace::scene_overlay,
+            NativeTypedWorldStatePersistence::transient,
+            edit({5, y, 0}, NativeCellStateNamespace::scene_overlay, -0.5,
+                TerrainMaterialId::air, TerrainBiomeId::plains,
+                TerrainFluidId::none, {15, 0}),
+        });
+    }
+    WorldDeltaStore store;
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = "effective-batch:all-air-column";
+    admission.transient_overlays = std::move(overlays);
+    static_cast<void>(store.admit_typed_state(admission));
+    return store.pin();
+}
+
 WorldDeltaPinnedSnapshot metadata_deltas(
     const std::string &payload, const bool retain_identifiers) {
     NativeCellStateInput input;
@@ -267,6 +331,7 @@ VWB_TEST(native_effective_batch_preserves_channel_order_duplicates_and_typed_fac
     VWB_EXPECT_EQ(2, result.surface_columns[2].source_x);
     VWB_EXPECT(near(13.0, result.surface_columns[0].reference_surface_y));
     VWB_EXPECT(near(13.0, result.surface_columns[0].deformed_surface_y));
+    VWB_EXPECT(near(13.5, result.surface_columns[0].volume_surface_y));
     VWB_EXPECT_EQ(result.surface_columns[0].biome, result.surface_columns[2].biome);
 
     VWB_EXPECT_EQ(4U, result.cell_centers.size());
@@ -304,6 +369,47 @@ VWB_TEST(native_effective_batch_preserves_channel_order_duplicates_and_typed_fac
     VWB_EXPECT(near(-0.5, result.surface_projection_numeric[1].facts.density));
     VWB_EXPECT_EQ(result.surface_projection_numeric[0].edited_sparse_state,
         result.surface_projection_numeric[2].edited_sparse_state);
+}
+
+VWB_TEST(native_effective_batch_surface_columns_own_effective_volume_surface_y) {
+    const auto definition = flat_definition();
+    NativeEffectiveTerrainBatchRequest request;
+    request.surface_columns.push_back({3, 0, WorldQueryIntent::gameplay});
+
+    const auto ordinary = NativeEffectiveTerrainBatch(
+        ready_pin(definition, {0, 0}, empty_deltas())).execute(request);
+    VWB_EXPECT(near(13.0, ordinary.surface_columns[0].reference_surface_y));
+    VWB_EXPECT(near(13.0, ordinary.surface_columns[0].deformed_surface_y));
+    VWB_EXPECT(near(13.5, ordinary.surface_columns[0].volume_surface_y));
+
+    const auto durable = NativeEffectiveTerrainBatch(
+        ready_pin(definition, {0, 0}, raised_column_deltas(false))).execute(request);
+    VWB_EXPECT(near(13.0, durable.surface_columns[0].reference_surface_y));
+    VWB_EXPECT(near(17.55, durable.surface_columns[0].volume_surface_y));
+
+    // Effective typed-cell precedence is part of the column scan: transient
+    // scene air at the same cell masks the durable solid and restores the
+    // generated column top. The shaped/reference height never changes.
+    const auto layered = NativeEffectiveTerrainBatch(
+        ready_pin(definition, {0, 0}, raised_column_deltas(true))).execute(request);
+    VWB_EXPECT(near(13.0, layered.surface_columns[0].reference_surface_y));
+    VWB_EXPECT(near(13.0, layered.surface_columns[0].deformed_surface_y));
+    VWB_EXPECT(near(13.5, layered.surface_columns[0].volume_surface_y));
+
+    // The original service probes no more than the admitted world top. A
+    // solid at that bound whose immediate upper neighbour is also solid is
+    // not an exposed top, so the scan continues to the ordinary terrain.
+    request.surface_columns[0].x = 4;
+    const auto capped = NativeEffectiveTerrainBatch(
+        ready_pin(definition, {0, 0}, capped_roof_deltas())).execute(request);
+    VWB_EXPECT(near(13.5, capped.surface_columns[0].volume_surface_y));
+
+    // If no effective solid exists in the bounded column, the GDScript owner
+    // falls back to the shaped/reference height rather than quantizing it.
+    request.surface_columns[0].x = 5;
+    const auto all_air = NativeEffectiveTerrainBatch(
+        ready_pin(definition, {0, 0}, all_air_column_deltas())).execute(request);
+    VWB_EXPECT(near(13.0, all_air.surface_columns[0].volume_surface_y));
 }
 
 VWB_TEST(native_effective_batch_preserves_high_coordinate_source_remaps) {
@@ -487,7 +593,7 @@ VWB_TEST(native_effective_batch_prepared_payload_cap_covers_static_and_nested_dy
     NativeEffectiveTerrainBatch baseline(
         ready_pin(definition, {0, 0}, empty_deltas()));
     const auto surface = baseline.execute(surface_request);
-    VWB_EXPECT_EQ(34U, surface.prepared_payload_bytes);
+    VWB_EXPECT_EQ(42U, surface.prepared_payload_bytes);
 
     NativeEffectiveTerrainBatchLimits limits;
     limits.max_prepared_payload_bytes = surface.prepared_payload_bytes;

@@ -179,12 +179,12 @@ NativeEffectiveTerrainBatchResult NativeEffectiveTerrainBatch::execute(
     add_to_total(request.world_numeric.size(), limits_.max_total_queries, total);
     add_to_total(request.surface_projection_numeric.size(), limits_.max_total_queries, total);
 
-    // Fixed logical record bytes (no C++ padding/capacity): surface 34,
+    // Fixed logical record bytes (no C++ padding/capacity): surface 42,
     // cell-center 42, lattice 58, arbitrary-world 62, surface-projection 62.
     // The optional edited-state discriminator is included in each applicable
     // fixed record. Its retained state payload is charged while copying below.
     std::size_t prepared_payload_bytes = 0;
-    add_static_records(request.surface_columns.size(), 34,
+    add_static_records(request.surface_columns.size(), 42,
         limits_.max_prepared_payload_bytes, prepared_payload_bytes);
     add_static_records(request.cell_centers.size(), 42,
         limits_.max_prepared_payload_bytes, prepared_payload_bytes);
@@ -219,6 +219,7 @@ NativeEffectiveTerrainBatchResult NativeEffectiveTerrainBatch::execute(
         const NativeSurfaceColumnFacts facts = source_.sample_surface_column(query);
         result.surface_columns.push_back({query, facts.cell_x, facts.cell_z,
             facts.reference_surface_y, facts.deformed_surface_y,
+            source_.sample_volume_surface_y(query),
             source_.sample_surface_biome(query)});
     }
     for (const WorldCellCenterQuery &query : request.cell_centers) {
