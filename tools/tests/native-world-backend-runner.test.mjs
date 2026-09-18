@@ -7,7 +7,9 @@ import {
   coverageTotals,
   expectedToolchainLockValue,
   inventoryProjectBuildInputs,
+  releaseSaveV2ProbeChecks,
   validateInstalledProvenance,
+  validateReleaseSaveV2ProbeReport,
   validateToolchainLockValue,
 } from '../lib/native-world-backend-runner.mjs';
 
@@ -99,6 +101,9 @@ test('toolchain lock validation fails closed on pin or license-path drift', () =
   const godotDrift = structuredClone(expectedToolchainLockValue);
   godotDrift.godot.patch = 0;
   assert.throws(() => validateToolchainLockValue(godotDrift), /does not exactly match/);
+  const templateDrift = structuredClone(expectedToolchainLockValue);
+  templateDrift.godot.windowsReleaseX8664TemplateSha256 = '0'.repeat(64);
+  assert.throws(() => validateToolchainLockValue(templateDrift), /does not exactly match/);
   const noiseDrift = structuredClone(expectedToolchainLockValue);
   noiseDrift.fastNoiseLite.patchedHeaderSha256 = '0'.repeat(64);
   assert.throws(() => validateToolchainLockValue(noiseDrift), /does not exactly match/);
@@ -109,9 +114,41 @@ test('project input inventory includes the owned launcher and adapter/build surf
   const paths = inventory.n1Inputs.map(item => item.path);
   assert(paths.includes('tools/lib/owned-process.mjs'));
   assert(paths.includes('scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'));
+  assert(paths.includes('scripts/testing/native_world/NativeWorldBackendReleaseSaveV2Probe.gd'));
   assert(paths.includes('native/world_backend/core/thirdparty/fast_noise_lite/LICENSE'));
   assert(inventory.extensionSources.some(item => item.path.endsWith('/terrain_meshing_backend.cpp')));
   assert.match(inventory.digestSha256, /^[0-9a-f]{64}$/);
+});
+
+function validReleaseProbeReport() {
+  return {
+    schema: 'native-world-backend-release-save-v2-probe/v1',
+    passed: true,
+    evidenceLevel: 'isolated-release-export-shadow-adapter',
+    productionCutover: false,
+    shadowOnly: true,
+    engineVersion: {
+      major: 4, minor: 6, patch: 1, status: 'stable',
+      hash: '14d19694e0c88a3f9e82d899a0400f27a24c176e',
+    },
+    features: { release: true, template: true, debug: false, editor: false, editorHint: false },
+    checks: Object.fromEntries(releaseSaveV2ProbeChecks.map(name => [name, true])),
+    failures: [],
+  };
+}
+
+test('release save-v2 probe validator requires the exact release/shadow evidence', () => {
+  const valid = validReleaseProbeReport();
+  assert.equal(validateReleaseSaveV2ProbeReport(valid), valid);
+  const debug = structuredClone(valid);
+  debug.features.debug = true;
+  assert.throws(() => validateReleaseSaveV2ProbeReport(debug), /release export template/);
+  const missing = structuredClone(valid);
+  delete missing.checks.overlay_excluded_from_save;
+  assert.throws(() => validateReleaseSaveV2ProbeReport(missing), /exact required check set/);
+  const cutover = structuredClone(valid);
+  cutover.productionCutover = true;
+  assert.throws(() => validateReleaseSaveV2ProbeReport(cutover), /envelope is invalid/);
 });
 
 test('installed artifact provenance rejects a missing pure-core digest', () => {

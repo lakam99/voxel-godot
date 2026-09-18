@@ -38,7 +38,9 @@
     "status": "stable",
     "hash": "14d19694e",
     "engineCommitSha": "14d19694e0c88a3f9e82d899a0400f27a24c176e",
-    "consoleSha256": "bd9e27c6994a128aaab45cdda4d372de87b91900618ba2de55c6aa29248d5b56"
+    "consoleSha256": "bd9e27c6994a128aaab45cdda4d372de87b91900618ba2de55c6aa29248d5b56",
+    "windowsReleaseX8664TemplateBytes": 104576512,
+    "windowsReleaseX8664TemplateSha256": "6a0266cb7571aa4d437a32094acd353f020c77dcf7ff5a3305ae45d0609e5c20"
   },
   "llvmCoverage": {
     "version": "23.1.1",

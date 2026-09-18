@@ -52,6 +52,8 @@ export const expectedToolchainLockValue = {
     status: 'stable', hash: '14d19694e',
     engineCommitSha: '14d19694e0c88a3f9e82d899a0400f27a24c176e',
     consoleSha256: 'bd9e27c6994a128aaab45cdda4d372de87b91900618ba2de55c6aa29248d5b56',
+    windowsReleaseX8664TemplateBytes: 104576512,
+    windowsReleaseX8664TemplateSha256: '6a0266cb7571aa4d437a32094acd353f020c77dcf7ff5a3305ae45d0609e5c20',
   },
   llvmCoverage: {
     version: llvmVersion, resourceDirVersion: llvmResourceDirVersion, platform: 'x86_64-pc-windows-msvc',
@@ -236,6 +238,7 @@ export async function inventoryProjectBuildInputs(project) {
     'native/world_backend/coverage_canary/coverage_canary.cpp',
     'native/world_backend/core/thirdparty/fast_noise_lite/LICENSE',
     'scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd',
+    'scripts/testing/native_world/NativeWorldBackendReleaseSaveV2Probe.gd',
     'tools/run-native-world-backend-tests.mjs',
     'tools/lib/native-compiler-owned-wrapper.mjs',
     'tools/lib/native-world-backend-runner.mjs',
@@ -367,6 +370,166 @@ async function runAdapterSmoke({ project, output, toolchainLock, projectInputs }
     report: { path: projectPath(project, reportPath), sha256: await hashFile(reportPath), value },
     godot: { path: godot, sha256: godotSha256, pinnedVersion: toolchainLock.godot.version },
     ownedProcess: projectPath(project, run.summaryPath),
+  };
+}
+
+export const releaseSaveV2ProbeChecks = [
+  'release_feature',
+  'template_feature',
+  'debug_feature_absent',
+  'editor_feature_absent',
+  'editor_hint_absent',
+  'engine_version',
+  'extension_load_ok',
+  'adapter_registered',
+  'adapter_instantiated',
+  'shadow_only',
+  'save_methods_bound',
+  'save_v2_restore_ready',
+  'save_v2_export_ready',
+  'save_v2_exact_roundtrip',
+  'overlay_commit_ready',
+  'overlay_excluded_from_save',
+  'durable_commit_ready',
+  'durable_export_updated',
+].sort();
+
+export function validateReleaseSaveV2ProbeReport(value, toolchainLock = expectedToolchainLockValue) {
+  if (!value || value.schema !== 'native-world-backend-release-save-v2-probe/v1'
+      || value.passed !== true
+      || value.evidenceLevel !== 'isolated-release-export-shadow-adapter'
+      || value.productionCutover !== false || value.shadowOnly !== true
+      || !Array.isArray(value.failures) || value.failures.length !== 0
+      || !value.checks || typeof value.checks !== 'object' || Array.isArray(value.checks)) {
+    throw new Error('Release save-v2 probe report envelope is invalid.');
+  }
+  const actualChecks = Object.keys(value.checks).sort();
+  if (!isDeepStrictEqual(actualChecks, releaseSaveV2ProbeChecks)
+      || releaseSaveV2ProbeChecks.some(name => value.checks[name] !== true)) {
+    throw new Error('Release save-v2 probe did not pass the exact required check set.');
+  }
+  const features = value.features;
+  if (!features || features.release !== true || features.template !== true
+      || features.debug !== false || features.editor !== false || features.editorHint !== false) {
+    throw new Error('Release save-v2 probe did not execute in a release export template.');
+  }
+  const version = value.engineVersion;
+  const pin = toolchainLock.godot;
+  if (!version || Number(version.major) !== pin.major || Number(version.minor) !== pin.minor
+      || Number(version.patch) !== pin.patch || String(version.status) !== pin.status
+      || String(version.hash) !== pin.engineCommitSha) {
+    throw new Error('Release save-v2 probe engine identity does not match the toolchain lock.');
+  }
+  return value;
+}
+
+function exportPresetString(releaseTemplate) {
+  const template = releaseTemplate.replaceAll('\\', '/').replaceAll('"', '\\"');
+  return `[preset.0]\n\nname="Native World Backend Release Gate"\nplatform="Windows Desktop"\nrunnable=false\nadvanced_options_enabled=false\ndedicated_server=false\ncustom_features=""\nexport_filter="all_resources"\ninclude_filter=""\nexclude_filter=""\nexport_path=""\npatches=PackedStringArray()\nencryption_include_filters=""\nencryption_exclude_filters=""\nseed=0\nencrypt_pck=false\nencrypt_directory=false\nscript_export_mode=2\n\n[preset.0.options]\n\ncustom_template/debug=""\ncustom_template/release="${template}"\ndebug/export_console_wrapper=0\nbinary_format/embed_pck=false\nbinary_format/architecture="x86_64"\ntexture_format/s3tc_bptc=true\ntexture_format/etc2_astc=false\napplication/modify_resources=false\ncodesign/enable=false\n`;
+}
+
+async function findReleaseTemplate(options, pin) {
+  const candidates = [
+    options.releaseTemplate,
+    process.env.GODOT_WINDOWS_RELEASE_TEMPLATE,
+    process.env.APPDATA ? join(process.env.APPDATA, 'Godot', 'export_templates', '4.6.1.stable', 'windows_release_x86_64.exe') : null,
+  ].filter(Boolean).map(value => resolve(String(value)));
+  for (const candidate of candidates) {
+    if (!await exists(candidate)) continue;
+    const value = await stat(candidate);
+    const sha256 = await hashFile(candidate);
+    if (value.size !== pin.windowsReleaseX8664TemplateBytes
+        || sha256 !== pin.windowsReleaseX8664TemplateSha256) {
+      throw new Error(`Godot release export template identity mismatch: ${candidate}`);
+    }
+    return { path: candidate, bytes: value.size, sha256 };
+  }
+  throw new Error('Pinned Godot 4.6.1 Windows x86_64 release export template is unavailable.');
+}
+
+export async function runReleaseAdapterSmoke({ project, output, toolchainLock, projectInputs, configurations, options }) {
+  if (process.platform !== 'win32') throw new Error('The pinned release-export adapter gate currently requires Windows x86_64.');
+  const godot = await findGodot();
+  const godotSha256 = await hashFile(godot);
+  if (godotSha256 !== toolchainLock.godot.consoleSha256) {
+    throw new Error('Godot editor console binary does not match the native toolchain lock.');
+  }
+  const releaseTemplate = await findReleaseTemplate(options, toolchainLock.godot);
+  const releaseBuild = configurations.find(value => value.configuration === 'release');
+  if (!releaseBuild?.extension?.dll) {
+    throw new Error('Release-export adapter gate requires the just-built Release extension.');
+  }
+  if (await hashFile(releaseBuild.extension.dll.path) !== releaseBuild.extension.dll.sha256) {
+    throw new Error('Just-built Release extension changed before release-export staging.');
+  }
+
+  const stage = join(output, 'release-adapter-stage');
+  const exportDirectory = join(output, 'release-adapter-export');
+  await mkdir(stage, { recursive: true });
+  await mkdir(exportDirectory, { recursive: false });
+  const probeSource = join(project, 'scripts', 'testing', 'native_world', 'NativeWorldBackendReleaseSaveV2Probe.gd');
+  const loaderSource = join(project, 'addons', 'terrain_meshing_backend', 'terrain_meshing_backend.gdextension');
+  const stageProbe = join(stage, 'NativeWorldBackendReleaseSaveV2Probe.gd');
+  await cp(probeSource, stageProbe, { force: false });
+  await writeFile(join(stage, 'project.godot'), `; Isolated native release-export gate. Not a production project.\nconfig_version=5\n\n[application]\n\nconfig/name="Native World Backend Release Gate"\nrun/main_scene="res://ReleaseSaveV2Probe.tscn"\n\n[rendering]\n\nrenderer/rendering_method="gl_compatibility"\nrenderer/rendering_method.mobile="gl_compatibility"\n`, { flag: 'wx' });
+  await writeFile(join(stage, 'ReleaseSaveV2Probe.tscn'), `[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://NativeWorldBackendReleaseSaveV2Probe.gd" id="1_probe"]\n\n[node name="NativeWorldBackendReleaseSaveV2Probe" type="Node"]\nscript = ExtResource("1_probe")\n`, { flag: 'wx' });
+  await writeFile(join(stage, 'export_presets.cfg'), exportPresetString(releaseTemplate.path), { flag: 'wx' });
+
+  const exportExecutable = join(exportDirectory, 'native-world-backend-release-gate.exe');
+  const exportRun = await runOwned({ project: stage, output, label: 'release-adapter-export', executable: godot,
+    args: ['--headless', '--path', stage, '--export-release', 'Native World Backend Release Gate', exportExecutable], timeoutSeconds: 180,
+    env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1' } });
+  if (!await exists(exportExecutable)) throw new Error('Release adapter export did not produce its executable.');
+  const outputFiles = await filesBelow(exportDirectory);
+  if (await hashFile(exportExecutable) !== releaseTemplate.sha256) {
+    throw new Error('Artifact executable is not the exact pinned release export template.');
+  }
+  // Keep the editor entirely outside the GDExtension lifecycle: Godot 4.6.1
+  // crashes after an otherwise successful export when it unloads this Debug
+  // extension. Deploy the checked-in loader and the just-built Release DLL
+  // into the finished artifact, then let the Release probe load it explicitly.
+  const runtimeLoader = join(exportDirectory, 'addons', 'terrain_meshing_backend', 'terrain_meshing_backend.gdextension');
+  const runtimeDll = join(exportDirectory, 'addons', 'terrain_meshing_backend', 'bin', releaseBuild.extension.dll.name);
+  await mkdir(dirname(runtimeDll), { recursive: true });
+  await cp(loaderSource, runtimeLoader, { force: false });
+  await cp(releaseBuild.extension.dll.path, runtimeDll, { force: false });
+  if (await hashFile(runtimeDll) !== releaseBuild.extension.dll.sha256) {
+    throw new Error('Export artifact Release DLL differs from the just-built Release DLL.');
+  }
+  const reportPath = join(output, 'release-adapter-smoke-report.json');
+  const runtimeRun = await runOwned({ project: exportDirectory, output, label: 'release-adapter-runtime', executable: exportExecutable,
+    args: ['--headless', '--audio-driver', 'Dummy'], timeoutSeconds: 120,
+    env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1', VWB_RELEASE_SAVE_V2_REPORT: reportPath } });
+  if (!await exists(reportPath)) throw new Error('Release save-v2 adapter probe did not publish its report.');
+  const report = validateReleaseSaveV2ProbeReport(JSON.parse(await readFile(reportPath, 'utf8')), toolchainLock);
+  const runtimeStderr = await readFile(runtimeRun.stderrPath, 'utf8');
+  if (runtimeStderr !== '') throw new Error('Release save-v2 adapter probe emitted stderr.');
+  const pcks = outputFiles.filter(path => extname(path).toLowerCase() === '.pck');
+  if (pcks.length !== 1) throw new Error(`Release adapter export must contain exactly one PCK; found ${pcks.length}.`);
+  const record = async path => ({ path: relative(project, path).replaceAll('\\', '/'), sha256: await hashFile(path), bytes: (await stat(path)).size });
+  return {
+    evidenceScope: 'Artifact-staged Windows release export loading and exercising the shadow save-v2 adapter.',
+    productionCutover: false,
+    shadowOnly: true,
+    inputsDigestSha256: projectInputs.digestSha256,
+    godotEditor: { path: godot, sha256: godotSha256, pinnedVersion: toolchainLock.godot.version },
+    releaseTemplate,
+    justBuiltReleaseDll: { ...releaseBuild.extension.dll, hashBoundToExport: true },
+    stagedInputs: {
+      probe: await record(stageProbe), loaderSource: await record(loaderSource),
+    },
+    export: {
+      executable: await record(exportExecutable), pck: await record(pcks[0]),
+      runtimeLoader: await record(runtimeLoader), runtimeLoadDll: await record(runtimeDll),
+      releaseDllMatchesJustBuilt: true,
+      executableMatchesPinnedTemplate: true,
+    },
+    report: { ...await record(reportPath), value: report },
+    ownedProcess: {
+      export: relative(project, exportRun.summaryPath).replaceAll('\\', '/'),
+      runtime: relative(project, runtimeRun.summaryPath).replaceAll('\\', '/'),
+    },
+    runtimeStderrEmpty: true,
   };
 }
 
@@ -846,7 +1009,7 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     git: { commit: await gitText(project, ['rev-parse', 'HEAD']), branch: await gitText(project, ['branch', '--show-current']), statusBefore: await gitText(project, ['status', '--short']) },
     source: {}, projectInputs: {},
     dependency: {}, toolchainLock: {}, compiler: await findCompilerIdentity(), compilerAfter: null,
-    configurations: [], installed: [], adapterSmoke: null, coverage: null,
+    configurations: [], installed: [], adapterSmoke: null, releaseAdapterSmoke: null, coverage: null,
   };
   try {
     receipt.source = await inventorySources(project);
@@ -909,6 +1072,10 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     receipt.installed = await installExtensions(project, receipt.configurations, receipt.projectInputs.before, receipt.source);
     receipt.adapterSmoke = await runAdapterSmoke({
       project, output, toolchainLock: toolchainLockValue, projectInputs: receipt.projectInputs.before,
+    });
+    receipt.releaseAdapterSmoke = await runReleaseAdapterSmoke({
+      project, output, toolchainLock: toolchainLockValue, projectInputs: receipt.projectInputs.before,
+      configurations: receipt.configurations, options,
     });
     try {
       receipt.coverage = dependencies.coverageProbe
