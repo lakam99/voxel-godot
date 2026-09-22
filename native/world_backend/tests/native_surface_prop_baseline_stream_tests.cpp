@@ -40,7 +40,7 @@ NativeSurfacePropBaselineInput input_for(const NativeSurfacePropAttempt &attempt
     result.classification.cell_z = attempt.cell_z;
     result.classification.source_decision_digest.fill(1U);
     result.classification.admission = NativeSurfacePropAdmission::eligible;
-    result.classification.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw;
+    result.classification.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_36_draw;
     return result;
 }
 
@@ -65,7 +65,7 @@ inputs_for(const NativeSurfacePropAttemptStream &attempts) {
     inputs[4].classification.policy.tree_upper = 1.0F;
     inputs[4].classification.policy.forage_upper = 1.0F;
     inputs[4].classification.policy.wildlife_upper = 1.0F;
-    inputs[4].classification.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::conifer_22_draw;
+    inputs[4].classification.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_22_draw;
     inputs[5].classification.policy.rock_upper = 1.0F;
     inputs[5].classification.policy.tree_upper = 1.0F;
     inputs[5].classification.policy.forage_upper = 1.0F;
@@ -106,9 +106,9 @@ VWB_TEST(native_surface_prop_baseline_stream_replays_every_typed_recipe_family) 
     VWB_EXPECT(entries[1].forage.has_value());
     VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::ordinary_rock, entries[2].outcome);
     VWB_EXPECT_EQ(6U, entries[2].compatibility_draws.size());
-    VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::broadleaf_tree, entries[3].outcome);
+    VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::tree_36_draw, entries[3].outcome);
     VWB_EXPECT_EQ(36U, entries[3].compatibility_draws.size());
-    VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::conifer_tree, entries[4].outcome);
+    VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::tree_22_draw, entries[4].outcome);
     VWB_EXPECT_EQ(22U, entries[4].compatibility_draws.size());
     VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster, entries[5].outcome);
     VWB_EXPECT(entries[5].ore_roll.has_value());

@@ -26,15 +26,15 @@ bool valid_disposition(const NativeSurfacePropReplayDisposition value) noexcept 
     return value == NativeSurfacePropReplayDisposition::skipped_before_prop_roll
         || value == NativeSurfacePropReplayDisposition::no_feature
         || value == NativeSurfacePropReplayDisposition::ordinary_rock
-        || value == NativeSurfacePropReplayDisposition::broadleaf_tree
-        || value == NativeSurfacePropReplayDisposition::conifer_tree;
+        || value == NativeSurfacePropReplayDisposition::tree_36_draw
+        || value == NativeSurfacePropReplayDisposition::tree_22_draw;
 }
 
 std::size_t recipe_draw_count(const NativeSurfacePropReplayDisposition value) noexcept {
     switch (value) {
     case NativeSurfacePropReplayDisposition::ordinary_rock: return 6U;
-    case NativeSurfacePropReplayDisposition::broadleaf_tree: return 36U;
-    case NativeSurfacePropReplayDisposition::conifer_tree: return 22U;
+    case NativeSurfacePropReplayDisposition::tree_36_draw: return 36U;
+    case NativeSurfacePropReplayDisposition::tree_22_draw: return 22U;
     default: return 0U;
     }
 }
@@ -64,7 +64,7 @@ std::vector<std::uint8_t> canonical_trace_binary(
     const std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &entries,
     const std::uint64_t final_rng_state) {
     CanonicalWriter writer;
-    writer.u8('S'); writer.u8('P'); writer.u8('T'); writer.u8('2');
+    writer.u8('S'); writer.u8('P'); writer.u8('T'); writer.u8('3');
     writer.u32(source_receipt.schema_revision); writer.digest(source_receipt.effective_source_digest);
     writer.u64(source_receipt.terrain_delta_revision); writer.u64(source_receipt.shaping_registry_revision);
     writer.u32(source_receipt.environment_profile_revision);

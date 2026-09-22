@@ -100,7 +100,7 @@ VWB_TEST(native_surface_prop_rng_trace_replays_every_coordinate_and_no_feature_r
     VWB_EXPECT_EQ(static_cast<std::uint8_t>('S'), trace.canonical_binary()[0]);
     VWB_EXPECT_EQ(static_cast<std::uint8_t>('P'), trace.canonical_binary()[1]);
     VWB_EXPECT_EQ(static_cast<std::uint8_t>('T'), trace.canonical_binary()[2]);
-    VWB_EXPECT_EQ(static_cast<std::uint8_t>('2'), trace.canonical_binary()[3]);
+    VWB_EXPECT_EQ(static_cast<std::uint8_t>('3'), trace.canonical_binary()[3]);
 }
 
 VWB_TEST(native_surface_prop_rng_trace_preserves_exact_class_compatibility_draw_counts) {
@@ -108,8 +108,8 @@ VWB_TEST(native_surface_prop_rng_trace_preserves_exact_class_compatibility_draw_
     std::vector<NativeSurfacePropReplayReceipt> input = receipts(source);
     input[0].disposition = NativeSurfacePropReplayDisposition::skipped_before_prop_roll;
     input[1].disposition = NativeSurfacePropReplayDisposition::ordinary_rock;
-    input[2].disposition = NativeSurfacePropReplayDisposition::broadleaf_tree;
-    input[3].disposition = NativeSurfacePropReplayDisposition::conifer_tree;
+    input[2].disposition = NativeSurfacePropReplayDisposition::tree_36_draw;
+    input[3].disposition = NativeSurfacePropReplayDisposition::tree_22_draw;
     const NativeSurfacePropRngTrace trace = NativeSurfacePropRngTrace::create(source, source_receipt(), input);
     VWB_EXPECT(!trace.entries()[0].has_prop_roll);
     VWB_EXPECT_EQ(NativeSurfacePropReplayDisposition::skipped_before_prop_roll, trace.entries()[0].disposition);
@@ -151,6 +151,8 @@ VWB_TEST(native_surface_prop_rng_trace_rejects_incomplete_unbound_and_unknown_re
     VWB_EXPECT_THROW(NativeSurfacePropRngTraceRejected, NativeSurfacePropRngTrace::create(source, malformed, receipts(source)));
     malformed = source_receipt(); malformed.schema_revision = 1U;
     VWB_EXPECT_THROW(NativeSurfacePropRngTraceRejected, NativeSurfacePropRngTrace::create(source, malformed, receipts(source)));
+    malformed = source_receipt(); malformed.schema_revision = 2U;
+    VWB_EXPECT_THROW(NativeSurfacePropRngTraceRejected, NativeSurfacePropRngTrace::create(source, malformed, receipts(source)));
     malformed = source_receipt(); malformed.effective_source_digest = {};
     VWB_EXPECT_THROW(NativeSurfacePropRngTraceRejected, NativeSurfacePropRngTrace::create(source, malformed, receipts(source)));
     malformed = source_receipt(); malformed.environment_profile_revision = 0U;
@@ -184,5 +186,5 @@ VWB_TEST(native_surface_prop_rng_trace_source_receipt_is_bound_to_one_admitted_p
         NativeSurfacePropSourceReceipt::from_pin(pin, 3U, {}));
     const auto source = stream();
     const auto trace = NativeSurfacePropRngTrace::create(source, receipt, receipts(source));
-    VWB_EXPECT_EQ(static_cast<std::uint8_t>('2'), trace.canonical_binary()[3]);
+    VWB_EXPECT_EQ(static_cast<std::uint8_t>('3'), trace.canonical_binary()[3]);
 }

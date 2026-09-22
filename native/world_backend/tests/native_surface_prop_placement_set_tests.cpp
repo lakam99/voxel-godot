@@ -44,7 +44,7 @@ inputs_for(const NativeSurfacePropAttemptStream &attempts) {
         classification.cell_z = attempts.attempts()[i].cell_z;
         classification.source_decision_digest.fill(static_cast<std::uint8_t>(i + 1U));
         classification.admission = NativeSurfacePropAdmission::eligible;
-        classification.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw;
+        classification.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_36_draw;
     }
     inputs[0].classification.policy.wildlife_upper = 1.0F; inputs[0].wildlife = boar_wildlife();
     inputs[1].classification.policy.forage_upper = 1.0F; inputs[1].classification.policy.wildlife_upper = 1.0F;
@@ -55,7 +55,7 @@ inputs_for(const NativeSurfacePropAttemptStream &attempts) {
     inputs[3].classification.policy.wildlife_upper = 1.0F;
     inputs[4].classification.policy.tree_upper = 1.0F; inputs[4].classification.policy.forage_upper = 1.0F;
     inputs[4].classification.policy.wildlife_upper = 1.0F;
-    inputs[4].classification.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::conifer_22_draw;
+    inputs[4].classification.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_22_draw;
     inputs[5].classification.policy.rock_upper = 1.0F; inputs[5].classification.policy.tree_upper = 1.0F;
     inputs[5].classification.policy.forage_upper = 1.0F; inputs[5].classification.policy.wildlife_upper = 1.0F;
     inputs[5].classification.policy.ore_policy = NativeSurfacePropOrePolicy::eligible;
@@ -150,14 +150,14 @@ VWB_TEST(native_surface_prop_placement_spp2_binds_all_typed_outcomes_to_pinned_c
     const auto terrain = terrain_for(definition);
     const auto receipt = surface_prop_test_fixture::receipt(terrain.pin());
     const auto set = NativeSurfacePropPlacementSet::create(attempt_stream, baseline, receipt, terrain);
-    VWB_EXPECT_EQ(2U, NativeSurfacePropPlacementSet::SCHEMA_REVISION);
+    VWB_EXPECT_EQ(3U, NativeSurfacePropPlacementSet::SCHEMA_REVISION);
     VWB_EXPECT_EQ(terrain.pin().physical_content_identity(), set.world_source_identity());
     VWB_EXPECT_EQ(receipt.effective_source_digest, set.source_receipt().effective_source_digest);
     VWB_EXPECT_EQ(terrain.pin().definition().physical_content_identity(), set.definition_source_identity());
     VWB_EXPECT_EQ(terrain.pin().terrain_delta_revision(), set.terrain_delta_revision());
     VWB_EXPECT_EQ(terrain.pin().shaping_registry_revision(), set.shaping_registry_revision());
     VWB_EXPECT_EQ(sha256(set.canonical_binary()), set.content_digest());
-    VWB_EXPECT_EQ(static_cast<std::uint8_t>('2'), set.canonical_binary()[3]);
+    VWB_EXPECT_EQ(static_cast<std::uint8_t>('3'), set.canonical_binary()[3]);
     bool saw_non_lattice = false;
     for (std::size_t i = 0; i < set.entries().size(); ++i) {
         const auto &entry = set.entries()[i];

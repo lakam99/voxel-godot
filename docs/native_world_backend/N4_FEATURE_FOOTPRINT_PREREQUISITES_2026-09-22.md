@@ -569,6 +569,24 @@ typed replay schema through all four owners together, with a schema revision
 and old-fixture audit. A composer-only alpine exception would leave the
 shared-PCG state and durable trace semantically mislabeled.
 
+**2026-09-22 correction implemented (shadow only):** Native classifier policy,
+classification outcome, baseline stream, placement set, and RNG trace now name
+the legacy tree consumer as a 36-draw or 22-draw replay mode, independent of
+the selected ecology architecture. The tree composer checks that mode against
+the source biome (`taiga`, `snow`, and `tundra` use 22; alpine and the remaining
+biomes use 36), then selects visual architecture from the profile family.
+Alpine conifer with 36 draws is a focused native test. Serialized placement
+and RNG-trace receipts advance from SPP2/SPT2 to SPP3/SPT3; tree recipe
+producer advances from STR1 to STR2. No v2 trace reader or fixture is retained:
+old trace source receipts are rejected, and placement/tree definition fixtures
+are rebuilt from current typed inputs. This changes shadow receipt identity,
+not live Godot world/save format. Direct Godot source evidence is
+`artifacts/native-world-backend/n4-tree-rng-all-profiles/report.json` (15/15
+cases, including alpine); focused native debug evidence is
+`artifacts/native-world-backend/n4-alpine-tree-replay-debug-04/test-debug.stdout.log`
+(353/353 after the final type rename). Neither is gameplay or
+production-cutover proof.
+
 Structure exclusion currently spans natural-prop exclusion records, structure
 terrain-footprint records, and ready/prepared Citadel reservations. The
 `reserve_natural_prop_exclusion` path does not advance the regional source

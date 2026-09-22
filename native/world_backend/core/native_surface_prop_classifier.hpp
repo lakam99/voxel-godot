@@ -19,12 +19,14 @@ enum class NativeSurfacePropAdmission : std::uint8_t {
     eligible = 5,
 };
 
-enum class NativeSurfacePropTreeCompatibilityFamily : std::uint8_t {
+// Legacy tree_visual_spec draw path. This is not a visual/tree-grammar family:
+// alpine selects conifer architecture while consuming the 36-draw path.
+enum class NativeSurfacePropTreeReplayMode : std::uint8_t {
     none = 0,
     // tree_visual_spec consumes rotation + fallback height, then six values
     // for its center clump (fixed zero spread) and seven per outer clump.
-    broadleaf_36_draw = 1,
-    conifer_22_draw = 2,
+    legacy_36_draw = 1,
+    legacy_22_draw = 2,
 };
 
 enum class NativeSurfacePropOrePolicy : std::uint8_t {
@@ -40,7 +42,7 @@ struct NativeSurfacePropPlacementPolicy final {
     float tree_upper = 0.0F;
     float forage_upper = 0.0F;
     float wildlife_upper = 0.0F;
-    NativeSurfacePropTreeCompatibilityFamily tree_family = NativeSurfacePropTreeCompatibilityFamily::none;
+    NativeSurfacePropTreeReplayMode tree_replay = NativeSurfacePropTreeReplayMode::none;
     NativeSurfacePropOrePolicy ore_policy = NativeSurfacePropOrePolicy::none;
     float iron_upper = 0.0F;
     float copper_upper = 0.0F;
@@ -64,8 +66,8 @@ enum class NativeSurfacePropClassificationOutcome : std::uint8_t {
     skipped_before_prop_roll = 1,
     no_feature = 2,
     ordinary_rock = 3,
-    broadleaf_tree = 4,
-    conifer_tree = 5,
+    tree_36_draw = 4,
+    tree_22_draw = 5,
     unported_iron_ore_cluster = 6,
     unported_copper_ore_cluster = 7,
     forage_recipe = 8,

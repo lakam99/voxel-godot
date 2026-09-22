@@ -18,7 +18,7 @@ NativeSurfacePropAttemptStream attempts(const std::string &seed = "tree-composer
 }
 
 NativeSurfacePropBaselineInput input_for(const NativeSurfacePropAttempt &attempt,
-    const NativeSurfacePropTreeCompatibilityFamily family) {
+    const NativeSurfacePropTreeReplayMode family) {
     NativeSurfacePropBaselineInput result;
     result.classification.ordinal = attempt.ordinal;
     result.classification.cell_x = attempt.cell_x;
@@ -28,12 +28,12 @@ NativeSurfacePropBaselineInput input_for(const NativeSurfacePropAttempt &attempt
     result.classification.policy.tree_upper = 1.0F;
     result.classification.policy.forage_upper = 1.0F;
     result.classification.policy.wildlife_upper = 1.0F;
-    result.classification.policy.tree_family = family;
+    result.classification.policy.tree_replay = family;
     return result;
 }
 
 NativeSurfacePropBaselineStream baseline(const NativeSurfacePropAttemptStream &source,
-    const NativeSurfacePropTreeCompatibilityFamily family = NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw) {
+    const NativeSurfacePropTreeReplayMode family = NativeSurfacePropTreeReplayMode::legacy_36_draw) {
     std::array<NativeSurfacePropBaselineInput, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> inputs{};
     for (std::size_t index = 0U; index < inputs.size(); ++index) inputs[index] = input_for(source.attempts()[index], family);
     return NativeSurfacePropBaselineStream::create(source, inputs);
@@ -71,7 +71,7 @@ NativeSurfaceTreeEcologyProfile profile(const std::string &biome, const std::str
     return result;
 }
 
-NativeTreeDefinition compose(const NativeSurfacePropTreeCompatibilityFamily family,
+NativeTreeDefinition compose(const NativeSurfacePropTreeReplayMode family,
     const NativeSurfaceTreeEcologyProfile &tree_profile, const std::uint32_t ordinal = 0U) {
     const NativeSurfacePropAttemptStream source = attempts();
     const NativeSurfacePropBaselineStream stream = baseline(source, family);
@@ -101,9 +101,9 @@ VWB_TEST(native_surface_tree_definition_composer_binds_a_broadleaf_definition_to
 }
 
 VWB_TEST(native_surface_tree_definition_composer_replays_conifer_and_savanna_physical_semantics) {
-    const NativeTreeDefinition conifer = compose(NativeSurfacePropTreeCompatibilityFamily::conifer_22_draw,
+    const NativeTreeDefinition conifer = compose(NativeSurfacePropTreeReplayMode::legacy_22_draw,
         profile("taiga", "ecological_conifer_tree"));
-    const NativeTreeDefinition savanna = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw,
+    const NativeTreeDefinition savanna = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw,
         profile("savanna", "ecological_savanna_tree"));
     VWB_EXPECT_EQ(NativeTreeArchitecture::conifer, conifer.input().architecture); VWB_EXPECT_EQ(std::string("norway_spruce"), conifer.input().species_grammar);
     VWB_EXPECT_EQ(NativeTreeArchitecture::savanna, savanna.input().architecture); VWB_EXPECT_EQ(std::string("umbrella_thorn"), savanna.input().species_grammar);
@@ -112,17 +112,31 @@ VWB_TEST(native_surface_tree_definition_composer_replays_conifer_and_savanna_phy
     VWB_EXPECT(conifer.content_digest() != savanna.content_digest());
 }
 
+VWB_TEST(native_surface_tree_definition_composer_alpine_conifer_uses_legacy_36_draw_replay) {
+    const NativeTreeDefinition alpine = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw,
+        profile("alpine", "ecological_conifer_tree"));
+    VWB_EXPECT_EQ(NativeTreeArchitecture::conifer, alpine.input().architecture);
+    VWB_EXPECT_EQ(std::string("norway_spruce"), alpine.input().species_grammar);
+    VWB_EXPECT_EQ(2U, alpine.input().producer_revision);
+    VWB_EXPECT_THROW(NativeSurfaceTreeDefinitionComposerRejected,
+        compose(NativeSurfacePropTreeReplayMode::legacy_22_draw,
+            profile("alpine", "ecological_conifer_tree")));
+    VWB_EXPECT_THROW(NativeSurfaceTreeDefinitionComposerRejected,
+        compose(NativeSurfacePropTreeReplayMode::legacy_36_draw,
+            profile("taiga", "ecological_conifer_tree")));
+}
+
 VWB_TEST(native_surface_tree_definition_composer_is_deterministic_and_binds_all_source_identity_inputs) {
     const NativeSurfaceTreeEcologyProfile forest = profile("forest", "ecological_broadleaf_tree");
-    const NativeTreeDefinition first = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, forest, 3U);
-    const NativeTreeDefinition second = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, forest, 3U);
+    const NativeTreeDefinition first = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, forest, 3U);
+    const NativeTreeDefinition second = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, forest, 3U);
     VWB_EXPECT_EQ(first.canonical_binary(), second.canonical_binary()); VWB_EXPECT_EQ(first.content_digest(), second.content_digest());
     NativeSurfaceTreeEcologyProfile changed = forest; changed.source_profile_digest[0] = 9U;
-    VWB_EXPECT(first.content_digest() != compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, changed, 3U).content_digest());
+    VWB_EXPECT(first.content_digest() != compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, changed, 3U).content_digest());
     changed = forest; ++changed.profile_revision;
-    VWB_EXPECT(first.content_digest() != compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, changed, 3U).content_digest());
+    VWB_EXPECT(first.content_digest() != compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, changed, 3U).content_digest());
     changed = forest; changed.tree_families = {"ecological_savanna_tree"};
-    VWB_EXPECT(first.content_digest() != compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, changed, 3U).content_digest());
+    VWB_EXPECT(first.content_digest() != compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, changed, 3U).content_digest());
 }
 
 VWB_TEST(native_surface_tree_definition_composer_keeps_raw_family_seed_separate_from_normalized_ecology_seed) {
@@ -255,7 +269,7 @@ VWB_TEST(native_surface_tree_definition_composer_exhaustively_rejects_profile_bo
     entry = original.entries()[0]; entry.outcome = NativeSurfacePropClassificationOutcome::no_feature;
     VWB_EXPECT_THROW(NativeSurfaceTreeDefinitionComposerRejected,
         NativeSurfaceTreeDefinitionComposer::create(set, malformed_stream, 0U, world_source(), forest));
-    const NativeSurfacePropBaselineStream conifer_stream = baseline(source, NativeSurfacePropTreeCompatibilityFamily::conifer_22_draw);
+    const NativeSurfacePropBaselineStream conifer_stream = baseline(source, NativeSurfacePropTreeReplayMode::legacy_22_draw);
     const NativeSurfacePropPlacementSet conifer_set = placements(source, conifer_stream);
     VWB_EXPECT_THROW(NativeSurfaceTreeDefinitionComposerRejected,
         NativeSurfaceTreeDefinitionComposer::create(conifer_set, conifer_stream, 0U, world_source(), forest));
@@ -282,7 +296,7 @@ VWB_TEST(native_surface_tree_definition_composer_rejects_each_independent_placem
     placement.cell_x += 1; rejects(); placement = original_placement;
     placement.cell_z += 1; rejects(); placement = original_placement;
     placement.source_decision_digest[0] ^= 0x01U; rejects(); placement = original_placement;
-    placement.outcome = NativeSurfacePropClassificationOutcome::conifer_tree; rejects(); placement = original_placement;
+    placement.outcome = NativeSurfacePropClassificationOutcome::tree_22_draw; rejects(); placement = original_placement;
     placement.source_decision_digest = {}; entry.source_decision_digest = {}; rejects();
     placement = original_placement; entry = original_entry;
     entry.compatibility_draws[0] = -0.1F; rejects(); entry = original_entry;
@@ -294,34 +308,34 @@ VWB_TEST(native_surface_tree_definition_composer_exercises_fallback_geometry_bio
     fallback.height_min = 0.0; fallback.height_max = 0.0;
     fallback.trunk_radius_min = 0.0; fallback.trunk_radius_max = 0.0;
     fallback.canopy_radius_min = 0.0; fallback.canopy_radius_max = 0.0;
-    const NativeTreeDefinition plain = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, fallback);
+    const NativeTreeDefinition plain = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, fallback);
     VWB_EXPECT(plain.input().visual_height >= 3.0);
     VWB_EXPECT(plain.input().trunk_radius >= 0.18);
     VWB_EXPECT(plain.input().canopy_radius >= plain.input().trunk_radius * 2.2);
     NativeSurfaceTreeEcologyProfile snow = fallback; snow.source_biome = "snow"; snow.profile_id = "snow";
     NativeSurfaceTreeEcologyProfile tundra = fallback; tundra.source_biome = "tundra"; tundra.profile_id = "tundra";
-    VWB_EXPECT(compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, snow).input().visual_height
+    VWB_EXPECT(compose(NativeSurfacePropTreeReplayMode::legacy_22_draw, snow).input().visual_height
         > plain.input().visual_height);
-    VWB_EXPECT(compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, tundra).input().visual_height
+    VWB_EXPECT(compose(NativeSurfacePropTreeReplayMode::legacy_22_draw, tundra).input().visual_height
         > plain.input().visual_height);
 
     NativeSurfaceTreeEcologyProfile flat_age = fallback;
     flat_age.age_min_years = 30.0; flat_age.age_typical_years = 30.0; flat_age.age_max_years = 30.0;
-    VWB_EXPECT_EQ(1.0, compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, flat_age).input().ecology.growth_stage);
+    VWB_EXPECT_EQ(1.0, compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, flat_age).input().ecology.growth_stage);
 
     NativeSurfaceTreeEcologyProfile repaired_age_window = fallback;
     repaired_age_window.age_min_years = 0.0;
     repaired_age_window.age_typical_years = 0.0;
     repaired_age_window.age_max_years = 1.0;
-    const NativeTreeDefinition repaired = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, repaired_age_window);
+    const NativeTreeDefinition repaired = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, repaired_age_window);
     VWB_EXPECT(repaired.input().ecology.age_range_max - repaired.input().ecology.age_range_min >= 0.999999);
 
     const NativeSurfaceTreeEcologyProfile forest = profile("forest", "ecological_broadleaf_tree");
-    const double growth = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, forest).input().ecology.growth_stage;
+    const double growth = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, forest).input().ecology.growth_stage;
     VWB_EXPECT(growth > 0.0 && growth < 1.0);
     const auto with_thresholds = [&](const std::array<double, 4U> &thresholds, const std::string &expected) {
         NativeSurfaceTreeEcologyProfile value = forest; value.age_band_thresholds = thresholds;
-        const NativeTreeDefinition tree = compose(NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw, value);
+        const NativeTreeDefinition tree = compose(NativeSurfacePropTreeReplayMode::legacy_36_draw, value);
         VWB_EXPECT_EQ(expected, tree.input().age_band);
     };
     const double above = (growth + 1.0) * 0.5;

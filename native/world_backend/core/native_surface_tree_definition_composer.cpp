@@ -204,7 +204,7 @@ Sha256Digest recipe_digest(const NativeSurfacePropPlacementSet &set, const Nativ
     const NativeSurfacePropBaselineEntry &baseline, const WorldSourceDefinition &source,
     const NativeSurfaceTreeEcologyProfile &profile) {
     Writer writer;
-    writer.u8('S'); writer.u8('T'); writer.u8('R'); writer.u8('1'); writer.u32(NativeSurfaceTreeDefinitionComposer::PRODUCER_REVISION);
+    writer.u8('S'); writer.u8('T'); writer.u8('R'); writer.u8('2'); writer.u32(NativeSurfaceTreeDefinitionComposer::PRODUCER_REVISION);
     writer.digest(set.content_digest()); writer.digest(source.physical_content_identity().digest);
     writer.u32(placement.ordinal); writer.text(placement.durable_id); writer.digest(placement.source_decision_digest);
     writer.u32(profile.schema_revision); writer.u32(profile.profile_revision); writer.digest(profile.source_profile_digest);
@@ -227,8 +227,8 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
         || !(placement_set.definition_source_identity() == world_source.physical_content_identity())) reject();
     const NativeSurfacePropPlacementEntry &placement = placement_set.entries()[ordinal];
     const NativeSurfacePropBaselineEntry &baseline_entry = baseline.entries()[ordinal];
-    const bool tree = placement.outcome == NativeSurfacePropClassificationOutcome::broadleaf_tree
-        || placement.outcome == NativeSurfacePropClassificationOutcome::conifer_tree;
+    const bool tree = placement.outcome == NativeSurfacePropClassificationOutcome::tree_36_draw
+        || placement.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw;
     if (!tree) reject();
     if (placement.presence != NativeSurfacePropPlacementPresence::anchored) reject();
     if (placement.ordinal != ordinal) reject();
@@ -239,7 +239,7 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
     if (placement.source_decision_digest != baseline_entry.source_decision_digest) reject();
     if (placement.outcome != baseline_entry.outcome) reject();
     if (!nonzero_digest(placement.source_decision_digest)) reject();
-    const std::size_t expected_draws = placement.outcome == NativeSurfacePropClassificationOutcome::conifer_tree ? 22U : 36U;
+    const std::size_t expected_draws = placement.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw ? 22U : 36U;
     if (baseline_entry.compatibility_draws.size() != expected_draws) reject();
     for (const float draw : baseline_entry.compatibility_draws) {
         if (!std::isfinite(draw)) reject();
@@ -256,8 +256,10 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
         % static_cast<std::uint32_t>(profile.tree_families.size());
     const std::string family = profile.tree_families[family_index];
     const NativeTreeArchitecture architecture = architecture_for(family);
-    if ((placement.outcome == NativeSurfacePropClassificationOutcome::conifer_tree)
-        != (architecture == NativeTreeArchitecture::conifer)) reject();
+    // Replay draw count follows source biome, not the selected visual grammar.
+    const bool legacy_22_draw = profile.source_biome == "taiga" || profile.source_biome == "snow"
+        || profile.source_biome == "tundra";
+    if ((placement.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw) != legacy_22_draw) reject();
     const Ecology ecology = ecology_for(ecology_seed.utf8, profile, placement.durable_id, placement.cell_x, placement.cell_z);
     const double fallback = 3.0 + static_cast<double>(baseline_entry.compatibility_draws[1]) * 2.2
         + ((profile.source_biome == "taiga" || profile.source_biome == "snow" || profile.source_biome == "tundra") ? 1.6 : 0.0);

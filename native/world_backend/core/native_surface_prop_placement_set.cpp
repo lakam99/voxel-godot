@@ -18,8 +18,8 @@ bool valid_outcome(const NativeSurfacePropClassificationOutcome outcome) noexcep
     return outcome == NativeSurfacePropClassificationOutcome::skipped_before_prop_roll
         || outcome == NativeSurfacePropClassificationOutcome::no_feature
         || outcome == NativeSurfacePropClassificationOutcome::ordinary_rock
-        || outcome == NativeSurfacePropClassificationOutcome::broadleaf_tree
-        || outcome == NativeSurfacePropClassificationOutcome::conifer_tree
+        || outcome == NativeSurfacePropClassificationOutcome::tree_36_draw
+        || outcome == NativeSurfacePropClassificationOutcome::tree_22_draw
         || outcome == NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster
         || outcome == NativeSurfacePropClassificationOutcome::unported_copper_ore_cluster
         || outcome == NativeSurfacePropClassificationOutcome::forage_recipe
@@ -28,8 +28,8 @@ bool valid_outcome(const NativeSurfacePropClassificationOutcome outcome) noexcep
 
 bool physical_outcome(const NativeSurfacePropClassificationOutcome outcome) noexcept {
     return outcome == NativeSurfacePropClassificationOutcome::ordinary_rock
-        || outcome == NativeSurfacePropClassificationOutcome::broadleaf_tree
-        || outcome == NativeSurfacePropClassificationOutcome::conifer_tree
+        || outcome == NativeSurfacePropClassificationOutcome::tree_36_draw
+        || outcome == NativeSurfacePropClassificationOutcome::tree_22_draw
         || outcome == NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster
         || outcome == NativeSurfacePropClassificationOutcome::unported_copper_ore_cluster
         || outcome == NativeSurfacePropClassificationOutcome::forage_recipe
@@ -86,7 +86,7 @@ std::vector<std::uint8_t> canonical_placement_binary(
     const WorldPhysicalContentIdentity &definition_source_identity,
     const std::array<NativeSurfacePropPlacementEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &entries) {
     CanonicalWriter writer;
-    writer.u8('S'); writer.u8('P'); writer.u8('P'); writer.u8('2');
+    writer.u8('S'); writer.u8('P'); writer.u8('P'); writer.u8('3');
     writer.u32(NativeSurfacePropPlacementSet::SCHEMA_REVISION);
     writer.u32(source_receipt.schema_revision); writer.digest(source_receipt.effective_source_digest);
     writer.u64(source_receipt.terrain_delta_revision); writer.u64(source_receipt.shaping_registry_revision);

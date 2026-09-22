@@ -23,7 +23,7 @@ NativeSurfacePropClassificationInput input() {
     result.policy.tree_upper = 0.30F;
     result.policy.forage_upper = 0.50F;
     result.policy.wildlife_upper = 0.70F;
-    result.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw;
+    result.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_36_draw;
     return result;
 }
 
@@ -54,7 +54,7 @@ VWB_TEST(native_surface_prop_classifier_uses_strict_cumulative_source_cutoffs_wi
     const NativeSurfacePropClassificationInput receipt = input();
     expect_outcome(NativeSurfacePropClassificationOutcome::ordinary_rock,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.099F));
-    expect_outcome(NativeSurfacePropClassificationOutcome::broadleaf_tree,
+    expect_outcome(NativeSurfacePropClassificationOutcome::tree_36_draw,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.10F));
     expect_outcome(NativeSurfacePropClassificationOutcome::forage_recipe,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.30F));
@@ -66,8 +66,8 @@ VWB_TEST(native_surface_prop_classifier_uses_strict_cumulative_source_cutoffs_wi
     saturated.policy.wildlife_upper = 1.4F;
     expect_outcome(NativeSurfacePropClassificationOutcome::wildlife_recipe,
         NativeSurfacePropClassifier::classify(saturated, attempt(), 0.99F));
-    saturated.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::conifer_22_draw;
-    expect_outcome(NativeSurfacePropClassificationOutcome::conifer_tree,
+    saturated.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_22_draw;
+    expect_outcome(NativeSurfacePropClassificationOutcome::tree_22_draw,
         NativeSurfacePropClassifier::classify(saturated, attempt(), 0.10F));
 }
 
@@ -102,7 +102,7 @@ VWB_TEST(native_surface_prop_classifier_rejects_unbound_noncanonical_or_nonfinit
     receipt = input(); receipt.policy.tree_upper = 0.05F;
     VWB_EXPECT_THROW(NativeSurfacePropClassifierRejected,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.2F));
-    receipt = input(); receipt.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::none;
+    receipt = input(); receipt.policy.tree_replay = NativeSurfacePropTreeReplayMode::none;
     VWB_EXPECT_THROW(NativeSurfacePropClassifierRejected,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.2F));
     receipt = input(); receipt.policy.ore_policy = NativeSurfacePropOrePolicy::none; receipt.policy.iron_upper = 0.1F;
@@ -132,7 +132,7 @@ VWB_TEST(native_surface_prop_classifier_exhaustively_rejects_receipt_and_roll_bo
     receipt = input(); receipt.admission = static_cast<NativeSurfacePropAdmission>(99); receipt.policy = {};
     VWB_EXPECT_THROW(NativeSurfacePropClassifierRejected,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.2F));
-    receipt = input(); receipt.policy.tree_family = static_cast<NativeSurfacePropTreeCompatibilityFamily>(99);
+    receipt = input(); receipt.policy.tree_replay = static_cast<NativeSurfacePropTreeReplayMode>(99);
     VWB_EXPECT_THROW(NativeSurfacePropClassifierRejected,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.2F));
     receipt = input(); receipt.policy.ore_policy = static_cast<NativeSurfacePropOrePolicy>(99);
@@ -152,7 +152,7 @@ VWB_TEST(native_surface_prop_classifier_exhaustively_rejects_receipt_and_roll_bo
     VWB_EXPECT_THROW(NativeSurfacePropClassifierRejected,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.2F));
     receipt = input(); receipt.admission = NativeSurfacePropAdmission::town; receipt.policy = {};
-    receipt.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw;
+    receipt.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_36_draw;
     VWB_EXPECT_THROW(NativeSurfacePropClassifierRejected,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.2F));
     receipt = input(); receipt.admission = NativeSurfacePropAdmission::town; receipt.policy = {};

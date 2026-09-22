@@ -37,7 +37,7 @@ NativeSurfacePropBaselineInput input_for(const NativeSurfacePropAttempt &attempt
     input.classification.policy.tree_upper = 1.0F;
     input.classification.policy.forage_upper = 1.0F;
     input.classification.policy.wildlife_upper = 1.0F;
-    input.classification.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::broadleaf_36_draw;
+    input.classification.policy.tree_replay = NativeSurfacePropTreeReplayMode::legacy_36_draw;
     return input;
 }
 

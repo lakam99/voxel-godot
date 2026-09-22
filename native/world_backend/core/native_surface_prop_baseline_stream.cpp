@@ -98,8 +98,8 @@ std::size_t NativeSurfacePropBaselineStream::compatibility_draw_count(
     const NativeSurfacePropClassificationOutcome outcome) {
     switch (outcome) {
     case NativeSurfacePropClassificationOutcome::ordinary_rock: return 6U;
-    case NativeSurfacePropClassificationOutcome::broadleaf_tree: return 36U;
-    case NativeSurfacePropClassificationOutcome::conifer_tree: return 22U;
+    case NativeSurfacePropClassificationOutcome::tree_36_draw: return 36U;
+    case NativeSurfacePropClassificationOutcome::tree_22_draw: return 22U;
     case NativeSurfacePropClassificationOutcome::skipped_before_prop_roll:
     case NativeSurfacePropClassificationOutcome::no_feature:
     case NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster:

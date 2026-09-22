@@ -16,7 +16,7 @@ namespace voxel::world_backend {
 // Revisions are ownership epochs and may be zero for an initial snapshot;
 // the digest names physical content. This trace does not sample either source.
 struct NativeSurfacePropSourceReceipt final {
-    static constexpr std::uint32_t SCHEMA_REVISION = 2U;
+    static constexpr std::uint32_t SCHEMA_REVISION = 3U;
     std::uint32_t schema_revision = SCHEMA_REVISION;
     Sha256Digest effective_source_digest{};
     std::uint64_t terrain_delta_revision = 0U;
@@ -39,8 +39,8 @@ enum class NativeSurfacePropReplayDisposition : std::uint8_t {
     skipped_before_prop_roll = 1,
     no_feature = 2,
     ordinary_rock = 3,
-    broadleaf_tree = 4,
-    conifer_tree = 5,
+    tree_36_draw = 4,
+    tree_22_draw = 5,
 };
 
 struct NativeSurfacePropReplayReceipt final {
@@ -58,7 +58,7 @@ struct NativeSurfacePropRngTraceEntry final {
     bool has_prop_roll = false;
     float prop_roll = 0.0F;
     // Exact legacy values consumed after class selection. Ordinary rocks use
-    // six; conifer and broadleaf tree compatibility consumers use 22 and 36.
+    // six; legacy tree compatibility consumers use 22 or 36 regardless of architecture.
     // They remain a stream compatibility trace, not geometry authority.
     std::vector<float> recipe_draws;
 };

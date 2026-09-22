@@ -61,7 +61,7 @@ public:
 // topology remains a later native recipe stage and cannot invent collision.
 class NativeSurfaceTreeDefinitionComposer final {
 public:
-    static constexpr std::uint32_t PRODUCER_REVISION = 1U;
+    static constexpr std::uint32_t PRODUCER_REVISION = 2U;
 
     static NativeTreeDefinition create(
         const NativeSurfacePropPlacementSet &placement_set,
