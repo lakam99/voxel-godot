@@ -277,6 +277,7 @@ const scriptTools = {
   'run-surface-rock-recipe-contract': ['res://scripts/testing/SurfaceRockRecipeContractRunner.gd', 'VOXEL_SURFACE_ROCK_RECIPE_REPORT'],
   'run-surface-prop-spawn-projection-oracle': ['res://scripts/testing/SurfacePropSpawnProjectionOracle.gd', 'VOXEL_SURFACE_PROP_SPAWN_PROJECTION_REPORT'],
   'run-surface-prop-chunk-transform-contract': ['res://scripts/testing/SurfacePropChunkTransformContractRunner.gd', 'VOXEL_SURFACE_PROP_CHUNK_TRANSFORM_REPORT'],
+  'run-surface-structure-exclusion-oracle': ['res://scripts/testing/native_world/SurfaceStructureExclusionOracle.gd', 'VOXEL_SURFACE_STRUCTURE_EXCLUSION_REPORT'],
   'run-biome-environment-snapshot-oracle': ['res://scripts/testing/BiomeEnvironmentSnapshotOracle.gd', 'VOXEL_BIOME_ENVIRONMENT_SNAPSHOT_REPORT'],
   'run-surface-tree-seed-semantics-contract': ['res://scripts/testing/SurfaceTreeSeedSemanticsContractRunner.gd', 'VOXEL_SURFACE_TREE_SEED_SEMANTICS_REPORT'],
   'run-startup-loading-readiness-contract-tests': ['res://scripts/testing/StartupLoadingReadinessContractRunner.gd', 'VOXEL_STARTUP_READINESS_CONTRACT_REPORT'],
