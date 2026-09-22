@@ -15,6 +15,17 @@ enum class NativeWildlifeNavigationPolicy : std::uint8_t {
     static_prop_blocker = 1,
 };
 
+// The adapter maps the native surface-biome identity into this deliberately
+// small selection group.  The table is the current production profile rule;
+// no renderer or asset readiness state participates in variant selection.
+enum class NativeWildlifeBiomeGroup : std::uint8_t {
+    cold = 1,
+    forest_or_plains = 2,
+    dry = 3,
+    swamp = 4,
+    other = 5,
+};
+
 struct NativeWildlifeBoxCollider final {
     float size_x = 0.0F;
     float size_y = 0.0F;
@@ -52,6 +63,11 @@ public:
 class NativeWildlifeRecipeCatalog final {
 public:
     static NativeWildlifeRecipe resolve(NativeWildlifeVariant variant);
+};
+
+class NativeWildlifeProfileSelector final {
+public:
+    static NativeWildlifeVariant select(NativeWildlifeBiomeGroup biome, float profile_roll);
 };
 
 } // namespace voxel::world_backend

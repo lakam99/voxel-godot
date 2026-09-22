@@ -2,6 +2,8 @@
 
 #include "../core/native_wildlife_recipe.hpp"
 
+#include <limits>
+
 using namespace voxel::world_backend;
 
 VWB_TEST(native_wildlife_recipe_catalog_resolves_current_physical_profiles) {
@@ -47,4 +49,39 @@ VWB_TEST(native_wildlife_recipe_catalog_resolves_current_physical_profiles) {
 VWB_TEST(native_wildlife_recipe_catalog_rejects_unknown_variant) {
     VWB_EXPECT_THROW(NativeWildlifeRecipeRejected,
         NativeWildlifeRecipeCatalog::resolve(static_cast<NativeWildlifeVariant>(99)));
+}
+
+VWB_TEST(native_wildlife_profile_selector_preserves_each_biome_threshold) {
+    VWB_EXPECT_EQ(NativeWildlifeVariant::hare,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::cold, 0.6199F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::deer,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::cold, 0.62F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::deer,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::forest_or_plains, 0.4199F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::hare,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::forest_or_plains, 0.42F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::boar,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::forest_or_plains, 0.68F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::hare,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::dry, 0.6999F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::boar,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::dry, 0.70F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::boar,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::swamp, 0.6999F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::hare,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::swamp, 0.70F));
+    VWB_EXPECT_EQ(NativeWildlifeVariant::boar,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::other, 0.99F));
+}
+
+VWB_TEST(native_wildlife_profile_selector_rejects_invalid_group_or_roll) {
+    VWB_EXPECT_THROW(NativeWildlifeRecipeRejected,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::cold, -0.01F));
+    VWB_EXPECT_THROW(NativeWildlifeRecipeRejected,
+        NativeWildlifeProfileSelector::select(NativeWildlifeBiomeGroup::cold, 1.0F));
+    VWB_EXPECT_THROW(NativeWildlifeRecipeRejected,
+        NativeWildlifeProfileSelector::select(
+            NativeWildlifeBiomeGroup::cold, std::numeric_limits<float>::quiet_NaN()));
+    VWB_EXPECT_THROW(NativeWildlifeRecipeRejected,
+        NativeWildlifeProfileSelector::select(static_cast<NativeWildlifeBiomeGroup>(99), 0.5F));
 }

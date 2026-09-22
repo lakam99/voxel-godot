@@ -1,5 +1,7 @@
 #include "native_wildlife_recipe.hpp"
 
+#include <cmath>
+
 namespace voxel::world_backend {
 namespace {
 
@@ -38,6 +40,27 @@ NativeWildlifeRecipe NativeWildlifeRecipeCatalog::resolve(const NativeWildlifeVa
         return recipe(variant, 0.66F, 1.10F, 3, 2, {0.94F, 1.52F, 0.72F, 0.76F});
     case NativeWildlifeVariant::hare:
         return recipe(variant, 0.92F, 1.34F, 1, 1, {0.62F, 0.74F, 0.52F, 0.34F});
+    }
+    throw NativeWildlifeRecipeRejected();
+}
+
+NativeWildlifeVariant NativeWildlifeProfileSelector::select(
+    const NativeWildlifeBiomeGroup biome, const float profile_roll) {
+    if (!std::isfinite(profile_roll) || profile_roll < 0.0F || profile_roll >= 1.0F) {
+        throw NativeWildlifeRecipeRejected();
+    }
+    switch (biome) {
+    case NativeWildlifeBiomeGroup::cold:
+        return profile_roll < 0.62F ? NativeWildlifeVariant::hare : NativeWildlifeVariant::deer;
+    case NativeWildlifeBiomeGroup::forest_or_plains:
+        if (profile_roll < 0.42F) return NativeWildlifeVariant::deer;
+        return profile_roll < 0.68F ? NativeWildlifeVariant::hare : NativeWildlifeVariant::boar;
+    case NativeWildlifeBiomeGroup::dry:
+        return profile_roll < 0.70F ? NativeWildlifeVariant::hare : NativeWildlifeVariant::boar;
+    case NativeWildlifeBiomeGroup::swamp:
+        return profile_roll < 0.70F ? NativeWildlifeVariant::boar : NativeWildlifeVariant::hare;
+    case NativeWildlifeBiomeGroup::other:
+        return NativeWildlifeVariant::boar;
     }
     throw NativeWildlifeRecipeRejected();
 }

@@ -295,9 +295,8 @@ n4-wildlife-presentation-receipt-03` passed the standalone debug/release core
 suites, both adapter smokes, and strict pure-core coverage of 6,927/6,927
 lines, 934/934 functions, and 3,862/3,862 branches.  Its receipt is
 `artifacts/native-world-backend/n4-wildlife-presentation-receipt-03/report.json`.
-This proves only capability-receipt admission; it does not yet establish a
-native wildlife profile, RNG stream, feature definition, publication, or live
-gameplay parity.
+This proves only capability-receipt admission; it does not itself establish a
+native feature definition, publication, or live gameplay parity.
 
 `NativeWildlifeRecipeCatalog` now owns the immutable current boar/deer/hare
 profile facts: wildlife/raw-meat/hide IDs and inclusive yields, visual and
@@ -309,6 +308,22 @@ n4-wildlife-recipe-catalog-01` passed 312/312 debug and release core tests,
 both adapter smokes, and strict coverage of 6,957/6,957 lines, 937/937
 functions, and 3,870/3,870 branches.  Its receipt is
 `artifacts/native-world-backend/n4-wildlife-recipe-catalog-01/report.json`.
+
+`NativeWildlifeProfileSelector` ports the current biome-group thresholds with
+strict cutoff equality, and `NativeWildlifeStream` replays the complete typed
+shared-PCG sequence: profile, yaw, inclusive primary/extra yields, two
+reserved presentation operations, direction, timer, and speed. The stream
+validates the source presentation receipt before it touches PCG, probes the
+same next profile roll to reject a variant mismatch without mutating the live
+stream, then records pre/post state and every typed result. A cold group is
+the only source of the current cold speed state. `node
+tools/run-native-world-backend-tests.mjs --run-name n4-wildlife-stream-01`
+passed 317/317 debug and release core tests, both adapter smokes, and strict
+coverage of 7,013/7,013 lines, 942/942 functions, and 3,900/3,900 branches.
+Its receipt is `artifacts/native-world-backend/n4-wildlife-stream-01/report.json`.
+This is still a shadow-only stream contract: no live feature manifest,
+tombstone filtering, GDScript caller deletion, or gameplay cutover has
+occurred.
 
 The eventual wildlife definition must preserve the selected profile's collider
 dimensions/center, yield ranges, cold and speed semantics, and current
