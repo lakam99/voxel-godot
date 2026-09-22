@@ -1,0 +1,33 @@
+#include "native_ore_cluster_stream.hpp"
+
+#include <utility>
+
+namespace voxel::world_backend {
+namespace { [[noreturn]] void reject() { throw NativeOreClusterStreamRejected(); } }
+NativeOreClusterStreamRejected::NativeOreClusterStreamRejected() : std::invalid_argument("invalid native ore cluster stream") {}
+NativeOreClusterStream::NativeOreClusterStream(std::array<NativeOreClusterChildStream, 2> children, const std::uint64_t final_state) noexcept
+    : children_(std::move(children)), final_state_(final_state) {}
+NativeOreClusterStream NativeOreClusterStream::create(const std::string &parent_id, const NativeOreKind kind, GodotPcg32 &rng) {
+    if (parent_id.empty() || (kind != NativeOreKind::iron && kind != NativeOreKind::copper)) reject();
+    std::array<NativeOreClusterChildStream, 2> children{};
+    for (std::size_t index = 0U; index < children.size(); ++index) {
+        NativeOreClusterChildStream child;
+        child.durable_id = index == 0U ? parent_id : parent_id + ":cluster1";
+        child.state_before = rng.state();
+        const auto draw = [&]() { child.float_draws.push_back(rng.randf()); };
+        draw(); // cluster angle
+        if (index != 0U) draw(); // second-child spacing
+        draw(); // vertical offset
+        draw(); // ore rotation
+        child.drop_count = rng.randi_range(1, kind == NativeOreKind::iron ? 2 : 3);
+        draw(); draw(); draw(); draw(); draw(); // radius, height factor, scale
+        for (int vein = 0; vein < 5; ++vein) for (int value = 0; value < 6; ++value) draw();
+        for (int glint = 0; glint < 3; ++glint) for (int value = 0; value < 3; ++value) draw();
+        child.state_after = rng.state();
+        children[index] = std::move(child);
+    }
+    return NativeOreClusterStream(std::move(children), rng.state());
+}
+const std::array<NativeOreClusterChildStream, 2> &NativeOreClusterStream::children() const noexcept { return children_; }
+std::uint64_t NativeOreClusterStream::final_rng_state() const noexcept { return final_state_; }
+} // namespace voxel::world_backend
