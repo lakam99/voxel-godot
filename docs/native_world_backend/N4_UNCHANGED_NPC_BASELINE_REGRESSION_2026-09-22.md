@@ -135,3 +135,38 @@ runner ordering. This focused result does not clear the three remaining
 headed NPC failures or establish full Gate 5 acceptance. The dummy-renderer
 signature path still needs a separate source-level repair/verification before
 it can serve as reliable headless evidence.
+
+## Scoped route-source repair and remaining latency
+
+The 2026-09-22 focused headed final-rescue diagnostic at
+`artifacts/npc/reports/final-rescue-route-phase-diagnostic.json` exposed
+repeated search resets that the earlier compact timeline hid. Niko's same
+return request reached 181, 73, 196 and 81 expansions before returning to
+goal preflight; `route_snapshot_changed` appears in the authority history.
+The search revision was the adapter's *global* static snapshot revision,
+which rises during unrelated streamed prop publication. This is a genuine
+planning-state invalidation, not a translation of `pendingBudgetFrames` into
+denied service. The repair now keys a search to the static, semantic and
+terrain revisions of the source tiles it has examined, including their
+collision halo. Unscoped changes still invalidate it; each edge is checked
+against current collision, and final route certification remains mandatory.
+It does not change the A* tie/order rule, the two-validation budget, motor,
+door or traffic policy. Focused day/night route contracts for unrelated
+publication, touched-halo changes, unscoped changes, collision edits,
+terrain edits and finalization invalidation pass under
+`artifacts/npc/reports/`.
+
+This is a bounded partial repair, **not NPC acceptance**. The post-change
+headed final-rescue replay
+`artifacts/npc/reports/final-rescue-route-local-revision.json` stopped before
+Niko's return on `final_rescue_hostiles_did_not_target_npcs`; it cannot prove
+the return fix. The post-change Mira home-only run
+`artifacts/npc/reports/mira-home-route-local-revision.json` still failed
+`mira_did_not_reach_strict_home_interior`: she was at `(288,11)` outside
+strict bounds at the deadline, and the timeout capture also frames her
+outside the house. Its route did **not** reset; it expanded 1,209 cells over
+about 17 seconds before movement, then began following a 62-cell route.
+That remaining player-visible latency is a distinct search/work-selection
+problem. It should be addressed with compact source-derived navigation and
+bounded exact proof in the authorized N6 scope, not by raising budgets or
+weakening the headed deadline. The full NPC/Gate 5 matrix remains open.

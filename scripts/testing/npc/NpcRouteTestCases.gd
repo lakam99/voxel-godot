@@ -472,6 +472,23 @@ class GeneratedTownRouteSubstrateFixtureWorld:
 		]
 
 
+class LocalRevisionRouteSubstrateFixtureWorld:
+	extends GeneratedTownRouteSubstrateFixtureWorld
+	var tile_source_revisions := {Vector2i(0, 0): 1}
+
+	func route_source_revision_for_cells(cells: Array) -> String:
+		var tiles := {}
+		for value in cells:
+			if value is Vector2i:
+				var cell: Vector2i = value
+				tiles[Vector2i(floori(float(cell.x) / 16.0), floori(float(cell.y) / 16.0))] = true
+		var keys: Array = tiles.keys()
+		keys.sort()
+		var parts: Array[String] = []
+		for tile in keys:
+			parts.append("%s:%d" % [str(tile), int(tile_source_revisions.get(tile, 1))])
+		return "|".join(parts)
+
 class SnapshotReuseRouteSubstrateFixtureWorld:
 	extends GeneratedTownRouteSubstrateFixtureWorld
 	var snapshot_build_count := 0
@@ -684,11 +701,13 @@ func cases() -> Array[Dictionary]:
 		["npc_route_substrate_dynamic_signature_32_actor_progress", "test_route_substrate_dynamic_signature_32_actor_progress"],
 		["npc_route_substrate_deferred_heap_exact_order", "test_route_substrate_deferred_heap_exact_order"],
 		["npc_route_incremental_approach_certification", "test_route_incremental_approach_certification"],
+		["npc_route_tile_local_search_source_revision", "test_route_tile_local_search_source_revision"],
 		["npc_route_substrate_lazy_frontier_honors_cheaper_deferred_goal", "test_route_substrate_lazy_frontier_honors_cheaper_deferred_goal"],
 		["npc_route_substrate_lazy_frontier_exhaustion_cleans_deferred_records", "test_route_substrate_lazy_frontier_exhaustion_cleans_deferred_records"],
 		["npc_route_substrate_reordered_candidates_resume_job_order", "test_route_substrate_reordered_candidates_resume_job_order"],
 		["npc_route_substrate_validation_microphases_resume_fresh_snapshot", "test_route_substrate_validation_microphases_resume_fresh_snapshot"],
 		["npc_route_substrate_source_revision_invalidates_partial_neighbor", "test_route_substrate_source_revision_invalidates_partial_neighbor"],
+		["npc_route_substrate_unrelated_static_publication_preserves_search", "test_route_substrate_unrelated_static_publication_preserves_search"],
 		["npc_route_substrate_source_revision_invalidates_finalization", "test_route_substrate_source_revision_invalidates_finalization"],
 		["npc_route_substrate_live_occupancy_restarts_finalization", "test_route_substrate_live_occupancy_restarts_finalization"],
 		["npc_route_substrate_door_revision_restarts_finalization", "test_route_substrate_door_revision_restarts_finalization"],
@@ -3209,6 +3228,26 @@ func test_route_substrate_deferred_heap_exact_order(_mode: String) -> Dictionary
 	)
 
 
+func test_route_tile_local_search_source_revision(_mode: String) -> Dictionary:
+	var adapter = GeneratedWorldNavigationAdapterScript.new()
+	var observed := [Vector2i(15, 0)]
+	var initial := adapter.route_source_revision_for_cells(observed)
+	var initial_tiles := adapter.route_source_revision_for_tiles(["0,-1", "0,0", "1,-1", "1,0"])
+	adapter.static_snapshot_revision += 1
+	adapter.navmesh_tile_revision_by_key["99,99"] = adapter.static_snapshot_revision
+	var unrelated := adapter.route_source_revision_for_cells(observed)
+	adapter.static_snapshot_revision += 1
+	adapter.navmesh_tile_revision_by_key["1,0"] = adapter.static_snapshot_revision
+	var halo_changed := adapter.route_source_revision_for_cells(observed)
+	adapter.route_global_source_revision += 1
+	var global_changed := adapter.route_source_revision_for_cells(observed)
+	var passed: bool = initial == initial_tiles and initial == unrelated and unrelated != halo_changed and halo_changed != global_changed
+	return outcome(passed,
+		"initial=%s unrelated=%s halo=%s global=%s" % [initial, unrelated, halo_changed, global_changed],
+		["unrelated_tile_publication_preserves_route_source", "neighboring_collision_halo_invalidates_route_source", "unscoped_change_invalidates_route_source"],
+		{ "initial": initial, "unrelated": unrelated, "halo": halo_changed, "global": global_changed })
+
+
 func test_route_incremental_approach_certification(_mode: String) -> Dictionary:
 	var adapter := IncrementalApproachAdapter.new()
 	for index in range(12):
@@ -3469,6 +3508,43 @@ func test_route_substrate_validation_microphases_resume_fresh_snapshot(_mode: St
 		["partial_edge_queue_resumes_across_calls", "resumed_edge_uses_fresh_dynamic_snapshot", "each_call_obeys_two_validation_step_cap", "node_expansion_count_is_not_double_charged", "cheap_reconstruction_and_materialization_do_not_require_idle_calls", "route_revalidation_remains_staged"],
 		{ "callCount": results.size(), "snapshotBuilds": fixture.snapshot_build_count, "partialCensus": census_partial, "secondProof": second_proof, "thirdProof": third_proof, "final": substrate_route_summary(final), "expansionSum": expansion_sum }
 	)
+
+
+func test_route_substrate_unrelated_static_publication_preserves_search(_mode: String) -> Dictionary:
+	var fixture := LocalRevisionRouteSubstrateFixtureWorld.new()
+	var substrate = CollisionBackedRouteSubstrateScript.new()
+	substrate.setup(fixture)
+	var entry := fixture.generated_town_entry()
+	entry["id"] = "local-source-revision"
+	var options := {
+		"allowOutside": true,
+		"maxExpansions": 128,
+		"expansionsPerCall": 2,
+		"validationStepsPerCall": 1,
+		"requestIdentity": "local-source-revision-request"
+	}
+	var first: Dictionary = {}
+	for _call_index in range(8):
+		first = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(5, 0)], options)
+		if int((first.get("proof", {}) as Dictionary).get("expansions", 0)) > 0:
+			break
+	var first_expansions := int((first.get("proof", {}) as Dictionary).get("expansions", 0))
+	fixture.static_snapshot_revision += 1
+	fixture.tile_source_revisions[Vector2i(99, 99)] = 2
+	var preserved: Dictionary = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(5, 0)], options)
+	var preserved_proof: Dictionary = preserved.get("proof", {}) if preserved.get("proof", {}) is Dictionary else {}
+	fixture.static_snapshot_revision += 1
+	fixture.tile_source_revisions[Vector2i(0, 0)] = 2
+	var invalidated: Dictionary = substrate.plan_route(entry, Vector2i.ZERO, [Vector2i(5, 0)], options)
+	var passed: bool = first_expansions > 0 \
+		and String(preserved.get("reason", "")) != "route_snapshot_changed" \
+		and int(preserved_proof.get("expansions", 0)) >= first_expansions \
+		and String(invalidated.get("reason", "")) == "route_snapshot_changed" \
+		and substrate.candidate_cache_census().get("searchJobCount", -1) == 0
+	return outcome(passed,
+		"first=%d preserved=%s invalidated=%s" % [first_expansions, JSON.stringify(substrate_route_summary(preserved)), JSON.stringify(substrate_route_summary(invalidated))],
+		["unrelated_static_publication_keeps_incremental_search", "touched_tile_change_invalidates_search", "no_stale_route_commits"],
+		{ "firstExpansions": first_expansions, "preserved": substrate_route_summary(preserved), "invalidated": substrate_route_summary(invalidated) })
 
 
 func test_route_substrate_source_revision_invalidates_partial_neighbor(_mode: String) -> Dictionary:

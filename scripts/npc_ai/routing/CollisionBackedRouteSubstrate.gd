@@ -165,14 +165,20 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 	var search_key := _search_key(entry, request_identity, start_cell, candidates, snapshot, allow_outside, moving_home, ignore_dynamic, semantic_kind, avoid_cells)
 	_clear_replaced_actor_search(actor_key, search_key)
 	var job: Dictionary = search_jobs.get(search_key, {}) if search_jobs.get(search_key, {}) is Dictionary else {}
-	var current_search_revision := _search_snapshot_revision(snapshot)
+	var observed_cells: Dictionary = job.get("observedCells", {}) if job.get("observedCells", {}) is Dictionary else {}
+	var observed_tiles: Dictionary = job.get("observedTiles", {}) if job.get("observedTiles", {}) is Dictionary else {}
+	if observed_cells.is_empty() and observed_tiles.is_empty():
+		_observe_search_source_cell(observed_cells, observed_tiles, start_cell)
+		for candidate in candidates:
+			_observe_search_source_cell(observed_cells, observed_tiles, candidate)
+	var current_search_revision := _search_snapshot_revision(snapshot, observed_cells.keys(), observed_tiles.keys())
 	var expansions_per_call := maxi(1, int(options.get("expansionsPerCall", DEFAULT_EXPANSIONS_PER_CALL)))
 	var validation_steps_per_call := maxi(1, int(options.get("validationStepsPerCall", DEFAULT_VALIDATION_STEPS_PER_CALL)))
 	var cheap_steps_per_call := maxi(1, int(options.get("cheapStepsPerCall", DEFAULT_CHEAP_STEPS_PER_CALL)))
 	if job.is_empty():
 		var prevalidated_goal_lookup := {}
 		var prevalidated_revision := String(options.get("prevalidatedGoalSnapshotRevision", ""))
-		if prevalidated_revision == current_search_revision:
+		if prevalidated_revision == current_search_revision or prevalidated_revision == _search_snapshot_revision(snapshot):
 			for value in options.get("prevalidatedGoalCells", []):
 				if value is Vector2i and candidates.has(value):
 					prevalidated_goal_lookup[value] = true
@@ -185,6 +191,8 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 			"requestIdentity": request_identity,
 			"phase": "preflight_goals",
 			"candidateCells": candidates.duplicate(),
+			"observedCells": observed_cells,
+			"observedTiles": observed_tiles,
 			"preflightIndex": candidates.size() if all_goals_prevalidated else 0,
 			"acceptedGoals": prevalidated_goal_lookup,
 			"rejectedGoals": [],
@@ -608,6 +616,8 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 		job["currentRecord"] = edge.get("record", {}) if edge.get("record", {}) is Dictionary else {}
 		job["currentNeighbors"] = [neighbor]
 		job["nextNeighborIndex"] = neighbor_index
+		_observe_search_source_cell(observed_cells, observed_tiles, current)
+		_observe_search_source_cell(observed_cells, observed_tiles, neighbor)
 		validation_steps_this_call += 1
 		var validation_start_usec := Time.get_ticks_usec()
 		var cell_validation := { "ok": true, "cell": neighbor, "validatedByTransition": _adapter_has("cell_transition_pathable") }
@@ -640,6 +650,7 @@ func plan_route(entry: Dictionary, start_cell: Vector2i, candidate_cells: Array,
 	if cheap_steps_this_call >= cheap_steps_per_call and pending_reason == "validation_step_budget_deferred":
 		pending_reason = "cheap_step_budget_deferred"
 	_update_search_job(job, open, closed, g_score, parent, cell_proofs, blocked_records, door_edges, expansions, sequence)
+	job["startedSnapshotRevision"] = _search_snapshot_revision(snapshot, observed_cells.keys(), observed_tiles.keys())
 	var pending_proof := _search_progress_proof(job, snapshot, current_search_revision, expansions_this_call, validation_steps_this_call, validation_steps_per_call, cheap_steps_this_call, cheap_steps_per_call, max_expansions, avoid_cells)
 	return _finish_plan_timing_profile(_result(false, CLASS_PENDING_BUDGET, pending_reason, [], visited_sample.duplicate(), pending_proof), plan_timing_start_usec, loop_start_usec, cheap_steps_this_call)
 
@@ -664,6 +675,8 @@ func _search_progress_proof(job: Dictionary, snapshot: Dictionary, current_searc
 		"searchSnapshotChanged": bool(job.get("snapshotChanged", false)),
 		"acceptedGoals": _cell_array(accepted_goals.keys()),
 		"rejectedGoals": rejected_goals,
+		"preflightIndex": int(job.get("preflightIndex", 0)),
+		"candidateCount": (job.get("candidateCells", []) as Array).size() if job.get("candidateCells", []) is Array else 0,
 		"prevalidatedGoalsReused": bool(job.get("prevalidatedGoalsReused", false)),
 		"blocked": blocked_records,
 		"doorEdges": explored_door_edges,
@@ -1555,7 +1568,20 @@ func _search_key(entry: Dictionary, request_identity: String, start_cell: Vector
 	]
 
 
-func _search_snapshot_revision(snapshot: Dictionary) -> String:
+func _observe_search_source_cell(observed_cells: Dictionary, observed_tiles: Dictionary, cell: Vector2i) -> void:
+	if _adapter_has("route_source_revision_for_tiles") and _adapter_has("tile_key_for_cell"):
+		for x_offset in range(-1, 2):
+			for z_offset in range(-1, 2):
+				observed_tiles[String(world_adapter.call("tile_key_for_cell", cell + Vector2i(x_offset, z_offset)))] = true
+	else:
+		observed_cells[cell] = true
+
+
+func _search_snapshot_revision(snapshot: Dictionary, observed_cells: Array = [], observed_tiles: Array = []) -> String:
+	if not observed_tiles.is_empty() and _adapter_has("route_source_revision_for_tiles"):
+		return String(world_adapter.call("route_source_revision_for_tiles", observed_tiles))
+	if not observed_cells.is_empty() and _adapter_has("route_source_revision_for_cells"):
+		return String(world_adapter.call("route_source_revision_for_cells", observed_cells))
 	if snapshot.has("staticSnapshotRevision"):
 		# Door open/closed state does not change portal topology. Route execution
 		# probes current collision and opens the portal before crossing.

@@ -62,6 +62,7 @@ var navmesh_tile_terrain_revision_by_key := {}
 var terrain_revision_clock := 0
 var terrain_global_revision := 0
 var static_snapshot_revision := 1
+var route_global_source_revision := 1
 var topology_revision := 1
 var dynamic_revision := 0
 var semantic_revision := 0
@@ -104,6 +105,7 @@ func performance_monitor():
 
 func invalidate() -> void:
     static_snapshot_revision += 1
+    route_global_source_revision += 1
     topology_revision = static_snapshot_revision
     cached_revision = ""
     height_cache = {}
@@ -175,6 +177,8 @@ func apply_navigation_events(events: Array) -> void:
         else:
             dynamic_changed = true
     if static_changed:
+        if static_changed_tiles.is_empty():
+            route_global_source_revision += 1
         static_snapshot_revision = maxi(static_snapshot_revision + 1, last_event_revision)
         topology_revision = static_snapshot_revision
         cached_revision = ""
@@ -191,6 +195,7 @@ func apply_navigation_events(events: Array) -> void:
         height_cache = {}
         terrain_projection_cache = {}
         if terrain_changed_tiles.is_empty():
+            route_global_source_revision += 1
             terrain_revision_clock = maxi(terrain_revision_clock + 1, last_event_revision)
             terrain_global_revision = terrain_revision_clock
             navmesh_tile_terrain_revision_by_key.clear()
@@ -212,6 +217,7 @@ func apply_navigation_events(events: Array) -> void:
     if semantic_changed:
         semantic_revision = maxi(semantic_revision + 1, last_event_revision)
         if semantic_global_changed or semantic_changed_tiles.is_empty():
+            route_global_source_revision += 1
             navmesh_tile_semantic_revision_by_key.clear()
             _clear_navmesh_tile_snapshot_cache()
         else:
@@ -1092,6 +1098,7 @@ func _mark_incremental_static_change(tile_key := "") -> void:
         # tile-local source identities and physical facts have not changed.
         _clear_navmesh_tile_snapshot_cache_for_tile(String(tile_key))
     else:
+        route_global_source_revision += 1
         # An unscoped event cannot prove locality, so retain the conservative
         # full invalidation used by world resets and unknown source mutations.
         _clear_navmesh_tile_snapshot_cache()
@@ -1740,6 +1747,37 @@ func cell_key(cell: Vector2i) -> String:
 
 func tile_key_for_cell(cell: Vector2i) -> String:
     return "%d,%d" % [floori(float(cell.x) / float(NAV_TILE_CELL_SIZE)), floori(float(cell.y) / float(NAV_TILE_CELL_SIZE))]
+
+func route_source_revision_for_cells(cells: Array) -> String:
+    # A route validates cells and their immediate collision/terrain halo. Prop
+    # publication outside those tiles must not discard its bounded search.
+    var tiles := {}
+    for value in cells:
+        if not value is Vector2i:
+            continue
+        var cell: Vector2i = value
+        for x_offset in range(-1, 2):
+            for z_offset in range(-1, 2):
+                tiles[tile_key_for_cell(cell + Vector2i(x_offset, z_offset))] = true
+    return route_source_revision_for_tiles(tiles.keys())
+
+func route_source_revision_for_tiles(source_tile_keys: Array) -> String:
+    var tile_keys: Array = source_tile_keys.duplicate()
+    tile_keys.sort()
+    var parts: Array[String] = ["global:%d" % route_global_source_revision]
+    for key_value in tile_keys:
+        var tile_key := String(key_value)
+        if not navmesh_tile_revision_by_key.has(tile_key):
+            navmesh_tile_revision_by_key[tile_key] = static_snapshot_revision
+        if not navmesh_tile_semantic_revision_by_key.has(tile_key):
+            navmesh_tile_semantic_revision_by_key[tile_key] = semantic_revision
+        parts.append("%s:%d:%d:%d" % [
+            tile_key,
+            int(navmesh_tile_revision_by_key[tile_key]),
+            int(navmesh_tile_semantic_revision_by_key[tile_key]),
+            int(navmesh_tile_terrain_revision_by_key.get(tile_key, terrain_global_revision))
+        ])
+    return "|".join(parts)
 
 func point_inside_town(entry: Dictionary, position: Vector3) -> bool:
     var center: Vector2i = entry.get("townCenter", Vector2i.ZERO)
