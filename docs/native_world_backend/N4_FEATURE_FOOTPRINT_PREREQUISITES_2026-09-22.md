@@ -345,3 +345,31 @@ that classification is a separate gameplay/product decision, not a migration
 translation.  Like every surface feature, native generation must first produce
 the full baseline recipe stream and only then apply durable `removedProps` as
 a publication filter.
+
+## Complete typed surface baseline stream
+
+`NativeSurfacePropBaselineStream` now composes one unfiltered 28-attempt
+shared-PCG baseline from the immutable attempt stream and one source-bound
+classification receipt per attempt. It replays coordinate draws, admission
+and class/ore rolls, legacy rock/tree compatibility draws, the two-child ore
+stream, typed forage stream, and typed wildlife stream in source order. Each
+entry records its PCG boundaries and typed child stream. The composer first
+dry-runs against a cloned PCG state, so malformed source/recipe receipts leave
+the caller's visible replay path unmodified.
+
+This is deliberately not a physical feature manifest. It does not contain
+world placement, geometry, visual asset selection, collision installation,
+navigation publication, tombstone filtering, or a Godot caller cutover. The
+next N4 slice must attach those facts as one typed feature definition and then
+derive footprint-catalog entries from that definition. Tombstones can only
+filter the completed baseline manifest at publication time; they must never
+skip a source attempt and perturb a later sibling's shared PCG state.
+
+`node tools/run-native-world-backend-tests.mjs --run-name
+n4-surface-prop-baseline-stream-03` passed 320/320 debug and release core
+tests, both adapter smokes, and strict pure-core coverage of 7,113/7,113
+lines, 952/952 functions, and 3,956/3,956 branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-baseline-stream-03/report.json`.
+The test suite includes every typed family, missing/ambiguous recipe receipts,
+source-classifier rejection, and a focused corrupt-enum invariant guard. It
+does not establish live surface/feature parity or gameplay acceptance.
