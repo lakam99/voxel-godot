@@ -374,6 +374,14 @@ The test suite includes every typed family, missing/ambiguous recipe receipts,
 source-classifier rejection, and a focused corrupt-enum invariant guard. It
 does not establish live surface/feature parity or gameplay acceptance.
 
+The tree compatibility names are now checked against direct Godot execution,
+not a source-text count: the center clump's literal zero spread consumes no
+PCG draw, so the live totals remain 36 for broadleaf and 22 for conifer.
+`node tools/run-surface-prop-tree-rng-contract.mjs --report-path
+artifacts/native-world-backend/n4-surface-prop-pcg-parity-02/godot-tree-rng-report.json`
+passed all three direct consumer cases. This is a source/RNG contract only,
+not feature-geometry, publication, or gameplay evidence.
+
 ## Canonical surface placement receipt
 
 `NativeSurfacePropPlacementSet` is the next SPP1 bridge from the complete

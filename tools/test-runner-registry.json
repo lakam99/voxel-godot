@@ -409,6 +409,15 @@
       "required": true
     },
     {
+      "id": "surface_prop_tree_rng_compatibility_contract",
+      "description": "Direct Godot source contract for legacy natural-tree shared-PCG draw counts retained by the native surface-prop baseline",
+      "command": ".\\tools\\run-surface-prop-tree-rng-contract.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-prop-tree-rng-contract.json"],
+      "reportPath": "artifacts\\test-runners\\surface-prop-tree-rng-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "canopy_asset_import_contract",
       "description": "VOX-120 Godot import integrity and runtime dormancy for generated mature canopy assets",
       "command": ".\\tools\\run-canopy-asset-import-contract-tests.mjs",

@@ -273,6 +273,7 @@ const scriptTools = {
   'run-project-compile-smoke': ['res://scripts/testing/ProjectCompileSmokeRunner.gd', 'VOXEL_PROJECT_COMPILE_REPORT'],
   'run-runtime-performance-observation-contract-tests': ['res://scripts/testing/RuntimePerformanceObservationContractRunner.gd', 'VOXEL_RUNTIME_PERF_CONTRACT_REPORT'],
   'run-seeded-cottage-recipe-contract': ['res://scripts/testing/buildings/SeededCottageRecipeContractRunner.gd', 'VOXEL_SEEDED_COTTAGE_RECIPE_CONTRACT_REPORT'],
+  'run-surface-prop-tree-rng-contract': ['res://scripts/testing/SurfacePropTreeRngCompatibilityContractRunner.gd', 'VOXEL_SURFACE_PROP_TREE_RNG_CONTRACT_REPORT'],
   'run-startup-loading-readiness-contract-tests': ['res://scripts/testing/StartupLoadingReadinessContractRunner.gd', 'VOXEL_STARTUP_READINESS_CONTRACT_REPORT'],
   'run-structure-town-manifest-contract-tests': ['res://scripts/testing/StructureTownManifestContractRunner.gd', 'VOXEL_STRUCTURE_TOWN_MANIFEST_REPORT'],
   'run-terrain-block-light-batch-contract': ['res://scripts/testing/TerrainBlockLightBatchContractRunner.gd', 'VOXEL_TERRAIN_BLOCK_LIGHT_BATCH_REPORT'],

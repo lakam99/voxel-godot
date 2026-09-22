@@ -21,6 +21,8 @@ enum class NativeSurfacePropAdmission : std::uint8_t {
 
 enum class NativeSurfacePropTreeCompatibilityFamily : std::uint8_t {
     none = 0,
+    // tree_visual_spec consumes rotation + fallback height, then six values
+    // for its center clump (fixed zero spread) and seven per outer clump.
     broadleaf_36_draw = 1,
     conifer_22_draw = 2,
 };
