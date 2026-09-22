@@ -72,7 +72,7 @@ NativeWorldDeltasV2Payload payload(
     std::vector<std::string> removed = {"generated:tree:z", "generated:tree:a"},
     std::vector<NativeValue> blocks = {block_entry({8, 4, -2})}) {
     return {
-        encode_native_terrain_volume_v2(terrain_volume()),
+        terrain_volume(),
         std::move(removed),
         std::move(blocks),
     };
@@ -169,7 +169,7 @@ VWB_TEST(native_world_deltas_v2_aborts_the_complete_decode_when_any_domain_is_ma
     const NativePlayerBlocksV2Catalog catalog = world_delta_catalog();
 
     NativeWorldDeltasV2Payload bad_terrain = payload();
-    bad_terrain.terrain_volume = NativeValue::object({});
+    bad_terrain.terrain_volume.section_revisions.clear();
     VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
         decode_native_world_deltas_v2(bad_terrain, catalog, {}));
 
@@ -179,9 +179,91 @@ VWB_TEST(native_world_deltas_v2_aborts_the_complete_decode_when_any_domain_is_ma
         decode_native_world_deltas_v2(bad_removed, catalog, {}));
 
     NativeWorldDeltasV2Payload bad_blocks = payload();
-    bad_blocks.blocks = {without_member(block_entry({1, 2, 3}), "worldY")};
+    bad_blocks.blocks = {without_member(block_entry({1, 2, 3}), "cell")};
     VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
         decode_native_world_deltas_v2(bad_blocks, catalog, {}));
+}
+
+VWB_TEST(native_world_deltas_v2_preflights_independent_domains_and_combined_capacity) {
+    const NativePlayerBlocksV2Catalog catalog = world_delta_catalog();
+    const NativeWorldDeltasV2Payload valid = payload(
+        {"generated:tree:a", "generated:tree:b"},
+        {block_entry({8, 4, -2}), block_entry({9, 4, -2})});
+
+    NativeWorldDeltasV2Limits exact;
+    exact.max_terrain_records = 1U;
+    exact.max_removed_props = 2U;
+    exact.max_player_blocks = 2U;
+    exact.max_persisted_records = 5U;
+    const WorldDeltaInitialSnapshot decoded = decode_native_world_deltas_v2(valid, catalog, {}, exact);
+    VWB_EXPECT_EQ(1U, decoded.terrain_volume.durable_snapshot.records().size());
+    VWB_EXPECT_EQ(2U, decoded.feature_delta_snapshot.tombstones().size());
+    VWB_EXPECT_EQ(2U, decoded.feature_delta_snapshot.player_created_instances().size());
+
+    NativeWorldDeltasV2Limits too_little_terrain = exact;
+    too_little_terrain.max_terrain_records = 0U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(valid, catalog, {}, too_little_terrain));
+
+    NativeWorldDeltasV2Limits too_little_removed = exact;
+    too_little_removed.max_removed_props = 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(valid, catalog, {}, too_little_removed));
+
+    NativeWorldDeltasV2Limits too_little_blocks = exact;
+    too_little_blocks.max_player_blocks = 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(valid, catalog, {}, too_little_blocks));
+
+    NativeWorldDeltasV2Limits too_little_total = exact;
+    too_little_total.max_persisted_records = 4U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(valid, catalog, {}, too_little_total));
+
+    NativeWorldDeltasV2Limits removed_exceeds_remaining = exact;
+    removed_exceeds_remaining.max_persisted_records = 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(valid, catalog, {}, removed_exceeds_remaining));
+}
+
+VWB_TEST(native_world_deltas_v2_rejects_invalid_limit_policies_before_record_validation) {
+    const NativePlayerBlocksV2Catalog catalog = world_delta_catalog();
+    NativeWorldDeltasV2Payload malformed = payload({}, {NativeValue::null()});
+
+    NativeWorldDeltasV2Limits zero_total;
+    zero_total.max_persisted_records = 0U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, zero_total));
+
+    NativeWorldDeltasV2Limits zero_removed;
+    zero_removed.max_removed_props = 0U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, zero_removed));
+
+    NativeWorldDeltasV2Limits zero_blocks;
+    zero_blocks.max_player_blocks = 0U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, zero_blocks));
+
+    NativeWorldDeltasV2Limits over_terrain;
+    over_terrain.max_terrain_records = NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS + 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, over_terrain));
+
+    NativeWorldDeltasV2Limits over_removed;
+    over_removed.max_removed_props = NativeFeatureDeltaLimits::MAX_TOMBSTONES + 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, over_removed));
+
+    NativeWorldDeltasV2Limits over_blocks;
+    over_blocks.max_player_blocks = NativePlayerBlocksV2Limits::MAX_BLOCKS + 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, over_blocks));
+
+    NativeWorldDeltasV2Limits over_total;
+    over_total.max_persisted_records = NativeWorldDeltasV2Limits::DEFAULT_MAX_PERSISTED_RECORDS + 1U;
+    VWB_EXPECT_THROW(NativeWorldDeltasV2Rejected,
+        decode_native_world_deltas_v2(malformed, catalog, {}, over_total));
 }
 
 VWB_TEST(native_world_deltas_v2_export_is_bound_to_one_immutable_pin) {

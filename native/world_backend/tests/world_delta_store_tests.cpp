@@ -201,6 +201,39 @@ WorldDeltaInitialSnapshot initial_checkpoint(
     return result;
 }
 
+WorldDeltaStoreLimits capacity_limits(
+    const std::size_t durable,
+    const std::size_t overlays,
+    const std::size_t tombstones,
+    const std::size_t player_instances,
+    const std::size_t persisted_total,
+    const std::size_t resident_total,
+    const std::size_t transactions,
+    const std::uint64_t initial_revision = 0U) {
+    WorldDeltaStoreLimits limits;
+    limits.max_durable_terrain_records = durable;
+    limits.max_scene_overlay_records = overlays;
+    limits.max_feature_tombstones = tombstones;
+    limits.max_player_created_instances = player_instances;
+    limits.max_persisted_records = persisted_total;
+    limits.max_resident_records = resident_total;
+    limits.max_transactions = transactions;
+    limits.initial_revision = initial_revision;
+    return limits;
+}
+
+// Preserve the old tests' deliberately shared small total while making that
+// policy explicit. Production defaults no longer collapse all domains into
+// this one record ceiling.
+WorldDeltaStoreLimits combined_test_limits(
+    const std::size_t records,
+    const std::size_t transactions,
+    const std::uint64_t initial_revision = 0U) {
+    return capacity_limits(
+        records, records, records, records, records, records,
+        transactions, initial_revision);
+}
+
 NativeTerrainVolumeV2 complete_section_volume() {
     std::vector<NativeTypedWorldStateRecord> records;
     records.reserve(NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION);
@@ -240,9 +273,129 @@ VWB_TEST(world_delta_store_starts_empty_and_pins_an_immutable_zero_revision) {
     VWB_EXPECT(first.feature_delta_snapshot().player_created_instances().empty());
 }
 
+VWB_TEST(world_delta_store_capacity_contract_preserves_every_independent_production_maximum) {
+    const WorldDeltaStoreLimits limits;
+    VWB_EXPECT_EQ(65536U, limits.max_durable_terrain_records);
+    VWB_EXPECT_EQ(65536U, limits.max_scene_overlay_records);
+    VWB_EXPECT_EQ(65536U, limits.max_feature_tombstones);
+    VWB_EXPECT_EQ(65536U, limits.max_player_created_instances);
+    VWB_EXPECT_EQ(196608U, limits.max_persisted_records);
+    VWB_EXPECT_EQ(262144U, limits.max_resident_records);
+
+    VWB_EXPECT(world_delta_store_fits_capacity({65536U, 0U, 0U, 0U}, limits));
+    VWB_EXPECT(world_delta_store_fits_capacity({0U, 65536U, 0U, 0U}, limits));
+    VWB_EXPECT(world_delta_store_fits_capacity({0U, 0U, 65536U, 0U}, limits));
+    VWB_EXPECT(world_delta_store_fits_capacity({0U, 0U, 0U, 65536U}, limits));
+    // The complete v2 persisted maximum and the runtime-only overlay maximum
+    // coexist. Tombstone semantic admission remains a separate, fail-closed
+    // footprint contract exercised by the store tests below.
+    VWB_EXPECT(world_delta_store_fits_capacity(
+        {65536U, 65536U, 65536U, 65536U}, limits));
+
+    VWB_EXPECT(!world_delta_store_fits_capacity({65537U, 0U, 0U, 0U}, limits));
+    VWB_EXPECT(!world_delta_store_fits_capacity({0U, 65537U, 0U, 0U}, limits));
+    VWB_EXPECT(!world_delta_store_fits_capacity({0U, 0U, 65537U, 0U}, limits));
+    VWB_EXPECT(!world_delta_store_fits_capacity({0U, 0U, 0U, 65537U}, limits));
+}
+
+VWB_TEST(world_delta_store_capacity_totals_use_subtraction_without_overflow) {
+    const WorldDeltaStoreLimits constrained = capacity_limits(
+        4U, 5U, 4U, 4U, 10U, 14U, 8U);
+    VWB_EXPECT(world_delta_store_fits_capacity({4U, 4U, 3U, 3U}, constrained));
+    VWB_EXPECT(!world_delta_store_fits_capacity({4U, 4U, 4U, 3U}, constrained));
+    VWB_EXPECT(!world_delta_store_fits_capacity({4U, 5U, 3U, 3U}, constrained));
+    const WorldDeltaStoreLimits tombstone_total = capacity_limits(
+        8U, 1U, 8U, 1U, 10U, 11U, 1U);
+    VWB_EXPECT(!world_delta_store_fits_capacity({4U, 0U, 7U, 0U}, tombstone_total));
+
+    const std::size_t maximum = std::numeric_limits<std::size_t>::max();
+    const WorldDeltaStoreLimits maximum_limits = capacity_limits(
+        maximum, maximum, maximum, maximum, maximum, maximum, 1U);
+    VWB_EXPECT(world_delta_store_fits_capacity({maximum, 0U, 0U, 0U}, maximum_limits));
+    VWB_EXPECT(!world_delta_store_fits_capacity({maximum, 0U, 1U, 0U}, maximum_limits));
+    VWB_EXPECT(!world_delta_store_fits_capacity({maximum - 1U, 1U, 1U, 0U}, maximum_limits));
+}
+
+VWB_TEST(world_delta_store_coexisting_domain_caps_reject_atomically_without_journaling_failure) {
+    const NativeTerrainVolumeV2 terrain = persisted_terrain_volume(5U, {
+        typed_durable({0, 0, 0}), typed_durable({1, 0, 0}),
+    }, {{{0, 0, 0}, 5U}});
+    const NativeFeatureDeltaSnapshot features = NativeFeatureDeltaSnapshot::create({}, {
+        feature_instance("capacity:player:1", {4, 0, 0}),
+        feature_instance("capacity:player:2", {5, 0, 0}),
+    });
+    const WorldDeltaStoreLimits limits = capacity_limits(
+        2U, 2U, 1U, 2U, 4U, 6U, 8U);
+    WorldDeltaStore store(limits, initial_checkpoint(0U, terrain, {
+        typed_overlay({2, 0, 0}), typed_overlay({3, 0, 0}),
+    }, features));
+    const WorldDeltaPinnedSnapshot before = store.pin();
+    VWB_EXPECT_EQ(2U, before.durable_terrain_snapshot().records().size());
+    VWB_EXPECT_EQ(2U, before.scene_overlays().size());
+    VWB_EXPECT_EQ(2U, before.feature_delta_snapshot().player_created_instances().size());
+    VWB_EXPECT(world_delta_store_fits_capacity({2U, 2U, 0U, 2U}, limits));
+
+    expect_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        transaction("capacity:failed-not-journaled", 0U, {
+            set(WorldDeltaNamespace::terrain_override, {6, 0, 0}, stone()),
+        }), store);
+    expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        typed_admission("capacity:overlay-over", 0U, {
+            typed_durable({0, 0, 0}), typed_durable({1, 0, 0}),
+        }, {
+            typed_overlay({2, 0, 0}), typed_overlay({3, 0, 0}), typed_overlay({6, 0, 0}),
+        }), store);
+    expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        feature_admission("capacity:player-over", 0U, {}, {
+            feature_instance("capacity:player:1", {4, 0, 0}),
+            feature_instance("capacity:player:2", {5, 0, 0}),
+            feature_instance("capacity:player:3", {6, 0, 0}),
+        }), store);
+
+    const WorldDeltaPinnedSnapshot after_rejections = store.pin();
+    VWB_EXPECT_EQ(0ULL, after_rejections.revision());
+    VWB_EXPECT_EQ(before.content_digest(), after_rejections.content_digest());
+    VWB_EXPECT_EQ(2U, after_rejections.durable_terrain_snapshot().records().size());
+    VWB_EXPECT_EQ(2U, after_rejections.scene_overlays().size());
+    VWB_EXPECT_EQ(2U, after_rejections.feature_delta_snapshot().player_created_instances().size());
+
+    // Reusing the first rejected transaction ID must succeed: capacity
+    // rejection cannot consume journal capacity or poison idempotency state.
+    const WorldDeltaCommitReceipt recovered = store.commit_typed_cells(transaction(
+        "capacity:failed-not-journaled", 0U, {
+            clear(WorldDeltaNamespace::terrain_override, {1, 0, 0}),
+        }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, recovered.status);
+    VWB_EXPECT_EQ(1ULL, recovered.revision);
+    VWB_EXPECT_EQ(1U, store.pin().durable_terrain_snapshot().records().size());
+}
+
+VWB_TEST(world_delta_store_persisted_total_rejects_with_each_domain_below_its_own_cap) {
+    const NativeTerrainVolumeV2 terrain = persisted_terrain_volume(5U, {
+        typed_durable({0, 0, 0}), typed_durable({1, 0, 0}),
+    }, {{{0, 0, 0}, 5U}});
+    const NativeFeatureDeltaSnapshot features = NativeFeatureDeltaSnapshot::create({}, {
+        feature_instance("capacity:total:player:1", {4, 0, 0}),
+        feature_instance("capacity:total:player:2", {5, 0, 0}),
+    });
+    const WorldDeltaStoreLimits limits = capacity_limits(
+        3U, 2U, 1U, 3U, 4U, 6U, 8U);
+    WorldDeltaStore store(limits, initial_checkpoint(0U, terrain, {}, features));
+    const WorldDeltaPinnedSnapshot before = store.pin();
+
+    // Three terrain records and two player instances would each remain below
+    // their domain limits, but together would exceed the persisted total.
+    expect_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        transaction("capacity:persisted-total", 0U, {
+            set(WorldDeltaNamespace::terrain_override, {6, 0, 0}, stone()),
+        }), store);
+    VWB_EXPECT_EQ(0ULL, store.revision());
+    VWB_EXPECT_EQ(before.content_digest(), store.pin().content_digest());
+}
+
 VWB_TEST(world_delta_store_constructor_admits_a_complete_4096_cell_v2_section_without_native_value_limits) {
     const NativeTerrainVolumeV2 volume = complete_section_volume();
-    WorldDeltaStore store({4096U, 8U, 0U}, initial_checkpoint(0U, volume));
+    WorldDeltaStore store(combined_test_limits(4096U, 8U), initial_checkpoint(0U, volume));
     const WorldDeltaPinnedSnapshot pin = store.pin();
     VWB_EXPECT_EQ(4096U, pin.durable_terrain_snapshot().records().size());
     VWB_EXPECT_EQ(1U, pin.terrain_volume().section_revisions.size());
@@ -279,7 +432,7 @@ VWB_TEST(world_delta_store_constructor_atomically_pins_a_validated_v2_terrain_ch
     const NativeFeatureDeltaSnapshot features = NativeFeatureDeltaSnapshot::create({}, {
         feature_instance("player:checkpoint", {0, 0, 0}),
     });
-    WorldDeltaStore store({64, 64, 19}, initial_checkpoint(19U, volume, {
+    WorldDeltaStore store(combined_test_limits(64U, 64U, 19U), initial_checkpoint(19U, volume, {
         typed_overlay_without_persistence_metadata({0, 0, 0}),
     }, features));
     const WorldDeltaPinnedSnapshot first = store.pin();
@@ -341,13 +494,14 @@ VWB_TEST(world_delta_store_rejects_malformed_or_conflicting_constructor_checkpoi
     malformed = valid;
     malformed.revision = 9007199254740993ULL;
     VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({}, initial_checkpoint(0U, malformed)));
-    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({8, 8, 3}, initial_checkpoint(2U, valid)));
+    VWB_EXPECT_THROW(WorldDeltaRejected,
+        WorldDeltaStore(combined_test_limits(8U, 8U, 3U), initial_checkpoint(2U, valid)));
 
     NativeTypedWorldStateRecord malformed_overlay = typed_overlay({0, 0, 0});
     malformed_overlay.persistence = NativeTypedWorldStatePersistence::durable;
     VWB_EXPECT_THROW(WorldDeltaRejected,
         WorldDeltaStore({}, initial_checkpoint(0U, valid, {malformed_overlay})));
-    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({1, 8}, initial_checkpoint(0U, valid, {
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(combined_test_limits(1U, 8U), initial_checkpoint(0U, valid, {
         typed_overlay({1, 0, 0}),
     })));
 }
@@ -465,7 +619,7 @@ VWB_TEST(world_delta_store_feature_admissions_are_idempotent_kind_strict_and_cap
     expect_feature_rejection(WorldDeltaRejectReason::revision_conflict,
         feature_admission("feature:stale", 0), store);
 
-    WorldDeltaStore combined_capacity({2, 4});
+    WorldDeltaStore combined_capacity(combined_test_limits(2U, 4U));
     static_cast<void>(combined_capacity.admit_typed_state(
         typed_admission("typed:capacity", 0, {typed_durable({0, 0, 0})})));
     expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
@@ -475,12 +629,13 @@ VWB_TEST(world_delta_store_feature_admissions_are_idempotent_kind_strict_and_cap
         }), combined_capacity);
     VWB_EXPECT_EQ(1ULL, combined_capacity.revision());
 
-    WorldDeltaStore transaction_capacity({4, 1});
+    WorldDeltaStore transaction_capacity(combined_test_limits(4U, 1U));
     static_cast<void>(transaction_capacity.admit_feature_deltas(feature_admission("feature:journal", 0)));
     expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
         feature_admission("feature:journal-full", 0), transaction_capacity);
 
-    WorldDeltaStore overflow({4, 4, std::numeric_limits<std::uint64_t>::max()});
+    WorldDeltaStore overflow(combined_test_limits(
+        4U, 4U, std::numeric_limits<std::uint64_t>::max()));
     expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
         feature_admission("feature:max-revision", std::numeric_limits<std::uint64_t>::max(), {}, {
             feature_instance("player:crate:max", {0, 0, 0}),
@@ -623,7 +778,7 @@ VWB_TEST(world_delta_store_typed_admission_is_idempotent_and_transaction_kind_st
 }
 
 VWB_TEST(world_delta_store_rejects_typed_capacity_and_malformed_overlay_without_publishing) {
-    WorldDeltaStore store({1, 8});
+    WorldDeltaStore store(combined_test_limits(1U, 8U));
     expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
         typed_admission("typed:over-capacity", 0, {typed_durable({0, 0, 0})}, {typed_overlay({1, 0, 0})}), store);
     VWB_EXPECT_EQ(0ULL, store.revision());
@@ -666,7 +821,7 @@ VWB_TEST(world_delta_store_typed_admission_covers_no_change_search_order_capacit
     static_cast<void>(store.admit_typed_state(typed_admission("typed:after-less", 2,
         {typed_durable({0, 0, 0})})));
 
-    WorldDeltaStore combined_capacity({2, 8});
+    WorldDeltaStore combined_capacity(combined_test_limits(2U, 8U));
     static_cast<void>(combined_capacity.commit_typed_cells(transaction("delta:capacity-base", 0, {
         set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
     })));
@@ -675,13 +830,14 @@ VWB_TEST(world_delta_store_typed_admission_covers_no_change_search_order_capacit
             {typed_durable({1, 0, 0}), typed_durable({2, 0, 0}), typed_durable({3, 0, 0})}), combined_capacity);
     VWB_EXPECT_EQ(1ULL, combined_capacity.revision());
 
-    WorldDeltaStore transaction_capacity({8, 1});
+    WorldDeltaStore transaction_capacity(combined_test_limits(8U, 1U));
     static_cast<void>(transaction_capacity.admit_typed_state(
         typed_admission("typed:journal-base", 0, {typed_durable({0, 0, 0})})));
     expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
         typed_admission("typed:journal-full", 1, {typed_durable({1, 0, 0})}), transaction_capacity);
 
-    WorldDeltaStore overflow({8, 8, std::numeric_limits<std::uint64_t>::max()});
+    WorldDeltaStore overflow(combined_test_limits(
+        8U, 8U, std::numeric_limits<std::uint64_t>::max()));
     expect_typed_rejection(WorldDeltaRejectReason::capacity_exceeded,
         typed_admission("typed:max-revision", std::numeric_limits<std::uint64_t>::max(),
             {typed_durable({0, 0, 0})}), overflow);
@@ -866,7 +1022,7 @@ VWB_TEST(world_delta_store_validates_everything_before_mutating) {
 }
 
 VWB_TEST(world_delta_store_rejects_stale_revisions_and_bounded_capacity_atomically) {
-    WorldDeltaStore store({1, 2});
+    WorldDeltaStore store(combined_test_limits(1U, 2U));
     expect_rejection(WorldDeltaRejectReason::revision_conflict, transaction("delta:stale", 1, {
         set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
     }), store);
@@ -891,8 +1047,24 @@ VWB_TEST(world_delta_store_rejects_stale_revisions_and_bounded_capacity_atomical
 }
 
 VWB_TEST(world_delta_store_rejects_invalid_limits_and_unknown_enums) {
-    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({0, 1}));
-    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore({1, 0}));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(combined_test_limits(0U, 1U)));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(combined_test_limits(1U, 0U)));
+    const WorldDeltaStoreLimits zero_resident = capacity_limits(
+        0U, 0U, 0U, 0U, 1U, 0U, 1U);
+    // Braces force construction; `WorldDeltaStore(zero_resident);` is a
+    // most-vexing declaration inside the assertion lambda under MSVC.
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore{zero_resident});
+    VWB_EXPECT(!world_delta_store_fits_capacity({}, zero_resident));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(capacity_limits(
+        3U, 1U, 1U, 1U, 2U, 4U, 1U)));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(capacity_limits(
+        1U, 1U, 3U, 1U, 2U, 4U, 1U)));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(capacity_limits(
+        1U, 1U, 1U, 3U, 2U, 4U, 1U)));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(capacity_limits(
+        1U, 1U, 1U, 1U, 4U, 3U, 1U)));
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore(capacity_limits(
+        1U, 5U, 1U, 1U, 3U, 4U, 1U)));
     WorldDeltaStore store;
     expect_rejection(WorldDeltaRejectReason::invalid_transaction, transaction("delta:unknown-space", 0, {
         {static_cast<NativeCellStateNamespace>(255U), {0, 0, 0}, WorldTypedCellOperationKind::set,
@@ -1017,7 +1189,8 @@ VWB_TEST(world_delta_store_invalidates_the_complete_negative_boundary_neighborho
 }
 
 VWB_TEST(world_delta_store_imported_max_revision_refuses_an_overflowing_commit) {
-    WorldDeltaStore store({1, 1, std::numeric_limits<std::uint64_t>::max()});
+    WorldDeltaStore store(combined_test_limits(
+        1U, 1U, std::numeric_limits<std::uint64_t>::max()));
     VWB_EXPECT_EQ(std::numeric_limits<std::uint64_t>::max(), store.pin().revision());
     expect_rejection(WorldDeltaRejectReason::capacity_exceeded,
         transaction("delta:max-revision", std::numeric_limits<std::uint64_t>::max(), {

@@ -113,14 +113,55 @@ private:
 };
 
 struct WorldDeltaStoreLimits {
-    // These are hard bounds rather than eviction hints: evicting a completed
+    // Persisted v2 domains have independent production capacities. The total
+    // defaults are their exact sum, so filling one domain never silently
+    // steals advertised capacity from either sibling domain. Scene overlays
+    // are runtime-only and have their own capacity plus the resident total.
+    static constexpr std::size_t DEFAULT_MAX_DURABLE_TERRAIN_RECORDS =
+        NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS;
+    static constexpr std::size_t DEFAULT_MAX_SCENE_OVERLAY_RECORDS = 65536U;
+    static constexpr std::size_t DEFAULT_MAX_FEATURE_TOMBSTONES =
+        NativeFeatureDeltaLimits::MAX_TOMBSTONES;
+    static constexpr std::size_t DEFAULT_MAX_PLAYER_CREATED_INSTANCES =
+        NativeFeatureDeltaLimits::MAX_PLAYER_CREATED_INSTANCES;
+    static constexpr std::size_t DEFAULT_MAX_PERSISTED_RECORDS =
+        DEFAULT_MAX_DURABLE_TERRAIN_RECORDS
+        + DEFAULT_MAX_FEATURE_TOMBSTONES
+        + DEFAULT_MAX_PLAYER_CREATED_INSTANCES;
+    static constexpr std::size_t DEFAULT_MAX_RESIDENT_RECORDS =
+        DEFAULT_MAX_PERSISTED_RECORDS + DEFAULT_MAX_SCENE_OVERLAY_RECORDS;
+
+    std::size_t max_durable_terrain_records = DEFAULT_MAX_DURABLE_TERRAIN_RECORDS;
+    std::size_t max_scene_overlay_records = DEFAULT_MAX_SCENE_OVERLAY_RECORDS;
+    std::size_t max_feature_tombstones = DEFAULT_MAX_FEATURE_TOMBSTONES;
+    std::size_t max_player_created_instances = DEFAULT_MAX_PLAYER_CREATED_INSTANCES;
+    std::size_t max_persisted_records = DEFAULT_MAX_PERSISTED_RECORDS;
+    std::size_t max_resident_records = DEFAULT_MAX_RESIDENT_RECORDS;
+    // This is a hard bound rather than an eviction hint: evicting a completed
     // transaction would invalidate its idempotency contract.
-    std::size_t max_records = 65536;
     std::size_t max_transactions = 65536;
     // Imported save state may resume a nonzero global revision. It is part of
     // the immutable first pin, never a post-construction mutable setting.
     std::uint64_t initial_revision = 0;
 };
+
+// Count-only capacity is a public value contract so aggregate save admission
+// can preflight every domain before constructing or copying a snapshot. It
+// deliberately does not bypass semantic admission; in particular, nonempty
+// tombstones remain rejected by WorldDeltaStore until feature footprints can
+// produce complete invalidation receipts.
+struct WorldDeltaStoreCapacityUsage {
+    std::size_t durable_terrain_records = 0;
+    std::size_t scene_overlay_records = 0;
+    std::size_t feature_tombstones = 0;
+    std::size_t player_created_instances = 0;
+};
+
+// Uses subtraction rather than unchecked addition, so adversarial size_t
+// counts cannot wrap into an apparently valid persisted or resident total.
+bool world_delta_store_fits_capacity(
+    const WorldDeltaStoreCapacityUsage &usage,
+    const WorldDeltaStoreLimits &limits = {}) noexcept;
 
 struct WorldDeltaSnapshotState;
 

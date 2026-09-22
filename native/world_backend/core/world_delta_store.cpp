@@ -370,9 +370,6 @@ void add_changed_feature_instance_cells(
     }
 }
 
-bool fits_record_capacity(
-    const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept;
-
 const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
     if (reason == WorldDeltaRejectReason::invalid_transaction) return "invalid world delta transaction";
     if (reason == WorldDeltaRejectReason::revision_conflict) return "world delta expected revision does not match";
@@ -492,13 +489,31 @@ void seal_content_digest(WorldDeltaSnapshotState &state) {
 }
 
 bool fits_record_capacity(const WorldDeltaSnapshotState &state, const WorldDeltaStoreLimits &limits) noexcept {
-    const std::size_t durable_count = state.terrain_volume.durable_snapshot.records().size();
-    const std::size_t overlay_count = state.typed_transient_overlays.size();
-    const std::size_t feature_count = state.feature_delta_snapshot.tombstones().size()
-        + state.feature_delta_snapshot.player_created_instances().size();
-    if (durable_count > limits.max_records) return false;
-    if (overlay_count > limits.max_records - durable_count) return false;
-    return feature_count <= limits.max_records - durable_count - overlay_count;
+    return world_delta_store_fits_capacity({
+        state.terrain_volume.durable_snapshot.records().size(),
+        state.typed_transient_overlays.size(),
+        state.feature_delta_snapshot.tombstones().size(),
+        state.feature_delta_snapshot.player_created_instances().size(),
+    }, limits);
+}
+
+bool valid_capacity_limits(const WorldDeltaStoreLimits &limits) noexcept {
+    if (limits.max_persisted_records == 0U
+        || limits.max_resident_records == 0U
+        || limits.max_transactions == 0U) {
+        return false;
+    }
+    // Every per-domain capacity must remain independently expressible. A
+    // configured total may constrain coexistence, but it cannot make an
+    // advertised individual domain impossible even when all siblings are
+    // empty.
+    if (limits.max_durable_terrain_records > limits.max_persisted_records
+        || limits.max_feature_tombstones > limits.max_persisted_records
+        || limits.max_player_created_instances > limits.max_persisted_records) {
+        return false;
+    }
+    return limits.max_persisted_records <= limits.max_resident_records
+        && limits.max_scene_overlay_records <= limits.max_resident_records;
 }
 
 std::optional<NativeCellState> typed_value_at(
@@ -559,6 +574,29 @@ WorldDeltaRejected::WorldDeltaRejected(const WorldDeltaRejectReason reason)
 
 WorldDeltaRejectReason WorldDeltaRejected::reason() const noexcept { return reason_; }
 
+bool world_delta_store_fits_capacity(
+    const WorldDeltaStoreCapacityUsage &usage,
+    const WorldDeltaStoreLimits &limits) noexcept {
+    if (!valid_capacity_limits(limits)) return false;
+    if (usage.durable_terrain_records > limits.max_durable_terrain_records
+        || usage.scene_overlay_records > limits.max_scene_overlay_records
+        || usage.feature_tombstones > limits.max_feature_tombstones
+        || usage.player_created_instances > limits.max_player_created_instances) {
+        return false;
+    }
+
+    // Validate the persisted total without ever forming an unchecked sum.
+    std::size_t persisted_remaining = limits.max_persisted_records
+        - usage.durable_terrain_records;
+    if (usage.feature_tombstones > persisted_remaining) return false;
+    persisted_remaining -= usage.feature_tombstones;
+    if (usage.player_created_instances > persisted_remaining) return false;
+    persisted_remaining -= usage.player_created_instances;
+
+    const std::size_t persisted_used = limits.max_persisted_records - persisted_remaining;
+    return usage.scene_overlay_records <= limits.max_resident_records - persisted_used;
+}
+
 WorldDeltaPinnedSnapshot::WorldDeltaPinnedSnapshot(std::shared_ptr<const WorldDeltaSnapshotState> state)
     : state_(std::move(state)) {}
 
@@ -613,7 +651,7 @@ Sha256Digest WorldDeltaPinnedSnapshot::typed_projection_digest(
 }
 
 WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits, WorldDeltaInitialSnapshot initial) : limits_(limits) {
-    if (limits_.max_records == 0U || limits_.max_transactions == 0U) {
+    if (!valid_capacity_limits(limits_)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
     // Reserve once so a later journal append cannot allocate after a candidate
