@@ -256,3 +256,55 @@ recipe stream must preserve the current branch draw order (berry 26, aloe 44,
 mushroom 26, frost herb 37 recipe calls) even when its root is later removed.
 Any isolated per-feature RNG redesign requires an explicit generator-version
 and world-signature migration rather than an implicit compatibility change.
+
+## Wildlife follow-on boundary
+
+Wildlife remains unported.  Its surface attempt is not representable as a
+generic count of random draws: after the classifier has selected wildlife,
+the live source consumes a typed sequence of a profile `randf`, yaw `randf`,
+two inclusive bounded yield ranges, a presentation branch, then direction,
+timer, and speed random values.  `randf` itself has Godot's two-raw-PCG-output
+ordinary path (and a rare one-output zero path), while each bounded range can
+consume an additional raw output through rejection.  A native compatibility
+stream must therefore replay the actual operation types and assert the
+pre/post-PCG state; it must not substitute nine generic float draws.
+
+The presentation branch is a real source dependency.  Procedural fallback
+uses two visual floats; an instantiated animated visual with a playable
+AnimationPlayer/clip uses scale and animation-speed floats; the legacy
+instantiated-but-no-player path uses only the scale float.  The latter is an
+asset-readiness accident, not a valid native authority.  Native admission must
+receive a source-bound presentation capability receipt that identifies the
+selected boar/deer/hare variant, canonical asset and clip IDs, the actual
+asset-catalog content digest, and whether the animation capability is
+playable.  It must admit only a deliberate procedural fallback or a complete
+animated capability, reserve the two presentation operations in either case,
+and reject partial asset/player states rather than preserving an eight-draw
+branch.
+
+`NativeWildlifePresentationReceipt` now supplies that narrow, source-bound
+capability value.  It requires a nonzero schema revision and catalog content
+digest, a typed boar/deer/hare variant, that variant's exact current asset and
+clip IDs, and either `procedural_fallback` or `animated_playable`.  There is no
+native representation for an instantiated visual without a playable player or
+clip.  The eventual adapter must turn that legacy partial capability into an
+explicit fallback before it reaches native generation.
+
+`node tools/run-native-world-backend-tests.mjs --run-name
+n4-wildlife-presentation-receipt-03` passed the standalone debug/release core
+suites, both adapter smokes, and strict pure-core coverage of 6,927/6,927
+lines, 934/934 functions, and 3,862/3,862 branches.  Its receipt is
+`artifacts/native-world-backend/n4-wildlife-presentation-receipt-03/report.json`.
+This proves only capability-receipt admission; it does not yet establish a
+native wildlife profile, RNG stream, feature definition, publication, or live
+gameplay parity.
+
+The eventual wildlife definition must preserve the selected profile's collider
+dimensions/center, yield ranges, cold and speed semantics, and current
+navigation classification.  Present wildlife is a transform-driven
+`StaticBody3D` that the navigation adapter treats as a static prop blocker; it
+is not yet a native terrain collider or a declared dynamic actor.  Changing
+that classification is a separate gameplay/product decision, not a migration
+translation.  Like every surface feature, native generation must first produce
+the full baseline recipe stream and only then apply durable `removedProps` as
+a publication filter.
