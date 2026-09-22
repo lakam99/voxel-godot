@@ -543,6 +543,31 @@ selected recipe draws. The native decision set must compute its own per-attempt
 digest from those facts and exact scalar-height cutoffs; a caller-supplied
 digest is insufficient. The source height must not be replaced by the rounded
 `Vector3` anchor Y when calculating biome policy.
+The catalog snapshot must retain scalar profile probabilities at Godot's
+float64 `float` boundary; `rock_chance`, `tree_chance`, `forage_chance`, and
+`wildlife_chance` are combined in that precision and only then become the
+float32 policy cutoffs consumed by the native classifier. Packed detail and
+tree-age arrays instead retain their loaded float32 elements. An oracle of
+only displayed decimal values cannot prove these boundaries.
+Legacy tree compatibility draw count is a separate input from ecology
+architecture: `tree_visual_spec` consumes 22 draws only for `taiga`, `snow`,
+and `tundra`, and 36 for all other tree biomes. `alpine.tres` declares a
+conifer architecture but still takes the 36-draw legacy path. The current
+native tree composer equates its conifer/broadleaf replay outcome with the
+selected family architecture and would reject this valid alpine combination;
+that is a migration mistranslation to correct before catalog-driven replay.
+The current catalog audit found alpine is the only architecture/draw-count
+mismatch: other conifer profiles (`taiga`, `snow`, `tundra`) use 22, while
+plains/beach may select savanna or broadleaf but both use 36. The native
+classifier's replay enum should describe draw compatibility only; the tree
+composer must validate family and architecture independently against the
+resolved profile. Extend the direct Godot tree RNG oracle across every
+profile biome, including alpine, before asserting that separation is exact.
+The coupling also appears in `NativeSurfacePropRngTrace` replay disposition,
+not only the classifier, baseline stream, and tree composer. Correct the
+typed replay schema through all four owners together, with a schema revision
+and old-fixture audit. A composer-only alpine exception would leave the
+shared-PCG state and durable trace semantically mislabeled.
 
 Structure exclusion currently spans natural-prop exclusion records, structure
 terrain-footprint records, and ready/prepared Citadel reservations. The
@@ -552,6 +577,37 @@ new native source needs a canonical content digest or dedicated revision for
 all three contributors. Environment identity must hash resolved profile
 values, including defaults inherited from `BiomeEnvironmentProfile.gd`, not
 merely raw `.tres` bytes; raw file hashes are separate provenance.
+For Citadel land use, `request_bounds` is the pre-RNG readiness gate;
+`source_state` is a non-enqueuing lookup. Both `prepared` (evicted
+reconstructible scene source) and `ready` supply the same durable
+`reservationCells` and source signature, while `absent` has no reservation.
+The snapshot must not mistake cache residency for physical-source identity.
+Natural-exclusion rectangles use inclusive max cells; terrain-footprint
+records use inclusive `minCell`/`maxCell` XZ bounds. The production query
+tests those sources in that order with zero margins before checking Citadel
+reservation intersection. Tree recipe exclusion later uses separate margins
+and must not be folded into this pre-roll gate.
+The immutable structure snapshot should carry the world/generation identity,
+inclusive natural-exclusion and terrain-footprint rectangles with stable
+record IDs, and per-intersecting-region Citadel decision status, source key,
+source signature, reservation rectangle, and admission generation. A canonical
+content digest over these sorted semantic records is required even if an
+epoch counter is added. The native query can return provenance for the first
+blocking source, but must reproduce the Boolean admission and not depend on
+Dictionary insertion order or retained scene-source cache entries.
+Capture belongs to `StructureSystem` on the main thread after the exact
+28×28 `request_bounds` reports `ready`; pending/failed admission must leave
+the prop PCG untouched. A non-enqueuing `source_state` result of
+`absent:source_not_requested` is not by itself a decided absent site:
+`request_bounds` may have skipped a region because its candidate declared
+influence does not intersect the chunk. Snapshot identities should separate
+the world/generation epoch from the local content digest so unrelated-region
+work does not invalidate this chunk, while reset always does. Natural and
+terrain rectangles are inclusive; Citadel `Rect2i` reservation intersection
+is half-open. Cache eviction may change `ready` to `prepared` without
+changing physical identity. A direct Godot oracle must cover those cases,
+negative/seam edges, record replacement/reset, insertion-order permutation,
+and all 28 live Boolean decisions before native publication can trust it.
 
 The direct headless catalog oracle at
 `artifacts/native-world-backend/n4-biome-environment-snapshot-oracle-04/report.json`
