@@ -456,8 +456,15 @@ const char *reject_message(const WorldDeltaRejectReason reason) noexcept {
 } // namespace
 
 struct WorldDeltaSnapshotState {
+    struct DurableColumnEntry {
+        std::int32_t x = 0;
+        std::int32_t z = 0;
+        std::size_t record_index = 0;
+    };
     std::uint64_t revision = 0;
     NativeTerrainVolumeV2 terrain_volume;
+    std::vector<DurableColumnEntry> durable_column_index;
+    std::vector<DurableColumnEntry> overlay_column_index;
     std::vector<NativeTypedWorldStateRecord> typed_transient_overlays;
     NativeFeatureDeltaSnapshot feature_delta_snapshot = NativeFeatureDeltaSnapshot::create({}, {});
     Sha256Digest content_digest{};
@@ -466,6 +473,22 @@ struct WorldDeltaSnapshotState {
 namespace {
 
 constexpr std::uint64_t MAX_V2_JSON_INTEGER = 9007199254740992ULL;
+
+std::vector<WorldDeltaSnapshotState::DurableColumnEntry> build_column_index(
+    const std::vector<NativeTypedWorldStateRecord> &records) {
+    std::vector<WorldDeltaSnapshotState::DurableColumnEntry> index;
+    index.reserve(records.size());
+    for (std::size_t i = 0; i < records.size(); ++i) {
+        const CellCoord cell = records[i].state.cell;
+        index.push_back({cell.x, cell.z, i});
+    }
+    std::sort(index.begin(), index.end(), [](const auto &left, const auto &right) {
+        if (left.x != right.x) return left.x < right.x;
+        if (left.z != right.z) return left.z < right.z;
+        return left.record_index < right.record_index;
+    });
+    return index;
+}
 
 bool section_less(const CellCoord &left, const CellCoord &right) noexcept {
     return CellCoordLess{}(left, right);
@@ -696,6 +719,48 @@ std::optional<NativeCellState> WorldDeltaPinnedSnapshot::durable_terrain_at(cons
     return typed_value_at(state_->terrain_volume.durable_snapshot.records(), cell);
 }
 
+bool WorldDeltaPinnedSnapshot::durable_terrain_column_any(
+    const std::int32_t x, const std::int32_t z,
+    const std::function<bool(const NativeCellState &)> &predicate) const {
+    const auto &index = state_->durable_column_index;
+    const auto found = std::lower_bound(index.begin(), index.end(), std::pair{x, z},
+        [](const WorldDeltaSnapshotState::DurableColumnEntry &entry, const auto &column) {
+            return entry.x < column.first || (entry.x == column.first && entry.z < column.second);
+        });
+    const auto &records = state_->terrain_volume.durable_snapshot.records();
+    for (auto it = found; it != index.end() && it->x == x && it->z == z; ++it) {
+        if (predicate(records[it->record_index].state)) return true;
+    }
+    return false;
+}
+
+bool WorldDeltaPinnedSnapshot::effective_typed_column_any(
+    const std::int32_t x, const std::int32_t z,
+    const std::function<bool(const NativeCellState &)> &predicate) const {
+    const auto first_in_column = [x, z](const auto &index) {
+        return std::lower_bound(index.begin(), index.end(), std::pair{x, z},
+            [](const WorldDeltaSnapshotState::DurableColumnEntry &entry, const auto &column) {
+                return entry.x < column.first || (entry.x == column.first && entry.z < column.second);
+            });
+    };
+    const auto &durable = state_->terrain_volume.durable_snapshot.records();
+    const auto &overlays = state_->typed_transient_overlays;
+    const auto &durable_index = state_->durable_column_index;
+    const auto &overlay_index = state_->overlay_column_index;
+    for (auto it = first_in_column(durable_index);
+         it != durable_index.end() && it->x == x && it->z == z; ++it) {
+        const NativeCellState &state = durable[it->record_index].state;
+        const auto overlay = scene_overlay_at(state.cell);
+        if (predicate(overlay ? *overlay : state)) return true;
+    }
+    for (auto it = first_in_column(overlay_index);
+         it != overlay_index.end() && it->x == x && it->z == z; ++it) {
+        const NativeCellState &state = overlays[it->record_index].state;
+        if (!durable_terrain_at(state.cell) && predicate(state)) return true;
+    }
+    return false;
+}
+
 std::optional<NativeCellState> WorldDeltaPinnedSnapshot::scene_overlay_at(const CellCoord &cell) const {
     return typed_value_at(state_->typed_transient_overlays, cell);
 }
@@ -745,7 +810,9 @@ WorldDeltaStore::WorldDeltaStore(
     }
     state->revision = initial.revision != 0U ? initial.revision : limits_.initial_revision;
     state->terrain_volume = validate_terrain_volume(initial.terrain_volume);
+    state->durable_column_index = build_column_index(state->terrain_volume.durable_snapshot.records());
     state->typed_transient_overlays = validate_initial_overlays(initial.transient_overlays);
+    state->overlay_column_index = build_column_index(state->typed_transient_overlays);
     state->feature_delta_snapshot = validate_initial_features(
         initial.feature_delta_snapshot, feature_footprint_catalog_.get());
     if (!fits_record_capacity(*state, limits_)) throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
@@ -822,6 +889,10 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
     // persisted by that domain and therefore cannot disturb its root or
     // per-section revision values.
     update_changed_terrain_sections(next->terrain_volume, changed_durable_cells);
+    if (!changed_durable_cells.empty())
+        next->durable_column_index = build_column_index(next->terrain_volume.durable_snapshot.records());
+    if (next->typed_transient_overlays != state_->typed_transient_overlays)
+        next->overlay_column_index = build_column_index(next->typed_transient_overlays);
 
     WorldDeltaCommitReceipt receipt;
     receipt.transaction_id = transaction.transaction_id;
@@ -887,6 +958,10 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
     changed_cells.insert(changed_durable_cells.begin(), changed_durable_cells.end());
     add_changed_typed_cells(state_->typed_transient_overlays, next->typed_transient_overlays, changed_cells);
     update_changed_terrain_sections(next->terrain_volume, changed_durable_cells);
+    if (!changed_durable_cells.empty())
+        next->durable_column_index = build_column_index(next->terrain_volume.durable_snapshot.records());
+    if (next->typed_transient_overlays != state_->typed_transient_overlays)
+        next->overlay_column_index = build_column_index(next->typed_transient_overlays);
 
     WorldDeltaCommitReceipt receipt;
     receipt.transaction_id = admission.transaction_id;

@@ -963,6 +963,93 @@ VWB_TEST(world_delta_store_typed_admission_covers_no_change_search_order_capacit
     VWB_EXPECT(overflow.pin().durable_terrain_snapshot().records().empty());
 }
 
+VWB_TEST(world_delta_store_pinned_column_index_tracks_durable_replacements_without_overlay_or_revision_leakage) {
+    WorldDeltaStore store;
+    const auto any = [](const WorldDeltaPinnedSnapshot &pin, const int x, const int z) {
+        return pin.durable_terrain_column_any(x, z, [](const NativeCellState &) { return true; });
+    };
+    const WorldDeltaPinnedSnapshot empty = store.pin();
+    VWB_EXPECT(!any(empty, -3, 7));
+    static_cast<void>(store.admit_typed_state(typed_admission("column:initial", 0, {
+        typed_durable({-3, -8, 7}), typed_durable({-3, 9, 7}),
+        typed_durable({-3, 0, 8}), typed_durable({4, 0, 7}),
+    })));
+    const WorldDeltaPinnedSnapshot initial = store.pin();
+    VWB_EXPECT(any(initial, -3, 7));
+    VWB_EXPECT(!any(initial, -3, 6));
+    VWB_EXPECT(!any(initial, 4, 8));
+    int visited = 0;
+    VWB_EXPECT(initial.durable_terrain_column_any(-3, 7, [&visited](const NativeCellState &state) {
+        ++visited;
+        return state.cell.y == 9;
+    }));
+    VWB_EXPECT_EQ(2, visited);
+    VWB_EXPECT(!initial.durable_terrain_column_any(-3, 7,
+        [](const NativeCellState &state) { return state.cell.y == 20; }));
+    VWB_EXPECT(!initial.durable_terrain_column_any(-3, 8,
+        [](const NativeCellState &) { return false; }));
+    VWB_EXPECT(!initial.durable_terrain_column_any(4, 7,
+        [](const NativeCellState &) { return false; }));
+    static_cast<void>(store.commit_typed_cells(transaction("column:overlay", 1, {
+        set(WorldDeltaNamespace::scene_overlay, {-3, 20, 6}, stone()),
+    })));
+    VWB_EXPECT(!any(store.pin(), -3, 6));
+    static_cast<void>(store.commit_typed_cells(transaction("column:clear-one", 2, {
+        clear(WorldDeltaNamespace::terrain_override, {-3, -8, 7}),
+    })));
+    VWB_EXPECT(any(store.pin(), -3, 7));
+    VWB_EXPECT(any(initial, -3, 7));
+    static_cast<void>(store.commit_typed_cells(transaction("column:clear-last", 3, {
+        clear(WorldDeltaNamespace::terrain_override, {-3, 9, 7}),
+    })));
+    VWB_EXPECT(!any(store.pin(), -3, 7));
+    VWB_EXPECT(any(initial, -3, 7));
+    VWB_EXPECT(!any(empty, -3, 7));
+}
+
+VWB_TEST(world_delta_store_effective_column_index_respects_overlay_masking_and_pin_isolation) {
+    WorldDeltaStore store;
+    const auto stone_in_column = [](const WorldDeltaPinnedSnapshot &pin) {
+        return pin.effective_typed_column_any(-3, 7, [](const NativeCellState &state) {
+            return state.material == TerrainMaterialId::stone;
+        });
+    };
+    const auto empty = store.pin();
+    VWB_EXPECT(!stone_in_column(empty));
+    static_cast<void>(store.commit_typed_cells(transaction("column:effective-durable", 0, {
+        set(WorldDeltaNamespace::terrain_override, {-3, 5, 7}, stone()),
+    })));
+    const auto durable = store.pin();
+    VWB_EXPECT(stone_in_column(durable));
+    static_cast<void>(store.commit_typed_cells(transaction("column:effective-mask", 1, {
+        set(WorldDeltaNamespace::scene_overlay, {-3, 5, 7}, air()),
+        set(WorldDeltaNamespace::scene_overlay, {-3, 8, 7}, stone()),
+        set(WorldDeltaNamespace::scene_overlay, {-3, 8, 8}, stone()),
+        set(WorldDeltaNamespace::scene_overlay, {4, 8, 7}, stone()),
+    })));
+    const auto with_second = store.pin();
+    VWB_EXPECT(stone_in_column(with_second));
+    VWB_EXPECT(!with_second.effective_typed_column_any(-3, 7,
+        [](const NativeCellState &) { return false; }));
+    VWB_EXPECT(!with_second.effective_typed_column_any(-3, 8,
+        [](const NativeCellState &) { return false; }));
+    VWB_EXPECT(!with_second.effective_typed_column_any(4, 7,
+        [](const NativeCellState &) { return false; }));
+    VWB_EXPECT(!with_second.effective_typed_column_any(-3, 7,
+        [](const NativeCellState &state) { return state.cell.y == 5 && state.material == TerrainMaterialId::stone; }));
+    static_cast<void>(store.commit_typed_cells(transaction("column:effective-clear", 2, {
+        clear(WorldDeltaNamespace::scene_overlay, {-3, 8, 7}),
+    })));
+    VWB_EXPECT(!stone_in_column(store.pin()));
+    VWB_EXPECT(stone_in_column(durable));
+    VWB_EXPECT(stone_in_column(with_second));
+    VWB_EXPECT(!stone_in_column(empty));
+    static_cast<void>(store.commit_typed_cells(transaction("column:effective-unmask", 3, {
+        clear(WorldDeltaNamespace::scene_overlay, {-3, 5, 7}),
+    })));
+    VWB_EXPECT(stone_in_column(store.pin()));
+}
+
 VWB_TEST(world_delta_store_commits_typed_cells_sections_and_preserves_old_pins) {
     WorldDeltaStore store;
     const WorldDeltaPinnedSnapshot before = store.pin();

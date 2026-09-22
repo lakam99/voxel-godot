@@ -2,6 +2,7 @@ extends "res://scripts/MainRuntimeTools.gd"
 
 const TreePublicationQueueScript := preload("res://scripts/environment/TreePublicationQueue.gd")
 const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/TreeRuntimeRequestBuilder.gd")
+const RockRecipeBuilderScript := preload("res://scripts/environment/RockRecipeBuilder.gd")
 
 const VOLUME_CUBE_CORNER_OFFSETS := [
     Vector3i(0, 0, 0),
@@ -4313,20 +4314,7 @@ func natural_tree_blocked_at_cell(
     return natural_props_blocked_at_cell(x, z)
 
 func rock_visual_spec(rng: RandomNumberGenerator) -> Dictionary:
-    var rotation := rng.randf() * TAU
-    var radius := 0.55 + rng.randf() * 0.7
-    var height_factor := 0.75 + rng.randf() * 0.8
-    var scale := Vector3(
-        1.15 + rng.randf() * 0.6,
-        0.58 + rng.randf() * 0.72,
-        1.0 + rng.randf() * 0.5
-    )
-    return {
-        "rotation": rotation,
-        "radius": radius,
-        "height_factor": height_factor,
-        "scale": scale
-    }
+    return RockRecipeBuilderScript.build_visual_spec(rng)
 
 func add_rock_visual(body: StaticBody3D, prop_id: String, biome: String, spec: Dictionary) -> void:
     if add_generated_rock_visual(body, prop_id, biome, spec):

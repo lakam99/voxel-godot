@@ -2,6 +2,7 @@
 
 #include "../core/native_surface_tree_definition_composer.hpp"
 #include "../core/legacy_seed_hash.hpp"
+#include "native_surface_prop_test_fixture.hpp"
 
 #include <array>
 #include <cmath>
@@ -38,13 +39,6 @@ NativeSurfacePropBaselineStream baseline(const NativeSurfacePropAttemptStream &s
     return NativeSurfacePropBaselineStream::create(source, inputs);
 }
 
-NativeSurfacePropSourceReceipt source_receipt() {
-    NativeSurfacePropSourceReceipt result;
-    result.schema_revision = 1U; result.terrain_revision = 7U; result.terrain_digest.fill(7U);
-    result.environment_profile_revision = 3U; result.environment_profile_digest.fill(3U);
-    return result;
-}
-
 WorldSourceDefinition world_source(const std::string &seed = "tree-composer") {
     WorldSourceDescriptor descriptor;
     descriptor.raw_terrain_seed = admit_raw_terrain_seed(seed);
@@ -55,14 +49,10 @@ WorldSourceDefinition world_source(const std::string &seed = "tree-composer") {
 
 NativeSurfacePropPlacementSet placements(const NativeSurfacePropAttemptStream &source,
     const NativeSurfacePropBaselineStream &stream, const WorldSourceDefinition &source_definition = world_source()) {
-    std::array<NativeSurfacePropPlacementReceipt, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> receipts{};
-    for (std::size_t index = 0U; index < receipts.size(); ++index) {
-        const NativeSurfacePropAttempt &attempt = source.attempts()[index];
-        receipts[index].ordinal = attempt.ordinal; receipts[index].presence = NativeSurfacePropPlacementPresence::anchored;
-        receipts[index].solid_cell = {attempt.cell_x, static_cast<std::int32_t>(16 + index), attempt.cell_z};
-        receipts[index].air_cell = {attempt.cell_x, static_cast<std::int32_t>(17 + index), attempt.cell_z};
-    }
-    return NativeSurfacePropPlacementSet::create(source, stream, source_receipt(), source_definition, receipts);
+    NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+        source_definition, {-1, 0}, surface_prop_test_fixture::empty_deltas()));
+    return NativeSurfacePropPlacementSet::create(
+        source, stream, surface_prop_test_fixture::receipt(terrain.pin()), terrain);
 }
 
 NativeSurfaceTreeEcologyProfile profile(const std::string &biome, const std::string &family) {
@@ -201,6 +191,12 @@ VWB_TEST(native_surface_tree_definition_composer_exhaustively_rejects_profile_bo
     };
     NativeSurfaceTreeEcologyProfile bad = forest; bad.profile_revision = 0U; reject_profile(bad);
     bad = forest; bad.source_biome.clear(); reject_profile(bad);
+    bad = forest; bad.source_biome = std::string(1U, static_cast<char>(0xff)); reject_profile(bad);
+    // NativeValue admits NUL as UTF-8 text, but the seed-hash decoder rejects it.
+    bad = forest; bad.source_biome = std::string("forest\0extra", 12U); reject_profile(bad);
+    // The profile admits up to NativeValue's text limit; the tree definition has
+    // a stricter 4 KiB durable-text contract, which the composer must preserve.
+    bad = forest; bad.source_biome.assign(4097U, 'f'); reject_profile(bad);
     bad = forest; bad.profile_id.clear(); reject_profile(bad);
     bad = forest; bad.tree_families.assign(65U, "ecological_broadleaf_tree"); reject_profile(bad);
     bad = forest; bad.tree_families = {""}; reject_profile(bad);

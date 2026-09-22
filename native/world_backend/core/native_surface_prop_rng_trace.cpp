@@ -16,8 +16,8 @@ bool is_zero_digest(const Sha256Digest &digest) noexcept {
 }
 
 bool valid_source_receipt(const NativeSurfacePropSourceReceipt &receipt) noexcept {
-    return receipt.schema_revision != 0U && receipt.terrain_revision != 0U
-        && !is_zero_digest(receipt.terrain_digest)
+    return receipt.schema_revision == NativeSurfacePropSourceReceipt::SCHEMA_REVISION
+        && !is_zero_digest(receipt.effective_source_digest)
         && receipt.environment_profile_revision != 0U
         && !is_zero_digest(receipt.environment_profile_digest);
 }
@@ -64,9 +64,10 @@ std::vector<std::uint8_t> canonical_trace_binary(
     const std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &entries,
     const std::uint64_t final_rng_state) {
     CanonicalWriter writer;
-    writer.u8('S'); writer.u8('P'); writer.u8('T'); writer.u8('1');
-    writer.u32(source_receipt.schema_revision); writer.u64(source_receipt.terrain_revision);
-    writer.digest(source_receipt.terrain_digest); writer.u32(source_receipt.environment_profile_revision);
+    writer.u8('S'); writer.u8('P'); writer.u8('T'); writer.u8('2');
+    writer.u32(source_receipt.schema_revision); writer.digest(source_receipt.effective_source_digest);
+    writer.u64(source_receipt.terrain_delta_revision); writer.u64(source_receipt.shaping_registry_revision);
+    writer.u32(source_receipt.environment_profile_revision);
     writer.digest(source_receipt.environment_profile_digest);
     writer.u32(static_cast<std::uint32_t>(entries.size()));
     for (const NativeSurfacePropRngTraceEntry &entry : entries) {
@@ -84,6 +85,26 @@ std::vector<std::uint8_t> canonical_trace_binary(
 
 NativeSurfacePropRngTraceRejected::NativeSurfacePropRngTraceRejected()
     : std::invalid_argument("invalid native surface-prop RNG trace") {}
+
+NativeSurfacePropSourceReceipt NativeSurfacePropSourceReceipt::from_pin(
+    const WorldSourcePin &pin, const std::uint32_t environment_profile_revision,
+    Sha256Digest environment_profile_digest) {
+    NativeSurfacePropSourceReceipt receipt;
+    receipt.effective_source_digest = pin.physical_content_identity().digest;
+    receipt.terrain_delta_revision = pin.terrain_delta_revision();
+    receipt.shaping_registry_revision = pin.shaping_registry_revision();
+    receipt.environment_profile_revision = environment_profile_revision;
+    receipt.environment_profile_digest = environment_profile_digest;
+    if (!valid_source_receipt(receipt)) reject();
+    return receipt;
+}
+
+bool NativeSurfacePropSourceReceipt::matches_pin(const WorldSourcePin &pin) const noexcept {
+    return valid_source_receipt(*this)
+        && effective_source_digest == pin.physical_content_identity().digest
+        && terrain_delta_revision == pin.terrain_delta_revision()
+        && shaping_registry_revision == pin.shaping_registry_revision();
+}
 
 NativeSurfacePropRngTrace::NativeSurfacePropRngTrace(
     NativeSurfacePropSourceReceipt source_receipt,

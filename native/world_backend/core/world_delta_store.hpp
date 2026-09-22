@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -191,6 +192,16 @@ public:
     const NativeTypedWorldStateSnapshot &durable_terrain_snapshot() const noexcept;
     const std::vector<NativeTypedWorldStateRecord> &scene_overlays() const noexcept;
     std::optional<NativeCellState> durable_terrain_at(const CellCoord &cell) const;
+    // Visit only durable edits in this X/Z column. The immutable index is
+    // rebuilt with a changed terrain snapshot, never per world query.
+    bool durable_terrain_column_any(
+        std::int32_t x, std::int32_t z,
+        const std::function<bool(const NativeCellState &)> &predicate) const;
+    // Evaluate the effective typed state in a column. A transient overlay
+    // masks a durable record at the same cell, just as point resolution does.
+    bool effective_typed_column_any(
+        std::int32_t x, std::int32_t z,
+        const std::function<bool(const NativeCellState &)> &predicate) const;
     std::optional<NativeCellState> scene_overlay_at(const CellCoord &cell) const;
     // This resolves only the two typed edit layers. Generated terrain and
     // feature precedence remain the owning source resolver's responsibility.

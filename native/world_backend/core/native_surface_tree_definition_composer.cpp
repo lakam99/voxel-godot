@@ -224,7 +224,7 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
     const WorldSourceDefinition &world_source, const NativeSurfaceTreeEcologyProfile &profile) {
     validate_profile(profile);
     if (ordinal >= NativeSurfacePropAttemptStream::ATTEMPT_COUNT
-        || !(placement_set.world_source_identity() == world_source.physical_content_identity())) reject();
+        || !(placement_set.definition_source_identity() == world_source.physical_content_identity())) reject();
     const NativeSurfacePropPlacementEntry &placement = placement_set.entries()[ordinal];
     const NativeSurfacePropBaselineEntry &baseline_entry = baseline.entries()[ordinal];
     const bool tree = placement.outcome == NativeSurfacePropClassificationOutcome::broadleaf_tree

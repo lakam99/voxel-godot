@@ -31,7 +31,7 @@ std::uint32_t bits(const float value) {
 
 WorldSourceDefinition flat_definition(
     const std::string &seed = "effective-flat", const double surface = 13.0,
-    const double cell_size = 1.35) {
+    const double cell_size = 1.35, const std::int32_t world_bottom = -64) {
     WorldSourceDescriptor descriptor;
     descriptor.raw_terrain_seed = admit_raw_terrain_seed(seed);
     descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed(seed);
@@ -42,6 +42,7 @@ WorldSourceDefinition flat_definition(
     descriptor.constants.minimum_surface_meters = surface;
     descriptor.constants.maximum_surface_meters = surface;
     descriptor.constants.cell_size_meters = cell_size;
+    descriptor.constants.world_bottom_cell_y = world_bottom;
     return WorldSourceDefinition(std::move(descriptor));
 }
 
@@ -825,4 +826,163 @@ VWB_TEST(native_effective_terrain_uses_remapped_source_pages_and_fails_closed_ou
     // pin, proving position admission did not reject the valid floored cell.
     VWB_EXPECT_THROW(std::out_of_range,
         edge.sample_world_numeric({2147483648.0F, 0.0F, 0.0F}));
+}
+
+VWB_TEST(native_surface_prop_spawn_query_binds_continuous_and_edited_authority) {
+    const auto definition = flat_definition("surface-prop-spawn", 13.0, 1.35);
+    NativeEffectiveTerrainSource generated(ready_pin(definition, {0, 0}, empty_deltas()));
+    const WorldSurfaceColumnQuery column{0, 0, WorldQueryIntent::gameplay};
+    const auto fast = generated.sample_surface_prop_spawn(column);
+    VWB_EXPECT(fast.found);
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::generated_surface_fast, fast.mode);
+    VWB_EXPECT_EQ(generated.pin().physical_content_identity(), fast.physical_content_identity);
+    VWB_EXPECT_EQ(generated.pin().terrain_delta_revision(), fast.terrain_delta_revision);
+    VWB_EXPECT_EQ(generated.pin().shaping_registry_revision(), fast.shaping_registry_revision);
+    VWB_EXPECT_EQ(static_cast<float>(fast.height_meters), fast.world_anchor_y);
+    VWB_EXPECT_EQ(fast.solid_cell.y + 1, fast.air_cell.y);
+    VWB_EXPECT_EQ(0, fast.solid_cell.x);
+    VWB_EXPECT_EQ(0, fast.solid_cell.z);
+    VWB_EXPECT(fast.material != TerrainMaterialId::air);
+
+    const CellCoord edit_cell{0, 11, 0};
+    NativeEffectiveTerrainSource edited(ready_pin(definition, {0, 0},
+        typed_deltas({edited_state(edit_cell, 1.0, TerrainMaterialId::stone,
+            NativeCellStateNamespace::durable_terrain, "terrain_edit")}, {})));
+    const auto projected = edited.sample_surface_prop_spawn(column);
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::terrain_volume_projection, projected.mode);
+    VWB_EXPECT(projected.found);
+    VWB_EXPECT_EQ(edited.pin().physical_content_identity(), projected.physical_content_identity);
+    VWB_EXPECT(!(fast.physical_content_identity == projected.physical_content_identity));
+    VWB_EXPECT_EQ(projected.solid_cell.y + 1, projected.air_cell.y);
+    VWB_EXPECT_EQ(static_cast<double>(projected.air_cell.y) * definition.constants().cell_size_meters,
+        projected.height_meters);
+
+    NativeEffectiveTerrainSource non_affecting(ready_pin(definition, {0, 0},
+        typed_deltas({}, {edited_state(edit_cell, 1.0, TerrainMaterialId::stone,
+            NativeCellStateNamespace::scene_overlay, "scene_block")})));
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::generated_surface_fast,
+        non_affecting.sample_surface_prop_spawn(column).mode);
+    NativeEffectiveTerrainSource transient_edit(ready_pin(definition, {0, 0},
+        typed_deltas({}, {edited_state_with_metadata(edit_cell, 1.0, TerrainMaterialId::stone,
+            NativeCellStateNamespace::scene_overlay, NativeValue::object({
+                {"saveDelta", NativeValue::boolean(false)},
+                {"source", NativeValue::string("terrain_edit")},
+                {"terrainMeshAffects", NativeValue::boolean(true)},
+            }))})));
+    const auto transient_projection = transient_edit.sample_surface_prop_spawn(column);
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::terrain_volume_projection, transient_projection.mode);
+    VWB_EXPECT(transient_projection.found);
+    NativeEffectiveTerrainSource masked_durable(ready_pin(definition, {0, 0},
+        typed_deltas({edited_state(edit_cell, 1.0, TerrainMaterialId::stone,
+            NativeCellStateNamespace::durable_terrain, "terrain_edit")},
+            {edited_state(edit_cell, 1.0, TerrainMaterialId::stone,
+                NativeCellStateNamespace::scene_overlay, "scene_block")})));
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::generated_surface_fast,
+        masked_durable.sample_surface_prop_spawn(column).mode);
+    VWB_EXPECT_THROW(std::out_of_range,
+        generated.sample_surface_prop_spawn({1000000, 0, WorldQueryIntent::gameplay}));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        generated.sample_surface_prop_spawn({0, 0, static_cast<WorldQueryIntent>(255)}));
+}
+
+VWB_TEST(native_surface_prop_spawn_generated_height_matches_direct_godot_oracle) {
+    const auto definition = atlas_definition();
+    NativeEffectiveTerrainSource source(ready_pin(definition, {0, 0}, empty_deltas()));
+    const auto at_origin = source.sample_surface_prop_spawn({0, 0, WorldQueryIntent::gameplay});
+    const auto nearby = source.sample_surface_prop_spawn({1, 2, WorldQueryIntent::gameplay});
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::generated_surface_fast, at_origin.mode);
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::generated_surface_fast, nearby.mode);
+    VWB_EXPECT_EQ(1102070153U, bits(at_origin.world_anchor_y));
+    VWB_EXPECT_EQ(1102310801U, bits(nearby.world_anchor_y));
+    NativeEffectiveTerrainSource negative(ready_pin(definition, {-1, 0}, empty_deltas()));
+    const auto west = negative.sample_surface_prop_spawn({-20, 13, WorldQueryIntent::gameplay});
+    VWB_EXPECT_EQ(1103514043U, bits(west.world_anchor_y));
+}
+
+VWB_TEST(native_surface_prop_spawn_handles_numeric_boundary_and_rejected_fluid) {
+    const auto definition = flat_definition("surface-prop-numeric", 13.0, 1.35);
+    const WorldSurfaceColumnQuery column{0, 0, WorldQueryIntent::gameplay};
+    NativeEffectiveTerrainSource generated(ready_pin(definition, {0, 0}, empty_deltas()));
+    const auto fast = generated.sample_surface_prop_spawn(column);
+    const CellCoord solid_cell = fast.solid_cell;
+    const CellCoord air_cell = fast.air_cell;
+    const auto stone = [&](const CellCoord cell, const double density,
+                           const TerrainBiomeId biome = TerrainBiomeId::plains) {
+        return edited_state(cell, density, TerrainMaterialId::stone,
+            NativeCellStateNamespace::durable_terrain, "terrain_edit", biome);
+    };
+    NativeEffectiveTerrainSource tiny_boundary(ready_pin(definition, {0, 0},
+        typed_deltas({stone(solid_cell, 0.000001),
+            edited_state(air_cell, -0.000001, TerrainMaterialId::air,
+                NativeCellStateNamespace::durable_terrain, "terrain_edit")}, {})));
+    const auto tiny = tiny_boundary.sample_surface_prop_spawn(column);
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::terrain_volume_projection, tiny.mode);
+    VWB_EXPECT(tiny.found);
+
+    // The top probe first sees a solid cell whose next cell is also solid.
+    NativeEffectiveTerrainSource capped(ready_pin(definition, {0, 0},
+        typed_deltas({stone({0, 14, 0}, 1.0), stone({0, 15, 0}, 1.0)}, {})));
+    VWB_EXPECT(capped.sample_surface_prop_spawn(column).found);
+
+    NativeCellStateInput water_input;
+    water_input.cell = air_cell;
+    water_input.density = -0.25;
+    water_input.solid = false;
+    water_input.material = TerrainMaterialId::water;
+    water_input.biome = TerrainBiomeId::plains;
+    water_input.fluid = TerrainFluidId::water;
+    water_input.metadata = NativeValue::object({{"source", NativeValue::string("terrain_edit")}});
+    water_input.block_id = NativeBlockIdentity::create("water");
+    water_input.edit_reason = "effective-test";
+    water_input.generated = false;
+    water_input.edited = true;
+    NativeEffectiveTerrainSource flooded(ready_pin(definition, {0, 0},
+        typed_deltas({stone(solid_cell, 1.0),
+            make_native_cell_state(water_input, NativeCellStateNamespace::durable_terrain)}, {})));
+    const auto flooded_projection = flooded.sample_surface_prop_spawn(column);
+    VWB_EXPECT_EQ(NativeSurfacePropSpawnMode::terrain_volume_projection, flooded_projection.mode);
+    VWB_EXPECT(!flooded_projection.found);
+
+    NativeEffectiveTerrainSource underground(ready_pin(definition, {0, 0},
+        typed_deltas({stone(solid_cell, 1.0, TerrainBiomeId::underground)}, {})));
+    NativeEffectiveTerrainSource deep(ready_pin(definition, {0, 0},
+        typed_deltas({stone(solid_cell, 1.0, TerrainBiomeId::deep_underground)}, {})));
+    VWB_EXPECT_EQ(generated.sample_surface_biome(column), underground.sample_surface_prop_spawn(column).biome);
+    VWB_EXPECT_EQ(generated.sample_surface_biome(column), deep.sample_surface_prop_spawn(column).biome);
+
+    const auto no_crossing_definition = flat_definition("surface-prop-no-crossing", 13.0, 1.35, 15);
+    NativeEffectiveTerrainSource no_crossing(ready_pin(no_crossing_definition, {0, 0}, empty_deltas()));
+    VWB_EXPECT(near(13.0, no_crossing.sample_surface_prop_spawn(column).height_meters));
+}
+
+VWB_TEST(native_surface_prop_spawn_fast_material_follows_each_biome_policy) {
+    const WorldSurfaceColumnQuery column{0, 0, WorldQueryIntent::gameplay};
+    NativeEffectiveTerrainSource beach(ready_pin(
+        flat_definition("surface-material-beach", 11.4), {0, 0}, empty_deltas()));
+    VWB_EXPECT_EQ(TerrainBiomeId::beach, beach.sample_surface_prop_spawn(column).biome);
+    VWB_EXPECT_EQ(TerrainMaterialId::sand, beach.sample_surface_prop_spawn(column).material);
+
+    struct Case { const char *name; TerrainBiomeId biome; TerrainMaterialId material; bool found; };
+    std::array<Case, 4> targets{{
+        {"desert", TerrainBiomeId::desert, TerrainMaterialId::sand, false},
+        {"swamp", TerrainBiomeId::swamp, TerrainMaterialId::mud, false},
+        {"snow", TerrainBiomeId::snow, TerrainMaterialId::snow, false},
+        {"tundra", TerrainBiomeId::tundra, TerrainMaterialId::stone, false},
+    }};
+    for (std::uint32_t i = 0U; i < 4096U; ++i) {
+        const std::string seed = "surface-material-" + std::to_string(i);
+        const std::string regional = BiomeRegionField::sample(
+            BiomeRegionField::admit_utf8_seed(seed), {0.0, 0.0}).biome;
+        for (Case &target : targets) {
+            if (target.found || regional != target.name) continue;
+            NativeEffectiveTerrainSource source(ready_pin(
+                flat_definition(seed, 13.0), {0, 0}, empty_deltas()));
+            const auto facts = source.sample_surface_prop_spawn(column);
+            VWB_EXPECT_EQ(target.biome, facts.biome);
+            VWB_EXPECT_EQ(target.material, facts.material);
+            target.found = true;
+        }
+        if (std::all_of(targets.begin(), targets.end(), [](const Case &value) { return value.found; })) break;
+    }
+    for (const Case &target : targets) VWB_EXPECT(target.found);
 }

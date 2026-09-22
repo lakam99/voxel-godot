@@ -259,6 +259,105 @@ double NativeEffectiveTerrainSource::sample_volume_surface_y(
     return reference_y;
 }
 
+double NativeEffectiveTerrainSource::continuous_volume_surface_y(
+    const WorldSurfaceColumnQuery &query) const {
+    const auto &constants = pin_.definition().constants();
+    const double cell_size = constants.cell_size_meters;
+    const double reference = shaped_surface(query.x, query.z);
+    const std::int32_t top = checked_cell_coordinate(std::min(
+        std::ceil((constants.maximum_surface_meters + cell_size * 4.0) / cell_size),
+        std::floor(reference / cell_size) + 8.0));
+    for (std::int64_t scan_y = top;
+         scan_y > static_cast<std::int64_t>(constants.world_bottom_cell_y); --scan_y) {
+        const auto y = static_cast<std::int32_t>(scan_y);
+        // The GDScript helper returns Vector3, so each density crosses one
+        // float32 storage boundary before the scalar interpolation resumes.
+        const double solid = static_cast<float>(sample_surface_projection_numeric(
+            {{query.x, y, query.z}, WorldQueryIntent::terrain_collision}).density);
+        if (solid < 0.0) continue;
+        const double air = static_cast<float>(sample_surface_projection_numeric(
+            {{query.x, checked_cell_coordinate(scan_y + 1.0), query.z},
+                WorldQueryIntent::terrain_collision}).density);
+        if (air >= 0.0) continue;
+        const double denominator = solid - air;
+        if (std::abs(denominator) <= 0.0001) return static_cast<double>(scan_y + 1) * cell_size;
+        const double t = std::clamp(solid / denominator, 0.0, 1.0);
+        return static_cast<double>(scan_y) * cell_size
+            + (static_cast<double>(scan_y + 1) * cell_size
+                - static_cast<double>(scan_y) * cell_size) * t;
+    }
+    return reference;
+}
+
+NativeSurfacePropSpawnFacts NativeEffectiveTerrainSource::sample_surface_prop_spawn(
+    const WorldSurfaceColumnQuery &query) const {
+    validate_world_query(query);
+    require_primary_page_query(pin_, query.x, query.z);
+    const auto &constants = pin_.definition().constants();
+    const double cell_size = constants.cell_size_meters;
+    NativeSurfacePropSpawnFacts result;
+    result.physical_content_identity = pin_.physical_content_identity();
+    result.terrain_delta_revision = pin_.terrain_delta_revision();
+    result.shaping_registry_revision = pin_.shaping_registry_revision();
+    const double height = continuous_volume_surface_y(query);
+    result.height_meters = height;
+    result.world_anchor_y = static_cast<float>(height);
+    result.biome = shaped_surface_biome(query.x, query.z);
+    const std::int32_t height_cell = checked_cell_coordinate(std::floor(height / cell_size));
+
+    // The live projection count includes edited cells even when saveDelta is
+    // false. Resolve the effective typed column, including transient edits;
+    // an overlay masks its durable cell just as point queries do.
+    const bool has_projection_edit = pin_.deltas().effective_typed_column_any(
+        query.x, query.z, affects_surface_projection);
+    if (!has_projection_edit) {
+        result.found = true;
+        result.mode = NativeSurfacePropSpawnMode::generated_surface_fast;
+        result.material = result.biome == TerrainBiomeId::beach
+                || result.biome == TerrainBiomeId::desert ? TerrainMaterialId::sand
+            : result.biome == TerrainBiomeId::swamp ? TerrainMaterialId::mud
+            : result.biome == TerrainBiomeId::snow ? TerrainMaterialId::snow
+            // The generated fast path can only yield ocean/beach, town, or
+            // BiomeRegionField's eight regional names. Alpine is not among
+            // them; an edited alpine state uses the projection path above.
+            : result.biome == TerrainBiomeId::tundra ? TerrainMaterialId::stone
+            : TerrainMaterialId::grass;
+        result.solid_cell = {query.x, height_cell, query.z};
+        result.air_cell = {query.x, checked_cell_coordinate(static_cast<double>(height_cell) + 1.0), query.z};
+        return result;
+    }
+
+    result.mode = NativeSurfacePropSpawnMode::terrain_volume_projection;
+    const std::int32_t top = checked_cell_coordinate(
+        std::ceil((constants.maximum_surface_meters + cell_size * 4.0) / cell_size));
+    const std::int32_t scan_top = checked_cell_coordinate(std::min(
+        static_cast<double>(top), static_cast<double>(height_cell) + 24.0));
+    const std::int32_t scan_bottom = checked_cell_coordinate(std::max(
+        static_cast<double>(constants.world_bottom_cell_y), static_cast<double>(height_cell) - 96.0));
+    for (std::int64_t y = scan_top; y >= scan_bottom; --y) {
+        const CellCoord solid_cell{query.x, static_cast<std::int32_t>(y), query.z};
+        const CellCoord air_cell{query.x, checked_cell_coordinate(y + 1.0), query.z};
+        const NativeCellState solid = sample_cell_state({solid_cell, WorldQueryIntent::gameplay});
+        if (!solid.solid) continue;
+        const NativeCellState air = sample_cell_state({air_cell, WorldQueryIntent::gameplay});
+        if (air.solid) continue;
+        // NativeCellState admission rejects solid air/fluid materials. The
+        // remaining live rejection is a fluid occupying the air cell.
+        if (air.fluid != TerrainFluidId::none) return result;
+        result.found = true;
+        result.height_meters = static_cast<double>(air_cell.y) * cell_size;
+        result.world_anchor_y = static_cast<float>(result.height_meters);
+        result.biome = solid.biome == TerrainBiomeId::underground
+                || solid.biome == TerrainBiomeId::deep_underground
+            ? shaped_surface_biome(query.x, query.z) : solid.biome;
+        result.material = solid.material;
+        result.solid_cell = solid_cell;
+        result.air_cell = air_cell;
+        return result;
+    }
+    return result;
+}
+
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_lattice_numeric(
     const WorldLatticeQuery &query) const {
     validate_world_query(query);

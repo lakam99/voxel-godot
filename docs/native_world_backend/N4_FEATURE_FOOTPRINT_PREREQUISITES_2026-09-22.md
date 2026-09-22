@@ -384,16 +384,36 @@ not feature-geometry, publication, or gameplay evidence.
 
 ## Canonical surface placement receipt
 
-`NativeSurfacePropPlacementSet` is the next SPP1 bridge from the complete
+**2026-09-22 source audit correction:** The SPP1 air-cell lattice anchor
+described below is not the live surface-prop body height on unedited ground.
+`MainPlaytestTools.spawn_chunk_prop_attempt` uses the continuous
+`surface_volume_spawn_sample_at_cell.height`, which normally comes from
+`WorldGenerationSystem.volume_surface_y_for_cell`'s numeric-density boundary
+interpolation. Only the surface-affecting edited-volume projection returns
+`airCell.y * CELL`. Thus SPP1 and its passing synthetic tests are a shadow
+placement witness, not physical placement parity or a cutover-ready authority.
+The shared placement set must be revised to consume a pinned native surface
+spawn projection, carry its continuous height and full effective-source
+identity, and reject stale source/profile receipts before any feature family
+publishes geometry or collision. Existing tree/rock definitions built on SPP1
+must be reverified after that correction.
+The source decision digest and environment-profile identity must also be
+checked against the same admitted projection/profile snapshot; nonzero bytes
+alone do not establish currentness. `make_rock` recomputes its visual biome
+from the body position, so classification and presentation biome must not be
+silently conflated. Neither an SPP2 digest nor a passing pure-core test alone
+proves live collision publication or tombstone lifecycle.
+
+The following SPP1 checkpoint is historical and superseded by SPP2.
+`NativeSurfacePropPlacementSet` was the first bridge from the complete
 baseline stream to future typed physical definitions. It binds every one of
 the 28 ordered baseline entries to its durable ID, source-decision digest,
 source receipt, and immutable `WorldSourceDefinition` identity. A selected
 feature must carry an authoritative solid/air surface pair at the candidate's
 same X/Z lattice coordinate; the pair must be adjacent and its canonical world
 anchor is resolved as the existing gameplay lattice query at the air cell.
-This intentionally preserves the live prop convention
-`(cell_x * CELL, air_cell_y * CELL, cell_z * CELL)`, rather than substituting
-the terrain service's cell-center coordinate.
+Its lattice Y was subsequently found not to be the live unedited prop height;
+the SPP2 projection below replaces that claim.
 
 Skipped and no-feature outcomes explicitly have no physical anchor. All typed
 feature outcomes (rocks, trees, ore clusters, forage, and wildlife) require
@@ -435,7 +455,7 @@ native parity, physical publication, or gameplay acceptance.
 
 ## Native natural-tree definition composer
 
-`NativeSurfaceTreeDefinitionComposer` consumes exactly one anchored SPP1 tree
+`NativeSurfaceTreeDefinitionComposer` was first verified against one anchored SPP1 tree
 placement, its matching unfiltered baseline entry, immutable world-source
 identity, and a typed ecology profile. It deterministically chooses the source
 family from the raw seed, derives ecology from the normalized seed, records the
@@ -457,3 +477,56 @@ does not yet compose rocks, ore, forage, or wildlife into the one ordered
 baseline feature manifest; publish geometry/collision/navigation; filter
 tombstones; or cut any Godot production caller over. Those remain aggregate
 N4 and later publication work.
+
+## SPP2 pinned surface projection and ordinary-rock correction
+
+SPP2 supersedes the SPP1 physical anchor. A pinned
+`NativeEffectiveTerrainSource` now supplies the surface-prop spawn facts from
+the same effective terrain revision as the placement set. Unedited columns
+use the continuous numeric-density boundary (including the Godot `Vector3`
+float32 density boundary); projection-affecting edited columns use the
+air-cell top and material/fluid checks. The edited-column decision sees both
+durable and transient typed edits, with overlay precedence, through an
+immutable per-column index. Query work is proportional to records in the
+column rather than all saved edits. Rebuilding that index on an effective
+transaction still costs O(N log N), so edit-throughput profiling remains a
+production-cutover task.
+
+The SPP2 receipt binds the full effective-source digest, terrain-delta and
+shaping revisions, and explicit environment-profile identity. Each of the 28
+attempts retains its source height, support pair, biome/material and the
+separately rounded chunk-origin/local-position operands. This matches the
+Godot `Node3D` global-position float32 boundary, including positive and
+negative chunk seams; multiplying an absolute X/Z cell directly is not
+bit-equivalent. Missing support and stale pins reject rather than inventing
+an anchor. The ordinary-rock native definition composes the source six-draw
+recipe into typed visual scale and sphere-collision facts; the script source
+recipe was extracted into `RockRecipeBuilder.gd` and remains the live path.
+
+Direct Godot contract evidence (not live gameplay acceptance):
+
+- `artifacts/native-world-backend/n4-surface-prop-spawn-oracle-02/report.json`
+  passed exact unedited float32 Y vectors from
+  `WorldGenerationSystem.volume_surface_y_for_cell`;
+- `artifacts/native-world-backend/n4-surface-prop-chunk-transform-oracle-01/report.json`
+  passed six exact `Node3D` origin/local/global X/Z bit vectors;
+- `artifacts/native-world-backend/n4-surface-rock-recipe-oracle-06/godot-rock-recipe-report.json`
+  passed four direct Godot rock-recipe sink cases.
+
+`node tools/run-native-world-backend-tests.mjs --run-name
+n4-surface-prop-spp2-rock-12` passed 352/352 debug and 352/352 release core
+tests, the debug and isolated release-export adapter smokes, and strict
+pure-core coverage of 7,874/7,874 lines, 1,050/1,050 functions, and
+4,486/4,486 branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-spp2-rock-12/report.json`.
+
+This is still shadow-stage evidence. The baseline classifier accepts a
+caller-supplied decision digest; no immutable native environment catalog or
+structure-exclusion manifest yet derives and binds that decision from the
+terrain pin. The tree composer also needs to enforce sampled-biome/profile
+agreement. Ore child removals in the live source can alter subsequent shared
+RNG draws, whereas the native stream currently represents an intact baseline.
+Forage and wildlife builders likewise consume shared RNG for presentation
+geometry. Those facts, full feature footprints and tombstone filtering,
+production caller/deletion audits, live collision publication, and real
+gameplay acceptance remain required before N4 or N3 cutover.

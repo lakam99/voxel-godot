@@ -2,6 +2,7 @@
 
 #include "native_surface_prop_attempt_stream.hpp"
 #include "sha256.hpp"
+#include "world_source.hpp"
 
 #include <array>
 #include <cstdint>
@@ -11,16 +12,22 @@
 
 namespace voxel::world_backend {
 
-// The adapter must capture these identities from the same admitted terrain
-// projection/profile snapshot that decided the per-attempt receipts. They are
-// intentionally opaque here: this trace cannot substitute a second terrain
-// sampler or environment catalog.
+// One admitted effective terrain pin and one environment catalog snapshot.
+// Revisions are ownership epochs and may be zero for an initial snapshot;
+// the digest names physical content. This trace does not sample either source.
 struct NativeSurfacePropSourceReceipt final {
-    std::uint32_t schema_revision = 0U;
-    std::uint64_t terrain_revision = 0U;
-    Sha256Digest terrain_digest{};
+    static constexpr std::uint32_t SCHEMA_REVISION = 2U;
+    std::uint32_t schema_revision = SCHEMA_REVISION;
+    Sha256Digest effective_source_digest{};
+    std::uint64_t terrain_delta_revision = 0U;
+    std::uint64_t shaping_registry_revision = 0U;
     std::uint32_t environment_profile_revision = 0U;
     Sha256Digest environment_profile_digest{};
+
+    static NativeSurfacePropSourceReceipt from_pin(
+        const WorldSourcePin &pin, std::uint32_t environment_profile_revision,
+        Sha256Digest environment_profile_digest);
+    bool matches_pin(const WorldSourcePin &pin) const noexcept;
 };
 
 // The Godot source decides these dispositions from authoritative terrain and

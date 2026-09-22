@@ -38,6 +38,27 @@ struct NativeResolvedSurfaceProjectionQuery {
     WorldQueryIntent intent = WorldQueryIntent::terrain_collision;
 };
 
+enum class NativeSurfacePropSpawnMode : std::uint8_t {
+    generated_surface_fast,
+    terrain_volume_projection,
+};
+
+// A source-bound surface fact, not a permission to publish. The consumer must
+// compare identity and both revisions against the current owner after work.
+struct NativeSurfacePropSpawnFacts {
+    bool found = false;
+    NativeSurfacePropSpawnMode mode = NativeSurfacePropSpawnMode::generated_surface_fast;
+    double height_meters = 0.0;
+    float world_anchor_y = 0.0F;
+    TerrainBiomeId biome = TerrainBiomeId::plains;
+    TerrainMaterialId material = TerrainMaterialId::air;
+    CellCoord solid_cell;
+    CellCoord air_cell;
+    WorldPhysicalContentIdentity physical_content_identity;
+    std::uint64_t terrain_delta_revision = 0;
+    std::uint64_t shaping_registry_revision = 0;
+};
+
 NativeResolvedSurfaceProjectionQuery resolve_native_surface_projection_query(
     const WorldSourceDefinition &definition, const WorldLatticeQuery &query);
 
@@ -61,6 +82,7 @@ public:
     // the upper face of the highest solid cell. This is deliberately distinct
     // from the shaped/reference surface carried by sample_surface_column().
     double sample_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
+    NativeSurfacePropSpawnFacts sample_surface_prop_spawn(const WorldSurfaceColumnQuery &query) const;
     NativeEffectiveCellStateFacts sample_cell_state_facts(const WorldCellCenterQuery &query) const;
     NativeCellState sample_cell_state(const WorldCellCenterQuery &query) const;
 
@@ -89,6 +111,7 @@ private:
     const NativeTerrainShapingSnapshot &shaping_for(std::int32_t x, std::int32_t z) const;
     double natural_surface(std::int32_t x, std::int32_t z) const;
     double shaped_surface(std::int32_t x, std::int32_t z) const;
+    double continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId shaped_surface_biome(std::int32_t x, std::int32_t z) const;
     GeneratedFacts generated_at(WorldFloat32Position position) const;
     NativeEffectiveNumericFacts generated_numeric(
