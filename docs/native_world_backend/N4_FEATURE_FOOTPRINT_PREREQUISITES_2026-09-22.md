@@ -174,10 +174,11 @@ terrain/profile decisions remain outside the core until their authoritative
 receipts are typed and supplied by the native source; no terrain or profile
 logic is copied into this value.
 
-The only currently admitted replay classes are pre-roll skips, no-feature,
-ordinary rock, broadleaf tree, and conifer tree. Ore, forage, and wildlife are
-rejected rather than being silently converted into no-feature: their complete
-recipe/channel traces are not yet ported. There is deliberately no tombstone
+The replay trace is a witness for supplied dispositions, not a classifier. In
+particular, an `ordinary_rock` receipt is valid only when the source has already
+established that `ore_for_cell` returned empty. It must never stand in for an
+ore-window rock: live Godot consumes an extra ore roll there and a selected ore
+cluster has its own child recipe stream. There is deliberately no tombstone
 argument; a later producer must generate this complete baseline first and only
 then let parent/child removal filter publication.
 
@@ -216,3 +217,23 @@ passed 296/296 debug and release core tests, both adapter smokes, and strict
 pure-core coverage of 6,772/6,772 lines, 902/902 functions, and 3,644/3,644
 branches. Its receipt is
 `artifacts/native-world-backend/n4-surface-prop-trace-identity-01/report.json`.
+
+## Typed surface classification receipt
+
+`NativeSurfacePropClassifier` is the next pure-core boundary. It accepts one
+Godot-authored, source-bound receipt per immutable attempt and verifies the
+ordinal/cell binding before it compares exact float32 cumulative cutoffs with
+the exact Godot PCG rolls. The receipt carries only source facts: structured
+admission (`structure_blocked`, unavailable/ineligible surface, town, or
+eligible), a nonzero decision digest, cumulative placement cutoffs, the legacy
+tree compatibility family, and the precomputed ore policy/cutoffs. It does not
+sample terrain, call the environment catalog, recompute height or biome bias,
+or know about tombstones.
+
+This deliberately preserves live priority semantics, including totals above
+one and strict cutoff equality. It also exposes ore as a separate consumed
+roll: iron/copper cluster outcomes are explicitly **unported**, not ordinary
+rocks. Forage and wildlife are likewise explicit unported outcomes until their
+complete recipe/asset contracts are native. Therefore this classifier cannot
+yet feed a completed trace or generated-feature catalog; it is a fail-closed
+decision boundary, not a feature-family cutover.
