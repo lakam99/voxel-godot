@@ -53,6 +53,30 @@ accepted.
 No Godot production caller, terrain publication path, NPC route/motor/door
 code, or save envelope was changed in this milestone.
 
+## First source-producer boundary
+
+The first native feature producer must be the complete deterministic
+28-attempt surface-prop manifest for one chunk, not a tree-only implementation.
+The live source seeds one shared RNG with `hash_string("%s:props:%d,%d")`,
+constructs durable IDs as `seed:x,z:attempt`, and lets trees, rocks, ore,
+forage, and wildlife consume that common stream. A tombstone lookup currently
+happens after the coordinate draws but before later attempt draws; copying that
+order would make a removed prop reshuffle unrelated future props. The native
+producer must instead derive the unfiltered baseline manifest, then apply
+tombstones only to publication.
+
+Tree records need both the durable removal ID and the distinct recipe identity
+when a Citadel request supplies one. Their typed definition must include the
+runtime request's height, trunk radius, canopy radius, collision height,
+exclusion margin, placement, and the single upright trunk cylinder contract.
+The footprint catalog references that definition through its digest; it does
+not replace typed feature geometry.
+
+Underground props are a separate source/RNG domain and are explicitly outside
+this first surface-manifest slice. Native compatibility tests must also cover
+Godot Unicode-scalar hashing and `RandomNumberGenerator` semantics before
+claiming raw-seed or non-ASCII stable-ID parity.
+
 ## Verification
 
 `node tools/run-native-world-backend-tests.mjs --run-name n4-shadow-prerequisites-06`
