@@ -11,6 +11,9 @@ namespace voxel::world_backend {
 namespace {
 
 constexpr double MAX_SAFE_JSON_INTEGER = 9007199254740991.0;
+// MainInterface.gd's CELL constant is part of the unchanged v2 restore
+// contract: omitted worldY falls back to cell.y * CELL.
+constexpr double PLAYER_BLOCK_CELL_SIZE = 1.35;
 
 [[noreturn]] void reject() {
     throw NativePlayerBlocksV2Rejected();
@@ -129,11 +132,22 @@ struct RuntimeState final {
     std::optional<FurnaceState> furnace_state;
 };
 
-Slot parse_slot(const NativeValue &value, const NativePlayerBlocksV2Catalog &catalog) {
+Slot parse_slot(
+    const NativeValue &value,
+    const NativePlayerBlocksV2Catalog &catalog,
+    const bool allow_omitted_defaults) {
     const NativeValue::Object &object = require_object(value);
-    require_exact_keys(object, {"count", "item"});
-    const std::string item = require_string(member(object, "item"));
-    const std::int64_t count = require_safe_integer(member(object, "count"));
+    std::vector<std::string> keys;
+    if (has_member(object, "count")) keys.push_back("count");
+    if (has_member(object, "item")) keys.push_back("item");
+    if (!allow_omitted_defaults) keys = {"count", "item"};
+    require_exact_keys(object, std::move(keys));
+    const std::string item = has_member(object, "item")
+        ? require_string(member(object, "item"))
+        : std::string{};
+    const std::int64_t count = has_member(object, "count")
+        ? require_safe_integer(member(object, "count"))
+        : 0;
     const std::optional<std::uint32_t> stack_max = catalog.stack_max(item);
     if (!stack_max.has_value() || count <= 0) return {};
     return {item, static_cast<std::uint32_t>(std::min<std::uint64_t>(
@@ -147,15 +161,22 @@ NativeValue encode_slot(const Slot &slot) {
     });
 }
 
-std::vector<Slot> parse_storage_slots(const NativeValue &value, const NativePlayerBlocksV2Catalog &catalog) {
+std::vector<Slot> parse_storage_slots(
+    const NativeValue &value,
+    const NativePlayerBlocksV2Catalog &catalog,
+    const bool allow_omitted_defaults) {
     const NativeValue::Array &source = require_array(value);
     std::vector<Slot> result(NativePlayerBlocksV2Limits::CHEST_SLOT_COUNT);
     const std::size_t retained = std::min(source.size(), result.size());
-    for (std::size_t index = 0U; index < retained; ++index) result[index] = parse_slot(source[index], catalog);
+    for (std::size_t index = 0U; index < retained; ++index) {
+        result[index] = parse_slot(source[index], catalog, allow_omitted_defaults);
+    }
     // MainSaveState.restore_slots ignores entries after CHEST_SIZE, but strict
     // wire validation still rejects malformed trailing values instead of
     // allowing unexamined data through the native boundary.
-    for (std::size_t index = retained; index < source.size(); ++index) static_cast<void>(parse_slot(source[index], catalog));
+    for (std::size_t index = retained; index < source.size(); ++index) {
+        static_cast<void>(parse_slot(source[index], catalog, allow_omitted_defaults));
+    }
     return result;
 }
 
@@ -166,17 +187,31 @@ NativeValue encode_storage_slots(const std::vector<Slot> &slots) {
     return NativeValue::array(std::move(result));
 }
 
-FurnaceState parse_furnace_state(const NativeValue &value, const NativePlayerBlocksV2Catalog &catalog) {
+FurnaceState parse_furnace_state(
+    const NativeValue &value,
+    const NativePlayerBlocksV2Catalog &catalog,
+    const bool allow_omitted_defaults) {
     const NativeValue::Object &object = require_object(value);
-    require_exact_keys(object, {"duration", "fuel", "input", "output", "outputItem", "processing", "progress"});
+    const std::vector<std::string> furnace_keys = {
+        "duration", "fuel", "input", "output", "outputItem", "processing", "progress",
+    };
+    std::vector<std::string> keys;
+    if (allow_omitted_defaults) {
+        for (const std::string &key : furnace_keys) {
+            if (has_member(object, key)) keys.push_back(key);
+        }
+    } else {
+        keys = furnace_keys;
+    }
+    require_exact_keys(object, std::move(keys));
     FurnaceState result;
-    result.input = parse_slot(member(object, "input"), catalog);
-    result.fuel = parse_slot(member(object, "fuel"), catalog);
-    result.output = parse_slot(member(object, "output"), catalog);
-    result.processing = require_boolean(member(object, "processing"));
-    result.progress = std::max(0.0, require_number(member(object, "progress")));
-    result.duration = std::max(0.1, require_number(member(object, "duration")));
-    result.output_item = require_string(member(object, "outputItem"));
+    if (has_member(object, "input")) result.input = parse_slot(member(object, "input"), catalog, allow_omitted_defaults);
+    if (has_member(object, "fuel")) result.fuel = parse_slot(member(object, "fuel"), catalog, allow_omitted_defaults);
+    if (has_member(object, "output")) result.output = parse_slot(member(object, "output"), catalog, allow_omitted_defaults);
+    if (has_member(object, "processing")) result.processing = require_boolean(member(object, "processing"));
+    if (has_member(object, "progress")) result.progress = std::max(0.0, require_number(member(object, "progress")));
+    if (has_member(object, "duration")) result.duration = std::max(0.1, require_number(member(object, "duration")));
+    if (has_member(object, "outputItem")) result.output_item = require_string(member(object, "outputItem"));
     return result;
 }
 
@@ -196,34 +231,55 @@ RuntimeState parse_runtime_state(
     const NativeValue::Object &object,
     const std::string &block_type,
     const NativePlayerBlocksV2Catalog &catalog,
-    const bool outer_entry) {
-    std::vector<std::string> keys = {
+    const bool outer_entry,
+    const bool allow_omitted_defaults) {
+    const std::vector<std::string> runtime_keys = {
         "destroyed", "doorGroupId", "doorPortalId", "jammed", "locked", "open",
     };
+    std::vector<std::string> keys;
+    if (allow_omitted_defaults) {
+        for (const std::string &key : runtime_keys) {
+            if (has_member(object, key)) keys.push_back(key);
+        }
+    } else {
+        keys = runtime_keys;
+    }
     if (has_member(object, "storageSlots")) keys.push_back("storageSlots");
     if (has_member(object, "furnaceState")) keys.push_back("furnaceState");
     if (outer_entry) {
-        keys.insert(keys.end(), {"cell", "facing", "type", "worldY"});
+        keys.insert(keys.end(), {"cell", "type"});
+        // outer_entry is the compatibility decode shape, so these fields are
+        // optional exactly as MainSaveState.restore_player_blocks specifies.
+        // The strict encode shape is runtime_state-only and never enters this
+        // branch; avoid encoding that impossible pairing as uncovered logic.
+        if (has_member(object, "facing")) keys.push_back("facing");
+        if (has_member(object, "worldY")) keys.push_back("worldY");
     }
     require_exact_keys(object, std::move(keys));
 
     RuntimeState result;
-    result.open = require_boolean(member(object, "open"));
-    result.locked = require_boolean(member(object, "locked"));
-    result.jammed = require_boolean(member(object, "jammed"));
-    result.destroyed = require_boolean(member(object, "destroyed"));
-    result.door_portal_id = require_string(member(object, "doorPortalId"));
-    result.door_group_id = require_string(member(object, "doorGroupId"));
+    if (has_member(object, "open")) result.open = require_boolean(member(object, "open"));
+    if (has_member(object, "locked")) result.locked = require_boolean(member(object, "locked"));
+    if (has_member(object, "jammed")) result.jammed = require_boolean(member(object, "jammed"));
+    if (has_member(object, "destroyed")) result.destroyed = require_boolean(member(object, "destroyed"));
+    if (has_member(object, "doorPortalId")) result.door_portal_id = require_string(member(object, "doorPortalId"));
+    if (has_member(object, "doorGroupId")) result.door_group_id = require_string(member(object, "doorGroupId"));
     if (has_member(object, "storageSlots")) {
         if (block_type != "chest") reject();
-        result.storage_slots = parse_storage_slots(member(object, "storageSlots"), catalog);
+        result.storage_slots = parse_storage_slots(member(object, "storageSlots"), catalog, allow_omitted_defaults);
     }
     if (has_member(object, "furnaceState")) {
         if (block_type != "furnace" && block_type != "campfire") reject();
-        result.furnace_state = parse_furnace_state(member(object, "furnaceState"), catalog);
+        result.furnace_state = parse_furnace_state(member(object, "furnaceState"), catalog, allow_omitted_defaults);
     }
     if (block_type == "door") {
-        if (result.door_portal_id.empty() || result.door_group_id.empty()) reject();
+        // create_block derives a missing portal exactly from a known group.
+        // A missing group depends on live neighbouring block types, which are
+        // deliberately outside this isolated codec; retain it as an empty
+        // publication-time default rather than inventing a facing-only ID.
+        if (result.door_portal_id.empty() && !result.door_group_id.empty()) {
+            result.door_portal_id = "door:" + result.door_group_id;
+        }
     } else if (result.open || result.locked || result.jammed || result.destroyed
         || !result.door_portal_id.empty() || !result.door_group_id.empty()) {
         reject();
@@ -250,9 +306,13 @@ NativePlayerCreatedInstance parse_entry(const NativeValue &entry, const NativePl
     const std::string block_type = require_string(member(object, "type"));
     if (!catalog.is_placeable(block_type)) reject();
     const CellCoord cell = parse_cell(member(object, "cell"));
-    const double world_y = require_number(member(object, "worldY"));
-    const double facing = require_number(member(object, "facing"));
-    const RuntimeState runtime_state = parse_runtime_state(object, block_type, catalog, true);
+    const double world_y = has_member(object, "worldY")
+        ? require_number(member(object, "worldY"))
+        : static_cast<double>(cell.y) * PLAYER_BLOCK_CELL_SIZE;
+    const double facing = has_member(object, "facing")
+        ? require_number(member(object, "facing"))
+        : 0.0;
+    const RuntimeState runtime_state = parse_runtime_state(object, block_type, catalog, true, true);
     return {
         native_player_block_v2_instance_id(cell),
         cell,
@@ -268,7 +328,7 @@ NativeValue encode_entry(const NativePlayerCreatedInstance &instance, const Nati
     if (!catalog.is_placeable(block_type)) reject();
     if (instance.instance_id != native_player_block_v2_instance_id(instance.cell)) reject();
     const RuntimeState runtime_state = parse_runtime_state(
-        require_object(instance.runtime_state), block_type, catalog, false);
+        require_object(instance.runtime_state), block_type, catalog, false, false);
     NativeValue::Object object = {
         {"cell", encode_cell(instance.cell)},
         {"destroyed", NativeValue::boolean(runtime_state.destroyed)},

@@ -62,6 +62,9 @@ std::string native_player_block_v2_instance_id(const CellCoord &cell);
 // MainSaveState.blocks after clear_player_blocks().  Input order is retained
 // while resolving occupancy: the first valid entry for a free cell wins, and
 // later entries (or entries colliding with an existing cell) are ignored.
+// Decode accepts the same omitted optional fields as MainSaveState restore and
+// normalizes their defaults.  Type and cell remain required identity fields;
+// present fields and unknown keys are still validated strictly.
 NativeFeatureDeltaSnapshot decode_native_player_blocks_v2(
     const std::vector<NativeValue> &entries,
     const NativePlayerBlocksV2Catalog &catalog,

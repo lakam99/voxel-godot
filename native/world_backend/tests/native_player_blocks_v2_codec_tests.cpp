@@ -167,6 +167,92 @@ VWB_TEST(native_player_blocks_v2_derives_reserved_cell_identity_without_world_y_
     VWB_EXPECT_EQ(std::string("stoneBlock"), placed.block_id.value());
 }
 
+VWB_TEST(native_player_blocks_v2_accepts_restore_defaults_but_canonicalizes_the_export) {
+    NativeValue legacy = entry("stoneBlock", {-2, 4, 7});
+    for (const std::string &key : {
+        "destroyed", "doorGroupId", "doorPortalId", "facing", "jammed", "locked", "open", "worldY",
+    }) {
+        legacy = remove_field(legacy, key);
+    }
+
+    const NativeFeatureDeltaSnapshot decoded = one_instance_snapshot(legacy);
+    const NativePlayerCreatedInstance &placed = decoded.player_created_instances()[0];
+    VWB_EXPECT_EQ(5.4, placed.world_y);
+    VWB_EXPECT_EQ(0.0, placed.facing);
+    for (const std::string &key : {"destroyed", "jammed", "locked", "open"}) {
+        VWB_EXPECT(!field(placed.runtime_state, key).as_boolean());
+    }
+    VWB_EXPECT_EQ(std::string(""), field(placed.runtime_state, "doorGroupId").as_string());
+    VWB_EXPECT_EQ(std::string(""), field(placed.runtime_state, "doorPortalId").as_string());
+
+    const std::vector<NativeValue> encoded = encode_native_player_blocks_v2(decoded, catalog());
+    VWB_EXPECT_EQ(1U, encoded.size());
+    VWB_EXPECT_EQ(5.4, field(encoded[0], "worldY").as_number());
+    VWB_EXPECT_EQ(0.0, field(encoded[0], "facing").as_number());
+    VWB_EXPECT_EQ(10U, encoded[0].as_object().size());
+}
+
+VWB_TEST(native_player_blocks_v2_defers_contextual_door_group_and_derives_only_known_portal) {
+    NativeValue contextual = entry("door", {5, 7, 2}, 8.125, 1.25, true);
+    for (const std::string &key : {"destroyed", "doorGroupId", "doorPortalId", "jammed", "locked"}) {
+        contextual = remove_field(contextual, key);
+    }
+    const NativeFeatureDeltaSnapshot contextual_decoded = one_instance_snapshot(contextual);
+    const NativeValue &contextual_state = contextual_decoded.player_created_instances()[0].runtime_state;
+    VWB_EXPECT(field(contextual_state, "open").as_boolean());
+    VWB_EXPECT_EQ(std::string(""), field(contextual_state, "doorGroupId").as_string());
+    VWB_EXPECT_EQ(std::string(""), field(contextual_state, "doorPortalId").as_string());
+    const std::vector<NativeValue> contextual_encoded = encode_native_player_blocks_v2(contextual_decoded, catalog());
+    VWB_EXPECT_EQ(std::string(""), field(contextual_encoded[0], "doorGroupId").as_string());
+    VWB_EXPECT_EQ(std::string(""), field(contextual_encoded[0], "doorPortalId").as_string());
+
+    NativeValue known_group = remove_field(entry(
+        "door", {-3, 2, 9}, 2.7, 0.0, false, false, false, false,
+        "", "door-group:known"), "doorPortalId");
+    const NativeFeatureDeltaSnapshot known_group_decoded = one_instance_snapshot(known_group);
+    const NativeValue &known_group_state = known_group_decoded.player_created_instances()[0].runtime_state;
+    VWB_EXPECT_EQ(std::string("door-group:known"), field(known_group_state, "doorGroupId").as_string());
+    VWB_EXPECT_EQ(std::string("door:door-group:known"), field(known_group_state, "doorPortalId").as_string());
+
+    NativeValue known_portal = remove_field(entry(
+        "door", {-4, 2, 9}, 2.7, 0.0, false, false, false, false,
+        "door:external", ""), "doorGroupId");
+    const NativeFeatureDeltaSnapshot known_portal_decoded = one_instance_snapshot(known_portal);
+    const NativeValue &known_portal_state = known_portal_decoded.player_created_instances()[0].runtime_state;
+    VWB_EXPECT_EQ(std::string(""), field(known_portal_state, "doorGroupId").as_string());
+    VWB_EXPECT_EQ(std::string("door:external"), field(known_portal_state, "doorPortalId").as_string());
+}
+
+VWB_TEST(native_player_blocks_v2_accepts_omitted_slot_and_furnace_defaults) {
+    NativeValue sparse_furnace = NativeValue::object({
+        {"input", NativeValue::object({{"item", NativeValue::string("ironOre")}})},
+    });
+    NativeValue::Array sparse_storage = {
+        NativeValue::object({{"count", NativeValue::number(2.0)}}),
+        NativeValue::object({{"item", NativeValue::string("logs")}}),
+        NativeValue::object({}),
+    };
+    const NativeFeatureDeltaSnapshot chest = one_instance_snapshot(entry(
+        "chest", {0, 2, 0}, 2.7, 0.0, false, false, false, false, "", "",
+        NativeValue::array(std::move(sparse_storage))));
+    const NativeValue::Array &slots = field(chest.player_created_instances()[0].runtime_state, "storageSlots").as_array();
+    VWB_EXPECT_EQ(0.0, field(slots[0], "count").as_number());
+    VWB_EXPECT_EQ(std::string(""), field(slots[0], "item").as_string());
+    VWB_EXPECT_EQ(0.0, field(slots[1], "count").as_number());
+    VWB_EXPECT_EQ(std::string(""), field(slots[1], "item").as_string());
+
+    const NativeFeatureDeltaSnapshot furnace = one_instance_snapshot(entry(
+        "furnace", {1, 2, 0}, 2.7, 0.0, false, false, false, false, "", "",
+        std::nullopt, std::move(sparse_furnace)));
+    const NativeValue &state = field(furnace.player_created_instances()[0].runtime_state, "furnaceState");
+    VWB_EXPECT_EQ(4.5, field(state, "duration").as_number());
+    VWB_EXPECT_EQ(0.0, field(state, "progress").as_number());
+    VWB_EXPECT(!field(state, "processing").as_boolean());
+    VWB_EXPECT_EQ(std::string(""), field(state, "outputItem").as_string());
+    VWB_EXPECT_EQ(0.0, field(field(state, "input"), "count").as_number());
+    VWB_EXPECT_EQ(std::string(""), field(field(state, "input"), "item").as_string());
+}
+
 VWB_TEST(native_player_blocks_v2_preserves_door_state_and_normalizes_storage_and_furnace_exactly) {
     NativeValue::Array storage = {
         slot("logs", 99.0),
@@ -241,8 +327,11 @@ VWB_TEST(native_player_blocks_v2_keeps_first_accepted_cell_and_respects_existing
 VWB_TEST(native_player_blocks_v2_rejects_noncanonical_record_shapes_types_and_coordinates) {
     const NativeValue valid = entry("stoneBlock", {1, 2, 3});
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({NativeValue::null()}, catalog(), {}));
+    // Exercises the member lookup's end-of-object rejection separately from
+    // a missing key whose sorted successor is still present.
+    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({NativeValue::object({})}, catalog(), {}));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({remove_field(valid, "type")}, catalog(), {}));
-    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({remove_field(valid, "worldY")}, catalog(), {}));
+    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({remove_field(valid, "cell")}, catalog(), {}));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({add_field(valid, "unknown", NativeValue::null())}, catalog(), {}));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, decode_native_player_blocks_v2({
         add_field(remove_field(valid, "open"), "opaque", NativeValue::boolean(false)),
@@ -262,10 +351,6 @@ VWB_TEST(native_player_blocks_v2_rejects_noncanonical_record_shapes_types_and_co
 }
 
 VWB_TEST(native_player_blocks_v2_rejects_state_that_the_game_writer_cannot_emit) {
-    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(entry(
-        "door", {0, 0, 0}, 0.0, 0.0, false, false, false, false, "", "")));
-    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(entry(
-        "door", {0, 0, 0}, 0.0, 0.0, false, false, false, false, "door:a", "")));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(entry("stoneBlock", {0, 0, 0}, 0.0, 0.0, true)));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(entry("stoneBlock", {0, 0, 0}, 0.0, 0.0, false, true)));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(entry("stoneBlock", {0, 0, 0}, 0.0, 0.0, false, false, true)));
@@ -288,7 +373,6 @@ VWB_TEST(native_player_blocks_v2_rejects_malformed_slot_and_furnace_values_witho
     };
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(chest_with(NativeValue::null())));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(chest_with(NativeValue::array({NativeValue::null()}))));
-    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(chest_with(NativeValue::array({remove_field(slot("logs", 1.0), "item")}))));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(chest_with(NativeValue::array({add_field(slot("logs", 1.0), "x", NativeValue::null())}))));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(chest_with(NativeValue::array({replace_field(slot("logs", 1.0), "item", NativeValue::number(1.0))}))));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(chest_with(NativeValue::array({replace_field(slot("logs", 1.0), "count", NativeValue::string("1"))}))));
@@ -299,7 +383,6 @@ VWB_TEST(native_player_blocks_v2_rejects_malformed_slot_and_furnace_values_witho
         return entry("furnace", {0, 0, 0}, 0.0, 0.0, false, false, false, false, "", "", std::nullopt, std::move(state));
     };
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(furnace_with(NativeValue::null())));
-    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(furnace_with(remove_field(furnace_state(), "fuel"))));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(furnace_with(add_field(furnace_state(), "x", NativeValue::null()))));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(furnace_with(replace_field(furnace_state(), "processing", NativeValue::number(1.0)))));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, one_instance_snapshot(furnace_with(replace_field(furnace_state(), "progress", NativeValue::string("2")))));
@@ -321,6 +404,14 @@ VWB_TEST(native_player_blocks_v2_encode_fails_closed_for_other_feature_domains_a
 
     changed = imported.player_created_instances()[0];
     changed.runtime_state = remove_field(changed.runtime_state, "open");
+    VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, encode_native_player_blocks_v2(
+        NativeFeatureDeltaSnapshot::create({}, {changed}), catalog()));
+
+    // Keep the object size equal to the strict expected shape so key-by-key
+    // validation, rather than the earlier size guard, rejects the unknown key.
+    changed = imported.player_created_instances()[0];
+    changed.runtime_state = add_field(
+        remove_field(changed.runtime_state, "open"), "opaque", NativeValue::boolean(false));
     VWB_EXPECT_THROW(NativePlayerBlocksV2Rejected, encode_native_player_blocks_v2(
         NativeFeatureDeltaSnapshot::create({}, {changed}), catalog()));
 
