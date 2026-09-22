@@ -162,3 +162,31 @@ This proves canonical native tree-definition admission, identity, coordinate
 frames, and the physical/non-collision boundary. It does not prove native
 ecology/recipe generation, a catalog producer, rendering/collision publication,
 tombstone behavior, or live gameplay.
+
+## Surface-prop shared-RNG trace
+
+`NativeSurfacePropRngTrace` is the next shadow-only producer boundary. It
+replays all 28 coordinate draws from the immutable attempt stream and accepts
+an externally supplied, source-authoritative replay receipt for every attempt.
+It records the exact post-coordinate, post-class-roll, and post-recipe PCG
+states plus the legacy ordinary-rock/tree compatibility values. Structure or
+terrain/profile decisions remain outside the core until their authoritative
+receipts are typed and supplied by the native source; no terrain or profile
+logic is copied into this value.
+
+The only currently admitted replay classes are pre-roll skips, no-feature,
+ordinary rock, broadleaf tree, and conifer tree. Ore, forage, and wildlife are
+rejected rather than being silently converted into no-feature: their complete
+recipe/channel traces are not yet ported. There is deliberately no tombstone
+argument; a later producer must generate this complete baseline first and only
+then let parent/child removal filter publication.
+
+`node tools/run-native-world-backend-tests.mjs --run-name n4-surface-prop-rng-trace-01`
+passed 296/296 debug and release core tests, both adapter smokes, and strict
+pure-core coverage of 6,718/6,718 lines, 890/890 functions, and 3,618/3,618
+branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-rng-trace-01/report.json`.
+
+This is shared-RNG compatibility evidence only. It does not classify a live
+surface, generate a native feature definition, publish a feature, accept a
+live tombstone, or establish gameplay parity.
