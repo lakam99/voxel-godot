@@ -131,7 +131,9 @@ func apply_navigation_events(events: Array) -> void:
     var monitor = performance_monitor()
     var apply_start: int = monitor.begin_section("generated_nav_event_apply") if monitor != null else Time.get_ticks_usec()
     var static_changed := false
+    var static_global_changed := false
     var terrain_changed := false
+    var terrain_global_changed := false
     var dynamic_changed := false
     var semantic_changed := false
     var semantic_global_changed := false
@@ -151,7 +153,10 @@ func apply_navigation_events(events: Array) -> void:
             _mark_chunk_load_publication_change(tile_key)
         if _event_has_kind(kinds, NpcEnumsScript.CHANGE_KIND_TERRAIN_EDIT):
             terrain_changed = true
-            for affected_tile_key in _terrain_capture_tile_keys_for_event(event):
+            var affected_terrain_tiles := _terrain_capture_tile_keys_for_event(event)
+            if affected_terrain_tiles.is_empty():
+                terrain_global_changed = true
+            for affected_tile_key in affected_terrain_tiles:
                 terrain_changed_tiles[affected_tile_key] = true
         if _event_changes_static_snapshot(kinds):
             var prop_start: int = monitor.begin_section("generated_nav_prop_event_apply") if monitor != null else Time.get_ticks_usec()
@@ -159,6 +164,8 @@ func apply_navigation_events(events: Array) -> void:
                 _mark_incremental_static_change(tile_key)
             else:
                 static_changed = true
+                if tile_key == "":
+                    static_global_changed = true
                 if tile_key != "" and not static_changed_tiles.has(tile_key):
                     static_changed_tiles.append(tile_key)
             if monitor != null:
@@ -177,7 +184,7 @@ func apply_navigation_events(events: Array) -> void:
         else:
             dynamic_changed = true
     if static_changed:
-        if static_changed_tiles.is_empty():
+        if static_global_changed or static_changed_tiles.is_empty():
             route_global_source_revision += 1
         static_snapshot_revision = maxi(static_snapshot_revision + 1, last_event_revision)
         topology_revision = static_snapshot_revision
@@ -194,7 +201,7 @@ func apply_navigation_events(events: Array) -> void:
         # prop or door body.
         height_cache = {}
         terrain_projection_cache = {}
-        if terrain_changed_tiles.is_empty():
+        if terrain_global_changed or terrain_changed_tiles.is_empty():
             route_global_source_revision += 1
             terrain_revision_clock = maxi(terrain_revision_clock + 1, last_event_revision)
             terrain_global_revision = terrain_revision_clock

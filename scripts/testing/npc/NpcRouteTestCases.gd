@@ -3241,11 +3241,18 @@ func test_route_tile_local_search_source_revision(_mode: String) -> Dictionary:
 	var halo_changed := adapter.route_source_revision_for_cells(observed)
 	adapter.route_global_source_revision += 1
 	var global_changed := adapter.route_source_revision_for_cells(observed)
-	var passed: bool = initial == initial_tiles and initial == unrelated and unrelated != halo_changed and halo_changed != global_changed
+	var mixed_adapter = GeneratedWorldNavigationAdapterScript.new()
+	var before_mixed := mixed_adapter.route_source_revision_for_cells(observed)
+	mixed_adapter.apply_navigation_events([
+		{ "revision": 10, "tileKey": "99,99", "changeKinds": [NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED] },
+		{ "revision": 11, "tileKey": "", "changeKinds": [NpcEnumsScript.CHANGE_KIND_BLOCK_CREATED] }
+	])
+	var after_mixed := mixed_adapter.route_source_revision_for_cells(observed)
+	var passed: bool = initial == initial_tiles and initial == unrelated and unrelated != halo_changed and halo_changed != global_changed and before_mixed != after_mixed
 	return outcome(passed,
 		"initial=%s unrelated=%s halo=%s global=%s" % [initial, unrelated, halo_changed, global_changed],
-		["unrelated_tile_publication_preserves_route_source", "neighboring_collision_halo_invalidates_route_source", "unscoped_change_invalidates_route_source"],
-		{ "initial": initial, "unrelated": unrelated, "halo": halo_changed, "global": global_changed })
+		["unrelated_tile_publication_preserves_route_source", "neighboring_collision_halo_invalidates_route_source", "unscoped_change_invalidates_route_source", "mixed_scoped_and_unscoped_batch_invalidates_route_source"],
+		{ "initial": initial, "unrelated": unrelated, "halo": halo_changed, "global": global_changed, "beforeMixed": before_mixed, "afterMixed": after_mixed })
 
 
 func test_route_incremental_approach_certification(_mode: String) -> Dictionary:
