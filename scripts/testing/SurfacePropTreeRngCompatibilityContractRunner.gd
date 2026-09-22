@@ -6,6 +6,13 @@ extends SceneTree
 ## not visual or gameplay acceptance evidence.
 
 const MainPlaytestToolsScript := preload("res://scripts/MainPlaytestTools.gd")
+const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalog.gd")
+const EXPECTED_DRAWS := {
+	"default": 36, "ocean": 36, "beach": 36, "plains": 36,
+	"forest": 36, "taiga": 22, "snow": 22, "tundra": 22,
+	"alpine": 36, "savanna": 36, "desert": 36, "swamp": 36,
+	"town": 36,
+}
 
 var report_path := ""
 var results: Array[Dictionary] = []
@@ -19,13 +26,24 @@ func run() -> void:
 		report_path = ProjectSettings.globalize_path("res://artifacts/vegetation/surface-prop-tree-rng-contract.json")
 	DirAccess.make_dir_recursive_absolute(report_path.get_base_dir())
 	var tools = MainPlaytestToolsScript.new()
-	verify_tree_visual_spec_consumption(tools, "forest", 5, 36)
-	verify_tree_visual_spec_consumption(tools, "taiga", 3, 22)
-	verify_tree_visual_spec_consumption(tools, "snow", 3, 22)
+	var catalog = CatalogScript.new()
+	var catalog_ready: bool = catalog.setup()
+	var ids: Array[String] = catalog.biome_ids() if catalog_ready else []
+	add_result("resolved_catalog_matches_frozen_tree_replay_matrix",
+		catalog_ready and ids.size() == EXPECTED_DRAWS.size() and ids.all(func(id: String) -> bool: return EXPECTED_DRAWS.has(id)),
+		{ "catalogReady": catalog_ready, "biomeIds": ids, "expectedIds": EXPECTED_DRAWS.keys() })
+	for biome in ids:
+		var expected_draws: int = int(EXPECTED_DRAWS.get(biome, -1))
+		verify_tree_visual_spec_consumption(tools, biome, 3 if expected_draws == 22 else 5, expected_draws,
+			String(catalog.profile_for_biome(biome).tree_architecture))
+	var alpine_profile = catalog.profile_for_biome("alpine") if catalog_ready else null
+	add_result("alpine_conifer_architecture_uses_legacy_36_draw_replay",
+		alpine_profile != null and String(alpine_profile.tree_architecture) == "conifer" and int(EXPECTED_DRAWS["alpine"]) == 36,
+		{ "architecture": String(alpine_profile.tree_architecture) if alpine_profile != null else "", "draws": int(EXPECTED_DRAWS["alpine"]) })
 	tools.free()
 	finish()
 
-func verify_tree_visual_spec_consumption(tools, biome: String, expected_clumps: int, expected_draws: int) -> void:
+func verify_tree_visual_spec_consumption(tools, biome: String, expected_clumps: int, expected_draws: int, architecture: String) -> void:
 	var observed := RandomNumberGenerator.new()
 	var oracle := RandomNumberGenerator.new()
 	observed.seed = 918273
@@ -45,8 +63,9 @@ func verify_tree_visual_spec_consumption(tools, biome: String, expected_clumps: 
 		complete_clumps = complete_clumps \
 			and clump.has("radius") and clump.has("position") and clump.has("scale")
 	add_result("%s_tree_visual_spec_consumes_%d_shared_pcg_draws" % [biome, expected_draws],
-		complete_clumps and observed.state == oracle.state, {
+		expected_draws >= 0 and complete_clumps and observed.state == oracle.state, {
 			"biome": biome,
+			"architecture": architecture,
 			"expectedClumps": expected_clumps,
 			"actualClumps": clumps.size(),
 			"expectedDraws": expected_draws,
