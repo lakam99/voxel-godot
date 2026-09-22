@@ -86,7 +86,7 @@ std::vector<std::uint8_t> canonical_placement_binary(
     const WorldPhysicalContentIdentity &definition_source_identity,
     const std::array<NativeSurfacePropPlacementEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &entries) {
     CanonicalWriter writer;
-    writer.u8('S'); writer.u8('P'); writer.u8('P'); writer.u8('3');
+    writer.u8('S'); writer.u8('P'); writer.u8('P'); writer.u8('4');
     writer.u32(NativeSurfacePropPlacementSet::SCHEMA_REVISION);
     writer.u32(source_receipt.schema_revision); writer.digest(source_receipt.effective_source_digest);
     writer.u64(source_receipt.terrain_delta_revision); writer.u64(source_receipt.shaping_registry_revision);

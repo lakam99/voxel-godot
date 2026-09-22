@@ -150,14 +150,14 @@ VWB_TEST(native_surface_prop_placement_spp2_binds_all_typed_outcomes_to_pinned_c
     const auto terrain = terrain_for(definition);
     const auto receipt = surface_prop_test_fixture::receipt(terrain.pin());
     const auto set = NativeSurfacePropPlacementSet::create(attempt_stream, baseline, receipt, terrain);
-    VWB_EXPECT_EQ(3U, NativeSurfacePropPlacementSet::SCHEMA_REVISION);
+    VWB_EXPECT_EQ(4U, NativeSurfacePropPlacementSet::SCHEMA_REVISION);
     VWB_EXPECT_EQ(terrain.pin().physical_content_identity(), set.world_source_identity());
     VWB_EXPECT_EQ(receipt.effective_source_digest, set.source_receipt().effective_source_digest);
     VWB_EXPECT_EQ(terrain.pin().definition().physical_content_identity(), set.definition_source_identity());
     VWB_EXPECT_EQ(terrain.pin().terrain_delta_revision(), set.terrain_delta_revision());
     VWB_EXPECT_EQ(terrain.pin().shaping_registry_revision(), set.shaping_registry_revision());
     VWB_EXPECT_EQ(sha256(set.canonical_binary()), set.content_digest());
-    VWB_EXPECT_EQ(static_cast<std::uint8_t>('3'), set.canonical_binary()[3]);
+    VWB_EXPECT_EQ(static_cast<std::uint8_t>('4'), set.canonical_binary()[3]);
     bool saw_non_lattice = false;
     for (std::size_t i = 0; i < set.entries().size(); ++i) {
         const auto &entry = set.entries()[i];

@@ -16,8 +16,8 @@ bool valid_roll(const float value) noexcept {
     return std::isfinite(value) && value >= 0.0F && value < 1.0F;
 }
 
-bool valid_cutoff(const float value) noexcept {
-    return std::isfinite(value) && value >= 0.0F;
+bool valid_cutoff(const double value) noexcept {
+    return std::isfinite(value) && value >= 0.0;
 }
 
 bool valid_admission(const NativeSurfacePropAdmission value) noexcept {
@@ -39,11 +39,11 @@ bool valid_ore_policy(const NativeSurfacePropOrePolicy value) noexcept {
 }
 
 bool policy_is_empty(const NativeSurfacePropPlacementPolicy &policy) noexcept {
-    return policy.rock_upper == 0.0F && policy.tree_upper == 0.0F
-        && policy.forage_upper == 0.0F && policy.wildlife_upper == 0.0F
+    return policy.rock_upper == 0.0 && policy.tree_upper == 0.0
+        && policy.forage_upper == 0.0 && policy.wildlife_upper == 0.0
         && policy.tree_replay == NativeSurfacePropTreeReplayMode::none
         && policy.ore_policy == NativeSurfacePropOrePolicy::none
-        && policy.iron_upper == 0.0F && policy.copper_upper == 0.0F;
+        && policy.iron_upper == 0.0 && policy.copper_upper == 0.0;
 }
 
 void validate_input(const NativeSurfacePropClassificationInput &input, const NativeSurfacePropAttempt &attempt) {
@@ -62,7 +62,7 @@ void validate_input(const NativeSurfacePropClassificationInput &input, const Nat
         || policy.forage_upper > policy.wildlife_upper
         || policy.tree_replay == NativeSurfacePropTreeReplayMode::none) reject();
     if (policy.ore_policy == NativeSurfacePropOrePolicy::none) {
-        if (policy.iron_upper != 0.0F || policy.copper_upper != 0.0F) reject();
+        if (policy.iron_upper != 0.0 || policy.copper_upper != 0.0) reject();
         return;
     }
     if (!valid_cutoff(policy.iron_upper) || !valid_cutoff(policy.copper_upper)

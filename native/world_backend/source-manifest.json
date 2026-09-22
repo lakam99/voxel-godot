@@ -3,6 +3,7 @@
   "coreSources": [
     "core/authority.cpp",
     "core/biome_region_field.cpp",
+    "core/native_biome_environment_catalog.cpp",
     "core/coordinates.cpp",
     "core/fast_noise_compat.cpp",
     "core/godot_pcg_compat.cpp",
@@ -18,6 +19,7 @@
     "core/native_ore_cluster_stream.cpp",
     "core/native_player_blocks_v2_codec.cpp",
     "core/native_removed_props_v2_codec.cpp",
+    "core/native_structure_exclusion_snapshot.cpp",
     "core/native_surface_prop_attempt_stream.cpp",
     "core/native_surface_prop_baseline_stream.cpp",
     "core/native_surface_prop_classifier.cpp",
@@ -47,6 +49,7 @@
   "coreHeaders": [
     "core/authority.hpp",
     "core/biome_region_field.hpp",
+    "core/native_biome_environment_catalog.hpp",
     "core/coordinates.hpp",
     "core/fast_noise_compat.hpp",
     "core/godot_pcg_compat.hpp",
@@ -62,6 +65,7 @@
     "core/native_ore_cluster_stream.hpp",
     "core/native_player_blocks_v2_codec.hpp",
     "core/native_removed_props_v2_codec.hpp",
+    "core/native_structure_exclusion_snapshot.hpp",
     "core/native_surface_prop_attempt_stream.hpp",
     "core/native_surface_prop_baseline_stream.hpp",
     "core/native_surface_prop_classifier.hpp",
@@ -91,6 +95,7 @@
   ],
   "testSources": [
     "tests/biome_region_field_tests.cpp",
+    "tests/native_biome_environment_catalog_tests.cpp",
     "tests/godot_pcg_compat_tests.cpp",
     "tests/native_effective_terrain_batch_tests.cpp",
     "tests/native_effective_terrain_source_tests.cpp",
@@ -108,6 +113,7 @@
     "tests/native_ore_cluster_stream_tests.cpp",
     "tests/native_player_blocks_v2_codec_tests.cpp",
     "tests/native_removed_props_v2_codec_tests.cpp",
+    "tests/native_structure_exclusion_snapshot_tests.cpp",
     "tests/native_surface_prop_attempt_stream_tests.cpp",
     "tests/native_surface_prop_baseline_stream_tests.cpp",
     "tests/native_surface_prop_classifier_tests.cpp",
@@ -129,6 +135,7 @@
     "tests/world_source_tests.cpp"
   ],
   "testHeaders": [
+    "tests/native_biome_environment_oracle_fixture.hpp",
     "tests/native_surface_prop_test_fixture.hpp",
     "tests/native_value_test_access.hpp",
     "tests/test_harness.hpp"

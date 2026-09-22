@@ -57,12 +57,12 @@ public:
 };
 
 // Immutable, source-bound placement witness for one full surface-prop attempt
-// stream. SPP3 derives every physical anchor from one pinned effective terrain
+// stream. SPP4 derives every physical anchor from one pinned effective terrain
 // source. No caller-supplied height or support pair can become production
 // authority. It is not a feature footprint or publication catalog.
 class NativeSurfacePropPlacementSet final {
 public:
-    static constexpr std::uint32_t SCHEMA_REVISION = 3U;
+    static constexpr std::uint32_t SCHEMA_REVISION = 4U;
 
     static NativeSurfacePropPlacementSet create(
         const NativeSurfacePropAttemptStream &attempts,

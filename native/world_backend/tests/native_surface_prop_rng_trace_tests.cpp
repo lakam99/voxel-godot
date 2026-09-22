@@ -100,7 +100,7 @@ VWB_TEST(native_surface_prop_rng_trace_replays_every_coordinate_and_no_feature_r
     VWB_EXPECT_EQ(static_cast<std::uint8_t>('S'), trace.canonical_binary()[0]);
     VWB_EXPECT_EQ(static_cast<std::uint8_t>('P'), trace.canonical_binary()[1]);
     VWB_EXPECT_EQ(static_cast<std::uint8_t>('T'), trace.canonical_binary()[2]);
-    VWB_EXPECT_EQ(static_cast<std::uint8_t>('3'), trace.canonical_binary()[3]);
+    VWB_EXPECT_EQ(static_cast<std::uint8_t>('4'), trace.canonical_binary()[3]);
 }
 
 VWB_TEST(native_surface_prop_rng_trace_preserves_exact_class_compatibility_draw_counts) {
@@ -186,5 +186,5 @@ VWB_TEST(native_surface_prop_rng_trace_source_receipt_is_bound_to_one_admitted_p
         NativeSurfacePropSourceReceipt::from_pin(pin, 3U, {}));
     const auto source = stream();
     const auto trace = NativeSurfacePropRngTrace::create(source, receipt, receipts(source));
-    VWB_EXPECT_EQ(static_cast<std::uint8_t>('3'), trace.canonical_binary()[3]);
+    VWB_EXPECT_EQ(static_cast<std::uint8_t>('4'), trace.canonical_binary()[3]);
 }

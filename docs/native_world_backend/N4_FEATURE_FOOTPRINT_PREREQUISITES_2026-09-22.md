@@ -222,8 +222,8 @@ branches. Its receipt is
 
 `NativeSurfacePropClassifier` is the next pure-core boundary. It accepts one
 Godot-authored, source-bound receipt per immutable attempt and verifies the
-ordinal/cell binding before it compares exact float32 cumulative cutoffs with
-the exact Godot PCG rolls. The receipt carries only source facts: structured
+ordinal/cell binding before it compares Godot float64 cumulative cutoffs with
+the exact float32 Godot PCG rolls (promoted for comparison). The receipt carries only source facts: structured
 admission (`structure_blocked`, unavailable/ineligible surface, town, or
 eligible), a nonzero decision digest, cumulative placement cutoffs, the legacy
 tree compatibility family, and the precomputed ore policy/cutoffs. It does not
@@ -545,8 +545,8 @@ digest is insufficient. The source height must not be replaced by the rounded
 `Vector3` anchor Y when calculating biome policy.
 The catalog snapshot must retain scalar profile probabilities at Godot's
 float64 `float` boundary; `rock_chance`, `tree_chance`, `forage_chance`, and
-`wildlife_chance` are combined in that precision and only then become the
-float32 policy cutoffs consumed by the native classifier. Packed detail and
+`wildlife_chance` are combined and compared in that precision. Narrowing the
+cumulative cutoffs to float32 changes strict-boundary decisions. Packed detail and
 tree-age arrays instead retain their loaded float32 elements. An oracle of
 only displayed decimal values cannot prove these boundaries.
 Legacy tree compatibility draw count is a separate input from ecology
@@ -675,3 +675,18 @@ the final IDs are `atlas-1492:21,15:27` (intact) and
 `atlas-1492:6,5:27` (removed), with different final PCG states. This is a
 full-chunk RNG-order target for the native producer, not yet a terrain,
 structure, recipe, save/reload, or gameplay acceptance result.
+
+**Float-boundary correction (shadow only):** The initial native classifier
+narrowed cumulative profile cutoffs to float32, but live Godot keeps those
+cutoffs at float64 and promotes each float32 `randf()` value for its strict
+comparison. The boundary is reachable: seed `22929874` produces attempt-zero
+roll bits `0ad7a33d`; that roll is below the live `0.08` cutoff but equal to
+the narrowed float32 cutoff. The direct Godot v4 oracle confirms the live
+rock decision and the contrary narrowed decision. Native policy cutoffs now
+remain float64, and shadow source/trace/placement receipts advance to revision
+4 and SPT4/SPP4 to reject stale identities. The focused native gate
+`n4-snapshot-f64-cutoff-03` passed 364/364 debug and release core tests, both
+adapter smokes, and 8,262/8,262 lines, 1,107/1,107 functions, and
+4,840/4,840 branches of strict pure-core coverage. Its receipt is
+`artifacts/native-world-backend/n4-snapshot-f64-cutoff-03/report.json`.
+This is not live-gameplay or production-cutover evidence.

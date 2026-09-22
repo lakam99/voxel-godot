@@ -113,11 +113,35 @@ func removed_root_shift_sequence(seed_text: String, remove_first_root: bool) -> 
 		})
 	return {"removedFirstRoot": remove_first_root, "attempts": attempts, "finalState": rng.state}
 
+func cutoff_precision_boundary() -> Dictionary:
+	# This seed's first prop roll after the live attempt-zero coordinate pair is
+	# exactly the float32 value immediately below the float64 scalar 0.08.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = 22929874
+	var coordinate_offsets := [rng.randi_range(0, 24), rng.randi_range(0, 24)]
+	var roll := rng.randf()
+	var cutoff := 0.08
+	var narrowed_cutoff := PackedFloat32Array([cutoff])[0]
+	return {
+		"seed": 22929874,
+		"coordinateOffsets": coordinate_offsets,
+		"roll": roll,
+		"rollFloat32BytesHex": PackedFloat32Array([roll]).to_byte_array().hex_encode(),
+		"rollFloat64BytesHex": PackedFloat64Array([roll]).to_byte_array().hex_encode(),
+		"cutoff": cutoff,
+		"cutoffFloat32BytesHex": PackedFloat32Array([cutoff]).to_byte_array().hex_encode(),
+		"cutoffFloat64BytesHex": PackedFloat64Array([cutoff]).to_byte_array().hex_encode(),
+		"liveFloat64Decision": roll < cutoff,
+		"narrowedFloat32Decision": roll < narrowed_cutoff,
+		"stateAfter": rng.state,
+	}
+
 func _initialize() -> void:
 	var unicode_seed := "世界🌲"
 	var prop_key := "%s:props:%d,%d" % [unicode_seed, -3, 5]
 	var without_removal := removed_root_shift_sequence("atlas-1492", false)
 	var with_removal := removed_root_shift_sequence("atlas-1492", true)
+	var cutoff_boundary := cutoff_precision_boundary()
 	if without_removal.attempts[0].id != with_removal.attempts[0].id \
 			or without_removal.attempts[1].id == with_removal.attempts[1].id \
 			or without_removal.attempts.size() != 28 or with_removal.attempts.size() != 28 \
@@ -125,8 +149,17 @@ func _initialize() -> void:
 		push_error("Removed-root source-order oracle did not shift the next candidate")
 		quit(1)
 		return
+	if cutoff_boundary.coordinateOffsets != [1, 7] \
+			or cutoff_boundary.rollFloat32BytesHex != "0ad7a33d" \
+			or cutoff_boundary.rollFloat64BytesHex != "00000040e17ab43f" \
+			or cutoff_boundary.cutoffFloat64BytesHex != "7b14ae47e17ab43f" \
+			or not cutoff_boundary.liveFloat64Decision \
+			or cutoff_boundary.narrowedFloat32Decision:
+		push_error("Surface-prop cutoff precision boundary oracle failed")
+		quit(1)
+		return
 	var report := {
-		"schema": "n4-surface-prop-rng-oracle/v3",
+		"schema": "n4-surface-prop-rng-oracle/v4",
 		"legacyHash": {
 			"empty": legacy_hash(""),
 			"atlas": legacy_hash("atlas-1492"),
@@ -144,7 +177,8 @@ func _initialize() -> void:
 		"removedRootShift": [
 			without_removal,
 			with_removal
-		]
+		],
+		"cutoffPrecisionBoundary": cutoff_boundary,
 	}
 	var encoded := JSON.stringify(report)
 	print(encoded)

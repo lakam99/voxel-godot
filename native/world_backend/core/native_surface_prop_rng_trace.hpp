@@ -16,7 +16,7 @@ namespace voxel::world_backend {
 // Revisions are ownership epochs and may be zero for an initial snapshot;
 // the digest names physical content. This trace does not sample either source.
 struct NativeSurfacePropSourceReceipt final {
-    static constexpr std::uint32_t SCHEMA_REVISION = 3U;
+    static constexpr std::uint32_t SCHEMA_REVISION = 4U;
     std::uint32_t schema_revision = SCHEMA_REVISION;
     Sha256Digest effective_source_digest{};
     std::uint64_t terrain_delta_revision = 0U;

@@ -34,22 +34,27 @@ enum class NativeSurfacePropOrePolicy : std::uint8_t {
     eligible = 1,
 };
 
-// The cutoffs are cumulative, exact float32 source values. They intentionally
-// are not capped at one: live source priority makes totals greater than one a
-// saturated final branch rather than an invalid profile.
+// The cutoffs are cumulative, exact Godot float64 source values. The live
+// GDScript adds scalar profile probabilities at this precision, then promotes
+// each float32 randf result exactly for the strict comparison. Narrowing a
+// cutoff would lose a reachable equality boundary when it rounds downward.
+// Cutoffs intentionally are not capped at one: live source priority makes
+// totals greater than one a saturated final branch rather than an invalid
+// profile.
 struct NativeSurfacePropPlacementPolicy final {
-    float rock_upper = 0.0F;
-    float tree_upper = 0.0F;
-    float forage_upper = 0.0F;
-    float wildlife_upper = 0.0F;
+    double rock_upper = 0.0;
+    double tree_upper = 0.0;
+    double forage_upper = 0.0;
+    double wildlife_upper = 0.0;
     NativeSurfacePropTreeReplayMode tree_replay = NativeSurfacePropTreeReplayMode::none;
     NativeSurfacePropOrePolicy ore_policy = NativeSurfacePropOrePolicy::none;
-    float iron_upper = 0.0F;
-    float copper_upper = 0.0F;
+    double iron_upper = 0.0;
+    double copper_upper = 0.0;
 };
 
 // source_decision_digest is calculated by the Godot adapter from this exact
-// per-attempt receipt and is subsequently bound to the aggregate trace. It
+// per-attempt receipt, including IEEE-754 float64 cutoff bits, and is
+// subsequently bound to the aggregate trace. It
 // prevents a matching ordinal/ID from being replayed with stale terrain or
 // profile facts. No tombstone belongs here: baseline selection precedes
 // publication filtering.
@@ -85,8 +90,8 @@ public:
     NativeSurfacePropClassifierRejected();
 };
 
-// Pure source-receipt classifier. It compares only precomputed source cutoffs
-// with the caller's exact Godot PCG float32 values. A recipe result remains a
+// Pure source-receipt classifier. It compares only precomputed float64 source
+// cutoffs with the caller's exact Godot PCG float32 values. A recipe result remains a
 // hard aggregate boundary: a caller cannot claim a complete RNG trace until a
 // manifest composer supplies its typed recipe-stream input.
 class NativeSurfacePropClassifier final {

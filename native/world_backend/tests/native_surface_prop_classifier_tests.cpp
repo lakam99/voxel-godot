@@ -71,6 +71,31 @@ VWB_TEST(native_surface_prop_classifier_uses_strict_cumulative_source_cutoffs_wi
         NativeSurfacePropClassifier::classify(saturated, attempt(), 0.10F));
 }
 
+VWB_TEST(native_surface_prop_classifier_preserves_float64_cutoffs_at_reachable_randf_boundaries) {
+    NativeSurfacePropClassificationInput receipt = input();
+    // Godot seed 22929874 yields this exact float32 randf after attempt zero's
+    // two coordinate draws. GDScript promotes it before comparing with the
+    // float64 scalar cutoff, so it remains strictly below 0.08.
+    const float downward_rounded_boundary = 0.08F;
+    VWB_EXPECT(static_cast<double>(downward_rounded_boundary) < 0.08);
+    receipt.policy.rock_upper = 0.08;
+    receipt.policy.tree_upper = 0.34;
+    receipt.policy.forage_upper = 0.52;
+    receipt.policy.wildlife_upper = 0.555;
+    expect_outcome(NativeSurfacePropClassificationOutcome::ordinary_rock,
+        NativeSurfacePropClassifier::classify(
+            receipt, attempt(), downward_rounded_boundary));
+
+    // Ore uses the same GDScript float64 cutoff arithmetic and must preserve
+    // the same strict boundary rather than narrowing the receipt.
+    receipt.policy.ore_policy = NativeSurfacePropOrePolicy::eligible;
+    receipt.policy.iron_upper = 0.08;
+    receipt.policy.copper_upper = 0.20;
+    expect_outcome(NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster,
+        NativeSurfacePropClassifier::classify(
+            receipt, attempt(), 0.01F, true, downward_rounded_boundary), true, true);
+}
+
 VWB_TEST(native_surface_prop_classifier_models_the_live_ore_roll_as_a_separate_unported_recipe_boundary) {
     NativeSurfacePropClassificationInput receipt = input();
     receipt.policy.ore_policy = NativeSurfacePropOrePolicy::eligible;
