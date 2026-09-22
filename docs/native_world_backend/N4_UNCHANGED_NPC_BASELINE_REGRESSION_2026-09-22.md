@@ -51,6 +51,23 @@ before this baseline. N4 implementation stays paused pending discussion of
 the protected pathfinding scope and resolution/verification of these baseline
 failures. Keep the original Gate 5 acceptance matrix open.
 
+An older, pre-N0 G1 aggregate at
+`artifacts/world-streaming-maturity/g1/baseline-20260914/all-npc-both.json`
+is a useful but limited comparator. Its `real_tutorial_playthrough` and
+`town_job_cycle_visual` children exited 0 after 127.178 and 216.624 seconds,
+respectively, but the aggregate marked both failed because their reports
+lacked the required `forbiddenCallSelfScan.status == passed` evidence. Their
+exit status does **not** reproduce the current Mira interior miss or current
+town-job 300-second timeout. Its `real_tutorial_final_rescue` child exited 1
+after 166.985 seconds, with missing required captures and evidence-integrity
+failure; the archived aggregate does not establish the same Niko
+`validation_step_budget_deferred` cause. The pre-N0 state also contained a
+large inherited Gate-5 working tree with routing/navigation edits later
+preserved in `cfcc96f`. Thus neither matching runner names nor this aggregate
+proves that the three current symptoms were introduced by, or predated, the
+native N0-N4 changes. Same-source, same-seed headed comparison remains
+necessary for causal attribution.
+
 For the timed-out town job runner specifically,
 `artifacts/node-tools/process-runs/godot-ItiQWw/watchdog.json` records
 `timedOut=true`, forced job-object cleanup, `cleanupPassed=false`, and
