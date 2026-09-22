@@ -94,6 +94,12 @@ VWB_TEST(native_surface_prop_baseline_stream_replays_every_typed_recipe_family) 
     const NativeSurfacePropAttemptStream source = attempts();
     const NativeSurfacePropBaselineStream stream = NativeSurfacePropBaselineStream::create(source, inputs_for(source));
     const auto &entries = stream.entries();
+    VWB_EXPECT_EQ(source.attempts()[0].ordinal, entries[0].ordinal);
+    VWB_EXPECT_EQ(source.attempts()[0].cell_x, entries[0].cell_x);
+    VWB_EXPECT_EQ(source.attempts()[0].cell_z, entries[0].cell_z);
+    VWB_EXPECT_EQ(source.attempts()[0].durable_id, entries[0].durable_id);
+    VWB_EXPECT_EQ(inputs_for(source)[0].classification.source_decision_digest, entries[0].source_decision_digest);
+    VWB_EXPECT_EQ(NativeSurfacePropAdmission::eligible, entries[0].admission);
     VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::wildlife_recipe, entries[0].outcome);
     VWB_EXPECT(entries[0].wildlife.has_value());
     VWB_EXPECT_EQ(NativeSurfacePropClassificationOutcome::forage_recipe, entries[1].outcome);

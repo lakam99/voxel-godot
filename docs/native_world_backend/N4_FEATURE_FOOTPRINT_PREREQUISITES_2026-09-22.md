@@ -373,3 +373,30 @@ lines, 952/952 functions, and 3,956/3,956 branches. Its receipt is
 The test suite includes every typed family, missing/ambiguous recipe receipts,
 source-classifier rejection, and a focused corrupt-enum invariant guard. It
 does not establish live surface/feature parity or gameplay acceptance.
+
+## Canonical surface placement receipt
+
+`NativeSurfacePropPlacementSet` is the next SPP1 bridge from the complete
+baseline stream to future typed physical definitions. It binds every one of
+the 28 ordered baseline entries to its durable ID, source-decision digest,
+source receipt, and immutable `WorldSourceDefinition` identity. A selected
+feature must carry an authoritative solid/air surface pair at the candidate's
+same X/Z lattice coordinate; the pair must be adjacent and its canonical world
+anchor is resolved as the existing gameplay lattice query at the air cell.
+This intentionally preserves the live prop convention
+`(cell_x * CELL, air_cell_y * CELL, cell_z * CELL)`, rather than substituting
+the terrain service's cell-center coordinate.
+
+Skipped and no-feature outcomes explicitly have no physical anchor. All typed
+feature outcomes (rocks, trees, ore clusters, forage, and wildlife) require
+one. SPP1 contains no renderer asset, collider shape, navigation declaration,
+terrain sampling, material/biome policy, or tombstone input. Those facts remain
+with each family definition and must be composed before a footprint-catalog
+entry can be derived. This keeps source selection, physical geometry, and
+publication filtering as distinct authorities.
+
+`node tools/run-native-world-backend-tests.mjs --run-name
+n4-surface-prop-placement-set-04` passed both debug and release core suites,
+both adapter smokes, and strict pure-core coverage of 7,249/7,249 lines,
+974/974 functions, and 4,056/4,056 branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-placement-set-04/report.json`.

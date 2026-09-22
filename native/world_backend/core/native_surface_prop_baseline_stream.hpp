@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace voxel::world_backend {
@@ -28,6 +29,15 @@ struct NativeSurfacePropBaselineInput final {
 };
 
 struct NativeSurfacePropBaselineEntry final {
+    // Preserve the source-bound identity that produced this replay result.
+    // Later physical placement must bind to these facts instead of accepting a
+    // second, merely ordinal-matched terrain/profile decision.
+    std::uint32_t ordinal = 0U;
+    std::int32_t cell_x = 0;
+    std::int32_t cell_z = 0;
+    std::string durable_id;
+    Sha256Digest source_decision_digest{};
+    NativeSurfacePropAdmission admission = NativeSurfacePropAdmission::surface_unavailable;
     NativeSurfacePropClassificationOutcome outcome = NativeSurfacePropClassificationOutcome::no_feature;
     std::uint64_t state_before_coordinates = 0U;
     std::uint64_t state_after_coordinates = 0U;

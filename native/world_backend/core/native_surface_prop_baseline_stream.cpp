@@ -40,6 +40,13 @@ NativeSurfacePropBaselineStream::ComposedBaseline NativeSurfacePropBaselineStrea
     for (std::size_t index = 0U; index < entries.size(); ++index) {
         const NativeSurfacePropBaselineInput &input = inputs[index];
         NativeSurfacePropBaselineEntry entry;
+        const NativeSurfacePropAttempt &attempt = attempts.attempts()[index];
+        entry.ordinal = attempt.ordinal;
+        entry.cell_x = attempt.cell_x;
+        entry.cell_z = attempt.cell_z;
+        entry.durable_id = attempt.durable_id;
+        entry.source_decision_digest = input.classification.source_decision_digest;
+        entry.admission = input.classification.admission;
         entry.state_before_coordinates = rng.state();
         static_cast<void>(rng.randi_range(0, NativeSurfacePropAttemptStream::CHUNK_CELLS - 4));
         static_cast<void>(rng.randi_range(0, NativeSurfacePropAttemptStream::CHUNK_CELLS - 4));
@@ -57,7 +64,7 @@ NativeSurfacePropBaselineStream::ComposedBaseline NativeSurfacePropBaselineStrea
             }
         }
         const NativeSurfacePropClassification classification = NativeSurfacePropClassifier::classify(
-            input.classification, attempts.attempts()[index], prop_roll, has_ore_roll, ore_roll);
+            input.classification, attempt, prop_roll, has_ore_roll, ore_roll);
         entry.outcome = classification.outcome;
         entry.state_after_classification = rng.state();
         validate_recipe_presence(input, entry.outcome);
@@ -67,10 +74,10 @@ NativeSurfacePropBaselineStream::ComposedBaseline NativeSurfacePropBaselineStrea
             entry.compatibility_draws.push_back(rng.randf());
         }
         if (entry.outcome == NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster) {
-            entry.ore_cluster = NativeOreClusterStream::create(attempts.attempts()[index].durable_id, NativeOreKind::iron, rng);
+            entry.ore_cluster = NativeOreClusterStream::create(attempt.durable_id, NativeOreKind::iron, rng);
         }
         if (entry.outcome == NativeSurfacePropClassificationOutcome::unported_copper_ore_cluster) {
-            entry.ore_cluster = NativeOreClusterStream::create(attempts.attempts()[index].durable_id, NativeOreKind::copper, rng);
+            entry.ore_cluster = NativeOreClusterStream::create(attempt.durable_id, NativeOreKind::copper, rng);
         }
         if (entry.outcome == NativeSurfacePropClassificationOutcome::forage_recipe) {
             entry.forage = NativeForageStreamBuilder::create(*input.forage_recipe, rng);
