@@ -79,6 +79,20 @@ far longer than the wrapper deadline. Do not infer game-path acceptance from
 the seven partial preconditions or count this forced cleanup as a clean
 natural exit.
 
+Capture review further bounds these results. The Mira midpoint capture shows
+her outside a building, but the timeout capture does not frame her clearly;
+the strict final cell comes from the live trace, not pixels alone. The Niko
+returning capture shows him at the rescue site when the return phase starts;
+the later no-movement conclusion comes from the route/status timeline, not
+that single image. The town-job run produced only the town-setup capture, not
+the required day-job/door/home captures. Its partial `day_0540` matrix has
+11 actors, zero completed job runs, six pending routes (two each of
+`planning_budget`, `candidate_validation_deferred`, and
+`route_snapshot_changed`); the progress file reached
+`observe_day_jobs_0660` at 292.068 seconds against a 2,700-frame day window.
+Absent day-job screenshots cannot establish visual gameplay success or prove
+that all actors are permanently stalled.
+
 ## World-signature fixture diagnostic
 
 `node tools/run-world-signature.mjs -Seed atlas-1492` was run without
