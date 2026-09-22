@@ -74,6 +74,9 @@ public:
         u64(static_cast<std::uint64_t>(value.size()));
         bytes_.insert(bytes_.end(), value.begin(), value.end());
     }
+    void digest(const Sha256Digest &value) {
+        bytes_.insert(bytes_.end(), value.begin(), value.end());
+    }
     void typed_cell_operation(const WorldTypedCellOperation &operation) {
         u8(static_cast<std::uint8_t>(operation.name_space));
         i32(operation.cell.x); i32(operation.cell.y); i32(operation.cell.z);
@@ -239,19 +242,25 @@ std::vector<std::uint8_t> canonical_typed_admission(
     return writer.finish();
 }
 
-ValidatedFeatureAdmission validate_feature_admission(const WorldFeatureDeltaAdmission &admission) {
+ValidatedFeatureAdmission validate_feature_admission(
+    const WorldFeatureDeltaAdmission &admission,
+    const NativeGeneratedFeatureFootprintCatalog *const feature_footprint_catalog) {
     if (admission.transaction_id.empty() || admission.transaction_id.find('\0') != std::string::npos) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
-    // A removedProps tombstone changes generated geometry, but FD1 records
-    // only its stable ID. Until a native baseline feature-footprint catalog
-    // can resolve that ID to all affected cells, publishing this replacement
-    // would let collision, render, and navigation retain stale geometry.
-    // Reject it at the WDS boundary rather than pretending an empty section
-    // receipt is safe. NativeFeatureDeltaSnapshot still retains tombstones as
-    // persistence groundwork for that catalog-backed admission later.
+    // A tombstone changes generated geometry. FD1 contains only its stable
+    // ID, so every ID must resolve through the immutable source-bound catalog
+    // before this replacement can be published. This makes a missing or stale
+    // catalog a fail-closed error rather than an empty invalidation receipt.
     if (!admission.snapshot.tombstones().empty()) {
-        throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+        if (feature_footprint_catalog == nullptr) {
+            throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+        }
+        for (const NativeFeatureTombstone &tombstone : admission.snapshot.tombstones()) {
+            if (feature_footprint_catalog->find(tombstone.feature_id) == nullptr) {
+                throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
+            }
+        }
     }
     // NativeFeatureDeltaSnapshot is immutable at its public boundary; FD1
     // repeats its own feature validation before producing the journal payload.
@@ -260,13 +269,25 @@ ValidatedFeatureAdmission validate_feature_admission(const WorldFeatureDeltaAdmi
 }
 
 std::vector<std::uint8_t> canonical_feature_admission(
-    const WorldFeatureDeltaAdmission &admission, const ValidatedFeatureAdmission &validated) {
+    const WorldFeatureDeltaAdmission &admission,
+    const ValidatedFeatureAdmission &validated,
+    const NativeGeneratedFeatureFootprintCatalog *const feature_footprint_catalog) {
     CanonicalWriter writer;
     // WFD1 is distinct from WDTX and WTY3: one transaction ID can identify
     // exactly one native world-state mutation kind.
     writer.u8('W'); writer.u8('F'); writer.u8('D'); writer.u8('1');
     writer.text(admission.transaction_id);
     writer.u64(admission.expected_revision);
+    // A transaction that removes generated geometry is tied to the precise
+    // source catalog that proved its invalidation footprint. This is compact
+    // (two digests plus revision), unlike embedding the full derived index in
+    // every journal record.
+    writer.u8(feature_footprint_catalog != nullptr ? 1U : 0U);
+    if (feature_footprint_catalog != nullptr) {
+        writer.digest(feature_footprint_catalog->source_digest());
+        writer.u64(feature_footprint_catalog->feature_source_revision());
+        writer.digest(feature_footprint_catalog->content_digest());
+    }
     writer.binary(validated.canonical_snapshot);
     return writer.finish();
 }
@@ -288,7 +309,9 @@ WorldDeltaSectionKey section_key_for(const CellCoord &coordinate) {
 }
 
 void add_conservative_invalidation_neighborhood(
-    const WorldDeltaSectionKey &owner, std::set<WorldDeltaSectionKey, SectionKeyLess> &affected) {
+    const WorldDeltaSectionKey &owner,
+    std::set<WorldDeltaSectionKey, SectionKeyLess> &affected,
+    const std::size_t max_affected_sections) {
     for (std::int32_t z_offset = -1; z_offset <= 1; ++z_offset) {
         for (std::int32_t y_offset = -1; y_offset <= 1; ++y_offset) {
             for (std::int32_t x_offset = -1; x_offset <= 1; ++x_offset) {
@@ -297,6 +320,9 @@ void add_conservative_invalidation_neighborhood(
                     static_cast<std::int32_t>(owner.section.y + y_offset),
                     static_cast<std::int32_t>(owner.section.z + z_offset),
                 }});
+                if (affected.size() > max_affected_sections) {
+                    throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
+                }
             }
         }
     }
@@ -367,6 +393,55 @@ void add_changed_feature_instance_cells(
                 ++new_index;
             }
         }
+    }
+}
+
+void add_feature_footprint_sections(
+    const NativeGeneratedFeatureFootprintEntry &entry,
+    std::set<WorldDeltaSectionKey, SectionKeyLess> &affected,
+    const std::size_t max_affected_sections) {
+    for (const NativeFeatureFootprintRun &run : entry.runs) {
+        const CellCoord first_section = section_key_for(run.first).section;
+        const CellCoord last_section = section_key_for({
+            run.last_x_inclusive, run.first.y, run.first.z,
+        }).section;
+        for (std::int64_t section_x = first_section.x; section_x <= last_section.x; ++section_x) {
+            add_conservative_invalidation_neighborhood({{
+                static_cast<std::int32_t>(section_x), first_section.y, first_section.z,
+            }}, affected, max_affected_sections);
+        }
+    }
+}
+
+void add_changed_feature_tombstone_sections(
+    const NativeFeatureDeltaSnapshot &before,
+    const NativeFeatureDeltaSnapshot &after,
+    const NativeGeneratedFeatureFootprintCatalog &feature_footprint_catalog,
+    std::set<WorldDeltaSectionKey, SectionKeyLess> &affected,
+    const std::size_t max_affected_sections) {
+    const auto &old_tombstones = before.tombstones();
+    const auto &new_tombstones = after.tombstones();
+    std::size_t old_index = 0U;
+    std::size_t new_index = 0U;
+    while (old_index < old_tombstones.size() || new_index < new_tombstones.size()) {
+        const NativeFeatureTombstone *changed = nullptr;
+        if (old_index == old_tombstones.size()) {
+            changed = &new_tombstones[new_index++];
+        } else if (new_index == new_tombstones.size()) {
+            changed = &old_tombstones[old_index++];
+        } else if (utf8_byte_less(old_tombstones[old_index].feature_id, new_tombstones[new_index].feature_id)) {
+            changed = &old_tombstones[old_index++];
+        } else if (utf8_byte_less(new_tombstones[new_index].feature_id, old_tombstones[old_index].feature_id)) {
+            changed = &new_tombstones[new_index++];
+        } else {
+            ++old_index;
+            ++new_index;
+            continue;
+        }
+        // Both snapshots passed feature-admission validation under this
+        // immutable catalog, so lookup is an established invariant here.
+        add_feature_footprint_sections(
+            *feature_footprint_catalog.find(changed->feature_id), affected, max_affected_sections);
     }
 }
 
@@ -450,11 +525,13 @@ NativeTerrainVolumeV2 validate_terrain_volume(const NativeTerrainVolumeV2 &value
     }
 }
 
-NativeFeatureDeltaSnapshot validate_initial_features(const NativeFeatureDeltaSnapshot &value) {
+NativeFeatureDeltaSnapshot validate_initial_features(
+    const NativeFeatureDeltaSnapshot &value,
+    const NativeGeneratedFeatureFootprintCatalog *const feature_footprint_catalog) {
     WorldFeatureDeltaAdmission admission;
     admission.transaction_id = "initial-feature-validation";
     admission.snapshot = value;
-    return validate_feature_admission(admission).snapshot;
+    return validate_feature_admission(admission, feature_footprint_catalog).snapshot;
 }
 
 std::vector<NativeTypedWorldStateRecord> validate_initial_overlays(
@@ -500,6 +577,7 @@ bool fits_record_capacity(const WorldDeltaSnapshotState &state, const WorldDelta
 bool valid_capacity_limits(const WorldDeltaStoreLimits &limits) noexcept {
     if (limits.max_persisted_records == 0U
         || limits.max_resident_records == 0U
+        || limits.max_affected_sections == 0U
         || limits.max_transactions == 0U) {
         return false;
     }
@@ -650,7 +728,11 @@ Sha256Digest WorldDeltaPinnedSnapshot::typed_projection_digest(
     return sha256(writer.finish());
 }
 
-WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits, WorldDeltaInitialSnapshot initial) : limits_(limits) {
+WorldDeltaStore::WorldDeltaStore(
+    const WorldDeltaStoreLimits limits,
+    WorldDeltaInitialSnapshot initial,
+    std::shared_ptr<const NativeGeneratedFeatureFootprintCatalog> feature_footprint_catalog)
+    : limits_(limits), feature_footprint_catalog_(std::move(feature_footprint_catalog)) {
     if (!valid_capacity_limits(limits_)) {
         throw WorldDeltaRejected(WorldDeltaRejectReason::invalid_transaction);
     }
@@ -664,7 +746,8 @@ WorldDeltaStore::WorldDeltaStore(const WorldDeltaStoreLimits limits, WorldDeltaI
     state->revision = initial.revision != 0U ? initial.revision : limits_.initial_revision;
     state->terrain_volume = validate_terrain_volume(initial.terrain_volume);
     state->typed_transient_overlays = validate_initial_overlays(initial.transient_overlays);
-    state->feature_delta_snapshot = validate_initial_features(initial.feature_delta_snapshot);
+    state->feature_delta_snapshot = validate_initial_features(
+        initial.feature_delta_snapshot, feature_footprint_catalog_.get());
     if (!fits_record_capacity(*state, limits_)) throw WorldDeltaRejected(WorldDeltaRejectReason::capacity_exceeded);
     seal_content_digest(*state);
     state_ = std::move(state);
@@ -752,7 +835,8 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
         next->revision = state_->revision + 1U;
         std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
         for (const CellCoord &cell : changed_cells) {
-            add_conservative_invalidation_neighborhood(section_key_for(cell), affected);
+            add_conservative_invalidation_neighborhood(
+                section_key_for(cell), affected, limits_.max_affected_sections);
         }
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
@@ -816,7 +900,8 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
         next->revision = state_->revision + 1U;
         std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
         for (const CellCoord &cell : changed_cells) {
-            add_conservative_invalidation_neighborhood(section_key_for(cell), affected);
+            add_conservative_invalidation_neighborhood(
+                section_key_for(cell), affected, limits_.max_affected_sections);
         }
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;
@@ -832,8 +917,10 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
 WorldDeltaCommitReceipt WorldDeltaStore::admit_feature_deltas(const WorldFeatureDeltaAdmission &admission) {
     static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
     static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
-    const ValidatedFeatureAdmission validated = validate_feature_admission(admission);
-    std::vector<std::uint8_t> canonical = canonical_feature_admission(admission, validated);
+    const ValidatedFeatureAdmission validated = validate_feature_admission(
+        admission, feature_footprint_catalog_.get());
+    std::vector<std::uint8_t> canonical = canonical_feature_admission(
+        admission, validated, feature_footprint_catalog_.get());
     const auto replay = std::find_if(transactions_.begin(), transactions_.end(), [&](const TransactionRecord &record) {
         return record.transaction_id == admission.transaction_id;
     });
@@ -875,7 +962,16 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_feature_deltas(const WorldFeature
         next->revision = state_->revision + 1U;
         std::set<WorldDeltaSectionKey, SectionKeyLess> affected;
         for (const CellCoord &cell : changed_cells) {
-            add_conservative_invalidation_neighborhood(section_key_for(cell), affected);
+            add_conservative_invalidation_neighborhood(
+                section_key_for(cell), affected, limits_.max_affected_sections);
+        }
+        if (!state_->feature_delta_snapshot.tombstones().empty()
+            || !next->feature_delta_snapshot.tombstones().empty()) {
+            // validate_feature_admission established this catalog requirement
+            // for any nonempty before/after tombstone snapshot.
+            add_changed_feature_tombstone_sections(
+                state_->feature_delta_snapshot, next->feature_delta_snapshot,
+                *feature_footprint_catalog_, affected, limits_.max_affected_sections);
         }
         receipt.status = WorldDeltaCommitStatus::committed;
         receipt.revision = next->revision;

@@ -2,6 +2,7 @@
 
 #include "coordinates.hpp"
 #include "native_feature_delta.hpp"
+#include "native_generated_feature_footprint_catalog.hpp"
 #include "native_terrain_volume_v2_codec.hpp"
 #include "native_typed_world_state_snapshot.hpp"
 #include "sha256.hpp"
@@ -130,6 +131,10 @@ struct WorldDeltaStoreLimits {
         + DEFAULT_MAX_PLAYER_CREATED_INSTANCES;
     static constexpr std::size_t DEFAULT_MAX_RESIDENT_RECORDS =
         DEFAULT_MAX_PERSISTED_RECORDS + DEFAULT_MAX_SCENE_OVERLAY_RECORDS;
+    // A receipt is consumed by bounded publication queues, so it must have a
+    // hard section cap. A feature mutation that would exceed it is rejected
+    // atomically and remains retryable after the caller narrows its request.
+    static constexpr std::size_t DEFAULT_MAX_AFFECTED_SECTIONS = 262144U;
 
     std::size_t max_durable_terrain_records = DEFAULT_MAX_DURABLE_TERRAIN_RECORDS;
     std::size_t max_scene_overlay_records = DEFAULT_MAX_SCENE_OVERLAY_RECORDS;
@@ -137,6 +142,7 @@ struct WorldDeltaStoreLimits {
     std::size_t max_player_created_instances = DEFAULT_MAX_PLAYER_CREATED_INSTANCES;
     std::size_t max_persisted_records = DEFAULT_MAX_PERSISTED_RECORDS;
     std::size_t max_resident_records = DEFAULT_MAX_RESIDENT_RECORDS;
+    std::size_t max_affected_sections = DEFAULT_MAX_AFFECTED_SECTIONS;
     // This is a hard bound rather than an eviction hint: evicting a completed
     // transaction would invalidate its idempotency contract.
     std::size_t max_transactions = 65536;
@@ -221,7 +227,9 @@ public:
     // reset endpoint: callers must build a fresh owner before publishing any
     // pin, so an import cannot expose a mixed old/new world snapshot.
     explicit WorldDeltaStore(
-        WorldDeltaStoreLimits limits = {}, WorldDeltaInitialSnapshot initial = {});
+        WorldDeltaStoreLimits limits = {},
+        WorldDeltaInitialSnapshot initial = {},
+        std::shared_ptr<const NativeGeneratedFeatureFootprintCatalog> feature_footprint_catalog = nullptr);
     ~WorldDeltaStore();
 
     std::uint64_t revision() const noexcept;
@@ -244,6 +252,10 @@ public:
 
 private:
     WorldDeltaStoreLimits limits_;
+    // Configuration is immutable for this store lifetime. It is not persisted
+    // delta state: the owning generated-world source recreates and verifies it
+    // before a v2 snapshot containing tombstones is admitted.
+    std::shared_ptr<const NativeGeneratedFeatureFootprintCatalog> feature_footprint_catalog_;
     std::shared_ptr<const WorldDeltaSnapshotState> state_;
     struct TransactionRecord;
     std::vector<TransactionRecord> transactions_;

@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -175,6 +176,39 @@ WorldFeatureDeltaAdmission feature_admission(const std::string &id, const std::u
     std::vector<NativeFeatureTombstone> tombstones = {},
     std::vector<NativePlayerCreatedInstance> instances = {}) {
     return {id, expected, NativeFeatureDeltaSnapshot::create(std::move(tombstones), std::move(instances))};
+}
+
+Sha256Digest feature_digest(const std::uint8_t value) {
+    Sha256Digest result{};
+    result.fill(value);
+    return result;
+}
+
+NativeGeneratedFeatureFootprintEntry footprint_entry(
+    const std::string &feature_id,
+    const std::int32_t first_x,
+    const std::int32_t last_x,
+    const std::int32_t y = 0,
+    const std::int32_t z = 0) {
+    NativeGeneratedFeatureFootprintEntry result;
+    result.feature_id = feature_id;
+    result.recipe_key = "tree.bushy_oak";
+    result.recipe_revision = 21U;
+    result.footprint_schema_revision = 1U;
+    result.generated_definition_digest = feature_digest(9U);
+    result.runs = {
+        {NativeFeatureFootprintChannel::terrain_source, {first_x, y, z}, last_x},
+        {NativeFeatureFootprintChannel::render, {first_x, y, z}, last_x},
+        {NativeFeatureFootprintChannel::collision, {first_x, y, z}, last_x},
+        {NativeFeatureFootprintChannel::navigation, {first_x, y, z}, last_x},
+    };
+    return result;
+}
+
+std::shared_ptr<const NativeGeneratedFeatureFootprintCatalog> feature_catalog(
+    std::vector<NativeGeneratedFeatureFootprintEntry> entries) {
+    return std::make_shared<const NativeGeneratedFeatureFootprintCatalog>(
+        NativeGeneratedFeatureFootprintCatalog::create(feature_digest(3U), 7U, std::move(entries)));
 }
 
 NativeTerrainVolumeV2 persisted_terrain_volume(
@@ -593,6 +627,91 @@ VWB_TEST(world_delta_store_rejects_tombstones_until_a_native_feature_footprint_c
     }));
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, player_only.status);
     VWB_EXPECT_EQ(27U, player_only.affected_sections.size());
+}
+
+VWB_TEST(world_delta_store_admits_catalog_resolved_tombstones_and_invalidates_all_channels) {
+    const auto catalog = feature_catalog({
+        footprint_entry("generated:tree:west", -16, -1, 0, 0),
+        footprint_entry("generated:tree:east", 32, 47, 0, 0),
+    });
+    WorldDeltaStore store({}, {}, catalog);
+    const WorldDeltaCommitReceipt first = store.admit_feature_deltas(feature_admission(
+        "feature:remove-west", 0, {{"generated:tree:west"}}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, first.status);
+    VWB_EXPECT_EQ(1ULL, first.revision);
+    // All four channels name the same section here, so the receipt is one
+    // deduplicated conservative 3x3x3 neighborhood rather than four copies.
+    VWB_EXPECT_EQ(27U, first.affected_sections.size());
+    VWB_EXPECT(std::find(first.affected_sections.begin(), first.affected_sections.end(),
+        WorldDeltaSectionKey{{-1, 0, 0}}) != first.affected_sections.end());
+    VWB_EXPECT_EQ(std::string("generated:tree:west"),
+        store.pin().feature_delta_snapshot().tombstones()[0].feature_id);
+
+    const WorldDeltaCommitReceipt replaced = store.admit_feature_deltas(feature_admission(
+        "feature:replace-tombstone", 1, {{"generated:tree:east"}}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, replaced.status);
+    // Old (section -1) and new (section 2) footprints both invalidate,
+    // including their halo sections, so resurrecting the old tree cannot
+    // retain a stale physical or navigation artifact.
+    VWB_EXPECT_EQ(54U, replaced.affected_sections.size());
+    VWB_EXPECT(std::find(replaced.affected_sections.begin(), replaced.affected_sections.end(),
+        WorldDeltaSectionKey{{-1, 0, 0}}) != replaced.affected_sections.end());
+    VWB_EXPECT(std::find(replaced.affected_sections.begin(), replaced.affected_sections.end(),
+        WorldDeltaSectionKey{{2, 0, 0}}) != replaced.affected_sections.end());
+
+    const WorldDeltaCommitReceipt reversed = store.admit_feature_deltas(feature_admission(
+        "feature:reverse-tombstone", 2, {{"generated:tree:west"}}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, reversed.status);
+    VWB_EXPECT_EQ(54U, reversed.affected_sections.size());
+
+    const WorldDeltaCommitReceipt restored = store.admit_feature_deltas(feature_admission(
+        "feature:restore", 3));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, restored.status);
+    VWB_EXPECT_EQ(27U, restored.affected_sections.size());
+    VWB_EXPECT(store.pin().feature_delta_snapshot().tombstones().empty());
+}
+
+VWB_TEST(world_delta_store_rejects_unresolved_or_overlarge_catalog_tombstone_receipts_atomically) {
+    const auto catalog = feature_catalog({footprint_entry("generated:tree:known", 0, 0)});
+    WorldDeltaStore unresolved({}, {}, catalog);
+    expect_feature_rejection(WorldDeltaRejectReason::invalid_transaction,
+        feature_admission("feature:unknown", 0, {{"generated:tree:unknown"}}), unresolved);
+    VWB_EXPECT_EQ(0ULL, unresolved.revision());
+    VWB_EXPECT(unresolved.pin().feature_delta_snapshot().tombstones().empty());
+
+    WorldDeltaStoreLimits tight = WorldDeltaStoreLimits{};
+    tight.max_affected_sections = 26U;
+    WorldDeltaStore overlarge(tight, {}, catalog);
+    expect_feature_rejection(WorldDeltaRejectReason::capacity_exceeded,
+        feature_admission("feature:too-wide", 0, {{"generated:tree:known"}}), overlarge);
+    VWB_EXPECT_EQ(0ULL, overlarge.revision());
+    VWB_EXPECT(overlarge.pin().feature_delta_snapshot().tombstones().empty());
+
+    const NativeFeatureDeltaSnapshot tombstones = NativeFeatureDeltaSnapshot::create(
+        {{"generated:tree:known"}}, {});
+    WorldDeltaStore restored({}, initial_checkpoint(4U, {}, {}, tombstones), catalog);
+    VWB_EXPECT_EQ(4ULL, restored.revision());
+    VWB_EXPECT_EQ(1U, restored.pin().feature_delta_snapshot().tombstones().size());
+    VWB_EXPECT_THROW(WorldDeltaRejected,
+        WorldDeltaStore({}, initial_checkpoint(4U, {}, {}, tombstones)));
+
+    WorldDeltaStoreLimits invalid_limits = WorldDeltaStoreLimits{};
+    invalid_limits.max_affected_sections = 0U;
+    VWB_EXPECT_THROW(WorldDeltaRejected, WorldDeltaStore{invalid_limits});
+}
+
+VWB_TEST(world_delta_store_keeps_an_unchanged_tombstone_footprint_when_other_feature_state_changes) {
+    const auto catalog = feature_catalog({footprint_entry("generated:tree:fixed", 0, 0)});
+    WorldDeltaStore store({}, {}, catalog);
+    static_cast<void>(store.admit_feature_deltas(feature_admission(
+        "feature:remove", 0, {{"generated:tree:fixed"}})));
+    const WorldDeltaCommitReceipt mixed = store.admit_feature_deltas(feature_admission(
+        "feature:add-player", 1, {{"generated:tree:fixed"}}, {
+            feature_instance("player:crate:catalog", {32, 0, 0}),
+        }));
+    // The unchanged tombstone is compared and retained without needless
+    // republishing; only the new player instance invalidates its own halo.
+    VWB_EXPECT_EQ(27U, mixed.affected_sections.size());
 }
 
 VWB_TEST(world_delta_store_feature_admissions_are_idempotent_kind_strict_and_capacity_bounded) {
