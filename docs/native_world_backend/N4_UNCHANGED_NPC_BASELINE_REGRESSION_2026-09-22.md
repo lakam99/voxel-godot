@@ -22,7 +22,7 @@ The four failing runners are:
 
 | Runner | Report | Concrete result |
 |---|---|---|
-| `streaming_save` | `artifacts/npc/reports/streaming_save-both.json` | Two `npc_save_world_signature_unchanged` failures: baseline 423,894 bytes, latest 0 bytes. Read-only source review found the fixed ignored `artifacts/world-signature/latest/atlas-1492.json` missing; the NPC runner does not generate it, and the aggregate registry's separate world-signature runner writes elsewhere and runs later. This is a missing-fixture/order failure, not proof of save mismatch. Actual signature parity remains untested. |
+| `streaming_save` | `artifacts/npc/reports/streaming_save-both.json` | Two `npc_save_world_signature_unchanged` failures: baseline 423,894 bytes, latest 0 bytes. Read-only source review found the fixed ignored `artifacts/world-signature/latest/atlas-1492.json` missing; the NPC runner does not generate it, and the aggregate registry's separate world-signature runner writes elsewhere and runs later. Subsequent visible signature generation and focused rerun below prove this particular failure was fixture/order, not a save mismatch. |
 | `real_tutorial_playthrough` | `artifacts/npc/reports/real_tutorial_playthrough-both.json` | Headed main-menu -> New Game; Mira did not reach strict home interior by the 42.824-second observation cutoff. Screenshot: `artifacts/npc/screenshots/real_tutorial_playthrough-both/mira_timeout_final_state.png`. |
 | `real_tutorial_final_rescue` | `artifacts/npc/reports/real_tutorial_final_rescue-both.json` | Niko remained at the rescue site with return-home route `pending_budget`/`validation_step_budget_deferred`; failure `final_rescue_return_actor_stalled`. Mira was also pending validation budget in the same final snapshot. |
 | `town_job_cycle_visual` | `artifacts/npc/reports/town_job_cycle_visual-both.json` | Wrapper exited 1 at about 300.5 seconds. The partial report contained seven precondition-only passes but `finished=false`; progress stopped at `observe_day_jobs_0660`. All 11 actors still had zero completed job runs at the last persisted day sample, with six active routes pending budget and none moving. This is a timeout, not a pass. |
@@ -61,3 +61,34 @@ frames/s during day observation also made the requested 2,700-frame window
 far longer than the wrapper deadline. Do not infer game-path acceptance from
 the seven partial preconditions or count this forced cleanup as a clean
 natural exit.
+
+## World-signature fixture diagnostic
+
+`node tools/run-world-signature.mjs -Seed atlas-1492` was run without
+`-UpdateBaseline`, targeting the exact missing latest path. It exited 1
+without writing a signature. The owned receipt
+`artifacts/node-tools/process-runs/godot-p2lZlw/watchdog.json` records a
+run-local stop at about 59 seconds (`overallExitCode=126`, not a timeout),
+forced cleanup, and authoritative zero owned processes. `stderr.log` contains
+dummy-renderer RID/mesh-storage errors, beginning with `Initializing already
+initialized RID`; no GDScript exception or signature-readiness milestone was
+reported. `WorldSignatureRunner.gd` instantiates the real Main scene before
+its first readiness milestone, so the exact offending visual/resource path
+is not proved by this log. This reproduces a headless presentation/lifecycle
+failure before signature serialization, not a deterministic-world mismatch.
+The known historical dummy world-signature access violation remains a
+separate unresolved possibility; this run did not establish that exact crash.
+
+The headed diagnostic `node tools/run-world-signature.mjs -Seed atlas-1492
+-Visible` then exited 0. It wrote the latest fixture and matched the tracked
+`artifacts/baselines/world-signature/atlas-1492.json` byte-for-byte; owned
+receipt: `artifacts/node-tools/process-runs/godot-FNfq5T/watchdog.json`.
+With that fixture present, `node tools/npc/run-npc-streaming-save-tests.mjs
+-TimeMode Both` exited 0. Its report
+`artifacts/npc/reports/streaming_save-both.json` shows both day and night
+`npc_save_world_signature_unchanged` assertions passing with 423,894 bytes
+each. The original aggregate failure is explained by missing fixture and
+runner ordering. This focused result does not clear the three remaining
+headed NPC failures or establish full Gate 5 acceptance. The dummy-renderer
+signature path still needs a separate source-level repair/verification before
+it can serve as reliable headless evidence.
