@@ -87,19 +87,20 @@ func prop_coordinate_sequence(seed_text: String, chunk_x: int, chunk_z: int) -> 
 	}
 
 func removed_root_shift_sequence(seed_text: String, remove_first_root: bool) -> Dictionary:
-	# Narrow source-order witness: attempt zero is otherwise an ordinary rock,
-	# whose make_rock path consumes six compatibility draws. A tombstone skips
-	# those draws and the prop roll before the next pair of coordinates.
+	# Full 28-attempt source-order witness with deliberately synthetic decisions:
+	# attempt zero is otherwise an ordinary rock; later eligible attempts choose
+	# no feature. A root tombstone skips the first prop roll and six rock draws.
 	var rng := RandomNumberGenerator.new()
 	rng.seed = legacy_hash("%s:props:%d,%d" % [seed_text, 0, 0])
 	var attempts: Array[Dictionary] = []
-	for attempt in range(2):
+	for attempt in range(28):
 		var before_coordinates := rng.state
 		var x := 2 + rng.randi_range(0, 24)
 		var z := 2 + rng.randi_range(0, 24)
 		var after_coordinates := rng.state
+		if attempt != 0 or not remove_first_root:
+			rng.randf() # eligible prop roll
 		if attempt == 0 and not remove_first_root:
-			rng.randf() # prop roll
 			for _draw in range(6):
 				rng.randf() # ordinary rock recipe
 		attempts.append({
@@ -118,12 +119,14 @@ func _initialize() -> void:
 	var without_removal := removed_root_shift_sequence("atlas-1492", false)
 	var with_removal := removed_root_shift_sequence("atlas-1492", true)
 	if without_removal.attempts[0].id != with_removal.attempts[0].id \
-			or without_removal.attempts[1].id == with_removal.attempts[1].id:
+			or without_removal.attempts[1].id == with_removal.attempts[1].id \
+			or without_removal.attempts.size() != 28 or with_removal.attempts.size() != 28 \
+			or without_removal.finalState == with_removal.finalState:
 		push_error("Removed-root source-order oracle did not shift the next candidate")
 		quit(1)
 		return
 	var report := {
-		"schema": "n4-surface-prop-rng-oracle/v2",
+		"schema": "n4-surface-prop-rng-oracle/v3",
 		"legacyHash": {
 			"empty": legacy_hash(""),
 			"atlas": legacy_hash("atlas-1492"),

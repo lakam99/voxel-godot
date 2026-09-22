@@ -666,3 +666,12 @@ and recipe from one advancing PCG in the live order. Keep the existing stream
 types as shadow diagnostics until that producer and a real save/reload
 differential prove replacement parity. A future decision to make removals
 non-perturbing should be a separately versioned gameplay/save change.
+
+The follow-up v3 direct Godot oracle extends the same synthetic first-rock
+versus removed-root pair through all 28 attempts, with later eligible attempts
+consuming a no-feature prop roll. The report is
+`artifacts/native-world-backend/n4-removed-root-rng-oracle-02/report.json`:
+the final IDs are `atlas-1492:21,15:27` (intact) and
+`atlas-1492:6,5:27` (removed), with different final PCG states. This is a
+full-chunk RNG-order target for the native producer, not yet a terrain,
+structure, recipe, save/reload, or gameplay acceptance result.
