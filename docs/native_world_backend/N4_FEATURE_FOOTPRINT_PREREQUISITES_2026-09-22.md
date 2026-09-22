@@ -77,6 +77,21 @@ this first surface-manifest slice. Native compatibility tests must also cover
 Godot Unicode-scalar hashing and `RandomNumberGenerator` semantics before
 claiming raw-seed or non-ASCII stable-ID parity.
 
+## Surface-prop RNG compatibility slice
+
+`GodotPcg32` now implements the pinned Godot 4.6 PCG seed, bounded-range,
+state, and single-precision `randf` semantics in the pure core. The companion
+`NativeSurfacePropAttemptStream` creates the unfiltered 28 coordinate/opaque-ID
+attempts for one surface chunk. It validates raw UTF-8/scalar agreement and
+rejects out-of-domain chunk coordinates; it does not query terrain, choose a
+feature class, calculate ecology, or publish anything.
+
+The headless `N4SurfacePropRngOracle.gd` records Godot's raw/range/float state
+vectors and ASCII plus non-ASCII chunk attempts. The native tests freeze those
+engine vectors and cover PCG rejection/float edge paths, Unicode scalars,
+negative chunks, and malformed admission. This is deliberately a compatibility
+prerequisite: no production prop recipe or `removedProps` authority changed.
+
 ## Verification
 
 `node tools/run-native-world-backend-tests.mjs --run-name n4-shadow-prerequisites-06`
@@ -103,3 +118,21 @@ That receipt passed 278/278 debug and 278/278 release tests with 6,412/6,412
 lines, 823/823 functions, and 3,272/3,272 branches. It proves the isolated
 native admission/invalidation contract only; it does not prove generated
 catalog construction or live publication.
+
+The surface-prop RNG/attempt-stream slice was verified with:
+
+`node tools/run-native-world-backend-tests.mjs --run-name n4-prop-rng-attempt-stream-08`
+
+Its receipt is
+`artifacts/native-world-backend/n4-prop-rng-attempt-stream-08/report.json`:
+
+- debug and release standalone core suites passed;
+- Godot 4.6.1 adapter smoke and staged release-adapter smoke passed;
+- strict pure-core coverage: 6,515/6,515 lines, 842/842 functions, and
+  3,296/3,296 branches.
+
+The engine oracle was captured at
+`artifacts/native-world-backend/n4-prop-rng-attempt-stream-07/godot-rng-oracle-report.json`.
+Together these prove source-RNG/coordinate compatibility in isolation, not
+terrain/feature-class parity, typed feature geometry, tombstone publication,
+or live gameplay.
