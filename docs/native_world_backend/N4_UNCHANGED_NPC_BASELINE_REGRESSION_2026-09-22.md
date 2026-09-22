@@ -22,10 +22,10 @@ The four failing runners are:
 
 | Runner | Report | Concrete result |
 |---|---|---|
-| `streaming_save` | `artifacts/npc/reports/streaming_save-both.json` | Two `npc_save_world_signature_unchanged` failures: baseline 423,894 bytes, latest 0 bytes. The save/runner cause remains undiagnosed. |
+| `streaming_save` | `artifacts/npc/reports/streaming_save-both.json` | Two `npc_save_world_signature_unchanged` failures: baseline 423,894 bytes, latest 0 bytes. Read-only source review found the fixed ignored `artifacts/world-signature/latest/atlas-1492.json` missing; the NPC runner does not generate it, and the aggregate registry's separate world-signature runner writes elsewhere and runs later. This is a missing-fixture/order failure, not proof of save mismatch. Actual signature parity remains untested. |
 | `real_tutorial_playthrough` | `artifacts/npc/reports/real_tutorial_playthrough-both.json` | Headed main-menu -> New Game; Mira did not reach strict home interior by the 42.824-second observation cutoff. Screenshot: `artifacts/npc/screenshots/real_tutorial_playthrough-both/mira_timeout_final_state.png`. |
 | `real_tutorial_final_rescue` | `artifacts/npc/reports/real_tutorial_final_rescue-both.json` | Niko remained at the rescue site with return-home route `pending_budget`/`validation_step_budget_deferred`; failure `final_rescue_return_actor_stalled`. Mira was also pending validation budget in the same final snapshot. |
-| `town_job_cycle_visual` | `artifacts/npc/reports/town_job_cycle_visual-both.json` | Wrapper exited 1 at about 300.5 seconds. The partial report contained seven passing results but `finished=false`; progress stopped at `observe_day_jobs_0660`. This is a timeout, not a pass. |
+| `town_job_cycle_visual` | `artifacts/npc/reports/town_job_cycle_visual-both.json` | Wrapper exited 1 at about 300.5 seconds. The partial report contained seven precondition-only passes but `finished=false`; progress stopped at `observe_day_jobs_0660`. All 11 actors still had zero completed job runs at the last persisted day sample, with six active routes pending budget and none moving. This is a timeout, not a pass. |
 
 ## Mira timeline diagnosis, not a fix
 
@@ -50,3 +50,14 @@ There were no new native catalog, structure snapshot, or route-code edits
 before this baseline. N4 implementation stays paused pending discussion of
 the protected pathfinding scope and resolution/verification of these baseline
 failures. Keep the original Gate 5 acceptance matrix open.
+
+For the timed-out town job runner specifically,
+`artifacts/node-tools/process-runs/godot-ItiQWw/watchdog.json` records
+`timedOut=true`, forced job-object cleanup, `cleanupPassed=false`, and
+`authoritativeZeroProven=true` with no final member PIDs. The owned engine
+was terminated *because* the 300-second deadline expired; cleanup was not
+the cause of the unfinished gameplay. Its roughly 6.7 observed physics
+frames/s during day observation also made the requested 2,700-frame window
+far longer than the wrapper deadline. Do not infer game-path acceptance from
+the seven partial preconditions or count this forced cleanup as a clean
+natural exit.
