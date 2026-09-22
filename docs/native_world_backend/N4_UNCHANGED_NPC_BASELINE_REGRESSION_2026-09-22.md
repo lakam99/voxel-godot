@@ -93,6 +93,18 @@ the required day-job/door/home captures. Its partial `day_0540` matrix has
 Absent day-job screenshots cannot establish visual gameplay success or prove
 that all actors are permanently stalled.
 
+The final-rescue return timeline narrows Niko's case further. From samples
+`final_rescue_return_018` through `_097` (time 132.38 to 141.08 seconds),
+his request ID remains `niko:v2:3:27`, cell remains `(312,-20)`, and
+`pendingBudgetFrames` rises from 55 to 577. It is not visibly cycling through
+new request IDs in that interval. The final recent events show a planning
+grant with two validation steps and zero actual search expansions, followed
+by `validation_step_budget_deferred`. This proves repeated incremental
+service while he does not move; the report does not expose enough substrate
+cursor history to prove whether each grant advances useful preflight or
+validation work. Do not label the pending counter itself as denied grants or
+infer a permanent deadlock from this bounded observation.
+
 ## World-signature fixture diagnostic
 
 `node tools/run-world-signature.mjs -Seed atlas-1492` was run without
