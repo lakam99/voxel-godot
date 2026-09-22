@@ -72,6 +72,15 @@ exclusion margin, placement, and the single upright trunk cylinder contract.
 The footprint catalog references that definition through its digest; it does
 not replace typed feature geometry.
 
+`NativeTreeDefinition` now records that fact as an immutable NTD1 value. It
+keeps natural world placement distinct from site-owner-local placement, retains
+the owner ID needed to rebind a Citadel tree, and never derives one opaque ID
+from the other. Its exact physical declaration is one float32 trunk cylinder
+(`radius = trunkRadius`, `height = collisionHeight`, centered at half height).
+Canopy and ordered root-buttress records are non-collision provenance; a
+natural surface tree cannot carry buttresses, while a site tree may. This is a
+definition/digest boundary only: it neither chooses a tree nor publishes one.
+
 Underground props are a separate source/RNG domain and are explicitly outside
 this first surface-manifest slice. Native compatibility tests must also cover
 Godot Unicode-scalar hashing and `RandomNumberGenerator` semantics before
@@ -136,3 +145,20 @@ The engine oracle was captured at
 Together these prove source-RNG/coordinate compatibility in isolation, not
 terrain/feature-class parity, typed feature geometry, tombstone publication,
 or live gameplay.
+
+The typed tree-definition contract was verified with:
+
+`node tools/run-native-world-backend-tests.mjs --run-name n4-tree-definition-contract-03`
+
+Its receipt is
+`artifacts/native-world-backend/n4-tree-definition-contract-03/report.json`:
+
+- debug and release standalone core suites passed 293/293 tests each;
+- Godot 4.6.1 adapter and staged release-adapter smokes passed;
+- strict pure-core coverage: 6,670/6,670 lines, 882/882 functions, and
+  3,586/3,586 branches.
+
+This proves canonical native tree-definition admission, identity, coordinate
+frames, and the physical/non-collision boundary. It does not prove native
+ecology/recipe generation, a catalog producer, rendering/collision publication,
+tombstone behavior, or live gameplay.
