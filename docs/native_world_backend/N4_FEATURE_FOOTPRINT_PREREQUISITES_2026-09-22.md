@@ -237,3 +237,22 @@ rocks. Forage and wildlife are likewise explicit unported outcomes until their
 complete recipe/asset contracts are native. Therefore this classifier cannot
 yet feed a completed trace or generated-feature catalog; it is a fail-closed
 decision boundary, not a feature-family cutover.
+
+## Ore and forage follow-on boundaries
+
+`NativeOreClusterStream` now captures the complete two-child shared-PCG
+baseline used by the live surface source. It records child IDs and state
+boundaries, consumes 47 float draws plus the bounded drop draw for child zero,
+and 48 plus the bounded draw for child one (the latter has the extra spacing
+draw). It has no tombstone parameter. The current script-side child removal
+check is therefore documented as a stream-order defect, not an intended source
+rule to carry into native generation.
+
+Forage remains unported. Its native admission must replace the current
+profile/default visual fallback with a typed recipe registry: stable recipe,
+material and drop IDs; inclusive yield range; positive collider radius;
+recognized visual grammar; and explicit navigation policy. The initial native
+recipe stream must preserve the current branch draw order (berry 26, aloe 44,
+mushroom 26, frost herb 37 recipe calls) even when its root is later removed.
+Any isolated per-feature RNG redesign requires an explicit generator-version
+and world-signature migration rather than an implicit compatibility change.
