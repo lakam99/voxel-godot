@@ -627,6 +627,12 @@ changing physical identity. A direct Godot oracle must cover those cases,
 negative/seam edges, record replacement/reset, insertion-order permutation,
 and all 28 live Boolean decisions before native publication can trust it.
 
+The shadow native snapshot now requires an explicit ready, 28-aligned bounds
+admission receipt and returns an incomplete decision for any query outside
+those bounds or any uncaptured Citadel region. The capture adapter must still
+obtain this receipt from the actual `request_bounds` owner; a caller-created
+ready value is not production evidence.
+
 The direct headless catalog oracle at
 `artifacts/native-world-backend/n4-biome-environment-snapshot-oracle-04/report.json`
 passed all 13 resolved profiles, exact float32/float64 sink bytes, and the
