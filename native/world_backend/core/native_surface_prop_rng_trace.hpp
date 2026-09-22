@@ -44,6 +44,7 @@ struct NativeSurfacePropReplayReceipt final {
 
 struct NativeSurfacePropRngTraceEntry final {
     std::uint32_t ordinal = 0U;
+    NativeSurfacePropReplayDisposition disposition = NativeSurfacePropReplayDisposition::no_feature;
     std::uint64_t state_before_coordinates = 0U;
     std::uint64_t state_after_coordinates = 0U;
     std::uint64_t state_after_recipe = 0U;
@@ -71,16 +72,21 @@ public:
     entries() const noexcept;
     const NativeSurfacePropSourceReceipt &source_receipt() const noexcept;
     std::uint64_t final_rng_state() const noexcept;
+    const std::vector<std::uint8_t> &canonical_binary() const noexcept;
+    const Sha256Digest &content_digest() const noexcept;
 
 private:
     NativeSurfacePropRngTrace(
         NativeSurfacePropSourceReceipt source_receipt,
         std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries,
-        std::uint64_t final_rng_state) noexcept;
+        std::uint64_t final_rng_state, std::vector<std::uint8_t> canonical_binary,
+        Sha256Digest content_digest) noexcept;
 
     NativeSurfacePropSourceReceipt source_receipt_{};
     std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries_{};
     std::uint64_t final_rng_state_ = 0U;
+    std::vector<std::uint8_t> canonical_binary_;
+    Sha256Digest content_digest_{};
 };
 
 } // namespace voxel::world_backend

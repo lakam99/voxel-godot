@@ -204,3 +204,15 @@ passed 296/296 debug and release core tests, both adapter smokes, and strict
 pure-core coverage of 6,732/6,732 lines, 893/893 functions, and 3,634/3,634
 branches. Its receipt is
 `artifacts/native-world-backend/n4-surface-prop-source-receipt-02/report.json`.
+
+The trace is now a canonical `SPT1` immutable artifact. Its SHA-256 content
+digest covers the source receipt, every attempt's replay disposition, all PCG
+state boundaries, class roll, compatibility values, and final state. This is
+the identity a future generated-feature catalog may reference; changing the
+terrain/profile receipt or any decision cannot reuse the prior trace digest.
+
+`node tools/run-native-world-backend-tests.mjs --run-name n4-surface-prop-trace-identity-01`
+passed 296/296 debug and release core tests, both adapter smokes, and strict
+pure-core coverage of 6,772/6,772 lines, 902/902 functions, and 3,644/3,644
+branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-trace-identity-01/report.json`.

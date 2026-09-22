@@ -2,6 +2,7 @@
 
 #include "godot_pcg_compat.hpp"
 
+#include <cstring>
 #include <utility>
 
 namespace voxel::world_backend {
@@ -38,6 +39,47 @@ std::size_t recipe_draw_count(const NativeSurfacePropReplayDisposition value) no
     }
 }
 
+class CanonicalWriter final {
+public:
+    void u8(const std::uint8_t value) { bytes_.push_back(value); }
+    void u32(const std::uint32_t value) {
+        for (int shift = 24; shift >= 0; shift -= 8) u8(static_cast<std::uint8_t>(value >> shift));
+    }
+    void u64(const std::uint64_t value) {
+        for (int shift = 56; shift >= 0; shift -= 8) u8(static_cast<std::uint8_t>(value >> shift));
+    }
+    void digest(const Sha256Digest &value) { bytes_.insert(bytes_.end(), value.begin(), value.end()); }
+    void number(const float value) {
+        std::uint32_t bits = 0U;
+        std::memcpy(&bits, &value, sizeof(bits));
+        u32(bits);
+    }
+    std::vector<std::uint8_t> finish() { return std::move(bytes_); }
+private:
+    std::vector<std::uint8_t> bytes_;
+};
+
+std::vector<std::uint8_t> canonical_trace_binary(
+    const NativeSurfacePropSourceReceipt &source_receipt,
+    const std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &entries,
+    const std::uint64_t final_rng_state) {
+    CanonicalWriter writer;
+    writer.u8('S'); writer.u8('P'); writer.u8('T'); writer.u8('1');
+    writer.u32(source_receipt.schema_revision); writer.u64(source_receipt.terrain_revision);
+    writer.digest(source_receipt.terrain_digest); writer.u32(source_receipt.environment_profile_revision);
+    writer.digest(source_receipt.environment_profile_digest);
+    writer.u32(static_cast<std::uint32_t>(entries.size()));
+    for (const NativeSurfacePropRngTraceEntry &entry : entries) {
+        writer.u32(entry.ordinal); writer.u8(static_cast<std::uint8_t>(entry.disposition));
+        writer.u64(entry.state_before_coordinates); writer.u64(entry.state_after_coordinates);
+        writer.u64(entry.state_after_recipe); writer.u8(entry.has_prop_roll ? 1U : 0U);
+        writer.number(entry.prop_roll); writer.u32(static_cast<std::uint32_t>(entry.recipe_draws.size()));
+        for (const float draw : entry.recipe_draws) writer.number(draw);
+    }
+    writer.u64(final_rng_state);
+    return writer.finish();
+}
+
 } // namespace
 
 NativeSurfacePropRngTraceRejected::NativeSurfacePropRngTraceRejected()
@@ -46,8 +88,11 @@ NativeSurfacePropRngTraceRejected::NativeSurfacePropRngTraceRejected()
 NativeSurfacePropRngTrace::NativeSurfacePropRngTrace(
     NativeSurfacePropSourceReceipt source_receipt,
     std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries,
-    const std::uint64_t final_rng_state) noexcept
-    : source_receipt_(std::move(source_receipt)), entries_(std::move(entries)), final_rng_state_(final_rng_state) {}
+    const std::uint64_t final_rng_state, std::vector<std::uint8_t> canonical_binary,
+    Sha256Digest content_digest) noexcept
+    : source_receipt_(std::move(source_receipt)), entries_(std::move(entries)),
+      final_rng_state_(final_rng_state), canonical_binary_(std::move(canonical_binary)),
+      content_digest_(content_digest) {}
 
 NativeSurfacePropRngTrace NativeSurfacePropRngTrace::create(
     const NativeSurfacePropAttemptStream &attempt_stream,
@@ -64,6 +109,7 @@ NativeSurfacePropRngTrace NativeSurfacePropRngTrace::create(
             || !valid_disposition(receipt.disposition)) reject();
         NativeSurfacePropRngTraceEntry entry;
         entry.ordinal = receipt.ordinal;
+        entry.disposition = receipt.disposition;
         entry.state_before_coordinates = rng.state();
         // Replaying the coordinates proves this trace is bound to the same
         // source stream rather than merely trusting a matching opaque ID.
@@ -81,7 +127,9 @@ NativeSurfacePropRngTrace NativeSurfacePropRngTrace::create(
         entry.state_after_recipe = rng.state();
         entries[index] = std::move(entry);
     }
-    return NativeSurfacePropRngTrace(std::move(source_receipt), std::move(entries), rng.state());
+    std::vector<std::uint8_t> canonical = canonical_trace_binary(source_receipt, entries, rng.state());
+    return NativeSurfacePropRngTrace(
+        std::move(source_receipt), std::move(entries), rng.state(), canonical, sha256(canonical));
 }
 
 const std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &
@@ -90,5 +138,9 @@ const NativeSurfacePropSourceReceipt &NativeSurfacePropRngTrace::source_receipt(
     return source_receipt_;
 }
 std::uint64_t NativeSurfacePropRngTrace::final_rng_state() const noexcept { return final_rng_state_; }
+const std::vector<std::uint8_t> &NativeSurfacePropRngTrace::canonical_binary() const noexcept {
+    return canonical_binary_;
+}
+const Sha256Digest &NativeSurfacePropRngTrace::content_digest() const noexcept { return content_digest_; }
 
 } // namespace voxel::world_backend
