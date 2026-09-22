@@ -409,6 +409,15 @@
       "required": true
     },
     {
+      "id": "biome_environment_snapshot_oracle",
+      "description": "Direct Godot resolved biome environment profile values, exact numeric bits, and source-file identity for native catalog parity",
+      "command": ".\\tools\\run-biome-environment-snapshot-oracle.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\biome-environment-snapshot-oracle.json"],
+      "reportPath": "artifacts\\test-runners\\biome-environment-snapshot-oracle.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "surface_prop_tree_rng_compatibility_contract",
       "description": "Direct Godot source contract for legacy natural-tree shared-PCG draw counts retained by the native surface-prop baseline",
       "command": ".\\tools\\run-surface-prop-tree-rng-contract.mjs",

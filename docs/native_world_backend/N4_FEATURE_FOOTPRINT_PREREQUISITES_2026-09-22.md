@@ -530,3 +530,42 @@ Forage and wildlife builders likewise consume shared RNG for presentation
 geometry. Those facts, full feature footprints and tombstone filtering,
 production caller/deletion audits, live collision publication, and real
 gameplay acceptance remain required before N4 or N3 cutover.
+
+### Source-decision boundary after SPP2
+
+The next producer must bind one admitted terrain pin, one resolved environment
+catalog snapshot, and one immutable structure-exclusion snapshot before the
+first of the 28 attempts. The live sequence waits for whole-chunk Citadel
+terrain admission without consuming RNG, then draws each coordinate pair,
+checks the durable removal ID and structure exclusion, samples effective
+surface, applies height/town gates, and only then consumes the prop roll and
+selected recipe draws. The native decision set must compute its own per-attempt
+digest from those facts and exact scalar-height cutoffs; a caller-supplied
+digest is insufficient. The source height must not be replaced by the rounded
+`Vector3` anchor Y when calculating biome policy.
+
+Structure exclusion currently spans natural-prop exclusion records, structure
+terrain-footprint records, and ready/prepared Citadel reservations. The
+`reserve_natural_prop_exclusion` path does not advance the regional source
+revision, so that revision alone cannot establish a current snapshot: the
+new native source needs a canonical content digest or dedicated revision for
+all three contributors. Environment identity must hash resolved profile
+values, including defaults inherited from `BiomeEnvironmentProfile.gd`, not
+merely raw `.tres` bytes; raw file hashes are separate provenance.
+
+The direct headless catalog oracle at
+`artifacts/native-world-backend/n4-biome-environment-snapshot-oracle-04/report.json`
+passed all 13 resolved profiles, exact float32/float64 sink bytes, and the
+explicit default fallback. Its semantic catalog digest is
+`130aae151cc57c5e00e227dbc0ed11187b74a7a7dae3df734db169654b61e2e4`;
+the 15 source-file hashes remain separate provenance. This is the Godot
+reference snapshot for a future native catalog, not native parity or gameplay
+acceptance.
+
+The current Godot `removed_props` check occurs before structure/surface and
+the prop roll. Consequently a removed root shifts every later shared-RNG
+decision in that chunk. Filtering completed native definitions instead would
+change existing save replay, despite being a cleaner long-term contract. This
+is an explicit migration choice requiring save-ID/reload differential evidence,
+not a parity claim or a test-only normalization. Ore child removals have a
+similar draw-order consequence inside their selected cluster recipe.
