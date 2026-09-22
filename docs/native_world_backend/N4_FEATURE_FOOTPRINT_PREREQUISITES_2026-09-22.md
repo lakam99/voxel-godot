@@ -643,3 +643,20 @@ change existing save replay, despite being a cleaner long-term contract. This
 is an explicit migration choice requiring save-ID/reload differential evidence,
 not a parity claim or a test-only normalization. Ore child removals have a
 similar draw-order consequence inside their selected cluster recipe.
+
+**Migration decision:** preserve the existing save replay during cutover. The
+direct Godot `N4SurfacePropRngOracle.gd` v2 contract fixes the first attempt
+as an ordinary rock and compares an intact root with a removed root. Both
+begin at `atlas-1492:16,17:0`; the next ID is respectively
+`atlas-1492:22,22:1` and `atlas-1492:14,9:1`. Its focused headless run passed
+on 2026-09-22; the report is
+`artifacts/native-world-backend/n4-removed-root-rng-oracle-01/report.json`.
+This is a synthetic RNG/source-order contract, not live-save
+acceptance. The current unfiltered native attempt stream and baseline replay
+cannot serve as the production 28-attempt authority because they assume a
+fixed coordinate stream and post-definition tombstone filtering. A native
+producer must drive each coordinate, tombstone gate, source decision, class,
+and recipe from one advancing PCG in the live order. Keep the existing stream
+types as shadow diagnostics until that producer and a real save/reload
+differential prove replacement parity. A future decision to make removals
+non-perturbing should be a separately versioned gameplay/save change.

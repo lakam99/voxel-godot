@@ -86,11 +86,44 @@ func prop_coordinate_sequence(seed_text: String, chunk_x: int, chunk_z: int) -> 
 		"stateAfterCoordinates": rng.state
 	}
 
+func removed_root_shift_sequence(seed_text: String, remove_first_root: bool) -> Dictionary:
+	# Narrow source-order witness: attempt zero is otherwise an ordinary rock,
+	# whose make_rock path consumes six compatibility draws. A tombstone skips
+	# those draws and the prop roll before the next pair of coordinates.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = legacy_hash("%s:props:%d,%d" % [seed_text, 0, 0])
+	var attempts: Array[Dictionary] = []
+	for attempt in range(2):
+		var before_coordinates := rng.state
+		var x := 2 + rng.randi_range(0, 24)
+		var z := 2 + rng.randi_range(0, 24)
+		var after_coordinates := rng.state
+		if attempt == 0 and not remove_first_root:
+			rng.randf() # prop roll
+			for _draw in range(6):
+				rng.randf() # ordinary rock recipe
+		attempts.append({
+			"ordinal": attempt,
+			"cell": [x, z],
+			"id": "%s:%d,%d:%d" % [seed_text, x, z, attempt],
+			"stateBeforeCoordinates": before_coordinates,
+			"stateAfterCoordinates": after_coordinates,
+			"stateAfterRecipe": rng.state
+		})
+	return {"removedFirstRoot": remove_first_root, "attempts": attempts, "finalState": rng.state}
+
 func _initialize() -> void:
 	var unicode_seed := "世界🌲"
 	var prop_key := "%s:props:%d,%d" % [unicode_seed, -3, 5]
+	var without_removal := removed_root_shift_sequence("atlas-1492", false)
+	var with_removal := removed_root_shift_sequence("atlas-1492", true)
+	if without_removal.attempts[0].id != with_removal.attempts[0].id \
+			or without_removal.attempts[1].id == with_removal.attempts[1].id:
+		push_error("Removed-root source-order oracle did not shift the next candidate")
+		quit(1)
+		return
 	var report := {
-		"schema": "n4-surface-prop-rng-oracle/v1",
+		"schema": "n4-surface-prop-rng-oracle/v2",
 		"legacyHash": {
 			"empty": legacy_hash(""),
 			"atlas": legacy_hash("atlas-1492"),
@@ -104,6 +137,10 @@ func _initialize() -> void:
 		"coordinates": [
 			prop_coordinate_sequence("atlas-1492", 0, 0),
 			prop_coordinate_sequence(unicode_seed, -3, 5)
+		],
+		"removedRootShift": [
+			without_removal,
+			with_removal
 		]
 	}
 	var encoded := JSON.stringify(report)
