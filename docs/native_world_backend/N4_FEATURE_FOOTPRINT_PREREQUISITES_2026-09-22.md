@@ -408,3 +408,52 @@ n4-surface-prop-placement-set-04` passed both debug and release core suites,
 both adapter smokes, and strict pure-core coverage of 7,249/7,249 lines,
 974/974 functions, and 4,056/4,056 branches. Its receipt is
 `artifacts/native-world-backend/n4-surface-prop-placement-set-04/report.json`.
+
+## Natural-tree source-semantics guard
+
+Before the native natural-tree definition can become a physical feature
+definition, its seed handling must preserve the two source operations exactly.
+`TreeRuntimeRequestBuilder.select_tree_family` hashes the raw `seed_text`,
+while `TreeEcologySampler.sample_tree` trims that seed and substitutes
+`"default"` when it is empty. These are deliberately distinct inputs even
+when the current two-family plains profile maps a particular raw and trimmed
+pair to the same selected family.
+
+Normal gameplay already trims an entered seed in `MainCore.apply_world_seed`
+before a world source is created, so this is not evidence of a current
+player-visible whitespace-seed regression. It remains a source-helper and
+adapter boundary that native code must preserve rather than collapsing through
+an incidental normalization.
+
+`node tools/run-surface-tree-seed-semantics-contract.mjs -ReportPath
+artifacts/native-world-backend/n4-surface-tree-seed-semantics-03/godot-seed-semantics-report.json`
+directly executed both source paths and passed its whitespace and empty-seed
+fixtures. The semantic fixture uses a wider family list solely to make the raw
+hash distinction observable; the actual plains profile remains the authority
+for the constructed ecology request. This is source-contract evidence, not
+native parity, physical publication, or gameplay acceptance.
+
+## Native natural-tree definition composer
+
+`NativeSurfaceTreeDefinitionComposer` consumes exactly one anchored SPP1 tree
+placement, its matching unfiltered baseline entry, immutable world-source
+identity, and a typed ecology profile. It deterministically chooses the source
+family from the raw seed, derives ecology from the normalized seed, records the
+runtime height/canopy/trunk/collision request, and emits the existing canonical
+single-upright-trunk `NativeTreeDefinition`. It rejects mismatched replay,
+identity, anchor, profile, family/outcome, and compatibility-draw facts before
+constructing that definition. The profile's finite/range requirements and
+source age-window repair are covered explicitly.
+
+`node tools/run-native-world-backend-tests.mjs --run-name
+n4-surface-tree-definition-composer-06` passed 332/332 standalone core tests
+in each debug and release configuration, both Godot adapter smokes, and strict
+pure-core coverage of 7,480/7,480 lines, 1,003/1,003 functions, and
+4,262/4,262 branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-tree-definition-composer-06/report.json`.
+
+This is a pure, source-bound recipe and physical-declaration slice only. It
+does not yet compose rocks, ore, forage, or wildlife into the one ordered
+baseline feature manifest; publish geometry/collision/navigation; filter
+tombstones; or cut any Godot production caller over. Those remain aggregate
+N4 and later publication work.

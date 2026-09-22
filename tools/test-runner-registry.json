@@ -418,6 +418,15 @@
       "required": true
     },
     {
+      "id": "surface_tree_seed_semantics_contract",
+      "description": "Direct Godot source contract for the intentional raw tree-family seed and normalized tree-ecology seed split",
+      "command": ".\\tools\\run-surface-tree-seed-semantics-contract.mjs",
+      "args": ["-ReportPath", "artifacts\\test-runners\\surface-tree-seed-semantics-contract.json"],
+      "reportPath": "artifacts\\test-runners\\surface-tree-seed-semantics-contract.json",
+      "evidenceLevel": "contract",
+      "required": true
+    },
+    {
       "id": "canopy_asset_import_contract",
       "description": "VOX-120 Godot import integrity and runtime dormancy for generated mature canopy assets",
       "command": ".\\tools\\run-canopy-asset-import-contract-tests.mjs",
