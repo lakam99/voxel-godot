@@ -21,9 +21,10 @@ struct NativeOreClusterChildStream final {
 class NativeOreClusterStreamRejected final : public std::invalid_argument {
 public: NativeOreClusterStreamRejected();
 };
-// Exact shared-PCG baseline for make_ore_cluster(..., count = 2). Tombstones
-// deliberately cannot enter this API: both children must consume their source
-// draws before a later publication layer filters a durable ID.
+// Shadow recipe witness for make_ore_cluster(..., count = 2) with neither
+// child removed. This is not yet a save-replay authority: live Godot checks
+// each child tombstone before that child's draws, so filtering a completed
+// cluster would perturb later shared-PCG coordinates and features.
 class NativeOreClusterStream final {
 public:
     static NativeOreClusterStream create(const std::string &parent_id, NativeOreKind kind, GodotPcg32 &rng);
