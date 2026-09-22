@@ -299,6 +299,17 @@ This proves only capability-receipt admission; it does not yet establish a
 native wildlife profile, RNG stream, feature definition, publication, or live
 gameplay parity.
 
+`NativeWildlifeRecipeCatalog` now owns the immutable current boar/deer/hare
+profile facts: wildlife/raw-meat/hide IDs and inclusive yields, visual and
+speed multipliers, cold multiplier, exact box-collider dimensions/center,
+default collision layer/mask, and static-prop navigation policy.  Biome/cold
+selection is intentionally not duplicated there; it remains a future typed
+source receipt.  `node tools/run-native-world-backend-tests.mjs --run-name
+n4-wildlife-recipe-catalog-01` passed 312/312 debug and release core tests,
+both adapter smokes, and strict coverage of 6,957/6,957 lines, 937/937
+functions, and 3,870/3,870 branches.  Its receipt is
+`artifacts/native-world-backend/n4-wildlife-recipe-catalog-01/report.json`.
+
 The eventual wildlife definition must preserve the selected profile's collider
 dimensions/center, yield ranges, cold and speed semantics, and current
 navigation classification.  Present wildlife is a transform-driven
