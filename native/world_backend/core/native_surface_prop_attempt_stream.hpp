@@ -24,10 +24,11 @@ public:
     NativeSurfacePropAttemptStreamRejected();
 };
 
-// Immutable *unfiltered* legacy attempt stream for one natural surface chunk.
-// It owns neither terrain sampling nor feature publication.  That separation
-// is intentional: removed-prop tombstones must filter a completed manifest,
-// never change which shared-RNG candidates later attempts observe.
+// Shadow diagnostic for an all-coordinate-only PCG pass. This is NOT the
+// production attempt authority: live Godot interleaves prop/recipe draws with
+// later coordinates and skips those draws for removed roots. A source-ordered
+// producer must generate each attempt from the advancing shared PCG instead
+// of using this precomputed stream as a placement manifest.
 class NativeSurfacePropAttemptStream final {
 public:
     static constexpr std::uint32_t ATTEMPT_COUNT = 28U;

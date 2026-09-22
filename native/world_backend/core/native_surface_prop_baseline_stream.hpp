@@ -56,9 +56,11 @@ public:
     NativeSurfacePropBaselineStreamRejected();
 };
 
-// Full unfiltered shared-PCG baseline for every currently typed surface-prop
-// family.  This is deliberately a stream witness, not geometry publication;
-// a later manifest owns definitions, footprints, and tombstone filtering.
+// Shadow recipe-consumption witness for currently typed families. Coordinates
+// are precomputed by NativeSurfacePropAttemptStream, so this is NOT yet a
+// source-ordered production replay or gameplay/save acceptance. The eventual
+// producer must interleave coordinate, tombstone, source/class, and recipe
+// decisions in one advancing PCG before it emits a placement manifest.
 class NativeSurfacePropBaselineStream final {
 public:
     static NativeSurfacePropBaselineStream create(
