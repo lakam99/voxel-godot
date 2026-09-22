@@ -170,3 +170,12 @@ That remaining player-visible latency is a distinct search/work-selection
 problem. It should be addressed with compact source-derived navigation and
 bounded exact proof in the authorized N6 scope, not by raising budgets or
 weakening the headed deadline. The full NPC/Gate 5 matrix remains open.
+The smallest N6-compatible acceleration is a revision-keyed, directed
+static-edge/clearance artifact published from authoritative terrain volume
+and exact feature collision before the tutorial town becomes playable.
+The current four-neighbor A* heap order, goal/tie order, actor-private rules,
+door policy and live occupancy remain unchanged; certified static edges can
+use the existing cheap-work allowance, while unknown or stale edges wait for
+bounded validation and the final route still receives current live proof.
+Exact ordered-route/door-action parity, edit/seam invalidation and the headed
+Mira/Niko/town cases are required before a production cutover.
