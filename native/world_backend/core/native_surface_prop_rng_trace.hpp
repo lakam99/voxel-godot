@@ -1,6 +1,7 @@
 #pragma once
 
 #include "native_surface_prop_attempt_stream.hpp"
+#include "sha256.hpp"
 
 #include <array>
 #include <cstdint>
@@ -9,6 +10,18 @@
 #include <vector>
 
 namespace voxel::world_backend {
+
+// The adapter must capture these identities from the same admitted terrain
+// projection/profile snapshot that decided the per-attempt receipts. They are
+// intentionally opaque here: this trace cannot substitute a second terrain
+// sampler or environment catalog.
+struct NativeSurfacePropSourceReceipt final {
+    std::uint32_t schema_revision = 0U;
+    std::uint64_t terrain_revision = 0U;
+    Sha256Digest terrain_digest{};
+    std::uint32_t environment_profile_revision = 0U;
+    Sha256Digest environment_profile_digest{};
+};
 
 // The Godot source decides these dispositions from authoritative terrain and
 // environment-profile receipts. This pure value deliberately replays their
@@ -51,17 +64,21 @@ class NativeSurfacePropRngTrace final {
 public:
     static NativeSurfacePropRngTrace create(
         const NativeSurfacePropAttemptStream &attempt_stream,
+        NativeSurfacePropSourceReceipt source_receipt,
         const std::vector<NativeSurfacePropReplayReceipt> &receipts);
 
     const std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &
     entries() const noexcept;
+    const NativeSurfacePropSourceReceipt &source_receipt() const noexcept;
     std::uint64_t final_rng_state() const noexcept;
 
 private:
     NativeSurfacePropRngTrace(
+        NativeSurfacePropSourceReceipt source_receipt,
         std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries,
         std::uint64_t final_rng_state) noexcept;
 
+    NativeSurfacePropSourceReceipt source_receipt_{};
     std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries_{};
     std::uint64_t final_rng_state_ = 0U;
 };

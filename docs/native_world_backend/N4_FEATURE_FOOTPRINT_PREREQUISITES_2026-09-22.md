@@ -190,3 +190,17 @@ branches. Its receipt is
 This is shared-RNG compatibility evidence only. It does not classify a live
 surface, generate a native feature definition, publish a feature, accept a
 live tombstone, or establish gameplay parity.
+
+The trace now also requires an opaque source receipt with a schema revision,
+terrain revision/digest, and environment-profile revision/digest. The future
+adapter must capture those identities from the same admitted generated- or
+edited-volume surface projection and profile snapshot that chose every attempt
+receipt. This prevents stale surface/profile facts from being replayed as a
+current feature baseline without putting a second terrain sampler or catalog
+into the trace core.
+
+`node tools/run-native-world-backend-tests.mjs --run-name n4-surface-prop-source-receipt-02`
+passed 296/296 debug and release core tests, both adapter smokes, and strict
+pure-core coverage of 6,732/6,732 lines, 893/893 functions, and 3,634/3,634
+branches. Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-source-receipt-02/report.json`.

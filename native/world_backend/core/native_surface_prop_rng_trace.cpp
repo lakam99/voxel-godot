@@ -9,6 +9,18 @@ namespace {
 
 [[noreturn]] void reject() { throw NativeSurfacePropRngTraceRejected(); }
 
+bool is_zero_digest(const Sha256Digest &digest) noexcept {
+    for (const std::uint8_t byte : digest) if (byte != 0U) return false;
+    return true;
+}
+
+bool valid_source_receipt(const NativeSurfacePropSourceReceipt &receipt) noexcept {
+    return receipt.schema_revision != 0U && receipt.terrain_revision != 0U
+        && !is_zero_digest(receipt.terrain_digest)
+        && receipt.environment_profile_revision != 0U
+        && !is_zero_digest(receipt.environment_profile_digest);
+}
+
 bool valid_disposition(const NativeSurfacePropReplayDisposition value) noexcept {
     return value == NativeSurfacePropReplayDisposition::skipped_before_prop_roll
         || value == NativeSurfacePropReplayDisposition::no_feature
@@ -32,14 +44,17 @@ NativeSurfacePropRngTraceRejected::NativeSurfacePropRngTraceRejected()
     : std::invalid_argument("invalid native surface-prop RNG trace") {}
 
 NativeSurfacePropRngTrace::NativeSurfacePropRngTrace(
+    NativeSurfacePropSourceReceipt source_receipt,
     std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries,
     const std::uint64_t final_rng_state) noexcept
-    : entries_(std::move(entries)), final_rng_state_(final_rng_state) {}
+    : source_receipt_(std::move(source_receipt)), entries_(std::move(entries)), final_rng_state_(final_rng_state) {}
 
 NativeSurfacePropRngTrace NativeSurfacePropRngTrace::create(
     const NativeSurfacePropAttemptStream &attempt_stream,
+    NativeSurfacePropSourceReceipt source_receipt,
     const std::vector<NativeSurfacePropReplayReceipt> &receipts) {
-    if (receipts.size() != NativeSurfacePropAttemptStream::ATTEMPT_COUNT) reject();
+    if (!valid_source_receipt(source_receipt)
+        || receipts.size() != NativeSurfacePropAttemptStream::ATTEMPT_COUNT) reject();
     GodotPcg32 rng(attempt_stream.rng_seed());
     std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries{};
     for (std::size_t index = 0U; index < receipts.size(); ++index) {
@@ -66,11 +81,14 @@ NativeSurfacePropRngTrace NativeSurfacePropRngTrace::create(
         entry.state_after_recipe = rng.state();
         entries[index] = std::move(entry);
     }
-    return NativeSurfacePropRngTrace(std::move(entries), rng.state());
+    return NativeSurfacePropRngTrace(std::move(source_receipt), std::move(entries), rng.state());
 }
 
 const std::array<NativeSurfacePropRngTraceEntry, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> &
 NativeSurfacePropRngTrace::entries() const noexcept { return entries_; }
+const NativeSurfacePropSourceReceipt &NativeSurfacePropRngTrace::source_receipt() const noexcept {
+    return source_receipt_;
+}
 std::uint64_t NativeSurfacePropRngTrace::final_rng_state() const noexcept { return final_rng_state_; }
 
 } // namespace voxel::world_backend
