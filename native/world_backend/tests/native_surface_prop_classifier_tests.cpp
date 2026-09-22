@@ -56,15 +56,15 @@ VWB_TEST(native_surface_prop_classifier_uses_strict_cumulative_source_cutoffs_wi
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.099F));
     expect_outcome(NativeSurfacePropClassificationOutcome::broadleaf_tree,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.10F));
-    expect_outcome(NativeSurfacePropClassificationOutcome::unported_forage_recipe,
+    expect_outcome(NativeSurfacePropClassificationOutcome::forage_recipe,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.30F));
-    expect_outcome(NativeSurfacePropClassificationOutcome::unported_wildlife_recipe,
+    expect_outcome(NativeSurfacePropClassificationOutcome::wildlife_recipe,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.50F));
     expect_outcome(NativeSurfacePropClassificationOutcome::no_feature,
         NativeSurfacePropClassifier::classify(receipt, attempt(), 0.70F));
     NativeSurfacePropClassificationInput saturated = receipt;
     saturated.policy.wildlife_upper = 1.4F;
-    expect_outcome(NativeSurfacePropClassificationOutcome::unported_wildlife_recipe,
+    expect_outcome(NativeSurfacePropClassificationOutcome::wildlife_recipe,
         NativeSurfacePropClassifier::classify(saturated, attempt(), 0.99F));
     saturated.policy.tree_family = NativeSurfacePropTreeCompatibilityFamily::conifer_22_draw;
     expect_outcome(NativeSurfacePropClassificationOutcome::conifer_tree,

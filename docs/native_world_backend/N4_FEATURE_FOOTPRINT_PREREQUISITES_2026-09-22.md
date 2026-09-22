@@ -238,6 +238,17 @@ complete recipe/asset contracts are native. Therefore this classifier cannot
 yet feed a completed trace or generated-feature catalog; it is a fail-closed
 decision boundary, not a feature-family cutover.
 
+Forage and wildlife now have typed native recipe streams, so their classifier
+outcomes are `forage_recipe` and `wildlife_recipe`, not stale `unported_*`
+labels.  That is deliberately not a claim of complete surface generation:
+the classifier still requires a future aggregate composer to supply the typed
+recipe-stream input and produce one baseline manifest.  `node
+tools/run-native-world-backend-tests.mjs --run-name
+n4-surface-prop-recipe-admission-01` passed 317/317 debug and release core
+tests, both adapter smokes, and strict coverage of 7,013/7,013 lines,
+942/942 functions, and 3,900/3,900 branches.  Its receipt is
+`artifacts/native-world-backend/n4-surface-prop-recipe-admission-01/report.json`.
+
 ## Ore and forage follow-on boundaries
 
 `NativeOreClusterStream` now captures the complete two-child shared-PCG

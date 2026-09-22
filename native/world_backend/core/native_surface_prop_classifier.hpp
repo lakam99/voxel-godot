@@ -66,8 +66,8 @@ enum class NativeSurfacePropClassificationOutcome : std::uint8_t {
     conifer_tree = 5,
     unported_iron_ore_cluster = 6,
     unported_copper_ore_cluster = 7,
-    unported_forage_recipe = 8,
-    unported_wildlife_recipe = 9,
+    forage_recipe = 8,
+    wildlife_recipe = 9,
 };
 
 struct NativeSurfacePropClassification final {
@@ -82,9 +82,9 @@ public:
 };
 
 // Pure source-receipt classifier. It compares only precomputed source cutoffs
-// with the caller's exact Godot PCG float32 values. An unported result is an
-// intentional hard boundary: a caller cannot claim a complete RNG trace until
-// that recipe family supplies its own stream contract.
+// with the caller's exact Godot PCG float32 values. A recipe result remains a
+// hard aggregate boundary: a caller cannot claim a complete RNG trace until a
+// manifest composer supplies its typed recipe-stream input.
 class NativeSurfacePropClassifier final {
 public:
     static NativeSurfacePropClassification classify(

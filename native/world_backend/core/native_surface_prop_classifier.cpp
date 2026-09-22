@@ -109,8 +109,8 @@ NativeSurfacePropClassification NativeSurfacePropClassifier::classify(
             ? result(NativeSurfacePropClassificationOutcome::broadleaf_tree, true)
             : result(NativeSurfacePropClassificationOutcome::conifer_tree, true);
     }
-    if (prop_roll < policy.forage_upper) return result(NativeSurfacePropClassificationOutcome::unported_forage_recipe, true);
-    if (prop_roll < policy.wildlife_upper) return result(NativeSurfacePropClassificationOutcome::unported_wildlife_recipe, true);
+    if (prop_roll < policy.forage_upper) return result(NativeSurfacePropClassificationOutcome::forage_recipe, true);
+    if (prop_roll < policy.wildlife_upper) return result(NativeSurfacePropClassificationOutcome::wildlife_recipe, true);
     return result(NativeSurfacePropClassificationOutcome::no_feature, true);
 }
 
