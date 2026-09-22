@@ -1,0 +1,4 @@
+#include "native_forage_stream.hpp"
+namespace voxel::world_backend { NativeForageStreamRejected::NativeForageStreamRejected():std::invalid_argument("invalid native forage stream"){}
+NativeForageStream NativeForageStreamBuilder::create(const NativeForageRecipe&source,GodotPcg32&rng){NativeForageStream r;try{r.recipe=NativeForageRecipeCatalog::admit(source);}catch(const NativeForageRecipeRejected&){throw NativeForageStreamRejected();}r.state_before=rng.state();auto draw=[&](){r.float_draws.push_back(rng.randf());};draw();r.drop_count=rng.randi_range(r.recipe.drop_min,r.recipe.drop_max);if(r.recipe.grammar==NativeForageGrammar::berry){draw();draw();draw();}static constexpr int tail_counts[]={21,42,24,35};const int count=tail_counts[static_cast<std::uint8_t>(r.recipe.grammar)-1U];for(int i=0;i<count;++i)draw();r.state_after=rng.state();return r;}
+} // namespace voxel::world_backend

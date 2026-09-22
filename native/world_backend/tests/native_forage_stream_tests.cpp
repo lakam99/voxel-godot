@@ -1,0 +1,6 @@
+#include "test_harness.hpp"
+#include "../core/native_forage_stream.hpp"
+using namespace voxel::world_backend;
+static NativeForageRecipe r(NativeForageGrammar g){if(g==NativeForageGrammar::aloe)return{"a","aloePatch","aloe",1,3,.5F,g,NativeForageNavigationPolicy::nonblocking};if(g==NativeForageGrammar::mushroom)return{"m","mushroomCluster","mirecap",1,3,.5F,g,NativeForageNavigationPolicy::nonblocking};if(g==NativeForageGrammar::frost_herb)return{"f","frostHerbPatch","frostHerb",1,2,.5F,g,NativeForageNavigationPolicy::nonblocking};return{"b","berryBush","berries",2,4,.5F,g,NativeForageNavigationPolicy::blocking};}
+VWB_TEST(native_forage_stream_replays_each_live_grammar_without_tombstones){for(auto g:{NativeForageGrammar::berry,NativeForageGrammar::aloe,NativeForageGrammar::mushroom,NativeForageGrammar::frost_herb}){GodotPcg32 rng(9U);auto s=NativeForageStreamBuilder::create(r(g),rng);VWB_EXPECT_EQ(s.state_after,rng.state());VWB_EXPECT(s.drop_count>=s.recipe.drop_min&&s.drop_count<=s.recipe.drop_max);VWB_EXPECT_EQ(g==NativeForageGrammar::aloe?43U:g==NativeForageGrammar::frost_herb?36U:25U,s.float_draws.size());}}
+VWB_TEST(native_forage_stream_rejects_unadmitted_recipe){auto x=r(NativeForageGrammar::berry);x.drop_id="x";GodotPcg32 rng(1U);VWB_EXPECT_THROW(NativeForageStreamRejected,NativeForageStreamBuilder::create(x,rng));}
