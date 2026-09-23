@@ -26,6 +26,27 @@ func bits(value: float) -> int:
 func vector_bits(value: Vector3) -> Array:
 	return [bits(value.x), bits(value.y), bits(value.z)]
 
+func tree_request_projection(request: Dictionary) -> Dictionary:
+	var parameters: Dictionary = request.get("biomeParameters", {})
+	var projected_parameters := {}
+	for key in ["heightMin", "heightMax", "trunkRadiusMin", "trunkRadiusMax",
+			"canopyRadiusMin", "canopyRadiusMax", "canopyDensity", "windResponse",
+			"visibilityRange", "shadowRange", "exclusionMargin"]:
+		projected_parameters[key + "Bits"] = bits(float(parameters.get(key, NAN)))
+	projected_parameters["version"] = parameters.get("version")
+	projected_parameters["architecture"] = parameters.get("architecture")
+	var result := {"assetId":request.get("assetId"), "family":request.get("family"),
+		"growthClass":request.get("growthClass"), "architecture":request.get("architecture"),
+		"speciesGrammar":request.get("speciesGrammar"), "ageBand":request.get("ageBand"),
+		"geneticSeed":request.get("geneticSeed"), "oldGrowth":request.get("oldGrowth"),
+		"biomeParameters":projected_parameters}
+	for key in ["ageYears", "ageRangeMin", "ageRangeMax", "localMaturity",
+			"growthStage", "scale", "barkScale", "sourceHeight", "visualHeight",
+			"trunkRadius", "canopyRadius", "collisionHeight", "exclusionMargin",
+			"canopyDensity"]:
+		result[key + "Bits"] = bits(float(request.get(key, NAN)))
+	return result
+
 func forage_geometry(body: StaticBody3D, materials: Dictionary) -> Dictionary:
 	var meshes := []
 	var collider := {}
@@ -305,6 +326,7 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		if bool(tree_halo.get("ok", false)) else {}
 	var rng: RandomNumberGenerator = state.rng
 	var direct_rows := []
+	var ordered_attempts: Array = ordered.get("attempts", [])
 	for index in range(28):
 		var before_state := rng.state
 		var preview := RandomNumberGenerator.new()
@@ -316,6 +338,15 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		var child_count_before := chunk.get_child_count()
 		main.spawn_chunk_prop_attempt(state, index, rng)
 		var id := "%s:%d,%d:%d" % [main.seed_text,x,z,index]
+		var native_attempt: Dictionary = ordered_attempts[index] if index < ordered_attempts.size() else {}
+		var direct_tree_request := {}
+		if int(native_attempt.get("outcome", -1)) in [4, 5]:
+			# Coordinates and the classification roll precede tree_visual_spec.
+			# Replay on a separate RNG to keep the production stream untouched.
+			preview.randf()
+			var legacy_spec: Dictionary = main.tree_visual_spec(String(sample.get("biome", "plains")), preview)
+			direct_tree_request = main.tree_runtime_spec_for_prop(String(sample.get("biome", "plains")),
+				id, float(legacy_spec.get("height", 4.0)), Vector2i(x, z))
 		var direct_row := {"ordinal":index,"cell":[x,z],
 			"durableId":id,"sourceSampleApplicable":not removed.has(id),
 			"stateBeforeCoordinates":str(before_state),"stateAfterRecipe":str(rng.state),
@@ -323,6 +354,8 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			"sourceHeightMeters":float(sample.get("height",0.0)),
 			"surfaceFound":bool(sample.get("found",false)),
 			"childCountDelta":chunk.get_child_count()-child_count_before}
+		if not direct_tree_request.is_empty():
+			direct_row["treeRequest"] = tree_request_projection(direct_tree_request)
 		var ore_children := []
 		for child in chunk.get_children():
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
@@ -462,6 +495,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 				"colliderHeightBits":bits(feature.trunkColliderHeight),
 				"colliderCenterYBits":bits(feature.trunkColliderCenterY),
 				"haloRequired":feature.haloRequired}
+			var native_request := feature.duplicate()
+			native_request["architecture"] = {1:"broadleaf",2:"conifer",3:"savanna"}.get(int(feature.architecture), "")
+			projected_feature["treeRequest"] = tree_request_projection(native_request)
 		native_rows.append({"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"durableId":row.durableId,"stateBeforeCoordinates":row.stateBeforeCoordinates,
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,

@@ -197,6 +197,8 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
         failures.push(`${label} attempt ${index} native tree definition missing or presence prematurely decided`);
       } else {
         treeDefinitionsCompared++;
+        if (!direct.treeRequest || JSON.stringify(direct.treeRequest) !== JSON.stringify(expected.treeRequest))
+          failures.push(`${label} attempt ${index} full tree runtime request mismatch`);
         if (!decision || decision.durableId !== native.durableId
             || decision.presence !== (actual ? 1 : 2))
           failures.push(`${label} attempt ${index} native tree presence differs from direct body`);

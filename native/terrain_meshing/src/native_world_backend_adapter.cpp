@@ -2388,12 +2388,43 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 				feature["growthClass"] = text(built.growth_class);
 				feature["architecture"] = static_cast<std::int64_t>(built.architecture);
 				feature["speciesGrammar"] = text(built.species_grammar);
+				feature["ageBand"] = text(built.age_band);
+				feature["ageYears"] = built.ecology.age_years;
+				feature["ageRangeMin"] = built.ecology.age_range_min;
+				feature["ageRangeMax"] = built.ecology.age_range_max;
+				feature["localMaturity"] = built.ecology.local_maturity;
+				feature["growthStage"] = built.ecology.growth_stage;
+				feature["geneticSeed"] = built.ecology.genetic_seed;
+				Dictionary biome_parameters;
+				biome_parameters["version"] = static_cast<std::int64_t>(built.biome_parameters.revision);
+				biome_parameters["architecture"] = text(built.architecture == NativeTreeArchitecture::conifer ? "conifer"
+					: built.architecture == NativeTreeArchitecture::savanna ? "savanna" : "broadleaf");
+				biome_parameters["heightMin"] = built.biome_parameters.height_min;
+				biome_parameters["heightMax"] = built.biome_parameters.height_max;
+				biome_parameters["trunkRadiusMin"] = built.biome_parameters.trunk_radius_min;
+				biome_parameters["trunkRadiusMax"] = built.biome_parameters.trunk_radius_max;
+				biome_parameters["canopyRadiusMin"] = built.biome_parameters.canopy_radius_min;
+				biome_parameters["canopyRadiusMax"] = built.biome_parameters.canopy_radius_max;
+				biome_parameters["canopyDensity"] = built.biome_parameters.canopy_density;
+				biome_parameters["windResponse"] = built.biome_parameters.wind_response;
+				biome_parameters["visibilityRange"] = built.biome_parameters.visibility_range;
+				biome_parameters["shadowRange"] = built.biome_parameters.shadow_range;
+				biome_parameters["exclusionMargin"] = built.biome_parameters.exclusion_margin;
+				feature["biomeParameters"] = biome_parameters;
 				feature["rotationY"] = built.rotation_y;
+				// Request compatibility values: natural-tree builder fixes these,
+				// while the typed definition owns the dimensions and ecology.
+				feature["assetId"] = "";
+				feature["scale"] = 1.0;
+				feature["barkScale"] = 1.0;
+				feature["sourceHeight"] = built.visual_height;
 				feature["visualHeight"] = built.visual_height;
 				feature["trunkRadius"] = built.trunk_radius;
 				feature["canopyRadius"] = built.canopy_radius;
 				feature["collisionHeight"] = built.collision_height;
 				feature["exclusionMargin"] = built.exclusion_margin;
+				feature["canopyDensity"] = built.biome_parameters.canopy_density;
+				feature["oldGrowth"] = built.old_growth;
 				feature["trunkColliderRadius"] = trunk.radius;
 				feature["trunkColliderHeight"] = trunk.height;
 				feature["trunkColliderCenterY"] = trunk.center_y;
