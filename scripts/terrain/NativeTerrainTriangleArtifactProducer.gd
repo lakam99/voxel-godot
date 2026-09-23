@@ -75,6 +75,34 @@ func request_block(block: Vector3i) -> Dictionary:
 	_pending_block = block
 	return {"status":"pending", "reason":"triangle_block_requested", "block":block}
 
+func rebind_demand() -> Dictionary:
+	if _stopped or _backend == null or not _failure_reason.is_empty():
+		return {"status":"failed", "reason":"triangle_producer_inactive"}
+	var source: Dictionary = _backend.status()
+	if source.get("status") != "ready" or source.get("sourceIdentity") != _source_identity \
+			or int(source.get("terrainDeltaRevision", -1)) != int(_identity.sourceRevision):
+		return {"status":"failed", "reason":"triangle_source_revision_changed"}
+	if _ticket != 0:
+		_backend.cancel_voxel_block_shadow_async(_ticket)
+		var drained: Dictionary = _backend.poll_voxel_block_shadow_async(_ticket)
+		if drained.get("status") != "ready":
+			return {"status":"pending", "reason":"triangle_demand_worker_draining"}
+		_ticket = 0
+	_pending_block = null
+	var demanded: Dictionary = _planner.required_collision_mesh_blocks()
+	if demanded.get("status") != "ready": return demanded
+	_demand_revision = int(demanded.revision)
+	_closure_token = String(demanded.closureToken)
+	var allowed := {}
+	for block: Vector3i in demanded.blocks: allowed[block] = true
+	for block: Vector3i in _artifacts.keys():
+		if allowed.has(block): continue
+		_artifacts.erase(block)
+		_artifact_rows.erase(block)
+		_validated_local_pins.erase(block)
+	return {"status":"ready", "demandRevision":_demand_revision,
+		"closureToken":_closure_token, "retainedArtifacts":_artifacts.size()}
+
 func advance() -> Dictionary:
 	if _stopped or _backend == null: return {"status":"failed", "reason":"triangle_producer_inactive"}
 	if _draining_failed_ticket:

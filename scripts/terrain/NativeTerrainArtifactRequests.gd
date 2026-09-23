@@ -4,6 +4,7 @@ class_name NativeTerrainArtifactRequests
 ## Inert source-bound request queue. Physical installation and retirement belong
 ## to the resident collision owner; this class only produces current rows.
 const Producer = preload("res://scripts/terrain/NativeTerrainTriangleArtifactProducer.gd")
+const WindowSource = preload("res://scripts/terrain/NativeTerrainCollisionWindowSource.gd")
 
 var _backend
 var _pages
@@ -22,6 +23,9 @@ var _active_block: Variant = null
 var _draining := false
 var _stop_issued := false
 var _stopping := false
+var _window_layout := {}
+var _window_records := {}
+var _active_window_tokens := {}
 
 func setup(backend, pages, admission, planner, cell_meters: float,
 		owner_generation: int, max_resident_blocks: int) -> Dictionary:
@@ -55,24 +59,30 @@ func advance() -> Dictionary:
 	if demand.get("status") != "ready" or source.get("status") != "ready":
 		return {"status":"pending", "reason":"artifact_source_or_demand_pending"}
 	var source_identity: Dictionary = source.get("sourceIdentity", {})
-	var changed: bool = _producer != null and (
+	var source_changed: bool = _producer != null and (
 			int(source.get("terrainDeltaRevision", -1)) != int(_identity.get("sourceRevision", -2))
-			or source_identity != _identity.get("sourceIdentity", {})
-			or int(demand.get("revision", -1)) != _demand_revision
-			or String(demand.get("closureToken", "")) != _closure_token)
-	if changed or _draining:
+			or source_identity != _identity.get("sourceIdentity", {}))
+	if source_changed or _draining:
 		var retired: Dictionary = _retire_producer()
 		if retired.get("status") != "ready": return retired
-	if (demand.blocks as Array).size() > _max_resident_blocks:
-		return _capacity_pending(demand)
+	if _producer != null and (int(demand.get("revision", -1)) != _demand_revision
+			or String(demand.get("closureToken", "")) != _closure_token):
+		var rebound: Dictionary = _producer.rebind_demand()
+		if rebound.get("status") != "ready": return rebound
+		_demand_revision = int(demand.revision)
+		_closure_token = String(demand.closureToken)
+		_active_block = null
 	if _producer == null:
 		var created: Dictionary = _create_producer(source, demand)
 		if created.get("status") != "ready": return created
+	var layout_ready: Dictionary = _refresh_window_layout()
+	if layout_ready.get("status") != "ready": return layout_ready
 	var snapshot: Dictionary = _producer.collision_source_snapshot()
 	for stale: Vector3i in snapshot.get("staleBlocks", []): _requests[stale] = true
 	if _active_block != null:
 		var result: Dictionary = _producer.advance()
 		if result.get("status") == "ready":
+			_cache_retained_row(result.row)
 			_requests.erase(_active_block)
 			_active_block = null
 			return result
@@ -107,7 +117,9 @@ func collision_source_snapshot() -> Dictionary:
 		var demand: Dictionary = _planner.required_collision_mesh_blocks()
 		if demand.get("status") == "ready" \
 				and (demand.blocks as Array).size() > _max_resident_blocks:
-			return _capacity_pending(demand)
+			return {"status":"pending", "reason":"partitioned_source_requires_window",
+				"requiredBlocks":(demand.blocks as Array).size(),
+				"windowLayout":collision_window_layout()}
 	if _producer == null or _draining:
 		return {"status":"pending", "reason":"artifact_producer_unavailable"}
 	return _producer.collision_source_snapshot()
@@ -117,13 +129,94 @@ func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary
 		return {"status":"failed", "reason":"artifact_producer_unavailable"}
 	return _producer.collision_artifact_row(block, identity)
 
+func collision_window_layout() -> Dictionary:
+	if _producer == null or _draining:
+		return {"status":"pending", "reason":"artifact_producer_unavailable"}
+	return _refresh_window_layout()
+
+func collision_window_source(window_id: Vector3i, layout_token: String) -> Dictionary:
+	var layout: Dictionary = collision_window_layout()
+	if layout.get("status") != "ready" or layout.get("layoutToken") != layout_token:
+		return {"status":"pending", "reason":"collision_window_layout_changed"}
+	for window: Dictionary in layout.windows:
+		if window.id != window_id: continue
+		var token := String(window.windowToken)
+		var record: Dictionary = _window_records.get(token, {})
+		if record.is_empty(): break
+		if record.get("facade") == null:
+			var facade = WindowSource.new()
+			var bound: Dictionary = facade.setup(self, token)
+			if bound.get("status") != "ready": return bound
+			record.facade = facade
+			_window_records[token] = record
+		return {"status":"ready", "source":record.facade,
+			"windowToken":token, "blocks":window.blocks}
+	return {"status":"failed", "reason":"collision_window_not_in_layout"}
+
+func collision_window_source_snapshot(window_token: String) -> Dictionary:
+	var record: Dictionary = _window_records.get(window_token, {})
+	if record.is_empty(): return {"status":"failed", "reason":"collision_window_retired"}
+	if _producer == null or _draining or not _active_window_tokens.has(window_token):
+		return {"status":"pending", "reason":"collision_window_source_superseded",
+			"retainedRows":(record.rows as Dictionary).size()}
+	var source: Dictionary = _producer.collision_source_snapshot()
+	if not source.has("identity") or source.get("identity") != record.identity:
+		return {"status":"pending", "reason":"collision_window_source_changed"}
+	var required: Array[Vector3i] = record.blocks
+	var produced: Array[Vector3i] = []
+	var artifacts := {}
+	var stale_set := {}
+	for block: Vector3i in source.get("staleBlocks", []): stale_set[block] = true
+	for block: Vector3i in required:
+		if (source.get("artifacts", {}) as Dictionary).has(block) and not stale_set.has(block):
+			produced.append(block)
+			artifacts[block] = source.artifacts[block]
+	var complete := produced.size() == required.size()
+	return {"status":"ready" if complete else "pending",
+		"reason":"" if complete else "collision_window_artifacts_incomplete",
+		"identity":record.identity.duplicate(true),
+		"sourceIdentity":source.sourceIdentity,
+		"sourceEpoch":source.sourceEpoch,
+		"nativeRevision":source.nativeRevision,
+		"ownerGeneration":source.ownerGeneration,
+		"cancellationEpoch":source.cancellationEpoch,
+		"requiredResidentBlocks":required.duplicate(),
+		"residentBlocks":produced, "artifacts":artifacts,
+		"membershipProvenance":record.membershipProvenance.duplicate(true)}
+
+func collision_window_artifact_row(window_token: String, block: Vector3i,
+		identity: Dictionary) -> Dictionary:
+	var record: Dictionary = _window_records.get(window_token, {})
+	if record.is_empty() or not (record.blocks as Array).has(block):
+		return {"status":"failed", "reason":"collision_window_block_invalid"}
+	if _producer == null or _draining or not _active_window_tokens.has(window_token) \
+			or identity != record.identity:
+		return {"status":"pending", "reason":"collision_window_source_superseded",
+			"retainedRow":(record.rows as Dictionary).get(block, {}).duplicate(true)}
+	return _producer.collision_artifact_row(block, identity)
+
+func acknowledge_collision_window_retired(window_token: String,
+		retirement_receipt: Dictionary) -> Dictionary:
+	var record: Dictionary = _window_records.get(window_token, {})
+	if record.is_empty() or _active_window_tokens.has(window_token) \
+			or not bool(retirement_receipt.get("drained", false)) \
+			or int(retirement_receipt.get("remainingBodies", -1)) != 0 \
+			or retirement_receipt.get("windowToken") != window_token:
+		return {"status":"failed", "reason":"collision_window_retirement_not_proven"}
+	_window_records.erase(window_token)
+	return {"status":"ready", "retiredWindowToken":window_token}
+
 func stop() -> Dictionary:
 	_stopping = true
-	return _retire_producer()
+	var retired: Dictionary = _retire_producer()
+	if retired.get("status") == "ready": _release_windows()
+	return retired
 
 func drain_step() -> Dictionary:
 	if not _stopping: return {"status":"failed", "reason":"artifact_stop_required"}
-	return _retire_producer()
+	var retired: Dictionary = _retire_producer()
+	if retired.get("status") == "ready": _release_windows()
+	return retired
 
 func _create_producer(source: Dictionary, demand: Dictionary) -> Dictionary:
 	if int(demand.get("revision", 0)) <= 0 or String(demand.get("closureToken", "")).is_empty():
@@ -145,6 +238,53 @@ func _create_producer(source: Dictionary, demand: Dictionary) -> Dictionary:
 		return ready
 	return {"status":"ready", "identity":_identity.duplicate(true)}
 
+func _refresh_window_layout() -> Dictionary:
+	var planned: Dictionary = _planner.collision_mesh_window_layout()
+	if planned.get("status") != "ready": return planned
+	var layout_token := ("%s:%s:%d:%d" % [String(planned.logicalClosureToken),
+		String(_identity.sourceIdentity.get("hex", "")),
+		int(_identity.sourceRevision), int(_identity.cancellationEpoch)]).sha256_text()
+	if _window_layout.get("layoutToken") == layout_token:
+		return _window_layout.duplicate(true)
+	var windows: Array[Dictionary] = []
+	var active := {}
+	for index in range((planned.windows as Array).size()):
+		var window: Dictionary = planned.windows[index]
+		if (window.blocks as Array).size() > _max_resident_blocks:
+			return {"status":"failed", "reason":"collision_window_exceeds_owner_cap"}
+		var token := ("%s:%s:%d:%d" % [String(window.closureToken),
+			String(_identity.sourceIdentity.get("hex", "")),
+			int(_identity.sourceRevision), int(_identity.cancellationEpoch)]).sha256_text()
+		active[token] = true
+		var member := {"id":window.id, "blocks":window.blocks,
+			"closureToken":window.closureToken, "windowToken":token,
+			"windowIndex":index}
+		windows.append(member)
+		if not _window_records.has(token):
+			_window_records[token] = {"layoutToken":layout_token,
+				"identity":_identity.duplicate(true), "blocks":window.blocks,
+				"rows":{}, "facade":null,
+				"membershipProvenance":{"authority":"pinned_demand",
+					"demandRevision":0,
+					"closureToken":String(window.closureToken),
+					"windowToken":token}}
+	_active_window_tokens = active
+	_window_layout = planned.duplicate(true)
+	_window_layout["layoutToken"] = layout_token
+	_window_layout["sourceIdentity"] = _identity.sourceIdentity.duplicate(true)
+	_window_layout["identity"] = _identity.duplicate(true)
+	_window_layout["windows"] = windows
+	return _window_layout.duplicate(true)
+
+func _cache_retained_row(row: Dictionary) -> void:
+	for window: Dictionary in _window_layout.get("windows", []):
+		if not (window.blocks as Array).has(row.block): continue
+		var token := String(window.windowToken)
+		var record: Dictionary = _window_records[token]
+		(record.rows as Dictionary)[row.block] = row.duplicate(true)
+		_window_records[token] = record
+		return
+
 func _retire_producer() -> Dictionary:
 	if _producer == null:
 		_draining = false
@@ -164,10 +304,10 @@ func _retire_producer() -> Dictionary:
 	_active_block = null
 	return {"status":"ready", "drained":true}
 
-func _capacity_pending(demand: Dictionary) -> Dictionary:
-	return {"status":"pending", "reason":"resident_mesh_capacity_backpressure",
-		"requiredBlocks":(demand.blocks as Array).size(),
-		"maxResidentBlocks":_max_resident_blocks,
-		"retainedRequests":_requests.size(),
-		"demandRevision":int(demand.revision),
-		"closureToken":String(demand.closureToken)}
+func _release_windows() -> void:
+	for token in _window_records:
+		var facade = (_window_records[token] as Dictionary).get("facade")
+		if facade != null: facade.detach()
+	_window_records.clear()
+	_active_window_tokens.clear()
+	_window_layout.clear()

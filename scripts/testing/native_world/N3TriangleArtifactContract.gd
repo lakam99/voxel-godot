@@ -295,24 +295,90 @@ func run() -> void:
 		planner, main.CELL, 78, 1).get("status") == "ready",
 		"resident capacity is explicit at the source request boundary")
 	var extra_viewers: Array[Dictionary] = [{"kind":"secondary", "id":"neighbor",
-		"position":Vector3(main.CELL * 16.0, 0, 0), "distance":0}]
+		"position":Vector3(main.CELL * 256.0, 0, 0), "distance":0}]
 	var two_demand: Dictionary = planner.replace_sources(viewer, extra_viewers, [], [], bounds)
 	check(two_demand.get("status") == "ready"
 		and bounded.request_block(block).get("status") == "pending",
 		"oversized demand still retains explicitly requested block")
-	var backpressure: Dictionary = bounded.advance()
-	check(backpressure.get("status") == "pending"
-		and backpressure.get("reason") == "resident_mesh_capacity_backpressure"
-		and int(backpressure.get("requiredBlocks", 0)) == 2
-		and int(backpressure.get("retainedRequests", 0)) == 1
-		and bounded.collision_source_snapshot().get("status") == "pending",
-		"oversized closure is explicit retryable backpressure, never ready")
+	var partition_step: Dictionary = bounded.advance()
+	var partition_layout: Dictionary = bounded.collision_window_layout()
+	check(partition_step.get("status") == "pending"
+		and int(partition_layout.get("requiredBlockCount", 0)) == 2
+		and int(partition_layout.get("windowCount", 0)) == 2
+		and bounded.collision_source_snapshot().get("reason") \
+			== "partitioned_source_requires_window",
+		"oversized logical closure requires exact spatial window sources")
+	var near_source
+	var remote_source
+	var near_token := ""
+	var remote_token := ""
+	for window: Dictionary in partition_layout.windows:
+		var acquired: Dictionary = bounded.collision_window_source(window.id,
+			String(partition_layout.layoutToken))
+		check(acquired.get("status") == "ready", "spatial window facade acquired")
+		if (window.blocks as Array).has(block):
+			near_source = acquired.get("source")
+			near_token = String(window.windowToken)
+		else:
+			remote_source = acquired.get("source")
+			remote_token = String(window.windowToken)
+	var near_result := {}
+	for frame in range(300):
+		near_result = bounded.advance()
+		if near_result.get("status") == "ready" and near_result.has("row"): break
+		await process_frame
+	check(near_result.get("status") == "ready"
+		and near_source.collision_source_snapshot().get("status") == "ready"
+		and remote_source.collision_source_snapshot().get("status") == "pending",
+		"one complete spatial window does not falsely complete other window")
 	planner.replace_sources(viewer, [], [], [], bounds)
 	var resumed: Dictionary = bounded.advance()
+	var smaller_layout: Dictionary = bounded.collision_window_layout()
 	check(resumed.get("status") == "pending"
-		and resumed.get("reason") != "resident_mesh_capacity_backpressure",
-		"retained request resumes after capacity-compatible demand")
-	bounded.stop()
+		and smaller_layout.get("layoutToken") != partition_layout.get("layoutToken")
+		and (smaller_layout.windows as Array).size() == 1
+		and smaller_layout.windows[0].windowToken == near_token
+		and near_source.collision_source_snapshot().get("status") == "ready"
+		and remote_source.collision_source_snapshot().get("status") == "pending",
+		"distant demand retirement preserves unchanged near window identity")
+	check(bounded.acknowledge_collision_window_retired(remote_token, {}).get("status") == "failed"
+		and bounded.acknowledge_collision_window_retired(remote_token,
+			{"windowToken":remote_token, "drained":true,
+				"remainingBodies":0}).get("status") == "ready",
+		"old window retained until explicit physical drain acknowledgment")
+	var bounded_stop: Dictionary = bounded.stop()
+	for frame in range(120):
+		if bounded_stop.get("status") == "ready": break
+		await process_frame
+		bounded_stop = bounded.drain_step()
+	check(bounded_stop.get("status") == "ready", "partitioned broker worker drains")
+	var large_planner = PLANNER.new()
+	large_planner.setup(79)
+	var large_demand: Dictionary = large_planner.replace_sources(
+		{"position":Vector3.ZERO, "distance":128}, [], [], [], Vector2i(0,256))
+	var large_broker = ARTIFACT_REQUESTS.new()
+	check(large_demand.get("status") == "ready"
+		and large_broker.setup(backend, pages,
+			main.structure_system.citadel_terrain_admission, large_planner,
+			main.CELL, 80, 4096).get("status") == "ready",
+		"4913-block demand admitted to partition-capable broker")
+	var large_step: Dictionary = large_broker.advance()
+	var large_layout: Dictionary = large_broker.collision_window_layout()
+	var large_union := {}
+	for window: Dictionary in large_layout.get("windows", []):
+		var facade: Dictionary = large_broker.collision_window_source(window.id,
+			String(large_layout.layoutToken))
+		check(facade.get("status") == "ready"
+			and facade.source.collision_source_snapshot().get("status") == "pending",
+			"unbuilt large window is pending, never physical-ready")
+		for member: Vector3i in window.blocks: large_union[member] = true
+	check(large_step.get("status") == "pending"
+		and large_step.get("reason") == "artifact_queue_idle"
+		and int(large_layout.get("requiredBlockCount", 0)) == 4913
+		and int(large_layout.get("windowCount", 0)) == 8
+		and large_union.size() == 4913,
+		"4913-block broker exposes complete bounded spatial windows without false readiness")
+	check(large_broker.stop().get("status") == "ready", "large broker stops without workers")
 	var remote_page := Vector2i.ZERO
 	var remote_candidate := {}
 	for page_index in range(2, 7):

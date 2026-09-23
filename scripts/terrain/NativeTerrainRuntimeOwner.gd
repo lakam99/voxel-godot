@@ -123,6 +123,20 @@ func required_collision_mesh_blocks() -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _planner.required_collision_mesh_blocks()
 
+func collision_window_layout() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.collision_window_layout()
+
+func collision_window_source(window_id: Vector3i, layout_token: String) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.collision_window_source(window_id, layout_token)
+
+func acknowledge_collision_window_retired(window_token: String,
+		retirement_receipt: Dictionary) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.acknowledge_collision_window_retired(window_token,
+		retirement_receipt)
+
 func advance_collision_artifacts() -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.advance()
