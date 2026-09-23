@@ -2099,9 +2099,14 @@ Dictionary NativeWorldBackend::begin_rock_ordered_source_async(
 			|| !p_page->batch_ || !p_exclusions->snapshot_)
 		return envelope(operation, "failed", "ordered_surface_sources_not_ready");
 	if (rock_source_worker_.joinable()) {
-		if (!rock_source_worker_finished_.load(std::memory_order_acquire))
-			return envelope(operation, "pending", "worker_running");
-		return envelope(operation, "pending", "worker_result_requires_poll");
+		const bool same_request = rock_source_worker_page_ == p_page
+			&& rock_source_worker_exclusions_ == p_exclusions;
+		Dictionary result = envelope(operation, "pending", same_request
+			? (rock_source_worker_finished_.load(std::memory_order_acquire)
+				? "worker_result_requires_poll" : "worker_running")
+			: "worker_busy");
+		if (same_request) result["ticket"] = rock_source_worker_ticket_;
+		return result;
 	}
 	if (next_rock_source_worker_ticket_ == std::numeric_limits<std::int64_t>::max())
 		return envelope(operation, "failed", "ticket_space_exhausted");
