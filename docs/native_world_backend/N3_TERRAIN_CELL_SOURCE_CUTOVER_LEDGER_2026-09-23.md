@@ -13,6 +13,17 @@ The installed-engine service contract passes at
 This is not wired to gameplay edits or physical replacement, and does not
 establish New Game/Continue or normal-game acceptance.
 
+Follow-up edit sequencing gate: a committed edit is retained as a pending
+physical barrier. The owner preflights the bounded republication footprint
+before committing, verifies the native affected-section receipt, and informs
+the block publisher immediately after commit. A second edit returns pending
+without advancing the native save revision. There is intentionally no barrier
+release method yet: the owner remains fail-closed after one edit until N5 can
+provide exact live collision acknowledgement, occupancy safety, and a
+revision-bound release contract. This service component is not suitable for
+production edits in its present state. Focused evidence:
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790172076190-ccda949c/report.json`.
+
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and

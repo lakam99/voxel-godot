@@ -24,6 +24,7 @@ var _state := "new"
 var _failure := ""
 var _seed_text := ""
 var _source_identity := {}
+var _pending_edit_plan := {}
 
 func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dictionary:
 	if _state != "new": return {"status":"failed", "reason":"owner_already_started"}
@@ -112,8 +113,11 @@ func read_numeric_batch(world_positions: Array[Vector3], projection_cells: Array
 ## The returned plan describes work still needed for physical publication; it
 ## is never a collision/readiness receipt.
 func commit_durable_cells(transaction_id: String, expected_revision: int,
-		operations: Array) -> Dictionary:
+		operations: Array, physical_probes: Dictionary = {}) -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	if not _pending_edit_plan.is_empty():
+		return {"status":"pending", "reason":"physical_edit_barrier_pending",
+			"barrier":_pending_edit_plan.get("barrier", {})}
 	if transaction_id.is_empty() or operations.is_empty() or operations.size() > 64:
 		return {"status":"failed", "reason":"edit_request_invalid"}
 	var before: Dictionary = _backend.status()
@@ -131,6 +135,19 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 			return {"status":"failed", "reason":"edit_operation_invalid"}
 		seen[cell] = true
 		cells.append(cell)
+	var anticipated_sections: Array[Vector3i] = []
+	var section_set := {}
+	for cell in cells:
+		var section := Vector3i(floori(float(cell.x) / 16.0),
+			floori(float(cell.y) / 16.0), floori(float(cell.z) / 16.0))
+		if not section_set.has(section):
+			section_set[section] = true
+			anticipated_sections.append(section)
+	var planned: Dictionary = EditPlan.for_committed_cells(cells,
+		anticipated_sections, expected_revision + 1,
+		String(_source_identity.get("hex", "")))
+	if planned.get("status") != "ready":
+		return planned
 	var request := {"schema":"n3-native-durable-cell-transaction/v1",
 		"transactionId":transaction_id, "expectedRevision":expected_revision,
 		"operations":operations}
@@ -144,15 +161,21 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 			or revision != expected_revision + 1 \
 			or int(after.get("terrainDeltaRevision", -1)) != revision:
 		return _active_failure("native_edit_receipt_stale")
-	var plan: Dictionary = EditPlan.for_committed_cells(cells,
-		receipt.get("affectedSections", []), revision,
-		String(_source_identity.get("hex", "")))
-	if plan.get("status") != "ready":
-		return _active_failure("native_edit_publication_plan_failed")
+	var actual_sections: Array = receipt.get("affectedSections", [])
+	if actual_sections.size() < anticipated_sections.size():
+		return _active_failure("native_edit_section_receipt_mismatch")
+	for section in anticipated_sections:
+		if not actual_sections.has(section):
+			return _active_failure("native_edit_section_receipt_mismatch")
+	_pending_edit_plan = planned
+	var observed: Dictionary = _publisher.observe_committed_edit(
+		planned.affectedMeshBlocks, physical_probes)
+	if observed.get("status") != "ready":
+		return _active_failure("native_edit_observation_failed")
 	return {"status":"ready", "nativeRevision":revision,
 		"affectedSections":receipt.get("affectedSections", []),
-		"changedCells":cells, "publicationPlan":plan,
-		"physicalReady":false}
+		"changedCells":cells, "publicationPlan":planned,
+		"physicalReady":false, "blockedResidentMeshes":observed.get("blocked", 0)}
 
 ## The save facade must export the same native owner used by terrain reads.
 ## Neither VoxelTerrain blocks nor the former script volume are save sources.
@@ -202,6 +225,7 @@ func drain_step() -> Dictionary:
 
 func snapshot() -> Dictionary:
 	return {"state":_state, "failure":_failure,
+		"pendingEditBarrier":_pending_edit_plan.get("barrier", {}),
 		"backendInstanceId":_backend.get_instance_id() if _backend != null else 0,
 		"backend":_backend.status() if _backend != null else {},
 		"planner":_planner.diagnostics() if _planner != null else {},
@@ -228,4 +252,5 @@ func _release_owners() -> void:
 	_admission = null
 	_seed_text = ""
 	_source_identity.clear()
+	_pending_edit_plan.clear()
 	_state = "drained"

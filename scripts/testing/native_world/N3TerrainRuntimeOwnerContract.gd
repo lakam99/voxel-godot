@@ -96,12 +96,24 @@ func run() -> void:
 			"metadata":{"saveDelta":true,"source":"terrain_edit"},
 			"blockId":"owner-new-edit", "editReason":"contract"}
 		var native_revision := int(saved.get("nativeRevision", -1))
+		var oversized: Array = []
+		for index in range(64):
+			oversized.append({"kind":"clear", "cell":Vector3i(index * 160, -1, 0)})
+		var rejected_plan: Dictionary = owner.commit_durable_cells("owner:oversized",
+			native_revision, oversized)
+		observations.append({"oversized":rejected_plan.get("reason", ""),
+			"ownerState":owner.snapshot().state})
+		check(rejected_plan.get("status") == "failed"
+			and int(owner.export_terrain_volume_v2().get("nativeRevision", -1)) == native_revision,
+			"unadmittable republication plan rejected before native commit")
 		var stale: Dictionary = owner.commit_durable_cells("owner:stale", native_revision - 1,
 			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
 		check(stale.get("reason") == "native_edit_revision_mismatch",
 			"stale edit rejected before native commit")
 		var committed: Dictionary = owner.commit_durable_cells("owner:edit-1", native_revision,
 			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
+		observations.append({"commit":committed.get("reason", committed.get("status", "")),
+			"ownerState":owner.snapshot().state})
 		check(committed.get("status") == "ready"
 			and int(committed.get("nativeRevision", -1)) == native_revision + 1
 			and committed.get("physicalReady") == false
@@ -117,19 +129,11 @@ func run() -> void:
 		check(edited.get("status") == "ready"
 			and edited.get("state", {}).get("blockId") == "owner-new-edit",
 			"gameplay cell facade sees committed native edit")
-		check(owner.commit_durable_cells("owner:stale-2", native_revision,
-			[{"kind":"clear", "cell":edit_cell}]).get("reason") == "native_edit_revision_mismatch",
-			"second stale edit rejected")
-		var cleared: Dictionary = owner.commit_durable_cells("owner:clear-2", native_revision + 1,
-			[{"kind":"clear", "cell":edit_cell}])
-		check(cleared.get("status") == "ready"
-			and int(cleared.get("nativeRevision", -1)) == native_revision + 2,
-			"clear uses the same typed durable authority")
-		var cleared_read: Dictionary = owner.read_cell(edit_cell)
-		check(cleared_read.get("status") == "ready"
-			and cleared_read.get("state", {}).get("blockId") != "owner-new-edit"
-			and cleared_read.get("state", {}).get("edited") == false,
-			"clear removes durable edit from gameplay cell source")
+		check(owner.commit_durable_cells("owner:second", native_revision + 1,
+			[{"kind":"clear", "cell":edit_cell}]).get("reason") == "physical_edit_barrier_pending",
+			"second edit retained behind unproven physical barrier")
+		check(int(owner.export_terrain_volume_v2().get("nativeRevision", -1)) == native_revision + 1,
+			"blocked second edit does not advance save owner")
 		var demand: Dictionary = owner.replace_demand(
 			{"position":Vector3.ZERO,"distance":0}, [], [], [], Vector2i(0, 0))
 		check(demand.get("status") == "ready" and demand.get("desiredDataBlocks") == 27,
