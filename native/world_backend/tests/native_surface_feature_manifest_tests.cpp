@@ -2,6 +2,9 @@
 #include "native_biome_environment_oracle_fixture.hpp"
 #include "native_surface_prop_test_fixture.hpp"
 #include "../core/native_surface_feature_manifest.hpp"
+#include "../core/native_surface_prop_chunk_transition.hpp"
+
+#include <algorithm>
 
 using namespace voxel::world_backend;
 
@@ -65,6 +68,111 @@ NativeSurfaceFeatureManifest compose(const NativeSurfacePropSourceOrderedStream 
 }
 
 } // namespace
+
+VWB_TEST(native_surface_transition_recomputes_changed_suffix_and_typed_manifests) {
+    const auto definition = surface_prop_test_fixture::definition("feature-transition");
+    const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+        definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+    const auto catalog = NativeBiomeEnvironmentCatalog::create(tests::godot_oracle_environment_profiles());
+    const auto assets = rocks(catalog);
+    const auto structure = exclusions();
+    const auto presentation = wildlife();
+    const auto capture = halo(structure);
+    const auto intact_snapshot = NativeFeatureDeltaSnapshot::create({}, {});
+    const auto intact = ordered(terrain, catalog, structure, intact_snapshot);
+    const auto removed_snapshot = NativeFeatureDeltaSnapshot::create(
+        {{intact.attempts()[0].attempt.durable_id}}, {});
+    const auto removed = ordered(terrain, catalog, structure, removed_snapshot);
+    const auto no_op = NativeSurfacePropChunkTransition::create(intact, intact, terrain,
+        catalog, assets, structure, presentation, &capture, &capture);
+    VWB_EXPECT(no_op.changed_ordinals().empty());
+    VWB_EXPECT(no_op.changed_ids().empty());
+    const auto changed = NativeSurfacePropChunkTransition::create(intact, removed, terrain,
+        catalog, assets, structure, presentation, &capture, &capture);
+    VWB_EXPECT(!changed.channel_footprints_complete());
+    VWB_EXPECT(!changed.changed_ordinals().empty());
+    VWB_EXPECT_EQ(0U, changed.changed_ordinals().front());
+    VWB_EXPECT_EQ(28U, changed.before_manifest().entries().size());
+    VWB_EXPECT_EQ(28U, changed.after_manifest().entries().size());
+    VWB_EXPECT_EQ(intact.final_rng_state(), changed.before_manifest().final_rng_state());
+    VWB_EXPECT_EQ(removed.final_rng_state(), changed.after_manifest().final_rng_state());
+    VWB_EXPECT(changed.before_manifest().content_digest() != changed.after_manifest().content_digest());
+    VWB_EXPECT(changed.content_digest() != no_op.content_digest());
+    VWB_EXPECT(std::find(changed.changed_ids().begin(), changed.changed_ids().end(),
+        intact.attempts()[0].attempt.durable_id) != changed.changed_ids().end());
+    VWB_EXPECT(std::is_sorted(changed.changed_ids().begin(), changed.changed_ids().end()));
+}
+
+VWB_TEST(native_surface_transition_tracks_ore_child_ids_and_rng_suffix) {
+    auto profiles = tests::godot_oracle_environment_profiles();
+    for (auto &profile : profiles) profile.rock_base_chance = 1.0;
+    const auto catalog = NativeBiomeEnvironmentCatalog::create(profiles);
+    const auto assets = rocks(catalog); const auto structure = exclusions();
+    const auto capture = halo(structure); const auto presentation = wildlife();
+    bool found = false;
+    for (std::uint32_t candidate = 0U; candidate < 32U && !found; ++candidate) {
+        const auto definition = surface_prop_test_fixture::definition("transition-ore-" + std::to_string(candidate));
+        const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+            definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+        const auto intact = ordered(terrain, catalog, structure, NativeFeatureDeltaSnapshot::create({}, {}));
+        for (std::uint32_t i = 0U; i + 1U < intact.attempts().size(); ++i) {
+            if (!intact.attempts()[i].ore_cluster) continue;
+            const auto child_id = intact.attempts()[i].attempt.durable_id + ":cluster1";
+            const auto filtered = ordered(terrain, catalog, structure,
+                NativeFeatureDeltaSnapshot::create({{child_id}}, {}));
+            const auto no_op = NativeSurfacePropChunkTransition::create(intact, intact, terrain,
+                catalog, assets, structure, presentation, &capture, &capture);
+            VWB_EXPECT(no_op.changed_ordinals().empty());
+            const auto change = NativeSurfacePropChunkTransition::create(intact, filtered, terrain,
+                catalog, assets, structure, presentation, &capture, &capture);
+            VWB_EXPECT(std::find(change.changed_ordinals().begin(), change.changed_ordinals().end(), i)
+                != change.changed_ordinals().end());
+            VWB_EXPECT(std::find(change.changed_ids().begin(), change.changed_ids().end(), child_id)
+                != change.changed_ids().end());
+            VWB_EXPECT(change.before_manifest().entries()[i].ore->children()[1].present);
+            VWB_EXPECT(!change.after_manifest().entries()[i].ore->children()[1].present);
+            VWB_EXPECT(intact.final_rng_state() != filtered.final_rng_state());
+            found = true; break;
+        }
+    }
+    VWB_EXPECT(found);
+}
+
+VWB_TEST(native_surface_transition_tracks_tree_halo_without_ordered_change) {
+    auto profiles = tests::godot_oracle_environment_profiles();
+    for (auto &profile : profiles) {
+        profile.rock_base_chance = 0.0; profile.tree_chance = 1.0;
+    }
+    const auto catalog = NativeBiomeEnvironmentCatalog::create(profiles);
+    const auto assets = rocks(catalog); const auto structure = exclusions();
+    const auto definition = surface_prop_test_fixture::definition("feature-tree");
+    const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+        definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+    const auto source = ordered(terrain, catalog, structure, NativeFeatureDeltaSnapshot::create({}, {}));
+    const auto placement = NativeSurfacePropOrderedPlacement::create(source, terrain);
+    std::uint32_t ordinal = 28U;
+    for (std::uint32_t i = 0U; i < 28U; ++i)
+        if (source.attempts()[i].outcome == NativeSurfacePropClassificationOutcome::tree_22_draw
+            || source.attempts()[i].outcome == NativeSurfacePropClassificationOutcome::tree_36_draw) {
+            ordinal = i; break;
+        }
+    VWB_EXPECT(ordinal < 28U);
+    const auto clear = halo(structure);
+    const auto &candidate = placement.entries()[ordinal];
+    const auto blocked = halo(structure, {{"transition-natural",
+        {candidate.cell_x - 2, candidate.cell_z, candidate.cell_x - 2, candidate.cell_z}}});
+    const auto change = NativeSurfacePropChunkTransition::create(source, source, terrain,
+        catalog, assets, structure, wildlife(), &clear, &blocked);
+    VWB_EXPECT(change.ordered_difference().changed_ordinals().empty());
+    VWB_EXPECT(std::find(change.changed_ordinals().begin(), change.changed_ordinals().end(), ordinal)
+        != change.changed_ordinals().end());
+    VWB_EXPECT_EQ(NativeSurfaceTreePresence::present,
+        change.before_manifest().entries()[ordinal].tree_presence->presence);
+    VWB_EXPECT_EQ(NativeSurfaceTreePresence::absent,
+        change.after_manifest().entries()[ordinal].tree_presence->presence);
+    VWB_EXPECT(std::find(change.changed_ids().begin(), change.changed_ids().end(), candidate.durable_id)
+        != change.changed_ids().end());
+}
 
 VWB_TEST(native_surface_feature_manifest_composes_all_attempts_and_detects_stale_inputs) {
     const auto definition = surface_prop_test_fixture::definition("feature-manifest");

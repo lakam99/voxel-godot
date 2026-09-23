@@ -89,6 +89,16 @@ VWB_TEST(native_ordered_wildlife_definition_projects_both_presentation_paths) {
             ordered, placements, ordinal, terrain, c, presentations);
         const auto &s = *ordered.attempts()[ordinal].wildlife;
         const auto &g = projected.construction();
+        const auto &collider = projected.initial_collider();
+        VWB_EXPECT_EQ(projected.placement().durable_id, collider.durable_id);
+        VWB_EXPECT_EQ(float_bits(projected.placement().world_anchor.x), float_bits(collider.body_origin.x));
+        VWB_EXPECT_EQ(float_bits(projected.placement().world_anchor.y), float_bits(collider.body_origin.y));
+        VWB_EXPECT_EQ(float_bits(projected.placement().world_anchor.z), float_bits(collider.body_origin.z));
+        VWB_EXPECT_EQ(float_bits(g.body_yaw), float_bits(collider.body_yaw));
+        VWB_EXPECT_EQ(float_bits(g.collider_center.y), float_bits(collider.local_center.y));
+        VWB_EXPECT_EQ(float_bits(g.collider_size.x), float_bits(collider.box_size.x));
+        VWB_EXPECT_EQ(s.recipe.collision_layer, collider.collision_layer);
+        VWB_EXPECT_EQ(s.recipe.collision_mask, collider.collision_mask);
         VWB_EXPECT_EQ(s.recipe.variant, projected.stream().recipe.variant);
         VWB_EXPECT_EQ(s.presentation.path, g.presentation_path);
         VWB_EXPECT_EQ(path == NativeWildlifePresentationPath::animated_playable ? 0U : 8U,
