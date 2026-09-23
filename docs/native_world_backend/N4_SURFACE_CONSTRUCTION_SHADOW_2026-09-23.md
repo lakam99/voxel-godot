@@ -439,6 +439,29 @@ future full-record scans from one per tree to one per chunk, but it remains a
 script-side capture prerequisite: the native adapter has not yet admitted the
 union against its tree definitions or decided actual tree presence.
 
+The ordered native shadow now emits the complete tree-halo request list from
+its own post-draw definitions, using the same pure-core margin function as
+the eventual presence decision. The `n4-tree-halo-requests-01` native gate
+passed at `artifacts/native-world-backend/n4-tree-halo-requests-01/report.json`.
+The focused direct differential passed six cases and 168 attempts at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-9b613098-0465-44b0-b447-0b5ec3375e82.json`:
+45 tree definitions, 44 actual tree bodies, and one body suppressed by a
+natural exclusion record whose source cell lies outside the prop chunk but
+inside its post-draw halo. The fixture checks native requests against present
+live tree-body dimensions and active biome-profile margins using Godot's
+clamped margin expression, captures one current union halo, and proves that
+the outside-chunk record is present in it. Independent review caught a
+false-failure risk: other trees may legitimately be absent due to existing
+exclusions. The edge assertion now requires a baseline-present tree and
+compares the other trees before and after injection. The initial six-case run failed
+only because the runner's old five-case count was not updated; its other
+comparisons passed. The count assertion was corrected without changing game
+code. The independent-review corrections above then passed the same short
+probe, without treating a legitimate pre-existing exclusion as a defect.
+This remains direct-service evidence: native admission of the union, native
+presence decisions, live publication, headed visuals/collision and save parity
+are still open.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

@@ -8,6 +8,7 @@
 #include "native_surface_prop_source_ordered_stream.hpp"
 #include "native_surface_rock_ordered_visual_plan.hpp"
 #include "native_surface_tree_ordered_composer.hpp"
+#include "native_surface_tree_presence.hpp"
 #include "native_surface_wildlife_ordered_definition.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
@@ -2217,6 +2218,7 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 			terrain, *biome_catalog_, *p_exclusions->snapshot_, *removed_props_, *wildlife_presentations_);
 		const NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
 		Array attempts;
+		Array tree_halo_requests;
 		for (std::size_t index = 0; index < ordered.attempts().size(); ++index) {
 			const NativeSurfacePropOrderedAttempt &source = ordered.attempts()[index];
 			const NativeSurfacePropPlacementEntry &placed = placement.entries()[index];
@@ -2365,6 +2367,15 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 					ordered, placement, static_cast<std::uint32_t>(index), terrain, profile);
 				const NativeTreeDefinitionInput &built = tree.input();
 				const NativeTreeTrunkCylinder trunk = tree.trunk_cylinder();
+				const NativeTreeExclusionMargins margins = native_tree_exclusion_margins(
+					built.trunk_radius, built.canopy_radius, built.exclusion_margin,
+					pin.definition().constants().cell_size_meters);
+				Dictionary halo_request;
+				halo_request["ordinal"] = static_cast<std::int64_t>(source.attempt.ordinal);
+				halo_request["cell"] = Vector2i(source.attempt.cell_x, source.attempt.cell_z);
+				halo_request["naturalMarginCells"] = margins.natural_cells;
+				halo_request["structureMarginCells"] = margins.structure_cells;
+				tree_halo_requests.append(halo_request);
 				Dictionary feature;
 				feature["kind"] = "treeDefinition";
 				feature["contentIdentity"] = text(sha256_hex(tree.content_digest()));
@@ -2400,6 +2411,7 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 		result["rngSeed"] = static_cast<std::int64_t>(ordered.rng_seed());
 		result["finalRngState"] = text(std::to_string(ordered.final_rng_state()));
 		result["attempts"] = attempts;
+		result["treeHaloRequests"] = tree_halo_requests;
 		result["attemptCount"] = static_cast<std::int64_t>(attempts.size());
 		result["completeFeatureManifest"] = false;
 		result["liveCaptureFreshnessProven"] = false;

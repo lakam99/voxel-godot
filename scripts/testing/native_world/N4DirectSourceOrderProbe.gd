@@ -5,6 +5,7 @@ const MainScript := preload("res://scripts/Main.gd")
 const Structures := preload("res://scripts/StructureSystem.gd")
 const Admission := preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const Bundle := preload("res://scripts/world/ActiveSurfacePropOwnerBundle.gd")
+const TreeHalo := preload("res://scripts/world/ActiveStructureTreeHaloSnapshot.gd")
 
 func native_initialization(seed_text: String) -> Dictionary:
 	return {"schema":"n3-native-world-backend-initialize/v1", "seedText":seed_text,
@@ -175,10 +176,22 @@ func tree_geometry(body: StaticBody3D) -> Dictionary:
 		"visualHeightBits":bits(float(body.get_meta("tree_visual_height", 0.0))),
 		"trunkRadiusBits":bits(float(body.get_meta("tree_trunk_radius", 0.0))),
 		"canopyRadiusBits":bits(float(body.get_meta("tree_canopy_radius", 0.0))),
+		"trunkRadius":float(body.get_meta("tree_trunk_radius", 0.0)),
+		"canopyRadius":float(body.get_meta("tree_canopy_radius", 0.0)),
 		"collisionHeightBits":bits(float(body.get_meta("tree_collision_height", 0.0))),
 		"colliderRadiusBits":bits((collider.shape as CylinderShape3D).radius),
 		"colliderHeightBits":bits((collider.shape as CylinderShape3D).height),
 		"colliderCenterYBits":bits(collider.position.y)}
+
+func direct_tree_halo_margins(main: Object, row: Dictionary) -> Dictionary:
+	var profile: BiomeEnvironmentProfile = main.biome_environment_catalog.profile_for_biome(
+		String(row.sourceBiome))
+	var exclusion := float(profile.natural_prop_exclusion_margin)
+	var trunk := maxf(0.12, float(row.tree.trunkRadius))
+	var canopy := maxf(trunk, float(row.tree.canopyRadius))
+	return {"ordinal":row.ordinal,
+		"naturalMarginCells":ceili(maxf(0.0, trunk + exclusion) / MainScript.CELL),
+		"structureMarginCells":ceili(maxf(0.0, canopy + exclusion) / MainScript.CELL)}
 
 func run() -> void:
 	var main = MainScript.new()
@@ -220,9 +233,29 @@ func run() -> void:
 				cases.append(run_case(main, ore_chunk, [child_tombstone]))
 				main.restore_removed_props([])
 				break
+	# A blocker can originate outside the 28-cell source chunk but intersect
+	# a post-draw tree margin. The center-cell stream must stay unchanged.
+	var edge_case_ready := false
+	for request in cases[0].nativeTreeHaloRequests:
+		if not cases[0].direct[int(request.ordinal)].has("tree"): continue
+		var cell := Vector2i(int(request.cell[0]), int(request.cell[1]))
+		var margin := int(request.naturalMarginCells)
+		var outside := Vector2i(2147483647, 2147483647)
+		if cell.x - margin < 0: outside = Vector2i(-1, cell.y)
+		elif cell.x + margin >= 28: outside = Vector2i(28, cell.y)
+		elif cell.y - margin < 0: outside = Vector2i(cell.x, -1)
+		elif cell.y + margin >= 28: outside = Vector2i(cell.x, 28)
+		if outside.x == 2147483647: continue
+		main.structure_system.reserve_natural_prop_exclusion(outside.x, outside.y, 1, 1, "n4_edge_halo")
+		var edge_case: Dictionary = run_case(main, Vector2i.ZERO, [])
+		edge_case["edgeBlockerCell"] = [outside.x, outside.y]
+		edge_case["edgeBlockerId"] = "n4_edge_halo:%d,%d:1x1" % [outside.x, outside.y]
+		cases.append(edge_case)
+		edge_case_ready = true
+		break
 	var result := {"scope":"direct_production_method_and_native_shadow_contract_not_live_gameplay",
 		"seed":main.seed_text,"cases":cases,"oreFixtureChunk":[ore_chunk.x,ore_chunk.y],
-		"oreChunkFound":ore_chunk_found}
+		"oreChunkFound":ore_chunk_found,"edgeCaseReady":edge_case_ready}
 	var path := OS.get_environment("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT")
 	if path.is_empty():
 		push_error("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT is required")
@@ -257,6 +290,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 	var ordered: Dictionary = backend.compose_surface_prop_ordered_shadow(
 		bundle.terrain.page, structure_receipt.snapshot) \
 		if structure_receipt.get("status") == "ready" else {}
+	var tree_requests: Array = ordered.get("treeHaloRequests", [])
+	var tree_halo: Dictionary = TreeHalo.capture(main.structure_system, tree_requests) \
+		if not tree_requests.is_empty() else {}
 	var rng: RandomNumberGenerator = state.rng
 	var direct_rows := []
 	for index in range(28):
@@ -425,6 +461,18 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		"nativeInitialization":initialized.get("status"),
 		"bundleReady":bundle.get("ok",false),"admissions":admissions,
 		"structureAdmission":structure_receipt.get("status"),"orderedStatus":ordered.get("status"),
+		"nativeTreeHaloRequests":tree_requests.map(func(row): return {
+			"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
+			"naturalMarginCells":row.naturalMarginCells,
+			"structureMarginCells":row.structureMarginCells}),
+		"godotTreeHaloMargins":direct_rows.filter(
+			func(row): return row.has("tree")
+		).map(func(row): return direct_tree_halo_margins(main, row)),
+		"treeHaloCaptureReady":bool(tree_halo.get("ok", false)),
+		"treeHaloCaptureCurrent":TreeHalo.is_current(main.structure_system, tree_halo) \
+			if bool(tree_halo.get("ok", false)) else false,
+		"treeHaloNaturalIds":tree_halo.halo.content.natural.map(func(row): return row.id) \
+			if bool(tree_halo.get("ok", false)) else [],
 		"direct":direct_rows,"native":native_rows,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),
 		"childCount":chunk.get_child_count()}

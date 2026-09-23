@@ -56,6 +56,16 @@ struct NativeSurfaceTreePresenceDecision final {
     Sha256Digest content_digest{};
 };
 
+struct NativeTreeExclusionMargins final {
+    std::int32_t natural_cells = 0;
+    std::int32_t structure_cells = 0;
+};
+
+// The same post-draw dimensions govern the capture request and final decision.
+NativeTreeExclusionMargins native_tree_exclusion_margins(
+    double trunk_radius, double canopy_radius, double exclusion_margin,
+    double cell_size_meters);
+
 // Pure expanded-footprint decision used by the source-bound composer and
 // focused edge tests. Missing halo or Citadel-region admission rejects.
 NativeSurfaceTreePresenceDecision evaluate_native_tree_exclusion_halo(

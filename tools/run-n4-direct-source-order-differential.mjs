@@ -22,16 +22,18 @@ let wildlifeDefinitionsCompared = 0;
 let rockDefinitionsCompared = 0;
 let treeDefinitionsCompared = 0;
 let treeBodiesCompared = 0;
+let edgeTreesSuppressed = 0;
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
 if (processResult.code !== 0) failures.push(`Godot process failed: ${processResult.code}`);
-if (probe?.cases?.length !== 5 || !probe?.oreChunkFound)
-  failures.push(`Expected intact and tombstoned ore cases, got ${probe?.cases?.length} cases, found=${probe?.oreChunkFound}`);
+if (probe?.cases?.length !== 6 || !probe?.oreChunkFound || !probe?.edgeCaseReady
+    || !probe?.cases?.[5]?.edgeBlockerId)
+  failures.push(`Expected intact/tombstoned ore and edge-halo cases, got ${probe?.cases?.length} cases, ore=${probe?.oreChunkFound}, edge=${probe?.edgeCaseReady}`);
 if (probe?.cases?.[4]?.removed?.length !== 1
     || JSON.stringify(probe?.cases?.[3]?.chunk) !== JSON.stringify(probe?.cases?.[4]?.chunk))
   failures.push('Ore tombstone replay does not target the same chunk and one child');
-if (probe?.cases?.length === 5) {
+if ((probe?.cases?.length ?? 0) >= 5) {
   const intact = probe.cases[3], tombstoned = probe.cases[4];
   const removedId = tombstoned.removed?.[0];
   const intactOre = intact.native?.find(row => (row.outcome === 6 || row.outcome === 7)
@@ -46,6 +48,8 @@ if (JSON.stringify(probe?.oreFixtureChunk) !== '[3,2]')
   failures.push(`Unexpected ore fixture chunk: ${JSON.stringify(probe?.oreFixtureChunk)}`);
 for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   const label = `case ${caseIndex} chunk ${JSON.stringify(sample.chunk)} removed ${sample.removed?.length ?? 0}`;
+  if (sample.edgeBlockerId && !(sample.treeHaloNaturalIds ?? []).includes(sample.edgeBlockerId))
+    failures.push(`${label} outside-chunk natural blocker missing from union halo`);
   for (const key of ['nativeInitialization', 'structureAdmission', 'orderedStatus'])
     if (sample[key] !== 'ready') failures.push(`${label} ${key}: ${sample[key]}`);
   if (!sample.bundleReady) failures.push(`${label} owner bundle not ready`);
@@ -53,6 +57,25 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
     if (value !== 'ready') failures.push(`${label} ${key} admission: ${value}`);
   if (sample.direct?.length !== 28 || sample.native?.length !== 28)
     failures.push(`${label} attempt counts: direct=${sample.direct?.length}, native=${sample.native?.length}`);
+  const treeAttempts = (sample.native ?? []).filter(row => row.feature?.kind === 'treeDefinition');
+  const requests = sample.nativeTreeHaloRequests ?? [];
+  const godotMargins = sample.godotTreeHaloMargins ?? [];
+  if (requests.length !== treeAttempts.length)
+    failures.push(`${label} tree halo request count ${requests.length} != definitions ${treeAttempts.length}`);
+  const directTreeCount = (sample.direct ?? []).filter(row => !!row.tree).length;
+  if (godotMargins.length !== directTreeCount)
+    failures.push(`${label} Godot tree halo margin count ${godotMargins.length} != direct tree bodies ${directTreeCount}`);
+  if (requests.length > 0 && (!sample.treeHaloCaptureReady || !sample.treeHaloCaptureCurrent))
+    failures.push(`${label} tree halo union was not captured fresh`);
+  for (let i = 0; i < Math.min(requests.length, treeAttempts.length); i++) {
+    const request = requests[i], tree = treeAttempts[i];
+    const godot = godotMargins.find(row => row.ordinal === tree.ordinal);
+    if (request.ordinal !== tree.ordinal || JSON.stringify(request.cell) !== JSON.stringify(tree.cell))
+      failures.push(`${label} tree halo request ${i} ordinal/cell mismatch`);
+    if (godot && (request.naturalMarginCells !== godot.naturalMarginCells
+        || request.structureMarginCells !== godot.structureMarginCells))
+      failures.push(`${label} tree halo request ${i} Godot post-draw margins mismatch`);
+  }
   const uint64 = value => BigInt.asUintN(64, BigInt(value)).toString();
   for (let index = 0; index < Math.min(sample.direct?.length ?? 0, sample.native?.length ?? 0); index++) {
     const direct = sample.direct[index], native = sample.native[index];
@@ -159,10 +182,20 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
     }
     if (native.outcome === 4 || native.outcome === 5) {
       const expected = native.feature, actual = direct.tree;
+      const request = requests.find(row => row.ordinal === native.ordinal);
+      const blockedByEdge = !!(sample.edgeBlockerCell && request
+        && Math.abs(sample.edgeBlockerCell[0] - native.cell[0]) <= request.naturalMarginCells
+        && Math.abs(sample.edgeBlockerCell[1] - native.cell[1]) <= request.naturalMarginCells);
+      const baseline = sample.edgeBlockerCell ? probe.cases[0]?.direct?.[index]?.tree : undefined;
       if (expected?.kind !== 'treeDefinition' || expected.haloRequired !== true) {
         failures.push(`${label} attempt ${index} native tree definition missing or presence prematurely decided`);
       } else {
         treeDefinitionsCompared++;
+        if (sample.edgeBlockerCell && blockedByEdge && baseline && !actual) edgeTreesSuppressed++;
+        if (sample.edgeBlockerCell && blockedByEdge && baseline && actual)
+          failures.push(`${label} attempt ${index} outside-chunk blocker did not suppress baseline tree`);
+        if (sample.edgeBlockerCell && !blockedByEdge && !!baseline !== !!actual)
+          failures.push(`${label} attempt ${index} outside-chunk blocker changed an unrelated tree`);
         if (actual) {
           if (actual.captureError) {
             failures.push(`${label} attempt ${index} tree body capture failed`);
@@ -189,6 +222,8 @@ if (wildlifeDefinitionsCompared === 0) failures.push('No wildlife definitions we
 if (rockDefinitionsCompared === 0) failures.push('No rock definitions were compared');
 if (treeDefinitionsCompared === 0 || treeBodiesCompared === 0)
   failures.push('No native tree definitions or direct tree bodies were compared');
+if (!probe?.edgeCaseReady) failures.push('No outside-chunk tree halo blocker case was captured');
+if (edgeTreesSuppressed === 0) failures.push('No baseline-present tree was suppressed by the outside-chunk blocker');
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -202,6 +237,7 @@ const report = {
   rockDefinitionsCompared,
   treeDefinitionsCompared,
   treeBodiesCompared,
+  edgeTreesSuppressed,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };

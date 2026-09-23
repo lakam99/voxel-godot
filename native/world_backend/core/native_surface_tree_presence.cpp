@@ -62,6 +62,13 @@ void write_records(Writer &w, const std::vector<StructureExclusionRecord> &recor
 NativeSurfaceTreePresenceRejected::NativeSurfaceTreePresenceRejected()
     : std::invalid_argument("invalid source-bound tree exclusion halo") {}
 
+NativeTreeExclusionMargins native_tree_exclusion_margins(
+    double trunk_radius, double canopy_radius, double exclusion_margin,
+    double cell_size_meters) {
+    return {margin_cells(trunk_radius, exclusion_margin, cell_size_meters),
+        margin_cells(canopy_radius, exclusion_margin, cell_size_meters)};
+}
+
 NativeTreeExclusionHaloCapture NativeTreeExclusionHaloCapture::create(
     Sha256Digest world_digest, std::uint64_t world_generation,
     Sha256Digest center_exclusion_digest, StructureExclusionRect coverage,
@@ -124,8 +131,10 @@ NativeSurfaceTreePresenceDecision evaluate_native_tree_exclusion_halo(
     double canopy_radius, double exclusion_margin, double cell_size_meters,
     const NativeTreeExclusionHaloCapture &halo) {
     NativeSurfaceTreePresenceDecision out;
-    out.natural_margin_cells = margin_cells(trunk_radius, exclusion_margin, cell_size_meters);
-    out.structure_margin_cells = margin_cells(canopy_radius, exclusion_margin, cell_size_meters);
+    const auto margins = native_tree_exclusion_margins(trunk_radius, canopy_radius,
+        exclusion_margin, cell_size_meters);
+    out.natural_margin_cells = margins.natural_cells;
+    out.structure_margin_cells = margins.structure_cells;
     const auto widest = std::max(out.natural_margin_cells, out.structure_margin_cells);
     const std::int64_t lo_x = static_cast<std::int64_t>(cell_x) - widest;
     const std::int64_t hi_x = static_cast<std::int64_t>(cell_x) + widest;

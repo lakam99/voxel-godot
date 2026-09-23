@@ -26,6 +26,21 @@ NativeTreeExclusionHaloCapture halo(StructureExclusionRect bounds,
 
 } // namespace
 
+VWB_TEST(native_tree_halo_request_margins_match_presence_decision) {
+    const auto margins = native_tree_exclusion_margins(1.0, 5.0, 0.0, 1.35);
+    VWB_EXPECT_EQ(1, margins.natural_cells);
+    VWB_EXPECT_EQ(4, margins.structure_cells);
+    const auto capture = halo({-8,-8,35,35}, {}, {},
+        {absent(-1,-1), absent(0,-1), absent(-1,0), absent(0,0)});
+    const auto decision = evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, capture);
+    VWB_EXPECT_EQ(margins.natural_cells, decision.natural_margin_cells);
+    VWB_EXPECT_EQ(margins.structure_cells, decision.structure_margin_cells);
+    VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
+        native_tree_exclusion_margins(-1.0, 5.0, 0.0, 1.35));
+    VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
+        native_tree_exclusion_margins(1.0, 5.0, 0.0, 0.0));
+}
+
 VWB_TEST(native_tree_halo_rejects_uncaptured_chunk_edge_and_negative_region) {
     const auto local = halo({0,0,27,27});
     VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
