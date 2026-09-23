@@ -3,6 +3,7 @@
 #include "biome_region_field.hpp"
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
+#include "native_effective_voxel_block.hpp"
 #include "native_surface_feature_manifest.hpp"
 #include "native_surface_forage_ordered_definition.hpp"
 #include "native_surface_ore_cluster_definition.hpp"
@@ -47,6 +48,8 @@ constexpr const char *INITIALIZE_SCHEMA = "n3-native-world-backend-initialize/v1
 constexpr const char *INITIALIZE_FROM_SAVE_V2_SCHEMA = "n3-native-world-backend-initialize-from-save-v2/v1";
 constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request/v1";
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
+constexpr const char *VOXEL_BLOCK_REQUEST_SCHEMA = "n3-effective-voxel-block-request/v1";
+constexpr const char *VOXEL_BLOCK_RESULT_SCHEMA = "n3-effective-voxel-block-result/v1";
 constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone-receipt/v1";
 constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catalog-receipt/v1";
 constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-receipt/v1";
@@ -1271,6 +1274,7 @@ std::vector<CitadelExclusionSource> structure_citadels(const Variant &p_value) {
 void NativeEffectiveTerrainPage::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("status"), &NativeEffectiveTerrainPage::status);
 	ClassDB::bind_method(D_METHOD("sample_batch", "request"), &NativeEffectiveTerrainPage::sample_batch);
+	ClassDB::bind_method(D_METHOD("encode_voxel_block", "request"), &NativeEffectiveTerrainPage::encode_voxel_block);
 }
 
 void NativeEffectiveTerrainPage::admit(std::unique_ptr<NativeEffectiveTerrainBatch> p_batch) {
@@ -1371,6 +1375,42 @@ Dictionary NativeEffectiveTerrainPage::sample_batch(const Dictionary &p_request)
 		return result;
 	} catch (const std::exception &error) {
 		return failure("sample_batch", error);
+	}
+}
+
+Dictionary NativeEffectiveTerrainPage::encode_voxel_block(const Dictionary &p_request) const {
+	if (!batch_) return envelope("encode_voxel_block", "failed", "page_has_no_pin");
+	try {
+		if (require_protocol_string(p_request.get("schema", Variant()), "schema") != VOXEL_BLOCK_REQUEST_SCHEMA)
+			throw std::invalid_argument("unsupported native effective voxel block request schema");
+		const Vector3i origin = require_vector3i(p_request.get("origin", Variant()), "origin");
+		const Vector3i size = require_vector3i(p_request.get("size", Variant()), "size");
+		const std::int64_t lod = require_i64(p_request.get("lod", Variant()), "lod");
+		if (lod < 0 || lod > std::numeric_limits<std::uint32_t>::max())
+			throw std::out_of_range("lod exceeds uint32");
+		const NativeEffectiveTerrainSource source(batch_->pin());
+		const NativeEffectiveVoxelBlock value = encode_native_effective_voxel_block(
+			source, {cell_coord(origin), cell_coord(size), static_cast<std::uint32_t>(lod)});
+		auto packed = [](const std::vector<std::uint8_t> &bytes) {
+			PackedByteArray result;
+			result.resize(static_cast<int64_t>(bytes.size()));
+			std::memcpy(result.ptrw(), bytes.data(), bytes.size());
+			return result;
+		};
+		Dictionary result = envelope("encode_voxel_block", "ready");
+		result["resultSchema"] = VOXEL_BLOCK_RESULT_SCHEMA;
+		result["origin"] = vector3i(value.origin);
+		result["size"] = vector3i(value.size);
+		result["lod"] = static_cast<int64_t>(value.lod);
+		result["pinIdentity"] = identity_dictionary(value.pin_identity);
+		result["terrainDeltaRevision"] = static_cast<int64_t>(value.terrain_delta_revision);
+		result["shapingRegistryRevision"] = static_cast<int64_t>(value.shaping_registry_revision);
+		result["sdf16Le"] = packed(value.sdf16_le);
+		result["indices8"] = packed(value.indices8);
+		result["data5_8"] = packed(value.data5_8);
+		return result;
+	} catch (const std::exception &error) {
+		return failure("encode_voxel_block", error);
 	}
 }
 

@@ -28,8 +28,16 @@ was a migration mistranslation, not a new world-rule change.
 The pinned Voxel Tools v1.6x boundary offers
 `VoxelBuffer.set_channel_from_byte_array`, so a later thin generator can copy
 three complete channels without per-voxel Godot calls or a Voxel Tools C++ ABI
-dependency. Before that cutover, the adapter must admit/split real cross-page
-blocks, compare owner generation plus source/delta/shaping identity before
+dependency. A shadow-only `NativeEffectiveTerrainPage.encode_voxel_block`
+adapter method now transports the three `PackedByteArray` channels, source
+identity and revision fields from its immutable single-page pin. Its focused
+Godot contract (`artifacts/native-world-backend/n3-voxel-adapter-focused-report.json`)
+passes exact edited bytes, malformed/cross-page rejection and old-pin
+immutability after an edit. It has not generated a live VoxelBuffer.
+
+Before production cutover, admission must cover real cross-page blocks from
+one coherent delta and shaping snapshot, compare owner generation plus
+source/delta/shaping identity before
 publication, retain retryable stale work, and atomically switch the gameplay
 terrain query facade and generator to the same native source. Generated-world
 byte differentials, edits/LOD/page seams, New Game/Continue, headed digging,
@@ -70,6 +78,11 @@ proof. No tree GDScript recipe or collision authority is deleted here.
   binary and produce `[0,0,65,0,191,255,65,0,1,128,255,127,191,255,0,0]`
   for the 2³ SDF channel and `[1,2]` at the threshold, respectively. These
   are channel-byte oracles, not headed gameplay tests.
+- `node tools/build-native-terrain-meshing.mjs --target template_debug --api-version 4.6`
+  built the shadow adapter; the focused installed-Godot
+  `native_effective_voxel_adapter_contract.gd` passed with no failures.
+  This is direct-service marshalling and pin-lifetime evidence, not live
+  generator consumption or adapter line/branch coverage.
 - Independent read-only reviews found the rounding and conversion-order
   issues and identified page-seam/freshness/live-recipe boundaries. No live
   caller changed, so no production authority or script sampler is deleted.

@@ -32,6 +32,7 @@ protected:
 public:
 	godot::Dictionary status() const;
 	godot::Dictionary sample_batch(const godot::Dictionary &p_request) const;
+	godot::Dictionary encode_voxel_block(const godot::Dictionary &p_request) const;
 
 private:
 	friend class NativeWorldBackend;
