@@ -12,24 +12,28 @@ export const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../
 export const scene = 'res://scenes/testing/WorldStreamingMaturityLoading.tscn';
 export const appDataSuffix = ['Godot', 'app_userdata', 'Voxel Biome World Godot'];
 export const comparatorPolicy = Object.freeze({
-  policyId: 'gate5-loading-comparator-2026-09-17',
-  status: 'duration_threshold_requires_product_confirmation',
+  policyId: 'gate5-responsive-loading-2026-09-23',
+  status: 'fixed_responsiveness_policy',
   passAffecting: {
     functionalReadiness: true,
     cleanLifecycle: true,
     emptyIsolatedColdProfile: true,
     immutableSavePairing: true,
+    firstVisibleLoadingFrameMaxMs: 1000,
+    loadingFrameP99MaxMs: 33,
+    loadingFrameMaxMs: 100,
+    progressHeartbeatMaxGapMs: 5000,
     loadingMainCallbackMaxMs: 33,
     noModalReentryAfterGameplayReady: true,
     duration: false,
   },
   provisionalReferencesOnly: {
-    source: 'G2 recorded 90s cold / 45s warm / warm <=110% of reusable paired cold work; the controlling G5 plan later says 90s is provisional and not an accepted hard threshold.',
+    source: 'Historical G2 references only. User decision: loading total seconds are diagnostic, while visible responsiveness and complete readiness determine acceptance.',
     coldInputToGameplayReadyMs: 90000,
     warmInputToGameplayReadyMs: 45000,
     warmToPairedColdRatio: 1.10,
   },
-  decisionRule: 'The harness reports every provisional comparison but does not convert the disputed 90-second duration into a Gate 5 pass/fail. A final release report must name an approved duration comparator.',
+  decisionRule: 'Every cold and warm sample must complete with visible responsive loading, honest source progress, full gameplay readiness and clean lifecycle. Total time and warm/cold ratio are diagnostic; watchdog timeout means noncompletion.',
 });
 export const loadingSaveBounds = Object.freeze({ activeSeedBytes: 4096, slotBytes: 64 * 1024 * 1024 });
 
@@ -229,15 +233,56 @@ function cleanEnvironment(parent) {
   return env;
 }
 
-export function evaluateSampleReport(report, expected) {
+export function evaluateSampleReport(report, expected, evaluationMode = 'gate5') {
   const errors = [];
+  const finitePositive = value => typeof value === 'number' && Number.isFinite(value) && value > 0;
+  const finiteNonnegative = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
   if (report?.schema !== 'world-streaming-loading-sample/v1' || report?.finished !== true || report?.passed !== true) errors.push('Godot loading sample did not pass.');
   if (report?.sampleId !== expected.sampleId || report?.launchMode !== expected.launchMode || report?.cacheClassification !== expected.cacheClassification) errors.push('Sample identity/classification mismatch.');
   if (report?.requestedTestSeed !== expected.requestedSeed || report?.processTestSeed !== expected.processTestSeed || !report?.actualSeed) errors.push('Requested/process/actual seed evidence is incomplete.');
   if (expected.actualSeed && report?.actualSeed !== expected.actualSeed) errors.push('Continue restored a different seed than its paired New Game.');
   if (report?.voxelPlaytest !== '' || report?.runTokenPresent !== true || report?.savePathOverride !== '') errors.push('Dedicated-token/save-path/VOXEL_PLAYTEST policy was not preserved.');
-  if (!(Number(report?.timing?.inputToFirstLoadingFrameMs) > 0) || !(Number(report?.timing?.inputToGameplayReadyMs) > 0)) errors.push('Menu-input loading timings are incomplete.');
-  if (!(Number(report?.timing?.loadingFrameCadence?.sampleCount) > 0) || !(Number(report?.timing?.loadingFrameCadence?.maxMs) > 0) || !Array.isArray(report?.timing?.startupTimeline) || report.timing.startupTimeline.length === 0 || !report?.timing?.stageDistributions || Object.keys(report.timing.stageDistributions).length === 0 || report?.timing?.timelineObservation?.complete !== true || report?.timing?.timelineObservation?.truncated !== false) errors.push('Loading cadence/stage-distribution evidence is incomplete or truncated.');
+  const firstFrameMs = report?.timing?.inputToFirstLoadingFrameMs;
+  const readyMs = report?.timing?.inputToGameplayReadyMs;
+  if (!finitePositive(firstFrameMs) || !finitePositive(readyMs) || readyMs < firstFrameMs) errors.push('Menu-input loading timings are incomplete.');
+  else if (firstFrameMs > comparatorPolicy.passAffecting.firstVisibleLoadingFrameMaxMs) errors.push(`First visible loading frame ${firstFrameMs.toFixed(3)}ms exceeded ${comparatorPolicy.passAffecting.firstVisibleLoadingFrameMaxMs}ms.`);
+  const cadence = report?.timing?.loadingFrameCadence;
+  if (!Number.isInteger(cadence?.sampleCount) || cadence.sampleCount <= 0 || !finitePositive(cadence?.p99Ms)
+      || !finitePositive(cadence?.maxMs) || cadence.p99Ms > cadence.maxMs
+      || !Array.isArray(report?.timing?.startupTimeline) || report.timing.startupTimeline.length === 0
+      || !report?.timing?.stageDistributions || Object.keys(report.timing.stageDistributions).length === 0
+      || report?.timing?.timelineObservation?.complete !== true || report?.timing?.timelineObservation?.truncated !== false) errors.push('Loading cadence/stage-distribution evidence is incomplete or truncated.');
+  else {
+    if (cadence.p99Ms > comparatorPolicy.passAffecting.loadingFrameP99MaxMs) errors.push(`Loading frame-gap p99 ${cadence.p99Ms.toFixed(3)}ms exceeded ${comparatorPolicy.passAffecting.loadingFrameP99MaxMs}ms.`);
+    if (cadence.maxMs > comparatorPolicy.passAffecting.loadingFrameMaxMs) errors.push(`Loading frame-gap max ${cadence.maxMs.toFixed(3)}ms exceeded ${comparatorPolicy.passAffecting.loadingFrameMaxMs}ms.`);
+  }
+  const heartbeat = report?.timing?.progressHeartbeat;
+  const workRows = heartbeat?.workProofRows;
+  let workGapMaxMs = NaN;
+  const heartbeatAvailable = heartbeat?.source === 'MainCore.startup_work_progress_revision'
+    && heartbeat?.verified === true && Array.isArray(workRows) && workRows.length > 0;
+  if (!heartbeatAvailable
+      || !Array.isArray(workRows) || workRows.length === 0 || !finitePositive(readyMs)) {
+    if (evaluationMode === 'gate5') errors.push('Authoritative completed-work heartbeat evidence is unavailable.');
+  } else {
+    let previousAtMs = 0, previousRevision = -1;
+    workGapMaxMs = 0;
+    for (const row of workRows) {
+      if (typeof row?.owner !== 'string' || !row.owner || !finiteNonnegative(row?.observedAtInputMs)
+          || row.observedAtInputMs <= previousAtMs || row.observedAtInputMs > readyMs
+          || !Number.isSafeInteger(row?.completedRevision) || row.completedRevision <= previousRevision
+          || !Number.isSafeInteger(row?.pendingWorkCount) || row.pendingWorkCount < 0
+          || !finiteNonnegative(row?.activeWorkAgeMs)) {
+        errors.push('Authoritative completed-work heartbeat row is invalid or nonprogressing.');
+        break;
+      }
+      workGapMaxMs = Math.max(workGapMaxMs, row.observedAtInputMs - previousAtMs);
+      previousAtMs = row.observedAtInputMs;
+      previousRevision = row.completedRevision;
+    }
+    workGapMaxMs = Math.max(workGapMaxMs, readyMs - previousAtMs);
+    if (workGapMaxMs > comparatorPolicy.passAffecting.progressHeartbeatMaxGapMs) errors.push(`Completed-work heartbeat gap ${workGapMaxMs.toFixed(3)}ms exceeded ${comparatorPolicy.passAffecting.progressHeartbeatMaxGapMs}ms.`);
+  }
   if (Number(report?.modal?.overlayMissingFramesDuringLoading) !== 0 || report?.modal?.reenteredAfterGameplayReady !== false || Number(report?.modal?.postReadyModalVisibleFrames) !== 0 || !(Number(report?.modal?.postReadyObservationFramesRequested) >= 60) || Number(report?.modal?.postReadyObservationFramesObserved) !== Number(report?.modal?.postReadyObservationFramesRequested)) errors.push('Loading modal continuity/re-entry observation failed.');
   if (!(Number(report?.modal?.overlayVisibleFrames) > 0)) errors.push('Loading overlay was never observed.');
   if (report?.startupReadinessDomains?.gameplay?.status !== 'ready') errors.push('Gameplay readiness domain was not ready.');
@@ -247,15 +292,21 @@ export function evaluateSampleReport(report, expected) {
   if (expected.resolution && JSON.stringify(report?.runtime?.nativeWindowResolution) !== JSON.stringify(requestedResolution)) errors.push('Native window resolution did not match the requested matrix resolution.');
   if (expected.resolution && JSON.stringify(report?.runtime?.renderTargetResolution) !== JSON.stringify(requestedResolution)) errors.push('Render target resolution did not match the requested matrix resolution.');
   const callback = report?.loadingMainCallbackObservation;
-  const mainCallbackMaxMs = Number(callback?.maxObservedFrameMs ?? NaN);
+  const mainCallbackMaxMs = callback?.maxObservedFrameMs;
   if (callback?.complete !== true || !Number.isInteger(callback?.pollCount) || callback.pollCount <= 0
       || !Number.isInteger(callback?.maxObservedMonitorSampleCount) || callback.maxObservedMonitorSampleCount <= 0
-      || typeof callback?.maxObservedFrameMs !== 'number' || !Number.isFinite(mainCallbackMaxMs) || mainCallbackMaxMs < 0) errors.push('Full-loading Main callback evidence is missing.');
+      || !finiteNonnegative(mainCallbackMaxMs)) errors.push('Full-loading Main callback evidence is missing.');
   else if (mainCallbackMaxMs > comparatorPolicy.passAffecting.loadingMainCallbackMaxMs) errors.push(`Loading Main callback ${mainCallbackMaxMs.toFixed(3)}ms exceeded 33ms.`);
   return {
     passed: errors.length === 0,
+    policyId: comparatorPolicy.policyId,
     errors,
     mainCallbackMaxMs,
+    firstFrameMs,
+    loadingFrameP99Ms: cadence?.p99Ms,
+    loadingFrameMaxMs: cadence?.maxMs,
+    progressHeartbeatMaxGapMs: workGapMaxMs,
+    authoritativeWorkProgressProven: heartbeatAvailable,
     loadingCallbackIntervalMaxMs: Number(report?.timing?.loadingCallbackIntervalMax?.stepMs ?? 0),
     scope: 'Main callback maximum is accumulated by polling RuntimePerformanceMonitor throughout the full loading interval; runner frame gaps and loading callback intervals remain separate presentation/cadence evidence.',
   };
@@ -288,17 +339,29 @@ export function aggregateMatrix(sampleRows, evaluationMode = 'gate5') {
   const allActualSeeds = new Set([...knownActualSeeds, ...freshActualSeeds]);
   const seedCohortsDistinct = controlledKnownSeedStable && freshSeedsDistinct && allActualSeeds.size === 3;
   const functionalPassed = sampleRows.length === 10 && sampleRows.every(row => row.verification?.passed === true) && seedCohortsDistinct;
+  const authoritativeWorkProgressProven = sampleRows.length === 10 && sampleRows.every(row =>
+    row.verification?.evaluation?.authoritativeWorkProgressProven === true);
+  const responsivePolicyPassed = functionalPassed && sampleRows.every(row =>
+    row.verification?.evaluation?.passed === true
+      && row.verification.evaluation.policyId === comparatorPolicy.policyId);
+  const gate5LoadingAccepted = evaluationMode === 'gate5' && authoritativeWorkProgressProven
+    ? responsivePolicyPassed : null;
   return {
     schema: 'world-streaming-loading-matrix/v1',
     finished: true,
-    status: functionalPassed ? (evaluationMode === 'functional-diagnostic' ? 'functional_diagnostic_passed' : 'gate5_blocked_duration_policy_unresolved') : 'failed',
+    status: evaluationMode === 'functional-diagnostic'
+      ? (functionalPassed ? 'functional_diagnostic_passed' : 'failed')
+      : (!authoritativeWorkProgressProven ? 'gate5_blocked_authoritative_work_progress_unavailable'
+        : (responsivePolicyPassed ? 'gate5_responsive_loading_passed' : 'failed')),
     evaluationMode,
-    gate5LoadingAccepted: null,
-    releaseDurationDecisionReady: false,
+    gate5LoadingAccepted,
+    responsivePolicyReady: authoritativeWorkProgressProven,
     comparatorPolicy,
     sampleCount: sampleRows.length,
     processCount: sampleRows.length,
     functionalPassed,
+    authoritativeWorkProgressProven,
+    responsivePolicyPassed,
     controlledKnownSeedStable,
     freshSeedsDistinct,
     seedCohortsDistinct,
@@ -345,7 +408,7 @@ async function runOneSample({ project, output, sample, userdata, godotExe, optio
     args: ['--path', project, scene, '--resolution', options.resolution, '--windowed'], env,
     timeoutSeconds: options.timeoutSeconds, ...paths });
   const report = await exists(reportPath) ? await readJson(reportPath) : null;
-  const evaluation = evaluateSampleReport(report, { ...sample, processTestSeed, actualSeed: expectedActualSeed, resolution: options.resolution });
+  const evaluation = evaluateSampleReport(report, { ...sample, processTestSeed, actualSeed: expectedActualSeed, resolution: options.resolution }, options.evaluationMode);
   const logText = (await readFile(paths.stdoutPath, 'utf8')) + '\n' + (await readFile(paths.stderrPath, 'utf8'));
   const engineIssues = logText.split(/\r?\n/).filter(line => /SCRIPT ERROR:|Parse Error:|ERROR:|WARNING:|leaked|resources still in use/i.test(line));
   const lifecyclePassed = watch.rootExited === true && watch.functionalExitCode === 0 && watch.timedOut === false && watch.forcedCleanup === false && watch.cleanupPassed === true && watch.authoritativeZeroProven === true;
@@ -445,7 +508,7 @@ export async function runLoadingMatrix(input, dependencies = {}) {
   summary.binariesFrozen = true;
   summary.outputDirectory = relative(project, output).replaceAll('\\', '/');
   await writeJson(join(output, 'report.json'), summary);
-  return { functionalPassed: summary.functionalPassed, gate5LoadingAccepted: null, evaluationMode: options.evaluationMode,
+  return { functionalPassed: summary.functionalPassed, gate5LoadingAccepted: summary.gate5LoadingAccepted, evaluationMode: options.evaluationMode,
     status: summary.status, outputDirectory: summary.outputDirectory,
-    processCount: summary.processCount, releaseDurationDecisionReady: false };
+    processCount: summary.processCount, responsivePolicyReady: summary.responsivePolicyReady };
 }

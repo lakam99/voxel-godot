@@ -11,13 +11,18 @@ import { projectFingerprintBounds } from '../lib/citadel-candidate-runner.mjs';
 import { loadingMatrixExitCode } from '../run-world-streaming-maturity-loading-matrix.mjs';
 
 function report(sample, actualSeed = 'atlas-12345678', elapsed = 75000, maxStep = 30) {
+  const workProofRows = [];
+  for (let at = 4000, revision = 0; at < elapsed; at += 4000, revision++)
+    workProofRows.push({ owner: 'startup-work', observedAtInputMs: at,
+      completedRevision: revision, pendingWorkCount: 1, activeWorkAgeMs: 100 });
   return {
     schema: 'world-streaming-loading-sample/v1', finished: true, passed: true,
     sampleId: sample.sampleId, launchMode: sample.launchMode, cacheClassification: sample.cacheClassification,
     requestedTestSeed: sample.requestedSeed, processTestSeed: sample.processTestSeed ?? sample.requestedSeed,
     actualSeed, voxelPlaytest: '', runTokenPresent: true, savePathOverride: '',
     timing: { inputToFirstLoadingFrameMs: 1, inputToGameplayReadyMs: elapsed,
-      loadingCallbackIntervalMax: { stepMs: 5000 }, loadingFrameCadence: { sampleCount: 10, maxMs: 16.7 },
+      loadingCallbackIntervalMax: { stepMs: 5000 }, loadingFrameCadence: { sampleCount: 10, p99Ms: 16.7, maxMs: 16.7 },
+      progressHeartbeat: { source: 'MainCore.startup_work_progress_revision', verified: true, workProofRows },
       startupTimeline: [{ domain: 'gameplay', stepMs: 1 }], stageDistributions: { gameplay: { count: 1 } },
       timelineObservation: { complete: true, truncated: false, observedRowCount: 1 } },
     mainCallbackWindowAtReady: { frameMaxMs: maxStep },
@@ -49,8 +54,24 @@ test('matrix plan is five ordered cold/warm pairs and exactly ten fresh processe
 test('sample validation enforces identity lifecycle-facing evidence and callback envelope', () => {
   const sample = buildSamplePlan('known', ['a', 'b'])[0];
   assert.equal(evaluateSampleReport(report(sample), expected(sample)).passed, true);
+  const atLimits = report(sample, 'atlas-12345678', 75000, 33);
+  atLimits.timing.inputToFirstLoadingFrameMs = 1000;
+  atLimits.timing.loadingFrameCadence.p99Ms = 33;
+  atLimits.timing.loadingFrameCadence.maxMs = 100;
+  atLimits.timing.progressHeartbeat.workProofRows[1].observedAtInputMs = 9000;
+  assert.equal(evaluateSampleReport(atLimits, expected(sample)).passed, true);
   const slowCallback = report(sample, 'atlas-12345678', 75000, 33.001);
   assert.equal(evaluateSampleReport(slowCallback, expected(sample)).passed, false);
+  for (const mutate of [
+    value => { value.timing.inputToFirstLoadingFrameMs = 1000.001; },
+    value => { value.timing.loadingFrameCadence.p99Ms = 33.001; },
+    value => { value.timing.loadingFrameCadence.maxMs = 100.001; },
+    value => { value.timing.progressHeartbeat.workProofRows[1].observedAtInputMs = 9000.001; },
+    value => { value.timing.progressHeartbeat.workProofRows[1].completedRevision = 0; },
+  ]) {
+    const value = structuredClone(report(sample)); mutate(value);
+    assert.equal(evaluateSampleReport(value, expected(sample)).passed, false);
+  }
   assert.equal(evaluateSampleReport(report(sample), expected(sample, { actualSeed: 'atlas-other' })).passed, false);
 });
 
@@ -62,6 +83,12 @@ test('sample validation fails closed for every provenance and evidence bypass', 
     value => { value.loadingMainCallbackObservation.maxObservedMonitorSampleCount = 0; },
     value => { value.loadingMainCallbackObservation.maxObservedFrameMs = -1; },
     value => { value.loadingMainCallbackObservation.maxObservedFrameMs = '1'; },
+    value => { value.timing.inputToFirstLoadingFrameMs = '1'; },
+    value => { value.timing.loadingFrameCadence.p99Ms = Infinity; },
+    value => { value.timing.loadingFrameCadence.maxMs = NaN; },
+    value => { value.timing.progressHeartbeat.verified = false; },
+    value => { value.timing.progressHeartbeat.source = 'MainCore.startup_loading_timeline'; },
+    value => { value.timing.progressHeartbeat.workProofRows = []; },
     value => { value.timing.timelineObservation = { complete: false, truncated: true }; },
     value => { value.runtime.renderingDriver = ''; },
     value => { value.runtime.displayServer = 'headless'; },
@@ -86,6 +113,8 @@ test('loading fixture records native window and renderer target separately from 
   assert.match(source, /"nativeWindowResolution"/);
   assert.match(source, /"renderTargetResolution"/);
   assert.match(source, /"logicalViewportResolution"/);
+  assert.match(source, /frame_gap_ms\.append\(float\(gameplay_ready_usec - last_frame_usec\)/);
+  assert.match(source, /"verified": false/);
 });
 
 test('warm Continue uses the cold actual seed without losing cohort identity', () => {
@@ -227,22 +256,51 @@ test('binary inventory names both active GDExtensions and debug/release variants
   assert.match(candidates.find(([id]) => id === 'godotEngine')[1], /Godot_v4\.6\.1-stable_win64\.exe$/);
 });
 
-test('provisional 90 second reference is reported but is not a hard Gate 5 pass threshold', () => {
+test('responsive loading can pass beyond historical total-time references; diagnostics cannot claim Gate 5', () => {
   const plan = buildSamplePlan('known', ['a', 'b']);
-  const rows = plan.map(sample => ({ ...sample, report: report(sample, sample.cohort === 'controlled_known_seed' ? 'atlas-known' : `atlas-${sample.pairId}`, sample.launchMode === 'new_game' ? 95000 : 50000), verification: { passed: true } }));
+  const rows = plan.map(sample => {
+    const value = report(sample, sample.cohort === 'controlled_known_seed' ? 'atlas-known' : `atlas-${sample.pairId}`,
+      sample.launchMode === 'new_game' ? 95000 : 50000);
+    const evaluation = evaluateSampleReport(value, expected(sample));
+    return { ...sample, report: value, verification: { passed: evaluation.passed, evaluation } };
+  });
   const summary = aggregateMatrix(rows);
   assert.equal(summary.functionalPassed, true);
   assert.equal(Object.hasOwn(summary, 'passed'), false);
-  assert.equal(summary.gate5LoadingAccepted, null);
-  assert.equal(summary.releaseDurationDecisionReady, false);
+  assert.equal(summary.gate5LoadingAccepted, true);
+  assert.equal(summary.responsivePolicyReady, true);
   assert.equal(summary.pairs.every(pair => pair.provisionalColdReferenceMet === false && pair.durationComparisonPassAffecting === false), true);
   assert.equal(comparatorPolicy.passAffecting.duration, false);
-  assert.equal(summary.status, 'gate5_blocked_duration_policy_unresolved');
-  assert.equal(loadingMatrixExitCode({ ...summary, evaluationMode: 'gate5' }), 1);
+  assert.equal(summary.status, 'gate5_responsive_loading_passed');
+  assert.equal(loadingMatrixExitCode({ ...summary, evaluationMode: 'gate5' }), 0);
   const diagnostic = aggregateMatrix(rows, 'functional-diagnostic');
   assert.equal(diagnostic.status, 'functional_diagnostic_passed');
+  assert.equal(diagnostic.gate5LoadingAccepted, null);
   assert.equal(loadingMatrixExitCode(diagnostic), 0);
   assert.equal(loadingMatrixExitCode({ dryRun: true, gate5LoadingAccepted: null }), 0);
+  const noWorkProof = structuredClone(rows);
+  noWorkProof[0].report.timing.progressHeartbeat.verified = false;
+  noWorkProof[0].verification.evaluation = evaluateSampleReport(noWorkProof[0].report, expected(noWorkProof[0]));
+  noWorkProof[0].verification.passed = noWorkProof[0].verification.evaluation.passed;
+  assert.equal(aggregateMatrix(noWorkProof).gate5LoadingAccepted, null);
+  assert.equal(aggregateMatrix(noWorkProof).status, 'gate5_blocked_authoritative_work_progress_unavailable');
+  assert.equal(loadingMatrixExitCode(aggregateMatrix(noWorkProof)), 1);
+  const diagnosticEvaluation = evaluateSampleReport(noWorkProof[0].report, expected(noWorkProof[0]), 'functional-diagnostic');
+  assert.equal(diagnosticEvaluation.passed, true);
+  assert.equal(diagnosticEvaluation.authoritativeWorkProgressProven, false);
+});
+
+test('frequent timeline messages cannot substitute for an authoritative completed-work receipt', () => {
+  const sample = buildSamplePlan('known', ['a', 'b'])[0];
+  const value = report(sample);
+  value.timing.startupTimeline = Array.from({ length: 100 }, (_, index) =>
+    ({ domain: 'terrain_chunks', status: 'pending', message: 'Loading terrain 0/9',
+      metrics: { loadedChunkCount: 0, requiredChunkCount: 9 }, elapsedMs: index * 10 }));
+  value.timing.timelineObservation.observedRowCount = 100;
+  value.timing.progressHeartbeat = { source: 'unavailable', verified: false,
+    reason: 'no_common_authoritative_completed_work_revision', workProofRows: [] };
+  assert.equal(evaluateSampleReport(value, expected(sample)).passed, false);
+  assert.equal(evaluateSampleReport(value, expected(sample), 'functional-diagnostic').passed, true);
 });
 
 test('known and fresh actual seed cohorts must be mutually distinct', () => {
