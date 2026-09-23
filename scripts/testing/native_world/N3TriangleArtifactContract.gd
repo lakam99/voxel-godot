@@ -379,6 +379,44 @@ func run() -> void:
 		and large_union.size() == 4913,
 		"4913-block broker exposes complete bounded spatial windows without false readiness")
 	check(large_broker.stop().get("status") == "ready", "large broker stops without workers")
+	var many_planner = PLANNER.new()
+	many_planner.setup(82)
+	var many_viewers: Array[Dictionary] = []
+	for index in range(65):
+		many_viewers.append({"kind":"secondary", "id":"retirement-%d" % index,
+			"position":Vector3(float((index + 1) * 256 + 8) * main.CELL, 0, 0),
+			"distance":0})
+	var many_demand: Dictionary = many_planner.replace_sources(viewer, many_viewers,
+		[], [], Vector2i(128,128))
+	var many_broker = ARTIFACT_REQUESTS.new()
+	check(many_demand.get("status") == "ready"
+		and many_broker.setup(backend, pages,
+			main.structure_system.citadel_terrain_admission, many_planner,
+			main.CELL, 83, 4096).get("status") == "ready",
+		"many spatial window sources admitted within data capacity")
+	many_broker.advance()
+	var many_layout: Dictionary = many_broker.collision_window_layout()
+	check(int(many_layout.get("windowCount", 0)) == 66,
+		"66 deterministic window records materialized: %s %s" % [str(many_demand), str(many_layout.get("windowCount", -1))])
+	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
+	var held: Dictionary = many_broker.advance()
+	check(held.get("status") == "pending"
+		and held.get("reason") == "collision_window_retirement_backpressure"
+		and int(held.get("retiredWindows", 0)) == 65
+		and (held.get("retiredWindowTokens", []) as Array).size() == 65,
+		"unretired window cap pauses publication without dropping records")
+	var retired_tokens: Array = held.get("retiredWindowTokens", [])
+	if not retired_tokens.is_empty():
+		var retired_token := String(retired_tokens[0])
+		check(many_broker.acknowledge_collision_window_retired(retired_token, {}).get("status") == "failed"
+			and many_broker.acknowledge_collision_window_retired(retired_token,
+				{"windowToken":retired_token, "drained":true,
+					"remainingBodies":0}).get("status") == "ready"
+			and many_broker.collision_window_layout().get("status") == "ready",
+			"explicit physical drain acknowledgment releases bounded backpressure")
+	else:
+		check(false, "retirement backpressure missing tokens: %s" % str(held))
+	check(many_broker.stop().get("status") == "ready", "many-window broker stops")
 	var worker_planner = PLANNER.new()
 	worker_planner.setup(81)
 	worker_planner.replace_sources(viewer, [], [], [], bounds)

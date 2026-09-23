@@ -5,6 +5,8 @@ class_name NativeTerrainArtifactRequests
 ## to the resident collision owner; this class only produces current rows.
 const Producer = preload("res://scripts/terrain/NativeTerrainTriangleArtifactProducer.gd")
 const WindowSource = preload("res://scripts/terrain/NativeTerrainCollisionWindowSource.gd")
+const MAX_RETIRED_WINDOWS := 64
+const MAX_RETIRED_VERTEX_BYTES := 268435456
 
 var _backend
 var _pages
@@ -203,6 +205,8 @@ func acknowledge_collision_window_retired(window_token: String,
 			or int(retirement_receipt.get("remainingBodies", -1)) != 0 \
 			or retirement_receipt.get("windowToken") != window_token:
 		return {"status":"failed", "reason":"collision_window_retirement_not_proven"}
+	var facade = record.get("facade")
+	if facade != null: facade.detach()
 	_window_records.erase(window_token)
 	return {"status":"ready", "retiredWindowToken":window_token}
 
@@ -245,7 +249,7 @@ func _refresh_window_layout() -> Dictionary:
 		String(_identity.sourceIdentity.get("hex", "")),
 		int(_identity.sourceRevision), int(_identity.cancellationEpoch)]).sha256_text()
 	if _window_layout.get("layoutToken") == layout_token:
-		return _window_layout.duplicate(true)
+		return _retention_status()
 	var windows: Array[Dictionary] = []
 	var active := {}
 	for index in range((planned.windows as Array).size()):
@@ -274,7 +278,7 @@ func _refresh_window_layout() -> Dictionary:
 	_window_layout["sourceIdentity"] = _identity.sourceIdentity.duplicate(true)
 	_window_layout["identity"] = _identity.duplicate(true)
 	_window_layout["windows"] = windows
-	return _window_layout.duplicate(true)
+	return _retention_status()
 
 func _cache_retained_row(row: Dictionary) -> void:
 	for window: Dictionary in _window_layout.get("windows", []):
@@ -311,3 +315,34 @@ func _release_windows() -> void:
 	_window_records.clear()
 	_active_window_tokens.clear()
 	_window_layout.clear()
+
+func _retention_status() -> Dictionary:
+	var retired_windows := 0
+	var retained_rows := 0
+	var retained_vertex_bytes := 0
+	var retired_tokens: Array[String] = []
+	for token in _window_records:
+		if _active_window_tokens.has(token): continue
+		retired_windows += 1
+		retired_tokens.append(String(token))
+		var rows: Dictionary = (_window_records[token] as Dictionary).rows
+		retained_rows += rows.size()
+		for block in rows:
+			var row: Dictionary = rows[block]
+			retained_vertex_bytes += (row.get("vertices", PackedVector3Array()) as PackedVector3Array).size() * 12
+	retired_tokens.sort()
+	if retired_windows > MAX_RETIRED_WINDOWS \
+			or retained_vertex_bytes > MAX_RETIRED_VERTEX_BYTES:
+		return {"status":"pending", "reason":"collision_window_retirement_backpressure",
+			"retiredWindows":retired_windows, "retainedRows":retained_rows,
+			"retainedVertexBytes":retained_vertex_bytes,
+			"maxRetiredWindows":MAX_RETIRED_WINDOWS,
+			"maxRetiredVertexBytes":MAX_RETIRED_VERTEX_BYTES,
+			"retiredWindowTokens":retired_tokens,
+			"layoutToken":_window_layout.get("layoutToken", "")}
+	var layout: Dictionary = _window_layout.duplicate(true)
+	layout["retirementTelemetry"] = {"retiredWindows":retired_windows,
+		"retainedRows":retained_rows,
+		"retainedVertexBytes":retained_vertex_bytes,
+		"retiredWindowTokens":retired_tokens}
+	return layout
