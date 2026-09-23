@@ -5,6 +5,7 @@
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
+#include "native_wildlife_presentation_receipt.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
 
@@ -51,6 +52,8 @@ public:
 	godot::Dictionary admit_visual_asset_catalog(const godot::Dictionary &p_bundle);
 	godot::Dictionary select_rock_asset_shadow(const godot::String &p_biome,
 		const godot::String &p_durable_prop_id) const;
+	godot::Dictionary admit_wildlife_presentation_catalog(const godot::Dictionary &p_bundle);
+	godot::Dictionary wildlife_presentation_shadow(const godot::String &p_variant) const;
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;
 	godot::Dictionary apply_shaping_resolutions(const godot::Array &p_resolutions);
@@ -81,6 +84,10 @@ private:
 	std::int64_t visual_capture_owner_id_ = 0;
 	std::int64_t visual_capture_revision_ = 0;
 	std::string visual_capture_identity_;
+	std::unique_ptr<voxel::world_backend::NativeWildlifePresentationCatalog> wildlife_presentations_;
+	std::int64_t presentation_capture_owner_id_ = 0;
+	std::int64_t presentation_capture_revision_ = 0;
+	std::string presentation_capture_identity_;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
 };
 

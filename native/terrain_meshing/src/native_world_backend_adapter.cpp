@@ -41,6 +41,7 @@ constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v
 constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone-receipt/v1";
 constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catalog-receipt/v1";
 constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-receipt/v1";
+constexpr const char *WILDLIFE_PRESENTATION_RECEIPT_SCHEMA = "n4-wildlife-presentation-catalog-receipt/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -1260,6 +1261,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_biome_environment_catalog", "capture"), &NativeWorldBackend::admit_biome_environment_catalog);
 	ClassDB::bind_method(D_METHOD("admit_visual_asset_catalog", "bundle"), &NativeWorldBackend::admit_visual_asset_catalog);
 	ClassDB::bind_method(D_METHOD("select_rock_asset_shadow", "biome", "durable_prop_id"), &NativeWorldBackend::select_rock_asset_shadow);
+	ClassDB::bind_method(D_METHOD("admit_wildlife_presentation_catalog", "bundle"), &NativeWorldBackend::admit_wildlife_presentation_catalog);
+	ClassDB::bind_method(D_METHOD("wildlife_presentation_shadow", "variant"), &NativeWorldBackend::wildlife_presentation_shadow);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
 	ClassDB::bind_method(D_METHOD("apply_shaping_resolutions", "resolutions"), &NativeWorldBackend::apply_shaping_resolutions);
@@ -1361,6 +1364,10 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 	visual_capture_owner_id_ = 0;
 	visual_capture_revision_ = 0;
 	visual_capture_identity_.clear();
+	wildlife_presentations_.reset();
+	presentation_capture_owner_id_ = 0;
+	presentation_capture_revision_ = 0;
+	presentation_capture_identity_.clear();
 	biome_capture_owner_id_ = 0;
 	biome_capture_revision_ = 0;
 	biome_capture_identity_.clear();
@@ -1487,6 +1494,10 @@ Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bu
 	visual_capture_owner_id_ = 0;
 	visual_capture_revision_ = 0;
 	visual_capture_identity_.clear();
+	wildlife_presentations_.reset();
+	presentation_capture_owner_id_ = 0;
+	presentation_capture_revision_ = 0;
+	presentation_capture_identity_.clear();
 	try {
 		require_exact_keys(p_bundle, {"ok", "schemaVersion", "complete", "scope", "ownerInstanceId",
 			"seed", "biome", "visual", "presentation", "removed"}, "surface owner bundle");
@@ -1648,10 +1659,179 @@ Dictionary NativeWorldBackend::select_rock_asset_shadow(
 	}
 }
 
+Dictionary NativeWorldBackend::admit_wildlife_presentation_catalog(const Dictionary &p_bundle) {
+	constexpr const char *operation = "admit_wildlife_presentation_catalog";
+	if (!state_ || !biome_catalog_ || !visual_catalog_ || !removed_props_) {
+		return envelope(operation, "failed", "surface_owner_sources_not_ready");
+	}
+	wildlife_presentations_.reset();
+	presentation_capture_owner_id_ = 0;
+	presentation_capture_revision_ = 0;
+	presentation_capture_identity_.clear();
+	try {
+		require_exact_keys(p_bundle, {"ok", "schemaVersion", "complete", "scope", "ownerInstanceId",
+			"seed", "biome", "visual", "presentation", "removed"}, "surface owner bundle");
+		if (!require_bool(p_bundle["ok"], "bundle.ok")
+				|| require_i64(p_bundle["schemaVersion"], "bundle.schemaVersion") != 1
+				|| require_bool(p_bundle["complete"], "bundle.complete")
+				|| require_bounded_utf8(p_bundle["scope"], "bundle.scope", 128U, false)
+					!= "owner_catalogs_and_removals_only") {
+			throw std::invalid_argument("unsupported surface owner bundle");
+		}
+		const std::int64_t main_id = require_i64(p_bundle["ownerInstanceId"], "bundle.ownerInstanceId");
+		if (main_id == 0 || main_id != removed_capture_owner_id_
+				|| require_bounded_utf8(p_bundle["seed"], "bundle.seed", MAX_SEED_TEXT_BYTES, false)
+					!= state_->definition().raw_terrain_seed().utf8) {
+			throw std::invalid_argument("surface owner bundle does not match admitted removals or world seed");
+		}
+		const Dictionary biome = require_dictionary(p_bundle["biome"], "bundle.biome");
+		const Dictionary visual = require_dictionary(p_bundle["visual"], "bundle.visual");
+		const Dictionary removed = require_dictionary(p_bundle["removed"], "bundle.removed");
+		const Dictionary biome_owner = require_dictionary(biome.get("ownerReceipt", Variant()), "bundle.biome.ownerReceipt");
+		const Dictionary visual_owner = require_dictionary(visual.get("ownerReceipt", Variant()), "bundle.visual.ownerReceipt");
+		if (!require_bool(biome.get("ok", Variant()), "bundle.biome.ok")
+				|| require_bounded_utf8(biome.get("contentIdentity", Variant()), "bundle.biome.contentIdentity", 64U, false)
+					!= biome_capture_identity_
+				|| require_i64(biome_owner.get("owner_id", Variant()), "bundle.biome.owner_id") != biome_capture_owner_id_
+				|| require_i64(biome_owner.get("revision", Variant()), "bundle.biome.revision") != biome_capture_revision_
+				|| !require_bool(visual.get("ok", Variant()), "bundle.visual.ok")
+				|| require_bounded_utf8(visual.get("contentIdentity", Variant()), "bundle.visual.contentIdentity", 64U, false)
+					!= visual_capture_identity_
+				|| require_i64(visual_owner.get("owner_id", Variant()), "bundle.visual.owner_id") != visual_capture_owner_id_
+				|| require_i64(visual_owner.get("revision", Variant()), "bundle.visual.revision") != visual_capture_revision_
+				|| !require_bool(removed.get("ok", Variant()), "bundle.removed.ok")
+				|| require_i64(removed.get("ownerInstanceId", Variant()), "bundle.removed.ownerInstanceId") != main_id
+				|| require_bounded_utf8(removed.get("seed", Variant()), "bundle.removed.seed", MAX_SEED_TEXT_BYTES, false)
+					!= state_->definition().raw_terrain_seed().utf8
+				|| require_i64(removed.get("revision", Variant()), "bundle.removed.revision") != removed_capture_revision_
+				|| require_bounded_utf8(removed.get("contentIdentity", Variant()), "bundle.removed.contentIdentity", 64U, false)
+					!= removed_capture_identity_) {
+			throw std::invalid_argument("surface owner bundle differs from admitted native generations");
+		}
+		const Dictionary capture = require_dictionary(p_bundle["presentation"], "bundle.presentation");
+		require_exact_keys(capture, {"ok", "schemaVersion", "ownerReceipt", "contentIdentity", "assets"},
+			"bundle.presentation");
+		if (!require_bool(capture["ok"], "bundle.presentation.ok")
+				|| require_i64(capture["schemaVersion"], "bundle.presentation.schemaVersion") != 1) {
+			throw std::invalid_argument("unsupported animated presentation capture");
+		}
+		const Dictionary owner = require_dictionary(capture["ownerReceipt"], "bundle.presentation.ownerReceipt");
+		require_exact_keys(owner, {"ownerInstanceId", "revision", "ready"}, "bundle.presentation.ownerReceipt");
+		const std::int64_t owner_id = require_i64(owner["ownerInstanceId"], "bundle.presentation.ownerInstanceId");
+		const std::int64_t revision = require_i64(owner["revision"], "bundle.presentation.revision");
+		if (owner_id == 0 || revision <= 0 || !require_bool(owner["ready"], "bundle.presentation.ready")) {
+			throw std::invalid_argument("animated presentation owner is not ready");
+		}
+		const Array assets = require_array(capture["assets"], "bundle.presentation.assets");
+		if (assets.is_empty() || assets.size() > 256) throw std::length_error("animated presentation assets exceed capacity");
+		Dictionary canonical;
+		canonical["domain"] = "animated_asset_registry_presentation";
+		canonical["schemaVersion"] = 1;
+		canonical["assets"] = assets;
+		const std::string identity = require_bounded_utf8(capture["contentIdentity"],
+			"bundle.presentation.contentIdentity", 64U, false);
+		const std::string canonical_text = utf8(JSON::stringify(canonical));
+		const Sha256Digest digest = sha256(reinterpret_cast<const std::uint8_t *>(canonical_text.data()), canonical_text.size());
+		if (identity != sha256_hex(digest)) throw std::invalid_argument("animated presentation content identity mismatch");
+		std::array<NativeWildlifePresentationReceipt, 3> receipts{};
+		const char *const canonical_ids[] = {"boar_idle_walk", "deer_idle_walk", "hare_idle_walk"};
+		for (std::size_t index = 0U; index < receipts.size(); ++index) {
+			receipts[index].schema_revision = 1U;
+			receipts[index].asset_catalog_digest = digest;
+			receipts[index].variant = static_cast<NativeWildlifeVariant>(index + 1U);
+			receipts[index].asset_id = canonical_ids[index];
+			receipts[index].animation_clip_id = canonical_ids[index];
+			receipts[index].path = NativeWildlifePresentationPath::procedural_fallback;
+		}
+		std::string previous_id;
+		for (const Variant &entry : assets) {
+			const Dictionary row = require_dictionary(entry, "bundle.presentation.assets[]");
+			require_exact_keys(row, {"id", "definition", "sceneResourcePath", "sceneInstanceId",
+				"animationPlayerPath", "availableClips"}, "bundle.presentation.assets[]");
+			const std::string id = require_bounded_utf8(row["id"], "presentation.asset.id", 4096U, false);
+			if (!previous_id.empty() && !(previous_id < id))
+				throw std::invalid_argument("animated presentation IDs are not canonical");
+			previous_id = id;
+			const Dictionary definition = require_dictionary(row["definition"], "presentation.asset.definition");
+			const std::string expected = require_bounded_utf8(definition.get("expected", Variant()),
+				"presentation.asset.expected", 4096U, false);
+			if (id != require_bounded_utf8(definition.get("id", Variant()), "presentation.asset.definition.id", 4096U, false)
+					|| require_bounded_utf8(definition.get("path", Variant()), "presentation.asset.path", 4096U, false)
+						!= require_bounded_utf8(row["sceneResourcePath"], "presentation.asset.sceneResourcePath", 4096U, false)
+					|| require_i64(row["sceneInstanceId"], "presentation.asset.sceneInstanceId") == 0
+					|| require_bounded_utf8(row["animationPlayerPath"], "presentation.asset.animationPlayerPath", 4096U, false).empty()) {
+				throw std::invalid_argument("animated presentation asset scene is incoherent");
+			}
+			const Array clips = require_array(row["availableClips"], "presentation.asset.availableClips");
+			if (clips.size() > 256) throw std::length_error("animated presentation clip list exceeds capacity");
+			bool has_expected = false;
+			for (const Variant &clip : clips)
+				if (require_bounded_utf8(clip, "presentation.asset.availableClips[]", 4096U, false) == expected)
+					has_expected = true;
+			if (!has_expected) throw std::invalid_argument("animated presentation expected clip is unavailable");
+			for (std::size_t index = 0U; index < receipts.size(); ++index) {
+				if (id == canonical_ids[index]) {
+					if (expected != canonical_ids[index])
+						throw std::invalid_argument("wildlife canonical animation differs from active asset");
+					receipts[index].path = NativeWildlifePresentationPath::animated_playable;
+				}
+			}
+		}
+		auto typed = NativeWildlifePresentationCatalog::create(receipts);
+		wildlife_presentations_ = std::make_unique<NativeWildlifePresentationCatalog>(std::move(typed));
+		presentation_capture_owner_id_ = owner_id;
+		presentation_capture_revision_ = revision;
+		presentation_capture_identity_ = identity;
+		Dictionary result = envelope(operation, "ready");
+		result["receiptSchema"] = WILDLIFE_PRESENTATION_RECEIPT_SCHEMA;
+		result["scope"] = "animated_wildlife_capabilities_only";
+		result["completeSurfacePropSource"] = false;
+		result["liveCaptureFreshnessProven"] = false;
+		result["bundleOwnerInstanceId"] = main_id;
+		result["captureOwnerInstanceId"] = owner_id;
+		result["captureRevision"] = revision;
+		result["captureContentIdentity"] = text(identity);
+		result["nativeOwnerInstanceId"] = static_cast<int64_t>(get_instance_id());
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["variantCount"] = static_cast<int64_t>(receipts.size());
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::wildlife_presentation_shadow(const String &p_variant) const {
+	constexpr const char *operation = "wildlife_presentation_shadow";
+	if (!wildlife_presentations_) return envelope(operation, "failed", "wildlife_presentation_not_ready");
+	try {
+		const std::string name = bounded_utf8(p_variant, 32U, "variant", false);
+		NativeWildlifeVariant variant;
+		if (name == "boar") variant = NativeWildlifeVariant::boar;
+		else if (name == "deer") variant = NativeWildlifeVariant::deer;
+		else if (name == "hare") variant = NativeWildlifeVariant::hare;
+		else throw std::invalid_argument("unsupported wildlife variant");
+		const auto receipt = wildlife_presentations_->resolve(variant);
+		Dictionary result = envelope(operation, "ready");
+		result["variant"] = text(name);
+		result["assetId"] = text(receipt.asset_id);
+		result["animationClipId"] = text(receipt.animation_clip_id);
+		result["presentationPath"] = receipt.path == NativeWildlifePresentationPath::animated_playable
+			? "animated_playable" : "procedural_fallback";
+		result["captureContentIdentity"] = text(presentation_capture_identity_);
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
 Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &p_capture) {
 	if (!state_ || !shaping_registry_) {
 		return envelope("admit_removed_props_tombstones", "failed", "backend_not_ready");
 	}
+	wildlife_presentations_.reset();
+	presentation_capture_owner_id_ = 0;
+	presentation_capture_revision_ = 0;
+	presentation_capture_identity_.clear();
 	removed_props_.reset();
 	removed_capture_owner_id_ = 0;
 	removed_capture_revision_ = 0;
@@ -1799,6 +1979,12 @@ Dictionary NativeWorldBackend::status() const {
 		result["visualCaptureOwnerInstanceId"] = visual_capture_owner_id_;
 		result["visualCaptureRevision"] = visual_capture_revision_;
 		result["visualCaptureContentIdentity"] = text(visual_capture_identity_);
+	}
+	result["wildlifePresentationReady"] = wildlife_presentations_ != nullptr;
+	if (wildlife_presentations_) {
+		result["wildlifePresentationCaptureOwnerInstanceId"] = presentation_capture_owner_id_;
+		result["wildlifePresentationCaptureRevision"] = presentation_capture_revision_;
+		result["wildlifePresentationCaptureContentIdentity"] = text(presentation_capture_identity_);
 	}
 	return result;
 }

@@ -153,9 +153,9 @@ receipt. A forged internally consistent capture cannot establish current
 Main ownership: the caller must run `ActiveRemovedPropsSnapshot.is_current`
 immediately before any eventual native feature publication. The adapter now
 retains the typed set under its native owner and clears it on rejected
-replacement. A focused direct contract for retention remains pending the
-next debug extension build. It still does not produce feature footprints or
-prove current Main ownership at publication.
+replacement. The focused direct retention contract passed against the rebuilt
+debug extension. It still does not produce feature footprints or prove current
+Main ownership at publication.
 `NativeWorldBackend.admit_biome_environment_catalog` now similarly converts
 the active 13-profile capture into the pure-core catalog and returns its typed
 identity, with exact numeric byte lanes and content-hash checks. Its focused
@@ -172,7 +172,21 @@ The attempted aggregate `n4-removed-adapter-01` at
 `artifacts/native-world-backend/n4-removed-adapter-01/report.json` failed its
 debug extension source-inventory comparison because these adapter edits began
 after its pre-build inventory. It is a reproducibility rejection, not a native
-test assertion or a passing gate. A new aggregate on settled source is required.
+test assertion or a passing gate. The settled-source aggregate
+`n4-wildlife-presentation-adapter-01` passed 446/446 debug and release tests,
+editor and release adapter smoke, and strict 100% pure-core line, function and
+branch coverage (9,988/9,988; 1,369/1,369; 5,940/5,940). Report:
+`artifacts/native-world-backend/n4-wildlife-presentation-adapter-01/report.json`.
+`NativeWorldBackend.admit_wildlife_presentation_catalog` now binds the active
+animated capture to the same owner bundle and retained biome, visual and
+removed generations. It retains three typed canonical variant capabilities,
+using the procedural fallback for an absent active variant, and invalidates
+them on any replacement of those admitted inputs. The direct Godot contracts
+`artifacts/native-world-backend/n4-wildlife-presentation-adapter-contract.json`
+and `artifacts/native-world-backend/n4-removed-props-adapter-contract.json`
+both passed against that build. These are captured-value adapter contracts,
+not proof of live freshness at publication, complete 28-attempt construction,
+wildlife motion, or Gate 5 gameplay.
 
 ## Integrated result and deletion review
 
