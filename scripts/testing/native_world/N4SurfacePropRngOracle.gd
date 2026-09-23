@@ -113,6 +113,51 @@ func removed_root_shift_sequence(seed_text: String, remove_first_root: bool) -> 
 		})
 	return {"removedFirstRoot": remove_first_root, "attempts": attempts, "finalState": rng.state}
 
+func synthetic_ore_child_draws(rng: RandomNumberGenerator, child_index: int) -> void:
+	# Operation order copied from make_ore_cluster(count=2) and make_ore.
+	rng.randf() # cluster angle
+	if child_index != 0:
+		rng.randf() # second-child spacing
+	rng.randf() # vertical offset
+	rng.randf() # ore rotation
+	rng.randi_range(1, 2) # iron drop count
+	for _scalar in range(5):
+		rng.randf() # radius, height factor, and three scale components
+	for _vein in range(5):
+		for _scalar in range(6):
+			rng.randf()
+	for _glint in range(3):
+		for _scalar in range(3):
+			rng.randf()
+
+func removed_ore_child_shift_sequence(seed_text: String, remove_second_child: bool) -> Dictionary:
+	# Synthetic source-order witness: attempt zero is an iron cluster, later
+	# eligible attempts consume only a no-feature prop roll. Child zero is
+	# intact; child one is gated before any of its recipe draws.
+	var rng := RandomNumberGenerator.new()
+	rng.seed = legacy_hash("%s:props:%d,%d" % [seed_text, 0, 0])
+	var attempts: Array[Dictionary] = []
+	for attempt in range(28):
+		var before_coordinates := rng.state
+		var x := 2 + rng.randi_range(0, 24)
+		var z := 2 + rng.randi_range(0, 24)
+		var after_coordinates := rng.state
+		rng.randf() # eligible prop roll
+		if attempt == 0:
+			rng.randf() # ore_for_cell roll
+			synthetic_ore_child_draws(rng, 0)
+			if not remove_second_child:
+				synthetic_ore_child_draws(rng, 1)
+		attempts.append({
+			"ordinal": attempt,
+			"cell": [x, z],
+			"id": "%s:%d,%d:%d" % [seed_text, x, z, attempt],
+			"stateBeforeCoordinates": before_coordinates,
+			"stateAfterCoordinates": after_coordinates,
+			"stateAfterRecipe": rng.state
+		})
+	return {"removedSecondChild": remove_second_child, "attempts": attempts, "finalState": rng.state}
+
 func cutoff_precision_boundary() -> Dictionary:
 	# This seed's first prop roll after the live attempt-zero coordinate pair is
 	# exactly the float32 value immediately below the float64 scalar 0.08.
@@ -141,6 +186,8 @@ func _initialize() -> void:
 	var prop_key := "%s:props:%d,%d" % [unicode_seed, -3, 5]
 	var without_removal := removed_root_shift_sequence("atlas-1492", false)
 	var with_removal := removed_root_shift_sequence("atlas-1492", true)
+	var ore_intact := removed_ore_child_shift_sequence("atlas-1492", false)
+	var ore_child_removed := removed_ore_child_shift_sequence("atlas-1492", true)
 	var cutoff_boundary := cutoff_precision_boundary()
 	if without_removal.attempts[0].id != with_removal.attempts[0].id \
 			or without_removal.attempts[1].id == with_removal.attempts[1].id \
@@ -158,8 +205,19 @@ func _initialize() -> void:
 		push_error("Surface-prop cutoff precision boundary oracle failed")
 		quit(1)
 		return
+	if ore_intact.attempts.size() != 28 or ore_child_removed.attempts.size() != 28 \
+			or ore_intact.attempts[0].id != ore_child_removed.attempts[0].id \
+			or ore_intact.attempts[1].id != "atlas-1492:16,10:1" \
+			or ore_child_removed.attempts[1].id != "atlas-1492:24,23:1" \
+			or ore_intact.attempts[27].id != "atlas-1492:22,3:27" \
+			or ore_child_removed.attempts[27].id != "atlas-1492:9,19:27" \
+			or ore_intact.finalState != -1028004439998731049 \
+			or ore_child_removed.finalState != -814739496189227464:
+		push_error("Removed-ore-child source-order oracle did not shift the next candidate")
+		quit(1)
+		return
 	var report := {
-		"schema": "n4-surface-prop-rng-oracle/v4",
+		"schema": "n4-surface-prop-rng-oracle/v5",
 		"legacyHash": {
 			"empty": legacy_hash(""),
 			"atlas": legacy_hash("atlas-1492"),
@@ -178,6 +236,7 @@ func _initialize() -> void:
 			without_removal,
 			with_removal
 		],
+		"removedOreChildShift": [ore_intact, ore_child_removed],
 		"cutoffPrecisionBoundary": cutoff_boundary,
 	}
 	var encoded := JSON.stringify(report)

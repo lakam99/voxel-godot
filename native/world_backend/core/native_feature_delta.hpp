@@ -66,6 +66,8 @@ public:
         std::vector<NativePlayerCreatedInstance> player_created_instances);
 
     const std::vector<NativeFeatureTombstone> &tombstones() const noexcept;
+    // Lookup against the canonical unsigned-UTF-8 tombstone ordering.
+    bool contains_tombstone(const std::string &feature_id) const noexcept;
     const std::vector<NativePlayerCreatedInstance> &player_created_instances() const noexcept;
 
     // FD1 contains big-endian fixed-width counts/coordinates, exact

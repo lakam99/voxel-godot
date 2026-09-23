@@ -59,11 +59,11 @@ The first native feature producer must be the complete deterministic
 28-attempt surface-prop manifest for one chunk, not a tree-only implementation.
 The live source seeds one shared RNG with `hash_string("%s:props:%d,%d")`,
 constructs durable IDs as `seed:x,z:attempt`, and lets trees, rocks, ore,
-forage, and wildlife consume that common stream. A tombstone lookup currently
-happens after the coordinate draws but before later attempt draws; copying that
-order would make a removed prop reshuffle unrelated future props. The native
-producer must instead derive the unfiltered baseline manifest, then apply
-tombstones only to publication.
+forage, and wildlife consume that common stream. A parent tombstone lookup
+happens after the coordinate draws but before later attempt draws, so a removed
+prop changes later coordinates in the existing save replay. The native producer
+must preserve that source order during migration. A non-perturbing removal
+policy would require a separately versioned gameplay/save decision.
 
 Tree records need both the durable removal ID and the distinct recipe identity
 when a Citadel request supplies one. Their typed definition must include the
@@ -178,9 +178,9 @@ The replay trace is a witness for supplied dispositions, not a classifier. In
 particular, an `ordinary_rock` receipt is valid only when the source has already
 established that `ore_for_cell` returned empty. It must never stand in for an
 ore-window rock: live Godot consumes an extra ore roll there and a selected ore
-cluster has its own child recipe stream. There is deliberately no tombstone
-argument; a later producer must generate this complete baseline first and only
-then let parent/child removal filter publication.
+cluster has its own child recipe stream. This diagnostic trace deliberately
+has no tombstone argument. It is an intact-stream witness, not a production
+source-order authority for replaying removed parents or ore children.
 
 `node tools/run-native-world-backend-tests.mjs --run-name n4-surface-prop-rng-trace-01`
 passed 296/296 debug and release core tests, both adapter smokes, and strict
@@ -251,13 +251,14 @@ tests, both adapter smokes, and strict coverage of 7,013/7,013 lines,
 
 ## Ore and forage follow-on boundaries
 
-`NativeOreClusterStream` now captures the complete two-child shared-PCG
+`NativeOreClusterStream` first captured the intact two-child shared-PCG
 baseline used by the live surface source. It records child IDs and state
 boundaries, consumes 47 float draws plus the bounded drop draw for child zero,
 and 48 plus the bounded draw for child one (the latter has the extra spacing
-draw). It has no tombstone parameter. The current script-side child removal
-check is therefore documented as a stream-order defect, not an intended source
-rule to carry into native generation.
+draw). The later tombstone-aware overload skips a removed child before its
+recipe draws, matching existing save replay. The intact overload remains a
+shadow diagnostic; neither overload independently owns the shared 28-attempt
+stream.
 
 Forage remains unported. Its native admission must replace the current
 profile/default visual fallback with a typed recipe registry: stable recipe,
@@ -342,9 +343,8 @@ navigation classification.  Present wildlife is a transform-driven
 `StaticBody3D` that the navigation adapter treats as a static prop blocker; it
 is not yet a native terrain collider or a declared dynamic actor.  Changing
 that classification is a separate gameplay/product decision, not a migration
-translation.  Like every surface feature, native generation must first produce
-the full baseline recipe stream and only then apply durable `removedProps` as
-a publication filter.
+translation. Native generation must preserve the live tombstone checkpoints
+before wildlife recipe selection and later shared-PCG draws.
 
 ## Complete typed surface baseline stream
 
@@ -357,13 +357,14 @@ entry records its PCG boundaries and typed child stream. The composer first
 dry-runs against a cloned PCG state, so malformed source/recipe receipts leave
 the caller's visible replay path unmodified.
 
-This is deliberately not a physical feature manifest. It does not contain
+This historical shadow stream is deliberately not a physical feature manifest.
+It does not contain
 world placement, geometry, visual asset selection, collision installation,
 navigation publication, tombstone filtering, or a Godot caller cutover. The
 next N4 slice must attach those facts as one typed feature definition and then
-derive footprint-catalog entries from that definition. Tombstones can only
-filter the completed baseline manifest at publication time; they must never
-skip a source attempt and perturb a later sibling's shared PCG state.
+derive footprint-catalog entries from that definition. Its unfiltered replay
+cannot substitute for the later source-ordered producer when tombstones are
+present; that producer must preserve the live parent and ore-child skip points.
 
 `node tools/run-native-world-backend-tests.mjs --run-name
 n4-surface-prop-baseline-stream-03` passed 320/320 debug and release core
@@ -667,6 +668,13 @@ types as shadow diagnostics until that producer and a real save/reload
 differential prove replacement parity. A future decision to make removals
 non-perturbing should be a separately versioned gameplay/save change.
 
+The next physical-definition bridge must consume the source-ordered entries
+directly, not reconstruct a fictitious unfiltered baseline. In particular,
+`make_rock` draws its visual spec before querying `prop_biome_for_position` at
+the transformed and rounded placement position. That visual biome may differ
+from the terrain sample used to classify the original attempt. Preserve and
+test both source facts before producing rock asset and collider definitions.
+
 The follow-up v3 direct Godot oracle extends the same synthetic first-rock
 versus removed-root pair through all 28 attempts, with later eligible attempts
 consuming a no-feature prop roll. The report is
@@ -690,3 +698,32 @@ adapter smokes, and 8,262/8,262 lines, 1,107/1,107 functions, and
 4,840/4,840 branches of strict pure-core coverage. Its receipt is
 `artifacts/native-world-backend/n4-snapshot-f64-cutoff-03/report.json`.
 This is not live-gameplay or production-cutover evidence.
+
+**Ore-child source-order witness:** A direct Godot v5 synthetic oracle now
+keeps the first iron-cluster root intact and removes only child one. The
+second attempt changes from `atlas-1492:16,10:1` to
+`atlas-1492:24,23:1`; the final attempt changes from
+`atlas-1492:22,3:27` to `atlas-1492:9,19:27`. The signed final PCG states
+are `-1028004439998731049` and `-814739496189227464` respectively. The
+report is `artifacts/native-world-backend/n4-ore-child-shift-oracle-01/report.json`.
+Child zero has the parent ID, so removing it at the ordinary spawn entry
+skips the entire cluster before `make_ore_cluster`; a child-zero-only
+cluster-helper case is synthetic, not a reachable live spawn case. This
+oracle fixes operation order, not source classification, visual publication,
+or live save/reload parity.
+
+**Ordered placement bridge contract:** The physical placement successor to
+SPP4 must consume all 28 `NativeSurfacePropSourceOrderedStream` entries
+directly. It must not rebuild an unfiltered attempt/baseline pair or resample
+terrain after the source decision. Use each entry's captured effective surface
+and source digest for anchored outcomes; retain an explicit absent record for
+parent tombstones, blocked/no-surface/town outcomes, and no-feature rolls.
+Preserve the exact float32 chunk-origin/local/world transform boundary and
+bind the receipt to world identity, generation, source revisions, ordinal,
+durable ID, and cell. Give the ordered receipt a distinct schema/digest so it
+cannot be confused with an intact-shadow SPP4 receipt. Focused tests need
+negative-chunk and seam frames, edited support, deterministic digest/revision
+changes, stale pin rejection, and no RNG or terrain-query work during bridge
+construction. Downstream rock definitions must separately reproduce Godot's
+visual-biome query at the transformed rounded position; the classifier's
+sampled biome is not automatically that visual biome.

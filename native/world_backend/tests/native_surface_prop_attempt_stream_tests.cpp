@@ -27,6 +27,8 @@ VWB_TEST(native_surface_prop_attempt_stream_matches_godot_461_all_ascii_chunk_co
         {{12, 9}}, {{23, 6}}, {{25, 13}}, {{20, 5}}, {{3, 26}}, {{13, 12}}, {{6, 3}},
     }};
     VWB_EXPECT_EQ(3123596935U, stream.rng_seed());
+    VWB_EXPECT_EQ(stream.rng_seed(), native_surface_prop_chunk_rng_seed(raw_seed("atlas-1492"), 0, 0));
+    VWB_EXPECT_EQ(16, native_surface_prop_checked_chunk_cell(0, 16));
     VWB_EXPECT_EQ(9985430908601423557ULL, stream.final_rng_state());
     for (std::size_t index = 0U; index < coordinates.size(); ++index) {
         const NativeSurfacePropAttempt &attempt = stream.attempts()[index];
@@ -42,6 +44,8 @@ VWB_TEST(native_surface_prop_attempt_stream_uses_unicode_scalars_and_negative_ch
     const std::string seed = u8"世界🌲";
     const NativeSurfacePropAttemptStream stream = NativeSurfacePropAttemptStream::create(raw_seed(seed), -3, 5);
     VWB_EXPECT_EQ(560539456U, stream.rng_seed());
+    VWB_EXPECT_EQ(stream.rng_seed(), native_surface_prop_chunk_rng_seed(raw_seed(seed), -3, 5));
+    VWB_EXPECT_EQ(-72, native_surface_prop_checked_chunk_cell(-3, 12));
     VWB_EXPECT_EQ(9602837116197045674ULL, stream.final_rng_state());
     VWB_EXPECT_EQ(-72, stream.attempts()[0].cell_x);
     VWB_EXPECT_EQ(143, stream.attempts()[0].cell_z);

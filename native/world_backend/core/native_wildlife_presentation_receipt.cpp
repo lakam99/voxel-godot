@@ -1,4 +1,5 @@
 #include "native_wildlife_presentation_receipt.hpp"
+#include <utility>
 namespace voxel::world_backend {
 namespace {
 
@@ -38,5 +39,30 @@ NativeWildlifePresentationReceipt NativeWildlifePresentationReceiptValidator::ad
     if (!canonical_ids_match(receipt)) throw NativeWildlifePresentationReceiptRejected();
     if (!valid_path(receipt.path)) throw NativeWildlifePresentationReceiptRejected();
     return receipt;
+}
+
+NativeWildlifePresentationCatalog::NativeWildlifePresentationCatalog(
+    std::array<NativeWildlifePresentationReceipt, 3> receipts)
+    : receipts_(std::move(receipts)) {}
+
+NativeWildlifePresentationCatalog NativeWildlifePresentationCatalog::create(
+    const std::array<NativeWildlifePresentationReceipt, 3> &receipts) {
+    std::array<NativeWildlifePresentationReceipt, 3> admitted;
+    for (std::size_t i = 0; i < admitted.size(); ++i) {
+        admitted[i] = NativeWildlifePresentationReceiptValidator::admit(receipts[i]);
+        if (static_cast<std::size_t>(admitted[i].variant) != i + 1U
+            || admitted[i].schema_revision != admitted[0].schema_revision
+            || admitted[i].asset_catalog_digest != admitted[0].asset_catalog_digest) {
+            throw NativeWildlifePresentationReceiptRejected();
+        }
+    }
+    return NativeWildlifePresentationCatalog(std::move(admitted));
+}
+
+NativeWildlifePresentationReceipt NativeWildlifePresentationCatalog::resolve(
+    const NativeWildlifeVariant variant) const {
+    const std::size_t index = static_cast<std::size_t>(variant);
+    if (index < 1U || index > receipts_.size()) throw NativeWildlifePresentationReceiptRejected();
+    return receipts_[index - 1U];
 }
 } // namespace voxel::world_backend

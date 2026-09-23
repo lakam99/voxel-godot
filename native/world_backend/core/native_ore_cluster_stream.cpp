@@ -8,12 +8,22 @@ NativeOreClusterStreamRejected::NativeOreClusterStreamRejected() : std::invalid_
 NativeOreClusterStream::NativeOreClusterStream(std::array<NativeOreClusterChildStream, 2> children, const std::uint64_t final_state) noexcept
     : children_(std::move(children)), final_state_(final_state) {}
 NativeOreClusterStream NativeOreClusterStream::create(const std::string &parent_id, const NativeOreKind kind, GodotPcg32 &rng) {
+    return create(parent_id, kind, NativeFeatureDeltaSnapshot::create({}, {}), rng);
+}
+NativeOreClusterStream NativeOreClusterStream::create(const std::string &parent_id, const NativeOreKind kind,
+    const NativeFeatureDeltaSnapshot &removed_props, GodotPcg32 &rng) {
     if (parent_id.empty() || (kind != NativeOreKind::iron && kind != NativeOreKind::copper)) reject();
     std::array<NativeOreClusterChildStream, 2> children{};
     for (std::size_t index = 0U; index < children.size(); ++index) {
         NativeOreClusterChildStream child;
         child.durable_id = index == 0U ? parent_id : parent_id + ":cluster1";
         child.state_before = rng.state();
+        child.skipped_by_tombstone = removed_props.contains_tombstone(child.durable_id);
+        if (child.skipped_by_tombstone) {
+            child.state_after = child.state_before;
+            children[index] = std::move(child);
+            continue;
+        }
         const auto draw = [&]() { child.float_draws.push_back(rng.randf()); };
         draw(); // cluster angle
         if (index != 0U) draw(); // second-child spacing

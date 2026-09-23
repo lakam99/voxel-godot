@@ -33,8 +33,9 @@ struct NativeSurfacePropSourceReceipt final {
 // The Godot source decides these dispositions from authoritative terrain and
 // environment-profile receipts. This pure value deliberately replays their
 // shared-PCG consequences without duplicating a terrain/profile authority.
-// It has no tombstone argument: removals must filter completed definitions at
-// publication, never alter this baseline trace.
+// Shadow-only receipt for an unfiltered diagnostic stream. Live Godot checks
+// parent and ore-child tombstones before their later shared-PCG draws, so this
+// trace is not the production replay authority for an existing save.
 enum class NativeSurfacePropReplayDisposition : std::uint8_t {
     skipped_before_prop_roll = 1,
     no_feature = 2,

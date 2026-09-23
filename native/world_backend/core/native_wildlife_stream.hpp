@@ -43,6 +43,8 @@ public:
 class NativeWildlifeStreamBuilder final {
 public:
     static NativeWildlifeStream create(const NativeWildlifeStreamInput &input, GodotPcg32 &rng);
+    static NativeWildlifeStream create(
+        NativeWildlifeBiomeGroup biome, const NativeWildlifePresentationCatalog &catalog, GodotPcg32 &rng);
 };
 
 } // namespace voxel::world_backend

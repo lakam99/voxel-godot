@@ -161,6 +161,13 @@ NativeFeatureDeltaSnapshot NativeFeatureDeltaSnapshot::create(
 const std::vector<NativeFeatureTombstone> &NativeFeatureDeltaSnapshot::tombstones() const noexcept {
     return tombstones_;
 }
+bool NativeFeatureDeltaSnapshot::contains_tombstone(const std::string &feature_id) const noexcept {
+    const auto found = std::lower_bound(tombstones_.begin(), tombstones_.end(), feature_id,
+        [](const NativeFeatureTombstone &left, const std::string &right) noexcept {
+            return utf8_byte_less(left.feature_id, right);
+        });
+    return found != tombstones_.end() && found->feature_id == feature_id;
+}
 
 const std::vector<NativePlayerCreatedInstance> &NativeFeatureDeltaSnapshot::player_created_instances() const noexcept {
     return player_created_instances_;

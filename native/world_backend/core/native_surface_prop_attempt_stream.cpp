@@ -13,7 +13,9 @@ void append_ascii(std::vector<std::uint32_t> &target, const std::string &value) 
     for (const unsigned char byte : value) target.push_back(byte);
 }
 
-std::int32_t checked_chunk_cell(const std::int32_t chunk, const std::int32_t offset) {
+} // namespace
+
+std::int32_t native_surface_prop_checked_chunk_cell(const std::int32_t chunk, const std::int32_t offset) {
     const std::int64_t value = static_cast<std::int64_t>(chunk)
         * NativeSurfacePropAttemptStream::CHUNK_CELLS + offset;
     if (value < std::numeric_limits<std::int32_t>::min()
@@ -23,7 +25,7 @@ std::int32_t checked_chunk_cell(const std::int32_t chunk, const std::int32_t off
     return static_cast<std::int32_t>(value);
 }
 
-std::uint32_t stream_seed(
+std::uint32_t native_surface_prop_chunk_rng_seed(
     const AdmittedTerrainSeed &seed, const std::int32_t chunk_x, const std::int32_t chunk_z) {
     try {
         const AdmittedTerrainSeed admitted = validate_admitted_raw_terrain_seed(
@@ -35,8 +37,6 @@ std::uint32_t stream_seed(
         throw NativeSurfacePropAttemptStreamRejected();
     }
 }
-
-} // namespace
 
 bool NativeSurfacePropAttempt::operator==(const NativeSurfacePropAttempt &other) const noexcept {
     return ordinal == other.ordinal && cell_x == other.cell_x && cell_z == other.cell_z
@@ -53,14 +53,14 @@ NativeSurfacePropAttemptStream::NativeSurfacePropAttemptStream(
 
 NativeSurfacePropAttemptStream NativeSurfacePropAttemptStream::create(
     const AdmittedTerrainSeed &seed, const std::int32_t chunk_x, const std::int32_t chunk_z) {
-    const std::uint32_t seed_value = stream_seed(seed, chunk_x, chunk_z);
+    const std::uint32_t seed_value = native_surface_prop_chunk_rng_seed(seed, chunk_x, chunk_z);
     GodotPcg32 rng(seed_value);
     std::array<NativeSurfacePropAttempt, ATTEMPT_COUNT> attempts{};
     constexpr std::int32_t span = CHUNK_CELLS - EDGE_MARGIN_CELLS * 2;
     for (std::uint32_t ordinal = 0U; ordinal < ATTEMPT_COUNT; ++ordinal) {
-        const std::int32_t cell_x = checked_chunk_cell(chunk_x,
+        const std::int32_t cell_x = native_surface_prop_checked_chunk_cell(chunk_x,
             EDGE_MARGIN_CELLS + static_cast<std::int32_t>(rng.randi_range(0, span)));
-        const std::int32_t cell_z = checked_chunk_cell(chunk_z,
+        const std::int32_t cell_z = native_surface_prop_checked_chunk_cell(chunk_z,
             EDGE_MARGIN_CELLS + static_cast<std::int32_t>(rng.randi_range(0, span)));
         attempts[ordinal] = {ordinal, cell_x, cell_z,
             seed.utf8 + ":" + std::to_string(cell_x) + "," + std::to_string(cell_z)

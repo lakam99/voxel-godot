@@ -24,6 +24,13 @@ public:
     NativeSurfacePropAttemptStreamRejected();
 };
 
+// Shared source identity for both the legacy shadow stream and the future
+// source-ordered producer. Coordinate draws must be interleaved with recipes
+// by the caller; this helper seeds the PCG but does not draw from it.
+std::uint32_t native_surface_prop_chunk_rng_seed(
+    const AdmittedTerrainSeed &seed, std::int32_t chunk_x, std::int32_t chunk_z);
+std::int32_t native_surface_prop_checked_chunk_cell(std::int32_t chunk, std::int32_t offset);
+
 // Shadow diagnostic for an all-coordinate-only PCG pass. This is NOT the
 // production attempt authority: live Godot interleaves prop/recipe draws with
 // later coordinates and skips those draws for removed roots. A source-ordered
