@@ -5,8 +5,10 @@ import { fileURLToPath } from 'node:url';
 
 import {
   coverageTotals,
+  assertNormalizedUpstreamTextIdentity,
   expectedToolchainLockValue,
   inventoryProjectBuildInputs,
+  normalizedUpstreamTextSha256,
   releaseSaveV2ProbeChecks,
   validateInstalledProvenance,
   validateReleaseSaveV2ProbeReport,
@@ -14,6 +16,16 @@ import {
 } from '../lib/native-world-backend-runner.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+test('pinned upstream text identity normalizes CRLF only and rejects changed content', () => {
+  const lf = Buffer.from('first line\nsecond line\n', 'utf8');
+  const crlf = Buffer.from('first line\r\nsecond line\r\n', 'utf8');
+  const expected = normalizedUpstreamTextSha256(lf);
+  assert.equal(normalizedUpstreamTextSha256(crlf), expected);
+  assert.equal(assertNormalizedUpstreamTextIdentity(crlf, expected), expected);
+  assert.notEqual(normalizedUpstreamTextSha256(lf), normalizedUpstreamTextSha256('first line\nchanged line\n'));
+  assert.throws(() => assertNormalizedUpstreamTextIdentity('first line\nchanged line\n', expected), /identity mismatch/);
+});
 
 function coverageExport(filename, branches) {
   return {

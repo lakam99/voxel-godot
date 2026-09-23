@@ -119,6 +119,19 @@ async function hashFile(path) {
   return createHash('sha256').update(await readFile(path)).digest('hex');
 }
 
+export function normalizedUpstreamTextSha256(value) {
+  const text = Buffer.isBuffer(value) ? value.toString('utf8') : String(value);
+  return sha256Text(text.replace(/\r\n/g, '\n'));
+}
+
+export function assertNormalizedUpstreamTextIdentity(value, expectedSha256) {
+  const normalizedSha256 = normalizedUpstreamTextSha256(value);
+  if (normalizedSha256 !== expectedSha256) {
+    throw new Error(`Upstream text identity mismatch after CRLF-to-LF normalization: ${normalizedSha256}`);
+  }
+  return normalizedSha256;
+}
+
 function projectPath(project, path) {
   return relative(project, path).replaceAll('\\', '/');
 }
@@ -1027,7 +1040,10 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     const dependencyLicenseSha256 = await hashFile(dependencyLicensePath);
     const noiseLicensePath = resolve(dirname(toolchainLockPath), toolchainLockValue.fastNoiseLite.licenseFile);
     const noiseHeaderPath = resolve(dirname(toolchainLockPath), toolchainLockValue.fastNoiseLite.patchedHeaderFile);
-    const noiseLicenseSha256 = await hashFile(noiseLicensePath);
+    const noiseLicenseBytes = await readFile(noiseLicensePath);
+    const noiseLicenseRawSha256 = createHash('sha256').update(noiseLicenseBytes).digest('hex');
+    const noiseLicenseNormalizedSha256 = assertNormalizedUpstreamTextIdentity(
+      noiseLicenseBytes, toolchainLockValue.fastNoiseLite.licenseSha256);
     const noiseHeaderSha256 = await hashFile(noiseHeaderPath);
     receipt.dependency = {
       pinnedRevision: (await readFile(pinPath, 'utf8')).trim(),
@@ -1046,7 +1062,9 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
         license: {
           identifier: toolchainLockValue.fastNoiseLite.license,
           path: relative(project, noiseLicensePath).replaceAll('\\', '/'),
-          sha256: noiseLicenseSha256,
+          rawSha256: noiseLicenseRawSha256,
+          normalizedSha256: noiseLicenseNormalizedSha256,
+          normalization: 'CRLF to LF for upstream text identity only; raw project-input hash remains byte-exact',
           pinnedSha256: toolchainLockValue.fastNoiseLite.licenseSha256,
         },
         patchedHeader: {
@@ -1060,7 +1078,6 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     };
     if (receipt.dependency.actualRevision !== receipt.dependency.pinnedRevision || receipt.dependency.status) throw new Error('godot-cpp dependency does not match the clean pinned revision.');
     if (dependencyLicenseSha256 !== toolchainLockValue.godotCpp.licenseSha256) throw new Error('godot-cpp license file differs from the N1 pin.');
-    if (noiseLicenseSha256 !== toolchainLockValue.fastNoiseLite.licenseSha256) throw new Error('FastNoiseLite license file differs from the N2 pin.');
     if (noiseHeaderSha256 !== toolchainLockValue.fastNoiseLite.patchedHeaderSha256) throw new Error('FastNoiseLite patched header differs from the N2 pin.');
     const scons = dependencies.scons ?? sconsCommand();
     for (const configuration of ['debug', 'release']) {
