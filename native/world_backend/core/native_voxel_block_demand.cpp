@@ -18,6 +18,12 @@ NativeVoxelBlockDemand::NativeVoxelBlockDemand(std::size_t max_in_flight, std::s
         throw std::invalid_argument("invalid voxel block demand capacity");
 }
 
+bool NativeVoxelBlockDemand::set_max_entries(std::size_t max_entries) {
+    if (max_entries == 0 || max_entries < entries_.size()) return false;
+    max_entries_ = max_entries;
+    return true;
+}
+
 void NativeVoxelBlockDemand::clear_bytes(Entry &entry) {
     prepared_bytes_ -= entry.bytes.size();
     entry.bytes.clear();

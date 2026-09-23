@@ -1491,6 +1491,7 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("poll_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::poll_voxel_block_shadow_async);
 	ClassDB::bind_method(D_METHOD("cancel_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::cancel_voxel_block_shadow_async);
 	ClassDB::bind_method(D_METHOD("request_voxel_block_shadow", "request", "consumer_id", "priority"), &NativeWorldBackend::request_voxel_block_shadow);
+	ClassDB::bind_method(D_METHOD("configure_voxel_block_shadow_capacity", "max_entries"), &NativeWorldBackend::configure_voxel_block_shadow_capacity);
 	ClassDB::bind_method(D_METHOD("release_voxel_block_shadow", "request", "consumer_id"), &NativeWorldBackend::release_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("pump_voxel_block_shadow"), &NativeWorldBackend::pump_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_insertion_receipt", "key", "generation", "accepted"), &NativeWorldBackend::voxel_block_shadow_insertion_receipt);
@@ -2766,7 +2767,16 @@ Dictionary NativeWorldBackend::status() const {
 	limits["metadataStringBytes"] = static_cast<int64_t>(NativeValueLimits::MAX_STRING_BYTES);
 	limits["metadataKeyBytes"] = static_cast<int64_t>(NativeValueLimits::MAX_OBJECT_KEY_BYTES);
 	limits["metadataContainerEntries"] = static_cast<int64_t>(NativeValueLimits::MAX_CONTAINER_ENTRIES);
+	limits["voxelDemandHardMaxEntries"] = static_cast<int64_t>(32768);
+	limits["voxelDemandMaxPreparedBytes"] = static_cast<int64_t>(4U * 1024U * 1024U);
+	limits["voxelDemandMaxInFlight"] = static_cast<int64_t>(1);
 	result["adapterLimits"] = limits;
+	result["voxelDemandRetainedEntries"] = static_cast<int64_t>(voxel_demand_.size());
+	result["voxelDemandPeakRetainedEntries"] = static_cast<int64_t>(voxel_demand_peak_entries_);
+	result["voxelDemandMaxRetainedEntries"] = static_cast<int64_t>(voxel_demand_.max_entries());
+	result["voxelDemandPreparedBytes"] = static_cast<int64_t>(voxel_demand_.prepared_bytes());
+	result["voxelDemandInFlight"] = static_cast<int64_t>(voxel_demand_.in_flight());
+	result["voxelDemandCapacityRejections"] = static_cast<int64_t>(voxel_demand_capacity_rejections_);
 	if (!state_ || !shaping_registry_) return result;
 	result["sourceSeedText"] = text(state_->definition().raw_terrain_seed().utf8);
 	result["sourceIdentity"] = identity_dictionary(state_->source_identity());
@@ -3177,13 +3187,34 @@ Dictionary NativeWorldBackend::request_voxel_block_shadow(const Dictionary &p_re
 		if (p_consumer_id <= 0) throw std::invalid_argument("consumer_id must be positive");
 		const auto key = voxel_demand_key(p_request);
 		voxel_demand_.retire(8);
-		if (!voxel_demand_.request_pending(key, static_cast<std::uint64_t>(p_consumer_id), p_priority))
-			return envelope(operation, "pending", "queue_capacity");
+		if (!voxel_demand_.request_pending(key, static_cast<std::uint64_t>(p_consumer_id), p_priority)) {
+			++voxel_demand_capacity_rejections_;
+			Dictionary result = envelope(operation, "pending", "queue_capacity");
+			result["retainedEntries"] = static_cast<int64_t>(voxel_demand_.size());
+			result["maxRetainedEntries"] = static_cast<int64_t>(voxel_demand_.max_entries());
+			result["capacityRejections"] = static_cast<int64_t>(voxel_demand_capacity_rejections_);
+			return result;
+		}
 		voxel_demand_requests_[key] = p_request;
+		voxel_demand_peak_entries_ = std::max(voxel_demand_peak_entries_, voxel_demand_.size());
 		Dictionary result = envelope(operation, "pending", "demand_retained");
 		result["key"] = voxel_demand_key_dictionary(key);
 		return result;
 	} catch (const std::exception &error) { return failure(operation, error); }
+}
+
+Dictionary NativeWorldBackend::configure_voxel_block_shadow_capacity(std::int64_t p_max_entries) {
+	constexpr const char *operation = "configure_voxel_block_shadow_capacity";
+	// Explicit live-viewer admission may size this to the measured union, but
+	// must not expand without limit or invalidate already retained tickets.
+	if (p_max_entries < 128 || p_max_entries > 32768)
+		return envelope(operation, "failed", "capacity_out_of_bounds");
+	if (!voxel_demand_.set_max_entries(static_cast<std::size_t>(p_max_entries)))
+		return envelope(operation, "failed", "capacity_below_retained_entries");
+	Dictionary result = envelope(operation, "ready");
+	result["maxRetainedEntries"] = static_cast<int64_t>(voxel_demand_.max_entries());
+	result["retainedEntries"] = static_cast<int64_t>(voxel_demand_.size());
+	return result;
 }
 
 Dictionary NativeWorldBackend::release_voxel_block_shadow(const Dictionary &p_request, std::int64_t p_consumer_id) {

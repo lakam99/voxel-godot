@@ -68,6 +68,10 @@ public:
     std::size_t in_flight() const { return in_flight_; }
     std::size_t prepared_bytes() const { return prepared_bytes_; }
     std::size_t size() const { return entries_.size(); }
+    std::size_t max_entries() const { return max_entries_; }
+    // Admission capacity may change without disturbing tickets or consumers.
+    // Shrinking below already retained entries is rejected by the caller.
+    bool set_max_entries(std::size_t max_entries);
 
 private:
     std::map<Key, Entry> entries_;

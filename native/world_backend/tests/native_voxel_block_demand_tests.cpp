@@ -9,6 +9,36 @@ static WorldPhysicalContentIdentity pin(std::uint8_t byte) {
     return value;
 }
 
+VWB_TEST(native_voxel_demand_capacity_resize_preserves_retained_requests) {
+    Demand owner(1, 8, 2, 4);
+    const Demand::Key first{0, 0, 0, 0, 0}, second{0, 16, 0, 0, 0}, third{0, 32, 0, 0, 0};
+    VWB_EXPECT(owner.request_pending(first, 7, 1));
+    VWB_EXPECT(owner.request_pending(second, 7, 1));
+    VWB_EXPECT(!owner.request_pending(third, 7, 1));
+    VWB_EXPECT_EQ(2u, owner.size());
+    VWB_EXPECT_EQ(2u, owner.max_entries());
+    VWB_EXPECT(!owner.set_max_entries(1));
+    VWB_EXPECT_EQ(2u, owner.max_entries());
+    VWB_EXPECT(owner.set_max_entries(3));
+    VWB_EXPECT(owner.request_pending(third, 7, 1));
+    VWB_EXPECT_EQ(3u, owner.size());
+    VWB_EXPECT_EQ(1u, owner.find(first)->consumers.size());
+    VWB_EXPECT_EQ(1u, owner.find(second)->consumers.size());
+    VWB_EXPECT(!owner.set_max_entries(0));
+}
+
+VWB_TEST(native_voxel_demand_capacity_retries_after_retirement) {
+    Demand owner(1, 8, 1, 4);
+    const Demand::Key old_key{0, 0, 0, 0, 0}, next_key{0, 16, 0, 0, 0};
+    VWB_EXPECT(owner.request_pending(old_key, 7, 1));
+    VWB_EXPECT(!owner.request_pending(next_key, 9, 1));
+    VWB_EXPECT(owner.find(next_key) == nullptr);
+    owner.release(old_key, 7);
+    VWB_EXPECT_EQ(1u, owner.retire(1));
+    VWB_EXPECT(owner.request_pending(next_key, 9, 1));
+    VWB_EXPECT_EQ(1u, owner.find(next_key)->consumers.size());
+}
+
 VWB_TEST(native_voxel_demand_retains_and_promotes_without_duplicate_jobs) {
     Demand owner(1, 8, 2, 4);
     Demand::Key key{0, 1, 2, 3, 0};

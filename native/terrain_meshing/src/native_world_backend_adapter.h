@@ -111,6 +111,7 @@ public:
 	godot::Dictionary poll_voxel_block_shadow_async(std::int64_t p_ticket);
 	 godot::Dictionary cancel_voxel_block_shadow_async(std::int64_t p_ticket);
 	 godot::Dictionary request_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id, int p_priority);
+	 godot::Dictionary configure_voxel_block_shadow_capacity(std::int64_t p_max_entries);
 	 godot::Dictionary release_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id);
 	 godot::Dictionary pump_voxel_block_shadow();
 	 godot::Dictionary voxel_block_shadow_insertion_receipt(const godot::Dictionary &p_key, std::int64_t p_generation, bool p_accepted);
@@ -155,7 +156,11 @@ private:
 	std::int64_t presentation_capture_revision_ = 0;
 	std::string presentation_capture_identity_;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
-	voxel::world_backend::NativeVoxelBlockDemand voxel_demand_{1, 4U * 1024U * 1024U, 128, 16384};
+	// One full-height primary viewer can exceed 3,000 retained data keys.
+	// This is an entry cap, not the independent one-worker/4 MiB byte caps.
+	voxel::world_backend::NativeVoxelBlockDemand voxel_demand_{1, 4U * 1024U * 1024U, 16384, 16384};
+	std::uint64_t voxel_demand_capacity_rejections_ = 0;
+	std::size_t voxel_demand_peak_entries_ = 0;
 	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key, godot::Dictionary> voxel_demand_requests_;
 	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key,
 		std::vector<voxel::world_backend::NativeTerrainPageKey>> voxel_demand_dependencies_;
