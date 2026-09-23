@@ -317,3 +317,12 @@ active. The focused 66-to-1-window contract proves the count cap, two more
 demand changes without record or byte growth, explicit acknowledgement and
 resumption at
 `artifacts/native-world-backend/n3-triangle-artifact-1790180079292-6b43bb0b/report.json`.
+If the demand returns to the previous current layout before physical drain,
+N3 revokes the projected retirement intent. A formerly pending token cannot
+then be acknowledged, and all original window facades remain current. A third
+rejected target recomputes the exact pending token set without allocating
+another record. Focused regression:
+`artifacts/native-world-backend/n3-triangle-artifact-1790180209479-f46d5f1e/report.json`.
+The runtime coordinator must derive each acknowledgement from the corresponding
+N5 owner's actual `stop_and_drain()` result; the source fixture supplies a
+contract-shaped receipt and does not prove that production coordinator path.

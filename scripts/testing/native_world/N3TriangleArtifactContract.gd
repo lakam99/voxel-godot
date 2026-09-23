@@ -410,13 +410,15 @@ func run() -> void:
 	var next_viewers: Array[Dictionary] = [{"kind":"secondary", "id":"next",
 		"position":Vector3(float(66 * 256 + 8) * main.CELL, 0, 0),
 		"distance":0}]
-	many_planner.replace_sources(viewer, next_viewers, [], [], Vector2i(128,128))
+	many_planner.replace_sources({}, next_viewers, [], [], Vector2i(128,128))
 	var still_held: Dictionary = many_broker.advance()
 	check(still_held.get("status") == "pending"
 		and still_held.get("reason") == "collision_window_retirement_backpressure"
+		and int(still_held.get("retiredWindows", 0)) == 66
+		and (still_held.get("retiredWindowTokens", []) as Array).size() == 66
 		and int(still_held.get("totalWindowRecords", -2)) == held_record_count
 		and int(still_held.get("retainedVertexBytes", -2)) == held_vertex_bytes,
-		"second demand change cannot materialize more records under backpressure")
+		"third rejected target refreshes exact pending retirement set without growth")
 	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 	var returned_held: Dictionary = many_broker.advance()
 	check(returned_held.get("status") == "pending"
@@ -425,6 +427,29 @@ func run() -> void:
 	var retired_tokens: Array = held.get("retiredWindowTokens", [])
 	if not retired_tokens.is_empty():
 		var retired_token := String(retired_tokens[0])
+		many_planner.replace_sources(viewer, many_viewers, [], [], Vector2i(128,128))
+		var reverted_step: Dictionary = many_broker.advance()
+		var reverted_layout: Dictionary = many_broker.collision_window_layout()
+		var reverted_facades := 0
+		for window: Dictionary in reverted_layout.get("windows", []):
+			var acquired: Dictionary = many_broker.collision_window_source(window.id,
+				String(reverted_layout.layoutToken))
+			if acquired.get("status") == "ready" \
+					and acquired.source.collision_source_snapshot().get("reason") \
+					!= "collision_window_source_superseded":
+				reverted_facades += 1
+		check(reverted_step.get("reason") == "artifact_queue_idle"
+			and int(reverted_layout.get("windowCount", 0)) == 66
+			and reverted_facades == 66
+			and many_broker.acknowledge_collision_window_retired(retired_token,
+				{"windowToken":retired_token, "drained":true,
+					"remainingBodies":0}).get("status") == "failed",
+			"reverted current window revokes projected retirement intent")
+		many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
+		var held_again: Dictionary = many_broker.advance()
+		check(held_again.get("reason") == "collision_window_retirement_backpressure"
+			and int(held_again.get("totalWindowRecords", -2)) == held_record_count,
+			"new retirement attempt remains bounded after revert")
 		check(many_broker.acknowledge_collision_window_retired(retired_token, {}).get("status") == "failed"
 			and many_broker.acknowledge_collision_window_retired(retired_token,
 				{"windowToken":retired_token, "drained":true,

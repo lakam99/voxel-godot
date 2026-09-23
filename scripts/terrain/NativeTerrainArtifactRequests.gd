@@ -258,6 +258,7 @@ func _refresh_window_layout() -> Dictionary:
 		String(_identity.sourceIdentity.get("hex", "")),
 		int(_identity.sourceRevision), int(_identity.cancellationEpoch)]).sha256_text()
 	if _window_layout.get("layoutToken") == layout_token:
+		_pending_retirement_tokens.clear()
 		return _retention_status()
 	var windows: Array[Dictionary] = []
 	var active := {}
