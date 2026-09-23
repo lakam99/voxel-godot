@@ -117,6 +117,14 @@ in `docs/native_world_backend/N3_EFFECTIVE_TERRAIN_AND_SAVE_SHADOW_2026-09-18.md
 
 ## Mandatory receipt fields
 
+### 2026-09-23 N2/N3 cutover-preparation checkpoint
+
+| Boundary | Current evidence | Remaining deletion or activation condition |
+|---|---|---|
+| N2 same-shape collision replacement | Commit `6eb4ba3`; `artifacts/native-world-backend/n2-same-shape-epoch-01/fixture-report.json` passes the headed one-body fixture. A terrain ray hits a shape owned by cancellation epoch 2 after a physics frame, while all previous shapes retire. The outer receipt fails only its clean-worktree condition because protected `native/terrain_meshing/artifacts/` remains untracked. | This proves a fixture mechanism, not N5 production collision publication. Revision-keyed whole-world terrain/feature artifacts, actor-safe replacement, readiness and gameplay proof remain. |
+| N3 native terrain owner and save export | Commits `c68bc37` and `d091cd7`; `artifacts/native-world-backend/n3-terrain-runtime-owner-1790170573591-4e9901e7/report.json` passes a real native-binding service contract. One backend owns cell/numeric reads, block-demand preparation and an exact revision-checked save-v2 volume export; a drained owner refuses export. | `VoxelTerrainRuntime` still installs `VoxelTerrainGenerator`, uses Voxel Tools collision and script edit copy/paste. `MainRuntimeTools` and `MainSaveState` still read script authority. Do not activate the native owner alone or claim save/Continue cutover. |
+
+
 Every stage receipt records:
 
 - Git commit and clean/dirty state;
