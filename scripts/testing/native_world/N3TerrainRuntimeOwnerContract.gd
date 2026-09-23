@@ -113,13 +113,25 @@ func run() -> void:
 		var committed: Dictionary = owner.commit_durable_cells("owner:edit-1", native_revision,
 			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
 		observations.append({"commit":committed.get("reason", committed.get("status", "")),
-			"ownerState":owner.snapshot().state})
+			"ownerState":owner.snapshot().state,
+			"affectedSections":str(committed.get("affectedSections", []))})
 		check(committed.get("status") == "ready"
 			and int(committed.get("nativeRevision", -1)) == native_revision + 1
 			and committed.get("physicalReady") == false
 			and committed.get("publicationPlan", {}).get("status") == "ready"
 			and committed.get("publicationPlan", {}).get("barrier", {}).get("activationEligible") == true,
 			"durable edit returns physical republication plan without readiness")
+		var sections: Array = committed.get("affectedSections", [])
+		var plan: Dictionary = committed.get("publicationPlan", {})
+		var edited_section := Vector3i(-2, -1, -1)
+		check(OWNER.receipt_covered_by_plan(sections, [edited_section], plan),
+			"real conservative native section receipt covered by preflighted mesh halo")
+		var forged_extra := sections.duplicate()
+		forged_extra.append(Vector3i(100, 0, 0))
+		check(not OWNER.receipt_covered_by_plan(forged_extra, [edited_section], plan)
+			and not OWNER.receipt_covered_by_plan([edited_section, edited_section], [edited_section], plan)
+			and not OWNER.receipt_covered_by_plan([Vector3i(-3, -1, -1)], [edited_section], plan),
+			"foreign duplicate and missing edited sections rejected")
 		var after_edit: Dictionary = owner.export_terrain_volume_v2()
 		check(after_edit.get("status") == "ready"
 			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1
