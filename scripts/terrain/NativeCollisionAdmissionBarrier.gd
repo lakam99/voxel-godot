@@ -9,6 +9,7 @@ const FORECAST_SECONDS := 1.0 / 30.0
 const MOVING_STATIC_GROUP := &"world_moving_physics_actor"
 
 var _root: Node
+var _tree: SceneTree
 var _collision_owner: Node
 var _identity := {}
 var _bounds := AABB()
@@ -32,6 +33,7 @@ func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB
 	if not bool(validity.get("clear", false)):
 		return {"status": "failed", "reason": "barrier_region_invalid"}
 	_root = root
+	_tree = root.get_tree()
 	_collision_owner = collision_owner
 	_identity = identity.duplicate(true)
 	_bounds = bounds
@@ -39,8 +41,9 @@ func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB
 	_scan_pending = [_root]
 	_scan_complete = false
 	_membership_dirty = false
-	_root.get_tree().node_added.connect(_on_node_added)
-	_root.get_tree().node_removed.connect(_on_node_removed)
+	_tree.node_added.connect(_on_node_added)
+	_tree.node_removed.connect(_on_node_removed)
+	_tree.process_frame.connect(_on_process_frame)
 	return advance_census(identity)
 
 
@@ -68,6 +71,13 @@ func advance_census(identity: Dictionary) -> Dictionary:
 		"actorCount": _actors.size(), "visitedNodes": visited,
 		"elapsedUsec": Time.get_ticks_usec() - started_usec,
 		"remainingNodes": _scan_pending.size(), "identity": _identity.duplicate(true)}
+
+
+func census_progress(identity: Dictionary) -> Dictionary:
+	if not _active or identity != _identity:
+		return {"status": "failed", "reason": "barrier_revision_mismatch"}
+	return {"status": "ready" if _scan_complete else "pending",
+		"actorCount": _actors.size(), "remainingNodes": _scan_pending.size()}
 
 
 func register_moving_actor(actor: PhysicsBody3D) -> bool:
@@ -162,14 +172,16 @@ func cancel_empty_startup(identity: Dictionary) -> bool:
 
 
 func _clear() -> void:
-	if _root != null and is_instance_valid(_root) and _root.is_inside_tree():
-		var tree := _root.get_tree()
-		if tree.node_added.is_connected(_on_node_added):
-			tree.node_added.disconnect(_on_node_added)
-		if tree.node_removed.is_connected(_on_node_removed):
-			tree.node_removed.disconnect(_on_node_removed)
+	if _tree != null:
+		if _tree.process_frame.is_connected(_on_process_frame):
+			_tree.process_frame.disconnect(_on_process_frame)
+		if _tree.node_added.is_connected(_on_node_added):
+			_tree.node_added.disconnect(_on_node_added)
+		if _tree.node_removed.is_connected(_on_node_removed):
+			_tree.node_removed.disconnect(_on_node_removed)
 	_active = false
 	_root = null
+	_tree = null
 	_collision_owner = null
 	_identity.clear()
 	_admitted_actor_ids.clear()
@@ -177,6 +189,11 @@ func _clear() -> void:
 	_scan_pending.clear()
 	_scan_complete = false
 	_membership_dirty = false
+
+
+func _on_process_frame() -> void:
+	if _active and not _scan_complete:
+		advance_census(_identity)
 
 
 func _register_if_moving(node: Node) -> void:

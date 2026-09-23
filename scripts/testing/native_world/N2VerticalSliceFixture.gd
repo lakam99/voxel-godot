@@ -655,10 +655,13 @@ func _actor_guard_contract() -> Dictionary:
 	late_group_actor.add_to_group(&"world_moving_physics_actor")
 	var group_registration: bool = capped_barrier.register_moving_actor(late_group_actor)
 	var group_entry_held: bool = not capped_barrier.admit_motion(late_group_actor, Vector3(-10, 0, 0))
-	while capped.get("status") == "pending":
-		capped = capped_barrier.advance_census(identity)
-	var census_completed: bool = capped.get("status") == "ready" \
-		and int(capped.get("actorCount", -1)) == 2
+	var census_frames := 0
+	while capped_barrier.census_progress(identity).get("status") == "pending" and census_frames < 4:
+		await get_tree().process_frame
+		census_frames += 1
+	var completed: Dictionary = capped_barrier.census_progress(identity)
+	var census_completed: bool = completed.get("status") == "ready" \
+		and int(completed.get("actorCount", -1)) == 2 and census_frames > 0
 	late_group_actor.reparent(self)
 	var reparent_out_held: bool = not capped_barrier.admit_motion(late_group_actor, Vector3(1, 0, 0))
 	late_group_actor.reparent(capped_root)
@@ -697,8 +700,8 @@ func _actor_guard_contract() -> Dictionary:
 			"farMotionAllowed":far_motion_allowed,"entryMotionHeld":entry_motion_held,
 			"lateGroupRegistered":group_registration,"lateGroupEntryHeld":group_entry_held,
 			"reparentOutHeld":reparent_out_held,"reparentBackHeld":reparent_back_held,
-			"reparentClearance":reparent_clearance,
-			"result":capped}}
+			"reparentClearance":reparent_clearance,"frames":census_frames,
+			"result":completed}}
 
 
 func _install_render(native_result: Dictionary) -> Dictionary:
