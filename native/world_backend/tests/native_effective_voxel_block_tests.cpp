@@ -28,16 +28,19 @@ WorldSourceDefinition definition() {
     return WorldSourceDefinition(std::move(descriptor));
 }
 
-std::vector<NativeTownRegionOverride> absent_towns(const NativeTerrainPageKey page) {
+std::vector<NativeTownRegionOverride> absent_towns(const NativeTerrainPageKey page,
+    const bool with_town = false) {
     std::vector<NativeTownRegionOverride> result;
     for (std::int32_t z = page.z - 1; z <= page.z + 1; ++z)
         for (std::int32_t x = page.x - 1; x <= page.x + 1; ++x)
-            result.push_back({x, z, false, {}});
+            result.push_back(with_town && x == 0 && z == 0
+                ? NativeTownRegionOverride{0, 0, true, {0, 0, 0, 0, 30, 10.0}}
+                : NativeTownRegionOverride{x, z, false, {}});
     return result;
 }
 
 WorldSourcePin ready_pin(const WorldSourceDefinition &source, const NativeTerrainPageKey primary,
-                         const WorldDeltaPinnedSnapshot &deltas) {
+                         const WorldDeltaPinnedSnapshot &deltas, const bool with_town = false) {
     NativeSiteSourcePolicy policy;
     policy.engine_version_utf8 = "4.6.1.stable.official.14d19694e";
     policy.ordinary_region_cells = 140;
@@ -46,7 +49,7 @@ WorldSourcePin ready_pin(const WorldSourceDefinition &source, const NativeTerrai
     const auto pages = world_effective_shaping_dependencies(source, primary);
     std::vector<NativeSiteSourceRegionKey> unresolved;
     for (const auto page : pages) {
-        const auto provisional = registry.pin_page(page, absent_towns(page));
+        const auto provisional = registry.pin_page(page, absent_towns(page, with_town));
         for (const auto region : provisional.unresolved_dependencies())
             if (std::find(unresolved.begin(), unresolved.end(), region) == unresolved.end())
                 unresolved.push_back(region);
@@ -64,7 +67,7 @@ WorldSourcePin ready_pin(const WorldSourceDefinition &source, const NativeTerrai
     }
     if (!resolutions.resolutions.empty()) static_cast<void>(registry.apply(resolutions));
     std::vector<NativeTerrainShapingPagePin> pins;
-    for (const auto page : pages) pins.push_back(registry.pin_page(page, absent_towns(page)));
+    for (const auto page : pages) pins.push_back(registry.pin_page(page, absent_towns(page, with_town)));
     return WorldSourcePin(source, deltas, primary, pins);
 }
 
@@ -108,6 +111,42 @@ WorldDeltaPinnedSnapshot deltas_with_edits(const std::vector<NativeCellState> &e
 std::uint16_t raw_sdf(const NativeEffectiveVoxelBlock &block, const std::size_t i) {
     return static_cast<std::uint16_t>(block.sdf16_le[2U * i]
         | (static_cast<std::uint16_t>(block.sdf16_le[2U * i + 1U]) << 8U));
+}
+
+void expect_point_column_and_encoded_bytes_match(
+    const NativeEffectiveTerrainSource &source, const NativeEffectiveVoxelBlockRequest &request) {
+    const auto block = encode_native_effective_voxel_block(source, request);
+    const auto scale = std::int64_t{1} << request.lod;
+    const double cell = source.pin().definition().constants().cell_size_meters;
+    for (std::int32_t z = 0; z < request.size.z; ++z) {
+        const auto cz = static_cast<std::int32_t>(request.origin.z + z * scale);
+        for (std::int32_t x = 0; x < request.size.x; ++x) {
+            const auto cx = static_cast<std::int32_t>(request.origin.x + x * scale);
+            auto column = source.prepare_lattice_column(cx, cz);
+            for (std::int32_t y = 0; y < request.size.y; ++y) {
+                const auto cy = static_cast<std::int32_t>(request.origin.y + y * scale);
+                const WorldLatticeQuery query{{cx, cy, cz}, WorldQueryIntent::terrain_mesh};
+                const auto point = source.sample_lattice_numeric(query);
+                const auto reused = source.sample_lattice_numeric(query, column);
+                VWB_EXPECT_EQ(point.source_cell, reused.source_cell);
+                VWB_EXPECT_EQ(point.density, reused.density);
+                VWB_EXPECT_EQ(point.surface_y, reused.surface_y);
+                VWB_EXPECT_EQ(point.material, reused.material);
+                VWB_EXPECT_EQ(point.underground_air_void, reused.underground_air_void);
+                VWB_EXPECT_EQ(point.edited, reused.edited);
+                const std::size_t index = static_cast<std::size_t>(y)
+                    + request.size.y * (static_cast<std::size_t>(x)
+                    + request.size.x * static_cast<std::size_t>(z));
+                const float normalized = std::clamp(
+                    static_cast<float>(-point.density / static_cast<double>(scale) / cell) * 0.002F,
+                    -1.0F, 1.0F);
+                const auto expected_sdf = static_cast<std::uint16_t>(
+                    static_cast<std::int16_t>(normalized * 32767.0F));
+                VWB_EXPECT_EQ(expected_sdf, raw_sdf(block, index));
+                VWB_EXPECT_EQ(native_voxel_material_channel_id(point.material), block.indices8[index]);
+            }
+        }
+    }
 }
 
 } // namespace
@@ -197,4 +236,37 @@ VWB_TEST(native_effective_voxel_block_preserves_godot_sdf_threshold) {
     // Independent installed-Godot VoxelBuffer oracle:
     // native_effective_voxel_threshold_oracle.gd emits raw 513 / [1, 2].
     VWB_EXPECT_EQ(std::vector<std::uint8_t>({1, 2}), block.sdf16_le);
+}
+
+VWB_TEST(native_effective_voxel_block_column_reuse_matches_point_sampling_16_cubed) {
+    const auto def = definition();
+    NativeEffectiveTerrainSource negative(ready_pin(def, {-1, -1}, deltas_with_edits({
+        durable_edit({-20, -2, -20}, -1.35, TerrainMaterialId::air),
+        durable_edit({-19, 0, -19}, 1.35, TerrainMaterialId::copper_ore),
+    })));
+    expect_point_column_and_encoded_bytes_match(negative, {{-20, -4, -20}, {16, 16, 16}, 0});
+
+    NativeEffectiveTerrainSource town_source(ready_pin(def, {0, 0}, deltas_with_edits({
+        durable_edit({0, -64, 0}, 5.0, TerrainMaterialId::bedrock),
+        durable_edit({1, -63, 0}, -2.0, TerrainMaterialId::air),
+    }), true));
+    expect_point_column_and_encoded_bytes_match(town_source, {{0, -64, 0}, {16, 16, 16}, 0});
+    expect_point_column_and_encoded_bytes_match(town_source, {{0, 0, 0}, {16, 16, 16}, 0});
+
+    NativeEffectiveTerrainSource remap(ready_pin(def, {7, 0}, deltas_with_edits({})));
+    expect_point_column_and_encoded_bytes_match(remap, {{1960, 0, 0}, {16, 16, 16}, 0});
+}
+
+VWB_TEST(native_effective_voxel_block_column_scratch_rejects_other_column) {
+    const auto def = definition();
+    NativeEffectiveTerrainSource source(ready_pin(def, {0, 0}, deltas_with_edits({})));
+    auto column = source.prepare_lattice_column(0, 0);
+    static_cast<void>(source.sample_lattice_numeric({{0, 0, 0}, WorldQueryIntent::terrain_mesh}, column));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        source.sample_lattice_numeric({{1, 0, 0}, WorldQueryIntent::terrain_mesh}, column));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        source.sample_lattice_numeric({{0, 0, 1}, WorldQueryIntent::terrain_mesh}, column));
+    NativeEffectiveTerrainSource other(ready_pin(def, {0, 0}, deltas_with_edits({})));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        other.sample_lattice_numeric({{0, 0, 0}, WorldQueryIntent::terrain_mesh}, column));
 }

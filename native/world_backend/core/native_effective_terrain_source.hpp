@@ -2,6 +2,7 @@
 
 #include "native_natural_terrain_source.hpp"
 #include "native_terrain_shaping_snapshot.hpp"
+#include <optional>
 
 namespace voxel::world_backend {
 
@@ -67,6 +68,26 @@ NativeResolvedSurfaceProjectionQuery resolve_native_surface_projection_query(
 // blocks: feature instances are not terrain cells.
 class NativeEffectiveTerrainSource final {
 public:
+    // Ephemeral reuse within one lattice x/z column of one immutable pin.
+    // The first sample establishes the float32-remapped source column.
+    class LatticeColumnScratch {
+        friend class NativeEffectiveTerrainSource;
+    public:
+        LatticeColumnScratch(const LatticeColumnScratch &) = delete;
+        LatticeColumnScratch(LatticeColumnScratch &&) noexcept = default;
+        LatticeColumnScratch &operator=(const LatticeColumnScratch &) = delete;
+        LatticeColumnScratch &operator=(LatticeColumnScratch &&) = delete;
+    private:
+        LatticeColumnScratch(const NativeEffectiveTerrainSource *source,
+            std::int32_t x, std::int32_t z)
+            : owner(source), requested_x(x), requested_z(z) {}
+        const NativeEffectiveTerrainSource *owner;
+        std::int32_t requested_x;
+        std::int32_t requested_z;
+        std::optional<double> source_surface_y;
+        std::optional<bool> source_protects_overburden;
+        std::optional<TerrainBiomeId> requested_surface_biome;
+    };
     explicit NativeEffectiveTerrainSource(WorldSourcePin pin);
     NativeEffectiveTerrainSource(const NativeEffectiveTerrainSource &) = delete;
     NativeEffectiveTerrainSource(NativeEffectiveTerrainSource &&) noexcept = default;
@@ -74,6 +95,7 @@ public:
     NativeEffectiveTerrainSource &operator=(NativeEffectiveTerrainSource &&) = delete;
 
     const WorldSourcePin &pin() const noexcept;
+    LatticeColumnScratch prepare_lattice_column(std::int32_t x, std::int32_t z) const;
 
     NativeSurfaceColumnFacts sample_surface_column(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId sample_surface_biome(const WorldSurfaceColumnQuery &query) const;
@@ -90,6 +112,8 @@ public:
     // integer lattice coordinate. Otherwise shaping/generation uses the
     // float32-remapped source coordinate. Scene overlays never enter this API.
     NativeEffectiveNumericFacts sample_lattice_numeric(const WorldLatticeQuery &query) const;
+    NativeEffectiveNumericFacts sample_lattice_numeric(
+        const WorldLatticeQuery &query, LatticeColumnScratch &column) const;
 
     // TerrainVolumeService.numeric_sample_world semantics: typed precedence is
     // resolved at the remapped world-position cell. A non-mesh overlay yields
@@ -113,11 +137,13 @@ private:
     double shaped_surface(std::int32_t x, std::int32_t z) const;
     double continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId shaped_surface_biome(std::int32_t x, std::int32_t z) const;
-    GeneratedFacts generated_at(WorldFloat32Position position) const;
+    GeneratedFacts generated_at(WorldFloat32Position position,
+        LatticeColumnScratch *column = nullptr) const;
     NativeEffectiveNumericFacts generated_numeric(
         CellCoord requested_cell, WorldFloat32Position position,
         CellCoord material_cell, CellCoord biome_cell,
-        GeneratedMaterialSemantics material_semantics) const;
+        GeneratedMaterialSemantics material_semantics,
+        LatticeColumnScratch *column = nullptr) const;
     NativeCellState sample_cell_state_in_pinned_page(const WorldCellCenterQuery &query) const;
 
     WorldSourcePin pin_;

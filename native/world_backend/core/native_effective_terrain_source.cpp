@@ -131,6 +131,12 @@ NativeEffectiveTerrainSource::NativeEffectiveTerrainSource(WorldSourcePin pin)
 
 const WorldSourcePin &NativeEffectiveTerrainSource::pin() const noexcept { return pin_; }
 
+NativeEffectiveTerrainSource::LatticeColumnScratch
+NativeEffectiveTerrainSource::prepare_lattice_column(const std::int32_t x, const std::int32_t z) const {
+    require_primary_page_query(pin_, x, z);
+    return {this, x, z};
+}
+
 const NativeTerrainShapingSnapshot &NativeEffectiveTerrainSource::shaping_for(
     const std::int32_t x, const std::int32_t z) const {
     return pin_.terrain_shaping_for_page(page_for(x, z));
@@ -161,19 +167,26 @@ TerrainBiomeId NativeEffectiveTerrainSource::shaped_surface_biome(
 }
 
 NativeEffectiveTerrainSource::GeneratedFacts NativeEffectiveTerrainSource::generated_at(
-    const WorldFloat32Position position) const {
+    const WorldFloat32Position position, LatticeColumnScratch *column) const {
     const double cell_size = pin_.definition().constants().cell_size_meters;
     const CellCoord source = position_cell(position, cell_size);
     const auto sampler = [this](const std::int32_t sample_x, const std::int32_t sample_z) {
         return natural_surface(sample_x, sample_z);
     };
     const auto &shaping = shaping_for(source.x, source.z);
-    const double surface = shaping.surface_y(source.x, source.z, sampler);
+    const double surface = column && column->source_surface_y
+        ? *column->source_surface_y : shaping.surface_y(source.x, source.z, sampler);
+    if (column && !column->source_surface_y) column->source_surface_y = surface;
     const double depth_cells = std::max(0.0, surface - static_cast<double>(position.y))
         / std::max(0.001, cell_size);
     double density = surface - static_cast<double>(position.y);
     if (density > 0.0) {
-        const double overburden = shaping.protects_minimum_overburden(source.x, source.z, sampler) ? 8.0 : 3.0;
+        const bool protected_column = column && column->source_protects_overburden
+            ? *column->source_protects_overburden
+            : shaping.protects_minimum_overburden(source.x, source.z, sampler);
+        if (column && !column->source_protects_overburden)
+            column->source_protects_overburden = protected_column;
+        const double overburden = protected_column ? 8.0 : 3.0;
         density = std::min(density,
             natural_.underground_air_density(position, source, surface, depth_cells, overburden));
         if (position.y <= pin_.definition().constants().world_bottom_cell_y * cell_size)
@@ -187,15 +200,19 @@ NativeEffectiveTerrainSource::GeneratedFacts NativeEffectiveTerrainSource::gener
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::generated_numeric(
     const CellCoord requested_cell, const WorldFloat32Position position,
     const CellCoord material_cell, const CellCoord biome_cell,
-    const GeneratedMaterialSemantics material_semantics) const {
-    const GeneratedFacts generated = generated_at(position);
+    const GeneratedMaterialSemantics material_semantics, LatticeColumnScratch *column) const {
+    const GeneratedFacts generated = generated_at(position, column);
     TerrainMaterialId material = TerrainMaterialId::air;
     if (generated.solid) {
         if (material_semantics == GeneratedMaterialSemantics::cell_state
             && material_cell.y <= pin_.definition().constants().world_bottom_cell_y + 1)
             material = TerrainMaterialId::bedrock;
         else {
-            const TerrainBiomeId biome = shaped_surface_biome(biome_cell.x, biome_cell.z);
+            const TerrainBiomeId biome = column && column->requested_surface_biome
+                ? *column->requested_surface_biome
+                : shaped_surface_biome(biome_cell.x, biome_cell.z);
+            if (column && !column->requested_surface_biome)
+                column->requested_surface_biome = biome;
             material = material_semantics == GeneratedMaterialSemantics::world_sample
                 ? natural_.world_sample_material_for(material_cell, generated.surface_y, position.y,
                     biome, generated.density)
@@ -361,17 +378,33 @@ NativeSurfacePropSpawnFacts NativeEffectiveTerrainSource::sample_surface_prop_sp
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_lattice_numeric(
     const WorldLatticeQuery &query) const {
     validate_world_query(query);
+    LatticeColumnScratch column = prepare_lattice_column(query.coordinate.x, query.coordinate.z);
+    return sample_lattice_numeric(query, column);
+}
+
+NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_lattice_numeric(
+    const WorldLatticeQuery &query, LatticeColumnScratch &column) const {
+    validate_world_query(query);
     require_primary_page_query(pin_, query.coordinate.x, query.coordinate.z);
     const auto resolved = resolve_world_query(pin_.definition(), query);
     const CellCoord source = position_cell(resolved.lattice_position, pin_.definition().constants().cell_size_meters);
-    const double surface = shaped_surface(source.x, source.z);
-    if (const auto durable = pin_.deltas().durable_terrain_at(query.coordinate))
-        return edited_numeric(query.coordinate, source, *durable, surface);
+    // The versioned lattice remap computes each float32 axis independently.
+    // With the same requested X/Z and source instance, Y cannot select a
+    // different shaping column; there is no separate mutable X/Z cache to
+    // accept as caller authority.
+    if (column.owner != this || column.requested_x != query.coordinate.x
+        || column.requested_z != query.coordinate.z)
+        throw std::invalid_argument("native lattice column scratch does not match query");
+    if (const auto durable = pin_.deltas().durable_terrain_at(query.coordinate)) {
+        if (!column.source_surface_y)
+            column.source_surface_y = shaped_surface(source.x, source.z);
+        return edited_numeric(query.coordinate, source, *durable, *column.source_surface_y);
+    }
     // This mirrors VoxelTerrainGenerator: density/shaping follows the remapped
     // world position while generated material classification keeps the
     // original lattice cell and its direct-integer biome lookup.
     return generated_numeric(query.coordinate, resolved.lattice_position, query.coordinate, query.coordinate,
-        GeneratedMaterialSemantics::cell_state);
+        GeneratedMaterialSemantics::cell_state, &column);
 }
 
 NativeEffectiveNumericFacts NativeEffectiveTerrainSource::sample_world_numeric(

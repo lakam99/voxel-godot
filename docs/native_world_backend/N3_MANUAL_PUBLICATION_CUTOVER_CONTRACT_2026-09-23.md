@@ -207,3 +207,39 @@ release core tests, both adapter smokes, and strict pure-core coverage of
 `n3-retained-queue-01` and `-02` failed only their new queue coverage floor;
 `-03` is invalid because a focused test edit changed the inventoried input
 during the run. None is cited as passing evidence.
+
+## Column-local encode performance checkpoint
+
+Focused monotonic telemetry now separates main-thread source capture from
+off-thread pure encode. Before column reuse, the installed-engine single
+16-cubed unedited block took 425 microseconds to capture and 1,938,240
+microseconds to encode (`n3-async-voxel-shadow-1790162143878-4bdf7ca3`).
+The generated-cell lattice path evaluated `shaped_surface` once before an
+edit lookup and again inside `generated_at`; moving the first evaluation into
+the edited branch preserved bytes and reduced a focused encode to about
+1.53 seconds. The source-bound, private `LatticeColumnScratch` then reused
+immutable shaped-surface, overburden and requested-biome facts across the
+Y samples of each X/Z column, retaining per-cell float32 resolution, durable
+edit lookup, cave noise, material classification and cancellation checks.
+
+The final focused async report
+`artifacts/native-world-backend/n3-async-voxel-shadow-1790163523275-2e688c24/report.json`
+passed byte parity and measured 400 microseconds of capture and 111,544
+microseconds of encode for its unedited block; its edited retry measured
+113,826 microseconds of encode. The direct GDScript differential
+`artifacts/native-world-backend/n3-multi-page-shadow-1790163459488-cdab4d8f/report.json`
+passes all-channel exact bytes against a freshly generated full 16-cubed
+Godot block, alongside the existing seam and edited native-pin cases. The
+final native gate `artifacts/native-world-backend/n3-column-reuse-02/report.json`
+passes 512/512 debug and release tests, both adapter smokes, and strict
+pure-core coverage of 11,206/11,206 lines, 1,490/1,490 functions and
+6,682/6,682 branches.
+
+On that installed debug build, the same headed 27-block mechanism fixture
+passed in 3,821 milliseconds of preparation instead of 60,861 milliseconds:
+`artifacts/native-world-backend/n3-retained-native-block-1790163467584-b89ffd9c/report.json`.
+Maximum measured main-thread pump was 283 microseconds; real meshing,
+collider ray and `CharacterBody3D` contact remained present. These timings
+exclude broad production source admission, gameplay streaming, nav, edits,
+normal materials, startup/Continue and sprinting; they are not a Gate 5
+performance result or permission to cut over production collision.

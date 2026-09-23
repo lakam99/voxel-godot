@@ -98,6 +98,20 @@ func run() -> void:
 			and direct.get("indices8") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_INDICES) \
 			and direct.get("data5_8") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_DATA5),
 			"direct VoxelTerrainGenerator X/Z seam byte parity")
+		var full_origin := Vector3i(-16, 0, -16)
+		var full_size := Vector3i.ONE * 16
+		var full_buffer := VoxelBuffer.new()
+		full_buffer.create(16, 16, 16)
+		generator._generate_block(full_buffer, full_origin, 0)
+		var full_native: Dictionary = backend.encode_voxel_block_shadow(
+			block_request(full_origin, full_size))
+		var full_equal: bool = full_native.get("status") == "ready" \
+			and full_native.get("sdf16Le") == full_buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_SDF) \
+			and full_native.get("indices8") == full_buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_INDICES) \
+			and full_native.get("data5_8") == full_buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_DATA5)
+		check(full_equal, "direct VoxelTerrainGenerator full 16-cubed byte parity")
+		cases.append({"origin":full_origin,"size":full_size,"lod":0,
+			"directGodotByteParity":full_equal})
 	var seam_request := block_request(Vector3i(-1, 0, -1), Vector3i(2, 1, 2))
 	var before: Dictionary = backend.encode_voxel_block_shadow(seam_request)
 	var tx := {"schema":"n3-native-typed-cell-transaction/v1",

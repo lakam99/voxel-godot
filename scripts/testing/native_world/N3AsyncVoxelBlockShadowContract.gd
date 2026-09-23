@@ -39,7 +39,9 @@ func wait_for_ticket(backend, ticket: int, label: String) -> Dictionary:
 	check(result.get("status") != "pending" or result.get("reason") != "worker_running",
 		label + " completed within 30 seconds")
 	observations.append({"case":label,"status":result.get("status"),
-		"reason":result.get("reason",""),"ticket":ticket})
+		"reason":result.get("reason",""),"ticket":ticket,
+		"captureUsec":result.get("captureUsec",-1),
+		"workerEncodeUsec":result.get("workerEncodeUsec",-1)})
 	return result
 
 func finish() -> void:
@@ -83,6 +85,8 @@ func run() -> void:
 	var direct: Dictionary = backend.encode_voxel_block_shadow(request)
 	check(result.get("status") == "ready" and direct.get("status") == "ready",
 		"async and direct blocks ready")
+	check(int(result.get("captureUsec",0)) > 0 and int(result.get("workerEncodeUsec",0)) > 0,
+		"ready worker reports capture and encode durations")
 	if result.get("status") == "ready" and direct.get("status") == "ready":
 		check(result.get("shadowOnly") == true and result.get("productionCutover") == false,
 			"async service result cannot be mistaken for production publication")

@@ -29,6 +29,7 @@
 #include <godot_cpp/variant/vector3i.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -3149,6 +3150,7 @@ Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &
 	constexpr const char *operation = "begin_voxel_block_shadow_async";
 	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
 	if (voxel_worker_ticket_ != 0) return envelope(operation, "rejected", "worker_busy");
+	const auto capture_started = std::chrono::steady_clock::now();
 	try {
 		if (require_protocol_string(p_request.get("schema", Variant()), "schema") != VOXEL_BLOCK_REQUEST_SCHEMA)
 			throw std::invalid_argument("unsupported native effective voxel block request schema");
@@ -3246,16 +3248,22 @@ Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &
 		voxel_worker_delta_revision_ = delta_revision;
 		voxel_worker_primary_page_count_ = static_cast<std::int64_t>(x_pages.size() * z_pages.size());
 		voxel_worker_shaping_page_count_ = static_cast<std::int64_t>(dependencies.size());
+		voxel_worker_capture_usec_ = std::chrono::duration_cast<std::chrono::microseconds>(
+			std::chrono::steady_clock::now() - capture_started).count();
+		voxel_worker_encode_usec_ = 0;
 		voxel_worker_result_.reset();
 		voxel_worker_error_ = nullptr;
 		voxel_worker_cancelled_ = false;
 		voxel_worker_finished_.store(false, std::memory_order_relaxed);
 		voxel_worker_cancel_token_ = std::make_shared<std::atomic<bool>>(false);
 		voxel_worker_ = std::thread([this, job = std::move(job), cancel_token = voxel_worker_cancel_token_]() {
+			const auto encode_started = std::chrono::steady_clock::now();
 			try { voxel_worker_result_ = job->encode([cancel_token]() {
 				return cancel_token->load(std::memory_order_relaxed);
 			}); }
 			catch (...) { voxel_worker_error_ = std::current_exception(); }
+			voxel_worker_encode_usec_ = std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - encode_started).count();
 			voxel_worker_finished_.store(true, std::memory_order_release);
 		});
 		voxel_worker_ticket_ = next_voxel_worker_ticket_++;
@@ -3339,6 +3347,8 @@ Dictionary NativeWorldBackend::poll_voxel_block_shadow_async(std::int64_t p_tick
 	result["ownerInstanceId"] = static_cast<std::int64_t>(get_instance_id());
 	result["primaryPageCount"] = voxel_worker_primary_page_count_;
 	result["shapingPageCount"] = voxel_worker_shaping_page_count_;
+	result["captureUsec"] = voxel_worker_capture_usec_;
+	result["workerEncodeUsec"] = voxel_worker_encode_usec_;
 	result["sdf16Le"] = packed(block.sdf16_le);
 	result["indices8"] = packed(block.indices8);
 	result["data5_8"] = packed(block.data5_8);

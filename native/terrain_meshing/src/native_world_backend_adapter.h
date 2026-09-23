@@ -176,6 +176,8 @@ private:
 	std::uint64_t voxel_worker_delta_revision_ = 0;
 	std::int64_t voxel_worker_primary_page_count_ = 0;
 	std::int64_t voxel_worker_shaping_page_count_ = 0;
+	std::int64_t voxel_worker_capture_usec_ = 0;
+	std::int64_t voxel_worker_encode_usec_ = 0;
 };
 
 #endif

@@ -108,10 +108,11 @@ NativeEffectiveVoxelBlock encode_native_effective_voxel_block(
         for (std::int32_t x = 0; x < size.x; ++x) {
             if (should_cancel && should_cancel()) throw NativeVoxelEncodeCancelled();
             const std::int32_t cx = checked_coordinate(request.origin.x, x, scale);
+            auto column = source.prepare_lattice_column(cx, cz);
             for (std::int32_t y = 0; y < size.y; ++y) {
                 const std::int32_t cy = checked_coordinate(request.origin.y, y, scale);
                 const NativeEffectiveNumericFacts facts = source.sample_lattice_numeric(
-                    {{cx, cy, cz}, WorldQueryIntent::terrain_mesh});
+                    {{cx, cy, cz}, WorldQueryIntent::terrain_mesh}, column);
                 // GDScript divides in real_t precision before VoxelBuffer's
                 // float channel conversion. Rounding density/CELL early can
                 // cross an SDF16 quantization boundary.
