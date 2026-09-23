@@ -84,7 +84,8 @@ func synchronize() -> Dictionary:
 		_records = next_records
 		_service_revision = source_revision
 		return {"status": "ready", "commitStatus": "no_change", "operationCount": 0,
-			"sourceRevision": _service_revision, "nativeRevision": _native_revision}
+			"sourceRevision": _service_revision, "nativeRevision": _native_revision,
+			"changedCells": []}
 	var request := {"schema": "n3-native-durable-cell-transaction/v1",
 		"transactionId": "shadow-volume:%d:%d" % [_native_revision, _sequence],
 		"expectedRevision": _native_revision, "operations": operations}
@@ -102,7 +103,7 @@ func synchronize() -> Dictionary:
 	_sequence += 1
 	return {"status": "ready", "commitStatus": "committed", "operationCount": operations.size(),
 		"sourceRevision": _service_revision, "nativeRevision": _native_revision,
-		"affectedSections": receipt.get("affectedSections", [])}
+		"affectedSections": receipt.get("affectedSections", []), "changedCells": cells}
 
 static func _index(snapshot) -> Dictionary:
 	if not snapshot is Dictionary or snapshot.get("schemaVersion") != 1 or snapshot.get("sectionSize") != 16:

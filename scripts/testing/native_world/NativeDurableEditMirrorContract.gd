@@ -2,6 +2,7 @@ extends SceneTree
 
 const SERVICE := preload("res://scripts/TerrainVolumeService.gd")
 const MIRROR := preload("res://scripts/terrain/NativeDurableEditMirror.gd")
+const EDIT_PLAN := preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 var failures: Array[String] = []
 
@@ -41,6 +42,12 @@ func run() -> void:
 	var first: Dictionary = mirror.synchronize()
 	check(first.get("status") == "ready" and first.get("commitStatus") == "committed"
 		and first.get("operationCount") == 1, "negative-cell durable set mirrored")
+	var changed: Array[Vector3i] = []
+	changed.assign(first.get("changedCells", []))
+	var edit_plan: Dictionary = EDIT_PLAN.for_committed_cells(changed, first.get("affectedSections", []))
+	check(edit_plan.get("status") == "ready"
+		and (edit_plan.get("replacementDataBlocks", []) as Array).has(Vector3i(-2, -1, 1)),
+		"committed native receipt plans exact replacement block")
 	check(mirror.synchronize().get("commitStatus") == "no_change", "unchanged source does not commit")
 	state.density = 2.25
 	service.set_cell_state(cell, state, "shadow_replace", false)
