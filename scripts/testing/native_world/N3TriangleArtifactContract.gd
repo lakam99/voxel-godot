@@ -157,6 +157,25 @@ func run() -> void:
 		and is_equal_approx(float(right_seam.bounds.size.x), 16.0)
 		and not left_seam.seam.is_empty() and left_seam.seam == right_seam.seam,
 		"negative and adjacent padded Transvoxel blocks meet at one world seam")
+	var distant_broker = ARTIFACT_REQUESTS.new()
+	check(distant_broker.setup(backend, pages,
+		main.structure_system.citadel_terrain_admission, planner,
+		main.CELL, 90, 4096).get("status") == "ready"
+		and distant_broker.request_block(block).get("status") == "pending",
+		"distant-edit baseline retains near collision request")
+	var distant_built := {}
+	for frame in range(300):
+		distant_built = distant_broker.advance()
+		if distant_built.get("status") == "ready" and distant_built.has("row"): break
+		await process_frame
+	var distant_before: Dictionary = distant_broker.collision_window_layout()
+	var distant_window: Dictionary = distant_before.windows[0]
+	var distant_facade: Dictionary = distant_broker.collision_window_source(distant_window.id,
+		String(distant_before.layoutToken))
+	check(distant_built.get("status") == "ready"
+		and distant_facade.get("status") == "ready"
+		and distant_facade.source.collision_source_snapshot().get("status") == "ready",
+		"near window has complete source row before distant edit")
 	var stale_producer = PRODUCER.new()
 	check(stale_producer.setup(backend, pages, main.structure_system.citadel_terrain_admission,
 		planner, main.CELL, identity).get("status") == "ready"
@@ -175,6 +194,14 @@ func run() -> void:
 		"schema":"n3-native-durable-cell-transaction/v1",
 		"transactionId":"triangle:revision-change", "expectedRevision":0,
 		"operations":[{"kind":"set", "cell":Vector3i(1000,-1,1000), "state":edit_state}]})
+	var distant_after_edit: Dictionary = distant_facade.source.collision_source_snapshot()
+	var distant_advance: Dictionary = distant_broker.advance()
+	var distant_after_layout: Dictionary = distant_broker.collision_window_layout()
+	check(committed.get("commitStatus") == "committed"
+		and distant_after_edit.get("status") != "ready"
+		and distant_before.get("layoutToken") != distant_after_layout.get("layoutToken")
+		and distant_advance.get("status") == "pending",
+		"baseline distant durable edit globally retires unchanged near window")
 	var stale_step: Dictionary = stale_producer.advance()
 	check(in_flight.get("reason") == "triangle_encode_in_flight"
 		and committed.get("commitStatus") == "committed"
@@ -190,6 +217,12 @@ func run() -> void:
 		and stale_producer.request_block(block).get("status") == "failed",
 		"stale worker cannot later attach old triangles to a new block")
 	stale_producer.stop()
+	var distant_stop: Dictionary = distant_broker.stop()
+	for frame in range(120):
+		if distant_stop.get("status") == "ready": break
+		await process_frame
+		distant_stop = distant_broker.drain_step()
+	check(distant_stop.get("status") == "ready", "distant edit broker drains")
 	var changed: Dictionary = planner.replace_sources({"position":Vector3(-main.CELL,0,-main.CELL),
 		"distance":0}, [], [], [], bounds)
 	check(changed.get("status") == "ready"
@@ -577,6 +610,11 @@ func run() -> void:
 		"emptyVertexCopyUsec":empty_result.get("vertexCopyUsec", 0),
 		"emptyFinalizeUsec":empty_result.get("finalizeUsec", 0),
 		"maxAnalyticBuildUsec":maxi(int(left_seam.buildUsec), int(right_seam.buildUsec)),
+		"distantEditBaseline":{"affectedSections":committed.get("affectedSections", []),
+			"beforeWindowToken":distant_window.windowToken,
+			"afterWindowToken":(distant_after_layout.get("windows", [{}]) as Array)[0].get("windowToken", ""),
+			"oldFacadeStatus":distant_after_edit.get("status", ""),
+			"oldFacadeReason":distant_after_edit.get("reason", "")},
 		"emptyStatus":empty_result.get("status", ""),
 		"emptyReason":empty_result.get("reason", ""),
 		"emptyVertexCount":(empty_row.get("vertices", PackedVector3Array()) as PackedVector3Array).size(),
