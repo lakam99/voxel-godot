@@ -15,6 +15,7 @@ const OccupancySource = preload("res://scripts/terrain/NativeTerrainOccupancySou
 const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 const LegacyConverter = preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
 const ArtifactRequests = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
+const ResidentCollisionOwner = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 
 var _backend
 var _admission
@@ -93,7 +94,8 @@ func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
 		return _setup_failure(String(occupancy_ready.get("reason", "native_occupancy_source_failed")))
 	_artifact_requests = ArtifactRequests.new()
 	var artifacts_ready: Dictionary = _artifact_requests.setup(_backend, _pages,
-		_admission, _planner, DemandPlanner.CELL, get_instance_id())
+		_admission, _planner, DemandPlanner.CELL, get_instance_id(),
+		ResidentCollisionOwner.MAX_RESIDENT)
 	if artifacts_ready.get("status") != "ready":
 		return _setup_failure(String(artifacts_ready.get("reason", "native_artifact_requests_failed")))
 	_publisher = BlockPublisher.new()
