@@ -121,6 +121,19 @@ results, then publish all families atomically with visual/physical and
 save/reload evidence. Per-family shadow oracles cannot justify a partial
 production substitution because each attempt shares the later RNG stream.
 
+The capture-only `ActiveSurfacePropOwnerBundle` now binds the live Main owner
+and seed to four existing value captures: resolved biome profiles, ordered
+visual registry/imports, animated wildlife presentation, and durable removed
+IDs. It rejects a tampered completeness claim, same-content restore,
+cross-Main reuse and registry replacement. Its direct Godot contract is
+15/15 at `artifacts/native-world-backend/n4-active-surface-owner-bundle-contract.json`.
+The bundle declares `complete=false`: it does not contain a native effective
+terrain pin, StructureSystem tree halos, an all-28-attempt manifest or an
+atomic publication lease. The capture's scene inspection is not a per-chunk
+hot-path operation; future integration must cache by owner generation and
+recheck freshness before publication without turning scene import inspection
+into a gameplay-frame stall.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
