@@ -90,7 +90,10 @@ func advance() -> Dictionary:
 		else: _requests.erase(block)
 	blocks.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
 		return a.z < b.z or (a.z == b.z and (a.y < b.y or (a.y == b.y and a.x < b.x))))
-	if blocks.is_empty(): return {"status":"ready", "queuedBlocks":0}
+	if blocks.is_empty():
+		return {"status":"pending", "reason":"artifact_queue_idle",
+			"queuedBlocks":0,
+			"sourceComplete":_producer.collision_source_snapshot().get("status") == "ready"}
 	_active_block = blocks[0]
 	var accepted: Dictionary = _producer.request_block(_active_block)
 	if accepted.get("status") == "failed":

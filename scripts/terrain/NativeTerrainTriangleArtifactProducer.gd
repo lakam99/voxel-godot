@@ -23,6 +23,7 @@ var _draining_failed_ticket := false
 var _failure_reason := ""
 var _artifacts := {}
 var _artifact_rows := {}
+var _validated_local_pins := {}
 var _demand_revision := -1
 var _closure_token := ""
 var _stopped := false
@@ -124,6 +125,7 @@ func advance() -> Dictionary:
 	if built.get("status") != "ready": return _failure(String(built.get("reason", "triangle_mesh_failed")))
 	_artifacts[_pending_block] = built.row.artifactKey
 	_artifact_rows[_pending_block] = built.row.duplicate(true)
+	_validated_local_pins.erase(_pending_block)
 	_pending_block = null
 	return built
 
@@ -173,6 +175,11 @@ func _build_artifact(encoded: Dictionary) -> Dictionary:
 	var pin: Dictionary = encoded.get("pinIdentity", {})
 	if not content.get("hex") is String or not pin.get("hex") is String:
 		return {"status":"failed", "reason":"triangle_content_identity_missing"}
+	var local_pins: Dictionary = _current_local_page_pins(block)
+	if local_pins.get("status") != "ready" \
+			or int(local_pins.get("shapingRegistryRevision", -1)) \
+			!= int(encoded.shapingRegistryRevision):
+		return {"status":"failed", "reason":"triangle_local_pin_capture_stale"}
 	var hasher := HashingContext.new()
 	if hasher.start(HashingContext.HASH_SHA256) != OK:
 		return {"status":"failed", "reason":"triangle_artifact_hash_failed"}
@@ -195,6 +202,7 @@ func _build_artifact(encoded: Dictionary) -> Dictionary:
 		"expectedHit":not vertices.is_empty(),
 		"sourceIdentity":encoded.sourceIdentity, "pinIdentity":pin,
 		"blockContentIdentity":content,
+		"localPagePins":local_pins.pins,
 		"nativeRevision":int(encoded.terrainDeltaRevision),
 		"shapingRegistryRevision":int(encoded.shapingRegistryRevision),
 		"sourceEpoch":_identity.get("sourceEpoch", ""),
@@ -249,14 +257,13 @@ func collision_source_snapshot() -> Dictionary:
 	for block: Vector3i in _artifacts: produced.append(block)
 	produced.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
 		return a.z < b.z or (a.z == b.z and (a.y < b.y or (a.y == b.y and a.x < b.x))))
-	var shaping_revision := int(status.get("shapingRegistryRevision", -1))
 	var stale_blocks: Array[Vector3i] = []
 	for block: Vector3i in produced:
-		if int((_artifact_rows[block] as Dictionary).get("shapingRegistryRevision", -1)) != shaping_revision:
+		if not _local_pins_current(block, status):
 			stale_blocks.append(block)
 	var complete: bool = produced == required.blocks and stale_blocks.is_empty()
 	return {"status":"ready" if complete else "pending",
-		"reason":"triangle_shaping_revision_changed" if not stale_blocks.is_empty() \
+		"reason":"triangle_local_source_changed" if not stale_blocks.is_empty() \
 			else ("triangle_artifacts_incomplete" if not complete else ""),
 		"identity":_identity.duplicate(true),
 		"sourceIdentity":_source_identity.duplicate(true),
@@ -280,10 +287,48 @@ func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary
 			or int(source.get("terrainDeltaRevision", -1)) \
 			!= int(_identity.sourceRevision):
 		return {"status":"failed", "reason":"triangle_artifact_source_stale"}
-	if int(source.get("shapingRegistryRevision", -1)) \
-			!= int((_artifact_rows[block] as Dictionary).get("shapingRegistryRevision", -1)):
-		return {"status":"failed", "reason":"triangle_artifact_shaping_stale"}
+	if not _local_pins_current(block, source):
+		return {"status":"failed", "reason":"triangle_artifact_local_source_stale"}
 	return {"status":"ready", "row":(_artifact_rows[block] as Dictionary).duplicate(true)}
+
+func _current_local_page_pins(block: Vector3i) -> Dictionary:
+	var before: Dictionary = _backend.status()
+	if before.get("status") != "ready": return {"status":"pending"}
+	var first := block * BLOCK_CELLS - Vector3i.ONE
+	var last := first + Vector3i.ONE * (BLOCK_CELLS + 2)
+	var pins := {}
+	for z in range(floori(float(first.z) / 280.0), floori(float(last.z) / 280.0) + 1):
+		for x in range(floori(float(first.x) / 280.0), floori(float(last.x) / 280.0) + 1):
+			var page := Vector2i(x, z)
+			var pinned: Dictionary = _backend.pin_effective_page(page)
+			var receipt: Dictionary = pinned.get("pageStatus", {})
+			if pinned.get("status") != "ready" or receipt.get("status") != "ready" \
+					or receipt.get("sourceIdentity") != _source_identity \
+					or int(receipt.get("terrainDeltaRevision", -1)) \
+					!= int(_identity.sourceRevision):
+				return {"status":"pending", "reason":"triangle_local_page_unavailable"}
+			pins[page] = (receipt.pinIdentity as Dictionary).duplicate(true)
+	var after: Dictionary = _backend.status()
+	if after.get("status") != "ready" or after.get("sourceIdentity") != _source_identity \
+			or int(after.get("terrainDeltaRevision", -1)) != int(_identity.sourceRevision) \
+			or int(after.get("shapingRegistryRevision", -1)) \
+			!= int(before.get("shapingRegistryRevision", -2)):
+		return {"status":"pending", "reason":"triangle_local_pin_capture_raced"}
+	return {"status":"ready", "pins":pins,
+		"shapingRegistryRevision":int(after.shapingRegistryRevision)}
+
+func _local_pins_current(block: Vector3i, source: Dictionary) -> bool:
+	var revision := int(source.get("shapingRegistryRevision", -1))
+	var row: Dictionary = _artifact_rows[block]
+	if revision == int(row.get("shapingRegistryRevision", -2)): return true
+	var cached: Dictionary = _validated_local_pins.get(block, {})
+	if int(cached.get("revision", -2)) == revision: return bool(cached.get("valid", false))
+	var current: Dictionary = _current_local_page_pins(block)
+	var valid: bool = current.get("status") == "ready" \
+		and int(current.get("shapingRegistryRevision", -2)) == revision \
+		and current.get("pins", {}) == row.get("localPagePins", {})
+	_validated_local_pins[block] = {"revision":revision, "valid":valid}
+	return valid
 
 func _required_blocks() -> Dictionary:
 	var current: Dictionary = _planner.required_collision_mesh_blocks()
