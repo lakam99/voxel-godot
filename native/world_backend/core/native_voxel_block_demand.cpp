@@ -112,6 +112,25 @@ bool NativeVoxelBlockDemand::same(const Entry &entry, const Ticket &ticket) {
     return entry.generation == ticket.generation && entry.revision == ticket.revision && entry.pin.digest == ticket.pin.digest;
 }
 
+bool NativeVoxelBlockDemand::defer(const Ticket &ticket) {
+    auto active = active_jobs_.find(ticket.key);
+    if (active == active_jobs_.end()) return false;
+    auto issued = active->second.find(ticket.generation);
+    if (issued == active->second.end() || issued->second.revision != ticket.revision ||
+        issued->second.pin.digest != ticket.pin.digest) return false;
+    active->second.erase(issued);
+    --in_flight_;
+    if (active->second.empty()) active_jobs_.erase(active);
+    auto it = entries_.find(ticket.key);
+    if (ticket.key.epoch != epoch_ || !same(it->second, ticket)) return false;
+    Entry &entry = it->second;
+    ++entry.generation;
+    // Releasing the last consumer supersedes the ticket, so a current ticket
+    // still has demand. Require fresh source admission after this deferral.
+    entry.state = State::waiting_source;
+    return true;
+}
+
 bool NativeVoxelBlockDemand::complete(const Ticket &ticket, std::vector<std::uint8_t> bytes) {
     auto active = active_jobs_.find(ticket.key);
     if (active == active_jobs_.end()) return false;

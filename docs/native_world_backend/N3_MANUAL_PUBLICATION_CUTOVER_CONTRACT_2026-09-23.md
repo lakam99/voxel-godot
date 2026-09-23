@@ -120,3 +120,23 @@ Its report is
 `artifacts/native-world-backend/n3-manual-lifecycle-1790155856338-906a0c30/report.json`.
 The headed native-byte injection evidence and limitations are recorded in
 `N3_MANUAL_VOXEL_BLOCK_INJECTION_FIXTURE_2026-09-23.md`.
+
+## Immutable encode preparation checkpoint
+
+`NativeCapturedVoxelEncodeJob` now owns a copied source definition, a pinned
+immutable delta snapshot, all shaping-page pins, and the typed block request.
+Its `encode()` invokes only the pure native encoder, so the prepared object can
+outlive later delta/registry mutations and be moved to a worker without calling
+Godot or consulting mutable backend state. Focused tests exercise that pin
+lifetime while a worker runs, plus incomplete, mixed-provenance, unresolved and
+failed captures. This does **not** make capture atomic by itself: the adapter
+must still serialize capture on Main and compare source, delta and registry
+identities/revisions before dispatch and again when a result returns.
+
+`NativeVoxelBlockDemand::defer(ticket)` releases a stopped capture/worker's
+reserved slot without falsely classifying source-pending admission as an empty
+terrain block. It retains current consumer demand in `waiting_source` and
+requires a new source-ready receipt before redispatch; stale revision/epoch
+workers release their physical reservation but cannot revive stale work.
+Actual off-Main dispatch, bounded thread ownership/drain, Godot marshalling,
+viewer-paired insertion and live mesh/physics publication remain unimplemented.

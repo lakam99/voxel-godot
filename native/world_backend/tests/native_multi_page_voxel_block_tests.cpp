@@ -1,8 +1,10 @@
 #include "test_harness.hpp"
 
 #include "../core/native_multi_page_voxel_block.hpp"
+#include "../core/native_captured_voxel_encode_job.hpp"
 
 #include <algorithm>
+#include <future>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -395,4 +397,90 @@ VWB_TEST(native_multi_page_voxel_rejects_pending_and_foreign_source_page) {
     pages.front() = *foreign_page;
     VWB_EXPECT_THROW(std::invalid_argument,
         encode_native_multi_page_voxel_block(fixture.source, deltas, pages, request));
+}
+
+VWB_TEST(native_captured_voxel_job_owns_old_pins_across_worker_and_authority_mutation) {
+    Fixture fixture;
+    const NativeEffectiveVoxelBlockRequest request{{-1, 0, -1}, {2, 1, 2}, 0};
+    auto pages = fixture.pins(request);
+    const auto before = fixture.store.pin();
+    const auto expected = encode_native_multi_page_voxel_block(fixture.source, before, pages, request);
+    NativeCapturedVoxelEncodeJob job(fixture.source, before, pages, request);
+    pages.clear();
+
+    auto worker = std::async(std::launch::async, [job = std::move(job)] {
+        return job.encode();
+    });
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = "captured-job:later-edit";
+    admission.durable_snapshot = NativeTypedWorldStateSnapshot::create({
+        {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
+            durable_edit({-1, 0, -1}, TerrainMaterialId::copper_ore)},
+    });
+    static_cast<void>(fixture.store.admit_typed_state(admission));
+    const auto actual = worker.get();
+    VWB_EXPECT_EQ(expected.pin_identity.digest, actual.pin_identity.digest);
+    VWB_EXPECT_EQ(expected.block_content_identity, actual.block_content_identity);
+    VWB_EXPECT_EQ(expected.sdf16_le, actual.sdf16_le);
+    VWB_EXPECT_EQ(expected.indices8, actual.indices8);
+    VWB_EXPECT_EQ(expected.data5_8, actual.data5_8);
+    const auto current = encode_native_multi_page_voxel_block(
+        fixture.source, fixture.store.pin(), fixture.pins(request), request);
+    VWB_EXPECT(current.block_content_identity.digest != actual.block_content_identity.digest);
+}
+
+VWB_TEST(native_captured_voxel_job_rejects_incomplete_mixed_and_pending_captures) {
+    Fixture fixture("atlas");
+    const NativeEffectiveVoxelBlockRequest request{{-1, 0, -1}, {2, 1, 2}, 0};
+    const auto ready = fixture.pins(request);
+    const auto deltas = fixture.store.pin();
+    auto incomplete = ready;
+    incomplete.pop_back();
+    VWB_EXPECT_THROW(std::invalid_argument,
+        NativeCapturedVoxelEncodeJob(fixture.source, deltas, incomplete, request).encode());
+
+    NativeSiteSourcePolicy alternate_policy = fixture.policy;
+    alternate_policy.engine_version_utf8 += "-alternate";
+    NativeTerrainShapingRegistry alternate(fixture.source, alternate_policy);
+    auto mixed = ready;
+    mixed.front() = alternate.pin_page(mixed.front().page_key(), absent_towns(mixed.front().page_key()));
+    VWB_EXPECT_THROW(std::invalid_argument,
+        NativeCapturedVoxelEncodeJob(fixture.source, deltas, mixed, request).encode());
+
+    NativeTerrainShapingRegistry unresolved(fixture.source, fixture.policy);
+    bool found_pending = false;
+    for (std::int32_t z = -32; z <= 32 && !found_pending; ++z)
+        for (std::int32_t x = -32; x <= 32 && !found_pending; ++x) {
+            const auto candidate = native_site_source_candidate_for_region(fixture.source, {x, z});
+            if (!candidate) continue;
+            const NativeTerrainPageKey key{floor_page(candidate->center_x), floor_page(candidate->center_z)};
+            const NativeEffectiveVoxelBlockRequest pending_request{{key.x * 280, 0, key.z * 280}, {1, 1, 1}, 0};
+            auto pending_pages = fixture.pins(pending_request);
+            const auto pending = unresolved.pin_page(key, absent_towns(key));
+            if (pending.readiness() == NativeTerrainShapingPageReadiness::ready) continue;
+            const auto found = std::find_if(pending_pages.begin(), pending_pages.end(), [&](const auto &page) {
+                return page.page_key() == key;
+            });
+            VWB_EXPECT(found != pending_pages.end());
+            *found = pending;
+            VWB_EXPECT_THROW(std::invalid_argument,
+                NativeCapturedVoxelEncodeJob(fixture.source, deltas, pending_pages, pending_request).encode());
+            NativeTerrainShapingRegistryBatch failure;
+            failure.expected_revision = unresolved.revision();
+            NativeSiteSourceResolution resolution;
+            resolution.region = {x, z};
+            resolution.request_identity = unresolved.source_request_identity(resolution.region);
+            resolution.worker_source_key.assign(64, 'b');
+            resolution.kind = NativeSiteSourceResolutionKind::failed;
+            resolution.reason_code = "worker_failed";
+            failure.resolutions.push_back(std::move(resolution));
+            static_cast<void>(unresolved.apply(failure));
+            const auto failed = unresolved.pin_page(key, absent_towns(key));
+            VWB_EXPECT(failed.readiness() == NativeTerrainShapingPageReadiness::failed);
+            *found = failed;
+            VWB_EXPECT_THROW(std::invalid_argument,
+                NativeCapturedVoxelEncodeJob(fixture.source, deltas, pending_pages, pending_request).encode());
+            found_pending = true;
+        }
+    VWB_EXPECT(found_pending);
 }

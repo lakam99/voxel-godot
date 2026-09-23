@@ -149,6 +149,70 @@ VWB_TEST(native_voxel_demand_empty_completion_is_terminal_until_invalidated) {
     VWB_EXPECT_EQ(1u, owner.dispatch().size());
 }
 
+VWB_TEST(native_voxel_demand_deferred_capture_retries_without_fake_empty) {
+    Demand owner(1, 4, 2, 4);
+    Demand::Key key{0, 0, 0, 0, 0};
+    owner.request(key, 1, 2, 1, pin(1));
+    owner.source_ready(key, 1, pin(1));
+    auto first = owner.dispatch()[0];
+    auto wrong_generation = first;
+    ++wrong_generation.generation;
+    VWB_EXPECT(!owner.defer(wrong_generation));
+    auto wrong_revision = first;
+    ++wrong_revision.revision;
+    VWB_EXPECT(!owner.defer(wrong_revision));
+    auto altered = first;
+    altered.pin.digest[31] = 1;
+    VWB_EXPECT(!owner.defer(altered));
+    VWB_EXPECT_EQ(1u, owner.in_flight());
+    VWB_EXPECT(owner.defer(first));
+    VWB_EXPECT_EQ(0u, owner.in_flight());
+    VWB_EXPECT_EQ(Demand::State::waiting_source, owner.find(key)->state);
+    VWB_EXPECT(owner.dispatch().empty());
+    VWB_EXPECT(!owner.defer(first));
+    owner.source_ready(key, 1, pin(1));
+    auto second = owner.dispatch()[0];
+    VWB_EXPECT(first.generation != second.generation);
+    VWB_EXPECT(!owner.complete(first, {1}));
+    VWB_EXPECT(owner.complete(second, {1}));
+}
+
+VWB_TEST(native_voxel_demand_defer_preserves_newer_same_key_worker) {
+    Demand owner(2, 8, 1, 4);
+    Demand::Key key{0, 0, 0, 0, 0};
+    owner.request(key, 1, 0, 1, pin(1));
+    owner.source_ready(key, 1, pin(1));
+    auto old = owner.dispatch()[0];
+    owner.invalidate(key, 2, pin(2));
+    owner.source_ready(key, 2, pin(2));
+    auto current = owner.dispatch()[0];
+    VWB_EXPECT_EQ(2u, owner.in_flight());
+    VWB_EXPECT(!owner.defer(old));
+    VWB_EXPECT_EQ(1u, owner.in_flight());
+    VWB_EXPECT_EQ(Demand::State::encoding, owner.find(key)->state);
+    VWB_EXPECT(owner.defer(current));
+    VWB_EXPECT_EQ(0u, owner.in_flight());
+    VWB_EXPECT_EQ(Demand::State::waiting_source, owner.find(key)->state);
+}
+
+VWB_TEST(native_voxel_demand_deferred_stale_epoch_and_revision_retire_slot) {
+    Demand owner(1, 4, 2, 4);
+    Demand::Key key{0, 0, 0, 0, 0};
+    owner.request(key, 1, 0, 1, pin(1));
+    owner.source_ready(key, 1, pin(1));
+    auto stale_revision = owner.dispatch()[0];
+    owner.invalidate(key, 2, pin(2));
+    VWB_EXPECT(!owner.defer(stale_revision));
+    VWB_EXPECT_EQ(0u, owner.in_flight());
+    VWB_EXPECT_EQ(Demand::State::waiting_source, owner.find(key)->state);
+    owner.source_ready(key, 2, pin(2));
+    auto stale_epoch = owner.dispatch()[0];
+    owner.reset_epoch(1);
+    VWB_EXPECT(!owner.defer(stale_epoch));
+    VWB_EXPECT_EQ(0u, owner.in_flight());
+    VWB_EXPECT_EQ(1u, owner.retire(1));
+}
+
 VWB_TEST(native_voxel_demand_rejects_invalid_capacity_and_epoch) {
     VWB_EXPECT_THROW(std::invalid_argument, Demand(0, 4, 1, 4));
     VWB_EXPECT_THROW(std::invalid_argument, Demand(1, 4, 0, 4));

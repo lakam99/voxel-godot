@@ -39,6 +39,10 @@ public:
     void release(const Key &key, std::uint64_t consumer);
     void reset_epoch(std::uint64_t epoch);
     std::vector<Ticket> dispatch(std::size_t max_jobs = 1);
+    // Capture or source admission could not supply an immutable job. Call only
+    // after the physical worker/capture has stopped; retain consumer demand
+    // and require a fresh source_ready before dispatching again.
+    bool defer(const Ticket &ticket);
     bool complete(const Ticket &ticket, std::vector<std::uint8_t> bytes);
     // The engine adapter must recheck current native pin/epoch and viewer
     // pairing on Main before try_set_block_data; accepted alone is not proof
