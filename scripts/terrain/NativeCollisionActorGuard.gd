@@ -32,3 +32,24 @@ static func inspect(actors: Array, affected_bounds: AABB, forecast_seconds: floa
 		if not has_shape:
 			return {"clear": false, "reason": "actor_without_collision_shape"}
 	return {"clear": true, "actorCount": actors.size()}
+
+
+static func motion_intersects(actor: CharacterBody3D, affected_bounds: AABB,
+		motion: Vector3) -> bool:
+	if actor == null or not is_instance_valid(actor) or not motion.is_finite():
+		return true
+	var has_shape := false
+	for child in actor.get_children():
+		if not child is CollisionShape3D:
+			continue
+		var collision_shape: CollisionShape3D = child
+		if collision_shape.disabled or collision_shape.shape == null:
+			continue
+		var mesh := collision_shape.shape.get_debug_mesh()
+		if mesh == null:
+			return true
+		has_shape = true
+		var current: AABB = collision_shape.global_transform * mesh.get_aabb()
+		if current.merge(AABB(current.position + motion, current.size)).intersects(affected_bounds):
+			return true
+	return not has_shape
