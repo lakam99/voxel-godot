@@ -17,15 +17,14 @@ bool finite_ordered(const NativeFeatureWorldBounds &b) {
         && b.min_x <= b.max_x && b.min_y <= b.max_y && b.min_z <= b.max_z;
 }
 
-NativeFeatureWorldBounds visual_bounds(const NativeSurfaceRockOrderedVisualPlan &plan,
+NativeFeatureWorldBounds visual_bounds(const NativeSurfaceRockDefinitionInput &input,
+    const NativeSurfaceRockAssetSelection &selected,
     const NativeSurfaceRockPublishedVisual outcome,
     const NativeSurfaceRockImportedBoundsReceipt *receipt) {
-    const auto &input = plan.definition().input();
-    const auto &selected = plan.selection();
     const double x = input.position.x, y = input.position.y, z = input.position.z;
     NativeFeatureWorldBounds bounds{x, y, z, x, y, z};
     if (outcome == NativeSurfaceRockPublishedVisual::selected_import) {
-        if (plan.intent() != NativeSurfaceRockVisualIntent::selected_asset || receipt == nullptr
+        if (receipt == nullptr
             || receipt->asset_catalog_digest != selected.asset_catalog_digest
             || receipt->asset_id != selected.asset_id || receipt->asset_path != selected.asset_path
             || !nonzero(receipt->glb_digest) || !finite_ordered(receipt->imported_mesh_bounds)) reject();
@@ -62,6 +61,28 @@ NativeFeatureWorldBounds visual_bounds(const NativeSurfaceRockOrderedVisualPlan 
 NativeSurfaceRockFootprintRejected::NativeSurfaceRockFootprintRejected()
     : std::invalid_argument("invalid native source-bound rock footprint") {}
 
+std::vector<NativeFeatureFootprintRun> native_surface_rock_geometry_runs(
+    const NativeSurfaceRockDefinitionInput &input,
+    const NativeSurfaceRockAssetSelection &selected,
+    const NativeSurfaceRockPublishedVisual published_visual,
+    const NativeSurfaceRockImportedBoundsReceipt *imported_bounds,
+    const double cell_size) {
+    try {
+        auto runs = native_feature_runs_for_bounds(
+            visual_bounds(input, selected, published_visual, imported_bounds), cell_size,
+            NativeFeatureFootprintChannel::render);
+        const double x = input.position.x, y = input.position.y + input.collision.center_y;
+        const double z = input.position.z, r = input.collision.radius;
+        const NativeFeatureWorldBounds physical{x-r,y-r,z-r,x+r,y+r,z+r};
+        for (const auto channel : {NativeFeatureFootprintChannel::collision,
+                NativeFeatureFootprintChannel::navigation}) {
+            const auto cells = native_feature_runs_for_bounds(physical, cell_size, channel);
+            runs.insert(runs.end(), cells.begin(), cells.end());
+        }
+        return runs;
+    } catch (const std::invalid_argument &) { reject(); }
+}
+
 NativeGeneratedFeatureFootprintCatalog compose_native_surface_rock_footprint(
     const NativeSurfacePropSourceOrderedStream &ordered,
     const NativeSurfacePropOrderedPlacement &placements, const std::uint32_t ordinal,
@@ -71,6 +92,8 @@ NativeGeneratedFeatureFootprintCatalog compose_native_surface_rock_footprint(
     try {
         const auto plan = NativeSurfaceRockOrderedVisualPlan::create(
             ordered, placements, ordinal, terrain, catalog);
+        if (published_visual == NativeSurfaceRockPublishedVisual::selected_import
+            && plan.intent() != NativeSurfaceRockVisualIntent::selected_asset) reject();
         const double cell_size = terrain.pin().definition().constants().cell_size_meters;
         NativeGeneratedFeatureFootprintEntry entry;
         entry.feature_id = plan.definition().input().durable_feature_id;
@@ -83,18 +106,8 @@ NativeGeneratedFeatureFootprintCatalog compose_native_surface_rock_footprint(
         if (imported_bounds != nullptr)
             identity.insert(identity.end(), imported_bounds->glb_digest.begin(), imported_bounds->glb_digest.end());
         entry.generated_definition_digest = sha256(identity);
-        entry.runs = native_feature_runs_for_bounds(
-            visual_bounds(plan, published_visual, imported_bounds), cell_size,
-            NativeFeatureFootprintChannel::render);
-        const auto &input = plan.definition().input();
-        const double x = input.position.x, y = input.position.y + input.collision.center_y;
-        const double z = input.position.z, r = input.collision.radius;
-        const NativeFeatureWorldBounds physical{x-r,y-r,z-r,x+r,y+r,z+r};
-        for (const auto channel : {NativeFeatureFootprintChannel::collision,
-                NativeFeatureFootprintChannel::navigation}) {
-            const auto runs = native_feature_runs_for_bounds(physical, cell_size, channel);
-            entry.runs.insert(entry.runs.end(), runs.begin(), runs.end());
-        }
+        entry.runs = native_surface_rock_geometry_runs(plan.definition().input(), plan.selection(),
+            published_visual, imported_bounds, cell_size);
         return NativeGeneratedFeatureFootprintCatalog::create(
             terrain.pin().physical_content_identity().digest, 1U, {std::move(entry)});
     } catch (const std::invalid_argument &) { reject(); }

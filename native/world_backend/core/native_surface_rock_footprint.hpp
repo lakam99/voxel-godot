@@ -24,6 +24,15 @@ public:
     NativeSurfaceRockFootprintRejected();
 };
 
+// Production-used pure projection, also accepts the exact direct-Godot
+// constructor facts without inventing an ordered world-placement witness.
+std::vector<NativeFeatureFootprintRun> native_surface_rock_geometry_runs(
+    const NativeSurfaceRockDefinitionInput &input,
+    const NativeSurfaceRockAssetSelection &selected,
+    NativeSurfaceRockPublishedVisual published_visual,
+    const NativeSurfaceRockImportedBoundsReceipt *imported_bounds,
+    double cell_size);
+
 // Pure-core footprint of one source-ordered rock. Publication outcome is
 // explicit because a selected GLB may fail to instantiate and use the same
 // primitive fallback as an empty selection.
