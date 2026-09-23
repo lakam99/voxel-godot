@@ -28,6 +28,7 @@ var _pending_candidates := {}
 var _admission_barrier: RefCounted
 var _restored_old_frame := -1
 var _last_probe_hit := {}
+var _drain_receipt := {}
 
 
 func bind_source(source: Object) -> bool:
@@ -252,8 +253,9 @@ func startup_empty_receipt(identity: Dictionary) -> Dictionary:
 
 func stop_and_drain() -> Dictionary:
 	if _stopped:
-		return {"status": "ready", "drained": true}
+		return _drain_receipt.duplicate(true)
 	_stopping = true
+	var retired_window_token := String(_membership_provenance.get("windowToken", ""))
 	if _admission_barrier is AdmissionBarrier:
 		_admission_barrier.owner_stopped(self)
 	for entry in _pending_candidates.values():
@@ -273,7 +275,9 @@ func stop_and_drain() -> Dictionary:
 	_source = null
 	_admission_barrier = null
 	_stopped = true
-	return {"status": "ready", "drained": true, "remainingBodies": get_child_count()}
+	_drain_receipt = {"status": "ready", "drained": true,
+		"remainingBodies": get_child_count(), "windowToken": retired_window_token}
+	return _drain_receipt.duplicate(true)
 
 
 func _validate_request(request: Dictionary) -> Dictionary:
