@@ -326,3 +326,21 @@ another record. Focused regression:
 The runtime coordinator must derive each acknowledgement from the corresponding
 N5 owner's actual `stop_and_drain()` result; the source fixture supplies a
 contract-shaped receipt and does not prove that production coordinator path.
+
+N3's scoped durable-edit candidate accepts only the runtime owner's native
+committed receipt after exact `affectedSections`/edit-plan parity. A bounded
+revision journal records conservative affected mesh blocks. Across a global
+terrain revision, a prior window keeps its local physical identity and
+source-owned row only when every intervening verified edit excludes all of
+its mesh blocks, the shaping revision matches, and fresh native local page
+pins equal the row's recorded pins. The layout carries the current global
+source/save revision; each window member carries its local identity and a
+proof digest through that global revision. Missing receipt/revision, changed
+local mesh, or changed page pin fails closed and demands a new artifact. Proof
+work yields after a 2 ms per-frame budget. Focused source contract
+`artifacts/native-world-backend/n3-triangle-artifact-1790180958697-e9200b71/report.json`
+shows a distant edit retaining the near window token with global revision 1,
+a missing-journal broker retiring it, and a local edit invalidating the
+affected window. This does not yet prove N5 aggregate physical acceptance
+under a new global revision; the joint fixture must compare the old physical
+owner receipt to local identity and the aggregate receipt to global identity.

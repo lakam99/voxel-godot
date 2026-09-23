@@ -265,6 +265,10 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 		planned.affectedMeshBlocks, physical_probes)
 	if observed.get("status") != "ready":
 		return _active_failure("native_edit_observation_failed")
+	var artifact_observed: Dictionary = _artifact_requests.observe_verified_durable_edit(
+		receipt, planned)
+	if artifact_observed.get("status") != "ready":
+		return _active_failure("native_artifact_edit_observation_failed")
 	return {"status":"ready", "nativeRevision":revision,
 		"affectedSections":receipt.get("affectedSections", []),
 		"changedCells":cells, "publicationPlan":planned,
