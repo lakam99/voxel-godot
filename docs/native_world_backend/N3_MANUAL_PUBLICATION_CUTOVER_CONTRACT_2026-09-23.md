@@ -75,6 +75,13 @@ contracts atomically, or replace those consumers together at their cutover.
 - Meshing needs a data-block halo and is asynchronous. The producer must
   reserve/prepare the halo and record real admission/encode/copy/upload atom
   costs, not hide them outside the shared 6 ms gameplay envelope.
+- `NativeVoxelBlockDemandFootprint.data_blocks_for_mesh_blocks` now provides
+  a deterministic, capped one-block X/Y/Z halo for a supplied bounded set of
+  mesh blocks. Its pure contract passes nine cases, including a y=2 input
+  layer for an adjacent upper mesh block and negative coordinates. Report:
+  `artifacts/native-world-backend/n3-block-demand-footprint-20260923.json`.
+  It does not yet choose mesh blocks from runtime viewer/chunk demand or
+  reserve the resulting native jobs; those integration steps remain open.
 
 ## Integration order and fail-closed checks
 
