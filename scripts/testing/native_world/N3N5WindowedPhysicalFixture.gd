@@ -301,8 +301,75 @@ func _run() -> void:
 	while retirement_census.get("status") == "pending":
 		await process_frame
 		retirement_census = retirement_barrier.census_progress(changed_layout.identity)
+	var drain_reversion := {}
+	var reversion_callback := func(_window_id: Vector3i, _window_token: String,
+			_lease_id: String) -> void:
+		planner.replace_sources({"position":Vector3.ZERO, "distance":0},
+			[], [], [], Vector2i(base_y * 16, (base_y + 1) * 16))
+		drain_reversion["advance"] = broker.advance()
+		drain_reversion["layout"] = broker.collision_window_layout()
+	coordinator.window_retirement_drain_started.connect(reversion_callback,
+		CONNECT_ONE_SHOT)
 	var retirement: Dictionary = await coordinator.retire_window(window.id)
 	var drained: Dictionary = retirement.get("drain", {})
+	var reactivated_layout: Dictionary = {}
+	for frame in range(300):
+		broker.advance()
+		reactivated_layout = broker.collision_window_layout()
+		if reactivated_layout.get("status") == "ready" \
+				and reactivated_layout.get("windowCount") == 1:
+			break
+		await process_frame
+	var reactivated_window: Dictionary = reactivated_layout.get("windows", [{}])[0]
+	var reactivated_requests := []
+	for block: Vector3i in reactivated_window.get("blocks", []):
+		reactivated_requests.append(broker.request_block(block))
+	var reactivated_facade
+	var reactivated_snapshot: Dictionary = {}
+	for frame in range(500):
+		broker.advance()
+		var acquired: Dictionary = broker.collision_window_source(
+			reactivated_window.get("id", Vector3i.ZERO),
+			String(reactivated_layout.get("layoutToken", "")))
+		if acquired.get("status") == "ready":
+			reactivated_facade = acquired.source
+			reactivated_snapshot = reactivated_facade.collision_source_snapshot()
+			if reactivated_snapshot.get("status") == "ready": break
+		await process_frame
+	var reactivated_rows: Array[Dictionary] = []
+	if reactivated_snapshot.get("status") == "ready":
+		for block: Vector3i in reactivated_window.blocks:
+			var row_status: Dictionary = reactivated_facade.collision_artifact_row(
+				block, reactivated_window.identity)
+			if row_status.get("status") == "ready":
+				reactivated_rows.append(row_status.row)
+	var reactivated_owner = OWNER.new()
+	coordinator.add_child(reactivated_owner)
+	var reactivated_bound: bool = reactivated_owner.bind_source(reactivated_facade)
+	var reactivated_registered: Dictionary = coordinator.register_window(
+		reactivated_window, reactivated_owner)
+	var reactivated_hold: Dictionary = coordinator.begin_window_barrier(
+		reactivated_window, bounds, reactivated_layout.identity)
+	var reactivated_barrier: RefCounted = reactivated_hold.get("barrier")
+	var reactivated_census: Dictionary = reactivated_hold.get("census", {})
+	while reactivated_census.get("status") == "pending":
+		await process_frame
+		reactivated_census = reactivated_barrier.census_progress(
+			reactivated_layout.identity)
+	var blocked_during_reversion: Dictionary = coordinator.aggregate_readiness(
+		reactivated_layout.identity)
+	var reactivated_publish: Dictionary = {}
+	if reactivated_rows.size() == reactivated_window.get("blocks", []).size():
+		reactivated_publish = await reactivated_owner.publish({
+			"schema":"n5-resident-collision-publication/v1",
+			"identity":reactivated_window.identity,
+			"residentBlocks":reactivated_window.blocks,
+			"affectedBlocks":reactivated_window.blocks,
+			"rows":reactivated_rows}, reactivated_barrier)
+	var reactivated_aggregate: Dictionary = coordinator.aggregate_readiness(
+		reactivated_layout.identity)
+	var reactivated_release: Dictionary = coordinator.release_barriers(
+		reactivated_layout.identity)
 	var retired_facade: Dictionary = facade.collision_source_snapshot()
 	var coordinator_drain: Dictionary = await coordinator.stop_and_drain()
 	var broker_stop: Dictionary = broker.stop()
@@ -374,6 +441,18 @@ func _run() -> void:
 		and retirement_hold.get("status") == "ready" \
 		and drained.get("status") == "ready" \
 		and drained.get("windowToken") == old_token \
+		and drain_reversion.get("layout", {}).get("status") == "pending" \
+		and drain_reversion.get("layout", {}).get("reason") \
+			== "collision_window_retirement_leased" \
+		and blocked_during_reversion.get("status") == "pending" \
+		and reactivated_layout.get("status") == "ready" \
+		and reactivated_window.get("windowToken") == old_token \
+		and reactivated_snapshot.get("status") == "ready" \
+		and reactivated_rows.size() == reactivated_window.get("blocks", []).size() \
+		and reactivated_bound and reactivated_registered.get("status") == "ready" \
+		and reactivated_publish.get("status") == "ready" \
+		and reactivated_aggregate.get("status") == "ready" \
+		and reactivated_release.get("status") == "ready" \
 		and retirement.get("status") == "ready" \
 		and retired_facade.get("status") == "failed" \
 		and coordinator_drain.get("status") == "ready" \
@@ -424,6 +503,18 @@ func _run() -> void:
 		"oldFacadePending":old_facade_pending,
 		"changedAggregate":changed_aggregate,
 		"prematureRetirement":premature_retirement,
+		"drainReversion":drain_reversion,
+		"blockedDuringReversion":blocked_during_reversion,
+		"reactivatedLayout":reactivated_layout,
+		"reactivatedSnapshot":reactivated_snapshot,
+		"reactivatedPublication":reactivated_publish,
+		"reactivatedAggregate":reactivated_aggregate,
+		"reactivatedRelease":reactivated_release,
+		"retirementHold":retirement_hold.get("status"),
+		"reactivatedBound":reactivated_bound,
+		"reactivatedRegistered":reactivated_registered,
+		"reactivatedRowCount":reactivated_rows.size(),
+		"reactivatedRequests":reactivated_requests,
 		"drained":drained, "retirement":retirement,
 		"retiredFacade":retired_facade,
 		"coordinatorDrain":coordinator_drain,
