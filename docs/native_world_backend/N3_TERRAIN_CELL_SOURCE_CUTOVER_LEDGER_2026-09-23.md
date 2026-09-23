@@ -40,6 +40,20 @@ service fixture at
 Even a structurally complete candidate returns
 `production_physical_owner_unbound`: caller dictionaries cannot attest to live
 collision or actor occupancy, and this method never clears the barrier.
+
+`NativeTerrainOccupancySource` now derives `terrain_occupancy_at_cell`'s
+ten gameplay fields from one native three-cell batch (center, above, below).
+The owner exposes the typed result with pending/revision propagation. The
+installed-engine service fixture first compared a saved edited stone cell and
+saved air over support, then independently compared a generated same-seed
+neighbor triple after initializing the real `WorldGenerationSystem` sampler.
+All comparisons passed at
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790173005001-accdc039/report.json`.
+An earlier fixture run initialized `TerrainVolumeService` with no generator;
+its unedited neighbors returned air and were not a valid generated parity
+oracle. Production `WorldGenerationSystem.terrain_occupancy_at_cell` and nav
+consumers still use the script service; this bridge supplies source facts only
+and does not prove physical publication or safe navigation occupancy.
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and
