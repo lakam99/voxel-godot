@@ -158,9 +158,13 @@ the active 13-profile capture into the pure-core catalog and returns its typed
 identity, with exact numeric byte lanes and content-hash checks. Its focused
 Godot adapter contract at
 `artifacts/native-world-backend/n4-biome-catalog-adapter-contract.json`
-passed with no failures after a debug/release build. Both admissions remain
-partial shadow receipts bound to a native owner; neither is a retained native
-catalog or an all-28-attempt job.
+passed with no failures after a debug/release build. A later N4 checkpoint
+retains that typed biome catalog in the native adapter and invalidates it on
+rejected replacement. The adapter also now retains an effective visual rock
+selection catalog from the active owner bundle; see
+`N4_ORDERED_ROCK_VISUAL_SHADOW_2026-09-22.md` and the passing
+`n4-visual-fallback-01` report. These remain partial shadow admissions, not
+an all-28-attempt job or production publication.
 The attempted aggregate `n4-removed-adapter-01` at
 `artifacts/native-world-backend/n4-removed-adapter-01/report.json` failed its
 debug extension source-inventory comparison because these adapter edits began

@@ -97,4 +97,11 @@ replacement invalidation, and biome replacement invalidation. A subsequent
 read-only audit found that live registry selection treats absent `biomeTags`
 as unrestricted and `asset_size` treats fewer than three size lanes as
 `Vector3.ONE`; the adapter and direct fixture now mirror those fallbacks.
-The fallback extension build/fixture rerun is pending at this checkpoint.
+The fallback correction is verified by
+`artifacts/native-world-backend/n4-visual-fallback-01/report.json`: 446/446
+debug and release tests, 100% pure-core line/function/branch coverage, and
+adapter smokes passed. The direct Godot fixture report at
+`artifacts/native-world-backend/n4-visual-catalog-adapter-contract.json`
+passed against that installed binary, including absent tags and the
+`Vector3.ONE` missing-size fallback. This remains service/adapter evidence,
+not live gameplay or screenshot acceptance.
