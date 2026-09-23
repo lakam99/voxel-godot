@@ -1489,6 +1489,13 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("begin_voxel_block_shadow_async", "request"), &NativeWorldBackend::begin_voxel_block_shadow_async);
 	ClassDB::bind_method(D_METHOD("poll_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::poll_voxel_block_shadow_async);
 	ClassDB::bind_method(D_METHOD("cancel_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::cancel_voxel_block_shadow_async);
+	ClassDB::bind_method(D_METHOD("request_voxel_block_shadow", "request", "consumer_id", "priority"), &NativeWorldBackend::request_voxel_block_shadow);
+	ClassDB::bind_method(D_METHOD("release_voxel_block_shadow", "request", "consumer_id"), &NativeWorldBackend::release_voxel_block_shadow);
+	ClassDB::bind_method(D_METHOD("pump_voxel_block_shadow"), &NativeWorldBackend::pump_voxel_block_shadow);
+	ClassDB::bind_method(D_METHOD("voxel_block_shadow_insertion_receipt", "key", "generation", "accepted"), &NativeWorldBackend::voxel_block_shadow_insertion_receipt);
+	ClassDB::bind_method(D_METHOD("voxel_block_shadow_mesh_receipt", "key", "generation", "mesh_ready", "physics_ready", "physics_required"), &NativeWorldBackend::voxel_block_shadow_mesh_receipt, DEFVAL(true));
+	ClassDB::bind_method(D_METHOD("voxel_block_shadow_unloaded", "key"), &NativeWorldBackend::voxel_block_shadow_unloaded);
+	ClassDB::bind_method(D_METHOD("voxel_block_shadow_mesh_exited", "key"), &NativeWorldBackend::voxel_block_shadow_mesh_exited);
 }
 
 NativeWorldBackend::~NativeWorldBackend() {
@@ -2963,6 +2970,7 @@ Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resoluti
 			batch.resolutions.push_back(std::move(resolution));
 		}
 		const NativeTerrainShapingRegistryReceipt receipt = shaping_registry_->apply(batch);
+		invalidate_changed_voxel_demand();
 		Dictionary result = envelope("apply_shaping_resolutions", "ready");
 		result["commitStatus"] = receipt.status == NativeTerrainShapingRegistryCommitStatus::committed ? "committed" : "no_change";
 		result["shapingRegistryRevision"] = static_cast<int64_t>(receipt.revision);
@@ -2976,7 +2984,9 @@ Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resoluti
 Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
 	if (!state_ || !shaping_registry_) return envelope("commit_typed_cells", "failed", "backend_not_ready");
 	try {
-		return commit_typed_cell_request(*state_, p_request, false, "commit_typed_cells");
+		Dictionary result = commit_typed_cell_request(*state_, p_request, false, "commit_typed_cells");
+		if (result.get("status", String()) == "ready") invalidate_changed_voxel_demand();
+		return result;
 	} catch (const std::exception &error) {
 		return failure("commit_typed_cells", error);
 	}
@@ -2985,7 +2995,9 @@ Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
 Dictionary NativeWorldBackend::commit_durable_cells(const Dictionary &p_request) {
 	if (!state_ || !shaping_registry_) return envelope("commit_durable_cells", "failed", "backend_not_ready");
 	try {
-		return commit_typed_cell_request(*state_, p_request, true, "commit_durable_cells");
+		Dictionary result = commit_typed_cell_request(*state_, p_request, true, "commit_durable_cells");
+		if (result.get("status", String()) == "ready") invalidate_changed_voxel_demand();
+		return result;
 	} catch (const std::exception &error) {
 		return failure("commit_durable_cells", error);
 	}
@@ -3027,6 +3039,110 @@ Dictionary NativeWorldBackend::pin_effective_page(const Vector2i &p_primary_page
 	} catch (const std::exception &error) {
 		return failure("pin_effective_page", error);
 	}
+}
+
+NativeVoxelBlockDemand::Key NativeWorldBackend::voxel_demand_key(const Dictionary &p_request) const {
+	const Vector3i origin = require_vector3i(p_request.get("origin", Variant()), "origin");
+	const Vector3i size = require_vector3i(p_request.get("size", Vector3i(16, 16, 16)), "size");
+	const std::int64_t lod = require_i64(p_request.get("lod", Variant()), "lod");
+	if (size != Vector3i(16, 16, 16) || lod < 0 || lod > 24)
+		throw std::invalid_argument("queued voxel block must be a canonical 16 cubed data block");
+	const std::int64_t span = std::int64_t{16} << lod;
+	if (static_cast<std::int64_t>(origin.x) % span != 0 ||
+		static_cast<std::int64_t>(origin.y) % span != 0 ||
+		static_cast<std::int64_t>(origin.z) % span != 0)
+		throw std::invalid_argument("queued voxel block origin is not aligned to its LOD span");
+	return {voxel_demand_epoch_, origin.x, origin.y, origin.z, static_cast<int>(lod)};
+}
+
+Dictionary NativeWorldBackend::voxel_demand_key_dictionary(const NativeVoxelBlockDemand::Key &p_key) const {
+	Dictionary key;
+	key["epoch"] = static_cast<std::int64_t>(p_key.epoch);
+	key["origin"] = Vector3i(p_key.x, p_key.y, p_key.z);
+	key["lod"] = p_key.lod;
+	return key;
+}
+
+Dictionary NativeWorldBackend::voxel_demand_event(const NativeVoxelBlockDemand::Key &p_key) const {
+	Dictionary result = envelope("pump_voxel_block_shadow", "pending");
+	result["key"] = voxel_demand_key_dictionary(p_key);
+	const auto *entry = voxel_demand_.find(p_key);
+	if (entry) {
+		result["generation"] = static_cast<std::int64_t>(entry->generation);
+		result["consumerCount"] = static_cast<std::int64_t>(entry->consumers.size());
+		result["preparedBytes"] = static_cast<std::int64_t>(entry->bytes.size());
+		switch (entry->state) {
+		case NativeVoxelBlockDemand::State::waiting_source: result["state"] = "waiting_source"; break;
+		case NativeVoxelBlockDemand::State::queued: result["state"] = "queued"; break;
+		case NativeVoxelBlockDemand::State::encoding: result["state"] = "encoding"; break;
+		case NativeVoxelBlockDemand::State::prepared: result["state"] = "prepared"; break;
+		case NativeVoxelBlockDemand::State::inserted_waiting_mesh: result["state"] = "inserted_waiting_mesh"; break;
+		case NativeVoxelBlockDemand::State::published: result["state"] = "published"; break;
+		case NativeVoxelBlockDemand::State::failed_empty: result["state"] = "failed_empty"; break;
+		case NativeVoxelBlockDemand::State::failed_oversize: result["state"] = "failed_oversize"; break;
+		case NativeVoxelBlockDemand::State::retired: result["state"] = "retired"; break;
+		}
+	}
+	return result;
+}
+
+WorldPhysicalContentIdentity NativeWorldBackend::voxel_demand_source_pin() const {
+	std::vector<std::uint8_t> bytes;
+	const auto append = [&bytes](const WorldPhysicalContentIdentity &identity) {
+		bytes.insert(bytes.end(), identity.digest.begin(), identity.digest.end());
+	};
+	append(state_->source_identity());
+	append(shaping_registry_->content_identity());
+	append(shaping_registry_->policy_content_identity());
+	for (const std::uint64_t revision : {state_->terrain_delta_revision(), shaping_registry_->revision()})
+		for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(revision >> shift));
+	return {sha256(bytes)};
+}
+
+void NativeWorldBackend::invalidate_changed_voxel_demand() {
+	if (!state_ || !shaping_registry_) return;
+	const auto pin = voxel_demand_source_pin();
+	for (const auto &[key, request] : voxel_demand_requests_) {
+		const auto *entry = voxel_demand_.find(key);
+		if (entry && entry->source_bound && entry->pin.digest != pin.digest) {
+			voxel_demand_.invalidate(key, state_->terrain_delta_revision(), pin);
+			voxel_demand_results_.erase(key);
+			voxel_demand_tickets_.erase(key);
+		}
+	}
+}
+
+Dictionary NativeWorldBackend::request_voxel_block_shadow(const Dictionary &p_request, std::int64_t p_consumer_id, int p_priority) {
+	constexpr const char *operation = "request_voxel_block_shadow";
+	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	try {
+		if (require_protocol_string(p_request.get("schema", Variant()), "schema") != VOXEL_BLOCK_REQUEST_SCHEMA)
+			throw std::invalid_argument("unsupported queued voxel block request schema");
+		if (p_consumer_id <= 0) throw std::invalid_argument("consumer_id must be positive");
+		const auto key = voxel_demand_key(p_request);
+		voxel_demand_.retire(8);
+		if (!voxel_demand_.request_pending(key, static_cast<std::uint64_t>(p_consumer_id), p_priority))
+			return envelope(operation, "pending", "queue_capacity");
+		voxel_demand_requests_[key] = p_request;
+		Dictionary result = envelope(operation, "pending", "demand_retained");
+		result["key"] = voxel_demand_key_dictionary(key);
+		return result;
+	} catch (const std::exception &error) { return failure(operation, error); }
+}
+
+Dictionary NativeWorldBackend::release_voxel_block_shadow(const Dictionary &p_request, std::int64_t p_consumer_id) {
+	constexpr const char *operation = "release_voxel_block_shadow";
+	try {
+		const auto key = voxel_demand_key(p_request);
+		voxel_demand_.release(key, static_cast<std::uint64_t>(p_consumer_id));
+		const auto *entry = voxel_demand_.find(key);
+		if (!entry || entry->consumers.empty()) {
+			voxel_demand_requests_.erase(key);
+			voxel_demand_results_.erase(key);
+			voxel_demand_tickets_.erase(key);
+		}
+		return envelope(operation, "ready");
+	} catch (const std::exception &error) { return failure(operation, error); }
 }
 
 Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &p_request) {
@@ -3108,6 +3224,19 @@ Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &
 			result["unresolvedRegions"] = regions_array(unresolved);
 			return result;
 		}
+		if (next_voxel_worker_ticket_ == std::numeric_limits<std::int64_t>::max())
+			return envelope(operation, "failed", "ticket_space_exhausted");
+		if (voxel_demand_capture_) {
+			const auto key = *voxel_demand_capture_;
+			voxel_demand_.bind_source(key, delta_revision, voxel_demand_source_pin());
+			const auto ticket = voxel_demand_.dispatch_specific(key);
+			if (!ticket) {
+				voxel_demand_.source_capture_deferred(key);
+				return envelope(operation, "pending", "queue_capacity");
+			}
+			voxel_demand_worker_ = *ticket;
+			voxel_demand_tickets_[key] = *ticket;
+		}
 		auto job = std::make_unique<NativeCapturedVoxelEncodeJob>(state_->definition(), std::move(deltas), std::move(pins),
 			NativeEffectiveVoxelBlockRequest{cell_coord(origin), cell_coord(size), static_cast<std::uint32_t>(lod)});
 		voxel_worker_source_identity_ = source_identity;
@@ -3120,8 +3249,6 @@ Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &
 		voxel_worker_result_.reset();
 		voxel_worker_error_ = nullptr;
 		voxel_worker_cancelled_ = false;
-		if (next_voxel_worker_ticket_ == std::numeric_limits<std::int64_t>::max())
-			return envelope(operation, "failed", "ticket_space_exhausted");
 		voxel_worker_finished_.store(false, std::memory_order_relaxed);
 		voxel_worker_cancel_token_ = std::make_shared<std::atomic<bool>>(false);
 		voxel_worker_ = std::thread([this, job = std::move(job), cancel_token = voxel_worker_cancel_token_]() {
@@ -3137,6 +3264,10 @@ Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &
 		result["ticket"] = voxel_worker_ticket_;
 		return result;
 	} catch (const std::exception &error) {
+		if (voxel_demand_capture_ && voxel_demand_worker_) {
+			voxel_demand_.defer(*voxel_demand_worker_);
+			voxel_demand_worker_.reset();
+		}
 		return failure(operation, error);
 	}
 }
@@ -3238,6 +3369,152 @@ Dictionary NativeWorldBackend::cancel_voxel_block_shadow_async(std::int64_t p_ti
 	result["ticket"] = p_ticket;
 	result["cancelled"] = true;
 	return result;
+}
+
+Dictionary NativeWorldBackend::pump_voxel_block_shadow() {
+	constexpr const char *operation = "pump_voxel_block_shadow";
+	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	if (voxel_demand_worker_) {
+		const auto ticket = *voxel_demand_worker_;
+		const Dictionary polled = poll_voxel_block_shadow_async(voxel_worker_ticket_);
+		if (polled.get("status", String()) == "pending" && polled.get("reason", String()) == "worker_running") {
+			Dictionary result = voxel_demand_event(ticket.key);
+			result["reason"] = "worker_running";
+			return result;
+		}
+		if (voxel_worker_ticket_ != 0) return polled;
+		voxel_demand_worker_.reset();
+		if (polled.get("status", String()) != "ready" || polled.get("cancelled", false)) {
+			voxel_demand_.defer(ticket);
+			voxel_demand_tickets_.erase(ticket.key);
+			Dictionary result = voxel_demand_event(ticket.key);
+			result["reason"] = polled.get("reason", String("worker_deferred"));
+			return result;
+		}
+		const PackedByteArray sdf = polled.get("sdf16Le", PackedByteArray());
+		const PackedByteArray indices = polled.get("indices8", PackedByteArray());
+		const PackedByteArray data = polled.get("data5_8", PackedByteArray());
+		if (sdf.size() != 8192 || indices.size() != 4096 || data.size() != 4096) {
+			voxel_demand_.defer(ticket);
+			return envelope(operation, "failed", "invalid_worker_buffer_sizes");
+		}
+		std::vector<std::uint8_t> bytes;
+		bytes.reserve(16384);
+		bytes.insert(bytes.end(), sdf.ptr(), sdf.ptr() + sdf.size());
+		bytes.insert(bytes.end(), indices.ptr(), indices.ptr() + indices.size());
+		bytes.insert(bytes.end(), data.ptr(), data.ptr() + data.size());
+		if (!voxel_demand_.complete(ticket, std::move(bytes))) {
+			voxel_demand_tickets_.erase(ticket.key);
+			return envelope(operation, "pending", "stale_completion");
+		}
+		voxel_demand_results_[ticket.key] = polled;
+	}
+	// A prepared buffer is returned again after a rejected insertion receipt.
+	for (int pass = 0; pass < 2; ++pass) {
+		if (voxel_demand_prepared_returned_ && voxel_demand_.next_waiting_source()) break;
+		const auto start = pass == 0 && voxel_demand_last_prepared_
+			? voxel_demand_results_.upper_bound(*voxel_demand_last_prepared_) : voxel_demand_results_.begin();
+		const auto stop = pass == 1 && voxel_demand_last_prepared_
+			? voxel_demand_results_.upper_bound(*voxel_demand_last_prepared_) : voxel_demand_results_.end();
+		for (auto it = start; it != stop; ++it) {
+		const auto &key = it->first;
+		const auto &result_data = it->second;
+		const auto *entry = voxel_demand_.find(key);
+		if (!entry || entry->state != NativeVoxelBlockDemand::State::prepared) continue;
+		const auto issued = voxel_demand_tickets_.find(key);
+		if (issued == voxel_demand_tickets_.end()) continue;
+		if (issued->second.pin.digest != voxel_demand_source_pin().digest) {
+			voxel_demand_.invalidate(key, state_->terrain_delta_revision(), voxel_demand_source_pin());
+			continue;
+		}
+		Dictionary result = result_data;
+		result["operation"] = operation;
+		result["state"] = "prepared";
+		result["key"] = voxel_demand_key_dictionary(key);
+		result["generation"] = static_cast<std::int64_t>(issued->second.generation);
+		voxel_demand_prepared_returned_ = true;
+		voxel_demand_last_prepared_ = key;
+		return result;
+		}
+	}
+	voxel_demand_prepared_returned_ = false;
+	if (voxel_worker_ticket_ != 0) return envelope(operation, "pending", "external_worker_busy");
+	const auto next = voxel_demand_.next_waiting_source();
+	if (!next) return envelope(operation, "pending", "no_waiting_source");
+	const auto request = voxel_demand_requests_.find(*next);
+	if (request == voxel_demand_requests_.end()) return envelope(operation, "failed", "missing_retained_request");
+	voxel_demand_capture_ = *next;
+	voxel_demand_.source_attempted(*next);
+	const Dictionary begun = begin_voxel_block_shadow_async(request->second);
+	voxel_demand_capture_.reset();
+	Dictionary result = voxel_demand_event(*next);
+	result["reason"] = begun.get("reason", String("capture_attempted"));
+	if (begun.get("status", String()) == "failed") {
+		result["status"] = "failed";
+		return result;
+	}
+	if (voxel_demand_worker_) result["state"] = "encoding";
+	return result;
+}
+
+Dictionary NativeWorldBackend::voxel_block_shadow_insertion_receipt(
+		const Dictionary &p_key, std::int64_t p_generation, bool p_accepted) {
+	constexpr const char *operation = "voxel_block_shadow_insertion_receipt";
+	try {
+		const auto key = voxel_demand_key(p_key);
+		if (require_i64(p_key.get("epoch", Variant()), "key.epoch") != static_cast<std::int64_t>(key.epoch))
+			return envelope(operation, "rejected", "stale_epoch");
+		const auto found = voxel_demand_tickets_.find(key);
+		if (found == voxel_demand_tickets_.end() || p_generation != static_cast<std::int64_t>(found->second.generation))
+			return envelope(operation, "rejected", "stale_generation");
+		if (found->second.pin.digest != voxel_demand_source_pin().digest) {
+			invalidate_changed_voxel_demand();
+			return envelope(operation, "rejected", "source_changed");
+		}
+		const bool accepted = voxel_demand_.insertion_result(found->second, p_accepted);
+		if (accepted) voxel_demand_results_.erase(key);
+		return envelope(operation, accepted ? "ready" : "rejected", p_accepted ? "" : "insertion_rejected_retry");
+	} catch (const std::exception &error) { return failure(operation, error); }
+}
+
+Dictionary NativeWorldBackend::voxel_block_shadow_mesh_receipt(const Dictionary &p_key, std::int64_t p_generation,
+		bool p_mesh_ready, bool p_physics_ready, bool p_physics_required) {
+	constexpr const char *operation = "voxel_block_shadow_mesh_receipt";
+	try {
+		const auto key = voxel_demand_key(p_key);
+		if (require_i64(p_key.get("epoch", Variant()), "key.epoch") != static_cast<std::int64_t>(key.epoch))
+			return envelope(operation, "rejected", "stale_epoch");
+		const auto found = voxel_demand_tickets_.find(key);
+		if (found == voxel_demand_tickets_.end() || p_generation != static_cast<std::int64_t>(found->second.generation))
+			return envelope(operation, "rejected", "stale_generation");
+		if (found->second.pin.digest != voxel_demand_source_pin().digest) {
+			invalidate_changed_voxel_demand();
+			return envelope(operation, "rejected", "source_changed");
+		}
+		return envelope(operation, voxel_demand_.receipt(found->second, p_mesh_ready, p_physics_ready,
+			p_physics_required) ? "ready" : "pending");
+	} catch (const std::exception &error) { return failure(operation, error); }
+}
+
+Dictionary NativeWorldBackend::voxel_block_shadow_unloaded(const Dictionary &p_key) {
+	constexpr const char *operation = "voxel_block_shadow_unloaded";
+	try {
+		if (require_i64(p_key.get("epoch", Variant()), "key.epoch") != static_cast<std::int64_t>(voxel_demand_epoch_))
+			return envelope(operation, "rejected", "stale_epoch");
+		voxel_demand_.unloaded(voxel_demand_key(p_key));
+		voxel_demand_.source_capture_deferred(voxel_demand_key(p_key));
+		return envelope(operation, "ready");
+	} catch (const std::exception &error) { return failure(operation, error); }
+}
+
+Dictionary NativeWorldBackend::voxel_block_shadow_mesh_exited(const Dictionary &p_key) {
+	constexpr const char *operation = "voxel_block_shadow_mesh_exited";
+	try {
+		if (require_i64(p_key.get("epoch", Variant()), "key.epoch") != static_cast<std::int64_t>(voxel_demand_epoch_))
+			return envelope(operation, "rejected", "stale_epoch");
+		voxel_demand_.mesh_exited(voxel_demand_key(p_key));
+		return envelope(operation, "ready");
+	} catch (const std::exception &error) { return failure(operation, error); }
 }
 
 Dictionary NativeWorldBackend::encode_voxel_block_shadow(const Dictionary &p_request) const {

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <vector>
 
 namespace voxel::world_backend {
@@ -23,6 +24,7 @@ public:
         State state = State::waiting_source;
         std::uint64_t revision = 0, generation = 0;
         WorldPhysicalContentIdentity pin;
+        bool source_bound = false;
         int priority = 0;
         std::uint64_t queued_at = 0;
         std::map<std::uint64_t, int> consumers;
@@ -34,11 +36,21 @@ public:
                            std::size_t max_block_bytes);
     // False means admission is at capacity; caller must retain/retry that demand.
     bool request(Key key, std::uint64_t consumer, int priority, std::uint64_t revision, WorldPhysicalContentIdentity pin);
+    // Retain a viewer before an authoritative source snapshot exists.
+    bool request_pending(Key key, std::uint64_t consumer, int priority);
+    // Bind the first resolved source or supersede a changed source.
+    void bind_source(const Key &key, std::uint64_t revision, WorldPhysicalContentIdentity pin);
     void source_ready(const Key &key, std::uint64_t revision, const WorldPhysicalContentIdentity &pin);
     void invalidate(const Key &key, std::uint64_t revision, WorldPhysicalContentIdentity pin);
     void release(const Key &key, std::uint64_t consumer);
     void reset_epoch(std::uint64_t epoch);
+    // Select the next source to capture using the same priority/age ordering
+    // as dispatch. This does not reserve a worker or mark the source ready.
+    std::optional<Key> next_waiting_source() const;
+    void source_attempted(const Key &key);
+    void source_capture_deferred(const Key &key);
     std::vector<Ticket> dispatch(std::size_t max_jobs = 1);
+    std::optional<Ticket> dispatch_specific(const Key &key);
     // Capture or source admission could not supply an immutable job. Call only
     // after the physical worker/capture has stopped; retain consumer demand
     // and require a fresh source_ready before dispatching again.

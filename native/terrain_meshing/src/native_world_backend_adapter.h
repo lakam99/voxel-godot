@@ -11,6 +11,7 @@
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
 #include "native_captured_voxel_encode_job.hpp"
+#include "native_voxel_block_demand.hpp"
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/ref.hpp>
@@ -23,6 +24,7 @@
 #include <atomic>
 #include <exception>
 #include <memory>
+#include <map>
 #include <optional>
 #include <string>
 #include <thread>
@@ -107,13 +109,26 @@ public:
 	godot::Dictionary encode_voxel_block_shadow(const godot::Dictionary &p_request) const;
 	godot::Dictionary begin_voxel_block_shadow_async(const godot::Dictionary &p_request);
 	godot::Dictionary poll_voxel_block_shadow_async(std::int64_t p_ticket);
-	godot::Dictionary cancel_voxel_block_shadow_async(std::int64_t p_ticket);
+	 godot::Dictionary cancel_voxel_block_shadow_async(std::int64_t p_ticket);
+	 godot::Dictionary request_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id, int p_priority);
+	 godot::Dictionary release_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id);
+	 godot::Dictionary pump_voxel_block_shadow();
+	 godot::Dictionary voxel_block_shadow_insertion_receipt(const godot::Dictionary &p_key, std::int64_t p_generation, bool p_accepted);
+	 godot::Dictionary voxel_block_shadow_mesh_receipt(const godot::Dictionary &p_key, std::int64_t p_generation,
+		bool p_mesh_ready, bool p_physics_ready, bool p_physics_required = true);
+	 godot::Dictionary voxel_block_shadow_unloaded(const godot::Dictionary &p_key);
+	 godot::Dictionary voxel_block_shadow_mesh_exited(const godot::Dictionary &p_key);
 
 private:
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_for_page(
 		voxel::world_backend::NativeTerrainPageKey p_page) const;
 	std::string canonical_worker_source_key(
 		voxel::world_backend::NativeSiteSourceRegionKey p_region) const;
+	voxel::world_backend::NativeVoxelBlockDemand::Key voxel_demand_key(const godot::Dictionary &p_request) const;
+	godot::Dictionary voxel_demand_key_dictionary(const voxel::world_backend::NativeVoxelBlockDemand::Key &p_key) const;
+	godot::Dictionary voxel_demand_event(const voxel::world_backend::NativeVoxelBlockDemand::Key &p_key) const;
+	voxel::world_backend::WorldPhysicalContentIdentity voxel_demand_source_pin() const;
+	void invalidate_changed_voxel_demand();
 
 	bool initialization_attempted_ = false;
 	std::string initialization_failure_;
@@ -137,6 +152,15 @@ private:
 	std::int64_t presentation_capture_revision_ = 0;
 	std::string presentation_capture_identity_;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
+	voxel::world_backend::NativeVoxelBlockDemand voxel_demand_{1, 4U * 1024U * 1024U, 128, 16384};
+	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key, godot::Dictionary> voxel_demand_requests_;
+	std::optional<voxel::world_backend::NativeVoxelBlockDemand::Ticket> voxel_demand_worker_;
+	std::optional<voxel::world_backend::NativeVoxelBlockDemand::Key> voxel_demand_capture_;
+	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key, voxel::world_backend::NativeVoxelBlockDemand::Ticket> voxel_demand_tickets_;
+	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key, godot::Dictionary> voxel_demand_results_;
+	std::uint64_t voxel_demand_epoch_ = 0;
+	bool voxel_demand_prepared_returned_ = false;
+	std::optional<voxel::world_backend::NativeVoxelBlockDemand::Key> voxel_demand_last_prepared_;
 	std::thread voxel_worker_;
 	std::shared_ptr<std::atomic<bool>> voxel_worker_cancel_token_;
 	std::atomic<bool> voxel_worker_finished_{false};

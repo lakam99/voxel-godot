@@ -164,8 +164,46 @@ rejection, edited retry, a pending nonblocking cancellation that drained, and
 one teardown observation. The
 teardown observation was 0 ms, but does not prove a worker was actively
 encoding at destruction. This is a service-level test, not a live terrain,
-collision, gameplay, or performance acceptance. The queue owner and async
-adapter are still unbound to `VoxelTerrainRuntime` and each other.
+collision, gameplay, or performance acceptance. At that checkpoint, the queue
+owner and async adapter were still unbound to `VoxelTerrainRuntime` and each
+other; the next section records their later shadow binding.
 The aggregate native gate `n3-async-shadow-01` passed 502/502 debug and
 release tests, both adapter smokes, and strict pure-core coverage of
 11,124/11,124 lines, 1,481/1,481 functions and 6,592/6,592 branches.
+
+## Retained queue to installed-engine mechanism checkpoint
+
+The native adapter now binds `NativeVoxelBlockDemand` to the bounded async
+encoder for canonical 16-cubed blocks. Consumer demand is retained before
+source readiness; Main captures source/delta/shaping pins, reserves the exact
+key, and gives immutable inputs to one worker. Its pump returns complete
+prepared channel buffers, repeats them after an insertion rejection, and
+requires separate accepted-insertion and mesh/physics receipts. Current
+source mutations invalidate old prepared/published generations; unload
+requeues active demand for a fresh source capture. The caller cannot supply a
+revision or pin as an authority shortcut.
+
+`node tools/run-n3-retained-native-block-injection.mjs` passed on the
+installed debug extension. Its report is
+`artifacts/native-world-backend/n3-retained-native-block-1790161472961-09906055/report.json`,
+with a headed screenshot beside it. An unpaired viewer first rejected the
+center insertion; the retained request then retried after viewer attachment.
+All 27 native halo blocks were accepted, Voxel Tools emitted a real mesh,
+a physics ray hit its collider, and a real `CharacterBody3D` landed on it.
+Maximum observed pump call was 344 microseconds in this fixture, while the
+full 27-block preparation elapsed about 61 seconds. The screenshot shows a
+plain green terrain patch, not production biome materials or gameplay. This
+is a bridge-mechanism test, not production cutover, normal-world visual
+acceptance, streaming performance, edited-block collision safety, or N3 exit.
+`VoxelTerrainRuntime` still installs its script generator in production.
+The fixture acknowledges mesh/physics only for the center block; the other
+26 blocks' receipt lifecycle and unload/revisit still need integration proof.
+Source invalidation rejects old queue generations but does not itself replace
+already injected Voxel Terrain data. The future runtime consumer must own that
+replacement before actor/nav readiness can move to native receipts.
+The same stable source set passed `n3-retained-queue-04`: 510/510 debug and
+release core tests, both adapter smokes, and strict pure-core coverage of
+11,180/11,180 lines, 1,488/1,488 functions and 6,650/6,650 branches.
+`n3-retained-queue-01` and `-02` failed only their new queue coverage floor;
+`-03` is invalid because a focused test edit changed the inventoried input
+during the run. None is cited as passing evidence.

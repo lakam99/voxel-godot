@@ -41,6 +41,171 @@ VWB_TEST(native_voxel_demand_retains_and_promotes_without_duplicate_jobs) {
     VWB_EXPECT_EQ(1u, owner.dispatch().size());
 }
 
+VWB_TEST(native_voxel_demand_pending_consumers_wait_for_authoritative_source) {
+    Demand owner(1, 8, 2, 4);
+    Demand::Key key{0, 16, 0, 0, 0};
+    VWB_EXPECT(owner.request_pending(key, 10, 2));
+    VWB_EXPECT(owner.request_pending(key, 11, 7));
+    VWB_EXPECT_EQ(2u, owner.find(key)->consumers.size());
+    VWB_EXPECT_EQ(7, owner.find(key)->priority);
+    VWB_EXPECT(!owner.find(key)->source_bound);
+    VWB_EXPECT(owner.dispatch().empty());
+    owner.source_ready(key, 0, pin(0));
+    VWB_EXPECT(owner.dispatch().empty());
+    owner.bind_source(key, 5, pin(9));
+    VWB_EXPECT(owner.find(key)->source_bound);
+    auto ticket = owner.dispatch()[0];
+    VWB_EXPECT_EQ(5u, ticket.revision);
+    VWB_EXPECT_EQ(9, ticket.pin.digest[0]);
+    owner.request_pending(key, 12, 8);
+    VWB_EXPECT_EQ(Demand::State::encoding, owner.find(key)->state);
+    owner.bind_source(key, 6, pin(10));
+    VWB_EXPECT(!owner.complete(ticket, {1}));
+    auto current = owner.dispatch()[0];
+    VWB_EXPECT_EQ(6u, current.revision);
+    VWB_EXPECT_EQ(3u, owner.find(key)->consumers.size());
+}
+
+VWB_TEST(native_voxel_demand_specific_dispatch_never_reserves_another_key) {
+    Demand owner(1, 8, 2, 4);
+    Demand::Key high{0, 0, 0, 0, 0}, captured{0, 16, 0, 0, 0};
+    owner.request_pending(high, 1, 10);
+    owner.request_pending(captured, 1, 1);
+    owner.bind_source(high, 1, pin(1));
+    owner.bind_source(captured, 1, pin(1));
+    auto ticket = owner.dispatch_specific(captured);
+    VWB_EXPECT(ticket.has_value());
+    VWB_EXPECT_EQ(16, ticket->key.x);
+    VWB_EXPECT_EQ(Demand::State::queued, owner.find(high)->state);
+    VWB_EXPECT(!owner.dispatch_specific(high).has_value());
+    VWB_EXPECT(owner.defer(*ticket));
+    VWB_EXPECT_EQ(0u, owner.in_flight());
+}
+
+VWB_TEST(native_voxel_demand_pending_admission_and_binding_require_live_consumers) {
+    Demand owner(1, 8, 1, 4);
+    Demand::Key first{0, 0, 0, 0, 0}, other{0, 1, 0, 0, 0}, stale{1, 0, 0, 0, 0};
+    VWB_EXPECT(!owner.request_pending(stale, 1, 1));
+    VWB_EXPECT(owner.request_pending(first, 1, 2));
+    VWB_EXPECT(!owner.request_pending(other, 2, 3));
+    owner.bind_source(other, 1, pin(1));
+    owner.bind_source(stale, 1, pin(1));
+    VWB_EXPECT(!owner.find(first)->source_bound);
+    owner.release(first, 1);
+    const auto retired_generation = owner.find(first)->generation;
+    owner.bind_source(first, 1, pin(1));
+    VWB_EXPECT_EQ(Demand::State::retired, owner.find(first)->state);
+    VWB_EXPECT_EQ(retired_generation, owner.find(first)->generation);
+    VWB_EXPECT(owner.request_pending(first, 2, 3));
+    owner.bind_source(first, 1, pin(1));
+    VWB_EXPECT_EQ(Demand::State::queued, owner.find(first)->state);
+    const auto generation = owner.find(first)->generation;
+    owner.bind_source(first, 1, pin(1));
+    VWB_EXPECT_EQ(generation, owner.find(first)->generation);
+    auto changed = pin(1);
+    changed.digest[31] = 7;
+    owner.bind_source(first, 1, changed);
+    VWB_EXPECT_EQ(generation + 1, owner.find(first)->generation);
+    VWB_EXPECT_EQ(7, owner.find(first)->pin.digest[31]);
+}
+
+VWB_TEST(native_voxel_demand_waiting_source_selection_and_capture_retry) {
+    Demand owner(1, 8, 4, 4);
+    Demand::Key low{0, 0, 0, 0, 0}, high{0, 1, 0, 0, 0}, retired{0, 2, 0, 0, 0};
+    VWB_EXPECT(!owner.next_waiting_source().has_value());
+    owner.source_attempted(low);
+    owner.source_capture_deferred(low);
+    owner.request_pending(low, 1, 1);
+    owner.request_pending(high, 1, 3);
+    owner.request_pending(retired, 1, 9);
+    owner.release(retired, 1);
+    VWB_EXPECT_EQ(1, owner.next_waiting_source()->x);
+    owner.source_attempted(high);
+    VWB_EXPECT_EQ(1, owner.next_waiting_source()->x);
+    owner.bind_source(high, 1, pin(1));
+    VWB_EXPECT_EQ(0, owner.next_waiting_source()->x);
+    owner.source_capture_deferred(high);
+    VWB_EXPECT_EQ(Demand::State::waiting_source, owner.find(high)->state);
+    VWB_EXPECT_EQ(1, owner.next_waiting_source()->x);
+    owner.source_attempted(high);
+    VWB_EXPECT(owner.find(high)->queued_at > 0);
+    owner.source_capture_deferred(high);
+    VWB_EXPECT_EQ(Demand::State::waiting_source, owner.find(high)->state);
+    owner.bind_source(low, 1, pin(1));
+    owner.bind_source(high, 1, pin(1));
+    VWB_EXPECT(!owner.next_waiting_source().has_value());
+}
+
+VWB_TEST(native_voxel_demand_specific_dispatch_checks_state_and_capacity) {
+    Demand owner(1, 4, 3, 4);
+    Demand::Key a{0, 0, 0, 0, 0}, b{0, 1, 0, 0, 0}, absent{0, 2, 0, 0, 0};
+    Demand::Key stale{1, 0, 0, 0, 0};
+    VWB_EXPECT(!owner.dispatch_specific(absent).has_value());
+    VWB_EXPECT(!owner.dispatch_specific(stale).has_value());
+    owner.request_pending(a, 1, 1);
+    VWB_EXPECT(!owner.dispatch_specific(a).has_value());
+    owner.request_pending(b, 1, 1);
+    owner.bind_source(a, 1, pin(1));
+    owner.bind_source(b, 1, pin(1));
+    auto first = owner.dispatch_specific(a);
+    VWB_EXPECT(first.has_value());
+    VWB_EXPECT(!owner.dispatch_specific(a).has_value());
+    VWB_EXPECT(!owner.dispatch_specific(b).has_value());
+    VWB_EXPECT(owner.complete(*first, {1, 2, 3, 4}));
+    VWB_EXPECT(!owner.dispatch_specific(b).has_value());
+    owner.release(a, 1);
+    VWB_EXPECT(owner.dispatch_specific(b).has_value());
+}
+
+VWB_TEST(native_voxel_demand_old_epoch_keys_cannot_bind_or_dispatch) {
+    Demand owner(2, 8, 2, 4);
+    Demand::Key old{0, 0, 0, 0, 0}, current{1, 0, 0, 0, 0};
+    owner.request_pending(old, 1, 1);
+    owner.reset_epoch(1);
+    owner.bind_source(old, 1, pin(1));
+    VWB_EXPECT_EQ(Demand::State::retired, owner.find(old)->state);
+    VWB_EXPECT(!owner.dispatch_specific(old).has_value());
+    owner.request_pending(current, 1, 1);
+    owner.bind_source(current, 1, pin(1));
+    VWB_EXPECT(owner.dispatch_specific(current).has_value());
+}
+
+VWB_TEST(native_voxel_demand_waiting_source_priority_and_age_ties) {
+    Demand owner(2, 8, 4, 4);
+    Demand::Key first{0, 0, 0, 0, 0}, second{0, 1, 0, 0, 0};
+    owner.request_pending(first, 1, 1);
+    owner.request_pending(second, 1, 2);
+    VWB_EXPECT_EQ(1, owner.next_waiting_source()->x);
+    owner.request_pending(second, 1, 0);
+    VWB_EXPECT_EQ(0, owner.next_waiting_source()->x);
+    owner.request_pending(second, 1, 1);
+    VWB_EXPECT_EQ(0, owner.next_waiting_source()->x);
+    owner.source_attempted(first);
+    VWB_EXPECT_EQ(1, owner.next_waiting_source()->x);
+    owner.source_attempted(second);
+    VWB_EXPECT_EQ(0, owner.next_waiting_source()->x);
+    owner.bind_source(first, 1, pin(1));
+    const auto queued_at = owner.find(first)->queued_at;
+    owner.source_attempted(first);
+    VWB_EXPECT_EQ(queued_at, owner.find(first)->queued_at);
+}
+
+VWB_TEST(native_voxel_demand_specific_dispatch_reserves_output_budget) {
+    Demand owner(2, 4, 2, 4);
+    Demand::Key first{0, 0, 0, 0, 0}, second{0, 1, 0, 0, 0};
+    owner.request_pending(first, 1, 1);
+    owner.request_pending(second, 1, 1);
+    owner.bind_source(first, 1, pin(1));
+    owner.bind_source(second, 1, pin(1));
+    auto ticket = owner.dispatch_specific(first);
+    VWB_EXPECT(ticket.has_value());
+    VWB_EXPECT_EQ(1u, owner.in_flight());
+    VWB_EXPECT(!owner.dispatch_specific(second).has_value());
+    VWB_EXPECT(owner.defer(*ticket));
+    owner.bind_source(first, 1, pin(1));
+    VWB_EXPECT(owner.dispatch_specific(second).has_value());
+}
+
 VWB_TEST(native_voxel_demand_caps_and_stale_worker_completion) {
     Demand owner(1, 4, 2, 4);
     Demand::Key a{0, 0, 0, 0, 0}, b{0, 1, 0, 0, 0};

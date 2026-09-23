@@ -27,6 +27,7 @@ void NativeVoxelBlockDemand::supersede(Entry &entry, std::uint64_t revision, Wor
     clear_bytes(entry);
     entry.revision = revision;
     entry.pin = pin;
+    entry.source_bound = true;
     ++entry.generation;
     entry.insertion_rejections = 0;
     entry.state = entry.consumers.empty() ? State::retired : State::waiting_source;
@@ -44,11 +45,30 @@ bool NativeVoxelBlockDemand::request(Key key, std::uint64_t consumer, int priori
     return true;
 }
 
+bool NativeVoxelBlockDemand::request_pending(Key key, std::uint64_t consumer, int priority) {
+    if (key.epoch != epoch_ || (entries_.find(key) == entries_.end() && entries_.size() >= max_entries_)) return false;
+    auto &entry = entries_[key];
+    entry.consumers[consumer] = priority;
+    entry.priority = 0;
+    for (const auto &[id, urgency] : entry.consumers) entry.priority = std::max(entry.priority, urgency);
+    if (entry.state == State::retired) entry.state = State::waiting_source;
+    return true;
+}
+
+void NativeVoxelBlockDemand::bind_source(const Key &key, std::uint64_t revision, WorldPhysicalContentIdentity pin) {
+    auto it = entries_.find(key);
+    if (it == entries_.end() || key.epoch != epoch_ || it->second.consumers.empty()) return;
+    Entry &entry = it->second;
+    if (!entry.source_bound || entry.revision != revision || entry.pin.digest != pin.digest)
+        supersede(entry, revision, pin);
+    source_ready(key, revision, pin);
+}
+
 void NativeVoxelBlockDemand::source_ready(const Key &key, std::uint64_t revision, const WorldPhysicalContentIdentity &pin) {
     auto it = entries_.find(key);
     if (it == entries_.end() || key.epoch != epoch_) return;
     Entry &entry = it->second;
-    if (entry.revision != revision || entry.pin.digest != pin.digest || entry.consumers.empty()) return;
+    if (!entry.source_bound || entry.revision != revision || entry.pin.digest != pin.digest || entry.consumers.empty()) return;
     if (entry.state == State::waiting_source) {
         entry.queued_at = ++clock_;
         entry.state = State::queued;
@@ -80,6 +100,32 @@ void NativeVoxelBlockDemand::reset_epoch(std::uint64_t epoch) {
     }
 }
 
+std::optional<NativeVoxelBlockDemand::Key> NativeVoxelBlockDemand::next_waiting_source() const {
+    auto best = entries_.end();
+    for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+        // reset_epoch and release retire entries when their consumers disappear.
+        // Only live current-epoch entries can remain waiting for a source.
+        if (it->second.state != State::waiting_source) continue;
+        const auto score = [&](const Entry &e) { return static_cast<std::int64_t>(e.priority) +
+            static_cast<std::int64_t>((clock_ - e.queued_at) / 8); };
+        if (best == entries_.end() || score(it->second) > score(best->second) ||
+            (score(it->second) == score(best->second) && it->second.queued_at < best->second.queued_at)) best = it;
+    }
+    return best == entries_.end() ? std::nullopt : std::optional<Key>(best->first);
+}
+
+void NativeVoxelBlockDemand::source_attempted(const Key &key) {
+    auto it = entries_.find(key);
+    if (it != entries_.end() && it->second.state == State::waiting_source)
+        it->second.queued_at = ++clock_;
+}
+
+void NativeVoxelBlockDemand::source_capture_deferred(const Key &key) {
+    auto it = entries_.find(key);
+    if (it != entries_.end() && it->second.state == State::queued)
+        it->second.state = State::waiting_source;
+}
+
 std::vector<NativeVoxelBlockDemand::Ticket> NativeVoxelBlockDemand::dispatch(std::size_t max_jobs) {
     std::vector<Ticket> jobs;
     while (jobs.size() < max_jobs && in_flight_ < max_in_flight_ &&
@@ -106,6 +152,22 @@ std::vector<NativeVoxelBlockDemand::Ticket> NativeVoxelBlockDemand::dispatch(std
         active_jobs_[best->first].emplace(entry.generation, jobs.back());
     }
     return jobs;
+}
+
+std::optional<NativeVoxelBlockDemand::Ticket> NativeVoxelBlockDemand::dispatch_specific(const Key &key) {
+    auto it = entries_.find(key);
+    if (it == entries_.end() || key.epoch != epoch_ || it->second.state != State::queued ||
+        in_flight_ >= max_in_flight_ || prepared_bytes_ > max_prepared_bytes_ - max_block_bytes_ ||
+        in_flight_ > (max_prepared_bytes_ - prepared_bytes_ - max_block_bytes_) / max_block_bytes_)
+        return std::nullopt;
+    Entry &entry = it->second;
+    entry.state = State::encoding;
+    ++entry.generation;
+    ++in_flight_;
+    ++clock_;
+    Ticket ticket{key, entry.generation, entry.revision, entry.pin};
+    active_jobs_[key].emplace(ticket.generation, ticket);
+    return ticket;
 }
 
 bool NativeVoxelBlockDemand::same(const Entry &entry, const Ticket &ticket) {
