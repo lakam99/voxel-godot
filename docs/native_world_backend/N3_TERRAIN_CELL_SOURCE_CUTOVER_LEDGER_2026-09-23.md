@@ -32,6 +32,16 @@ The stronger missing-neighbor check passes at
 `artifacts/native-world-backend/n3-terrain-runtime-owner-1790172570225-d0c9c2f2/report.json`
 in the isolated N3 worktree.
 
+Release-candidate inspection now binds the pending plan to the live owner
+instance, source identity/epoch, native revision and barrier identity before
+checking all subwindow/mesh receipts. Forged owner, stale revision, foreign
+epoch, partial and duplicate candidates are covered by the installed-engine
+service fixture at
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790172721925-a15dd1ec/report.json`.
+Even a structurally complete candidate returns
+`production_physical_owner_unbound`: caller dictionaries cannot attest to live
+collision or actor occupancy, and this method never clears the barrier.
+
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and
