@@ -3,6 +3,7 @@
 
 #include "native_effective_terrain_batch.hpp"
 #include "native_biome_environment_catalog.hpp"
+#include "native_feature_delta.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
@@ -45,7 +46,7 @@ public:
 	godot::Dictionary initialize(const godot::Dictionary &p_request);
 	godot::Dictionary initialize_from_save_v2(const godot::Dictionary &p_request);
 	godot::Dictionary export_terrain_volume_v2() const;
-	godot::Dictionary admit_removed_props_tombstones(const godot::Dictionary &p_capture) const;
+	godot::Dictionary admit_removed_props_tombstones(const godot::Dictionary &p_capture);
 	godot::Dictionary admit_biome_environment_catalog(const godot::Dictionary &p_capture);
 	godot::Dictionary admit_visual_asset_catalog(const godot::Dictionary &p_bundle);
 	godot::Dictionary select_rock_asset_shadow(const godot::String &p_biome,
@@ -68,6 +69,11 @@ private:
 	std::unique_ptr<voxel::world_backend::NativeWorldBackendState> state_;
 	std::unique_ptr<voxel::world_backend::NativeTerrainShapingRegistry> shaping_registry_;
 	std::unique_ptr<voxel::world_backend::NativeBiomeEnvironmentCatalog> biome_catalog_;
+	std::unique_ptr<voxel::world_backend::NativeFeatureDeltaSnapshot> removed_props_;
+	std::int64_t removed_capture_owner_id_ = 0;
+	std::int64_t removed_capture_revision_ = 0;
+	std::string removed_capture_identity_;
+	std::string removed_fd1_identity_;
 	std::int64_t biome_capture_owner_id_ = 0;
 	std::int64_t biome_capture_revision_ = 0;
 	std::string biome_capture_identity_;

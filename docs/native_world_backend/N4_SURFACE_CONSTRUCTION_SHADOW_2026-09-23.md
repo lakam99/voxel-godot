@@ -151,8 +151,11 @@ It validates strict sorted UTF-8 IDs, bounds, seed, capture content hash and
 the FD1 tombstone grammar, but returns only a shadow, incomplete typed
 receipt. A forged internally consistent capture cannot establish current
 Main ownership: the caller must run `ActiveRemovedPropsSnapshot.is_current`
-immediately before any eventual native feature publication. The adapter does
-not retain the typed set or produce feature footprints yet.
+immediately before any eventual native feature publication. The adapter now
+retains the typed set under its native owner and clears it on rejected
+replacement. A focused direct contract for retention remains pending the
+next debug extension build. It still does not produce feature footprints or
+prove current Main ownership at publication.
 `NativeWorldBackend.admit_biome_environment_catalog` now similarly converts
 the active 13-profile capture into the pure-core catalog and returns its typed
 identity, with exact numeric byte lanes and content-hash checks. Its focused

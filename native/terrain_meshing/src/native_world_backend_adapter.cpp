@@ -1648,10 +1648,15 @@ Dictionary NativeWorldBackend::select_rock_asset_shadow(
 	}
 }
 
-Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &p_capture) const {
+Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &p_capture) {
 	if (!state_ || !shaping_registry_) {
 		return envelope("admit_removed_props_tombstones", "failed", "backend_not_ready");
 	}
+	removed_props_.reset();
+	removed_capture_owner_id_ = 0;
+	removed_capture_revision_ = 0;
+	removed_capture_identity_.clear();
+	removed_fd1_identity_.clear();
 	try {
 		require_exact_keys(p_capture,
 			{"ok", "schemaVersion", "ownerInstanceId", "seed", "revision", "ids", "contentIdentity"},
@@ -1704,8 +1709,15 @@ Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &
 			throw std::invalid_argument("removed props capture content identity mismatch");
 		}
 		// FD1 admission validates UTF-8, uniqueness and canonical byte ordering.
-		const NativeFeatureDeltaSnapshot typed = NativeFeatureDeltaSnapshot::create(
+		NativeFeatureDeltaSnapshot typed = NativeFeatureDeltaSnapshot::create(
 			std::move(tombstones), {});
+		const std::string fd1_identity = sha256_hex(sha256(typed.canonical_binary()));
+		const std::int64_t tombstone_count = static_cast<std::int64_t>(typed.tombstones().size());
+		removed_props_ = std::make_unique<NativeFeatureDeltaSnapshot>(std::move(typed));
+		removed_capture_owner_id_ = owner_id;
+		removed_capture_revision_ = revision;
+		removed_capture_identity_ = claimed_identity;
+		removed_fd1_identity_ = fd1_identity;
 		Dictionary result = envelope("admit_removed_props_tombstones", "ready");
 		result["receiptSchema"] = REMOVED_PROPS_RECEIPT_SCHEMA;
 		result["scope"] = "removed_prop_tombstones_only";
@@ -1716,8 +1728,8 @@ Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &
 		result["captureContentIdentity"] = text(claimed_identity);
 		result["nativeOwnerInstanceId"] = static_cast<int64_t>(get_instance_id());
 		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
-		result["tombstoneCount"] = static_cast<int64_t>(typed.tombstones().size());
-		result["fd1Identity"] = text(sha256_hex(sha256(typed.canonical_binary())));
+		result["tombstoneCount"] = tombstone_count;
+		result["fd1Identity"] = text(fd1_identity);
 		return result;
 	} catch (const std::exception &error) {
 		return failure("admit_removed_props_tombstones", error);
@@ -1766,6 +1778,14 @@ Dictionary NativeWorldBackend::status() const {
 	result["preparedShapingResolutionsSupported"] = true;
 	result["saveV2InitializationSupported"] = true;
 	result["terrainVolumeV2ExportSupported"] = true;
+	result["removedPropsReady"] = removed_props_ != nullptr;
+	if (removed_props_) {
+		result["removedPropsFd1Identity"] = text(removed_fd1_identity_);
+		result["removedPropsCaptureOwnerInstanceId"] = removed_capture_owner_id_;
+		result["removedPropsCaptureRevision"] = removed_capture_revision_;
+		result["removedPropsCaptureContentIdentity"] = text(removed_capture_identity_);
+		result["removedPropsCount"] = static_cast<int64_t>(removed_props_->tombstones().size());
+	}
 	result["biomeCatalogReady"] = biome_catalog_ != nullptr;
 	if (biome_catalog_) {
 		result["biomeCatalogIdentity"] = text(sha256_hex(biome_catalog_->content_digest()));

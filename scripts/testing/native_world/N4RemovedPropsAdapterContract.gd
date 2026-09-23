@@ -21,6 +21,7 @@ func initialization() -> Dictionary:
 
 func rejected(backend: Object, capture: Dictionary, label: String) -> void:
 	check(backend.call("admit_removed_props_tombstones", capture).get("status") == "failed", label)
+	check(not bool(backend.status().get("removedPropsReady", false)), label + " clears retained tombstones")
 
 func run() -> void:
 	var backend = ClassDB.instantiate("NativeWorldBackend")
@@ -29,6 +30,7 @@ func run() -> void:
 		finish()
 		return
 	check(backend.initialize(initialization()).get("status") == "ready", "backend initialization")
+	check(not bool(backend.status().get("removedPropsReady", false)), "native tombstones initially absent")
 	var owner := CaptureOwner.new()
 	var capture: Dictionary = Snapshot.capture(owner)
 	check(capture.get("ok") == true, "source capture")
@@ -40,6 +42,10 @@ func run() -> void:
 	check(receipt.get("tombstoneCount") == 2 and String(receipt.get("fd1Identity", "")).length() == 64, "typed count and identity")
 	check(receipt.get("captureRevision") == 2 and receipt.get("captureOwnerInstanceId") == owner.get_instance_id(), "capture provenance")
 	check(receipt.get("sourceIdentity") == backend.status().get("sourceIdentity"), "source identity binding")
+	check(backend.status().get("removedPropsReady") == true
+		and backend.status().get("removedPropsFd1Identity") == receipt.get("fd1Identity")
+		and backend.status().get("removedPropsCaptureContentIdentity") == capture.contentIdentity,
+		"typed tombstones retained by native owner")
 	var changed := capture.duplicate(true)
 	changed.schemaVersion = 2
 	rejected(backend, changed, "schema tamper")
@@ -67,7 +73,8 @@ func run() -> void:
 	changed = capture.duplicate(true)
 	changed.ids = ["é".repeat(512)]
 	changed.contentIdentity = Snapshot._identity(changed.ids)
-	check(backend.admit_removed_props_tombstones(changed).get("status") == "ready", "exact unicode byte limit")
+	check(backend.admit_removed_props_tombstones(changed).get("status") == "ready"
+		and backend.status().get("removedPropsReady") == true, "exact unicode byte limit")
 	changed.ids = ["é".repeat(513)]
 	changed.contentIdentity = Snapshot._identity(changed.ids)
 	rejected(backend, changed, "unicode byte overflow")
