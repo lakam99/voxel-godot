@@ -40,6 +40,8 @@ var progress_heartbeat_last_usec := 0
 var progress_heartbeat_last_owner := ""
 var progress_heartbeat_last_status := ""
 var progress_heartbeat_last_metrics := {}
+var work_proof_rows: Array[Dictionary] = []
+var last_work_revision := 0
 var timeline_observation_started := false
 var timeline_initial_snapshot_size := -1
 var timeline_initial_snapshot_at_capacity := false
@@ -180,6 +182,7 @@ func attach_main_if_available() -> void:
 	if main.has_signal("startup_loading_failed") and not main.is_connected("startup_loading_failed", failed_callback):
 		main.connect("startup_loading_failed", failed_callback)
 	capture_startup_timeline()
+	observe_completed_work()
 	observe_main_callback_monitor(true)
 	var domains = main.get("startup_readiness_domains")
 	if domains is Dictionary and String(domains.get("gameplay", {}).get("status", "")) == "ready" and not bool(main.get("startup_loading_active")):
@@ -202,7 +205,29 @@ func observe_loading_frame() -> void:
 		first_loading_usec = now_usec
 		write_progress("first_loading_frame")
 	capture_startup_timeline()
+	observe_completed_work()
 	observe_main_callback_monitor(false)
+
+func observe_completed_work() -> void:
+	if main == null or not is_instance_valid(main) or input_started_usec <= 0:
+		return
+	var receipt = main.get("startup_work_progress_receipt")
+	if not (receipt is Dictionary) or receipt.is_empty():
+		return
+	var revision := int(receipt.get("completedRevision", 0))
+	if revision <= last_work_revision:
+		return
+	last_work_revision = revision
+	var observed_usec := Time.get_ticks_usec()
+	work_proof_rows.append({
+		"owner": String(receipt.get("owner", "")),
+		"completedRevision": revision,
+		"completedCount": int(receipt.get("completedCount", -1)),
+		"pendingWorkCount": int(receipt.get("pendingWorkCount", -1)),
+		"completedAtTicksUsec": int(receipt.get("completedAtTicksUsec", 0)),
+		"observedAtInputMs": float(observed_usec - input_started_usec) / 1000.0,
+		"activeWorkAgeMs": float(observed_usec - int(receipt.get("completedAtTicksUsec", 0))) / 1000.0
+	})
 
 func capture_startup_timeline() -> void:
 	if main == null or not is_instance_valid(main):
@@ -286,6 +311,7 @@ func modal_visible() -> bool:
 
 func _on_loading_step(message: String) -> void:
 	capture_startup_timeline()
+	observe_completed_work()
 	loading_signal_rows.append({
 		"elapsedMs": elapsed_ms(input_started_usec),
 		"message": message
@@ -410,10 +436,10 @@ func write_report(passed: bool, reason: String) -> void:
 				"lastMetrics": progress_heartbeat_last_metrics
 			},
 			"progressHeartbeat": {
-				"source": "unavailable",
-				"verified": false,
-				"reason": "no_common_authoritative_completed_work_revision",
-				"workProofRows": []
+				"source": "MainCore.startup_work_progress_revision",
+				"verified": not work_proof_rows.is_empty(),
+				"reason": "source_owned_completed_publication_or_ready_transition",
+				"workProofRows": work_proof_rows
 			}
 		},
 		"mainCallbackWindowAtReady": main_callback_window_at_ready,
