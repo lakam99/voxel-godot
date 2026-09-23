@@ -405,14 +405,19 @@ one:
 
 ### Atomic Staging Plan
 
-Stage A adds a retained Main load transaction and owner lifecycle behind the
-existing production source. It freezes source inputs and one v2 snapshot,
-retains pending work, exposes progress, and drains on cancellation. It does not
-publish native gameplay queries or collision, so the current source remains
-the only authority. Stage A is the first safe PR-sized implementation step:
-make transaction ownership and retry/cancel semantics concrete without
-changing visible terrain or readiness. It should carry focused no-lag
-measurement for frame time while pages are pending and during cancel/drain.
+Stage A's intended contract is a retained Main load transaction behind the
+existing production source: freeze exact source inputs and one v2 snapshot,
+retain pending work, expose progress, and drain cancellation without publishing
+native gameplay queries or collision. An initial prototype wired synchronous
+native initialization into deferred Main startup, but review found that its
+snapshot construction/deep copies and `initialize_from_save_v2()` parse the
+whole durable volume inline. The explicit staged New Game and runtime Continue
+paths were also not wired to that transaction. That unsafe/partial Main hook
+has been removed. The fixture-fed transaction remains service evidence only;
+it is not Stage A completion. See
+`N3_RESPONSIVE_MAIN_LOAD_INITIALIZER_DESIGN_2026-09-23.md` for the measured
+limitation and the bounded native-import design required before re-integrating
+it with Main.
 
 Stage B routes cell reads and durable mutations through that retained owner.
 It cannot ship until gate 2 parity and gate 3 pending semantics pass. Stage C

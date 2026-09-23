@@ -555,24 +555,13 @@ func test_scene_bootstrap() -> void:
     var chunks := get_chunks()
     add_result("scene_bootstrap", main != null and player != null and camera != null, "main/player/camera present")
     add_result("initial_chunks_loaded", chunks.size() >= expected_chunks, "%d chunks" % chunks.size())
-    var native_load = main.get("native_terrain_load_transaction") if main != null else null
-    var native_load_state: Dictionary = main.get("native_terrain_load_transaction_state") if main != null else {}
-    var native_load_snapshot: Dictionary = native_load.snapshot() if native_load != null else {}
-    var native_identity: Dictionary = native_load_snapshot.get("sourceIdentity", {})
-    var native_transaction_started: bool = native_load != null \
-        and native_load_state.get("status") in ["pending", "ready"] \
-        and native_load_snapshot.get("state") in ["pending", "ready"] \
-        and int(native_load_snapshot.get("transactionId", 0)) != 0 \
-        and native_identity.get("algorithm") == "sha256" \
-        and native_identity.get("hex", "").length() == 64
-    add_result("native_load_transaction_retained", native_transaction_started,
-        "state %s/%s transaction %s source %s start %dus maxAdvance %dus" % [
-            String(native_load_state.get("status", "missing")),
-            String(native_load_snapshot.get("state", "missing")),
-            str(native_load_snapshot.get("transactionId", 0)),
-            String(native_identity.get("hex", "")),
-            int(main.get("native_terrain_load_transaction_start_usec")),
-            int(main.get("native_terrain_load_transaction_max_advance_usec"))])
+    var has_native_load_main_hook := main != null \
+        and (main.has_method("begin_native_terrain_load_preparation") \
+            or main.has_method("advance_native_terrain_load_preparation") \
+            or main.has_method("stop_native_terrain_load_preparation"))
+    add_result("native_load_transaction_not_wired_before_bounded_import",
+        main != null and not has_native_load_main_hook,
+        "native initialization remains fixture-only until a bounded, cancellation-aware import can serve staged New Game and Continue")
     var voxel_runtime = main.get("voxel_terrain_runtime") if main != null else null
     var voxel_terrain = voxel_runtime.get("terrain") if voxel_runtime != null else null
     var voxel_viewer = voxel_runtime.get("viewer") if voxel_runtime != null else null

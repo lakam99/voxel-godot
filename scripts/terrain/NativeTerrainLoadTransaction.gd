@@ -112,6 +112,12 @@ func cancel() -> Dictionary:
 		_state = "drained"
 		return {"status":"ready", "drained":true}
 	if _state == "ready": return {"status":"failed", "reason":"transaction_already_ready"}
+	# Admission.advance() may enqueue shared Citadel source work. Until this
+	# transaction uses consumer leases and observes their retirement ack, it is
+	# safe to release only before the first advance could issue page demand.
+	if _advance_count > 0:
+		return {"status":"failed", "reason":"active_source_cancellation_unsupported",
+			"drained":false, "state":_state}
 	_cancel_requested = true
 	_state = "draining"
 	return advance()
