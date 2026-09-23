@@ -6,6 +6,7 @@
 #include "native_surface_forage_ordered_definition.hpp"
 #include "native_surface_ore_cluster_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
+#include "native_surface_wildlife_ordered_definition.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
 
@@ -88,6 +89,10 @@ String text(const std::string &p_value) {
 }
 
 Vector3 world_vector(const WorldFloat32Position &p_value) {
+	return Vector3(p_value.x, p_value.y, p_value.z);
+}
+
+Vector3 wildlife_vector(const NativeWildlifeVec3 &p_value) {
 	return Vector3(p_value.x, p_value.y, p_value.z);
 }
 
@@ -2238,6 +2243,57 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 				for (const NativeSurfaceOreChildDefinition &child : ore.children())
 					children.append(ore_child_shadow(child));
 				feature["children"] = children;
+				row["feature"] = feature;
+			}
+			if (source.outcome == NativeSurfacePropClassificationOutcome::wildlife_recipe) {
+				const NativeSurfaceWildlifeOrderedDefinition wildlife =
+					NativeSurfaceWildlifeOrderedDefinition::create(ordered, placement,
+						static_cast<std::uint32_t>(index), terrain, *biome_catalog_, *wildlife_presentations_);
+				const NativeWildlifeStream &stream = wildlife.stream();
+				const NativeWildlifeDecodedConstruction &built = wildlife.construction();
+				Dictionary feature;
+				feature["kind"] = "wildlife";
+				feature["contentIdentity"] = text(sha256_hex(wildlife.content_digest()));
+				feature["variant"] = static_cast<std::int64_t>(stream.recipe.variant);
+				feature["materialId"] = text(stream.recipe.material_id);
+				feature["primaryDropId"] = text(stream.recipe.primary_drop_id);
+				feature["primaryDropCount"] = stream.primary_drop_count;
+				feature["extraDropId"] = text(stream.recipe.extra_drop_id);
+				feature["extraDropCount"] = stream.extra_drop_count;
+				feature["cold"] = stream.cold;
+				feature["bodyYaw"] = built.body_yaw;
+				feature["colliderSize"] = wildlife_vector(built.collider_size);
+				feature["colliderCenter"] = wildlife_vector(built.collider_center);
+				feature["collisionLayer"] = static_cast<std::int64_t>(stream.recipe.collision_layer);
+				feature["collisionMask"] = static_cast<std::int64_t>(stream.recipe.collision_mask);
+				feature["presentationPath"] = static_cast<std::int64_t>(built.presentation_path);
+				feature["assetId"] = text(stream.presentation.asset_id);
+				feature["animationClipId"] = text(stream.presentation.animation_clip_id);
+				feature["visualScale"] = wildlife_vector(built.visual_scale);
+				feature["visualRotation"] = wildlife_vector(built.visual_rotation);
+				feature["animationSpeedScale"] = built.animation_speed_scale;
+				Array meshes;
+				for (const NativeWildlifeMesh &mesh : built.procedural_meshes) {
+					Dictionary visual;
+					visual["kind"] = static_cast<std::int64_t>(mesh.kind);
+					visual["position"] = wildlife_vector(mesh.position);
+					visual["rotation"] = wildlife_vector(mesh.rotation);
+					visual["scale"] = wildlife_vector(mesh.scale);
+					visual["radius"] = mesh.radius;
+					visual["height"] = mesh.height;
+					visual["topRadius"] = mesh.top_radius;
+					visual["bottomRadius"] = mesh.bottom_radius;
+					visual["radialSegments"] = mesh.radial_segments;
+					visual["rings"] = mesh.rings;
+					visual["materialId"] = text(mesh.material_id);
+					meshes.append(visual);
+				}
+				feature["proceduralMeshes"] = meshes;
+				feature["movementHome"] = wildlife_vector(built.movement.home);
+				feature["movementDirection"] = wildlife_vector(built.movement.direction);
+				feature["movementTimer"] = built.movement.timer;
+				feature["movementSpeed"] = built.movement.speed;
+				feature["movementLastMove"] = built.movement.last_move;
 				row["feature"] = feature;
 			}
 			attempts.append(row);

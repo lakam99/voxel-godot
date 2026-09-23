@@ -386,6 +386,21 @@ facts, and verifies that the tombstone suppresses the same child and changes
 the later shared-RNG stream. This remains direct-service shadow evidence;
 full atomic publication and live gameplay/save/collision cutover remain open.
 
+The adapter now also projects the native ordered wildlife definition into its
+shadow row, including chosen variant and drops, collider, presentation path,
+visual transform, animation speed and initial movement state. The rebuilt
+`n4-wildlife-adapter-shadow-01` native gate passed at
+`artifacts/native-world-backend/n4-wildlife-adapter-shadow-01/report.json`.
+The short direct production-method differential passed five cases and 140
+attempts with 30 forage definitions, two ore clusters and four wildlife
+bodies at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-e0a23629-0e26-49f9-900d-c97f4255ce1d.json`.
+All four wildlife samples used the admitted animated presentation path, so
+this run does not exercise procedural fallback meshes, imported GLB internals,
+headed movement, or publication authority. The probe now places each chunk at
+its actual world anchor before comparing movement-home float32 bits. N4
+remains shadow-only and the full all-family feature footprint is still open.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

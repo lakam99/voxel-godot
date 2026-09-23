@@ -106,6 +106,40 @@ func ore_geometry(body: StaticBody3D) -> Dictionary:
 		"seamCount":seams.size(),"glintCount":glints.size(),
 		"seams":seams,"glints":glints}
 
+func wildlife_geometry(body: StaticBody3D) -> Dictionary:
+	var collider: CollisionShape3D = null
+	var visual: Node3D = null
+	for child in body.get_children():
+		if child is CollisionShape3D:
+			collider = child
+		elif child is Node3D:
+			visual = child
+	if collider == null or not (collider.shape is BoxShape3D) or visual == null:
+		return {"captureError":"incomplete_wildlife_body"}
+	var animation_speed := 0.0
+	if body.has_meta("wildlife_animation_player_path"):
+		var player := body.get_node_or_null(NodePath(String(body.get_meta("wildlife_animation_player_path")))) as AnimationPlayer
+		if player != null:
+			animation_speed = player.speed_scale
+	return {"variant":String(body.get_meta("wildlife_variant", "")),
+		"primaryDropId":String(body.get_meta("drop", "")),
+		"primaryDropCount":int(body.get_meta("drop_count", -1)),
+		"extraDropId":String(body.get_meta("extra_drop", "")),
+		"extraDropCount":int(body.get_meta("extra_drop_count", -1)),
+		"bodyYawBits":bits(body.rotation.y),
+		"colliderSizeBits":vector_bits((collider.shape as BoxShape3D).size),
+		"colliderCenterBits":vector_bits(collider.position),
+		"collisionLayer":body.collision_layer,"collisionMask":body.collision_mask,
+		"presentationPath":2 if bool(body.get_meta("wildlife_animated", false)) else 1,
+		"visualScaleBits":vector_bits(visual.scale),
+		"visualRotationBits":vector_bits(visual.rotation),
+		"animationSpeedBits":bits(animation_speed),
+		"movementHomeBits":vector_bits(body.get_meta("wildlife_home", Vector3.ZERO)),
+		"movementDirectionBits":vector_bits(body.get_meta("wildlife_direction", Vector3.ZERO)),
+		"movementTimerBits":bits(float(body.get_meta("wildlife_timer", 0.0))),
+		"movementSpeedBits":bits(float(body.get_meta("wildlife_speed", 0.0))),
+		"movementLastMoveBits":bits(float(body.get_meta("wildlife_last_move", 0.0)))}
+
 func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
@@ -165,6 +199,8 @@ func run() -> void:
 func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 	var chunk := Node3D.new()
 	root.add_child(chunk)
+	chunk.global_position = Vector3(float(chunk_key.x * 28) * 1.35, 0.0,
+		float(chunk_key.y * 28) * 1.35)
 	var state: Dictionary = main.begin_chunk_prop_spawn_state(chunk, chunk_key.x, chunk_key.y)
 	var backend = ClassDB.instantiate("NativeWorldBackend")
 	var initialized: Dictionary = backend.initialize(native_initialization(main.seed_text))
@@ -210,6 +246,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			if child is StaticBody3D and String(child.get_meta("prop_id", "")) in [id,id + ":cluster1"] \
 					and String(child.get_meta("material", "")) in ["ironOre","copperOre"]:
 				ore_children.append(ore_geometry(child))
+			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
+					and String(child.get_meta("material", "")) == "wildlife":
+				direct_row["wildlife"] = wildlife_geometry(child)
 		if not ore_children.is_empty():
 			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
@@ -271,6 +310,26 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 					"seams":seams,"glints":glints})
 			projected_feature = {"kind":feature.kind,"oreKind":feature.oreKind,
 				"rootDurableId":feature.rootDurableId,"children":children}
+		elif feature.get("kind") == "wildlife":
+			projected_feature = {"kind":feature.kind,"variant":feature.variant,
+				"primaryDropId":feature.primaryDropId,
+				"primaryDropCount":feature.primaryDropCount,
+				"extraDropId":feature.extraDropId,
+				"extraDropCount":feature.extraDropCount,
+				"bodyYawBits":bits(feature.bodyYaw),
+				"colliderSizeBits":vector_bits(feature.colliderSize),
+				"colliderCenterBits":vector_bits(feature.colliderCenter),
+				"collisionLayer":feature.collisionLayer,
+				"collisionMask":feature.collisionMask,"cold":feature.cold,
+				"presentationPath":feature.presentationPath,
+				"visualScaleBits":vector_bits(feature.visualScale),
+				"visualRotationBits":vector_bits(feature.visualRotation),
+				"animationSpeedBits":bits(feature.animationSpeedScale),
+				"movementHomeBits":vector_bits(feature.movementHome),
+				"movementDirectionBits":vector_bits(feature.movementDirection),
+				"movementTimerBits":bits(feature.movementTimer),
+				"movementSpeedBits":bits(feature.movementSpeed),
+				"movementLastMoveBits":bits(feature.movementLastMove)}
 		native_rows.append({"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"durableId":row.durableId,"stateBeforeCoordinates":row.stateBeforeCoordinates,
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,

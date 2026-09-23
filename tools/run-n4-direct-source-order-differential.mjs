@@ -18,6 +18,7 @@ const processResult = await runGodotProcess(executable, command, {
 const failures = [];
 let forageDefinitionsCompared = 0;
 let oreClustersCompared = 0;
+let wildlifeDefinitionsCompared = 0;
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
@@ -118,11 +119,32 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
         }
       }
     }
+    if (native.outcome === 9) {
+      const expected = native.feature, actual = direct.wildlife;
+      if (expected?.kind !== 'wildlife' || !actual || actual.captureError) {
+        failures.push(`${label} attempt ${index} wildlife definition or live body missing`);
+      } else {
+        wildlifeDefinitionsCompared++;
+        const variant = {1: 'boar', 2: 'deer', 3: 'hare'}[expected.variant];
+        if (actual.variant !== variant) failures.push(`${label} attempt ${index} wildlife variant mismatch`);
+        if (expected.cold !== ['snow', 'tundra', 'alpine', 'taiga'].includes(native.sourceBiome))
+          failures.push(`${label} attempt ${index} wildlife cold-biome mismatch`);
+        for (const field of ['primaryDropId', 'primaryDropCount', 'extraDropId', 'extraDropCount',
+          'bodyYawBits', 'collisionLayer', 'collisionMask', 'presentationPath', 'animationSpeedBits', 'movementTimerBits',
+          'movementSpeedBits', 'movementLastMoveBits'])
+          if (actual[field] !== expected[field]) failures.push(`${label} attempt ${index} wildlife ${field} mismatch`);
+        for (const field of ['colliderSizeBits', 'colliderCenterBits', 'visualScaleBits',
+          'visualRotationBits', 'movementHomeBits', 'movementDirectionBits'])
+          if (JSON.stringify(actual[field]) !== JSON.stringify(expected[field]))
+            failures.push(`${label} attempt ${index} wildlife ${field} mismatch`);
+      }
+    }
   }
   if (uint64(sample.directFinalRngState) !== uint64(sample.nativeFinalRngState)) failures.push(`${label} final RNG state mismatch`);
 }
 if (forageDefinitionsCompared === 0) failures.push('No forage definitions were compared');
 if (oreClustersCompared === 0) failures.push('No ore clusters were compared');
+if (wildlifeDefinitionsCompared === 0) failures.push('No wildlife definitions were compared');
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -132,6 +154,7 @@ const report = {
   })) ?? [],
   forageDefinitionsCompared,
   oreClustersCompared,
+  wildlifeDefinitionsCompared,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };
