@@ -153,6 +153,19 @@ receipt. A forged internally consistent capture cannot establish current
 Main ownership: the caller must run `ActiveRemovedPropsSnapshot.is_current`
 immediately before any eventual native feature publication. The adapter does
 not retain the typed set or produce feature footprints yet.
+`NativeWorldBackend.admit_biome_environment_catalog` now similarly converts
+the active 13-profile capture into the pure-core catalog and returns its typed
+identity, with exact numeric byte lanes and content-hash checks. Its focused
+Godot adapter contract at
+`artifacts/native-world-backend/n4-biome-catalog-adapter-contract.json`
+passed with no failures after a debug/release build. Both admissions remain
+partial shadow receipts bound to a native owner; neither is a retained native
+catalog or an all-28-attempt job.
+The attempted aggregate `n4-removed-adapter-01` at
+`artifacts/native-world-backend/n4-removed-adapter-01/report.json` failed its
+debug extension source-inventory comparison because these adapter edits began
+after its pre-build inventory. It is a reproducibility rejection, not a native
+test assertion or a passing gate. A new aggregate on settled source is required.
 
 ## Integrated result and deletion review
 

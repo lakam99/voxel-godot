@@ -1,11 +1,13 @@
 #include "native_world_backend_adapter.h"
 
 #include "biome_region_field.hpp"
+#include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
@@ -18,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -36,6 +39,7 @@ constexpr const char *INITIALIZE_FROM_SAVE_V2_SCHEMA = "n3-native-world-backend-
 constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request/v1";
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
 constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone-receipt/v1";
+constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catalog-receipt/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -192,6 +196,53 @@ bool require_bool(const Variant &p_value, const char *p_field) {
 		throw std::invalid_argument(std::string(p_field) + " must be a bool");
 	}
 	return static_cast<bool>(p_value);
+}
+
+template <typename T> std::string numeric_bytes_hex(T value) {
+	std::uint8_t bytes[sizeof(T)];
+	std::memcpy(bytes, &value, sizeof(T));
+	static constexpr char digits[] = "0123456789abcdef";
+	std::string result;
+	result.reserve(sizeof(T) * 2U);
+	for (std::uint8_t byte : bytes) {
+		result.push_back(digits[byte >> 4U]);
+		result.push_back(digits[byte & 15U]);
+	}
+	return result;
+}
+
+double require_snapshot_numeric(const Variant &value, const char *field, bool packed_float32) {
+	const Dictionary record = require_dictionary(value, field);
+	require_exact_keys(record, {"value", "float32BytesHex", "float64BytesHex"}, field);
+	if (record["value"].get_type() != Variant::FLOAT) {
+		throw std::invalid_argument(std::string(field) + ".value must be float64");
+	}
+	const double number = require_number(record["value"], field);
+	const float narrowed = static_cast<float>(number);
+	if (!std::isfinite(narrowed) || (packed_float32 && static_cast<double>(narrowed) != number)
+			|| require_bounded_utf8(record["float32BytesHex"], field, 8U, false) != numeric_bytes_hex(narrowed)
+			|| require_bounded_utf8(record["float64BytesHex"], field, 16U, false) != numeric_bytes_hex(number)) {
+		throw std::invalid_argument(std::string(field) + " numeric bit semantics mismatch");
+	}
+	return number;
+}
+
+std::vector<std::string> require_snapshot_strings(const Variant &value, const char *field) {
+	const Array array = require_array(value, field);
+	if (array.size() > 64) throw std::length_error(std::string(field) + " exceeds capacity");
+	std::vector<std::string> result;
+	result.reserve(static_cast<std::size_t>(array.size()));
+	for (const Variant &entry : array) result.push_back(require_bounded_utf8(entry, field, 1024U));
+	return result;
+}
+
+std::vector<float> require_snapshot_floats(const Variant &value, const char *field) {
+	const Array array = require_array(value, field);
+	if (array.size() > 64) throw std::length_error(std::string(field) + " exceeds capacity");
+	std::vector<float> result;
+	result.reserve(static_cast<std::size_t>(array.size()));
+	for (const Variant &entry : array) result.push_back(static_cast<float>(require_snapshot_numeric(entry, field, true)));
+	return result;
 }
 
 std::uint64_t require_u64(const Variant &p_value, const char *p_field) {
@@ -1205,6 +1256,7 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("initialize_from_save_v2", "request"), &NativeWorldBackend::initialize_from_save_v2);
 	ClassDB::bind_method(D_METHOD("export_terrain_volume_v2"), &NativeWorldBackend::export_terrain_volume_v2);
 	ClassDB::bind_method(D_METHOD("admit_removed_props_tombstones", "capture"), &NativeWorldBackend::admit_removed_props_tombstones);
+	ClassDB::bind_method(D_METHOD("admit_biome_environment_catalog", "capture"), &NativeWorldBackend::admit_biome_environment_catalog);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
 	ClassDB::bind_method(D_METHOD("apply_shaping_resolutions", "resolutions"), &NativeWorldBackend::apply_shaping_resolutions);
@@ -1296,6 +1348,118 @@ Dictionary NativeWorldBackend::export_terrain_volume_v2() const {
 	}
 }
 
+Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary &p_capture) const {
+	constexpr const char *operation = "admit_biome_environment_catalog";
+	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	try {
+		require_exact_keys(p_capture,
+			{"ok", "schemaVersion", "ownerReceipt", "fallbackId", "contentIdentity", "profiles"}, "biome capture");
+		if (!require_bool(p_capture["ok"], "capture.ok")
+				|| require_i64(p_capture["schemaVersion"], "capture.schemaVersion") != 1) {
+			throw std::invalid_argument("unsupported biome capture schema");
+		}
+		const Dictionary owner = require_dictionary(p_capture["ownerReceipt"], "capture.ownerReceipt");
+		require_exact_keys(owner, {"owner_id", "revision", "ready"}, "capture.ownerReceipt");
+		const std::int64_t owner_id = require_i64(owner["owner_id"], "capture.ownerReceipt.owner_id");
+		const std::int64_t revision = require_i64(owner["revision"], "capture.ownerReceipt.revision");
+		if (owner_id == 0 || revision <= 0 || !require_bool(owner["ready"], "capture.ownerReceipt.ready")) {
+			throw std::invalid_argument("biome capture source is not ready");
+		}
+		const std::string fallback = require_bounded_utf8(p_capture["fallbackId"], "capture.fallbackId", 64U, false);
+		if (fallback != "default") throw std::invalid_argument("biome fallback is unsupported");
+		const Array rows = require_array(p_capture["profiles"], "capture.profiles");
+		if (rows.size() != static_cast<int64_t>(NativeBiomeEnvironmentCatalog::PROFILE_COUNT)) {
+			throw std::invalid_argument("biome profile count mismatch");
+		}
+		std::vector<NativeBiomeEnvironmentProfile> profiles;
+		profiles.reserve(NativeBiomeEnvironmentCatalog::PROFILE_COUNT);
+		for (const Variant &entry : rows) {
+			const Dictionary row = require_dictionary(entry, "capture.profiles[]");
+			require_exact_keys(row, {"biomeId", "biome_id", "forage_material", "forage_drop", "tree_architecture",
+				"cold_weather", "forage_drop_min", "forage_drop_max", "tree_scale", "rock_scale", "tree_chance",
+				"rock_base_chance", "forage_chance", "wildlife_chance", "forage_radius", "weather_precip",
+				"weather_clouds", "detail_max_height_above_water", "tree_height_min", "tree_height_max",
+				"crown_radius_min", "crown_radius_max", "trunk_radius_min", "trunk_radius_max",
+				"old_growth_chance", "wind_response", "canopy_density", "natural_prop_exclusion_margin",
+				"tree_visibility_range", "tree_shadow_range", "tree_age_min_years", "tree_age_typical_years",
+				"tree_age_max_years", "tree_maturity_cell_scale", "tree_maturity_influence", "tree_local_age_span",
+				"tree_age_distribution_skew", "tree_height_growth_exponent", "tree_girth_growth_exponent",
+				"tree_crown_growth_exponent", "tree_families", "rock_families", "detail_types",
+				"detail_thresholds", "detail_y_offsets", "detail_scale_mins", "detail_scale_maxs",
+				"tree_age_band_thresholds"}, "capture.profiles[]");
+			NativeBiomeEnvironmentProfile profile;
+			profile.biome_id = require_bounded_utf8(row["biome_id"], "profile.biome_id", 1024U, false);
+			if (profile.biome_id != require_bounded_utf8(row["biomeId"], "profile.biomeId", 1024U, false)) {
+				throw std::invalid_argument("biome ID alias mismatch");
+			}
+#define SNAP_TEXT(name) profile.name = require_bounded_utf8(row[#name], "profile." #name, 1024U, false)
+#define SNAP_BOOL(name) profile.name = require_bool(row[#name], "profile." #name)
+#define SNAP_INT(name) profile.name = require_i32(row[#name], "profile." #name)
+#define SNAP_SCALAR(name) profile.name = require_snapshot_numeric(row[#name], "profile." #name, false)
+#define SNAP_STRINGS(name) profile.name = require_snapshot_strings(row[#name], "profile." #name)
+#define SNAP_FLOATS(name) profile.name = require_snapshot_floats(row[#name], "profile." #name)
+			SNAP_TEXT(forage_material); SNAP_TEXT(forage_drop); SNAP_TEXT(tree_architecture);
+			SNAP_BOOL(cold_weather); SNAP_INT(forage_drop_min); SNAP_INT(forage_drop_max);
+			SNAP_SCALAR(tree_scale); SNAP_SCALAR(rock_scale); SNAP_SCALAR(tree_chance);
+			SNAP_SCALAR(rock_base_chance); SNAP_SCALAR(forage_chance); SNAP_SCALAR(wildlife_chance);
+			SNAP_SCALAR(forage_radius); SNAP_SCALAR(weather_precip); SNAP_SCALAR(weather_clouds);
+			SNAP_SCALAR(detail_max_height_above_water); SNAP_SCALAR(tree_height_min); SNAP_SCALAR(tree_height_max);
+			SNAP_SCALAR(crown_radius_min); SNAP_SCALAR(crown_radius_max); SNAP_SCALAR(trunk_radius_min);
+			SNAP_SCALAR(trunk_radius_max); SNAP_SCALAR(old_growth_chance); SNAP_SCALAR(wind_response);
+			SNAP_SCALAR(canopy_density); SNAP_SCALAR(natural_prop_exclusion_margin);
+			SNAP_SCALAR(tree_visibility_range); SNAP_SCALAR(tree_shadow_range);
+			SNAP_SCALAR(tree_age_min_years); SNAP_SCALAR(tree_age_typical_years); SNAP_SCALAR(tree_age_max_years);
+			SNAP_SCALAR(tree_maturity_cell_scale); SNAP_SCALAR(tree_maturity_influence);
+			SNAP_SCALAR(tree_local_age_span); SNAP_SCALAR(tree_age_distribution_skew);
+			SNAP_SCALAR(tree_height_growth_exponent); SNAP_SCALAR(tree_girth_growth_exponent);
+			SNAP_SCALAR(tree_crown_growth_exponent);
+			SNAP_STRINGS(tree_families); SNAP_STRINGS(rock_families); SNAP_STRINGS(detail_types);
+			SNAP_FLOATS(detail_thresholds); SNAP_FLOATS(detail_y_offsets);
+			SNAP_FLOATS(detail_scale_mins); SNAP_FLOATS(detail_scale_maxs);
+			const std::vector<float> age_bands = require_snapshot_floats(row["tree_age_band_thresholds"], "profile.tree_age_band_thresholds");
+			if (age_bands.size() != profile.tree_age_band_thresholds.size()) {
+				throw std::invalid_argument("tree age band count mismatch");
+			}
+			std::copy(age_bands.begin(), age_bands.end(), profile.tree_age_band_thresholds.begin());
+#undef SNAP_TEXT
+#undef SNAP_BOOL
+#undef SNAP_INT
+#undef SNAP_SCALAR
+#undef SNAP_STRINGS
+#undef SNAP_FLOATS
+			profiles.push_back(std::move(profile));
+		}
+		const NativeBiomeEnvironmentCatalog typed = NativeBiomeEnvironmentCatalog::create(std::move(profiles), fallback);
+		Dictionary canonical;
+		canonical["domain"] = "biome_environment_resolved_catalog";
+		canonical["schemaVersion"] = 1;
+		canonical["fallbackId"] = "default";
+		canonical["profiles"] = rows;
+		const std::string identity = require_bounded_utf8(p_capture["contentIdentity"], "capture.contentIdentity", 64U, false);
+		const std::string canonical_text = utf8(JSON::stringify(canonical));
+		if (identity != sha256_hex(sha256(reinterpret_cast<const std::uint8_t *>(canonical_text.data()), canonical_text.size()))) {
+			throw std::invalid_argument("biome capture content identity mismatch");
+		}
+		Dictionary result = envelope(operation, "ready");
+		result["receiptSchema"] = BIOME_CATALOG_RECEIPT_SCHEMA;
+		result["scope"] = "resolved_biome_environment_catalog_only";
+		result["completeSurfacePropSource"] = false;
+		result["liveCaptureFreshnessProven"] = false;
+		result["captureOwnerInstanceId"] = owner_id;
+		result["captureRevision"] = revision;
+		result["captureContentIdentity"] = text(identity);
+		result["nativeOwnerInstanceId"] = static_cast<int64_t>(get_instance_id());
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["nativeCatalogSchemaRevision"] = static_cast<int64_t>(NativeBiomeEnvironmentCatalog::SCHEMA_REVISION);
+		result["nativeCatalogIdentity"] = text(sha256_hex(typed.content_digest()));
+		result["profileCount"] = static_cast<int64_t>(typed.profiles().size());
+		result["fallbackId"] = text(typed.fallback_id());
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
 Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &p_capture) const {
 	if (!state_ || !shaping_registry_) {
 		return envelope("admit_removed_props_tombstones", "failed", "backend_not_ready");
@@ -1362,6 +1526,7 @@ Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &
 		result["captureOwnerInstanceId"] = owner_id;
 		result["captureRevision"] = revision;
 		result["captureContentIdentity"] = text(claimed_identity);
+		result["nativeOwnerInstanceId"] = static_cast<int64_t>(get_instance_id());
 		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
 		result["tombstoneCount"] = static_cast<int64_t>(typed.tombstones().size());
 		result["fd1Identity"] = text(sha256_hex(sha256(typed.canonical_binary())));
