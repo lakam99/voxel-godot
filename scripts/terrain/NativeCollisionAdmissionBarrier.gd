@@ -168,6 +168,25 @@ func release(identity: Dictionary) -> bool:
 	return true
 
 
+## Keep the old affected region held while a new source identity replaces its
+## physical owner. Release only after the coordinator proves the new complete
+## collision set and the old region remains actor-clear.
+func release_after_replacement(old_identity: Dictionary,
+		new_identity: Dictionary) -> bool:
+	if not _active or _terminal_hold or old_identity != _identity \
+			or new_identity.is_empty() or _collision_owner == null:
+		return false
+	if not bool(clearance(old_identity).get("clear", false)):
+		return false
+	var receipt: Dictionary = _collision_owner.call("physical_receipt", new_identity)
+	if not bool(receipt.get("ready", false)) \
+			or int(receipt.get("physicsFrame", -1)) < 0 \
+			or receipt.get("provenance", {}).get("requestIdentity") != new_identity:
+		return false
+	_clear()
+	return true
+
+
 ## Only a pre-install rejection with the previous live physical shapes intact
 ## may abandon admission. A rollback after shape mutation needs new proof.
 func abort(identity: Dictionary) -> bool:
