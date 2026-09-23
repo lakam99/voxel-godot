@@ -96,6 +96,9 @@ public:
 	godot::Dictionary commit_typed_cells(const godot::Dictionary &p_request);
 	godot::Dictionary commit_durable_cells(const godot::Dictionary &p_request);
 	godot::Dictionary pin_effective_page(const godot::Vector2i &p_primary_page) const;
+	// Serialized, shadow-service-only composite admission. Not a Voxel Tools
+	// worker callback or a production publication authority.
+	godot::Dictionary encode_voxel_block_shadow(const godot::Dictionary &p_request) const;
 
 private:
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_for_page(

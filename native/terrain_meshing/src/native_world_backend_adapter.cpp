@@ -4,6 +4,7 @@
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
 #include "native_effective_voxel_block.hpp"
+#include "native_multi_page_voxel_block.hpp"
 #include "native_surface_feature_manifest.hpp"
 #include "native_surface_forage_ordered_definition.hpp"
 #include "native_surface_ore_cluster_definition.hpp"
@@ -1481,6 +1482,7 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("commit_typed_cells", "request"), &NativeWorldBackend::commit_typed_cells);
 	ClassDB::bind_method(D_METHOD("commit_durable_cells", "request"), &NativeWorldBackend::commit_durable_cells);
 	ClassDB::bind_method(D_METHOD("pin_effective_page", "primary_page"), &NativeWorldBackend::pin_effective_page);
+	ClassDB::bind_method(D_METHOD("encode_voxel_block_shadow", "request"), &NativeWorldBackend::encode_voxel_block_shadow);
 }
 
 Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
@@ -3013,5 +3015,128 @@ Dictionary NativeWorldBackend::pin_effective_page(const Vector2i &p_primary_page
 		return result;
 	} catch (const std::exception &error) {
 		return failure("pin_effective_page", error);
+	}
+}
+
+Dictionary NativeWorldBackend::encode_voxel_block_shadow(const Dictionary &p_request) const {
+	constexpr const char *operation = "encode_voxel_block_shadow";
+	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	try {
+		if (require_protocol_string(p_request.get("schema", Variant()), "schema") != VOXEL_BLOCK_REQUEST_SCHEMA)
+			throw std::invalid_argument("unsupported native effective voxel block request schema");
+		const Vector3i origin = require_vector3i(p_request.get("origin", Variant()), "origin");
+		const Vector3i size = require_vector3i(p_request.get("size", Variant()), "size");
+		const std::int64_t lod = require_i64(p_request.get("lod", Variant()), "lod");
+		// Admit the bounded block before computing even one page dependency. The
+		// pure core independently repeats these limits before byte allocation.
+		if (size.x <= 0 || size.y <= 0 || size.z <= 0
+				|| size.x > 32 || size.y > 32 || size.z > 32 || lod < 0 || lod > 24)
+			throw std::invalid_argument("native shadow voxel block dimensions or LOD are invalid");
+		const std::int64_t scale = std::int64_t{1} << lod;
+		auto checked_cell = [scale](const std::int32_t base, const std::int32_t offset) {
+			const std::int64_t value = static_cast<std::int64_t>(base) + static_cast<std::int64_t>(offset) * scale;
+			// base is already int32, offset is admitted nonnegative, and scale is
+			// positive: the value cannot cross INT32_MIN, only INT32_MAX.
+			if (value > std::numeric_limits<std::int32_t>::max())
+				throw std::out_of_range("native shadow voxel block coordinate overflows int32");
+			return static_cast<std::int32_t>(value);
+		};
+		auto page_axis = [](const std::int32_t cell) {
+			constexpr std::int32_t page_cells = NativeTerrainShapingSnapshot::PAGE_CELLS;
+			return cell / page_cells - static_cast<std::int32_t>(cell % page_cells < 0);
+		};
+		(void)checked_cell(origin.y, size.y - 1);
+		std::vector<std::int32_t> x_pages;
+		std::vector<std::int32_t> z_pages;
+		for (std::int32_t x = 0; x < size.x; ++x) {
+			const std::int32_t page = page_axis(checked_cell(origin.x, x));
+			if (x_pages.empty() || x_pages.back() != page) x_pages.push_back(page);
+		}
+		for (std::int32_t z = 0; z < size.z; ++z) {
+			const std::int32_t page = page_axis(checked_cell(origin.z, z));
+			if (z_pages.empty() || z_pages.back() != page) z_pages.push_back(page);
+		}
+		const WorldPhysicalContentIdentity source_identity = state_->source_identity();
+		const WorldPhysicalContentIdentity registry_identity = shaping_registry_->content_identity();
+		const WorldPhysicalContentIdentity town_policy_identity = shaping_registry_->policy_content_identity();
+		const std::uint64_t registry_revision = shaping_registry_->revision();
+		const WorldDeltaPinnedSnapshot deltas = state_->pin_deltas();
+		std::vector<NativeTerrainPageKey> dependencies;
+		for (const std::int32_t z : z_pages) for (const std::int32_t x : x_pages) {
+			const auto pages = world_effective_shaping_dependencies(state_->definition(), {x, z});
+			dependencies.insert(dependencies.end(), pages.begin(), pages.end());
+		}
+		auto less_page = [](const NativeTerrainPageKey a, const NativeTerrainPageKey b) {
+			return a.z < b.z || (a.z == b.z && a.x < b.x);
+		};
+		std::sort(dependencies.begin(), dependencies.end(), less_page);
+		dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+		std::vector<NativeTerrainShapingPagePin> pins;
+		pins.reserve(dependencies.size());
+		std::vector<NativeSiteSourceRegionKey> unresolved;
+		std::vector<NativeSiteSourceRegionKey> failed_regions;
+		for (const NativeTerrainPageKey page : dependencies) {
+			NativeTerrainShapingPagePin pin = shaping_registry_->pin_page(page, town_overrides_for_page(page));
+			for (const auto region : pin.unresolved_dependencies())
+				if (std::find(unresolved.begin(), unresolved.end(), region) == unresolved.end())
+					unresolved.push_back(region);
+			for (const auto region : pin.failed_dependencies())
+				if (std::find(failed_regions.begin(), failed_regions.end(), region) == failed_regions.end())
+					failed_regions.push_back(region);
+			pins.push_back(std::move(pin));
+		}
+		if (state_->terrain_delta_revision() != deltas.revision()
+				|| shaping_registry_->revision() != registry_revision
+				|| !(shaping_registry_->content_identity() == registry_identity)
+				|| !(state_->source_identity() == source_identity))
+			return envelope(operation, "pending", "source_changed_retry");
+		if (!failed_regions.empty()) {
+			Dictionary result = envelope(operation, "failed", "shaping_dependency_failed");
+			result["failedRegions"] = regions_array(failed_regions);
+			return result;
+		}
+		if (!unresolved.empty()) {
+			Dictionary result = envelope(operation, "pending", "shaping_dependency_unresolved");
+			result["unresolvedRegions"] = regions_array(unresolved);
+			result["shapingRegistryRevision"] = static_cast<int64_t>(registry_revision);
+			result["shapingRegistryIdentity"] = identity_dictionary(registry_identity);
+			return result;
+		}
+		const NativeEffectiveVoxelBlock block = encode_native_multi_page_voxel_block(
+			state_->definition(), deltas, pins,
+			{cell_coord(origin), cell_coord(size), static_cast<std::uint32_t>(lod)});
+		if (state_->terrain_delta_revision() != deltas.revision()
+				|| shaping_registry_->revision() != registry_revision
+				|| !(shaping_registry_->content_identity() == registry_identity)
+				|| !(state_->source_identity() == source_identity))
+			return envelope(operation, "pending", "source_changed_retry");
+		auto packed = [](const std::vector<std::uint8_t> &bytes) {
+			PackedByteArray result;
+			result.resize(static_cast<int64_t>(bytes.size()));
+			std::memcpy(result.ptrw(), bytes.data(), bytes.size());
+			return result;
+		};
+		Dictionary result = envelope(operation, "ready");
+		result["resultSchema"] = VOXEL_BLOCK_RESULT_SCHEMA;
+		result["shadowOnly"] = true;
+		result["productionCutover"] = false;
+		result["origin"] = vector3i(block.origin);
+		result["size"] = vector3i(block.size);
+		result["lod"] = static_cast<int64_t>(block.lod);
+		result["sourceIdentity"] = identity_dictionary(source_identity);
+		result["pinIdentity"] = identity_dictionary(block.pin_identity);
+		result["terrainDeltaRevision"] = static_cast<int64_t>(block.terrain_delta_revision);
+		result["shapingRegistryRevision"] = static_cast<int64_t>(block.shaping_registry_revision);
+		result["shapingRegistryIdentity"] = identity_dictionary(registry_identity);
+		result["townPolicyIdentity"] = identity_dictionary(town_policy_identity);
+		result["ownerInstanceId"] = static_cast<int64_t>(get_instance_id());
+		result["primaryPageCount"] = static_cast<int64_t>(x_pages.size() * z_pages.size());
+		result["shapingPageCount"] = static_cast<int64_t>(dependencies.size());
+		result["sdf16Le"] = packed(block.sdf16_le);
+		result["indices8"] = packed(block.indices8);
+		result["data5_8"] = packed(block.data5_8);
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
 	}
 }

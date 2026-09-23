@@ -63,6 +63,10 @@ public:
     const WorldSourceDefinition &definition() const noexcept;
     const WorldPhysicalContentIdentity &source_identity() const noexcept;
     std::uint64_t terrain_delta_revision() const noexcept;
+    // One immutable snapshot for a composite multi-page admission. Callers
+    // must serialize this with registry/town-owner mutation and recheck before
+    // publication; this accessor is not a cross-authority transaction.
+    WorldDeltaPinnedSnapshot pin_deltas() const;
     WorldSourcePin pin_effective_page(
         NativeTerrainPageKey primary_page,
         const std::vector<NativeTerrainShapingPagePin> &shaping_pages) const;

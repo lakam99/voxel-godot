@@ -150,6 +150,9 @@ VWB_TEST(native_world_backend_state_owns_an_immutable_definition_and_empty_first
     VWB_EXPECT_EQ(std::string("backend-state-seed"), state.definition().admitted_biome_seed().utf8);
     VWB_EXPECT_EQ(state.definition().physical_content_identity(), state.source_identity());
     VWB_EXPECT_EQ(0ULL, state.terrain_delta_revision());
+    const WorldDeltaPinnedSnapshot empty_deltas = state.pin_deltas();
+    VWB_EXPECT_EQ(0ULL, empty_deltas.revision());
+    VWB_EXPECT(empty_deltas.durable_terrain_snapshot().records().empty());
 
     const WorldSourcePin first = state.pin_effective_page({0, 0}, shaping);
     VWB_EXPECT_EQ(state.source_identity(), first.definition().physical_content_identity());
@@ -173,6 +176,7 @@ VWB_TEST(native_world_backend_state_returns_the_delta_store_receipt_and_preserve
     NativeWorldBackendState state{WorldSourceDefinition(state_descriptor())};
     NativeTerrainShapingRegistry registry(state.definition(), shaping_policy());
     const auto shaping = ready_shaping(registry, {-1, 0});
+    const WorldDeltaPinnedSnapshot pinned_before = state.pin_deltas();
     const WorldSourcePin before = state.pin_effective_page({-1, 0}, shaping);
     const NativeWorldBackendTransaction transaction =
         set_transaction(state, "state:commit", 0, {-17, 4, 18});
@@ -183,6 +187,9 @@ VWB_TEST(native_world_backend_state_returns_the_delta_store_receipt_and_preserve
     VWB_EXPECT_EQ(1ULL, receipt.revision);
     VWB_EXPECT_EQ(27U, receipt.affected_sections.size());
     VWB_EXPECT_EQ(1ULL, state.terrain_delta_revision());
+    VWB_EXPECT_EQ(0ULL, pinned_before.revision());
+    VWB_EXPECT(!pinned_before.effective_typed_cell_at({-17, 4, 18}));
+    VWB_EXPECT_EQ(1ULL, state.pin_deltas().revision());
 
     const WorldSourcePin after = state.pin_effective_page({-1, 0}, shaping);
     VWB_EXPECT_EQ(0ULL, before.terrain_delta_revision());

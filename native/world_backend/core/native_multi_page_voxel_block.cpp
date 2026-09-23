@@ -81,14 +81,14 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
     }
     std::sort(required.begin(), required.end(), page_less);
     required.erase(std::unique(required.begin(), required.end()), required.end());
+    if (shaping_pages.size() != required.size())
+        throw std::invalid_argument("native multi-page voxel shaping dependency set is incomplete");
     std::vector<const NativeTerrainShapingPagePin *> supplied;
-    supplied.reserve(shaping_pages.size());
+    supplied.reserve(required.size());
     for (const auto &page : shaping_pages) supplied.push_back(&page);
     std::sort(supplied.begin(), supplied.end(), [](const auto *a, const auto *b) {
         return page_less(a->page_key(), b->page_key());
     });
-    if (supplied.size() != required.size())
-        throw std::invalid_argument("native multi-page voxel shaping dependency set is incomplete");
     for (std::size_t index = 0; index < required.size(); ++index) {
         const auto &page = *supplied[index];
         if (!(page.page_key() == required[index])

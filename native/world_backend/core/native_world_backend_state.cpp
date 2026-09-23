@@ -53,6 +53,10 @@ std::uint64_t NativeWorldBackendState::terrain_delta_revision() const noexcept {
     return deltas_.revision();
 }
 
+WorldDeltaPinnedSnapshot NativeWorldBackendState::pin_deltas() const {
+    return deltas_.pin();
+}
+
 WorldSourcePin NativeWorldBackendState::pin_effective_page(
     const NativeTerrainPageKey primary_page,
     const std::vector<NativeTerrainShapingPagePin> &shaping_pages) const {
