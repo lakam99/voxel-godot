@@ -40,3 +40,19 @@ evidence. N4 still needs source-bound feature footprints across all changed
 families, actual adapter admission and publication, direct headed visual and
 collision parity, save/reload and no-resurrection proof, and a later caller
 cutover/deletion audit. N3 full checkpoint admission likewise remains open.
+
+Follow-up adapter/caller audit: `MainCore.gd` constructs one environment
+catalog and passes it into `VisualAssetRegistry.setup`; registry setup may
+replace the object and clears/rebuilds asset maps and scene cache. A future
+native admission must capture the active registry's ordered enabled manifest
+rows and resolved profiles during that setup, bind an active registry
+generation/readiness receipt, and invalidate it on replacement or reload.
+The registry's family lists retain duplicate-ID rows while its ID map
+overwrites the value, so reconstructing candidate lists from `assets_by_id`
+alone would mistranslate live selection. Native selection must not mask an
+import failure by picking a different asset; Godot's documented primitive
+fallback remains presentation policy. Production surface cutover must replace
+the shared 28-attempt stream atomically across rock, ore, tree, forage and
+wildlife; replacing only `make_rock` would shift later RNG decisions. The
+underground `make_rock` caller is a separate source path. These are current
+cutover requirements, not claims that the adapter or gameplay now pass.

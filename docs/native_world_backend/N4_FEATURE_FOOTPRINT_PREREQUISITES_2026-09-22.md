@@ -748,3 +748,25 @@ bounded witness should compare before/after source-order streams (including
 restoration) and explicitly mark channel footprints incomplete; full cutover
 requires the changed suffix's typed or live-publication occupancy and a
 transactional differential receipt.
+
+**Underground `removedProps` is a separate source family:** The live chunk
+runner uses an independent `seed:underground-props:cx,cz` RNG and obtains its
+ordered candidates from the edited terrain-volume underground-floor scan,
+not the 28 surface-attempt sampler. The scan covers the full 28-by-28 XZ
+chunk, chooses the first eligible exposed floor in each column by descending
+Y, hash-filters candidates, and caps the first 36. Underground parent IDs
+include X,Y,Z; the removal gate precedes the outcome draw, so a tombstone
+can shift later underground outcomes too. The existing surface producer
+cannot be reused as an authority for these IDs. Before native checkpoint
+admission of underground removals, port the pinned volume-floor candidate
+order and distinct underground PCG stream, prove direct Godot ordered parity,
+and include its before/after publication footprints. A surface-only catalog
+must continue to reject underground IDs rather than silently accept them.
+The native effective source already exposes shaped reference-surface height
+and effective cell-state facts for the floor/air/head predicate, but each
+query is restricted to its pin's primary terrain page. An underground chunk
+that crosses a page edge therefore needs globally ordered, revision-coherent
+page segments (or an explicit multi-page pin); a one-page scan that silently
+omits the rest of the chunk is not acceptable. Add an in-page ordered scan and
+page-edge rejection first, then certify whole-chunk composition across page
+seams against the direct Godot candidate order.
