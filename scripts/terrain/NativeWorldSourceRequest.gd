@@ -89,5 +89,29 @@ static func from_main_with_save_volume(main, volume) -> Dictionary:
 	request["terrainVolume"] = volume.duplicate(true)
 	return {"status":"ready", "request":request}
 
+## Resolve current save-v2 precedence before constructing one native volume.
+## Historical v2 `terrain` columns only affect the final state when the full
+## terrainVolume field is absent. Their native conversion is still pending;
+## never silently load an empty volume over those edits.
+static func from_main_with_v2_save(main, save) -> Dictionary:
+	if not save is Dictionary or int(save.get("version", -1)) != 2:
+		return _failed("save_v2_required")
+	if main == null:
+		return _failed("main_missing")
+	if String(save.get("seed", main.get("seed_text"))) != String(main.get("seed_text")):
+		return _failed("save_seed_mismatch")
+	var terrain_value = save.get("terrain", [])
+	if not terrain_value is Array:
+		return _failed("save_terrain_entries_invalid")
+	var volume_value = save.get("terrainVolume", {})
+	if not volume_value is Dictionary:
+		return _failed("save_terrain_volume_invalid")
+	var volume: Dictionary = volume_value
+	if volume.is_empty():
+		if not terrain_value.is_empty():
+			return {"status":"pending", "reason":"native_legacy_terrain_conversion_required"}
+		volume = {"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}
+	return from_main_with_save_volume(main, volume)
+
 static func _failed(reason: String) -> Dictionary:
 	return {"status": "failed", "reason": reason}
