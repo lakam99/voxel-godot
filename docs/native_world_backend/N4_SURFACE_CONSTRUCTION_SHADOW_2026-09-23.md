@@ -428,6 +428,17 @@ The row explicitly says `haloRequired=true`: no post-draw natural/structure
 exclusion halo was admitted, so these results do not establish tree presence
 outside the empty-structure fixture or authorize live publication.
 
+The capture-only `ActiveStructureTreeHaloSnapshot` now takes the native
+definition stage's ordered tree cells and declared post-draw margins and asks
+`StructureSystem` for one union halo over the chunk. It retains the copied
+owner/admission identities and recaptures to reject mutation, reset or
+tampered requests. The focused direct structure oracle passed 97/97 checks at
+`artifacts/node-tools/run-surface-structure-exclusion-oracle.json`, including
+outside-chunk natural records and stale direct-map mutations. This reduces
+future full-record scans from one per tree to one per chunk, but it remains a
+script-side capture prerequisite: the native adapter has not yet admitted the
+union against its tree definitions or decided actual tree presence.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

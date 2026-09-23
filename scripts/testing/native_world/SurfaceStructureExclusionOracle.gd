@@ -5,6 +5,7 @@ extends SceneTree
 const Structures = preload("res://scripts/StructureSystem.gd")
 const RealAdmission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const ChunkSnapshot = preload("res://scripts/world/ActiveStructureExclusionChunkSnapshot.gd")
+const TreeHaloSnapshot = preload("res://scripts/world/ActiveStructureTreeHaloSnapshot.gd")
 const REPORT_ENV := "VOXEL_SURFACE_STRUCTURE_EXCLUSION_REPORT"
 const CELLS := [
 	Vector2i(-5,-5), Vector2i(-4,-4), Vector2i(-3,-3), Vector2i(-2,-2),
@@ -92,8 +93,25 @@ func run() -> void:
 		and real_chunk.boundsAdmission.status == "ready"
 		and real_chunk.content.citadel[0].reason == "source_not_requested"
 		and ChunkSnapshot.is_current(real_structures, real_chunk))
+	var tree_requests := [
+		{"ordinal":0,"cell":Vector2i(-1,-1),"naturalMarginCells":2,"structureMarginCells":3},
+		{"ordinal":1,"cell":Vector2i(1,1),"naturalMarginCells":1,"structureMarginCells":2}]
+	var tree_union := TreeHaloSnapshot.capture(real_structures, tree_requests)
+	check("tree_union_covers_both_expanded_halos", tree_union.get("ok", false)
+		and tree_union.coverage.has_point(Vector2i(-4,-4))
+		and tree_union.coverage.has_point(Vector2i(3,3))
+		and TreeHaloSnapshot.is_current(real_structures, tree_union))
+	var tampered_tree_union: Dictionary = tree_union.duplicate(true)
+	tampered_tree_union.requests[0].naturalMarginCells = 1
+	check("tree_union_request_tamper_rejected", not TreeHaloSnapshot.is_current(real_structures, tampered_tree_union))
+	tampered_tree_union = tree_union.duplicate(true)
+	tampered_tree_union.halo.content.citadel[0].status = "failed"
+	check("tree_union_content_tamper_rejected", not TreeHaloSnapshot.is_current(real_structures, tampered_tree_union))
+	check("tree_union_rejects_duplicate_ordinal", not TreeHaloSnapshot.capture(real_structures,
+		[tree_requests[0],tree_requests[0]]).get("ok", false))
 	real_admission.configure("admission-context-oracle", {}, {"regionCells":384, "spawnChance":0.0})
 	check("admission_reconfigure_rejects_old_chunk", not ChunkSnapshot.is_current(real_structures, real_chunk))
+	check("admission_reconfigure_rejects_old_tree_union", not TreeHaloSnapshot.is_current(real_structures, tree_union))
 	check("reconfigured_admission_finalized", real_admission.finalize_town_inputs({}).status == "ready")
 	real_admission._fail(Vector2i.ZERO, "failed_site_outside_requested_bounds")
 	var real_failed_elsewhere := real_structures.capture_surface_tree_exclusion_halo(0,0,0,0)
@@ -215,8 +233,14 @@ func run() -> void:
 	var outside_halo := structures.capture_surface_tree_exclusion_halo(-28,-1,3,0)
 	check("outside_chunk_natural_record_captured",outside_halo.content.natural.size()==1
 		and outside_halo.content.natural[0].source=="outside-28-source")
+	var outside_union := TreeHaloSnapshot.capture(structures, [
+		{"ordinal":0,"cell":Vector2i(-28,-1),"naturalMarginCells":3,"structureMarginCells":0}])
+	check("tree_union_captures_outside_chunk_source", outside_union.get("ok", false)
+		and outside_union.halo.content.natural.size() == 1
+		and TreeHaloSnapshot.is_current(structures, outside_union))
 	structures.natural_prop_exclusion_records["outside-28-source:-31,-1:1x1"].maxX = -30
 	check("direct_record_mutation_stales_halo",not structures.surface_tree_exclusion_halo_is_current(outside_halo))
+	check("direct_record_mutation_stales_tree_union",not TreeHaloSnapshot.is_current(structures, outside_union))
 	check("owner_revision_stales_halo",not structures.surface_tree_exclusion_halo_is_current(seam_halo))
 	structures.record_structure_terrain_footprint(-32,-1,0.0,1,1,0,"outside-terrain","stone",0)
 	var terrain_halo := structures.capture_surface_tree_exclusion_halo(-28,-1,0,3)
