@@ -8,6 +8,7 @@ const BiomeSnapshotScript := preload("res://scripts/environment/ActiveBiomeEnvir
 const VisualSnapshotScript := preload("res://scripts/visual/ActiveVisualAssetSnapshot.gd")
 const RemovedSnapshotScript := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
 const StructureChunkScript := preload("res://scripts/world/ActiveStructureExclusionChunkSnapshot.gd")
+const EffectiveTerrainPinScript := preload("res://scripts/world/ActiveEffectiveTerrainChunkPin.gd")
 
 static func capture(main: Object) -> Dictionary:
 	if main == null or not is_instance_valid(main):
@@ -97,6 +98,31 @@ static func chunk_is_current(main: Object, bundle: Dictionary) -> bool:
 		and bundle.exclusions.get("admissionSeed") == bundle.owner.get("seed") \
 		and is_current(main, bundle.owner) \
 		and StructureChunkScript.is_current(structures, bundle.exclusions)
+
+static func capture_terrain_chunk(main: Object, chunk: Vector2i, backend: Object) -> Dictionary:
+	var sources := capture_chunk(main, chunk)
+	if not bool(sources.get("ok", false)):
+		return _failed("chunk_sources_not_ready")
+	var terrain: Dictionary = EffectiveTerrainPinScript.capture(backend, String(sources.owner.seed), chunk)
+	if not bool(terrain.get("ok", false)) \
+			or not chunk_is_current(main, sources) \
+			or not EffectiveTerrainPinScript.is_current(backend, String(sources.owner.seed), terrain):
+		return _failed("terrain_or_chunk_changed_during_capture")
+	return {"ok":true, "schemaVersion":SCHEMA_VERSION, "complete":false,
+		"scope":"owner_structure_and_effective_terrain_chunk_only", "chunk":chunk,
+		"sources":sources.duplicate(true), "terrain":terrain.duplicate(true)}
+
+static func terrain_chunk_is_current(main: Object, backend: Object, bundle: Dictionary) -> bool:
+	return main != null and is_instance_valid(main) and bool(bundle.get("ok", false)) \
+		and bundle.get("schemaVersion") == SCHEMA_VERSION \
+		and bundle.get("complete") == false \
+		and bundle.get("scope") == "owner_structure_and_effective_terrain_chunk_only" \
+		and bundle.get("chunk") is Vector2i \
+		and bundle.get("sources") is Dictionary and bundle.get("terrain") is Dictionary \
+		and bundle.sources.get("chunk") == bundle.chunk \
+		and bundle.terrain.get("chunk") == bundle.chunk \
+		and chunk_is_current(main, bundle.sources) \
+		and EffectiveTerrainPinScript.is_current(backend, String(bundle.sources.owner.seed), bundle.terrain)
 
 static func _failed(reason: String) -> Dictionary:
 	return {"ok": false, "complete": false, "reason": reason}

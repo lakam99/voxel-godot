@@ -1945,6 +1945,7 @@ Dictionary NativeWorldBackend::status() const {
 	limits["metadataContainerEntries"] = static_cast<int64_t>(NativeValueLimits::MAX_CONTAINER_ENTRIES);
 	result["adapterLimits"] = limits;
 	if (!state_ || !shaping_registry_) return result;
+	result["sourceSeedText"] = text(state_->definition().raw_terrain_seed().utf8);
 	result["sourceIdentity"] = identity_dictionary(state_->source_identity());
 	result["terrainDeltaRevision"] = static_cast<int64_t>(state_->terrain_delta_revision());
 	result["shapingRegistryRevision"] = static_cast<int64_t>(shaping_registry_->revision());

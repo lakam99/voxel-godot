@@ -53,6 +53,30 @@ func run() -> void:
 	structures.regional_source_generation = 1
 	structures.citadel_terrain_admission = admission
 	main.structure_system = structures
+	var backend = ClassDB.instantiate("NativeWorldBackend")
+	check("native_backend_available", backend != null)
+	if backend != null:
+		var initialized: Dictionary = backend.initialize({
+			"schema":"n3-native-world-backend-initialize/v1", "seedText":main.seed_text,
+			"revisions":{"sourceSchema":2,"terrainGenerator":1,"biomeRegionField":2,
+				"latticeQuery":1,"cellCenterQuery":1,"surfaceColumnQuery":1},
+			"constants":{"cellSizeMeters":1.35,"cellCenterOffsetCells":0.5,
+				"worldBottomCellY":-64,"waterLevelMeters":11.1,
+				"minimumSurfaceMeters":4.0,"maximumSurfaceMeters":120.0},
+			"sitePolicy":{"sourcePolicyRevision":1,"surveyGenerationPolicyRevision":1,
+				"ordinaryRegionCells":140,"ordinarySpawnChance":0.0,"townOverrides":[]}})
+		check("native_backend_initialized", initialized.get("status") == "ready")
+		var terrain_bundle: Dictionary = BundleScript.capture_terrain_chunk(main, Vector2i.ZERO, backend)
+		check("terrain_bundle_captured", bool(terrain_bundle.get("ok", false)))
+		check("terrain_bundle_explicitly_incomplete", terrain_bundle.get("complete") == false \
+			and terrain_bundle.get("scope") == "owner_structure_and_effective_terrain_chunk_only")
+		check("terrain_bundle_current", BundleScript.terrain_chunk_is_current(main, backend, terrain_bundle))
+		var tampered_terrain := terrain_bundle.duplicate(true)
+		tampered_terrain.terrain.pageStatus.terrainDeltaRevision = -1
+		check("terrain_bundle_pin_tamper_rejected", not BundleScript.terrain_chunk_is_current(main, backend, tampered_terrain))
+		main.seed_text = "replacement-seed"
+		check("terrain_bundle_seed_replacement_rejected", not BundleScript.terrain_chunk_is_current(main, backend, terrain_bundle))
+		main.seed_text = "bundle-seed"
 	var chunk_bundle := BundleScript.capture_chunk(main, Vector2i.ZERO)
 	check("chunk_bundle_captured", bool(chunk_bundle.get("ok", false)))
 	check("chunk_bundle_explicitly_incomplete", chunk_bundle.get("complete") == false \
@@ -129,6 +153,6 @@ func run() -> void:
 		"evidenceLevel": "contract", "resultCount": results.size(), "results": results,
 		"captureMs": capture_ms, "freshnessMs": freshness_ms,
 		"freshnessParts": freshness_parts,
-		"scope": "Owner catalog/removal and one structure-exclusion chunk capture/freshness only; no terrain pin, native manifest or gameplay."}, "  "))
+		"scope": "Owner catalog/removal, structure-exclusion and native effective-terrain chunk pin capture/freshness only; no native feature manifest or gameplay."}, "  "))
 	file.close()
 	quit(0 if passed else 1)

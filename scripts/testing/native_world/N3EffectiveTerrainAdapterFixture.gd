@@ -2,6 +2,7 @@ extends SceneTree
 
 const Oracle := preload("res://scripts/testing/native_world/N3EffectiveTerrainOracle.gd")
 const CitadelSiteFieldScript := preload("res://scripts/world/CitadelSiteField.gd")
+const ChunkPinScript := preload("res://scripts/world/ActiveEffectiveTerrainChunkPin.gd")
 
 const REPORT_SCHEMA := "n3-effective-terrain-differential-report/v1"
 const EVIDENCE_LEVEL := "shadow-only/no-production-cutover"
@@ -97,18 +98,41 @@ func _run() -> void:
 
 	var old_pages := _pin_pages(backend, pages, 0)
 	_require(bool(old_pages.get("ok", false)), "old_page_pin_failed")
+	var old_chunk_pin: Dictionary = {}
+	if bool(old_pages.get("ok", false)) and not pages.is_empty():
+		old_chunk_pin = ChunkPinScript.capture(backend, String(world_spec.get("seed", "")),
+			Vector2i(pages[0].x * 10, pages[0].y * 10))
+		_require(bool(old_chunk_pin.get("ok", false)), "old_effective_chunk_pin_capture_failed")
 	var mutation := _commit_mutations(backend, world_spec)
 	_require(bool(mutation.get("ok", false)), "native_mutation_contract_failed")
+	if bool(old_chunk_pin.get("ok", false)):
+		_require(not ChunkPinScript.is_current(backend, String(world_spec.get("seed", "")), old_chunk_pin),
+			"old_effective_chunk_pin_survived_delta_mutation")
 	checks.mutationChecks = bool(mutation.get("ok", false))
 	evidence["mutations"] = mutation
 	var new_pages := _pin_pages(backend, pages, 1)
 	_require(bool(new_pages.get("ok", false)), "new_page_pin_failed")
+	if bool(new_pages.get("ok", false)) and not pages.is_empty():
+		var test_chunk: Vector2i = Vector2i(pages[0].x * 10, pages[0].y * 10)
+		var admitted_chunk: Dictionary = ChunkPinScript.capture(backend, String(world_spec.get("seed", "")), test_chunk)
+		_require(bool(admitted_chunk.get("ok", false)) and admitted_chunk.get("primaryPage") == pages[0],
+			"effective_chunk_pin_capture_failed")
+		_require(ChunkPinScript.is_current(backend, String(world_spec.get("seed", "")), admitted_chunk),
+			"effective_chunk_pin_freshness_failed")
+		var forged_chunk := admitted_chunk.duplicate(true)
+		forged_chunk.pageStatus.terrainDeltaRevision = 0
+		_require(not ChunkPinScript.is_current(backend, String(world_spec.get("seed", "")), forged_chunk),
+			"effective_chunk_pin_tamper_accepted")
+		_require(not ChunkPinScript.is_current(backend, "different-seed", admitted_chunk),
+			"effective_chunk_pin_seed_mismatch_accepted")
 	if not failures.is_empty():
 		_finish(golden_hash_before, dll_hash_before)
 		return
 
 	var owner_status: Dictionary = backend.status()
 	_envelope(owner_status, "owner_status")
+	_require(owner_status.get("sourceSeedText") == String(world_spec.get("seed", "")),
+		"native_owner_seed_mismatch")
 	var expected_source_identity := _identity_hex(owner_status.get("sourceIdentity"))
 	var expected_shaping_identity := _identity_hex(owner_status.get("shapingRegistryIdentity"))
 	backend = null

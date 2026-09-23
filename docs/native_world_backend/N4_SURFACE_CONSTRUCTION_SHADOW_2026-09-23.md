@@ -273,6 +273,23 @@ rejects an admission seed different from Main's. Direct Godot contracts pass
 and the owner-bundle contract's reset, mismatched-seed and recapture checks.
 This closes receipt freshness only, not terrain or feature cutover.
 
+The next chunk bundle can retain one native `NativeEffectiveTerrainPage`
+against the same Main seed, source identity, terrain-delta revision and shaping
+registry revision/identity as the backend owner. The adapter status now exposes
+its immutable raw source seed for this admission. The wrapper maps ten 28-cell
+prop chunks to each 280-cell native page (including negative page keys) and
+rejects a replaced backend, seed change, tampered pin or later terrain delta.
+The native gate `n4-terrain-seed-status-01` passed 446/446 debug and release
+core tests, both adapter smokes and strict pure-core coverage at
+`artifacts/native-world-backend/n4-terrain-seed-status-01/report.json`.
+The focused N3 differential at
+`artifacts/native-world-backend/n3-chunk-pin-differential-02.json` passed
+goldens, source parity, delta mutation and pin lifetime; the combined owner
+bundle contract passed 39/39 checks at
+`artifacts/native-world-backend/n4-active-surface-owner-bundle-contract.json`.
+This is still a capture-only receipt, not a native prop decision, live terrain
+cutover or gameplay acceptance.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
