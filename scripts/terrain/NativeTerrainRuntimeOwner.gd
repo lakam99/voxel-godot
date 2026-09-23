@@ -11,6 +11,7 @@ const DemandPlanner = preload("res://scripts/terrain/NativeTerrainDemandPlanner.
 const BlockPublisher = preload("res://scripts/terrain/NativeTerrainBlockPublisher.gd")
 const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
 const NumericSource = preload("res://scripts/terrain/NativeTerrainNumericSource.gd")
+const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 var _backend
 var _admission
@@ -106,6 +107,52 @@ func read_cells(cells: Array[Vector3i]) -> Dictionary:
 func read_numeric_batch(world_positions: Array[Vector3], projection_cells: Array[Vector3i]) -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _numeric.read_numeric_batch(world_positions, projection_cells)
+
+## Commit durable cell deltas through the same owner used for reads and saves.
+## The returned plan describes work still needed for physical publication; it
+## is never a collision/readiness receipt.
+func commit_durable_cells(transaction_id: String, expected_revision: int,
+		operations: Array) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	if transaction_id.is_empty() or operations.is_empty() or operations.size() > 64:
+		return {"status":"failed", "reason":"edit_request_invalid"}
+	var before: Dictionary = _backend.status()
+	if before.get("status") != "ready" or before.get("sourceIdentity") != _source_identity \
+			or int(before.get("terrainDeltaRevision", -1)) != expected_revision:
+		return {"status":"failed", "reason":"native_edit_revision_mismatch"}
+	var cells: Array[Vector3i] = []
+	var seen := {}
+	for operation in operations:
+		if not operation is Dictionary or not operation.get("cell") is Vector3i \
+				or not String(operation.get("kind", "")) in ["set", "clear"]:
+			return {"status":"failed", "reason":"edit_operation_invalid"}
+		var cell: Vector3i = operation.cell
+		if seen.has(cell) or operation.kind == "set" and not operation.get("state") is Dictionary:
+			return {"status":"failed", "reason":"edit_operation_invalid"}
+		seen[cell] = true
+		cells.append(cell)
+	var request := {"schema":"n3-native-durable-cell-transaction/v1",
+		"transactionId":transaction_id, "expectedRevision":expected_revision,
+		"operations":operations}
+	var receipt: Dictionary = _backend.commit_durable_cells(request)
+	if receipt.get("status") != "ready" or receipt.get("commitStatus") != "committed":
+		return {"status":receipt.get("status", "failed"),
+			"reason":receipt.get("reason", receipt.get("commitStatus", "native_edit_rejected"))}
+	var after: Dictionary = _backend.status()
+	var revision := int(receipt.get("revision", -1))
+	if after.get("status") != "ready" or after.get("sourceIdentity") != _source_identity \
+			or revision != expected_revision + 1 \
+			or int(after.get("terrainDeltaRevision", -1)) != revision:
+		return _active_failure("native_edit_receipt_stale")
+	var plan: Dictionary = EditPlan.for_committed_cells(cells,
+		receipt.get("affectedSections", []), revision,
+		String(_source_identity.get("hex", "")))
+	if plan.get("status") != "ready":
+		return _active_failure("native_edit_publication_plan_failed")
+	return {"status":"ready", "nativeRevision":revision,
+		"affectedSections":receipt.get("affectedSections", []),
+		"changedCells":cells, "publicationPlan":plan,
+		"physicalReady":false}
 
 ## The save facade must export the same native owner used by terrain reads.
 ## Neither VoxelTerrain blocks nor the former script volume are save sources.

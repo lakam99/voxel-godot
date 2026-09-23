@@ -3,6 +3,16 @@
 Status: service-level native read path implemented; production `WorldGenerationSystem`
 and `TerrainVolumeService` are **not** cut over. No legacy path is deleted yet.
 
+The inert `NativeTerrainRuntimeOwner` now accepts bounded, typed durable cell
+transactions against its current native revision. It checks source identity,
+rejects stale edits, and returns the existing edit republication plan with
+`physicalReady: false`. The same owner subsequently reads the edited cell and
+exports its v2 save volume; clearing the edit uses the same native authority.
+The installed-engine service contract passes at
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790171666415-c810bcff/report.json`.
+This is not wired to gameplay edits or physical replacement, and does not
+establish New Game/Continue or normal-game acceptance.
+
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and

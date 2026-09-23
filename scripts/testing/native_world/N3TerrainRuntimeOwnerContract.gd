@@ -90,6 +90,46 @@ func run() -> void:
 			check((numeric.get("worldNumeric", []) as Array).size() == 1
 				and (numeric.get("surfaceProjectionNumeric", []) as Array).size() == 1,
 				"native numeric channels remain a complete batch")
+		var edit_cell := Vector3i(-18, -1, -1)
+		var edit_state := {"materialId":3, "biomeId":13, "fluidId":0,
+			"solid":true, "density":1.5, "light":Vector2i(2, 9),
+			"metadata":{"saveDelta":true,"source":"terrain_edit"},
+			"blockId":"owner-new-edit", "editReason":"contract"}
+		var native_revision := int(saved.get("nativeRevision", -1))
+		var stale: Dictionary = owner.commit_durable_cells("owner:stale", native_revision - 1,
+			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
+		check(stale.get("reason") == "native_edit_revision_mismatch",
+			"stale edit rejected before native commit")
+		var committed: Dictionary = owner.commit_durable_cells("owner:edit-1", native_revision,
+			[{"kind":"set", "cell":edit_cell, "state":edit_state}])
+		check(committed.get("status") == "ready"
+			and int(committed.get("nativeRevision", -1)) == native_revision + 1
+			and committed.get("physicalReady") == false
+			and committed.get("publicationPlan", {}).get("status") == "ready"
+			and committed.get("publicationPlan", {}).get("barrier", {}).get("activationEligible") == true,
+			"durable edit returns physical republication plan without readiness")
+		var after_edit: Dictionary = owner.export_terrain_volume_v2()
+		check(after_edit.get("status") == "ready"
+			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1
+			and after_edit.get("terrainVolume") != saved.get("terrainVolume"),
+			"save facade sees the committed native edit")
+		var edited: Dictionary = owner.read_cell(edit_cell)
+		check(edited.get("status") == "ready"
+			and edited.get("state", {}).get("blockId") == "owner-new-edit",
+			"gameplay cell facade sees committed native edit")
+		check(owner.commit_durable_cells("owner:stale-2", native_revision,
+			[{"kind":"clear", "cell":edit_cell}]).get("reason") == "native_edit_revision_mismatch",
+			"second stale edit rejected")
+		var cleared: Dictionary = owner.commit_durable_cells("owner:clear-2", native_revision + 1,
+			[{"kind":"clear", "cell":edit_cell}])
+		check(cleared.get("status") == "ready"
+			and int(cleared.get("nativeRevision", -1)) == native_revision + 2,
+			"clear uses the same typed durable authority")
+		var cleared_read: Dictionary = owner.read_cell(edit_cell)
+		check(cleared_read.get("status") == "ready"
+			and cleared_read.get("state", {}).get("blockId") != "owner-new-edit"
+			and cleared_read.get("state", {}).get("edited") == false,
+			"clear removes durable edit from gameplay cell source")
 		var demand: Dictionary = owner.replace_demand(
 			{"position":Vector3.ZERO,"distance":0}, [], [], [], Vector2i(0, 0))
 		check(demand.get("status") == "ready" and demand.get("desiredDataBlocks") == 27,
@@ -118,6 +158,8 @@ func run() -> void:
 		"drained owner does not fall back")
 	check(owner.export_terrain_volume_v2().get("reason") == "owner_not_active",
 		"drained owner cannot export stale save data")
+	check(owner.commit_durable_cells("owner:drained", 0, []).get("reason") == "owner_not_active",
+		"drained owner rejects edits")
 	world.queue_free()
 	main.free()
 	var report := {"schema":"n3-terrain-runtime-owner-contract/v1",
