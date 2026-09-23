@@ -2,7 +2,9 @@
 #include "native_biome_environment_oracle_fixture.hpp"
 #include "native_surface_prop_test_fixture.hpp"
 #include "../core/native_surface_ore_cluster_definition.hpp"
+#include "../core/native_surface_ore_footprint.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -388,4 +390,122 @@ VWB_TEST(native_surface_ore_cluster_composer_covers_iron_and_rejects_nonore_ordi
         }
     }
     VWB_EXPECT(found_iron && rejected_nonore);
+}
+
+VWB_TEST(native_surface_ore_footprints_cover_visual_and_physical_children) {
+    bool found = false;
+    for (std::uint32_t candidate = 0U; candidate < 32U && !found; ++candidate) {
+        const auto definition = surface_prop_test_fixture::definition("feature-ore-" + std::to_string(candidate));
+        const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+            definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+        const auto intact = stream(terrain);
+        const auto set = placement(intact, terrain);
+        for (std::uint32_t i = 0U; i < intact.attempts().size(); ++i) {
+            if (!intact.attempts()[i].ore_cluster) continue;
+            const auto ore = NativeSurfaceOreClusterDefinition::create(intact, set, i, terrain);
+            const auto footprints = compose_native_surface_ore_footprints(intact, set, i, terrain);
+            const auto repeated = compose_native_surface_ore_footprints(intact, set, i, terrain);
+            VWB_EXPECT_EQ(footprints.content_digest(), repeated.content_digest());
+            VWB_EXPECT_EQ(2U, footprints.entries().size());
+            VWB_EXPECT_EQ(terrain.pin().physical_content_identity().digest, footprints.source_digest());
+            const double cell_size = terrain.pin().definition().constants().cell_size_meters;
+            const auto covered = [&](const NativeGeneratedFeatureFootprintEntry &entry,
+                NativeFeatureFootprintChannel channel, double x, double y, double z) {
+                const auto cx = static_cast<std::int32_t>(std::floor(x / cell_size));
+                const auto cy = static_cast<std::int32_t>(std::floor(y / cell_size));
+                const auto cz = static_cast<std::int32_t>(std::floor(z / cell_size));
+                for (const auto &run : entry.runs)
+                    if (run.channel == channel && run.first.y == cy && run.first.z == cz
+                        && run.first.x <= cx && cx <= run.last_x_inclusive) return true;
+                return false;
+            };
+            for (const auto &child : ore.children()) {
+                const auto *entry = footprints.find(child.durable_id);
+                VWB_EXPECT(entry != nullptr);
+                VWB_EXPECT_EQ(NATIVE_FEATURE_FOOTPRINT_ALL_CHANNELS, entry->declared_channel_mask);
+                VWB_EXPECT_EQ(ore.content_digest(), entry->generated_definition_digest);
+                VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::collision,
+                    child.world_anchor.x + child.collider_radius,
+                    child.world_anchor.y + child.collider_center_y, child.world_anchor.z));
+                VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::navigation,
+                    child.world_anchor.x, child.world_anchor.y + child.collider_center_y,
+                    child.world_anchor.z + child.collider_radius));
+                VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::render,
+                    child.world_anchor.x + child.mesh_radius * child.mesh_scale.x,
+                    child.world_anchor.y + child.mesh_center_y, child.world_anchor.z));
+                const double c = std::cos(child.rotation_y), s = std::sin(child.rotation_y);
+                const double seam_radius = 0.5 * std::sqrt(
+                    child.seam_mesh_size.x * child.seam_mesh_size.x
+                    + child.seam_mesh_size.y * child.seam_mesh_size.y
+                    + child.seam_mesh_size.z * child.seam_mesh_size.z);
+                for (const auto &seam : child.seams) {
+                    const double x = child.world_anchor.x + c * seam.local_position.x - s * seam.local_position.z;
+                    const double z = child.world_anchor.z + s * seam.local_position.x + c * seam.local_position.z;
+                    VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::render,
+                        x - seam_radius, child.world_anchor.y + seam.local_position.y + seam_radius, z));
+                    VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::render,
+                        x + seam_radius, child.world_anchor.y + seam.local_position.y - seam_radius, z));
+                }
+                for (const auto &glint : child.glints) {
+                    const double x = child.world_anchor.x + c * glint.local_position.x - s * glint.local_position.z;
+                    const double z = child.world_anchor.z + s * glint.local_position.x + c * glint.local_position.z;
+                    const double radius = std::max(static_cast<double>(child.glint_mesh_radius)
+                        * std::max(glint.scale.x, glint.scale.z),
+                        static_cast<double>(child.glint_mesh_height) * glint.scale.y * 0.5);
+                    VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::render,
+                        x - radius, child.world_anchor.y + glint.local_position.y, z - radius));
+                    VWB_EXPECT(covered(*entry, NativeFeatureFootprintChannel::render,
+                        x + radius, child.world_anchor.y + glint.local_position.y, z + radius));
+                }
+                for (const auto &run : entry->runs)
+                    VWB_EXPECT(run.channel != NativeFeatureFootprintChannel::terrain_source);
+            }
+            const auto child_id = ore.children()[1].durable_id;
+            const auto filtered = stream(terrain, NativeFeatureDeltaSnapshot::create({{child_id}}, {}));
+            const auto filtered_set = placement(filtered, terrain);
+            const auto after = compose_native_surface_ore_footprints(filtered, filtered_set, i, terrain);
+            VWB_EXPECT_EQ(1U, after.entries().size());
+            VWB_EXPECT(after.find(child_id) == nullptr);
+            VWB_EXPECT(after.find(ore.children()[0].durable_id) != nullptr);
+            VWB_EXPECT(footprints.content_digest() != after.content_digest());
+            found = true; break;
+        }
+    }
+    VWB_EXPECT(found);
+}
+
+VWB_TEST(native_surface_ore_world_bounds_quantize_negative_and_reject_unbounded) {
+    const auto channel = NativeFeatureFootprintChannel::collision;
+    const auto runs = native_surface_ore_runs_for_bounds(
+        {-2.2, -0.4, -1.9, 0.1, 1.2, 0.2}, 1.0, channel);
+    VWB_EXPECT_EQ(9U, runs.size());
+    VWB_EXPECT_EQ(-3, runs.front().first.x);
+    VWB_EXPECT_EQ(0, runs.front().last_x_inclusive);
+    VWB_EXPECT_EQ(-2, runs.front().first.z);
+    VWB_EXPECT_EQ(-1, runs.front().first.y);
+    VWB_EXPECT_EQ(0, runs.back().first.z);
+    VWB_EXPECT_EQ(1, runs.back().first.y);
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,0,1,1,1}, 0.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,0,1,1,1}, std::numeric_limits<double>::infinity(), channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({1,0,0,0,1,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,1,0,1,0,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,1,1,1,0}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({-1.0e20,0,0,1,1,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,0,1.0e20,1,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({std::numeric_limits<double>::quiet_NaN(),0,0,1,1,1},
+            1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,0,1,4096,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,0,1,1,4096}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
+        native_surface_ore_runs_for_bounds({0,0,0,1,64,64}, 1.0, channel));
 }
