@@ -555,6 +555,37 @@ func test_scene_bootstrap() -> void:
     var chunks := get_chunks()
     add_result("scene_bootstrap", main != null and player != null and camera != null, "main/player/camera present")
     add_result("initial_chunks_loaded", chunks.size() >= expected_chunks, "%d chunks" % chunks.size())
+    var native_load = main.get("native_terrain_load_transaction") if main != null else null
+    var native_load_state: Dictionary = main.get("native_terrain_load_transaction_state") if main != null else {}
+    var native_load_snapshot: Dictionary = native_load.snapshot() if native_load != null else {}
+    var native_identity: Dictionary = native_load_snapshot.get("sourceIdentity", {})
+    var native_transaction_started: bool = native_load != null \
+        and native_load_state.get("status") in ["pending", "ready"] \
+        and native_load_snapshot.get("state") in ["pending", "ready"] \
+        and int(native_load_snapshot.get("transactionId", 0)) != 0 \
+        and native_identity.get("algorithm") == "sha256" \
+        and native_identity.get("hex", "").length() == 64
+    add_result("native_load_transaction_retained", native_transaction_started,
+        "state %s/%s transaction %s source %s" % [
+            String(native_load_state.get("status", "missing")),
+            String(native_load_snapshot.get("state", "missing")),
+            str(native_load_snapshot.get("transactionId", 0)),
+            String(native_identity.get("hex", ""))])
+    var voxel_runtime = main.get("voxel_terrain_runtime") if main != null else null
+    var voxel_terrain = voxel_runtime.get("terrain") if voxel_runtime != null else null
+    var voxel_viewer = voxel_runtime.get("viewer") if voxel_runtime != null else null
+    var script_collision_retained: bool = voxel_runtime != null and voxel_terrain != null \
+        and voxel_runtime.get("authority_ready") == true \
+        and voxel_runtime.get("generator") != null \
+        and voxel_terrain.generator == voxel_runtime.get("generator") \
+        and voxel_terrain.generate_collisions \
+        and voxel_viewer != null and voxel_viewer.requires_collisions
+    add_result("precutover_voxel_collision_retained", script_collision_retained,
+        "authority %s generator %s collisions %s viewer %s" % [
+            str(voxel_runtime.authority_ready) if voxel_runtime != null else "missing",
+            str(voxel_terrain.generator != null) if voxel_terrain != null else "missing",
+            str(voxel_terrain.generate_collisions) if voxel_terrain != null else "missing",
+            str(voxel_viewer.requires_collisions) if voxel_viewer != null else "missing"])
     if player:
         add_result("controller_ticks", int(player.get("physics_ticks")) > 0, "%d ticks" % int(player.get("physics_ticks")))
     var hud = main.get("hud") if main else null

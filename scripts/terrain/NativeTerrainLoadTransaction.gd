@@ -116,6 +116,14 @@ func cancel() -> Dictionary:
 	_state = "draining"
 	return advance()
 
+func stop() -> Dictionary:
+	if _state == "pending" or _state == "draining": return cancel()
+	if _state == "new" or _state == "ready" or _state == "failed":
+		_release()
+		return {"status":"ready", "drained":true}
+	if _state == "drained": return {"status":"ready", "drained":true}
+	return {"status":"failed", "reason":"transaction_stop_state_invalid"}
+
 func snapshot() -> Dictionary:
 	return {"state":_state, "transactionId":get_instance_id(),
 		"sourceIdentity":_source_identity.duplicate(true), "page":_page,
