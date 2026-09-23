@@ -21,6 +21,8 @@ var _cells
 var _numeric
 var _state := "new"
 var _failure := ""
+var _seed_text := ""
+var _source_identity := {}
 
 func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dictionary:
 	if _state != "new": return {"status":"failed", "reason":"owner_already_started"}
@@ -38,6 +40,8 @@ func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dict
 	var initialized: Dictionary = _backend.initialize_from_save_v2(source.request)
 	if initialized.get("status") != "ready":
 		return _setup_failure(String(initialized.get("reason", "native_initialize_failed")))
+	_seed_text = String(source.request.seedText)
+	_source_identity = initialized.get("sourceIdentity", {}).duplicate(true)
 	_pages = PageAdmission.new()
 	var page_ready: Dictionary = _pages.setup(_backend, _admission)
 	if page_ready.get("status") != "ready":
@@ -103,6 +107,29 @@ func read_numeric_batch(world_positions: Array[Vector3], projection_cells: Array
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _numeric.read_numeric_batch(world_positions, projection_cells)
 
+## The save facade must export the same native owner used by terrain reads.
+## Neither VoxelTerrain blocks nor the former script volume are save sources.
+func export_terrain_volume_v2() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	var before: Dictionary = _backend.status()
+	if before.get("status") != "ready" or before.get("sourceIdentity") != _source_identity:
+		return {"status":"failed", "reason":"native_save_owner_changed"}
+	var exported: Dictionary = _backend.export_terrain_volume_v2()
+	var after: Dictionary = _backend.status()
+	if exported.get("status") != "ready" or exported.get("saveSeedText") != _seed_text \
+			or exported.get("sourceIdentity") != _source_identity \
+			or int(exported.get("terrainDeltaRevision", -1)) != int(before.get("terrainDeltaRevision", -2)) \
+			or after.get("sourceIdentity") != _source_identity \
+			or int(after.get("terrainDeltaRevision", -1)) != int(before.get("terrainDeltaRevision", -2)):
+		return {"status":"failed", "reason":"native_save_snapshot_stale_or_invalid"}
+	var volume = exported.get("terrainVolume")
+	if not volume is Dictionary or int(volume.get("schemaVersion", -1)) != 1 \
+			or int(volume.get("sectionSize", -1)) != 16 \
+			or int(volume.get("revision", -1)) != int(exported.get("persistedRevision", -2)):
+		return {"status":"failed", "reason":"native_save_volume_invalid"}
+	return {"status":"ready", "terrainVolume":volume, "nativeRevision":int(exported.terrainDeltaRevision),
+		"sourceIdentity":_source_identity.duplicate(true), "saveSeedText":_seed_text}
+
 func stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
 	if _state == "new":
@@ -152,4 +179,6 @@ func _release_owners() -> void:
 	_pages = null
 	_backend = null
 	_admission = null
+	_seed_text = ""
+	_source_identity.clear()
 	_state = "drained"

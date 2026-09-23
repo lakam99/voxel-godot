@@ -66,6 +66,12 @@ func run() -> void:
 		check(snapshot.backend.get("status") == "ready"
 			and snapshot.backend.get("sourceIdentity") == setup.get("sourceIdentity"),
 			"native source identity shared")
+		var saved: Dictionary = owner.export_terrain_volume_v2()
+		check(saved.get("status") == "ready"
+			and saved.get("terrainVolume") == main.world_generation_system.terrain_volume_service.save_all_section_deltas()
+			and saved.get("sourceIdentity") == setup.get("sourceIdentity")
+			and saved.get("saveSeedText") == main.seed_text,
+			"save facade exports exact native durable volume from shared owner")
 		check(snapshot.publisher.get("active") == true
 			and int(snapshot.planner.get("consumerId", 0)) == 71,
 			"publisher and planner bound")
@@ -94,6 +100,7 @@ func run() -> void:
 			"publisher received same desired union")
 		observations.append({"backendInstanceId":snapshot.backendInstanceId,
 			"sourceIdentity":setup.get("sourceIdentity"),
+			"saveStatus":saved.get("status"), "saveNativeRevision":saved.get("nativeRevision"),
 			"cellStatus":exported.get("status"), "numericStatus":numeric.get("status"),
 			"tickStatus":tick.get("status"),
 			"nativeRevision":snapshot.backend.get("terrainDeltaRevision")})
@@ -109,6 +116,8 @@ func run() -> void:
 		"no retained backend after drain")
 	check(owner.read_cell(Vector3i.ZERO).get("reason") == "owner_not_active",
 		"drained owner does not fall back")
+	check(owner.export_terrain_volume_v2().get("reason") == "owner_not_active",
+		"drained owner cannot export stale save data")
 	world.queue_free()
 	main.free()
 	var report := {"schema":"n3-terrain-runtime-owner-contract/v1",
