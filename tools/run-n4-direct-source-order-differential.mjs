@@ -20,6 +20,8 @@ let forageDefinitionsCompared = 0;
 let oreClustersCompared = 0;
 let wildlifeDefinitionsCompared = 0;
 let rockDefinitionsCompared = 0;
+let treeDefinitionsCompared = 0;
+let treeBodiesCompared = 0;
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
@@ -155,6 +157,29 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
           failures.push(`${label} attempt ${index} rock visual scale mismatch`);
       }
     }
+    if (native.outcome === 4 || native.outcome === 5) {
+      const expected = native.feature, actual = direct.tree;
+      if (expected?.kind !== 'treeDefinition' || expected.haloRequired !== true) {
+        failures.push(`${label} attempt ${index} native tree definition missing or presence prematurely decided`);
+      } else {
+        treeDefinitionsCompared++;
+        if (actual) {
+          if (actual.captureError) {
+            failures.push(`${label} attempt ${index} tree body capture failed`);
+          } else {
+            treeBodiesCompared++;
+            const architecture = {1: 'broadleaf', 2: 'conifer', 3: 'savanna'}[expected.architecture];
+            for (const field of ['durableId', 'biome', 'family', 'growthClass'])
+              if (actual[field] !== expected[field]) failures.push(`${label} attempt ${index} tree ${field} mismatch`);
+            if (actual.architecture !== architecture) failures.push(`${label} attempt ${index} tree architecture mismatch`);
+            for (const field of ['rotationYBits', 'visualHeightBits', 'trunkRadiusBits',
+              'canopyRadiusBits', 'collisionHeightBits', 'colliderRadiusBits',
+              'colliderHeightBits', 'colliderCenterYBits'])
+              if (actual[field] !== expected[field]) failures.push(`${label} attempt ${index} tree ${field} mismatch`);
+          }
+        }
+      }
+    }
   }
   if (uint64(sample.directFinalRngState) !== uint64(sample.nativeFinalRngState)) failures.push(`${label} final RNG state mismatch`);
 }
@@ -162,6 +187,8 @@ if (forageDefinitionsCompared === 0) failures.push('No forage definitions were c
 if (oreClustersCompared === 0) failures.push('No ore clusters were compared');
 if (wildlifeDefinitionsCompared === 0) failures.push('No wildlife definitions were compared');
 if (rockDefinitionsCompared === 0) failures.push('No rock definitions were compared');
+if (treeDefinitionsCompared === 0 || treeBodiesCompared === 0)
+  failures.push('No native tree definitions or direct tree bodies were compared');
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -173,6 +200,8 @@ const report = {
   oreClustersCompared,
   wildlifeDefinitionsCompared,
   rockDefinitionsCompared,
+  treeDefinitionsCompared,
+  treeBodiesCompared,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };

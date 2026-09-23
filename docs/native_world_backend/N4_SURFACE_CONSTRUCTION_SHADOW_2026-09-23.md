@@ -415,6 +415,19 @@ other biome presentations remain pure-core/catalog-oracle evidence only. This
 is direct-service shadow parity, not live publication, headed visuals or N4
 cutover.
 
+The adapter now maps a tree's source biome to the already admitted immutable
+biome-environment profile and projects the native ordered tree definition.
+The rebuilt `n4-tree-definition-adapter-shadow-01` gate passed at
+`artifacts/native-world-backend/n4-tree-definition-adapter-shadow-01/report.json`.
+The direct production-method differential passed five cases and 140 attempts,
+including 38 native tree definitions matched against 38 actual tree bodies at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-d9030d32-5cce-4c7f-9a1c-359a27666c0c.json`.
+It compares durable ID, source biome, family, growth class, architecture,
+rotation, visual/trunk/canopy dimensions and the one physical trunk cylinder.
+The row explicitly says `haloRequired=true`: no post-draw natural/structure
+exclusion halo was admitted, so these results do not establish tree presence
+outside the empty-structure fixture or authorize live publication.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

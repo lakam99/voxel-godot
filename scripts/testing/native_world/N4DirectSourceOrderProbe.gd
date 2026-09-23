@@ -159,6 +159,27 @@ func rock_geometry(body: StaticBody3D) -> Dictionary:
 		"assetId":String(body.get_meta("visual_asset_id", "")),
 		"visualScaleBits":vector_bits(visual.scale)}
 
+func tree_geometry(body: StaticBody3D) -> Dictionary:
+	var collider: CollisionShape3D = null
+	for child in body.get_children():
+		if child is CollisionShape3D:
+			collider = child
+	if collider == null or not (collider.shape is CylinderShape3D):
+		return {"captureError":"incomplete_tree_body"}
+	return {"durableId":String(body.get_meta("prop_id", "")),
+		"biome":String(body.get_meta("visual_biome", "")),
+		"family":String(body.get_meta("tree_family", "")),
+		"growthClass":String(body.get_meta("tree_growth_class", "")),
+		"architecture":String(body.get_meta("tree_architecture", "")),
+		"rotationYBits":bits(body.rotation.y),
+		"visualHeightBits":bits(float(body.get_meta("tree_visual_height", 0.0))),
+		"trunkRadiusBits":bits(float(body.get_meta("tree_trunk_radius", 0.0))),
+		"canopyRadiusBits":bits(float(body.get_meta("tree_canopy_radius", 0.0))),
+		"collisionHeightBits":bits(float(body.get_meta("tree_collision_height", 0.0))),
+		"colliderRadiusBits":bits((collider.shape as CylinderShape3D).radius),
+		"colliderHeightBits":bits((collider.shape as CylinderShape3D).height),
+		"colliderCenterYBits":bits(collider.position.y)}
+
 func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
@@ -271,6 +292,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
 					and String(child.get_meta("material", "")) == "rock":
 				direct_row["rock"] = rock_geometry(child)
+			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
+					and String(child.get_meta("material", "")) == "tree":
+				direct_row["tree"] = tree_geometry(child)
 		if not ore_children.is_empty():
 			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
@@ -376,6 +400,22 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 				"assetPath":feature.assetPath,
 				"assetSizeBits":vector_bits(feature.assetSize),
 				"profileScaleBits":bits(feature.profileScale)}
+		elif feature.get("kind") == "treeDefinition":
+			projected_feature = {"kind":feature.kind,
+				"durableId":feature.durableId,"biome":feature.biome,
+				"family":feature.family,"growthClass":feature.growthClass,
+				"architecture":feature.architecture,
+				"speciesGrammar":feature.speciesGrammar,
+				"rotationYBits":bits(feature.rotationY),
+				"visualHeightBits":bits(feature.visualHeight),
+				"trunkRadiusBits":bits(feature.trunkRadius),
+				"canopyRadiusBits":bits(feature.canopyRadius),
+				"collisionHeightBits":bits(feature.collisionHeight),
+				"exclusionMarginBits":bits(feature.exclusionMargin),
+				"colliderRadiusBits":bits(feature.trunkColliderRadius),
+				"colliderHeightBits":bits(feature.trunkColliderHeight),
+				"colliderCenterYBits":bits(feature.trunkColliderCenterY),
+				"haloRequired":feature.haloRequired}
 		native_rows.append({"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"durableId":row.durableId,"stateBeforeCoordinates":row.stateBeforeCoordinates,
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,

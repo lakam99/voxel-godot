@@ -7,6 +7,7 @@
 #include "native_surface_ore_cluster_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
 #include "native_surface_rock_ordered_visual_plan.hpp"
+#include "native_surface_tree_ordered_composer.hpp"
 #include "native_surface_wildlife_ordered_definition.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
@@ -95,6 +96,43 @@ Vector3 world_vector(const WorldFloat32Position &p_value) {
 
 Vector3 wildlife_vector(const NativeWildlifeVec3 &p_value) {
 	return Vector3(p_value.x, p_value.y, p_value.z);
+}
+
+NativeSurfaceTreeEcologyProfile tree_ecology_profile(
+		const NativeBiomeEnvironmentCatalog &p_catalog, const std::string &p_biome) {
+	const NativeBiomeEnvironmentProfile &source = p_catalog.profile_for_biome(p_biome);
+	NativeSurfaceTreeEcologyProfile profile;
+	profile.schema_revision = NativeBiomeEnvironmentCatalog::SCHEMA_REVISION;
+	profile.profile_revision = NativeBiomeEnvironmentCatalog::SCHEMA_REVISION;
+	profile.source_profile_digest = p_catalog.profile_digest(p_biome);
+	profile.source_biome = p_biome;
+	profile.profile_id = source.biome_id;
+	profile.tree_families = source.tree_families;
+	profile.tree_scale = source.tree_scale;
+	profile.height_min = source.tree_height_min;
+	profile.height_max = source.tree_height_max;
+	profile.trunk_radius_min = source.trunk_radius_min;
+	profile.trunk_radius_max = source.trunk_radius_max;
+	profile.canopy_radius_min = source.crown_radius_min;
+	profile.canopy_radius_max = source.crown_radius_max;
+	profile.canopy_density = source.canopy_density;
+	profile.wind_response = source.wind_response;
+	profile.visibility_range = source.tree_visibility_range;
+	profile.shadow_range = source.tree_shadow_range;
+	profile.exclusion_margin = source.natural_prop_exclusion_margin;
+	profile.age_min_years = source.tree_age_min_years;
+	profile.age_typical_years = source.tree_age_typical_years;
+	profile.age_max_years = source.tree_age_max_years;
+	profile.maturity_cell_scale = source.tree_maturity_cell_scale;
+	profile.maturity_influence = source.tree_maturity_influence;
+	profile.local_age_span = source.tree_local_age_span;
+	profile.age_distribution_skew = source.tree_age_distribution_skew;
+	for (std::size_t index = 0; index < profile.age_band_thresholds.size(); ++index)
+		profile.age_band_thresholds[index] = source.tree_age_band_thresholds[index];
+	profile.height_growth_exponent = source.tree_height_growth_exponent;
+	profile.girth_growth_exponent = source.tree_girth_growth_exponent;
+	profile.crown_growth_exponent = source.tree_crown_growth_exponent;
+	return profile;
 }
 
 Dictionary ore_child_shadow(const NativeSurfaceOreChildDefinition &p_child) {
@@ -2318,6 +2356,34 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 				feature["assetPath"] = text(selected.asset_path);
 				feature["assetSize"] = world_vector(selected.asset_size);
 				feature["profileScale"] = selected.rock_scale;
+				row["feature"] = feature;
+			}
+			if (source.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw
+					|| source.outcome == NativeSurfacePropClassificationOutcome::tree_36_draw) {
+				const NativeSurfaceTreeEcologyProfile profile = tree_ecology_profile(*biome_catalog_, source.source->biome_id);
+				const NativeTreeDefinition tree = NativeSurfaceTreeOrderedComposer::create(
+					ordered, placement, static_cast<std::uint32_t>(index), terrain, profile);
+				const NativeTreeDefinitionInput &built = tree.input();
+				const NativeTreeTrunkCylinder trunk = tree.trunk_cylinder();
+				Dictionary feature;
+				feature["kind"] = "treeDefinition";
+				feature["contentIdentity"] = text(sha256_hex(tree.content_digest()));
+				feature["durableId"] = text(built.durable_feature_id);
+				feature["biome"] = text(built.biome);
+				feature["family"] = text(built.family);
+				feature["growthClass"] = text(built.growth_class);
+				feature["architecture"] = static_cast<std::int64_t>(built.architecture);
+				feature["speciesGrammar"] = text(built.species_grammar);
+				feature["rotationY"] = built.rotation_y;
+				feature["visualHeight"] = built.visual_height;
+				feature["trunkRadius"] = built.trunk_radius;
+				feature["canopyRadius"] = built.canopy_radius;
+				feature["collisionHeight"] = built.collision_height;
+				feature["exclusionMargin"] = built.exclusion_margin;
+				feature["trunkColliderRadius"] = trunk.radius;
+				feature["trunkColliderHeight"] = trunk.height;
+				feature["trunkColliderCenterY"] = trunk.center_y;
+				feature["haloRequired"] = true;
 				row["feature"] = feature;
 			}
 			attempts.append(row);
