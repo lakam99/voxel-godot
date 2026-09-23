@@ -2971,7 +2971,9 @@ Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resoluti
 			batch.resolutions.push_back(std::move(resolution));
 		}
 		const NativeTerrainShapingRegistryReceipt receipt = shaping_registry_->apply(batch);
-		invalidate_changed_voxel_demand();
+		// A bound block has already captured every site decision required by its
+		// shaping pages. Newly resolved regions cannot change that ready source.
+		// Unbound demand remains waiting and retries against the new registry.
 		Dictionary result = envelope("apply_shaping_resolutions", "ready");
 		result["commitStatus"] = receipt.status == NativeTerrainShapingRegistryCommitStatus::committed ? "committed" : "no_change";
 		result["shapingRegistryRevision"] = static_cast<int64_t>(receipt.revision);
@@ -2986,7 +2988,8 @@ Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
 	if (!state_ || !shaping_registry_) return envelope("commit_typed_cells", "failed", "backend_not_ready");
 	try {
 		Dictionary result = commit_typed_cell_request(*state_, p_request, false, "commit_typed_cells");
-		if (result.get("status", String()) == "ready") invalidate_changed_voxel_demand();
+		if (result.get("commitStatus", String()) == "committed")
+			invalidate_changed_voxel_demand(Array(result.get("affectedSections", Array())));
 		return result;
 	} catch (const std::exception &error) {
 		return failure("commit_typed_cells", error);
@@ -2997,7 +3000,8 @@ Dictionary NativeWorldBackend::commit_durable_cells(const Dictionary &p_request)
 	if (!state_ || !shaping_registry_) return envelope("commit_durable_cells", "failed", "backend_not_ready");
 	try {
 		Dictionary result = commit_typed_cell_request(*state_, p_request, true, "commit_durable_cells");
-		if (result.get("status", String()) == "ready") invalidate_changed_voxel_demand();
+		if (result.get("commitStatus", String()) == "committed")
+			invalidate_changed_voxel_demand(Array(result.get("affectedSections", Array())));
 		return result;
 	} catch (const std::exception &error) {
 		return failure("commit_durable_cells", error);
@@ -3087,26 +3091,77 @@ Dictionary NativeWorldBackend::voxel_demand_event(const NativeVoxelBlockDemand::
 	return result;
 }
 
-WorldPhysicalContentIdentity NativeWorldBackend::voxel_demand_source_pin() const {
-	std::vector<std::uint8_t> bytes;
-	const auto append = [&bytes](const WorldPhysicalContentIdentity &identity) {
-		bytes.insert(bytes.end(), identity.digest.begin(), identity.digest.end());
+WorldPhysicalContentIdentity NativeWorldBackend::voxel_demand_source_pin(
+		const NativeVoxelBlockDemand::Key &key, const WorldDeltaPinnedSnapshot &deltas,
+		const std::vector<NativeTerrainShapingPagePin> &pages) const {
+	const NativeEffectiveVoxelBlockRequest request{{key.x, key.y, key.z}, {16, 16, 16},
+		static_cast<std::uint32_t>(key.lod)};
+	const std::int64_t scale = std::int64_t{1} << key.lod;
+	auto page_axis = [](const std::int32_t cell) {
+		constexpr std::int32_t page_cells = NativeTerrainShapingSnapshot::PAGE_CELLS;
+		return cell / page_cells - static_cast<std::int32_t>(cell % page_cells < 0);
 	};
-	append(state_->source_identity());
-	append(shaping_registry_->content_identity());
-	append(shaping_registry_->policy_content_identity());
-	for (const std::uint64_t revision : {state_->terrain_delta_revision(), shaping_registry_->revision()})
-		for (unsigned shift = 0; shift < 64; shift += 8) bytes.push_back(static_cast<std::uint8_t>(revision >> shift));
-	return {sha256(bytes)};
+	std::vector<std::int32_t> xs, zs;
+	for (std::int32_t index = 0; index < 16; ++index) {
+		const std::int64_t x = static_cast<std::int64_t>(key.x) + index * scale;
+		const std::int64_t z = static_cast<std::int64_t>(key.z) + index * scale;
+		if (x > std::numeric_limits<std::int32_t>::max() || z > std::numeric_limits<std::int32_t>::max())
+			throw std::out_of_range("retained voxel block coordinate overflows int32");
+		const std::int32_t xp = page_axis(static_cast<std::int32_t>(x));
+		const std::int32_t zp = page_axis(static_cast<std::int32_t>(z));
+		if (xs.empty() || xs.back() != xp) xs.push_back(xp);
+		if (zs.empty() || zs.back() != zp) zs.push_back(zp);
+	}
+	if (xs.size() * zs.size() > 16U)
+		throw std::length_error("retained voxel block exceeds primary page capture limit");
+	std::vector<WorldPhysicalContentIdentity> primary_identities;
+	primary_identities.reserve(xs.size() * zs.size());
+	for (const std::int32_t z : zs) for (const std::int32_t x : xs) {
+		const NativeTerrainPageKey primary{x, z};
+		const auto dependencies = world_effective_shaping_dependencies(state_->definition(), primary);
+		std::vector<NativeTerrainShapingPagePin> pins;
+		pins.reserve(dependencies.size());
+		for (const NativeTerrainPageKey page : dependencies) {
+			const auto found = std::find_if(pages.begin(), pages.end(), [page](const auto &pin) {
+				return pin.page_key() == page;
+			});
+			if (found == pages.end() || found->readiness() != NativeTerrainShapingPageReadiness::ready)
+				throw std::invalid_argument("retained voxel block shaping dependency is incomplete");
+			pins.push_back(*found);
+		}
+		primary_identities.push_back(WorldSourcePin(state_->definition(), deltas, primary, pins)
+			.physical_content_identity());
+	}
+	return native_voxel_block_content_identity(state_->source_identity(), request, primary_identities);
 }
 
-void NativeWorldBackend::invalidate_changed_voxel_demand() {
-	if (!state_ || !shaping_registry_) return;
-	const auto pin = voxel_demand_source_pin();
-	for (const auto &[key, request] : voxel_demand_requests_) {
+void NativeWorldBackend::invalidate_changed_voxel_demand(const Array &affected_sections) {
+	if (!state_ || affected_sections.is_empty()) return;
+	for (const auto &[key, dependencies] : voxel_demand_dependencies_) {
 		const auto *entry = voxel_demand_.find(key);
-		if (entry && entry->source_bound && entry->pin.digest != pin.digest) {
-			voxel_demand_.invalidate(key, state_->terrain_delta_revision(), pin);
+		if (!entry || !entry->source_bound) continue;
+		bool affected = false;
+		for (const NativeTerrainPageKey page : dependencies) {
+			const auto bounds = native_terrain_page_bounds(page);
+			if (!bounds) { affected = true; break; }
+			for (int64_t index = 0; index < affected_sections.size(); ++index) {
+				const Vector3i section = require_vector3i(affected_sections[index], "affectedSections[]");
+				const std::int64_t x = static_cast<std::int64_t>(section.x) * NativeCellState::SECTION_SIZE;
+				const std::int64_t z = static_cast<std::int64_t>(section.z) * NativeCellState::SECTION_SIZE;
+				if (x < static_cast<std::int64_t>(bounds->x) + bounds->width
+						&& x + NativeCellState::SECTION_SIZE > bounds->x
+						&& z < static_cast<std::int64_t>(bounds->z) + bounds->depth
+						&& z + NativeCellState::SECTION_SIZE > bounds->z) {
+					affected = true;
+					break;
+				}
+			}
+			if (affected) break;
+		}
+		if (affected) {
+			// The next capture binds a fresh exact local pin. A zero pin cannot
+			// accidentally admit an old prepared or published generation.
+			voxel_demand_.invalidate(key, 0, {});
 			voxel_demand_results_.erase(key);
 			voxel_demand_tickets_.erase(key);
 		}
@@ -3139,6 +3194,7 @@ Dictionary NativeWorldBackend::release_voxel_block_shadow(const Dictionary &p_re
 		const auto *entry = voxel_demand_.find(key);
 		if (!entry || entry->consumers.empty()) {
 			voxel_demand_requests_.erase(key);
+			voxel_demand_dependencies_.erase(key);
 			voxel_demand_results_.erase(key);
 			voxel_demand_tickets_.erase(key);
 		}
@@ -3230,7 +3286,11 @@ Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &
 			return envelope(operation, "failed", "ticket_space_exhausted");
 		if (voxel_demand_capture_) {
 			const auto key = *voxel_demand_capture_;
-			voxel_demand_.bind_source(key, delta_revision, voxel_demand_source_pin());
+			const auto local_pin = voxel_demand_source_pin(key, deltas, pins);
+			// The retained ticket's revision domain is its local source pin. The
+			// worker still checks the global capture revision before returning bytes.
+			voxel_demand_.bind_source(key, 0, local_pin);
+			voxel_demand_dependencies_[key] = dependencies;
 			const auto ticket = voxel_demand_.dispatch_specific(key);
 			if (!ticket) {
 				voxel_demand_.source_capture_deferred(key);
@@ -3433,8 +3493,9 @@ Dictionary NativeWorldBackend::pump_voxel_block_shadow() {
 		if (!entry || entry->state != NativeVoxelBlockDemand::State::prepared) continue;
 		const auto issued = voxel_demand_tickets_.find(key);
 		if (issued == voxel_demand_tickets_.end()) continue;
-		if (issued->second.pin.digest != voxel_demand_source_pin().digest) {
-			voxel_demand_.invalidate(key, state_->terrain_delta_revision(), voxel_demand_source_pin());
+		if (entry->pin.digest != issued->second.pin.digest
+				|| entry->generation != issued->second.generation) {
+			voxel_demand_.invalidate(key, 0, {});
 			continue;
 		}
 		Dictionary result = result_data;
@@ -3477,8 +3538,9 @@ Dictionary NativeWorldBackend::voxel_block_shadow_insertion_receipt(
 		const auto found = voxel_demand_tickets_.find(key);
 		if (found == voxel_demand_tickets_.end() || p_generation != static_cast<std::int64_t>(found->second.generation))
 			return envelope(operation, "rejected", "stale_generation");
-		if (found->second.pin.digest != voxel_demand_source_pin().digest) {
-			invalidate_changed_voxel_demand();
+		const auto *entry = voxel_demand_.find(key);
+		if (!entry || entry->pin.digest != found->second.pin.digest
+				|| entry->generation != found->second.generation) {
 			return envelope(operation, "rejected", "source_changed");
 		}
 		const bool accepted = voxel_demand_.insertion_result(found->second, p_accepted);
@@ -3497,8 +3559,9 @@ Dictionary NativeWorldBackend::voxel_block_shadow_mesh_receipt(const Dictionary 
 		const auto found = voxel_demand_tickets_.find(key);
 		if (found == voxel_demand_tickets_.end() || p_generation != static_cast<std::int64_t>(found->second.generation))
 			return envelope(operation, "rejected", "stale_generation");
-		if (found->second.pin.digest != voxel_demand_source_pin().digest) {
-			invalidate_changed_voxel_demand();
+		const auto *entry = voxel_demand_.find(key);
+		if (!entry || entry->pin.digest != found->second.pin.digest
+				|| entry->generation != found->second.generation) {
 			return envelope(operation, "rejected", "source_changed");
 		}
 		return envelope(operation, voxel_demand_.receipt(found->second, p_mesh_ready, p_physics_ready,

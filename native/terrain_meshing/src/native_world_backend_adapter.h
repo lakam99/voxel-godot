@@ -127,8 +127,11 @@ private:
 	voxel::world_backend::NativeVoxelBlockDemand::Key voxel_demand_key(const godot::Dictionary &p_request) const;
 	godot::Dictionary voxel_demand_key_dictionary(const voxel::world_backend::NativeVoxelBlockDemand::Key &p_key) const;
 	godot::Dictionary voxel_demand_event(const voxel::world_backend::NativeVoxelBlockDemand::Key &p_key) const;
-	voxel::world_backend::WorldPhysicalContentIdentity voxel_demand_source_pin() const;
-	void invalidate_changed_voxel_demand();
+	voxel::world_backend::WorldPhysicalContentIdentity voxel_demand_source_pin(
+		const voxel::world_backend::NativeVoxelBlockDemand::Key &p_key,
+		const voxel::world_backend::WorldDeltaPinnedSnapshot &p_deltas,
+		const std::vector<voxel::world_backend::NativeTerrainShapingPagePin> &p_pages) const;
+	void invalidate_changed_voxel_demand(const godot::Array &p_affected_sections);
 
 	bool initialization_attempted_ = false;
 	std::string initialization_failure_;
@@ -154,6 +157,8 @@ private:
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
 	voxel::world_backend::NativeVoxelBlockDemand voxel_demand_{1, 4U * 1024U * 1024U, 128, 16384};
 	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key, godot::Dictionary> voxel_demand_requests_;
+	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key,
+		std::vector<voxel::world_backend::NativeTerrainPageKey>> voxel_demand_dependencies_;
 	std::optional<voxel::world_backend::NativeVoxelBlockDemand::Ticket> voxel_demand_worker_;
 	std::optional<voxel::world_backend::NativeVoxelBlockDemand::Key> voxel_demand_capture_;
 	std::map<voxel::world_backend::NativeVoxelBlockDemand::Key, voxel::world_backend::NativeVoxelBlockDemand::Ticket> voxel_demand_tickets_;
