@@ -5,12 +5,14 @@
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
 #include "native_structure_exclusion_snapshot.hpp"
+#include "native_surface_prop_ordered_placement.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
 #include "native_wildlife_presentation_receipt.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
 
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -79,6 +81,9 @@ public:
 		const godot::String &p_durable_prop_id) const;
 	godot::Dictionary admit_wildlife_presentation_catalog(const godot::Dictionary &p_bundle);
 	godot::Dictionary admit_structure_exclusion_chunk(const godot::Dictionary &p_capture) const;
+	godot::Dictionary compose_surface_prop_ordered_shadow(
+		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
+		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions) const;
 	godot::Dictionary wildlife_presentation_shadow(const godot::String &p_variant) const;
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;

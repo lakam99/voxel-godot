@@ -313,6 +313,26 @@ Both focused Godot contracts passed again against that installed DLL: 45/45
 owner-bundle checks and 90/90 direct source/native decisions at
 `artifacts/native-world-backend/n4-structure-adapter-differential-02.json`.
 
+The adapter now composes the native source-ordered stream and SPO1 placement
+witness for all 28 attempts from one effective terrain page, admitted
+structure chunk, and retained biome/removal/visual/wildlife admissions. It
+returns a shadow receipt with every ordinal, durable ID, cell, outcome, RNG
+boundary and anchor; it does not construct or publish a complete feature
+manifest. `n4-ordered-adapter-01` passed 446/446 debug and release core tests,
+adapter smokes and validated pure-core coverage at
+`artifacts/native-world-backend/n4-ordered-adapter-01/report.json`.
+The first focused Godot invocation exposed a receipt translation error: the
+terrain-pin wrapper compared the entire backend status, so unrelated catalog
+admissions falsely staled an unchanged terrain page. It now compares only the
+seed, source identity, terrain delta and shaping revision/identity. The
+combined owner-bundle contract passes 52/52 checks at
+`artifacts/native-world-backend/n4-active-surface-owner-bundle-contract.json`;
+the focused N3 differential at
+`artifacts/native-world-backend/n3-terrain-owner-identity-01.json` still
+rejects the genuinely stale pre-edit pin. This establishes adapter execution,
+not an independent full Godot source-order differential, complete geometry,
+live freshness proof or production cutover.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

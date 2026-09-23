@@ -83,6 +83,24 @@ func run() -> void:
 				and native_status.get("completeFeatureManifest") == false)
 			check("native_structure_chunk_clear", native_clear.get("complete") == true \
 				and native_clear.get("blocked") == false)
+			check("ordered_biome_admitted", backend.admit_biome_environment_catalog(
+				terrain_bundle.sources.owner.biome).get("status") == "ready")
+			check("ordered_visual_admitted", backend.admit_visual_asset_catalog(
+				terrain_bundle.sources.owner).get("status") == "ready")
+			check("ordered_removed_admitted", backend.admit_removed_props_tombstones(
+				terrain_bundle.sources.owner.removed).get("status") == "ready")
+			check("ordered_wildlife_admitted", backend.admit_wildlife_presentation_catalog(
+				terrain_bundle.sources.owner).get("status") == "ready")
+			var ordered: Dictionary = backend.compose_surface_prop_ordered_shadow(
+				terrain_bundle.terrain.page, native_chunk)
+			check("ordered_native_28_attempts", ordered.get("status") == "ready" \
+				and ordered.get("attemptCount") == 28 \
+				and (ordered.get("attempts", []) as Array).size() == 28 \
+				and String(ordered.get("placementIdentity", "")).length() == 64)
+			check("ordered_native_shadow_scope", ordered.get("completeFeatureManifest") == false \
+				and ordered.get("liveCaptureFreshnessProven") == false)
+			check("ordered_native_owner_bundle_still_current",
+				BundleScript.terrain_chunk_is_current(main, backend, terrain_bundle))
 		var forged_exclusions: Dictionary = terrain_bundle.sources.exclusions.duplicate(true)
 		forged_exclusions.content.citadel[0].reason = "forged"
 		check("native_structure_content_tamper_rejected",

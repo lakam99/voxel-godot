@@ -3,6 +3,7 @@
 #include "biome_region_field.hpp"
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
+#include "native_surface_prop_source_ordered_stream.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
 
@@ -44,6 +45,7 @@ constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catal
 constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-receipt/v1";
 constexpr const char *WILDLIFE_PRESENTATION_RECEIPT_SCHEMA = "n4-wildlife-presentation-catalog-receipt/v1";
 constexpr const char *STRUCTURE_CHUNK_RECEIPT_SCHEMA = "n4-structure-exclusion-chunk-receipt/v1";
+constexpr const char *SURFACE_ORDERED_SHADOW_SCHEMA = "n4-surface-prop-ordered-shadow/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -1368,6 +1370,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("select_rock_asset_shadow", "biome", "durable_prop_id"), &NativeWorldBackend::select_rock_asset_shadow);
 	ClassDB::bind_method(D_METHOD("admit_wildlife_presentation_catalog", "bundle"), &NativeWorldBackend::admit_wildlife_presentation_catalog);
 	ClassDB::bind_method(D_METHOD("admit_structure_exclusion_chunk", "capture"), &NativeWorldBackend::admit_structure_exclusion_chunk);
+	ClassDB::bind_method(D_METHOD("compose_surface_prop_ordered_shadow", "page", "exclusions"),
+		&NativeWorldBackend::compose_surface_prop_ordered_shadow);
 	ClassDB::bind_method(D_METHOD("wildlife_presentation_shadow", "variant"), &NativeWorldBackend::wildlife_presentation_shadow);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
@@ -2090,6 +2094,69 @@ Dictionary NativeWorldBackend::admit_structure_exclusion_chunk(const Dictionary 
 		Dictionary result = envelope(operation, "ready");
 		result["snapshot"] = admitted;
 		result["snapshotStatus"] = admitted->status();
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
+		const Ref<NativeEffectiveTerrainPage> &p_page,
+		const Ref<NativeStructureExclusionChunk> &p_exclusions) const {
+	constexpr const char *operation = "compose_surface_prop_ordered_shadow";
+	if (!state_ || !shaping_registry_ || !biome_catalog_ || !removed_props_ || !visual_catalog_
+			|| !wildlife_presentations_ || p_page.is_null() || p_exclusions.is_null()
+			|| !p_page->batch_ || !p_exclusions->snapshot_)
+		return envelope(operation, "failed", "ordered_surface_sources_not_ready");
+	try {
+		const WorldSourcePin &pin = p_page->batch_->pin();
+		if (!(pin.definition().physical_content_identity() == state_->source_identity())
+				|| pin.terrain_delta_revision() != state_->terrain_delta_revision()
+				|| pin.shaping_registry_revision() != shaping_registry_->revision()
+				|| !(pin.shaping_registry_content_identity() == shaping_registry_->content_identity())
+				|| p_exclusions->snapshot_->world_digest() != state_->source_identity().digest)
+			throw std::invalid_argument("ordered surface pin or exclusions are stale");
+		const NativeEffectiveTerrainSource terrain(pin);
+		const NativeSurfacePropSourceOrderedStream ordered = NativeSurfacePropSourceOrderedStream::create(
+			state_->definition().raw_terrain_seed(), p_exclusions->chunk_.x, p_exclusions->chunk_.y,
+			state_->source_identity().digest, p_exclusions->snapshot_->world_generation(),
+			terrain, *biome_catalog_, *p_exclusions->snapshot_, *removed_props_, *wildlife_presentations_);
+		const NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
+		Array attempts;
+		for (std::size_t index = 0; index < ordered.attempts().size(); ++index) {
+			const NativeSurfacePropOrderedAttempt &source = ordered.attempts()[index];
+			const NativeSurfacePropPlacementEntry &placed = placement.entries()[index];
+			Dictionary row;
+			row["ordinal"] = static_cast<std::int64_t>(source.attempt.ordinal);
+			row["durableId"] = text(source.attempt.durable_id);
+			row["cell"] = Vector2i(source.attempt.cell_x, source.attempt.cell_z);
+			row["parentTombstoned"] = source.parent_tombstoned;
+			row["outcome"] = static_cast<std::int64_t>(source.outcome);
+			row["stateBeforeCoordinates"] = text(std::to_string(source.state_before_coordinates));
+			row["stateAfterRecipe"] = text(std::to_string(source.state_after_recipe));
+			row["sourceBiome"] = source.source ? text(source.source->biome_id) : String();
+			row["sourceHeightMeters"] = source.source && source.source->has_surface
+				? source.source->surface.height_meters : 0.0;
+			row["presence"] = static_cast<std::int64_t>(placed.presence);
+			row["worldAnchor"] = Vector3(placed.world_anchor.x, placed.world_anchor.y,
+				placed.world_anchor.z);
+			attempts.append(row);
+		}
+		Dictionary result = envelope(operation, "ready");
+		result["receiptSchema"] = SURFACE_ORDERED_SHADOW_SCHEMA;
+		result["chunk"] = p_exclusions->chunk_;
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["terrainDeltaRevision"] = static_cast<std::int64_t>(pin.terrain_delta_revision());
+		result["shapingRegistryRevision"] = static_cast<std::int64_t>(pin.shaping_registry_revision());
+		result["structureOwnerGeneration"] = static_cast<std::int64_t>(p_exclusions->snapshot_->world_generation());
+		result["structureContentIdentity"] = text(sha256_hex(ordered.exclusion_digest()));
+		result["placementIdentity"] = text(sha256_hex(placement.content_digest()));
+		result["rngSeed"] = static_cast<std::int64_t>(ordered.rng_seed());
+		result["finalRngState"] = text(std::to_string(ordered.final_rng_state()));
+		result["attempts"] = attempts;
+		result["attemptCount"] = static_cast<std::int64_t>(attempts.size());
+		result["completeFeatureManifest"] = false;
+		result["liveCaptureFreshnessProven"] = false;
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);

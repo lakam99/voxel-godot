@@ -23,12 +23,13 @@ static func capture(backend: Object, seed: String, chunk: Vector2i) -> Dictionar
 		return _failed("effective_page_invalid")
 	var page_status: Dictionary = page.status()
 	var after: Dictionary = backend.status()
-	if before != after or not _page_matches_owner(page_status, after, page_key):
+	if _terrain_owner_identity(before) != _terrain_owner_identity(after) \
+			or not _page_matches_owner(page_status, after, page_key):
 		return _failed("effective_page_changed_during_capture")
 	return {"ok":true, "schemaVersion":SCHEMA_VERSION,
 		"scope":"native_effective_terrain_chunk_pin_only", "backendInstanceId":backend.get_instance_id(),
 		"seed":seed, "chunk":chunk, "primaryPage":page_key,
-		"ownerStatus":after.duplicate(true), "pageStatus":page_status.duplicate(true), "page":page}
+		"ownerStatus":_terrain_owner_identity(after), "pageStatus":page_status.duplicate(true), "page":page}
 
 static func is_current(backend: Object, seed: String, snapshot: Dictionary) -> bool:
 	if backend == null or not is_instance_valid(backend) or not snapshot.get("ok", false) \
@@ -49,7 +50,7 @@ static func is_current(backend: Object, seed: String, snapshot: Dictionary) -> b
 		floori(float(snapshot.chunk.y) / CHUNKS_PER_PAGE))
 	var owner: Dictionary = backend.status()
 	return expected_page == snapshot.primaryPage and _owner_ready(owner, seed) \
-		and owner == snapshot.ownerStatus \
+		and _terrain_owner_identity(owner) == snapshot.ownerStatus \
 		and page.status() == snapshot.pageStatus \
 		and _page_matches_owner(snapshot.pageStatus, owner, expected_page)
 
@@ -59,6 +60,13 @@ static func _owner_ready(status: Dictionary, seed: String) -> bool:
 		and _valid_identity(status.get("shapingRegistryIdentity")) \
 		and status.get("terrainDeltaRevision") is int \
 		and status.get("shapingRegistryRevision") is int
+
+static func _terrain_owner_identity(status: Dictionary) -> Dictionary:
+	return {"sourceSeedText":status.get("sourceSeedText"),
+		"sourceIdentity":status.get("sourceIdentity"),
+		"terrainDeltaRevision":status.get("terrainDeltaRevision"),
+		"shapingRegistryRevision":status.get("shapingRegistryRevision"),
+		"shapingRegistryIdentity":status.get("shapingRegistryIdentity")}
 
 static func _page_matches_owner(page: Dictionary, owner: Dictionary, key: Vector2i) -> bool:
 	return page.get("status") == "ready" and page.get("primaryPage") == key \
