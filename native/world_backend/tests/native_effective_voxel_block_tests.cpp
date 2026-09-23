@@ -158,6 +158,7 @@ VWB_TEST(native_effective_voxel_block_lod_edits_and_stale_pin) {
     const std::size_t edited_index = 2U + 3U * (1U + 2U * 1U);
     VWB_EXPECT_EQ(std::uint8_t{11}, edited_block.indices8[edited_index]);
     VWB_EXPECT(!(old_block.pin_identity == edited_block.pin_identity));
+    VWB_EXPECT(!(old_block.block_content_identity == edited_block.block_content_identity));
     VWB_EXPECT_EQ(old_source.pin().physical_content_identity(), old_block.pin_identity);
     VWB_EXPECT_EQ(std::size_t{12}, edited_block.indices8.size());
 }

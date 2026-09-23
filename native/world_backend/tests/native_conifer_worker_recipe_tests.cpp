@@ -61,6 +61,23 @@ void expect(const NativeConiferWorkerRequest &input,const Expected &e) {
     VWB_EXPECT_EQ(350.0,r.render_visibility_range);
     VWB_EXPECT_EQ(170.0,r.render_shadow_range);
     VWB_EXPECT_EQ(1.25,r.render_wind_response);
+    VWB_EXPECT_EQ(1,r.runtime_recipe_pass_count);
+    VWB_EXPECT_EQ(0,r.runtime_foliage_supplement_count);
+    if (r.render_lod_tier=="impostor") {
+        VWB_EXPECT_EQ(std::string("distance_impostor"),r.crown_habit);
+        VWB_EXPECT_EQ(0,r.raw_recipe_version);
+        VWB_EXPECT_EQ(std::string(""),r.methodology);
+    } else {
+        VWB_EXPECT_EQ(std::string("irregular_deep_conical"),r.crown_habit);
+        VWB_EXPECT_EQ(std::string("deterministic_monopodial_bud_spacing_pipe_model"),r.methodology);
+        VWB_EXPECT_EQ(2,r.raw_recipe_version);
+        VWB_EXPECT(r.apical_leader_continuous && r.graph_connected && r.foliage_derived_from_fine_segments);
+        VWB_EXPECT_EQ(r.source_branch_count+1,static_cast<std::size_t>(r.raw_node_count));
+        VWB_EXPECT_EQ(r.source_branch_count,static_cast<std::size_t>(r.raw_segment_counts_by_order[0]+r.raw_segment_counts_by_order[1]+r.raw_segment_counts_by_order[2]+r.raw_segment_counts_by_order[3]+r.raw_segment_counts_by_order[4]));
+        VWB_EXPECT(r.raw_occupied_crown_bins>=0 && r.raw_occupied_crown_bins<=50);
+    }
+    VWB_EXPECT_EQ(r.review,r.poc_continuous_wood);
+    VWB_EXPECT_EQ(!r.review && !r.impostor,r.runtime_continuous_bole);
 }
 }
 
@@ -79,6 +96,26 @@ VWB_TEST(native_conifer_worker_matches_direct_godot_runtime_review_and_impostor_
     const auto near=NativeConiferWorkerRecipeBuilder::build(r);
     VWB_EXPECT_EQ(392,near.render_branch_budget);
     VWB_EXPECT_EQ(579,near.render_foliage_budget);
+    VWB_EXPECT_EQ(14,near.raw_whorl_count);
+    VWB_EXPECT_EQ(49,near.raw_occupied_crown_bins);
+    VWB_EXPECT_EQ(641,near.raw_node_count);
+    VWB_EXPECT_EQ(141,near.raw_pipe_junction_count);
+    VWB_EXPECT_EQ(205,near.raw_support_driven_branchlet_count);
+    VWB_EXPECT_EQ(15,near.raw_interstitial_spray_count);
+    VWB_EXPECT_EQ(45,near.raw_segment_counts_by_order[0]);
+    VWB_EXPECT_EQ(155,near.raw_segment_counts_by_order[1]);
+    VWB_EXPECT_EQ(220,near.raw_segment_counts_by_order[2]);
+    VWB_EXPECT_EQ(220,near.raw_segment_counts_by_order[3]);
+    VWB_EXPECT_EQ(0,near.raw_segment_counts_by_order[4]);
+    VWB_EXPECT(std::abs(near.raw_crown_base-2.58683286861676)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_crown_height-49.9320012859303)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_first_whorl_height-6.3698586730074)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_mean_bough_bud_charge-2.05126067928479)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_lower_whorl_mean_length-11.4943438624107)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_upper_whorl_mean_length-3.83456609755237)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_drooping_curtain_mean_pitch+0.352929197942338)<1e-8);
+    VWB_EXPECT(std::abs(near.raw_pipe_max_relative_error-2.32875962589423e-16)<1e-12);
+    VWB_EXPECT(std::abs(double(near.raw_crown_center.y)-25.55555)<1e-4);
     VWB_EXPECT(std::abs(double(near.branches.front().end.x)-0.000194541411474347)<1e-9);
     VWB_EXPECT(std::abs(double(near.branches.front().end.y)-0.577777743339539)<1e-6);
     VWB_EXPECT(std::abs(near.branches.front().radius_start-1.364)<1e-9);

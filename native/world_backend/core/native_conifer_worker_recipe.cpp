@@ -142,6 +142,10 @@ NativeConiferWorkerRecipe NativeConiferWorkerRecipeBuilder::build(const NativeCo
     out.review=input.presentation=="review";
     const bool skip_grammar=out.render_lod_tier=="impostor";
     out.impostor=!out.review && skip_grammar;
+    out.runtime_continuous_bole=!out.review && !out.impostor;
+    out.poc_continuous_wood=out.review;
+    out.crown_habit=skip_grammar?"distance_impostor":"irregular_deep_conical";
+    if (!skip_grammar) out.methodology="deterministic_monopodial_bud_spacing_pipe_model";
     out.genetic_seed=input.genetic_seed;
     if (out.genetic_seed==0) {
         const std::string key="tree-local:"+out.world_seed+":"+out.tree_id+":"+out.biome+":"+out.architecture+":"+out.species_grammar+":v10";
@@ -156,6 +160,26 @@ NativeConiferWorkerRecipe NativeConiferWorkerRecipeBuilder::build(const NativeCo
         out.topology_signature="impostor:"+out.world_seed+":"+out.tree_id+":"+out.species_grammar;
     } else {
         const auto raw=NativeConiferRecipeBuilder::build(out.genetic_seed,out.growth_stage);
+        out.raw_recipe_version=NativeConiferRecipe::RECIPE_VERSION;
+        out.raw_maturity=raw.maturity;
+        out.raw_crown_base=raw.crown_base;out.raw_crown_height=raw.crown_height;
+        out.raw_crown_center=raw.crown_center;out.raw_crown_radii=raw.crown_radii;
+        out.raw_node_count=raw.node_count;out.raw_whorl_count=raw.whorl_count;
+        out.raw_interstitial_spray_count=raw.interstitial_spray_count;
+        out.raw_support_driven_branchlet_count=raw.support_driven_branchlet_count;
+        out.raw_pipe_junction_count=raw.pipe_junction_count;
+        out.raw_occupied_crown_bins=raw.occupied_crown_bins;
+        out.raw_segment_counts_by_order=raw.segment_counts_by_order;
+        out.raw_first_whorl_height=raw.first_whorl_height;
+        out.raw_mean_bough_bud_charge=raw.mean_bough_bud_charge;
+        out.raw_lower_whorl_mean_length=raw.lower_whorl_mean_length;
+        out.raw_upper_whorl_mean_length=raw.upper_whorl_mean_length;
+        out.raw_drooping_curtain_mean_pitch=raw.drooping_curtain_mean_pitch;
+        out.raw_pipe_max_relative_error=raw.pipe_max_relative_error;
+        // The conifer grammar constructs a rooted support graph and an apical
+        // leader with at least twelve steps; both source facts are invariant.
+        out.apical_leader_continuous=true;out.graph_connected=true;
+        out.foliage_derived_from_fine_segments=true;
         out.topology_signature=raw.signature;
         if (out.review) {
             out.source_branch_count=raw.branches.size();out.source_foliage_count=raw.foliage.size();

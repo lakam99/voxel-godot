@@ -1404,6 +1404,7 @@ Dictionary NativeEffectiveTerrainPage::encode_voxel_block(const Dictionary &p_re
 		result["size"] = vector3i(value.size);
 		result["lod"] = static_cast<int64_t>(value.lod);
 		result["pinIdentity"] = identity_dictionary(value.pin_identity);
+		result["blockContentIdentity"] = identity_dictionary(value.block_content_identity);
 		result["terrainDeltaRevision"] = static_cast<int64_t>(value.terrain_delta_revision);
 		result["shapingRegistryRevision"] = static_cast<int64_t>(value.shaping_registry_revision);
 		result["sdf16Le"] = packed(value.sdf16_le);
@@ -3125,6 +3126,7 @@ Dictionary NativeWorldBackend::encode_voxel_block_shadow(const Dictionary &p_req
 		result["lod"] = static_cast<int64_t>(block.lod);
 		result["sourceIdentity"] = identity_dictionary(source_identity);
 		result["pinIdentity"] = identity_dictionary(block.pin_identity);
+		result["blockContentIdentity"] = identity_dictionary(block.block_content_identity);
 		result["terrainDeltaRevision"] = static_cast<int64_t>(block.terrain_delta_revision);
 		result["shapingRegistryRevision"] = static_cast<int64_t>(block.shaping_registry_revision);
 		result["shapingRegistryIdentity"] = identity_dictionary(registry_identity);

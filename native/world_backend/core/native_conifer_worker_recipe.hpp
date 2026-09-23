@@ -35,6 +35,10 @@ struct NativeConiferWorkerRequest final {
 struct NativeConiferWorkerRecipe final {
     static constexpr int RECIPE_VERSION = 10;
     bool valid = false, review = false, impostor = false;
+    bool runtime_continuous_bole = false, poc_continuous_wood = false;
+    bool apical_leader_continuous = false, graph_connected = false;
+    bool foliage_derived_from_fine_segments = false;
+    std::string crown_habit, methodology;
     std::string tree_id, world_seed, biome, architecture, species_grammar;
     std::string age_band, render_lod_tier, signature, topology_signature;
     double age_years = 0.0, growth_stage = 0.0;
@@ -47,6 +51,16 @@ struct NativeConiferWorkerRecipe final {
     NativeConiferVec3 interaction_world_position;
     double interaction_world_rotation_y = 0.0;
     std::size_t source_branch_count = 0, source_foliage_count = 0;
+    int runtime_recipe_pass_count = 1, runtime_foliage_supplement_count = 0;
+    int raw_recipe_version = 0, raw_node_count = 0, raw_whorl_count = 0;
+    int raw_interstitial_spray_count = 0, raw_support_driven_branchlet_count = 0;
+    int raw_pipe_junction_count = 0, raw_occupied_crown_bins = 0;
+    std::array<int, 5> raw_segment_counts_by_order{};
+    double raw_maturity = 0.0, raw_crown_base = 0.0, raw_crown_height = 0.0;
+    double raw_first_whorl_height = 0.0, raw_mean_bough_bud_charge = 0.0;
+    double raw_lower_whorl_mean_length = 0.0, raw_upper_whorl_mean_length = 0.0;
+    double raw_drooping_curtain_mean_pitch = 0.0, raw_pipe_max_relative_error = 0.0;
+    NativeConiferVec3 raw_crown_center, raw_crown_radii;
     std::vector<NativeConiferBranch> branches;
     std::vector<NativeConiferFoliage> foliage;
 };

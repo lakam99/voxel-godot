@@ -17,6 +17,24 @@ edits invalidate it. A separate local block-content identity must derive
 from the ordered page-scoped content identities, with global revision and
 owner generation carried separately for publication admission.
 
+The next shadow change adds `blockContentIdentity` alongside `pinIdentity`
+for one-page and multi-page encoders. It hashes source identity, the admitted
+block request and ordered page-scoped physical identities, omitting global
+delta/registry sequence values. This is conservative **page-local source
+content**, not a hash of the exact packed bytes: an edit elsewhere in a
+dependency page may change it while this block's bytes stay unchanged.
+Focused tests were added for far-page invariance, same-page conservative invalidation,
+local seam-edit invalidation and single-page/multi-page equivalence. The
+global revision-bearing pin remains mandatory for stale-result rejection.
+The final combined gate for this addition is
+`artifacts/native-world-backend/n3-local-content-n4-conifer-schema-01/report.json`:
+480/480 debug and release tests, adapter smokes, 10,936/10,936 pure-core
+lines, 1,459/1,459 functions and 6,424/6,424 branches pass.
+The post-build focused Godot adapter contract at
+`artifacts/native-world-backend/n3-local-content-shadow-01/report.json`
+also passes the new local-content-identity invalidation check, with an owned
+process exit of zero and no cleanup residue.
+
 The focused linked suite passes 7/7. It covers negative and positive X/Z
 seams, both axes, LOD page skips, durable edits on opposite sides, repeated
 identity, malformed dimensions/LOD/overflow, and empty/missing/extra/duplicate,

@@ -47,6 +47,7 @@ func _initialize() -> void:
 		var render_lod: Dictionary = recipe.get("renderLod", {})
 		var interaction: Dictionary = recipe.get("interactionFacts", {})
 		var policy: Dictionary = recipe.get("renderPolicy", {})
+		var stats: Dictionary = recipe.get("stats", {})
 		print("VWB_CONIFER_WORKER_ORACLE:", JSON.stringify({
 			"case": variation, "version": recipe.get("version", -1),
 			"treeId": recipe.get("treeId", ""), "biome": recipe.get("biome", ""),
@@ -60,6 +61,16 @@ func _initialize() -> void:
 			"branchSelectionHash": service.stable_hash(",".join(branch_parts)),
 			"foliageSelectionHash": service.stable_hash(",".join(foliage_parts)),
 			"renderLod": render_lod, "runtimeImpostor": recipe.get("runtimeImpostor", null),
+			"crownHabit": recipe.get("crownHabit", ""), "methodology": recipe.get("methodology", ""),
+			"pocContinuousWood": recipe.get("pocContinuousWood", null),
+			"runtimeContinuousBole": recipe.get("runtimeContinuousBole", null),
+			"runtimeRecipePassCount": recipe.get("runtimeRecipePassCount", null),
+			"runtimeFoliageSupplementCount": recipe.get("runtimeFoliageSupplementCount", null),
+			"rawRecipeVersion": recipe.get("recipeVersion", null),
+			"rawMaturity": recipe.get("maturity", null),
+			"crownBase": recipe.get("crownBase", null), "crownHeight": recipe.get("crownHeight", null),
+			"crownCenter": recipe.get("crownCenter", null), "crownRadii": recipe.get("crownRadii", null),
+			"stats": stats,
 			"collision": collision, "renderPolicy": policy,
 			"interactionFacts": interaction,
 			"firstBranch": first_branch, "firstFoliage": first_foliage,

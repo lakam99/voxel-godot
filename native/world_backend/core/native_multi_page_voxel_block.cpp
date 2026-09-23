@@ -127,6 +127,8 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
     append_u32(identity, static_cast<std::uint32_t>(size.z));
     append_u32(identity, request.lod);
     append_u32(identity, static_cast<std::uint32_t>(primaries.size()));
+    std::vector<WorldPhysicalContentIdentity> content_pages;
+    content_pages.reserve(primaries.size());
 
     for (const auto &z : zs) for (const auto &x : xs) {
         const NativeTerrainPageKey primary{x.page.x, z.page.z};
@@ -141,6 +143,7 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
             local.push_back(**found);
         }
         WorldSourcePin pin(definition, deltas, primary, local);
+        content_pages.push_back(pin.physical_content_identity());
         identity.insert(identity.end(), pin.physical_content_identity().digest.begin(),
             pin.physical_content_identity().digest.end());
         const NativeEffectiveTerrainSource source(std::move(pin));
@@ -165,6 +168,8 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
                 }
     }
     result.pin_identity = {sha256(identity)};
+    result.block_content_identity = native_voxel_block_content_identity(
+        definition.physical_content_identity(), request, content_pages);
     return result;
 }
 

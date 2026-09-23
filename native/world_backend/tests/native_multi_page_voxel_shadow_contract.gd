@@ -115,6 +115,8 @@ func run() -> void:
 		check(before.get("terrainDeltaRevision") == 0 and after.get("terrainDeltaRevision") == 1,
 			"one whole-block delta revision")
 		check(before.get("pinIdentity") != after.get("pinIdentity"), "whole-block identity invalidated")
+		check(before.get("blockContentIdentity") != after.get("blockContentIdentity"),
+			"local block content invalidated by two seam edits")
 		check(after.indices8[0] == 13 and after.indices8[3] == 11,
 			"both sides of seam use committed materials")
 	verify_case(backend, Vector3i(-1, 0, -1), Vector3i(2, 1, 2), 0)

@@ -1,4 +1,5 @@
 #include "native_effective_voxel_block.hpp"
+#include "sha256.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -9,6 +10,11 @@ namespace voxel::world_backend {
 namespace {
 
 constexpr std::int32_t MAX_SIDE = 32;
+
+void append_u32(std::vector<std::uint8_t> &bytes, const std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
 
 std::int16_t sdf16_from_voxel_float(const float value) {
     // Voxel Tools v1.6x: real_to_raw_voxel(DEPTH_16_BIT) calls
@@ -29,6 +35,26 @@ std::int32_t checked_coordinate(const std::int32_t origin, const std::int32_t of
 }
 
 } // namespace
+
+WorldPhysicalContentIdentity native_voxel_block_content_identity(
+    const WorldPhysicalContentIdentity &source_identity,
+    const NativeEffectiveVoxelBlockRequest &request,
+    const std::vector<WorldPhysicalContentIdentity> &ordered_page_identities) {
+    std::vector<std::uint8_t> bytes;
+    bytes.insert(bytes.end(), {'v','w','b','-','v','o','x','e','l','-','c','o','n','t','e','n','t','-','v','1'});
+    bytes.insert(bytes.end(), source_identity.digest.begin(), source_identity.digest.end());
+    append_u32(bytes, static_cast<std::uint32_t>(request.origin.x));
+    append_u32(bytes, static_cast<std::uint32_t>(request.origin.y));
+    append_u32(bytes, static_cast<std::uint32_t>(request.origin.z));
+    append_u32(bytes, static_cast<std::uint32_t>(request.size.x));
+    append_u32(bytes, static_cast<std::uint32_t>(request.size.y));
+    append_u32(bytes, static_cast<std::uint32_t>(request.size.z));
+    append_u32(bytes, request.lod);
+    append_u32(bytes, static_cast<std::uint32_t>(ordered_page_identities.size()));
+    for (const auto &page : ordered_page_identities)
+        bytes.insert(bytes.end(), page.digest.begin(), page.digest.end());
+    return {sha256(bytes)};
+}
 
 std::uint8_t native_voxel_material_channel_id(const TerrainMaterialId material) {
     const auto id = static_cast<std::uint8_t>(material);
@@ -66,6 +92,8 @@ NativeEffectiveVoxelBlock encode_native_effective_voxel_block(
     result.size = size;
     result.lod = request.lod;
     result.pin_identity = pin.physical_content_identity();
+    result.block_content_identity = native_voxel_block_content_identity(
+        pin.definition().physical_content_identity(), request, {result.pin_identity});
     result.terrain_delta_revision = pin.terrain_delta_revision();
     result.shaping_registry_revision = pin.shaping_registry_revision();
     result.sdf16_le.resize(count * 2U);

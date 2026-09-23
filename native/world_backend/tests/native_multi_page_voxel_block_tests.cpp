@@ -119,6 +119,7 @@ void check_against_page_samples(Fixture &fixture, const NativeEffectiveVoxelBloc
     const auto block = encode_native_multi_page_voxel_block(fixture.source, deltas, pages, request);
     const auto again = encode_native_multi_page_voxel_block(fixture.source, deltas, pages, request);
     VWB_EXPECT_EQ(block.pin_identity.digest, again.pin_identity.digest);
+    VWB_EXPECT_EQ(block.block_content_identity, again.block_content_identity);
     const std::int64_t scale = std::int64_t{1} << request.lod;
     for (std::int32_t z = 0; z < request.size.z; ++z)
         for (std::int32_t x = 0; x < request.size.x; ++x) {
@@ -155,6 +156,22 @@ void check_against_page_samples(Fixture &fixture, const NativeEffectiveVoxelBloc
 VWB_TEST(native_multi_page_voxel_negative_both_axes_stitches_zxy) {
     Fixture fixture;
     check_against_page_samples(fixture, {{-2, -1, -2}, {4, 3, 4}, 0});
+}
+
+VWB_TEST(native_multi_page_voxel_single_page_content_matches_single_page_encoder) {
+    Fixture fixture;
+    const NativeEffectiveVoxelBlockRequest request{{0, 0, 0}, {2, 2, 2}, 0};
+    const auto deltas = fixture.store.pin();
+    const auto pages = fixture.pins(request);
+    const auto composite = encode_native_multi_page_voxel_block(
+        fixture.source, deltas, pages, request);
+    const NativeEffectiveTerrainSource source(
+        WorldSourcePin(fixture.source, deltas, {0, 0}, pages));
+    const auto single = encode_native_effective_voxel_block(source, request);
+    VWB_EXPECT_EQ(single.block_content_identity, composite.block_content_identity);
+    VWB_EXPECT_EQ(single.sdf16_le, composite.sdf16_le);
+    VWB_EXPECT_EQ(single.indices8, composite.indices8);
+    VWB_EXPECT_EQ(single.data5_8, composite.data5_8);
 }
 
 VWB_TEST(native_multi_page_voxel_positive_boundary_stitches_zxy) {
@@ -217,11 +234,55 @@ VWB_TEST(native_multi_page_voxel_seam_edits_share_one_delta_snapshot) {
     const auto after = fixture.store.pin();
     const auto new_block = encode_native_multi_page_voxel_block(fixture.source, after, pages, request);
     VWB_EXPECT(old_block.pin_identity.digest != new_block.pin_identity.digest);
+    VWB_EXPECT(old_block.block_content_identity.digest != new_block.block_content_identity.digest);
     VWB_EXPECT_EQ(before.revision(), old_block.terrain_delta_revision);
     VWB_EXPECT_EQ(after.revision(), new_block.terrain_delta_revision);
     VWB_EXPECT_EQ(13U, new_block.indices8[0]);
     VWB_EXPECT_EQ(11U, new_block.indices8[3]);
     check_against_page_samples(fixture, request);
+}
+
+VWB_TEST(native_multi_page_voxel_content_identity_ignores_unrelated_delta_revision) {
+    Fixture fixture;
+    const NativeEffectiveVoxelBlockRequest request{{-1, 0, -1}, {2, 1, 2}, 0};
+    const auto pages = fixture.pins(request);
+    const auto before = encode_native_multi_page_voxel_block(
+        fixture.source, fixture.store.pin(), pages, request);
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = "multi-page:remote-edit";
+    admission.durable_snapshot = NativeTypedWorldStateSnapshot::create({
+        {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
+            durable_edit({10000, 0, 10000}, TerrainMaterialId::copper_ore)},
+    });
+    static_cast<void>(fixture.store.admit_typed_state(admission));
+    const auto after = encode_native_multi_page_voxel_block(
+        fixture.source, fixture.store.pin(), pages, request);
+    VWB_EXPECT(before.pin_identity.digest != after.pin_identity.digest);
+    VWB_EXPECT_EQ(before.block_content_identity, after.block_content_identity);
+    VWB_EXPECT_EQ(before.sdf16_le, after.sdf16_le);
+    VWB_EXPECT_EQ(before.indices8, after.indices8);
+    VWB_EXPECT_EQ(before.data5_8, after.data5_8);
+}
+
+VWB_TEST(native_multi_page_voxel_content_identity_conservatively_tracks_dependency_page) {
+    Fixture fixture;
+    const NativeEffectiveVoxelBlockRequest request{{0, 0, 0}, {2, 1, 2}, 0};
+    const auto pages = fixture.pins(request);
+    const auto before = encode_native_multi_page_voxel_block(
+        fixture.source, fixture.store.pin(), pages, request);
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = "multi-page:same-page-outside-block";
+    admission.durable_snapshot = NativeTypedWorldStateSnapshot::create({
+        {NativeCellStateNamespace::durable_terrain, NativeTypedWorldStatePersistence::durable,
+            durable_edit({100, 0, 100}, TerrainMaterialId::copper_ore)},
+    });
+    static_cast<void>(fixture.store.admit_typed_state(admission));
+    const auto after = encode_native_multi_page_voxel_block(
+        fixture.source, fixture.store.pin(), pages, request);
+    VWB_EXPECT(before.block_content_identity.digest != after.block_content_identity.digest);
+    VWB_EXPECT_EQ(before.sdf16_le, after.sdf16_le);
+    VWB_EXPECT_EQ(before.indices8, after.indices8);
+    VWB_EXPECT_EQ(before.data5_8, after.data5_8);
 }
 
 VWB_TEST(native_multi_page_voxel_rejects_missing_or_mixed_shaping) {

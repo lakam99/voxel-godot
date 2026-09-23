@@ -29,3 +29,20 @@ scene/render conversion, trunk collision publication and live visual
 acceptance remain N4 work. Non-conifer families, nonfinite inputs, malformed
 UTF-8 and full Unicode casefold/whitespace normalization are not admitted by
 this typed conifer-only API. No production caller or script authority changes.
+
+The following pure-core schema-preparation slice adds conifer crown habit,
+wood-continuity flags, recipe-pass/supplement facts and typed source-space
+crown/whorl/pipe/order diagnostics. Its focused worker tests and eight direct
+Godot oracle cases pass. The owned direct-service oracle receipt is
+`artifacts/native-world-backend/n4-conifer-worker-schema-oracle-01/watchdog.json`;
+its stdout contains eight case rows, stderr is empty, and Godot exited zero
+with zero owned processes. This still does not produce the full Dictionary:
+review and impostor recipes have different *key presence*, not just boolean
+values; nested `renderLod`, `interactionFacts`, occupancy/budget statistics
+and source-cache derived-LOD behavior remain to be represented and checked
+before a conifer-only worker cutover.
+The combined native gate for this metadata addition is
+`artifacts/native-world-backend/n3-local-content-n4-conifer-schema-01/report.json`:
+480/480 debug and release tests, adapter smokes and exact 100% pure-core
+line/function/branch coverage pass. This is pure-core and direct-service
+evidence, not live conifer publication or collision acceptance.
