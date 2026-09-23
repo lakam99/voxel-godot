@@ -28,6 +28,7 @@ var _stopping := false
 var _window_layout := {}
 var _window_records := {}
 var _active_window_tokens := {}
+var _pending_retirement_tokens := {}
 
 func setup(backend, pages, admission, planner, cell_meters: float,
 		owner_generation: int, max_resident_blocks: int) -> Dictionary:
@@ -200,7 +201,8 @@ func collision_window_artifact_row(window_token: String, block: Vector3i,
 func acknowledge_collision_window_retired(window_token: String,
 		retirement_receipt: Dictionary) -> Dictionary:
 	var record: Dictionary = _window_records.get(window_token, {})
-	if record.is_empty() or _active_window_tokens.has(window_token) \
+	if record.is_empty() or (_active_window_tokens.has(window_token) \
+			and not _pending_retirement_tokens.has(window_token)) \
 			or not bool(retirement_receipt.get("drained", false)) \
 			or int(retirement_receipt.get("remainingBodies", -1)) != 0 \
 			or retirement_receipt.get("windowToken") != window_token:
@@ -208,6 +210,8 @@ func acknowledge_collision_window_retired(window_token: String,
 	var facade = record.get("facade")
 	if facade != null: facade.detach()
 	_window_records.erase(window_token)
+	_active_window_tokens.erase(window_token)
+	_pending_retirement_tokens.erase(window_token)
 	return {"status":"ready", "retiredWindowToken":window_token}
 
 func stop() -> Dictionary:
@@ -243,6 +247,11 @@ func _create_producer(source: Dictionary, demand: Dictionary) -> Dictionary:
 	return {"status":"ready", "identity":_identity.duplicate(true)}
 
 func _refresh_window_layout() -> Dictionary:
+	# Once old physical owners exceed the retention budget, no subsequent
+	# demand revision may allocate another window record before N5 drains one.
+	if not _window_layout.is_empty():
+		var held: Dictionary = _retention_status()
+		if held.get("status") != "ready": return held
 	var planned: Dictionary = _planner.collision_mesh_window_layout()
 	if planned.get("status") != "ready": return planned
 	var layout_token := ("%s:%s:%d:%d" % [String(planned.logicalClosureToken),
@@ -252,6 +261,7 @@ func _refresh_window_layout() -> Dictionary:
 		return _retention_status()
 	var windows: Array[Dictionary] = []
 	var active := {}
+	var new_records := {}
 	for index in range((planned.windows as Array).size()):
 		var window: Dictionary = planned.windows[index]
 		if (window.blocks as Array).size() > _max_resident_blocks:
@@ -265,14 +275,22 @@ func _refresh_window_layout() -> Dictionary:
 			"windowIndex":index}
 		windows.append(member)
 		if not _window_records.has(token):
-			_window_records[token] = {"layoutToken":layout_token,
+			new_records[token] = {"layoutToken":layout_token,
 				"identity":_identity.duplicate(true), "blocks":window.blocks,
 				"rows":{}, "facade":null,
 				"membershipProvenance":{"authority":"pinned_demand",
 					"demandRevision":0,
 					"closureToken":String(window.closureToken),
 					"windowToken":token}}
+	var projected: Dictionary = _retention_status(active)
+	if projected.get("status") != "ready":
+		_pending_retirement_tokens.clear()
+		for token in projected.retiredWindowTokens:
+			_pending_retirement_tokens[token] = true
+		return projected
+	for token in new_records: _window_records[token] = new_records[token]
 	_active_window_tokens = active
+	_pending_retirement_tokens.clear()
 	_window_layout = planned.duplicate(true)
 	_window_layout["layoutToken"] = layout_token
 	_window_layout["sourceIdentity"] = _identity.sourceIdentity.duplicate(true)
@@ -314,15 +332,17 @@ func _release_windows() -> void:
 		if facade != null: facade.detach()
 	_window_records.clear()
 	_active_window_tokens.clear()
+	_pending_retirement_tokens.clear()
 	_window_layout.clear()
 
-func _retention_status() -> Dictionary:
+func _retention_status(projected_active: Dictionary = {}) -> Dictionary:
+	var active: Dictionary = projected_active if not projected_active.is_empty() else _active_window_tokens
 	var retired_windows := 0
 	var retained_rows := 0
 	var retained_vertex_bytes := 0
 	var retired_tokens: Array[String] = []
 	for token in _window_records:
-		if _active_window_tokens.has(token): continue
+		if active.has(token): continue
 		retired_windows += 1
 		retired_tokens.append(String(token))
 		var rows: Dictionary = (_window_records[token] as Dictionary).rows
@@ -334,6 +354,7 @@ func _retention_status() -> Dictionary:
 	if retired_windows > MAX_RETIRED_WINDOWS \
 			or retained_vertex_bytes > MAX_RETIRED_VERTEX_BYTES:
 		return {"status":"pending", "reason":"collision_window_retirement_backpressure",
+			"totalWindowRecords":_window_records.size(),
 			"retiredWindows":retired_windows, "retainedRows":retained_rows,
 			"retainedVertexBytes":retained_vertex_bytes,
 			"maxRetiredWindows":MAX_RETIRED_WINDOWS,
@@ -342,7 +363,15 @@ func _retention_status() -> Dictionary:
 			"layoutToken":_window_layout.get("layoutToken", "")}
 	var layout: Dictionary = _window_layout.duplicate(true)
 	layout["retirementTelemetry"] = {"retiredWindows":retired_windows,
+		"totalWindowRecords":_window_records.size(),
 		"retainedRows":retained_rows,
 		"retainedVertexBytes":retained_vertex_bytes,
 		"retiredWindowTokens":retired_tokens}
+	if _window_layout.is_empty():
+		return {"status":"ready", "retirementTelemetry":{
+			"retiredWindows":retired_windows,
+			"totalWindowRecords":_window_records.size(),
+			"retainedRows":retained_rows,
+			"retainedVertexBytes":retained_vertex_bytes,
+			"retiredWindowTokens":retired_tokens}}
 	return layout

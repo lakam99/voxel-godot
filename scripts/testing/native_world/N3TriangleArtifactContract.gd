@@ -405,6 +405,23 @@ func run() -> void:
 		and int(held.get("retiredWindows", 0)) == 65
 		and (held.get("retiredWindowTokens", []) as Array).size() == 65,
 		"unretired window cap pauses publication without dropping records")
+	var held_record_count := int(held.get("totalWindowRecords", -1))
+	var held_vertex_bytes := int(held.get("retainedVertexBytes", -1))
+	var next_viewers: Array[Dictionary] = [{"kind":"secondary", "id":"next",
+		"position":Vector3(float(66 * 256 + 8) * main.CELL, 0, 0),
+		"distance":0}]
+	many_planner.replace_sources(viewer, next_viewers, [], [], Vector2i(128,128))
+	var still_held: Dictionary = many_broker.advance()
+	check(still_held.get("status") == "pending"
+		and still_held.get("reason") == "collision_window_retirement_backpressure"
+		and int(still_held.get("totalWindowRecords", -2)) == held_record_count
+		and int(still_held.get("retainedVertexBytes", -2)) == held_vertex_bytes,
+		"second demand change cannot materialize more records under backpressure")
+	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
+	var returned_held: Dictionary = many_broker.advance()
+	check(returned_held.get("status") == "pending"
+		and int(returned_held.get("totalWindowRecords", -2)) == held_record_count,
+		"third demand change also retains exact bounded window record set")
 	var retired_tokens: Array = held.get("retiredWindowTokens", [])
 	if not retired_tokens.is_empty():
 		var retired_token := String(retired_tokens[0])
