@@ -51,6 +51,16 @@ func run() -> void:
 		finish()
 		return
 	check(backend.initialize(source_request()).get("status") == "ready","backend initialized")
+	var initial_capacity: Dictionary = backend.status()
+	check(int(initial_capacity.get("voxelDemandMaxRetainedEntries", -1)) == 16384,
+		"production-scale retained capacity exposed")
+	check(backend.configure_voxel_block_shadow_capacity(256).get("status") == "ready"
+		and int(backend.status().get("voxelDemandMaxRetainedEntries", -1)) == 256,
+		"bounded retained capacity configurable")
+	check(backend.configure_voxel_block_shadow_capacity(32769).get("reason") == "capacity_out_of_bounds",
+		"hard retained capacity bound enforced")
+	check(backend.configure_voxel_block_shadow_capacity(16384).get("status") == "ready",
+		"retained capacity restored before block demand")
 	var request := {"schema":"n3-effective-voxel-block-request/v1",
 		"origin":Vector3i.ZERO,"size":Vector3i.ONE * 16,"lod":0}
 	check(backend.request_voxel_block_shadow(request,1,10).has("key"),"retained request admitted")

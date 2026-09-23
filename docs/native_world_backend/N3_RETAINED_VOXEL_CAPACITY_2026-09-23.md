@@ -55,3 +55,16 @@ rejection count in `status()`. The remaining integration work is to measure live
 viewer unions (including movement handoff and secondary viewers), configure
 before admitting each union, and prove retained retry under a capacity-full
 headed fixture.
+
+The debug extension was built and installed for focused service/engine checks;
+the installed SHA-256 is
+`58627318F58CDDCA01DAD46148C2CAD58AA5549A2F84FF3C70B4FDDCE47B4065`.
+The former installed debug binary was copied to
+`artifacts/native-world-backend/n3-capacity-install-backup/` before replacement.
+`node tools/run-n3-local-retained-voxel-demand.mjs` passed with capacity
+configuration/bound assertions and local/remote edit receipts:
+`artifacts/native-world-backend/n3-local-retained-demand-1790169135719-4e09c09b/report.json`.
+`node tools/run-n3-native-terrain-block-publisher.mjs` passed on that binary:
+`artifacts/native-world-backend/n3-native-terrain-publisher-1790169082597-646e7e86/report.json`.
+These are focused service and headed mechanism results, not a measured normal
+viewer union, production cutover, or Gate 5 acceptance.
