@@ -39,6 +39,9 @@ var startup_loading_active := false
 var startup_loading_started_usec := 0
 var startup_loading_last_step_usec := 0
 var startup_loading_timeline: Array[Dictionary] = []
+var startup_work_progress_revision := 0
+var startup_work_progress_receipt := {}
+var startup_work_completed_counts := {}
 var startup_readiness_domains := {}
 var startup_loading_failure_result := {}
 var world_streaming = WorldStreamingCoordinatorScript.new()
@@ -683,6 +686,9 @@ func begin_startup_loading_timeline() -> void:
     startup_loading_started_usec = Time.get_ticks_usec()
     startup_loading_last_step_usec = startup_loading_started_usec
     startup_loading_timeline.clear()
+    startup_work_progress_revision = 0
+    startup_work_progress_receipt.clear()
+    startup_work_completed_counts.clear()
     startup_readiness_domains.clear()
     startup_loading_failure_result.clear()
     startup_loading_max_step.clear()
@@ -711,6 +717,32 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
     if normalized_status == "":
         normalized_status = "pending"
     var normalized_metrics: Dictionary = metrics.duplicate(true) if metrics is Dictionary else {}
+    # Count only source-owned completed publications, never a repeated message
+    # or elapsed-time update. A ready transition certifies a completed domain.
+    var counter_key: String = {
+        "terrain_chunks": "loadedChunkCount",
+        "terrain_collision": "publishedChunkCount",
+        "navigation_tiles": "publishedTileCount"
+    }.get(normalized_domain, "")
+    var completed_count := int(normalized_metrics.get(counter_key, -1)) if counter_key != "" else -1
+    var previous_count := int(startup_work_completed_counts.get(normalized_domain, -1))
+    var previous_status := String(startup_readiness_domains.get(normalized_domain, {}).get("status", ""))
+    var completed_owner := ""
+    if completed_count > previous_count and completed_count > 0:
+        startup_work_completed_counts[normalized_domain] = completed_count
+        completed_owner = normalized_domain
+    if normalized_status == "ready" and previous_status != "ready":
+        completed_owner = normalized_domain
+    if completed_owner != "":
+        startup_work_progress_revision += 1
+        var required_count := int(normalized_metrics.get("requiredChunkCount", normalized_metrics.get("requiredTileCount", completed_count)))
+        startup_work_progress_receipt = {
+            "completedRevision": startup_work_progress_revision,
+            "owner": completed_owner,
+            "completedCount": completed_count,
+            "pendingWorkCount": maxi(0, required_count - completed_count) if completed_count >= 0 else 0,
+            "completedAtTicksUsec": now_usec
+        }
     var timeline_row := {
         "message": message,
         "domain": normalized_domain,

@@ -114,7 +114,8 @@ test('loading fixture records native window and renderer target separately from 
   assert.match(source, /"renderTargetResolution"/);
   assert.match(source, /"logicalViewportResolution"/);
   assert.match(source, /frame_gap_ms\.append\(float\(gameplay_ready_usec - last_frame_usec\)/);
-  assert.match(source, /"verified": false/);
+  assert.match(source, /"verified": not work_proof_rows\.is_empty\(\)/);
+  assert.match(source, /observe_completed_work\(\)/);
 });
 
 test('warm Continue uses the cold actual seed without losing cohort identity', () => {
