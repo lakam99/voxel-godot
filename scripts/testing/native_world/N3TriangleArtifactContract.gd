@@ -208,6 +208,11 @@ func run() -> void:
 	var edit_plan: Dictionary = EDIT_PLAN.for_committed_cells(
 		[Vector3i(1000,-1,1000)], committed.get("affectedSections", []), 1,
 		String(backend.status().get("sourceIdentity", {}).get("hex", "")))
+	var tampered_receipt: Dictionary = committed.duplicate(true)
+	tampered_receipt.affectedSections = [Vector3i(0,0,0)]
+	check(distant_broker.observe_verified_durable_edit(tampered_receipt,
+		edit_plan).get("status") == "failed",
+		"native affected-section receipt must exactly match preflight plan")
 	var verified_edit: Dictionary = distant_broker.observe_verified_durable_edit(
 		committed, edit_plan)
 	var distant_proof_started := Time.get_ticks_usec()
