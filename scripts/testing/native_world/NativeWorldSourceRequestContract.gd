@@ -69,6 +69,22 @@ func run() -> void:
 			var exported: Dictionary = restored_backend.export_terrain_volume_v2()
 			check(exported.get("status") == "ready" and exported.get("terrainVolume") == current_volume,
 				"native save-v2 export retains current durable volume")
+	var explicit_request: Dictionary = REQUEST.from_main_with_save_volume(main, current_volume)
+	check(explicit_request.get("status") == "ready"
+		and explicit_request.get("request", {}) == restored_request.get("request", {}),
+		"explicit v2 save envelope builds the same native initialization request")
+	var explicit_backend = ClassDB.instantiate("NativeWorldBackend")
+	check(explicit_backend != null and explicit_backend.initialize_from_save_v2(
+		explicit_request.get("request", {})).get("status") == "ready",
+		"native owner accepts explicit durable snapshot")
+	main.world_generation_system = null
+	check(REQUEST.from_main_with_current_volume(main).get("reason") == "terrain_volume_owner_missing"
+		and REQUEST.from_main_with_save_volume(main, current_volume).get("status") == "ready",
+		"explicit Continue path does not depend on script volume owner")
+	check(REQUEST.from_main_with_save_volume(main, {}).get("reason") == "terrain_volume_snapshot_invalid",
+		"invalid explicit volume rejected")
+	check(REQUEST.from_main_with_current_volume(null).get("reason") == "main_missing",
+		"missing main rejected before script volume lookup")
 	main.structure_system.citadel_terrain_admission.configure("other-seed", {},
 		{"regionCells": main.STRUCTURE_REGION_CELLS, "spawnChance": main.STRUCTURE_SPAWN_CHANCE})
 	check(REQUEST.from_main(main).get("reason") == "site_admission_seed_mismatch", "seed mismatch fails")
