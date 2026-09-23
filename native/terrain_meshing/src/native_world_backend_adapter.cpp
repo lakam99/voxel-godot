@@ -1312,6 +1312,28 @@ std::vector<CitadelExclusionSource> structure_citadels(const Variant &p_value) {
 
 } // namespace
 
+struct NativeTerrainVolumeV2FinalizeJob {
+	enum class Phase : std::uint8_t {
+		accepting, finalizing, candidate_ready, cancel_requested, cancelled,
+		failed, disposing, committed
+	};
+	std::atomic<Phase> phase{Phase::accepting};
+	std::atomic<bool> cancel_requested{false};
+	std::atomic<bool> worker_finished{false};
+	std::int64_t generation = 0;
+	std::size_t records_at_finalize_start = 0U;
+	std::size_t sections_at_finalize_start = 0U;
+	NativeTerrainVolumeV2ImportIdentity import_identity;
+	std::string failure;
+	std::exception_ptr worker_error;
+	std::unique_ptr<NativeTerrainVolumeV2ImportBuilder> builder;
+	std::unique_ptr<WorldSourceDefinition> definition;
+	NativeSiteSourcePolicy site_policy;
+	std::vector<NativeTownRegionOverride> town_overrides;
+	std::unique_ptr<NativeWorldBackendState> candidate_state;
+	std::unique_ptr<NativeTerrainShapingRegistry> candidate_registry;
+};
+
 void NativeEffectiveTerrainPage::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("status"), &NativeEffectiveTerrainPage::status);
 	ClassDB::bind_method(D_METHOD("sample_batch", "request"), &NativeEffectiveTerrainPage::sample_batch);
@@ -1564,6 +1586,18 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("cancel_terrain_volume_v2_import", "generation"), &NativeWorldBackend::cancel_terrain_volume_v2_import);
 	ClassDB::bind_method(D_METHOD("drain_terrain_volume_v2_import", "generation"), &NativeWorldBackend::drain_terrain_volume_v2_import);
 	ClassDB::bind_method(D_METHOD("terrain_volume_v2_import_status", "generation"), &NativeWorldBackend::terrain_volume_v2_import_status);
+	ClassDB::bind_method(D_METHOD("begin_staged_save_v2_initialization", "source_request", "import_identity"),
+		&NativeWorldBackend::begin_staged_save_v2_initialization);
+	ClassDB::bind_method(D_METHOD("start_staged_save_v2_finalization", "generation"),
+		&NativeWorldBackend::start_staged_save_v2_finalization);
+	ClassDB::bind_method(D_METHOD("staged_save_v2_initialization_status", "generation"),
+		&NativeWorldBackend::staged_save_v2_initialization_status);
+	ClassDB::bind_method(D_METHOD("cancel_staged_save_v2_initialization", "generation"),
+		&NativeWorldBackend::cancel_staged_save_v2_initialization);
+	ClassDB::bind_method(D_METHOD("drain_staged_save_v2_initialization", "generation"),
+		&NativeWorldBackend::drain_staged_save_v2_initialization);
+	ClassDB::bind_method(D_METHOD("commit_staged_save_v2_initialization", "generation", "expected_source_identity"),
+		&NativeWorldBackend::commit_staged_save_v2_initialization);
 	ClassDB::bind_method(D_METHOD("request_voxel_block_shadow", "request", "consumer_id", "priority"), &NativeWorldBackend::request_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("configure_voxel_block_shadow_capacity", "max_entries"), &NativeWorldBackend::configure_voxel_block_shadow_capacity);
 	ClassDB::bind_method(D_METHOD("release_voxel_block_shadow", "request", "consumer_id"), &NativeWorldBackend::release_voxel_block_shadow);
@@ -1582,9 +1616,13 @@ NativeWorldBackend::~NativeWorldBackend() {
 	if (rock_source_worker_cancel_token_)
 		rock_source_worker_cancel_token_->store(true, std::memory_order_relaxed);
 	if (rock_source_worker_.joinable()) rock_source_worker_.join();
+	if (terrain_volume_finalize_job_)
+		terrain_volume_finalize_job_->cancel_requested.store(true, std::memory_order_relaxed);
+	if (terrain_volume_finalize_worker_.joinable()) terrain_volume_finalize_worker_.join();
 }
 
 Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
+	if (!Thread::is_main_thread()) return envelope("initialize", "failed", "main_thread_required");
 	if (initialization_attempted_) return envelope("initialize", "failed", "initialization_is_one_shot");
 	if (terrain_volume_import_ && !terrain_volume_import_->disposal_complete())
 		return envelope("initialize", "failed", "terrain_volume_import_owner_not_drained");
@@ -1609,6 +1647,7 @@ Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 }
 
 Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_request) {
+	if (!Thread::is_main_thread()) return envelope("initialize_from_save_v2", "failed", "main_thread_required");
 	if (initialization_attempted_) {
 		return envelope("initialize_from_save_v2", "failed", "initialization_is_one_shot");
 	}
@@ -1658,6 +1697,7 @@ Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_reque
 
 Dictionary NativeWorldBackend::begin_terrain_volume_v2_import(const Dictionary &p_identity) {
 	constexpr const char *operation = "begin_terrain_volume_v2_import";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
 	if (initialization_attempted_ || state_ || shaping_registry_)
 		return envelope(operation, "failed", "backend_initialization_already_started");
 	if (terrain_volume_import_ && !terrain_volume_import_->disposal_complete())
@@ -1704,6 +1744,13 @@ Dictionary NativeWorldBackend::begin_terrain_volume_v2_import(const Dictionary &
 Dictionary NativeWorldBackend::append_terrain_volume_v2_import(const Array &p_chunks,
 		const std::int64_t p_generation) {
 	constexpr const char *operation = "append_terrain_volume_v2_import";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (terrain_volume_finalize_job_
+			&& p_generation == terrain_volume_finalize_job_->generation
+			&& terrain_volume_finalize_job_->phase.load(std::memory_order_acquire)
+			!= NativeTerrainVolumeV2FinalizeJob::Phase::accepting) {
+		return envelope(operation, "failed", "staged_import_not_accepting_records");
+	}
 	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
 		Dictionary result = envelope(operation, "failed", "stale_import_generation");
 		result["requestedGeneration"] = p_generation;
@@ -1715,6 +1762,15 @@ Dictionary NativeWorldBackend::append_terrain_volume_v2_import(const Array &p_ch
 	const auto fail_and_retain_for_drain = [&](const std::exception &error) {
 		terrain_volume_import_failure_ = error.what();
 		terrain_volume_import_->abandon();
+		if (terrain_volume_finalize_job_
+			&& terrain_volume_finalize_job_->generation == static_cast<std::uint64_t>(p_generation)) {
+			terrain_volume_finalize_job_->failure = error.what();
+			terrain_volume_finalize_job_->phase.store(
+				NativeTerrainVolumeV2FinalizeJob::Phase::failed, std::memory_order_release);
+			// Append rejection runs on the caller before a finalization worker is
+			// launched, so publish the terminal acknowledgement directly.
+			terrain_volume_finalize_job_->worker_finished.store(true, std::memory_order_release);
+		}
 		Dictionary result = envelope(operation, "pending", "rejected_cleanup_pending");
 		result["terminalStatus"] = "failed";
 		result["failure"] = text(terrain_volume_import_failure_);
@@ -1785,6 +1841,10 @@ Dictionary NativeWorldBackend::append_terrain_volume_v2_import(const Array &p_ch
 
 Dictionary NativeWorldBackend::cancel_terrain_volume_v2_import(const std::int64_t p_generation) {
 	constexpr const char *operation = "cancel_terrain_volume_v2_import";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (terrain_volume_finalize_job_
+			&& p_generation == terrain_volume_finalize_job_->generation)
+		return cancel_staged_save_v2_initialization(p_generation);
 	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
 		Dictionary result = envelope(operation, "failed", "stale_import_generation");
 		result["requestedGeneration"] = p_generation;
@@ -1811,6 +1871,10 @@ Dictionary NativeWorldBackend::cancel_terrain_volume_v2_import(const std::int64_
 
 Dictionary NativeWorldBackend::drain_terrain_volume_v2_import(const std::int64_t p_generation) {
 	constexpr const char *operation = "drain_terrain_volume_v2_import";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (terrain_volume_finalize_job_
+			&& p_generation == terrain_volume_finalize_job_->generation)
+		return drain_staged_save_v2_initialization(p_generation);
 	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
 		Dictionary result = envelope(operation, "failed", "stale_import_generation");
 		result["requestedGeneration"] = p_generation;
@@ -1843,6 +1907,10 @@ Dictionary NativeWorldBackend::drain_terrain_volume_v2_import(const std::int64_t
 
 Dictionary NativeWorldBackend::terrain_volume_v2_import_status(const std::int64_t p_generation) const {
 	constexpr const char *operation = "terrain_volume_v2_import_status";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (terrain_volume_finalize_job_
+			&& p_generation == terrain_volume_finalize_job_->generation)
+		return staged_save_v2_initialization_status(p_generation);
 	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
 		Dictionary result = envelope(operation, "failed", "stale_import_generation");
 		result["requestedGeneration"] = p_generation;
@@ -1863,6 +1931,387 @@ Dictionary NativeWorldBackend::terrain_volume_v2_import_status(const std::int64_
 	result["ownerMustBeRetainedUntilDrain"] = cleanup && !drained;
 	if (!terrain_volume_import_failure_.empty()) result["failure"] = text(terrain_volume_import_failure_);
 	return result;
+}
+
+Dictionary NativeWorldBackend::begin_staged_save_v2_initialization(
+		const Dictionary &p_source_request, const Dictionary &p_import_identity) {
+	constexpr const char *operation = "begin_staged_save_v2_initialization";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (initialization_attempted_ || state_ || shaping_registry_)
+		return envelope(operation, "failed", "backend_initialization_already_started");
+	if (terrain_volume_finalize_job_)
+		return envelope(operation, "failed", "previous_staged_initialization_not_drained_or_committed");
+	try {
+		WorldSourceDefinition definition(parse_source_descriptor(p_source_request, INITIALIZE_SCHEMA));
+		const String save_seed_text = require_string(
+			p_source_request.get("saveSeedText", Variant()), "saveSeedText");
+		if (static_cast<std::size_t>(save_seed_text.length()) > MAX_SEED_CODE_POINTS)
+			throw std::length_error("saveSeedText exceeds adapter code point limit");
+		const std::string save_seed = bounded_utf8(
+			save_seed_text, MAX_SEED_TEXT_BYTES, "saveSeedText", false);
+		if (save_seed != definition.raw_terrain_seed().utf8)
+			throw std::invalid_argument("saveSeedText does not match the native world source seed");
+		const Dictionary policy = require_dictionary(
+			p_source_request.get("sitePolicy", Variant()), "sitePolicy");
+		std::vector<NativeTownRegionOverride> towns = parse_town_overrides(
+			require_array(policy.get("townOverrides", Variant()), "sitePolicy.townOverrides"));
+		NativeSiteSourcePolicy site_policy = parse_site_policy(p_source_request, towns);
+
+		auto job = std::make_shared<NativeTerrainVolumeV2FinalizeJob>();
+		job->import_identity.domain = require_bounded_utf8(
+			p_import_identity.get("domain", Variant()), "identity.domain", 32U, false);
+		job->import_identity.schema_version = static_cast<std::uint32_t>(require_save_u64(
+			p_import_identity.get("schemaVersion", Variant()), "identity.schemaVersion"));
+		job->import_identity.section_size = static_cast<std::uint32_t>(require_save_u64(
+			p_import_identity.get("sectionSize", Variant()), "identity.sectionSize"));
+		job->import_identity.revision = require_save_u64(
+			p_import_identity.get("revision", Variant()), "identity.revision");
+		job->definition = std::make_unique<WorldSourceDefinition>(std::move(definition));
+		job->site_policy = std::move(site_policy);
+		job->town_overrides = std::move(towns);
+		// Allocate/copy the complete staged owner before the import becomes live.
+		// This avoids an orphaned builder if staging-job allocation throws.
+		const Dictionary import_started = begin_terrain_volume_v2_import(p_import_identity);
+		if (import_started.get("status", String()) != "pending") return import_started;
+		job->generation = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		terrain_volume_finalize_job_ = std::move(job);
+		Dictionary result = envelope(operation, "pending", "accepting_bounded_chunks");
+		result["generation"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		result["maxRecordsPerCall"] = static_cast<std::int64_t>(MAX_TERRAIN_IMPORT_RECORDS_PER_CALL);
+		result["finalizeAvailable"] = true;
+		result["productionCutover"] = false;
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::start_staged_save_v2_finalization(const std::int64_t p_generation) {
+	constexpr const char *operation = "start_staged_save_v2_finalization";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	auto job = terrain_volume_finalize_job_;
+	if (!job || p_generation != job->generation)
+		return envelope(operation, "failed", "stale_import_generation");
+	if (job->phase.load(std::memory_order_acquire) != NativeTerrainVolumeV2FinalizeJob::Phase::accepting
+			|| !terrain_volume_import_ || !terrain_volume_import_->active())
+		return envelope(operation, "failed", "staged_import_not_accepting_records");
+	job->records_at_finalize_start = terrain_volume_import_->record_count();
+	job->sections_at_finalize_start = terrain_volume_import_->section_count();
+	auto sentinel = std::make_unique<NativeTerrainVolumeV2ImportBuilder>();
+	sentinel->begin(job->import_identity);
+	job->builder = std::move(terrain_volume_import_);
+	terrain_volume_import_ = std::move(sentinel);
+	job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::finalizing, std::memory_order_release);
+	job->worker_finished.store(false, std::memory_order_relaxed);
+	try {
+		terrain_volume_finalize_worker_ = std::thread([job]() {
+			auto builder = std::move(job->builder);
+			try {
+				if (job->cancel_requested.load(std::memory_order_acquire)) {
+					if (builder) builder->abandon();
+					job->builder = std::move(builder);
+					job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::cancelled,
+						std::memory_order_relaxed);
+					job->worker_finished.store(true, std::memory_order_release);
+					return;
+				}
+				NativeTerrainVolumeV2 volume = builder->finalize();
+				builder.reset();
+				if (job->cancel_requested.load(std::memory_order_acquire)) {
+					job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::cancelled,
+						std::memory_order_relaxed);
+					job->worker_finished.store(true, std::memory_order_release);
+					return;
+				}
+				NativeWorldBackendInitialSnapshot initial;
+				initial.source_identity = job->definition->physical_content_identity();
+				initial.deltas.revision = 0U;
+				initial.deltas.terrain_volume = std::move(volume);
+				auto candidate_state = std::make_unique<NativeWorldBackendState>(
+					*job->definition, std::move(initial));
+				auto candidate_registry = std::make_unique<NativeTerrainShapingRegistry>(
+					*job->definition, std::move(job->site_policy));
+				if (job->cancel_requested.load(std::memory_order_acquire)) {
+					job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::cancelled,
+						std::memory_order_relaxed);
+				} else {
+					job->candidate_state = std::move(candidate_state);
+					job->candidate_registry = std::move(candidate_registry);
+					job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready,
+						std::memory_order_relaxed);
+				}
+			} catch (...) {
+				job->builder = std::move(builder);
+				job->worker_error = std::current_exception();
+				try {
+					std::rethrow_exception(job->worker_error);
+				} catch (const std::exception &error) {
+					job->failure = error.what();
+				} catch (...) {
+					job->failure = "unknown staged save-v2 finalization failure";
+				}
+				job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::failed,
+					std::memory_order_relaxed);
+			}
+			job->worker_finished.store(true, std::memory_order_release);
+		});
+	} catch (const std::exception &error) {
+		terrain_volume_import_ = std::move(job->builder);
+		job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::accepting, std::memory_order_release);
+		return failure(operation, error);
+	}
+	Dictionary result = envelope(operation, "pending", "worker_finalizing_candidate");
+	result["generation"] = p_generation;
+	result["records"] = static_cast<std::int64_t>(job->records_at_finalize_start);
+	result["sections"] = static_cast<std::int64_t>(job->sections_at_finalize_start);
+	result["ownerMustBeRetainedUntilDrain"] = true;
+	result["productionCutover"] = false;
+	return result;
+}
+
+Dictionary NativeWorldBackend::staged_save_v2_initialization_status(const std::int64_t p_generation) const {
+	constexpr const char *operation = "staged_save_v2_initialization_status";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	const auto job = terrain_volume_finalize_job_;
+	if (!job || p_generation != job->generation) {
+		Dictionary result = envelope(operation, "failed", "stale_import_generation");
+		result["requestedGeneration"] = p_generation;
+		result["currentGeneration"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		return result;
+	}
+	const bool worker_finished = job->worker_finished.load(std::memory_order_acquire);
+	const auto phase = job->phase.load(std::memory_order_acquire);
+	const bool cancel_requested = job->cancel_requested.load(std::memory_order_acquire);
+	const char *status = "pending";
+	const char *reason = "accepting_bounded_chunks";
+	switch (phase) {
+		case NativeTerrainVolumeV2FinalizeJob::Phase::accepting: break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::finalizing:
+			reason = cancel_requested ? "cancel_requested_worker_retained" : "worker_finalizing_candidate";
+			break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::cancel_requested:
+			reason = "cancel_requested_worker_retained";
+			break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready:
+			status = worker_finished ? "ready" : "pending";
+			reason = worker_finished ? "candidate_ready_for_explicit_commit" : "worker_finalizing_candidate";
+			break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::cancelled:
+			status = worker_finished ? "ready" : "pending"; reason = "cancelled_cleanup_required"; break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::failed:
+			status = worker_finished ? "failed" : "pending";
+			reason = worker_finished ? "finalization_failed_cleanup_required" : "worker_failure_ack_pending";
+			break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::disposing:
+			reason = worker_finished ? "candidate_disposal_ready_to_drain" : "candidate_disposal_running"; break;
+		case NativeTerrainVolumeV2FinalizeJob::Phase::committed:
+			status = "ready"; reason = "committed"; break;
+	}
+	Dictionary result = envelope(operation, status, reason);
+	result["generation"] = p_generation;
+	std::size_t retained_records = job->records_at_finalize_start;
+	std::size_t retained_sections = job->sections_at_finalize_start;
+	// worker_finished is the acquire/release ownership handoff for builder and
+	// failure: the worker moves/writes both until it publishes this flag.
+	if (worker_finished && job->builder) {
+		retained_records = job->builder->record_count();
+		retained_sections = job->builder->section_count();
+	} else if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::accepting
+			|| (phase == NativeTerrainVolumeV2FinalizeJob::Phase::cancelled && !worker_finished)) {
+		retained_records = terrain_volume_import_ ? terrain_volume_import_->record_count() : 0U;
+		retained_sections = terrain_volume_import_ ? terrain_volume_import_->section_count() : 0U;
+	}
+	result["recordsRetained"] = static_cast<std::int64_t>(retained_records);
+	result["sectionsRetained"] = static_cast<std::int64_t>(retained_sections);
+	result["workerFinished"] = worker_finished;
+	result["cancelRequested"] = cancel_requested;
+	const bool candidate_visible = worker_finished
+		&& phase == NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready
+		&& bool(job->candidate_state) && bool(job->candidate_registry);
+	result["candidateVisible"] = candidate_visible;
+	result["ownerMustBeRetainedUntilDrain"] = phase != NativeTerrainVolumeV2FinalizeJob::Phase::committed;
+	result["productionCutover"] = false;
+	if (candidate_visible && job->definition)
+		result["candidateSourceIdentity"] = identity_dictionary(job->definition->physical_content_identity());
+	if (worker_finished && !job->failure.empty()) result["failure"] = text(job->failure);
+	return result;
+}
+
+Dictionary NativeWorldBackend::cancel_staged_save_v2_initialization(const std::int64_t p_generation) {
+	constexpr const char *operation = "cancel_staged_save_v2_initialization";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	auto job = terrain_volume_finalize_job_;
+	if (!job || p_generation != job->generation)
+		return envelope(operation, "failed", "stale_import_generation");
+	auto phase = job->phase.load(std::memory_order_acquire);
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::accepting) {
+		if (!terrain_volume_import_ || !terrain_volume_import_->active())
+			return envelope(operation, "failed", "staged_import_owner_missing");
+		terrain_volume_import_->abandon();
+		terrain_volume_import_failure_ = "cancelled";
+		job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::cancelled, std::memory_order_release);
+		Dictionary result = envelope(operation, "pending", "bounded_cleanup_required");
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		result["recordsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->record_count());
+		return result;
+	}
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::finalizing
+			|| phase == NativeTerrainVolumeV2FinalizeJob::Phase::cancel_requested) {
+		job->cancel_requested.store(true, std::memory_order_release);
+		Dictionary result = envelope(operation, "pending", "cancel_requested_worker_retained");
+		result["generation"] = p_generation;
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		result["workerFinished"] = job->worker_finished.load(std::memory_order_acquire);
+		return result;
+	}
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready) {
+		job->cancel_requested.store(true, std::memory_order_release);
+		if (terrain_volume_finalize_worker_.joinable()) {
+			if (!job->worker_finished.load(std::memory_order_acquire))
+				return envelope(operation, "pending", "worker_completion_ack_pending");
+			terrain_volume_finalize_worker_.join();
+		}
+		job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::disposing, std::memory_order_release);
+		job->worker_finished.store(false, std::memory_order_relaxed);
+		try {
+			terrain_volume_finalize_worker_ = std::thread([job]() {
+				job->candidate_registry.reset();
+				job->candidate_state.reset();
+				job->town_overrides.clear();
+				job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::cancelled,
+					std::memory_order_relaxed);
+				job->worker_finished.store(true, std::memory_order_release);
+			});
+		} catch (const std::exception &error) {
+			job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready, std::memory_order_release);
+			return failure(operation, error);
+		}
+		Dictionary result = envelope(operation, "pending", "candidate_disposal_running");
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		return result;
+	}
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::cancelled
+			|| phase == NativeTerrainVolumeV2FinalizeJob::Phase::failed
+			|| phase == NativeTerrainVolumeV2FinalizeJob::Phase::disposing) {
+		Dictionary result = envelope(operation, "pending", "bounded_cleanup_required");
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		return result;
+	}
+	return envelope(operation, "failed", "staged_initialization_not_cancellable");
+}
+
+Dictionary NativeWorldBackend::drain_staged_save_v2_initialization(const std::int64_t p_generation) {
+	constexpr const char *operation = "drain_staged_save_v2_initialization";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	auto job = terrain_volume_finalize_job_;
+	if (!job || p_generation != job->generation)
+		return envelope(operation, "failed", "stale_import_generation");
+	auto phase = job->phase.load(std::memory_order_acquire);
+	if (terrain_volume_finalize_worker_.joinable()) {
+		if (!job->worker_finished.load(std::memory_order_acquire)) {
+			Dictionary result = envelope(operation, "pending", "worker_drain_ack_pending");
+			result["workerJoined"] = false;
+			result["ownerMustBeRetainedUntilDrain"] = true;
+			return result;
+		}
+		if (terrain_volume_finalize_worker_.joinable()) terrain_volume_finalize_worker_.join();
+		phase = job->phase.load(std::memory_order_acquire);
+	}
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready
+			&& job->cancel_requested.load(std::memory_order_acquire))
+		return cancel_staged_save_v2_initialization(p_generation);
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::finalizing
+			|| phase == NativeTerrainVolumeV2FinalizeJob::Phase::cancel_requested
+			|| phase == NativeTerrainVolumeV2FinalizeJob::Phase::disposing) {
+		Dictionary result = envelope(operation, "pending", "worker_drain_ack_pending");
+		result["workerJoined"] = false;
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		return result;
+	}
+	if (phase == NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready)
+		return envelope(operation, "failed", "candidate_requires_commit_or_cancel");
+	if (phase != NativeTerrainVolumeV2FinalizeJob::Phase::cancelled
+			&& phase != NativeTerrainVolumeV2FinalizeJob::Phase::failed)
+		return envelope(operation, "failed", "cancel_or_failure_required_before_drain");
+
+	constexpr std::size_t dispose_budget = MAX_TERRAIN_IMPORT_DISPOSE_ITEMS_PER_CALL;
+	std::size_t disposed = 0U;
+	if (job->builder && !job->builder->disposal_complete()) {
+		if (job->builder->active()) job->builder->abandon();
+		disposed += job->builder->dispose_step(dispose_budget);
+	}
+	if (disposed < dispose_budget && terrain_volume_import_
+			&& !terrain_volume_import_->disposal_complete()) {
+		if (terrain_volume_import_->active()) terrain_volume_import_->abandon();
+		disposed += terrain_volume_import_->dispose_step(dispose_budget - disposed);
+	}
+	const bool job_drained = !job->builder || job->builder->disposal_complete();
+	const bool sentinel_drained = !terrain_volume_import_ || terrain_volume_import_->disposal_complete();
+	Dictionary result = envelope(operation, "pending", "bounded_cleanup_in_progress");
+	result["disposedItems"] = static_cast<std::int64_t>(disposed);
+	result["recordsRetained"] = static_cast<std::int64_t>(
+		(job->builder ? job->builder->record_count() : 0U)
+		+ (terrain_volume_import_ ? terrain_volume_import_->record_count() : 0U));
+	result["ownerMustBeRetainedUntilDrain"] = true;
+	if (!job_drained || !sentinel_drained) return result;
+	const bool failed_import = phase == NativeTerrainVolumeV2FinalizeJob::Phase::failed;
+	if (terrain_volume_import_) terrain_volume_import_.reset();
+	job->builder.reset();
+	const std::string failure_reason = job->failure;
+	terrain_volume_finalize_job_.reset();
+	terrain_volume_import_failure_.clear();
+	result["status"] = failed_import ? String("failed") : String("ready");
+	result["reason"] = failed_import ? text(failure_reason) : String("drained");
+	result["cleanupComplete"] = true;
+	result["workerJoined"] = true;
+	result["ownerMustBeRetainedUntilDrain"] = false;
+	result["productionCutover"] = false;
+	return result;
+}
+
+Dictionary NativeWorldBackend::commit_staged_save_v2_initialization(
+		const std::int64_t p_generation, const Dictionary &p_expected_source_identity) {
+	constexpr const char *operation = "commit_staged_save_v2_initialization";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	auto job = terrain_volume_finalize_job_;
+	if (!job || p_generation != job->generation)
+		return envelope(operation, "failed", "stale_import_generation");
+	if (!job->worker_finished.load(std::memory_order_acquire)
+			|| job->phase.load(std::memory_order_acquire)
+			!= NativeTerrainVolumeV2FinalizeJob::Phase::candidate_ready)
+		return envelope(operation, "pending", "candidate_not_ready");
+	if (initialization_attempted_ || state_ || shaping_registry_
+			|| !job->candidate_state || !job->candidate_registry)
+		return envelope(operation, "failed", "candidate_or_backend_state_invalid");
+	if (terrain_volume_finalize_worker_.joinable()) terrain_volume_finalize_worker_.join();
+	try {
+		require_exact_keys(p_expected_source_identity, {"algorithm", "hex"}, "expected_source_identity");
+		const std::string algorithm = require_bounded_utf8(
+			p_expected_source_identity.get("algorithm", Variant()), "expected_source_identity.algorithm", 16U, false);
+		const std::string expected_hex = require_bounded_utf8(
+			p_expected_source_identity.get("hex", Variant()), "expected_source_identity.hex", 64U, false);
+		const auto &actual_identity = job->candidate_state->source_identity();
+		if (algorithm != "sha256" || expected_hex != actual_identity.digest_hex()) {
+			cancel_staged_save_v2_initialization(p_generation);
+			return envelope(operation, "failed", "candidate_source_identity_mismatch_owner_retained");
+		}
+		state_ = std::move(job->candidate_state);
+		shaping_registry_ = std::move(job->candidate_registry);
+		town_overrides_ = std::move(job->town_overrides);
+		initialization_attempted_ = true;
+		terrain_volume_import_.reset();
+		terrain_volume_import_failure_.clear();
+		job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::committed, std::memory_order_release);
+		Dictionary result = status();
+		result["generation"] = p_generation;
+		result["committed"] = true;
+		result["productionCutover"] = false;
+		terrain_volume_finalize_job_.reset();
+		return result;
+	} catch (const std::exception &error) {
+		cancel_staged_save_v2_initialization(p_generation);
+		return failure(operation, error);
+	}
 }
 
 Dictionary NativeWorldBackend::export_terrain_volume_v2() const {

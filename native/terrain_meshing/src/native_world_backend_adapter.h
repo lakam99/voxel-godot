@@ -18,6 +18,7 @@
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/ref.hpp>
+#include <godot_cpp/classes/thread.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/string.hpp>
@@ -63,6 +64,8 @@ struct NativeRockOrderedCache {
 	voxel::world_backend::NativeSurfacePropSourceOrderedStream ordered;
 	voxel::world_backend::NativeSurfacePropOrderedPlacement placement;
 };
+
+struct NativeTerrainVolumeV2FinalizeJob;
 
 class NativeStructureExclusionChunk : public godot::RefCounted {
 	GDCLASS(NativeStructureExclusionChunk, godot::RefCounted);
@@ -148,6 +151,21 @@ public:
 	godot::Dictionary cancel_terrain_volume_v2_import(std::int64_t p_generation);
 	godot::Dictionary drain_terrain_volume_v2_import(std::int64_t p_generation);
 	godot::Dictionary terrain_volume_v2_import_status(std::int64_t p_generation) const;
+	// Staged save-v2 initialization: metadata is parsed on the calling thread,
+	// durable volume records are appended under the existing bounded contract,
+	// and whole-volume finalization/build happens on a pure-C++ worker.
+	// All adapter lifecycle calls are main-thread-only; only the private worker
+	// touches the detached C++ job while finalizing/discarding candidates.
+	// Only explicit commit consumes the backend's one-shot initialization right;
+	// cancelled/rejected uncommitted generations may retry after acknowledged drain.
+	godot::Dictionary begin_staged_save_v2_initialization(
+		const godot::Dictionary &p_source_request, const godot::Dictionary &p_import_identity);
+	godot::Dictionary start_staged_save_v2_finalization(std::int64_t p_generation);
+	godot::Dictionary staged_save_v2_initialization_status(std::int64_t p_generation) const;
+	godot::Dictionary cancel_staged_save_v2_initialization(std::int64_t p_generation);
+	godot::Dictionary drain_staged_save_v2_initialization(std::int64_t p_generation);
+	godot::Dictionary commit_staged_save_v2_initialization(
+		std::int64_t p_generation, const godot::Dictionary &p_expected_source_identity);
 	 godot::Dictionary request_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id, int p_priority);
 	 godot::Dictionary configure_voxel_block_shadow_capacity(std::int64_t p_max_entries);
 	 godot::Dictionary release_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id);
@@ -179,6 +197,8 @@ private:
 	std::unique_ptr<voxel::world_backend::NativeTerrainVolumeV2ImportBuilder> terrain_volume_import_;
 	std::string terrain_volume_import_failure_;
 	std::uint64_t terrain_volume_import_generation_ = 0;
+	std::shared_ptr<NativeTerrainVolumeV2FinalizeJob> terrain_volume_finalize_job_;
+	std::thread terrain_volume_finalize_worker_;
 	std::unique_ptr<voxel::world_backend::NativeTerrainShapingRegistry> shaping_registry_;
 	std::unique_ptr<voxel::world_backend::NativeBiomeEnvironmentCatalog> biome_catalog_;
 	std::unique_ptr<voxel::world_backend::NativeFeatureDeltaSnapshot> removed_props_;
