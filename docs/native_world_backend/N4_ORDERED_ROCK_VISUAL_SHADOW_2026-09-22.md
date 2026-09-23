@@ -67,3 +67,15 @@ debug link of `test_main`, the rock-catalog tests, and the current core library
 passed 10/10 tests; the wider direct debug binary passed 458/458, but its
 wildcard object link is not a source-inventoried integrated gate. No adapter
 retains this effective catalog and no production caller consumes it yet.
+
+The first source-inventoried gate for this checkpoint,
+`artifacts/native-world-backend/n4-effective-registry-owner-01/report.json`,
+passed 445/445 standalone tests in both debug and release and all line and
+function coverage. It is blocked at 5,930/5,940 pure-core branches. All ten
+missing branches are the new effective-catalog bounds/numeric rejection
+conditions, not gameplay or adapter failures. A focused 11/11 test run now
+exercises those exact rejection lanes; the full coverage gate still needs a
+rerun. The same gate built the adapter, and the direct Godot
+`N4BiomeCatalogAdapterContract.gd` passed after typed biome catalog retention
+was added. The retained catalog is invalidated on any rejected replacement.
+This remains a shadow receipt, not a live N4 publication.

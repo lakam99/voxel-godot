@@ -17,6 +17,7 @@ func initialization() -> Dictionary:
 
 func rejected(backend: Object, capture: Dictionary, label: String) -> void:
 	check(backend.call("admit_biome_environment_catalog", capture).get("status") == "failed", label)
+	check(not bool(backend.status().get("biomeCatalogReady", false)), label + " leaves no stale native catalog")
 
 func run() -> void:
 	var backend = ClassDB.instantiate("NativeWorldBackend")
@@ -25,6 +26,7 @@ func run() -> void:
 		finish()
 		return
 	check(backend.initialize(initialization()).get("status") == "ready", "backend initialization")
+	check(not bool(backend.status().get("biomeCatalogReady", false)), "native catalog initially absent")
 	var catalog = Catalog.new()
 	check(catalog.setup(), "source catalog ready")
 	var capture: Dictionary = Snapshot.capture(catalog)
@@ -40,6 +42,10 @@ func run() -> void:
 		and receipt.get("captureOwnerInstanceId") == catalog.get_instance_id(), "capture provenance")
 	check(receipt.get("nativeOwnerInstanceId") == backend.get_instance_id()
 		and receipt.get("sourceIdentity") == backend.status().get("sourceIdentity"), "native owner binding")
+	check(backend.status().get("biomeCatalogReady") == true
+		and backend.status().get("biomeCatalogIdentity") == receipt.get("nativeCatalogIdentity")
+		and backend.status().get("biomeCaptureContentIdentity") == capture.contentIdentity,
+		"typed catalog retained by native owner")
 	var repeated: Dictionary = backend.admit_biome_environment_catalog(capture)
 	check(repeated.get("nativeCatalogIdentity") == receipt.get("nativeCatalogIdentity"), "stable native identity")
 	var changed := capture.duplicate(true)
@@ -81,6 +87,9 @@ func run() -> void:
 	var changed_receipt: Dictionary = backend.admit_biome_environment_catalog(changed)
 	check(changed_receipt.get("status") == "ready" and changed_receipt.get("nativeCatalogIdentity") != receipt.get("nativeCatalogIdentity"),
 		"valid resolved value changes native identity")
+	check(backend.status().get("biomeCatalogReady") == true
+		and backend.status().get("biomeCatalogIdentity") == changed_receipt.get("nativeCatalogIdentity"),
+		"valid replacement retained after failed captures")
 	var uninitialized = ClassDB.instantiate("NativeWorldBackend")
 	rejected(uninitialized, capture, "uninitialized backend")
 	var another = ClassDB.instantiate("NativeWorldBackend")

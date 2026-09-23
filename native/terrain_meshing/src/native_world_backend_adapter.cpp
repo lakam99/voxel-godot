@@ -1348,9 +1348,15 @@ Dictionary NativeWorldBackend::export_terrain_volume_v2() const {
 	}
 }
 
-Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary &p_capture) const {
+Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary &p_capture) {
 	constexpr const char *operation = "admit_biome_environment_catalog";
 	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	// A rejected replacement cannot leave an earlier catalog available to a
+	// later visual admission under the same native owner.
+	biome_catalog_.reset();
+	biome_capture_owner_id_ = 0;
+	biome_capture_revision_ = 0;
+	biome_capture_identity_.clear();
 	try {
 		require_exact_keys(p_capture,
 			{"ok", "schemaVersion", "ownerReceipt", "fallbackId", "contentIdentity", "profiles"}, "biome capture");
@@ -1429,7 +1435,7 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 #undef SNAP_FLOATS
 			profiles.push_back(std::move(profile));
 		}
-		const NativeBiomeEnvironmentCatalog typed = NativeBiomeEnvironmentCatalog::create(std::move(profiles), fallback);
+		NativeBiomeEnvironmentCatalog typed = NativeBiomeEnvironmentCatalog::create(std::move(profiles), fallback);
 		Dictionary canonical;
 		canonical["domain"] = "biome_environment_resolved_catalog";
 		canonical["schemaVersion"] = 1;
@@ -1440,6 +1446,11 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 		if (identity != sha256_hex(sha256(reinterpret_cast<const std::uint8_t *>(canonical_text.data()), canonical_text.size()))) {
 			throw std::invalid_argument("biome capture content identity mismatch");
 		}
+		const std::string native_identity = sha256_hex(typed.content_digest());
+		biome_catalog_ = std::make_unique<NativeBiomeEnvironmentCatalog>(std::move(typed));
+		biome_capture_owner_id_ = owner_id;
+		biome_capture_revision_ = revision;
+		biome_capture_identity_ = identity;
 		Dictionary result = envelope(operation, "ready");
 		result["receiptSchema"] = BIOME_CATALOG_RECEIPT_SCHEMA;
 		result["scope"] = "resolved_biome_environment_catalog_only";
@@ -1451,9 +1462,9 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 		result["nativeOwnerInstanceId"] = static_cast<int64_t>(get_instance_id());
 		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
 		result["nativeCatalogSchemaRevision"] = static_cast<int64_t>(NativeBiomeEnvironmentCatalog::SCHEMA_REVISION);
-		result["nativeCatalogIdentity"] = text(sha256_hex(typed.content_digest()));
-		result["profileCount"] = static_cast<int64_t>(typed.profiles().size());
-		result["fallbackId"] = text(typed.fallback_id());
+		result["nativeCatalogIdentity"] = text(native_identity);
+		result["profileCount"] = static_cast<int64_t>(biome_catalog_->profiles().size());
+		result["fallbackId"] = text(biome_catalog_->fallback_id());
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);
@@ -1578,6 +1589,13 @@ Dictionary NativeWorldBackend::status() const {
 	result["preparedShapingResolutionsSupported"] = true;
 	result["saveV2InitializationSupported"] = true;
 	result["terrainVolumeV2ExportSupported"] = true;
+	result["biomeCatalogReady"] = biome_catalog_ != nullptr;
+	if (biome_catalog_) {
+		result["biomeCatalogIdentity"] = text(sha256_hex(biome_catalog_->content_digest()));
+		result["biomeCaptureOwnerInstanceId"] = biome_capture_owner_id_;
+		result["biomeCaptureRevision"] = biome_capture_revision_;
+		result["biomeCaptureContentIdentity"] = text(biome_capture_identity_);
+	}
 	return result;
 }
 

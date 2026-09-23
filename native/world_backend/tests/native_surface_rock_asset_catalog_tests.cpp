@@ -263,3 +263,30 @@ VWB_TEST(native_surface_rock_effective_registry_rejects_incoherent_capture) {
     VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
         NativeSurfaceRockAssetCatalog::create_effective({row}, {{"rock", {"id"}}}, environment()));
 }
+
+VWB_TEST(native_surface_rock_effective_registry_checks_each_bounded_numeric_lane) {
+    auto row = rock("id");
+    auto rows = std::vector<NativeSurfaceRockAssetRecord>(65537U, row);
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective(rows, {}, environment()));
+    auto families = std::vector<NativeSurfaceRockFamilyMembers>(65537U, {"rock", {}});
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row}, families, environment()));
+    row.biome_tags.resize(257U, "forest");
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row}, {}, environment()));
+    for (int axis = 0; axis < 3; ++axis) {
+        for (int kind = 0; kind < 2; ++kind) {
+            row = rock("id");
+            const double bad = kind == 0 ? -1.0 : std::numeric_limits<double>::infinity();
+            if (axis == 0) row.size_x = bad;
+            if (axis == 1) row.size_y = bad;
+            if (axis == 2) row.size_z = bad;
+            VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+                NativeSurfaceRockAssetCatalog::create_effective({row}, {}, environment()));
+        }
+    }
+    row = rock("id");
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row}, {{"rock", std::vector<std::string>(65537U, "id")}}, environment()));
+}

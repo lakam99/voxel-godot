@@ -2,6 +2,7 @@
 #define NATIVE_WORLD_BACKEND_ADAPTER_H
 
 #include "native_effective_terrain_batch.hpp"
+#include "native_biome_environment_catalog.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
 
@@ -10,6 +11,7 @@
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,7 +44,7 @@ public:
 	godot::Dictionary initialize_from_save_v2(const godot::Dictionary &p_request);
 	godot::Dictionary export_terrain_volume_v2() const;
 	godot::Dictionary admit_removed_props_tombstones(const godot::Dictionary &p_capture) const;
-	godot::Dictionary admit_biome_environment_catalog(const godot::Dictionary &p_capture) const;
+	godot::Dictionary admit_biome_environment_catalog(const godot::Dictionary &p_capture);
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;
 	godot::Dictionary apply_shaping_resolutions(const godot::Array &p_resolutions);
@@ -60,6 +62,10 @@ private:
 	std::string initialization_failure_;
 	std::unique_ptr<voxel::world_backend::NativeWorldBackendState> state_;
 	std::unique_ptr<voxel::world_backend::NativeTerrainShapingRegistry> shaping_registry_;
+	std::unique_ptr<voxel::world_backend::NativeBiomeEnvironmentCatalog> biome_catalog_;
+	std::int64_t biome_capture_owner_id_ = 0;
+	std::int64_t biome_capture_revision_ = 0;
+	std::string biome_capture_identity_;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
 };
 
