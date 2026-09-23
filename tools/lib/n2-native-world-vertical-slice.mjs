@@ -60,6 +60,7 @@ export const inputPaths = [
   'scripts/testing/native_world/N2LatticeSourceOracle.gd',
   'scripts/testing/native_world/N2PreparedRenderGenerator.gd',
   'scripts/testing/native_world/N2VerticalSliceFixture.gd',
+  'scripts/terrain/NativeCollisionActorGuard.gd',
   'scripts/terrain/NativeTerrainCollisionOwner.gd',
   'scenes/testing/native_world/N2VerticalSliceFixture.tscn',
   'scripts/terrain/VoxelTerrainGenerator.gd',
@@ -209,6 +210,9 @@ export function validateFixtureReport(report) {
         || evidence?.blockedReplacement?.reason !== 'replacement_occupied_before_install'
         || evidence?.sameShapeSameHits !== true) errors.push('replacement_sequence_invalid');
     if (evidence?.physics?.ok !== true) errors.push('direct_physics_evidence_invalid');
+    if (evidence?.actorGuard?.ok !== true || evidence.actorGuard.occupied?.reason !== 'actor_occupies_replacement'
+        || evidence.actorGuard.swept?.reason !== 'actor_occupies_replacement'
+        || evidence.actorGuard.clear?.clear !== true) errors.push('actor_guard_fixture_invalid');
     if (evidence?.staleBeforeAck?.reason !== 'stale_before_acknowledgement') errors.push('stale_before_ack_rejection_invalid');
     if (evidence?.staleBeforeInstall?.reason !== 'stale_before_install') errors.push('stale_before_install_rejection_invalid');
     if (evidence?.crossSeamPhysics?.changed !== true

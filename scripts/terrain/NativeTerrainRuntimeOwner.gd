@@ -174,6 +174,30 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 		"changedCells":cells, "publicationPlan":planned,
 		"physicalReady":false, "blockedResidentMeshes":observed.get("blocked", 0)}
 
+## Candidate validation only. A caller-supplied Dictionary cannot attest to
+## live collision or actor occupancy, so this never clears the edit barrier.
+func inspect_edit_release_candidate(candidate: Dictionary) -> Dictionary:
+	if _state != "active" or _pending_edit_plan.is_empty():
+		return {"status":"failed", "reason":"pending_edit_missing"}
+	var barrier: Dictionary = _pending_edit_plan.get("barrier", {})
+	var current: Dictionary = _backend.status()
+	if current.get("status") != "ready" or current.get("sourceIdentity") != _source_identity \
+			or int(current.get("terrainDeltaRevision", -1)) != int(barrier.get("nativeRevision", -2)):
+		return _active_failure("pending_edit_source_drift")
+	if int(candidate.get("ownerInstanceId", 0)) != get_instance_id() \
+			or candidate.get("sourceIdentity") != _source_identity \
+			or candidate.get("sourceEpoch") != barrier.get("sourceEpoch") \
+			or int(candidate.get("nativeRevision", -1)) != int(barrier.get("nativeRevision", -2)) \
+			or candidate.get("barrierIdentity") != barrier.get("identity"):
+		return {"status":"failed", "reason":"edit_release_identity_mismatch"}
+	var windows = candidate.get("subwindowReceipts", null)
+	if not windows is Array:
+		return {"status":"failed", "reason":"edit_release_receipts_missing"}
+	var checked: Dictionary = EditPlan.publication_barrier_status(_pending_edit_plan, windows)
+	if checked.get("status") != "ready": return checked
+	return {"status":"pending", "reason":"production_physical_owner_unbound",
+		"barrierIdentity":barrier.identity}
+
 ## Native affectedSections is exactly the conservative one-block neighborhood
 ## of the edited sections. It must equal the preflighted mesh halo as a set.
 static func receipt_matches_plan(sections: Array, plan: Dictionary) -> bool:
