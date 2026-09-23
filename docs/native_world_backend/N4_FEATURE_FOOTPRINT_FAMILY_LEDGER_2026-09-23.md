@@ -29,3 +29,9 @@ and advance the same global revision consumed by N3 terrain pins and N6 nav
 tiles. The constructor-fixed catalog cannot certify an RNG-shifted suffix
 whose after-state contains new IDs. No current N4 family producer is wired to
 the journal or gameplay, and no script deletion is authorized.
+
+The read-only `tools/derive-n4-rock-glb-bounds.mjs` now extracts exact vertex
+bounds from each active rock GLB and verifies its single-node identity scene
+transform. Its receipt records the visual manifest and each GLB SHA-256. This
+establishes asset-source facts only; Godot import transforms, active asset
+selection, fallback outcome and live publication still require admission.
