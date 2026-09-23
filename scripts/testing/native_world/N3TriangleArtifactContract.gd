@@ -379,6 +379,44 @@ func run() -> void:
 		and large_union.size() == 4913,
 		"4913-block broker exposes complete bounded spatial windows without false readiness")
 	check(large_broker.stop().get("status") == "ready", "large broker stops without workers")
+	var worker_planner = PLANNER.new()
+	worker_planner.setup(81)
+	worker_planner.replace_sources(viewer, [], [], [], bounds)
+	var worker_producer = PRODUCER.new()
+	var worker_identity := {"ownerGeneration":81, "sourceRevision":1,
+		"cancellationEpoch":1, "sourceEpoch":"demand-worker-drain"}
+	check(worker_producer.setup(backend, pages,
+		main.structure_system.citadel_terrain_admission, worker_planner,
+		main.CELL, worker_identity).get("status") == "ready"
+		and worker_producer.request_block(block).get("status") == "pending",
+		"surface producer starts for demand-change worker drain")
+	var face_in_flight := false
+	for frame in range(300):
+		var worker_step: Dictionary = worker_producer.advance()
+		if worker_step.get("reason") == "triangle_mesh_in_flight":
+			face_in_flight = true
+			break
+		if worker_step.get("status") == "failed" or worker_step.get("status") == "ready": break
+		await process_frame
+	check(face_in_flight, "demand change reaches actual mesh face worker")
+	worker_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
+	var worker_rebound := {}
+	for frame in range(120):
+		worker_rebound = worker_producer.rebind_demand()
+		if worker_rebound.get("status") == "ready" or worker_rebound.get("status") == "failed": break
+		await process_frame
+	var rebound_snapshot: Dictionary = worker_producer.collision_source_snapshot()
+	check(worker_rebound.get("status") == "ready"
+		and rebound_snapshot.get("status") == "pending"
+		and (rebound_snapshot.get("residentBlocks", []) as Array).is_empty()
+		and worker_producer.collision_artifact_row(block, worker_identity).get("status") != "ready",
+		"demand rebind drains face worker without publishing removed block")
+	var worker_stop: Dictionary = worker_producer.stop()
+	for frame in range(120):
+		if worker_stop.get("status") == "ready": break
+		await process_frame
+		worker_stop = worker_producer.drain_step()
+	check(worker_stop.get("status") == "ready", "rebound producer drains")
 	var remote_page := Vector2i.ZERO
 	var remote_candidate := {}
 	for page_index in range(2, 7):

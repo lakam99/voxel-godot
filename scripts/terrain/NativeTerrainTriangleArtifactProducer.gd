@@ -91,6 +91,12 @@ func rebind_demand() -> Dictionary:
 		if drained.get("status") != "ready":
 			return {"status":"pending", "reason":"triangle_demand_worker_draining"}
 		_ticket = 0
+	if _build_thread != null:
+		if _build_thread.is_alive():
+			return {"status":"pending", "reason":"triangle_demand_mesh_worker_draining"}
+		_build_thread.wait_to_finish()
+		_build_thread = null
+		_build_context.clear()
 	_pending_block = null
 	var demanded: Dictionary = _planner.required_collision_mesh_blocks()
 	if demanded.get("status") != "ready": return demanded

@@ -272,14 +272,9 @@ each producer and preserves its owner generation. It does not install or retire
 colliders, set `authority_ready`, or change Main/Continue. The focused service
 fixture covers request retention and demand-change producer replacement at
 `artifacts/native-world-backend/n3-triangle-artifact-1790178474287-be48d6b6/report.json`.
-The request boundary reads N5's current resident cap and returns explicit
-`resident_mesh_capacity_backpressure` with required block count, cap, demand
-identity and retained request count when the complete mesh closure is too
-large. It drains a superseded producer before applying that backpressure and
-never offers an oversized ready source snapshot to N5. This is a bounded
-service response, not spatial retirement or a solution for legitimate larger
-world demand. The two-block/one-block-cap focused preflight is covered in
-`artifacts/native-world-backend/n3-triangle-artifact-1790178589610-4fd2eab5/report.json`.
+The earlier cap-aware pending boundary is superseded by deterministic spatial
+windows. Directly binding the unpartitioned source to one N5 owner stays
+pending when the full mesh closure exceeds that owner's cap.
 The focused two-distant-block shaping test at
 `artifacts/native-world-backend/n3-triangle-artifact-1790178952729-d395b59f/report.json`
 proves a remote registry revision preserves the first block's canonical row
@@ -287,3 +282,25 @@ while the distant block is produced. The broker reports idle as pending even
 after its request queue empties; only the source snapshot can declare its
 logical artifact closure, and only N5's physics receipt can declare physical
 readiness. The test does not prove a live collision owner or gameplay release.
+
+The planner now partitions the exact logical mesh closure into 16³ mesh-block
+spatial windows. A 17³ (4,913-block) demand yields eight disjoint windows,
+each at most 1,296 blocks, and the union equals all 4,913 demanded blocks.
+The broker provides an independent parameterless source facade for each
+window. Its local token and membership provenance remain stable when a
+distant demand source changes. The global layout still carries the full block
+list and logical closure token for N5 to verify one complete aggregate
+physical receipt. Changed windows retain their canonical rows and facade
+until an explicit drained-owner retirement acknowledgement. Idle broker and
+unbuilt windows remain pending. A demand change during async face extraction
+drains and discards that worker result before rebinding the producer.
+Focused evidence:
+`artifacts/native-world-backend/n3-terrain-demand-planner-1790179731210-2c24f5ab/report.json`
+and `artifacts/native-world-backend/n3-triangle-artifact-1790179724985-2e1fc94e/report.json`.
+
+This is source and planner contract evidence. N5 still needs aggregate owners
+and an exact union physical receipt; no 4,913-block physical completion is
+claimed. A global durable terrain revision still changes every window's N5
+identity, even when the edit is distant. Native affected-section and local
+content identities may support a later scoped proof, but this change does not
+retain physical owners across such revisions.
