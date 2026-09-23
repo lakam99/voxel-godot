@@ -51,8 +51,10 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 			return {"ready": false}
 	return {"ready": true, "physicsFrame": Engine.get_physics_frames(),
 		"provenance": {"requestIdentity": _identity.duplicate(true),
-			"sourceIdentity": _source_identity.duplicate(true)},
-		"residentBlockCount": _resident_blocks.size()}
+			"sourceIdentity": _source_identity.duplicate(true),
+			"membershipProvenance": _membership_provenance.duplicate(true)},
+		"residentBlockCount": _resident_blocks.size(),
+		"residentBlocks": _resident_blocks.duplicate()}
 
 
 func startup_readiness(identity: Dictionary) -> Dictionary:
