@@ -11,6 +11,10 @@ terrain or create a fallback generator. It checks seed/profile-store binding,
 the admission policy against Main constants, and canonicalized town inputs
 before returning a request. `CitadelTerrainAdmission.source_policy_snapshot`
 is the narrow read-only policy boundary used by that builder.
+For Continue, `from_main_with_current_volume` takes the current
+`TerrainVolumeService.save_all_section_deltas()` durable v2 snapshot and
+builds the one-shot native save-v2 initialization envelope. It does not
+serialize Voxel Tools generated blocks or infer missing volume as empty.
 
 `NativeShapingPageAdmission` then translates native page requests through
 the production Citadel source admission. Pending remains pending across calls;
@@ -25,8 +29,9 @@ Focused evidence:
 
 - `node tools/run-n3-native-world-source-request.mjs` passed with installed
   Godot and native adapter, including one finalized town, one explicit
-  no-town region and seed-mismatch failure. Report:
-  `artifacts/native-world-backend/n3-world-source-request-1790164944950-4acec69e/report.json`.
+  no-town region, seed-mismatch failure, and exact native save-v2
+  import/export of a current negative-cell durable edit. Report:
+  `artifacts/native-world-backend/n3-world-source-request-1790165382026-0a933981/report.json`.
 - `node tools/run-n3-native-shaping-page-admission.mjs` passed repeated
   pending retention for a real Citadel admission and ready-page passthrough.
   Report:

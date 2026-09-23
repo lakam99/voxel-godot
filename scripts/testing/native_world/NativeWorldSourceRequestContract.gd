@@ -3,6 +3,8 @@ extends SceneTree
 const REQUEST := preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const MAIN := preload("res://scripts/MainCore.gd")
 const STRUCTURES := preload("res://scripts/StructureSystem.gd")
+const WORLD := preload("res://scripts/WorldGenerationSystem.gd")
+const VOLUME := preload("res://scripts/TerrainVolumeService.gd")
 
 var failures: Array[String] = []
 
@@ -44,6 +46,29 @@ func run() -> void:
 		check(backend != null, "native backend available")
 		if backend != null:
 			check(backend.initialize(request).get("status") == "ready", "native initialization accepts production request")
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.terrain_volume_service = VOLUME.new()
+	var volume_service = main.world_generation_system.terrain_volume_service
+	volume_service.setup(main, null)
+	volume_service.set_cell_state(Vector3i(-17,-1,-1), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.25, "fluid":"", "blockId":"source-request-contract",
+		"light":{"sky":3,"block":11},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	var current_volume: Dictionary = volume_service.save_all_section_deltas()
+	var restored_request: Dictionary = REQUEST.from_main_with_current_volume(main)
+	check(restored_request.get("status") == "ready", "current durable volume request built")
+	if restored_request.get("status") == "ready":
+		check(restored_request.request.terrainVolume == current_volume
+			and restored_request.request.saveSeedText == main.seed_text,
+			"current durable volume and seed forwarded exactly")
+		var restored_backend = ClassDB.instantiate("NativeWorldBackend")
+		check(restored_backend != null and restored_backend.initialize_from_save_v2(
+			restored_request.request).get("status") == "ready", "native save-v2 initialization accepts current volume")
+		if restored_backend != null:
+			var exported: Dictionary = restored_backend.export_terrain_volume_v2()
+			check(exported.get("status") == "ready" and exported.get("terrainVolume") == current_volume,
+				"native save-v2 export retains current durable volume")
 	main.structure_system.citadel_terrain_admission.configure("other-seed", {},
 		{"regionCells": main.STRUCTURE_REGION_CELLS, "spawnChance": main.STRUCTURE_SPAWN_CHANCE})
 	check(REQUEST.from_main(main).get("reason") == "site_admission_seed_mismatch", "seed mismatch fails")
