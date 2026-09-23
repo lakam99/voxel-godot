@@ -66,6 +66,10 @@ std::uint32_t GodotPcg32::bounded_randi(GodotPcg32 &rng, const std::uint32_t bou
 std::int64_t GodotPcg32::randi_range(const std::int32_t from, const std::int32_t to) noexcept {
     const std::int64_t minimum = std::min<std::int64_t>(from, to);
     const std::int64_t maximum = std::max<std::int64_t>(from, to);
+    // Godot 4.6.1 returns an equal-bound range without advancing PCG. This
+    // matters for hare's 1..1 primary and extra drops in the shared chunk
+    // stream; consuming a raw value here shifts every later prop attempt.
+    if (minimum == maximum) return minimum;
     const std::uint32_t difference = static_cast<std::uint32_t>(maximum - minimum);
     if (difference == UINT32_MAX) {
         return static_cast<std::int64_t>(randi()) + minimum;

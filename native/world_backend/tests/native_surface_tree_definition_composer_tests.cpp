@@ -85,6 +85,10 @@ VWB_TEST(native_surface_tree_definition_composer_binds_a_broadleaf_definition_to
     const NativeSurfacePropAttemptStream source = attempts(); const NativeSurfacePropBaselineStream stream = baseline(source);
     const NativeSurfacePropPlacementSet set = placements(source, stream); const NativeSurfaceTreeEcologyProfile forest = profile("forest", "ecological_broadleaf_tree");
     const NativeTreeDefinition tree = NativeSurfaceTreeDefinitionComposer::create(set, stream, 0U, world_source(), forest);
+    const Sha256Digest str2_golden = {
+        0x24,0xc8,0x20,0x0d,0x9b,0x8f,0x41,0xce,0x6c,0x96,0x8a,0x5c,0x12,0xef,0xde,0x15,
+        0xd0,0x17,0x91,0x29,0x46,0x86,0xb7,0x24,0x95,0x18,0x3e,0xf6,0x3f,0x09,0x03,0xf9};
+    VWB_EXPECT_EQ(str2_golden, tree.content_digest());
     const NativeTreeDefinitionInput &input = tree.input(); const NativeSurfacePropPlacementEntry &placement = set.entries()[0];
     VWB_EXPECT_EQ(std::string("native_surface_tree_recipe"), input.producer_key);
     VWB_EXPECT_EQ(NativeTreeFeatureKind::natural_surface_tree, input.feature_kind);

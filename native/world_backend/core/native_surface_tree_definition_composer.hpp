@@ -71,4 +71,15 @@ public:
         const NativeSurfaceTreeEcologyProfile &profile);
 };
 
+// Shared, independently validating recipe authority for legacy STR2 and the
+// source-ordered bridge. Callers own distinct provenance digests.
+NativeTreeDefinition compose_native_surface_tree_recipe(
+    const NativeSurfacePropPlacementEntry &placement,
+    const std::vector<float> &compatibility_draws,
+    const WorldSourceDefinition &world_source,
+    const NativeSurfaceTreeEcologyProfile &profile,
+    const Sha256Digest &source_recipe_digest,
+    const std::string &producer_key,
+    std::uint32_t producer_revision);
+
 } // namespace voxel::world_backend

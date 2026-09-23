@@ -53,14 +53,23 @@ func canonical_content(structures: StructureSystem, admission: Admission) -> Str
 
 func source(status: String, rect: Rect2i) -> Dictionary:
 	return {"status":status,"sourceKey":"oracle-citadel","sourceSignature":"oracle-v1",
+		"binding":{"siteId":"oracle-site","sourceKey":"oracle-citadel","generation":1},
 		"reservationCells":rect}
 
 func run() -> void:
 	var structures := Structures.new()
 	var admission := Admission.new()
 	structures.citadel_terrain_admission = admission
+	var revision_before := structures.surface_prop_exclusion_records_revision()
 	structures.reserve_natural_prop_exclusion(-4,-4,3,3,"natural") # inclusive [-4,-2]
+	var revision_after_natural := structures.surface_prop_exclusion_records_revision()
 	structures.record_structure_terrain_footprint(9,9,0.0,3,3,2,"terrain","stone",0) # inclusive [8,12]
+	var revision_after_terrain := structures.surface_prop_exclusion_records_revision()
+	check("owner_exclusion_revision_tracks_both_record_families",
+		revision_before == 0 and revision_after_natural == 1 and revision_after_terrain == 2)
+	structures.reserve_natural_prop_exclusion(-4,-4,3,3,"natural")
+	check("identical_natural_record_keeps_revision",
+		structures.surface_prop_exclusion_records_revision() == revision_after_terrain)
 	admission.states[Vector2i.ZERO] = source("ready",Rect2i(15,15,3,3)) # half-open [15,18)
 	admission.states[Vector2i(1,1)] = source("prepared",Rect2i(2048,2048,2,2))
 	admission.states[Vector2i(-2,-2)] = source("ready",Rect2i(-2049,-2049,1,1))
@@ -78,6 +87,46 @@ func run() -> void:
 	admission.states[Vector2i(1,1)] = source("pending",Rect2i(2048,2048,2,2))
 	check("pending_is_not_exclusion",not structures.blocks_natural_prop_at_cell(2048,2048))
 	admission.states[Vector2i(1,1)] = source("prepared",Rect2i(2048,2048,2,2))
+	var missing_halo := structures.capture_surface_tree_exclusion_halo(2047,2047,0,1)
+	check("crossed_region_unrequested_fails_closed",not missing_halo.ready and missing_halo.content.citadel.size()==4
+		and not structures.surface_tree_exclusion_halo_is_current(missing_halo))
+	admission.states[Vector2i(0,1)] = source("absent",Rect2i())
+	admission.states[Vector2i(1,0)] = source("absent",Rect2i())
+	var seam_halo := structures.capture_surface_tree_exclusion_halo(2047,2047,0,1)
+	check("four_region_seam_admitted",seam_halo.ready and structures.surface_tree_exclusion_halo_is_current(seam_halo))
+	admission.states[Vector2i(1,0)] = source("pending",Rect2i())
+	check("crossed_region_pending_stales",not structures.surface_tree_exclusion_halo_is_current(seam_halo))
+	admission.states[Vector2i(1,0)] = source("absent",Rect2i())
+	var tampered_halo: Dictionary = seam_halo.duplicate(true)
+	tampered_halo.content.citadel[0].status = "failed"
+	check("copied_citadel_tamper_rejected",not structures.surface_tree_exclusion_halo_is_current(tampered_halo))
+	var tampered_cell: Dictionary = seam_halo.duplicate(true)
+	tampered_cell.cell = Vector2i(2046,2046)
+	check("capture_cell_tamper_rejected",not structures.surface_tree_exclusion_halo_is_current(tampered_cell))
+	admission.states[Vector2i(-1,-1)] = source("absent",Rect2i())
+	admission.states[Vector2i(-1,0)] = source("absent",Rect2i())
+	admission.states[Vector2i(0,-1)] = source("absent",Rect2i())
+	var negative_halo := structures.capture_surface_tree_exclusion_halo(-1,-1,0,1)
+	check("negative_zero_region_seam",negative_halo.ready and negative_halo.content.citadel.size()==4
+		and structures.surface_tree_exclusion_halo_is_current(negative_halo))
+	structures.reserve_natural_prop_exclusion(-31,-1,1,1,"outside-28-source")
+	var outside_halo := structures.capture_surface_tree_exclusion_halo(-28,-1,3,0)
+	check("outside_chunk_natural_record_captured",outside_halo.content.natural.size()==1
+		and outside_halo.content.natural[0].source=="outside-28-source")
+	structures.natural_prop_exclusion_records["outside-28-source:-31,-1:1x1"].maxX = -30
+	check("direct_record_mutation_stales_halo",not structures.surface_tree_exclusion_halo_is_current(outside_halo))
+	check("owner_revision_stales_halo",not structures.surface_tree_exclusion_halo_is_current(seam_halo))
+	structures.record_structure_terrain_footprint(-32,-1,0.0,1,1,0,"outside-terrain","stone",0)
+	var terrain_halo := structures.capture_surface_tree_exclusion_halo(-28,-1,0,3)
+	check("outside_chunk_terrain_record_captured",terrain_halo.content.terrain.size()==1)
+	var widest_halo := structures.capture_surface_tree_exclusion_halo(-28,-1,3,0)
+	check("widest_coverage_includes_both_families",widest_halo.content.natural.size()==1 and widest_halo.content.terrain.size()==1)
+	check("invalid_margins_fail_closed",not structures.capture_surface_tree_exclusion_halo(0,0,-1,0).ready
+		and not structures.capture_surface_tree_exclusion_halo(0,0,0,4097).ready)
+	var saved_binding: Variant = admission.states[Vector2i(1,1)].binding
+	admission.states[Vector2i(1,1)].binding = "malformed"
+	check("malformed_binding_fails_closed",not structures.capture_surface_tree_exclusion_halo(2048,2048,0,0).ready)
+	admission.states[Vector2i(1,1)].binding = saved_binding
 	var initial_digest := canonical_content(structures,admission)
 	var initial_rows := decision_rows(structures)
 	admission.states[Vector2i.ZERO].status = "prepared"
@@ -94,7 +143,23 @@ func run() -> void:
 	replacement.maxX = 42
 	structures.natural_prop_exclusion_records["a:40,40:2x2"] = replacement
 	check("content_change_identity",canonical_content(structures,admission)!=ordered_digest)
-	check("natural_reservation_does_not_advance_regional_revision",structures.regional_source_revision==1)
+	check("direct_map_mutation_requires_content_recheck",
+		structures.surface_prop_exclusion_records_revision() == revision_after_terrain + 4)
+	check("natural_reservation_does_not_advance_regional_revision",structures.regional_source_revision==2)
+	var before_same_terrain := structures.surface_prop_exclusion_records_revision()
+	structures.record_structure_terrain_footprint(9,9,0.0,3,3,2,"terrain","stone",0)
+	check("identical_terrain_record_keeps_exclusion_revision",
+		structures.surface_prop_exclusion_records_revision() == before_same_terrain)
+	structures.natural_prop_exclusion_records["malformed-natural"] = {"id":"malformed-natural","minX":4}
+	check("malformed_natural_fails_closed",not structures.capture_surface_tree_exclusion_halo(50,50,0,0).ready)
+	structures.natural_prop_exclusion_records.erase("malformed-natural")
+	structures.terrain_footprint_records["malformed-terrain"] = {"id":"malformed-terrain",
+		"minCell":Vector3i(5,0,5),"maxCell":Vector3i(4,0,4)}
+	check("reversed_terrain_fails_closed",not structures.capture_surface_tree_exclusion_halo(50,50,0,0).ready)
+	structures.terrain_footprint_records.erase("malformed-terrain")
+	admission.states[Vector2i(1,1)].binding.generation = 0
+	check("zero_admission_generation_fails_closed",not structures.capture_surface_tree_exclusion_halo(2048,2048,0,0).ready)
+	admission.states[Vector2i(1,1)].binding.generation = 1
 	# reset() requires a configured main. Test the exact reset clearing effect by
 	# comparing the record stores, without invoking unrelated world setup.
 	structures.natural_prop_exclusion_records.clear()

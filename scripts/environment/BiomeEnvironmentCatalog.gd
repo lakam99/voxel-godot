@@ -20,8 +20,11 @@ const PROFILE_PATHS := [
 var profiles_by_biome := {}
 var last_errors: Array[Dictionary] = []
 var loaded := false
+var generation_revision := 0
 
 func setup(profile_paths: Array = PROFILE_PATHS) -> bool:
+	generation_revision += 1
+	loaded = false
 	profiles_by_biome.clear()
 	last_errors.clear()
 	for path_variant in profile_paths:
@@ -46,6 +49,11 @@ func setup(profile_paths: Array = PROFILE_PATHS) -> bool:
 
 func is_ready() -> bool:
 	return loaded
+
+func generation_receipt() -> Dictionary:
+	# Lifecycle only: callers can still mutate the Resource instances returned by
+	# profile_for_biome. A native capture must copy/validate its actual values.
+	return {"owner_id": get_instance_id(), "revision": generation_revision, "ready": loaded}
 
 func profile_count() -> int:
 	return profiles_by_biome.size()

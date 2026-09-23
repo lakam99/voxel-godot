@@ -69,6 +69,20 @@ VWB_TEST(godot_pcg_compat_matches_inclusive_ranges_swapped_bounds_and_full_domai
     VWB_EXPECT_EQ(17770778703077977929ULL, full_domain.state());
 }
 
+VWB_TEST(godot_pcg_compat_equal_bound_range_preserves_godot_461_state) {
+    // Direct Godot RandomNumberGenerator oracle, seed 0xffffffff:
+    // randi_range(1, 1) -> 1, before == after == -9176265316429931931
+    // when viewed as signed, or 9270478757279619685 as uint64_t.
+    GodotPcg32 rng(0xffffffffULL);
+    VWB_EXPECT_EQ(9270478757279619685ULL, rng.state());
+    VWB_EXPECT_EQ(1, rng.randi_range(1, 1));
+    VWB_EXPECT_EQ(9270478757279619685ULL, rng.state());
+    VWB_EXPECT_EQ(-7, rng.randi_range(-7, -7));
+    VWB_EXPECT_EQ(9270478757279619685ULL, rng.state());
+    // A neighboring non-equal range must still consume the original draw.
+    VWB_EXPECT_EQ(10362380710714179936ULL, (static_cast<void>(rng.randi_range(1, 2)), rng.state()));
+}
+
 VWB_TEST(godot_pcg_compat_matches_randf_bits_and_explicit_zero_path) {
     GodotPcg32 rng(0U);
     const std::array<std::uint32_t, 8U> expected_bits = {

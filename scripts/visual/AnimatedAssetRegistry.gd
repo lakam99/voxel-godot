@@ -33,8 +33,11 @@ var assets_by_id := {}
 var scene_cache := {}
 var last_errors: Array[String] = []
 var loaded := false
+var _generation_revision := 0
 
 func setup() -> bool:
+    _generation_revision += 1
+    loaded = false
     assets_by_id.clear()
     scene_cache.clear()
     last_errors.clear()
@@ -46,6 +49,8 @@ func setup() -> bool:
     return loaded
 
 func cache_asset_scenes() -> bool:
+    _generation_revision += 1
+    loaded = false
     var ok := true
     for asset_id in assets_by_id.keys():
         var asset: Dictionary = assets_by_id[asset_id]
@@ -61,10 +66,86 @@ func cache_asset_scenes() -> bool:
             ok = false
             continue
         scene_cache[asset_id] = packed
-    return ok and scene_cache.size() == assets_by_id.size()
+    loaded = ok and scene_cache.size() == assets_by_id.size()
+    return loaded
 
 func is_ready() -> bool:
     return loaded
+
+func generation_receipt() -> Dictionary:
+    return {"ownerInstanceId": get_instance_id(), "revision": _generation_revision, "ready": loaded}
+
+## Explicit capture boundary; never called by the per-frame presentation path.
+## The imported PackedScenes remain owned by this registry. A partial scene or
+## missing expected clip is not admitted as a native wildlife presentation.
+func capture_active_presentation() -> Dictionary:
+    if not loaded or _generation_revision <= 0:
+        return {"ok": false, "reason": "registry_not_ready"}
+    var before := generation_receipt()
+    var first := _read_active_presentation_values()
+    if not bool(first.get("ok", false)):
+        return first
+    var middle := generation_receipt()
+    var second := _read_active_presentation_values()
+    var after := generation_receipt()
+    if before != middle or middle != after or not bool(second.get("ok", false)) \
+            or first.get("assets") != second.get("assets"):
+        return {"ok": false, "reason": "registry_changed_during_capture"}
+    var values := {"domain": "animated_asset_registry_presentation", "schemaVersion": 1,
+        "assets": first.assets}
+    var context := HashingContext.new()
+    context.start(HashingContext.HASH_SHA256)
+    context.update(JSON.stringify(values).to_utf8_buffer())
+    return {"ok": true, "schemaVersion": 1, "ownerReceipt": before.duplicate(true),
+        "contentIdentity": context.finish().hex_encode(), "assets": (first.assets as Array).duplicate(true)}
+
+func _read_active_presentation_values() -> Dictionary:
+    var rows: Array[Dictionary] = []
+    var ids := asset_ids()
+    if ids.is_empty() or scene_cache.size() != ids.size():
+        return {"ok": false, "reason": "scene_cache_incomplete"}
+    for asset_id in ids:
+        var row = assets_by_id.get(asset_id)
+        var scene := scene_cache.get(asset_id) as PackedScene
+        if not row is Dictionary or String(row.get("id", "")) != asset_id \
+                or scene == null or String(row.get("path", "")) != scene.resource_path:
+            return {"ok": false, "reason": "asset_row_or_scene_invalid:" + asset_id}
+        var expected := String(row.get("expected", ""))
+        if expected == "":
+            return {"ok": false, "reason": "expected_clip_missing:" + asset_id}
+        var raw_instance := scene.instantiate()
+        var instance := raw_instance as Node3D
+        if instance == null:
+            if raw_instance != null:
+                raw_instance.free()
+            return {"ok": false, "reason": "scene_root_invalid:" + asset_id}
+        var player := find_animation_player(instance)
+        var names := PackedStringArray()
+        var player_path := ""
+        if player != null:
+            names = player.get_animation_list()
+            names.sort()
+            player_path = String(instance.get_path_to(player))
+        var has_expected := player != null and names.has(expected)
+        instance.free()
+        if not has_expected:
+            return {"ok": false, "reason": "expected_clip_unavailable:" + asset_id}
+        rows.append({"id": asset_id, "definition": (row as Dictionary).duplicate(true),
+            "sceneResourcePath": scene.resource_path, "sceneInstanceId": scene.get_instance_id(),
+            "animationPlayerPath": player_path, "availableClips": Array(names)})
+    return {"ok": true, "assets": rows}
+
+func presentation_capture_is_current(snapshot: Dictionary) -> bool:
+    if not bool(snapshot.get("ok", false)) or int(snapshot.get("schemaVersion", -1)) != 1 \
+            or not snapshot.get("assets") is Array \
+            or not snapshot.get("contentIdentity") is String \
+            or snapshot.get("ownerReceipt") != generation_receipt():
+        return false
+    var current := capture_active_presentation()
+    return bool(current.get("ok", false)) \
+        and current.get("ownerReceipt") == snapshot.get("ownerReceipt") \
+        and current.get("contentIdentity") == snapshot.get("contentIdentity") \
+        and current.get("assets") == snapshot.get("assets")
 
 func asset_ids() -> PackedStringArray:
     var ids := PackedStringArray()

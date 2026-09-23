@@ -43,6 +43,7 @@ var active_structure_town_key := ""
 var terrain_surface_sample_cache := {}
 var terrain_footprint_records := {}
 var natural_prop_exclusion_records := {}
+var surface_prop_exclusion_revision := 0
 var private_interior_records := {}
 var private_interior_revision := 0
 var town_home_records_revision := 0
@@ -57,6 +58,7 @@ var standalone_admission_states := {}
 
 func setup(main_node) -> void:
     regional_source_generation += 1
+    surface_prop_exclusion_revision += 1
     main = main_node
     loot = StructureLootScript.new()
     configure_citadel_terrain_admission()
@@ -471,6 +473,7 @@ func reset() -> void:
     terrain_surface_sample_cache.clear()
     terrain_footprint_records.clear()
     natural_prop_exclusion_records.clear()
+    surface_prop_exclusion_revision += 1
     private_interior_records.clear()
     private_interior_revision += 1
 
@@ -1067,7 +1070,7 @@ func record_structure_terrain_footprint(base_x: int, base_z: int, level: float, 
     var min_cell := Vector3i(base_x - 1, floor_y - 3, base_z - 1)
     var max_cell := Vector3i(base_x + width, floor_y, base_z + depth)
     var record_id := "%s:%d,%d:%dx%d:%d" % [source, base_x, base_z, width, depth, floor_y]
-    terrain_footprint_records[record_id] = {
+    var record := {
         "id": record_id,
         "source": source,
         "material": foundation_material,
@@ -1081,6 +1084,9 @@ func record_structure_terrain_footprint(base_x: int, base_z: int, level: float, 
         "minCell": min_cell,
         "maxCell": max_cell
     }
+    if terrain_footprint_records.get(record_id, {}) != record:
+        terrain_footprint_records[record_id] = record
+        surface_prop_exclusion_revision += 1
 
 func structure_terrain_footprints_for_chunk(chunk_key: Vector2i, chunk_size: int) -> Array:
     var result := []
@@ -1113,7 +1119,7 @@ func reserve_natural_prop_exclusion(base_x: int, base_z: int, width: int, depth:
     if width <= 0 or depth <= 0:
         return
     var record_id := "%s:%d,%d:%dx%d" % [source, base_x, base_z, width, depth]
-    natural_prop_exclusion_records[record_id] = {
+    var record := {
         "id": record_id,
         "source": source,
         "minX": base_x,
@@ -1121,6 +1127,125 @@ func reserve_natural_prop_exclusion(base_x: int, base_z: int, width: int, depth:
         "minZ": base_z,
         "maxZ": base_z + depth - 1
     }
+    if natural_prop_exclusion_records.get(record_id, {}) != record:
+        natural_prop_exclusion_records[record_id] = record
+        surface_prop_exclusion_revision += 1
+
+func surface_prop_exclusion_records_revision() -> int:
+    # Only owner API mutations are revisioned. A future native adapter must
+    # still copy/hash the captured records because GDScript maps are mutable.
+    return surface_prop_exclusion_revision
+
+func capture_surface_tree_exclusion_halo(
+    x: int, z: int, natural_margin_cells: int, structure_margin_cells: int
+) -> Dictionary:
+    # Capture the post-draw tree decision footprint, not just its 28-cell
+    # source chunk. Source records outside that chunk can block the tree.
+    if natural_margin_cells < 0 or structure_margin_cells < 0 \
+        or natural_margin_cells > 4096 or structure_margin_cells > 4096:
+        return {"ready":false, "reason":"invalid_margin"}
+    var natural_margin := natural_margin_cells
+    var structure_margin := structure_margin_cells
+    var coverage := maxi(natural_margin, structure_margin)
+    var ready := true
+    var natural_rows := []
+    for value in natural_prop_exclusion_records.values():
+        if not (value is Dictionary):
+            ready = false
+            continue
+        var row: Dictionary = value
+        if String(row.get("id", "")).is_empty() or String(row.get("id", "")).length() > 1024 \
+            or not (row.get("minX") is int) or not (row.get("maxX") is int) \
+            or not (row.get("minZ") is int) or not (row.get("maxZ") is int):
+            ready = false
+            natural_rows.append(row.duplicate(true))
+            continue
+        if int(row.minX) > int(row.maxX) or int(row.minZ) > int(row.maxZ):
+            ready = false
+            natural_rows.append(row.duplicate(true))
+            continue
+        if x < int(row.get("minX", x)) - coverage or x > int(row.get("maxX", x)) + coverage: continue
+        if z < int(row.get("minZ", z)) - coverage or z > int(row.get("maxZ", z)) + coverage: continue
+        natural_rows.append(row.duplicate(true))
+    natural_rows.sort_custom(func(a, b): return String(a.get("id", "")) < String(b.get("id", "")))
+    var terrain_rows := []
+    for value in terrain_footprint_records.values():
+        if not (value is Dictionary):
+            ready = false
+            continue
+        var row: Dictionary = value
+        if String(row.get("id", "")).is_empty() or String(row.get("id", "")).length() > 1024 \
+            or not (row.get("minCell") is Vector3i) or not (row.get("maxCell") is Vector3i):
+            ready = false
+            terrain_rows.append(row.duplicate(true))
+            continue
+        var low: Vector3i = row.get("minCell", Vector3i.ZERO)
+        var high: Vector3i = row.get("maxCell", Vector3i.ZERO)
+        if low.x > high.x or low.z > high.z:
+            ready = false
+            terrain_rows.append(row.duplicate(true))
+            continue
+        if x < low.x - coverage or x > high.x + coverage: continue
+        if z < low.z - coverage or z > high.z + coverage: continue
+        terrain_rows.append(row.duplicate(true))
+    terrain_rows.sort_custom(func(a, b): return String(a.get("id", "")) < String(b.get("id", "")))
+    if natural_rows.size() > 65536 or terrain_rows.size() > 65536: ready = false
+    var bounds := Rect2i(Vector2i(x, z), Vector2i.ONE).grow(coverage)
+    var low_region := CitadelSiteFieldScript.region_for_cell(bounds.position)
+    var high_region := CitadelSiteFieldScript.region_for_cell(bounds.end - Vector2i.ONE)
+    var source_rows := []
+    for region_z in range(low_region.y, high_region.y + 1):
+        for region_x in range(low_region.x, high_region.x + 1):
+            var region := Vector2i(region_x, region_z)
+            var state: Dictionary = citadel_terrain_admission.source_state(region)
+            var status := String(state.get("status", ""))
+            if status not in ["ready", "prepared", "absent"] or (status == "absent" and state.get("reason") == "source_not_requested"):
+                ready = false
+            var binding_value: Variant = state.get("binding", {})
+            if not (binding_value is Dictionary):
+                ready = false
+                binding_value = {}
+            var binding: Dictionary = binding_value
+            var source_key := String(binding.get("sourceKey", state.get("sourceKey", "")))
+            var source_generation := int(binding.get("generation", -1))
+            # A source payload is mutable and potentially huge. Only its
+            # admission identity and half-open reservation are needed here.
+            var source_row := {"region":region, "status":status,
+                "reason":String(state.get("reason", "")),
+                "sourceKey":source_key, "sourceGeneration":source_generation,
+                "binding":binding.duplicate(true),
+                "sourceSignature":String(state.get("sourceSignature", "")),
+                "reservationCells":state.get("reservationCells", Rect2i())}
+            if status in ["ready", "prepared"] and (not state.has("reservationCells") or not (state.reservationCells is Rect2i) \
+                or not state.has("sourceSignature") or String(state.sourceSignature).is_empty() \
+                or source_key.is_empty() or not (binding.get("generation") is int) or source_generation <= 0 \
+                or String(binding.get("siteId", "")).is_empty() \
+                or (state.get("reservationCells") is Rect2i and (state.reservationCells.size.x <= 0 or state.reservationCells.size.y <= 0))):
+                ready = false
+            source_rows.append(source_row)
+    var content := {"natural":natural_rows, "terrain":terrain_rows, "citadel":source_rows}
+    return {"ownerInstanceId":get_instance_id(), "ownerGeneration":regional_source_generation,
+        "exclusionRevision":surface_prop_exclusion_revision, "cell":Vector2i(x, z),
+        "naturalMarginCells":natural_margin, "structureMarginCells":structure_margin,
+        "ready":ready, "content":content,
+        "contentDigest":Marshalls.raw_to_base64(var_to_bytes([
+            Vector2i(x, z), natural_margin, structure_margin, content])).sha256_text()}
+
+func surface_tree_exclusion_halo_is_current(snapshot: Dictionary) -> bool:
+    for required in ["cell", "naturalMarginCells", "structureMarginCells", "content", "contentDigest"]:
+        if not snapshot.has(required): return false
+    if not (snapshot.cell is Vector2i) or not (snapshot.content is Dictionary): return false
+    if int(snapshot.get("ownerInstanceId", -1)) != get_instance_id(): return false
+    if int(snapshot.get("ownerGeneration", -1)) != regional_source_generation: return false
+    if int(snapshot.get("exclusionRevision", -1)) != surface_prop_exclusion_revision: return false
+    var cell: Vector2i = snapshot.get("cell", Vector2i.ZERO)
+    var current := capture_surface_tree_exclusion_halo(cell.x, cell.y,
+        int(snapshot.get("naturalMarginCells", -1)), int(snapshot.get("structureMarginCells", -1)))
+    return bool(snapshot.get("ready", false)) and bool(current.ready) \
+        and snapshot.get("content", {}) == current.content \
+        and snapshot.get("contentDigest", "") == current.contentDigest \
+        and snapshot.get("naturalMarginCells", -1) == current.naturalMarginCells \
+        and snapshot.get("structureMarginCells", -1) == current.structureMarginCells
 
 func blocks_natural_prop_at_cell(x: int, z: int) -> bool:
     return blocks_natural_prop_with_margin_at_cell(x, z, 0)

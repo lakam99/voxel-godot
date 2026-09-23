@@ -31,8 +31,11 @@ var tree_wind_material_cache := {}
 var disabled_asset_ids := {}
 var last_errors: Array[String] = []
 var loaded := false
+var generation_revision := 0
 
 func setup(catalog: BiomeEnvironmentCatalog = null) -> bool:
+    generation_revision += 1
+    loaded = false
     assets_by_id.clear()
     assets_by_family.clear()
     scene_cache.clear()
@@ -122,6 +125,16 @@ func read_text(path: String) -> String:
 
 func is_ready() -> bool:
     return loaded
+
+func generation_receipt() -> Dictionary:
+    # Lifecycle only: public asset dictionaries/resources are mutable, so a
+    # native capture must copy and validate the relevant payload separately.
+    return {
+        "owner_id": get_instance_id(),
+        "revision": generation_revision,
+        "ready": loaded,
+        "catalog": environment_catalog.generation_receipt() if environment_catalog != null else {}
+    }
 
 func asset_count() -> int:
     return assets_by_id.size()
@@ -499,10 +512,13 @@ func rock_scale_for_biome(biome: String) -> float:
     return float(profile.get("rock_scale")) if profile else 1.0
 
 func disable_asset_for_test(asset_id: String) -> void:
-    if asset_id != "":
+    if asset_id != "" and not disabled_asset_ids.has(asset_id):
+        generation_revision += 1
         disabled_asset_ids[asset_id] = true
 
 func clear_test_disabled_assets() -> void:
+    if not disabled_asset_ids.is_empty():
+        generation_revision += 1
     disabled_asset_ids.clear()
 
 func stable_index(text: String, modulo: int) -> int:

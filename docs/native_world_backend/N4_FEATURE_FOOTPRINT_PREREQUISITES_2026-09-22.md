@@ -743,9 +743,10 @@ all affected feature families. In particular, ore/forage/wildlife do not yet
 have complete typed publication envelopes, and wildlife can move after spawn.
 Keep `WorldDeltaStore` production `removedProps` admission fail-closed for
 unknown IDs. Do not promote a catalog of rock-only local shapes, or a
-changed-ordinal witness, as a complete v2 checkpoint receipt. The next
-bounded witness should compare before/after source-order streams (including
-restoration) and explicitly mark channel footprints incomplete; full cutover
+changed-ordinal witness, as a complete v2 checkpoint receipt. The
+before/after chunk witness now records the changed suffix and explicitly
+marks channel footprints incomplete; see
+`N4_SURFACE_PROP_CHUNK_DIFFERENCE_SHADOW_2026-09-22.md`. Full cutover still
 requires the changed suffix's typed or live-publication occupancy and a
 transactional differential receipt.
 
@@ -770,3 +771,86 @@ page segments (or an explicit multi-page pin); a one-page scan that silently
 omits the rest of the chunk is not acceptable. Add an in-page ordered scan and
 page-edge rejection first, then certify whole-chunk composition across page
 seams against the direct Godot candidate order.
+
+**Atomic surface cutover sequence:** Complete source-bound physical
+definitions for rock, ore, forage, wildlife and trees first. Admit the same
+active environment, registry, structure-exclusion, wildlife-presentation and
+terrain pins through the Godot adapter, with readiness and generation
+invalidation. Compose one immutable all-28-attempt manifest, then replace
+the whole live surface attempt loop as one authority. A rock-only or
+ore-only production substitution would disturb later shared-PCG decisions.
+Publish each definition with retryable stale-revision checks; derive complete
+before/after affected cells for every changed feature and child before
+admitting `removedProps` in N3. Unknown families, including underground
+IDs, must continue to reject. For ore, the captured stream has all 47/48
+float draws per active child, but its typed plan must still reproduce the
+Godot float32 transform, mesh, collider and metadata. `ItemCatalog.MATERIALS`
+owns required tool/tier; native publication must bind an admitted policy
+receipt or leave that metadata explicitly to Godot, not hardcode another
+editable table.
+
+**Forage collision versus navigation:** The apparent native
+`NativeForageNavigationPolicy::nonblocking` mismatch was checked against
+live `GeneratedWorldNavigationAdapter.prop_blocks_npc`. It accurately
+describes navigation occupancy: berry bushes block the nav cache; aloe,
+mushrooms and frost herbs do not. All four Godot `make_forage` variants still
+publish physical `SphereShape3D` colliders and send prop-created notifications,
+which the adapter filters for navigation. A typed forage definition must keep
+the physics-collider and navigation-blocker channels separate; a
+`nonblocking` nav label must never erase the collider footprint. This is a
+read-only contract finding, not headed movement acceptance.
+
+**Forage and wildlife biome input:** The live surface loop passes the biome
+from its original authoritative `surface_volume_spawn_sample_at_cell(x, z)`
+to `make_forage` and `make_wildlife`. Only rock visual selection separately
+queries the transformed/rounded world anchor. An ordered native forage or
+wildlife definition must therefore use the attempt's captured source biome,
+not the rock visual-cell helper; the two can diverge at biome seams. This
+distinction is a migration parity requirement, not an alternate biome sampler.
+
+**Shared PCG equal-bound semantics:** Direct Godot RNG construction showed
+`randi_range(1, 1)` returns the bound without advancing state. The initial
+native PCG bridge advanced once, which desynchronized hare wildlife after its
+two fixed 1..1 drop counts and could shift later surface attempts. The
+correction belongs in the shared `GodotPcg32` primitive, not a hare-only
+recipe patch. Any allowed forage profile with equal drop bounds has the same
+semantic requirement. Recheck complete ordered-stream fixtures after that
+change; previous native reports describe the older binary and cannot prove
+the corrected stream. Native-forage geometry parity also exposed and fixed
+an initial cylinder top/bottom-radius reversal; direct Godot bit fixtures,
+not only recipe counts, are needed to catch such translations.
+
+**Tree physical presence and exclusion halo:** The live `make_tree` path
+consumes its recipe draws, computes trunk and canopy dimensions, then checks
+`natural_tree_blocked_at_cell` with separate dimension-dependent margins. A
+center-cell exclusion decision cannot prove that a tree exists: a natural or
+terrain structure just outside the admitted 28-cell chunk can block its
+expanded footprint without changing the suffix RNG. Before a native tree
+definition is publishable, the adapter must admit a same-generation halo
+capture of all potentially intersecting natural/terrain records and Citadel
+region states, or explicitly reject the decision. The native post-draw
+presence predicate must use the same separate rounded cell margins and fail
+closed when that capture is incomplete. The current ordered recipe shadow is
+not a production tree-presence authority until this receipt and parity proof
+exist.
+
+**Next adapter boundary:** The whole live 28-attempt surface loop remains in
+`MainPlaytestTools.gd`. Its exact Citadel request-bounds admission precedes
+the shared RNG stream, so a native adapter must capture one immutable,
+same-generation bundle there: current effective terrain/shaping pins and
+removed IDs; resolved active biome profiles; the active visual registry's
+ordered rows, readiness and generation; wildlife presentation admission;
+and complete structure records for post-draw tree halos. Catalog and visual
+registry setup now expose owner/revision/ready lifecycle receipts, but their
+public Resource/Dictionary payloads still require copied content hashes at
+capture. A capture-only active biome snapshot now copies and double-reads the
+resolved profile values, checks the independent oracle digest, and rejects
+tampered snapshot rows on freshness recheck. Separate capture-only receipts
+now copy the active visual registry's ordered family rows/cache readiness,
+the animated registry's scene/clip admission, and the StructureSystem's
+post-draw tree halo; none is yet a bound production native adapter. The native
+tree halo is a shadow capture value whose
+completeness must be established by the owning `StructureSystem`. The
+smallest safe next integration is a capture-only, stale-rejecting bundle and
+whole-loop differential; it must not substitute only one feature family into
+production or publish a candidate with a guessed/missing receipt.

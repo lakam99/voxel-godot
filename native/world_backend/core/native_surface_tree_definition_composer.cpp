@@ -246,6 +246,24 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
         if (draw < 0.0F) reject();
         if (draw >= 1.0F) reject();
     }
+    return compose_native_surface_tree_recipe(placement, baseline_entry.compatibility_draws,
+        world_source, profile, recipe_digest(placement_set, placement, baseline_entry, world_source, profile),
+        "native_surface_tree_recipe", PRODUCER_REVISION);
+}
+
+NativeTreeDefinition compose_native_surface_tree_recipe(
+    const NativeSurfacePropPlacementEntry &placement, const std::vector<float> &draws,
+    const WorldSourceDefinition &world_source, const NativeSurfaceTreeEcologyProfile &profile,
+    const Sha256Digest &source_recipe_digest, const std::string &producer_key,
+    const std::uint32_t producer_revision) {
+    validate_profile(profile);
+    text(producer_key);
+    if (producer_revision == 0U || !nonzero_digest(source_recipe_digest)
+        || placement.presence != NativeSurfacePropPlacementPresence::anchored
+        || (placement.outcome != NativeSurfacePropClassificationOutcome::tree_22_draw
+            && placement.outcome != NativeSurfacePropClassificationOutcome::tree_36_draw)
+        || draws.size() != (placement.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw ? 22U : 36U)) reject();
+    for (const float draw : draws) if (!std::isfinite(draw) || draw < 0.0F || draw >= 1.0F) reject();
     const std::string &raw_seed = world_source.raw_terrain_seed().utf8;
     const AdmittedBiomeSeed ecology_seed = BiomeRegionField::admit_utf8_seed(raw_seed);
     // TreeRuntimeRequestBuilder intentionally selects family with seed_text as
@@ -261,7 +279,7 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
         || profile.source_biome == "tundra";
     if ((placement.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw) != legacy_22_draw) reject();
     const Ecology ecology = ecology_for(ecology_seed.utf8, profile, placement.durable_id, placement.cell_x, placement.cell_z);
-    const double fallback = 3.0 + static_cast<double>(baseline_entry.compatibility_draws[1]) * 2.2
+    const double fallback = 3.0 + static_cast<double>(draws[1]) * 2.2
         + ((profile.source_biome == "taiga" || profile.source_biome == "snow" || profile.source_biome == "tundra") ? 1.6 : 0.0);
     double height = std::max(0.1, fallback) * profile.tree_scale;
     // validate_profile has already established height_max >= height_min.
@@ -280,15 +298,15 @@ NativeTreeDefinition NativeSurfaceTreeDefinitionComposer::create(
     if (profile.canopy_radius_max >= profile.canopy_radius_min && profile.canopy_radius_max > 0.0)
         canopy = clamp(canopy, std::max(trunk * 2.2, profile.canopy_radius_min), profile.canopy_radius_max);
     NativeTreeDefinitionInput input;
-    input.schema_revision = 1U; input.producer_key = "native_surface_tree_recipe"; input.producer_revision = PRODUCER_REVISION;
-    input.source_recipe_digest = recipe_digest(placement_set, placement, baseline_entry, world_source, profile);
+    input.schema_revision = 1U; input.producer_key = producer_key; input.producer_revision = producer_revision;
+    input.source_recipe_digest = source_recipe_digest;
     input.feature_kind = NativeTreeFeatureKind::natural_surface_tree; input.durable_feature_id = placement.durable_id;
     input.recipe_tree_id = placement.durable_id; input.world_seed = raw_seed; input.biome = profile.source_biome;
     input.family = family; input.growth_class = ecology.age_band; input.age_band = ecology.age_band;
     input.architecture = architecture; input.species_grammar = grammar_for(architecture);
     input.coordinate_frame = NativeTreeCoordinateFrame::world;
     input.position = {placement.world_anchor.x, placement.world_anchor.y, placement.world_anchor.z};
-    input.rotation_y = static_cast<double>(baseline_entry.compatibility_draws[0]) * TAU;
+    input.rotation_y = static_cast<double>(draws[0]) * TAU;
     input.ecology = {ecology.age, ecology.age_min, ecology.age_max, ecology.maturity, ecology.growth_stage,
         static_cast<std::int64_t>(ecology.genetic_seed)};
     input.biome_parameters = {profile.profile_revision, profile.height_min, profile.height_max,
