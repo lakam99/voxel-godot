@@ -1883,11 +1883,15 @@ Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bu
 					"asset.rockGeometry");
 				require_exact_keys(geometry, {"schema", "glbSha256", "min", "max", "vertexCount",
 					"primitiveCount", "identitySceneTransform"}, "asset.rockGeometry");
+				// Godot JSON parses manifest numeric literals as Variant FLOAT. Keep
+				// the positive integral contract without requiring Variant INT.
+				const double vertex_count = require_number(geometry["vertexCount"], "asset.rockGeometry.vertexCount");
+				const double primitive_count = require_number(geometry["primitiveCount"], "asset.rockGeometry.primitiveCount");
 				if (require_bounded_utf8(geometry["schema"], "asset.rockGeometry.schema", 64U, false)
 						!= "rock-glb-geometry/v1"
 						|| !require_bool(geometry["identitySceneTransform"], "asset.rockGeometry.identity")
-						|| require_u32(geometry["vertexCount"], "asset.rockGeometry.vertexCount") > 1000000U
-						|| require_u32(geometry["primitiveCount"], "asset.rockGeometry.primitiveCount") > 1024U)
+						|| vertex_count < 1.0 || vertex_count > 1000000.0 || std::floor(vertex_count) != vertex_count
+						|| primitive_count < 1.0 || primitive_count > 1024.0 || std::floor(primitive_count) != primitive_count)
 					throw std::invalid_argument("unsupported rock GLB geometry receipt");
 				const std::string claimed_hash = require_bounded_utf8(geometry["glbSha256"],
 					"asset.rockGeometry.glbSha256", 64U, false);
