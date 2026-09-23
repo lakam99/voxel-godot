@@ -1,6 +1,7 @@
 extends SceneTree
 
 const Publisher = preload("res://scripts/terrain/NativeTerrainBlockPublisher.gd")
+const Footprint = preload("res://scripts/terrain/NativeVoxelBlockDemandFootprint.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const PageBridge = preload("res://scripts/world/NativeShapingPageAdmission.gd")
 const SIZE := 16
@@ -150,6 +151,195 @@ func run() -> void:
 	check(new_inserted, "new_frontier_inserted_before_old_retirement")
 	check(terrain.has_data_block(old_retiring) and publisher.snapshot().retiring == 9,
 		"old_native_ownership_retained_during_new_insertion")
+	# Two actual native durable edits replace one already-demanded block. The
+	# edited platform is in the block above the natural terrain so both height
+	# steps remain in that same native generation key.
+	var old_query := PhysicsRayQueryParameters3D.create(
+		Vector3(147,60,131)*CELL,Vector3(147,-24,131)*CELL)
+	old_query.collision_mask = 1
+	var edit_block := Vector3i(9,1,8)
+	var edit_base := edit_block.y * SIZE + 2
+	var edit_mesh: Array[Vector3i] = [Vector3i(9,0,8), edit_block]
+	check(publisher.demand_mesh_blocks(edit_mesh).get("status") == "ready", "edit_halo_demanded")
+	var edit_halo_deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < edit_halo_deadline \
+			and publisher.snapshot().inserted < publisher.snapshot().demanded + publisher.snapshot().retiring:
+		var halo_event: Dictionary = publisher.pump()
+		if halo_event.get("status") == "failed":
+			observations.editHaloFailure = halo_event
+			break
+		await process_frame
+	check(terrain.has_data_block(edit_block), "edit_target_halo_inserted")
+	var old_hit: Dictionary = {}
+	for i in range(180):
+		await physics_frame
+		old_hit = world.get_world_3d().direct_space_state.intersect_ray(old_query)
+		if old_hit.get("collider") == terrain:
+			break
+	check(old_hit.get("collider") == terrain, "edit_probe_has_old_terrain")
+	var edit_generations: Array[int] = [publisher.installed_generation(edit_block)]
+	var edit_heights: Array[float] = []
+	var revision := 0
+	for edit_index in range(2):
+		var ops := []
+		for z in range(129, 134):
+			for y in range(edit_base, edit_base + 2 + edit_index * 2):
+				for x in range(145, 150):
+					ops.append({"namespace":"durable_terrain","kind":"set",
+						"cell":Vector3i(x,y,z),"state":{"materialId":13,
+							"biomeId":0,"solid":true,"density":1.35,"fluidId":0,
+							"light":Vector2i.ZERO,"metadata":{"source":"terrain_edit",
+								"terrainMeshAffects":true},"blockId":"publisher_platform",
+							"editReason":"publisher-headed-edit"}})
+		var committed: Dictionary = backend.commit_typed_cells({
+			"schema":"n3-native-typed-cell-transaction/v1",
+			"transactionId":"publisher-platform-%d" % edit_index,
+			"expectedRevision":revision,"operations":ops})
+		check(committed.get("commitStatus") == "committed", "native_edit_%d_committed" % edit_index)
+		revision = int(committed.get("revision",revision))
+		var changed_cells := []
+		for operation in ops:
+			changed_cells.append(operation.cell)
+		var edit_proof := {"rayFrom":old_query.from,"rayTo":old_query.to,
+			"expectedMinimumY":float(edit_base + 1 + edit_index * 2) * CELL,
+			"changedCells":changed_cells}
+		var edit_probes := {}
+		edit_probes[edit_block] = edit_proof
+		var invalidated: Dictionary = publisher.observe_committed_edit(
+			[edit_block],edit_probes)
+		check(invalidated.get("status") == "ready" and publisher.snapshot().editBlocked > 0,
+			"actor_readiness_blocked_immediately_after_edit_%d" % edit_index)
+		var prior_generation: int = edit_generations[-1]
+		check(publisher.acknowledge_physics(edit_block,true).get("status") == "rejected",
+			"old_boolean_physics_proof_rejected_%d" % edit_index)
+		var replacement_generation := 0
+		var replacement_deadline := Time.get_ticks_msec() + 45000
+		while Time.get_ticks_msec() < replacement_deadline:
+			var replacement_event: Dictionary = publisher.pump()
+			if replacement_event.get("status") == "failed":
+				observations["editFailure%d" % edit_index] = replacement_event
+				break
+			replacement_generation = publisher.installed_generation(edit_block)
+			if replacement_generation > prior_generation:
+				break
+			await process_frame
+		check(replacement_generation > prior_generation,
+			"replacement_generation_advances_%d" % edit_index)
+		check(publisher.snapshot().editBlocked > 0,
+			"actor_still_blocked_after_bytes_before_physics_%d" % edit_index)
+		check(publisher.acknowledge_physics_generation(edit_block,prior_generation).get("status") == "rejected",
+			"stale_generation_proof_rejected_%d" % edit_index)
+		var edited_hit: Dictionary = {}
+		var expected_min_height := float(edit_base + 1 + edit_index * 2) * CELL
+		for physics_index in range(360):
+			await physics_frame
+			if physics_index % 10 == 0:
+				edited_hit = world.get_world_3d().direct_space_state.intersect_ray(old_query)
+			if edited_hit.get("collider") == terrain \
+						and float(edited_hit.position.y) >= expected_min_height:
+				break
+		var physical_new: bool = edited_hit.get("collider") == terrain \
+			and float(edited_hit.get("position",Vector3.ZERO).y) >= expected_min_height
+		check(physical_new, "new_collision_height_%d" % edit_index)
+		var receipt: Dictionary = publisher.acknowledge_physics_generation(
+			edit_block,replacement_generation)
+		check(receipt.get("status") == "ready", "new_generation_physics_receipt_%d" % edit_index)
+		check(publisher.snapshot().editBlocked == 0, "actor_readiness_released_%d" % edit_index)
+		edit_generations.append(replacement_generation)
+		edit_heights.append(float(edited_hit.get("position",Vector3.ZERO).y))
+	observations.edits = {"block":edit_block,"baseY":edit_base,
+		"generations":edit_generations,"collisionHeights":edit_heights}
+	# A committed edit can land after demand registration but before the first
+	# engine insertion. There is no old SDF/collider generation to compare.
+	viewer.position = Vector3(144,36,128)*CELL
+	viewer.view_distance = 100
+	var first_block := Vector3i(9,3,8)
+	var first_mesh: Array[Vector3i] = [Vector3i(9,0,8),edit_block,first_block]
+	check(publisher.demand_mesh_blocks(first_mesh).get("status") == "ready",
+		"first_publication_mesh_demanded")
+	var registered_first := false
+	for i in range(120):
+		var registration_event: Dictionary = publisher.pump()
+		if registration_event.get("status") == "failed":
+			observations.firstRegistrationFailure = registration_event
+			break
+		if publisher.has_native_request(first_block):
+			registered_first = true
+			break
+		await process_frame
+	check(registered_first and publisher.installed_generation(first_block) == 0,
+		"first_publication_edit_hits_registered_uninstalled_demand")
+	var first_ops := []
+	for z in range(129,134):
+		for y in range(50,52):
+			for x in range(145,150):
+				first_ops.append({"namespace":"durable_terrain","kind":"set",
+					"cell":Vector3i(x,y,z),"state":{"materialId":13,"biomeId":0,
+						"solid":true,"density":1.35,"fluidId":0,"light":Vector2i.ZERO,
+						"metadata":{"source":"terrain_edit","terrainMeshAffects":true},
+						"blockId":"publisher_first_platform","editReason":"pending-first-publication"}})
+	var first_commit: Dictionary = backend.commit_typed_cells({
+		"schema":"n3-native-typed-cell-transaction/v1",
+		"transactionId":"publisher-pending-first-publication",
+		"expectedRevision":revision,"operations":first_ops})
+	check(first_commit.get("commitStatus") == "committed", "pending_first_edit_committed")
+	var first_changed := []
+	for operation in first_ops:
+		first_changed.append(operation.cell)
+	var first_probes := {}
+	first_probes[first_block] = {"rayFrom":old_query.from,"rayTo":old_query.to,
+		"expectedMinimumY":51.0*CELL,"changedCells":first_changed}
+	var first_observed: Dictionary = publisher.observe_committed_edit([first_block],first_probes)
+	check(first_observed.get("status") == "ready" and publisher.snapshot().editBlocked > 0,
+		"first_publication_actor_gate_immediate")
+	check(publisher.acknowledge_physics(first_block,true).get("status") == "rejected",
+		"first_publication_boolean_receipt_blocked")
+	var first_generation := 0
+	var first_deadline := Time.get_ticks_msec() + 45000
+	while Time.get_ticks_msec() < first_deadline:
+		var first_event: Dictionary = publisher.pump()
+		if first_event.get("status") == "failed":
+			observations.firstPumpFailure = first_event
+			break
+		first_generation = publisher.installed_generation(first_block)
+		if first_generation > 0:
+			break
+		await process_frame
+	check(first_generation > 0 and publisher.snapshot().editBlocked > 0,
+		"first_current_bytes_do_not_open_actor_gate")
+	check(publisher.acknowledge_physics_generation(first_block,0).get("status") == "rejected",
+		"first_publication_stale_zero_generation_rejected")
+	var first_required: Array = Footprint.data_blocks_for_mesh_blocks(first_mesh).get("blocks", [])
+	var first_halo_ready := false
+	var first_halo_deadline := Time.get_ticks_msec() + 45000
+	while Time.get_ticks_msec() < first_halo_deadline:
+		first_halo_ready = true
+		for data_block in first_required:
+			if not terrain.has_data_block(data_block):
+				first_halo_ready = false
+				break
+		if first_halo_ready:
+			break
+		var first_halo_event: Dictionary = publisher.pump()
+		if first_halo_event.get("status") == "failed":
+			observations.firstHaloFailure = first_halo_event
+			break
+		await process_frame
+	check(first_halo_ready, "first_publication_full_mesh_halo_inserted")
+	var first_hit := {}
+	var first_receipt := {}
+	for i in range(360):
+		await physics_frame
+		if i % 10 == 0:
+			first_hit = world.get_world_3d().direct_space_state.intersect_ray(old_query)
+			first_receipt = publisher.acknowledge_physics_generation(first_block,first_generation)
+		if first_receipt.get("status") == "ready":
+			break
+	observations.firstPublication = {"registeredBeforeEdit":registered_first,
+		"generation":first_generation,"collisionHeight":float(first_hit.get("position",Vector3.ZERO).y),
+		"receipt":first_receipt.get("status")}
+	check(first_receipt.get("status") == "ready" and publisher.snapshot().editBlocked == 0,
+		"first_current_generation_real_physics_proof_releases_gate")
 	check(publisher.stop().get("reason") == "physical_blocks_must_unload",
 		"resident_physics_blocks_prevent_native_release")
 	viewer.position = Vector3(2000,12,2000)*CELL
@@ -158,23 +348,24 @@ func run() -> void:
 		await physics_frame
 		var resident := false
 		for z in range(7, 10):
-			for y in range(-1, 2):
+			for y in range(-1, 5):
 				for x in range(7, 11):
 					resident = resident or terrain.has_data_block(Vector3i(x, y, z))
+		resident = resident or terrain.has_data_block(edit_block)
 		if not resident:
 			unloaded = true
 			break
 	var unload_event: Dictionary = {}
 	var unload_receipts := 0
 	var old_unload_receipt := false
-	for i in range(36):
+	for i in range(100):
 		unload_event = publisher.reconcile_one()
 		if unload_event.get("state") == "unloaded":
 			unload_receipts += 1
 			if unload_event.get("block") == old_retiring:
 				old_unload_receipt = true
 	var retired_old := false
-	for i in range(36):
+	for i in range(100):
 		var event: Dictionary = publisher.stop()
 		if event.get("status") == "ready":
 			retired_old = true

@@ -110,6 +110,18 @@ contracts atomically, or replace those consumers together at their cutover.
   demand union, real pending-source completion, live edit replacement and reset
   are not yet connected. Runtime reset must retire or clear the paired physical
   terrain before acknowledging a new seed.
+  A later focused headed fixture repeated two geometry-changing native edits
+  on one installed block, observing generation 2→5→8 and two distinct current
+  collision heights while rejecting old-generation actor receipts. An edit
+  before first insertion also remained blocked until the first current mesh
+  and physical ray were proven. Report:
+  `artifacts/native-world-backend/n3-native-terrain-publisher-1790168973061-b204d24b/report.json`.
+  Voxel Tools emits no new `mesh_block_entered` for an already resident block's
+  same-block replacement. The narrow proof requires changed SDF bytes, an old
+  and new terrain ray in a declared changed column, and a demonstrable height
+  increase; same-shape/material-only replacement remains pending, not
+  generically accepted. This is still a headed mechanism fixture, not normal
+  gameplay edit/collision acceptance.
 - Retained native demand now uses a page-local physical-content pin and
   authoritative affected-section invalidation. Distant shaping resolution and
   durable edits preserve a prepared block; a local edit rejects its old receipt

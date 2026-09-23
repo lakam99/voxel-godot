@@ -23,6 +23,11 @@ var _inserted: Dictionary = {}
 var _retiring: Dictionary = {}
 var _orphaned: Dictionary = {}
 var _meshed: Dictionary = {}
+var _edit_blocked: Dictionary = {}
+var _edit_probes: Dictionary = {}
+var _sdf_bytes: Dictionary = {}
+var _old_edit_sdf: Dictionary = {}
+var _changed_sdf: Dictionary = {}
 var _cursor := 0
 var _reconcile_cursor := 0
 var _active := false
@@ -69,6 +74,38 @@ func demand_mesh_blocks(mesh_blocks: Array[Vector3i]) -> Dictionary:
 	_blocks = blocks
 	_cursor = 0
 	return {"status":"ready", "dataBlocks":blocks.size(), "retiring":_retiring.size()}
+
+func observe_committed_edit(affected_blocks: Array[Vector3i], physical_probes: Dictionary = {}) -> Dictionary:
+	# Call immediately after the native commit, before any actor/nav readiness
+	# query. The caller passes the complete physical mesh-impact set; native
+	# demand independently invalidates exact source pins for retained blocks.
+	if not _active or _stopping or affected_blocks.is_empty():
+		return {"status":"failed", "reason":"invalid_edit_observation"}
+	var blocked := 0
+	for block: Vector3i in affected_blocks:
+		if not _requested.has(block):
+			continue
+		var old_generation := int((_inserted.get(block, {}) as Dictionary).get("generation", 0))
+		_edit_blocked[block] = old_generation
+		_old_edit_sdf[block] = _sdf_bytes.get(block, PackedByteArray())
+		_changed_sdf.erase(block)
+		_edit_probes.erase(block)
+		if physical_probes.has(block):
+			var proof: Dictionary = physical_probes[block]
+			if proof.get("rayFrom") is Vector3 and proof.get("rayTo") is Vector3 \
+					and proof.get("expectedMinimumY") is float \
+					and proof.get("changedCells") is Array:
+				var old_hit: Dictionary = _collision_probe(proof)
+				if old_generation == 0:
+					# No old engine block exists to compare. First publication is
+					# proved by its own current generation and physical result.
+					_edit_probes[block] = {"spec":proof.duplicate(true), "firstPublication":true}
+				elif old_hit.get("collider") == _terrain:
+					_edit_probes[block] = {"spec":proof.duplicate(true),
+						"firstPublication":false, "oldY":float(old_hit.position.y)}
+		_meshed.erase(block)
+		blocked += 1
+	return {"status":"ready", "blocked":blocked}
 
 func pump() -> Dictionary:
 	if not _active:
@@ -136,7 +173,14 @@ func pump() -> Dictionary:
 		return {"status":"failed", "reason":_last_failure, "block":block,
 			"insertionReceipt":receipt}
 	if accepted and receipt.get("status") == "ready":
+		if _edit_blocked.has(block) and int(event.generation) <= int(_edit_blocked[block]):
+			_last_failure = "edit_replacement_generation_not_advanced"
+			_orphaned[block] = {"key":key, "generation":int(event.generation)}
+			return {"status":"failed", "reason":_last_failure, "block":block}
 		_inserted[block] = {"key":key, "generation":int(event.generation)}
+		if _edit_blocked.has(block):
+			_changed_sdf[block] = _old_edit_sdf.get(block, PackedByteArray()) != sdf
+		_sdf_bytes[block] = sdf
 		_meshed.erase(block)
 	return {"status":"ready" if accepted and receipt.get("status") == "ready" else "pending",
 		"state":"inserted_waiting_mesh" if accepted else "prepared", "block":block,
@@ -163,6 +207,11 @@ func reconcile_one() -> Dictionary:
 		_inserted.erase(block)
 		_orphaned.erase(block)
 		_meshed.erase(block)
+		_edit_blocked.erase(block)
+		_edit_probes.erase(block)
+		_old_edit_sdf.erase(block)
+		_changed_sdf.erase(block)
+		_sdf_bytes.erase(block)
 		if _last_failure == "native_receipt_rejected_after_engine_insert" and _orphaned.is_empty():
 			_last_failure = ""
 		return {"status":"ready", "state":"unloaded", "block":block, "receipt":receipt.get("status")}
@@ -175,8 +224,61 @@ func acknowledge_physics(block: Vector3i, physical_proof: bool) -> Dictionary:
 		return {"status":"failed", "reason":_last_failure}
 	if not physical_proof or not _meshed.has(block) or not _inserted.has(block):
 		return {"status":"rejected", "reason":"current_physics_proof_required"}
+	if _edit_blocked.has(block):
+		return {"status":"rejected", "reason":"generation_specific_edit_proof_required"}
 	var installed: Dictionary = _inserted[block]
 	return _backend.voxel_block_shadow_mesh_receipt(installed.key, int(installed.generation), true, true, true)
+
+func acknowledge_physics_generation(block: Vector3i, generation: int) -> Dictionary:
+	if not _last_failure.is_empty():
+		return {"status":"failed", "reason":_last_failure}
+	if not _inserted.has(block) or not _terrain.has_data_block(block):
+		return {"status":"rejected", "reason":"current_data_block_required"}
+	var installed: Dictionary = _inserted[block]
+	if generation != int(installed.generation) or (_edit_blocked.has(block)
+			and generation <= int(_edit_blocked[block])):
+		return {"status":"rejected", "reason":"stale_physics_generation"}
+	if not _edit_probes.has(block):
+		return {"status":"pending", "reason":"collision_change_not_provable"}
+	var probe: Dictionary = _edit_probes[block]
+	var first_publication := bool(probe.get("firstPublication", false))
+	if first_publication:
+		if not _meshed.has(block):
+			return {"status":"pending", "reason":"first_mesh_publication_pending"}
+	elif not bool(_changed_sdf.get(block, false)):
+		return {"status":"pending", "reason":"collision_change_not_provable"}
+	var proof: Dictionary = probe.spec
+	var mesh_area := AABB(Vector3(block * BLOCK_SIZE), Vector3.ONE * BLOCK_SIZE)
+	if not _terrain.is_area_meshed(mesh_area):
+		return {"status":"rejected", "reason":"current_mesh_area_missing"}
+	var hit: Dictionary = _collision_probe(proof)
+	if hit.get("collider") != _terrain or float(hit.position.y) < float(proof.expectedMinimumY) \
+			or (not first_publication and float(hit.position.y) <= float(probe.oldY) + 0.5 * _terrain.scale.y):
+		return {"status":"rejected", "reason":"current_collision_geometry_missing"}
+	var local_hit: Vector3 = _terrain.to_local(hit.position)
+	if floori(local_hit.x / BLOCK_SIZE) != block.x or floori(local_hit.z / BLOCK_SIZE) != block.z:
+		return {"status":"rejected", "reason":"physics_proof_outside_block"}
+	var probe_cell := Vector2i(floori(local_hit.x), floori(local_hit.z))
+	var changed_column := false
+	for cell in proof.changedCells:
+		if cell is Vector3i and Vector2i(cell.x,cell.z) == probe_cell:
+			changed_column = true
+			break
+	if not changed_column:
+		return {"status":"pending", "reason":"proof_ray_not_in_changed_column"}
+	var receipt: Dictionary = _backend.voxel_block_shadow_mesh_receipt(
+		installed.key, generation, true, true, true)
+	if receipt.get("status") == "ready":
+		_edit_blocked.erase(block)
+		_edit_probes.erase(block)
+		_old_edit_sdf.erase(block)
+		_changed_sdf.erase(block)
+	return receipt
+
+func _collision_probe(spec: Dictionary) -> Dictionary:
+	var ray := PhysicsRayQueryParameters3D.create(spec.rayFrom, spec.rayTo)
+	ray.collision_mask = _terrain.collision_layer
+	return _terrain.get_world_3d().direct_space_state.intersect_ray(ray)
 
 func stop() -> Dictionary:
 	if not _active:
@@ -196,6 +298,11 @@ func stop() -> Dictionary:
 	_terrain.mesh_block_exited.disconnect(_mesh_exited)
 	_requested.clear()
 	_meshed.clear()
+	_edit_blocked.clear()
+	_edit_probes.clear()
+	_old_edit_sdf.clear()
+	_changed_sdf.clear()
+	_sdf_bytes.clear()
 	_active = false
 	return {"status":"ready", "released":true}
 
@@ -212,7 +319,13 @@ func drain_step() -> Dictionary:
 func snapshot() -> Dictionary:
 	return {"active":_active, "demanded":_blocks.size(), "registered":_requested.size(),
 		"inserted":_inserted.size(), "retiring":_retiring.size(), "orphaned":_orphaned.size(),
-		"meshEntered":_meshed.size(), "failure":_last_failure}
+		"meshEntered":_meshed.size(), "editBlocked":_edit_blocked.size(), "failure":_last_failure}
+
+func installed_generation(block: Vector3i) -> int:
+	return int((_inserted.get(block, {}) as Dictionary).get("generation", 0))
+
+func has_native_request(block: Vector3i) -> bool:
+	return _requested.has(block)
 
 func _retire_one() -> Dictionary:
 	for block: Vector3i in _retiring.keys():
@@ -223,6 +336,11 @@ func _retire_one() -> Dictionary:
 			if release.get("status") != "ready":
 				return {"status":"failed", "reason":"native_demand_release_failed", "block":block}
 			_requested.erase(block)
+			_edit_blocked.erase(block)
+			_edit_probes.erase(block)
+			_old_edit_sdf.erase(block)
+			_changed_sdf.erase(block)
+			_sdf_bytes.erase(block)
 		_retiring.erase(block)
 		return {"status":"ready", "block":block}
 	return {"status":"pending", "reason":"retiring_blocks_still_resident"}
