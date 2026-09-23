@@ -3,7 +3,8 @@ class_name NativeResidentCollisionOwner
 
 ## A composed physical owner for a source-declared complete resident mesh set.
 ## The source must independently publish exact block keys, artifact keys and
-## revision. No production source implements that contract yet.
+## revision. The native triangle producer implements the source contract;
+## live runtime collision binding remains a separate cutover.
 const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const SCHEMA := "n5-resident-collision-publication/v1"
 const COLLISION_LAYER := 2
@@ -285,6 +286,9 @@ func _validate_request(request: Dictionary) -> Dictionary:
 			or String(identity.sourceEpoch).is_empty():
 		return {"status": "failed", "reason": "resident_identity_invalid"}
 	var source_snapshot: Dictionary = _source.call("collision_source_snapshot")
+	if source_snapshot.get("status") == "pending":
+		return {"status": "pending", "reason": source_snapshot.get("reason",
+			"resident_source_pending")}
 	if source_snapshot.get("status") != "ready" \
 			or source_snapshot.get("identity") != identity \
 			or not source_snapshot.get("sourceIdentity") is Dictionary \
