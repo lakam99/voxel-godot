@@ -165,6 +165,10 @@ NativeSurfaceWildlifeOrderedDefinition NativeSurfaceWildlifeOrderedDefinition::c
     NativeSurfaceWildlifeOrderedDefinition r;
     r.placement_ = p; r.stream_ = s;
     r.construction_ = decode_native_wildlife_construction(s, p.world_anchor);
+    r.initial_collider_ = {p.durable_id,
+        {p.world_anchor.x, p.world_anchor.y, p.world_anchor.z},
+        r.construction_.collider_center, r.construction_.collider_size,
+        r.construction_.body_yaw, s.recipe.collision_layer, s.recipe.collision_mask};
     Writer w; w.u8('N'); w.u8('W'); w.u8('O'); w.u8('1');
     w.digest(ordered.world_digest()); w.u64(ordered.world_generation());
     w.digest(ordered.source_receipt().environment_profile_digest);
@@ -196,5 +200,6 @@ NativeSurfaceWildlifeOrderedDefinition NativeSurfaceWildlifeOrderedDefinition::c
 const NativeSurfacePropPlacementEntry &NativeSurfaceWildlifeOrderedDefinition::placement() const noexcept { return placement_; }
 const NativeWildlifeStream &NativeSurfaceWildlifeOrderedDefinition::stream() const noexcept { return stream_; }
 const NativeWildlifeDecodedConstruction &NativeSurfaceWildlifeOrderedDefinition::construction() const noexcept { return construction_; }
+const NativeWildlifeInitialCollider &NativeSurfaceWildlifeOrderedDefinition::initial_collider() const noexcept { return initial_collider_; }
 const Sha256Digest &NativeSurfaceWildlifeOrderedDefinition::content_digest() const noexcept { return content_digest_; }
 } // namespace voxel::world_backend
