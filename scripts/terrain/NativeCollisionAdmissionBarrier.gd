@@ -19,6 +19,7 @@ var _actors := {}
 var _scan_pending: Array[Node] = []
 var _scan_complete := false
 var _membership_dirty := false
+var _terminal_hold := false
 
 
 func is_active() -> bool:
@@ -48,7 +49,7 @@ func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB
 
 
 func advance_census(identity: Dictionary) -> Dictionary:
-	if not _active or identity != _identity:
+	if not _active or _terminal_hold or identity != _identity:
 		return {"status": "failed", "reason": "barrier_revision_mismatch"}
 	if _root == null or not is_instance_valid(_root) or not _root.is_inside_tree():
 		return {"status": "failed", "reason": "actor_census_root_lost"}
@@ -74,10 +75,15 @@ func advance_census(identity: Dictionary) -> Dictionary:
 
 
 func census_progress(identity: Dictionary) -> Dictionary:
-	if not _active or identity != _identity:
+	if not _active or _terminal_hold or identity != _identity:
 		return {"status": "failed", "reason": "barrier_revision_mismatch"}
 	return {"status": "ready" if _scan_complete else "pending",
 		"actorCount": _actors.size(), "remainingNodes": _scan_pending.size()}
+
+
+func covers_bounds(identity: Dictionary, bounds: AABB) -> bool:
+	return _active and not _terminal_hold and identity == _identity \
+		and _bounds.encloses(bounds)
 
 
 func register_moving_actor(actor: PhysicsBody3D) -> bool:
@@ -99,6 +105,8 @@ func register_moving_actor(actor: PhysicsBody3D) -> bool:
 func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 	if not _active:
 		return true
+	if _terminal_hold:
+		return false
 	if actor == null or not is_instance_valid(actor) or _root == null \
 			or not is_instance_valid(_root) or not _root.is_inside_tree() \
 			or not _root.is_ancestor_of(actor) or not motion.is_finite():
@@ -113,6 +121,8 @@ func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 func admit_placement(actor: PhysicsBody3D, proposed_transform: Transform3D) -> bool:
 	if not _active:
 		return true
+	if _terminal_hold:
+		return false
 	if actor == null or not is_instance_valid(actor) or _root == null \
 			or not is_instance_valid(_root) or not _root.is_inside_tree() \
 			or not _root.is_ancestor_of(actor):
@@ -124,7 +134,7 @@ func admit_placement(actor: PhysicsBody3D, proposed_transform: Transform3D) -> b
 
 
 func clearance(identity: Dictionary) -> Dictionary:
-	if not _active or identity != _identity:
+	if not _active or _terminal_hold or identity != _identity:
 		return {"clear": false, "reason": "barrier_revision_mismatch"}
 	if _root == null or not is_instance_valid(_root) or not _root.is_inside_tree():
 		return {"clear": false, "reason": "actor_census_root_lost"}
@@ -146,7 +156,7 @@ func clearance(identity: Dictionary) -> Dictionary:
 
 
 func release(identity: Dictionary) -> bool:
-	if not _active or identity != _identity:
+	if not _active or _terminal_hold or identity != _identity:
 		return false
 	if not bool(clearance(identity).get("clear", false)):
 		return false
@@ -161,7 +171,7 @@ func release(identity: Dictionary) -> bool:
 ## Only a pre-install rejection with the previous live physical shapes intact
 ## may abandon admission. A rollback after shape mutation needs new proof.
 func abort(identity: Dictionary) -> bool:
-	if not _active or identity != _identity or _collision_owner == null \
+	if not _active or _terminal_hold or identity != _identity or _collision_owner == null \
 			or not _collision_owner.has_method("preinstall_rejection_receipt"):
 		return false
 	var receipt: Dictionary = _collision_owner.call("preinstall_rejection_receipt", identity)
@@ -176,8 +186,13 @@ func abort(identity: Dictionary) -> bool:
 
 ## Startup-only cancellation, before any physical owner or admitted actor.
 func cancel_empty_startup(identity: Dictionary) -> bool:
-	if not _active or identity != _identity or _collision_owner == null \
-			or bool(_collision_owner.get("_installing")) \
+	if not _active or _terminal_hold or identity != _identity or _collision_owner == null:
+		return false
+	if _collision_owner.has_method("startup_empty_receipt"):
+		var receipt: Dictionary = _collision_owner.call("startup_empty_receipt", identity)
+		if not bool(receipt.get("empty", false)):
+			return false
+	elif bool(_collision_owner.get("_installing")) \
 			or not (_collision_owner.get("installed_shapes") as Array).is_empty():
 		return false
 	if not bool(clearance(identity).get("clear", false)) or not _actors.is_empty():
@@ -186,7 +201,15 @@ func cancel_empty_startup(identity: Dictionary) -> bool:
 	return true
 
 
-func _clear() -> void:
+func owner_stopped(owner: Node) -> bool:
+	if not _active or owner == null or owner != _collision_owner:
+		return false
+	_terminal_hold = true
+	_disconnect_signals()
+	return true
+
+
+func _disconnect_signals() -> void:
 	if _tree != null:
 		if _tree.process_frame.is_connected(_on_process_frame):
 			_tree.process_frame.disconnect(_on_process_frame)
@@ -194,7 +217,12 @@ func _clear() -> void:
 			_tree.node_added.disconnect(_on_node_added)
 		if _tree.node_removed.is_connected(_on_node_removed):
 			_tree.node_removed.disconnect(_on_node_removed)
+
+
+func _clear() -> void:
+	_disconnect_signals()
 	_active = false
+	_terminal_hold = false
 	_root = null
 	_tree = null
 	_collision_owner = null
