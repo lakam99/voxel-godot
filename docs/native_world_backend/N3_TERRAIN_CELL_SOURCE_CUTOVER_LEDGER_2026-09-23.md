@@ -191,3 +191,35 @@ not permission to delete a mixed-responsibility file. No code in NPC/nav was
 changed. Next vertical slices should add bulk/derived queries and
 transaction/save orchestration, before atomically replacing the
 production `WorldGenerationSystem` forwarding paths.
+
+## Production terrain owner handoff
+
+`MainRuntimeTools.ensure_voxel_terrain_authority` is the concrete production
+constructor. It creates `VoxelTerrainRuntime`, calls synchronous `setup(self)`,
+and accepts only `{ok:true}`. That setup installs the script generator on
+`VoxelTerrain`, attaches the script-backed site gate, and immediately sets
+`authority_ready`. `MainCore.reinitialize_voxel_terrain_authority_staged`
+retains the runtime on Continue, calls `reset_for_current_seed_staged` when its
+generation context changes, and requires `authority_ready` plus the expected
+seed before publication. The reset drains Voxel Tools tasks, then replaces the
+script generator and site gate. The native owner has not entered either path.
+
+The replacement must preserve the runtime-facing chunk admission/release,
+foreground collision demand, edit collection, gameplay publication, startup
+collision bounds/proofs, viewer expansion, shutdown drain, and diagnostics
+contracts used by `MainRuntimeTools` and `MainCore`. A native owner returning
+`pending` from setup cannot fit the current synchronous constructor: loading
+must retain that same instance, advance conversion and publication each frame,
+show progress, and handle cancellation. For Continue, `MainSaveState` currently
+restores historical `terrain` synchronously into the script volume before the
+runtime's staged reset; initial Continue does the same before bootstrap. A
+production switch must route one save snapshot to native conversion/import,
+keep the current full `terrainVolume` precedence, and remove that script
+terrain restore at the same authority cutover. The script volume cannot remain
+a second save/edit/mesh source after native publication begins.
+
+N5's physical install, rollback, collision, and actor admission receipt must
+gate `authority_ready` and gameplay release; a logical native page or edit
+commit alone is insufficient. Until those runtime contracts are implemented
+and verified through headed New Game and Continue, the N3 owner remains an
+inert service and the production script runtime remains authoritative.
