@@ -104,6 +104,7 @@ public:
     // the upper face of the highest solid cell. This is deliberately distinct
     // from the shaped/reference surface carried by sample_surface_column().
     double sample_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
+    double sample_continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     NativeSurfacePropSpawnFacts sample_surface_prop_spawn(const WorldSurfaceColumnQuery &query) const;
     NativeEffectiveCellStateFacts sample_cell_state_facts(const WorldCellCenterQuery &query) const;
     NativeCellState sample_cell_state(const WorldCellCenterQuery &query) const;

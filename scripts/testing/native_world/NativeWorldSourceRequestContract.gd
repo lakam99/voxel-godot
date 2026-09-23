@@ -143,8 +143,12 @@ func run() -> void:
 		"shaping page pending retains conversion and withholds snapshot")
 	converter._pages = real_pages
 	var converted: Dictionary = {}
+	var max_conversion_step_usec := 0
 	for frame in range(300):
+		var step_started := Time.get_ticks_usec()
 		converted = converter.advance()
+		max_conversion_step_usec = maxi(max_conversion_step_usec,
+			Time.get_ticks_usec() - step_started)
 		if converted.get("status") != "pending": break
 		await process_frame
 	check(converted.get("status") == "ready"
@@ -211,8 +215,12 @@ func run() -> void:
 		"deep native excavation starts")
 	var progress_count := 0
 	var deep_result: Dictionary = {}
+	var max_deep_step_usec := 0
 	for frame in range(300):
+		var step_started := Time.get_ticks_usec()
 		deep_result = deep_converter.advance()
+		max_deep_step_usec = maxi(max_deep_step_usec,
+			Time.get_ticks_usec() - step_started)
 		if deep_result.get("reason") in ["legacy_conversion_progress", "preparing_legacy_column"]:
 			progress_count += 1
 		if deep_result.get("status") != "pending": break
@@ -255,7 +263,8 @@ func run() -> void:
 	main.free()
 	var report := {"schema": "native-world-source-request-contract/v1", "passed": failures.is_empty(),
 		"evidenceLevel": "source-request-service-contract", "productionCutover": false,
-		"failures": failures}
+		"failures": failures, "maxConversionStepUsec": max_conversion_step_usec,
+		"maxDeepStepUsec": max_deep_step_usec}
 	var path := OS.get_environment("VWB_SOURCE_REQUEST_REPORT")
 	if path != "":
 		var file := FileAccess.open(path, FileAccess.WRITE)

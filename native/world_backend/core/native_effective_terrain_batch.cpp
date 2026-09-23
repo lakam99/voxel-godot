@@ -154,6 +154,11 @@ NativeEffectiveTerrainBatch::NativeEffectiveTerrainBatch(
 
 const WorldSourcePin &NativeEffectiveTerrainBatch::pin() const noexcept { return source_.pin(); }
 
+double NativeEffectiveTerrainBatch::sample_continuous_volume_surface_y(
+    const WorldSurfaceColumnQuery &query) const {
+    return source_.sample_continuous_volume_surface_y(query);
+}
+
 const NativeEffectiveTerrainBatchLimits &NativeEffectiveTerrainBatch::limits() const noexcept {
     return limits_;
 }
