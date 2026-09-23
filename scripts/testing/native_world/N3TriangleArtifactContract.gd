@@ -8,6 +8,7 @@ const PAGES = preload("res://scripts/world/NativeShapingPageAdmission.gd")
 const PLANNER = preload("res://scripts/terrain/NativeTerrainDemandPlanner.gd")
 const PRODUCER = preload("res://scripts/terrain/NativeTerrainTriangleArtifactProducer.gd")
 const ARTIFACT_REQUESTS = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
+const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 var failures: Array[String] = []
 
@@ -176,6 +177,15 @@ func run() -> void:
 		and distant_facade.get("status") == "ready"
 		and distant_facade.source.collision_source_snapshot().get("status") == "ready",
 		"near window has complete source row before distant edit")
+	var unverified_broker = ARTIFACT_REQUESTS.new()
+	unverified_broker.setup(backend, pages, main.structure_system.citadel_terrain_admission,
+		planner, main.CELL, 91, 4096)
+	unverified_broker.request_block(block)
+	for frame in range(300):
+		var unverified_step: Dictionary = unverified_broker.advance()
+		if unverified_step.get("status") == "ready" and unverified_step.has("row"): break
+		await process_frame
+	var unverified_before: Dictionary = unverified_broker.collision_window_layout()
 	var stale_producer = PRODUCER.new()
 	check(stale_producer.setup(backend, pages, main.structure_system.citadel_terrain_admission,
 		planner, main.CELL, identity).get("status") == "ready"
@@ -195,13 +205,31 @@ func run() -> void:
 		"transactionId":"triangle:revision-change", "expectedRevision":0,
 		"operations":[{"kind":"set", "cell":Vector3i(1000,-1,1000), "state":edit_state}]})
 	var distant_after_edit: Dictionary = distant_facade.source.collision_source_snapshot()
+	var edit_plan: Dictionary = EDIT_PLAN.for_committed_cells(
+		[Vector3i(1000,-1,1000)], committed.get("affectedSections", []), 1,
+		String(backend.status().get("sourceIdentity", {}).get("hex", "")))
+	var verified_edit: Dictionary = distant_broker.observe_verified_durable_edit(
+		committed, edit_plan)
+	var distant_proof_started := Time.get_ticks_usec()
 	var distant_advance: Dictionary = distant_broker.advance()
+	var distant_proof_advance_usec := Time.get_ticks_usec() - distant_proof_started
 	var distant_after_layout: Dictionary = distant_broker.collision_window_layout()
+	var unverified_advance: Dictionary = unverified_broker.advance()
+	var unverified_after: Dictionary = unverified_broker.collision_window_layout()
 	check(committed.get("commitStatus") == "committed"
+		and edit_plan.get("status") == "ready"
+		and verified_edit.get("status") == "ready"
 		and distant_after_edit.get("status") != "ready"
 		and distant_before.get("layoutToken") != distant_after_layout.get("layoutToken")
+		and distant_window.windowToken == distant_after_layout.windows[0].windowToken
+		and distant_after_layout.identity.sourceRevision == 1
+		and distant_after_layout.windows[0].identity.sourceRevision == 0
+		and distant_facade.source.collision_source_snapshot().get("status") == "ready"
 		and distant_advance.get("status") == "pending",
-		"baseline distant durable edit globally retires unchanged near window")
+		"verified distant edit advances global revision while retaining local physical identity")
+	check(unverified_advance.get("status") == "pending"
+		and unverified_before.windows[0].windowToken != unverified_after.windows[0].windowToken,
+		"missing owner-verified edit receipt fails closed and retires near window")
 	var stale_step: Dictionary = stale_producer.advance()
 	check(in_flight.get("reason") == "triangle_encode_in_flight"
 		and committed.get("commitStatus") == "committed"
@@ -223,6 +251,7 @@ func run() -> void:
 		await process_frame
 		distant_stop = distant_broker.drain_step()
 	check(distant_stop.get("status") == "ready", "distant edit broker drains")
+	check(unverified_broker.stop().get("status") == "ready", "unverified edit broker drains")
 	var changed: Dictionary = planner.replace_sources({"position":Vector3(-main.CELL,0,-main.CELL),
 		"distance":0}, [], [], [], bounds)
 	check(changed.get("status") == "ready"
@@ -588,6 +617,47 @@ func run() -> void:
 			await process_frame
 			local_stop = local_producer.drain_step()
 		check(local_stop.get("status") == "ready", "distant page producer drains")
+	var local_edit_planner = PLANNER.new()
+	local_edit_planner.setup(92)
+	local_edit_planner.replace_sources(viewer, [], [], [], bounds)
+	var local_edit_broker = ARTIFACT_REQUESTS.new()
+	local_edit_broker.setup(backend, pages,
+		main.structure_system.citadel_terrain_admission, local_edit_planner,
+		main.CELL, 93, 4096)
+	local_edit_broker.request_block(block)
+	for frame in range(300):
+		var local_edit_step: Dictionary = local_edit_broker.advance()
+		if local_edit_step.get("status") == "ready" and local_edit_step.has("row"): break
+		await process_frame
+	var local_before: Dictionary = local_edit_broker.collision_window_layout()
+	var local_facade: Dictionary = local_edit_broker.collision_window_source(
+		local_before.windows[0].id, String(local_before.layoutToken))
+	var local_cell := Vector3i(0, y_cell, 0)
+	var local_commit: Dictionary = backend.commit_durable_cells({
+		"schema":"n3-native-durable-cell-transaction/v1",
+		"transactionId":"triangle:local-revision-change", "expectedRevision":1,
+		"operations":[{"kind":"set", "cell":local_cell, "state":edit_state}]})
+	var local_plan: Dictionary = EDIT_PLAN.for_committed_cells(
+		[local_cell], local_commit.get("affectedSections", []), 2,
+		String(backend.status().get("sourceIdentity", {}).get("hex", "")))
+	var local_verified: Dictionary = local_edit_broker.observe_verified_durable_edit(
+		local_commit, local_plan)
+	var local_invalidation_started := Time.get_ticks_usec()
+	local_edit_broker.advance()
+	var local_invalidation_advance_usec := Time.get_ticks_usec() - local_invalidation_started
+	var local_after: Dictionary = local_edit_broker.collision_window_layout()
+	check(local_commit.get("commitStatus") == "committed"
+		and local_verified.get("status") == "ready"
+		and local_before.windows[0].windowToken != local_after.windows[0].windowToken
+		and local_facade.source.collision_source_snapshot().get("status") != "ready"
+		and local_after.identity.sourceRevision == 2,
+		"verified local edit invalidates affected collision window and advances global revision")
+	var local_edit_stop: Dictionary = local_edit_broker.stop()
+	for frame in range(120):
+		if local_edit_stop.get("status") == "ready": break
+		await process_frame
+		local_edit_stop = local_edit_broker.drain_step()
+	check(local_edit_stop.get("status") == "ready", "local edit broker drains")
 	var stopped: Dictionary = producer.stop()
 	for frame in range(120):
 		if stopped.get("status") == "ready": break
@@ -610,9 +680,14 @@ func run() -> void:
 		"emptyVertexCopyUsec":empty_result.get("vertexCopyUsec", 0),
 		"emptyFinalizeUsec":empty_result.get("finalizeUsec", 0),
 		"maxAnalyticBuildUsec":maxi(int(left_seam.buildUsec), int(right_seam.buildUsec)),
-		"distantEditBaseline":{"affectedSections":committed.get("affectedSections", []),
+		"distantEditLocality":{"affectedSections":committed.get("affectedSections", []),
+			"proofAdvanceUsec":distant_proof_advance_usec,
+			"localInvalidationAdvanceUsec":local_invalidation_advance_usec,
 			"beforeWindowToken":distant_window.windowToken,
 			"afterWindowToken":(distant_after_layout.get("windows", [{}]) as Array)[0].get("windowToken", ""),
+			"globalRevision":distant_after_layout.get("identity", {}).get("sourceRevision", -1),
+			"localWindowRevision":distant_after_layout.get("windows", [{}])[0].get("identity", {}).get("sourceRevision", -1),
+			"localCurrentProof":distant_after_layout.get("windows", [{}])[0].get("localCurrentProof", {}),
 			"oldFacadeStatus":distant_after_edit.get("status", ""),
 			"oldFacadeReason":distant_after_edit.get("reason", "")},
 		"emptyStatus":empty_result.get("status", ""),

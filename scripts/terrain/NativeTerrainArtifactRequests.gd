@@ -7,6 +7,8 @@ const Producer = preload("res://scripts/terrain/NativeTerrainTriangleArtifactPro
 const WindowSource = preload("res://scripts/terrain/NativeTerrainCollisionWindowSource.gd")
 const MAX_RETIRED_WINDOWS := 64
 const MAX_RETIRED_VERTEX_BYTES := 268435456
+const MAX_VERIFIED_EDIT_REVISIONS := 256
+const MAX_LOCAL_PROOF_USEC_PER_FRAME := 2000
 
 var _backend
 var _pages
@@ -29,6 +31,11 @@ var _window_layout := {}
 var _window_records := {}
 var _active_window_tokens := {}
 var _pending_retirement_tokens := {}
+var _verified_edits := {}
+var _last_verified_revision := -1
+var _local_proof_cache := {}
+var _proof_budget_frame := -1
+var _proof_used_usec := 0
 
 func setup(backend, pages, admission, planner, cell_meters: float,
 		owner_generation: int, max_resident_blocks: int) -> Dictionary:
@@ -43,7 +50,52 @@ func setup(backend, pages, admission, planner, cell_meters: float,
 	_cell_meters = cell_meters
 	_owner_generation = owner_generation
 	_max_resident_blocks = max_resident_blocks
+	_last_verified_revision = int(backend.status().get("terrainDeltaRevision", -1))
 	return {"status":"ready"}
+
+## Called only by NativeTerrainRuntimeOwner after native receipt/plan parity.
+## Missing revisions leave old windows stale; this journal never edits terrain.
+func observe_verified_durable_edit(receipt: Dictionary,
+		plan: Dictionary) -> Dictionary:
+	var affected_mesh_blocks: Array = plan.get("affectedMeshBlocks", [])
+	if _stopping or _backend == null or affected_mesh_blocks.is_empty() \
+			or plan.get("status") != "ready":
+		return {"status":"failed", "reason":"verified_edit_owner_invalid"}
+	var source: Dictionary = _backend.status()
+	var revision := int(receipt.get("revision", -1))
+	if receipt.get("status") != "ready" or receipt.get("commitStatus") != "committed" \
+			or source.get("status") != "ready" \
+			or revision != _last_verified_revision + 1 \
+			or int(source.get("terrainDeltaRevision", -1)) != revision \
+			or source.get("sourceIdentity") != _identity.get("sourceIdentity", source.get("sourceIdentity")) \
+			or not receipt.get("affectedSections") is Array:
+		return {"status":"failed", "reason":"verified_edit_revision_or_source_invalid"}
+	var sections := {}
+	for section in receipt.affectedSections:
+		if not section is Vector3i:
+			return {"status":"failed", "reason":"verified_edit_section_invalid"}
+		if sections.has(section):
+			return {"status":"failed", "reason":"verified_edit_section_duplicate"}
+		sections[section] = true
+	if sections.size() != affected_mesh_blocks.size():
+		return {"status":"failed", "reason":"verified_edit_receipt_plan_mismatch"}
+	var affected := {}
+	for block in affected_mesh_blocks:
+		if not block is Vector3i or not sections.has(block) or affected.has(block):
+			return {"status":"failed", "reason":"verified_edit_receipt_plan_mismatch"}
+		affected[block] = true
+	if int(plan.get("barrier", {}).get("nativeRevision", -1)) != revision:
+		return {"status":"failed", "reason":"verified_edit_plan_revision_mismatch"}
+	_verified_edits[revision] = {"affectedMeshBlocks":affected,
+		"shapingRevision":int(source.get("shapingRegistryRevision", -1)),
+		"receiptDigest":("%d:%s:%s" % [revision,
+			String(receipt.get("transactionId", "")),
+			str(affected_mesh_blocks)]).sha256_text()}
+	_last_verified_revision = revision
+	if _verified_edits.size() > MAX_VERIFIED_EDIT_REVISIONS:
+		_verified_edits.clear()
+	return {"status":"ready", "verifiedThroughRevision":revision,
+		"affectedMeshBlocks":affected.size()}
 
 func request_block(block: Vector3i) -> Dictionary:
 	if _stopping or _backend == null:
@@ -51,6 +103,13 @@ func request_block(block: Vector3i) -> Dictionary:
 	var demand: Dictionary = _planner.required_collision_mesh_blocks()
 	if demand.get("status") != "ready" or not (demand.blocks as Array).has(block):
 		return {"status":"failed", "reason":"artifact_block_not_demanded"}
+	for window: Dictionary in _window_layout.get("windows", []):
+		if not (window.blocks as Array).has(block): continue
+		var record: Dictionary = _window_records.get(window.windowToken, {})
+		if record.get("identity") != _identity and record.get("rows", {}).has(block) \
+				and _prove_local_window(record, _backend.status()).get("status") == "ready":
+			return {"status":"ready", "reason":"locally_proven_artifact_retained",
+				"block":block, "windowToken":window.windowToken}
 	_requests[block] = true
 	return {"status":"pending", "reason":"artifact_request_retained", "block":block}
 
@@ -162,6 +221,28 @@ func collision_window_source_snapshot(window_token: String) -> Dictionary:
 	if _producer == null or _draining or not _active_window_tokens.has(window_token):
 		return {"status":"pending", "reason":"collision_window_source_superseded",
 			"retainedRows":(record.rows as Dictionary).size()}
+	if record.identity != _identity:
+		var current: Dictionary = _backend.status()
+		if int(record.get("provenThroughRevision", -1)) != int(_identity.sourceRevision) \
+				or _prove_local_window(record, current).get("status") != "ready":
+			return {"status":"pending", "reason":"collision_window_local_proof_stale"}
+		var retained_artifacts := {}
+		for block: Vector3i in record.blocks:
+			retained_artifacts[block] = (record.rows[block] as Dictionary).artifactKey
+		return {"status":"ready", "reason":"",
+			"identity":record.identity.duplicate(true),
+			"sourceIdentity":record.sourceIdentity.duplicate(true),
+			"sourceEpoch":record.identity.sourceEpoch,
+			"nativeRevision":int(record.identity.sourceRevision),
+			"ownerGeneration":int(record.identity.ownerGeneration),
+			"cancellationEpoch":int(record.identity.cancellationEpoch),
+			"requiredResidentBlocks":(record.blocks as Array).duplicate(),
+			"residentBlocks":(record.blocks as Array).duplicate(),
+			"artifacts":retained_artifacts,
+			"membershipProvenance":record.membershipProvenance.duplicate(true),
+			"localCurrentProof":{"kind":"verified_native_affected_mesh_exclusion/v1",
+				"throughGlobalRevision":int(_identity.sourceRevision),
+				"digest":String(record.proofDigest)}}
 	var source: Dictionary = _producer.collision_source_snapshot()
 	if not source.has("identity") or source.get("identity") != record.identity:
 		return {"status":"pending", "reason":"collision_window_source_changed"}
@@ -196,6 +277,12 @@ func collision_window_artifact_row(window_token: String, block: Vector3i,
 			or identity != record.identity:
 		return {"status":"pending", "reason":"collision_window_source_superseded",
 			"retainedRow":(record.rows as Dictionary).get(block, {}).duplicate(true)}
+	if record.identity != _identity:
+		var current: Dictionary = _backend.status()
+		if int(record.get("provenThroughRevision", -1)) != int(_identity.sourceRevision) \
+				or _prove_local_window(record, current).get("status") != "ready":
+			return {"status":"pending", "reason":"collision_window_local_proof_stale"}
+		return {"status":"ready", "row":(record.rows[block] as Dictionary).duplicate(true)}
 	return _producer.collision_artifact_row(block, identity)
 
 func acknowledge_collision_window_retired(window_token: String,
@@ -263,6 +350,12 @@ func _refresh_window_layout() -> Dictionary:
 	var windows: Array[Dictionary] = []
 	var active := {}
 	var new_records := {}
+	var proven_records := {}
+	var current_source: Dictionary = _backend.status()
+	var frame := Engine.get_process_frames()
+	if frame != _proof_budget_frame:
+		_proof_budget_frame = frame
+		_proof_used_usec = 0
 	for index in range((planned.windows as Array).size()):
 		var window: Dictionary = planned.windows[index]
 		if (window.blocks as Array).size() > _max_resident_blocks:
@@ -270,15 +363,56 @@ func _refresh_window_layout() -> Dictionary:
 		var token := ("%s:%s:%d:%d" % [String(window.closureToken),
 			String(_identity.sourceIdentity.get("hex", "")),
 			int(_identity.sourceRevision), int(_identity.cancellationEpoch)]).sha256_text()
+		var proof := {"status":"new"}
+		for old_token in _window_records:
+			var candidate: Dictionary = _window_records[old_token]
+			if candidate.get("membershipProvenance", {}).get("closureToken") \
+					!= window.closureToken or candidate.get("blocks") != window.blocks:
+				continue
+			var cache_key := "%s:%d:%d" % [String(old_token),
+				int(current_source.get("terrainDeltaRevision", -1)),
+				int(current_source.get("shapingRegistryRevision", -1))]
+			var checked: Dictionary = _local_proof_cache.get(cache_key, {})
+			if checked.is_empty():
+				if _proof_used_usec >= MAX_LOCAL_PROOF_USEC_PER_FRAME:
+					return {"status":"pending", "reason":"collision_window_local_proof_budget",
+						"verifiedWindows":proven_records.size(),
+						"proofUsecThisFrame":_proof_used_usec,
+						"maxProofUsecPerFrame":MAX_LOCAL_PROOF_USEC_PER_FRAME}
+				var proof_started := Time.get_ticks_usec()
+				checked = _prove_local_window(candidate, current_source)
+				_proof_used_usec += Time.get_ticks_usec() - proof_started
+				if checked.get("status") == "ready":
+					_local_proof_cache[cache_key] = checked.duplicate(true)
+			if checked.get("status") != "ready": continue
+			token = String(old_token)
+			proof = checked
+			var retained: Dictionary = candidate.duplicate(true)
+			retained.provenThroughRevision = int(_identity.sourceRevision)
+			retained.proofDigest = String(checked.digest)
+			proven_records[token] = retained
+			break
 		active[token] = true
 		var member := {"id":window.id, "blocks":window.blocks,
 			"closureToken":window.closureToken, "windowToken":token,
-			"windowIndex":index}
+			"windowIndex":index,
+			"identity":proven_records[token].identity.duplicate(true) if proven_records.has(token)
+				else _identity.duplicate(true),
+			"localCurrentProof":{"kind":"verified_native_affected_mesh_exclusion/v1"
+					if proven_records.has(token) else "native_current_revision",
+				"throughGlobalRevision":int(_identity.sourceRevision),
+				"digest":String(proof.get("digest", ""))}}
 		windows.append(member)
 		if not _window_records.has(token):
 			new_records[token] = {"layoutToken":layout_token,
 				"identity":_identity.duplicate(true), "blocks":window.blocks,
 				"rows":{}, "facade":null,
+				"sourceIdentity":_identity.sourceIdentity.duplicate(true),
+				"shapingRevision":int(current_source.get("shapingRegistryRevision", -1)),
+				"provenThroughRevision":int(_identity.sourceRevision),
+				"proofDigest":("%s:%s:%d" % [String(window.closureToken),
+					String(_identity.sourceIdentity.get("hex", "")),
+					int(_identity.sourceRevision)]).sha256_text(),
 				"membershipProvenance":{"authority":"pinned_demand",
 					"demandRevision":0,
 					"closureToken":String(window.closureToken),
@@ -290,6 +424,7 @@ func _refresh_window_layout() -> Dictionary:
 			_pending_retirement_tokens[token] = true
 		return projected
 	for token in new_records: _window_records[token] = new_records[token]
+	for token in proven_records: _window_records[token] = proven_records[token]
 	_active_window_tokens = active
 	_pending_retirement_tokens.clear()
 	_window_layout = planned.duplicate(true)
@@ -297,6 +432,7 @@ func _refresh_window_layout() -> Dictionary:
 	_window_layout["sourceIdentity"] = _identity.sourceIdentity.duplicate(true)
 	_window_layout["identity"] = _identity.duplicate(true)
 	_window_layout["windows"] = windows
+	_local_proof_cache.clear()
 	return _retention_status()
 
 func _cache_retained_row(row: Dictionary) -> void:
@@ -307,6 +443,57 @@ func _cache_retained_row(row: Dictionary) -> void:
 		(record.rows as Dictionary)[row.block] = row.duplicate(true)
 		_window_records[token] = record
 		return
+
+func _prove_local_window(record: Dictionary, current_source: Dictionary) -> Dictionary:
+	if current_source.get("status") != "ready" \
+			or current_source.get("sourceIdentity") != record.get("sourceIdentity") \
+			or int(current_source.get("shapingRegistryRevision", -1)) \
+			!= int(record.get("shapingRevision", -2)) \
+			or (record.get("rows", {}) as Dictionary).size() != (record.blocks as Array).size():
+		return {"status":"pending", "reason":"local_source_unproven"}
+	var current_revision := int(current_source.get("terrainDeltaRevision", -1))
+	var proven_revision := int(record.get("provenThroughRevision", -1))
+	if current_revision < proven_revision: return {"status":"failed", "reason":"revision_reversed"}
+	var digest := String(record.get("proofDigest", ""))
+	for revision in range(proven_revision + 1, current_revision + 1):
+		var edit: Dictionary = _verified_edits.get(revision, {})
+		if edit.is_empty() or int(edit.get("shapingRevision", -1)) \
+				!= int(record.shapingRevision):
+			return {"status":"pending", "reason":"edit_revision_proof_missing"}
+		for block: Vector3i in record.blocks:
+			if (edit.affectedMeshBlocks as Dictionary).has(block):
+				return {"status":"pending", "reason":"local_mesh_affected"}
+		digest = ("%s:%s" % [digest, String(edit.receiptDigest)]).sha256_text()
+	if current_revision > proven_revision and not _local_page_pins_match(record, current_source):
+		return {"status":"pending", "reason":"local_page_pin_changed_or_unavailable"}
+	return {"status":"ready", "digest":digest,
+		"throughGlobalRevision":current_revision}
+
+func _local_page_pins_match(record: Dictionary, current_source: Dictionary) -> bool:
+	var expected := {}
+	for block in record.rows:
+		var row: Dictionary = record.rows[block]
+		var pins: Dictionary = row.get("localPagePins", {})
+		if pins.is_empty(): return false
+		for page in pins:
+			if expected.has(page) and expected[page] != pins[page]: return false
+			expected[page] = pins[page]
+	for page in expected:
+		var current: Dictionary = _backend.pin_effective_page(page)
+		var receipt: Dictionary = current.get("pageStatus", {})
+		if current.get("status") != "ready" or receipt.get("status") != "ready" \
+				or receipt.get("pinIdentity") != expected[page] \
+				or receipt.get("sourceIdentity") != record.sourceIdentity \
+				or int(receipt.get("terrainDeltaRevision", -1)) \
+				!= int(current_source.get("terrainDeltaRevision", -2)):
+			return false
+	var after: Dictionary = _backend.status()
+	return after.get("status") == "ready" \
+		and after.get("sourceIdentity") == record.sourceIdentity \
+		and int(after.get("terrainDeltaRevision", -1)) \
+			== int(current_source.get("terrainDeltaRevision", -2)) \
+		and int(after.get("shapingRegistryRevision", -1)) \
+			== int(current_source.get("shapingRegistryRevision", -2))
 
 func _retire_producer() -> Dictionary:
 	if _producer == null:
