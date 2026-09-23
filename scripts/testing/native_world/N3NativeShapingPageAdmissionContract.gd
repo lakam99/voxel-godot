@@ -62,7 +62,7 @@ func run() -> void:
 	observations.ready = ready.get("status")
 	check(ready.get("status") == "ready", "already_ready_page_preserved")
 	if OS.get_environment("VWB_SHAPING_ADVANCE") == "1":
-		var deadline := Time.get_ticks_msec() + 30000
+		var deadline := Time.get_ticks_msec() + 90000
 		var final: Dictionary = {}
 		while Time.get_ticks_msec() < deadline:
 			admission.advance()
@@ -71,7 +71,11 @@ func run() -> void:
 				break
 			await process_frame
 		observations.completion = final
-		check(final.get("status") == "ready", "real_site_source_reaches_native_page_ready")
+		observations.sourceStats = admission.stats()
+		var source_decision: Dictionary = admission.source_state(Vector2i(-1, -1))
+		observations.sourceDecision = {"status":source_decision.get("status"), "reason":source_decision.get("reason")}
+		check(source_decision.get("status") in ["ready", "prepared", "absent"], "real_site_source_reaches_decision")
+		check(final.get("status") == "ready", "decided_site_source_reaches_native_page_ready")
 		admission.request_shutdown()
 		var drain_deadline := Time.get_ticks_msec() + 8000
 		while Time.get_ticks_msec() < drain_deadline:

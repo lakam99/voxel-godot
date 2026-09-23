@@ -14,6 +14,7 @@ const MAX_VALIDATION_GRID_CELLS := 4096
 # Leave room for the validator's neighbour offsets and inclusive range end.
 # Reject huge finite coordinates before its floori()/range() conversions.
 const MAX_VALIDATION_GRID_COORDINATE := 2147483644.0
+const RECTANGULAR_SYMMETRY_EPSILON := 0.00002
 const KNEE_SEMANTIC := "citadel_market_joinery"
 const RIDGE_SEMANTIC := "citadel_market_canopy_ridge"
 const CACHE_KEYS := ["physicalRoot", "physicalSupportPartIds", "physicalSupportCoverage", "physicalAnchorPartIds", "physicalIntentResolution"]
@@ -339,9 +340,12 @@ static func _assemble(b, ridge_id: String, knee_ids: Array, support_id: String) 
 	var half_width: float = absf(reference.low.x)
 	var half_depth: float = absf(reference.low.z)
 	var rail_y: float = reference.high.y
+	# Transforming parts placed tens of metres from the source origin through
+	# float32 yaw matrices accumulates several ULPs. This 20-micron comparison
+	# admits that roundoff without relaxing seat, socket or collision checks.
 	for slot in slots.values():
-		if absf(absf(slot.low.x) - half_width) > 0.00001 or absf(absf(slot.low.z) - half_depth) > 0.00001 or absf(slot.high.y - rail_y) > 0.00001:
-			return _fail("nonrectangular_canopy")
+		if absf(absf(slot.low.x) - half_width) > RECTANGULAR_SYMMETRY_EPSILON or absf(absf(slot.low.z) - half_depth) > RECTANGULAR_SYMMETRY_EPSILON or absf(slot.high.y - rail_y) > RECTANGULAR_SYMMETRY_EPSILON:
+			return _fail("nonrectangular_canopy", {"referenceLow": reference.low, "referenceHigh": reference.high, "actualLow": slot.low, "actualHigh": slot.high})
 	var support_top: float = support.position.y + support.size.y * 0.5
 	var floor_y: float = support_top - frame.origin.y
 	var post_top: float = rail_y + section * 0.5

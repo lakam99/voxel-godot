@@ -26,6 +26,7 @@ func _run() -> void:
 				positive_count += 1
 				_positive(_fixture(scale_value, yaw, elevated), "shape_%d" % positive_count)
 	_record("positive_matrix_complete", positive_count == 32)
+	_precision_boundary_cases()
 	for mode in ["missing_member", "duplicate_member", "missing_ridge", "duplicate_ridge_semantic", "missing_support", "support_is_household", "duplicate_source_id", "nonfinite_member", "zero_member_size", "nonfinite_rotation", "wrong_material", "colliding_knee", "visual_detail_knee", "forged_knee_root", "existing_joint", "tilted_ridge", "shifted_knee", "duplicate_quadrant", "ridge_too_short", "seat_above_knees", "seat_outside_feet", "seat_too_narrow", "noncolliding_support", "forged_support_root", "root_with_unchecked_seat", "undeclared_elevated_support", "undeclared_support_with_neighbor", "missing_declared_support", "malformed_dependency", "malformed_seat", "occupied_output_id", "already_built"]:
 		_input_negative(mode)
 	var completed := _fixture(1.0, 0.0, true)
@@ -106,6 +107,17 @@ func _positive(fixture: Dictionary, label: String) -> void:
 				joints_ok = joints_ok and result.partIds.has(fact.anchorId) and _socket_contained(part, fact) and b.has_rooted_attachment_socket(part, fact)
 	_record(label + ":all_mandatory_seats_and_two_ended_sockets", joints_ok)
 	_record(label + ":original_source_order", b.parts.filter(func(p): return original_ids.has(p.id)).map(func(p): return p.id) == original_ids)
+
+func _precision_boundary_cases() -> void:
+	var translated := _fixture(1.25, 0.37, false)
+	for part in translated.b.parts:
+		part.position += Vector3(8.0, 0.0, -31.0)
+	var placed: Dictionary = Frame.add_frame(translated.b, translated.ids, translated.support)
+	_record("translated_yawed_float32_canopy_ready", placed.get("ready", false), placed.get("reason", ""))
+	var warped := _fixture(1.0, 0.0, false)
+	_find(warped.b, "synthetic_knee_1_1").position.z += 0.00005
+	var rejected: Dictionary = Frame.add_frame(warped.b, warped.ids, warped.support)
+	_record("fifty_micron_warp_rejected", not rejected.get("ready", false) and rejected.get("reason") == "nonrectangular_canopy", rejected.get("reason", ""))
 
 func _input_negative(mode: String) -> void:
 	var f := _fixture(1.0, 0.0, mode in ["undeclared_elevated_support", "undeclared_support_with_neighbor", "missing_declared_support", "malformed_dependency", "malformed_seat"])

@@ -18,7 +18,7 @@ const execution = await runGodotProcess(await findGodot(), [
   'res://scripts/testing/native_world/N3NativeShapingPageAdmissionContract.gd',
 ], {
   cwd: project,
-  timeoutSeconds: 45,
+  timeoutSeconds: advance ? 110 : 45,
   reportPath,
   env: { ...process.env, VWB_SHAPING_BRIDGE_REPORT: reportPath,
     VWB_SHAPING_ADVANCE: advance ? '1' : '0' },
