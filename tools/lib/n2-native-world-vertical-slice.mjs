@@ -61,6 +61,7 @@ export const inputPaths = [
   'scripts/testing/native_world/N2PreparedRenderGenerator.gd',
   'scripts/testing/native_world/N2VerticalSliceFixture.gd',
   'scripts/terrain/NativeCollisionActorGuard.gd',
+  'scripts/terrain/NativeCollisionAdmissionBarrier.gd',
   'scripts/terrain/NativeTerrainCollisionOwner.gd',
   'scenes/testing/native_world/N2VerticalSliceFixture.tscn',
   'scripts/terrain/VoxelTerrainGenerator.gd',
@@ -212,7 +213,12 @@ export function validateFixtureReport(report) {
     if (evidence?.physics?.ok !== true) errors.push('direct_physics_evidence_invalid');
     if (evidence?.actorGuard?.ok !== true || evidence.actorGuard.occupied?.reason !== 'actor_occupies_replacement'
         || evidence.actorGuard.swept?.reason !== 'actor_occupies_replacement'
-        || evidence.actorGuard.clear?.clear !== true) errors.push('actor_guard_fixture_invalid');
+        || evidence.actorGuard.clear?.clear !== true
+        || evidence.actorGuard.lateActor?.clearance?.reason !== 'actor_occupies_replacement'
+        || evidence.actorGuard.lateActor?.motionAdmitted !== false
+        || evidence.actorGuard.lateActor?.prematureRelease !== false
+        || evidence.actorGuard.lateActor?.aborted !== true
+        || evidence.actorGuard.nodeCap?.reason !== 'actor_census_node_cap') errors.push('actor_guard_fixture_invalid');
     if (evidence?.staleBeforeAck?.reason !== 'stale_before_acknowledgement') errors.push('stale_before_ack_rejection_invalid');
     if (evidence?.staleBeforeInstall?.reason !== 'stale_before_install') errors.push('stale_before_install_rejection_invalid');
     if (evidence?.crossSeamPhysics?.changed !== true
