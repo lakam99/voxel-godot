@@ -1,6 +1,9 @@
 extends Node3D
 class_name NativeWindowedCollisionCoordinator
 
+signal window_retirement_drain_started(window_id: Vector3i,
+	window_token: String, retirement_lease_id: String)
+
 const Aggregate = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
 const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const MAX_RETIRED_BARRIERS := 64
@@ -12,6 +15,7 @@ var _broker: Object
 var _actor_root: Node
 var _owners := {}
 var _window_tokens := {}
+var _retirement_leases := {}
 var _barriers := {}
 var _barrier_identities := {}
 var _barrier_bounds := {}
@@ -21,11 +25,29 @@ var _stopping := false
 func setup(broker: Object, actor_root: Node) -> Dictionary:
 	if _broker != null or broker == null or actor_root == null \
 			or not broker.has_method("collision_window_layout") \
-			or not broker.has_method("acknowledge_collision_window_retired"):
+			or not broker.has_method("acknowledge_collision_window_retired") \
+			or not broker.has_method("claim_collision_window_retirement") \
+			or not broker.has_method("validate_collision_window_retirement") \
+			or not broker.has_method("abort_collision_window_retirement"):
 		return {"status":"failed", "reason":"window_coordinator_source_invalid"}
 	_broker = broker
 	_actor_root = actor_root
 	return {"status":"ready"}
+
+## Admission target contract consumed by MainCore. It may bind during startup,
+## but ingress stays closed until every demanded physical window is current.
+func is_active() -> bool:
+	return not _stopping and _broker != null and _actor_root != null
+
+func can_unbind() -> bool:
+	return _stopping and _owners.is_empty() and active_barrier_count() == 0
+
+func _physical_admission_ready() -> bool:
+	if not is_active(): return false
+	var layout: Dictionary = _broker.collision_window_layout()
+	if layout.get("status") != "ready" or not layout.get("identity") is Dictionary:
+		return false
+	return bool(physical_receipt(layout.identity).get("ready", false))
 
 func register_window(window: Dictionary, owner: Node3D) -> Dictionary:
 	if _stopping or owner == null or not owner.is_inside_tree() \
@@ -149,6 +171,7 @@ func release_barriers(identity: Dictionary) -> Dictionary:
 
 func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 	if _stopping: return false
+	if not _physical_admission_ready(): return false
 	for barrier in _barriers.values():
 		if barrier.is_active() and not barrier.admit_motion(actor, motion):
 			return false
@@ -160,6 +183,7 @@ func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 
 func admit_placement(actor: PhysicsBody3D, transform: Transform3D) -> bool:
 	if _stopping: return false
+	if not _physical_admission_ready(): return false
 	for barrier in _barriers.values():
 		if barrier.is_active() and not barrier.admit_placement(actor, transform):
 			return false
@@ -171,6 +195,7 @@ func admit_placement(actor: PhysicsBody3D, transform: Transform3D) -> bool:
 
 func register_moving_actor(actor: PhysicsBody3D) -> bool:
 	if _stopping: return false
+	if not _physical_admission_ready(): return false
 	for barrier in _barriers.values():
 		if barrier.is_active() and not barrier.register_moving_actor(actor):
 			return false
@@ -185,26 +210,61 @@ func retire_window(id: Vector3i) -> Dictionary:
 		return {"status":"failed", "reason":"physical_window_not_registered"}
 	var token: String = _window_tokens[id]
 	var layout: Dictionary = _broker.collision_window_layout()
-	if layout.get("status") == "ready":
-		for window in layout.windows:
-			if window.get("windowToken") == token:
-				return {"status":"pending", "reason":"physical_window_still_demanded"}
-	elif layout.get("reason") != "collision_window_retirement_backpressure" \
-			or not (layout.get("retiredWindowTokens", []) as Array).has(token):
-		return {"status":"pending", "reason":"physical_window_retirement_not_requested"}
+	var lease: Dictionary = _retirement_leases.get(id, {})
+	if lease.is_empty():
+		if layout.get("status") == "ready":
+			for window in layout.windows:
+				if window.get("windowToken") == token:
+					return {"status":"pending", "reason":"physical_window_still_demanded"}
+		elif layout.get("reason") != "collision_window_retirement_backpressure":
+			return {"status":"pending", "reason":"physical_window_retirement_not_requested"}
 	if not _barriers.has(id) or not _barriers[id].is_active():
 		return {"status":"pending", "reason":"window_actor_barrier_required"}
 	var barrier: RefCounted = _barriers[id]
 	var identity: Dictionary = _barrier_identities[id]
 	if not bool(barrier.clearance(identity).get("clear", false)):
 		return {"status":"pending", "reason":"window_actor_clearance_pending"}
+	if lease.is_empty():
+		var layout_token := String(layout.get("layoutToken", ""))
+		var claim: Dictionary = _broker.claim_collision_window_retirement(token,
+			layout_token)
+		if claim.get("status") != "ready":
+			return {"status":"pending", "reason":claim.get("reason",
+				"window_retirement_lease_pending"), "lease":claim}
+		lease = {"leaseId":String(claim.get("leaseId", "")),
+			"layoutToken":layout_token}
+		if String(lease.leaseId).is_empty():
+			return {"status":"pending", "reason":"window_retirement_lease_invalid"}
+		_retirement_leases[id] = lease
+	else:
+		var valid_lease: Dictionary = _broker.validate_collision_window_retirement(
+			token, String(lease.leaseId))
+		if valid_lease.get("status") != "ready":
+			return {"status":"pending", "reason":"window_retirement_lease_stale",
+				"lease":valid_lease}
 	var owner: Node3D = _owners[id]
+	window_retirement_drain_started.emit(id, token, String(lease.leaseId))
 	var drained: Dictionary = await owner.stop_and_drain()
 	if drained.get("status") != "ready" or not bool(drained.get("drained", false)) \
 			or int(drained.get("remainingBodies", -1)) != 0 \
 			or drained.get("windowToken") != token:
-		return {"status":"failed", "reason":"physical_window_drain_unproven",
+		if bool(drained.get("ownerUnchanged", false)) \
+				and _broker.abort_collision_window_retirement(token,
+					String(lease.leaseId), true).get("status") == "ready":
+			_retirement_leases.erase(id)
+			return {"status":"pending", "reason":"physical_window_drain_retry",
+				"drain":drained}
+		if drained.get("status") == "pending":
+			return {"status":"pending", "reason":"physical_window_drain_pending",
+				"drain":drained}
+		return {"status":"failed", "reason":"physical_window_drain_unproven_terminal_hold",
 			"drain":drained}
+	var lease_valid: Dictionary = _broker.validate_collision_window_retirement(
+		token, String(lease.leaseId))
+	if lease_valid.get("status") != "ready":
+		return {"status":"pending", "reason":"window_retirement_lease_stale",
+			"drain":drained, "lease":lease_valid}
+	drained["retirementLeaseId"] = lease.leaseId
 	var acknowledged: Dictionary = _broker.acknowledge_collision_window_retired(
 		token, drained)
 	if acknowledged.get("status") != "ready":
@@ -212,6 +272,7 @@ func retire_window(id: Vector3i) -> Dictionary:
 			"drain":drained, "acknowledgement":acknowledged}
 	_owners.erase(id)
 	_window_tokens.erase(id)
+	_retirement_leases.erase(id)
 	owner.queue_free()
 	return {"status":"ready", "windowId":id, "windowToken":token,
 		"drain":drained, "acknowledgement":acknowledged}
@@ -252,6 +313,7 @@ func stop_and_drain() -> Dictionary:
 	_barrier_identities.clear()
 	_barrier_bounds.clear()
 	_retired_barriers.clear()
+	_retirement_leases.clear()
 	return {"status":"ready", "drained":true,
 		"remainingChildren":get_child_count(),
 		"activeBarriers":active_barrier_count()}

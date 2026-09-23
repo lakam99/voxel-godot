@@ -409,10 +409,37 @@ func run() -> void:
 		and remote_source.collision_source_snapshot().get("status") == "pending",
 		"distant demand retirement preserves unchanged near window identity")
 	check(bounded.acknowledge_collision_window_retired(remote_token, {}).get("status") == "failed"
-		and bounded.acknowledge_collision_window_retired(remote_token,
+		and bounded.claim_collision_window_retirement(remote_token,
+			String(smaller_layout.get("layoutToken", ""))).get("status") == "ready",
+		"old window retirement requires an explicit pre-drain lease")
+	var bounded_lease: Dictionary = bounded.claim_collision_window_retirement(
+		remote_token, String(smaller_layout.get("layoutToken", "")))
+	planner.replace_sources(viewer, extra_viewers, [], [], bounds)
+	var leased_revert_step: Dictionary = bounded.advance()
+	var leased_revert_layout: Dictionary = bounded.collision_window_layout()
+	var lease_valid: Dictionary = bounded.validate_collision_window_retirement(
+		remote_token, String(bounded_lease.get("leaseId", "")))
+	check(bounded.acknowledge_collision_window_retired(remote_token,
 			{"windowToken":remote_token, "drained":true,
-				"remainingBodies":0}).get("status") == "ready",
-		"old window retained until explicit physical drain acknowledgment")
+				"remainingBodies":0,
+				"retirementLeaseId":bounded_lease.get("leaseId", "")}).get("status") == "ready",
+		"claimed old window accepts exact physical drain acknowledgment")
+	var resumed_layout: Dictionary = {}
+	for frame in range(300):
+		bounded.advance()
+		resumed_layout = bounded.collision_window_layout()
+		if resumed_layout.get("status") == "ready" \
+				and resumed_layout.get("windowCount") == 2:
+			break
+		await process_frame
+	check(leased_revert_step.get("reason") == "collision_window_retirement_leased"
+		and leased_revert_layout.get("status") == "pending"
+		and lease_valid.get("status") == "ready"
+		and resumed_layout.get("status") == "ready"
+		and resumed_layout.get("windowCount") == 2
+		and (resumed_layout.windows as Array).any(
+			func(window: Dictionary) -> bool: return window.windowToken == remote_token),
+		"demand reactivation waits for leased drain, then materializes a fresh logical window")
 	var bounded_stop: Dictionary = bounded.stop()
 	for frame in range(120):
 		if bounded_stop.get("status") == "ready": break
@@ -518,9 +545,15 @@ func run() -> void:
 			and int(held_again.get("totalWindowRecords", -2)) == held_record_count,
 			"new retirement attempt remains bounded after revert")
 		check(many_broker.acknowledge_collision_window_retired(retired_token, {}).get("status") == "failed"
-			and many_broker.acknowledge_collision_window_retired(retired_token,
+			and many_broker.claim_collision_window_retirement(retired_token,
+				String(held_again.get("layoutToken", ""))).get("status") == "ready",
+			"retired window must acquire lease before drain acknowledgment")
+		var many_lease: Dictionary = many_broker.claim_collision_window_retirement(
+			retired_token, String(held_again.get("layoutToken", "")))
+		check(many_broker.acknowledge_collision_window_retired(retired_token,
 				{"windowToken":retired_token, "drained":true,
-					"remainingBodies":0}).get("status") == "ready"
+					"remainingBodies":0,
+					"retirementLeaseId":many_lease.get("leaseId", "")}).get("status") == "ready"
 			and many_broker.collision_window_layout().get("status") == "ready",
 			"explicit physical drain acknowledgment releases bounded backpressure")
 	else:

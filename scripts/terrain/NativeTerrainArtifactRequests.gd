@@ -31,6 +31,8 @@ var _window_layout := {}
 var _window_records := {}
 var _active_window_tokens := {}
 var _pending_retirement_tokens := {}
+var _retirement_leases := {}
+var _retirement_lease_sequence := 0
 var _verified_edits := {}
 var _last_verified_revision := -1
 var _local_proof_cache := {}
@@ -291,8 +293,11 @@ func collision_window_artifact_row(window_token: String, block: Vector3i,
 func acknowledge_collision_window_retired(window_token: String,
 		retirement_receipt: Dictionary) -> Dictionary:
 	var record: Dictionary = _window_records.get(window_token, {})
+	var lease: Dictionary = _retirement_leases.get(window_token, {})
 	if record.is_empty() or (_active_window_tokens.has(window_token) \
 			and not _pending_retirement_tokens.has(window_token)) \
+			or lease.is_empty() \
+			or String(retirement_receipt.get("retirementLeaseId", "")) != lease.get("leaseId") \
 			or not bool(retirement_receipt.get("drained", false)) \
 			or int(retirement_receipt.get("remainingBodies", -1)) != 0 \
 			or retirement_receipt.get("windowToken") != window_token:
@@ -302,7 +307,52 @@ func acknowledge_collision_window_retired(window_token: String,
 	_window_records.erase(window_token)
 	_active_window_tokens.erase(window_token)
 	_pending_retirement_tokens.erase(window_token)
+	_retirement_leases.erase(window_token)
 	return {"status":"ready", "retiredWindowToken":window_token}
+
+func claim_collision_window_retirement(window_token: String,
+		expected_layout_token: String) -> Dictionary:
+	if _stopping or _backend == null or not _window_records.has(window_token):
+		return {"status":"failed", "reason":"collision_window_retirement_claim_invalid"}
+	var existing: Dictionary = _retirement_leases.get(window_token, {})
+	if not existing.is_empty():
+		if existing.get("expectedLayoutToken") == expected_layout_token:
+			return {"status":"ready", "leaseId":existing.leaseId,
+				"windowToken":window_token}
+		return {"status":"pending", "reason":"collision_window_retirement_leased"}
+	var layout: Dictionary = collision_window_layout()
+	var telemetry: Dictionary = layout.get("retirementTelemetry", {})
+	var retired_tokens: Array = layout.get("retiredWindowTokens",
+		telemetry.get("retiredWindowTokens", []))
+	if layout.get("layoutToken") != expected_layout_token \
+			or not retired_tokens.has(window_token):
+		return {"status":"pending", "reason":"collision_window_retirement_not_requested",
+			"layoutStatus":layout.get("status", "")}
+	_retirement_lease_sequence += 1
+	var lease_id := ("%d:%d:%s:%s" % [_owner_generation,
+		_retirement_lease_sequence, window_token, expected_layout_token]).sha256_text()
+	_retirement_leases[window_token] = {"leaseId":lease_id,
+		"expectedLayoutToken":expected_layout_token}
+	return {"status":"ready", "leaseId":lease_id, "windowToken":window_token}
+
+func validate_collision_window_retirement(window_token: String,
+		lease_id: String) -> Dictionary:
+	var lease: Dictionary = _retirement_leases.get(window_token, {})
+	if lease.is_empty() or lease.get("leaseId") != lease_id:
+		return {"status":"failed", "reason":"collision_window_retirement_lease_stale"}
+	if _active_window_tokens.has(window_token):
+		return {"status":"failed", "reason":"leased_collision_window_reactivated"}
+	return {"status":"ready", "windowToken":window_token, "leaseId":lease_id}
+
+## A lease can be cancelled only before physical drain starts or when the
+## owner proves its collision bodies remain installed and unchanged.
+func abort_collision_window_retirement(window_token: String, lease_id: String,
+		owner_unchanged: bool) -> Dictionary:
+	var lease: Dictionary = _retirement_leases.get(window_token, {})
+	if not owner_unchanged or lease.is_empty() or lease.get("leaseId") != lease_id:
+		return {"status":"failed", "reason":"collision_window_retirement_abort_unproven"}
+	_retirement_leases.erase(window_token)
+	return {"status":"ready", "windowToken":window_token}
 
 func stop() -> Dictionary:
 	_stopping = true
@@ -421,6 +471,11 @@ func _refresh_window_layout() -> Dictionary:
 					"demandRevision":0,
 					"closureToken":String(window.closureToken),
 					"windowToken":token}}
+	for leased_token in _retirement_leases:
+		if active.has(leased_token):
+			return {"status":"pending", "reason":"collision_window_retirement_leased",
+				"retiredWindowTokens":[leased_token],
+				"layoutToken":_window_layout.get("layoutToken", "")}
 	var projected: Dictionary = _retention_status(active)
 	if projected.get("status") != "ready":
 		_pending_retirement_tokens.clear()
@@ -525,6 +580,7 @@ func _release_windows() -> void:
 	_window_records.clear()
 	_active_window_tokens.clear()
 	_pending_retirement_tokens.clear()
+	_retirement_leases.clear()
 	_window_layout.clear()
 
 func _retention_status(projected_active: Dictionary = {}) -> Dictionary:

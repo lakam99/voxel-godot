@@ -21,6 +21,8 @@ var _policy: Dictionary = {}
 var _decisions: Dictionary = {}
 var _candidates: Dictionary = {}
 var _requests: Dictionary = {}
+var _source_leases: Dictionary = {}
+var _next_source_lease_id := 1
 var _prefetch_regions: Array[Vector2i] = []
 var _sources: Dictionary = {}
 var _retired: Dictionary = {}
@@ -31,7 +33,15 @@ var _last_queue_status: Dictionary = {}
 var _max_advance_usec := 0
 
 func configure(seed_text: String, towns: Dictionary, ordinary_policy: Dictionary) -> void:
+	for lease: Dictionary in _source_leases.values():
+		if lease.state == "pending":
+			lease.state = "draining" if int(lease.get("token", 0)) > 0 else "drained"
+			lease.reason = "admission_generation_replaced"
+		elif lease.state not in ["draining", "drained"]:
+			lease.state = "invalidated"
+			lease.reason = "admission_generation_replaced"
 	_queue.reset()
+	_update_draining_source_leases()
 	if not _sources.is_empty(): _retired[_generation] = _sources
 	_sources = {}
 	_requests.clear()
@@ -89,14 +99,130 @@ func request_bounds(bounds: Rect2i, priority := true) -> Dictionary:
 			if decision.get("status") in ["prepared", "absent"]: continue
 			waiting = true
 			if not _requests.has(region):
-				_requests[region] = {"priority":priority,"receipt":{},"prefetch":false,"drainingPrefetch":false}
+				_requests[region] = _new_request(priority, true)
 			else:
 				_requests[region].prefetch = false
 				_requests[region].drainingPrefetch = false
+				_requests[region].legacyDemand = true
 				if priority: _requests[region].priority = true
 	return _result("pending" if waiting else "ready", "preparing_citadel_terrain" if waiting else "")
 
 func request_source(region: Vector2i, priority := true) -> Dictionary:
+	return _request_source(region, priority, true)
+
+## Create a scoped consumer interest in one region. Unlike a bare source request,
+## this lease may be released independently without shutting down shared admission.
+func acquire_source_lease(region: Vector2i, priority := true) -> Dictionary:
+	if _closing or not _fatal.is_empty() or not _town_inputs_finalized:
+		return _result("failed", "admission_unavailable")
+	if not Field._valid_region(region): return _result("failed", "invalid_source_region")
+	var lease_id := _next_source_lease_id
+	_next_source_lease_id += 1
+	var lease := {"leaseId":lease_id, "generation":_generation, "region":region, "priority":priority,
+		"state":"pending", "token":0, "reason":""}
+	_source_leases[lease_id] = lease
+	var existing: Dictionary = source_state(region)
+	if existing.get("status") == "ready" or existing.get("status") == "prepared":
+		lease.state = "ready"
+	elif existing.get("status") == "failed" or (existing.get("status") == "absent"
+			and existing.get("reason") != "source_not_requested"):
+		lease.state = String(existing.status)
+		lease.reason = String(existing.get("reason", ""))
+	else:
+		var request: Dictionary = _requests.get(region, {})
+		if request.is_empty():
+			request = _new_request(priority, false)
+			_requests[region] = request
+		else:
+			request.priority = bool(request.priority) or priority
+			request.prefetch = false
+			request.drainingPrefetch = false
+			if not request.has("legacyDemand"): request.legacyDemand = false
+			if not request.has("leaseIds"): request.leaseIds = []
+		request.leaseIds.append(lease_id)
+		# A lease can attach after a legacy consumer already dispatched this
+		# region. Preserve that exact token so generation replacement cannot
+		# misclassify an active shared worker as a tokenless request.
+		lease.token = int(request.get("receipt", {}).get("token", 0))
+	return {"status":"ready", "leaseId":lease_id, "generation":_generation, "region":region,
+		"state":lease.state}
+
+func request_source_with_lease(lease_id: int) -> Dictionary:
+	var lease: Dictionary = _source_leases.get(lease_id, {})
+	if lease.is_empty(): return _result("failed", "source_lease_unknown")
+	if lease.state in ["draining", "drained", "invalidated"]: return _result("failed", "source_lease_released")
+	if lease.state in ["ready", "prepared", "absent", "failed", "invalidated"]:
+		return source_state(lease.region)
+	return _request_source(lease.region, bool(lease.priority), false)
+
+## Releases only this consumer. Last-lease cancellation is cooperative: the lease
+## remains draining until its queue token and any worker-owned retirement clear.
+func release_source_lease(lease_id: int) -> Dictionary:
+	var lease: Dictionary = _source_leases.get(lease_id, {})
+	if lease.is_empty(): return _result("failed", "source_lease_unknown")
+	if lease.state == "drained": return {"status":"ready", "state":"drained", "leaseId":lease_id}
+	if int(lease.get("generation", -1)) != _generation:
+		if lease.state == "draining" and _queue.source_request_state(int(lease.token)) != "absent":
+			return {"status":"pending", "state":"draining", "leaseId":lease_id,
+				"token":lease.token, "reason":lease.reason}
+		lease.state = "drained"
+		return {"status":"ready", "state":"drained", "leaseId":lease_id,
+			"reason":lease.reason}
+	if lease.state == "invalidated":
+		lease.state = "drained"
+		return {"status":"ready", "state":"drained", "leaseId":lease_id,
+			"reason":lease.reason}
+	if lease.state in ["ready", "prepared", "absent", "failed"]:
+		# The lease owns demand, not the immutable decision/result payload. Once
+		# terminal, admission owns any pending receipt retirement independently;
+		# this consumer may drain without waiting on shared admission cleanup.
+		lease.state = "drained"
+		return {"status":"ready", "state":"drained", "leaseId":lease_id}
+	var region: Vector2i = lease.region
+	var request: Dictionary = _requests.get(region, {})
+	if not request.is_empty():
+		request.leaseIds.erase(lease_id)
+		if not request.legacyDemand and request.leaseIds.is_empty():
+			_requests.erase(region)
+			var token := int(request.get("receipt", {}).get("token", 0))
+			if token <= 0:
+				lease.state = "drained"
+				return {"status":"ready", "state":"drained", "leaseId":lease_id}
+			var before := _queue.source_request_state(token)
+			if before == "pending":
+				var cancelled: Dictionary = _queue.cancel_with_status(token)
+				lease.state = "drained" if cancelled.get("accepted", false) else "draining"
+			elif before == "active":
+				_queue.cancel_with_status(token)
+				lease.state = "draining"
+			elif before in ["completed", "retirement_pending"]:
+				_queue.cancel_with_status(token)
+				lease.state = "draining"
+			else:
+				lease.state = "drained"
+			lease.token = token
+			return {"status":"pending" if lease.state == "draining" else "ready",
+				"state":lease.state, "leaseId":lease_id, "token":token,
+				"workerState":before}
+	lease.state = "drained"
+	return {"status":"ready", "state":"drained", "leaseId":lease_id}
+
+func source_lease_state(lease_id: int) -> Dictionary:
+	var lease: Dictionary = _source_leases.get(lease_id, {})
+	if lease.is_empty(): return _result("failed", "source_lease_unknown")
+	if lease.state == "draining" and _queue.source_request_state(int(lease.token)) == "absent":
+		lease.state = "drained"
+	return {"status":"pending" if lease.state in ["pending", "draining"] else "ready",
+		"state":lease.state, "leaseId":lease_id, "generation":lease.generation, "region":lease.region,
+		"token":lease.token, "reason":lease.reason}
+
+func forget_source_lease(lease_id: int) -> bool:
+	var lease: Dictionary = _source_leases.get(lease_id, {})
+	if lease.is_empty() or lease.state != "drained": return false
+	_source_leases.erase(lease_id)
+	return true
+
+func _request_source(region: Vector2i, priority: bool, legacy: bool) -> Dictionary:
 	if _closing: return _result("failed","shutting_down")
 	if not _fatal.is_empty(): return _result("failed",_fatal)
 	if not _town_inputs_finalized: return _result("failed","citadel_town_inputs_unfinalized")
@@ -104,10 +230,11 @@ func request_source(region: Vector2i, priority := true) -> Dictionary:
 		return source_state(region)
 	var decision: Dictionary = _decisions.get(region,{})
 	if decision.get("status") in ["failed","absent"]: return decision.duplicate()
-	if not _requests.has(region): _requests[region] = {"priority":priority,"receipt":{},"prefetch":false,"drainingPrefetch":false}
+	if not _requests.has(region): _requests[region] = _new_request(priority, legacy)
 	else:
 		_requests[region].prefetch = false
 		_requests[region].drainingPrefetch = false
+		_requests[region].legacyDemand = bool(_requests[region].get("legacyDemand", false)) or legacy
 		if priority: _requests[region].priority = true
 	return _result("pending","preparing_citadel_source")
 
@@ -139,7 +266,9 @@ func set_prefetch_regions(regions: Array[Vector2i]) -> bool:
 			if token>0: _queue.cancel(token)
 	for region: Vector2i in ordered:
 		if _decisions.get(region,{}).get("status") in ["prepared","absent","failed"]: continue
-		if not _requests.has(region): _requests[region]={"priority":false,"receipt":{},"prefetch":true,"drainingPrefetch":false}
+		if not _requests.has(region):
+			_requests[region]=_new_request(false, false)
+			_requests[region].prefetch = true
 		else: _requests[region].drainingPrefetch = false
 	_prefetch_regions=ordered
 	return true
@@ -165,7 +294,14 @@ func advance() -> Dictionary:
 	var started := Time.get_ticks_usec()
 	# Do not dispatch new sources until old generation payloads can be disposed
 	# by the queue's existing worker-owned retirement path.
-	if not _retired.is_empty() and _queue.retire_external_payload(_retired): _retired = {}
+	if not _retired.is_empty():
+		var retirement_tokens: Array[int] = []
+		for key: Variant in _retired:
+			var text := str(key)
+			if text.begins_with("stale:") or text.begins_with("result:"):
+				var parsed := text.get_slice(":", 1).to_int()
+				if parsed > 0: retirement_tokens.append(parsed)
+		if _queue.retire_external_payload(_retired, retirement_tokens): _retired = {}
 	_last_queue_status = _queue.poll()
 	var token := int(_last_queue_status.get("completedToken",0))
 	if token != 0:
@@ -189,6 +325,9 @@ func advance() -> Dictionary:
 				_fail(region, String(receipt.get("reason","site_dispatch_failed")))
 				continue
 			request.receipt = receipt
+			for lease_id: int in request.get("leaseIds", []):
+				if _source_leases.has(lease_id): _source_leases[lease_id].token = int(receipt.get("token", 0))
+	_update_draining_source_leases()
 	_max_advance_usec = maxi(_max_advance_usec,Time.get_ticks_usec()-started)
 	return stats()
 
@@ -235,6 +374,7 @@ func _accept(receipt: Dictionary) -> void:
 			_decisions[region] = {"status":"prepared","reason":"","sourceKey":receipt.sourceKey,
 				"sourceSignature":profile.sourceSignature,"siteId":profile.siteId,"reservationCells":source.reservationCells,
 				"level":profile.level,"envelopeCells":profile.envelopeCells,"apronCells":profile.apronCells}
+			_resolve_source_leases(region, "ready", "", int(receipt.get("token", 0)))
 			_requests.erase(region)
 			return
 	elif state == "absent":
@@ -244,9 +384,10 @@ func _accept(receipt: Dictionary) -> void:
 			_fail(region,"prepared_site_rebuild_became_absent")
 		else:
 			_decisions[region] = {"status":"absent","reason":source.get("reason",""),"sourceKey":receipt.sourceKey}
+			_resolve_source_leases(region, "absent", String(source.get("reason", "")), int(receipt.get("token", 0)))
 			_requests.erase(region)
 	else:
-		_fail(region,String(source.get("reason","site_preparation_failed")))
+		_fail(region,String(source.get("reason","site_preparation_failed")), int(receipt.get("token", 0)))
 	_retired["result:%s" % receipt.token] = receipt
 
 func _admit_or_reuse_profile(region: Vector2i, receipt: Dictionary, profile: Dictionary) -> bool:
@@ -258,9 +399,29 @@ func _admit_or_reuse_profile(region: Vector2i, receipt: Dictionary, profile: Dic
 			and previous.level == profile.level and previous.envelopeCells == profile.envelopeCells and previous.apronCells == profile.apronCells
 	return profile_store.append_prepared_profile(profile)
 
-func _fail(region: Vector2i, reason: String) -> void:
+func _fail(region: Vector2i, reason: String, token := 0) -> void:
 	_decisions[region] = {"status":"failed","reason":reason}
+	_resolve_source_leases(region, "failed", reason, token)
 	_requests.erase(region)
+
+func _resolve_source_leases(region: Vector2i, state: String, reason: String, token: int) -> void:
+	var request: Dictionary = _requests.get(region, {})
+	for lease_id: int in request.get("leaseIds", []):
+		if not _source_leases.has(lease_id): continue
+		var lease: Dictionary = _source_leases[lease_id]
+		if lease.state != "draining":
+			lease.state = state
+			lease.reason = reason
+			lease.token = token
+
+func _update_draining_source_leases() -> void:
+	for lease: Dictionary in _source_leases.values():
+		if lease.state == "draining" and _queue.source_request_state(int(lease.token)) == "absent":
+			lease.state = "drained"
+
+func _new_request(priority: bool, legacy: bool) -> Dictionary:
+	return {"priority":priority,"receipt":{},"prefetch":false,"drainingPrefetch":false,
+		"legacyDemand":legacy,"leaseIds":[]}
 
 func prepared_sources() -> Dictionary:
 	# Immutable worker values; only the small registry shell is copied.
