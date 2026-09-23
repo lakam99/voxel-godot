@@ -35,6 +35,15 @@ struct NativeWildlifeDecodedConstruction final {
     NativeWildlifeInitialMovement movement;
 };
 
+// Initial physical publication facts. Movement subsequently owns the body
+// transform; presentation choice never changes this box or its owner.
+struct NativeWildlifeInitialCollider final {
+    std::string durable_id;
+    NativeWildlifeVec3 body_origin, local_center, box_size;
+    float body_yaw = 0;
+    std::uint32_t collision_layer = 0, collision_mask = 0;
+};
+
 // Exact source-receipt equality guards used by ordered construction. Exposed
 // for focused negative mutation tests because ordered witnesses are immutable.
 bool native_surface_wildlife_same_receipt(
@@ -70,12 +79,14 @@ public:
     const NativeSurfacePropPlacementEntry &placement() const noexcept;
     const NativeWildlifeStream &stream() const noexcept;
     const NativeWildlifeDecodedConstruction &construction() const noexcept;
+    const NativeWildlifeInitialCollider &initial_collider() const noexcept;
     const Sha256Digest &content_digest() const noexcept;
 
 private:
     NativeSurfacePropPlacementEntry placement_;
     NativeWildlifeStream stream_;
     NativeWildlifeDecodedConstruction construction_;
+    NativeWildlifeInitialCollider initial_collider_;
     Sha256Digest content_digest_{};
 };
 
