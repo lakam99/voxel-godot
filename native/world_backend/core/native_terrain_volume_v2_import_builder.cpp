@@ -1,5 +1,6 @@
 #include "native_terrain_volume_v2_import_builder.hpp"
 
+#include <algorithm>
 #include <utility>
 
 namespace voxel::world_backend {
@@ -33,8 +34,6 @@ void NativeTerrainVolumeV2ImportBuilder::begin(const NativeTerrainVolumeV2Import
         || identity.schema_version != 1U || identity.section_size != NativeCellState::SECTION_SIZE
         || identity.revision > 9007199254740992ULL) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         reject();
@@ -47,8 +46,6 @@ void NativeTerrainVolumeV2ImportBuilder::append(
     const std::vector<NativeTerrainVolumeV2ImportChunk> &chunks) {
     if (state_ != State::importing || chunks.empty()) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         reject();
@@ -99,22 +96,16 @@ void NativeTerrainVolumeV2ImportBuilder::append(
         for (const auto &record : new_records) records_.push_back(record);
     } catch (const NativeTerrainVolumeV2ImportBuilderRejected &) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         throw;
     } catch (const std::invalid_argument &) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         reject();
     } catch (...) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         throw;
@@ -123,12 +114,30 @@ void NativeTerrainVolumeV2ImportBuilder::append(
 
 bool NativeTerrainVolumeV2ImportBuilder::abandon() noexcept {
     if (state_ != State::importing) return false;
-    records_.clear();
-    sections_.clear();
     last_cell_.reset();
     last_section_.reset();
     state_ = State::abandoned;
     return true;
+}
+
+std::size_t NativeTerrainVolumeV2ImportBuilder::dispose_step(const std::size_t max_items) noexcept {
+    if ((state_ != State::abandoned && state_ != State::rejected) || max_items == 0U) return 0U;
+    std::size_t disposed = 0U;
+    const std::size_t budget = std::min(max_items, MAX_RECORDS_PER_APPEND);
+    while (disposed < budget && !records_.empty()) {
+        records_.pop_back();
+        ++disposed;
+    }
+    while (disposed < budget && !sections_.empty()) {
+        sections_.pop_back();
+        ++disposed;
+    }
+    return disposed;
+}
+
+bool NativeTerrainVolumeV2ImportBuilder::disposal_complete() const noexcept {
+    return (state_ == State::abandoned || state_ == State::rejected)
+        && records_.empty() && sections_.empty();
 }
 
 NativeTerrainVolumeV2 NativeTerrainVolumeV2ImportBuilder::finalize() {
@@ -149,15 +158,11 @@ NativeTerrainVolumeV2 NativeTerrainVolumeV2ImportBuilder::finalize() {
         return result;
     } catch (const std::invalid_argument &) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         reject();
     } catch (...) {
         state_ = State::rejected;
-        records_.clear();
-        sections_.clear();
         last_cell_.reset();
         last_section_.reset();
         throw;

@@ -68,6 +68,9 @@ constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
 constexpr std::size_t MAX_SHAPING_RESOLUTIONS = 64U;
 constexpr std::size_t MAX_TYPED_CELL_OPERATIONS = 4096U;
+constexpr std::size_t MAX_TERRAIN_IMPORT_RECORDS_PER_CALL =
+	NativeTerrainVolumeV2ImportBuilder::DEFAULT_MAX_RECORDS_PER_APPEND;
+constexpr std::size_t MAX_TERRAIN_IMPORT_DISPOSE_ITEMS_PER_CALL = 64U;
 constexpr std::size_t MAX_PROTOCOL_TEXT_BYTES = 128U;
 // CitadelSiteBuildQueue._canonical_request admits 1024 Unicode code points.
 // Keep that semantic limit exact while independently bounding the temporary
@@ -807,9 +810,17 @@ NativeCellState parse_save_state(const Dictionary &p_value, const CellCoord p_ce
 		throw std::out_of_range("terrainVolume state light channel exceeds [0, 15]");
 	}
 	const Dictionary metadata = require_dictionary(p_value.get("metadata", Variant()), "terrainVolume.state.metadata");
-	if (metadata.has("saveDelta") && metadata.get("saveDelta", Variant()).get_type() == Variant::BOOL
-			&& !static_cast<bool>(metadata.get("saveDelta", Variant()))) {
-		throw std::invalid_argument("terrainVolume durable state explicitly disables saveDelta");
+	if (metadata.has("saveDelta")) {
+		const Variant save_delta = metadata.get("saveDelta", Variant());
+		if (save_delta.get_type() == Variant::BOOL) {
+			if (!static_cast<bool>(save_delta))
+				throw std::invalid_argument("terrainVolume durable state explicitly disables saveDelta");
+		} else if (save_delta.get_type() == Variant::INT || save_delta.get_type() == Variant::FLOAT) {
+			if (require_number(save_delta, "terrainVolume.state.metadata.saveDelta") == 0.0)
+				throw std::invalid_argument("terrainVolume durable state has zero saveDelta");
+		} else {
+			throw std::invalid_argument("terrainVolume durable state has non-convertible saveDelta");
+		}
 	}
 	NativeCellStateInput input;
 	input.cell = p_cell;
@@ -1548,6 +1559,11 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("begin_voxel_block_shadow_async", "request"), &NativeWorldBackend::begin_voxel_block_shadow_async);
 	ClassDB::bind_method(D_METHOD("poll_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::poll_voxel_block_shadow_async);
 	ClassDB::bind_method(D_METHOD("cancel_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::cancel_voxel_block_shadow_async);
+	ClassDB::bind_method(D_METHOD("begin_terrain_volume_v2_import", "identity"), &NativeWorldBackend::begin_terrain_volume_v2_import);
+	ClassDB::bind_method(D_METHOD("append_terrain_volume_v2_import", "chunks", "generation"), &NativeWorldBackend::append_terrain_volume_v2_import);
+	ClassDB::bind_method(D_METHOD("cancel_terrain_volume_v2_import", "generation"), &NativeWorldBackend::cancel_terrain_volume_v2_import);
+	ClassDB::bind_method(D_METHOD("drain_terrain_volume_v2_import", "generation"), &NativeWorldBackend::drain_terrain_volume_v2_import);
+	ClassDB::bind_method(D_METHOD("terrain_volume_v2_import_status", "generation"), &NativeWorldBackend::terrain_volume_v2_import_status);
 	ClassDB::bind_method(D_METHOD("request_voxel_block_shadow", "request", "consumer_id", "priority"), &NativeWorldBackend::request_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("configure_voxel_block_shadow_capacity", "max_entries"), &NativeWorldBackend::configure_voxel_block_shadow_capacity);
 	ClassDB::bind_method(D_METHOD("release_voxel_block_shadow", "request", "consumer_id"), &NativeWorldBackend::release_voxel_block_shadow);
@@ -1559,6 +1575,8 @@ void NativeWorldBackend::_bind_methods() {
 }
 
 NativeWorldBackend::~NativeWorldBackend() {
+	// An import owner must remain retained until its bounded disposal calls
+	// complete. Any residual cleanup here is teardown-only, never a frame API.
 	if (voxel_worker_cancel_token_) voxel_worker_cancel_token_->store(true, std::memory_order_relaxed);
 	if (voxel_worker_.joinable()) voxel_worker_.join();
 	if (rock_source_worker_cancel_token_)
@@ -1568,6 +1586,9 @@ NativeWorldBackend::~NativeWorldBackend() {
 
 Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 	if (initialization_attempted_) return envelope("initialize", "failed", "initialization_is_one_shot");
+	if (terrain_volume_import_ && !terrain_volume_import_->disposal_complete())
+		return envelope("initialize", "failed", "terrain_volume_import_owner_not_drained");
+	terrain_volume_import_.reset();
 	initialization_attempted_ = true;
 	try {
 		WorldSourceDefinition definition(parse_source_descriptor(p_request, INITIALIZE_SCHEMA));
@@ -1591,6 +1612,10 @@ Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_reque
 	if (initialization_attempted_) {
 		return envelope("initialize_from_save_v2", "failed", "initialization_is_one_shot");
 	}
+	if (terrain_volume_import_ && !terrain_volume_import_->disposal_complete()) {
+		return envelope("initialize_from_save_v2", "failed", "terrain_volume_import_owner_not_drained");
+	}
+	terrain_volume_import_.reset();
 	initialization_attempted_ = true;
 	try {
 		WorldSourceDefinition definition(parse_source_descriptor(p_request, INITIALIZE_FROM_SAVE_V2_SCHEMA));
@@ -1629,6 +1654,215 @@ Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_reque
 		initialization_failure_ = error.what();
 		return failure("initialize_from_save_v2", error);
 	}
+}
+
+Dictionary NativeWorldBackend::begin_terrain_volume_v2_import(const Dictionary &p_identity) {
+	constexpr const char *operation = "begin_terrain_volume_v2_import";
+	if (initialization_attempted_ || state_ || shaping_registry_)
+		return envelope(operation, "failed", "backend_initialization_already_started");
+	if (terrain_volume_import_ && !terrain_volume_import_->disposal_complete())
+		return envelope(operation, "failed", "previous_import_owner_not_drained");
+	if (terrain_volume_import_generation_ >= static_cast<std::uint64_t>(
+			std::numeric_limits<std::int64_t>::max()))
+		return envelope(operation, "failed", "import_generation_exhausted");
+	terrain_volume_import_.reset();
+	terrain_volume_import_failure_.clear();
+	try {
+		require_exact_keys(p_identity, {"domain", "schemaVersion", "sectionSize", "revision"},
+			"terrainVolume import identity");
+		const std::string domain = require_bounded_utf8(
+			p_identity.get("domain", Variant()), "identity.domain", 32U, false);
+		const std::uint64_t schema = require_save_u64(
+			p_identity.get("schemaVersion", Variant()), "identity.schemaVersion");
+		const std::uint64_t section_size = require_save_u64(
+			p_identity.get("sectionSize", Variant()), "identity.sectionSize");
+		const std::uint64_t revision = require_save_u64(
+			p_identity.get("revision", Variant()), "identity.revision");
+		if (schema > std::numeric_limits<std::uint32_t>::max()
+				|| section_size > std::numeric_limits<std::uint32_t>::max()) {
+			throw std::out_of_range("terrainVolume identity field exceeds uint32");
+		}
+		auto builder = std::make_unique<NativeTerrainVolumeV2ImportBuilder>();
+		builder->begin({domain, static_cast<std::uint32_t>(schema),
+			static_cast<std::uint32_t>(section_size), revision});
+		terrain_volume_import_ = std::move(builder);
+		++terrain_volume_import_generation_;
+		Dictionary result = envelope(operation, "pending", "accepting_bounded_chunks");
+		result["generation"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		result["maxRecordsPerCall"] = static_cast<std::int64_t>(MAX_TERRAIN_IMPORT_RECORDS_PER_CALL);
+		result["finalizeAvailable"] = false;
+		result["productionCutover"] = false;
+		return result;
+	} catch (const std::exception &error) {
+		terrain_volume_import_failure_ = error.what();
+		Dictionary result = failure(operation, error);
+		result["cleanupComplete"] = true;
+		return result;
+	}
+}
+
+Dictionary NativeWorldBackend::append_terrain_volume_v2_import(const Array &p_chunks,
+		const std::int64_t p_generation) {
+	constexpr const char *operation = "append_terrain_volume_v2_import";
+	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
+		Dictionary result = envelope(operation, "failed", "stale_import_generation");
+		result["requestedGeneration"] = p_generation;
+		result["currentGeneration"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		return result;
+	}
+	if (!terrain_volume_import_ || !terrain_volume_import_->active())
+		return envelope(operation, "failed", "no_active_import");
+	const auto fail_and_retain_for_drain = [&](const std::exception &error) {
+		terrain_volume_import_failure_ = error.what();
+		terrain_volume_import_->abandon();
+		Dictionary result = envelope(operation, "pending", "rejected_cleanup_pending");
+		result["terminalStatus"] = "failed";
+		result["failure"] = text(terrain_volume_import_failure_);
+		result["recordsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->record_count());
+		result["sectionsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->section_count());
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		return result;
+	};
+	try {
+		std::vector<NativeTerrainVolumeV2ImportChunk> chunks;
+		std::size_t record_count = 0U;
+		const auto parse_started = std::chrono::steady_clock::now();
+		for (int64_t section_index = 0; section_index < p_chunks.size(); ++section_index) {
+			const Dictionary section = require_dictionary(p_chunks[section_index], "terrainVolume import chunks[]");
+			require_exact_keys(section, {"schemaVersion", "sectionKey", "originCell", "revision", "cells"},
+				"terrainVolume import chunks[]");
+			if (require_save_u64(section.get("schemaVersion", Variant()), "chunk.schemaVersion") != 1U)
+				throw std::invalid_argument("unsupported terrainVolume import section schema");
+			const CellCoord section_key = parse_save_coordinate(
+				section.get("sectionKey", Variant()), "chunk.sectionKey");
+			const auto origin = section_origin(section_key, NativeCellState::SECTION_SIZE);
+			if (!origin.has_value() || !(parse_save_coordinate(
+				section.get("originCell", Variant()), "chunk.originCell") == *origin)) {
+				throw std::invalid_argument("terrainVolume import section origin does not match sectionKey");
+			}
+			const std::uint64_t section_revision = require_save_u64(
+				section.get("revision", Variant()), "chunk.revision");
+			const Array cells = require_array(section.get("cells", Variant()), "chunk.cells");
+			const std::size_t count = static_cast<std::size_t>(cells.size());
+			if (count == 0U || count > MAX_TERRAIN_IMPORT_RECORDS_PER_CALL - record_count)
+				throw std::length_error("terrainVolume import append exceeds its 256-record budget");
+			record_count += count;
+			NativeTerrainVolumeV2ImportChunk chunk;
+			chunk.section = section_key;
+			chunk.section_revision = section_revision;
+			chunk.records.reserve(count);
+			for (int64_t cell_index = 0; cell_index < cells.size(); ++cell_index) {
+				const Dictionary cell_value = require_dictionary(cells[cell_index], "chunk.cells[]");
+				require_exact_keys(cell_value, {"cell", "local", "state"}, "chunk.cells[]");
+				const CellCoord cell = parse_save_coordinate(cell_value.get("cell", Variant()), "cell.cell");
+				const CellCoord local = parse_save_coordinate(cell_value.get("local", Variant()), "cell.local");
+				const auto split = split_cell(cell, NativeCellState::SECTION_SIZE);
+				if (!split.has_value() || !(split->section == section_key) || !(split->local == local))
+					throw std::invalid_argument("terrainVolume import cell address is inconsistent");
+				chunk.records.push_back({NativeCellStateNamespace::durable_terrain,
+					NativeTypedWorldStatePersistence::durable,
+					parse_save_state(require_dictionary(cell_value.get("state", Variant()), "cell.state"),
+						cell, section_key, local)});
+			}
+			chunks.push_back(std::move(chunk));
+		}
+		const auto parse_finished = std::chrono::steady_clock::now();
+		terrain_volume_import_->append(chunks);
+		const auto append_finished = std::chrono::steady_clock::now();
+		Dictionary result = envelope(operation, "pending", "accepting_bounded_chunks");
+		result["generation"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		result["appendedRecords"] = static_cast<std::int64_t>(record_count);
+		result["recordsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->record_count());
+		result["sectionsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->section_count());
+		result["parseUsec"] = std::chrono::duration_cast<std::chrono::microseconds>(parse_finished - parse_started).count();
+		result["appendUsec"] = std::chrono::duration_cast<std::chrono::microseconds>(append_finished - parse_finished).count();
+		result["finalizeAvailable"] = false;
+		return result;
+	} catch (const std::exception &error) {
+		return fail_and_retain_for_drain(error);
+	}
+}
+
+Dictionary NativeWorldBackend::cancel_terrain_volume_v2_import(const std::int64_t p_generation) {
+	constexpr const char *operation = "cancel_terrain_volume_v2_import";
+	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
+		Dictionary result = envelope(operation, "failed", "stale_import_generation");
+		result["requestedGeneration"] = p_generation;
+		result["currentGeneration"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		return result;
+	}
+	if (!terrain_volume_import_) return envelope(operation, "ready", "no_import_owner");
+	if (terrain_volume_import_->active()) {
+		terrain_volume_import_->abandon();
+		terrain_volume_import_failure_ = "cancelled";
+	}
+	if (terrain_volume_import_->disposal_complete()) {
+		terrain_volume_import_.reset();
+		Dictionary result = envelope(operation, "ready", "drained");
+		result["cancelled"] = true;
+		return result;
+	}
+	Dictionary result = envelope(operation, "pending", "bounded_cleanup_required");
+	result["recordsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->record_count());
+	result["sectionsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->section_count());
+	result["ownerMustBeRetainedUntilDrain"] = true;
+	return result;
+}
+
+Dictionary NativeWorldBackend::drain_terrain_volume_v2_import(const std::int64_t p_generation) {
+	constexpr const char *operation = "drain_terrain_volume_v2_import";
+	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
+		Dictionary result = envelope(operation, "failed", "stale_import_generation");
+		result["requestedGeneration"] = p_generation;
+		result["currentGeneration"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		return result;
+	}
+	if (!terrain_volume_import_) return envelope(operation, "ready", "no_import_owner");
+	if (!terrain_volume_import_->disposal_complete() && terrain_volume_import_->active())
+		return envelope(operation, "failed", "cancel_or_reject_import_before_drain");
+	const std::size_t disposed = terrain_volume_import_->dispose_step(MAX_TERRAIN_IMPORT_DISPOSE_ITEMS_PER_CALL);
+	if (!terrain_volume_import_->disposal_complete()) {
+		Dictionary result = envelope(operation, "pending", "bounded_cleanup_in_progress");
+		result["disposedItems"] = static_cast<std::int64_t>(disposed);
+		result["recordsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->record_count());
+		result["sectionsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->section_count());
+		result["ownerMustBeRetainedUntilDrain"] = true;
+		return result;
+	}
+	const bool rejected = !terrain_volume_import_failure_.empty();
+	const bool cancelled = terrain_volume_import_failure_ == "cancelled";
+	terrain_volume_import_.reset();
+	Dictionary result = envelope(operation, rejected && !cancelled ? "failed" : "ready",
+		rejected && !cancelled ? text(terrain_volume_import_failure_) : String("drained"));
+	result["disposedItems"] = static_cast<std::int64_t>(disposed);
+	result["cancelled"] = cancelled;
+	result["cleanupComplete"] = true;
+	result["productionCutover"] = false;
+	return result;
+}
+
+Dictionary NativeWorldBackend::terrain_volume_v2_import_status(const std::int64_t p_generation) const {
+	constexpr const char *operation = "terrain_volume_v2_import_status";
+	if (p_generation < 0 || static_cast<std::uint64_t>(p_generation) != terrain_volume_import_generation_) {
+		Dictionary result = envelope(operation, "failed", "stale_import_generation");
+		result["requestedGeneration"] = p_generation;
+		result["currentGeneration"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+		return result;
+	}
+	if (!terrain_volume_import_) return envelope(operation, "ready", "no_import_owner");
+	const bool cleanup = !terrain_volume_import_->active();
+	const bool drained = terrain_volume_import_->disposal_complete();
+	Dictionary result = envelope(operation, cleanup && drained
+		? (terrain_volume_import_failure_.empty() ? "ready" : "failed") : "pending",
+		cleanup ? "cleanup" : "accepting_bounded_chunks");
+	result["generation"] = static_cast<std::int64_t>(terrain_volume_import_generation_);
+	result["recordsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->record_count());
+	result["sectionsRetained"] = static_cast<std::int64_t>(terrain_volume_import_->section_count());
+	result["cleanupComplete"] = drained;
+	result["finalizeAvailable"] = false;
+	result["ownerMustBeRetainedUntilDrain"] = cleanup && !drained;
+	if (!terrain_volume_import_failure_.empty()) result["failure"] = text(terrain_volume_import_failure_);
+	return result;
 }
 
 Dictionary NativeWorldBackend::export_terrain_volume_v2() const {

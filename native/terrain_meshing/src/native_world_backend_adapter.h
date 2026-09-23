@@ -13,6 +13,7 @@
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
 #include "native_captured_voxel_encode_job.hpp"
+#include "native_terrain_volume_v2_import_builder.hpp"
 #include "native_voxel_block_demand.hpp"
 
 #include <godot_cpp/classes/ref_counted.hpp>
@@ -140,6 +141,13 @@ public:
 	godot::Dictionary begin_voxel_block_shadow_async(const godot::Dictionary &p_request);
 	godot::Dictionary poll_voxel_block_shadow_async(std::int64_t p_ticket);
 	 godot::Dictionary cancel_voxel_block_shadow_async(std::int64_t p_ticket);
+	// Staging-only incremental save import. Appends/cleanup have record/item
+	// count caps per call, not CPU-time bounds; finalization is not exposed.
+	godot::Dictionary begin_terrain_volume_v2_import(const godot::Dictionary &p_identity);
+	godot::Dictionary append_terrain_volume_v2_import(const godot::Array &p_chunks, std::int64_t p_generation);
+	godot::Dictionary cancel_terrain_volume_v2_import(std::int64_t p_generation);
+	godot::Dictionary drain_terrain_volume_v2_import(std::int64_t p_generation);
+	godot::Dictionary terrain_volume_v2_import_status(std::int64_t p_generation) const;
 	 godot::Dictionary request_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id, int p_priority);
 	 godot::Dictionary configure_voxel_block_shadow_capacity(std::int64_t p_max_entries);
 	 godot::Dictionary release_voxel_block_shadow(const godot::Dictionary &p_request, std::int64_t p_consumer_id);
@@ -168,6 +176,9 @@ private:
 	std::string initialization_failure_;
 	std::unique_ptr<voxel::world_backend::NativeWorldBackendState> state_;
 	std::optional<voxel::world_backend::NativeWorldBackendTransaction> staged_durable_cells_;
+	std::unique_ptr<voxel::world_backend::NativeTerrainVolumeV2ImportBuilder> terrain_volume_import_;
+	std::string terrain_volume_import_failure_;
+	std::uint64_t terrain_volume_import_generation_ = 0;
 	std::unique_ptr<voxel::world_backend::NativeTerrainShapingRegistry> shaping_registry_;
 	std::unique_ptr<voxel::world_backend::NativeBiomeEnvironmentCatalog> biome_catalog_;
 	std::unique_ptr<voxel::world_backend::NativeFeatureDeltaSnapshot> removed_props_;

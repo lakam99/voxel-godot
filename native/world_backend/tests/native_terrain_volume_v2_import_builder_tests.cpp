@@ -89,13 +89,42 @@ VWB_TEST(native_terrain_volume_v2_import_builder_rejects_duplicate_reversed_and_
         builder.append({chunk({0, 0, 0}, 1U, {zero})});
         VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
             builder.append({chunk({0, 0, 0}, 1U, {zero})}));
+        VWB_EXPECT_EQ(1U, builder.record_count());
+        VWB_EXPECT(!builder.active());
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
         VWB_EXPECT_EQ(0U, builder.record_count());
+        VWB_EXPECT_EQ(1U, builder.section_count());
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT(builder.disposal_complete());
     }
     {
         NativeTerrainVolumeV2ImportBuilder builder;
         builder.begin(identity());
         VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
             builder.append({chunk({0, 0, 0}, 1U, {one, zero})}));
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 1}, 2U, {record({0, 0, 16})}),
+                chunk({0, 0, 0}, 1U, {zero})}));
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {zero})});
+        builder.append({chunk({1, 0, 0}, 2U, {record({16, 0, 0})})});
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {one})}));
+        VWB_EXPECT_EQ(2U, builder.record_count());
+        VWB_EXPECT_EQ(2U, builder.section_count());
+        VWB_EXPECT_EQ(3U, builder.dispose_step(3U));
+        VWB_EXPECT_EQ(0U, builder.record_count());
+        VWB_EXPECT_EQ(1U, builder.section_count());
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT(builder.disposal_complete());
     }
     {
         NativeTerrainVolumeV2ImportBuilder builder;
@@ -120,10 +149,13 @@ VWB_TEST(native_terrain_volume_v2_import_builder_rejects_duplicate_reversed_and_
         VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
             builder.append({chunk({0, 0, 0}, 1U, {malformed})}));
         VWB_EXPECT(!builder.active());
-        VWB_EXPECT_EQ(0U, builder.record_count());
+        VWB_EXPECT_EQ(1U, builder.record_count());
         VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
             builder.append({chunk({0, 0, 0}, 1U, {one})}));
         VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT(builder.disposal_complete());
     }
     {
         NativeTerrainVolumeV2ImportBuilder builder(2U, 2U);
@@ -131,6 +163,12 @@ VWB_TEST(native_terrain_volume_v2_import_builder_rejects_duplicate_reversed_and_
         builder.append({chunk({0, 0, 0}, 1U, {zero, one})});
         VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
             builder.append({chunk({0, 0, 0}, 1U, {record({2, 0, 0})})}));
+        VWB_EXPECT_EQ(2U, builder.record_count());
+        VWB_EXPECT_EQ(2U, builder.dispose_step(2U));
+        VWB_EXPECT_EQ(0U, builder.record_count());
+        VWB_EXPECT_EQ(1U, builder.section_count());
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT(builder.disposal_complete());
     }
 }
 
@@ -164,14 +202,47 @@ VWB_TEST(native_terrain_volume_v2_import_builder_abandons_only_unfinalized_input
     builder.append({chunk({0, 0, 0}, 1U, {record({0, 0, 0})})});
     VWB_EXPECT(builder.abandon());
     VWB_EXPECT(!builder.abandon());
-    VWB_EXPECT_EQ(0U, builder.record_count());
-    VWB_EXPECT_EQ(0U, builder.section_count());
+    VWB_EXPECT_EQ(1U, builder.record_count());
+    VWB_EXPECT_EQ(1U, builder.section_count());
     VWB_EXPECT(!builder.active());
     VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+    VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+    VWB_EXPECT_EQ(0U, builder.record_count());
+    VWB_EXPECT_EQ(1U, builder.section_count());
+    VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+    VWB_EXPECT(builder.disposal_complete());
+    VWB_EXPECT_EQ(0U, builder.dispose_step(1U));
+
+    NativeTerrainVolumeV2ImportBuilder empty;
+    empty.begin(identity());
+    VWB_EXPECT(empty.abandon());
+    VWB_EXPECT(empty.disposal_complete());
+    VWB_EXPECT_EQ(0U, empty.dispose_step(1U));
 
     NativeTerrainVolumeV2ImportBuilder finalized;
     finalized.begin(identity());
     const NativeTerrainVolumeV2 result = finalized.finalize();
     VWB_EXPECT_EQ(7U, result.revision);
     VWB_EXPECT(!finalized.abandon());
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_defers_finalize_failure_cleanup_to_bounded_steps) {
+    NativeTerrainVolumeV2ImportBuilder builder;
+    builder.begin(identity());
+    auto invalid_durable_record = record({0, 0, 0});
+    invalid_durable_record.state.metadata = NativeValue::object({
+        {"saveDelta", NativeValue::boolean(false)}});
+    builder.append({chunk({0, 0, 0}, 1U, {invalid_durable_record})});
+
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+    VWB_EXPECT(!builder.active());
+    VWB_EXPECT_EQ(1U, builder.record_count());
+    VWB_EXPECT_EQ(1U, builder.section_count());
+    VWB_EXPECT(!builder.disposal_complete());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+    VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+    VWB_EXPECT_EQ(0U, builder.record_count());
+    VWB_EXPECT_EQ(1U, builder.section_count());
+    VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+    VWB_EXPECT(builder.disposal_complete());
 }

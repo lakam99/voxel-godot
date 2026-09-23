@@ -47,8 +47,15 @@ public:
 
     void begin(const NativeTerrainVolumeV2ImportIdentity &identity);
     void append(const std::vector<NativeTerrainVolumeV2ImportChunk> &chunks);
-    // Returns true only when partial input was safely discarded before finalize.
+    // Marks an active import abandoned without bulk destruction. Rejected or
+    // abandoned inputs must be released through bounded dispose_step calls.
     bool abandon() noexcept;
+    // Destroys no more than min(max_items, MAX_RECORDS_PER_APPEND) retained
+    // records/section rows. Only terminal, non-finalized builders can drain.
+    std::size_t dispose_step(std::size_t max_items) noexcept;
+    bool disposal_complete() const noexcept;
+    // Owners must keep this builder alive until disposal_complete(); destroying
+    // it earlier performs unbounded teardown-only cleanup.
     NativeTerrainVolumeV2 finalize();
 
     std::size_t record_count() const noexcept;
