@@ -17,11 +17,29 @@ const processResult = await runGodotProcess(executable, command, {
 });
 const failures = [];
 let forageDefinitionsCompared = 0;
+let oreClustersCompared = 0;
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
 if (processResult.code !== 0) failures.push(`Godot process failed: ${processResult.code}`);
-if (probe?.cases?.length !== 3) failures.push(`Expected three cases, got ${probe?.cases?.length}`);
+if (probe?.cases?.length !== 5 || !probe?.oreChunkFound)
+  failures.push(`Expected intact and tombstoned ore cases, got ${probe?.cases?.length} cases, found=${probe?.oreChunkFound}`);
+if (probe?.cases?.[4]?.removed?.length !== 1
+    || JSON.stringify(probe?.cases?.[3]?.chunk) !== JSON.stringify(probe?.cases?.[4]?.chunk))
+  failures.push('Ore tombstone replay does not target the same chunk and one child');
+if (probe?.cases?.length === 5) {
+  const intact = probe.cases[3], tombstoned = probe.cases[4];
+  const removedId = tombstoned.removed?.[0];
+  const intactOre = intact.native?.find(row => (row.outcome === 6 || row.outcome === 7)
+    && row.feature?.children?.some(child => child.durableId === removedId && child.present));
+  const removedOre = tombstoned.native?.find(row => row.durableId === intactOre?.durableId);
+  if (!intactOre || !removedOre || removedOre.feature?.children?.find(child => child.durableId === removedId)?.present !== false)
+    failures.push('Ore child tombstone did not suppress the same native child');
+  if (intact.nativeFinalRngState === tombstoned.nativeFinalRngState)
+    failures.push('Ore child tombstone did not change the later native RNG stream');
+}
+if (JSON.stringify(probe?.oreFixtureChunk) !== '[3,2]')
+  failures.push(`Unexpected ore fixture chunk: ${JSON.stringify(probe?.oreFixtureChunk)}`);
 for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   const label = `case ${caseIndex} chunk ${JSON.stringify(sample.chunk)} removed ${sample.removed?.length ?? 0}`;
   for (const key of ['nativeInitialization', 'structureAdmission', 'orderedStatus'])
@@ -74,10 +92,37 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
         }
       }
     }
+    if (native.outcome === 6 || native.outcome === 7) {
+      const expected = native.feature, actual = direct.oreChildren ?? [];
+      if (expected?.kind !== 'oreCluster' || expected.children?.length !== 2)
+        failures.push(`${label} attempt ${index} native ore definition missing`);
+      else {
+        oreClustersCompared++;
+        const present = expected.children.filter(child => child.present);
+        if (actual.length !== present.length)
+          failures.push(`${label} attempt ${index} ore child count mismatch`);
+        for (const child of present) {
+          const body = actual.find(row => row.durableId === child.durableId);
+          if (!body) { failures.push(`${label} attempt ${index} ore child ${child.durableId} missing`); continue; }
+          if (body.oreType !== (expected.oreKind === 1 ? 'ironOre' : 'copperOre') || body.clusterSize !== 2)
+            failures.push(`${label} attempt ${index} ore child ${child.durableId} type/cluster mismatch`);
+          for (const field of ['dropCount', 'rotationYBits', 'meshRadiusBits', 'meshHeightBits',
+            'meshCenterYBits', 'colliderRadiusBits', 'colliderCenterYBits', 'seamCount', 'glintCount'])
+            if (body[field] !== child[field]) failures.push(`${label} attempt ${index} ore child ${child.durableId} ${field} mismatch`);
+          for (const field of ['localPositionBits', 'meshScaleBits'])
+            if (JSON.stringify(body[field]) !== JSON.stringify(child[field]))
+              failures.push(`${label} attempt ${index} ore child ${child.durableId} ${field} mismatch`);
+          for (const field of ['seams', 'glints'])
+            if (JSON.stringify(body[field]) !== JSON.stringify(child[field]))
+              failures.push(`${label} attempt ${index} ore child ${child.durableId} ${field} geometry mismatch`);
+        }
+      }
+    }
   }
   if (uint64(sample.directFinalRngState) !== uint64(sample.nativeFinalRngState)) failures.push(`${label} final RNG state mismatch`);
 }
 if (forageDefinitionsCompared === 0) failures.push('No forage definitions were compared');
+if (oreClustersCompared === 0) failures.push('No ore clusters were compared');
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -86,6 +131,7 @@ const report = {
     chunk, removed, attemptsCompared: Math.min(direct?.length ?? 0, native?.length ?? 0),
   })) ?? [],
   forageDefinitionsCompared,
+  oreClustersCompared,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };

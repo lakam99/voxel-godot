@@ -368,6 +368,24 @@ transforms, body rotation and sphere collider using exact float32 bits.
 This proves the adapter projection against those direct-service cases, not
 atomic native feature publication, headed gameplay or N4 cutover.
 
+The adapter also projects the existing typed native two-child surface ore
+cluster into an ordered shadow row, including child presence/tombstones,
+durable IDs, RNG boundaries, body/base-mesh transforms, all five seam and
+three glint transforms per child, drop counts and colliders. The rebuilt
+`n4-ore-adapter-shadow-01` native gate passed at
+`artifacts/native-world-backend/n4-ore-adapter-shadow-01/report.json`.
+A one-time bounded source-outcome search located an ore-bearing fixture at
+`atlas-1492`, chunk `(3,2)`; the fixture now pins that coordinate to avoid
+repeated search. The direct Godot differential passed five cases and 140
+ordered attempts, including intact and second-child-tombstoned ore replays,
+two ore cluster definitions and 30 forage definitions, at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-3305712e-8b10-4432-af16-360897abb107.json`.
+It compares actual production ore bodies against native child IDs,
+material kind, drop count, exact float32 base/seam/glint geometry and collider
+facts, and verifies that the tombstone suppresses the same child and changes
+the later shared-RNG stream. This remains direct-service shadow evidence;
+full atomic publication and live gameplay/save/collision cutover remain open.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

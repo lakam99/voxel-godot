@@ -4,6 +4,7 @@
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
 #include "native_surface_forage_ordered_definition.hpp"
+#include "native_surface_ore_cluster_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
@@ -84,6 +85,54 @@ std::string utf8(const String &p_value) {
 
 String text(const std::string &p_value) {
 	return String::utf8(p_value.data(), static_cast<int64_t>(p_value.size()));
+}
+
+Vector3 world_vector(const WorldFloat32Position &p_value) {
+	return Vector3(p_value.x, p_value.y, p_value.z);
+}
+
+Dictionary ore_child_shadow(const NativeSurfaceOreChildDefinition &p_child) {
+	Dictionary row;
+	row["childIndex"] = static_cast<std::int64_t>(p_child.child_index);
+	row["durableId"] = text(p_child.durable_id);
+	row["present"] = p_child.present;
+	row["stateBefore"] = text(std::to_string(p_child.state_before));
+	row["stateAfter"] = text(std::to_string(p_child.state_after));
+	row["dropCount"] = p_child.drop_count;
+	row["localPosition"] = world_vector(p_child.local_position);
+	row["worldAnchor"] = world_vector(p_child.world_anchor);
+	row["rotationY"] = p_child.rotation_y;
+	row["radius"] = p_child.radius;
+	row["meshRadius"] = p_child.mesh_radius;
+	row["meshHeight"] = p_child.mesh_height;
+	row["meshRadialSegments"] = p_child.mesh_radial_segments;
+	row["meshRings"] = p_child.mesh_rings;
+	row["meshCenterY"] = p_child.mesh_center_y;
+	row["meshScale"] = world_vector(p_child.mesh_scale);
+	row["seamMeshSize"] = world_vector(p_child.seam_mesh_size);
+	Array seams;
+	for (const NativeSurfaceOreSeamDefinition &seam : p_child.seams) {
+		Dictionary entry;
+		entry["localPosition"] = world_vector(seam.local_position);
+		entry["rotation"] = world_vector(seam.rotation);
+		seams.append(entry);
+	}
+	row["seams"] = seams;
+	row["glintMeshRadius"] = p_child.glint_mesh_radius;
+	row["glintMeshHeight"] = p_child.glint_mesh_height;
+	row["glintRadialSegments"] = p_child.glint_radial_segments;
+	row["glintRings"] = p_child.glint_rings;
+	Array glints;
+	for (const NativeSurfaceOreGlintDefinition &glint : p_child.glints) {
+		Dictionary entry;
+		entry["localPosition"] = world_vector(glint.local_position);
+		entry["scale"] = world_vector(glint.scale);
+		glints.append(entry);
+	}
+	row["glints"] = glints;
+	row["colliderRadius"] = p_child.collider_radius;
+	row["colliderCenterY"] = p_child.collider_center_y;
+	return row;
 }
 
 Dictionary envelope(const char *p_operation, const char *p_status, const String &p_reason = String()) {
@@ -2174,6 +2223,21 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 					meshes.append(visual);
 				}
 				feature["meshes"] = meshes;
+				row["feature"] = feature;
+			}
+			if (source.outcome == NativeSurfacePropClassificationOutcome::unported_iron_ore_cluster
+					|| source.outcome == NativeSurfacePropClassificationOutcome::unported_copper_ore_cluster) {
+				const NativeSurfaceOreClusterDefinition ore = NativeSurfaceOreClusterDefinition::create(
+					ordered, placement, static_cast<std::uint32_t>(index), terrain);
+				Dictionary feature;
+				feature["kind"] = "oreCluster";
+				feature["oreKind"] = static_cast<std::int64_t>(ore.kind());
+				feature["rootDurableId"] = text(ore.root_durable_id());
+				feature["contentIdentity"] = text(sha256_hex(ore.content_digest()));
+				Array children;
+				for (const NativeSurfaceOreChildDefinition &child : ore.children())
+					children.append(ore_child_shadow(child));
+				feature["children"] = children;
 				row["feature"] = feature;
 			}
 			attempts.append(row);

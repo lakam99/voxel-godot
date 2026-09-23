@@ -62,6 +62,50 @@ func forage_geometry(body: StaticBody3D, materials: Dictionary) -> Dictionary:
 		"rotationYBits":bits(body.rotation.y),
 		"collider":collider,"meshes":meshes}
 
+func ore_geometry(body: StaticBody3D) -> Dictionary:
+	var visuals: Array[MeshInstance3D] = []
+	var seams := []
+	var glints := []
+	var collider: CollisionShape3D = null
+	for child in body.get_children():
+		if child is MeshInstance3D:
+			visuals.append(child)
+		elif child is CollisionShape3D:
+			collider = child
+	if visuals.size() != 9 or collider == null or not (visuals[0].mesh is SphereMesh) \
+			or not (collider.shape is SphereShape3D):
+		return {"captureError":"incomplete_ore_body"}
+	var base := visuals[0]
+	for index in range(1, 6):
+		var seam := visuals[index]
+		if not (seam.mesh is BoxMesh):
+			return {"captureError":"ore_seam_mesh_type"}
+		seams.append({"positionBits":vector_bits(seam.position),
+			"rotationBits":vector_bits(seam.rotation),
+			"meshSizeBits":vector_bits((seam.mesh as BoxMesh).size)})
+	for index in range(6, 9):
+		var glint := visuals[index]
+		if not (glint.mesh is SphereMesh):
+			return {"captureError":"ore_glint_mesh_type"}
+		glints.append({"positionBits":vector_bits(glint.position),
+			"scaleBits":vector_bits(glint.scale),
+			"meshRadiusBits":bits((glint.mesh as SphereMesh).radius),
+			"meshHeightBits":bits((glint.mesh as SphereMesh).height)})
+	var sphere := base.mesh as SphereMesh
+	return {"durableId":body.get_meta("prop_id", ""),
+		"oreType":body.get_meta("ore_type", ""),
+		"clusterSize":body.get_meta("cluster_size", -1),
+		"dropCount":body.get_meta("drop_count", -1),
+		"localPositionBits":vector_bits(body.position),
+		"rotationYBits":bits(body.rotation.y),
+		"meshRadiusBits":bits(sphere.radius),"meshHeightBits":bits(sphere.height),
+		"meshScaleBits":vector_bits(base.scale),
+		"meshCenterYBits":bits(base.position.y),
+		"colliderRadiusBits":bits((collider.shape as SphereShape3D).radius),
+		"colliderCenterYBits":bits(collider.position.y),
+		"seamCount":seams.size(),"glintCount":glints.size(),
+		"seams":seams,"glints":glints}
+
 func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
@@ -84,8 +128,27 @@ func run() -> void:
 		{"chunk": Vector2i(-1, -1), "removed": []}]:
 		main.restore_removed_props(spec.removed)
 		cases.append(run_case(main, spec.chunk, spec.removed))
+	# This seed/chunk was found by a one-time, bounded native-outcome search.
+	# Pinning it keeps each later differential focused and reproducible.
+	var ore_chunk := Vector2i(3, 2)
+	var ore_case: Dictionary = run_case(main, ore_chunk, [])
+	var ore_chunk_found := false
+	for row in ore_case.native:
+		if int(row.outcome) in [6, 7]:
+			ore_chunk_found = true
+			break
+	if ore_chunk_found:
+		cases.append(ore_case)
+		for row in ore_case.native:
+			if int(row.outcome) in [6, 7]:
+				var child_tombstone := String(row.durableId) + ":cluster1"
+				main.restore_removed_props([child_tombstone])
+				cases.append(run_case(main, ore_chunk, [child_tombstone]))
+				main.restore_removed_props([])
+				break
 	var result := {"scope":"direct_production_method_and_native_shadow_contract_not_live_gameplay",
-		"seed":main.seed_text,"cases":cases}
+		"seed":main.seed_text,"cases":cases,"oreFixtureChunk":[ore_chunk.x,ore_chunk.y],
+		"oreChunkFound":ore_chunk_found}
 	var path := OS.get_environment("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT")
 	if path.is_empty():
 		push_error("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT is required")
@@ -138,11 +201,17 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			"sourceHeightMeters":float(sample.get("height",0.0)),
 			"surfaceFound":bool(sample.get("found",false)),
 			"childCountDelta":chunk.get_child_count()-child_count_before}
+		var ore_children := []
 		for child in chunk.get_children():
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
 					and String(child.get_meta("material", "")) in \
 					["berryBush","aloePatch","mushroomCluster","frostHerbPatch"]:
 				direct_row["forage"] = forage_geometry(child, main.materials)
+			if child is StaticBody3D and String(child.get_meta("prop_id", "")) in [id,id + ":cluster1"] \
+					and String(child.get_meta("material", "")) in ["ironOre","copperOre"]:
+				ore_children.append(ore_geometry(child))
+		if not ore_children.is_empty():
+			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
 	var native_rows := []
 	for row in ordered.get("attempts", []):
@@ -174,6 +243,34 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 				"colliderCenterYBits":bits(feature.colliderCenterY),
 				"physicalColliderPresent":feature.physicalColliderPresent,
 				"navigationBlocker":feature.navigationBlocker,"meshes":meshes}
+		elif feature.get("kind") == "oreCluster":
+			var children := []
+			for child in feature.children:
+				var seams := []
+				for seam in child.seams:
+					seams.append({"positionBits":vector_bits(seam.localPosition),
+						"rotationBits":vector_bits(seam.rotation),
+						"meshSizeBits":vector_bits(child.seamMeshSize)})
+				var glints := []
+				for glint in child.glints:
+					glints.append({"positionBits":vector_bits(glint.localPosition),
+						"scaleBits":vector_bits(glint.scale),
+						"meshRadiusBits":bits(child.glintMeshRadius),
+						"meshHeightBits":bits(child.glintMeshHeight)})
+				children.append({"durableId":child.durableId,"present":child.present,
+					"dropCount":child.dropCount,
+					"localPositionBits":vector_bits(child.localPosition),
+					"rotationYBits":bits(child.rotationY),
+					"meshRadiusBits":bits(child.meshRadius),
+					"meshHeightBits":bits(child.meshHeight),
+					"meshScaleBits":vector_bits(child.meshScale),
+					"meshCenterYBits":bits(child.meshCenterY),
+					"colliderRadiusBits":bits(child.colliderRadius),
+					"colliderCenterYBits":bits(child.colliderCenterY),
+					"seamCount":child.seams.size(),"glintCount":child.glints.size(),
+					"seams":seams,"glints":glints})
+			projected_feature = {"kind":feature.kind,"oreKind":feature.oreKind,
+				"rootDurableId":feature.rootDurableId,"children":children}
 		native_rows.append({"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"durableId":row.durableId,"stateBeforeCoordinates":row.stateBeforeCoordinates,
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,
