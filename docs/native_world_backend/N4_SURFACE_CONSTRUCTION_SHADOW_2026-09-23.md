@@ -126,13 +126,22 @@ and seed to four existing value captures: resolved biome profiles, ordered
 visual registry/imports, animated wildlife presentation, and durable removed
 IDs. It rejects a tampered completeness claim, same-content restore,
 cross-Main reuse and registry replacement. Its direct Godot contract is
-15/15 at `artifacts/native-world-backend/n4-active-surface-owner-bundle-contract.json`.
+19/19 at `artifacts/native-world-backend/n4-active-surface-owner-bundle-contract.json`.
 The bundle declares `complete=false`: it does not contain a native effective
 terrain pin, StructureSystem tree halos, an all-28-attempt manifest or an
 atomic publication lease. The capture's scene inspection is not a per-chunk
 hot-path operation; future integration must cache by owner generation and
 recheck freshness before publication without turning scene import inspection
 into a gameplay-frame stall.
+The same direct fixture now records measurement-only timings: roughly 39 ms
+for a full owner bundle capture and 18 ms for a full freshness recheck on this
+headless host, with visual rows (~10.5 ms) and biome profiles (~5.4 ms)
+dominating that recheck. These are not gameplay-frame benchmarks or acceptance
+thresholds, but they rule out a naive per-chunk full recapture. The eventual
+native catalog must own immutable copied values after setup, with a cheap
+same-owner/revision check adjacent to the no-yield publication swap; content
+audits belong in loading/diagnostic work unless an owner-controlled mutation
+requires a new catalog generation.
 
 `NativeWorldBackend.admit_removed_props_tombstones` is the first narrow Godot
 adapter conversion for that bundle. Its focused Godot contract passed after

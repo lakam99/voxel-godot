@@ -5,6 +5,9 @@ const CatalogScript := preload("res://scripts/environment/BiomeEnvironmentCatalo
 const VisualScript := preload("res://scripts/visual/VisualAssetRegistry.gd")
 const AnimatedScript := preload("res://scripts/visual/AnimatedAssetRegistry.gd")
 const BundleScript := preload("res://scripts/world/ActiveSurfacePropOwnerBundle.gd")
+const BiomeSnapshot := preload("res://scripts/environment/ActiveBiomeEnvironmentSnapshot.gd")
+const VisualSnapshot := preload("res://scripts/visual/ActiveVisualAssetSnapshot.gd")
+const RemovedSnapshot := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
 
 var results: Array[Dictionary] = []
 
@@ -30,11 +33,29 @@ func run() -> void:
 	main.biome_environment_catalog = catalog
 	main.visual_asset_registry = visual
 	main.animated_asset_registry = animated
+	var capture_start_usec := Time.get_ticks_usec()
 	var bundle: Dictionary = BundleScript.capture(main)
+	var capture_ms := float(Time.get_ticks_usec() - capture_start_usec) / 1000.0
 	check("bundle_captured", bool(bundle.get("ok", false)))
 	check("explicitly_incomplete", bundle.get("complete") == false \
 		and bundle.get("scope") == "owner_catalogs_and_removals_only")
-	check("initial_current", BundleScript.is_current(main, bundle))
+	var freshness_start_usec := Time.get_ticks_usec()
+	var initially_current: bool = BundleScript.is_current(main, bundle)
+	var freshness_ms := float(Time.get_ticks_usec() - freshness_start_usec) / 1000.0
+	check("initial_current", initially_current)
+	var freshness_parts := {}
+	var part_start := Time.get_ticks_usec()
+	check("biome_current", BiomeSnapshot.is_current(catalog, bundle.biome))
+	freshness_parts["biomeMs"] = float(Time.get_ticks_usec() - part_start) / 1000.0
+	part_start = Time.get_ticks_usec()
+	check("visual_current", VisualSnapshot.is_current(visual, bundle.visual))
+	freshness_parts["visualMs"] = float(Time.get_ticks_usec() - part_start) / 1000.0
+	part_start = Time.get_ticks_usec()
+	check("presentation_current", animated.presentation_capture_is_current(bundle.presentation))
+	freshness_parts["presentationMs"] = float(Time.get_ticks_usec() - part_start) / 1000.0
+	part_start = Time.get_ticks_usec()
+	check("removed_current", RemovedSnapshot.is_current(main, bundle.removed))
+	freshness_parts["removedMs"] = float(Time.get_ticks_usec() - part_start) / 1000.0
 	var forged_complete := bundle.duplicate(true)
 	forged_complete.complete = true
 	check("complete_claim_rejected", not BundleScript.is_current(main, forged_complete))
@@ -73,6 +94,8 @@ func run() -> void:
 		return
 	file.store_string(JSON.stringify({"finished": true, "passed": passed,
 		"evidenceLevel": "contract", "resultCount": results.size(), "results": results,
+		"captureMs": capture_ms, "freshnessMs": freshness_ms,
+		"freshnessParts": freshness_parts,
 		"scope": "Owner catalog/removal capture and freshness only; no terrain pin, structure halo, native manifest or gameplay."}, "  "))
 	file.close()
 	quit(0 if passed else 1)
