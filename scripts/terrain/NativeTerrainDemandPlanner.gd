@@ -13,6 +13,9 @@ const MAX_DELTA_BLOCKS := 128
 var _consumer_id := 0
 var _sources: Dictionary = {}
 var _desired: Dictionary = {}
+var _required_mesh_blocks: Dictionary = {}
+var _demand_revision := 0
+var _closure_token := ""
 var _desired_priority: Dictionary = {}
 var _applied: Dictionary = {}
 var _issued: Dictionary = {}
@@ -34,8 +37,10 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 	if vertical_bounds.x > vertical_bounds.y or vertical_bounds.y - vertical_bounds.x > 256:
 		return {"status":"failed", "reason":"invalid_vertical_bounds"}
 	var planned_sources := {}
+	var planned_mesh_sources := {}
 	if not primary.is_empty():
-		var primary_result := _add_viewer(planned_sources, "primary", "primary", primary, vertical_bounds)
+		var primary_result := _add_viewer(planned_sources, planned_mesh_sources,
+			"primary", "primary", primary, vertical_bounds)
 		if primary_result.status != "ready": return primary_result
 	for spec in other_viewers:
 		var kind := String(spec.get("kind", ""))
@@ -43,13 +48,16 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 			return {"status":"failed", "reason":"invalid_viewer_kind"}
 		var source_id := String(spec.get("id", ""))
 		if source_id.is_empty(): return {"status":"failed", "reason":"missing_viewer_id"}
-		var viewer_result := _add_viewer(planned_sources, kind, source_id, spec, vertical_bounds)
+		var viewer_result := _add_viewer(planned_sources, planned_mesh_sources,
+			kind, source_id, spec, vertical_bounds)
 		if viewer_result.status != "ready": return viewer_result
 	for chunk in retained_chunks:
-		var retained_result := _add_chunk(planned_sources, "retained", chunk, vertical_bounds)
+		var retained_result := _add_chunk(planned_sources, planned_mesh_sources,
+			"retained", chunk, vertical_bounds)
 		if retained_result.status != "ready": return retained_result
 	for chunk in foreground_chunks:
-		var foreground_result := _add_chunk(planned_sources, "foreground", chunk, vertical_bounds)
+		var foreground_result := _add_chunk(planned_sources, planned_mesh_sources,
+			"foreground", chunk, vertical_bounds)
 		if foreground_result.status != "ready": return foreground_result
 	var union := {}
 	var priorities := {}
@@ -61,12 +69,36 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 			if union.size() > MAX_UNION_BLOCKS:
 				return {"status":"pending", "reason":"desired_union_capacity",
 					"attemptedBlocks":union.size(), "maxBlocks":MAX_UNION_BLOCKS}
+	var next_required := {}
+	for source_id in planned_mesh_sources:
+		for block: Vector3i in planned_mesh_sources[source_id]:
+			next_required[block] = true
+	if next_required != _required_mesh_blocks:
+		_required_mesh_blocks = next_required
+		_demand_revision += 1
+		var closure: Array[Vector3i] = []
+		for block: Vector3i in _required_mesh_blocks: closure.append(block)
+		_sort_blocks(closure)
+		var key_parts := PackedStringArray(["%d:%d" % [_consumer_id, _demand_revision]])
+		for block in closure:
+			key_parts.append("%d,%d,%d" % [block.x, block.y, block.z])
+		_closure_token = ":".join(key_parts).sha256_text()
 	_sources = planned_sources
 	_desired = union
 	_desired_priority = priorities
 	return {"status":"ready", "sourceCount":_sources.size(),
 		"desiredDataBlocks":_desired.size(), "appliedDataBlocks":_applied.size(),
+		"requiredMeshBlocks":_required_mesh_blocks.size(),
+		"demandRevision":_demand_revision, "closureToken":_closure_token,
 		"consumerId":_consumer_id}
+
+func required_collision_mesh_blocks() -> Dictionary:
+	if _consumer_id <= 0: return {"status":"failed", "reason":"planner_not_configured"}
+	var blocks: Array[Vector3i] = []
+	for block: Vector3i in _required_mesh_blocks: blocks.append(block)
+	_sort_blocks(blocks)
+	return {"status":"ready", "revision":_demand_revision,
+		"closureToken":_closure_token, "blocks":blocks}
 
 func next_delta() -> Dictionary:
 	if _consumer_id <= 0:
@@ -120,7 +152,7 @@ func source_ids() -> Array[String]:
 	ids.sort()
 	return ids
 
-func _add_viewer(target: Dictionary, kind: String, source_id: String,
+func _add_viewer(target: Dictionary, mesh_target: Dictionary, kind: String, source_id: String,
 		spec: Dictionary, bounds: Vector2i) -> Dictionary:
 	var key := "viewer:%s:%s" % [kind, source_id]
 	if target.has(key): return {"status":"failed", "reason":"duplicate_source_id"}
@@ -134,25 +166,29 @@ func _add_viewer(target: Dictionary, kind: String, source_id: String,
 	var blocks := _data_blocks_for_cell_box(center.x - distance, center.x + distance,
 		center.y - distance, center.y + distance, bounds)
 	target[key] = blocks
+	mesh_target[key] = _data_blocks_for_cell_box(center.x - distance, center.x + distance,
+		center.y - distance, center.y + distance, bounds, 0)
 	return {"status":"ready"}
 
-func _add_chunk(target: Dictionary, kind: String, chunk: Vector2i, bounds: Vector2i) -> Dictionary:
+func _add_chunk(target: Dictionary, mesh_target: Dictionary, kind: String, chunk: Vector2i,
+		bounds: Vector2i) -> Dictionary:
 	var key := "chunk:%s:%d:%d" % [kind, chunk.x, chunk.y]
 	if target.has(key): return {"status":"ready"}
 	var first := chunk * GAME_CHUNK_CELLS
 	var last := first + Vector2i.ONE * (GAME_CHUNK_CELLS - 1)
 	target[key] = _data_blocks_for_cell_box(first.x, last.x, first.y, last.y, bounds)
+	mesh_target[key] = _data_blocks_for_cell_box(first.x, last.x, first.y, last.y, bounds, 0)
 	return {"status":"ready"}
 
 func _data_blocks_for_cell_box(min_x: int, max_x: int, min_z: int, max_z: int,
-		bounds: Vector2i) -> Dictionary:
+		bounds: Vector2i, halo := 1) -> Dictionary:
 	var blocks := {}
-	for z in range(floori(float(min_z) / BLOCK_CELLS) - 1,
-			floori(float(max_z) / BLOCK_CELLS) + 2):
-		for y in range(floori(float(bounds.x) / BLOCK_CELLS) - 1,
-				floori(float(bounds.y) / BLOCK_CELLS) + 2):
-			for x in range(floori(float(min_x) / BLOCK_CELLS) - 1,
-				floori(float(max_x) / BLOCK_CELLS) + 2):
+	for z in range(floori(float(min_z) / BLOCK_CELLS) - halo,
+			floori(float(max_z) / BLOCK_CELLS) + halo + 1):
+		for y in range(floori(float(bounds.x) / BLOCK_CELLS) - halo,
+				floori(float(bounds.y) / BLOCK_CELLS) + halo + 1):
+			for x in range(floori(float(min_x) / BLOCK_CELLS) - halo,
+					floori(float(max_x) / BLOCK_CELLS) + halo + 1):
 				blocks[Vector3i(x, y, z)] = true
 	return blocks
 

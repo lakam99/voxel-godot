@@ -223,3 +223,36 @@ gate `authority_ready` and gameplay release; a logical native page or edit
 commit alone is insufficient. Until those runtime contracts are implemented
 and verified through headed New Game and Continue, the N3 owner remains an
 inert service and the production script runtime remains authoritative.
+
+`NativeTerrainTriangleArtifactProducer` now provides the source-bound input
+side for N5's future resident collision owner. It asks the native backend for
+an asynchronous padded 19-cell block (Transvoxel padding 1/2), loads all three
+native SDF/indices/data channels, and calls the installed Voxel Tools
+`VoxelMesherTransvoxel.build_mesh` API. The resulting triangle soup is scaled
+and translated from local 16-cell block coordinates to world coordinates.
+This is a native-source consumer using Voxel Tools meshing, not a first-party
+pure-C++ geometry authority or an installed collision shape. Rows retain
+source/pin/content identities, native and shaping revisions, owner/source and
+cancellation epochs, a deterministic artifact key, world bounds, and a probe
+segment. Empty blocks produce an explicit no-shape row. The source-owned
+`collision_artifact_row` returns a deep copy so N5 can reject caller-modified
+vertices even if a key is reused.
+
+Required mesh membership is derived independently in
+`NativeTerrainDemandPlanner` from the same viewer/chunk source geometry as
+data-block demand, without its data halo. Identical demand refreshes retain
+their revision and closure token; a changed closure gets a new identity. The
+producer's `collision_source_snapshot` stays pending until every required
+block has a source-bound artifact at the current shaping registry revision.
+Artifact keys digest the exact native channels and source identity; an
+unrelated durable edit can refresh row revisions without changing an unchanged
+block's key. A shaping revision change makes older rows stale until they are
+encoded again. This contract is still a service boundary:
+the production `VoxelTerrainRuntime` does not consume it, N5 has not installed
+its full resident collision set, and Voxel Tools remains the live collider
+authority. Focused evidence:
+`artifacts/native-world-backend/n3-triangle-artifact-1790178008748-faeb26fd/report.json`
+passes native payload/triangle attribution, empty blocks, stale worker drain,
+immutable row copy, no-op demand identity, negative/adjacent analytic seams,
+and a measured maximum `advance` step of 2,237 microseconds in that fixture.
+It does not prove headed loading cadence or full-world collision parity.
