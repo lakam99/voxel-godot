@@ -5,7 +5,7 @@ const TreeRuntimeRequestBuilderScript := preload("res://scripts/environment/Tree
 const RockRecipeBuilderScript := preload("res://scripts/environment/RockRecipeBuilder.gd")
 
 # Emitted only after the production rock body, visual and collider are published.
-signal rock_published(body: StaticBody3D)
+signal rock_published(body: StaticBody3D, collider: CollisionShape3D)
 
 const VOLUME_CUBE_CORNER_OFFSETS := [
     Vector3i(0, 0, 0),
@@ -4414,7 +4414,7 @@ func make_rock(parent: Node, prop_id: String, position: Vector3, rng: RandomNumb
         npc_system.notify_navigation_prop_created(prop_id, body)
         if runtime_perf_monitor != null:
             runtime_perf_monitor.end_section("rock_navigation_notify", navigation_started)
-    rock_published.emit(body)
+    rock_published.emit(body, collider)
     return body
 
 func make_ore_cluster(parent: Node, prop_id: String, position: Vector3, ore_type: String, rng: RandomNumberGenerator, count: int = 3) -> Array:

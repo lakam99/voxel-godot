@@ -56,9 +56,30 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   if (sample.rockJournalBinding?.status !== 'ready'
       || sample.rockJournalBinding?.productionCutover !== false)
     failures.push(`${label} production rock event journal not bound`);
+  if (sample.rockSourceBegin?.status !== 'pending'
+      || sample.rockSourcePoll?.status !== 'ready')
+    failures.push(`${label} async rock source preparation did not reach ready`);
   if (sample.rockJournalStatus?.pending !== 0 || sample.rockJournalUnbind?.status !== 'ready'
       || (sample.rockJournalAdvances ?? []).some(row => row.processed !== 1))
     failures.push(`${label} rock publication queue failed to drain`);
+  if ((sample.publishedRockFootprints?.length ?? 0) > 0
+      && (sample.rockLifecycle?.beforeStatus !== 'ready'
+        || sample.rockLifecycle?.afterStatus !== 'failed'
+        || !['observed_rock_body_exited', 'observed_rock_collider_exited'].includes(
+          sample.rockLifecycle?.afterReason)
+        || !sample.rockLifecycle?.beforeFootprintIdentity))
+    failures.push(`${label} rock body exit did not invalidate its receipt`);
+  if ((sample.publishedRockFootprints?.length ?? 0) > 1
+      && (sample.colliderLifecycle?.beforeStatus !== 'ready'
+        || sample.colliderLifecycle?.afterStatus !== 'failed'
+        || sample.colliderLifecycle?.afterReason !== 'observed_rock_collider_exited'
+        || !sample.colliderLifecycle?.beforeFootprintIdentity))
+    failures.push(`${label} collider exit did not invalidate its receipt`);
+  if ((sample.rockJournalStatus?.maxCallbackUsec ?? Infinity) > 1000
+      || (sample.rockJournalStatus?.maxPrepareCaptureUsec ?? Infinity) > 8000
+      || (sample.rockJournalStatus?.maxPreparePollUsec ?? Infinity) > 8000
+      || (sample.rockJournalStatus?.maxAdvanceUsec ?? Infinity) > 8000)
+    failures.push(`${label} rock publication main-thread budget exceeded`);
   for (const [key, value] of Object.entries(sample.admissions ?? {}))
     if (value !== 'ready') failures.push(`${label} ${key} admission: ${value}`);
   if (sample.direct?.length !== 28 || sample.native?.length !== 28)
@@ -263,6 +284,12 @@ if (!probe?.edgeCaseReady) failures.push('No outside-chunk tree halo blocker cas
 if (edgeTreesSuppressed === 0) failures.push('No baseline-present tree was suppressed by the outside-chunk blocker');
 const absentCitadelKeysCompared = (probe?.cases ?? [])
   .reduce((count, sample) => count + (sample.treeHaloAbsentCitadelKeys?.length ?? 0), 0);
+const p99 = values => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  return sorted.length ? sorted[Math.ceil(sorted.length * 0.99) - 1] : 0;
+};
+const timingSamples = field => (probe?.cases ?? []).flatMap(
+  sample => sample.rockJournalStatus?.[field] ?? []);
 // This fixture configures zero Citadel spawn chance and does not enqueue a
 // candidate region. Its legitimate source_not_requested absence has no key;
 // report keyed-absence coverage separately rather than claim it was exercised.
@@ -279,8 +306,18 @@ const report = {
   rockDefinitionsCompared,
   maxRockPublicationCallbackUsec: Math.max(0, ...(probe?.cases ?? []).map(
     sample => sample.rockJournalStatus?.maxCallbackUsec ?? 0)),
+  p99RockPublicationCallbackUsec: p99(timingSamples('callbackUsecSamples')),
   maxRockFootprintAdvanceUsec: Math.max(0, ...(probe?.cases ?? []).map(
     sample => sample.rockJournalStatus?.maxAdvanceUsec ?? 0)),
+  p99RockFootprintAdvanceUsec: p99(timingSamples('advanceUsecSamples')),
+  maxRockSourceCaptureUsec: Math.max(0, ...(probe?.cases ?? []).map(
+    sample => sample.rockJournalStatus?.maxPrepareCaptureUsec ?? 0)),
+  p99RockSourceCaptureUsec: p99(timingSamples('prepareCaptureUsecSamples')),
+  maxRockSourcePollUsec: Math.max(0, ...(probe?.cases ?? []).map(
+    sample => sample.rockJournalStatus?.maxPreparePollUsec ?? 0)),
+  p99RockSourcePollUsec: p99(timingSamples('preparePollUsecSamples')),
+  maxRockSourceWorkerUsec: Math.max(0, ...(probe?.cases ?? []).map(
+    sample => sample.rockJournalStatus?.maxPrepareWorkerUsec ?? 0)),
   maxOrderedSourceComposeUsec: Math.max(0, ...(probe?.cases ?? []).map(
     sample => sample.orderedComposeUsec ?? 0)),
   productionCutover: false,
