@@ -86,6 +86,11 @@ NativeTreeExclusionHaloCapture NativeTreeExclusionHaloCapture::create(
                 || c.reservation.min_z >= c.reservation.max_z) reject();
         } else if (c.status != CitadelSourceStatus::absent
             && c.status != CitadelSourceStatus::pending && c.status != CitadelSourceStatus::failed) reject();
+        else if ((c.status != CitadelSourceStatus::absent
+                && (c.reason.empty() || !c.source_key.empty()))
+            || !c.source_signature.empty() || c.admission_generation != 0U
+            || c.reservation.min_x != 0 || c.reservation.min_z != 0
+            || c.reservation.max_x != 0 || c.reservation.max_z != 0) reject();
     }
     Writer w;
     w.u8('T'); w.u8('H'); w.u8('L'); w.u8('1');
@@ -141,9 +146,9 @@ NativeSurfaceTreePresenceDecision evaluate_native_tree_exclusion_halo(
                 [rx, rz](const auto &c) { return c.region_x == rx && c.region_z == rz; });
             // The adapter must have admitted the exact expanded coverage.
             // Under that receipt, source_not_requested means the candidate's
-            // declared influence cannot touch this halo.
-            if (found == halo.citadels().end() || found->status == CitadelSourceStatus::pending
-                || found->status == CitadelSourceStatus::failed) reject();
+            // declared influence cannot touch this halo. The same ready
+            // admission makes an unrelated failed source irrelevant.
+            if (found == halo.citadels().end() || found->status == CitadelSourceStatus::pending) reject();
         }
     }
     const auto n = out.natural_margin_cells, s = out.structure_margin_cells;

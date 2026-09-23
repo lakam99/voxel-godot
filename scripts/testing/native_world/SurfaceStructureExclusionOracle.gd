@@ -4,6 +4,7 @@ extends SceneTree
 
 const Structures = preload("res://scripts/StructureSystem.gd")
 const RealAdmission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
+const ChunkSnapshot = preload("res://scripts/world/ActiveStructureExclusionChunkSnapshot.gd")
 const REPORT_ENV := "VOXEL_SURFACE_STRUCTURE_EXCLUSION_REPORT"
 const CELLS := [
 	Vector2i(-5,-5), Vector2i(-4,-4), Vector2i(-3,-3), Vector2i(-2,-2),
@@ -67,12 +68,29 @@ func run() -> void:
 	real_admission.configure("admission-context-oracle", {}, {"regionCells":384, "spawnChance":0.0})
 	check("real_admission_town_inputs_finalized", real_admission.finalize_town_inputs({}).status == "ready")
 	real_structures.citadel_terrain_admission = real_admission
+	real_structures.regional_source_generation = 1
 	var real_irrelevant := real_structures.capture_surface_tree_exclusion_halo(0,0,0,0)
 	check("real_unrequested_region_is_ready_after_exact_bounds", real_irrelevant.ready
 		and real_irrelevant.boundsAdmission.status == "ready"
 		and real_irrelevant.content.citadel[0].reason == "source_not_requested"
 		and real_structures.surface_tree_exclusion_halo_is_current(real_irrelevant))
+	var real_chunk := ChunkSnapshot.capture(real_structures, Vector2i.ZERO)
+	check("real_ready_chunk_captures_unrequested_region", real_chunk.ok
+		and real_chunk.boundsAdmission.status == "ready"
+		and real_chunk.content.citadel[0].reason == "source_not_requested"
+		and ChunkSnapshot.is_current(real_structures, real_chunk))
+	real_admission._fail(Vector2i.ZERO, "failed_site_outside_requested_bounds")
+	var real_failed_elsewhere := real_structures.capture_surface_tree_exclusion_halo(0,0,0,0)
+	check("real_failed_irrelevant_source_keeps_exact_bounds_ready", real_failed_elsewhere.ready
+		and real_failed_elsewhere.boundsAdmission.status == "ready"
+		and real_failed_elsewhere.content.citadel[0].status == "failed"
+		and real_structures.surface_tree_exclusion_halo_is_current(real_failed_elsewhere))
+	var real_failed_chunk := ChunkSnapshot.capture(real_structures, Vector2i.ZERO)
+	check("real_ready_chunk_captures_irrelevant_failed_region", real_failed_chunk.ok
+		and real_failed_chunk.content.citadel[0].status == "failed"
+		and not ChunkSnapshot.is_current(real_structures, real_chunk))
 	var structures := Structures.new()
+	structures.regional_source_generation = 1
 	var admission := Admission.new()
 	structures.citadel_terrain_admission = admission
 	var revision_before := structures.surface_prop_exclusion_records_revision()
@@ -88,6 +106,28 @@ func run() -> void:
 	admission.states[Vector2i.ZERO] = source("ready",Rect2i(15,15,3,3)) # half-open [15,18)
 	admission.states[Vector2i(1,1)] = source("prepared",Rect2i(2048,2048,2,2))
 	admission.states[Vector2i(-2,-2)] = source("ready",Rect2i(-2049,-2049,1,1))
+	var chunk_snapshot := ChunkSnapshot.capture(structures, Vector2i.ZERO)
+	check("chunk_snapshot_admits_canonical_local_records", chunk_snapshot.ok
+		and chunk_snapshot.bounds == Rect2i(0,0,28,28)
+		and chunk_snapshot.content.natural.is_empty()
+		and chunk_snapshot.content.terrain.size() == 1
+		and chunk_snapshot.content.citadel.size() == 1
+		and ChunkSnapshot.is_current(structures, chunk_snapshot))
+	var tampered_chunk := chunk_snapshot.duplicate(true)
+	tampered_chunk.content.terrain[0].maxX = 100
+	check("chunk_snapshot_nested_tamper_rejected", not ChunkSnapshot.is_current(structures, tampered_chunk))
+	admission.pending_bounds = true
+	check("chunk_snapshot_pending_bounds_rejected", not ChunkSnapshot.capture(structures, Vector2i.ZERO).ok
+		and not ChunkSnapshot.is_current(structures, chunk_snapshot))
+	admission.pending_bounds = false
+	structures.regional_source_generation += 1
+	check("chunk_snapshot_owner_generation_change_rejected", not ChunkSnapshot.is_current(structures, chunk_snapshot))
+	structures.regional_source_generation -= 1
+	var negative_chunk := ChunkSnapshot.capture(structures, Vector2i(-1,-1))
+	check("negative_chunk_captures_natural_record", negative_chunk.ok
+		and negative_chunk.content.natural.size() == 1
+		and negative_chunk.content.terrain.is_empty()
+		and ChunkSnapshot.is_current(structures, negative_chunk))
 	var rows := decision_rows(structures)
 	var expected := [false,true,true,true,false,false,false,false,false,false,false,false,false,true,true,true,true,true,false,false,true,true,true,false,false,false,true,true]
 	check("all_28_ordered_decisions",rows.size()==28)
@@ -193,7 +233,7 @@ func run() -> void:
 	if path.is_empty(): path = ProjectSettings.globalize_path("res://artifacts/native-world-backend/surface-structure-exclusion-oracle.json")
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	var report := {"runnerId":"surface_structure_exclusion_oracle","finished":true,"passed":passed,
-		"scope":"direct_structure_query_synthetic_citadel_states_not_live_gameplay",
+		"scope":"direct_structure_exclusion_and_chunk_capture_real_admission_plus_synthetic_states_not_live_gameplay",
 		"checks":checks,"orderedDecisions":rows,"expectedBlocked":expected,
 		"initialContentDigest":initial_digest,"permutedContentDigest":ordered_digest}
 	var file := FileAccess.open(path,FileAccess.WRITE)

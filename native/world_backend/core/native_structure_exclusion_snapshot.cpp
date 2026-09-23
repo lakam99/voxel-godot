@@ -237,12 +237,13 @@ StructureExclusionDecision NativeStructureExclusionSnapshot::query(std::int32_t 
         if (source.region_x != region_x || source.region_z != region_z) {
             continue;
         }
-        if (source.status == CitadelSourceStatus::pending || source.status == CitadelSourceStatus::failed) {
+        if (source.status == CitadelSourceStatus::pending) {
             return {false, false, StructureExclusionKind::unresolved, source.reason};
         }
-        if (source.status == CitadelSourceStatus::absent) {
+        if (source.status == CitadelSourceStatus::absent || source.status == CitadelSourceStatus::failed) {
             // Exact ready bounds admission proves an unrequested candidate
-            // cannot affect this chunk. The source lookup alone does not.
+            // or an unrelated failed candidate cannot affect this chunk.
+            // The region-wide source lookup alone proves neither fact.
             return {false, true, StructureExclusionKind::clear, source.reason};
         }
         if (half_open_contains(source.reservation, x, z)) {
@@ -267,7 +268,7 @@ bool NativeStructureExclusionSnapshot::covers_decided_regions(
                     return source.region_x == region_x && source.region_z == region_z;
                 });
             if (found == citadels_.end()) return false;
-            if (found->status == CitadelSourceStatus::pending || found->status == CitadelSourceStatus::failed)
+            if (found->status == CitadelSourceStatus::pending)
                 return false;
         }
     }

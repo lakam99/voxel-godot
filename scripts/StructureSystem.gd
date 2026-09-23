@@ -1203,7 +1203,10 @@ func capture_surface_tree_exclusion_halo(
             var region := Vector2i(region_x, region_z)
             var state: Dictionary = citadel_terrain_admission.source_state(region)
             var status := String(state.get("status", ""))
-            if status not in ["ready", "prepared", "absent"]:
+            # A failed source outside this footprint is irrelevant when the
+            # exact bounds request is ready; a failed relevant source makes
+            # that request fail before this capture can be admitted.
+            if status not in ["ready", "prepared", "absent", "failed"]:
                 ready = false
             var binding_value: Variant = state.get("binding", {})
             if not (binding_value is Dictionary):

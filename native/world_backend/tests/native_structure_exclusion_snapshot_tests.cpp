@@ -138,9 +138,9 @@ VWB_TEST(structure_exclusion_status_is_explicit_and_not_empty_success) {
         {unrequested_source}, admissions());
     const auto uncaptured = NativeStructureExclusionSnapshot::create(world(), 1, {}, {}, {}, admissions());
     VWB_EXPECT(!pending.query(2048, 2048).blocked && !pending.query(2048, 2048).complete);
-    VWB_EXPECT(!failed.query(2048, 2048).complete);
+    VWB_EXPECT(failed.query(2048, 2048).complete && !failed.query(2048, 2048).blocked);
     VWB_EXPECT(!pending.covers_decided_regions(2048, 2048, 2048, 2048));
-    VWB_EXPECT(!failed.covers_decided_regions(2048, 2048, 2048, 2048));
+    VWB_EXPECT(failed.covers_decided_regions(2048, 2048, 2048, 2048));
     VWB_EXPECT(absent.query(2048, 2048).complete && !absent.query(2048, 2048).blocked);
     VWB_EXPECT(unrequested.query(2048, 2048).complete && !unrequested.query(2048, 2048).blocked);
     VWB_EXPECT(unrequested.covers_decided_regions(2048, 2048, 2048, 2048));

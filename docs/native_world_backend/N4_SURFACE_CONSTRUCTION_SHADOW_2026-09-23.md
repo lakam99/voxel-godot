@@ -229,6 +229,30 @@ n4-citadel-bounds-context-01` passed at
 lines, 1,371/1,371 functions, and 5,954/5,954 branches covered. These are
 source-contract and shadow-adapter results, not live publication evidence.
 
+A further direct admission case showed that a region may retain a failed site
+whose declared influence is outside the requested chunk. The exact bounds
+request still returns ready, so the failure is not a blocker for that chunk;
+`source_state` alone cannot decide this either. The native center and tree
+queries now accept that failed-but-irrelevant state only under their respective
+ready bounds contracts, while a failed relevant source makes the bounds
+request fail. A composed `ActiveStructureExclusionChunkSnapshot` now captures
+one 28-cell StructureSystem source value with that admission, validated local
+natural/terrain rectangles, every crossed Citadel row, reset/revision identity,
+and a content hash. The focused Godot oracle passed 74/74 at
+`artifacts/native-world-backend/n4-structure-exclusion-chunk-capture-03/report.json`,
+including real irrelevant-failed admission, pending-bounds rejection, negative
+chunks, tamper and owner-generation freshness. This capture has no production
+caller and does not yet enter the native adapter or generate a live prop.
+The first integrated run, `n4-structure-chunk-capture-01`, exposed one stale
+native test expectation: it still expected every failed Citadel row to reject
+a tree halo. The corrected contract accepts a failed row only under exact
+ready-bounds admission and rejects a malformed failed row that carries
+physical source fields. `node tools/run-native-world-backend-tests.mjs
+--run-name n4-structure-chunk-capture-02` then passed 446/446 debug and
+446/446 release tests, both adapter smokes, and strict pure-core coverage of
+10,012/10,012 lines, 1,371/1,371 functions and 5,968/5,968 branches.
+Its report is `artifacts/native-world-backend/n4-structure-chunk-capture-02/report.json`.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

@@ -40,12 +40,21 @@ VWB_TEST(native_tree_halo_rejects_uncaptured_chunk_edge_and_negative_region) {
     VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
         evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, missing_region));
     const auto pending = [] {
-        auto c = absent(-1,-1); c.status = CitadelSourceStatus::pending; c.reason = "pending"; return c;
+        auto c = absent(-1,-1); c.status = CitadelSourceStatus::pending;
+        c.source_key.clear(); c.reason = "pending"; return c;
     }();
     const auto pending_halo = halo({-8,-8,35,35}, {}, {},
         {pending, absent(0,-1), absent(-1,0), absent(0,0)});
     VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
         evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, pending_halo));
+    auto failed_elsewhere = absent(-1,-1);
+    failed_elsewhere.status = CitadelSourceStatus::failed;
+    failed_elsewhere.source_key.clear();
+    failed_elsewhere.reason = "failed_site_outside_requested_bounds";
+    const auto failed_elsewhere_halo = halo({-8,-8,35,35}, {}, {},
+        {failed_elsewhere, absent(0,-1), absent(-1,0), absent(0,0)});
+    VWB_EXPECT_EQ(NativeSurfaceTreePresence::present,
+        evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, failed_elsewhere_halo).presence);
     auto unrequested = absent(-1,-1);
     unrequested.source_key.clear();
     unrequested.reason = "source_not_requested";
@@ -166,9 +175,16 @@ VWB_TEST(native_tree_halo_validates_complete_receipt_fields) {
     bad = c; bad.reservation.max_z = 0; invalid_citadel(bad);
     bad = c; bad.status = static_cast<CitadelSourceStatus>(99); invalid_citadel(bad);
     bad = c; bad.status = CitadelSourceStatus::failed; bad.reason = "failed";
-    const auto failed = halo({0,0,40,40}, {}, {}, {bad});
-    VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
-        evaluate_native_tree_exclusion_halo(10,10,1.0,1.0,0.0,1.35,failed));
+    invalid_citadel(bad);
+    bad = absent(0,0); bad.status = CitadelSourceStatus::failed;
+    bad.source_key.clear(); invalid_citadel(bad);
+    bad.reason = "failed"; bad.source_key = "site"; invalid_citadel(bad);
+    bad.source_key.clear(); bad.source_signature = "sig"; invalid_citadel(bad);
+    bad.source_signature.clear(); bad.admission_generation = 1U; invalid_citadel(bad);
+    bad.admission_generation = 0U; bad.reservation.min_x = 1; invalid_citadel(bad);
+    bad.reservation.min_x = 0; bad.reservation.min_z = 1; invalid_citadel(bad);
+    bad.reservation.min_z = 0; bad.reservation.max_x = 1; invalid_citadel(bad);
+    bad.reservation.max_x = 0; bad.reservation.max_z = 1; invalid_citadel(bad);
 }
 
 VWB_TEST(native_tree_halo_rejects_all_margin_and_coverage_boundaries) {

@@ -85,7 +85,8 @@ public:
 
     StructureExclusionDecision query(std::int32_t x, std::int32_t z) const;
     // Inclusive cell rectangle. The caller separately requires exact ready
-    // bounds admission; within it, an unrequested candidate is irrelevant.
+    // bounds admission; within it, an unrequested or failed-outside-footprint
+    // candidate is irrelevant.
     bool covers_decided_regions(std::int32_t min_x, std::int32_t min_z,
                                 std::int32_t max_x, std::int32_t max_z) const noexcept;
     const Sha256Digest &world_digest() const noexcept;
