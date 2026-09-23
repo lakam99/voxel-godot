@@ -7,7 +7,8 @@ func _init() -> void:
 
 func _run() -> void:
 	var identity := {"ownerGeneration":7, "sourceRevision":3,
-		"sourceEpoch":"aggregate-source", "cancellationEpoch":4}
+		"sourceEpoch":"aggregate-source", "cancellationEpoch":4,
+		"sourceIdentity":{"hex":"aggregate-source-hash"}}
 	var source_identity := {"hex":"aggregate-source-hash"}
 	var required: Array[Vector3i] = []
 	var groups := {}
@@ -30,7 +31,9 @@ func _run() -> void:
 		var local_token := "window:%d,%d,%d" % [id.x, id.y, id.z]
 		var window := {"id":id, "blocks":groups[id],
 			"closureToken":local_token, "windowToken":local_token,
-			"windowIndex":index}
+			"windowIndex":index, "identity":identity.duplicate(true),
+			"localCurrentProof":{"kind":"native_current_revision",
+				"throughGlobalRevision":3, "digest":"current:%s" % local_token}}
 		windows.append(window)
 		receipts[id] = _receipt(identity, source_identity, window)
 	var layout := {"status":"ready", "schema":"n3-mesh-window-layout/v1",
@@ -54,7 +57,10 @@ func _run() -> void:
 	var remote := Vector3i(32, 0, 0)
 	var remote_window := {"id":Vector3i(2, 0, 0), "blocks":[remote],
 		"closureToken":"remote-window", "windowToken":"remote-window",
-		"windowIndex":expanded_layout.windows.size()}
+		"windowIndex":expanded_layout.windows.size(),
+		"identity":identity.duplicate(true),
+		"localCurrentProof":{"kind":"native_current_revision",
+			"throughGlobalRevision":3, "digest":"current:remote-window"}}
 	expanded_layout.requiredBlocks.append(remote)
 	expanded_layout.requiredBlockCount += 1
 	expanded_layout.windows.append(remote_window)
@@ -68,6 +74,23 @@ func _run() -> void:
 		remote_window)
 	var expanded_ready: Dictionary = AGGREGATE.evaluate(expanded_layout,
 		expanded_receipts)
+	var edited_layout: Dictionary = layout.duplicate(true)
+	edited_layout.identity.sourceRevision = 4
+	edited_layout.layoutToken = "layout-distant-edit"
+	for window in edited_layout.windows:
+		window.localCurrentProof.kind = "verified_native_affected_mesh_exclusion/v1"
+		window.localCurrentProof.throughGlobalRevision = 4
+		window.localCurrentProof.digest = "native-verified:%s" % window.windowToken
+	var retained_ready: Dictionary = AGGREGATE.evaluate(edited_layout, receipts)
+	var old_generation_layout: Dictionary = edited_layout.duplicate(true)
+	old_generation_layout.windows[0].identity.ownerGeneration = 6
+	var old_generation: Dictionary = AGGREGATE.evaluate(old_generation_layout, receipts)
+	var old_epoch_layout: Dictionary = edited_layout.duplicate(true)
+	old_epoch_layout.windows[0].identity.sourceEpoch = "prior-source-epoch"
+	var old_epoch: Dictionary = AGGREGATE.evaluate(old_epoch_layout, receipts)
+	var unproved_layout: Dictionary = edited_layout.duplicate(true)
+	unproved_layout.windows[0].localCurrentProof.digest = ""
+	var unproved: Dictionary = AGGREGATE.evaluate(unproved_layout, receipts)
 	var passed: bool = required.size() == 4913 and windows.size() == 8 \
 		and (groups[Vector3i.ZERO] as Array).size() == 4096 \
 		and full.get("status") == "ready" \
@@ -78,14 +101,24 @@ func _run() -> void:
 		and duplicate.get("status") == "failed" \
 		and duplicate.get("reason") == "collision_window_union_invalid" \
 		and expanded_pending.get("status") == "pending" \
-		and expanded_ready.get("status") == "ready"
+		and expanded_ready.get("status") == "ready" \
+		and retained_ready.get("status") == "ready" \
+		and old_generation.get("status") == "pending" \
+		and old_generation.get("reason") == "collision_window_local_proof_stale" \
+		and old_epoch.get("status") == "pending" \
+		and old_epoch.get("reason") == "collision_window_local_proof_stale" \
+		and unproved.get("status") == "pending" \
+		and unproved.get("reason") == "collision_window_local_proof_stale"
 	var report := {"schema":"n5-window-aggregate-contract/v1",
 		"passed":passed, "evidenceLevel":"synthetic aggregate contract",
 		"productionCutover":false, "requiredBlockCount":required.size(),
 		"windowCount":windows.size(), "largestWindowBlockCount":4096,
 		"full":full, "missing":missing, "stale":stale,
 		"duplicate":duplicate, "expandedPending":expanded_pending,
-		"expandedReady":expanded_ready}
+		"expandedReady":expanded_ready,
+		"retainedAfterVerifiedEdit":retained_ready,
+		"oldGeneration":old_generation, "oldSourceEpoch":old_epoch,
+		"unprovedEdit":unproved}
 	var path := OS.get_environment("N5_WINDOW_AGGREGATE_REPORT")
 	if not path.is_empty():
 		DirAccess.make_dir_recursive_absolute(path.get_base_dir())
