@@ -104,6 +104,10 @@ public:
 	godot::Dictionary apply_shaping_resolutions(const godot::Array &p_resolutions);
 	godot::Dictionary commit_typed_cells(const godot::Dictionary &p_request);
 	godot::Dictionary commit_durable_cells(const godot::Dictionary &p_request);
+	godot::Dictionary begin_staged_durable_cells(const godot::Dictionary &p_request);
+	godot::Dictionary append_staged_durable_cells(const godot::Array &p_operations);
+	godot::Dictionary commit_staged_durable_cells();
+	godot::Dictionary abort_staged_durable_cells();
 	godot::Dictionary pin_effective_page(const godot::Vector2i &p_primary_page) const;
 	// Serialized, shadow-service-only composite admission. Not a Voxel Tools
 	// worker callback or a production publication authority.
@@ -138,6 +142,7 @@ private:
 	bool initialization_attempted_ = false;
 	std::string initialization_failure_;
 	std::unique_ptr<voxel::world_backend::NativeWorldBackendState> state_;
+	std::optional<voxel::world_backend::NativeWorldBackendTransaction> staged_durable_cells_;
 	std::unique_ptr<voxel::world_backend::NativeTerrainShapingRegistry> shaping_registry_;
 	std::unique_ptr<voxel::world_backend::NativeBiomeEnvironmentCatalog> biome_catalog_;
 	std::unique_ptr<voxel::world_backend::NativeFeatureDeltaSnapshot> removed_props_;

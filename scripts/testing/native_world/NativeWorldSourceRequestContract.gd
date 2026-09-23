@@ -240,13 +240,57 @@ func run() -> void:
 	check(oversized_converter.setup(main, oversized).get("status") == "ready",
 		"oversized historical column enters bounded conversion")
 	var oversized_result: Dictionary = {}
+	var max_oversized_step_usec := 0
+	var slowest_oversized_step := {}
 	for frame in range(300):
+		var step_started := Time.get_ticks_usec()
 		oversized_result = oversized_converter.advance()
+		var elapsed := Time.get_ticks_usec() - step_started
+		if elapsed > max_oversized_step_usec:
+			max_oversized_step_usec = elapsed
+			slowest_oversized_step = {"reason":oversized_result.get("reason", ""),
+				"status":oversized_result.get("status", ""),
+				"preparedCells":oversized_result.get("preparedCells", 0)}
 		if oversized_result.get("status") != "pending": break
 		await process_frame
-	check(oversized_result.get("reason") == "legacy_column_operation_limit"
-		and oversized_converter.export_volume().get("status") != "ready",
-		"oversized historical column fails closed before durable publication")
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	main.restore_volume_edits(oversized.terrain)
+	check(oversized_result.get("status") == "ready"
+		and oversized_result.get("terrainVolume", {})
+			== main.world_generation_system.save_terrain_volume_deltas(),
+		"oversized historical column stages past 4096 with one exact native revision")
+	var partial_converter = LEGACY_CONVERTER.new()
+	check(partial_converter.setup(main, deep_save).get("status") == "ready",
+		"partial conversion starts on private native backend")
+	var partial_step: Dictionary = {}
+	for frame in range(100):
+		partial_step = partial_converter.advance()
+		if partial_step.get("reason") == "preparing_legacy_column": break
+		await process_frame
+	var partial_backend = partial_converter._backend
+	check(partial_step.get("reason") == "preparing_legacy_column"
+		and int(partial_backend.status().get("terrainDeltaRevision", -1)) == 0
+		and partial_backend.export_terrain_volume_v2().get("terrainVolume", {}).get("sections", []) == []
+		and partial_converter.cancel().get("status") == "ready",
+		"cancel after staged cells leaves durable native volume unpublished")
+	var in_flight_converter = LEGACY_CONVERTER.new()
+	check(in_flight_converter.setup(main, oversized).get("status") == "ready",
+		"large conversion can start before asynchronous cancellation")
+	var in_flight_step: Dictionary = {}
+	for frame in range(300):
+		in_flight_step = in_flight_converter.advance()
+		if in_flight_step.get("reason") == "native_legacy_commit_in_flight": break
+		await process_frame
+	var cancellation: Dictionary = in_flight_converter.cancel()
+	for frame in range(300):
+		if cancellation.get("status") == "ready": break
+		await process_frame
+		cancellation = in_flight_converter.advance()
+	check(in_flight_step.get("reason") == "native_legacy_commit_in_flight"
+		and cancellation.get("cancelled") == true
+		and in_flight_converter.export_volume().get("status") != "ready",
+		"cancel while native commit runs drains worker without publishing owner")
 	var cancelled = LEGACY_CONVERTER.new()
 	check(cancelled.setup(main, legacy_save).get("status") == "ready"
 		and cancelled.cancel().get("status") == "ready"
@@ -264,7 +308,9 @@ func run() -> void:
 	var report := {"schema": "native-world-source-request-contract/v1", "passed": failures.is_empty(),
 		"evidenceLevel": "source-request-service-contract", "productionCutover": false,
 		"failures": failures, "maxConversionStepUsec": max_conversion_step_usec,
-		"maxDeepStepUsec": max_deep_step_usec}
+		"maxDeepStepUsec": max_deep_step_usec,
+		"maxOversizedStepUsec": max_oversized_step_usec,
+		"slowestOversizedStep":slowest_oversized_step}
 	var path := OS.get_environment("VWB_SOURCE_REQUEST_REPORT")
 	if path != "":
 		var file := FileAccess.open(path, FileAccess.WRITE)

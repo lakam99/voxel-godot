@@ -288,9 +288,13 @@ func export_terrain_volume_v2() -> Dictionary:
 func stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
 	if _state == "converting":
-		_legacy_converter.cancel()
+		var cancelled: Dictionary = _legacy_converter.cancel()
+		if cancelled.get("status") == "pending":
+			_state = "stopping_conversion"
+			return cancelled
 		_release_owners()
 		return {"status":"ready", "drained":true}
+	if _state == "stopping_conversion": return drain_step()
 	if _state == "new":
 		_state = "drained"
 		return {"status":"ready", "drained":true}
@@ -303,6 +307,11 @@ func stop() -> Dictionary:
 	return drain_step()
 
 func drain_step() -> Dictionary:
+	if _state == "stopping_conversion":
+		var drained: Dictionary = _legacy_converter.advance()
+		if drained.get("status") != "ready": return drained
+		_release_owners()
+		return {"status":"ready", "drained":true}
 	if _state != "stopping": return {"status":"failed", "reason":"stop_before_drain"}
 	var stopped: Dictionary = _publisher.stop()
 	if stopped.get("status") != "ready": return stopped

@@ -105,9 +105,17 @@ compares exact full snapshots against that production restore method for a
 negative column, duplicate ordered columns, and a deep column; it also covers
 pending page admission, cancellation, malformed input, and oversized-column
 failure. Report: `artifacts/native-world-backend/n3-world-source-request-1790174219980-877b22e0/report.json`.
-The native transaction binding limits a column to 4096 operations. Larger
-historical columns fail closed with `legacy_column_operation_limit`; they are
-not silently truncated or accepted for playable Continue. The converter's
+The converter now uses a private native staged durable transaction: it appends
+at most 64 typed cells per loading step, then commits one full column off the
+Godot frame and exports the completed v2 volume on a worker. A column beyond
+the adapter's 4096-operation one-shot limit matches the complete historical
+script snapshot, including its single revision and section stamps. Cancelling
+after a partial append or during the native commit drains the worker without
+publishing a playable owner. The focused report at
+`artifacts/native-world-backend/n3-world-source-request-1790176366615-6417e805/report.json`
+records a 1,721-microsecond maximum `advance` step for the >4096-cell fixture;
+the native core executable passed 520/520 tests. This is a service fixture,
+not a headed loading-cadence measurement. The converter's
 scheduling and save-shape adapter are transitional; v2 terrain-list support
 must remain through an authoritative native conversion API at production
 cutover. This service report does not prove headed reload, physical
