@@ -26,12 +26,26 @@ func run() -> void:
 		"centerZ":-main.TOWN_REGION_CELLS, "radius":main.TOWN_RADIUS_CELLS,
 		"level":main.WATER_LEVEL + 3.0}}
 	main.world_generation_system = WORLD.new()
-	main.world_generation_system.terrain_volume_service = VOLUME.new()
-	main.world_generation_system.terrain_volume_service.setup(main, null)
+	main.world_generation_system.setup(main)
 	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,-1,-1), {
 		"material":"stone", "biome":"deep_underground", "solid":true,
 		"density":1.25, "fluid":"", "blockId":"owner-contract-edit",
 		"light":{"sky":3,"block":11},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,0,-1), {
+		"material":"air", "biome":"underground_air", "solid":false,
+		"density":-1.0, "fluid":"", "blockId":"owner-above-air",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,1,-1), {
+		"material":"air", "biome":"underground_air", "solid":false,
+		"density":-1.0, "fluid":"", "blockId":"owner-headroom-air",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(-17,-2,-1), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.0, "fluid":"", "blockId":"owner-below-stone",
+		"light":{"sky":0,"block":0},
 		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
 	var world := Node3D.new()
 	root.add_child(world)
@@ -82,6 +96,34 @@ func run() -> void:
 			check(exported.get("state", {}).get("blockId") == "owner-contract-edit"
 				and exported.get("state", {}).get("solid") == true,
 				"current durable edit visible through native cell source")
+		var occupied_cell := Vector3i(-17,-1,-1)
+		var occupancy: Dictionary = owner.read_occupancy(occupied_cell)
+		var old_occupancy: Dictionary = main.world_generation_system.terrain_volume_service.terrain_occupancy_at_cell(occupied_cell)
+		var occupancy_fields := ["cell", "solid", "air", "material", "biome", "fluid",
+			"light", "floorSolid", "ceilingSolid", "walkableAir"]
+		var occupancy_matches: bool = occupancy.get("status") == "ready"
+		for field in occupancy_fields:
+			occupancy_matches = occupancy_matches and occupancy.get("occupancy", {}).get(field) == old_occupancy.get(field)
+		if not occupancy_matches:
+			observations.append({"nativeOccupancy":occupancy, "scriptOccupancy":old_occupancy})
+		check(occupancy_matches, "three-cell native occupancy matches script source vocabulary")
+		var walkable_cell := Vector3i(-17,0,-1)
+		var walkable: Dictionary = owner.read_occupancy(walkable_cell)
+		var old_walkable: Dictionary = main.world_generation_system.terrain_volume_service.terrain_occupancy_at_cell(walkable_cell)
+		var walkable_matches: bool = walkable.get("status") == "ready" and old_walkable.get("walkableAir") == true
+		for field in occupancy_fields:
+			walkable_matches = walkable_matches and walkable.get("occupancy", {}).get(field) == old_walkable.get(field)
+		check(walkable_matches, "edited air over support has exact native walkable occupancy")
+		var generated_cell := Vector3i(-20,-3,-3)
+		var generated: Dictionary = owner.read_occupancy(generated_cell)
+		var old_generated: Dictionary = main.world_generation_system.terrain_volume_service.terrain_occupancy_at_cell(generated_cell)
+		var generated_matches: bool = generated.get("status") == "ready"
+		for field in occupancy_fields:
+			generated_matches = generated_matches and generated.get("occupancy", {}).get(field) == old_generated.get(field)
+		if not generated_matches:
+			observations.append({"nativeGeneratedOccupancy":generated,
+				"scriptGeneratedOccupancy":old_generated})
+		check(generated_matches, "same-seed generated triple occupancy parity")
 		var numeric: Dictionary = owner.read_numeric_batch(
 			[Vector3(-16.5,-0.5,-0.5) * main.CELL], [Vector3i(-17,-1,-1)])
 		check(numeric.get("status") in ["ready", "pending"],
@@ -124,14 +166,51 @@ func run() -> void:
 		var sections: Array = committed.get("affectedSections", [])
 		var plan: Dictionary = committed.get("publicationPlan", {})
 		var edited_section := Vector3i(-2, -1, -1)
-		check(OWNER.receipt_covered_by_plan(sections, [edited_section], plan),
+		check(OWNER.receipt_matches_plan(sections, plan),
 			"real conservative native section receipt covered by preflighted mesh halo")
 		var forged_extra := sections.duplicate()
 		forged_extra.append(Vector3i(100, 0, 0))
-		check(not OWNER.receipt_covered_by_plan(forged_extra, [edited_section], plan)
-			and not OWNER.receipt_covered_by_plan([edited_section, edited_section], [edited_section], plan)
-			and not OWNER.receipt_covered_by_plan([Vector3i(-3, -1, -1)], [edited_section], plan),
-			"foreign duplicate and missing edited sections rejected")
+		var forged_missing := sections.duplicate()
+		forged_missing.erase(Vector3i(-3, -2, -2))
+		var forged_duplicate := sections.duplicate()
+		forged_duplicate[0] = forged_duplicate[1]
+		check(not OWNER.receipt_matches_plan(forged_extra, plan)
+			and not OWNER.receipt_matches_plan(forged_duplicate, plan)
+			and not OWNER.receipt_matches_plan(forged_missing, plan),
+			"foreign duplicate and missing neighbor sections rejected")
+		var barrier: Dictionary = plan.get("barrier", {})
+		var window_receipts: Array = []
+		for window in plan.get("subwindows", []):
+			var mesh_receipts: Array = []
+			for mesh_block in window.meshBlocks:
+				mesh_receipts.append({"block":mesh_block, "generation":2, "physicalReady":true})
+			window_receipts.append({"index":window.index, "token":window.token,
+				"nativeRevision":barrier.nativeRevision, "status":"ready",
+				"meshBlockReceipts":mesh_receipts})
+		var candidate := {"ownerInstanceId":owner.get_instance_id(),
+			"sourceIdentity":setup.sourceIdentity, "sourceEpoch":barrier.sourceEpoch,
+			"nativeRevision":barrier.nativeRevision, "barrierIdentity":barrier.identity,
+			"subwindowReceipts":window_receipts}
+		check(owner.inspect_edit_release_candidate(candidate).get("reason")
+			== "production_physical_owner_unbound",
+			"complete synthetic candidate cannot release physical barrier")
+		var wrong_owner := candidate.duplicate(true)
+		wrong_owner.ownerInstanceId = 1
+		var stale_revision := candidate.duplicate(true)
+		stale_revision.nativeRevision = native_revision
+		var wrong_source := candidate.duplicate(true)
+		wrong_source.sourceEpoch = "foreign"
+		check(owner.inspect_edit_release_candidate(wrong_owner).get("reason") == "edit_release_identity_mismatch"
+			and owner.inspect_edit_release_candidate(stale_revision).get("reason") == "edit_release_identity_mismatch"
+			and owner.inspect_edit_release_candidate(wrong_source).get("reason") == "edit_release_identity_mismatch",
+			"owner revision and source epoch mismatches rejected")
+		var partial := candidate.duplicate(true)
+		partial.subwindowReceipts.pop_back()
+		var duplicate := candidate.duplicate(true)
+		duplicate.subwindowReceipts.append(window_receipts[0])
+		check(owner.inspect_edit_release_candidate(partial).get("status") == "pending"
+			and owner.inspect_edit_release_candidate(duplicate).get("status") == "failed",
+			"partial candidate waits and duplicate subwindow is rejected")
 		var after_edit: Dictionary = owner.export_terrain_volume_v2()
 		check(after_edit.get("status") == "ready"
 			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1
@@ -172,6 +251,8 @@ func run() -> void:
 		"no retained backend after drain")
 	check(owner.read_cell(Vector3i.ZERO).get("reason") == "owner_not_active",
 		"drained owner does not fall back")
+	check(owner.read_occupancy(Vector3i.ZERO).get("reason") == "owner_not_active",
+		"drained owner rejects occupancy queries")
 	check(owner.export_terrain_volume_v2().get("reason") == "owner_not_active",
 		"drained owner cannot export stale save data")
 	check(owner.commit_durable_cells("owner:drained", 0, []).get("reason") == "owner_not_active",

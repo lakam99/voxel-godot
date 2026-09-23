@@ -11,6 +11,7 @@ const DemandPlanner = preload("res://scripts/terrain/NativeTerrainDemandPlanner.
 const BlockPublisher = preload("res://scripts/terrain/NativeTerrainBlockPublisher.gd")
 const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
 const NumericSource = preload("res://scripts/terrain/NativeTerrainNumericSource.gd")
+const OccupancySource = preload("res://scripts/terrain/NativeTerrainOccupancySource.gd")
 const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 var _backend
@@ -20,6 +21,7 @@ var _planner
 var _publisher
 var _cells
 var _numeric
+var _occupancy
 var _state := "new"
 var _failure := ""
 var _seed_text := ""
@@ -60,6 +62,10 @@ func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dict
 	var numeric_ready: Dictionary = _numeric.bind(_backend)
 	if numeric_ready.get("status") != "ready":
 		return _setup_failure(String(numeric_ready.get("reason", "native_numeric_source_failed")))
+	_occupancy = OccupancySource.new()
+	var occupancy_ready: Dictionary = _occupancy.bind(_cells)
+	if occupancy_ready.get("status") != "ready":
+		return _setup_failure(String(occupancy_ready.get("reason", "native_occupancy_source_failed")))
 	_publisher = BlockPublisher.new()
 	var published: Dictionary = _publisher.setup(_backend, terrain, _pages, consumer_id, priority)
 	if published.get("status") != "ready":
@@ -108,6 +114,10 @@ func read_cells(cells: Array[Vector3i]) -> Dictionary:
 func read_numeric_batch(world_positions: Array[Vector3], projection_cells: Array[Vector3i]) -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _numeric.read_numeric_batch(world_positions, projection_cells)
+
+func read_occupancy(cell: Vector3i) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _occupancy.read_occupancy(cell)
 
 ## Commit durable cell deltas through the same owner used for reads and saves.
 ## The returned plan describes work still needed for physical publication; it
@@ -162,7 +172,7 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 			or int(after.get("terrainDeltaRevision", -1)) != revision:
 		return _active_failure("native_edit_receipt_stale")
 	var actual_sections: Array = receipt.get("affectedSections", [])
-	if not receipt_covered_by_plan(actual_sections, anticipated_sections, planned):
+	if not receipt_matches_plan(actual_sections, planned):
 		return _active_failure("native_edit_section_receipt_mismatch")
 	_pending_edit_plan = planned
 	var observed: Dictionary = _publisher.observe_committed_edit(
@@ -174,20 +184,41 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 		"changedCells":cells, "publicationPlan":planned,
 		"physicalReady":false, "blockedResidentMeshes":observed.get("blocked", 0)}
 
-## Native affectedSections includes conservative neighbors. Every receipt
-## section must fit the preflighted mesh halo, and every edited section must be
-## represented; unknown, duplicate, or untyped sections fail closed.
-static func receipt_covered_by_plan(sections: Array, edited_sections: Array,
-		plan: Dictionary) -> bool:
+## Candidate validation only. A caller-supplied Dictionary cannot attest to
+## live collision or actor occupancy, so this never clears the edit barrier.
+func inspect_edit_release_candidate(candidate: Dictionary) -> Dictionary:
+	if _state != "active" or _pending_edit_plan.is_empty():
+		return {"status":"failed", "reason":"pending_edit_missing"}
+	var barrier: Dictionary = _pending_edit_plan.get("barrier", {})
+	var current: Dictionary = _backend.status()
+	if current.get("status") != "ready" or current.get("sourceIdentity") != _source_identity \
+			or int(current.get("terrainDeltaRevision", -1)) != int(barrier.get("nativeRevision", -2)):
+		return _active_failure("pending_edit_source_drift")
+	if int(candidate.get("ownerInstanceId", 0)) != get_instance_id() \
+			or candidate.get("sourceIdentity") != _source_identity \
+			or candidate.get("sourceEpoch") != barrier.get("sourceEpoch") \
+			or int(candidate.get("nativeRevision", -1)) != int(barrier.get("nativeRevision", -2)) \
+			or candidate.get("barrierIdentity") != barrier.get("identity"):
+		return {"status":"failed", "reason":"edit_release_identity_mismatch"}
+	var windows = candidate.get("subwindowReceipts", null)
+	if not windows is Array:
+		return {"status":"failed", "reason":"edit_release_receipts_missing"}
+	var checked: Dictionary = EditPlan.publication_barrier_status(_pending_edit_plan, windows)
+	if checked.get("status") != "ready": return checked
+	return {"status":"pending", "reason":"production_physical_owner_unbound",
+		"barrierIdentity":barrier.identity}
+
+## Native affectedSections is exactly the conservative one-block neighborhood
+## of the edited sections. It must equal the preflighted mesh halo as a set.
+static func receipt_matches_plan(sections: Array, plan: Dictionary) -> bool:
 	if plan.get("status") != "ready": return false
 	var expected: Array = plan.get("affectedMeshBlocks", [])
+	if sections.size() != expected.size(): return false
 	var seen := {}
 	for section in sections:
 		if not section is Vector3i or seen.has(section) or not expected.has(section):
 			return false
 		seen[section] = true
-	for section in edited_sections:
-		if not seen.has(section): return false
 	return true
 
 ## The save facade must export the same native owner used by terrain reads.
@@ -259,6 +290,7 @@ func _release_owners() -> void:
 	_publisher = null
 	_cells = null
 	_numeric = null
+	_occupancy = null
 	_planner = null
 	_pages = null
 	_backend = null
