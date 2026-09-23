@@ -124,14 +124,18 @@ func run() -> void:
 		var sections: Array = committed.get("affectedSections", [])
 		var plan: Dictionary = committed.get("publicationPlan", {})
 		var edited_section := Vector3i(-2, -1, -1)
-		check(OWNER.receipt_covered_by_plan(sections, [edited_section], plan),
+		check(OWNER.receipt_matches_plan(sections, plan),
 			"real conservative native section receipt covered by preflighted mesh halo")
 		var forged_extra := sections.duplicate()
 		forged_extra.append(Vector3i(100, 0, 0))
-		check(not OWNER.receipt_covered_by_plan(forged_extra, [edited_section], plan)
-			and not OWNER.receipt_covered_by_plan([edited_section, edited_section], [edited_section], plan)
-			and not OWNER.receipt_covered_by_plan([Vector3i(-3, -1, -1)], [edited_section], plan),
-			"foreign duplicate and missing edited sections rejected")
+		var forged_missing := sections.duplicate()
+		forged_missing.erase(Vector3i(-3, -2, -2))
+		var forged_duplicate := sections.duplicate()
+		forged_duplicate[0] = forged_duplicate[1]
+		check(not OWNER.receipt_matches_plan(forged_extra, plan)
+			and not OWNER.receipt_matches_plan(forged_duplicate, plan)
+			and not OWNER.receipt_matches_plan(forged_missing, plan),
+			"foreign duplicate and missing neighbor sections rejected")
 		var after_edit: Dictionary = owner.export_terrain_volume_v2()
 		check(after_edit.get("status") == "ready"
 			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1

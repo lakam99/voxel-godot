@@ -162,7 +162,7 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 			or int(after.get("terrainDeltaRevision", -1)) != revision:
 		return _active_failure("native_edit_receipt_stale")
 	var actual_sections: Array = receipt.get("affectedSections", [])
-	if not receipt_covered_by_plan(actual_sections, anticipated_sections, planned):
+	if not receipt_matches_plan(actual_sections, planned):
 		return _active_failure("native_edit_section_receipt_mismatch")
 	_pending_edit_plan = planned
 	var observed: Dictionary = _publisher.observe_committed_edit(
@@ -174,20 +174,17 @@ func commit_durable_cells(transaction_id: String, expected_revision: int,
 		"changedCells":cells, "publicationPlan":planned,
 		"physicalReady":false, "blockedResidentMeshes":observed.get("blocked", 0)}
 
-## Native affectedSections includes conservative neighbors. Every receipt
-## section must fit the preflighted mesh halo, and every edited section must be
-## represented; unknown, duplicate, or untyped sections fail closed.
-static func receipt_covered_by_plan(sections: Array, edited_sections: Array,
-		plan: Dictionary) -> bool:
+## Native affectedSections is exactly the conservative one-block neighborhood
+## of the edited sections. It must equal the preflighted mesh halo as a set.
+static func receipt_matches_plan(sections: Array, plan: Dictionary) -> bool:
 	if plan.get("status") != "ready": return false
 	var expected: Array = plan.get("affectedMeshBlocks", [])
+	if sections.size() != expected.size(): return false
 	var seen := {}
 	for section in sections:
 		if not section is Vector3i or seen.has(section) or not expected.has(section):
 			return false
 		seen[section] = true
-	for section in edited_sections:
-		if not seen.has(section): return false
 	return true
 
 ## The save facade must export the same native owner used by terrain reads.
