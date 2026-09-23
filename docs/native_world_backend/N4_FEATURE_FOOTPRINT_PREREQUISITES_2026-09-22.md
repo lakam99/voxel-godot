@@ -727,3 +727,24 @@ changes, stale pin rejection, and no RNG or terrain-query work during bridge
 construction. Downstream rock definitions must separately reproduce Godot's
 visual-biome query at the transformed rounded position; the classifier's
 sampled biome is not automatically that visual biome.
+
+**Tombstone footprint boundary (2026-09-22):** The ordered producer's source
+chunk is 28 by 28 cells, with 28 attempt centers at offsets +2 through +26.
+A parent tombstone bypasses classification and recipe draws before the next
+coordinate pair. An ore-child tombstone can likewise skip draws inside its
+cluster recipe. Thus the physical rock or ore-child shape alone is not a
+complete invalidation footprint: later attempt positions, durable IDs,
+outcomes, and generated features can all change. The source-ordered stream
+and ordered placement bridge can replay intact and removed snapshots against
+one pinned terrain/environment/exclusion source and compare the full 28-entry
+sequence. That comparison is useful shadow evidence, but it does not yet
+produce complete render, collision, terrain-source, and navigation runs for
+all affected feature families. In particular, ore/forage/wildlife do not yet
+have complete typed publication envelopes, and wildlife can move after spawn.
+Keep `WorldDeltaStore` production `removedProps` admission fail-closed for
+unknown IDs. Do not promote a catalog of rock-only local shapes, or a
+changed-ordinal witness, as a complete v2 checkpoint receipt. The next
+bounded witness should compare before/after source-order streams (including
+restoration) and explicitly mark channel footprints incomplete; full cutover
+requires the changed suffix's typed or live-publication occupancy and a
+transactional differential receipt.
