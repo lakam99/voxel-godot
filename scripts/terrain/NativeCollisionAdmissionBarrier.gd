@@ -81,7 +81,9 @@ func census_progress(identity: Dictionary) -> Dictionary:
 
 
 func register_moving_actor(actor: PhysicsBody3D) -> bool:
-	if not _active or actor == null or not is_instance_valid(actor) \
+	if not _active:
+		return true
+	if actor == null or not is_instance_valid(actor) \
 			or not actor.is_inside_tree() or not _root.is_ancestor_of(actor) \
 			or not (actor is CharacterBody3D or actor is StaticBody3D \
 			and actor.is_in_group(MOVING_STATIC_GROUP)):
