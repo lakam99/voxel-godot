@@ -46,6 +46,8 @@ if ((probe?.cases?.length ?? 0) >= 5) {
 }
 if (JSON.stringify(probe?.oreFixtureChunk) !== '[3,2]')
   failures.push(`Unexpected ore fixture chunk: ${JSON.stringify(probe?.oreFixtureChunk)}`);
+if (!(probe?.cases ?? []).some(sample => sample.rockCancelRetry?.beginStatus))
+  failures.push('No rock source cancellation/retry case was captured');
 for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   const label = `case ${caseIndex} chunk ${JSON.stringify(sample.chunk)} removed ${sample.removed?.length ?? 0}`;
   if (sample.edgeBlockerId && !(sample.treeHaloNaturalIds ?? []).includes(sample.edgeBlockerId))
@@ -59,6 +61,12 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   if (sample.rockSourceBegin?.status !== 'pending'
       || sample.rockSourcePoll?.status !== 'ready')
     failures.push(`${label} async rock source preparation did not reach ready`);
+  if (sample.rockTerminalRepoll?.status !== 'failed'
+      || sample.rockTerminalRepoll?.reason !== 'unknown_ticket')
+    failures.push(`${label} terminal rock worker poll was not consumed exactly once`);
+  if (sample.rockJournalReadyRepoll?.status !== 'ready'
+      || sample.rockJournalReadyRepoll?.ticket !== sample.rockSourcePoll?.ticket)
+    failures.push(`${label} journal ready poll was not idempotent`);
   if (sample.rockJournalStatus?.pending !== 0 || sample.rockJournalUnbind?.status !== 'ready'
       || (sample.rockJournalAdvances ?? []).some(row => row.processed !== 1))
     failures.push(`${label} rock publication queue failed to drain`);
@@ -80,6 +88,16 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
       || (sample.rockJournalStatus?.maxPreparePollUsec ?? Infinity) > 8000
       || (sample.rockJournalStatus?.maxAdvanceUsec ?? Infinity) > 8000)
     failures.push(`${label} rock publication main-thread budget exceeded`);
+  if (sample.rockCancelRetry?.beginStatus &&
+      (sample.rockCancelRetry.beginStatus !== 'pending'
+        || sample.rockCancelRetry.cancelStatus !== 'pending'
+        || sample.rockCancelRetry.terminalStatus !== 'failed'
+        || sample.rockCancelRetry.terminalReason !== 'worker_cancelled'
+        || sample.rockCancelRetry.repollReason !== 'rock_source_ticket_missing'
+        || sample.rockCancelRetry.retryBeginStatus !== 'pending'
+        || sample.rockCancelRetry.retryStatus !== 'ready'
+        || sample.rockCancelRetry.retryRepollStatus !== 'ready'))
+    failures.push(`${label} rock source cancel and retry lifecycle failed`);
   for (const [key, value] of Object.entries(sample.admissions ?? {}))
     if (value !== 'ready') failures.push(`${label} ${key} admission: ${value}`);
   if (sample.direct?.length !== 28 || sample.native?.length !== 28)

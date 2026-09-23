@@ -112,6 +112,7 @@ public:
 	godot::Dictionary begin_rock_ordered_source_async(
 		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
 		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions);
+	godot::Dictionary cancel_rock_ordered_source_async(std::int64_t p_ticket);
 	godot::Dictionary poll_rock_ordered_source_async(std::int64_t p_ticket);
 	godot::Dictionary admit_wildlife_presentation_catalog(const godot::Dictionary &p_bundle);
 	godot::Dictionary admit_structure_exclusion_chunk(const godot::Dictionary &p_capture) const;
@@ -225,6 +226,7 @@ private:
 	std::unique_ptr<NativeRockOrderedCache> rock_source_worker_result_;
 	std::exception_ptr rock_source_worker_error_;
 	bool rock_source_worker_cancelled_ = false;
+	bool rock_source_worker_cancel_requested_ = false;
 	std::int64_t rock_source_worker_ticket_ = 0;
 	std::int64_t next_rock_source_worker_ticket_ = 1;
 	std::int64_t rock_source_worker_capture_usec_ = 0;

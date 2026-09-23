@@ -22,6 +22,7 @@ var _last_failure := ""
 var _generation := 0
 var _source_ticket := 0
 var _source_ready := false
+var _source_ready_receipt: Dictionary = {}
 var _invalidated_by_id: Dictionary = {}
 var _max_prepare_capture_usec := 0
 var _max_prepare_poll_usec := 0
@@ -64,21 +65,31 @@ func bind(main: Object, backend: Object, page: Object, exclusions: Object,
 	_ordinals_by_id = ordinals
 	_main.rock_published.connect(_on_rock_published)
 	_source_ready = not ordinals.is_empty()
+	_source_ticket = 0
+	_source_ready_receipt = ordered.duplicate(true) if _source_ready else {}
 	return {"status":"ready", "rockCount":ordinals.size(),
 		"sourcePrepared":_source_ready, "generation":_generation, "productionCutover":false}
 
 func prepare_source() -> Dictionary:
 	if _backend == null or _page == null or _exclusions == null:
 		return {"status":"failed", "reason":"rock_journal_not_bound"}
+	# Beginning a new source epoch invalidates any previous ordinal map. Queued
+	# publication events remain retained while the replacement is prepared.
+	_source_ticket = 0
+	_source_ready = false
+	_source_ready_receipt.clear()
+	_ordinals_by_id.clear()
 	var result: Dictionary = _backend.begin_rock_ordered_source_async(_page, _exclusions)
 	if result.get("status") == "pending":
-		_source_ticket = int(result.get("ticket", _source_ticket))
+		_source_ticket = int(result.get("ticket", 0))
 		_max_prepare_capture_usec = maxi(_max_prepare_capture_usec,
 			int(result.get("captureUsec", 0)))
 		_prepare_capture_samples.append(int(result.get("captureUsec", 0)))
 	return result
 
 func poll_source() -> Dictionary:
+	if _source_ticket <= 0 and _source_ready:
+		return _source_ready_receipt.duplicate(true)
 	if _backend == null or _source_ticket <= 0:
 		return {"status":"failed", "reason":"rock_source_ticket_missing"}
 	var started := Time.get_ticks_usec()
@@ -94,7 +105,20 @@ func poll_source() -> Dictionary:
 		for durable_id in _pending_ids:
 			if not _ordinals_by_id.has(durable_id):
 				_invalidated_by_id[durable_id] = "published_rock_not_in_native_source"
+		_source_ready_receipt = result.duplicate(true)
+		_source_ticket = 0
+	elif result.get("status") != "pending":
+		_source_ticket = 0
+		_source_ready = false
+		_ordinals_by_id.clear()
+		_source_ready_receipt = result.duplicate(true)
+		_last_failure = String(result.get("reason", "rock_source_worker_failed"))
 	return result
+
+func cancel_source() -> Dictionary:
+	if _backend == null or _source_ticket <= 0:
+		return {"status":"failed", "reason":"rock_source_ticket_missing"}
+	return _backend.cancel_rock_ordered_source_async(_source_ticket)
 
 func unbind() -> Dictionary:
 	if not _pending_ids.is_empty():

@@ -397,10 +397,42 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		if rock_source_poll.get("status") != "pending":
 			break
 		await process_frame
+	var rock_terminal_repoll: Dictionary = backend.poll_rock_ordered_source_async(
+		int(rock_source_poll.get("ticket", 0)))
+	var rock_journal_ready_repoll: Dictionary = rock_journal.poll_source()
 	var rock_journal_advances := []
 	while rock_journal.status().pending > 0 and rock_journal_advances.size() < 28:
 		rock_journal_advances.append(rock_journal.advance(1, 2000))
 	var rock_journal_status: Dictionary = rock_journal.status()
+	var cancel_retry_case := {}
+	if chunk_key == Vector2i.ZERO and removed.is_empty() \
+			and not bool(main.get_meta("n4_rock_cancel_retry_done", false)):
+		main.set_meta("n4_rock_cancel_retry_done", true)
+		var cancel_begin: Dictionary = rock_journal.prepare_source()
+		var cancel_request: Dictionary = rock_journal.cancel_source()
+		var cancel_terminal := {}
+		for _frame in range(120):
+			await process_frame
+			cancel_terminal = rock_journal.poll_source()
+			if cancel_terminal.get("status") != "pending": break
+		var cancel_repoll: Dictionary = rock_journal.poll_source()
+		var retry_begin: Dictionary = rock_journal.prepare_source()
+		var retry_terminal := {}
+		for _frame in range(120):
+			await process_frame
+			retry_terminal = rock_journal.poll_source()
+			if retry_terminal.get("status") != "pending": break
+		var retry_repoll: Dictionary = rock_journal.poll_source()
+		cancel_retry_case = {"beginStatus":cancel_begin.get("status"),
+			"cancelStatus":cancel_request.get("status"),
+			"terminalStatus":cancel_terminal.get("status"),
+			"terminalReason":cancel_terminal.get("reason"),
+			"repollReason":cancel_repoll.get("reason"),
+			"retryBeginStatus":retry_begin.get("status"),
+			"retryStatus":retry_terminal.get("status"),
+			"retryPollWorkerUsec":retry_terminal.get("workerUsec"),
+			"retryRepollStatus":retry_repoll.get("status"),
+			"retryRepollTicket":retry_repoll.get("ticket")}
 	var published_rock_footprints := []
 	for row in ordered.get("attempts", []):
 		var ordinal := int(row.ordinal)
@@ -605,6 +637,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		"rockJournalBinding":rock_journal_binding,
 		"rockSourceBegin":rock_source_begin,
 		"rockSourcePoll":rock_source_poll,
+		"rockTerminalRepoll":rock_terminal_repoll,
+		"rockJournalReadyRepoll":rock_journal_ready_repoll,
+		"rockCancelRetry":cancel_retry_case,
 		"rockJournalAdvances":rock_journal_advances,
 		"rockJournalStatus":rock_journal_status,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),

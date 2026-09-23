@@ -1523,6 +1523,8 @@ void NativeWorldBackend::_bind_methods() {
 		&NativeWorldBackend::project_published_rock_footprint_shadow);
 	ClassDB::bind_method(D_METHOD("begin_rock_ordered_source_async", "page", "exclusions"),
 		&NativeWorldBackend::begin_rock_ordered_source_async);
+	ClassDB::bind_method(D_METHOD("cancel_rock_ordered_source_async", "ticket"),
+		&NativeWorldBackend::cancel_rock_ordered_source_async);
 	ClassDB::bind_method(D_METHOD("poll_rock_ordered_source_async", "ticket"),
 		&NativeWorldBackend::poll_rock_ordered_source_async);
 	ClassDB::bind_method(D_METHOD("admit_wildlife_presentation_catalog", "bundle"), &NativeWorldBackend::admit_wildlife_presentation_catalog);
@@ -2153,6 +2155,7 @@ Dictionary NativeWorldBackend::begin_rock_ordered_source_async(
 		rock_source_worker_result_.reset();
 		rock_source_worker_error_ = nullptr;
 		rock_source_worker_cancelled_ = false;
+		rock_source_worker_cancel_requested_ = false;
 		rock_source_worker_finished_.store(false, std::memory_order_relaxed);
 		rock_source_worker_capture_usec_ = std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now() - capture_started).count();
@@ -2199,6 +2202,18 @@ Dictionary NativeWorldBackend::begin_rock_ordered_source_async(
 	}
 }
 
+Dictionary NativeWorldBackend::cancel_rock_ordered_source_async(const std::int64_t p_ticket) {
+	constexpr const char *operation = "cancel_rock_ordered_source_async";
+	if (p_ticket <= 0 || p_ticket != rock_source_worker_ticket_ || !rock_source_worker_.joinable())
+		return envelope(operation, "failed", "unknown_ticket");
+	rock_source_worker_cancel_requested_ = true;
+	if (rock_source_worker_cancel_token_)
+		rock_source_worker_cancel_token_->store(true, std::memory_order_relaxed);
+	Dictionary result = envelope(operation, "pending", "worker_cancellation_draining");
+	result["ticket"] = p_ticket;
+	return result;
+}
+
 Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t p_ticket) {
 	constexpr const char *operation = "poll_rock_ordered_source_async";
 	if (p_ticket <= 0 || p_ticket != rock_source_worker_ticket_)
@@ -2227,11 +2242,12 @@ Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t
 			&& live_page->batch_->pin().shaping_registry_revision() != shaping_registry_->revision());
 	// The final pointer/content checks happen after the worker finishes; this
 	// early invalidation only requests bounded cancellation between attempts.
-	if (stale_while_running && rock_source_worker_cancel_token_)
+	if (stale_while_running) rock_source_worker_cancel_requested_ = true;
+	if ((stale_while_running || rock_source_worker_cancel_requested_) && rock_source_worker_cancel_token_)
 		rock_source_worker_cancel_token_->store(true, std::memory_order_relaxed);
 	if (!rock_source_worker_finished_.load(std::memory_order_acquire)) {
 		Dictionary result = envelope(operation, "pending",
-			rock_source_worker_cancel_token_ && rock_source_worker_cancel_token_->load(std::memory_order_relaxed)
+			rock_source_worker_cancel_requested_
 				? "worker_cancellation_draining" : "worker_running");
 		result["ticket"] = p_ticket;
 		return result;
@@ -2239,8 +2255,10 @@ Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t
 	if (rock_source_worker_.joinable()) rock_source_worker_.join();
 	Dictionary result = envelope(operation, "failed", "worker_result_invalid");
 	try {
-		if (rock_source_worker_cancelled_)
-			throw std::invalid_argument("rock ordered source worker cancelled");
+		if (rock_source_worker_cancelled_ || rock_source_worker_cancel_requested_) {
+			result = envelope(operation, "failed", "worker_cancelled");
+			throw std::runtime_error("rock worker terminal cancellation");
+		}
 		if (rock_source_worker_error_) std::rethrow_exception(rock_source_worker_error_);
 		const auto &page = rock_source_worker_page_;
 		const auto &exclusions = rock_source_worker_exclusions_;
@@ -2283,10 +2301,12 @@ Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t
 		result["rocks"] = rocks;
 		result["productionCutover"] = false;
 	} catch (const std::exception &error) {
-		result = failure(operation, error);
+		if (std::string(error.what()) != "rock worker terminal cancellation")
+			result = failure(operation, error);
 	}
 	rock_source_worker_error_ = nullptr;
 	rock_source_worker_cancelled_ = false;
+	rock_source_worker_cancel_requested_ = false;
 	rock_source_worker_finished_.store(false, std::memory_order_relaxed);
 	rock_source_worker_cancel_token_.reset();
 	rock_source_worker_page_.unref();
@@ -2301,6 +2321,7 @@ Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t
 	rock_source_worker_removed_identity_.clear();
 	rock_source_worker_visual_identity_.clear();
 	rock_source_worker_wildlife_identity_.clear();
+	rock_source_worker_ticket_ = 0;
 	return result;
 }
 
