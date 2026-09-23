@@ -191,12 +191,12 @@ wildlife motion, or Gate 5 gameplay.
 The subsequent Citadel source-admission review found a semantic mismatch:
 `CitadelTerrainAdmission.source_state` returns `status=absent` with
 `reason=source_not_requested` before a region has been decided, and
-`StructureSystem.capture_surface_tree_exclusion_halo` correctly treats that
+`StructureSystem.capture_surface_tree_exclusion_halo` initially treated that
 as not ready. The native exclusion query had treated it as a complete clear
-decision. The pure-core query now leaves it unresolved. The source-ordered
-chunk preflight and post-draw tree-halo evaluator both require every crossed
-Citadel region to be decided even when natural/terrain exclusion would
-short-circuit individual cells. The original two-suite C++ focused executable
+decision. The first correction left it unresolved. The source-ordered chunk
+preflight and post-draw tree-halo evaluator required every crossed Citadel
+region to be decided even when natural/terrain exclusion would short-circuit
+individual cells. The original two-suite C++ focused executable
 passed 16/16 after direct compilation; the additional tree-halo correction
 passed 7/7 in its focused suite. The `n4-exclusion-source-admission-02`
 aggregate passed all 446 debug/release assertions but was blocked solely by
@@ -208,6 +208,26 @@ then passed as `artifacts/native-world-backend/n4-exclusion-source-admission-03/
 lines, 1,371/1,371 functions, and 5,964/5,964 branches covered. This changes
 only the N4 shadow source, not production prop spawning or protected NPC
 routing.
+
+Follow-up source-admission audit found a subtler boundary in that correction:
+`request_bounds` deliberately leaves an irrelevant Citadel candidate
+unrequested, yet returns `ready` for the exact footprint. Thus
+`absent:source_not_requested` cannot decide coverage alone, but is a complete
+clear result *under that ready bounds receipt*. The native chunk query now
+accepts it only after the exact 28-cell admission preflight, while still
+requiring every crossed region row and rejecting pending, failed, or missing
+rows. The post-draw tree-halo capture now requests its own expanded bounds
+before reading region states; pending/failed admission remains unready. The
+direct StructureSystem oracle passed 66/66 checks at
+`artifacts/native-world-backend/n4-surface-structure-exclusion-context-02/report.json`,
+including a real `CitadelTerrainAdmission` case where an unrequested region
+is irrelevant to ready bounds. The integrated command
+`node tools/run-native-world-backend-tests.mjs --run-name
+n4-citadel-bounds-context-01` passed at
+`artifacts/native-world-backend/n4-citadel-bounds-context-01/report.json`:
+446/446 debug and 446/446 release assertions, with 10,008/10,008 pure-core
+lines, 1,371/1,371 functions, and 5,954/5,954 branches covered. These are
+source-contract and shadow-adapter results, not live publication evidence.
 
 ## Integrated result and deletion review
 

@@ -241,12 +241,8 @@ StructureExclusionDecision NativeStructureExclusionSnapshot::query(std::int32_t 
             return {false, false, StructureExclusionKind::unresolved, source.reason};
         }
         if (source.status == CitadelSourceStatus::absent) {
-            // StructureSystem.source_state reports an unrequested region as
-            // {status: absent, reason: source_not_requested}. It is not a
-            // decided absence and cannot clear a native prop attempt.
-            if (source.reason == "source_not_requested") {
-                return {false, false, StructureExclusionKind::unresolved, source.reason};
-            }
+            // Exact ready bounds admission proves an unrequested candidate
+            // cannot affect this chunk. The source lookup alone does not.
             return {false, true, StructureExclusionKind::clear, source.reason};
         }
         if (half_open_contains(source.reservation, x, z)) {
@@ -271,9 +267,8 @@ bool NativeStructureExclusionSnapshot::covers_decided_regions(
                     return source.region_x == region_x && source.region_z == region_z;
                 });
             if (found == citadels_.end()) return false;
-            if (found->status == CitadelSourceStatus::pending || found->status == CitadelSourceStatus::failed
-                || (found->status == CitadelSourceStatus::absent
-                    && found->reason == "source_not_requested")) return false;
+            if (found->status == CitadelSourceStatus::pending || found->status == CitadelSourceStatus::failed)
+                return false;
         }
     }
     return true;

@@ -3,6 +3,7 @@ extends SceneTree
 ## The 28 coordinates are an ordered decision fixture, not a live RNG replay.
 
 const Structures = preload("res://scripts/StructureSystem.gd")
+const RealAdmission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const REPORT_ENV := "VOXEL_SURFACE_STRUCTURE_EXCLUSION_REPORT"
 const CELLS := [
 	Vector2i(-5,-5), Vector2i(-4,-4), Vector2i(-3,-3), Vector2i(-2,-2),
@@ -16,6 +17,10 @@ const CELLS := [
 
 class Admission extends RefCounted:
 	var states := {}
+	var pending_bounds := false
+	func request_bounds(_bounds: Rect2i) -> Dictionary:
+		return {"status":"pending" if pending_bounds else "ready",
+			"reason":"preparing_citadel_terrain" if pending_bounds else ""}
 	func source_state(region: Vector2i) -> Dictionary:
 		return states.get(region, {"status":"absent","reason":"source_not_requested"})
 
@@ -57,6 +62,16 @@ func source(status: String, rect: Rect2i) -> Dictionary:
 		"reservationCells":rect}
 
 func run() -> void:
+	var real_structures := Structures.new()
+	var real_admission := RealAdmission.new()
+	real_admission.configure("admission-context-oracle", {}, {"regionCells":384, "spawnChance":0.0})
+	check("real_admission_town_inputs_finalized", real_admission.finalize_town_inputs({}).status == "ready")
+	real_structures.citadel_terrain_admission = real_admission
+	var real_irrelevant := real_structures.capture_surface_tree_exclusion_halo(0,0,0,0)
+	check("real_unrequested_region_is_ready_after_exact_bounds", real_irrelevant.ready
+		and real_irrelevant.boundsAdmission.status == "ready"
+		and real_irrelevant.content.citadel[0].reason == "source_not_requested"
+		and real_structures.surface_tree_exclusion_halo_is_current(real_irrelevant))
 	var structures := Structures.new()
 	var admission := Admission.new()
 	structures.citadel_terrain_admission = admission
@@ -87,9 +102,15 @@ func run() -> void:
 	admission.states[Vector2i(1,1)] = source("pending",Rect2i(2048,2048,2,2))
 	check("pending_is_not_exclusion",not structures.blocks_natural_prop_at_cell(2048,2048))
 	admission.states[Vector2i(1,1)] = source("prepared",Rect2i(2048,2048,2,2))
+	admission.pending_bounds = true
 	var missing_halo := structures.capture_surface_tree_exclusion_halo(2047,2047,0,1)
-	check("crossed_region_unrequested_fails_closed",not missing_halo.ready and missing_halo.content.citadel.size()==4
+	check("pending_bounds_fail_closed",not missing_halo.ready and missing_halo.content.citadel.size()==4
 		and not structures.surface_tree_exclusion_halo_is_current(missing_halo))
+	admission.pending_bounds = false
+	var irrelevant_halo := structures.capture_surface_tree_exclusion_halo(2047,2047,0,1)
+	check("ready_bounds_admit_unrequested_irrelevant_regions",irrelevant_halo.ready
+		and structures.surface_tree_exclusion_halo_is_current(irrelevant_halo)
+		and irrelevant_halo.content.citadel.size()==4)
 	admission.states[Vector2i(0,1)] = source("absent",Rect2i())
 	admission.states[Vector2i(1,0)] = source("absent",Rect2i())
 	var seam_halo := structures.capture_surface_tree_exclusion_halo(2047,2047,0,1)

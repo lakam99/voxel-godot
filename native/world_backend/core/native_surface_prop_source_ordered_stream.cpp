@@ -86,7 +86,8 @@ void preflight(const AdmittedTerrainSeed &seed, const std::int32_t chunk_x, cons
         });
     if (!bounds_ready) reject();
     // A natural/terrain exclusion can short-circuit an individual query, but
-    // cannot turn an unrequested Citadel region into a complete chunk input.
+    // all crossed region states still must be captured. Exact ready bounds
+    // admission proves unrequested candidates irrelevant to this chunk.
     if (!exclusions.covers_decided_regions(min_x, min_z, max_x, max_z)) reject();
     // Exact chunk bounds and decided coverage make every center-cell query
     // complete. A second 28x28 scan would only duplicate these admissions.

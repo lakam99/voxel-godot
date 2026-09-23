@@ -287,9 +287,15 @@ VWB_TEST(native_source_ordered_prop_stream_skips_structure_blocked_attempts) {
     auto unrequested = CitadelExclusionSource{};
     unrequested.status = CitadelSourceStatus::absent;
     unrequested.reason = "source_not_requested";
+    const auto admitted_irrelevant = NativeStructureExclusionSnapshot::create(world_digest(), 1U,
+        {{"blocked", {0,0,27,27}}}, {}, {unrequested}, {{0,0,true}});
+    VWB_EXPECT(admitted_irrelevant.query(10, 10).blocked);
+    VWB_EXPECT(admitted_irrelevant.covers_decided_regions(0, 0, 27, 27));
+    VWB_EXPECT_EQ(28U, run(terrain, NativeFeatureDeltaSnapshot::create({}, {}), admitted_irrelevant).attempts().size());
+    unrequested.status = CitadelSourceStatus::pending;
+    unrequested.reason = "preparing_citadel_terrain";
     const auto masked_pending = NativeStructureExclusionSnapshot::create(world_digest(), 1U,
         {{"blocked", {0,0,27,27}}}, {}, {unrequested}, {{0,0,true}});
-    VWB_EXPECT(masked_pending.query(10, 10).blocked);
     VWB_EXPECT(!masked_pending.covers_decided_regions(0, 0, 27, 27));
     VWB_EXPECT_THROW(NativeSurfacePropSourceOrderedStreamRejected,
         run(terrain, NativeFeatureDeltaSnapshot::create({}, {}), masked_pending));

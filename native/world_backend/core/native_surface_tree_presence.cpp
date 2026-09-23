@@ -139,10 +139,11 @@ NativeSurfaceTreePresenceDecision evaluate_native_tree_exclusion_halo(
         for (auto rx = low_region_x; rx <= high_region_x; ++rx) {
             const auto found = std::find_if(halo.citadels().begin(), halo.citadels().end(),
                 [rx, rz](const auto &c) { return c.region_x == rx && c.region_z == rz; });
+            // The adapter must have admitted the exact expanded coverage.
+            // Under that receipt, source_not_requested means the candidate's
+            // declared influence cannot touch this halo.
             if (found == halo.citadels().end() || found->status == CitadelSourceStatus::pending
-                || found->status == CitadelSourceStatus::failed
-                || (found->status == CitadelSourceStatus::absent
-                    && found->reason == "source_not_requested")) reject();
+                || found->status == CitadelSourceStatus::failed) reject();
         }
     }
     const auto n = out.natural_margin_cells, s = out.structure_margin_cells;

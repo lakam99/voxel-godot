@@ -142,8 +142,8 @@ VWB_TEST(structure_exclusion_status_is_explicit_and_not_empty_success) {
     VWB_EXPECT(!pending.covers_decided_regions(2048, 2048, 2048, 2048));
     VWB_EXPECT(!failed.covers_decided_regions(2048, 2048, 2048, 2048));
     VWB_EXPECT(absent.query(2048, 2048).complete && !absent.query(2048, 2048).blocked);
-    VWB_EXPECT(!unrequested.query(2048, 2048).complete && !unrequested.query(2048, 2048).blocked);
-    VWB_EXPECT(!unrequested.covers_decided_regions(2048, 2048, 2048, 2048));
+    VWB_EXPECT(unrequested.query(2048, 2048).complete && !unrequested.query(2048, 2048).blocked);
+    VWB_EXPECT(unrequested.covers_decided_regions(2048, 2048, 2048, 2048));
     VWB_EXPECT(absent.covers_decided_regions(2048, 2048, 2048, 2048));
     VWB_EXPECT_EQ(std::string("source_not_requested"), unrequested.query(2048, 2048).source_id);
     VWB_EXPECT(!uncaptured.query(2048, 2048).complete);

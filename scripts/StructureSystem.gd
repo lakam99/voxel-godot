@@ -1191,6 +1191,10 @@ func capture_surface_tree_exclusion_halo(
     terrain_rows.sort_custom(func(a, b): return String(a.get("id", "")) < String(b.get("id", "")))
     if natural_rows.size() > 65536 or terrain_rows.size() > 65536: ready = false
     var bounds := Rect2i(Vector2i(x, z), Vector2i.ONE).grow(coverage)
+    # A source_state lookup alone cannot distinguish a genuinely undecided
+    # region from an irrelevant candidate. Exact ready bounds admission does.
+    var bounds_admission: Dictionary = citadel_terrain_admission.request_bounds(bounds)
+    if bounds_admission.get("status") != "ready": ready = false
     var low_region := CitadelSiteFieldScript.region_for_cell(bounds.position)
     var high_region := CitadelSiteFieldScript.region_for_cell(bounds.end - Vector2i.ONE)
     var source_rows := []
@@ -1199,7 +1203,7 @@ func capture_surface_tree_exclusion_halo(
             var region := Vector2i(region_x, region_z)
             var state: Dictionary = citadel_terrain_admission.source_state(region)
             var status := String(state.get("status", ""))
-            if status not in ["ready", "prepared", "absent"] or (status == "absent" and state.get("reason") == "source_not_requested"):
+            if status not in ["ready", "prepared", "absent"]:
                 ready = false
             var binding_value: Variant = state.get("binding", {})
             if not (binding_value is Dictionary):
@@ -1227,12 +1231,12 @@ func capture_surface_tree_exclusion_halo(
     return {"ownerInstanceId":get_instance_id(), "ownerGeneration":regional_source_generation,
         "exclusionRevision":surface_prop_exclusion_revision, "cell":Vector2i(x, z),
         "naturalMarginCells":natural_margin, "structureMarginCells":structure_margin,
-        "ready":ready, "content":content,
+        "ready":ready, "boundsAdmission":bounds_admission.duplicate(true), "content":content,
         "contentDigest":Marshalls.raw_to_base64(var_to_bytes([
-            Vector2i(x, z), natural_margin, structure_margin, content])).sha256_text()}
+            Vector2i(x, z), natural_margin, structure_margin, bounds_admission, content])).sha256_text()}
 
 func surface_tree_exclusion_halo_is_current(snapshot: Dictionary) -> bool:
-    for required in ["cell", "naturalMarginCells", "structureMarginCells", "content", "contentDigest"]:
+    for required in ["cell", "naturalMarginCells", "structureMarginCells", "boundsAdmission", "content", "contentDigest"]:
         if not snapshot.has(required): return false
     if not (snapshot.cell is Vector2i) or not (snapshot.content is Dictionary): return false
     if int(snapshot.get("ownerInstanceId", -1)) != get_instance_id(): return false
@@ -1242,6 +1246,7 @@ func surface_tree_exclusion_halo_is_current(snapshot: Dictionary) -> bool:
     var current := capture_surface_tree_exclusion_halo(cell.x, cell.y,
         int(snapshot.get("naturalMarginCells", -1)), int(snapshot.get("structureMarginCells", -1)))
     return bool(snapshot.get("ready", false)) and bool(current.ready) \
+        and snapshot.get("boundsAdmission", {}) == current.boundsAdmission \
         and snapshot.get("content", {}) == current.content \
         and snapshot.get("contentDigest", "") == current.contentDigest \
         and snapshot.get("naturalMarginCells", -1) == current.naturalMarginCells \

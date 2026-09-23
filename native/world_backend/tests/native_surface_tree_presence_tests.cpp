@@ -51,13 +51,13 @@ VWB_TEST(native_tree_halo_rejects_uncaptured_chunk_edge_and_negative_region) {
     unrequested.reason = "source_not_requested";
     const auto unrequested_halo = halo({-8,-8,35,35}, {}, {},
         {unrequested, absent(0,-1), absent(-1,0), absent(0,0)});
-    VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
-        evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, unrequested_halo));
+    VWB_EXPECT_EQ(NativeSurfaceTreePresence::present,
+        evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, unrequested_halo).presence);
     const auto masked_unrequested = halo({-8,-8,35,35},
         {{"blocker", {0,0,3,3}}}, {},
         {unrequested, absent(0,-1), absent(-1,0), absent(0,0)});
-    VWB_EXPECT_THROW(NativeSurfaceTreePresenceRejected,
-        evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, masked_unrequested));
+    VWB_EXPECT_EQ(NativeSurfaceTreePresence::absent,
+        evaluate_native_tree_exclusion_halo(1, 1, 1.0, 5.0, 0.0, 1.35, masked_unrequested).presence);
 }
 
 VWB_TEST(native_tree_halo_uses_separate_natural_and_structure_margins) {
