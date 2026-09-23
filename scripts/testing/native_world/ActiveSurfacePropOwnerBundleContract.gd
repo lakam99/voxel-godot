@@ -8,6 +8,8 @@ const BundleScript := preload("res://scripts/world/ActiveSurfacePropOwnerBundle.
 const BiomeSnapshot := preload("res://scripts/environment/ActiveBiomeEnvironmentSnapshot.gd")
 const VisualSnapshot := preload("res://scripts/visual/ActiveVisualAssetSnapshot.gd")
 const RemovedSnapshot := preload("res://scripts/world/ActiveRemovedPropsSnapshot.gd")
+const Structures := preload("res://scripts/StructureSystem.gd")
+const Admission := preload("res://scripts/world/CitadelTerrainAdmission.gd")
 
 var results: Array[Dictionary] = []
 
@@ -43,6 +45,28 @@ func run() -> void:
 	var initially_current: bool = BundleScript.is_current(main, bundle)
 	var freshness_ms := float(Time.get_ticks_usec() - freshness_start_usec) / 1000.0
 	check("initial_current", initially_current)
+	var structures := Structures.new()
+	var admission := Admission.new()
+	admission.configure(main.seed_text, {}, {"regionCells":384, "spawnChance":0.0})
+	check("chunk_town_inputs_finalized", admission.finalize_town_inputs({}).status == "ready")
+	structures.main = main
+	structures.regional_source_generation = 1
+	structures.citadel_terrain_admission = admission
+	main.structure_system = structures
+	var chunk_bundle := BundleScript.capture_chunk(main, Vector2i.ZERO)
+	check("chunk_bundle_captured", bool(chunk_bundle.get("ok", false)))
+	check("chunk_bundle_explicitly_incomplete", chunk_bundle.get("complete") == false \
+		and chunk_bundle.get("scope") == "owner_and_structure_chunk_only")
+	check("chunk_bundle_current", BundleScript.chunk_is_current(main, chunk_bundle))
+	var changed_chunk := chunk_bundle.duplicate(true)
+	changed_chunk.exclusions.content.citadel[0].reason = "forged"
+	check("chunk_exclusion_tamper_rejected", not BundleScript.chunk_is_current(main, changed_chunk))
+	structures.regional_source_generation += 1
+	check("chunk_structure_generation_rejected", not BundleScript.chunk_is_current(main, chunk_bundle))
+	structures.regional_source_generation -= 1
+	main.structure_system = null
+	check("chunk_structure_replacement_rejected", not BundleScript.chunk_is_current(main, chunk_bundle))
+	main.structure_system = structures
 	var freshness_parts := {}
 	var part_start := Time.get_ticks_usec()
 	check("biome_current", BiomeSnapshot.is_current(catalog, bundle.biome))
@@ -96,6 +120,6 @@ func run() -> void:
 		"evidenceLevel": "contract", "resultCount": results.size(), "results": results,
 		"captureMs": capture_ms, "freshnessMs": freshness_ms,
 		"freshnessParts": freshness_parts,
-		"scope": "Owner catalog/removal capture and freshness only; no terrain pin, structure halo, native manifest or gameplay."}, "  "))
+		"scope": "Owner catalog/removal and one structure-exclusion chunk capture/freshness only; no terrain pin, native manifest or gameplay."}, "  "))
 	file.close()
 	quit(0 if passed else 1)

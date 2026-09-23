@@ -253,6 +253,16 @@ physical source fields. `node tools/run-native-world-backend-tests.mjs
 10,012/10,012 lines, 1,371/1,371 functions and 5,968/5,968 branches.
 Its report is `artifacts/native-world-backend/n4-structure-chunk-capture-02/report.json`.
 
+The owner-local N4 bundle now has an optional `capture_chunk`/`chunk_is_current`
+boundary that binds the catalog/removal receipt to one admitted
+StructureSystem exclusion chunk under the same Main owner. It rechecks both
+sources after capture and rejects nested tampering, owner replacement and
+structure-generation changes. The direct headless contract at
+`artifacts/native-world-backend/n4-active-surface-owner-bundle-contract.json`
+passes 26/26 checks. This remains explicitly incomplete: it does not bind an
+effective terrain pin, capture dimension-dependent tree halos, produce an
+all-family native manifest or change the live prop loop.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
