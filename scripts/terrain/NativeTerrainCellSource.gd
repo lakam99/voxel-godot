@@ -23,7 +23,8 @@ func read_cell(cell: Vector3i) -> Dictionary:
 	if result.get("status") != "ready":
 		return result
 	return {"status":"ready", "cell":cell, "state":result.states[0],
-		"nativeRevision":result.nativeRevision, "sourceIdentity":result.sourceIdentity}
+		"nativeRevision":result.nativeRevision, "shapingRevision":result.shapingRevision,
+		"sourceIdentity":result.sourceIdentity}
 
 func read_cells(cells: Array[Vector3i]) -> Dictionary:
 	if _backend == null:
@@ -34,7 +35,8 @@ func read_cells(cells: Array[Vector3i]) -> Dictionary:
 	if before.get("status") != "ready":
 		return {"status":"failed", "reason":"native_backend_not_ready"}
 	var revision := int(before.get("terrainDeltaRevision", -1))
-	if revision < 0:
+	var shaping_revision := int(before.get("shapingRegistryRevision", -1))
+	if revision < 0 or shaping_revision < 0:
 		return {"status":"failed", "reason":"native_revision_missing"}
 	var groups := {}
 	for index in range(cells.size()):
@@ -64,6 +66,7 @@ func read_cells(cells: Array[Vector3i]) -> Dictionary:
 			request.cellCenters.append({"coordinate":entry.cell, "intent":"gameplay"})
 		var sampled: Dictionary = source.sample_batch(request)
 		if sampled.get("status") != "ready" or int(sampled.get("terrainDeltaRevision", -1)) != revision \
+				or int(sampled.get("shapingRegistryRevision", -1)) != shaping_revision \
 				or (sampled.get("cellCenters", []) as Array).size() != entries.size():
 			return {"status":"failed", "reason":"native_page_result_stale_or_incomplete", "page":page}
 		if identity.is_empty():
@@ -85,7 +88,8 @@ func read_cells(cells: Array[Vector3i]) -> Dictionary:
 				"editReason":sparse.get("editReason", ""),
 				"edited":bool(record.edited), "generated":bool(record.generated)}
 	var after: Dictionary = _backend.status()
-	if after.get("status") != "ready" or int(after.get("terrainDeltaRevision", -1)) != revision:
+	if after.get("status") != "ready" or int(after.get("terrainDeltaRevision", -1)) != revision \
+			or int(after.get("shapingRegistryRevision", -1)) != shaping_revision:
 		return {"status":"failed", "reason":"native_revision_changed_during_read"}
 	return {"status":"ready", "states":states, "nativeRevision":revision,
-		"sourceIdentity":identity}
+		"shapingRevision":shaping_revision, "sourceIdentity":identity}
