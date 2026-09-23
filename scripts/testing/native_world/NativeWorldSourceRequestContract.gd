@@ -1,12 +1,29 @@
 extends SceneTree
 
 const REQUEST := preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
-const MAIN := preload("res://scripts/MainCore.gd")
+const MAIN := preload("res://scripts/Main.gd")
 const STRUCTURES := preload("res://scripts/StructureSystem.gd")
 const WORLD := preload("res://scripts/WorldGenerationSystem.gd")
 const VOLUME := preload("res://scripts/TerrainVolumeService.gd")
+const LEGACY_CONVERTER := preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
 
 var failures: Array[String] = []
+
+class PendingPages extends RefCounted:
+	func request_page(_page: Vector2i) -> Dictionary:
+		return {"status":"pending", "reason":"test_page_pending"}
+
+func semantic_cells(volume: Dictionary) -> Dictionary:
+	var indexed := {}
+	for section in volume.get("sections", []):
+		for record in section.get("cells", []):
+			var state: Dictionary = record.get("state", {})
+			indexed[JSON.stringify(record.get("cell", []))] = {"material":state.get("material"),
+				"biome":state.get("biome"), "solid":state.get("solid"),
+				"density":state.get("density"), "fluid":state.get("fluid"),
+				"metadata":state.get("metadata"), "blockId":state.get("blockId"),
+				"editReason":state.get("editReason")}
+	return indexed
 
 func check(value: bool, label: String) -> void:
 	if not value:
@@ -18,6 +35,8 @@ func _init() -> void:
 func run() -> void:
 	var main = MAIN.new()
 	main.seed_text = "source-request-contract"
+	main.seed_hash = main.hash_string(main.seed_text)
+	main.setup_noise()
 	main.structure_system = STRUCTURES.new()
 	var admission = main.structure_system.citadel_terrain_admission
 	admission.configure(main.seed_text, {}, {"regionCells": main.STRUCTURE_REGION_CELLS,
@@ -107,6 +126,129 @@ func run() -> void:
 		"terrainVolume":current_volume}
 	check(REQUEST.from_main_with_v2_save(main, both).get("request", {}).get("terrainVolume")
 		== current_volume, "full v2 volume retains current restore precedence over terrain list")
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	var column := Vector3i(-17, 0, -1)
+	var old_surface := float(main.world_generation_system.surface_y_for_cell(column))
+	var new_surface: float = old_surface - 2.0 * main.CELL
+	var legacy_save := {"version":2, "seed":main.seed_text,
+		"terrain":[{"x":column.x, "z":column.z, "surfaceY":new_surface}]}
+	var converter = LEGACY_CONVERTER.new()
+	check(converter.setup(main, legacy_save).get("status") == "ready",
+		"native historical v2 conversion starts")
+	var real_pages = converter._pages
+	converter._pages = PendingPages.new()
+	check(converter.advance().get("status") == "pending"
+		and converter.export_volume().get("status") == "pending",
+		"shaping page pending retains conversion and withholds snapshot")
+	converter._pages = real_pages
+	var converted: Dictionary = {}
+	for frame in range(300):
+		converted = converter.advance()
+		if converted.get("status") != "pending": break
+		await process_frame
+	check(converted.get("status") == "ready"
+		and not converted.get("terrainVolume", {}).get("sections", []).is_empty(),
+		"native historical v2 excavation produces durable volume")
+	var new_y := floori(new_surface / main.CELL)
+	main.restore_volume_edits(legacy_save.terrain)
+	var script_volume: Dictionary = main.world_generation_system.save_terrain_volume_deltas()
+	var script_state := {}
+	for section in script_volume.get("sections", []):
+		for record in section.get("cells", []):
+			if record.get("cell") == [column.x,new_y,column.z]:
+				script_state = record.get("state", {})
+	var converted_volume: Dictionary = converted.get("terrainVolume", {})
+	var converted_record := {}
+	for section in converted_volume.get("sections", []):
+		for record in section.get("cells", []):
+			if record.get("cell") == [column.x,new_y,column.z]:
+				converted_record = record.get("state", {})
+	var same_legacy_cell: bool = (converted_record.get("material") == script_state.get("material")
+		and converted_record.get("biome") == script_state.get("biome")
+		and converted_record.get("solid") == script_state.get("solid")
+		and is_equal_approx(float(converted_record.get("density", 0)), float(script_state.get("density", 1)))
+		and converted_record.get("metadata") == script_state.get("metadata"))
+	check(same_legacy_cell, "native conversion preserves historical excavation cell semantics")
+	check(semantic_cells(converted_volume) == semantic_cells(script_volume),
+		"complete native excavation durable cells match MainSaveState restore")
+	check(converted_volume == script_volume,
+		"native v2 excavation matches exact saved volume revisions and records")
+	var resolved_legacy: Dictionary = converter.resolved_save()
+	var canonical_legacy_save: Dictionary = resolved_legacy.get("save", {})
+	var converted_request: Dictionary = REQUEST.from_main_with_v2_save(main, canonical_legacy_save)
+	var converted_backend = ClassDB.instantiate("NativeWorldBackend")
+	check(resolved_legacy.get("status") == "ready"
+		and canonical_legacy_save.get("terrain", []) == []
+		and converted_request.get("status") == "ready"
+		and converted_backend.initialize_from_save_v2(
+			converted_request.get("request", {})).get("status") == "ready"
+		and converted_backend.export_terrain_volume_v2().get("terrainVolume") == script_volume,
+		"converted valid v2 save enters the ordinary native Continue owner exactly")
+	var second_surface: float = old_surface - 4.0 * main.CELL
+	var duplicate_save := {"version":2, "seed":main.seed_text,
+		"terrain":[{"x":column.x, "z":column.z, "surfaceY":new_surface},
+			{"x":column.x, "z":column.z, "surfaceY":second_surface}]}
+	var duplicate_converter = LEGACY_CONVERTER.new()
+	check(duplicate_converter.setup(main, duplicate_save).get("status") == "ready",
+		"duplicate-column native conversion starts")
+	var duplicate_result: Dictionary = {}
+	for frame in range(300):
+		duplicate_result = duplicate_converter.advance()
+		if duplicate_result.get("status") != "pending": break
+		await process_frame
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	main.restore_volume_edits(duplicate_save.terrain)
+	check(duplicate_result.get("status") == "ready"
+		and duplicate_result.get("terrainVolume", {})
+			== main.world_generation_system.save_terrain_volume_deltas(),
+		"duplicate negative column follows ordered native surface and edit semantics")
+	var deep_save := {"version":2, "seed":main.seed_text,
+		"terrain":[{"x":column.x, "z":column.z, "surfaceY":old_surface - 65.0 * main.CELL}]}
+	var deep_converter = LEGACY_CONVERTER.new()
+	check(deep_converter.setup(main, deep_save).get("status") == "ready",
+		"deep native excavation starts")
+	var progress_count := 0
+	var deep_result: Dictionary = {}
+	for frame in range(300):
+		deep_result = deep_converter.advance()
+		if deep_result.get("reason") in ["legacy_conversion_progress", "preparing_legacy_column"]:
+			progress_count += 1
+		if deep_result.get("status") != "pending": break
+		await process_frame
+	check(deep_result.get("status") == "ready" and progress_count >= 2,
+		"deep column commits in bounded native batches")
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	main.restore_volume_edits(deep_save.terrain)
+	check(deep_result.get("terrainVolume", {})
+			== main.world_generation_system.save_terrain_volume_deltas(),
+		"deep column preserves one transaction and exact v2 section revisions")
+	var oversized := {"version":2, "seed":main.seed_text,
+		"terrain":[{"x":column.x, "z":column.z,
+			"surfaceY":old_surface - 4097.0 * main.CELL}]}
+	var oversized_converter = LEGACY_CONVERTER.new()
+	check(oversized_converter.setup(main, oversized).get("status") == "ready",
+		"oversized historical column enters bounded conversion")
+	var oversized_result: Dictionary = {}
+	for frame in range(300):
+		oversized_result = oversized_converter.advance()
+		if oversized_result.get("status") != "pending": break
+		await process_frame
+	check(oversized_result.get("reason") == "legacy_column_operation_limit"
+		and oversized_converter.export_volume().get("status") != "ready",
+		"oversized historical column fails closed before durable publication")
+	var cancelled = LEGACY_CONVERTER.new()
+	check(cancelled.setup(main, legacy_save).get("status") == "ready"
+		and cancelled.cancel().get("status") == "ready"
+		and cancelled.advance().get("status") == "failed"
+		and cancelled.export_volume().get("status") != "ready",
+		"cancelled conversion cannot publish partial durable volume")
+	var malformed := {"version":2, "seed":main.seed_text,
+		"terrain":[{"x":"bad", "z":column.z, "surfaceY":new_surface}]}
+	check(LEGACY_CONVERTER.new().setup(main, malformed).get("reason") == "legacy_terrain_entry_invalid",
+		"malformed historical entry rejected before native initialization")
 	main.structure_system.citadel_terrain_admission.configure("other-seed", {},
 		{"regionCells": main.STRUCTURE_REGION_CELLS, "spawnChance": main.STRUCTURE_SPAWN_CHANCE})
 	check(REQUEST.from_main(main).get("reason") == "site_admission_seed_mismatch", "seed mismatch fails")
