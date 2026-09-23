@@ -5,6 +5,10 @@ const RenderGeneratorScript := preload("res://scripts/testing/native_world/N2Pre
 const CollisionOwnerScript := preload("res://scripts/terrain/NativeTerrainCollisionOwner.gd")
 const ActorGuardScript := preload("res://scripts/terrain/NativeCollisionActorGuard.gd")
 const AdmissionBarrierScript := preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
+const MainFacadeScript := preload("res://scripts/MainCore.gd")
+const CharacterMotorScript := preload("res://scripts/npc_ai/motor/CharacterMotor3D.gd")
+const MotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
+const MotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 
 const REPORT_SCHEMA := "n2-native-world-vertical-slice-fixture/v1"
 const RESULT_SCHEMA := "n2-native-vertical-slice-result/v1"
@@ -582,8 +586,46 @@ func _actor_guard_contract() -> Dictionary:
 	late_actor.queue_free()
 	body.queue_free()
 	await get_tree().physics_frame
+	var moving_static := StaticBody3D.new()
+	moving_static.add_to_group(&"world_moving_physics_actor")
+	var static_shape := CollisionShape3D.new()
+	static_shape.shape = BoxShape3D.new()
+	moving_static.add_child(static_shape)
+	add_child(moving_static)
+	await get_tree().physics_frame
+	var static_clearance: Dictionary = barrier.clearance(identity)
+	var static_motion_admitted: bool = barrier.admit_motion(moving_static, Vector3.ZERO)
+	var static_cancel_admitted: bool = barrier.cancel_empty_startup(identity)
+	var main_facade = MainFacadeScript.new()
+	var facade_bound: bool = main_facade.bind_native_collision_admission(_body, barrier)
+	moving_static.position = Vector3(10, 0, 0)
+	var static_sweep_admitted: bool = barrier.admit_motion(moving_static, Vector3(-10, 0, 0))
+	var facade_sweep_admitted: bool = main_facade.native_collision_admit_motion(moving_static, Vector3(-10, 0, 0))
+	var facade_early_unbind: bool = main_facade.unbind_native_collision_admission(_body)
+	var motor_actor := CharacterBody3D.new()
+	motor_actor.position = Vector3(10, 0, 0)
+	var motor_shape := CollisionShape3D.new()
+	motor_shape.shape = BoxShape3D.new()
+	motor_actor.add_child(motor_shape)
+	add_child(motor_actor)
+	await get_tree().physics_frame
+	barrier.clearance(identity)
+	var motor = CharacterMotorScript.new()
+	var motor_profile = MotorProfileScript.npc_default()
+	motor_profile.use_terrain_grounding = false
+	var motor_command = MotorCommandScript.from_velocity(Vector3(-40, 0, 0))
+	var motor_state = motor.apply(motor_actor, motor_command, motor_profile, 0.25, main_facade)
+	var motor_held: bool = bool(motor_state.get("blocked")) and motor_actor.position.x >= 9.9
+	motor_actor.position = Vector3(0, 10, 0)
+	motor.move_vertical_toward(motor_actor, 0.0, main_facade)
+	var correction_held: bool = motor_actor.position.y >= 9.9
+	motor_actor.queue_free()
+	moving_static.queue_free()
+	await get_tree().physics_frame
 	var premature_abort: bool = barrier.abort(identity)
 	var cancelled_empty_startup: bool = barrier.cancel_empty_startup(identity)
+	var facade_unbound: bool = main_facade.unbind_native_collision_admission(_body)
+	main_facade.free()
 	var capped_root := Node.new()
 	add_child(capped_root)
 	for _index in range(8193):
@@ -597,12 +639,21 @@ func _actor_guard_contract() -> Dictionary:
 		and bool(clear.get("clear", false)) and begun.get("status") == "ready" \
 		and late_clearance.get("reason") == "actor_occupies_replacement" \
 		and not late_motion_admitted and not premature_release and not premature_abort \
+		and static_clearance.get("reason") == "actor_occupies_replacement" \
+		and not static_motion_admitted and not static_sweep_admitted \
+		and not static_cancel_admitted and facade_bound and not facade_sweep_admitted \
+		and not facade_early_unbind and facade_unbound and motor_held and correction_held \
 		and cancelled_empty_startup \
 		and capped.get("reason") == "actor_census_node_cap",
 		"occupied":occupied, "swept":swept, "clear":clear,
 		"lateActor": {"clearance":late_clearance, "motionAdmitted":late_motion_admitted,
 			"prematureRelease":premature_release, "prematureAbort":premature_abort,
 			"cancelledEmptyStartup":cancelled_empty_startup},
+		"movingStatic": {"clearance":static_clearance, "motionAdmitted":static_motion_admitted,
+			"sweepAdmitted":static_sweep_admitted, "cancelAdmitted":static_cancel_admitted,
+			"facadeBound":facade_bound, "facadeSweepAdmitted":facade_sweep_admitted,
+			"facadeEarlyUnbind":facade_early_unbind, "facadeUnbound":facade_unbound,
+			"motorHeld":motor_held, "correctionHeld":correction_held},
 		"nodeCap":capped}
 
 

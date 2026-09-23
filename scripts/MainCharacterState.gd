@@ -152,7 +152,8 @@ func update_single_wildlife(body: StaticBody3D, delta: float) -> void:
         body.rotation.y = atan2(-direction.x, -direction.z)
     update_wildlife_animation(body, moved, speed)
     var ground_y := surface_y_at_position(body.global_position)
-    body.global_position.y = ground_y
+    if native_collision_admit_motion(body, Vector3(0.0, ground_y - body.global_position.y, 0.0)):
+        body.global_position.y = ground_y
     body.set_meta("wildlife_direction", direction)
     body.set_meta("wildlife_timer", timer)
     body.set_meta("wildlife_last_move", moved)
@@ -184,6 +185,8 @@ func move_wildlife(body: StaticBody3D, displacement: Vector3) -> float:
     if absf(next_ground - previous_ground) > CELL * 0.72:
         return 0.0
     if wildlife_blocked_at(candidate):
+        return 0.0
+    if not native_collision_admit_motion(body, candidate - previous):
         return 0.0
     body.global_position.x = candidate.x
     body.global_position.z = candidate.z

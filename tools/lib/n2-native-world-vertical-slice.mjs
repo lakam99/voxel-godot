@@ -60,6 +60,10 @@ export const inputPaths = [
   'scripts/testing/native_world/N2LatticeSourceOracle.gd',
   'scripts/testing/native_world/N2PreparedRenderGenerator.gd',
   'scripts/testing/native_world/N2VerticalSliceFixture.gd',
+  'scripts/MainCore.gd',
+  'scripts/npc_ai/motor/CharacterMotor3D.gd',
+  'scripts/npc_ai/contracts/CharacterMotorProfile.gd',
+  'scripts/npc_ai/contracts/CharacterMotorCommand.gd',
   'scripts/terrain/NativeCollisionActorGuard.gd',
   'scripts/terrain/NativeCollisionAdmissionBarrier.gd',
   'scripts/terrain/NativeTerrainCollisionOwner.gd',
@@ -222,6 +226,16 @@ export function validateFixtureReport(report) {
         || evidence.actorGuard.lateActor?.prematureRelease !== false
         || evidence.actorGuard.lateActor?.prematureAbort !== false
         || evidence.actorGuard.lateActor?.cancelledEmptyStartup !== true
+        || evidence.actorGuard.movingStatic?.clearance?.reason !== 'actor_occupies_replacement'
+        || evidence.actorGuard.movingStatic?.motionAdmitted !== false
+        || evidence.actorGuard.movingStatic?.sweepAdmitted !== false
+        || evidence.actorGuard.movingStatic?.cancelAdmitted !== false
+        || evidence.actorGuard.movingStatic?.facadeBound !== true
+        || evidence.actorGuard.movingStatic?.facadeSweepAdmitted !== false
+        || evidence.actorGuard.movingStatic?.facadeEarlyUnbind !== false
+        || evidence.actorGuard.movingStatic?.facadeUnbound !== true
+        || evidence.actorGuard.movingStatic?.motorHeld !== true
+        || evidence.actorGuard.movingStatic?.correctionHeld !== true
         || evidence.actorGuard.nodeCap?.reason !== 'actor_census_node_cap') errors.push('actor_guard_fixture_invalid');
     if (evidence?.staleBeforeAck?.reason !== 'stale_before_acknowledgement') errors.push('stale_before_ack_rejection_invalid');
     if (evidence?.staleBeforeInstall?.reason !== 'stale_before_install') errors.push('stale_before_install_rejection_invalid');
