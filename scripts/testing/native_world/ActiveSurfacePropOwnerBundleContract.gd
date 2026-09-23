@@ -71,6 +71,32 @@ func run() -> void:
 		check("terrain_bundle_explicitly_incomplete", terrain_bundle.get("complete") == false \
 			and terrain_bundle.get("scope") == "owner_structure_and_effective_terrain_chunk_only")
 		check("terrain_bundle_current", BundleScript.terrain_chunk_is_current(main, backend, terrain_bundle))
+		var structure_receipt: Dictionary = backend.admit_structure_exclusion_chunk(
+			terrain_bundle.sources.exclusions)
+		check("native_structure_chunk_admitted", structure_receipt.get("status") == "ready")
+		if structure_receipt.get("status") == "ready":
+			var native_chunk: Object = structure_receipt.snapshot
+			var native_status: Dictionary = native_chunk.status()
+			var native_clear: Dictionary = native_chunk.query(Vector2i.ZERO)
+			check("native_structure_chunk_bound", native_status.get("chunk") == Vector2i.ZERO \
+				and native_status.get("ownerGeneration") == structures.regional_source_generation \
+				and native_status.get("completeFeatureManifest") == false)
+			check("native_structure_chunk_clear", native_clear.get("complete") == true \
+				and native_clear.get("blocked") == false)
+		var forged_exclusions: Dictionary = terrain_bundle.sources.exclusions.duplicate(true)
+		forged_exclusions.content.citadel[0].reason = "forged"
+		check("native_structure_content_tamper_rejected",
+			backend.admit_structure_exclusion_chunk(forged_exclusions).get("status") == "failed")
+		forged_exclusions = terrain_bundle.sources.exclusions.duplicate(true)
+		forged_exclusions.admissionSeed = "different-seed"
+		check("native_structure_seed_tamper_rejected",
+			backend.admit_structure_exclusion_chunk(forged_exclusions).get("status") == "failed")
+		forged_exclusions = terrain_bundle.sources.exclusions.duplicate(true)
+		forged_exclusions.content.citadel.clear()
+		forged_exclusions.contentIdentity = Marshalls.raw_to_base64(var_to_bytes([
+			forged_exclusions.chunk, forged_exclusions.bounds, forged_exclusions.content])).sha256_text()
+		check("native_structure_missing_region_rejected",
+			backend.admit_structure_exclusion_chunk(forged_exclusions).get("status") == "failed")
 		var tampered_terrain := terrain_bundle.duplicate(true)
 		tampered_terrain.terrain.pageStatus.terrainDeltaRevision = -1
 		check("terrain_bundle_pin_tamper_rejected", not BundleScript.terrain_chunk_is_current(main, backend, tampered_terrain))

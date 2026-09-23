@@ -4,6 +4,7 @@
 #include "native_effective_terrain_batch.hpp"
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
+#include "native_structure_exclusion_snapshot.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
 #include "native_wildlife_presentation_receipt.hpp"
 #include "native_terrain_shaping_registry.hpp"
@@ -37,6 +38,30 @@ private:
 	std::unique_ptr<voxel::world_backend::NativeEffectiveTerrainBatch> batch_;
 };
 
+class NativeStructureExclusionChunk : public godot::RefCounted {
+	GDCLASS(NativeStructureExclusionChunk, godot::RefCounted);
+
+protected:
+	static void _bind_methods();
+
+public:
+	godot::Dictionary status() const;
+	godot::Dictionary query(const godot::Vector2i &p_cell) const;
+
+private:
+	friend class NativeWorldBackend;
+	void admit(std::unique_ptr<voxel::world_backend::NativeStructureExclusionSnapshot> p_snapshot,
+		godot::Vector2i p_chunk, std::int64_t p_owner_id, std::int64_t p_revision,
+		std::int64_t p_admission_generation, std::string p_capture_identity);
+
+	std::unique_ptr<voxel::world_backend::NativeStructureExclusionSnapshot> snapshot_;
+	godot::Vector2i chunk_;
+	std::int64_t owner_id_ = 0;
+	std::int64_t revision_ = 0;
+	std::int64_t admission_generation_ = 0;
+	std::string capture_identity_;
+};
+
 class NativeWorldBackend : public godot::RefCounted {
 	GDCLASS(NativeWorldBackend, godot::RefCounted);
 
@@ -53,6 +78,7 @@ public:
 	godot::Dictionary select_rock_asset_shadow(const godot::String &p_biome,
 		const godot::String &p_durable_prop_id) const;
 	godot::Dictionary admit_wildlife_presentation_catalog(const godot::Dictionary &p_bundle);
+	godot::Dictionary admit_structure_exclusion_chunk(const godot::Dictionary &p_capture) const;
 	godot::Dictionary wildlife_presentation_shadow(const godot::String &p_variant) const;
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;

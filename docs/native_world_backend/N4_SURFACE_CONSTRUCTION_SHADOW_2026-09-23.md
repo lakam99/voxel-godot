@@ -290,6 +290,29 @@ bundle contract passed 39/39 checks at
 This is still a capture-only receipt, not a native prop decision, live terrain
 cutover or gameplay acceptance.
 
+The structure-exclusion chunk now crosses a native adapter boundary as an
+immutable `NativeStructureExclusionChunk` value. Admission validates the
+Godot capture's seed, owner/revision, exact 28-cell bounds, row limits, copied
+content identity and complete decided Citadel region set before constructing
+the typed core snapshot. Native queries remain shadow-only and retain no live
+StructureSystem reference; freshness still belongs to the owning bundle.
+The first rebuilt adapter gate, `n4-structure-adapter-01`, passed 446/446
+debug and release core tests and both adapter smokes at
+`artifacts/native-world-backend/n4-structure-adapter-01/report.json`.
+Focused Godot contracts passed 45/45 owner-bundle checks and 90/90 direct
+structure-oracle checks at
+`artifacts/native-world-backend/n4-structure-adapter-differential-01.json`,
+including terrain/Citadel inclusive-versus-half-open boundaries, negative
+natural exclusion, seed/content tampering and a missing region. The native
+parser was subsequently tightened to bound rows before serializing their
+identity. The final rebuilt-DLL gate, `n4-structure-adapter-bounded-02`, passed
+446/446 debug and release core tests, both adapter smokes and validated strict
+pure-core coverage at
+`artifacts/native-world-backend/n4-structure-adapter-bounded-02/report.json`.
+Both focused Godot contracts passed again against that installed DLL: 45/45
+owner-bundle checks and 90/90 direct source/native decisions at
+`artifacts/native-world-backend/n4-structure-adapter-differential-02.json`.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

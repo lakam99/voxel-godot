@@ -65,6 +65,16 @@ func source(status: String, rect: Rect2i) -> Dictionary:
 		"binding":{"siteId":"oracle-site","sourceKey":"oracle-citadel","generation":1},
 		"reservationCells":rect}
 
+func native_initialization() -> Dictionary:
+	return {"schema":"n3-native-world-backend-initialize/v1", "seedText":"oracle-seed",
+		"revisions":{"sourceSchema":2,"terrainGenerator":1,"biomeRegionField":2,
+			"latticeQuery":1,"cellCenterQuery":1,"surfaceColumnQuery":1},
+		"constants":{"cellSizeMeters":1.35,"cellCenterOffsetCells":0.5,
+			"worldBottomCellY":-64,"waterLevelMeters":11.1,
+			"minimumSurfaceMeters":4.0,"maximumSurfaceMeters":120.0},
+		"sitePolicy":{"sourcePolicyRevision":1,"surveyGenerationPolicyRevision":1,
+			"ordinaryRegionCells":140,"ordinarySpawnChance":0.0,"townOverrides":[]}}
+
 func run() -> void:
 	var real_structures := Structures.new()
 	var real_admission := RealAdmission.new()
@@ -119,6 +129,21 @@ func run() -> void:
 		and chunk_snapshot.content.terrain.size() == 1
 		and chunk_snapshot.content.citadel.size() == 1
 		and ChunkSnapshot.is_current(structures, chunk_snapshot))
+	var native_backend = ClassDB.instantiate("NativeWorldBackend")
+	check("native_structure_backend_exists", native_backend != null)
+	if native_backend != null:
+		check("native_structure_backend_initialized",
+			native_backend.initialize(native_initialization()).get("status") == "ready")
+		var native_admission: Dictionary = native_backend.admit_structure_exclusion_chunk(chunk_snapshot)
+		check("native_structure_physical_chunk_admitted", native_admission.get("status") == "ready")
+		if native_admission.get("status") == "ready":
+			var native_chunk: Object = native_admission.snapshot
+			for cell in [Vector2i(0,0),Vector2i(8,8),Vector2i(12,12),Vector2i(13,13),
+					Vector2i(15,15),Vector2i(17,17),Vector2i(18,18)]:
+				var decision: Dictionary = native_chunk.query(cell)
+				check("native_structure_cell_%d_%d" % [cell.x, cell.y],
+					decision.get("complete") == true and decision.get("blocked") == \
+					structures.blocks_natural_prop_at_cell(cell.x, cell.y))
 	var tampered_chunk := chunk_snapshot.duplicate(true)
 	tampered_chunk.content.terrain[0].maxX = 100
 	check("chunk_snapshot_nested_tamper_rejected", not ChunkSnapshot.is_current(structures, tampered_chunk))
@@ -134,6 +159,16 @@ func run() -> void:
 		and negative_chunk.content.natural.size() == 1
 		and negative_chunk.content.terrain.is_empty()
 		and ChunkSnapshot.is_current(structures, negative_chunk))
+	if native_backend != null:
+		var native_negative: Dictionary = native_backend.admit_structure_exclusion_chunk(negative_chunk)
+		check("native_structure_negative_chunk_admitted", native_negative.get("status") == "ready")
+		if native_negative.get("status") == "ready":
+			var negative_native_chunk: Object = native_negative.snapshot
+			for cell in [Vector2i(-4,-4),Vector2i(-2,-2),Vector2i(-1,-1)]:
+				var decision: Dictionary = negative_native_chunk.query(cell)
+				check("native_structure_negative_cell_%d_%d" % [cell.x, cell.y],
+					decision.get("complete") == true and decision.get("blocked") == \
+					structures.blocks_natural_prop_at_cell(cell.x, cell.y))
 	var rows := decision_rows(structures)
 	var expected := [false,true,true,true,false,false,false,false,false,false,false,false,false,true,true,true,true,true,false,false,true,true,true,false,false,false,true,true]
 	check("all_28_ordered_decisions",rows.size()==28)

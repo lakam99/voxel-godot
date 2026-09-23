@@ -15,6 +15,7 @@ void initialize_terrain_meshing_module(ModuleInitializationLevel p_level) {
 	ClassDB::register_class<TerrainMeshingBackend>();
 	ClassDB::register_class<NativeWorldBackend>();
 	ClassDB::register_class<NativeEffectiveTerrainPage>();
+	ClassDB::register_class<NativeStructureExclusionChunk>();
 	register_building_support_kernel();
 }
 

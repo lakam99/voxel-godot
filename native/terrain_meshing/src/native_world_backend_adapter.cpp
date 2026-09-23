@@ -8,6 +8,7 @@
 
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/json.hpp>
+#include <godot_cpp/classes/marshalls.hpp>
 #include <godot_cpp/classes/ref.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/packed_byte_array.hpp>
@@ -42,6 +43,7 @@ constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone
 constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catalog-receipt/v1";
 constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-receipt/v1";
 constexpr const char *WILDLIFE_PRESENTATION_RECEIPT_SCHEMA = "n4-wildlife-presentation-catalog-receipt/v1";
+constexpr const char *STRUCTURE_CHUNK_RECEIPT_SCHEMA = "n4-structure-exclusion-chunk-receipt/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -1145,6 +1147,63 @@ Array regions_array(const std::vector<NativeSiteSourceRegionKey> &p_regions) {
 	return result;
 }
 
+StructureExclusionRect structure_rect(const Dictionary &p_row) {
+	require_exact_keys(p_row, {"id", "minX", "minZ", "maxX", "maxZ"}, "structure rectangle");
+	return {require_i32(p_row["minX"], "rect.minX"), require_i32(p_row["minZ"], "rect.minZ"),
+		require_i32(p_row["maxX"], "rect.maxX"), require_i32(p_row["maxZ"], "rect.maxZ")};
+}
+
+std::vector<StructureExclusionRecord> structure_records(const Variant &p_value, const char *p_field) {
+	const Array rows = require_array(p_value, p_field);
+	if (rows.size() > 65536) throw std::length_error("structure record count exceeds limit");
+	std::vector<StructureExclusionRecord> result;
+	result.reserve(static_cast<std::size_t>(rows.size()));
+	for (const Variant &entry : rows) {
+		const Dictionary row = require_dictionary(entry, p_field);
+		result.push_back({require_bounded_utf8(row.get("id", Variant()), "rect.id", 1024U, false),
+			structure_rect(row)});
+	}
+	return result;
+}
+
+std::vector<CitadelExclusionSource> structure_citadels(const Variant &p_value) {
+	const Array rows = require_array(p_value, "content.citadel");
+	if (rows.size() > 65536) throw std::length_error("citadel record count exceeds limit");
+	std::vector<CitadelExclusionSource> result;
+	result.reserve(static_cast<std::size_t>(rows.size()));
+	for (const Variant &entry : rows) {
+		const Dictionary row = require_dictionary(entry, "content.citadel[]");
+		require_exact_keys(row, {"region", "status", "reason", "sourceKey", "sourceSignature",
+			"admissionGeneration", "reservationCells"}, "citadel exclusion row");
+		const Vector2i region = require_vector2i(row["region"], "citadel.region");
+		const std::string status = require_bounded_utf8(row["status"], "citadel.status", 16U, false);
+		CitadelSourceStatus source_status;
+		if (status == "absent") source_status = CitadelSourceStatus::absent;
+		else if (status == "failed") source_status = CitadelSourceStatus::failed;
+		else if (status == "ready") source_status = CitadelSourceStatus::ready;
+		else if (status == "prepared") source_status = CitadelSourceStatus::prepared;
+		else throw std::invalid_argument("citadel source status is not admitted");
+		if (row["reservationCells"].get_type() != Variant::RECT2I)
+			throw std::invalid_argument("citadel reservationCells must be a Rect2i");
+		const Rect2i reservation = row["reservationCells"];
+		const std::int64_t end_x = static_cast<std::int64_t>(reservation.position.x) + reservation.size.x;
+		const std::int64_t end_z = static_cast<std::int64_t>(reservation.position.y) + reservation.size.y;
+		if (end_x > std::numeric_limits<std::int32_t>::max() || end_x < std::numeric_limits<std::int32_t>::min()
+				|| end_z > std::numeric_limits<std::int32_t>::max() || end_z < std::numeric_limits<std::int32_t>::min())
+			throw std::out_of_range("citadel reservation end exceeds int32");
+		const std::int64_t generation = require_i64(row["admissionGeneration"], "citadel.admissionGeneration");
+		if (generation < 0) throw std::out_of_range("citadel admissionGeneration is negative");
+		result.push_back({region.x, region.y, source_status,
+			require_bounded_utf8(row["reason"], "citadel.reason", 1024U),
+			require_bounded_utf8(row["sourceKey"], "citadel.sourceKey", 1024U),
+			require_bounded_utf8(row["sourceSignature"], "citadel.sourceSignature", 1024U),
+			static_cast<std::uint64_t>(generation),
+			{reservation.position.x, reservation.position.y,
+				static_cast<std::int32_t>(end_x), static_cast<std::int32_t>(end_z)}});
+	}
+	return result;
+}
+
 } // namespace
 
 void NativeEffectiveTerrainPage::_bind_methods() {
@@ -1253,6 +1312,52 @@ Dictionary NativeEffectiveTerrainPage::sample_batch(const Dictionary &p_request)
 	}
 }
 
+void NativeStructureExclusionChunk::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("status"), &NativeStructureExclusionChunk::status);
+	ClassDB::bind_method(D_METHOD("query", "cell"), &NativeStructureExclusionChunk::query);
+}
+
+void NativeStructureExclusionChunk::admit(std::unique_ptr<NativeStructureExclusionSnapshot> p_snapshot,
+		Vector2i p_chunk, std::int64_t p_owner_id, std::int64_t p_revision,
+		std::int64_t p_admission_generation, std::string p_capture_identity) {
+	if (snapshot_ || !p_snapshot) throw std::logic_error("native structure chunk admission is invalid");
+	snapshot_ = std::move(p_snapshot);
+	chunk_ = p_chunk;
+	owner_id_ = p_owner_id;
+	revision_ = p_revision;
+	admission_generation_ = p_admission_generation;
+	capture_identity_ = std::move(p_capture_identity);
+}
+
+Dictionary NativeStructureExclusionChunk::status() const {
+	Dictionary result = envelope("structure_chunk_status", snapshot_ ? "ready" : "uninitialized",
+		snapshot_ ? String() : String("structure_chunk_has_no_snapshot"));
+	if (!snapshot_) return result;
+	result["receiptSchema"] = STRUCTURE_CHUNK_RECEIPT_SCHEMA;
+	result["chunk"] = chunk_;
+	result["ownerInstanceId"] = owner_id_;
+	result["ownerGeneration"] = static_cast<std::int64_t>(snapshot_->world_generation());
+	result["exclusionRevision"] = revision_;
+	result["admissionGeneration"] = admission_generation_;
+	result["captureIdentity"] = text(capture_identity_);
+	result["sourceIdentity"] = text(sha256_hex(snapshot_->world_digest()));
+	result["contentIdentity"] = text(sha256_hex(snapshot_->content_digest()));
+	result["completeFeatureManifest"] = false;
+	result["liveCaptureFreshnessProven"] = false;
+	return result;
+}
+
+Dictionary NativeStructureExclusionChunk::query(const Vector2i &p_cell) const {
+	if (!snapshot_) return envelope("structure_chunk_query", "failed", "structure_chunk_has_no_snapshot");
+	const StructureExclusionDecision decision = snapshot_->query(p_cell.x, p_cell.y);
+	Dictionary result = envelope("structure_chunk_query", "ready");
+	result["blocked"] = decision.blocked;
+	result["complete"] = decision.complete;
+	result["kind"] = static_cast<std::int64_t>(decision.kind);
+	result["sourceId"] = text(decision.source_id);
+	return result;
+}
+
 void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("initialize", "request"), &NativeWorldBackend::initialize);
 	ClassDB::bind_method(D_METHOD("initialize_from_save_v2", "request"), &NativeWorldBackend::initialize_from_save_v2);
@@ -1262,6 +1367,7 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_visual_asset_catalog", "bundle"), &NativeWorldBackend::admit_visual_asset_catalog);
 	ClassDB::bind_method(D_METHOD("select_rock_asset_shadow", "biome", "durable_prop_id"), &NativeWorldBackend::select_rock_asset_shadow);
 	ClassDB::bind_method(D_METHOD("admit_wildlife_presentation_catalog", "bundle"), &NativeWorldBackend::admit_wildlife_presentation_catalog);
+	ClassDB::bind_method(D_METHOD("admit_structure_exclusion_chunk", "capture"), &NativeWorldBackend::admit_structure_exclusion_chunk);
 	ClassDB::bind_method(D_METHOD("wildlife_presentation_shadow", "variant"), &NativeWorldBackend::wildlife_presentation_shadow);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
@@ -1913,6 +2019,80 @@ Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &
 		return result;
 	} catch (const std::exception &error) {
 		return failure("admit_removed_props_tombstones", error);
+	}
+}
+
+Dictionary NativeWorldBackend::admit_structure_exclusion_chunk(const Dictionary &p_capture) const {
+	constexpr const char *operation = "admit_structure_exclusion_chunk";
+	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	try {
+		require_exact_keys(p_capture, {"ok", "schemaVersion", "scope", "ownerInstanceId",
+			"ownerGeneration", "exclusionRevision", "admissionSeed", "admissionGeneration",
+			"chunk", "bounds", "boundsAdmission", "content", "contentIdentity"},
+			"structure exclusion capture");
+		if (!require_bool(p_capture["ok"], "capture.ok")
+				|| require_i64(p_capture["schemaVersion"], "capture.schemaVersion") != 1
+				|| require_bounded_utf8(p_capture["scope"], "capture.scope", 64U, false)
+					!= "admitted_structure_exclusion_chunk_only")
+			throw std::invalid_argument("unsupported structure exclusion capture schema");
+		const std::int64_t owner_id = require_i64(p_capture["ownerInstanceId"], "capture.ownerInstanceId");
+		const std::int64_t generation = require_i64(p_capture["ownerGeneration"], "capture.ownerGeneration");
+		const std::int64_t revision = require_i64(p_capture["exclusionRevision"], "capture.exclusionRevision");
+		const std::int64_t admission_generation = require_i64(p_capture["admissionGeneration"], "capture.admissionGeneration");
+		if (owner_id == 0 || generation <= 0 || revision < 0 || admission_generation <= 0)
+			throw std::invalid_argument("structure exclusion capture owner identity is invalid");
+		const std::string seed = require_bounded_utf8(p_capture["admissionSeed"],
+			"capture.admissionSeed", MAX_SEED_TEXT_BYTES, false);
+		if (seed != state_->definition().raw_terrain_seed().utf8)
+			throw std::invalid_argument("structure exclusion capture seed differs from native source");
+		const Vector2i chunk = require_vector2i(p_capture["chunk"], "capture.chunk");
+		if (p_capture["bounds"].get_type() != Variant::RECT2I)
+			throw std::invalid_argument("structure exclusion bounds must be a Rect2i");
+		const Rect2i bounds = p_capture["bounds"];
+		const std::int64_t start_x = static_cast<std::int64_t>(chunk.x) * 28;
+		const std::int64_t start_z = static_cast<std::int64_t>(chunk.y) * 28;
+		if (start_x < -1000000 || start_z < -1000000 || start_x + 28 > 1000000
+				|| start_z + 28 > 1000000 || bounds.position.x != start_x
+				|| bounds.position.y != start_z || bounds.size != Vector2i(28, 28))
+			throw std::invalid_argument("structure exclusion chunk bounds do not match the admitted page");
+		const Dictionary bounds_admission = require_dictionary(p_capture["boundsAdmission"],
+			"capture.boundsAdmission");
+		if (require_bounded_utf8(bounds_admission.get("status", Variant()),
+				"capture.boundsAdmission.status", 16U, false) != "ready")
+			throw std::invalid_argument("structure exclusion bounds are not ready");
+		const Dictionary content = require_dictionary(p_capture["content"], "capture.content");
+		require_exact_keys(content, {"natural", "terrain", "citadel"}, "structure exclusion content");
+		std::vector<StructureExclusionRecord> natural = structure_records(content["natural"], "content.natural");
+		std::vector<StructureExclusionRecord> terrain = structure_records(content["terrain"], "content.terrain");
+		std::vector<CitadelExclusionSource> citadels = structure_citadels(content["citadel"]);
+		const std::string claimed = require_bounded_utf8(p_capture["contentIdentity"],
+			"capture.contentIdentity", 64U, false);
+		Array identity_value;
+		identity_value.append(chunk);
+		identity_value.append(bounds);
+		identity_value.append(content);
+		const String actual = Marshalls::get_singleton()->raw_to_base64(
+			UtilityFunctions::var_to_bytes(identity_value)).sha256_text();
+		if (claimed != utf8(actual))
+			throw std::invalid_argument("structure exclusion capture content identity mismatch");
+		std::vector<StructureExclusionBoundsAdmission> admissions{{
+			static_cast<std::int32_t>(start_x), static_cast<std::int32_t>(start_z), true}};
+		auto snapshot = std::make_unique<NativeStructureExclusionSnapshot>(
+			NativeStructureExclusionSnapshot::create(state_->source_identity().digest,
+				static_cast<std::uint64_t>(generation), std::move(natural), std::move(terrain),
+				std::move(citadels), std::move(admissions)));
+		if (!snapshot->covers_decided_regions(bounds.position.x, bounds.position.y,
+				bounds.position.x + 27, bounds.position.y + 27))
+			throw std::invalid_argument("structure exclusion capture lacks decided Citadel rows");
+		Ref<NativeStructureExclusionChunk> admitted;
+		admitted.instantiate();
+		admitted->admit(std::move(snapshot), chunk, owner_id, revision, admission_generation, claimed);
+		Dictionary result = envelope(operation, "ready");
+		result["snapshot"] = admitted;
+		result["snapshotStatus"] = admitted->status();
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
 	}
 }
 
