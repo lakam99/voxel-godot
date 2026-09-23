@@ -266,7 +266,10 @@ func collision_window_source_snapshot(window_token: String) -> Dictionary:
 		"cancellationEpoch":source.cancellationEpoch,
 		"requiredResidentBlocks":required.duplicate(),
 		"residentBlocks":produced, "artifacts":artifacts,
-		"membershipProvenance":record.membershipProvenance.duplicate(true)}
+		"membershipProvenance":record.membershipProvenance.duplicate(true),
+		"localCurrentProof":{"kind":"native_current_revision",
+			"throughGlobalRevision":int(_identity.sourceRevision),
+			"digest":String(record.proofDigest)}}
 
 func collision_window_artifact_row(window_token: String, block: Vector3i,
 		identity: Dictionary) -> Dictionary:
@@ -393,6 +396,9 @@ func _refresh_window_layout() -> Dictionary:
 			proven_records[token] = retained
 			break
 		active[token] = true
+		var new_proof_digest := ("%s:%s:%d" % [String(window.closureToken),
+			String(_identity.sourceIdentity.get("hex", "")),
+			int(_identity.sourceRevision)]).sha256_text()
 		var member := {"id":window.id, "blocks":window.blocks,
 			"closureToken":window.closureToken, "windowToken":token,
 			"windowIndex":index,
@@ -401,7 +407,7 @@ func _refresh_window_layout() -> Dictionary:
 			"localCurrentProof":{"kind":"verified_native_affected_mesh_exclusion/v1"
 					if proven_records.has(token) else "native_current_revision",
 				"throughGlobalRevision":int(_identity.sourceRevision),
-				"digest":String(proof.get("digest", ""))}}
+				"digest":String(proof.get("digest", new_proof_digest))}}
 		windows.append(member)
 		if not _window_records.has(token):
 			new_records[token] = {"layoutToken":layout_token,
@@ -410,9 +416,7 @@ func _refresh_window_layout() -> Dictionary:
 				"sourceIdentity":_identity.sourceIdentity.duplicate(true),
 				"shapingRevision":int(current_source.get("shapingRegistryRevision", -1)),
 				"provenThroughRevision":int(_identity.sourceRevision),
-				"proofDigest":("%s:%s:%d" % [String(window.closureToken),
-					String(_identity.sourceIdentity.get("hex", "")),
-					int(_identity.sourceRevision)]).sha256_text(),
+				"proofDigest":new_proof_digest,
 				"membershipProvenance":{"authority":"pinned_demand",
 					"demandRevision":0,
 					"closureToken":String(window.closureToken),
