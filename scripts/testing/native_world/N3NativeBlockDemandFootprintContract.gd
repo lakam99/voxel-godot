@@ -29,11 +29,11 @@ func _run() -> void:
 				packed.append(Vector3i(x, y, z))
 	_check("packed_125_block_halo_admitted", (Footprint.data_blocks_for_mesh_blocks(packed).get("blocks", []) as Array).size() == 125)
 	packed.append(Vector3i(4, 0, 0))
-	_check("beyond_native_128_entry_queue_rejected", Footprint.data_blocks_for_mesh_blocks(packed).get("reason") == "data_block_demand_limit")
+	_check("beyond_128_data_block_batch_rejected", Footprint.data_blocks_for_mesh_blocks(packed).get("reason") == "data_block_demand_limit")
 	var far: Array[Vector3i] = []
 	for x in range(64):
 		far.append(Vector3i(x * 4, 0, 0))
-	_check("sparse_capacity_fails_closed", Footprint.data_blocks_for_mesh_blocks(far).get("reason") == "data_block_demand_limit")
+	_check("sparse_batch_limit_fails_closed", Footprint.data_blocks_for_mesh_blocks(far).get("reason") == "data_block_demand_limit")
 	far.append(Vector3i(256, 0, 0))
 	_check("mesh_budget_fails_closed", Footprint.data_blocks_for_mesh_blocks(far).get("reason") == "mesh_block_demand_limit")
 	var passed := not checks.values().has(false)

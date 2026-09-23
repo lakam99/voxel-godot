@@ -82,16 +82,16 @@ contracts atomically, or replace those consumers together at their cutover.
   `artifacts/native-world-backend/n3-block-demand-footprint-20260923.json`.
   It does not yet choose mesh blocks from runtime viewer/chunk demand or
   reserve the resulting native jobs; those integration steps remain open.
-  The cap matches the native retained queue's 128-entry ceiling, but existing
+  This is a per-call batch cap. The native retained queue now defaults to
+  16,384 entries with a configurable hard ceiling of 32,768, but existing
   consumers can still make a newly requested footprint temporarily full;
   admission must retain and retry any `queue_capacity` result.
-  This is a *batch* bound, not enough capacity for the whole production viewer.
+  A single batch remains too small for the whole production viewer.
   Even an 11-by-11 mesh-block XZ square across the five startup vertical mesh
   blocks would require a 13-by-13-by-7 data halo (1,183 keys), before extra
   foreground/retained viewers. The actual viewer footprint is not that exact
-  square, but the 128-entry global retained map cannot be assumed sufficient.
-  Production integration must measure real resident demand, size the queue and
-  byte caps accordingly, and use bounded incremental registration/retirement;
+  square. Production integration must measure real resident demand, configure
+  bounded queue capacity, and use incremental registration/retirement;
   it must not drop old resident ownership simply to admit a new window.
 - `NativeTerrainBlockPublisher` is a composed manual-data bridge that admits
   shaping pages, retains a bounded native block request, inserts complete
@@ -121,8 +121,11 @@ contracts atomically, or replace those consumers together at their cutover.
 - A committed durable-mirror receipt now carries the exact changed cells.
   `NativeTerrainEditRepublicationPlan` maps those cells to replacement data
   blocks, affected neighboring mesh blocks, and their full data-input halo,
-  with receipt matching and finite plan caps. Focused planner report:
-  `artifacts/native-world-backend/n3-edit-republication-plan-1790168077551-776f5a78/report.json`;
+  with receipt matching and finite plan caps. Adjacent edits are partitioned
+  into deterministic subwindows within the publisher's 128-data-block batch
+  limit; a revision/source-epoch barrier waits for every physical mesh receipt.
+  Focused planner report:
+  `artifacts/native-world-backend/n3-edit-republication-plan-1790168494201-61b71c38/report.json`;
   linked shadow-mirror report:
   `artifacts/native-world-backend/n3-durable-edit-mirror-1790168114011-2af6c598/report.json`.
   The normal runtime still scans script edited cells and pastes through
