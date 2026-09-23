@@ -37,6 +37,7 @@ func run() -> void:
 	test_pages.configure(backend, held_page, 8)
 	check(transaction._set_page_adapter_for_test(test_pages),
 		"fixture page adapter binds within retained transaction")
+	main.native_terrain_load_transaction = transaction
 	var initial_id := int(transaction.snapshot().get("transactionId", 0))
 	check(begin.get("status") == "pending" and initial_id != 0,
 		"Main-facing transaction starts pending without a terrain publisher")
@@ -48,8 +49,9 @@ func run() -> void:
 		var state: Dictionary = transaction.advance()
 		max_frame_usec = maxi(max_frame_usec, Time.get_ticks_usec() - frame_started)
 		var snapshot: Dictionary = transaction.snapshot()
-		check(int(snapshot.get("transactionId", -1)) == initial_id,
-			"same transaction instance retained across advances")
+		check(main.native_terrain_load_transaction == transaction
+			and int(snapshot.get("transactionId", -1)) == initial_id,
+			"Main retains the same transaction instance across advances")
 		if state.get("status") == "pending": saw_pending = true
 		check(state.get("status") == "pending", "held page remains pending")
 		await process_frame
