@@ -79,3 +79,22 @@ rerun. The same gate built the adapter, and the direct Godot
 `N4BiomeCatalogAdapterContract.gd` passed after typed biome catalog retention
 was added. The retained catalog is invalidated on any rejected replacement.
 This remains a shadow receipt, not a live N4 publication.
+
+Visual bundle admission checkpoint: the native adapter now consumes the
+incomplete `ActiveSurfacePropOwnerBundle` as one generation-bound input,
+requires its biome owner/digest to match the retained native biome catalog,
+verifies the visual snapshot identity, and retains a typed effective rock
+selection catalog. A read-only shadow selection method exposes ID/path/size
+parity for direct contract tests. The admission receipt explicitly does not
+claim current-live freshness, imported-scene readiness, a complete prop
+manifest, or production cutover. The first integrated gate,
+`artifacts/native-world-backend/n4-effective-visual-admission-01/report.json`,
+passed 446/446 debug and release native tests plus 100% pure-core
+line/function/branch coverage. The direct
+`N4VisualCatalogAdapterContract.gd` passed against its installed extension,
+including duplicate family membership, registry selection parity, failed
+replacement invalidation, and biome replacement invalidation. A subsequent
+read-only audit found that live registry selection treats absent `biomeTags`
+as unrestricted and `asset_size` treats fewer than three size lanes as
+`Vector3.ONE`; the adapter and direct fixture now mirror those fallbacks.
+The fallback extension build/fixture rerun is pending at this checkpoint.

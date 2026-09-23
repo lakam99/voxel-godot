@@ -40,6 +40,7 @@ constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
 constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone-receipt/v1";
 constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catalog-receipt/v1";
+constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-receipt/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -1257,6 +1258,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("export_terrain_volume_v2"), &NativeWorldBackend::export_terrain_volume_v2);
 	ClassDB::bind_method(D_METHOD("admit_removed_props_tombstones", "capture"), &NativeWorldBackend::admit_removed_props_tombstones);
 	ClassDB::bind_method(D_METHOD("admit_biome_environment_catalog", "capture"), &NativeWorldBackend::admit_biome_environment_catalog);
+	ClassDB::bind_method(D_METHOD("admit_visual_asset_catalog", "bundle"), &NativeWorldBackend::admit_visual_asset_catalog);
+	ClassDB::bind_method(D_METHOD("select_rock_asset_shadow", "biome", "durable_prop_id"), &NativeWorldBackend::select_rock_asset_shadow);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
 	ClassDB::bind_method(D_METHOD("apply_shaping_resolutions", "resolutions"), &NativeWorldBackend::apply_shaping_resolutions);
@@ -1354,6 +1357,10 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 	// A rejected replacement cannot leave an earlier catalog available to a
 	// later visual admission under the same native owner.
 	biome_catalog_.reset();
+	visual_catalog_.reset();
+	visual_capture_owner_id_ = 0;
+	visual_capture_revision_ = 0;
+	visual_capture_identity_.clear();
 	biome_capture_owner_id_ = 0;
 	biome_capture_revision_ = 0;
 	biome_capture_identity_.clear();
@@ -1465,6 +1472,176 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 		result["nativeCatalogIdentity"] = text(native_identity);
 		result["profileCount"] = static_cast<int64_t>(biome_catalog_->profiles().size());
 		result["fallbackId"] = text(biome_catalog_->fallback_id());
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bundle) {
+	constexpr const char *operation = "admit_visual_asset_catalog";
+	if (!state_ || !shaping_registry_ || !biome_catalog_) {
+		return envelope(operation, "failed", "native_biome_catalog_not_ready");
+	}
+	visual_catalog_.reset();
+	visual_capture_owner_id_ = 0;
+	visual_capture_revision_ = 0;
+	visual_capture_identity_.clear();
+	try {
+		require_exact_keys(p_bundle, {"ok", "schemaVersion", "complete", "scope", "ownerInstanceId",
+			"seed", "biome", "visual", "presentation", "removed"}, "surface owner bundle");
+		if (!require_bool(p_bundle["ok"], "bundle.ok")
+				|| require_i64(p_bundle["schemaVersion"], "bundle.schemaVersion") != 1
+				|| require_bool(p_bundle["complete"], "bundle.complete")
+				|| require_bounded_utf8(p_bundle["scope"], "bundle.scope", 128U, false)
+					!= "owner_catalogs_and_removals_only") {
+			throw std::invalid_argument("unsupported surface owner bundle");
+		}
+		const std::int64_t main_id = require_i64(p_bundle["ownerInstanceId"], "bundle.ownerInstanceId");
+		if (main_id == 0 || require_bounded_utf8(p_bundle["seed"], "bundle.seed",
+				MAX_SEED_TEXT_BYTES, false) != state_->definition().raw_terrain_seed().utf8) {
+			throw std::invalid_argument("surface owner bundle does not match native world seed");
+		}
+		const Dictionary biome = require_dictionary(p_bundle["biome"], "bundle.biome");
+		const Dictionary biome_owner = require_dictionary(biome.get("ownerReceipt", Variant()), "bundle.biome.ownerReceipt");
+		require_exact_keys(biome_owner, {"owner_id", "revision", "ready"}, "bundle.biome.ownerReceipt");
+		if (!require_bool(biome.get("ok", Variant()), "bundle.biome.ok")
+				|| require_i64(biome_owner["owner_id"], "bundle.biome.owner_id") != biome_capture_owner_id_
+				|| require_i64(biome_owner["revision"], "bundle.biome.revision") != biome_capture_revision_
+				|| !require_bool(biome_owner["ready"], "bundle.biome.ready")
+				|| require_bounded_utf8(biome.get("contentIdentity", Variant()), "bundle.biome.contentIdentity", 64U, false)
+					!= biome_capture_identity_) {
+			throw std::invalid_argument("bundle biome generation differs from admitted native catalog");
+		}
+		const Dictionary visual = require_dictionary(p_bundle["visual"], "bundle.visual");
+		require_exact_keys(visual, {"ok", "schemaVersion", "ownerReceipt", "contentIdentity",
+			"assets", "families", "disabledIds", "sceneCache"}, "bundle.visual");
+		if (!require_bool(visual["ok"], "bundle.visual.ok")
+				|| require_i64(visual["schemaVersion"], "bundle.visual.schemaVersion") != 1) {
+			throw std::invalid_argument("unsupported visual capture schema");
+		}
+		const Dictionary owner = require_dictionary(visual["ownerReceipt"], "bundle.visual.ownerReceipt");
+		require_exact_keys(owner, {"owner_id", "revision", "ready", "catalog"}, "bundle.visual.ownerReceipt");
+		const std::int64_t owner_id = require_i64(owner["owner_id"], "bundle.visual.owner_id");
+		const std::int64_t revision = require_i64(owner["revision"], "bundle.visual.revision");
+		if (owner_id == 0 || revision <= 0 || !require_bool(owner["ready"], "bundle.visual.ready")
+				|| require_dictionary(owner["catalog"], "bundle.visual.catalog") != biome_owner) {
+			throw std::invalid_argument("visual registry generation differs from admitted biome generation");
+		}
+		const Array assets = require_array(visual["assets"], "bundle.visual.assets");
+		const Array families = require_array(visual["families"], "bundle.visual.families");
+		const Array disabled = require_array(visual["disabledIds"], "bundle.visual.disabledIds");
+		const Array cache = require_array(visual["sceneCache"], "bundle.visual.sceneCache");
+		if (assets.is_empty() || assets.size() > 65536 || families.size() > 65536
+				|| disabled.size() > 65536 || cache.size() > 65536) {
+			throw std::length_error("visual capture exceeds native catalog capacity");
+		}
+		Dictionary canonical;
+		canonical["domain"] = "visual_asset_registry_active_values";
+		canonical["schemaVersion"] = 1;
+		canonical["assets"] = assets;
+		canonical["families"] = families;
+		canonical["disabledIds"] = disabled;
+		canonical["sceneCache"] = cache;
+		const std::string identity = require_bounded_utf8(visual["contentIdentity"],
+			"bundle.visual.contentIdentity", 64U, false);
+		const std::string canonical_text = utf8(JSON::stringify(canonical));
+		if (identity != sha256_hex(sha256(reinterpret_cast<const std::uint8_t *>(canonical_text.data()), canonical_text.size()))) {
+			throw std::invalid_argument("visual capture content identity mismatch");
+		}
+		std::vector<NativeSurfaceRockAssetRecord> typed_assets;
+		typed_assets.reserve(static_cast<std::size_t>(assets.size()));
+		std::string previous_id;
+		for (const Variant &entry : assets) {
+			const Dictionary row = require_dictionary(entry, "bundle.visual.assets[]");
+			require_exact_keys(row, {"id", "value"}, "bundle.visual.assets[]");
+			const Dictionary value = require_dictionary(row["value"], "bundle.visual.assets[].value");
+			NativeSurfaceRockAssetRecord asset;
+			asset.id = require_bounded_utf8(row["id"], "asset.id", 4096U, false);
+			if (asset.id != require_bounded_utf8(value.get("id", Variant()), "asset.value.id", 4096U, false)
+					|| (!previous_id.empty() && !(previous_id < asset.id))) {
+				throw std::invalid_argument("visual asset ID map is not canonical");
+			}
+			previous_id = asset.id;
+			asset.family = require_bounded_utf8(value.get("family", Variant()), "asset.family", 4096U, false);
+			asset.path = require_bounded_utf8(value.get("path", Variant()), "asset.path", 4096U, false);
+			const Array tags = require_array(value.get("biomeTags", Array()), "asset.biomeTags");
+			if (tags.size() > 256) throw std::length_error("asset biome tags exceed capacity");
+			for (const Variant &tag : tags)
+				asset.biome_tags.push_back(require_bounded_utf8(tag, "asset.biomeTags[]", 4096U, false));
+			const Dictionary bounds = require_dictionary(value.get("boundingBox", Dictionary()), "asset.boundingBox");
+			const Array size = require_array(bounds.get("size", Array()), "asset.boundingBox.size");
+			// VisualAssetRegistry.asset_size returns Vector3.ONE for fewer than
+			// three lanes, and ignores lanes beyond the first three.
+			if (size.size() >= 3) {
+				asset.size_x = require_number(size[0], "asset.size.x");
+				asset.size_y = require_number(size[1], "asset.size.y");
+				asset.size_z = require_number(size[2], "asset.size.z");
+			}
+			typed_assets.push_back(std::move(asset));
+		}
+		std::vector<NativeSurfaceRockFamilyMembers> typed_families;
+		typed_families.reserve(static_cast<std::size_t>(families.size()));
+		std::string previous_family;
+		for (const Variant &entry : families) {
+			const Dictionary row = require_dictionary(entry, "bundle.visual.families[]");
+			require_exact_keys(row, {"family", "orderedIds"}, "bundle.visual.families[]");
+			NativeSurfaceRockFamilyMembers members;
+			members.family = require_bounded_utf8(row["family"], "family.name", 4096U, false);
+			if (!previous_family.empty() && !(previous_family < members.family))
+				throw std::invalid_argument("visual family map is not canonical");
+			previous_family = members.family;
+			const Array ids = require_array(row["orderedIds"], "family.orderedIds");
+			if (ids.size() > 65536) throw std::length_error("family members exceed capacity");
+			for (const Variant &id : ids)
+				members.ordered_ids.push_back(require_bounded_utf8(id, "family.orderedIds[]", 4096U, false));
+			typed_families.push_back(std::move(members));
+		}
+		auto typed = NativeSurfaceRockAssetCatalog::create_effective(
+			std::move(typed_assets), std::move(typed_families), *biome_catalog_);
+		const std::string native_identity = sha256_hex(typed.content_digest());
+		const std::uint64_t asset_count = static_cast<std::uint64_t>(assets.size());
+		visual_catalog_ = std::make_unique<NativeSurfaceRockAssetCatalog>(std::move(typed));
+		visual_capture_owner_id_ = owner_id;
+		visual_capture_revision_ = revision;
+		visual_capture_identity_ = identity;
+		Dictionary result = envelope(operation, "ready");
+		result["receiptSchema"] = VISUAL_CATALOG_RECEIPT_SCHEMA;
+		result["scope"] = "effective_rock_selection_inputs_only";
+		result["completeSurfacePropSource"] = false;
+		result["importReadinessProven"] = false;
+		result["liveCaptureFreshnessProven"] = false;
+		result["bundleOwnerInstanceId"] = main_id;
+		result["captureOwnerInstanceId"] = owner_id;
+		result["captureRevision"] = revision;
+		result["captureContentIdentity"] = text(identity);
+		result["nativeOwnerInstanceId"] = static_cast<int64_t>(get_instance_id());
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["biomeCatalogIdentity"] = text(sha256_hex(biome_catalog_->content_digest()));
+		result["nativeCatalogIdentity"] = text(native_identity);
+		result["assetCount"] = static_cast<int64_t>(asset_count);
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::select_rock_asset_shadow(
+		const String &p_biome, const String &p_durable_prop_id) const {
+	constexpr const char *operation = "select_rock_asset_shadow";
+	if (!visual_catalog_) return envelope(operation, "failed", "native_visual_catalog_not_ready");
+	try {
+		const NativeSurfaceRockAssetSelection selected = visual_catalog_->select(
+			bounded_utf8(p_biome, 4096U, "biome", false),
+			bounded_utf8(p_durable_prop_id, 4096U, "durablePropId", false));
+		Dictionary result = envelope(operation, "ready");
+		result["assetId"] = text(selected.asset_id);
+		result["assetPath"] = text(selected.asset_path);
+		result["assetSize"] = Vector3(selected.asset_size.x, selected.asset_size.y, selected.asset_size.z);
+		result["candidateCount"] = static_cast<int64_t>(selected.candidate_count);
+		result["matchedBiomeTag"] = selected.matched_biome_tag;
+		result["resolvedProfileBiome"] = text(selected.resolved_profile_biome);
+		result["nativeCatalogIdentity"] = text(sha256_hex(selected.asset_catalog_digest));
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);
@@ -1595,6 +1772,13 @@ Dictionary NativeWorldBackend::status() const {
 		result["biomeCaptureOwnerInstanceId"] = biome_capture_owner_id_;
 		result["biomeCaptureRevision"] = biome_capture_revision_;
 		result["biomeCaptureContentIdentity"] = text(biome_capture_identity_);
+	}
+	result["visualCatalogReady"] = visual_catalog_ != nullptr;
+	if (visual_catalog_) {
+		result["visualCatalogIdentity"] = text(sha256_hex(visual_catalog_->content_digest()));
+		result["visualCaptureOwnerInstanceId"] = visual_capture_owner_id_;
+		result["visualCaptureRevision"] = visual_capture_revision_;
+		result["visualCaptureContentIdentity"] = text(visual_capture_identity_);
 	}
 	return result;
 }

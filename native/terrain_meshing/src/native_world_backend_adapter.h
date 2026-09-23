@@ -3,12 +3,14 @@
 
 #include "native_effective_terrain_batch.hpp"
 #include "native_biome_environment_catalog.hpp"
+#include "native_surface_rock_asset_catalog.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
+#include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector2i.hpp>
 
 #include <cstdint>
@@ -45,6 +47,9 @@ public:
 	godot::Dictionary export_terrain_volume_v2() const;
 	godot::Dictionary admit_removed_props_tombstones(const godot::Dictionary &p_capture) const;
 	godot::Dictionary admit_biome_environment_catalog(const godot::Dictionary &p_capture);
+	godot::Dictionary admit_visual_asset_catalog(const godot::Dictionary &p_bundle);
+	godot::Dictionary select_rock_asset_shadow(const godot::String &p_biome,
+		const godot::String &p_durable_prop_id) const;
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;
 	godot::Dictionary apply_shaping_resolutions(const godot::Array &p_resolutions);
@@ -66,6 +71,10 @@ private:
 	std::int64_t biome_capture_owner_id_ = 0;
 	std::int64_t biome_capture_revision_ = 0;
 	std::string biome_capture_identity_;
+	std::unique_ptr<voxel::world_backend::NativeSurfaceRockAssetCatalog> visual_catalog_;
+	std::int64_t visual_capture_owner_id_ = 0;
+	std::int64_t visual_capture_revision_ = 0;
+	std::string visual_capture_identity_;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
 };
 
