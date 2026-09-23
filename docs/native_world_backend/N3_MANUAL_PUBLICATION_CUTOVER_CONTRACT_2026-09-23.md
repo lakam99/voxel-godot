@@ -85,6 +85,14 @@ contracts atomically, or replace those consumers together at their cutover.
   The cap matches the native retained queue's 128-entry ceiling, but existing
   consumers can still make a newly requested footprint temporarily full;
   admission must retain and retry any `queue_capacity` result.
+  This is a *batch* bound, not enough capacity for the whole production viewer.
+  Even an 11-by-11 mesh-block XZ square across the five startup vertical mesh
+  blocks would require a 13-by-13-by-7 data halo (1,183 keys), before extra
+  foreground/retained viewers. The actual viewer footprint is not that exact
+  square, but the 128-entry global retained map cannot be assumed sufficient.
+  Production integration must measure real resident demand, size the queue and
+  byte caps accordingly, and use bounded incremental registration/retirement;
+  it must not drop old resident ownership simply to admit a new window.
 - `NativeTerrainBlockPublisher` is a composed manual-data bridge that admits
   shaping pages, retains a bounded native block request, inserts complete
   channel buffers into a paired `VoxelTerrain`, and keeps mesh/physics/unload

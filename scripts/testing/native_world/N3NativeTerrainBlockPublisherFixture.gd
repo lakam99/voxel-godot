@@ -5,6 +5,15 @@ const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const PageBridge = preload("res://scripts/world/NativeShapingPageAdmission.gd")
 const SIZE := 16
 const CELL := 1.35
+
+class DelayedPageBridge extends RefCounted:
+	var delegate
+	var open := false
+	func request_page(page: Vector2i) -> Dictionary:
+		if not open:
+			return {"status":"pending", "reason":"synthetic_page_delay", "page":page}
+		return delegate.request_page(page)
+
 var failures: Array[String] = []
 var observations := {}
 
@@ -68,11 +77,18 @@ func run() -> void:
 	var light := DirectionalLight3D.new()
 	world.add_child(light)
 	light.rotation_degrees = Vector3(-50,20,0)
+	var delayed := DelayedPageBridge.new()
+	delayed.delegate = bridge
 	var publisher = Publisher.new()
-	check(publisher.setup(backend,terrain,bridge,1,10).get("status") == "ready", "publisher_configured")
+	check(publisher.setup(backend,terrain,delayed,1,10).get("status") == "ready", "publisher_configured")
 	var mesh: Array[Vector3i] = [Vector3i(8,0,8)]
 	check(publisher.demand_mesh_blocks(mesh).get("status") == "ready", "bounded_mesh_demand")
 	check(publisher.snapshot().demanded == 27, "explicit_xyz_halo")
+	for i in range(4):
+		check(publisher.pump().get("status") != "failed", "synthetic_pending_source_retained_%d" % i)
+	check(publisher.snapshot().demanded == 27 and publisher.snapshot().registered == 0,
+		"pending_page_registers_no_native_block")
+	delayed.open = true
 	var deadline := Time.get_ticks_msec() + 120000
 	var insertion_count := 0
 	var last_event := {}
@@ -109,22 +125,67 @@ func run() -> void:
 		var receipt: Dictionary = publisher.acknowledge_physics(target, true)
 		observations.physical.receipt = receipt.get("status")
 		check(receipt.get("status") == "ready", "real_physics_receipt")
+	var old_retiring := Vector3i(7,0,8)
+	check(terrain.has_data_block(old_retiring), "old_frontier_resident_before_shift")
+	viewer.position = Vector3(144,12,128)*CELL
+	var shifted_mesh: Array[Vector3i] = [Vector3i(9,0,8)]
+	var shifted: Dictionary = publisher.demand_mesh_blocks(shifted_mesh)
+	check(shifted.get("status") == "ready", "frontier_shift_accepted_while_old_resident")
+	check(publisher.snapshot().retiring == 9 and publisher.snapshot().registered == 27,
+		"old_frontier_retained_during_shift")
+	var new_frontier := Vector3i(10,0,8)
+	var new_inserted := false
+	var shift_deadline := Time.get_ticks_msec() + 30000
+	while Time.get_ticks_msec() < shift_deadline:
+		var event: Dictionary = publisher.pump()
+		if event.get("status") == "failed":
+			observations.shiftFailure = event
+			break
+		if terrain.has_data_block(new_frontier):
+			new_inserted = true
+			break
+		await process_frame
+	observations.shift = {"newInserted":new_inserted,
+		"oldResident":terrain.has_data_block(old_retiring), "snapshot":publisher.snapshot()}
+	check(new_inserted, "new_frontier_inserted_before_old_retirement")
+	check(terrain.has_data_block(old_retiring) and publisher.snapshot().retiring == 9,
+		"old_native_ownership_retained_during_new_insertion")
+	check(publisher.stop().get("reason") == "physical_blocks_must_unload",
+		"resident_physics_blocks_prevent_native_release")
 	viewer.position = Vector3(2000,12,2000)*CELL
 	var unloaded := false
 	for i in range(180):
 		await physics_frame
-		if not terrain.has_data_block(target):
+		var resident := false
+		for z in range(7, 10):
+			for y in range(-1, 2):
+				for x in range(7, 11):
+					resident = resident or terrain.has_data_block(Vector3i(x, y, z))
+		if not resident:
 			unloaded = true
 			break
 	var unload_event: Dictionary = {}
-	for i in range(27):
+	var unload_receipts := 0
+	var old_unload_receipt := false
+	for i in range(36):
 		unload_event = publisher.reconcile_one()
-		if unload_event.get("state") == "unloaded" and unload_event.get("block") == target:
+		if unload_event.get("state") == "unloaded":
+			unload_receipts += 1
+			if unload_event.get("block") == old_retiring:
+				old_unload_receipt = true
+	var retired_old := false
+	for i in range(36):
+		var event: Dictionary = publisher.stop()
+		if event.get("status") == "ready":
+			retired_old = true
 			break
-	observations.unload = {"engineUnloaded":unloaded,"event":unload_event}
-	check(unloaded and unload_event.get("state") == "unloaded", "explicit_native_unload_receipt")
-	var stopped: Dictionary = publisher.stop()
-	check(stopped.get("status") == "ready" and publisher.snapshot().registered == 0,
+		if event.get("status") == "failed":
+			break
+	observations.unload = {"engineUnloaded":unloaded,"receiptCount":unload_receipts,
+		"oldFrontierReceipt":old_unload_receipt,"lastEvent":unload_event}
+	check(unloaded and old_unload_receipt and unload_receipts >= 27,
+		"explicit_native_unload_receipt")
+	check(retired_old and publisher.snapshot().registered == 0,
 		"all_consumer_requests_released")
 	var drained := false
 	for i in range(120):
