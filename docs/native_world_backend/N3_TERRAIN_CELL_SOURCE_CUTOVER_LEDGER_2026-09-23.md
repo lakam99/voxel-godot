@@ -311,6 +311,9 @@ window count, row count and vertex bytes. More than 64 unretired windows or
 256 MiB of retained vertex arrays pauses new source publication with
 `collision_window_retirement_backpressure` and the exact retired tokens;
 acknowledging a drained window releases its rows and permits retry. The
-focused 66-to-1-window contract proves the count cap, explicit acknowledgement
-and resumption at
-`artifacts/native-world-backend/n3-triangle-artifact-1790179905890-601e22c0/report.json`.
+broker preflights the projected retired set before creating another layout,
+then stops further layout materialization while retirement backpressure is
+active. The focused 66-to-1-window contract proves the count cap, two more
+demand changes without record or byte growth, explicit acknowledgement and
+resumption at
+`artifacts/native-world-backend/n3-triangle-artifact-1790180079292-6b43bb0b/report.json`.
