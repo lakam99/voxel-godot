@@ -1,9 +1,9 @@
 extends SceneTree
 
 const TRANSACTION = preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
-const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const MAIN = preload("res://scripts/MainCore.gd")
 const STRUCTURES = preload("res://scripts/StructureSystem.gd")
+const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
 const PENDING_PAGES = preload("res://scripts/testing/native_world/PendingPages.gd")
 
 var failures: Array[String] = []
@@ -16,30 +16,31 @@ func _init() -> void:
 
 func run() -> void:
 	var started_usec := Time.get_ticks_usec()
+	var world := Node3D.new()
+	root.add_child(world)
 	var main = MAIN.new()
 	main.seed_text = "native-main-load-transaction-contract"
 	main.structure_system = STRUCTURES.new()
 	main.structure_system.citadel_terrain_admission.configure(main.seed_text, {},
 		{"regionCells":main.STRUCTURE_REGION_CELLS, "spawnChance":main.STRUCTURE_SPAWN_CHANCE})
-	var source: Dictionary = SOURCE.from_main_with_save_volume(main,
-		{"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]})
-	check(source.get("status") == "ready", "frozen source envelope ready")
-	var transaction = TRANSACTION.new()
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	main.player = CharacterBody3D.new()
+	world.add_child(main.player)
 	var admission = main.structure_system.citadel_terrain_admission
 	var policy := {"regionCells":main.STRUCTURE_REGION_CELLS,
 		"spawnChance":main.STRUCTURE_SPAWN_CHANCE}
-	var backend = ClassDB.instantiate("NativeWorldBackend")
-	var initialized: Dictionary = backend.initialize_from_save_v2(source.request)
-	check(initialized.get("status") == "ready", "native source initializes")
+	var begin: Dictionary = main.begin_native_terrain_load_preparation()
+	var transaction = main.native_terrain_load_transaction
+	check(begin.get("status") == "pending" and transaction != null,
+		"Main startup helper retains a native source transaction")
 	var test_pages = PENDING_PAGES.new()
 	var held_page := Vector2i(0, 0)
-	var begin: Dictionary = transaction.start_backend(backend, admission, held_page)
-	test_pages.configure(backend, held_page, 8)
+	test_pages.configure(transaction._backend, held_page, 8)
 	check(transaction._set_page_adapter_for_test(test_pages),
 		"fixture page adapter binds within retained transaction")
-	main.native_terrain_load_transaction = transaction
 	var initial_id := int(transaction.snapshot().get("transactionId", 0))
-	check(begin.get("status") == "pending" and initial_id != 0,
+	check(initial_id != 0,
 		"Main-facing transaction starts pending without a terrain publisher")
 	var saw_pending := false
 	var became_ready := false
@@ -77,7 +78,10 @@ func run() -> void:
 	cancel_structures.citadel_terrain_admission.configure(main.seed_text, {}, policy)
 	cancel_structures.citadel_terrain_admission.finalize_town_inputs({})
 	var cancel_admission = cancel_structures.citadel_terrain_admission
-	var cancelled_setup := pending_cancel.start(source.request, cancel_admission,
+	var save_volume: Dictionary = main.world_generation_system.call("save_terrain_volume_deltas")
+	var cancel_request: Dictionary = preload("res://scripts/terrain/NativeWorldSourceRequest.gd").from_main_with_save_volume(
+		main, save_volume)
+	var cancelled_setup := pending_cancel.start(cancel_request.request, cancel_admission,
 		Vector2i(0, 0))
 	check(cancelled_setup.get("status") == "pending", "second load remains pending for cancel test")
 	var cancel_started := Time.get_ticks_usec()
@@ -96,6 +100,7 @@ func run() -> void:
 		"failures":failures,
 		"metrics":{"elapsedUsec":elapsed_usec, "advanceCount":ready_snapshot.get("advanceCount", 0),
 			"maxAdvanceUsec":ready_snapshot.get("maxAdvanceUsec", 0),
+			"mainStartUsec":main.native_terrain_load_transaction_start_usec,
 			"maxFrameWorkUsec":max_frame_usec, "cancelDrainUsec":cancel_usec},
 		"identities":{"transactionId":initial_id,
 			"sourceIdentity":ready_snapshot.get("sourceIdentity", {}),
@@ -104,5 +109,7 @@ func run() -> void:
 	if not path.is_empty():
 		var file := FileAccess.open(path, FileAccess.WRITE)
 		if file != null: file.store_string(JSON.stringify(report, "\t"))
+	world.queue_free()
 	main.free()
+	await process_frame
 	quit(0 if report.passed else 1)

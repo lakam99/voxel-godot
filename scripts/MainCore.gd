@@ -17,6 +17,7 @@ const GeneratedContentViewPriorityScript := preload("res://scripts/world/Generat
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
 const NativeTerrainLoadTransactionScript := preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
+const NativeWorldSourceRequestScript := preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarkerIndex.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
@@ -97,6 +98,9 @@ var _native_collision_admission_owner_id := 0
 ## Reserved loading-only composition seam. Normal boot leaves this null; it
 ## never participates in terrain queries, collision publication, or readiness.
 var native_terrain_load_transaction
+var native_terrain_load_transaction_state := {"status":"idle"}
+var native_terrain_load_transaction_max_advance_usec := 0
+var native_terrain_load_transaction_start_usec := 0
 var world_environment: WorldEnvironment
 var visual_style: Resource
 var sky_resource: Sky
@@ -536,9 +540,15 @@ func _run_deferred_startup_boot() -> void:
             await tutorial_system.call("complete_restore_world_staged"),
             "invalid_staged_tutorial_restore_result"
         )
-        if not startup_result_is_ready(tutorial_result):
-            await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
-            return
+    if not startup_result_is_ready(tutorial_result):
+        await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
+        return
+    if not skip_synchronous_world_boot:
+        var native_load_start := begin_native_terrain_load_preparation()
+        native_terrain_load_transaction_state = native_load_start.duplicate(true)
+        await startup_loading_yield("Preparing native terrain source",
+            "native_terrain_preparation", String(native_load_start.get("status", "failed")),
+            native_load_start)
     if loaded:
         await startup_loading_yield("Saved world restored", "save_restore", "ready", {
             "requestedMode": requested_startup_mode,
@@ -706,6 +716,7 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
     # old publication work draining without dispatching against a partial world.
     if structure_system != null:
         structure_system.advance_citadel_publication()
+    advance_native_terrain_load_preparation()
     if streaming_active:
         apply_streaming_region_demand()
     # Local-light rigs can be published while the regular gameplay process is
@@ -750,6 +761,62 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
         hud.set_loading_message(message)
     await get_tree().process_frame
 
+## Start a retained native source load from Main's restored durable terrain
+## snapshot. This remains a pre-cutover preparation path: Main gameplay queries,
+## readiness, saves, and collision continue to use their existing authorities.
+func begin_native_terrain_load_preparation() -> Dictionary:
+    var started_usec := Time.get_ticks_usec()
+    if native_terrain_load_transaction != null:
+        return {"status":"failed", "reason":"native_load_transaction_already_retained"}
+    if structure_system == null or player == null:
+        return {"status":"failed", "reason":"native_load_transaction_main_inputs_missing"}
+    var terrain_volume: Dictionary = {}
+    if world_generation_system != null and world_generation_system.has_method("save_terrain_volume_deltas"):
+        terrain_volume = world_generation_system.call("save_terrain_volume_deltas")
+    var save_snapshot := {"version":2, "seed":seed_text, "terrain":[],
+        "terrainVolume":terrain_volume}
+    var source: Dictionary = NativeWorldSourceRequestScript.from_main_with_v2_save(
+        self, save_snapshot)
+    if source.get("status") != "ready": return source
+    var admission = structure_system.get("citadel_terrain_admission")
+    if admission == null:
+        return {"status":"failed", "reason":"native_load_transaction_site_admission_missing"}
+    var cell_x := floori(player.global_position.x / CELL)
+    var cell_z := floori(player.global_position.z / CELL)
+    var page := Vector2i(floori(float(cell_x) / 280.0), floori(float(cell_z) / 280.0))
+    native_terrain_load_transaction = NativeTerrainLoadTransactionScript.new()
+    var started: Dictionary = native_terrain_load_transaction.start(source.request,
+        admission, page)
+    native_terrain_load_transaction_start_usec = Time.get_ticks_usec() - started_usec
+    native_terrain_load_transaction_state = started.duplicate(true)
+    native_terrain_load_transaction_state["startUsec"] = native_terrain_load_transaction_start_usec
+    return native_terrain_load_transaction_state.duplicate(true)
+
+func advance_native_terrain_load_preparation() -> Dictionary:
+    if native_terrain_load_transaction == null:
+        return native_terrain_load_transaction_state.duplicate(true)
+    var transaction_state: Dictionary = native_terrain_load_transaction.snapshot()
+    if transaction_state.get("state") != "pending":
+        return native_terrain_load_transaction_state.duplicate(true)
+    var started_usec := Time.get_ticks_usec()
+    var advanced: Dictionary = native_terrain_load_transaction.advance()
+    var elapsed_usec := Time.get_ticks_usec() - started_usec
+    native_terrain_load_transaction_max_advance_usec = maxi(
+        native_terrain_load_transaction_max_advance_usec, elapsed_usec)
+    native_terrain_load_transaction_state = advanced.duplicate(true)
+    native_terrain_load_transaction_state["advanceUsec"] = elapsed_usec
+    native_terrain_load_transaction_state["maxAdvanceUsec"] = \
+        native_terrain_load_transaction_max_advance_usec
+    return native_terrain_load_transaction_state.duplicate(true)
+
+func stop_native_terrain_load_preparation() -> Dictionary:
+    if native_terrain_load_transaction == null:
+        return {"status":"ready", "drained":true}
+    var stopped: Dictionary = native_terrain_load_transaction.stop()
+    native_terrain_load_transaction_state = stopped.duplicate(true)
+    native_terrain_load_transaction = null
+    return stopped
+
 func normalized_startup_result(value, fallback_reason: String) -> Dictionary:
     if shutdown_requested and (startup_loading_active or runtime_loading_active):
         return StartupReadinessResultScript.failed("startup_cancelled")
@@ -774,6 +841,7 @@ func stop_startup_loading(result_value, fallback_reason := "startup_readiness_fa
     )
 
 func apply_startup_loading_failure_state(result_value, fallback_reason := "startup_readiness_failed") -> String:
+    stop_native_terrain_load_preparation()
     var result := normalized_startup_result(result_value, fallback_reason)
     var reason := String(result.get("reason", fallback_reason)).strip_edges()
     if reason == "":
@@ -2085,6 +2153,7 @@ func should_defer_autosave_snapshot_for_activity(delta: float) -> bool:
     return true
 
 func apply_world_seed(new_seed: String, remember := false) -> void:
+    stop_native_terrain_load_preparation()
     seed_text = new_seed.strip_edges()
     if seed_text == "":
         seed_text = random_world_seed()
@@ -2933,6 +3002,7 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
     if not await retire_generated_scenes_before_world_reset():
         await stop_startup_loading(StartupReadinessResultScript.failed("generated_scene_retirement_failed"))
         return false
+    stop_native_terrain_load_preparation()
     if shutdown_requested:
         await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
         return false
@@ -3173,6 +3243,7 @@ func request_graceful_quit(exit_code := 0) -> void:
     if shutdown_requested:
         return
     shutdown_requested = true
+    stop_native_terrain_load_preparation()
     if hud != null and hud.has_method("show_loading_overlay"):
         hud.show_loading_overlay("Saving and exiting")
     set_process(false)

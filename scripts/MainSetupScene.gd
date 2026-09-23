@@ -727,6 +727,7 @@ func advance_world_clock(delta: float) -> bool:
 
 func _process(delta: float) -> void:
     var frame_start := Time.get_ticks_usec()
+    advance_native_terrain_load_preparation()
     var trace_post_startup := post_startup_trace_frames > 0
     if trace_post_startup:
         startup_loading_step.emit("Runtime frame: start")
