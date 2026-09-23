@@ -11,6 +11,7 @@ const DemandPlanner = preload("res://scripts/terrain/NativeTerrainDemandPlanner.
 const BlockPublisher = preload("res://scripts/terrain/NativeTerrainBlockPublisher.gd")
 const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
 const NumericSource = preload("res://scripts/terrain/NativeTerrainNumericSource.gd")
+const OccupancySource = preload("res://scripts/terrain/NativeTerrainOccupancySource.gd")
 const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 var _backend
@@ -20,6 +21,7 @@ var _planner
 var _publisher
 var _cells
 var _numeric
+var _occupancy
 var _state := "new"
 var _failure := ""
 var _seed_text := ""
@@ -60,6 +62,10 @@ func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dict
 	var numeric_ready: Dictionary = _numeric.bind(_backend)
 	if numeric_ready.get("status") != "ready":
 		return _setup_failure(String(numeric_ready.get("reason", "native_numeric_source_failed")))
+	_occupancy = OccupancySource.new()
+	var occupancy_ready: Dictionary = _occupancy.bind(_cells)
+	if occupancy_ready.get("status") != "ready":
+		return _setup_failure(String(occupancy_ready.get("reason", "native_occupancy_source_failed")))
 	_publisher = BlockPublisher.new()
 	var published: Dictionary = _publisher.setup(_backend, terrain, _pages, consumer_id, priority)
 	if published.get("status") != "ready":
@@ -108,6 +114,10 @@ func read_cells(cells: Array[Vector3i]) -> Dictionary:
 func read_numeric_batch(world_positions: Array[Vector3], projection_cells: Array[Vector3i]) -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _numeric.read_numeric_batch(world_positions, projection_cells)
+
+func read_occupancy(cell: Vector3i) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _occupancy.read_occupancy(cell)
 
 ## Commit durable cell deltas through the same owner used for reads and saves.
 ## The returned plan describes work still needed for physical publication; it
@@ -280,6 +290,7 @@ func _release_owners() -> void:
 	_publisher = null
 	_cells = null
 	_numeric = null
+	_occupancy = null
 	_planner = null
 	_pages = null
 	_backend = null
