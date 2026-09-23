@@ -107,6 +107,31 @@ func run() -> void:
 		"primaryPlusAux":8204, "overflow":overflow,
 		"handoffAddBlocks":(moving_delta.addBlocks as Array).size(),
 		"handoffRemoveBlocks":(moving_delta.removeBlocks as Array).size()})
+	var partitioned = PLANNER.new()
+	partitioned.setup(72)
+	var large: Dictionary = partitioned.replace_sources(
+		{"position":Vector3.ZERO, "distance":128}, [], [], [], Vector2i(0,256))
+	var layout: Dictionary = partitioned.collision_mesh_window_layout()
+	var union := {}
+	var max_window := 0
+	for window: Dictionary in layout.get("windows", []):
+		max_window = maxi(max_window, (window.blocks as Array).size())
+		for block: Vector3i in window.blocks:
+			check(not union.has(block), "spatial window duplicate rejected")
+			union[block] = true
+	check(large.get("status") == "ready"
+		and int(layout.get("requiredBlockCount", 0)) == 4913
+		and union.size() == 4913
+		and int(layout.get("windowCount", 0)) > 1
+		and max_window <= 4096
+		and union.keys().size() == (layout.get("requiredBlocks", []) as Array).size(),
+		"17 cubed closure partitions without gaps or over-capacity windows")
+	var same_layout: Dictionary = partitioned.collision_mesh_window_layout()
+	check(same_layout == layout, "identical 4913-block demand retains window tokens")
+	observations.append({"phase":"partitioned_17_cubed",
+		"requiredBlocks":layout.get("requiredBlockCount", 0),
+		"windows":layout.get("windowCount", 0), "maxWindowBlocks":max_window,
+		"logicalClosureToken":layout.get("logicalClosureToken", "")})
 
 	var output := {"schema":"n3-terrain-demand-planner-contract/v1",
 		"passed":failures.is_empty(), "evidenceLevel":"pure-headless-planner-contract",

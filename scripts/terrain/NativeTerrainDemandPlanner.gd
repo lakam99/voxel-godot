@@ -9,6 +9,8 @@ const GAME_CHUNK_CELLS := 28
 const MAX_VIEW_DISTANCE := 128
 const MAX_UNION_BLOCKS := 32768
 const MAX_DELTA_BLOCKS := 128
+const MESH_WINDOW_EDGE_BLOCKS := 16
+const MAX_MESH_WINDOW_BLOCKS := 4096
 
 var _consumer_id := 0
 var _sources: Dictionary = {}
@@ -16,6 +18,8 @@ var _desired: Dictionary = {}
 var _required_mesh_blocks: Dictionary = {}
 var _demand_revision := 0
 var _closure_token := ""
+var _mesh_window_layout := {}
+var _mesh_window_layout_revision := -1
 var _desired_priority: Dictionary = {}
 var _applied: Dictionary = {}
 var _issued: Dictionary = {}
@@ -99,6 +103,46 @@ func required_collision_mesh_blocks() -> Dictionary:
 	_sort_blocks(blocks)
 	return {"status":"ready", "revision":_demand_revision,
 		"closureToken":_closure_token, "blocks":blocks}
+
+func collision_mesh_window_layout() -> Dictionary:
+	if _consumer_id <= 0 or _demand_revision <= 0:
+		return {"status":"pending", "reason":"mesh_demand_unset"}
+	if _mesh_window_layout_revision == _demand_revision:
+		return _mesh_window_layout.duplicate(true)
+	var buckets := {}
+	for block: Vector3i in _required_mesh_blocks:
+		var window := Vector3i(floori(float(block.x) / MESH_WINDOW_EDGE_BLOCKS),
+			floori(float(block.y) / MESH_WINDOW_EDGE_BLOCKS),
+			floori(float(block.z) / MESH_WINDOW_EDGE_BLOCKS))
+		if not buckets.has(window): buckets[window] = []
+		buckets[window].append(block)
+	var ids: Array[Vector3i] = []
+	for window: Vector3i in buckets: ids.append(window)
+	_sort_blocks(ids)
+	var windows: Array[Dictionary] = []
+	for window: Vector3i in ids:
+		var blocks: Array[Vector3i] = []
+		for block: Vector3i in buckets[window]: blocks.append(block)
+		_sort_blocks(blocks)
+		if blocks.is_empty() or blocks.size() > MAX_MESH_WINDOW_BLOCKS:
+			return {"status":"failed", "reason":"mesh_window_capacity_invalid"}
+		var token_parts := PackedStringArray(["n3-spatial-window-v1",
+			"%d,%d,%d" % [window.x, window.y, window.z]])
+		for block: Vector3i in blocks:
+			token_parts.append("%d,%d,%d" % [block.x, block.y, block.z])
+		windows.append({"id":window, "blocks":blocks,
+			"closureToken":":".join(token_parts).sha256_text()})
+	_mesh_window_layout = {"status":"ready", "schema":"n3-mesh-window-layout/v1",
+		"logicalDemandRevision":_demand_revision,
+		"logicalClosureToken":_closure_token,
+		"requiredBlockCount":_required_mesh_blocks.size(),
+		"requiredBlocks":required_collision_mesh_blocks().blocks,
+		"windowEdgeBlocks":MESH_WINDOW_EDGE_BLOCKS,
+		"maxWindowBlocks":MAX_MESH_WINDOW_BLOCKS,
+		"windowCount":windows.size(),
+		"windows":windows}
+	_mesh_window_layout_revision = _demand_revision
+	return _mesh_window_layout.duplicate(true)
 
 func next_delta() -> Dictionary:
 	if _consumer_id <= 0:
