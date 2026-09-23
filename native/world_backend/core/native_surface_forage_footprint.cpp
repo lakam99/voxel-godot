@@ -5,11 +5,11 @@
 
 namespace voxel::world_backend {
 namespace {
-NativeFeatureWorldBounds render_bounds(const NativeSurfaceForageOrderedDefinition &forage) {
-    const auto &anchor = forage.placement().world_anchor;
+NativeFeatureWorldBounds render_bounds(const std::vector<NativeForageMesh> &meshes,
+    const NativeForageVec3 anchor) {
     const double x = anchor.x, y = anchor.y, z = anchor.z;
     NativeFeatureWorldBounds bounds{x, y, z, x, y, z};
-    for (const auto &mesh : forage.meshes()) {
+    for (const auto &mesh : meshes) {
         const double horizontal = mesh.kind == NativeForageMeshKind::sphere
             ? mesh.radius : std::max(mesh.top_radius, mesh.bottom_radius);
         // Circumscribe the scaled mesh before its local Euler rotation. The
@@ -26,6 +26,25 @@ NativeFeatureWorldBounds render_bounds(const NativeSurfaceForageOrderedDefinitio
 }
 } // namespace
 
+std::vector<NativeFeatureFootprintRun> native_surface_forage_geometry_runs(
+    const NativeForageDecodedGeometry &geometry, const NativeForageVec3 world_anchor,
+    const double cell_size) {
+    auto runs = native_feature_runs_for_bounds(render_bounds(geometry.meshes, world_anchor), cell_size,
+        NativeFeatureFootprintChannel::render);
+    const double x = world_anchor.x, y = world_anchor.y + geometry.collider_center_y;
+    const double z = world_anchor.z, radius = geometry.collider_radius;
+    const NativeFeatureWorldBounds physical{x-radius, y-radius, z-radius, x+radius, y+radius, z+radius};
+    const auto collision = native_feature_runs_for_bounds(physical, cell_size,
+        NativeFeatureFootprintChannel::collision);
+    runs.insert(runs.end(), collision.begin(), collision.end());
+    if (geometry.navigation_blocker) {
+        const auto navigation = native_feature_runs_for_bounds(physical, cell_size,
+            NativeFeatureFootprintChannel::navigation);
+        runs.insert(runs.end(), navigation.begin(), navigation.end());
+    }
+    return runs;
+}
+
 NativeGeneratedFeatureFootprintCatalog compose_native_surface_forage_footprint(
     const NativeSurfacePropSourceOrderedStream &ordered,
     const NativeSurfacePropOrderedPlacement &placements, const std::uint32_t ordinal,
@@ -40,21 +59,16 @@ NativeGeneratedFeatureFootprintCatalog compose_native_surface_forage_footprint(
     entry.recipe_revision = 1U;
     entry.footprint_schema_revision = 1U;
     entry.generated_definition_digest = forage.content_digest();
-    const auto visual = native_feature_runs_for_bounds(render_bounds(forage), cell_size,
-        NativeFeatureFootprintChannel::render);
-    entry.runs.insert(entry.runs.end(), visual.begin(), visual.end());
+    NativeForageDecodedGeometry geometry;
+    geometry.meshes = forage.meshes();
+    geometry.rotation_y = forage.rotation_y();
+    geometry.collider_radius = forage.collider_radius();
+    geometry.collider_center_y = forage.collider_center_y();
+    geometry.navigation_blocker = forage.navigation_blocker();
     const auto &anchor = forage.placement().world_anchor;
-    const double x = anchor.x, y = anchor.y + forage.collider_center_y();
-    const double z = anchor.z, radius = forage.collider_radius();
-    const NativeFeatureWorldBounds physical{x-radius, y-radius, z-radius, x+radius, y+radius, z+radius};
-    const auto collision = native_feature_runs_for_bounds(physical, cell_size,
-        NativeFeatureFootprintChannel::collision);
-    entry.runs.insert(entry.runs.end(), collision.begin(), collision.end());
-    if (forage.navigation_blocker()) {
-        const auto navigation = native_feature_runs_for_bounds(physical, cell_size,
-            NativeFeatureFootprintChannel::navigation);
-        entry.runs.insert(entry.runs.end(), navigation.begin(), navigation.end());
-    }
+    entry.runs = native_surface_forage_geometry_runs(geometry,
+        {static_cast<float>(anchor.x), static_cast<float>(anchor.y), static_cast<float>(anchor.z)},
+        cell_size);
     return NativeGeneratedFeatureFootprintCatalog::create(
         terrain.pin().physical_content_identity().digest, 1U, {std::move(entry)});
 }

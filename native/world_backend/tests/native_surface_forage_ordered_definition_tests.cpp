@@ -267,6 +267,63 @@ VWB_TEST(native_ordered_forage_definition_projects_all_four_grammars_and_separat
     }
 }
 
+VWB_TEST(native_forage_footprint_contains_every_direct_godot_child_aabb_cell) {
+    // Independent transformed mesh.get_aabb() and sphere-shape world AABBs from
+    // N4ForageConstructionOracle.gd, source-matched report SHA-256
+    // 1cfa4d6eb760ed3c4b7a7b0db0d34441675989380f8e13e4ae01de4382449507.
+    // Each range is floor(world AABB min/max / 1.35), inclusive. The preceding
+    // decoder golden fixes every mesh transform, dimension, and draw for these seeds.
+    struct Range { int x0,y0,z0,x1,y1,z1; bool collider = false; };
+    struct Case { const char *biome; std::uint64_t seed; NativeForageVec3 anchor;
+        std::vector<Range> bounds; };
+    const Case cases[] = {
+        {"plains",17U,{4.050000190734863F,18.25F,35.099998474121094F},
+            {{2,13,25,3,13,26},{3,13,25,3,13,25},{3,13,25,3,13,26},
+             {2,13,26,3,13,26},{3,13,25,3,13,26},{3,13,26,3,13,26},
+             {3,13,26,3,13,26},{2,13,25,2,13,26},{2,13,25,3,14,26,true}}},
+        {"desert",29U,{-33.75F,18.25F,35.099998474121094F},
+            {{-26,13,25,-25,13,26},{-26,13,25,-25,13,26},
+             {-26,13,25,-25,13,26},{-26,13,25,-25,13,26},
+             {-26,13,25,-25,13,26},{-26,13,25,-25,13,26},
+             {-26,13,25,-25,14,26,true}}},
+        {"swamp",41U,{-71.54999542236328F,18.25F,-2.700000762939453F},
+            {{-54,13,-2,-54,13,-2},{-54,13,-3,-53,13,-2},
+             {-53,13,-3,-53,13,-3},{-54,13,-3,-53,13,-3},
+             {-54,13,-2,-54,13,-2},{-54,13,-3,-54,13,-2},
+             {-53,13,-3,-53,13,-3},{-54,13,-3,-53,13,-2},
+             {-54,13,-3,-53,14,-2,true}}},
+        {"snow",53U,{344.25F,18.25F,-229.5F},
+            {{254,13,-171,254,13,-170},{254,13,-171,254,13,-170},
+             {254,13,-170,255,13,-170},{254,13,-170,254,13,-170},
+             {254,13,-170,255,13,-170},{254,13,-171,255,14,-170,true}}},
+    };
+    const auto catalog = NativeBiomeEnvironmentCatalog::create(tests::godot_oracle_environment_profiles());
+    for (const auto &case_ : cases) {
+        const auto &profile = catalog.profile_for_biome(case_.biome);
+        const auto recipe = native_forage_recipe_for_environment_profile(profile);
+        GodotPcg32 rng(case_.seed);
+        const auto stream = NativeForageStreamBuilder::create(recipe, rng);
+        const auto geometry = decode_native_forage_geometry(recipe, stream);
+        VWB_EXPECT_EQ(case_.bounds.size(), geometry.meshes.size() + 1U);
+        const auto runs = native_surface_forage_geometry_runs(geometry, case_.anchor, 1.35);
+        for (const auto &bound : case_.bounds) {
+            const auto channel = bound.collider ? NativeFeatureFootprintChannel::collision
+                : NativeFeatureFootprintChannel::render;
+            for (int z=bound.z0; z<=bound.z1; ++z)
+                for (int y=bound.y0; y<=bound.y1; ++y)
+                    for (int x=bound.x0; x<=bound.x1; ++x) {
+                        const bool covered = std::any_of(runs.begin(), runs.end(), [&](const auto &run) {
+                            return run.channel == channel && run.first.z == z && run.first.y == y
+                                && run.first.x <= x && x <= run.last_x_inclusive;
+                        });
+                        if (!covered) tests::fail("direct Godot AABB cell absent from native forage footprint",
+                            __FILE__, __LINE__, std::string(case_.biome) + " cell="
+                                + std::to_string(x) + "," + std::to_string(y) + "," + std::to_string(z));
+                    }
+        }
+    }
+}
+
 VWB_TEST(native_ordered_forage_footprints_follow_four_grammars_and_nav_policy) {
     for (const auto grammar : {NativeForageGrammar::berry, NativeForageGrammar::aloe,
             NativeForageGrammar::mushroom, NativeForageGrammar::frost_herb}) {
