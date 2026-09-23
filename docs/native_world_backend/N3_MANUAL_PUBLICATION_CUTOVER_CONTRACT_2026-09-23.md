@@ -243,3 +243,25 @@ collider ray and `CharacterBody3D` contact remained present. These timings
 exclude broad production source admission, gameplay streaming, nav, edits,
 normal materials, startup/Continue and sprinting; they are not a Gate 5
 performance result or permission to cut over production collision.
+
+The expanded direct Godot/native differential at
+`artifacts/native-world-backend/n3-multi-page-shadow-1790163694516-15c2e0b9/report.json`
+also passes exact SDF, indices and data5 bytes for six small blocks straddling
+positive/negative shaping-page seams at LOD 1 and the positive/negative
+1960-cell float32 remap boundary at LOD 0 and LOD 1. Its LOD 10 request
+remains explicitly `shaping_dependency_unresolved` with no returned bytes;
+that pending result is not a parity pass. This is a focused direct generator
+oracle, not a streamed or player-visible terrain result.
+
+The retained-demand headed fixture was then extended through actual viewer
+departure and revisit:
+`artifacts/native-world-backend/n3-retained-native-block-1790163968047-33154225/report.json`
+and its `headed-terrain.png`. VoxelTerrain evicted the center data block;
+explicit native unload receipts retained all 27 halo demands. On revisit,
+all 27 blocks were reinserted, the center generation advanced from 2 to 4,
+and a fresh mesh and physics ray hit were observed. The screenshot shows
+only a sparse plain-green fixture patch. This proves a headed bridge
+lifecycle, not edit replacement, normal gameplay, full runtime streaming or
+Gate 5 acceptance. A first fixture attempt sent an unload receipt only for
+the center despite all 27 real blocks being evicted; that correctly failed
+the 27-block revisit assertion and prompted full-halo receipt handling.

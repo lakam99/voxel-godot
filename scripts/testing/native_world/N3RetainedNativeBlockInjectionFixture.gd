@@ -165,6 +165,7 @@ func run() -> void:
 				check(demand.has("key"),"halo demand retained: %s" % block)
 	var insert_deadline := Time.get_ticks_msec() + 120000
 	var inserted_blocks := {}
+	var inserted_keys := {}
 	while Time.get_ticks_msec() < insert_deadline and inserted_blocks.size() < 27:
 		var begin_usec := Time.get_ticks_usec()
 		var event: Dictionary = backend.pump_voxel_block_shadow()
@@ -177,6 +178,7 @@ func run() -> void:
 			backend.voxel_block_shadow_insertion_receipt(key,int(event.generation),inserted)
 			if inserted:
 				inserted_blocks[position] = true
+				inserted_keys[position] = key
 				accepted += 1
 				if position == Vector3i.ZERO:
 					center_key = key
@@ -225,4 +227,63 @@ func run() -> void:
 			"actorY":actor.global_position.y,"terrainHitY":collision.position.y})
 	observations.append({"stage":"mesh_physics","meshed":meshed,
 		"collision":collision,"meshEvents":mesh_events})
+	# Keep consumer 1 retained while the real viewer leaves. VoxelTerrain owns
+	# eviction; the native receipts make that eviction retryable on revisit.
+	viewer.position = Vector3(2000,12,2000)*CELL
+	var unloaded := false
+	for i in range(180):
+		await physics_frame
+		if not terrain.has_data_block(Vector3i.ZERO):
+			unloaded = true
+			break
+	check(unloaded,"viewer departure unloads native center data block")
+	var unload_receipt: Dictionary = {}
+	var mesh_exit_receipt: Dictionary = {}
+	if unloaded and not center_key.is_empty():
+		for key in inserted_keys.values():
+			unload_receipt = backend.voxel_block_shadow_unloaded(key)
+			check(unload_receipt.get("status") == "ready","native halo demand receives unload")
+		mesh_exit_receipt = backend.voxel_block_shadow_mesh_exited(center_key)
+		check(mesh_exit_receipt.get("status") == "ready","native retained demand receives mesh exit")
+	observations.append({"stage":"viewer_departure","unloaded":unloaded,
+		"nativeUnload":unload_receipt,"nativeMeshExit":mesh_exit_receipt})
+	viewer.position = Vector3(8,12,8)*CELL
+	await physics_frame
+	check(not terrain.has_data_block(Vector3i.ZERO),"revisited center needs native reinsertion")
+	var revisit_deadline := Time.get_ticks_msec() + 120000
+	var revisit_inserted := {}
+	var revisit_generation := 0
+	while Time.get_ticks_msec() < revisit_deadline and revisit_inserted.size() < 27:
+		var begin_usec := Time.get_ticks_usec()
+		var event: Dictionary = backend.pump_voxel_block_shadow()
+		max_pump_usec = maxi(max_pump_usec,Time.get_ticks_usec()-begin_usec)
+		if event.get("status") == "ready" and event.get("state") == "prepared":
+			var key: Dictionary = event.get("key",{})
+			var position := block_position(key.get("origin",Vector3i.ZERO))
+			var inserted: bool = terrain.try_set_block_data(position,make_buffer(event))
+			backend.voxel_block_shadow_insertion_receipt(key,int(event.generation),inserted)
+			if inserted:
+				revisit_inserted[position] = true
+				accepted += 1
+				if position == Vector3i.ZERO:
+					revisit_generation = int(event.generation)
+		await process_frame
+	var revisit_meshed := false
+	var revisit_collision := {}
+	for i in range(360):
+		await physics_frame
+		if i % 30 == 0:
+			revisit_meshed = terrain.is_area_meshed(AABB(Vector3.ZERO,Vector3.ONE*SIZE))
+			revisit_collision = ray_hit()
+		if revisit_meshed and bool(revisit_collision.get("hit",false)):
+			break
+	if revisit_meshed and bool(revisit_collision.get("hit",false)) and revisit_generation > 0:
+		backend.voxel_block_shadow_mesh_receipt(center_key,revisit_generation,true,true,true)
+	check(revisit_inserted.size() == 27,"retained native halo reinserted on viewer revisit")
+	check(revisit_generation > center_generation,"center native generation advances after unload")
+	check(revisit_meshed and bool(revisit_collision.get("hit",false)),
+		"revisited native center republishes mesh and physics")
+	observations.append({"stage":"viewer_revisit","inserted":revisit_inserted.size(),
+		"previousGeneration":center_generation,"generation":revisit_generation,
+		"meshed":revisit_meshed,"collision":revisit_collision})
 	await finish()

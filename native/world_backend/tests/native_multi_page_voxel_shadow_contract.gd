@@ -29,6 +29,26 @@ func edit_state(block_id: String, material_id: int) -> Dictionary:
 func floor_page(value: int) -> int:
 	return floori(float(value) / 280.0)
 
+func verify_direct_generator(backend, generator, origin: Vector3i, size: Vector3i, lod: int, label: String) -> void:
+	var buffer := VoxelBuffer.new()
+	buffer.create(size.x, size.y, size.z)
+	generator._generate_block(buffer, origin, lod)
+	var native: Dictionary = backend.encode_voxel_block_shadow(block_request(origin, size, lod))
+	if native.get("status") == "pending":
+		check(native.get("reason") == "shaping_dependency_unresolved" \
+			and not native.has("sdf16Le") and not native.has("indices8") and not native.has("data5_8"),
+			"pending classification without invented bytes: %s" % label)
+		cases.append({"label":label,"origin":origin,"size":size,"lod":lod,
+			"status":"pending","reason":native.get("reason"),"directGodotByteParity":"not_tested_pending"})
+		return
+	var equal: bool = native.get("status") == "ready" \
+		and native.get("sdf16Le") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_SDF) \
+		and native.get("indices8") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_INDICES) \
+		and native.get("data5_8") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_DATA5)
+	check(equal, "direct VoxelTerrainGenerator all-channel byte parity: %s" % label)
+	cases.append({"label":label,"origin":origin,"size":size,"lod":lod,
+		"status":native.get("status"),"reason":native.get("reason"),"directGodotByteParity":equal})
+
 func verify_case(backend, origin: Vector3i, size: Vector3i, lod: int) -> void:
 	var result: Dictionary = backend.encode_voxel_block_shadow(block_request(origin, size, lod))
 	var ok: bool = result.get("status") == "ready" and result.get("shadowOnly") == true \
@@ -112,6 +132,18 @@ func run() -> void:
 		check(full_equal, "direct VoxelTerrainGenerator full 16-cubed byte parity")
 		cases.append({"origin":full_origin,"size":full_size,"lod":0,
 			"directGodotByteParity":full_equal})
+		# 1960 is the first cell of page 7; nearby lattice products expose
+		# Godot Vector3 float32 rounding and source-cell remapping.
+		for specification in [
+			["negative-page-seam-lod1", Vector3i(-281, -1, -281), Vector3i(2, 2, 2), 1],
+			["positive-page-seam-lod1", Vector3i(279, 0, 279), Vector3i(2, 1, 2), 1],
+			["float32-remap-positive-lod0", Vector3i(1959, -1, 1959), Vector3i(2, 2, 2), 0],
+			["float32-remap-negative-lod0", Vector3i(-1961, -1, -1961), Vector3i(2, 2, 2), 0],
+			["float32-remap-positive-lod1", Vector3i(1959, -1, 1959), Vector3i(2, 2, 2), 1],
+			["float32-remap-negative-lod1", Vector3i(-1961, -1, -1961), Vector3i(2, 2, 2), 1],
+		]:
+			verify_direct_generator(backend, generator, specification[1], specification[2],
+				specification[3], specification[0])
 	var seam_request := block_request(Vector3i(-1, 0, -1), Vector3i(2, 1, 2))
 	var before: Dictionary = backend.encode_voxel_block_shadow(seam_request)
 	var tx := {"schema":"n3-native-typed-cell-transaction/v1",
