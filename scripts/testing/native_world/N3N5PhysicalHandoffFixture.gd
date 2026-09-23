@@ -73,6 +73,7 @@ func _run() -> void:
 	var steps: Array[Dictionary] = []
 	var partial_snapshot: Dictionary = {}
 	var max_advance_usec := 0
+	var max_advance_result: Dictionary = {}
 	if setup.get("status") == "ready" and required.get("status") == "ready":
 		for block: Vector3i in required.blocks:
 			var requested: Dictionary = producer.request_block(block)
@@ -83,20 +84,36 @@ func _run() -> void:
 			for frame in range(400):
 				var started := Time.get_ticks_usec()
 				produced = producer.advance()
-				max_advance_usec = maxi(max_advance_usec, Time.get_ticks_usec() - started)
+				var advance_usec := Time.get_ticks_usec() - started
+				if advance_usec > max_advance_usec:
+					max_advance_usec = advance_usec
+					max_advance_result = {"block":block, "frame":frame,
+						"status":produced.get("status"),
+						"reason":produced.get("reason", ""),
+						"captureUsec":produced.get("captureUsec", -1),
+						"workerEncodeUsec":produced.get("workerEncodeUsec", -1),
+						"bufferUsec":produced.get("bufferUsec", -1),
+						"meshUsec":produced.get("meshUsec", -1),
+						"facesUsec":produced.get("facesUsec", -1),
+						"vertexCopyUsec":produced.get("vertexCopyUsec", -1)}
 				if produced.get("status") == "ready" or produced.get("status") == "failed":
 					break
 				await process_frame
 			steps.append({"status":produced.get("status"),
 				"reason":produced.get("reason", ""),
 				"meshUsec":produced.get("meshUsec", -1),
-				"vertexCopyUsec":produced.get("vertexCopyUsec", -1)})
+				"facesUsec":produced.get("facesUsec", -1),
+				"vertexCopyUsec":produced.get("vertexCopyUsec", -1),
+				"vertexCount":produced.get("row", {}).get("vertices",
+					PackedVector3Array()).size()})
 			if produced.get("status") != "ready":
 				break
 			rows.append(produced.row)
 			if rows.size() == 1 and required.blocks.size() > 1:
 				partial_snapshot = producer.collision_source_snapshot()
 	var snapshot: Dictionary = producer.collision_source_snapshot()
+	var reference: Dictionary = await _reference_faces(backend,
+		required.blocks[0], main.CELL, rows[0])
 	var bounds: AABB = rows[0].bounds if not rows.is_empty() \
 		else AABB(Vector3.ZERO, Vector3.ONE)
 	for row in rows:
@@ -194,6 +211,27 @@ func _run() -> void:
 			"affectedBlocks":required.blocks, "rows":second_rows}, second_barrier)
 	var second_receipt: Dictionary = owner.physical_receipt(second_identity)
 	var second_release: bool = second_barrier.release(second_identity)
+	var cancellation_probe = PRODUCER.new()
+	var cancellation_setup: Dictionary = cancellation_probe.setup(backend, pages,
+		main.structure_system.citadel_terrain_admission, planner, main.CELL,
+		second_identity)
+	var cancellation_requested: Dictionary = cancellation_probe.request_block(
+		required.blocks[0])
+	var cancellation_in_flight: Dictionary = {}
+	for frame in range(400):
+		cancellation_in_flight = cancellation_probe.advance()
+		if cancellation_in_flight.get("reason") == "triangle_mesh_in_flight" \
+				or cancellation_in_flight.get("status") == "failed":
+			break
+		await process_frame
+	var cancellation_stop: Dictionary = cancellation_probe.stop()
+	var cancellation_drain: Dictionary = {}
+	for frame in range(400):
+		cancellation_drain = cancellation_probe.drain_step()
+		if cancellation_drain.get("status") == "ready" \
+				or cancellation_drain.get("status") == "failed":
+			break
+		await process_frame
 	var drained: Dictionary = await owner.stop_and_drain()
 	producer.stop()
 	second_producer.stop()
@@ -213,6 +251,8 @@ func _run() -> void:
 		and snapshot.get("identity") == identity \
 		and snapshot.get("membershipProvenance", {}).get("closureToken") \
 			== planned.get("closureToken") \
+		and bool(reference.get("exact", false)) \
+		and int(reference.get("vertexCount", -1)) == rows[0].vertices.size() \
 		and solid_count > 0 and empty_count > 0 \
 		and publication.get("status") == "ready" \
 		and bool(receipt.get("ready", false)) and contact and release \
@@ -224,11 +264,18 @@ func _run() -> void:
 		and stale_request.get("status") != "ready" \
 		and second_publication.get("status") == "ready" \
 		and bool(second_receipt.get("ready", false)) and second_release \
+		and cancellation_setup.get("status") == "ready" \
+		and cancellation_requested.get("status") == "pending" \
+		and cancellation_in_flight.get("reason") == "triangle_mesh_in_flight" \
+		and cancellation_stop.get("status") == "pending" \
+		and cancellation_drain.get("status") == "ready" \
 		and drained.get("status") == "ready"
 	_finish(passed, {"backendInit":backend_init, "planned":planned,
 		"requiredBlocks":required.get("blocks", []), "earlyPending":early,
 		"partialSnapshot":partial_snapshot, "sourceSnapshot":snapshot,
+		"synchronousFaceReference":reference,
 		"steps":steps, "maxAdvanceUsec":max_advance_usec,
+		"maxAdvanceResult":max_advance_result,
 		"surfaceBlock":surface_block, "rowCount":rows.size(),
 		"solidCount":solid_count, "emptyCount":empty_count,
 		"publication":publication, "physicalReceipt":receipt,
@@ -238,7 +285,52 @@ func _run() -> void:
 		"secondSnapshot":second_snapshot, "staleRequest":stale_request,
 		"secondPublication":second_publication,
 		"secondReceipt":second_receipt, "secondRelease":second_release,
+		"workerCancellation": {"setup":cancellation_setup,
+			"requested":cancellation_requested,
+			"inFlight":cancellation_in_flight, "stop":cancellation_stop,
+			"drain":cancellation_drain},
 		"drained":drained})
+
+func _reference_faces(backend, block: Vector3i, cell_meters: float,
+		row: Dictionary) -> Dictionary:
+	var began: Dictionary = backend.begin_voxel_block_shadow_async({
+		"schema":"n3-effective-voxel-block-request/v1",
+		"origin":block * 16 - Vector3i.ONE,
+		"size":Vector3i.ONE * 19, "lod":0})
+	if began.get("status") != "pending":
+		return {"status":"failed", "reason":"reference_begin_failed"}
+	var encoded: Dictionary = {}
+	for frame in range(400):
+		encoded = backend.poll_voxel_block_shadow_async(int(began.ticket))
+		if encoded.get("status") == "ready" or encoded.get("status") == "failed":
+			break
+		await process_frame
+	if encoded.get("status") != "ready":
+		return {"status":"failed", "reason":"reference_encode_failed"}
+	var format := VoxelFormat.new()
+	format.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
+	format.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
+	format.set_channel_depth(VoxelBuffer.CHANNEL_DATA5, VoxelBuffer.DEPTH_8_BIT)
+	var buffer: VoxelBuffer = format.create_buffer(Vector3i.ONE * 19)
+	buffer.set_channel_from_byte_array(VoxelBuffer.CHANNEL_SDF, encoded.sdf16Le)
+	buffer.set_channel_from_byte_array(VoxelBuffer.CHANNEL_INDICES, encoded.indices8)
+	buffer.set_channel_from_byte_array(VoxelBuffer.CHANNEL_DATA5, encoded.data5_8)
+	var mesher := VoxelMesherTransvoxel.new()
+	mesher.texturing_mode = VoxelMesherTransvoxel.TEXTURES_SINGLE_S4
+	mesher.transitions_enabled = false
+	mesher.mesh_optimization_enabled = false
+	var mesh: Mesh = mesher.build_mesh(buffer, [])
+	var local := PackedVector3Array() if mesh == null else mesh.get_faces()
+	var expected: PackedVector3Array = row.vertices
+	var exact := local.size() == expected.size()
+	if exact:
+		var world_origin := Vector3(block * 16) * cell_meters
+		for index in range(local.size()):
+			if world_origin + local[index] * cell_meters != expected[index]:
+				exact = false
+				break
+	return {"status":"ready", "vertexCount":local.size(),
+		"exact":exact}
 
 func _finish(passed: bool, evidence: Dictionary) -> void:
 	var report := {"schema":"n3-n5-physical-handoff-fixture/v1",

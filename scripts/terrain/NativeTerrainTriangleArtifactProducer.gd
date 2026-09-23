@@ -21,6 +21,9 @@ var _pending_block: Variant = null
 var _ticket := 0
 var _draining_failed_ticket := false
 var _failure_reason := ""
+var _build_thread: Thread
+var _build_context := {}
+var _draining_failed_build := false
 var _artifacts := {}
 var _artifact_rows := {}
 var _validated_local_pins := {}
@@ -77,6 +80,16 @@ func request_block(block: Vector3i) -> Dictionary:
 
 func advance() -> Dictionary:
 	if _stopped or _backend == null: return {"status":"failed", "reason":"triangle_producer_inactive"}
+	if _draining_failed_build:
+		if _build_thread != null and _build_thread.is_alive():
+			return {"status":"pending", "reason":"triangle_mesh_worker_draining"}
+		if _build_thread != null:
+			_build_thread.wait_to_finish()
+			_build_thread = null
+		_build_context.clear()
+		_draining_failed_build = false
+		_pending_block = null
+		return {"status":"failed", "reason":_failure_reason}
 	if _draining_failed_ticket:
 		var drained: Dictionary = _backend.poll_voxel_block_shadow_async(_ticket)
 		if drained.get("status") != "ready":
@@ -94,6 +107,23 @@ func advance() -> Dictionary:
 			or int(source.get("terrainDeltaRevision", -1)) \
 			!= int(_identity.get("sourceRevision", -2)):
 		return _failure("triangle_source_revision_changed")
+	if _build_thread != null:
+		if _build_thread.is_alive():
+			return {"status":"pending", "reason":"triangle_mesh_in_flight"}
+		var extracted: Dictionary = _build_thread.wait_to_finish()
+		_build_thread = null
+		var context: Dictionary = _build_context
+		_build_context = {}
+		var built: Dictionary = _finish_artifact(context.encoded,
+			extracted.get("local", PackedVector3Array()), context.bufferUsec,
+			context.meshUsec, int(extracted.get("facesUsec", -1)))
+		if built.get("status") != "ready":
+			return _failure(String(built.get("reason", "triangle_mesh_failed")))
+		_artifacts[_pending_block] = built.row.artifactKey
+		_artifact_rows[_pending_block] = built.row.duplicate(true)
+		_validated_local_pins.erase(_pending_block)
+		_pending_block = null
+		return built
 	var site: Dictionary = _admission.advance()
 	if not String(site.get("failure", "")).is_empty():
 		return _failure(String(site.failure))
@@ -121,13 +151,10 @@ func advance() -> Dictionary:
 			or encoded.get("origin") != requested_block * BLOCK_CELLS - Vector3i.ONE \
 			or encoded.get("size") != Vector3i.ONE * (BLOCK_CELLS + 3):
 		return _failure("triangle_source_receipt_mismatch")
-	var built: Dictionary = _build_artifact(encoded)
-	if built.get("status") != "ready": return _failure(String(built.get("reason", "triangle_mesh_failed")))
-	_artifacts[_pending_block] = built.row.artifactKey
-	_artifact_rows[_pending_block] = built.row.duplicate(true)
-	_validated_local_pins.erase(_pending_block)
-	_pending_block = null
-	return built
+	var build_started: Dictionary = _begin_artifact_build(encoded)
+	if build_started.get("status") == "failed":
+		return _failure(String(build_started.get("reason", "triangle_mesh_failed")))
+	return build_started
 
 func _admit_pages(block: Vector3i) -> Dictionary:
 	var first_cell := block * BLOCK_CELLS - Vector3i.ONE
@@ -140,7 +167,7 @@ func _admit_pages(block: Vector3i) -> Dictionary:
 			if page.get("status") != "ready": return page
 	return {"status":"ready"}
 
-func _build_artifact(encoded: Dictionary) -> Dictionary:
+func _begin_artifact_build(encoded: Dictionary) -> Dictionary:
 	var size := BLOCK_CELLS + 3
 	var cells := size * size * size
 	var sdf: PackedByteArray = encoded.get("sdf16Le", PackedByteArray())
@@ -156,8 +183,28 @@ func _build_artifact(encoded: Dictionary) -> Dictionary:
 	var mesh_started := Time.get_ticks_usec()
 	var mesh: Mesh = _mesher.build_mesh(buffer, [])
 	var faces_started := Time.get_ticks_usec()
+	_build_context = {"encoded":encoded, "bufferUsec":mesh_started - buffer_started,
+		"meshUsec":faces_started - mesh_started}
+	_build_thread = Thread.new()
+	var started: Error = _build_thread.start(
+		Callable(self, "_extract_faces_worker").bind(mesh))
+	if started != OK:
+		_build_thread = null
+		_build_context.clear()
+		return {"status":"failed", "reason":"triangle_mesh_worker_start_failed"}
+	return {"status":"pending", "reason":"triangle_mesh_in_flight"}
+
+func _extract_faces_worker(mesh: Mesh) -> Dictionary:
+	var started := Time.get_ticks_usec()
 	var local := PackedVector3Array() if mesh == null else mesh.get_faces()
+	return {"local":local, "facesUsec":Time.get_ticks_usec() - started}
+
+func _finish_artifact(encoded: Dictionary, local: PackedVector3Array,
+		buffer_usec: int, mesh_usec: int, faces_usec: int) -> Dictionary:
 	var translate_started := Time.get_ticks_usec()
+	var sdf: PackedByteArray = encoded.sdf16Le
+	var indices: PackedByteArray = encoded.indices8
+	var data: PackedByteArray = encoded.data5_8
 	if local.size() > MAX_VERTICES or local.size() % 3 != 0:
 		return {"status":"failed", "reason":"triangle_vertex_capacity_or_topology"}
 	var block: Vector3i = _pending_block
@@ -208,15 +255,15 @@ func _build_artifact(encoded: Dictionary) -> Dictionary:
 		"sourceEpoch":_identity.get("sourceEpoch", ""),
 		"ownerGeneration":int(_identity.ownerGeneration),
 		"cancellationEpoch":int(_identity.cancellationEpoch),
-		"mesherBuildUsec":faces_started - mesh_started,
+		"mesherBuildUsec":mesh_usec,
 		"vertexCopyUsec":copied_usec,
 		"coordinateFrame":"world", "empty":vertices.is_empty()}
 	return {"status":"ready", "row":row,
 		"captureUsec":encoded.get("captureUsec", 0),
 		"workerEncodeUsec":encoded.get("workerEncodeUsec", 0),
-		"bufferUsec":mesh_started - buffer_started,
-		"meshUsec":faces_started - mesh_started,
-		"facesUsec":translate_started - faces_started,
+		"bufferUsec":buffer_usec,
+		"meshUsec":mesh_usec,
+		"facesUsec":faces_usec,
 		"vertexCopyUsec":copied_usec,
 		"finalizeUsec":Time.get_ticks_usec() - translate_started - copied_usec}
 
@@ -342,6 +389,8 @@ func stop() -> Dictionary:
 	if _ticket != 0:
 		_backend.cancel_voxel_block_shadow_async(_ticket)
 		return {"status":"pending", "reason":"triangle_worker_draining"}
+	if _build_thread != null:
+		return {"status":"pending", "reason":"triangle_mesh_worker_draining"}
 	_backend = null
 	_pages = null
 	_admission = null
@@ -354,6 +403,12 @@ func drain_step() -> Dictionary:
 		var result: Dictionary = _backend.poll_voxel_block_shadow_async(_ticket)
 		if result.get("status") != "ready": return result
 		_ticket = 0
+	if _build_thread != null:
+		if _build_thread.is_alive():
+			return {"status":"pending", "reason":"triangle_mesh_worker_draining"}
+		_build_thread.wait_to_finish()
+		_build_thread = null
+		_build_context.clear()
 	_backend = null
 	_pages = null
 	_admission = null
@@ -362,6 +417,9 @@ func drain_step() -> Dictionary:
 
 func _failure(reason: String) -> Dictionary:
 	_failure_reason = reason
+	if _build_thread != null:
+		_draining_failed_build = true
+		return {"status":"pending", "reason":"triangle_mesh_worker_draining"}
 	if _ticket != 0:
 		_backend.cancel_voxel_block_shadow_async(_ticket)
 		_draining_failed_ticket = true
