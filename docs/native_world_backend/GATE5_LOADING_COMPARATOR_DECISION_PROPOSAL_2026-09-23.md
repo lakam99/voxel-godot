@@ -1,5 +1,7 @@
 # Gate 5 loading comparator: read-only decision proposal — 2026-09-23
 
+**Superseded product direction:** the user clarified that loading “doesn't have to be 90s, just needs to not lag.” The 90-second cold / 45-second warm candidate below is rejected as a hard pass/fail duration policy. The final evaluator must use a predeclared, measurable responsiveness and honest-readiness envelope; record cold/warm time-to-ready without treating this candidate as acceptance. The independent evaluator audit is in progress. Until that policy is encoded and verified, `gate5LoadingAccepted` remains `null` and Gate 5 remains open.
+
 **Decision status: unresolved; user approval required before final timed acceptance.** No loading run or threshold change was made for this review. `gate5LoadingAccepted` must remain `null` and Gate 5 must remain open. Authority: `CODEX_NATIVE_WORLD_BACKEND_MIGRATION_HANDOFF_2026-09-17.md` §8, `docs/WORLD_STREAMING_MATURITY_MIGRATION_PLAN_2026-09-14.md` §6, and the hardened loading runner.
 
 ## Control search
