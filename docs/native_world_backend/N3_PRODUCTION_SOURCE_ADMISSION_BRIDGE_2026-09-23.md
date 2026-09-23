@@ -43,6 +43,13 @@ decision is `town_reservation_overlap`; the native page then reports ready
 with no outstanding requests. Report:
 `artifacts/native-world-backend/n3-shaping-page-admission-1790165939263-3660175c/report.json`.
 This is a real source decision, not a prepared-site or headed gameplay proof.
+The complementary `node tools/run-n3-prepared-shaping-bridge.mjs` contract
+injects a synthetic prepared profile at the site-worker boundary, then proves
+the bridge admits canonical candidate/signature data into the real native
+shaping registry and rejects a mismatched signature without publication.
+Report:
+`artifacts/native-world-backend/n3-prepared-shaping-bridge-1790166297483-13afbfee/report.json`.
+It does not prove a real site can finish preparation.
 The first retry's 30-second fixture deadline was too short for this source;
 the focused advance budget is now 90 seconds, below the production owner's
 450-second source watchdog.
@@ -70,3 +77,16 @@ The direct generated recipe diagnostic for this seed also reaches `ready`.
 Durable save-v2 delta synchronization, page-demand planning, current receipt
 publication, runtime reset/shutdown and all other N3 consumer cutovers remain
 open. No script generation or collision authority was deleted here.
+
+A later shadow-only `NativeDurableEditMirror` bridge binds only when the
+current native export exactly matches `TerrainVolumeService`'s durable v2
+snapshot. It mirrors explicit set/replace/clear deltas through bounded native
+typed transactions, verifies the resulting native durable records, and fails
+closed on an external native revision or mismatched initial owners. The
+focused service contract is `node tools/run-n3-native-durable-edit-mirror.mjs`
+with report
+`artifacts/native-world-backend/n3-durable-edit-mirror-1790166319655-cf167007/report.json`.
+The mirror is not connected to the production edit path. Its explicit sync
+currently scans all durable records and has a 4,096-operation transaction cap;
+bounded incremental scheduling and native edit/mesh/physics publication
+receipts are still required for live cutover.
