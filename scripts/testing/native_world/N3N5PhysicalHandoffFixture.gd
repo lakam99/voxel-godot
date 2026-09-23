@@ -232,6 +232,33 @@ func _run() -> void:
 				or cancellation_drain.get("status") == "failed":
 			break
 		await process_frame
+	var revision_probe = PRODUCER.new()
+	var revision_setup: Dictionary = revision_probe.setup(backend, pages,
+		main.structure_system.citadel_terrain_admission, planner, main.CELL,
+		second_identity)
+	var revision_requested: Dictionary = revision_probe.request_block(required.blocks[0])
+	var revision_in_flight: Dictionary = {}
+	for frame in range(400):
+		revision_in_flight = revision_probe.advance()
+		if revision_in_flight.get("reason") == "triangle_mesh_in_flight" \
+				or revision_in_flight.get("status") == "failed":
+			break
+		await process_frame
+	var changed_while_extracting: Dictionary = backend.commit_durable_cells({
+		"schema":"n3-native-durable-cell-transaction/v1",
+		"transactionId":"physical-handoff:mid-worker-revision",
+		"expectedRevision":1,
+		"operations":[{"kind":"set", "cell":Vector3i(1001,-1,1000),
+			"state":edit_state}]})
+	var stale_worker: Dictionary = revision_probe.advance()
+	var stale_worker_final: Dictionary = stale_worker
+	for frame in range(400):
+		if stale_worker_final.get("status") == "failed":
+			break
+		await process_frame
+		stale_worker_final = revision_probe.advance()
+	var revision_stop: Dictionary = revision_probe.stop()
+	var revision_drain: Dictionary = revision_probe.drain_step()
 	var drained: Dictionary = await owner.stop_and_drain()
 	producer.stop()
 	second_producer.stop()
@@ -269,6 +296,16 @@ func _run() -> void:
 		and cancellation_in_flight.get("reason") == "triangle_mesh_in_flight" \
 		and cancellation_stop.get("status") == "pending" \
 		and cancellation_drain.get("status") == "ready" \
+		and revision_setup.get("status") == "ready" \
+		and revision_requested.get("status") == "pending" \
+		and revision_in_flight.get("reason") == "triangle_mesh_in_flight" \
+		and changed_while_extracting.get("commitStatus") == "committed" \
+		and stale_worker.get("status") == "pending" \
+		and stale_worker.get("reason") == "triangle_mesh_worker_draining" \
+		and stale_worker_final.get("status") == "failed" \
+		and stale_worker_final.get("reason") == "triangle_source_revision_changed" \
+		and revision_stop.get("status") == "ready" \
+		and revision_drain.get("status") == "ready" \
 		and drained.get("status") == "ready"
 	_finish(passed, {"backendInit":backend_init, "planned":planned,
 		"requiredBlocks":required.get("blocks", []), "earlyPending":early,
@@ -289,6 +326,11 @@ func _run() -> void:
 			"requested":cancellation_requested,
 			"inFlight":cancellation_in_flight, "stop":cancellation_stop,
 			"drain":cancellation_drain},
+		"workerRevisionChange": {"setup":revision_setup,
+			"requested":revision_requested, "inFlight":revision_in_flight,
+			"committed":changed_while_extracting, "stale":stale_worker,
+			"final":stale_worker_final, "stop":revision_stop,
+			"drain":revision_drain},
 		"drained":drained})
 
 func _reference_faces(backend, block: Vector3i, cell_meters: float,
