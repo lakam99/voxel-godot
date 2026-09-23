@@ -82,6 +82,12 @@ func _run() -> void:
 		window.localCurrentProof.throughGlobalRevision = 4
 		window.localCurrentProof.digest = "native-verified:%s" % window.windowToken
 	var retained_ready: Dictionary = AGGREGATE.evaluate(edited_layout, receipts)
+	var old_generation_layout: Dictionary = edited_layout.duplicate(true)
+	old_generation_layout.windows[0].identity.ownerGeneration = 6
+	var old_generation: Dictionary = AGGREGATE.evaluate(old_generation_layout, receipts)
+	var old_epoch_layout: Dictionary = edited_layout.duplicate(true)
+	old_epoch_layout.windows[0].identity.sourceEpoch = "prior-source-epoch"
+	var old_epoch: Dictionary = AGGREGATE.evaluate(old_epoch_layout, receipts)
 	var unproved_layout: Dictionary = edited_layout.duplicate(true)
 	unproved_layout.windows[0].localCurrentProof.digest = ""
 	var unproved: Dictionary = AGGREGATE.evaluate(unproved_layout, receipts)
@@ -97,6 +103,10 @@ func _run() -> void:
 		and expanded_pending.get("status") == "pending" \
 		and expanded_ready.get("status") == "ready" \
 		and retained_ready.get("status") == "ready" \
+		and old_generation.get("status") == "pending" \
+		and old_generation.get("reason") == "collision_window_local_proof_stale" \
+		and old_epoch.get("status") == "pending" \
+		and old_epoch.get("reason") == "collision_window_local_proof_stale" \
 		and unproved.get("status") == "pending" \
 		and unproved.get("reason") == "collision_window_local_proof_stale"
 	var report := {"schema":"n5-window-aggregate-contract/v1",
@@ -107,6 +117,7 @@ func _run() -> void:
 		"duplicate":duplicate, "expandedPending":expanded_pending,
 		"expandedReady":expanded_ready,
 		"retainedAfterVerifiedEdit":retained_ready,
+		"oldGeneration":old_generation, "oldSourceEpoch":old_epoch,
 		"unprovedEdit":unproved}
 	var path := OS.get_environment("N5_WINDOW_AGGREGATE_REPORT")
 	if not path.is_empty():

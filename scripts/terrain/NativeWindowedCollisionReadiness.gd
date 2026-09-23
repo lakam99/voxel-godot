@@ -53,6 +53,10 @@ static func evaluate(layout: Dictionary, receipts_by_window: Dictionary) -> Dict
 		var local_revision := int(local_identity.get("sourceRevision", -1))
 		if global_revision < 0 or local_revision < 0 \
 				or local_revision > global_revision \
+				or int(local_identity.get("ownerGeneration", -1)) <= 0 \
+				or local_identity.get("ownerGeneration") != layout.identity.get("ownerGeneration") \
+				or String(local_identity.get("sourceEpoch", "")).is_empty() \
+				or local_identity.get("sourceEpoch") != layout.identity.get("sourceEpoch") \
 				or local_identity.get("sourceIdentity") != layout.sourceIdentity \
 				or int(proof.get("throughGlobalRevision", -1)) != global_revision \
 				or String(proof.get("digest", "")).is_empty() \
