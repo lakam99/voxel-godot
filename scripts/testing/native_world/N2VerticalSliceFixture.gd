@@ -68,8 +68,10 @@ func _run() -> void:
 		return
 	var baseline_request := oracle.native_request(PackedByteArray())
 	baseline_request["requestIdentity"] = {"ownerGeneration": 1, "sourceRevision": 1, "cancellationEpoch": 1}
+	var same_shape_request := oracle.native_request(PackedByteArray())
+	same_shape_request["requestIdentity"] = {"ownerGeneration": 1, "sourceRevision": 1, "cancellationEpoch": 2}
 	var edited_request := oracle.native_request(delta_serialization.bytes)
-	edited_request["requestIdentity"] = {"ownerGeneration": 1, "sourceRevision": 2, "cancellationEpoch": 1}
+	edited_request["requestIdentity"] = {"ownerGeneration": 1, "sourceRevision": 2, "cancellationEpoch": 2}
 	var native_baseline: Variant = _prepare_native(backend, baseline_request)
 	var baseline_check := _validate_native_result(oracle, baseline, native_baseline, baseline_request)
 	if not baseline_check.ok:
@@ -104,6 +106,26 @@ func _run() -> void:
 	var baseline_seam := await _seam_physics("baseline")
 	_release_prepared(native_baseline)
 	native_baseline = null
+	var native_same_shape: Variant = _prepare_native(backend, same_shape_request)
+	var same_shape_check := _validate_native_result(oracle, baseline, native_same_shape, same_shape_request)
+	if not same_shape_check.ok or same_shape_check.tileGeometrySha256 != baseline_check.tileGeometrySha256 \
+			or same_shape_check.terrainTriangleCount != baseline_check.terrainTriangleCount \
+			or same_shape_check.blockerTriangleCount != baseline_check.blockerTriangleCount \
+			or same_shape_check.collisionArtifactKey == baseline_check.collisionArtifactKey:
+		_finish(false, "same_shape_new_revision_artifact_invalid", common.merged({
+			"sameShapeCheck":same_shape_check,"baselineCheck":baseline_check}, true))
+		return
+	_current_authority = same_shape_request.requestIdentity.duplicate(true)
+	var same_shape_install := await _replace_collision(native_same_shape, same_shape_request.requestIdentity)
+	if not same_shape_install.ok or same_shape_install.acknowledgement.provenance.get("requestIdentity") != same_shape_request.requestIdentity:
+		_finish(false, "same_shape_new_owner_not_physically_acknowledged", common.merged({
+			"sameShapeInstall":same_shape_install}, true))
+		return
+	var same_shape_seam := await _seam_physics("same_shape_new_epoch")
+	var same_shape_same_hits: bool = baseline_seam.results.map(func(row): return [row.id,row.hit]) \
+		== same_shape_seam.results.map(func(row): return [row.id,row.hit])
+	_release_prepared(native_same_shape)
+	native_same_shape = null
 	var native_edited: Variant = _prepare_native(backend, edited_request)
 	var edited_check := _validate_native_result(oracle, edited, native_edited, edited_request)
 	if not edited_check.ok:
@@ -145,19 +167,25 @@ func _run() -> void:
 		render_result["requiredSnapshotGap"] = ""
 	var authority := _authority_inventory()
 	var timing := _timing_record(native_edited_timings, edited_install, render_result)
-	var lifecycle_ok := int(_resource_lifecycle.admittedRequests) == 2 \
+	var lifecycle_ok := int(_resource_lifecycle.admittedRequests) == 3 \
 		and int(_resource_lifecycle.currentInFlightBuilds) == 0 and int(_resource_lifecycle.peakInFlightBuilds) == 1 \
 		and int(_resource_lifecycle.currentPreparedResults) == 0 and int(_resource_lifecycle.peakPreparedResults) == 1 \
 		and int(_resource_lifecycle.currentPreparedBytes) == 0 and int(_resource_lifecycle.peakPreparedBytes) <= 4194304 \
 		and int(_resource_lifecycle.currentRetiredShapeSetsAwaitingRelease) == 0 \
 		and int(_resource_lifecycle.peakRetiredShapeSetsAwaitingRelease) <= 1
 	var passed: bool = bool(physics.ok) and bool(cross_seam.changed) and bool(cross_seam.allHitsOwnedBySoleBody) \
+		and same_shape_same_hits and same_shape_seam.results.all(func(row): return row.soleBody) \
+		and same_shape_seam.results.any(func(row): return row.id == "solid_down" and row.hit \
+			and row.provenance.get("requestIdentity") == same_shape_request.requestIdentity) \
 		and authority.staticBodyCount == 1 and authority.projectOwnedTerrainBodies == 1 \
 		and authority.voxelTerrainCollisionEnabled == false and _installed_shapes.size() == 3 \
 		and _acknowledged_physics_frame >= 0 and float(timing.totalMilliseconds) <= MAX_SECONDS * 1000.0 and lifecycle_ok
 	common["nativeBaseline"] = baseline_check
 	common["nativeEdited"] = edited_check
 	common["baselineInstall"] = baseline_install
+	common["sameShapeInstall"] = same_shape_install
+	common["sameShapePhysics"] = same_shape_seam
+	common["sameShapeSameHits"] = same_shape_same_hits
 	common["editedInstall"] = edited_install
 	common["staleBeforeInstall"] = stale_before_install
 	common["staleBeforeAck"] = stale_before_ack
@@ -208,7 +236,31 @@ func _validate_native_result(oracle, expected: Dictionary, value, request: Dicti
 			return {"ok": false, "reason": "native_result_field_missing:%s" % required}
 	if value.requestIdentity != request.requestIdentity:
 		return {"ok": false, "reason": "native_request_identity_mismatch"}
-	var parity: Dictionary = oracle.compare_packed_columns(expected.samples, value.source)
+	# The frozen N2 source domain has no lava sample. Later native schema work
+	# appended lava at material ID 16 and fluid ID 2; require exactly that
+	# extension, then compare every original N2 column against its unchanged
+	# independent 16/2-name oracle. Any lava ID in this frozen vector still
+	# fails the oracle's per-cell range/value checks below.
+	var source_tables: Dictionary = value.source.get("nameTables", {})
+	var native_material_names = source_tables.get("materialNames")
+	var native_fluid_names = source_tables.get("fluidNames")
+	if not native_material_names is PackedStringArray or not native_fluid_names is PackedStringArray:
+		return {"ok":false, "reason":"native_extended_name_tables_untyped"}
+	if native_material_names.size() != OracleScript.MATERIAL_NAMES.size() + 1 \
+			or native_fluid_names.size() != OracleScript.FLUID_NAMES.size() + 1:
+		return {"ok":false, "reason":"native_lava_extension_count_mismatch"}
+	for i in range(OracleScript.MATERIAL_NAMES.size()):
+		if native_material_names[i] != OracleScript.MATERIAL_NAMES[i]:
+			return {"ok":false, "reason":"native_lava_extension_material_prefix_mismatch", "index":i}
+	for i in range(OracleScript.FLUID_NAMES.size()):
+		if native_fluid_names[i] != OracleScript.FLUID_NAMES[i]:
+			return {"ok":false, "reason":"native_lava_extension_fluid_prefix_mismatch", "index":i}
+	if native_material_names[-1] != "lava" or native_fluid_names[-1] != "lava":
+		return {"ok":false, "reason":"native_lava_extension_value_mismatch"}
+	var frozen_source: Dictionary = value.source.duplicate(true)
+	frozen_source.nameTables.materialNames = PackedStringArray(OracleScript.MATERIAL_NAMES)
+	frozen_source.nameTables.fluidNames = PackedStringArray(OracleScript.FLUID_NAMES)
+	var parity: Dictionary = oracle.compare_packed_columns(expected.samples, frozen_source)
 	if not parity.ok:
 		return {"ok": false, "reason": parity.reason, "parity": parity}
 	if value.source.get("sampleCount") != 33915 or value.source.get("ordering") != "x_fastest_then_z_then_y":
@@ -399,7 +451,8 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 		shape.data = vertices_result.vertices
 		var node := CollisionShape3D.new()
 		node.shape = shape
-		node.set_meta("provenance", {"snapshotDigest": native_result.source.snapshotDigest, "artifactKey": native_result.collision.artifactKey, "tileKey": tile.get("tileKey")})
+		node.set_meta("provenance", {"snapshotDigest": native_result.source.snapshotDigest, "artifactKey": native_result.collision.artifactKey,
+			"requestIdentity":request_identity.duplicate(true), "tileKey": tile.get("tileKey")})
 		_body.add_child(node)
 		replacements.append(node)
 	var blocker_record: Dictionary = native_result.collision.blockers[0]
@@ -413,6 +466,7 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 	blocker.shape = blocker_shape
 	blocker.position = blocker_center.value
 	blocker.set_meta("provenance", {"snapshotDigest": native_result.source.snapshotDigest, "artifactKey": native_result.collision.artifactKey,
+		"requestIdentity":request_identity.duplicate(true),
 		"featureId": blocker_record.id, "semanticClass": blocker_record.semanticClass, "physicalIntent": blocker_record.physicalIntent})
 	_body.add_child(blocker)
 	replacements.append(blocker)
@@ -433,6 +487,7 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 		if not hit.is_empty() and hit.get("collider") == _body \
 				and provenance.get("snapshotDigest") == native_result.source.snapshotDigest \
 				and provenance.get("artifactKey") == native_result.collision.artifactKey \
+				and provenance.get("requestIdentity") == request_identity \
 				and provenance.get("featureId") == "n2:blocker:tile-b:-24,-10":
 			acknowledgement = {"physicsFrame": Engine.get_physics_frames(), "provenance": provenance}
 			break
@@ -491,6 +546,7 @@ func _seam_physics(label: String) -> Dictionary:
 	var space := get_world_3d().direct_space_state
 	var results: Array = []
 	for row in [
+		["solid_down", Vector3(-19.75, 35, -1.75) * CELL, Vector3(-19.75, -10, -1.75) * CELL],
 		["tile_a_edit_pair", Vector3(-32.5, 12.1, -4.5) * CELL, Vector3(-34.0, 12.1, -4.5) * CELL],
 		["tile_b_edit_pair", Vector3(-31.95, 12.1, -4.5) * CELL, Vector3(-31.0, 12.1, -4.5) * CELL],
 		["cross_seam", Vector3(-32.5, 12.1, -4.5) * CELL, Vector3(-31.0, 12.1, -4.5) * CELL]
