@@ -377,6 +377,46 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		if not ore_children.is_empty():
 			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
+	var published_rock_footprints := []
+	for row in ordered.get("attempts", []):
+		var ordinal := int(row.ordinal)
+		if row.get("feature", {}).get("kind") != "rock" or not direct_rows[ordinal].has("rock"):
+			continue
+		var published: Dictionary = direct_rows[ordinal].rock
+		var projection: Dictionary = backend.project_published_rock_footprint_shadow(
+			bundle.terrain.page, structure_receipt.snapshot, ordinal,
+			published.visualSource, published.assetId)
+		var fallback_probe := {}
+		if not String(row.feature.assetId).is_empty():
+			var feature: Dictionary = row.feature
+			var fallback_body := StaticBody3D.new()
+			main.visual_asset_registry.disabled_asset_ids[feature.assetId] = true
+			main.add_rock_visual(fallback_body, feature.durableId, feature.visualBiome,
+				{"radius": feature.visualRadius, "height_factor": feature.visualHeightFactor,
+				"scale": feature.visualScale})
+			main.visual_asset_registry.disabled_asset_ids.erase(feature.assetId)
+			var fallback_projection: Dictionary = backend.project_published_rock_footprint_shadow(
+				bundle.terrain.page, structure_receipt.snapshot, ordinal,
+				fallback_body.get_meta("visual_source", ""),
+				fallback_body.get_meta("visual_asset_id", ""))
+			fallback_probe = {"visualSource": fallback_body.get_meta("visual_source", ""),
+				"assetId": fallback_body.get_meta("visual_asset_id", ""),
+				"status": fallback_projection.get("status"),
+				"featureId": fallback_projection.get("featureId"),
+				"footprintIdentity": fallback_projection.get("footprintIdentity"),
+				"runCount": (fallback_projection.get("runs", []) as Array).size()}
+			fallback_body.free()
+		published_rock_footprints.append({"ordinal": ordinal,
+			"durableId": published.durableId, "visualSource": published.visualSource,
+			"assetId": published.assetId, "status": projection.get("status"),
+			"featureId": projection.get("featureId"),
+			"footprintIdentity": projection.get("footprintIdentity"),
+			"runCount": (projection.get("runs", []) as Array).size(),
+			"productionCutover": projection.get("productionCutover", true),
+			"fallbackProbe": fallback_probe,
+			"forgedAssetStatus": backend.project_published_rock_footprint_shadow(
+				bundle.terrain.page, structure_receipt.snapshot, ordinal,
+				"generated_asset", "forged_asset").get("status")})
 	var native_rows := []
 	for row in ordered.get("attempts", []):
 		var feature: Dictionary = row.get("feature", {})
@@ -536,6 +576,7 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		).map(func(row): return String(row.sourceKey)) \
 			if bool(tree_halo.get("ok", false)) else [],
 		"direct":direct_rows,"native":native_rows,
+		"publishedRockFootprints":published_rock_footprints,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),
 		"childCount":chunk.get_child_count()}
 	chunk.free()

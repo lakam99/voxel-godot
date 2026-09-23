@@ -1518,6 +1518,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_biome_environment_catalog", "capture"), &NativeWorldBackend::admit_biome_environment_catalog);
 	ClassDB::bind_method(D_METHOD("admit_visual_asset_catalog", "bundle"), &NativeWorldBackend::admit_visual_asset_catalog);
 	ClassDB::bind_method(D_METHOD("select_rock_asset_shadow", "biome", "durable_prop_id"), &NativeWorldBackend::select_rock_asset_shadow);
+	ClassDB::bind_method(D_METHOD("project_published_rock_footprint_shadow", "page", "exclusions", "ordinal", "visual_source", "visual_asset_id"),
+		&NativeWorldBackend::project_published_rock_footprint_shadow);
 	ClassDB::bind_method(D_METHOD("admit_wildlife_presentation_catalog", "bundle"), &NativeWorldBackend::admit_wildlife_presentation_catalog);
 	ClassDB::bind_method(D_METHOD("admit_structure_exclusion_chunk", "capture"), &NativeWorldBackend::admit_structure_exclusion_chunk);
 	ClassDB::bind_method(D_METHOD("compose_surface_prop_ordered_shadow", "page", "exclusions"),
@@ -1996,6 +1998,74 @@ Dictionary NativeWorldBackend::select_rock_asset_shadow(
 			result["importedMeshMin"] = Vector3(b.min_x, b.min_y, b.min_z);
 			result["importedMeshMax"] = Vector3(b.max_x, b.max_y, b.max_z);
 		}
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::project_published_rock_footprint_shadow(
+		const Ref<NativeEffectiveTerrainPage> &p_page,
+		const Ref<NativeStructureExclusionChunk> &p_exclusions,
+		const std::int64_t p_ordinal, const String &p_visual_source,
+		const String &p_visual_asset_id) const {
+	constexpr const char *operation = "project_published_rock_footprint_shadow";
+	if (!state_ || !shaping_registry_ || !biome_catalog_ || !removed_props_ || !visual_catalog_
+			|| !wildlife_presentations_ || p_page.is_null() || p_exclusions.is_null()
+			|| !p_page->batch_ || !p_exclusions->snapshot_)
+		return envelope(operation, "failed", "ordered_surface_sources_not_ready");
+	try {
+		const WorldSourcePin &pin = p_page->batch_->pin();
+		if (!(pin.definition().physical_content_identity() == state_->source_identity())
+				|| pin.terrain_delta_revision() != state_->terrain_delta_revision()
+				|| pin.shaping_registry_revision() != shaping_registry_->revision()
+				|| !(pin.shaping_registry_content_identity() == shaping_registry_->content_identity())
+				|| p_exclusions->snapshot_->world_digest() != state_->source_identity().digest)
+			throw std::invalid_argument("ordered surface pin or exclusions are stale");
+		const NativeEffectiveTerrainSource terrain(pin);
+		const NativeSurfacePropSourceOrderedStream ordered = NativeSurfacePropSourceOrderedStream::create(
+			state_->definition().raw_terrain_seed(), p_exclusions->chunk_.x, p_exclusions->chunk_.y,
+			state_->source_identity().digest, p_exclusions->snapshot_->world_generation(),
+			terrain, *biome_catalog_, *p_exclusions->snapshot_, *removed_props_, *wildlife_presentations_);
+		if (p_ordinal < 0 || static_cast<std::size_t>(p_ordinal) >= ordered.attempts().size()
+				|| ordered.attempts()[static_cast<std::size_t>(p_ordinal)].outcome
+					!= NativeSurfacePropClassificationOutcome::ordinary_rock)
+			throw std::invalid_argument("ordinal is not an ordinary rock");
+		const NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
+		const NativeSurfaceRockOrderedVisualPlan plan = NativeSurfaceRockOrderedVisualPlan::create(
+			ordered, placement, static_cast<std::uint32_t>(p_ordinal), terrain, *visual_catalog_);
+		const std::string source = bounded_utf8(p_visual_source, 64U, "visualSource", false);
+		const std::string asset_id = bounded_utf8(p_visual_asset_id, 1024U, "visualAssetId", true);
+		NativeSurfaceRockPublishedVisual outcome;
+		const NativeSurfaceRockImportedBoundsReceipt *bounds = nullptr;
+		if (source == "generated_asset" && asset_id == plan.selection().asset_id && !asset_id.empty()) {
+			outcome = NativeSurfaceRockPublishedVisual::selected_import;
+			const auto found = rock_import_bounds_.find(asset_id);
+			if (found == rock_import_bounds_.end())
+				throw std::invalid_argument("selected rock import bounds are not verified");
+			bounds = &found->second;
+		} else if (source == "primitive_fallback" && asset_id.empty()) {
+			outcome = NativeSurfaceRockPublishedVisual::primitive_fallback;
+		} else throw std::invalid_argument("published rock outcome disagrees with source selection");
+		const NativeGeneratedFeatureFootprintCatalog catalog = compose_native_surface_rock_footprint(
+			ordered, placement, static_cast<std::uint32_t>(p_ordinal), terrain, *visual_catalog_, outcome, bounds);
+		const auto &entry = catalog.entries().front();
+		Array runs;
+		for (const auto &run : entry.runs) {
+			Dictionary row;
+			row["channel"] = static_cast<std::int64_t>(run.channel);
+			row["first"] = Vector3i(run.first.x, run.first.y, run.first.z);
+			row["lastXInclusive"] = run.last_x_inclusive;
+			runs.append(row);
+		}
+		Dictionary result = envelope(operation, "ready");
+		result["featureId"] = text(entry.feature_id);
+		result["publishedVisualSource"] = p_visual_source;
+		result["publishedAssetId"] = p_visual_asset_id;
+		result["footprintIdentity"] = text(sha256_hex(catalog.content_digest()));
+		result["sourceIdentity"] = text(sha256_hex(catalog.source_digest()));
+		result["runs"] = runs;
+		result["productionCutover"] = false;
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);

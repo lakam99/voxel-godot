@@ -185,6 +185,20 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
         if (actual.visualSource !== source) failures.push(`${label} attempt ${index} rock visual source mismatch`);
         if (JSON.stringify(actual.visualScaleBits) !== JSON.stringify(expected.expectedRenderedScaleBits))
           failures.push(`${label} attempt ${index} rock visual scale mismatch`);
+        const footprint = sample.publishedRockFootprints?.find(row => row.ordinal === index);
+        if (!footprint || footprint.status !== 'ready' || footprint.featureId !== actual.durableId
+            || footprint.visualSource !== actual.visualSource || footprint.assetId !== actual.assetId
+            || !footprint.footprintIdentity || footprint.runCount < 1
+            || footprint.productionCutover !== false || footprint.forgedAssetStatus !== 'failed')
+          failures.push(`${label} attempt ${index} published rock native footprint mismatch`);
+        if (expected.assetId) {
+          const fallback = footprint?.fallbackProbe;
+          if (!fallback || fallback.visualSource !== 'primitive_fallback' || fallback.assetId !== ''
+              || fallback.status !== 'ready' || fallback.featureId !== actual.durableId
+              || !fallback.footprintIdentity || fallback.runCount < 1
+              || fallback.footprintIdentity === footprint.footprintIdentity)
+            failures.push(`${label} attempt ${index} fallback rock native footprint mismatch`);
+        }
       }
     }
     if (native.outcome === 4 || native.outcome === 5) {
