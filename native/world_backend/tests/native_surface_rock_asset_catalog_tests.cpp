@@ -207,3 +207,59 @@ VWB_TEST(native_surface_rock_asset_catalog_utf8_hash_checks_all_codepoint_widths
         VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected, native_surface_rock_stable_hash(bad));
     }
 }
+
+VWB_TEST(native_surface_rock_effective_registry_preserves_cross_family_membership_and_multiplicity) {
+    auto old_value = rock("shared");
+    old_value.family = "rock";
+    old_value.biome_tags = {"forest"};
+    auto final_value = old_value;
+    final_value.family = "other";
+    final_value.biome_tags = {"snow"};
+    final_value.path = "assets/visual/generated/environment/final.glb";
+    const auto raw = NativeSurfaceRockAssetCatalog::create({old_value, final_value}, environment());
+    const auto effective = NativeSurfaceRockAssetCatalog::create_effective(
+        {final_value}, {{"rock", {"shared", "shared"}}, {"other", {"shared"}}}, environment());
+    const auto selected = effective.select("forest", "id");
+    VWB_EXPECT_EQ(2U, selected.candidate_count);
+    VWB_EXPECT(!selected.matched_biome_tag);
+    VWB_EXPECT_EQ(std::string("shared"), selected.asset_id);
+    VWB_EXPECT_EQ(final_value.path, selected.asset_path);
+    VWB_EXPECT_EQ(1U, raw.select("forest", "id").candidate_count);
+    VWB_EXPECT(raw.content_digest() != effective.content_digest());
+    const auto fewer = NativeSurfaceRockAssetCatalog::create_effective(
+        {final_value}, {{"rock", {"shared"}}, {"other", {"shared"}}}, environment());
+    VWB_EXPECT_EQ(1U, fewer.select("forest", "id").candidate_count);
+    VWB_EXPECT(fewer.content_digest() != effective.content_digest());
+}
+
+VWB_TEST(native_surface_rock_effective_registry_matches_direct_godot_selection_oracle) {
+    auto rows = manifest_rocks();
+    const auto catalog = NativeSurfaceRockAssetCatalog::create_effective(
+        rows, {{"rock", {"rock_01", "rock_02", "rock_03", "rock_04", "rock_05", "rock_06"}}},
+        environment());
+    VWB_EXPECT_EQ(std::string("rock_06"), catalog.select("forest", "atlas-1492:10,20:3").asset_id);
+    VWB_EXPECT_EQ(std::string("rock_03"), catalog.select("swamp", "atlas-1492:10,20:3").asset_id);
+    VWB_EXPECT_EQ(std::string("rock_04"), catalog.select("desert", "atlas-1492:10,20:3").asset_id);
+    VWB_EXPECT_EQ(std::string("rock_05"), catalog.select("future_biome", "atlas-1492:10,20:3").asset_id);
+    VWB_EXPECT_EQ(std::string("rock_02"), catalog.select("forest", "世界🌲:10,20:3").asset_id);
+    const auto reordered = NativeSurfaceRockAssetCatalog::create_effective(
+        rows, {{"rock", {"rock_06", "rock_05", "rock_04", "rock_03", "rock_02", "rock_01"}}},
+        environment());
+    VWB_EXPECT_EQ(catalog.select("forest", "id").asset_id, reordered.select("forest", "id").asset_id);
+    VWB_EXPECT(catalog.content_digest() != reordered.content_digest());
+}
+
+VWB_TEST(native_surface_rock_effective_registry_rejects_incoherent_capture) {
+    auto row = rock("id");
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({}, {}, environment()));
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row, row}, {{"rock", {"id"}}}, environment()));
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row}, {{"rock", {"missing"}}}, environment()));
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row}, {{"rock", {}}, {"rock", {}}}, environment()));
+    row.runtime_enabled = false;
+    VWB_EXPECT_THROW(NativeSurfaceRockAssetCatalogRejected,
+        NativeSurfaceRockAssetCatalog::create_effective({row}, {{"rock", {"id"}}}, environment()));
+}

@@ -26,6 +26,13 @@ struct NativeSurfaceRockAssetRecord final {
     bool runtime_enabled = true;
 };
 
+// One effective assets_by_family entry. Membership is independent of the
+// last-write-wins asset value: old-family IDs and duplicates remain selectable.
+struct NativeSurfaceRockFamilyMembers final {
+    std::string family;
+    std::vector<std::string> ordered_ids;
+};
+
 struct NativeSurfaceRockAssetSelection final {
     std::uint32_t schema_revision = 0U;
     Sha256Digest asset_catalog_digest{};
@@ -55,6 +62,10 @@ public:
     static constexpr std::uint32_t SCHEMA_REVISION = 1U;
     static NativeSurfaceRockAssetCatalog create(std::vector<NativeSurfaceRockAssetRecord> manifest_rows,
         NativeBiomeEnvironmentCatalog environment);
+    static NativeSurfaceRockAssetCatalog create_effective(
+        std::vector<NativeSurfaceRockAssetRecord> assets_by_id,
+        std::vector<NativeSurfaceRockFamilyMembers> families,
+        NativeBiomeEnvironmentCatalog environment);
 
     NativeSurfaceRockAssetSelection select(const std::string &biome,
         const std::string &durable_prop_id) const;
@@ -65,10 +76,12 @@ public:
 private:
     NativeSurfaceRockAssetCatalog(std::vector<NativeSurfaceRockAssetRecord> rows,
         std::map<std::string, std::size_t> last_by_id,
+        std::map<std::string, std::vector<std::string>> family_members,
         NativeBiomeEnvironmentCatalog environment, std::vector<std::uint8_t> canonical,
         Sha256Digest digest) noexcept;
     std::vector<NativeSurfaceRockAssetRecord> rows_;
     std::map<std::string, std::size_t> last_by_id_;
+    std::map<std::string, std::vector<std::string>> family_members_;
     NativeBiomeEnvironmentCatalog environment_;
     std::vector<std::uint8_t> canonical_binary_;
     Sha256Digest content_digest_{};

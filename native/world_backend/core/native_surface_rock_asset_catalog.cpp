@@ -82,9 +82,11 @@ std::uint32_t native_surface_rock_stable_hash(const std::string &utf8) {
 
 NativeSurfaceRockAssetCatalog::NativeSurfaceRockAssetCatalog(
     std::vector<NativeSurfaceRockAssetRecord> rows, std::map<std::string, std::size_t> last_by_id,
+    std::map<std::string, std::vector<std::string>> family_members,
     NativeBiomeEnvironmentCatalog environment,
     std::vector<std::uint8_t> canonical, const Sha256Digest digest) noexcept
-    : rows_(std::move(rows)), last_by_id_(std::move(last_by_id)), environment_(std::move(environment)),
+    : rows_(std::move(rows)), last_by_id_(std::move(last_by_id)),
+      family_members_(std::move(family_members)), environment_(std::move(environment)),
       canonical_binary_(std::move(canonical)), content_digest_(digest) {}
 
 NativeSurfaceRockAssetCatalog NativeSurfaceRockAssetCatalog::create(
@@ -106,8 +108,11 @@ NativeSurfaceRockAssetCatalog NativeSurfaceRockAssetCatalog::create(
     }
     if (enabled.empty()) reject();
     std::map<std::string, std::size_t> last_by_id;
+    std::map<std::string, std::vector<std::string>> family_members;
     for (std::size_t index = 0U; index < enabled.size(); ++index)
         last_by_id[enabled[index].id] = index;
+    for (const auto &row : enabled) family_members[row.family].push_back(row.id);
+    for (auto &[family, ids] : family_members) std::sort(ids.begin(), ids.end());
     Writer writer;
     writer.u8('S'); writer.u8('R'); writer.u8('A'); writer.u8('1');
     writer.u32(SCHEMA_REVISION); writer.digest(environment.content_digest());
@@ -120,8 +125,56 @@ NativeSurfaceRockAssetCatalog NativeSurfaceRockAssetCatalog::create(
     }
     auto bytes = writer.finish();
     const auto digest = sha256(bytes);
-    return NativeSurfaceRockAssetCatalog(std::move(enabled), std::move(last_by_id), std::move(environment),
+    return NativeSurfaceRockAssetCatalog(std::move(enabled), std::move(last_by_id),
+        std::move(family_members), std::move(environment),
         std::move(bytes), digest);
+}
+
+NativeSurfaceRockAssetCatalog NativeSurfaceRockAssetCatalog::create_effective(
+    std::vector<NativeSurfaceRockAssetRecord> assets_by_id,
+    std::vector<NativeSurfaceRockFamilyMembers> families,
+    NativeBiomeEnvironmentCatalog environment) {
+    if (assets_by_id.empty() || assets_by_id.size() > 65536U || families.size() > 65536U) reject();
+    std::map<std::string, std::size_t> by_id;
+    for (std::size_t index = 0U; index < assets_by_id.size(); ++index) {
+        const auto &row = assets_by_id[index];
+        validate_text(row.id); validate_text(row.family); validate_text(row.path);
+        if (!row.runtime_enabled || row.biome_tags.size() > 256U
+            || !std::isfinite(row.size_x) || !std::isfinite(row.size_y) || !std::isfinite(row.size_z)
+            || row.size_x < 0.0 || row.size_y < 0.0 || row.size_z < 0.0) reject();
+        for (const auto &tag : row.biome_tags) validate_text(tag);
+        if (!by_id.emplace(row.id, index).second) reject();
+    }
+    std::map<std::string, std::vector<std::string>> family_members;
+    for (auto &entry : families) {
+        validate_text(entry.family);
+        if (entry.ordered_ids.size() > 65536U || family_members.count(entry.family) != 0U) reject();
+        for (const auto &id : entry.ordered_ids) {
+            validate_text(id);
+            if (by_id.count(id) == 0U) reject();
+        }
+        family_members.emplace(std::move(entry.family), std::move(entry.ordered_ids));
+    }
+    Writer writer;
+    writer.u8('S'); writer.u8('R'); writer.u8('E'); writer.u8('1');
+    writer.u32(SCHEMA_REVISION); writer.digest(environment.content_digest());
+    writer.u32(static_cast<std::uint32_t>(assets_by_id.size()));
+    for (const auto &[id, index] : by_id) {
+        const auto &row = assets_by_id[index];
+        writer.text(id); writer.text(row.family); writer.text(row.path);
+        writer.u32(static_cast<std::uint32_t>(row.biome_tags.size()));
+        for (const auto &tag : row.biome_tags) writer.text(tag);
+        writer.f64(row.size_x); writer.f64(row.size_y); writer.f64(row.size_z);
+    }
+    writer.u32(static_cast<std::uint32_t>(family_members.size()));
+    for (const auto &[family, ids] : family_members) {
+        writer.text(family); writer.u32(static_cast<std::uint32_t>(ids.size()));
+        for (const auto &id : ids) writer.text(id);
+    }
+    auto bytes = writer.finish();
+    const auto digest = sha256(bytes);
+    return NativeSurfaceRockAssetCatalog(std::move(assets_by_id), std::move(by_id),
+        std::move(family_members), std::move(environment), std::move(bytes), digest);
 }
 
 NativeSurfaceRockAssetSelection NativeSurfaceRockAssetCatalog::select(
@@ -139,18 +192,21 @@ NativeSurfaceRockAssetSelection NativeSurfaceRockAssetCatalog::select(
     result.rock_scale = profile.rock_scale;
     std::vector<std::string> candidates;
     for (const auto &family : profile.rock_families) {
-        for (const auto &row : rows_) {
-            if (row.family != family) continue;
-            const auto &resolved = rows_[last_by_id_.at(row.id)];
+        const auto members = family_members_.find(family);
+        if (members == family_members_.end()) continue;
+        for (const auto &id : members->second) {
+            const auto &resolved = rows_[last_by_id_.at(id)];
             if (has_tag(resolved.biome_tags, biome))
-                candidates.push_back(row.id);
+                candidates.push_back(id);
         }
     }
     result.matched_biome_tag = !candidates.empty();
     if (candidates.empty()) {
-        for (const auto &family : profile.rock_families)
-            for (const auto &row : rows_)
-                if (row.family == family) candidates.push_back(row.id);
+        for (const auto &family : profile.rock_families) {
+            const auto members = family_members_.find(family);
+            if (members != family_members_.end())
+                candidates.insert(candidates.end(), members->second.begin(), members->second.end());
+        }
     }
     if (candidates.empty()) return result;
     std::sort(candidates.begin(), candidates.end());

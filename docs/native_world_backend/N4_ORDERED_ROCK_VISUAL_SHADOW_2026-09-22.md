@@ -44,8 +44,8 @@ cutover/deletion audit. N3 full checkpoint admission likewise remains open.
 Follow-up adapter/caller audit: `MainCore.gd` constructs one environment
 catalog and passes it into `VisualAssetRegistry.setup`; registry setup may
 replace the object and clears/rebuilds asset maps and scene cache. A future
-native admission must capture the active registry's ordered enabled manifest
-rows and resolved profiles during that setup, bind an active registry
+native admission must capture the active registry's effective ID values and
+independent family member lists, plus resolved profiles during that setup, bind an active registry
 generation/readiness receipt, and invalidate it on replacement or reload.
 The registry's family lists retain duplicate-ID rows while its ID map
 overwrites the value, so reconstructing candidate lists from `assets_by_id`
@@ -56,3 +56,14 @@ the shared 28-attempt stream atomically across rock, ore, tree, forage and
 wildlife; replacing only `make_rock` would shift later RNG decisions. The
 underground `make_rock` caller is a separate source path. These are current
 cutover requirements, not claims that the adapter or gameplay now pass.
+
+Effective-registry core checkpoint: `NativeSurfaceRockAssetCatalog::create_effective`
+now accepts the active last-write-wins ID values and ordered family lists as
+separate inputs. It preserves cross-family membership and duplicate IDs, uses
+the final ID value for tag/path/size, and binds both value and membership
+payloads into its digest. The earlier manifest-row constructor remains only
+for existing shadow tests until the adapter cutover. A focused standalone
+debug link of `test_main`, the rock-catalog tests, and the current core library
+passed 10/10 tests; the wider direct debug binary passed 458/458, but its
+wildcard object link is not a source-inventoried integrated gate. No adapter
+retains this effective catalog and no production caller consumes it yet.
