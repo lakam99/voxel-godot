@@ -346,6 +346,15 @@ failed owned-process cleanup as failures. This is direct-service evidence
 under an empty Citadel/town policy, not headed gameplay, feature geometry,
 live-capture freshness or N4 production cutover acceptance.
 
+The differential was then extended to replay the same chunk with its first
+durable prop ID tombstoned and a negative-coordinate chunk. Its fresh report
+passed all 84 attempts across the three cases at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-69ac3929-6a3a-4724-9aee-8e15df706d67.json`.
+The tombstoned attempt preserves its coordinate and RNG boundary but correctly
+does not consume a terrain sample; the probe compares only source values
+actually used by production. This remains direct-service evidence, not a
+headed game-flow or feature-geometry acceptance claim.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

@@ -20,33 +20,41 @@ let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
 if (processResult.code !== 0) failures.push(`Godot process failed: ${processResult.code}`);
-if (probe) {
+if (probe?.cases?.length !== 3) failures.push(`Expected three cases, got ${probe?.cases?.length}`);
+for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
+  const label = `case ${caseIndex} chunk ${JSON.stringify(sample.chunk)} removed ${sample.removed?.length ?? 0}`;
   for (const key of ['nativeInitialization', 'structureAdmission', 'orderedStatus'])
-    if (probe[key] !== 'ready') failures.push(`${key}: ${probe[key]}`);
-  if (!probe.bundleReady) failures.push('Owner bundle not ready');
-  for (const [key, value] of Object.entries(probe.admissions ?? {}))
-    if (value !== 'ready') failures.push(`${key} admission: ${value}`);
-  if (probe.direct?.length !== 28 || probe.native?.length !== 28)
-    failures.push(`Attempt counts: direct=${probe.direct?.length}, native=${probe.native?.length}`);
+    if (sample[key] !== 'ready') failures.push(`${label} ${key}: ${sample[key]}`);
+  if (!sample.bundleReady) failures.push(`${label} owner bundle not ready`);
+  for (const [key, value] of Object.entries(sample.admissions ?? {}))
+    if (value !== 'ready') failures.push(`${label} ${key} admission: ${value}`);
+  if (sample.direct?.length !== 28 || sample.native?.length !== 28)
+    failures.push(`${label} attempt counts: direct=${sample.direct?.length}, native=${sample.native?.length}`);
   const uint64 = value => BigInt.asUintN(64, BigInt(value)).toString();
-  for (let index = 0; index < Math.min(probe.direct?.length ?? 0, probe.native?.length ?? 0); index++) {
-    const direct = probe.direct[index], native = probe.native[index];
-    for (const field of ['ordinal', 'durableId', 'sourceBiome'])
-      if (direct[field] !== native[field]) failures.push(`attempt ${index} ${field}: ${direct[field]} != ${native[field]}`);
-    if (JSON.stringify(direct.cell) !== JSON.stringify(native.cell)) failures.push(`attempt ${index} cell mismatch`);
-    if (Math.abs(direct.sourceHeightMeters - native.sourceHeightMeters) > 1e-5)
-      failures.push(`attempt ${index} source height mismatch`);
+  for (let index = 0; index < Math.min(sample.direct?.length ?? 0, sample.native?.length ?? 0); index++) {
+    const direct = sample.direct[index], native = sample.native[index];
+    for (const field of ['ordinal', 'durableId'])
+      if (direct[field] !== native[field]) failures.push(`${label} attempt ${index} ${field}: ${direct[field]} != ${native[field]}`);
+    if (JSON.stringify(direct.cell) !== JSON.stringify(native.cell)) failures.push(`${label} attempt ${index} cell mismatch`);
+    if (direct.sourceSampleApplicable) {
+      if (direct.sourceBiome !== native.sourceBiome) failures.push(`${label} attempt ${index} source biome mismatch`);
+      if (Math.abs(direct.sourceHeightMeters - native.sourceHeightMeters) > 1e-5)
+        failures.push(`${label} attempt ${index} source height mismatch`);
+    } else if (native.sourceBiome !== '' || native.sourceHeightMeters !== 0) {
+      failures.push(`${label} attempt ${index} sampled after tombstone`);
+    }
     for (const field of ['stateBeforeCoordinates', 'stateAfterRecipe'])
-      if (uint64(direct[field]) !== uint64(native[field])) failures.push(`attempt ${index} ${field} mismatch`);
+      if (uint64(direct[field]) !== uint64(native[field])) failures.push(`${label} attempt ${index} ${field} mismatch`);
   }
-  if (uint64(probe.directFinalRngState) !== uint64(probe.nativeFinalRngState)) failures.push('Final RNG state mismatch');
+  if (uint64(sample.directFinalRngState) !== uint64(sample.nativeFinalRngState)) failures.push(`${label} final RNG state mismatch`);
 }
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
   evidenceLevel: 'direct production-method/service differential; not headed gameplay acceptance',
-  seed: probe?.seed ?? null, chunk: probe?.chunk ?? null,
-  attemptsCompared: Math.min(probe?.direct?.length ?? 0, probe?.native?.length ?? 0),
+  seed: probe?.seed ?? null, cases: probe?.cases?.map(({chunk, removed, direct, native}) => ({
+    chunk, removed, attemptsCompared: Math.min(direct?.length ?? 0, native?.length ?? 0),
+  })) ?? [],
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };

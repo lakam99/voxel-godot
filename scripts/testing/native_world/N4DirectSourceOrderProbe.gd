@@ -34,12 +34,35 @@ func run() -> void:
 	admission.finalize_town_inputs({})
 	structures.citadel_terrain_admission = admission
 	main.structure_system = structures
+	var cases := []
+	for spec in [
+		{"chunk": Vector2i.ZERO, "removed": []},
+		{"chunk": Vector2i.ZERO, "removed": ["atlas-1492:16,17:0"]},
+		{"chunk": Vector2i(-1, -1), "removed": []}]:
+		main.restore_removed_props(spec.removed)
+		cases.append(run_case(main, spec.chunk, spec.removed))
+	var result := {"scope":"direct_production_method_and_native_shadow_contract_not_live_gameplay",
+		"seed":main.seed_text,"cases":cases}
+	var path := OS.get_environment("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT")
+	if path.is_empty():
+		push_error("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT is required")
+		quit(2)
+		return
+	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
+	var file := FileAccess.open(path, FileAccess.WRITE)
+	file.store_string(JSON.stringify(result, "  "))
+	file.close()
+	await process_frame
+	main.free()
+	quit(0)
+
+func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 	var chunk := Node3D.new()
 	root.add_child(chunk)
-	var state: Dictionary = main.begin_chunk_prop_spawn_state(chunk, 0, 0)
+	var state: Dictionary = main.begin_chunk_prop_spawn_state(chunk, chunk_key.x, chunk_key.y)
 	var backend = ClassDB.instantiate("NativeWorldBackend")
 	var initialized: Dictionary = backend.initialize(native_initialization(main.seed_text))
-	var bundle: Dictionary = Bundle.capture_terrain_chunk(main, Vector2i.ZERO, backend)
+	var bundle: Dictionary = Bundle.capture_terrain_chunk(main, chunk_key, backend)
 	var admissions := {}
 	if initialized.get("status") == "ready" and bool(bundle.get("ok", false)):
 		var owner: Dictionary = bundle.sources.owner
@@ -59,13 +82,14 @@ func run() -> void:
 		var preview := RandomNumberGenerator.new()
 		preview.seed = rng.seed
 		preview.state = before_state
-		var x := 2 + preview.randi_range(0, 24)
-		var z := 2 + preview.randi_range(0, 24)
+		var x: int = state.startX + 2 + preview.randi_range(0, 24)
+		var z: int = state.startZ + 2 + preview.randi_range(0, 24)
 		var sample: Dictionary = main.surface_volume_spawn_sample_at_cell(x, z)
 		var child_count_before := chunk.get_child_count()
 		main.spawn_chunk_prop_attempt(state, index, rng)
 		direct_rows.append({"ordinal":index,"cell":[x,z],
 			"durableId":"%s:%d,%d:%d" % [main.seed_text,x,z,index],
+			"sourceSampleApplicable":not removed.has("%s:%d,%d:%d" % [main.seed_text,x,z,index]),
 			"stateBeforeCoordinates":str(before_state),"stateAfterRecipe":str(rng.state),
 			"sourceBiome":String(sample.get("biome","")),
 			"sourceHeightMeters":float(sample.get("height",0.0)),
@@ -78,23 +102,12 @@ func run() -> void:
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,
 			"sourceHeightMeters":row.sourceHeightMeters,"outcome":row.outcome,
 			"presence":row.presence})
-	var result := {"scope":"direct_production_method_and_native_shadow_contract_not_live_gameplay",
-		"seed":main.seed_text,"chunk":[0,0],"nativeInitialization":initialized.get("status"),
+	var result := {"chunk":[chunk_key.x,chunk_key.y],"removed":removed,
+		"nativeInitialization":initialized.get("status"),
 		"bundleReady":bundle.get("ok",false),"admissions":admissions,
 		"structureAdmission":structure_receipt.get("status"),"orderedStatus":ordered.get("status"),
 		"direct":direct_rows,"native":native_rows,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),
 		"childCount":chunk.get_child_count()}
-	var path := OS.get_environment("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT")
-	if path.is_empty():
-		push_error("N4_DIRECT_SOURCE_ORDER_PROBE_REPORT is required")
-		quit(2)
-		return
-	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
-	var file := FileAccess.open(path, FileAccess.WRITE)
-	file.store_string(JSON.stringify(result, "  "))
-	file.close()
-	chunk.queue_free()
-	await process_frame
-	main.free()
-	quit(0)
+	chunk.free()
+	return result
