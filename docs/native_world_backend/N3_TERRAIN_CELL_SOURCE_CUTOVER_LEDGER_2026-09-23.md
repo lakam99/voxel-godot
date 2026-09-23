@@ -87,13 +87,31 @@ instead of silently discarding terrain edits. Both accepted shapes round trip
 through the installed native backend, and the pending/precedence cases pass at
 `artifacts/native-world-backend/n3-world-source-request-1790173418313-94456927/report.json`.
 
-The remaining valid-v2 conversion must derive each column's prior surface
+The valid-v2 conversion must derive each column's prior surface
 from the native source in save order, apply the historical excavation cells
 as typed durable native transactions, and export one canonical volume before
 playable Continue. It must admit shaping pages and retain pending work, bound
 large columns across frames, and preserve the current `terrainVolume` override
-rule. No production Continue cutover is safe until this converter and headed
-reload evidence exist.
+rule. No production Continue cutover is safe until conversion is wired into
+loading and headed reload evidence exists.
+
+The loading-only `NativeV2LegacyTerrainConverter` now converts historical v2
+`terrain` columns when `terrainVolume` is absent or empty. It reads the native
+effective surface in save order, prepares at most 64 cells per frame, and
+commits each excavated column as one typed native transaction so global and
+section revisions match `MainSaveState.restore_volume_edits`. A resolved save
+enters the ordinary native v2 import path. The focused service contract
+compares exact full snapshots against that production restore method for a
+negative column, duplicate ordered columns, and a deep column; it also covers
+pending page admission, cancellation, malformed input, and oversized-column
+failure. Report: `artifacts/native-world-backend/n3-world-source-request-1790174219980-877b22e0/report.json`.
+The native transaction binding limits a column to 4096 operations. Larger
+historical columns fail closed with `legacy_column_operation_limit`; they are
+not silently truncated or accepted for playable Continue. The converter's
+scheduling and save-shape adapter are transitional; v2 terrain-list support
+must remain through an authoritative native conversion API at production
+cutover. This service report does not prove headed reload, physical
+publication, or runtime frame budgets.
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and
