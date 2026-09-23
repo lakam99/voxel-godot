@@ -23,11 +23,14 @@ provide exact live collision acknowledgement, occupancy safety, and a
 revision-bound release contract. This service component is not suitable for
 production edits in its present state. Focused evidence:
 `artifacts/native-world-backend/n3-terrain-runtime-owner-1790172076190-ccda949c/report.json`.
-The receipt guard now checks that every conservative native affected section
-is inside the preflighted mesh halo and that every edited section is present.
-The focused real receipt plus forged foreign, duplicate, and missing-section
+The receipt guard now requires exact deduplicated set equality between the
+native conservative affected sections and the preflighted mesh halo. The
+focused real receipt plus forged foreign, duplicate, and missing-section
 checks pass at
 `artifacts/native-world-backend/n3-terrain-runtime-owner-1790172197383-6f38d9b7/report.json`.
+The stronger missing-neighbor check passes at
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790172570225-d0c9c2f2/report.json`
+in the isolated N3 worktree.
 
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
