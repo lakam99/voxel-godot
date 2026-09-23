@@ -7892,6 +7892,23 @@
         "foliage": []
       },
       "runtimeEnabled": true,
+      "rockGeometry": {
+        "schema": "rock-glb-geometry/v1",
+        "glbSha256": "41085923f2d906b6335c811cb9e61576f45d1f091f873329fd330cadd15ff25d",
+        "min": [
+          -0.6786725521087646,
+          0,
+          -0.4762398600578308
+        ],
+        "max": [
+          0.7803832292556763,
+          0.5639727115631104,
+          0.44836854934692383
+        ],
+        "vertexCount": 60,
+        "primitiveCount": 2,
+        "identitySceneTransform": true
+      },
       "animationContract": {
         "skeletons": 0,
         "shapeKeys": 0,
@@ -7949,6 +7966,23 @@
         "foliage": []
       },
       "runtimeEnabled": true,
+      "rockGeometry": {
+        "schema": "rock-glb-geometry/v1",
+        "glbSha256": "596a5395284d2ae943986bcaa42209c79c1307b862c658ed63dda5013f82ab86",
+        "min": [
+          -0.6260432004928589,
+          0,
+          -0.511671781539917
+        ],
+        "max": [
+          0.6348230838775635,
+          1.0197832584381104,
+          0.41783103346824646
+        ],
+        "vertexCount": 60,
+        "primitiveCount": 2,
+        "identitySceneTransform": true
+      },
       "animationContract": {
         "skeletons": 0,
         "shapeKeys": 0,
@@ -8006,6 +8040,23 @@
         "foliage": []
       },
       "runtimeEnabled": true,
+      "rockGeometry": {
+        "schema": "rock-glb-geometry/v1",
+        "glbSha256": "9d2e9d4d4a02772dfe386bda7fc23ab1e2283d6d72459ea2f67684a955aa2ef7",
+        "min": [
+          -0.7500827312469482,
+          0,
+          -0.6174744963645935
+        ],
+        "max": [
+          0.8790338039398193,
+          0.829885721206665,
+          0.6342648863792419
+        ],
+        "vertexCount": 240,
+        "primitiveCount": 2,
+        "identitySceneTransform": true
+      },
       "animationContract": {
         "skeletons": 0,
         "shapeKeys": 0,
@@ -8063,6 +8114,23 @@
         "foliage": []
       },
       "runtimeEnabled": true,
+      "rockGeometry": {
+        "schema": "rock-glb-geometry/v1",
+        "glbSha256": "2a76fd45d3d3350c74327a7168ca27512b52c91d3fb0ac758c2b7cb28e397d51",
+        "min": [
+          -0.6730222105979919,
+          0,
+          -0.7087781429290771
+        ],
+        "max": [
+          0.6753228306770325,
+          1.2823452949523926,
+          0.7069584727287292
+        ],
+        "vertexCount": 60,
+        "primitiveCount": 2,
+        "identitySceneTransform": true
+      },
       "animationContract": {
         "skeletons": 0,
         "shapeKeys": 0,
@@ -8120,6 +8188,23 @@
         "foliage": []
       },
       "runtimeEnabled": true,
+      "rockGeometry": {
+        "schema": "rock-glb-geometry/v1",
+        "glbSha256": "deddad96918460356e1fa7b8ce120c76416df36e41a61ad2d864df79cca4d423",
+        "min": [
+          -1.070626974105835,
+          0,
+          -0.8674660325050354
+        ],
+        "max": [
+          0.9867365956306458,
+          1.282177448272705,
+          0.9506295919418335
+        ],
+        "vertexCount": 60,
+        "primitiveCount": 2,
+        "identitySceneTransform": true
+      },
       "animationContract": {
         "skeletons": 0,
         "shapeKeys": 0,
@@ -8177,6 +8262,23 @@
         "foliage": []
       },
       "runtimeEnabled": true,
+      "rockGeometry": {
+        "schema": "rock-glb-geometry/v1",
+        "glbSha256": "4bdbc37fa0607c816c86cfb3c705a32418463c356f7d1175e717d57341ae75b6",
+        "min": [
+          -1.3803905248641968,
+          0,
+          -0.8011751770973206
+        ],
+        "max": [
+          1.4661654233932495,
+          1.0785475969314575,
+          0.7006177306175232
+        ],
+        "vertexCount": 240,
+        "primitiveCount": 2,
+        "identitySceneTransform": true
+      },
       "animationContract": {
         "skeletons": 0,
         "shapeKeys": 0,
