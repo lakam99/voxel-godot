@@ -140,7 +140,9 @@ NativeSurfaceTreePresenceDecision evaluate_native_tree_exclusion_halo(
             const auto found = std::find_if(halo.citadels().begin(), halo.citadels().end(),
                 [rx, rz](const auto &c) { return c.region_x == rx && c.region_z == rz; });
             if (found == halo.citadels().end() || found->status == CitadelSourceStatus::pending
-                || found->status == CitadelSourceStatus::failed) reject();
+                || found->status == CitadelSourceStatus::failed
+                || (found->status == CitadelSourceStatus::absent
+                    && found->reason == "source_not_requested")) reject();
         }
     }
     const auto n = out.natural_margin_cells, s = out.structure_margin_cells;

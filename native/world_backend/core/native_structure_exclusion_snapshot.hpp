@@ -84,6 +84,10 @@ public:
         std::vector<StructureExclusionBoundsAdmission> admitted_bounds);
 
     StructureExclusionDecision query(std::int32_t x, std::int32_t z) const;
+    // Inclusive cell rectangle. A decided absence is complete; an unrequested
+    // lookup is not, even if another exclusion would block a sampled cell.
+    bool covers_decided_regions(std::int32_t min_x, std::int32_t min_z,
+                                std::int32_t max_x, std::int32_t max_z) const noexcept;
     const Sha256Digest &world_digest() const noexcept;
     std::uint64_t world_generation() const noexcept;
     const Sha256Digest &content_digest() const noexcept;

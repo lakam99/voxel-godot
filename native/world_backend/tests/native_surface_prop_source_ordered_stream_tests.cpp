@@ -284,6 +284,15 @@ VWB_TEST(native_source_ordered_prop_stream_skips_structure_blocked_attempts) {
         VWB_EXPECT(!entry.prop_roll.has_value());
         VWB_EXPECT_EQ(entry.state_after_coordinates, entry.state_after_recipe);
     }
+    auto unrequested = CitadelExclusionSource{};
+    unrequested.status = CitadelSourceStatus::absent;
+    unrequested.reason = "source_not_requested";
+    const auto masked_pending = NativeStructureExclusionSnapshot::create(world_digest(), 1U,
+        {{"blocked", {0,0,27,27}}}, {}, {unrequested}, {{0,0,true}});
+    VWB_EXPECT(masked_pending.query(10, 10).blocked);
+    VWB_EXPECT(!masked_pending.covers_decided_regions(0, 0, 27, 27));
+    VWB_EXPECT_THROW(NativeSurfacePropSourceOrderedStreamRejected,
+        run(terrain, NativeFeatureDeltaSnapshot::create({}, {}), masked_pending));
 }
 
 VWB_TEST(native_source_ordered_prop_stream_replays_forage_and_wildlife_recipes) {

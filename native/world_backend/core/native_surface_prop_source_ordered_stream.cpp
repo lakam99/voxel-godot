@@ -85,11 +85,11 @@ void preflight(const AdmittedTerrainSeed &seed, const std::int32_t chunk_x, cons
             return receipt.min_x == min_x && receipt.min_z == min_z;
         });
     if (!bounds_ready) reject();
-    // Complete source capture is required even if the current RNG happens not
-    // to pick the unresolved cell. This bounded 28x28 pass samples no terrain.
-    for (std::int32_t z = 0; z < 28; ++z)
-        for (std::int32_t x = 0; x < 28; ++x)
-            if (!exclusions.query(min_x + x, min_z + z).complete) reject();
+    // A natural/terrain exclusion can short-circuit an individual query, but
+    // cannot turn an unrequested Citadel region into a complete chunk input.
+    if (!exclusions.covers_decided_regions(min_x, min_z, max_x, max_z)) reject();
+    // Exact chunk bounds and decided coverage make every center-cell query
+    // complete. A second 28x28 scan would only duplicate these admissions.
 }
 
 } // namespace

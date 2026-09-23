@@ -33,7 +33,8 @@ CitadelExclusionSource source(std::int32_t rx, std::int32_t rz,
         result.admission_generation = 7;
         result.reservation = rect;
     } else {
-        result.reason = status == CitadelSourceStatus::absent ? "source_not_requested" : "not_ready";
+        result.reason = status == CitadelSourceStatus::absent ? "" : "not_ready";
+        if (status == CitadelSourceStatus::absent) result.source_key = "decided-absent";
     }
     return result;
 }
@@ -82,6 +83,11 @@ VWB_TEST(structure_exclusion_matches_28_ordered_godot_oracle_decisions) {
     VWB_EXPECT_EQ(std::size_t{1}, snapshot.terrain().size());
     VWB_EXPECT_EQ(std::size_t{6}, snapshot.citadels().size());
     VWB_EXPECT_EQ(std::size_t{5}, snapshot.admitted_bounds().size());
+    VWB_EXPECT(snapshot.covers_decided_regions(0, 0, 27, 27));
+    VWB_EXPECT(snapshot.covers_decided_regions(2047, 2047, 2048, 2048));
+    VWB_EXPECT(!snapshot.covers_decided_regions(-1, -1, 0, 0));
+    VWB_EXPECT(!snapshot.covers_decided_regions(1, 0, 0, 0));
+    VWB_EXPECT(!snapshot.covers_decided_regions(0, 1, 0, 0));
     VWB_EXPECT(!snapshot.query(-3, 0).blocked);
     VWB_EXPECT(!snapshot.query(15, 18).blocked);
     VWB_EXPECT(!snapshot.query(18, 15).blocked);
@@ -125,10 +131,21 @@ VWB_TEST(structure_exclusion_status_is_explicit_and_not_empty_success) {
         {source(1, 1, CitadelSourceStatus::failed)}, admissions());
     const auto absent = NativeStructureExclusionSnapshot::create(world(), 1, {}, {},
         {source(1, 1, CitadelSourceStatus::absent)}, admissions());
+    auto unrequested_source = source(1, 1, CitadelSourceStatus::absent);
+    unrequested_source.source_key.clear();
+    unrequested_source.reason = "source_not_requested";
+    const auto unrequested = NativeStructureExclusionSnapshot::create(world(), 1, {}, {},
+        {unrequested_source}, admissions());
     const auto uncaptured = NativeStructureExclusionSnapshot::create(world(), 1, {}, {}, {}, admissions());
     VWB_EXPECT(!pending.query(2048, 2048).blocked && !pending.query(2048, 2048).complete);
     VWB_EXPECT(!failed.query(2048, 2048).complete);
+    VWB_EXPECT(!pending.covers_decided_regions(2048, 2048, 2048, 2048));
+    VWB_EXPECT(!failed.covers_decided_regions(2048, 2048, 2048, 2048));
     VWB_EXPECT(absent.query(2048, 2048).complete && !absent.query(2048, 2048).blocked);
+    VWB_EXPECT(!unrequested.query(2048, 2048).complete && !unrequested.query(2048, 2048).blocked);
+    VWB_EXPECT(!unrequested.covers_decided_regions(2048, 2048, 2048, 2048));
+    VWB_EXPECT(absent.covers_decided_regions(2048, 2048, 2048, 2048));
+    VWB_EXPECT_EQ(std::string("source_not_requested"), unrequested.query(2048, 2048).source_id);
     VWB_EXPECT(!uncaptured.query(2048, 2048).complete);
     VWB_EXPECT(pending.content_digest() != failed.content_digest());
     VWB_EXPECT(absent.content_digest() != uncaptured.content_digest());

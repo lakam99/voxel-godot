@@ -241,6 +241,12 @@ StructureExclusionDecision NativeStructureExclusionSnapshot::query(std::int32_t 
             return {false, false, StructureExclusionKind::unresolved, source.reason};
         }
         if (source.status == CitadelSourceStatus::absent) {
+            // StructureSystem.source_state reports an unrequested region as
+            // {status: absent, reason: source_not_requested}. It is not a
+            // decided absence and cannot clear a native prop attempt.
+            if (source.reason == "source_not_requested") {
+                return {false, false, StructureExclusionKind::unresolved, source.reason};
+            }
             return {false, true, StructureExclusionKind::clear, source.reason};
         }
         if (half_open_contains(source.reservation, x, z)) {
@@ -249,6 +255,28 @@ StructureExclusionDecision NativeStructureExclusionSnapshot::query(std::int32_t 
         return {false, true, StructureExclusionKind::clear, {}};
     }
     return {false, false, StructureExclusionKind::unresolved, "region_not_captured"};
+}
+
+bool NativeStructureExclusionSnapshot::covers_decided_regions(
+    std::int32_t min_x, std::int32_t min_z, std::int32_t max_x, std::int32_t max_z) const noexcept {
+    if (min_x > max_x || min_z > max_z) return false;
+    const auto low_x = floor_grid(min_x, CITADEL_REGION_SIZE);
+    const auto low_z = floor_grid(min_z, CITADEL_REGION_SIZE);
+    const auto high_x = floor_grid(max_x, CITADEL_REGION_SIZE);
+    const auto high_z = floor_grid(max_z, CITADEL_REGION_SIZE);
+    for (auto region_z = low_z; region_z <= high_z; ++region_z) {
+        for (auto region_x = low_x; region_x <= high_x; ++region_x) {
+            const auto found = std::find_if(citadels_.begin(), citadels_.end(),
+                [region_x, region_z](const CitadelExclusionSource &source) {
+                    return source.region_x == region_x && source.region_z == region_z;
+                });
+            if (found == citadels_.end()) return false;
+            if (found->status == CitadelSourceStatus::pending || found->status == CitadelSourceStatus::failed
+                || (found->status == CitadelSourceStatus::absent
+                    && found->reason == "source_not_requested")) return false;
+        }
+    }
+    return true;
 }
 
 const Sha256Digest &NativeStructureExclusionSnapshot::world_digest() const noexcept { return world_digest_; }

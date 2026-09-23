@@ -188,6 +188,27 @@ both passed against that build. These are captured-value adapter contracts,
 not proof of live freshness at publication, complete 28-attempt construction,
 wildlife motion, or Gate 5 gameplay.
 
+The subsequent Citadel source-admission review found a semantic mismatch:
+`CitadelTerrainAdmission.source_state` returns `status=absent` with
+`reason=source_not_requested` before a region has been decided, and
+`StructureSystem.capture_surface_tree_exclusion_halo` correctly treats that
+as not ready. The native exclusion query had treated it as a complete clear
+decision. The pure-core query now leaves it unresolved. The source-ordered
+chunk preflight and post-draw tree-halo evaluator both require every crossed
+Citadel region to be decided even when natural/terrain exclusion would
+short-circuit individual cells. The original two-suite C++ focused executable
+passed 16/16 after direct compilation; the additional tree-halo correction
+passed 7/7 in its focused suite. The `n4-exclusion-source-admission-02`
+aggregate passed all 446 debug/release assertions but was blocked solely by
+one strict coverage branch: the old per-cell completeness check could no
+longer fail after exact bounds and all-region decided preflight. That
+redundant 28x28 scan has been removed; an integrated rebuild/coverage rerun
+then passed as `artifacts/native-world-backend/n4-exclusion-source-admission-03/report.json`:
+446/446 debug and 446/446 release assertions, with 10,014/10,014 pure-core
+lines, 1,371/1,371 functions, and 5,964/5,964 branches covered. This changes
+only the N4 shadow source, not production prop spawning or protected NPC
+routing.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
