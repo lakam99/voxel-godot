@@ -401,6 +401,20 @@ headed movement, or publication authority. The probe now places each chunk at
 its actual world anchor before comparing movement-home float32 bits. N4
 remains shadow-only and the full all-family feature footprint is still open.
 
+The adapter now projects the existing native ordered rock visual plan from
+the admitted effective visual catalog. The rebuilt
+`n4-rock-adapter-shadow-01` gate passed at
+`artifacts/native-world-backend/n4-rock-adapter-shadow-01/report.json`.
+The same direct production-method differential passed five cases and 140
+attempts, comparing 10 actual rock bodies at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-93dd682a-9bba-4623-8911-11af1ad345cf.json`.
+It checks durable ID, separately sampled visual biome, body rotation, sphere
+collider, selected generated-asset ID/source and rendered scale. All ten
+samples were swamp rocks using generated assets; the primitive fallback and
+other biome presentations remain pure-core/catalog-oracle evidence only. This
+is direct-service shadow parity, not live publication, headed visuals or N4
+cutover.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

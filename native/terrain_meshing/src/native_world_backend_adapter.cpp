@@ -6,6 +6,7 @@
 #include "native_surface_forage_ordered_definition.hpp"
 #include "native_surface_ore_cluster_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
+#include "native_surface_rock_ordered_visual_plan.hpp"
 #include "native_surface_wildlife_ordered_definition.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
@@ -2294,6 +2295,29 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 				feature["movementTimer"] = built.movement.timer;
 				feature["movementSpeed"] = built.movement.speed;
 				feature["movementLastMove"] = built.movement.last_move;
+				row["feature"] = feature;
+			}
+			if (source.outcome == NativeSurfacePropClassificationOutcome::ordinary_rock) {
+				const NativeSurfaceRockOrderedVisualPlan rock = NativeSurfaceRockOrderedVisualPlan::create(
+					ordered, placement, static_cast<std::uint32_t>(index), terrain, *visual_catalog_);
+				const NativeSurfaceRockDefinitionInput &built = rock.definition().input();
+				const NativeSurfaceRockAssetSelection &selected = rock.selection();
+				Dictionary feature;
+				feature["kind"] = "rock";
+				feature["contentIdentity"] = text(sha256_hex(rock.definition().content_digest()));
+				feature["durableId"] = text(built.durable_feature_id);
+				feature["visualBiome"] = text(built.source_biome);
+				feature["rotationY"] = built.rotation_y;
+				feature["visualRadius"] = built.visual_radius;
+				feature["visualHeightFactor"] = built.visual_height_factor;
+				feature["visualScale"] = Vector3(built.visual_scale_x, built.visual_scale_y, built.visual_scale_z);
+				feature["colliderRadius"] = built.collision.radius;
+				feature["colliderCenterY"] = built.collision.center_y;
+				feature["visualIntent"] = static_cast<std::int64_t>(rock.intent());
+				feature["assetId"] = text(selected.asset_id);
+				feature["assetPath"] = text(selected.asset_path);
+				feature["assetSize"] = world_vector(selected.asset_size);
+				feature["profileScale"] = selected.rock_scale;
 				row["feature"] = feature;
 			}
 			attempts.append(row);

@@ -140,6 +140,25 @@ func wildlife_geometry(body: StaticBody3D) -> Dictionary:
 		"movementSpeedBits":bits(float(body.get_meta("wildlife_speed", 0.0))),
 		"movementLastMoveBits":bits(float(body.get_meta("wildlife_last_move", 0.0)))}
 
+func rock_geometry(body: StaticBody3D) -> Dictionary:
+	var collider: CollisionShape3D = null
+	var visual: Node3D = null
+	for child in body.get_children():
+		if child is CollisionShape3D:
+			collider = child
+		elif child is Node3D:
+			visual = child
+	if collider == null or not (collider.shape is SphereShape3D) or visual == null:
+		return {"captureError":"incomplete_rock_body"}
+	return {"durableId":String(body.get_meta("prop_id", "")),
+		"visualBiome":String(body.get_meta("visual_biome", "")),
+		"rotationYBits":bits(body.rotation.y),
+		"colliderRadiusBits":bits((collider.shape as SphereShape3D).radius),
+		"colliderCenterYBits":bits(collider.position.y),
+		"visualSource":String(body.get_meta("visual_source", "")),
+		"assetId":String(body.get_meta("visual_asset_id", "")),
+		"visualScaleBits":vector_bits(visual.scale)}
+
 func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
@@ -249,6 +268,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
 					and String(child.get_meta("material", "")) == "wildlife":
 				direct_row["wildlife"] = wildlife_geometry(child)
+			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
+					and String(child.get_meta("material", "")) == "rock":
+				direct_row["rock"] = rock_geometry(child)
 		if not ore_children.is_empty():
 			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
@@ -330,6 +352,30 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 				"movementTimerBits":bits(feature.movementTimer),
 				"movementSpeedBits":bits(feature.movementSpeed),
 				"movementLastMoveBits":bits(feature.movementLastMove)}
+		elif feature.get("kind") == "rock":
+			var expected_rock_scale: Vector3 = feature.visualScale
+			if int(feature.visualIntent) == 1:
+				var radius: float = feature.visualRadius
+				var height_factor: float = feature.visualHeightFactor
+				var old_scale: Vector3 = feature.visualScale
+				var asset_size: Vector3 = feature.assetSize
+				var sx := (radius * 2.0 * old_scale.x) / maxf(0.1, asset_size.x)
+				var sy := (radius * height_factor * old_scale.y) / maxf(0.1, asset_size.z)
+				var sz := (radius * 2.0 * old_scale.z) / maxf(0.1, asset_size.y)
+				expected_rock_scale = Vector3(sx, sy, sz) * float(feature.profileScale)
+			projected_feature = {"kind":feature.kind,
+				"durableId":feature.durableId,"visualBiome":feature.visualBiome,
+				"rotationYBits":bits(feature.rotationY),
+				"visualRadiusBits":bits(feature.visualRadius),
+				"visualHeightFactorBits":bits(feature.visualHeightFactor),
+				"visualScaleBits":vector_bits(feature.visualScale),
+				"expectedRenderedScaleBits":vector_bits(expected_rock_scale),
+				"colliderRadiusBits":bits(feature.colliderRadius),
+				"colliderCenterYBits":bits(feature.colliderCenterY),
+				"visualIntent":feature.visualIntent,"assetId":feature.assetId,
+				"assetPath":feature.assetPath,
+				"assetSizeBits":vector_bits(feature.assetSize),
+				"profileScaleBits":bits(feature.profileScale)}
 		native_rows.append({"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"durableId":row.durableId,"stateBeforeCoordinates":row.stateBeforeCoordinates,
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,

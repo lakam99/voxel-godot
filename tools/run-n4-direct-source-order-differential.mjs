@@ -19,6 +19,7 @@ const failures = [];
 let forageDefinitionsCompared = 0;
 let oreClustersCompared = 0;
 let wildlifeDefinitionsCompared = 0;
+let rockDefinitionsCompared = 0;
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
@@ -139,12 +140,28 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
             failures.push(`${label} attempt ${index} wildlife ${field} mismatch`);
       }
     }
+    if (native.outcome === 3) {
+      const expected = native.feature, actual = direct.rock;
+      if (expected?.kind !== 'rock' || !actual || actual.captureError) {
+        failures.push(`${label} attempt ${index} rock definition or live body missing`);
+      } else {
+        rockDefinitionsCompared++;
+        for (const field of ['durableId', 'visualBiome', 'rotationYBits',
+          'colliderRadiusBits', 'colliderCenterYBits', 'assetId'])
+          if (actual[field] !== expected[field]) failures.push(`${label} attempt ${index} rock ${field} mismatch`);
+        const source = expected.visualIntent === 1 ? 'generated_asset' : 'primitive_fallback';
+        if (actual.visualSource !== source) failures.push(`${label} attempt ${index} rock visual source mismatch`);
+        if (JSON.stringify(actual.visualScaleBits) !== JSON.stringify(expected.expectedRenderedScaleBits))
+          failures.push(`${label} attempt ${index} rock visual scale mismatch`);
+      }
+    }
   }
   if (uint64(sample.directFinalRngState) !== uint64(sample.nativeFinalRngState)) failures.push(`${label} final RNG state mismatch`);
 }
 if (forageDefinitionsCompared === 0) failures.push('No forage definitions were compared');
 if (oreClustersCompared === 0) failures.push('No ore clusters were compared');
 if (wildlifeDefinitionsCompared === 0) failures.push('No wildlife definitions were compared');
+if (rockDefinitionsCompared === 0) failures.push('No rock definitions were compared');
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -155,6 +172,7 @@ const report = {
   forageDefinitionsCompared,
   oreClustersCompared,
   wildlifeDefinitionsCompared,
+  rockDefinitionsCompared,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };
