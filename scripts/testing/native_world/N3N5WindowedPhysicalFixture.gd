@@ -10,6 +10,7 @@ const BROKER = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
 const OWNER = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 const BARRIER = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
+const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
 
 func _init() -> void:
 	call_deferred("_run")
@@ -83,18 +84,24 @@ func _run() -> void:
 			if canonical.get("status") == "ready": rows.append(canonical.row)
 	var root_3d := Node3D.new()
 	root.add_child(root_3d)
+	var coordinator = COORDINATOR.new()
+	root_3d.add_child(coordinator)
+	var coordinator_setup: Dictionary = coordinator.setup(broker, root_3d)
 	var owner = OWNER.new()
-	root_3d.add_child(owner)
+	coordinator.add_child(owner)
 	var bound: bool = owner.bind_source(facade)
+	var registered: Dictionary = coordinator.register_window(window, owner)
 	var bounds: AABB = rows[0].bounds if not rows.is_empty() \
 		else AABB(Vector3.ZERO, Vector3.ONE)
 	for row in rows: bounds = bounds.merge(row.bounds)
-	var barrier = BARRIER.new()
-	var census: Dictionary = barrier.begin(root_3d, owner,
-		layout.get("identity", {}), bounds)
+	var held: Dictionary = coordinator.begin_window_barrier(window, bounds,
+		layout.get("identity", {}))
+	var barrier: RefCounted = held.get("barrier")
+	var census: Dictionary = held.get("census", {})
 	while census.get("status") == "pending":
 		await process_frame
 		census = barrier.census_progress(layout.identity)
+	var missing_aggregate: Dictionary = coordinator.aggregate_readiness(layout.identity)
 	var published: Dictionary = {}
 	if bound and rows.size() == window.get("blocks", []).size():
 		published = await owner.publish({
@@ -102,10 +109,8 @@ func _run() -> void:
 			"identity":layout.identity, "residentBlocks":window.blocks,
 			"affectedBlocks":window.blocks, "rows":rows}, barrier)
 	var physical: Dictionary = owner.physical_receipt(layout.identity)
-	var missing_aggregate: Dictionary = AGGREGATE.evaluate(layout, {})
-	var aggregate: Dictionary = AGGREGATE.evaluate(layout,
-		{window.id:physical})
-	var released: bool = barrier.release(layout.identity)
+	var aggregate: Dictionary = coordinator.aggregate_readiness(layout.identity)
+	var released: Dictionary = coordinator.release_barriers(layout.identity)
 	var contact := false
 	var solid_count := 0
 	var empty_count := 0
@@ -127,6 +132,117 @@ func _run() -> void:
 		contact = actor.move_and_collide(row.probeTo - row.probeFrom) != null
 		actor.queue_free()
 	await process_frame
+	var guard_actor := CharacterBody3D.new()
+	guard_actor.collision_mask = 2
+	guard_actor.position = bounds.position - Vector3(5, 0, 0)
+	var guard_shape := CollisionShape3D.new()
+	var guard_sphere := SphereShape3D.new()
+	guard_sphere.radius = main.CELL * 0.05
+	guard_shape.shape = guard_sphere
+	guard_actor.add_child(guard_shape)
+	root_3d.add_child(guard_actor)
+	var crossing_motion: Vector3 = bounds.get_center() - guard_actor.position
+	var first_identity: Dictionary = layout.identity.duplicate(true)
+	var old_hold: Dictionary = coordinator.begin_window_barrier(window,
+		bounds, layout.identity)
+	var old_barrier: RefCounted = old_hold.get("barrier")
+	var old_census: Dictionary = old_hold.get("census", {})
+	while old_census.get("status") == "pending":
+		await process_frame
+		old_census = old_barrier.census_progress(layout.identity)
+	var edit_state := {"materialId":3, "biomeId":13, "fluidId":0,
+		"solid":true, "density":1.5, "light":Vector2i.ZERO,
+		"metadata":{"saveDelta":true,"source":"terrain_edit"},
+		"blockId":"window-revision-edit", "editReason":"contract"}
+	var committed: Dictionary = backend.commit_durable_cells({
+		"schema":"n3-native-durable-cell-transaction/v1",
+		"transactionId":"windowed-physical:revision-change",
+		"expectedRevision":0,
+		"operations":[{"kind":"set", "cell":Vector3i(1000,-1,1000),
+			"state":edit_state}]})
+	var replacement_layout: Dictionary = {}
+	for frame in range(300):
+		broker.advance()
+		replacement_layout = broker.collision_window_layout()
+		if replacement_layout.get("status") == "ready" \
+				and replacement_layout.get("layoutToken") != layout.layoutToken:
+			break
+		await process_frame
+	var replacement_window: Dictionary = replacement_layout.get("windows", [{}])[0]
+	var replacement_hold: Dictionary = coordinator.begin_window_barrier(
+		replacement_window, bounds, replacement_layout.identity)
+	var replacement_barrier: RefCounted = replacement_hold.get("barrier")
+	var replacement_census: Dictionary = replacement_hold.get("census", {})
+	while replacement_census.get("status") == "pending":
+		await process_frame
+		replacement_census = replacement_barrier.census_progress(
+			replacement_layout.identity)
+	var overlap_barriers: int = coordinator.active_barrier_count()
+	var denied_before_drain: bool = not coordinator.admit_motion(
+		guard_actor, crossing_motion)
+	var denied_placement_before: bool = not coordinator.admit_placement(
+		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
+	var premature_replacement_release: Dictionary = coordinator.release_barriers(
+		replacement_layout.identity)
+	var replaced_old: Dictionary = await coordinator.retire_window(window.id)
+	var denied_after_drain: bool = not coordinator.admit_motion(
+		guard_actor, crossing_motion)
+	var denied_placement_after: bool = not coordinator.admit_placement(
+		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
+	var replacement_requests := []
+	for block: Vector3i in replacement_window.blocks:
+		replacement_requests.append(broker.request_block(block))
+	var replacement_facade_status: Dictionary = {}
+	var replacement_facade
+	var replacement_snapshot: Dictionary = {}
+	for frame in range(500):
+		broker.advance()
+		replacement_facade_status = broker.collision_window_source(
+			replacement_window.id, replacement_layout.layoutToken)
+		if replacement_facade_status.get("status") == "ready":
+			replacement_facade = replacement_facade_status.source
+			replacement_snapshot = replacement_facade.collision_source_snapshot()
+			if replacement_snapshot.get("status") == "ready": break
+		await process_frame
+	var replacement_rows: Array[Dictionary] = []
+	if replacement_snapshot.get("status") == "ready":
+		for block: Vector3i in replacement_window.blocks:
+			var row_status: Dictionary = replacement_facade.collision_artifact_row(
+				block, replacement_layout.identity)
+			if row_status.get("status") == "ready":
+				replacement_rows.append(row_status.row)
+	var replacement_owner = OWNER.new()
+	coordinator.add_child(replacement_owner)
+	var replacement_bound: bool = replacement_owner.bind_source(
+		replacement_facade)
+	var replacement_registered: Dictionary = coordinator.register_window(
+		replacement_window, replacement_owner)
+	var before_replacement_install: Dictionary = coordinator.aggregate_readiness(
+		replacement_layout.identity)
+	var replacement_published: Dictionary = {}
+	if replacement_rows.size() == replacement_window.get("blocks", []).size():
+		replacement_published = await replacement_owner.publish({
+			"schema":"n5-resident-collision-publication/v1",
+			"identity":replacement_layout.identity,
+			"residentBlocks":replacement_window.blocks,
+			"affectedBlocks":replacement_window.blocks,
+			"rows":replacement_rows}, replacement_barrier)
+	var replacement_aggregate: Dictionary = coordinator.aggregate_readiness(
+		replacement_layout.identity)
+	var replacement_release: Dictionary = coordinator.release_barriers(
+		replacement_layout.identity)
+	var admitted_after_replacement: bool = coordinator.admit_motion(
+		guard_actor, crossing_motion)
+	var placement_after_replacement: bool = coordinator.admit_placement(
+		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
+	var barriers_after_release: int = coordinator.active_barrier_count()
+	guard_actor.queue_free()
+	await process_frame
+	owner = replacement_owner
+	facade = replacement_facade
+	layout = replacement_layout
+	window = replacement_window
+	rows = replacement_rows
 	var shifted: Dictionary = planner.replace_sources(
 		{"position":Vector3(main.CELL * 512.0, 0, 0), "distance":0},
 		[], [], [], Vector2i(base_y * 16, (base_y + 1) * 16))
@@ -140,15 +256,23 @@ func _run() -> void:
 			break
 		await process_frame
 	var old_facade_pending: Dictionary = facade.collision_source_snapshot()
-	var changed_aggregate: Dictionary = AGGREGATE.evaluate(changed_layout, {})
+	var changed_aggregate: Dictionary = coordinator.aggregate_readiness(
+		changed_layout.identity)
 	var old_token: String = window.windowToken
 	var premature_retirement: Dictionary = broker.acknowledge_collision_window_retired(
 		old_token, {"windowToken":old_token, "drained":false,
 			"remainingBodies":1})
-	var drained: Dictionary = await owner.stop_and_drain()
-	var retirement: Dictionary = broker.acknowledge_collision_window_retired(
-		old_token, drained)
+	var retirement_hold: Dictionary = coordinator.begin_window_barrier(window,
+		bounds, changed_layout.identity)
+	var retirement_barrier: RefCounted = retirement_hold.get("barrier")
+	var retirement_census: Dictionary = retirement_hold.get("census", {})
+	while retirement_census.get("status") == "pending":
+		await process_frame
+		retirement_census = retirement_barrier.census_progress(changed_layout.identity)
+	var retirement: Dictionary = await coordinator.retire_window(window.id)
+	var drained: Dictionary = retirement.get("drain", {})
 	var retired_facade: Dictionary = facade.collision_source_snapshot()
+	var coordinator_drain: Dictionary = await coordinator.stop_and_drain()
 	var broker_stop: Dictionary = broker.stop()
 	for frame in range(100):
 		if broker_stop.get("status") == "ready": break
@@ -161,6 +285,8 @@ func _run() -> void:
 		and planner_setup.get("status") == "ready" \
 		and planned.get("status") == "ready" \
 		and broker_setup.get("status") == "ready" \
+		and coordinator_setup.get("status") == "ready" \
+		and registered.get("status") == "ready" \
 		and initial_layout.get("status") == "pending" \
 		and initial_aggregate.get("status") == "pending" \
 		and required.get("blocks", []).size() == 2 \
@@ -170,17 +296,45 @@ func _run() -> void:
 		and published.get("status") == "ready" \
 		and missing_aggregate.get("status") == "pending" \
 		and aggregate.get("status") == "ready" \
-		and released and contact \
+		and released.get("status") == "ready" and contact \
+		and old_hold.get("status") == "ready" \
+		and committed.get("commitStatus") == "committed" \
+		and replacement_layout.get("status") == "ready" \
+		and first_identity.sourceRevision == 0 \
+		and replacement_layout.identity.sourceRevision == 1 \
+		and replacement_layout.identity.cancellationEpoch \
+			> first_identity.cancellationEpoch \
+		and replacement_hold.get("status") == "ready" \
+		and overlap_barriers == 2 \
+		and denied_before_drain and denied_after_drain \
+		and denied_placement_before and denied_placement_after \
+		and premature_replacement_release.get("status") == "pending" \
+		and replaced_old.get("status") == "ready" \
+		and replaced_old.get("drain", {}).get("remainingBodies") == 0 \
+		and replacement_snapshot.get("status") == "ready" \
+		and replacement_bound and replacement_registered.get("status") == "ready" \
+		and before_replacement_install.get("status") == "pending" \
+		and replacement_published.get("status") == "ready" \
+		and replacement_aggregate.get("status") == "ready" \
+		and replacement_release.get("status") == "ready" \
+		and admitted_after_replacement and placement_after_replacement \
+		and barriers_after_release == 0 \
 		and shifted.get("status") == "ready" \
 		and changed_layout.get("status") == "ready" \
 		and changed_layout.get("layoutToken") != layout.layoutToken \
 		and old_facade_pending.get("status") == "pending" \
 		and changed_aggregate.get("status") == "pending" \
+		and changed_aggregate.get("reason") \
+			== "obsolete_physical_window_retirement_pending" \
 		and premature_retirement.get("status") == "failed" \
+		and retirement_hold.get("status") == "ready" \
 		and drained.get("status") == "ready" \
 		and drained.get("windowToken") == old_token \
 		and retirement.get("status") == "ready" \
 		and retired_facade.get("status") == "failed" \
+		and coordinator_drain.get("status") == "ready" \
+		and coordinator_drain.get("remainingChildren") == 0 \
+		and coordinator_drain.get("activeBarriers") == 0 \
 		and broker_stop.get("status") == "ready"
 	_finish(passed, {"initialLayout":initial_layout,
 		"initialAggregate":initial_aggregate, "required":required,
@@ -191,15 +345,39 @@ func _run() -> void:
 		"sourceSnapshot":snapshot, "rowCount":rows.size(),
 		"solidCount":solid_count, "emptyCount":empty_count,
 		"publication":published, "physicalReceipt":physical,
-		"missingAggregate":missing_aggregate, "aggregate":aggregate,
+		"coordinatorSetup":coordinator_setup,
+		"registered":registered, "missingAggregate":missing_aggregate,
+		"aggregate":aggregate,
 		"barrierReleased":released, "actorContact":contact,
+		"sourceRevisionReplacement": {"oldIdentity":first_identity,
+			"oldHold":old_hold.get("status"),
+			"committed":committed, "newLayout":replacement_layout,
+			"newHold":replacement_hold.get("status"),
+			"overlapBarriers":overlap_barriers,
+			"deniedBeforeDrain":denied_before_drain,
+			"deniedPlacementBefore":denied_placement_before,
+			"prematureRelease":premature_replacement_release,
+			"oldOwnerRetired":replaced_old,
+			"deniedAfterDrain":denied_after_drain,
+			"deniedPlacementAfter":denied_placement_after,
+			"newSnapshot":replacement_snapshot,
+			"newOwnerRegistered":replacement_registered,
+			"beforeInstall":before_replacement_install,
+			"newPublication":replacement_published,
+			"newAggregate":replacement_aggregate,
+			"newRelease":replacement_release,
+			"admittedAfterRelease":admitted_after_replacement,
+			"placementAfterRelease":placement_after_replacement,
+			"barriersAfterRelease":barriers_after_release},
 		"shiftedDemand":shifted, "changedStep":changed_step,
 		"changedLayout":changed_layout,
 		"oldFacadePending":old_facade_pending,
 		"changedAggregate":changed_aggregate,
 		"prematureRetirement":premature_retirement,
 		"drained":drained, "retirement":retirement,
-		"retiredFacade":retired_facade, "brokerStop":broker_stop})
+		"retiredFacade":retired_facade,
+		"coordinatorDrain":coordinator_drain,
+		"brokerStop":broker_stop})
 
 func _finish(passed: bool, evidence: Dictionary) -> void:
 	var report := {"schema":"n3-n5-windowed-physical-fixture/v1",

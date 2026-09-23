@@ -53,6 +53,12 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   for (const key of ['nativeInitialization', 'structureAdmission', 'orderedStatus'])
     if (sample[key] !== 'ready') failures.push(`${label} ${key}: ${sample[key]}`);
   if (!sample.bundleReady) failures.push(`${label} owner bundle not ready`);
+  if (sample.rockJournalBinding?.status !== 'ready'
+      || sample.rockJournalBinding?.productionCutover !== false)
+    failures.push(`${label} production rock event journal not bound`);
+  if (sample.rockJournalStatus?.pending !== 0 || sample.rockJournalUnbind?.status !== 'ready'
+      || (sample.rockJournalAdvances ?? []).some(row => row.processed !== 1))
+    failures.push(`${label} rock publication queue failed to drain`);
   for (const [key, value] of Object.entries(sample.admissions ?? {}))
     if (value !== 'ready') failures.push(`${label} ${key} admission: ${value}`);
   if (sample.direct?.length !== 28 || sample.native?.length !== 28)
@@ -188,6 +194,7 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
         const footprint = sample.publishedRockFootprints?.find(row => row.ordinal === index);
         if (!footprint || footprint.status !== 'ready' || footprint.featureId !== actual.durableId
             || footprint.visualSource !== actual.visualSource || footprint.assetId !== actual.assetId
+            || footprint.observedFromProductionEvent !== true || footprint.observedBodyId <= 0
             || !footprint.footprintIdentity || footprint.runCount < 1
             || footprint.productionCutover !== false || footprint.forgedAssetStatus !== 'failed')
           failures.push(`${label} attempt ${index} published rock native footprint mismatch`);
@@ -270,6 +277,13 @@ const report = {
   oreClustersCompared,
   wildlifeDefinitionsCompared,
   rockDefinitionsCompared,
+  maxRockPublicationCallbackUsec: Math.max(0, ...(probe?.cases ?? []).map(
+    sample => sample.rockJournalStatus?.maxCallbackUsec ?? 0)),
+  maxRockFootprintAdvanceUsec: Math.max(0, ...(probe?.cases ?? []).map(
+    sample => sample.rockJournalStatus?.maxAdvanceUsec ?? 0)),
+  maxOrderedSourceComposeUsec: Math.max(0, ...(probe?.cases ?? []).map(
+    sample => sample.orderedComposeUsec ?? 0)),
+  productionCutover: false,
   treeDefinitionsCompared,
   treeBodiesCompared,
   edgeTreesSuppressed,
