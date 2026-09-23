@@ -12,9 +12,10 @@ import { loadingMatrixExitCode } from '../run-world-streaming-maturity-loading-m
 
 function report(sample, actualSeed = 'atlas-12345678', elapsed = 75000, maxStep = 30) {
   const workProofRows = [];
-  for (let at = 4000, revision = 0; at < elapsed; at += 4000, revision++)
+  for (let at = 4000, revision = 1; at < elapsed; at += 4000, revision++)
     workProofRows.push({ owner: 'startup-work', observedAtInputMs: at,
-      completedRevision: revision, pendingWorkCount: 1, activeWorkAgeMs: 100 });
+      completedRevision: revision, pendingWorkCount: 1, activeWorkAgeMs: 100,
+      kind: 'completed_units', completedCount: revision });
   return {
     schema: 'world-streaming-loading-sample/v1', finished: true, passed: true,
     sampleId: sample.sampleId, launchMode: sample.launchMode, cacheClassification: sample.cacheClassification,
@@ -67,7 +68,7 @@ test('sample validation enforces identity lifecycle-facing evidence and callback
     value => { value.timing.loadingFrameCadence.p99Ms = 33.001; },
     value => { value.timing.loadingFrameCadence.maxMs = 100.001; },
     value => { value.timing.progressHeartbeat.workProofRows[1].observedAtInputMs = 9000.001; },
-    value => { value.timing.progressHeartbeat.workProofRows[1].completedRevision = 0; },
+    value => { value.timing.progressHeartbeat.workProofRows[1].completedRevision = 1; },
   ]) {
     const value = structuredClone(report(sample)); mutate(value);
     assert.equal(evaluateSampleReport(value, expected(sample)).passed, false);
@@ -114,8 +115,7 @@ test('loading fixture records native window and renderer target separately from 
   assert.match(source, /"renderTargetResolution"/);
   assert.match(source, /"logicalViewportResolution"/);
   assert.match(source, /frame_gap_ms\.append\(float\(gameplay_ready_usec - last_frame_usec\)/);
-  assert.match(source, /"verified": not work_proof_rows\.is_empty\(\)/);
-  assert.match(source, /observe_completed_work\(\)/);
+  assert.match(source, /startup_work_progress/);
 });
 
 test('warm Continue uses the cold actual seed without losing cohort identity', () => {
@@ -302,6 +302,18 @@ test('frequent timeline messages cannot substitute for an authoritative complete
     reason: 'no_common_authoritative_completed_work_revision', workProofRows: [] };
   assert.equal(evaluateSampleReport(value, expected(sample)).passed, false);
   assert.equal(evaluateSampleReport(value, expected(sample), 'functional-diagnostic').passed, true);
+});
+
+test('distinct completed units may share a source clock tick', () => {
+  const sample = buildSamplePlan('known', ['a', 'b'])[0];
+  const value = report(sample);
+  const rows = value.timing.progressHeartbeat.workProofRows;
+  rows.splice(1, 0, { ...rows[0], completedRevision: 2, completedCount: 2 });
+  for (let index = 2; index < rows.length; index++) {
+    rows[index].completedRevision += 1;
+    rows[index].completedCount += 1;
+  }
+  assert.equal(evaluateSampleReport(value, expected(sample)).passed, true);
 });
 
 test('known and fresh actual seed cohorts must be mutually distinct', () => {
