@@ -36,6 +36,22 @@ NativeFeatureWorldBounds render_bounds(const NativeSurfaceOreChildDefinition &ch
 }
 } // namespace
 
+std::vector<NativeFeatureFootprintRun> native_surface_ore_child_footprint_runs(
+    const NativeSurfaceOreChildDefinition &child, const double cell_size) {
+    if (!child.present) return {};
+    auto runs = native_feature_runs_for_bounds(render_bounds(child), cell_size,
+        NativeFeatureFootprintChannel::render);
+    const double x = child.world_anchor.x, y = child.world_anchor.y + child.collider_center_y;
+    const double z = child.world_anchor.z, radius = child.collider_radius;
+    const NativeFeatureWorldBounds physical{x-radius, y-radius, z-radius, x+radius, y+radius, z+radius};
+    for (const auto channel : {NativeFeatureFootprintChannel::collision,
+            NativeFeatureFootprintChannel::navigation}) {
+        const auto physical_runs = native_feature_runs_for_bounds(physical, cell_size, channel);
+        runs.insert(runs.end(), physical_runs.begin(), physical_runs.end());
+    }
+    return runs;
+}
+
 NativeGeneratedFeatureFootprintCatalog compose_native_surface_ore_footprints(
     const NativeSurfacePropSourceOrderedStream &ordered,
     const NativeSurfacePropOrderedPlacement &placements, const std::uint32_t ordinal,
@@ -51,17 +67,7 @@ NativeGeneratedFeatureFootprintCatalog compose_native_surface_ore_footprints(
         entry.recipe_revision = NativeSurfaceOreClusterDefinition::SCHEMA_REVISION;
         entry.footprint_schema_revision = 1U;
         entry.generated_definition_digest = definition.content_digest();
-        const auto visual = native_feature_runs_for_bounds(render_bounds(child), cell_size,
-            NativeFeatureFootprintChannel::render);
-        entry.runs.insert(entry.runs.end(), visual.begin(), visual.end());
-        const double x = child.world_anchor.x, y = child.world_anchor.y + child.collider_center_y;
-        const double z = child.world_anchor.z, radius = child.collider_radius;
-        const NativeFeatureWorldBounds physical{x-radius, y-radius, z-radius, x+radius, y+radius, z+radius};
-        for (const auto channel : {NativeFeatureFootprintChannel::collision,
-                NativeFeatureFootprintChannel::navigation}) {
-            const auto runs = native_feature_runs_for_bounds(physical, cell_size, channel);
-            entry.runs.insert(entry.runs.end(), runs.begin(), runs.end());
-        }
+        entry.runs = native_surface_ore_child_footprint_runs(child, cell_size);
         entries.push_back(std::move(entry));
     }
     return NativeGeneratedFeatureFootprintCatalog::create(

@@ -474,6 +474,83 @@ VWB_TEST(native_surface_ore_footprints_cover_visual_and_physical_children) {
     VWB_EXPECT(found);
 }
 
+VWB_TEST(native_surface_ore_footprint_contains_direct_godot_transformed_world_aabbs) {
+    // N4OreConstructionOracle.gd v2, eight direct-engine cases. Each render
+    // box is the union of the actual transformed AABBs of one stone, five
+    // seams and three glints; the physical box is the sphere collider AABB.
+    // These are independent Godot cell bounds, not bounds recomputed from the
+    // native recipe under test. The production composer binds the same runs
+    // to its ordered source/placement/terrain pin.
+    struct CellBox { int x0,y0,z0,x1,y1,z1; };
+    struct OracleCase {
+        const char *id; NativeOreKind kind; std::uint64_t seed;
+        std::uint32_t origin_x, origin_z;
+        std::array<CellBox,2> render, physical;
+        std::uint64_t intact_state, removed_state;
+    };
+    const std::array<OracleCase,4> cases{{
+        {"世界🌲:-2,58:0", NativeOreKind::iron, 0U, 3256300339U, 1117205299U,
+            {{{-4,17,56,-1,19,59},{-4,17,56,-2,18,59}}},
+            {{{-4,17,56,-1,19,59},{-4,17,57,-3,18,58}}},
+            6842957682071426898ULL, 2085834082288173311ULL},
+        {"世界🌲:-30,-26:0", NativeOreKind::copper, 4294967295ULL, 3264688947U, 3256300339U,
+            {{{-32,17,-28,-29,19,-25},{-32,17,-29,-28,19,-25}}},
+            {{{-32,17,-28,-29,19,-25},{-31,17,-28,-29,19,-26}}},
+            8243394605982837029ULL, 3429495335233395582ULL},
+        {"世界🌲:54,58:0", NativeOreKind::iron, 177U, 1108816691U, 1117205299U,
+            {{{52,18,56,55,19,59},{53,18,57,55,18,59}}},
+            {{{53,17,57,54,19,58},{53,17,57,54,18,59}}},
+            static_cast<std::uint64_t>(-4845579065015597969LL),
+            static_cast<std::uint64_t>(-6120500400008941776LL)},
+        {"世界🌲:82,30:0", NativeOreKind::copper, 4294967295ULL, 1117205299U, 1108816691U,
+            {{{80,17,28,83,19,31},{80,17,27,84,19,31}}},
+            {{{80,17,28,83,19,31},{81,17,28,83,19,30}}},
+            8243394605982837029ULL, 3429495335233395582ULL},
+    }};
+    const auto covered = [](const std::vector<NativeFeatureFootprintRun> &runs,
+            NativeFeatureFootprintChannel channel, int x, int y, int z) {
+        return std::any_of(runs.begin(), runs.end(), [&](const auto &run) {
+            return run.channel == channel && run.first.y == y && run.first.z == z
+                && run.first.x <= x && x <= run.last_x_inclusive;
+        });
+    };
+    const auto covers_box = [&](const std::vector<NativeFeatureFootprintRun> &runs,
+            NativeFeatureFootprintChannel channel, const CellBox &box) {
+        for (int z = box.z0; z <= box.z1; ++z)
+            for (int y = box.y0; y <= box.y1; ++y)
+                for (int x = box.x0; x <= box.x1; ++x)
+                    VWB_EXPECT(covered(runs, channel, x, y, z));
+    };
+    for (const auto &oracle : cases) {
+        const auto root = oracle_root(oracle.id, oracle.origin_x, oracle.origin_z);
+        for (const bool remove_second : {false, true}) {
+            GodotPcg32 rng(oracle.seed);
+            const auto removed = NativeFeatureDeltaSnapshot::create(
+                remove_second ? std::vector<NativeFeatureTombstone>{{std::string(oracle.id)+":cluster1"}}
+                    : std::vector<NativeFeatureTombstone>{}, {});
+            const auto source = NativeOreClusterStream::create(oracle.id, oracle.kind, removed, rng);
+            VWB_EXPECT_EQ(remove_second ? oracle.removed_state : oracle.intact_state,
+                source.final_rng_state());
+            for (std::uint32_t index = 0; index < 2U; ++index) {
+                const auto child = decode_native_surface_ore_child(source.children()[index],
+                    index, root, oracle.kind);
+                const auto runs = native_surface_ore_child_footprint_runs(child, 1.35);
+                if (index == 1U && remove_second) {
+                    VWB_EXPECT(!child.present && runs.empty());
+                    continue;
+                }
+                VWB_EXPECT(child.present && !runs.empty());
+                covers_box(runs, NativeFeatureFootprintChannel::render, oracle.render[index]);
+                covers_box(runs, NativeFeatureFootprintChannel::collision, oracle.physical[index]);
+                covers_box(runs, NativeFeatureFootprintChannel::navigation, oracle.physical[index]);
+                VWB_EXPECT(std::none_of(runs.begin(), runs.end(), [](const auto &run) {
+                    return run.channel == NativeFeatureFootprintChannel::terrain_source;
+                }));
+            }
+        }
+    }
+}
+
 VWB_TEST(native_surface_ore_world_bounds_quantize_negative_and_reject_unbounded) {
     const auto channel = NativeFeatureFootprintChannel::collision;
     const auto runs = native_feature_runs_for_bounds(
