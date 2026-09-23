@@ -1,6 +1,7 @@
 #include "native_world_backend_adapter.h"
 
 #include "biome_region_field.hpp"
+#include "native_feature_delta.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
 
@@ -34,6 +35,7 @@ constexpr const char *INITIALIZE_SCHEMA = "n3-native-world-backend-initialize/v1
 constexpr const char *INITIALIZE_FROM_SAVE_V2_SCHEMA = "n3-native-world-backend-initialize-from-save-v2/v1";
 constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request/v1";
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
+constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone-receipt/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -1202,6 +1204,7 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("initialize", "request"), &NativeWorldBackend::initialize);
 	ClassDB::bind_method(D_METHOD("initialize_from_save_v2", "request"), &NativeWorldBackend::initialize_from_save_v2);
 	ClassDB::bind_method(D_METHOD("export_terrain_volume_v2"), &NativeWorldBackend::export_terrain_volume_v2);
+	ClassDB::bind_method(D_METHOD("admit_removed_props_tombstones", "capture"), &NativeWorldBackend::admit_removed_props_tombstones);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
 	ClassDB::bind_method(D_METHOD("apply_shaping_resolutions", "resolutions"), &NativeWorldBackend::apply_shaping_resolutions);
@@ -1290,6 +1293,81 @@ Dictionary NativeWorldBackend::export_terrain_volume_v2() const {
 		return result;
 	} catch (const std::exception &error) {
 		return failure("export_terrain_volume_v2", error);
+	}
+}
+
+Dictionary NativeWorldBackend::admit_removed_props_tombstones(const Dictionary &p_capture) const {
+	if (!state_ || !shaping_registry_) {
+		return envelope("admit_removed_props_tombstones", "failed", "backend_not_ready");
+	}
+	try {
+		require_exact_keys(p_capture,
+			{"ok", "schemaVersion", "ownerInstanceId", "seed", "revision", "ids", "contentIdentity"},
+			"removed props capture");
+		if (!require_bool(p_capture["ok"], "capture.ok")
+				|| require_i64(p_capture["schemaVersion"], "capture.schemaVersion") != 1) {
+			throw std::invalid_argument("unsupported removed props capture schema");
+		}
+		const std::int64_t owner_id = require_i64(p_capture["ownerInstanceId"], "capture.ownerInstanceId");
+		const std::int64_t revision = require_i64(p_capture["revision"], "capture.revision");
+		// Godot instance IDs use all 64 bits; valid IDs may appear negative
+		// when represented by Variant::INT. Zero alone is the absent sentinel.
+		if (owner_id == 0 || revision < 0) {
+			throw std::invalid_argument("invalid removed props capture owner or revision");
+		}
+		const std::string seed = require_bounded_utf8(
+			p_capture["seed"], "capture.seed", MAX_SEED_TEXT_BYTES, false);
+		if (seed != state_->definition().raw_terrain_seed().utf8) {
+			throw std::invalid_argument("removed props capture seed does not match native world source");
+		}
+		const Array ids = require_array(p_capture["ids"], "capture.ids");
+		if (static_cast<std::size_t>(ids.size()) > NativeFeatureDeltaLimits::MAX_TOMBSTONES) {
+			throw std::length_error("removed props capture exceeds tombstone capacity");
+		}
+		std::vector<NativeFeatureTombstone> tombstones;
+		tombstones.reserve(static_cast<std::size_t>(ids.size()));
+		std::vector<std::uint8_t> capture_bytes;
+		std::string previous_id;
+		for (int64_t index = 0; index < ids.size(); ++index) {
+			std::string id = require_bounded_utf8(ids[index], "capture.ids[]",
+				NativeFeatureDeltaLimits::MAX_ID_BYTES, false);
+			if (index > 0 && !std::lexicographical_compare(previous_id.begin(), previous_id.end(),
+					id.begin(), id.end(), [](char left, char right) {
+						return static_cast<unsigned char>(left) < static_cast<unsigned char>(right);
+					})) {
+				throw std::invalid_argument("removed props capture IDs must be strictly ordered");
+			}
+			previous_id = id;
+			const std::uint32_t size = static_cast<std::uint32_t>(id.size());
+			// ActiveRemovedPropsSnapshot hashes little-endian u32 lengths.
+			for (unsigned shift = 0; shift < 32U; shift += 8U) {
+				capture_bytes.push_back(static_cast<std::uint8_t>((size >> shift) & 0xffU));
+			}
+			capture_bytes.insert(capture_bytes.end(), id.begin(), id.end());
+			tombstones.push_back({std::move(id)});
+		}
+		const std::string claimed_identity = require_bounded_utf8(
+			p_capture["contentIdentity"], "capture.contentIdentity", 64U, false);
+		if (claimed_identity != sha256_hex(sha256(capture_bytes))) {
+			throw std::invalid_argument("removed props capture content identity mismatch");
+		}
+		// FD1 admission validates UTF-8, uniqueness and canonical byte ordering.
+		const NativeFeatureDeltaSnapshot typed = NativeFeatureDeltaSnapshot::create(
+			std::move(tombstones), {});
+		Dictionary result = envelope("admit_removed_props_tombstones", "ready");
+		result["receiptSchema"] = REMOVED_PROPS_RECEIPT_SCHEMA;
+		result["scope"] = "removed_prop_tombstones_only";
+		result["completeFeatureManifest"] = false;
+		result["liveCaptureFreshnessProven"] = false;
+		result["captureOwnerInstanceId"] = owner_id;
+		result["captureRevision"] = revision;
+		result["captureContentIdentity"] = text(claimed_identity);
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["tombstoneCount"] = static_cast<int64_t>(typed.tombstones().size());
+		result["fd1Identity"] = text(sha256_hex(sha256(typed.canonical_binary())));
+		return result;
+	} catch (const std::exception &error) {
+		return failure("admit_removed_props_tombstones", error);
 	}
 }
 

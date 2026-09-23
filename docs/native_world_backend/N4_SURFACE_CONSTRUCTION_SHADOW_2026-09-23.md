@@ -134,6 +134,17 @@ hot-path operation; future integration must cache by owner generation and
 recheck freshness before publication without turning scene import inspection
 into a gameplay-frame stall.
 
+`NativeWorldBackend.admit_removed_props_tombstones` is the first narrow Godot
+adapter conversion for that bundle. Its focused Godot contract passed after
+the debug native build at
+`artifacts/native-world-backend/n4-removed-props-adapter-contract.json`.
+It validates strict sorted UTF-8 IDs, bounds, seed, capture content hash and
+the FD1 tombstone grammar, but returns only a shadow, incomplete typed
+receipt. A forged internally consistent capture cannot establish current
+Main ownership: the caller must run `ActiveRemovedPropsSnapshot.is_current`
+immediately before any eventual native feature publication. The adapter does
+not retain the typed set or produce feature footprints yet.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
