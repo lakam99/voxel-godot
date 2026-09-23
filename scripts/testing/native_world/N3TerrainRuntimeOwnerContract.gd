@@ -71,6 +71,7 @@ func run() -> void:
 	check(int(invalid.snapshot().backendInstanceId) == 0, "invalid setup owns no backend")
 	terrain.automatic_loading_enabled = false
 	var owner = OWNER.new()
+	var owner_saved_volume: Dictionary = {}
 	var setup: Dictionary = owner.setup(main, terrain, 71, 10)
 	check(setup.get("status") == "ready", "atomic native owner setup")
 	if setup.get("status") == "ready":
@@ -212,6 +213,7 @@ func run() -> void:
 			and owner.inspect_edit_release_candidate(duplicate).get("status") == "failed",
 			"partial candidate waits and duplicate subwindow is rejected")
 		var after_edit: Dictionary = owner.export_terrain_volume_v2()
+		owner_saved_volume = after_edit.get("terrainVolume", {})
 		check(after_edit.get("status") == "ready"
 			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1
 			and after_edit.get("terrainVolume") != saved.get("terrainVolume"),
@@ -257,6 +259,37 @@ func run() -> void:
 		"drained owner cannot export stale save data")
 	check(owner.commit_durable_cells("owner:drained", 0, []).get("reason") == "owner_not_active",
 		"drained owner rejects edits")
+	main.world_generation_system = null
+	var continued = OWNER.new()
+	var continued_setup: Dictionary = continued.setup(main, terrain, 72, 10,
+		{"version":2, "seed":main.seed_text, "terrain":[], "terrainVolume":owner_saved_volume})
+	check(continued_setup.get("status") == "ready",
+		"Continue owner initializes from explicit saved v2 volume without script owner")
+	if continued_setup.get("status") == "ready":
+		var continued_save: Dictionary = continued.export_terrain_volume_v2()
+		check(continued_save.get("status") == "ready"
+			and continued_save.get("terrainVolume") == owner_saved_volume,
+			"Continue owner round trips exact durable snapshot")
+	var continued_stop: Dictionary = continued.stop()
+	for frame in range(120):
+		if continued_stop.get("status") == "ready": break
+		await process_frame
+		continued_stop = continued.drain_step()
+	check(continued_stop.get("status") == "ready", "Continue owner drains")
+	main.world_generation_system = WORLD.new()
+	main.world_generation_system.setup(main)
+	var new_game = OWNER.new()
+	var new_game_setup: Dictionary = new_game.setup(main, terrain, 73, 10)
+	check(new_game_setup.get("status") == "ready", "New Game owner initializes from empty durable volume")
+	if new_game_setup.get("status") == "ready":
+		var new_game_volume: Dictionary = new_game.export_terrain_volume_v2().get("terrainVolume", {})
+		check(new_game_volume.get("sections", []) == [], "New Game native save starts with no durable cells")
+	var new_game_stop: Dictionary = new_game.stop()
+	for frame in range(120):
+		if new_game_stop.get("status") == "ready": break
+		await process_frame
+		new_game_stop = new_game.drain_step()
+	check(new_game_stop.get("status") == "ready", "New Game owner drains")
 	world.queue_free()
 	main.free()
 	var report := {"schema":"n3-terrain-runtime-owner-contract/v1",

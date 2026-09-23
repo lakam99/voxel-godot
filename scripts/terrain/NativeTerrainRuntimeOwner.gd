@@ -28,7 +28,8 @@ var _seed_text := ""
 var _source_identity := {}
 var _pending_edit_plan := {}
 
-func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dictionary:
+func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
+		save_snapshot = null) -> Dictionary:
 	if _state != "new": return {"status":"failed", "reason":"owner_already_started"}
 	if main == null or terrain == null or terrain.generator != null \
 			or terrain.automatic_loading_enabled:
@@ -36,7 +37,8 @@ func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int) -> Dict
 	var structures = main.get("structure_system")
 	_admission = structures.get("citadel_terrain_admission") if structures != null else null
 	if _admission == null: return _setup_failure("site_admission_missing")
-	var source: Dictionary = SourceRequest.from_main_with_current_volume(main)
+	var source: Dictionary = SourceRequest.from_main_with_current_volume(main) \
+		if save_snapshot == null else SourceRequest.from_main_with_v2_save(main, save_snapshot)
 	if source.get("status") != "ready":
 		return _setup_failure(String(source.get("reason", "native_source_request_failed")))
 	_backend = ClassDB.instantiate("NativeWorldBackend")
