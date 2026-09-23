@@ -17,6 +17,20 @@ var _installing := false
 var _pending_shapes: Array[CollisionShape3D] = []
 
 
+## A receipt is usable only after the physics probe has acknowledged the exact
+## installed revision. A queued replacement never makes its candidate ready.
+func physical_receipt(identity: Dictionary) -> Dictionary:
+	if _stopped or _installing or not _identity_valid(identity) or authority != identity \
+			or installed_provenance.get("requestIdentity") != identity \
+			or acknowledged_physics_frame < 0 or installed_shapes.is_empty():
+		return {"ready": false}
+	for shape in installed_shapes:
+		if not is_instance_valid(shape) or shape.is_queued_for_deletion() or shape.disabled:
+			return {"ready": false}
+	return {"ready": true, "physicsFrame": acknowledged_physics_frame,
+		"provenance": installed_provenance.duplicate(true)}
+
+
 func set_authority(identity: Dictionary) -> void:
 	authority = identity.duplicate(true)
 
@@ -40,7 +54,7 @@ func stop_and_drain() -> void:
 
 
 func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Callable,
-		before_ack: Callable = Callable()) -> Dictionary:
+		before_ack: Callable = Callable(), occupancy_guard: Callable = Callable()) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	if not _identity_valid(identity):
 		return {"ok": false, "reason": "collision_identity_invalid"}
@@ -54,6 +68,10 @@ func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Ca
 		return {"ok": false, "reason": "stale_before_install" if not _current(result, identity) else "collision_owner_unavailable"}
 	if not acknowledgement_probe.is_valid():
 		return {"ok": false, "reason": "acknowledgement_probe_required"}
+	if not installed_shapes.is_empty() and not occupancy_guard.is_valid():
+		return {"ok": false, "reason": "replacement_occupancy_guard_required"}
+	if occupancy_guard.is_valid() and not bool(occupancy_guard.call(self, identity)):
+		return {"ok": false, "reason": "replacement_occupied_before_install"}
 	var payload := _prepare_shapes(result, identity)
 	if not payload.ok:
 		return payload
@@ -69,9 +87,13 @@ func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Ca
 	if before_ack.is_valid():
 		before_ack.call()
 	var acknowledgement := {}
+	var occupied_during_ack := false
 	for attempt in range(MAX_ACK_FRAMES):
 		await get_tree().physics_frame
 		if not _current(result, identity):
+			break
+		if occupancy_guard.is_valid() and not bool(occupancy_guard.call(self, identity)):
+			occupied_during_ack = true
 			break
 		var observed: Variant = acknowledgement_probe.call(self, identity)
 		if observed is Dictionary and bool(observed.get("ok", false)) \
@@ -94,7 +116,9 @@ func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Ca
 		await get_tree().physics_frame
 		_pending_shapes.clear()
 		_installing = false
-		return {"ok": false, "reason": "stale_before_acknowledgement" if not _current(result, identity) else "replacement_not_acknowledged_within_six_physics_frames"}
+		return {"ok": false, "reason": "stale_before_acknowledgement" if not _current(result, identity) \
+			else "replacement_occupied_during_acknowledgement" if occupied_during_ack \
+			else "replacement_not_acknowledged_within_six_physics_frames"}
 	acknowledged_physics_frame = int(acknowledgement.physicsFrame)
 	installed_shapes = replacements
 	_pending_shapes.clear()

@@ -136,6 +136,16 @@ func _run() -> void:
 			"sameShapeCheck":same_shape_check,"baselineCheck":baseline_check}, true))
 		return
 	_current_authority = same_shape_request.requestIdentity.duplicate(true)
+	(_body as Node).call("set_authority", _current_authority)
+	var occupied_guard := func(_owner: StaticBody3D, _identity: Dictionary) -> bool:
+		return false
+	var blocked_replacement: Dictionary = await (_body as Node).call("replace", native_same_shape,
+		same_shape_request.requestIdentity, no_probe, Callable(), occupied_guard)
+	if blocked_replacement.get("reason") != "replacement_occupied_before_install" \
+			or (_body as Node).call("physical_receipt", same_shape_request.requestIdentity).get("ready", false):
+		_finish(false, "occupied_replacement_not_rejected", common.merged({
+			"blockedReplacement": blocked_replacement}, true))
+		return
 	var same_shape_install := await _replace_collision(native_same_shape, same_shape_request.requestIdentity)
 	if not same_shape_install.ok or same_shape_install.acknowledgement.provenance.get("requestIdentity") != same_shape_request.requestIdentity:
 		_finish(false, "same_shape_new_owner_not_physically_acknowledged", common.merged({
@@ -480,7 +490,15 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 			and provenance.get("requestIdentity") == identity
 			and provenance.get("featureId") == "n2:blocker:tile-b:-24,-10",
 			"provenance": provenance}
-	var outcome: Dictionary = await (_body as Node).call("replace", native_result, request_identity, probe, before_ack)
+	var clear_guard := func(_owner: StaticBody3D, _identity: Dictionary) -> bool:
+		return true
+	var outcome: Dictionary = await (_body as Node).call("replace", native_result, request_identity, probe, before_ack, clear_guard)
+	var physical_receipt: Dictionary = (_body as Node).call("physical_receipt", request_identity)
+	if bool(outcome.get("ok", false)) != bool(physical_receipt.get("ready", false)):
+		return {"ok": false, "reason": "physical_receipt_disagrees_with_replacement",
+			"replacement": outcome, "physicalReceipt": physical_receipt}
+	if bool(physical_receipt.get("ready", false)) and physical_receipt.get("provenance", {}).get("requestIdentity") != request_identity:
+		return {"ok": false, "reason": "physical_receipt_wrong_revision"}
 	_installed_shapes = (_body as Node).get("installed_shapes")
 	_installed_provenance = (_body as Node).get("installed_provenance")
 	_acknowledged_physics_frame = (_body as Node).get("acknowledged_physics_frame")
