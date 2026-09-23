@@ -193,6 +193,7 @@ func complete_destroy_target(hit: Dictionary, collider: Node, kind: String, mate
             drop = String(metrics.get("drop", drop))
             drop_count = int(metrics.get("amount", drop_count))
         removed_props[prop_id] = true
+        removed_props_revision += 1
         mark_world_dirty("prop_removed")
         if npc_system and npc_system.has_method("notify_navigation_prop_removed"):
             npc_system.notify_navigation_prop_removed(prop_id, collider)

@@ -117,6 +117,7 @@ var town_slope_apron_cache := {}
 var blocks := {}
 var navigation_marker_index = NavigationMarkerIndexScript.new()
 var removed_props := {}
+var removed_props_revision := 0
 var inventory := {}
 var inventory_system
 var crafting_system

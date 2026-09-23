@@ -21,6 +21,7 @@ func reset_runtime_world_state(reload_world := true) -> void:
     if subsurface_system and subsurface_system.has_method("reset"):
         subsurface_system.reset()
     removed_props.clear()
+    removed_props_revision += 1
     clear_chunk_asset_cache()
     clear_dropped_pickups()
     wildlife_nodes.clear()
@@ -402,6 +403,7 @@ func restore_subsurface(snapshot_value) -> void:
 
 func restore_removed_props(entries) -> void:
     removed_props.clear()
+    removed_props_revision += 1
     if not (entries is Array):
         return
     for prop_id in entries:

@@ -6,6 +6,11 @@
 namespace voxel::world_backend {
 namespace {
 
+// Game chunks and terrain shaping pages share the origin. Every aligned
+// 28-cell chunk must fit one primary page, including negative chunk keys.
+static_assert(NativeTerrainShapingSnapshot::PAGE_CELLS
+    % NativeSurfacePropAttemptStream::CHUNK_CELLS == 0);
+
 [[noreturn]] void reject() { throw NativeSurfacePropSourceOrderedStreamRejected(); }
 
 NativeForageRecipe forage_recipe(const NativeBiomeEnvironmentProfile &profile) {

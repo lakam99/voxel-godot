@@ -765,12 +765,15 @@ and include its before/after publication footprints. A surface-only catalog
 must continue to reject underground IDs rather than silently accept them.
 The native effective source already exposes shaped reference-surface height
 and effective cell-state facts for the floor/air/head predicate, but each
-query is restricted to its pin's primary terrain page. An underground chunk
-that crosses a page edge therefore needs globally ordered, revision-coherent
-page segments (or an explicit multi-page pin); a one-page scan that silently
-omits the rest of the chunk is not acceptable. Add an in-page ordered scan and
-page-edge rejection first, then certify whole-chunk composition across page
-seams against the direct Godot candidate order.
+query is restricted to its pin's primary terrain page. The current 280-cell
+native shaping page is exactly ten aligned 28-cell gameplay chunks wide, so
+an ordinary underground chunk cannot cross a page edge, including at negative
+coordinates. The native producer must still prove its selected page contains
+the entire requested chunk and reject non-aligned/out-of-range requests; it
+must not silently omit columns. Port the in-page ordered scan and certify
+all 28-by-28 columns against direct Godot candidate order, including chunks
+on both sides of a page seam. Revisit multi-page composition if either size
+or alignment changes; the surface producer now compile-checks divisibility.
 
 **Atomic surface cutover sequence:** Complete source-bound physical
 definitions for rock, ore, forage, wildlife and trees first. Admit the same

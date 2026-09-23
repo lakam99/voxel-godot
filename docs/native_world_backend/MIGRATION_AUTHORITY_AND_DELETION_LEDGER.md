@@ -77,6 +77,16 @@ as acceptance evidence. The detailed N1 evidence boundary is recorded in
 The detailed semantic corrections, artifact boundaries, and blocker are recorded
 in `docs/native_world_backend/N3_EFFECTIVE_TERRAIN_AND_SAVE_SHADOW_2026-09-18.md`.
 
+## N4 ordered surface construction and capture checkpoint
+
+| Item | Authoritative record | Scope and status |
+|---|---|---|
+| Shadow commit | `dbfe284` | Added typed source-ordered ore, forage, wildlife and tree construction/presence, plus capture-only active catalog/visual/animated/structure receipts. This did not switch a production caller. |
+| Native aggregate | `artifacts/native-world-backend/n4-surface-definitions-02/report.json` | Passed 442/442 debug and release tests, editor/release adapter smokes and 100% pure-core coverage (9,937 lines, 1,368 functions, 5,892 branches). The report predates the later Godot capture-only additions in the same commit; its 168 native file hashes still match the committed sources. |
+| Direct capture evidence | `artifacts/native-world-backend/n4-tree-direct-exclusions-02.json`, `artifacts/native-world-backend/n4-active-biome-snapshot-contract.json`, `artifacts/native-world-backend/n4-active-visual-snapshot-contract.json`, `artifacts/native-world-backend/n4-animated-presentation-capture-contract.json`, `artifacts/node-tools/run-surface-structure-exclusion-oracle.json` | Focused direct Godot construction/capture contracts only. They do not prove runtime N4 adapter invocation, live scene/collision publication, headed gameplay or save/reload. |
+| Durable removal capture | `scripts/world/ActiveRemovedPropsSnapshot.gd`; `artifacts/native-world-backend/n4-active-removed-props-snapshot-contract.json` | Capture-only sorted generated-ID set bound to Main instance, seed, explicit removal generation and copied content. Focused direct Godot report passes 20/20 including same-content reset/restore invalidation. This does not admit removal footprints or establish native save/production cutover. |
+| Independent review and deletion | `docs/native_world_backend/N4_SURFACE_CONSTRUCTION_SHADOW_2026-09-23.md` | Post-draw tree halo and visual import-readiness findings were corrected before commit. No production deletion or authority cutover is authorized; N3 full checkpoint and N4 remain open. |
+
 
 ## Mandatory receipt fields
 
