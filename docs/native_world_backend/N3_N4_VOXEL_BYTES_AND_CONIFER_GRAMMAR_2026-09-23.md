@@ -33,14 +33,19 @@ adapter method now transports the three `PackedByteArray` channels, source
 identity and revision fields from its immutable single-page pin. Its focused
 Godot contract (`artifacts/native-world-backend/n3-voxel-adapter-focused-report.json`)
 passes exact edited bytes, malformed/cross-page rejection and old-pin
-immutability after an edit. It has not generated a live VoxelBuffer.
+immutability after an edit. A later focused direct-service differential at
+`artifacts/native-world-backend/n3-voxel-generated-byte-differential-03.json`
+compares four `VoxelTerrainGenerator._generate_block` buffers on seed
+`atlas-1492` against the native adapter's complete channels: surface band,
+below-ground, LOD 1 and high air all match byte-for-byte. This invokes the
+real script generator directly, but not a live streaming worker or scene.
 
 Before production cutover, admission must cover real cross-page blocks from
 one coherent delta and shaping snapshot, compare owner generation plus
 source/delta/shaping identity before
 publication, retain retryable stale work, and atomically switch the gameplay
-terrain query facade and generator to the same native source. Generated-world
-byte differentials, edits/LOD/page seams, New Game/Continue, headed digging,
+terrain query facade and generator to the same native source. Fresh-seed,
+edited and crossing-page differentials, New Game/Continue, headed digging,
 collision/navigation and save/reload proof remain open. This encoder's
 `cell_size_meters` must be admitted equal to the live `CELL=1.35` contract.
 
@@ -83,6 +88,10 @@ proof. No tree GDScript recipe or collision authority is deleted here.
   `native_effective_voxel_adapter_contract.gd` passed with no failures.
   This is direct-service marshalling and pin-lifetime evidence, not live
   generator consumption or adapter line/branch coverage.
+- The focused installed-Godot `native_effective_voxel_adapter_contract.gd`
+  rerun records four generated-block byte matches in
+  `artifacts/native-world-backend/n3-voxel-generated-byte-differential-03.json`.
+  It does not exercise a Voxel Tools worker callback, a page seam or collision.
 - Independent read-only reviews found the rounding and conversion-order
   issues and identified page-seam/freshness/live-recipe boundaries. No live
   caller changed, so no production authority or script sampler is deleted.

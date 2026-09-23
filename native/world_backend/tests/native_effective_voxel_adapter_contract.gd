@@ -1,8 +1,12 @@
 extends SceneTree
 
 # Shadow-service byte transport only; this does not publish a VoxelBuffer.
+const Oracle := preload("res://scripts/testing/native_world/N3EffectiveTerrainOracle.gd")
+const Generator := preload("res://scripts/terrain/VoxelTerrainGenerator.gd")
 const REQUEST_SCHEMA := "n3-effective-voxel-block-request/v1"
 var failures: Array[String] = []
+var generated_byte_parity := false
+var generated_cases: Array[Dictionary] = []
 
 func check(value: bool, label: String) -> void:
 	if not value:
@@ -42,6 +46,30 @@ func run() -> void:
 	check(old_result.get("indices8") is PackedByteArray and old_result.indices8.size() == 1, "indices bytes")
 	check(old_result.get("data5_8") is PackedByteArray and old_result.data5_8.size() == 1, "data bytes")
 	check(old_result.get("pinIdentity") == old_page.status().get("pinIdentity") and old_result.get("terrainDeltaRevision") == 0, "pin receipt")
+	var oracle_world: Dictionary = Oracle.build_world("atlas-1492")
+	check(bool(oracle_world.get("ok", false)), "generated-world oracle setup")
+	if bool(oracle_world.get("ok", false)):
+		var generator = Generator.new()
+		generator.setup(oracle_world.context)
+		generated_byte_parity = true
+		for spec in [
+			{"origin": Vector3i(5, 0, 7), "size": Vector3i(4, 16, 4), "lod": 0},
+			{"origin": Vector3i(5, -16, 7), "size": Vector3i(4, 16, 4), "lod": 0},
+			{"origin": Vector3i(5, 0, 7), "size": Vector3i(4, 8, 4), "lod": 1},
+			{"origin": Vector3i(5, 96, 7), "size": Vector3i(4, 4, 4), "lod": 0},
+		]:
+			var buffer := VoxelBuffer.new()
+			buffer.create(spec.size.x, spec.size.y, spec.size.z)
+			generator._generate_block(buffer, spec.origin, spec.lod)
+			var native_generated: Dictionary = old_page.encode_voxel_block(request(spec.origin, spec.size, spec.lod))
+			var matches: bool = native_generated.get("status") == "ready" \
+				and native_generated.get("sdf16Le") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_SDF) \
+				and native_generated.get("indices8") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_INDICES) \
+				and native_generated.get("data5_8") == buffer.get_channel_as_byte_array(VoxelBuffer.CHANNEL_DATA5)
+			generated_byte_parity = generated_byte_parity and matches
+			generated_cases.append({"origin": spec.origin, "size": spec.size,
+				"lod": spec.lod, "passed": matches})
+			check(matches, "direct generated VoxelTerrainGenerator byte parity: " + str(spec))
 	var state := {"materialId":0,"biomeId":0,"solid":false,"density":-1.35,"fluidId":0,"light":Vector2i.ZERO,
 		"metadata":{"source":"terrain_edit","terrainMeshAffects":true},"blockId":"adapter_air","editReason":"voxel-adapter-contract"}
 	var tx := {"schema":"n3-native-typed-cell-transaction/v1","transactionId":"voxel-adapter-contract:1","expectedRevision":0,
@@ -62,7 +90,9 @@ func run() -> void:
 		var failure: Dictionary = new_page.encode_voxel_block(invalid)
 		check(failure.get("status") == "failed" and failure.get("operation") == "encode_voxel_block", "invalid request rejected: " + str(invalid))
 	var report := {"schema":"native-effective-voxel-adapter-contract/v1","passed":failures.is_empty(),
-		"evidenceLevel":"shadow-service-byte-contract-only","productionCutover":false,"failures":failures}
+		"evidenceLevel":"shadow-service-byte-contract-only","productionCutover":false,
+		"seedText":"atlas-1492", "generatedByteParity":generated_byte_parity,
+		"generatedCases":generated_cases,"failures":failures}
 	var path := OS.get_environment("VWB_VOXEL_ADAPTER_REPORT")
 	if path != "":
 		var file := FileAccess.open(path, FileAccess.WRITE)
