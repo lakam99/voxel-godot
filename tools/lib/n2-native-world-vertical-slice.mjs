@@ -60,6 +60,7 @@ export const inputPaths = [
   'scripts/testing/native_world/N2LatticeSourceOracle.gd',
   'scripts/testing/native_world/N2PreparedRenderGenerator.gd',
   'scripts/testing/native_world/N2VerticalSliceFixture.gd',
+  'scripts/terrain/NativeTerrainCollisionOwner.gd',
   'scenes/testing/native_world/N2VerticalSliceFixture.tscn',
   'scripts/terrain/VoxelTerrainGenerator.gd',
   'scripts/terrain/VoxelTerrainRuntime.gd',

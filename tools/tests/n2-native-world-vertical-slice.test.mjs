@@ -110,6 +110,7 @@ test('N2 inventory names every oracle, fixture, scene, runner and controlling in
     'scripts/testing/native_world/N2LatticeSourceOracle.gd',
     'scripts/testing/native_world/N2PreparedRenderGenerator.gd',
     'scripts/testing/native_world/N2VerticalSliceFixture.gd',
+    'scripts/terrain/NativeTerrainCollisionOwner.gd',
     'scenes/testing/native_world/N2VerticalSliceFixture.tscn',
     'tools/run-n2-native-world-vertical-slice.mjs',
     'tools/lib/n2-native-world-vertical-slice.mjs',

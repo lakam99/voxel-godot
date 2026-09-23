@@ -2,6 +2,7 @@ extends Node3D
 
 const OracleScript := preload("res://scripts/testing/native_world/N2LatticeSourceOracle.gd")
 const RenderGeneratorScript := preload("res://scripts/testing/native_world/N2PreparedRenderGenerator.gd")
+const CollisionOwnerScript := preload("res://scripts/terrain/NativeTerrainCollisionOwner.gd")
 
 const REPORT_SCHEMA := "n2-native-world-vertical-slice-fixture/v1"
 const RESULT_SCHEMA := "n2-native-vertical-slice-result/v1"
@@ -84,6 +85,25 @@ func _run() -> void:
 	var setup := _setup_fixture_nodes(native_baseline)
 	if not setup.ok:
 		_finish(false, String(setup.reason), common.merged({"setup": setup}, true))
+		return
+	var invalid_identity: Dictionary = baseline_request.requestIdentity.duplicate(true)
+	invalid_identity["sourceRevision"] = -1
+	var no_probe := func(_owner: StaticBody3D, _identity: Dictionary) -> Dictionary:
+		return {"ok": false}
+	var invalid_identity_result: Dictionary = await (_body as Node).call("replace", native_baseline, invalid_identity, no_probe)
+	var invalid_source: Dictionary = native_baseline.duplicate(true)
+	invalid_source.source["snapshotDigest"] = ""
+	var invalid_source_result: Dictionary = await (_body as Node).call("replace", invalid_source, baseline_request.requestIdentity, no_probe)
+	var invalid_artifact: Dictionary = native_baseline.duplicate(true)
+	invalid_artifact.collision["artifactKey"] = 17
+	var invalid_artifact_result: Dictionary = await (_body as Node).call("replace", invalid_artifact, baseline_request.requestIdentity, no_probe)
+	if invalid_identity_result.get("reason") != "collision_identity_invalid" \
+			or invalid_source_result.get("reason") != "collision_provenance_invalid" \
+			or invalid_artifact_result.get("reason") != "collision_provenance_invalid" \
+			or _body.get_child_count() != 0:
+		_finish(false, "collision_owner_invalid_input_rejection_failed", common.merged({
+			"invalidIdentity": invalid_identity_result, "invalidSource": invalid_source_result,
+			"invalidArtifact": invalid_artifact_result}, true))
 		return
 	_current_authority = baseline_request.requestIdentity.duplicate(true)
 	_current_authority["sourceRevision"] = int(_current_authority.sourceRevision) + 1000
@@ -198,6 +218,14 @@ func _run() -> void:
 	common["installedProvenance"] = _installed_provenance
 	common["acknowledgedPhysicsFrame"] = _acknowledged_physics_frame
 	await _capture()
+	await (_body as Node).call("stop_and_drain")
+	var stop_drain := {"remainingShapes": (_body as Node).get("installed_shapes").size(),
+		"remainingChildren": _body.get_child_count(),
+		"installedProvenance": (_body as Node).get("installed_provenance"),
+		"acknowledgedPhysicsFrame": (_body as Node).get("acknowledged_physics_frame")}
+	common["stopDrain"] = stop_drain
+	passed = passed and stop_drain.remainingShapes == 0 and stop_drain.remainingChildren == 0 \
+		and stop_drain.installedProvenance.is_empty() and stop_drain.acknowledgedPhysicsFrame == -1
 	_finish(passed, "passed" if passed else "one_authority_or_physics_evidence_failed", common)
 
 
@@ -394,7 +422,7 @@ func _validate_payload_accounting(value: Dictionary, prepared_bytes: int) -> Dic
 
 
 func _setup_fixture_nodes(native_result: Dictionary) -> Dictionary:
-	_body = StaticBody3D.new()
+	_body = CollisionOwnerScript.new()
 	_body.name = "N2SoleTerrainCollisionAuthority"
 	_body.collision_layer = TERRAIN_LAYER
 	_body.collision_mask = 0
@@ -436,86 +464,29 @@ func _setup_fixture_nodes(native_result: Dictionary) -> Dictionary:
 
 
 func _replace_collision(native_result: Dictionary, request_identity: Dictionary, mutate_before_ack := false) -> Dictionary:
-	var replace_started_usec := Time.get_ticks_usec()
-	if native_result.requestIdentity != request_identity or _current_authority != request_identity:
-		return {"ok": false, "reason": "stale_before_install"}
-	var replacements: Array[CollisionShape3D] = []
-	var previous := _installed_shapes
-	for tile in native_result.collision.tileTriangles:
-		if tile.get("coordinateFrame") != "world" or bool(tile.get("includesDeclaredBlockers", true)):
-			return {"ok": false, "reason": "tile_collision_not_world_frame_or_contains_blocker"}
-		var vertices_result := _vertices(tile.get("vertices") if tile is Dictionary else null)
-		if not vertices_result.ok:
-			return vertices_result
-		var shape := ConcavePolygonShape3D.new()
-		shape.data = vertices_result.vertices
-		var node := CollisionShape3D.new()
-		node.shape = shape
-		node.set_meta("provenance", {"snapshotDigest": native_result.source.snapshotDigest, "artifactKey": native_result.collision.artifactKey,
-			"requestIdentity":request_identity.duplicate(true), "tileKey": tile.get("tileKey")})
-		_body.add_child(node)
-		replacements.append(node)
-	var blocker_record: Dictionary = native_result.collision.blockers[0]
-	var blocker_center := _array_v3(blocker_record.center)
-	var blocker_size := _array_v3(blocker_record.size)
-	if not blocker_center.ok or not blocker_size.ok or blocker_size.value.x <= 0.0 or blocker_size.value.y <= 0.0 or blocker_size.value.z <= 0.0:
-		return {"ok": false, "reason": "native_blocker_geometry_invalid"}
-	var blocker_shape := BoxShape3D.new()
-	blocker_shape.size = blocker_size.value
-	var blocker := CollisionShape3D.new()
-	blocker.shape = blocker_shape
-	blocker.position = blocker_center.value
-	blocker.set_meta("provenance", {"snapshotDigest": native_result.source.snapshotDigest, "artifactKey": native_result.collision.artifactKey,
-		"requestIdentity":request_identity.duplicate(true),
-		"featureId": blocker_record.id, "semanticClass": blocker_record.semanticClass, "physicalIntent": blocker_record.physicalIntent})
-	_body.add_child(blocker)
-	replacements.append(blocker)
-	for node in previous:
-		node.disabled = true
-	var install_finished_usec := Time.get_ticks_usec()
-	if mutate_before_ack:
-		_current_authority = request_identity.duplicate(true)
-		_current_authority["sourceRevision"] = int(_current_authority.sourceRevision) + 1000
-	var acknowledgement := {}
-	for _attempt in range(3):
-		await get_tree().physics_frame
-		if native_result.requestIdentity != request_identity or _current_authority != request_identity:
-			break
+	(_body as Node).call("set_authority", _current_authority)
+	var before_ack := func():
+		if mutate_before_ack:
+			_current_authority = request_identity.duplicate(true)
+			_current_authority["sourceRevision"] = int(_current_authority.sourceRevision) + 1000
+			(_body as Node).call("set_authority", _current_authority)
+	var probe := func(body: StaticBody3D, identity: Dictionary) -> Dictionary:
 		var hit := get_world_3d().direct_space_state.intersect_ray(PhysicsRayQueryParameters3D.create(
 			Vector3(-32.4, 16.497, -16.0), Vector3(-32.4, 16.497, -12.0), TERRAIN_LAYER))
 		var provenance := _hit_provenance(int(hit.get("shape", -1)))
-		if not hit.is_empty() and hit.get("collider") == _body \
-				and provenance.get("snapshotDigest") == native_result.source.snapshotDigest \
-				and provenance.get("artifactKey") == native_result.collision.artifactKey \
-				and provenance.get("requestIdentity") == request_identity \
-				and provenance.get("featureId") == "n2:blocker:tile-b:-24,-10":
-			acknowledgement = {"physicsFrame": Engine.get_physics_frames(), "provenance": provenance}
-			break
-	if acknowledgement.is_empty() or native_result.requestIdentity != request_identity or _current_authority != request_identity:
-		for node in replacements:
-			node.disabled = true
-			node.queue_free()
-		for node in previous:
-			node.disabled = false
-		await get_tree().physics_frame
-		return {"ok": false, "reason": "stale_before_acknowledgement" if _current_authority != request_identity else "replacement_not_acknowledged_within_three_physics_frames"}
-	_acknowledged_physics_frame = int(acknowledgement.physicsFrame)
-	var acknowledgement_finished_usec := Time.get_ticks_usec()
-	_installed_shapes = replacements
-	_installed_provenance = {"snapshotDigest": native_result.source.snapshotDigest, "collisionArtifactKey": native_result.collision.artifactKey, "requestIdentity": request_identity}
-	if not previous.is_empty():
-		_resource_lifecycle["currentRetiredShapeSetsAwaitingRelease"] = int(_resource_lifecycle.currentRetiredShapeSetsAwaitingRelease) + 1
-		_resource_lifecycle["peakRetiredShapeSetsAwaitingRelease"] = max(
-			int(_resource_lifecycle.peakRetiredShapeSetsAwaitingRelease), int(_resource_lifecycle.currentRetiredShapeSetsAwaitingRelease))
-	for node in previous:
-		node.queue_free()
-	await get_tree().physics_frame
-	if not previous.is_empty():
-		_resource_lifecycle["currentRetiredShapeSetsAwaitingRelease"] = int(_resource_lifecycle.currentRetiredShapeSetsAwaitingRelease) - 1
-	return {"ok": true, "acknowledgedPhysicsFrame": _acknowledged_physics_frame, "acknowledgement": acknowledgement,
-		"retiredShapeCount": previous.size(), "currentShapeCount": replacements.size(),
-		"installMilliseconds": float(install_finished_usec - replace_started_usec) / 1000.0,
-		"acknowledgementMilliseconds": float(acknowledgement_finished_usec - install_finished_usec) / 1000.0}
+		return {"ok": not hit.is_empty() and hit.get("collider") == body
+			and provenance.get("snapshotDigest") == native_result.source.snapshotDigest
+			and provenance.get("artifactKey") == native_result.collision.artifactKey
+			and provenance.get("requestIdentity") == identity
+			and provenance.get("featureId") == "n2:blocker:tile-b:-24,-10",
+			"provenance": provenance}
+	var outcome: Dictionary = await (_body as Node).call("replace", native_result, request_identity, probe, before_ack)
+	_installed_shapes = (_body as Node).get("installed_shapes")
+	_installed_provenance = (_body as Node).get("installed_provenance")
+	_acknowledged_physics_frame = (_body as Node).get("acknowledged_physics_frame")
+	_resource_lifecycle["currentRetiredShapeSetsAwaitingRelease"] = (_body as Node).get("retired_shape_sets")
+	_resource_lifecycle["peakRetiredShapeSetsAwaitingRelease"] = (_body as Node).get("peak_retired_shape_sets")
+	return outcome
 
 
 func _install_render(native_result: Dictionary) -> Dictionary:
@@ -634,27 +605,6 @@ func _hit_provenance(shape_index: int) -> Dictionary:
 	return owner.get_meta("provenance", {}) if owner != null else {}
 
 
-func _vertices(value) -> Dictionary:
-	if value is PackedVector3Array:
-		if value.is_empty() or value.size() % 3 != 0:
-			return {"ok": false, "reason": "collision_vertices_not_triangle_soup"}
-		for vertex in value:
-			if not vertex.is_finite(): return {"ok": false, "reason": "collision_vertex_nonfinite"}
-		return {"ok": true, "vertices": value, "reason": ""}
-	if not value is Array or value.is_empty():
-		return {"ok": false, "reason": "collision_vertices_missing"}
-	if value.size() % 3 != 0:
-		return {"ok": false, "reason": "collision_vertices_not_triangle_soup"}
-	var vertices := PackedVector3Array()
-	for row in value:
-		if not row is Array or row.size() != 3:
-			return {"ok": false, "reason": "collision_vertex_invalid"}
-		var vertex := Vector3(float(row[0]), float(row[1]), float(row[2]))
-		if not vertex.is_finite(): return {"ok": false, "reason": "collision_vertex_nonfinite"}
-		vertices.append(vertex)
-	return {"ok": true, "vertices": vertices}
-
-
 func _authority_inventory() -> Dictionary:
 	var bodies := get_tree().get_nodes_in_group("n2_never_used")
 	bodies.clear()
@@ -718,10 +668,3 @@ func _finish(passed: bool, reason: String, evidence: Dictionary) -> void:
 
 func _v3(value: Vector3) -> Array:
 	return [value.x, value.y, value.z]
-
-
-func _array_v3(value) -> Dictionary:
-	if not value is Array or value.size() != 3:
-		return {"ok": false}
-	var vector := Vector3(float(value[0]), float(value[1]), float(value[2]))
-	return {"ok": vector.is_finite(), "value": vector}
