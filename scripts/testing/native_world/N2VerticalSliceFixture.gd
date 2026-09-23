@@ -3,6 +3,7 @@ extends Node3D
 const OracleScript := preload("res://scripts/testing/native_world/N2LatticeSourceOracle.gd")
 const RenderGeneratorScript := preload("res://scripts/testing/native_world/N2PreparedRenderGenerator.gd")
 const CollisionOwnerScript := preload("res://scripts/terrain/NativeTerrainCollisionOwner.gd")
+const ActorGuardScript := preload("res://scripts/terrain/NativeCollisionActorGuard.gd")
 
 const REPORT_SCHEMA := "n2-native-world-vertical-slice-fixture/v1"
 const RESULT_SCHEMA := "n2-native-vertical-slice-result/v1"
@@ -86,6 +87,11 @@ func _run() -> void:
 	if not setup.ok:
 		_finish(false, String(setup.reason), common.merged({"setup": setup}, true))
 		return
+	var actor_guard_check: Dictionary = await _actor_guard_contract()
+	if not bool(actor_guard_check.get("ok", false)):
+		_finish(false, "actor_guard_contract_failed", common.merged({"actorGuard":actor_guard_check}, true))
+		return
+	common["actorGuard"] = actor_guard_check
 	var invalid_identity: Dictionary = baseline_request.requestIdentity.duplicate(true)
 	invalid_identity["sourceRevision"] = -1
 	var no_probe := func(_owner: StaticBody3D, _identity: Dictionary) -> Dictionary:
@@ -507,6 +513,31 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 	_resource_lifecycle["currentRetiredShapeSetsAwaitingRelease"] = (_body as Node).get("retired_shape_sets")
 	_resource_lifecycle["peakRetiredShapeSetsAwaitingRelease"] = (_body as Node).get("peak_retired_shape_sets")
 	return outcome
+
+
+func _actor_guard_contract() -> Dictionary:
+	var body := CharacterBody3D.new()
+	body.name = "N2GuardActor"
+	var shape := CollisionShape3D.new()
+	var box := BoxShape3D.new()
+	box.size = Vector3.ONE
+	shape.shape = box
+	body.add_child(shape)
+	add_child(body)
+	await get_tree().physics_frame
+	var region := AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2))
+	var occupied: Dictionary = ActorGuardScript.inspect([body], region, 0.25)
+	body.position = Vector3(10, 0, 0)
+	body.velocity = Vector3(-40, 0, 0)
+	await get_tree().physics_frame
+	var swept: Dictionary = ActorGuardScript.inspect([body], region, 0.25)
+	body.velocity = Vector3.ZERO
+	var clear: Dictionary = ActorGuardScript.inspect([body], region, 0.25)
+	body.queue_free()
+	await get_tree().physics_frame
+	return {"ok": occupied.get("reason") == "actor_occupies_replacement" \
+		and swept.get("reason") == "actor_occupies_replacement" \
+		and bool(clear.get("clear", false)), "occupied":occupied, "swept":swept, "clear":clear}
 
 
 func _install_render(native_result: Dictionary) -> Dictionary:
