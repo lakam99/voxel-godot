@@ -17,6 +17,7 @@ const SOURCE_TIMING_HISTORY_LIMIT := 64
 
 class RetirementState extends RefCounted:
 	var payload: Dictionary
+	var tokens: Array[int] = []
 	var transferred := Semaphore.new()
 	var released_on_thread := -1
 	func release_payload() -> int:
@@ -121,11 +122,13 @@ var _max_submit_usec := 0
 var _discarded_stale := 0
 var _retired: Dictionary = {}
 var _retirement: RetirementState
+var _retiring_tokens: Dictionary = {}
 var _retirement_start_error := OK
 var _max_retirement_usec := 0
 var _last_retirement_thread := -1
 var _source_timing_history: Array[Dictionary] = []
 var _source_timing_dropped := 0
+var _worker_callable_for_test: Callable
 
 func submit(world_seed: String, region: Vector2i, towns: Dictionary, ordinary_policy: Dictionary, priority: bool = false) -> Dictionary:
 	var started := Time.get_ticks_usec()
@@ -160,13 +163,14 @@ func poll() -> Dictionary:
 		if _active.get("kind","") == "retirement":
 			_max_retirement_usec = maxi(_max_retirement_usec,int(result))
 			_last_retirement_thread = _retirement.released_on_thread
+			for token: int in _retirement.tokens: _retiring_tokens.erase(token)
 			_retirement = null
 		elif _active.epoch != _epoch or _closing:
-			if result is Dictionary: _queue_retirement(result)
+			if result is Dictionary: _queue_retirement(result, int(_active.get("token", 0)))
 			_discarded_stale += 1
 			terminal_status = "discarded_stale"
 		elif _active.cancelled or _state.is_cancelled():
-			if result is Dictionary: _queue_retirement(result)
+			if result is Dictionary: _queue_retirement(result, int(_active.get("token", 0)))
 			_store_completed(_terminal("cancelled","cancelled"),false)
 			terminal_status = "cancelled"
 		elif result is Dictionary:
@@ -186,7 +190,8 @@ func poll() -> Dictionary:
 		_active = _pending.pop_at(_next_index())
 		_state = RunState.new()
 		_thread = Thread.new()
-		var error := _start_thread(_run.bind(_active.input,_state))
+		var worker := _worker_callable_for_test if _worker_callable_for_test.is_valid() else Callable(self, "_run")
+		var error := _start_thread(worker.bind(_active.input,_state))
 		if error != OK:
 			_thread = null
 			_store_completed(_terminal("failed","worker_start_failed"),false)
@@ -235,26 +240,42 @@ func is_active_token(token: int) -> bool:
 	return token > 0 and int(_active.get("token", 0)) == token and int(_active.get("epoch", 0)) == _epoch
 
 func cancel(token: int) -> bool:
+	return cancel_with_status(token).get("accepted", false)
+
+## Structured cancellation result for owners that must retain a lease until
+## the worker-owned payload has been retired. This never waits or joins.
+func cancel_with_status(token: int) -> Dictionary:
 	for index in range(_pending.size()):
 		if _pending[index].token == token:
 			_pending.remove_at(index)
-			return true
+			return {"accepted":true,"state":"cancelled_before_dispatch","token":token}
 	if _active.get("token",0) == token and _active.get("epoch",0) == _epoch:
 		_active.cancelled = true
 		_state.cancel()
-		return true
+		return {"accepted":true,"state":"cancel_requested","token":token}
 	if _completed.get("token",0) == token and _completed.get("epoch",0) == _epoch:
-		if _completed.ownsWorkerPayload: _queue_retirement(_completed.result)
+		if _completed.ownsWorkerPayload: _queue_retirement(_completed.result, token)
 		_completed.ownsWorkerPayload = false
 		_completed.cancelled = true
 		_completed.result = _terminal("cancelled","cancelled")
-		return true
-	return false
+		return {"accepted":true,"state":"retirement_pending" if _retiring_tokens.has(token) else "cancelled", "token":token}
+	return {"accepted":false,"state":"not_found","token":token}
+
+func source_request_state(token: int) -> String:
+	if token <= 0: return "absent"
+	# Include an active old-epoch worker: reset() cooperatively cancels it, but
+	# it is not drained until its returned payload passes through retirement.
+	if _active.get("token", 0) == token: return "active"
+	if _pending.any(func(entry): return int(entry.get("token", 0)) == token): return "pending"
+	if _completed.get("token", 0) == token and _completed.get("epoch", 0) == _epoch:
+		return "retirement_pending" if _retiring_tokens.has(token) else "completed"
+	if _retiring_tokens.has(token): return "retirement_pending"
+	return "absent"
 
 func reset() -> int:
 	_epoch += 1
 	_pending.clear()
-	if _completed.get("ownsWorkerPayload",false): _queue_retirement(_completed.result)
+	if _completed.get("ownsWorkerPayload",false): _queue_retirement(_completed.result, int(_completed.get("token", 0)))
 	_completed = {}
 	_priority_burst = 0
 	if _state != null: _state.cancel()
@@ -264,11 +285,11 @@ func request_shutdown() -> void:
 	_closing = true
 	reset()
 
-func retire_external_payload(payload: Dictionary) -> bool:
+func retire_external_payload(payload: Dictionary, tokens: Array[int] = []) -> bool:
 	# A lifecycle consumer may relinquish previously consumed immutable sources.
 	# The same owned retirement worker handles final disposal, never a frame call.
 	if _thread != null or not _completed.is_empty() or not _retired.is_empty(): return false
-	_queue_retirement(payload)
+	_queue_retirement(payload, 0, tokens)
 	return true
 
 func _next_index() -> int:
@@ -283,6 +304,14 @@ func _next_index() -> int:
 
 func _start_thread(work: Callable) -> int:
 	return _thread.start(work)
+
+## Deterministic worker gate for focused queue ownership contracts only.
+## Production admission never configures this callback.
+func _set_worker_callable_for_test(callback: Callable) -> bool:
+	if _thread != null or not _pending.is_empty() or not _active.is_empty(): return false
+	if not callback.is_valid(): return false
+	_worker_callable_for_test = callback
+	return true
 
 func _prepare_site(request: Dictionary, continuation: Callable, raw_stage_observer: Callable = Callable()) -> Dictionary:
 	return Site.prepare(request.worldSeed,request.region,request.towns,request.ordinaryPolicy,continuation,raw_stage_observer)
@@ -330,15 +359,19 @@ func _run(request: Dictionary, state: RunState) -> Dictionary:
 func _store_completed(result: Dictionary, owns_worker_payload: bool = true) -> void:
 	_completed = {"token":_active.token,"epoch":_active.epoch,"sourceKey":_active.sourceKey,"cancelled":_active.cancelled,"result":result,"ownsWorkerPayload":owns_worker_payload}
 
-func _queue_retirement(result: Dictionary) -> void:
+func _queue_retirement(result: Dictionary, token := 0, tokens: Array[int] = []) -> void:
 	# Single ownership invariant: no source dispatch while this slot is held,
 	# and repeated terminal cancellation never re-enqueues its small receipt.
 	assert(_retired.is_empty())
 	_retired = result
+	if token > 0: _retiring_tokens[token] = true
+	for retired_token: int in tokens:
+		if retired_token > 0: _retiring_tokens[retired_token] = true
 
 func _start_retirement() -> void:
 	_retirement = RetirementState.new()
 	_retirement.payload = _retired
+	for token: Variant in _retiring_tokens: _retirement.tokens.append(int(token))
 	_active = {"kind":"retirement","epoch":_epoch,"token":0,"sourceKey":"","cancelled":false}
 	_state = RunState.new()
 	_state.advance("retiring_source")
