@@ -31,9 +31,13 @@ is:
    the C++ one-shot commit right. A successful commit checks the backend's
    current source identity and leaves the imported terrain privately held by
    this transaction.
-6. Call `take_backend()` exactly once and install that backend in the next
-   owner. Save-envelope coordination may release the source snapshot only after
-   transfer. Installation and physical readiness remain separate obligations.
+6. Pass the transaction and exact commit receipt to
+   `NativeTerrainRuntimeOwner.setup_from_committed_transaction(main, terrain,
+   transaction, commit_receipt, consumer_id, priority)`. That boundary
+   validates the committed generation/backend/source-identity receipt and
+   consumes `take_backend()` exactly once. Save-envelope coordination may
+   release the source snapshot only after transfer. Installation and physical
+   readiness remain separate obligations.
 7. For cancellation or failure before commit, retain the transaction and its
    backend, request cancellation, and keep calling `advance()` until
    `cleanupComplete`/`drained` is reported. The native API owns asynchronous
