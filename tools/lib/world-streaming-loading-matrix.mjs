@@ -265,14 +265,17 @@ export function evaluateSampleReport(report, expected, evaluationMode = 'gate5')
       || !Array.isArray(workRows) || workRows.length === 0 || !finitePositive(readyMs)) {
     if (evaluationMode === 'gate5') errors.push('Authoritative completed-work heartbeat evidence is unavailable.');
   } else {
-    let previousAtMs = 0, previousRevision = -1;
+    let previousAtMs = 0, previousRevision = 0;
     workGapMaxMs = 0;
     for (const row of workRows) {
       if (typeof row?.owner !== 'string' || !row.owner || !finiteNonnegative(row?.observedAtInputMs)
-          || row.observedAtInputMs <= previousAtMs || row.observedAtInputMs > readyMs
-          || !Number.isSafeInteger(row?.completedRevision) || row.completedRevision <= previousRevision
+          || row.observedAtInputMs < previousAtMs || row.observedAtInputMs > readyMs
+          || !Number.isSafeInteger(row?.completedRevision) || row.completedRevision !== previousRevision + 1
           || !Number.isSafeInteger(row?.pendingWorkCount) || row.pendingWorkCount < 0
-          || !finiteNonnegative(row?.activeWorkAgeMs)) {
+          || !finiteNonnegative(row?.activeWorkAgeMs)
+          || !['completed_units', 'readiness_transition'].includes(row?.kind)
+          || !Number.isSafeInteger(row?.completedCount) || row.completedCount < 1
+          || (row.kind === 'readiness_transition' && (row.completedCount !== 1 || row.pendingWorkCount !== 0))) {
         errors.push('Authoritative completed-work heartbeat row is invalid or nonprogressing.');
         break;
       }

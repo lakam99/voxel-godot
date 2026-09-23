@@ -603,6 +603,10 @@ func _actor_guard_contract() -> Dictionary:
 	var main_facade = MainFacadeScript.new()
 	var facade_bound: bool = main_facade.bind_native_collision_admission(_body, barrier)
 	moving_static.position = Vector3(10, 0, 0)
+	var placement_inside_held: bool = not main_facade.native_collision_admit_placement(
+		moving_static, Transform3D(Basis.IDENTITY, Vector3.ZERO))
+	var placement_outside_admitted: bool = main_facade.native_collision_admit_placement(
+		moving_static, Transform3D(Basis.IDENTITY, Vector3(10, 0, 0)))
 	var static_sweep_admitted: bool = barrier.admit_motion(moving_static, Vector3(-10, 0, 0))
 	var facade_sweep_admitted: bool = main_facade.native_collision_admit_motion(moving_static, Vector3(-10, 0, 0))
 	var facade_early_unbind: bool = main_facade.unbind_native_collision_admission(_body)
@@ -681,6 +685,7 @@ func _actor_guard_contract() -> Dictionary:
 		and static_clearance.get("reason") == "actor_occupies_replacement" \
 		and not static_motion_admitted and not static_sweep_admitted \
 		and not static_cancel_admitted and facade_bound and not facade_sweep_admitted \
+		and placement_inside_held and placement_outside_admitted \
 		and not facade_early_unbind and facade_unbound and motor_held and correction_held \
 		and cancelled_empty_startup \
 		and census_pending and census_completed and far_motion_allowed \
@@ -694,6 +699,8 @@ func _actor_guard_contract() -> Dictionary:
 		"movingStatic": {"clearance":static_clearance, "motionAdmitted":static_motion_admitted,
 			"sweepAdmitted":static_sweep_admitted, "cancelAdmitted":static_cancel_admitted,
 			"facadeBound":facade_bound, "facadeSweepAdmitted":facade_sweep_admitted,
+			"placementInsideHeld":placement_inside_held,
+			"placementOutsideAdmitted":placement_outside_admitted,
 			"facadeEarlyUnbind":facade_early_unbind, "facadeUnbound":facade_unbound,
 			"motorHeld":motor_held, "correctionHeld":correction_held},
 		"incrementalCensus":{"pending":census_pending,"completed":census_completed,

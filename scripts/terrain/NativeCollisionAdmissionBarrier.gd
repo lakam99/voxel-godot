@@ -108,6 +108,19 @@ func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 	return not ActorGuard.motion_intersects(actor, _bounds, motion)
 
 
+func admit_placement(actor: PhysicsBody3D, proposed_transform: Transform3D) -> bool:
+	if not _active:
+		return true
+	if actor == null or not is_instance_valid(actor) or _root == null \
+			or not is_instance_valid(_root) or not _root.is_inside_tree() \
+			or not _root.is_ancestor_of(actor):
+		return false
+	_register_if_moving(actor)
+	if not _actors.has(actor.get_instance_id()):
+		return false
+	return not ActorGuard.placement_intersects(actor, _bounds, proposed_transform)
+
+
 func clearance(identity: Dictionary) -> Dictionary:
 	if not _active or identity != _identity:
 		return {"clear": false, "reason": "barrier_revision_mismatch"}

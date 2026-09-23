@@ -7,6 +7,7 @@ signal startup_loading_failed(message)
 const DEFAULT_VISUAL_STYLE := preload("res://resources/visual/gamecube_style.tres")
 const NpcConstantsScript := preload("res://scripts/npc_ai/NpcConstants.gd")
 const StartupReadinessResultScript := preload("res://scripts/world/StartupReadinessResult.gd")
+const StartupWorkProgressTrackerScript := preload("res://scripts/perf/StartupWorkProgressTracker.gd")
 const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/GeneratedStructurePlayerClearance.gd")
 const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
 const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
@@ -39,9 +40,7 @@ var startup_loading_active := false
 var startup_loading_started_usec := 0
 var startup_loading_last_step_usec := 0
 var startup_loading_timeline: Array[Dictionary] = []
-var startup_work_progress_revision := 0
-var startup_work_progress_receipt := {}
-var startup_work_completed_counts := {}
+var startup_work_progress = StartupWorkProgressTrackerScript.new()
 var startup_readiness_domains := {}
 var startup_loading_failure_result := {}
 var world_streaming = WorldStreamingCoordinatorScript.new()
@@ -329,6 +328,13 @@ func native_collision_register_moving_actor(body: PhysicsBody3D) -> bool:
     if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
         return false
     return _native_collision_admission_barrier.register_moving_actor(body)
+
+func native_collision_admit_placement(body: PhysicsBody3D, proposed_transform: Transform3D) -> bool:
+    if _native_collision_admission_owner_id == 0:
+        return true
+    if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
+        return false
+    return _native_collision_admission_barrier.admit_placement(body, proposed_transform)
 
 func bind_native_collision_admission(owner: Node, barrier: RefCounted) -> bool:
     if owner == null or not is_instance_valid(owner) or owner.get_instance_id() <= 0 \
@@ -686,9 +692,7 @@ func begin_startup_loading_timeline() -> void:
     startup_loading_started_usec = Time.get_ticks_usec()
     startup_loading_last_step_usec = startup_loading_started_usec
     startup_loading_timeline.clear()
-    startup_work_progress_revision = 0
-    startup_work_progress_receipt.clear()
-    startup_work_completed_counts.clear()
+    startup_work_progress.reset()
     startup_readiness_domains.clear()
     startup_loading_failure_result.clear()
     startup_loading_max_step.clear()
@@ -717,48 +721,15 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
     if normalized_status == "":
         normalized_status = "pending"
     var normalized_metrics: Dictionary = metrics.duplicate(true) if metrics is Dictionary else {}
-    # Count only source-owned completed publications, never a repeated message
-    # or elapsed-time update. A ready transition certifies a completed domain.
-    var counter_key: String = {
-        "terrain_chunks": "loadedChunkCount",
-        "terrain_collision": "publishedChunkCount",
-        "navigation_tiles": "publishedTileCount",
-        "navigation_changes": "processedEventCount"
-    }.get(normalized_domain, "")
-    var completed_count := int(normalized_metrics.get(counter_key, -1)) if counter_key != "" else -1
-    var required_count := int(normalized_metrics.get("requiredChunkCount", normalized_metrics.get("requiredTileCount", completed_count)))
-    if normalized_domain == "town_manifest" and normalized_metrics.get("publishedKeys") is Array:
-        completed_count = (normalized_metrics.get("publishedKeys") as Array).size()
-        required_count = (normalized_metrics.get("requiredKeys", []) as Array).size() \
-            if normalized_metrics.get("requiredKeys", []) is Array else completed_count
-    if normalized_domain == "scene" and normalized_metrics.get("audio") is Dictionary:
-        var audio_progress: Dictionary = normalized_metrics.get("audio")
-        completed_count = int(audio_progress.get("completedJobs", -1))
-        required_count = int(audio_progress.get("totalJobs", completed_count))
-    var previous_count := int(startup_work_completed_counts.get(normalized_domain, -1))
-    var previous_status := String(startup_readiness_domains.get(normalized_domain, {}).get("status", ""))
-    var completed_owner := ""
-    if completed_count > previous_count and completed_count > 0:
-        startup_work_completed_counts[normalized_domain] = completed_count
-        completed_owner = normalized_domain
-    if normalized_status == "ready" and previous_status != "ready":
-        completed_owner = normalized_domain
-    if completed_owner != "":
-        startup_work_progress_revision += 1
-        startup_work_progress_receipt = {
-            "completedRevision": startup_work_progress_revision,
-            "owner": completed_owner,
-            "completedCount": completed_count,
-            "pendingWorkCount": maxi(0, required_count - completed_count) if completed_count >= 0 else 0,
-            "completedAtTicksUsec": now_usec
-        }
+    startup_work_progress.observe(normalized_domain, normalized_status, normalized_metrics, now_usec)
     var timeline_row := {
         "message": message,
         "domain": normalized_domain,
         "status": normalized_status,
         "metrics": normalized_metrics,
         "elapsedMs": float(now_usec - startup_loading_started_usec) / 1000.0,
-        "stepMs": float(now_usec - startup_loading_last_step_usec) / 1000.0
+        "stepMs": float(now_usec - startup_loading_last_step_usec) / 1000.0,
+        "completedWorkRevision": startup_work_progress.completed_revision
     }
     if startup_loading_max_step.is_empty() \
         or float(timeline_row.get("stepMs", 0.0)) > float(startup_loading_max_step.get("stepMs", 0.0)):
