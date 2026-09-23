@@ -112,6 +112,16 @@ scheduling and save-shape adapter are transitional; v2 terrain-list support
 must remain through an authoritative native conversion API at production
 cutover. This service report does not prove headed reload, physical
 publication, or runtime frame budgets.
+
+`NativeTerrainRuntimeOwner.setup` now retains this conversion as a pending
+loading state, and `advance` imports the completed canonical save before
+activating the terrain publisher. Stop cancels pending conversion. The owner
+contract checks no partial save export during conversion, exact restored v2
+snapshot after activation, and cancellation, at
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790174495648-296ca828/report.json`.
+This is an owner-level service checkpoint. No production Main caller retains
+this owner across pending setup yet; loading feedback, headed Continue, and
+physical world readiness remain unproved.
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and
