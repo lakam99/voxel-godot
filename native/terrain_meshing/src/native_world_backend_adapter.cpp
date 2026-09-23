@@ -10,6 +10,7 @@
 #include "native_surface_ore_cluster_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
 #include "native_surface_rock_ordered_visual_plan.hpp"
+#include "native_surface_rock_footprint.hpp"
 #include "native_surface_tree_ordered_composer.hpp"
 #include "native_surface_tree_presence.hpp"
 #include "native_surface_wildlife_ordered_definition.hpp"
@@ -17,6 +18,7 @@
 #include "terrain_snapshot.hpp"
 
 #include <godot_cpp/classes/engine.hpp>
+#include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/json.hpp>
 #include <godot_cpp/classes/marshalls.hpp>
 #include <godot_cpp/classes/ref.hpp>
@@ -98,6 +100,21 @@ std::string utf8(const String &p_value) {
 
 String text(const std::string &p_value) {
 	return String::utf8(p_value.data(), static_cast<int64_t>(p_value.size()));
+}
+
+Sha256Digest rock_glb_digest(const std::string &hex) {
+	if (hex.size() != 64U) throw std::invalid_argument("rock GLB digest must be SHA-256 hex");
+	Sha256Digest digest{};
+	for (std::size_t index = 0; index < digest.size(); ++index) {
+		const auto digit = [](const char c) -> std::uint8_t {
+			if (c >= '0' && c <= '9') return static_cast<std::uint8_t>(c - '0');
+			if (c >= 'a' && c <= 'f') return static_cast<std::uint8_t>(c - 'a' + 10);
+			throw std::invalid_argument("rock GLB digest must be lowercase hex");
+		};
+		digest[index] = static_cast<std::uint8_t>(digit(hex[index * 2U]) * 16U
+			+ digit(hex[index * 2U + 1U]));
+	}
+	return digest;
 }
 
 Vector3 world_vector(const WorldFloat32Position &p_value) {
@@ -1627,6 +1644,7 @@ Dictionary NativeWorldBackend::admit_biome_environment_catalog(const Dictionary 
 	// later visual admission under the same native owner.
 	biome_catalog_.reset();
 	visual_catalog_.reset();
+	rock_import_bounds_.clear();
 	visual_capture_owner_id_ = 0;
 	visual_capture_revision_ = 0;
 	visual_capture_identity_.clear();
@@ -1757,6 +1775,7 @@ Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bu
 		return envelope(operation, "failed", "native_biome_catalog_not_ready");
 	}
 	visual_catalog_.reset();
+	rock_import_bounds_.clear();
 	visual_capture_owner_id_ = 0;
 	visual_capture_revision_ = 0;
 	visual_capture_identity_.clear();
@@ -1828,6 +1847,7 @@ Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bu
 		}
 		std::vector<NativeSurfaceRockAssetRecord> typed_assets;
 		typed_assets.reserve(static_cast<std::size_t>(assets.size()));
+		std::map<std::string, NativeSurfaceRockImportedBoundsReceipt> verified_rock_bounds;
 		std::string previous_id;
 		for (const Variant &entry : assets) {
 			const Dictionary row = require_dictionary(entry, "bundle.visual.assets[]");
@@ -1855,6 +1875,42 @@ Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bu
 				asset.size_y = require_number(size[1], "asset.size.y");
 				asset.size_z = require_number(size[2], "asset.size.z");
 			}
+			if (asset.family == "rock") {
+				const std::string prefix = "assets/visual/generated/environment/";
+				if (asset.path != prefix + asset.id + ".glb")
+					throw std::invalid_argument("rock GLB path does not match selected asset ID");
+				const Dictionary geometry = require_dictionary(value.get("rockGeometry", Variant()),
+					"asset.rockGeometry");
+				require_exact_keys(geometry, {"schema", "glbSha256", "min", "max", "vertexCount",
+					"primitiveCount", "identitySceneTransform"}, "asset.rockGeometry");
+				if (require_bounded_utf8(geometry["schema"], "asset.rockGeometry.schema", 64U, false)
+						!= "rock-glb-geometry/v1"
+						|| !require_bool(geometry["identitySceneTransform"], "asset.rockGeometry.identity")
+						|| require_u32(geometry["vertexCount"], "asset.rockGeometry.vertexCount") > 1000000U
+						|| require_u32(geometry["primitiveCount"], "asset.rockGeometry.primitiveCount") > 1024U)
+					throw std::invalid_argument("unsupported rock GLB geometry receipt");
+				const std::string claimed_hash = require_bounded_utf8(geometry["glbSha256"],
+					"asset.rockGeometry.glbSha256", 64U, false);
+				NativeSurfaceRockImportedBoundsReceipt receipt;
+				receipt.glb_digest = rock_glb_digest(claimed_hash);
+				const std::string file_hash = utf8(FileAccess::get_sha256(text("res://" + asset.path)));
+				if (file_hash != claimed_hash)
+					throw std::invalid_argument("rock GLB bytes differ from visual manifest");
+				const Array minimum = require_array(geometry["min"], "asset.rockGeometry.min");
+				const Array maximum = require_array(geometry["max"], "asset.rockGeometry.max");
+				if (minimum.size() != 3 || maximum.size() != 3)
+					throw std::invalid_argument("rock GLB bounds need three axes");
+				receipt.imported_mesh_bounds = {require_number(minimum[0], "rock.min.x"),
+					require_number(minimum[1], "rock.min.y"), require_number(minimum[2], "rock.min.z"),
+					require_number(maximum[0], "rock.max.x"), require_number(maximum[1], "rock.max.y"),
+					require_number(maximum[2], "rock.max.z")};
+				const auto &b = receipt.imported_mesh_bounds;
+				if (b.min_x > b.max_x || b.min_y > b.max_y || b.min_z > b.max_z)
+					throw std::invalid_argument("rock GLB bounds are reversed");
+				receipt.asset_id = asset.id;
+				receipt.asset_path = asset.path;
+				verified_rock_bounds[asset.id] = std::move(receipt);
+			}
 			typed_assets.push_back(std::move(asset));
 		}
 		std::vector<NativeSurfaceRockFamilyMembers> typed_families;
@@ -1877,16 +1933,21 @@ Dictionary NativeWorldBackend::admit_visual_asset_catalog(const Dictionary &p_bu
 		auto typed = NativeSurfaceRockAssetCatalog::create_effective(
 			std::move(typed_assets), std::move(typed_families), *biome_catalog_);
 		const std::string native_identity = sha256_hex(typed.content_digest());
+		for (auto &[id, bounds] : verified_rock_bounds)
+			bounds.asset_catalog_digest = typed.content_digest();
 		const std::uint64_t asset_count = static_cast<std::uint64_t>(assets.size());
 		visual_catalog_ = std::make_unique<NativeSurfaceRockAssetCatalog>(std::move(typed));
+		rock_import_bounds_ = std::move(verified_rock_bounds);
 		visual_capture_owner_id_ = owner_id;
 		visual_capture_revision_ = revision;
 		visual_capture_identity_ = identity;
 		Dictionary result = envelope(operation, "ready");
 		result["receiptSchema"] = VISUAL_CATALOG_RECEIPT_SCHEMA;
-		result["scope"] = "effective_rock_selection_inputs_only";
+		result["scope"] = "effective_rock_selection_and_verified_glb_bounds";
 		result["completeSurfacePropSource"] = false;
 		result["importReadinessProven"] = false;
+		result["rockGlbBytesVerified"] = true;
+		result["rockBoundsCount"] = static_cast<int64_t>(rock_import_bounds_.size());
 		result["liveCaptureFreshnessProven"] = false;
 		result["bundleOwnerInstanceId"] = main_id;
 		result["captureOwnerInstanceId"] = owner_id;
@@ -1919,6 +1980,18 @@ Dictionary NativeWorldBackend::select_rock_asset_shadow(
 		result["matchedBiomeTag"] = selected.matched_biome_tag;
 		result["resolvedProfileBiome"] = text(selected.resolved_profile_biome);
 		result["nativeCatalogIdentity"] = text(sha256_hex(selected.asset_catalog_digest));
+		const auto verified = rock_import_bounds_.find(selected.asset_id);
+		const bool bounds_ready = verified != rock_import_bounds_.end()
+			&& verified->second.asset_catalog_digest == selected.asset_catalog_digest
+			&& verified->second.asset_path == selected.asset_path;
+		result["rockBoundsReady"] = bounds_ready;
+		if (bounds_ready) {
+			const auto &receipt = verified->second;
+			const auto &b = receipt.imported_mesh_bounds;
+			result["rockGlbSha256"] = text(sha256_hex(receipt.glb_digest));
+			result["importedMeshMin"] = Vector3(b.min_x, b.min_y, b.min_z);
+			result["importedMeshMax"] = Vector3(b.max_x, b.max_y, b.max_z);
+		}
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);

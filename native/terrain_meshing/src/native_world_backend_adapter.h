@@ -7,6 +7,7 @@
 #include "native_structure_exclusion_snapshot.hpp"
 #include "native_surface_prop_ordered_placement.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
+#include "native_surface_rock_footprint.hpp"
 #include "native_wildlife_presentation_receipt.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
@@ -154,6 +155,7 @@ private:
 	std::int64_t biome_capture_revision_ = 0;
 	std::string biome_capture_identity_;
 	std::unique_ptr<voxel::world_backend::NativeSurfaceRockAssetCatalog> visual_catalog_;
+	std::map<std::string, voxel::world_backend::NativeSurfaceRockImportedBoundsReceipt> rock_import_bounds_;
 	std::int64_t visual_capture_owner_id_ = 0;
 	std::int64_t visual_capture_revision_ = 0;
 	std::string visual_capture_identity_;

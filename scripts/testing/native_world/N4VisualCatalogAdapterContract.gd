@@ -54,6 +54,34 @@ func run() -> void:
 		and receipt.get("biomeCatalogIdentity") == biome_receipt.get("nativeCatalogIdentity")
 		and backend.status().get("visualCatalogIdentity") == receipt.get("nativeCatalogIdentity"),
 		"native owner and biome identity")
+	check(receipt.get("rockGlbBytesVerified") == true and receipt.get("rockBoundsCount") == 6,
+		"six active rock GLB bytes verified")
+	for number in range(1, 7):
+		var target_id := "rock_%02d" % number
+		var prop_id := ""
+		for candidate in range(10000):
+			var proposed := "rock-bound-admission:%s:%d" % [target_id, candidate]
+			if visual.select_rock_asset_id("forest", proposed) == target_id:
+				prop_id = proposed
+				break
+		check(not prop_id.is_empty(), "rock selection search: " + target_id)
+		if prop_id.is_empty():
+			continue
+		var selected_bounds: Dictionary = backend.select_rock_asset_shadow("forest", prop_id)
+		var asset: Dictionary = visual.asset_record(target_id)
+		var geometry: Dictionary = asset.get("rockGeometry", {})
+		var expected_min: Array = geometry.get("min", [])
+		var expected_max: Array = geometry.get("max", [])
+		var actual_min: Vector3 = selected_bounds.get("importedMeshMin", Vector3.INF)
+		var actual_max: Vector3 = selected_bounds.get("importedMeshMax", Vector3.INF)
+		check(selected_bounds.get("rockBoundsReady") == true
+			and selected_bounds.get("rockGlbSha256") == FileAccess.get_sha256("res://" + String(asset.path))
+			and expected_min.size() == 3 and expected_max.size() == 3
+			and actual_min.distance_to(
+				Vector3(expected_min[0], expected_min[1], expected_min[2])) < 0.000001
+			and actual_max.distance_to(
+				Vector3(expected_max[0], expected_max[1], expected_max[2])) < 0.000001,
+			"selected rock source bounds and file SHA: " + target_id)
 	for case in [{"biome":"forest", "id":"atlas-1492:10,20:3"},
 		{"biome":"swamp", "id":"atlas-1492:10,20:3"},
 		{"biome":"desert", "id":"atlas-1492:10,20:3"},
@@ -62,6 +90,21 @@ func run() -> void:
 		var selected: Dictionary = backend.select_rock_asset_shadow(case.biome, case.id)
 		check(selected.get("status") == "ready" and selected.get("assetId") == visual.select_rock_asset_id(case.biome, case.id),
 			"registry selection parity: " + str(case))
+	var rock_record: Dictionary = visual.assets_by_id["rock_01"]
+	var original_geometry: Dictionary = rock_record.rockGeometry.duplicate(true)
+	rock_record.rockGeometry.glbSha256 = "0".repeat(64)
+	visual.assets_by_id["rock_01"] = rock_record
+	var stale_file_bundle: Dictionary = BundleScript.capture(main)
+	check(bool(stale_file_bundle.get("ok", false)), "stale rock file recapture constructed")
+	var stale_receipt: Dictionary = backend.admit_visual_asset_catalog(stale_file_bundle)
+	check(stale_receipt.get("status") == "failed"
+		and String(stale_receipt.get("reason", "")).contains("rock GLB bytes differ")
+		and backend.status().get("visualCatalogReady") == false,
+		"same owner recapture with stale rock GLB hash rejects")
+	rock_record.rockGeometry = original_geometry
+	visual.assets_by_id["rock_01"] = rock_record
+	check(backend.admit_visual_asset_catalog(bundle).get("status") == "ready",
+		"valid rock geometry source recovers after rejected recapture")
 	var tampered := bundle.duplicate(true)
 	tampered.visual.contentIdentity = "0".repeat(64)
 	check(backend.admit_visual_asset_catalog(tampered).get("status") == "failed"
@@ -104,7 +147,7 @@ func finish() -> void:
 	if file != null:
 		file.store_string(JSON.stringify({"finished":true,"passed":failures.is_empty(),
 			"evidenceLevel":"Godot adapter contract",
-			"scope":"Effective visual registry admission and rock selection parity only; no live freshness, import readiness, full surface manifest or gameplay.",
+			"scope":"Effective visual registry admission, on-disk rock GLB hashes and imported bounds; no live selected/fallback outcome, full surface manifest or gameplay.",
 			"failures":failures}, "  "))
 		file.close()
 	quit(0 if failures.is_empty() and file != null else 1)
