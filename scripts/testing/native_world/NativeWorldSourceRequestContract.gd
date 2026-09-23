@@ -85,6 +85,28 @@ func run() -> void:
 		"invalid explicit volume rejected")
 	check(REQUEST.from_main_with_current_volume(null).get("reason") == "main_missing",
 		"missing main rejected before script volume lookup")
+	var absent_v2 := {"version":2, "seed":main.seed_text, "terrain":[]}
+	var empty_v2 := {"version":2, "seed":main.seed_text, "terrain":[], "terrainVolume":{}}
+	var expected_empty := {"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}
+	for save in [absent_v2, empty_v2]:
+		var resolved: Dictionary = REQUEST.from_main_with_v2_save(main, save)
+		check(resolved.get("status") == "ready"
+			and resolved.get("request", {}).get("terrainVolume") == expected_empty,
+			"absent or empty v2 volume resolves to canonical empty native snapshot")
+		var empty_backend = ClassDB.instantiate("NativeWorldBackend")
+		check(empty_backend != null and empty_backend.initialize_from_save_v2(
+			resolved.get("request", {})).get("status") == "ready"
+			and empty_backend.export_terrain_volume_v2().get("terrainVolume") == expected_empty,
+			"canonical empty v2 Continue snapshot native round trip")
+	var legacy_entry := {"x":-17, "z":-1, "surfaceY":-4.0}
+	var legacy_only := {"version":2, "seed":main.seed_text, "terrain":[legacy_entry]}
+	check(REQUEST.from_main_with_v2_save(main, legacy_only).get("reason")
+		== "native_legacy_terrain_conversion_required",
+		"nonempty historical v2 terrain list cannot silently become empty native volume")
+	var both := {"version":2, "seed":main.seed_text, "terrain":[legacy_entry],
+		"terrainVolume":current_volume}
+	check(REQUEST.from_main_with_v2_save(main, both).get("request", {}).get("terrainVolume")
+		== current_volume, "full v2 volume retains current restore precedence over terrain list")
 	main.structure_system.citadel_terrain_admission.configure("other-seed", {},
 		{"regionCells": main.STRUCTURE_REGION_CELLS, "spawnChance": main.STRUCTURE_SPAWN_CHANCE})
 	check(REQUEST.from_main(main).get("reason") == "site_admission_seed_mismatch", "seed mismatch fails")

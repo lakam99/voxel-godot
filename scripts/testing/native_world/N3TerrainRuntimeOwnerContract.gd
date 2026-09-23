@@ -262,7 +262,7 @@ func run() -> void:
 	main.world_generation_system = null
 	var continued = OWNER.new()
 	var continued_setup: Dictionary = continued.setup(main, terrain, 72, 10,
-		owner_saved_volume)
+		{"version":2, "seed":main.seed_text, "terrain":[], "terrainVolume":owner_saved_volume})
 	check(continued_setup.get("status") == "ready",
 		"Continue owner initializes from explicit saved v2 volume without script owner")
 	if continued_setup.get("status") == "ready":
