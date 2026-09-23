@@ -1152,23 +1152,12 @@ NativeCellStateNamespace parse_cell_namespace(const Variant &p_value, const char
 	throw std::invalid_argument(std::string(p_field) + " is unsupported");
 }
 
-Dictionary commit_typed_cell_request(NativeWorldBackendState &p_state,
-		const Dictionary &p_request, const bool p_durable_only, const char *p_operation) {
-	const String expected_schema = p_durable_only ?
-		String("n3-native-durable-cell-transaction/v1") : String("n3-native-typed-cell-transaction/v1");
-	if (require_protocol_string(p_request.get("schema", Variant()), "schema") != expected_schema) {
-		throw std::invalid_argument("unsupported typed cell transaction schema");
-	}
-	NativeWorldBackendTransaction transaction;
-	transaction.source_identity = p_state.source_identity();
-	transaction.deltas.transaction_id = require_bounded_utf8(
-		p_request.get("transactionId", Variant()), "transactionId", MAX_TRANSACTION_ID_BYTES, false);
-	transaction.deltas.expected_revision = require_u64(p_request.get("expectedRevision", Variant()), "expectedRevision");
-	const Array operations = require_array(p_request.get("operations", Variant()), "operations");
+void append_typed_cell_operations(const Array &operations, const bool p_durable_only,
+		std::vector<WorldTypedCellOperation> &p_target) {
 	if (static_cast<std::size_t>(operations.size()) > MAX_TYPED_CELL_OPERATIONS) {
 		throw std::length_error("typed cell transaction exceeds adapter operation limit");
 	}
-	transaction.deltas.operations.reserve(static_cast<std::size_t>(operations.size()));
+	p_target.reserve(p_target.size() + static_cast<std::size_t>(operations.size()));
 	for (int64_t index = 0; index < operations.size(); ++index) {
 		const Dictionary value = require_dictionary(operations[index], "operations[]");
 		WorldTypedCellOperation operation;
@@ -1193,9 +1182,12 @@ Dictionary commit_typed_cell_request(NativeWorldBackendState &p_state,
 		} else {
 			throw std::invalid_argument("operation.kind is unsupported");
 		}
-		transaction.deltas.operations.push_back(std::move(operation));
+		p_target.push_back(std::move(operation));
 	}
-	const WorldDeltaCommitReceipt receipt = p_state.commit(transaction);
+
+}
+
+Dictionary commit_receipt_dictionary(const WorldDeltaCommitReceipt &receipt, const char *p_operation) {
 	Dictionary result = envelope(p_operation, "ready");
 	result["transactionId"] = text(receipt.transaction_id);
 	result["revision"] = static_cast<int64_t>(receipt.revision);
@@ -1208,6 +1200,23 @@ Dictionary commit_typed_cell_request(NativeWorldBackendState &p_state,
 	for (const WorldDeltaSectionKey section : receipt.affected_sections) affected.append(vector3i(section.section));
 	result["affectedSections"] = affected;
 	return result;
+}
+
+Dictionary commit_typed_cell_request(NativeWorldBackendState &p_state,
+		const Dictionary &p_request, const bool p_durable_only, const char *p_operation) {
+	const String expected_schema = p_durable_only ?
+		String("n3-native-durable-cell-transaction/v1") : String("n3-native-typed-cell-transaction/v1");
+	if (require_protocol_string(p_request.get("schema", Variant()), "schema") != expected_schema) {
+		throw std::invalid_argument("unsupported typed cell transaction schema");
+	}
+	NativeWorldBackendTransaction transaction;
+	transaction.source_identity = p_state.source_identity();
+	transaction.deltas.transaction_id = require_bounded_utf8(
+		p_request.get("transactionId", Variant()), "transactionId", MAX_TRANSACTION_ID_BYTES, false);
+	transaction.deltas.expected_revision = require_u64(p_request.get("expectedRevision", Variant()), "expectedRevision");
+	append_typed_cell_operations(require_array(p_request.get("operations", Variant()), "operations"),
+		p_durable_only, transaction.deltas.operations);
+	return commit_receipt_dictionary(p_state.commit(transaction), p_operation);
 }
 
 Array regions_array(const std::vector<NativeSiteSourceRegionKey> &p_regions) {
@@ -1504,6 +1513,10 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("apply_shaping_resolutions", "resolutions"), &NativeWorldBackend::apply_shaping_resolutions);
 	ClassDB::bind_method(D_METHOD("commit_typed_cells", "request"), &NativeWorldBackend::commit_typed_cells);
 	ClassDB::bind_method(D_METHOD("commit_durable_cells", "request"), &NativeWorldBackend::commit_durable_cells);
+	ClassDB::bind_method(D_METHOD("begin_staged_durable_cells", "request"), &NativeWorldBackend::begin_staged_durable_cells);
+	ClassDB::bind_method(D_METHOD("append_staged_durable_cells", "operations"), &NativeWorldBackend::append_staged_durable_cells);
+	ClassDB::bind_method(D_METHOD("commit_staged_durable_cells"), &NativeWorldBackend::commit_staged_durable_cells);
+	ClassDB::bind_method(D_METHOD("abort_staged_durable_cells"), &NativeWorldBackend::abort_staged_durable_cells);
 	ClassDB::bind_method(D_METHOD("pin_effective_page", "primary_page"), &NativeWorldBackend::pin_effective_page);
 	ClassDB::bind_method(D_METHOD("encode_voxel_block_shadow", "request"), &NativeWorldBackend::encode_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("begin_voxel_block_shadow_async", "request"), &NativeWorldBackend::begin_voxel_block_shadow_async);
@@ -3015,6 +3028,7 @@ Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resoluti
 
 Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
 	if (!state_ || !shaping_registry_) return envelope("commit_typed_cells", "failed", "backend_not_ready");
+	if (staged_durable_cells_) return envelope("commit_typed_cells", "failed", "staged_durable_transaction_pending");
 	try {
 		Dictionary result = commit_typed_cell_request(*state_, p_request, false, "commit_typed_cells");
 		if (result.get("commitStatus", String()) == "committed")
@@ -3027,6 +3041,7 @@ Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
 
 Dictionary NativeWorldBackend::commit_durable_cells(const Dictionary &p_request) {
 	if (!state_ || !shaping_registry_) return envelope("commit_durable_cells", "failed", "backend_not_ready");
+	if (staged_durable_cells_) return envelope("commit_durable_cells", "failed", "staged_durable_transaction_pending");
 	try {
 		Dictionary result = commit_typed_cell_request(*state_, p_request, true, "commit_durable_cells");
 		if (result.get("commitStatus", String()) == "committed")
@@ -3035,6 +3050,74 @@ Dictionary NativeWorldBackend::commit_durable_cells(const Dictionary &p_request)
 	} catch (const std::exception &error) {
 		return failure("commit_durable_cells", error);
 	}
+}
+
+Dictionary NativeWorldBackend::begin_staged_durable_cells(const Dictionary &p_request) {
+	if (!state_ || !shaping_registry_) return envelope("begin_staged_durable_cells", "failed", "backend_not_ready");
+	if (staged_durable_cells_) return envelope("begin_staged_durable_cells", "failed", "staged_durable_transaction_pending");
+	try {
+		if (require_protocol_string(p_request.get("schema", Variant()), "schema") !=
+				String("n3-native-staged-durable-cell-transaction/v1"))
+			throw std::invalid_argument("unsupported staged durable transaction schema");
+		NativeWorldBackendTransaction transaction;
+		transaction.source_identity = state_->source_identity();
+		transaction.deltas.transaction_id = require_bounded_utf8(
+			p_request.get("transactionId", Variant()), "transactionId", MAX_TRANSACTION_ID_BYTES, false);
+		transaction.deltas.expected_revision = require_u64(
+			p_request.get("expectedRevision", Variant()), "expectedRevision");
+		if (transaction.deltas.expected_revision != state_->terrain_delta_revision())
+			return envelope("begin_staged_durable_cells", "failed", "staged_durable_revision_mismatch");
+		staged_durable_cells_.emplace(std::move(transaction));
+		Dictionary result = envelope("begin_staged_durable_cells", "ready");
+		result["preparedCells"] = static_cast<int64_t>(0);
+		return result;
+	} catch (const std::exception &error) {
+		return failure("begin_staged_durable_cells", error);
+	}
+}
+
+Dictionary NativeWorldBackend::append_staged_durable_cells(const Array &p_operations) {
+	if (!state_ || !staged_durable_cells_) return envelope("append_staged_durable_cells", "failed", "staged_durable_transaction_missing");
+	try {
+		if (p_operations.is_empty()) throw std::invalid_argument("staged durable batch is empty");
+		if (!(state_->source_identity() == staged_durable_cells_->source_identity) ||
+				state_->terrain_delta_revision() != staged_durable_cells_->deltas.expected_revision)
+			throw std::invalid_argument("staged durable source revision changed");
+		append_typed_cell_operations(p_operations, true, staged_durable_cells_->deltas.operations);
+		Dictionary result = envelope("append_staged_durable_cells", "ready");
+		result["preparedCells"] = static_cast<int64_t>(staged_durable_cells_->deltas.operations.size());
+		return result;
+	} catch (const std::exception &error) {
+		staged_durable_cells_.reset();
+		return failure("append_staged_durable_cells", error);
+	}
+}
+
+Dictionary NativeWorldBackend::commit_staged_durable_cells() {
+	if (!state_ || !staged_durable_cells_) return envelope("commit_staged_durable_cells", "failed", "staged_durable_transaction_missing");
+	try {
+		if (staged_durable_cells_->deltas.operations.empty())
+			throw std::invalid_argument("staged durable transaction is empty");
+		if (!(state_->source_identity() == staged_durable_cells_->source_identity) ||
+				state_->terrain_delta_revision() != staged_durable_cells_->deltas.expected_revision)
+			throw std::invalid_argument("staged durable source revision changed");
+		Dictionary result = commit_receipt_dictionary(state_->commit(*staged_durable_cells_),
+			"commit_staged_durable_cells");
+		staged_durable_cells_.reset();
+		if (result.get("commitStatus", String()) == "committed")
+			invalidate_changed_voxel_demand(Array(result.get("affectedSections", Array())));
+		return result;
+	} catch (const std::exception &error) {
+		staged_durable_cells_.reset();
+		return failure("commit_staged_durable_cells", error);
+	}
+}
+
+Dictionary NativeWorldBackend::abort_staged_durable_cells() {
+	staged_durable_cells_.reset();
+	Dictionary result = envelope("abort_staged_durable_cells", "ready");
+	result["aborted"] = true;
+	return result;
 }
 
 Dictionary NativeWorldBackend::pin_effective_page(const Vector2i &p_primary_page) const {

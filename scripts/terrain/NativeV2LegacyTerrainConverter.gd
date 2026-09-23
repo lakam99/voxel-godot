@@ -9,7 +9,6 @@ const PageAdmission = preload("res://scripts/world/NativeShapingPageAdmission.gd
 const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
 const DurableCodec = preload("res://scripts/terrain/NativeDurableEditMirror.gd")
 const MAX_CELLS_PER_STEP := 64
-const MAX_COLUMN_OPERATIONS := 4096
 
 var _backend
 var _pages
@@ -22,7 +21,11 @@ var _last_y := -1
 var _state := "new"
 var _failure := ""
 var _cell_meters := 0.0
-var _staged_operations: Array = []
+var _prepared_count := 0
+var _commit_thread: Thread
+var _export_thread: Thread
+var _exported_volume := {}
+var _cancel_requested := false
 var _save_snapshot := {}
 
 func setup(main, save: Dictionary) -> Dictionary:
@@ -66,11 +69,41 @@ func setup(main, save: Dictionary) -> Dictionary:
 	return {"status":"ready", "entryCount":_entries.size()}
 
 func advance() -> Dictionary:
+	if _export_thread != null:
+		if _export_thread.is_alive():
+			return {"status":"pending", "reason":"native_legacy_export_in_flight"}
+		var exported: Dictionary = _export_thread.wait_to_finish()
+		_export_thread = null
+		if _cancel_requested:
+			_release_cancelled()
+			return {"status":"ready", "cancelled":true}
+		if exported.get("status") != "ready": return _failed("native_legacy_export_failed")
+		_exported_volume = {"status":"ready", "terrainVolume":exported.terrainVolume,
+			"nativeRevision":exported.terrainDeltaRevision}
+		_state = "complete"
+		return _exported_volume
+	if _commit_thread != null:
+		if _commit_thread.is_alive():
+			return {"status":"pending", "reason":"native_legacy_commit_in_flight"}
+		var committed: Dictionary = _commit_thread.wait_to_finish()
+		_commit_thread = null
+		if _cancel_requested:
+			_release_cancelled()
+			return {"status":"ready", "cancelled":true}
+		if committed.get("status") != "ready" or committed.get("commitStatus") != "committed":
+			return _failed(String(committed.get("reason", "native_legacy_commit_failed")))
+		_prepared_count = 0
+		_entry_index += 1
+		return {"status":"pending", "reason":"legacy_conversion_progress",
+			"completedEntries":_entry_index, "entryCount":_entries.size()}
 	if _state == "complete": return export_volume()
 	if _state != "active": return _failed("converter_not_active")
 	if _entry_index >= _entries.size():
-		_state = "complete"
-		return export_volume()
+		_export_thread = Thread.new()
+		if _export_thread.start(_export_on_worker) != OK:
+			_export_thread = null
+			return _failed("native_legacy_export_worker_failed")
+		return {"status":"pending", "reason":"native_legacy_export_in_flight"}
 	if _next_y > _last_y:
 		var entry = _entries[_entry_index]
 		if not entry is Dictionary:
@@ -100,12 +133,17 @@ func advance() -> Dictionary:
 			return {"status":"pending", "reason":"no_excavation"}
 		_next_y = floori(new_surface / _cell_meters)
 		_last_y = ceili(old_surface / _cell_meters)
-		_staged_operations.clear()
-		if _last_y - _next_y + 1 > MAX_COLUMN_OPERATIONS:
-			return _failed("legacy_column_operation_limit")
+		_prepared_count = 0
 		if _next_y > _last_y:
 			_entry_index += 1
 			return {"status":"pending", "reason":"no_excavation"}
+		var before: Dictionary = _backend.status()
+		var started: Dictionary = _backend.begin_staged_durable_cells({
+			"schema":"n3-native-staged-durable-cell-transaction/v1",
+			"transactionId":"v2-legacy:%d" % _entry_index,
+			"expectedRevision":int(before.get("terrainDeltaRevision", -1))})
+		if started.get("status") != "ready":
+			return _failed(String(started.get("reason", "native_legacy_stage_failed")))
 	var operations: Array = []
 	var end_y := mini(_last_y, _next_y + MAX_CELLS_PER_STEP - 1)
 	for y in range(_next_y, end_y + 1):
@@ -117,30 +155,29 @@ func advance() -> Dictionary:
 				"metadata":{"source":"legacy_volume_edit", "terrainMeshAffects":true,
 					"saveDelta":true}, "blockId":"air",
 				"editReason":"legacy_volume_edit_restore"}})
-	_staged_operations.append_array(operations)
+	var appended: Dictionary = _backend.append_staged_durable_cells(operations)
+	if appended.get("status") != "ready":
+		return _failed(String(appended.get("reason", "native_legacy_append_failed")))
+	_prepared_count = int(appended.get("preparedCells", -1))
 	_next_y = end_y + 1
 	if _next_y <= _last_y:
 		return {"status":"pending", "reason":"preparing_legacy_column",
-			"preparedCells":_staged_operations.size(), "completedEntries":_entry_index}
-	var before: Dictionary = _backend.status()
-	var transaction := {"schema":"n3-native-durable-cell-transaction/v1",
-		"transactionId":"v2-legacy:%d" % _entry_index,
-		"expectedRevision":int(before.get("terrainDeltaRevision", -1)),
-		"operations":_staged_operations}
-	var committed: Dictionary = _backend.commit_durable_cells(transaction)
-	if committed.get("status") != "ready" or committed.get("commitStatus") != "committed":
-		return _failed(String(committed.get("reason", "native_legacy_commit_failed")))
-	_staged_operations.clear()
-	_entry_index += 1
-	return {"status":"pending", "reason":"legacy_conversion_progress",
-		"completedEntries":_entry_index, "entryCount":_entries.size()}
+			"preparedCells":_prepared_count, "completedEntries":_entry_index}
+	_commit_thread = Thread.new()
+	if _commit_thread.start(_commit_staged_on_worker) != OK:
+		_commit_thread = null
+		return _failed("native_legacy_commit_worker_failed")
+	return {"status":"pending", "reason":"native_legacy_commit_in_flight"}
+
+func _commit_staged_on_worker() -> Dictionary:
+	return _backend.commit_staged_durable_cells()
+
+func _export_on_worker() -> Dictionary:
+	return _backend.export_terrain_volume_v2()
 
 func export_volume() -> Dictionary:
 	if _state != "complete": return {"status":"pending", "reason":"legacy_conversion_incomplete"}
-	var exported: Dictionary = _backend.export_terrain_volume_v2()
-	if exported.get("status") != "ready": return _failed("native_legacy_export_failed")
-	return {"status":"ready", "terrainVolume":exported.terrainVolume,
-		"nativeRevision":exported.terrainDeltaRevision}
+	return _exported_volume
 
 func resolved_save() -> Dictionary:
 	var exported: Dictionary = export_volume()
@@ -152,14 +189,22 @@ func resolved_save() -> Dictionary:
 
 func cancel() -> Dictionary:
 	if _state == "complete": return {"status":"failed", "reason":"converter_already_complete"}
+	if _commit_thread != null or _export_thread != null:
+		_cancel_requested = true
+		return {"status":"pending", "reason":"native_legacy_commit_drain_pending"}
+	_release_cancelled()
+	return {"status":"ready", "cancelled":true}
+
+func _release_cancelled() -> void:
 	_state = "cancelled"
+	if _backend != null: _backend.abort_staged_durable_cells()
 	_backend = null
 	_pages = null
 	_admission = null
-	_staged_operations.clear()
-	return {"status":"ready", "cancelled":true}
+	_prepared_count = 0
 
 func _failed(reason: String) -> Dictionary:
+	if _backend != null: _backend.abort_staged_durable_cells()
 	_failure = reason
 	_state = "failed"
 	return {"status":"failed", "reason":reason}
