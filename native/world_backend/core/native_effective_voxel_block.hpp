@@ -3,6 +3,8 @@
 #include "native_effective_terrain_source.hpp"
 
 #include <cstdint>
+#include <functional>
+#include <stdexcept>
 #include <vector>
 
 namespace voxel::world_backend {
@@ -11,6 +13,11 @@ struct NativeEffectiveVoxelBlockRequest {
     CellCoord origin;
     CellCoord size;
     std::uint32_t lod = 0;
+};
+
+class NativeVoxelEncodeCancelled final : public std::runtime_error {
+public:
+    NativeVoxelEncodeCancelled() : std::runtime_error("native voxel encode cancelled") {}
 };
 
 // Exactly one VoxelBuffer data block, in its native [z][x][y] byte layout.
@@ -44,6 +51,7 @@ WorldPhysicalContentIdentity native_voxel_block_content_identity(
 
 NativeEffectiveVoxelBlock encode_native_effective_voxel_block(
     const NativeEffectiveTerrainSource &source,
-    const NativeEffectiveVoxelBlockRequest &request);
+    const NativeEffectiveVoxelBlockRequest &request,
+    const std::function<bool()> &should_cancel = {});
 
 } // namespace voxel::world_backend

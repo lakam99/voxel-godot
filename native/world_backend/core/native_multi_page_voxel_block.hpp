@@ -12,6 +12,7 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
     const WorldSourceDefinition &definition,
     const WorldDeltaPinnedSnapshot &deltas,
     const std::vector<NativeTerrainShapingPagePin> &shaping_pages,
-    const NativeEffectiveVoxelBlockRequest &request);
+    const NativeEffectiveVoxelBlockRequest &request,
+    const std::function<bool()> &should_cancel = {});
 
 } // namespace voxel::world_backend

@@ -138,5 +138,34 @@ reserved slot without falsely classifying source-pending admission as an empty
 terrain block. It retains current consumer demand in `waiting_source` and
 requires a new source-ready receipt before redispatch; stale revision/epoch
 workers release their physical reservation but cannot revive stale work.
-Actual off-Main dispatch, bounded thread ownership/drain, Godot marshalling,
-viewer-paired insertion and live mesh/physics publication remain unimplemented.
+At that pure-core checkpoint, off-Main dispatch, Godot marshalling,
+viewer-paired insertion and live mesh/physics publication were unimplemented.
+
+## Async shadow adapter checkpoint
+
+The adapter now has a one-worker shadow-only `begin/poll/cancel` API for a
+captured voxel block. Main captures source, delta and shaping pins, enforces
+16-primary/64-shaping-page caps, and gives only the immutable job to the
+worker. Polling on Main compares the source, delta revision, shaping registry
+identity/revision and town policy again before marshalling result bytes to
+Godot; an old edit result returns `source_changed_retry` without bytes.
+Cancellation marks a cooperative token; encode checks it at bounded page and
+column boundaries. An active cancellation drains through poll without joining
+on the gameplay call. Backend destruction also sets the token before its
+safety join; production teardown must still retain/drain the owner explicitly
+rather than relying on a destructor in a frame budget.
+
+The focused installed-engine binding contract is
+`node tools/run-n3-async-voxel-shadow.mjs`, with report
+`artifacts/native-world-backend/n3-async-voxel-shadow-1790159308598-6441ba60/report.json`.
+It passed exact async/synchronous native byte and identity parity, busy and
+high-LOD capture rejection, unresolved shaping without bytes, edit-stale
+rejection, edited retry, a pending nonblocking cancellation that drained, and
+one teardown observation. The
+teardown observation was 0 ms, but does not prove a worker was actively
+encoding at destruction. This is a service-level test, not a live terrain,
+collision, gameplay, or performance acceptance. The queue owner and async
+adapter are still unbound to `VoxelTerrainRuntime` and each other.
+The aggregate native gate `n3-async-shadow-01` passed 502/502 debug and
+release tests, both adapter smokes, and strict pure-core coverage of
+11,124/11,124 lines, 1,481/1,481 functions and 6,592/6,592 branches.

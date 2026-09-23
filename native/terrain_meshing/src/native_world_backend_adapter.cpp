@@ -35,6 +35,7 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <thread>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -51,6 +52,7 @@ constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
 constexpr const char *VOXEL_BLOCK_REQUEST_SCHEMA = "n3-effective-voxel-block-request/v1";
 constexpr const char *VOXEL_BLOCK_RESULT_SCHEMA = "n3-effective-voxel-block-result/v1";
+constexpr const char *VOXEL_BLOCK_ASYNC_SCHEMA = "n3-voxel-block-shadow-async/v1";
 constexpr const char *REMOVED_PROPS_RECEIPT_SCHEMA = "n4-removed-props-tombstone-receipt/v1";
 constexpr const char *BIOME_CATALOG_RECEIPT_SCHEMA = "n4-biome-environment-catalog-receipt/v1";
 constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-receipt/v1";
@@ -1484,6 +1486,14 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("commit_durable_cells", "request"), &NativeWorldBackend::commit_durable_cells);
 	ClassDB::bind_method(D_METHOD("pin_effective_page", "primary_page"), &NativeWorldBackend::pin_effective_page);
 	ClassDB::bind_method(D_METHOD("encode_voxel_block_shadow", "request"), &NativeWorldBackend::encode_voxel_block_shadow);
+	ClassDB::bind_method(D_METHOD("begin_voxel_block_shadow_async", "request"), &NativeWorldBackend::begin_voxel_block_shadow_async);
+	ClassDB::bind_method(D_METHOD("poll_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::poll_voxel_block_shadow_async);
+	ClassDB::bind_method(D_METHOD("cancel_voxel_block_shadow_async", "ticket"), &NativeWorldBackend::cancel_voxel_block_shadow_async);
+}
+
+NativeWorldBackend::~NativeWorldBackend() {
+	if (voxel_worker_cancel_token_) voxel_worker_cancel_token_->store(true, std::memory_order_relaxed);
+	if (voxel_worker_.joinable()) voxel_worker_.join();
 }
 
 Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
@@ -3017,6 +3027,217 @@ Dictionary NativeWorldBackend::pin_effective_page(const Vector2i &p_primary_page
 	} catch (const std::exception &error) {
 		return failure("pin_effective_page", error);
 	}
+}
+
+Dictionary NativeWorldBackend::begin_voxel_block_shadow_async(const Dictionary &p_request) {
+	constexpr const char *operation = "begin_voxel_block_shadow_async";
+	if (!state_ || !shaping_registry_) return envelope(operation, "failed", "backend_not_ready");
+	if (voxel_worker_ticket_ != 0) return envelope(operation, "rejected", "worker_busy");
+	try {
+		if (require_protocol_string(p_request.get("schema", Variant()), "schema") != VOXEL_BLOCK_REQUEST_SCHEMA)
+			throw std::invalid_argument("unsupported native effective voxel block request schema");
+		const Vector3i origin = require_vector3i(p_request.get("origin", Variant()), "origin");
+		const Vector3i size = require_vector3i(p_request.get("size", Variant()), "size");
+		const std::int64_t lod = require_i64(p_request.get("lod", Variant()), "lod");
+		if (size.x <= 0 || size.y <= 0 || size.z <= 0 || size.x > 32 || size.y > 32 || size.z > 32 || lod < 0 || lod > 24)
+			throw std::invalid_argument("native shadow voxel block dimensions or LOD are invalid");
+		const std::int64_t scale = std::int64_t{1} << lod;
+		auto checked_cell = [scale](const std::int32_t base, const std::int32_t offset) {
+			const std::int64_t value = static_cast<std::int64_t>(base) + static_cast<std::int64_t>(offset) * scale;
+			if (value > std::numeric_limits<std::int32_t>::max())
+				throw std::out_of_range("native shadow voxel block coordinate overflows int32");
+			return static_cast<std::int32_t>(value);
+		};
+		auto page_axis = [](const std::int32_t cell) {
+			constexpr std::int32_t page_cells = NativeTerrainShapingSnapshot::PAGE_CELLS;
+			return cell / page_cells - static_cast<std::int32_t>(cell % page_cells < 0);
+		};
+		(void)checked_cell(origin.y, size.y - 1);
+		std::vector<std::int32_t> x_pages, z_pages;
+		for (std::int32_t x = 0; x < size.x; ++x) {
+			const std::int32_t page = page_axis(checked_cell(origin.x, x));
+			if (x_pages.empty() || x_pages.back() != page) x_pages.push_back(page);
+		}
+		for (std::int32_t z = 0; z < size.z; ++z) {
+			const std::int32_t page = page_axis(checked_cell(origin.z, z));
+			if (z_pages.empty() || z_pages.back() != page) z_pages.push_back(page);
+		}
+		if (x_pages.size() * z_pages.size() > 16U)
+			throw std::length_error("native shadow async block exceeds primary page capture limit");
+		const WorldPhysicalContentIdentity source_identity = state_->source_identity();
+		const WorldPhysicalContentIdentity registry_identity = shaping_registry_->content_identity();
+		const WorldPhysicalContentIdentity town_policy_identity = shaping_registry_->policy_content_identity();
+		const std::uint64_t registry_revision = shaping_registry_->revision();
+		WorldDeltaPinnedSnapshot deltas = state_->pin_deltas();
+		const std::uint64_t delta_revision = deltas.revision();
+		std::vector<NativeTerrainPageKey> dependencies;
+		for (const std::int32_t z : z_pages) for (const std::int32_t x : x_pages) {
+			const auto pages = world_effective_shaping_dependencies(state_->definition(), {x, z});
+			dependencies.insert(dependencies.end(), pages.begin(), pages.end());
+		}
+		auto less_page = [](const NativeTerrainPageKey a, const NativeTerrainPageKey b) {
+			return a.z < b.z || (a.z == b.z && a.x < b.x);
+		};
+		std::sort(dependencies.begin(), dependencies.end(), less_page);
+		dependencies.erase(std::unique(dependencies.begin(), dependencies.end()), dependencies.end());
+		if (dependencies.size() > 64U)
+			throw std::length_error("native shadow async block exceeds shaping page capture limit");
+		std::vector<NativeTerrainShapingPagePin> pins;
+		pins.reserve(dependencies.size());
+		std::vector<NativeSiteSourceRegionKey> unresolved, failed_regions;
+		for (const NativeTerrainPageKey page : dependencies) {
+			NativeTerrainShapingPagePin pin = shaping_registry_->pin_page(page, town_overrides_for_page(page));
+			for (const auto region : pin.unresolved_dependencies())
+				if (std::find(unresolved.begin(), unresolved.end(), region) == unresolved.end()) unresolved.push_back(region);
+			for (const auto region : pin.failed_dependencies())
+				if (std::find(failed_regions.begin(), failed_regions.end(), region) == failed_regions.end()) failed_regions.push_back(region);
+			pins.push_back(std::move(pin));
+		}
+		if (state_->terrain_delta_revision() != delta_revision || shaping_registry_->revision() != registry_revision
+				|| !(shaping_registry_->content_identity() == registry_identity)
+				|| !(shaping_registry_->policy_content_identity() == town_policy_identity)
+				|| !(state_->source_identity() == source_identity))
+			return envelope(operation, "pending", "source_changed_retry");
+		if (!failed_regions.empty()) {
+			Dictionary result = envelope(operation, "failed", "shaping_dependency_failed");
+			result["failedRegions"] = regions_array(failed_regions);
+			return result;
+		}
+		if (!unresolved.empty()) {
+			Dictionary result = envelope(operation, "pending", "shaping_dependency_unresolved");
+			result["unresolvedRegions"] = regions_array(unresolved);
+			return result;
+		}
+		auto job = std::make_unique<NativeCapturedVoxelEncodeJob>(state_->definition(), std::move(deltas), std::move(pins),
+			NativeEffectiveVoxelBlockRequest{cell_coord(origin), cell_coord(size), static_cast<std::uint32_t>(lod)});
+		voxel_worker_source_identity_ = source_identity;
+		voxel_worker_registry_identity_ = registry_identity;
+		voxel_worker_town_policy_identity_ = town_policy_identity;
+		voxel_worker_registry_revision_ = registry_revision;
+		voxel_worker_delta_revision_ = delta_revision;
+		voxel_worker_primary_page_count_ = static_cast<std::int64_t>(x_pages.size() * z_pages.size());
+		voxel_worker_shaping_page_count_ = static_cast<std::int64_t>(dependencies.size());
+		voxel_worker_result_.reset();
+		voxel_worker_error_ = nullptr;
+		voxel_worker_cancelled_ = false;
+		if (next_voxel_worker_ticket_ == std::numeric_limits<std::int64_t>::max())
+			return envelope(operation, "failed", "ticket_space_exhausted");
+		voxel_worker_finished_.store(false, std::memory_order_relaxed);
+		voxel_worker_cancel_token_ = std::make_shared<std::atomic<bool>>(false);
+		voxel_worker_ = std::thread([this, job = std::move(job), cancel_token = voxel_worker_cancel_token_]() {
+			try { voxel_worker_result_ = job->encode([cancel_token]() {
+				return cancel_token->load(std::memory_order_relaxed);
+			}); }
+			catch (...) { voxel_worker_error_ = std::current_exception(); }
+			voxel_worker_finished_.store(true, std::memory_order_release);
+		});
+		voxel_worker_ticket_ = next_voxel_worker_ticket_++;
+		Dictionary result = envelope(operation, "pending", "worker_running");
+		result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+		result["ticket"] = voxel_worker_ticket_;
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::poll_voxel_block_shadow_async(std::int64_t p_ticket) {
+	constexpr const char *operation = "poll_voxel_block_shadow_async";
+	if (p_ticket <= 0 || p_ticket != voxel_worker_ticket_)
+		return envelope(operation, "failed", "unknown_ticket");
+	if (!voxel_worker_finished_.load(std::memory_order_acquire)) {
+		Dictionary result = envelope(operation, "pending", voxel_worker_cancelled_ ? "worker_draining" : "worker_running");
+		result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+		result["ticket"] = p_ticket;
+		if (voxel_worker_cancelled_) result["cancelled"] = true;
+		return result;
+	}
+	voxel_worker_.join();
+	voxel_worker_ticket_ = 0;
+	voxel_worker_cancel_token_.reset();
+	if (voxel_worker_cancelled_) {
+		voxel_worker_result_.reset();
+		voxel_worker_error_ = nullptr;
+		voxel_worker_cancelled_ = false;
+		Dictionary result = envelope(operation, "ready");
+		result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+		result["ticket"] = p_ticket;
+		result["cancelled"] = true;
+		return result;
+	}
+	if (!state_ || !shaping_registry_ || state_->terrain_delta_revision() != voxel_worker_delta_revision_
+			|| shaping_registry_->revision() != voxel_worker_registry_revision_
+			|| !(shaping_registry_->content_identity() == voxel_worker_registry_identity_)
+			|| !(shaping_registry_->policy_content_identity() == voxel_worker_town_policy_identity_)
+			|| !(state_->source_identity() == voxel_worker_source_identity_)) {
+		voxel_worker_result_.reset();
+		voxel_worker_error_ = nullptr;
+		Dictionary result = envelope(operation, "pending", "source_changed_retry");
+		result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+		result["ticket"] = p_ticket;
+		return result;
+	}
+	if (voxel_worker_error_) {
+		try { std::rethrow_exception(voxel_worker_error_); }
+		catch (const std::exception &error) { voxel_worker_error_ = nullptr; return failure(operation, error); }
+		catch (...) { voxel_worker_error_ = nullptr; return envelope(operation, "failed", "unknown_worker_error"); }
+	}
+	if (!voxel_worker_result_) return envelope(operation, "failed", "missing_worker_result");
+	NativeEffectiveVoxelBlock block = std::move(*voxel_worker_result_);
+	voxel_worker_result_.reset();
+	auto packed = [](const std::vector<std::uint8_t> &bytes) {
+		PackedByteArray result;
+		result.resize(static_cast<int64_t>(bytes.size()));
+		if (!bytes.empty()) std::memcpy(result.ptrw(), bytes.data(), bytes.size());
+		return result;
+	};
+	Dictionary result = envelope(operation, "ready");
+	result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+	result["ticket"] = p_ticket;
+	result["resultSchema"] = VOXEL_BLOCK_RESULT_SCHEMA;
+	result["origin"] = vector3i(block.origin);
+	result["size"] = vector3i(block.size);
+	result["lod"] = static_cast<std::int64_t>(block.lod);
+	result["sourceIdentity"] = identity_dictionary(voxel_worker_source_identity_);
+	result["pinIdentity"] = identity_dictionary(block.pin_identity);
+	result["blockContentIdentity"] = identity_dictionary(block.block_content_identity);
+	result["terrainDeltaRevision"] = static_cast<std::int64_t>(block.terrain_delta_revision);
+	result["shapingRegistryRevision"] = static_cast<std::int64_t>(block.shaping_registry_revision);
+	result["shapingRegistryIdentity"] = identity_dictionary(voxel_worker_registry_identity_);
+	result["townPolicyIdentity"] = identity_dictionary(voxel_worker_town_policy_identity_);
+	result["ownerInstanceId"] = static_cast<std::int64_t>(get_instance_id());
+	result["primaryPageCount"] = voxel_worker_primary_page_count_;
+	result["shapingPageCount"] = voxel_worker_shaping_page_count_;
+	result["sdf16Le"] = packed(block.sdf16_le);
+	result["indices8"] = packed(block.indices8);
+	result["data5_8"] = packed(block.data5_8);
+	return result;
+}
+
+Dictionary NativeWorldBackend::cancel_voxel_block_shadow_async(std::int64_t p_ticket) {
+	constexpr const char *operation = "cancel_voxel_block_shadow_async";
+	if (p_ticket <= 0 || p_ticket != voxel_worker_ticket_)
+		return envelope(operation, "rejected", "unknown_ticket");
+	if (!voxel_worker_finished_.load(std::memory_order_acquire)) {
+		voxel_worker_cancelled_ = true;
+		voxel_worker_cancel_token_->store(true, std::memory_order_relaxed);
+		Dictionary result = envelope(operation, "pending", "worker_draining");
+		result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+		result["ticket"] = p_ticket;
+		result["cancelled"] = true;
+		return result;
+	}
+	if (voxel_worker_.joinable()) voxel_worker_.join();
+	voxel_worker_ticket_ = 0;
+	voxel_worker_cancel_token_.reset();
+	voxel_worker_cancelled_ = false;
+	voxel_worker_result_.reset();
+	voxel_worker_error_ = nullptr;
+	Dictionary result = envelope(operation, "ready");
+	result["asyncSchema"] = VOXEL_BLOCK_ASYNC_SCHEMA;
+	result["ticket"] = p_ticket;
+	result["cancelled"] = true;
+	return result;
 }
 
 Dictionary NativeWorldBackend::encode_voxel_block_shadow(const Dictionary &p_request) const {

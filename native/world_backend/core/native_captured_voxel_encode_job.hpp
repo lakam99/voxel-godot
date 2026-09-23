@@ -14,7 +14,7 @@ public:
         std::vector<NativeTerrainShapingPagePin> shaping_pages,
         NativeEffectiveVoxelBlockRequest request);
 
-    NativeEffectiveVoxelBlock encode() const;
+    NativeEffectiveVoxelBlock encode(const std::function<bool()> &should_cancel = {}) const;
 
 private:
     const WorldSourceDefinition definition_;

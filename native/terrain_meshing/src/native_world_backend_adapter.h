@@ -10,6 +10,7 @@
 #include "native_wildlife_presentation_receipt.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
+#include "native_captured_voxel_encode_job.hpp"
 
 #include <godot_cpp/classes/ref_counted.hpp>
 #include <godot_cpp/classes/ref.hpp>
@@ -19,8 +20,12 @@
 #include <godot_cpp/variant/vector2i.hpp>
 
 #include <cstdint>
+#include <atomic>
+#include <exception>
 #include <memory>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 class NativeEffectiveTerrainPage : public godot::RefCounted {
@@ -72,6 +77,7 @@ protected:
 	static void _bind_methods();
 
 public:
+	~NativeWorldBackend() override;
 	godot::Dictionary initialize(const godot::Dictionary &p_request);
 	godot::Dictionary initialize_from_save_v2(const godot::Dictionary &p_request);
 	godot::Dictionary export_terrain_volume_v2() const;
@@ -99,6 +105,9 @@ public:
 	// Serialized, shadow-service-only composite admission. Not a Voxel Tools
 	// worker callback or a production publication authority.
 	godot::Dictionary encode_voxel_block_shadow(const godot::Dictionary &p_request) const;
+	godot::Dictionary begin_voxel_block_shadow_async(const godot::Dictionary &p_request);
+	godot::Dictionary poll_voxel_block_shadow_async(std::int64_t p_ticket);
+	godot::Dictionary cancel_voxel_block_shadow_async(std::int64_t p_ticket);
 
 private:
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_for_page(
@@ -128,6 +137,21 @@ private:
 	std::int64_t presentation_capture_revision_ = 0;
 	std::string presentation_capture_identity_;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_;
+	std::thread voxel_worker_;
+	std::shared_ptr<std::atomic<bool>> voxel_worker_cancel_token_;
+	std::atomic<bool> voxel_worker_finished_{false};
+	std::optional<voxel::world_backend::NativeEffectiveVoxelBlock> voxel_worker_result_;
+	std::exception_ptr voxel_worker_error_;
+	std::int64_t voxel_worker_ticket_ = 0;
+	bool voxel_worker_cancelled_ = false;
+	std::int64_t next_voxel_worker_ticket_ = 1;
+	voxel::world_backend::WorldPhysicalContentIdentity voxel_worker_source_identity_;
+	voxel::world_backend::WorldPhysicalContentIdentity voxel_worker_registry_identity_;
+	voxel::world_backend::WorldPhysicalContentIdentity voxel_worker_town_policy_identity_;
+	std::uint64_t voxel_worker_registry_revision_ = 0;
+	std::uint64_t voxel_worker_delta_revision_ = 0;
+	std::int64_t voxel_worker_primary_page_count_ = 0;
+	std::int64_t voxel_worker_shaping_page_count_ = 0;
 };
 
 #endif

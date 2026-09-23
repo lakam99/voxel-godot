@@ -59,7 +59,9 @@ void append_u64(std::vector<std::uint8_t> &bytes, const std::uint64_t value) {
 NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
     const WorldSourceDefinition &definition, const WorldDeltaPinnedSnapshot &deltas,
     const std::vector<NativeTerrainShapingPagePin> &shaping_pages,
-    const NativeEffectiveVoxelBlockRequest &request) {
+    const NativeEffectiveVoxelBlockRequest &request,
+    const std::function<bool()> &should_cancel) {
+    if (should_cancel && should_cancel()) throw NativeVoxelEncodeCancelled();
     const CellCoord size = request.size;
     if (size.x <= 0 || size.y <= 0 || size.z <= 0
         || size.x > 32 || size.y > 32 || size.z > 32 || request.lod > 24U)
@@ -74,6 +76,7 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
     // primaries times the bounded dependency set for one primary. There is no
     // additional capacity rejection that could strand a valid Voxel Tools LOD.
     for (const auto &z : zs) for (const auto &x : xs) {
+        if (should_cancel && should_cancel()) throw NativeVoxelEncodeCancelled();
         const NativeTerrainPageKey primary{x.page.x, z.page.z};
         primaries.push_back(primary);
         const auto dependencies = world_effective_shaping_dependencies(definition, primary);
@@ -151,7 +154,7 @@ NativeEffectiveVoxelBlock encode_native_multi_page_voxel_block(
             coordinate(request.origin.x, x.begin, scale), request.origin.y,
             coordinate(request.origin.z, z.begin, scale)};
         const NativeEffectiveVoxelBlock sub = encode_native_effective_voxel_block(
-            source, {sub_origin, {x.count, size.y, z.count}, request.lod});
+            source, {sub_origin, {x.count, size.y, z.count}, request.lod}, should_cancel);
         for (std::int32_t sz = 0; sz < z.count; ++sz)
             for (std::int32_t sx = 0; sx < x.count; ++sx)
                 for (std::int32_t y = 0; y < size.y; ++y) {

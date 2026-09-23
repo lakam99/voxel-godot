@@ -484,3 +484,23 @@ VWB_TEST(native_captured_voxel_job_rejects_incomplete_mixed_and_pending_captures
         }
     VWB_EXPECT(found_pending);
 }
+
+VWB_TEST(native_captured_voxel_job_cancels_at_bounded_encode_checkpoints) {
+    Fixture fixture;
+    const NativeEffectiveVoxelBlockRequest request{{-1, 0, -1}, {2, 2, 2}, 0};
+    NativeCapturedVoxelEncodeJob job(fixture.source, fixture.store.pin(), fixture.pins(request), request);
+    const auto baseline = job.encode();
+    const auto uncancelled = job.encode([] { return false; });
+    VWB_EXPECT_EQ(baseline.sdf16_le, uncancelled.sdf16_le);
+    VWB_EXPECT_EQ(baseline.indices8, uncancelled.indices8);
+    VWB_EXPECT_EQ(baseline.data5_8, uncancelled.data5_8);
+    // 1: entry, 2-5: four primary dependency passes, 6: first z
+    // column, 7: first x column. These probes are deterministic and avoid
+    // racing wall time or relying on worker scheduling in the unit test.
+    for (const int stop_on : {1, 2, 6, 7}) {
+        int probes = 0;
+        VWB_EXPECT_THROW(NativeVoxelEncodeCancelled,
+            job.encode([&] { return ++probes == stop_on; }));
+        VWB_EXPECT_EQ(stop_on, probes);
+    }
+}

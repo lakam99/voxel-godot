@@ -67,7 +67,8 @@ std::uint8_t native_voxel_material_channel_id(const TerrainMaterialId material) 
 
 NativeEffectiveVoxelBlock encode_native_effective_voxel_block(
     const NativeEffectiveTerrainSource &source,
-    const NativeEffectiveVoxelBlockRequest &request) {
+    const NativeEffectiveVoxelBlockRequest &request,
+    const std::function<bool()> &should_cancel) {
     const CellCoord size = request.size;
     if (size.x <= 0 || size.y <= 0 || size.z <= 0
         || size.x > MAX_SIDE || size.y > MAX_SIDE || size.z > MAX_SIDE
@@ -102,8 +103,10 @@ NativeEffectiveVoxelBlock encode_native_effective_voxel_block(
     const double cell = pin.definition().constants().cell_size_meters;
     const double voxel_scale = static_cast<double>(scale);
     for (std::int32_t z = 0; z < size.z; ++z) {
+        if (should_cancel && should_cancel()) throw NativeVoxelEncodeCancelled();
         const std::int32_t cz = checked_coordinate(request.origin.z, z, scale);
         for (std::int32_t x = 0; x < size.x; ++x) {
+            if (should_cancel && should_cancel()) throw NativeVoxelEncodeCancelled();
             const std::int32_t cx = checked_coordinate(request.origin.x, x, scale);
             for (std::int32_t y = 0; y < size.y; ++y) {
                 const std::int32_t cy = checked_coordinate(request.origin.y, y, scale);
