@@ -85,6 +85,20 @@ contracts atomically, or replace those consumers together at their cutover.
   The cap matches the native retained queue's 128-entry ceiling, but existing
   consumers can still make a newly requested footprint temporarily full;
   admission must retain and retry any `queue_capacity` result.
+- `NativeTerrainBlockPublisher` is a composed manual-data bridge that admits
+  shaping pages, retains a bounded native block request, inserts complete
+  channel buffers into a paired `VoxelTerrain`, and keeps mesh/physics/unload
+  receipts separate. A headed mechanism fixture inserted 27 halo blocks,
+  obtained a real mesh and collision ray, rejected premature physics
+  acknowledgement, then accepted the proven receipt and observed viewer
+  unload/release/drain. Command:
+  `node tools/run-n3-native-terrain-block-publisher.mjs`. Report:
+  `artifacts/native-world-backend/n3-native-terrain-publisher-1790166777903-0355ab15/report.json`.
+  It uses an already-ready source page and an exclusive backend. Production
+  viewer/chunk/foreground demand union, pending-source completion, live edit
+  replacement and reset are not yet connected. `stop()` releases demand but
+  does not clear injected VoxelTerrain data; runtime reset must also retire or
+  clear the paired physical terrain before acknowledging a new seed.
 
 ## Integration order and fail-closed checks
 
