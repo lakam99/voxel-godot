@@ -279,6 +279,11 @@ func run() -> void:
 		and replacement.get("row", {}).get("block") == block
 		and requests.collision_source_snapshot().get("status") == "ready",
 		"demand change retires old producer and retries new requested block")
+	var broker_idle: Dictionary = requests.advance()
+	check(broker_idle.get("status") == "pending"
+		and broker_idle.get("reason") == "artifact_queue_idle"
+		and broker_idle.get("sourceComplete") == true,
+		"idle request queue cannot masquerade as physical readiness")
 	var request_stop: Dictionary = requests.stop()
 	for frame in range(120):
 		if request_stop.get("status") == "ready": break
@@ -308,6 +313,64 @@ func run() -> void:
 		and resumed.get("reason") != "resident_mesh_capacity_backpressure",
 		"retained request resumes after capacity-compatible demand")
 	bounded.stop()
+	var remote_page := Vector2i.ZERO
+	var remote_candidate := {}
+	for page_index in range(2, 7):
+		var trial_page := Vector2i(page_index, page_index)
+		var trial: Dictionary = backend.shaping_requests(trial_page)
+		if not (trial.get("requests", []) as Array).is_empty():
+			remote_page = trial_page
+			remote_candidate = trial.requests[0]
+			break
+	check(not remote_candidate.is_empty(), "distant unresolved shaping source found")
+	if not remote_candidate.is_empty():
+		var remote_block := Vector3i(floori(float(remote_page.x * 280 + 16) / 16.0), 8,
+			floori(float(remote_page.y * 280 + 16) / 16.0))
+		var remote_viewers: Array[Dictionary] = [{"kind":"secondary", "id":"remote",
+			"position":Vector3(remote_block.x * 16, 0, remote_block.z * 16) * main.CELL,
+			"distance":0}]
+		var both: Dictionary = planner.replace_sources(viewer, remote_viewers, [], [],
+			Vector2i(128,128))
+		var local_producer = PRODUCER.new()
+		check(both.get("status") == "ready" and local_producer.setup(backend, pages,
+			main.structure_system.citadel_terrain_admission, planner, main.CELL,
+			{"ownerGeneration":79, "sourceRevision":1,
+				"cancellationEpoch":1, "sourceEpoch":"local-page-pins"}).get("status") == "ready",
+			"two distant blocks share one pinned terrain revision")
+		local_producer.request_block(high_block)
+		var local_result := {}
+		for frame in range(300):
+			local_result = local_producer.advance()
+			if local_result.get("status") == "ready" or local_result.get("status") == "failed": break
+			await process_frame
+		var before_registry := int(backend.status().get("shapingRegistryRevision", -1))
+		var remote_resolution := {"region":remote_candidate.region,
+			"requestIdentity":remote_candidate.requestIdentity,
+			"workerSourceKey":remote_candidate.workerSourceKey,
+			"kind":"absent", "reasonCode":"n3_remote_page_contract_absent"}
+		var remote_change: Dictionary = backend.apply_shaping_resolutions([remote_resolution])
+		var local_identity: Dictionary = local_producer.collision_source_snapshot().get("identity", {})
+		check(local_result.get("status") == "ready"
+			and remote_change.get("commitStatus") == "committed"
+			and int(backend.status().get("shapingRegistryRevision", -1)) > before_registry
+			and local_producer.collision_artifact_row(high_block, local_identity).get("status") == "ready",
+			"remote shaping revision preserves unchanged local triangle row")
+		local_producer.request_block(remote_block)
+		var remote_result := {}
+		for frame in range(500):
+			remote_result = local_producer.advance()
+			if remote_result.get("status") == "ready" or remote_result.get("status") == "failed": break
+			await process_frame
+		check(remote_result.get("status") == "ready"
+			and local_producer.collision_source_snapshot().get("status") == "ready"
+			and local_producer.collision_artifact_row(high_block, local_identity).get("status") == "ready",
+			"distant block admission preserves first row and completes closure")
+		var local_stop: Dictionary = local_producer.stop()
+		for frame in range(120):
+			if local_stop.get("status") == "ready": break
+			await process_frame
+			local_stop = local_producer.drain_step()
+		check(local_stop.get("status") == "ready", "distant page producer drains")
 	var stopped: Dictionary = producer.stop()
 	for frame in range(120):
 		if stopped.get("status") == "ready": break

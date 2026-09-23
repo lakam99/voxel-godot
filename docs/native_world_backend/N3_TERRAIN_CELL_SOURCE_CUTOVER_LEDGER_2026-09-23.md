@@ -243,11 +243,13 @@ Required mesh membership is derived independently in
 data-block demand, without its data halo. Identical demand refreshes retain
 their revision and closure token; a changed closure gets a new identity. The
 producer's `collision_source_snapshot` stays pending until every required
-block has a source-bound artifact at the current shaping registry revision.
+block has a source-bound artifact with current local page pins.
 Artifact keys digest the exact native channels and source identity; an
 unrelated durable edit can refresh row revisions without changing an unchanged
-block's key. A shaping revision change makes older rows stale until they are
-encoded again. This contract is still a service boundary:
+block's key. A global shaping revision change rechecks each row's padded
+block primary-page pins through the native effective-page API. A distant page
+change leaves unrelated rows current; a changed local physical pin requires
+the affected row to be encoded again. This contract is still a service boundary:
 the production `VoxelTerrainRuntime` does not consume it, N5 has not installed
 its full resident collision set, and Voxel Tools remains the live collider
 authority. Focused evidence:
@@ -278,3 +280,10 @@ never offers an oversized ready source snapshot to N5. This is a bounded
 service response, not spatial retirement or a solution for legitimate larger
 world demand. The two-block/one-block-cap focused preflight is covered in
 `artifacts/native-world-backend/n3-triangle-artifact-1790178589610-4fd2eab5/report.json`.
+The focused two-distant-block shaping test at
+`artifacts/native-world-backend/n3-triangle-artifact-1790178952729-d395b59f/report.json`
+proves a remote registry revision preserves the first block's canonical row
+while the distant block is produced. The broker reports idle as pending even
+after its request queue empties; only the source snapshot can declare its
+logical artifact closure, and only N5's physics receipt can declare physical
+readiness. The test does not prove a live collision owner or gameplay release.
