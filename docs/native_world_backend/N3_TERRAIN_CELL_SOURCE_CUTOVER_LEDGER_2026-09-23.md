@@ -73,6 +73,27 @@ each. Evidence:
 This is owner setup only. `MainSaveState` and `VoxelTerrainRuntime` remain
 script-owned in production, and live New Game/Continue loading, physical
 collision replacement, and save-after-play are unproven.
+
+Save-v2 optional-field audit: `SaveSystem` checks version 2 but does not
+require `terrainVolume`. `MainSaveState.apply_save_snapshot` applies historical
+`terrain` column edits first, then, when a nonempty `terrainVolume` exists,
+resets and restores that volume. Current new saves write `terrain: []` and a
+full volume, but valid earlier v2 saves may omit or empty `terrainVolume`.
+`from_main_with_v2_save` now resolves absent/empty volume plus empty `terrain`
+to one canonical empty native volume, and uses a present full volume with the
+same precedence as current restore. A nonempty historical `terrain` list with
+no full volume returns pending `native_legacy_terrain_conversion_required`
+instead of silently discarding terrain edits. Both accepted shapes round trip
+through the installed native backend, and the pending/precedence cases pass at
+`artifacts/native-world-backend/n3-world-source-request-1790173418313-94456927/report.json`.
+
+The remaining valid-v2 conversion must derive each column's prior surface
+from the native source in save order, apply the historical excavation cells
+as typed durable native transactions, and export one canonical volume before
+playable Continue. It must admit shaping pages and retain pending work, bound
+large columns across frames, and preserve the current `terrainVolume` override
+rule. No production Continue cutover is safe until this converter and headed
+reload evidence exist.
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and
