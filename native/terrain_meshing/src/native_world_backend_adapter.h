@@ -88,8 +88,13 @@ public:
 	godot::Dictionary admit_removed_props_tombstones(const godot::Dictionary &p_capture);
 	godot::Dictionary admit_biome_environment_catalog(const godot::Dictionary &p_capture);
 	godot::Dictionary admit_visual_asset_catalog(const godot::Dictionary &p_bundle);
-	godot::Dictionary select_rock_asset_shadow(const godot::String &p_biome,
+	 godot::Dictionary select_rock_asset_shadow(const godot::String &p_biome,
 		const godot::String &p_durable_prop_id) const;
+	godot::Dictionary project_published_rock_footprint_shadow(
+		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
+		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions,
+		std::int64_t p_ordinal, const godot::String &p_visual_source,
+		const godot::String &p_visual_asset_id) const;
 	godot::Dictionary admit_wildlife_presentation_catalog(const godot::Dictionary &p_bundle);
 	godot::Dictionary admit_structure_exclusion_chunk(const godot::Dictionary &p_capture) const;
 	godot::Dictionary compose_surface_prop_ordered_shadow(
