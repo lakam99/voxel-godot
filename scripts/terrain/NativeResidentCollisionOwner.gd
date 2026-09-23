@@ -133,16 +133,28 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			return {"status": "pending", "reason": "candidate_source_row_drift"}
 	var old := {}
 	for block in affected:
+		if _live.has(block):
+			old[block] = _live[block]
+	var switched_any := false
+	for block in affected:
 		if not _source_row_current(block, identity, rows_by_block[block]):
-			var restored_before_switch: Dictionary = await _rollback(candidates, old)
+			if switched_any:
+				var restored_drift: Dictionary = await _rollback(candidates, old)
+				_pending_candidates.clear()
+				_busy = false
+				return {"status": "pending" if bool(restored_drift.get("physicalReady", false)) else "failed",
+					"reason": "candidate_source_row_drift",
+					"oldPhysicalRestored": restored_drift.get("physicalReady", false),
+					"oldPhysicsFrame": restored_drift.get("physicsFrame", -1)}
+			_dispose_candidates(candidates)
 			_pending_candidates.clear()
 			_busy = false
 			return {"status": "pending", "reason": "candidate_source_row_drift",
-				"oldPhysicalRestored": restored_before_switch.get("physicalReady", false)}
+				"oldPhysicalUnchanged": true}
 		if _live.has(block):
-			old[block] = _live[block]
 			_set_enabled(old[block], false)
 		_set_enabled(candidates[block], true)
+		switched_any = true
 		var source_current := false
 		var actor_clear := false
 		var physics_probe := false
@@ -462,14 +474,23 @@ func _rollback(candidates: Dictionary, old: Dictionary) -> Dictionary:
 	for entry in old.values():
 		_set_enabled(entry, true)
 	await get_tree().physics_frame
-	var restored := not old.is_empty()
+	var restored := true
 	for entry in old.values():
 		if not _probe(entry):
+			restored = false
+	for block in candidates:
+		if not old.has(block) and not _probe_clear(candidates[block]):
 			restored = false
 	_restored_old_frame = Engine.get_physics_frames() if restored else -1
 	if not restored:
 		_failed = true
 	return {"physicalReady": restored, "physicsFrame": _restored_old_frame}
+
+
+func _probe_clear(entry: Dictionary) -> bool:
+	var query := PhysicsRayQueryParameters3D.create(entry.probeFrom, entry.probeTo,
+		COLLISION_LAYER)
+	return get_world_3d().direct_space_state.intersect_ray(query).is_empty()
 
 
 func _source_current(identity: Dictionary) -> bool:
