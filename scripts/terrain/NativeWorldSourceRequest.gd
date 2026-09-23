@@ -4,6 +4,7 @@ class_name NativeWorldSourceRequest
 const WORLD_GENERATION := preload("res://scripts/WorldGenerationSystem.gd")
 const SITE_QUEUE := preload("res://scripts/world/CitadelSiteBuildQueue.gd")
 const SITE_SURVEY := preload("res://scripts/world/CitadelSiteSurvey.gd")
+const SAVE_SNAPSHOT_LEASE := preload("res://scripts/terrain/NativeWorldSaveSnapshotLease.gd")
 
 # Constructs the native initialization envelope from the same finalized inputs
 # used by production site admission. This does not request or sample terrain.
@@ -112,6 +113,44 @@ static func from_main_with_v2_save(main, save) -> Dictionary:
 			return {"status":"pending", "reason":"native_legacy_terrain_conversion_required"}
 		volume = {"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}
 	return from_main_with_save_volume(main, volume)
+
+## Build the bounded native source descriptor while borrowing the already
+## decoded save's terrainVolume and retaining the save owner. The caller must
+## pass snapshotOwner to NativeTerrainLoadTransaction.start() and keep that
+## transaction alive through commit/take_backend or acknowledged cancellation
+## drain. Unlike from_main_with_v2_save(), this constructor never recursively
+## clones the potentially large section/cell payload.
+static func from_main_with_v2_save_snapshot(main, save) -> Dictionary:
+	if not save is Dictionary or int(save.get("version", -1)) != 2:
+		return _failed("save_v2_required")
+	if main == null:
+		return _failed("main_missing")
+	if String(save.get("seed", main.get("seed_text"))) != String(main.get("seed_text")):
+		return _failed("save_seed_mismatch")
+	var terrain_value = save.get("terrain", [])
+	if not terrain_value is Array:
+		return _failed("save_terrain_entries_invalid")
+	var volume_value = save.get("terrainVolume", {})
+	if not volume_value is Dictionary:
+		return _failed("save_terrain_volume_invalid")
+	var volume: Dictionary = volume_value
+	if volume.is_empty():
+		if not terrain_value.is_empty():
+			return {"status":"pending", "reason":"native_legacy_terrain_conversion_required"}
+		volume = {"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}
+	var built := from_main(main)
+	if built.get("status") != "ready":
+		return built
+	var request: Dictionary = built.request.duplicate(true)
+	request["schema"] = "n3-native-world-backend-initialize-from-save-v2/v1"
+	request["saveSeedText"] = request.seedText
+	# Direct reference by design. Transaction start retains both this envelope
+	# and a producer lease, then sends only shallow 256-record slices per advance.
+	request["terrainVolume"] = volume
+	var lease = SAVE_SNAPSHOT_LEASE.new()
+	if not lease.acquire(save, volume): return _failed("save_snapshot_lease_unavailable")
+	return {"status":"ready", "request":request, "snapshotOwner":lease,
+		"snapshotLease":lease}
 
 static func _failed(reason: String) -> Dictionary:
 	return {"status": "failed", "reason": reason}
