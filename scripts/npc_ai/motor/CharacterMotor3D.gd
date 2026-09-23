@@ -40,9 +40,17 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 
 	if state.jumped and terrain_provider != null and (terrain_provider.has_method("ground_y_near_position") or terrain_provider.has_method("surface_y_at_position")):
 		var jump_ground_y: float = ground_y_for_body(terrain_provider, body.global_position)
-		move_vertical_toward(body, jump_ground_y + 0.08)
+		move_vertical_toward(body, jump_ground_y + 0.08, terrain_provider)
 
 	var pre_slide_position := body.global_position
+	if terrain_provider != null and terrain_provider.has_method("native_collision_admit_motion") \
+			and not terrain_provider.call("native_collision_admit_motion", body, body.velocity * delta):
+		body.velocity = Vector3.ZERO
+		state.position = body.global_position
+		state.velocity = body.velocity
+		state.blocked = true
+		state.blocked_contact_category = "collision_publication_admission"
+		return state
 	var slide_start: int = monitor.begin_section("npc_motor_move_and_slide") if monitor != null else Time.get_ticks_usec()
 	body.move_and_slide()
 	if monitor != null:
@@ -59,7 +67,7 @@ func apply(body: CharacterBody3D, command, profile, delta: float, terrain_provid
 		elif collider != null:
 			state.blocked_contact_type = str(collider)
 	if state.jumped:
-		move_vertical_toward(body, pre_slide_position.y + float(profile.get("jump_speed")) * delta)
+		move_vertical_toward(body, pre_slide_position.y + float(profile.get("jump_speed")) * delta, terrain_provider)
 		body.velocity.y = maxf(body.velocity.y, float(profile.get("jump_speed")))
 
 	if bool(profile.get("use_terrain_grounding")):
@@ -101,13 +109,13 @@ func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terra
 		if was_grounded and not jumped and rise_needed <= float(profile.get("terrain_walkable_rise")):
 			var old_y: float = body.global_position.y
 			var max_rise: float = float(profile.get("terrain_ascend_speed")) * delta
-			move_vertical_toward(body, move_toward(body.global_position.y, ground_y, max_rise))
+			move_vertical_toward(body, move_toward(body.global_position.y, ground_y, max_rise), terrain_provider)
 			state.upward_terrain_correction = maxf(0.0, body.global_position.y - old_y)
 			body.velocity.y = 0.0
 			state.terrain_grounded = true
 			return
 		if (not was_grounded or jumped) and horizontal_move > 0.001 and obstacle_rise > float(profile.get("terrain_walkable_rise")):
-			move_horizontal_toward(body, previous_position)
+			move_horizontal_toward(body, previous_position, terrain_provider)
 			body.velocity.x = 0.0
 			body.velocity.z = 0.0
 			state.terrain_grounded = false
@@ -115,19 +123,19 @@ func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terra
 			state.blocked_contact_category = "airborne_terrain_obstacle"
 			state.airborne_obstacle_blocked = true
 			if body.velocity.y <= 0.0 and body.global_position.y <= previous_ground_y + float(profile.get("terrain_landing_distance")):
-				move_vertical_toward(body, previous_ground_y)
+				move_vertical_toward(body, previous_ground_y, terrain_provider)
 				body.velocity.y = 0.0
 				state.terrain_grounded = true
 			return
 		if was_grounded and not jumped:
-			move_horizontal_toward(body, previous_position)
-			move_vertical_toward(body, maxf(previous_position.y, previous_ground_y))
+			move_horizontal_toward(body, previous_position, terrain_provider)
+			move_vertical_toward(body, maxf(previous_position.y, previous_ground_y), terrain_provider)
 			body.velocity = Vector3.ZERO
 			state.terrain_grounded = true
 			state.blocked = true
 			state.blocked_contact_category = "terrain_step_rejected"
 			return
-		move_vertical_toward(body, ground_y)
+		move_vertical_toward(body, ground_y, terrain_provider)
 		body.velocity.y = maxf(body.velocity.y, 0.0)
 		state.terrain_grounded = not jumped
 		return
@@ -141,15 +149,15 @@ func apply_terrain_grounding(body: CharacterBody3D, profile, delta: float, terra
 	if was_grounded and body.velocity.y <= 0.0 and distance_above_ground <= float(profile.get("terrain_walkable_drop")):
 		var old_y: float = body.global_position.y
 		var max_drop: float = float(profile.get("terrain_descend_speed")) * delta
-		move_vertical_toward(body, move_toward(body.global_position.y, ground_y, max_drop))
+		move_vertical_toward(body, move_toward(body.global_position.y, ground_y, max_drop), terrain_provider)
 		state.downward_terrain_correction = maxf(0.0, old_y - body.global_position.y)
 		if body.global_position.y <= ground_y + 0.03:
-			move_vertical_toward(body, ground_y)
+			move_vertical_toward(body, ground_y, terrain_provider)
 			body.velocity.y = 0.0
 		state.terrain_grounded = true
 		return
 	if body.velocity.y <= 0.0 and distance_above_ground <= float(profile.get("terrain_landing_distance")):
-		move_vertical_toward(body, ground_y)
+		move_vertical_toward(body, ground_y, terrain_provider)
 		body.velocity.y = 0.0
 		state.terrain_grounded = true
 	else:
@@ -162,14 +170,21 @@ func ground_y_for_body(terrain_provider: Node, position: Vector3) -> float:
 		return float(terrain_provider.call("surface_y_at_position", position))
 	return position.y
 
-func move_vertical_toward(body: CharacterBody3D, target_y: float) -> void:
+func move_vertical_toward(body: CharacterBody3D, target_y: float, terrain_provider: Node = null) -> void:
 	var delta_y := target_y - body.global_position.y
 	if absf(delta_y) <= 0.0001:
 		return
+	if terrain_provider != null and terrain_provider.has_method("native_collision_admit_motion") \
+			and not terrain_provider.call("native_collision_admit_motion", body, Vector3(0.0, delta_y, 0.0)):
+		return
 	body.move_and_collide(Vector3(0.0, delta_y, 0.0))
 
-func move_horizontal_toward(body: CharacterBody3D, target_position: Vector3) -> void:
+func move_horizontal_toward(body: CharacterBody3D, target_position: Vector3,
+		terrain_provider: Node = null) -> void:
 	var correction := Vector3(target_position.x - body.global_position.x, 0.0, target_position.z - body.global_position.z)
 	if correction.length_squared() <= 0.000001:
+		return
+	if terrain_provider != null and terrain_provider.has_method("native_collision_admit_motion") \
+			and not terrain_provider.call("native_collision_admit_motion", body, correction):
 		return
 	body.move_and_collide(correction)

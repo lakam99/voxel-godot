@@ -48,9 +48,15 @@ var scripted_leash_max_distance := 0.0
 var hostile_update_cursor := 0
 var tutorial_spawn_attempts_remaining := 0
 var hostile_body_pool := {}
+var native_collision_admission_required := false
+
+func set_native_collision_admission_required(required: bool) -> void:
+    native_collision_admission_required = required
 
 func setup(main_node, player_node: CharacterBody3D, survival_system, inventory_system) -> void:
     main = main_node
+    native_collision_admission_required = main != null and main.has_method("native_collision_admission_bound") \
+        and bool(main.call("native_collision_admission_bound"))
     player = player_node
     survival = survival_system
     inventory = inventory_system
@@ -775,6 +781,7 @@ func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
     else:
         spec = body.get_meta("hostile_pool_spec", {}) if body.get_meta("hostile_pool_spec", {}) is Dictionary else {}
     reset_hostile_runtime_body_state(body)
+    body.add_to_group(&"world_moving_physics_actor")
     body.name = "Hostile_%s_%d" % [variant, enemies.size()]
     body.position = position
     body.rotation = Vector3.ZERO
@@ -829,6 +836,11 @@ func horizontal_move(body: Node3D, displacement: Vector3, variant: String, ignor
     if hostile_body_overlaps_block(candidate, variant):
         return 0.0
     if hostile_spacing_blocks(body, previous, candidate, variant):
+        return 0.0
+    if native_collision_admission_required and (main == null or not main.has_method("native_collision_admit_motion")):
+        return 0.0
+    if main != null and main.has_method("native_collision_admit_motion") \
+            and not main.call("native_collision_admit_motion", body, candidate - previous):
         return 0.0
     body.global_position.x = candidate.x
     body.global_position.z = candidate.z
@@ -1104,7 +1116,13 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     var ground_y: float = ground_y_near_position(body.global_position)
     var hover: float = 0.78 if variant == "rift" else 0.72
     var bob: float = 0.03 if variant == "rift" else 0.05
-    body.global_position.y = ground_y + hover + sin(float(enemy.get("wobble", 0.0))) * bob
+    var next_y := ground_y + hover + sin(float(enemy.get("wobble", 0.0))) * bob
+    var vertical_admitted := not native_collision_admission_required
+    if main != null and main.has_method("native_collision_admit_motion"):
+        vertical_admitted = bool(main.call("native_collision_admit_motion", body,
+            Vector3(0.0, next_y - body.global_position.y, 0.0)))
+    if vertical_admitted:
+        body.global_position.y = next_y
     if facing_direction.length_squared() > 0.001:
         body.rotation.y = atan2(facing_direction.x, facing_direction.z)
 
@@ -1194,7 +1212,13 @@ func update_scripted_enemy(enemy: Dictionary, body: StaticBody3D, delta: float, 
     var hover: float = 0.78 if variant == "rift" else 0.72
     var bob: float = 0.03 if variant == "rift" else 0.05
     enemy["wobble"] = float(enemy.get("wobble", 0.0)) + delta * 4.0
-    body.global_position.y = ground_y + hover + sin(float(enemy.get("wobble", 0.0))) * bob
+    var next_y := ground_y + hover + sin(float(enemy.get("wobble", 0.0))) * bob
+    var vertical_admitted := not native_collision_admission_required
+    if main != null and main.has_method("native_collision_admit_motion"):
+        vertical_admitted = bool(main.call("native_collision_admit_motion", body,
+            Vector3(0.0, next_y - body.global_position.y, 0.0)))
+    if vertical_admitted:
+        body.global_position.y = next_y
     var face := anchor - body.global_position
     face.y = 0.0
     if face.length_squared() > 0.001:

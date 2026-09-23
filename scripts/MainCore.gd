@@ -11,6 +11,7 @@ const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/Ge
 const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
 const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
 const ActorPhysicalStreamingDemandScript := preload("res://scripts/world/ActorPhysicalStreamingDemand.gd")
+const NativeCollisionAdmissionBarrierScript := preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
@@ -88,6 +89,8 @@ var moon: DirectionalLight3D
 var sun_visual: MeshInstance3D
 var moon_visual: MeshInstance3D
 var player: CharacterBody3D
+var _native_collision_admission_barrier: RefCounted
+var _native_collision_admission_owner_id := 0
 var world_environment: WorldEnvironment
 var visual_style: Resource
 var sky_resource: Sky
@@ -306,6 +309,40 @@ var hud_skipped_refresh_count := 0
 var last_hud_refresh_message := ""
 var detail_meshes := {}
 var block_meshes := {}
+
+func native_collision_admit_motion(body: PhysicsBody3D, motion: Vector3) -> bool:
+    if _native_collision_admission_owner_id == 0:
+        return true
+    if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
+        return false
+    return _native_collision_admission_barrier.admit_motion(body, motion)
+
+func native_collision_admission_bound() -> bool:
+    return _native_collision_admission_owner_id != 0
+
+func bind_native_collision_admission(owner: Node, barrier: RefCounted) -> bool:
+    if owner == null or not is_instance_valid(owner) or owner.get_instance_id() <= 0 \
+            or _native_collision_admission_owner_id != 0 \
+            or not barrier is NativeCollisionAdmissionBarrierScript \
+            or not barrier.is_active():
+        return false
+    _native_collision_admission_owner_id = owner.get_instance_id()
+    _native_collision_admission_barrier = barrier
+    if hostile_system != null and hostile_system.has_method("set_native_collision_admission_required"):
+        hostile_system.set_native_collision_admission_required(true)
+    return true
+
+func unbind_native_collision_admission(owner: Node) -> bool:
+    if owner == null or not is_instance_valid(owner) \
+            or owner.get_instance_id() != _native_collision_admission_owner_id \
+            or _native_collision_admission_barrier == null \
+            or _native_collision_admission_barrier.is_active():
+        return false
+    _native_collision_admission_owner_id = 0
+    _native_collision_admission_barrier = null
+    if hostile_system != null and hostile_system.has_method("set_native_collision_admission_required"):
+        hostile_system.set_native_collision_admission_required(false)
+    return true
 
 func _ready() -> void:
     if get_tree() != null:

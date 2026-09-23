@@ -10,10 +10,10 @@ static func inspect(actors: Array, affected_bounds: AABB, forecast_seconds: floa
 			or forecast_seconds < 0.0 or forecast_seconds > 1.0:
 		return {"clear": false, "reason": "invalid_guard_region"}
 	for actor in actors:
-		if not actor is CharacterBody3D or not is_instance_valid(actor) \
+		if not actor is PhysicsBody3D or not is_instance_valid(actor) \
 				or not actor.is_inside_tree() or actor.is_queued_for_deletion():
 			return {"clear": false, "reason": "actor_registry_invalid"}
-		var body: CharacterBody3D = actor
+		var body: PhysicsBody3D = actor
 		var has_shape := false
 		for child in body.get_children():
 			if not child is CollisionShape3D:
@@ -26,7 +26,8 @@ static func inspect(actors: Array, affected_bounds: AABB, forecast_seconds: floa
 				return {"clear": false, "reason": "actor_shape_bounds_unavailable"}
 			has_shape = true
 			var current: AABB = collision_shape.global_transform * mesh.get_aabb()
-			var predicted := AABB(current.position + body.velocity * forecast_seconds, current.size)
+			var velocity := (body as CharacterBody3D).velocity if body is CharacterBody3D else Vector3.ZERO
+			var predicted := AABB(current.position + velocity * forecast_seconds, current.size)
 			if current.merge(predicted).intersects(affected_bounds):
 				return {"clear": false, "reason": "actor_occupies_replacement", "actorId": body.get_instance_id()}
 		if not has_shape:
@@ -34,7 +35,7 @@ static func inspect(actors: Array, affected_bounds: AABB, forecast_seconds: floa
 	return {"clear": true, "actorCount": actors.size()}
 
 
-static func motion_intersects(actor: CharacterBody3D, affected_bounds: AABB,
+static func motion_intersects(actor: PhysicsBody3D, affected_bounds: AABB,
 		motion: Vector3) -> bool:
 	if actor == null or not is_instance_valid(actor) or not motion.is_finite():
 		return true

@@ -40,6 +40,7 @@ var visual_root: Node3D
 var storm_ring: MeshInstance3D
 
 func _ready() -> void:
+    add_to_group(&"world_moving_physics_actor")
     set_meta("kind", "story_worldmark")
     set_meta("variant", "gloam_hart")
     if get_child_count() == 0:
