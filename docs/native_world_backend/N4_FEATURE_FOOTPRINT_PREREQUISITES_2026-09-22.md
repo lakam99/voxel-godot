@@ -50,6 +50,14 @@ tree/prop/structure/citadel recipes and consume the receipt in terrain,
 render, collision, and navigation publication before a live tombstone can be
 accepted.
 
+For ordinary surface props, even a complete per-ID entry would be insufficient:
+parent and ore-child tombstones alter the later shared RNG stream, moving or
+changing other features. A source-bound before/after whole-chunk transition
+receipt is required instead of invalidating only the edited ID. See
+`N4_SURFACE_TRANSITION_ADMISSION_CONTRACT_2026-09-23.md`. The catalog remains a
+prerequisite for source-order-independent feature families, not a general
+surface-prop removal solution.
+
 No Godot production caller, terrain publication path, NPC route/motor/door
 code, or save envelope was changed in this milestone.
 
