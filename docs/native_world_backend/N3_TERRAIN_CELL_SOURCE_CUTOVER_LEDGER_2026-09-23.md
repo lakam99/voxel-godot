@@ -304,3 +304,13 @@ claimed. A global durable terrain revision still changes every window's N5
 identity, even when the edit is distant. Native affected-section and local
 content identities may support a later scoped proof, but this change does not
 retain physical owners across such revisions.
+
+Superseded window rows remain available to the coordinator until it supplies
+a drained physical-owner retirement acknowledgement. N3 now accounts their
+window count, row count and vertex bytes. More than 64 unretired windows or
+256 MiB of retained vertex arrays pauses new source publication with
+`collision_window_retirement_backpressure` and the exact retired tokens;
+acknowledging a drained window releases its rows and permits retry. The
+focused 66-to-1-window contract proves the count cap, explicit acknowledgement
+and resumption at
+`artifacts/native-world-backend/n3-triangle-artifact-1790179905890-601e22c0/report.json`.
