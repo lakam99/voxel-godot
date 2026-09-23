@@ -39,6 +39,7 @@ protected:
 public:
 	godot::Dictionary status() const;
 	godot::Dictionary sample_batch(const godot::Dictionary &p_request) const;
+	godot::Dictionary sample_continuous_surface(const godot::Vector2i &p_column) const;
 	godot::Dictionary encode_voxel_block(const godot::Dictionary &p_request) const;
 
 private:

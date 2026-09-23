@@ -10,7 +10,6 @@ const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
 const DurableCodec = preload("res://scripts/terrain/NativeDurableEditMirror.gd")
 const MAX_CELLS_PER_STEP := 64
 const MAX_COLUMN_OPERATIONS := 4096
-const SCHEMA := "n3-effective-terrain-batch-request/v1"
 
 var _backend
 var _pages
@@ -23,11 +22,6 @@ var _last_y := -1
 var _state := "new"
 var _failure := ""
 var _cell_meters := 0.0
-var _last_surface_facts := {}
-var _scan_y := -2147483648
-var _reference_y := 0.0
-var _world_bottom := -64
-var _world_top := 0
 var _staged_operations: Array = []
 var _save_snapshot := {}
 
@@ -53,9 +47,6 @@ func setup(main, save: Dictionary) -> Dictionary:
 		{"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]})
 	if source.get("status") != "ready": return _failed(String(source.get("reason", "native_source_invalid")))
 	_cell_meters = float(source.request.constants.cellSizeMeters)
-	_world_bottom = int(source.request.constants.worldBottomCellY)
-	_world_top = ceili((float(source.request.constants.maximumSurfaceMeters)
-		+ _cell_meters * 4.0) / _cell_meters)
 	if _cell_meters <= 0.0 or DurableCodec.BIOMES.find("underground_air") < 0:
 		return _failed("native_legacy_constants_invalid")
 	_backend = ClassDB.instantiate("NativeWorldBackend")
@@ -94,21 +85,15 @@ func advance() -> Dictionary:
 		if admitted.get("status") != "ready": return admitted
 		var pin: Dictionary = _backend.pin_effective_page(page)
 		if pin.get("status") != "ready": return pin
-		if _scan_y == -2147483648:
-			var surface_request := {"schema":SCHEMA,
-				"surfaceColumns":[{"coordinate":_column, "intent":"gameplay"}],
-				"cellCenters":[], "latticeNumeric":[], "worldNumeric":[],
-				"surfaceProjectionNumeric":[]}
-			var surface: Dictionary = pin.page.sample_batch(surface_request)
-			if surface.get("status") != "ready" or (surface.get("surfaceColumns", []) as Array).size() != 1:
-				return _failed("native_legacy_surface_unavailable")
-			_last_surface_facts = surface.surfaceColumns[0]
-			_reference_y = float(_last_surface_facts.deformedSurfaceY)
-			_scan_y = mini(_world_top, floori(_reference_y / _cell_meters) + 8)
-		var smooth: Dictionary = _scan_smooth_surface(pin.page)
-		if smooth.get("status") != "ready": return smooth
+		var smooth: Dictionary = pin.page.sample_continuous_surface(_column)
+		var page_status: Dictionary = pin.page.status()
+		if smooth.get("status") != "ready" or smooth.get("column") != _column \
+				or smooth.get("sourceIdentity") != page_status.get("sourceIdentity") \
+				or smooth.get("pinIdentity") != page_status.get("pinIdentity") \
+				or smooth.get("terrainDeltaRevision") != page_status.get("terrainDeltaRevision") \
+				or smooth.get("shapingRegistryRevision") != page_status.get("shapingRegistryRevision"):
+			return _failed("native_legacy_surface_unavailable")
 		var old_surface := float(smooth.surfaceY)
-		_scan_y = -2147483648
 		var new_surface := float(entry.get("surfaceY", entry.get("height", old_surface)))
 		if new_surface >= old_surface - _cell_meters * 0.10:
 			_entry_index += 1
@@ -149,34 +134,6 @@ func advance() -> Dictionary:
 	_entry_index += 1
 	return {"status":"pending", "reason":"legacy_conversion_progress",
 		"completedEntries":_entry_index, "entryCount":_entries.size()}
-
-func _scan_smooth_surface(page) -> Dictionary:
-	if _scan_y <= _world_bottom:
-		return {"status":"ready", "surfaceY":_reference_y}
-	var last := maxi(_world_bottom + 1, _scan_y - 31)
-	var request := {"schema":SCHEMA, "surfaceColumns":[], "cellCenters":[],
-		"latticeNumeric":[], "worldNumeric":[], "surfaceProjectionNumeric":[]}
-	for y in range(_scan_y, last - 1, -1):
-		request.surfaceProjectionNumeric.append({"coordinate":Vector3i(_column.x,y,_column.y),
-			"intent":"terrain_collision", "semanticRevision":1})
-		request.surfaceProjectionNumeric.append({"coordinate":Vector3i(_column.x,y+1,_column.y),
-			"intent":"terrain_collision", "semanticRevision":1})
-	var sampled: Dictionary = page.sample_batch(request)
-	var rows: Array = sampled.get("surfaceProjectionNumeric", [])
-	if sampled.get("status") != "ready" or rows.size() != request.surfaceProjectionNumeric.size():
-		return _failed("native_legacy_numeric_surface_unavailable")
-	for index in range(0, rows.size(), 2):
-		var solid: float = Vector3(float(rows[index].density),0.0,0.0).x
-		var air: float = Vector3(float(rows[index+1].density),0.0,0.0).x
-		if solid < 0.0 or air >= 0.0: continue
-		var y: int = _scan_y - index / 2
-		var denominator := solid - air
-		var boundary := float(y + 1) * _cell_meters if absf(denominator) <= 0.0001 \
-			else lerpf(float(y) * _cell_meters, float(y + 1) * _cell_meters,
-				clampf(solid / denominator, 0.0, 1.0))
-		return {"status":"ready", "surfaceY":boundary}
-	_scan_y = last - 1
-	return {"status":"pending", "reason":"native_smooth_surface_scan_pending"}
 
 func export_volume() -> Dictionary:
 	if _state != "complete": return {"status":"pending", "reason":"legacy_conversion_incomplete"}

@@ -152,6 +152,7 @@ public:
     const WorldSourcePin &pin() const noexcept;
     const NativeEffectiveTerrainBatchLimits &limits() const noexcept;
     NativeEffectiveTerrainBatchResult execute(const NativeEffectiveTerrainBatchRequest &request) const;
+    double sample_continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
 
 private:
     NativeEffectiveTerrainSource source_;

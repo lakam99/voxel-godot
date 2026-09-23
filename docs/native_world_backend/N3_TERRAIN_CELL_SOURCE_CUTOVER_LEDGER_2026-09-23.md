@@ -122,6 +122,18 @@ snapshot after activation, and cancellation, at
 This is an owner-level service checkpoint. No production Main caller retains
 this owner across pending setup yet; loading feedback, headed Continue, and
 physical world readiness remain unproved.
+
+The converter's temporary GDScript numeric-boundary scan has been removed.
+`NativeEffectiveTerrainPage.sample_continuous_surface` now exposes the
+existing native continuous-volume surface calculation from its pinned source,
+with source identity and revision receipts checked by the converter. Exact
+historical v2 snapshots still match `MainSaveState` for negative, duplicate,
+and deep columns. The focused report at
+`artifacts/native-world-backend/n3-world-source-request-1790175217913-96ac5117/report.json`
+records maximum conversion-step durations of 1,424 microseconds for the
+ordinary fixture and 1,912 microseconds for the deep fixture. The native core
+executable passed 519/519 tests. These are isolated service measurements, not
+headed loading-frame cadence or production Continue evidence.
 `NativeTerrainCellSource.read_cells` is a bounded, all-or-nothing gameplay-cell
 query over `NativeWorldBackend.pin_effective_page` and
 `NativeEffectiveTerrainPage.sample_batch`. It retains caller order and

@@ -276,6 +276,13 @@ double NativeEffectiveTerrainSource::sample_volume_surface_y(
     return reference_y;
 }
 
+double NativeEffectiveTerrainSource::sample_continuous_volume_surface_y(
+    const WorldSurfaceColumnQuery &query) const {
+    validate_world_query(query);
+    require_primary_page_query(pin_, query.x, query.z);
+    return continuous_volume_surface_y(query);
+}
+
 double NativeEffectiveTerrainSource::continuous_volume_surface_y(
     const WorldSurfaceColumnQuery &query) const {
     const auto &constants = pin_.definition().constants();

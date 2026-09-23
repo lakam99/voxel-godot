@@ -1278,6 +1278,7 @@ std::vector<CitadelExclusionSource> structure_citadels(const Variant &p_value) {
 void NativeEffectiveTerrainPage::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("status"), &NativeEffectiveTerrainPage::status);
 	ClassDB::bind_method(D_METHOD("sample_batch", "request"), &NativeEffectiveTerrainPage::sample_batch);
+	ClassDB::bind_method(D_METHOD("sample_continuous_surface", "column"), &NativeEffectiveTerrainPage::sample_continuous_surface);
 	ClassDB::bind_method(D_METHOD("encode_voxel_block", "request"), &NativeEffectiveTerrainPage::encode_voxel_block);
 }
 
@@ -1379,6 +1380,24 @@ Dictionary NativeEffectiveTerrainPage::sample_batch(const Dictionary &p_request)
 		return result;
 	} catch (const std::exception &error) {
 		return failure("sample_batch", error);
+	}
+}
+
+Dictionary NativeEffectiveTerrainPage::sample_continuous_surface(const Vector2i &p_column) const {
+	if (!batch_) return envelope("sample_continuous_surface", "failed", "page_has_no_pin");
+	try {
+		const WorldSourcePin &pin = batch_->pin();
+		Dictionary result = envelope("sample_continuous_surface", "ready");
+		result["column"] = p_column;
+		result["surfaceY"] = batch_->sample_continuous_volume_surface_y(
+			{p_column.x, p_column.y, WorldQueryIntent::gameplay});
+		result["sourceIdentity"] = identity_dictionary(pin.definition().physical_content_identity());
+		result["pinIdentity"] = identity_dictionary(pin.physical_content_identity());
+		result["terrainDeltaRevision"] = static_cast<int64_t>(pin.terrain_delta_revision());
+		result["shapingRegistryRevision"] = static_cast<int64_t>(pin.shaping_registry_revision());
+		return result;
+	} catch (const std::exception &error) {
+		return failure("sample_continuous_surface", error);
 	}
 }
 
