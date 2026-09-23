@@ -136,6 +136,39 @@ func run() -> void:
 			and not OWNER.receipt_matches_plan(forged_duplicate, plan)
 			and not OWNER.receipt_matches_plan(forged_missing, plan),
 			"foreign duplicate and missing neighbor sections rejected")
+		var barrier: Dictionary = plan.get("barrier", {})
+		var window_receipts: Array = []
+		for window in plan.get("subwindows", []):
+			var mesh_receipts: Array = []
+			for mesh_block in window.meshBlocks:
+				mesh_receipts.append({"block":mesh_block, "generation":2, "physicalReady":true})
+			window_receipts.append({"index":window.index, "token":window.token,
+				"nativeRevision":barrier.nativeRevision, "status":"ready",
+				"meshBlockReceipts":mesh_receipts})
+		var candidate := {"ownerInstanceId":owner.get_instance_id(),
+			"sourceIdentity":setup.sourceIdentity, "sourceEpoch":barrier.sourceEpoch,
+			"nativeRevision":barrier.nativeRevision, "barrierIdentity":barrier.identity,
+			"subwindowReceipts":window_receipts}
+		check(owner.inspect_edit_release_candidate(candidate).get("reason")
+			== "production_physical_owner_unbound",
+			"complete synthetic candidate cannot release physical barrier")
+		var wrong_owner := candidate.duplicate(true)
+		wrong_owner.ownerInstanceId = 1
+		var stale_revision := candidate.duplicate(true)
+		stale_revision.nativeRevision = native_revision
+		var wrong_source := candidate.duplicate(true)
+		wrong_source.sourceEpoch = "foreign"
+		check(owner.inspect_edit_release_candidate(wrong_owner).get("reason") == "edit_release_identity_mismatch"
+			and owner.inspect_edit_release_candidate(stale_revision).get("reason") == "edit_release_identity_mismatch"
+			and owner.inspect_edit_release_candidate(wrong_source).get("reason") == "edit_release_identity_mismatch",
+			"owner revision and source epoch mismatches rejected")
+		var partial := candidate.duplicate(true)
+		partial.subwindowReceipts.pop_back()
+		var duplicate := candidate.duplicate(true)
+		duplicate.subwindowReceipts.append(window_receipts[0])
+		check(owner.inspect_edit_release_candidate(partial).get("status") == "pending"
+			and owner.inspect_edit_release_candidate(duplicate).get("status") == "failed",
+			"partial candidate waits and duplicate subwindow is rejected")
 		var after_edit: Dictionary = owner.export_terrain_volume_v2()
 		check(after_edit.get("status") == "ready"
 			and int(after_edit.get("nativeRevision", -1)) == native_revision + 1
