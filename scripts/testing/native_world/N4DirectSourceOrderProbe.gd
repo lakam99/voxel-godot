@@ -526,6 +526,7 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			if bool(tree_halo.get("ok", false)) else false,
 		"treePresenceStatus":tree_presence.get("status"),
 		"treePresenceReason":tree_presence.get("reason"),
+		"nativeFeatureManifestIdentity":tree_presence.get("featureManifestIdentity", ""),
 		"treePresenceDecisions":tree_presence.get("decisions", []),
 		"tamperedTreePresenceStatus":tampered_presence.get("status"),
 		"treeHaloNaturalIds":tree_halo.halo.content.natural.map(func(row): return row.id) \

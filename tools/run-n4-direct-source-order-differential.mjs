@@ -72,6 +72,8 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
       || sample.tamperedTreePresenceStatus !== 'failed'
       || presenceDecisions.length !== treeAttempts.length))
     failures.push(`${label} native tree presence/tamper admission failed: ${sample.treePresenceStatus}/${sample.treePresenceReason}/${sample.tamperedTreePresenceStatus}/${presenceDecisions.length}`);
+  if (requests.length > 0 && !/^[0-9a-f]{64}$/.test(sample.nativeFeatureManifestIdentity ?? ''))
+    failures.push(`${label} source-bound feature manifest identity missing`);
   for (let i = 0; i < Math.min(requests.length, treeAttempts.length); i++) {
     const request = requests[i], tree = treeAttempts[i];
     const godot = godotMargins.find(row => row.ordinal === tree.ordinal);

@@ -3,6 +3,7 @@
 #include "biome_region_field.hpp"
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
+#include "native_surface_feature_manifest.hpp"
 #include "native_surface_forage_ordered_definition.hpp"
 #include "native_surface_ore_cluster_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
@@ -98,43 +99,6 @@ Vector3 world_vector(const WorldFloat32Position &p_value) {
 
 Vector3 wildlife_vector(const NativeWildlifeVec3 &p_value) {
 	return Vector3(p_value.x, p_value.y, p_value.z);
-}
-
-NativeSurfaceTreeEcologyProfile tree_ecology_profile(
-		const NativeBiomeEnvironmentCatalog &p_catalog, const std::string &p_biome) {
-	const NativeBiomeEnvironmentProfile &source = p_catalog.profile_for_biome(p_biome);
-	NativeSurfaceTreeEcologyProfile profile;
-	profile.schema_revision = NativeBiomeEnvironmentCatalog::SCHEMA_REVISION;
-	profile.profile_revision = NativeBiomeEnvironmentCatalog::SCHEMA_REVISION;
-	profile.source_profile_digest = p_catalog.profile_digest(p_biome);
-	profile.source_biome = p_biome;
-	profile.profile_id = source.biome_id;
-	profile.tree_families = source.tree_families;
-	profile.tree_scale = source.tree_scale;
-	profile.height_min = source.tree_height_min;
-	profile.height_max = source.tree_height_max;
-	profile.trunk_radius_min = source.trunk_radius_min;
-	profile.trunk_radius_max = source.trunk_radius_max;
-	profile.canopy_radius_min = source.crown_radius_min;
-	profile.canopy_radius_max = source.crown_radius_max;
-	profile.canopy_density = source.canopy_density;
-	profile.wind_response = source.wind_response;
-	profile.visibility_range = source.tree_visibility_range;
-	profile.shadow_range = source.tree_shadow_range;
-	profile.exclusion_margin = source.natural_prop_exclusion_margin;
-	profile.age_min_years = source.tree_age_min_years;
-	profile.age_typical_years = source.tree_age_typical_years;
-	profile.age_max_years = source.tree_age_max_years;
-	profile.maturity_cell_scale = source.tree_maturity_cell_scale;
-	profile.maturity_influence = source.tree_maturity_influence;
-	profile.local_age_span = source.tree_local_age_span;
-	profile.age_distribution_skew = source.tree_age_distribution_skew;
-	for (std::size_t index = 0; index < profile.age_band_thresholds.size(); ++index)
-		profile.age_band_thresholds[index] = source.tree_age_band_thresholds[index];
-	profile.height_growth_exponent = source.tree_height_growth_exponent;
-	profile.girth_growth_exponent = source.tree_girth_growth_exponent;
-	profile.crown_growth_exponent = source.tree_crown_growth_exponent;
-	return profile;
 }
 
 Dictionary ore_child_shadow(const NativeSurfaceOreChildDefinition &p_child) {
@@ -2365,7 +2329,7 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 			}
 			if (source.outcome == NativeSurfacePropClassificationOutcome::tree_22_draw
 					|| source.outcome == NativeSurfacePropClassificationOutcome::tree_36_draw) {
-				const NativeSurfaceTreeEcologyProfile profile = tree_ecology_profile(*biome_catalog_, source.source->biome_id);
+				const NativeSurfaceTreeEcologyProfile profile = native_surface_tree_profile_from_catalog(*biome_catalog_, source.source->biome_id);
 				const NativeTreeDefinition tree = NativeSurfaceTreeOrderedComposer::create(
 					ordered, placement, static_cast<std::uint32_t>(index), terrain, profile);
 				const NativeTreeDefinitionInput &built = tree.input();
@@ -2460,7 +2424,7 @@ Dictionary NativeWorldBackend::compose_surface_tree_presence_shadow(
 		const Ref<NativeStructureExclusionChunk> &p_exclusions,
 		const Dictionary &p_union_capture) const {
 	constexpr const char *operation = "compose_surface_tree_presence_shadow";
-	if (!state_ || !shaping_registry_ || !biome_catalog_ || !removed_props_ || !wildlife_presentations_
+	if (!state_ || !shaping_registry_ || !biome_catalog_ || !visual_catalog_ || !removed_props_ || !wildlife_presentations_
 			|| p_page.is_null() || p_exclusions.is_null() || !p_page->batch_ || !p_exclusions->snapshot_)
 		return envelope(operation, "failed", "tree_presence_sources_not_ready");
 	try {
@@ -2493,13 +2457,13 @@ Dictionary NativeWorldBackend::compose_surface_tree_presence_shadow(
 			terrain, *biome_catalog_, *p_exclusions->snapshot_, *removed_props_, *wildlife_presentations_);
 		const NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
 		Array expected_requests;
-		struct TreeSource { std::uint32_t ordinal; std::string durable_id; std::string biome; };
+		struct TreeSource { std::uint32_t ordinal; std::string durable_id; };
 		std::vector<TreeSource> trees;
 		for (std::size_t index = 0; index < ordered.attempts().size(); ++index) {
 			const auto &source = ordered.attempts()[index];
 			if (source.outcome != NativeSurfacePropClassificationOutcome::tree_22_draw
 					&& source.outcome != NativeSurfacePropClassificationOutcome::tree_36_draw) continue;
-			const auto profile = tree_ecology_profile(*biome_catalog_, source.source->biome_id);
+			const auto profile = native_surface_tree_profile_from_catalog(*biome_catalog_, source.source->biome_id);
 			const auto tree = NativeSurfaceTreeOrderedComposer::create(ordered, placement,
 				static_cast<std::uint32_t>(index), terrain, profile);
 			const auto margins = native_tree_exclusion_margins(tree.input().trunk_radius,
@@ -2511,7 +2475,7 @@ Dictionary NativeWorldBackend::compose_surface_tree_presence_shadow(
 			row["naturalMarginCells"] = margins.natural_cells;
 			row["structureMarginCells"] = margins.structure_cells;
 			expected_requests.append(row);
-			trees.push_back({static_cast<std::uint32_t>(index), source.attempt.durable_id, source.source->biome_id});
+			trees.push_back({static_cast<std::uint32_t>(index), source.attempt.durable_id});
 		}
 		const Array requests = require_array(p_union_capture["requests"], "union.requests");
 		if (requests.size() == 0 || requests.size() > 28 || requests.size() != expected_requests.size())
@@ -2677,11 +2641,12 @@ Dictionary NativeWorldBackend::compose_surface_tree_presence_shadow(
 			state_->source_identity().digest, ordered.world_generation(), ordered.exclusion_digest(),
 			{coverage.position.x, coverage.position.y, coverage.get_end().x - 1, coverage.get_end().y - 1},
 			std::move(natural), std::move(terrain_rows_native), std::move(citadels));
+		const NativeSurfaceFeatureManifest manifest = NativeSurfaceFeatureManifest::create(
+			ordered, placement, terrain, *biome_catalog_, *visual_catalog_,
+			*p_exclusions->snapshot_, *wildlife_presentations_, &admitted);
 		Array decisions;
 		for (const TreeSource &source : trees) {
-			const auto profile = tree_ecology_profile(*biome_catalog_, source.biome);
-			const auto decision = compose_native_surface_tree_presence(ordered, placement,
-				source.ordinal, terrain, profile, admitted);
+			const auto &decision = manifest.entries()[source.ordinal].tree_presence.value();
 			Dictionary row;
 			row["ordinal"] = static_cast<std::int64_t>(source.ordinal);
 			row["durableId"] = text(source.durable_id);
@@ -2703,6 +2668,7 @@ Dictionary NativeWorldBackend::compose_surface_tree_presence_shadow(
 		result["structureExclusionRevision"] = p_exclusions->revision_;
 		result["unionCaptureIdentity"] = text(utf8(union_identity));
 		result["haloIdentity"] = text(sha256_hex(admitted.content_digest()));
+		result["featureManifestIdentity"] = text(sha256_hex(manifest.content_digest()));
 		result["decisions"] = decisions;
 		result["completeFeatureManifest"] = false;
 		result["liveCaptureFreshnessProven"] = false;
