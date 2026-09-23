@@ -73,6 +73,8 @@ func start(request: Dictionary, max_records_per_advance: int = DEFAULT_RECORDS_P
 		if not snapshot_owner is Object or not snapshot_owner.has_method("is_valid_for") \
 				or not snapshot_owner.is_valid_for(volume):
 			return _failed("save_snapshot_lease_required")
+	elif request.has("terrainVolume"):
+		return _failed("save_volume_requires_snapshot_lease")
 
 	# Strip the potentially huge save before copying the immutable native source
 	# descriptor and finalized town policy.
@@ -183,6 +185,10 @@ func candidate_source_identity() -> Dictionary:
 func commit(expected_source_identity: Dictionary) -> Dictionary:
 	if _state != "candidate_ready":
 		return {"status": "failed", "reason": "candidate_not_ready"}
+	if not _snapshot_lease_is_valid():
+		_request_failure("save_snapshot_lease_revoked_before_commit")
+		return {"status": "pending", "reason": _failure,
+			"candidateVisible": false, "ownerMustBeRetained": true}
 	if expected_source_identity != _candidate_source_identity:
 		return {"status": "failed", "reason": "candidate_source_identity_mismatch",
 			"candidateVisible": false, "ownerRetained": true}

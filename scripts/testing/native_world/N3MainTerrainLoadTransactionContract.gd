@@ -131,6 +131,12 @@ func run() -> void:
 	var unleased = TRANSACTION.new()
 	check(unleased.start(caller_request, RECORD_BUDGET).get("reason") == "save_snapshot_lease_required",
 		"save-volume requests fail closed without a producer-issued snapshot lease")
+	var bypass_request: Dictionary = base.request.duplicate(true)
+	bypass_request["terrainVolume"] = volume
+	var bypass_transaction = TRANSACTION.new()
+	check(bypass_transaction.start(bypass_request, RECORD_BUDGET).get("reason")
+		== "save_volume_requires_snapshot_lease",
+		"ordinary source schema cannot smuggle in an unleased save volume")
 	var descriptor_before := String(main.seed_text)
 	caller_request.constants["waterLevelMeters"] = -777.0
 	check(String(main.seed_text) == descriptor_before and float(main.WATER_LEVEL) != -777.0,
@@ -188,6 +194,21 @@ func run() -> void:
 		"only committed backend transfers, preserving the complete save-v2 volume")
 	check(transaction.take_backend() == null,
 		"backend transfer is single-owner and cannot be consumed twice")
+
+	var revoked_commit_source: Dictionary = _source(main, _volume(4))
+	var revoked_commit_transaction = TRANSACTION.new()
+	revoked_commit_transaction.start(revoked_commit_source.request, 4, revoked_commit_source.snapshotOwner)
+	await _drive_to_candidate(revoked_commit_transaction)
+	var revoked_commit_backend = revoked_commit_transaction._backend
+	var revoked_commit_identity := revoked_commit_transaction.candidate_source_identity()
+	revoked_commit_source.snapshotOwner.invalidate("producer_released_before_commit")
+	var rejected_revoked_commit: Dictionary = revoked_commit_transaction.commit(revoked_commit_identity)
+	var revoked_commit_cleanup: Dictionary = await _drive_to_terminal(revoked_commit_transaction)
+	check(rejected_revoked_commit.get("reason") == "save_snapshot_lease_revoked_before_commit"
+		and revoked_commit_backend.status().get("status") == "uninitialized"
+		and revoked_commit_cleanup.get("drained") == true
+		and revoked_commit_transaction.take_backend() == null,
+		"revoked snapshot lease after worker completion still blocks commit and drains private candidate")
 
 	var revoked_source: Dictionary = _source(main, _volume(300))
 	var revoked_transaction = TRANSACTION.new()
@@ -319,7 +340,8 @@ func run() -> void:
 			"malformedDrainStatus": malformed_cleanup.get("status"),
 			"malformedFailure": malformed_cleanup.get("reason", ""),
 			"staleGenerationRejected": stale_append.get("reason") == "stale_import_generation",
-			"leaseRevocationStopsAdmission": revoked_cleanup.get("drained", false),
+		"leaseRevocationStopsAdmission": revoked_cleanup.get("drained", false),
+		"leaseRevokedCommitRejected": rejected_revoked_commit.get("reason"),
 		"workerInFlightDrainCalls": fake_backend.drain_calls,
 		"workerInFlightTrace": {"cancelled": fake_backend.cancelled,
 			"firstStatus": in_flight_poll.get("status"),
