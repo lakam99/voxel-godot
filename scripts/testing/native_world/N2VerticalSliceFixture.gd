@@ -4,6 +4,7 @@ const OracleScript := preload("res://scripts/testing/native_world/N2LatticeSourc
 const RenderGeneratorScript := preload("res://scripts/testing/native_world/N2PreparedRenderGenerator.gd")
 const CollisionOwnerScript := preload("res://scripts/terrain/NativeTerrainCollisionOwner.gd")
 const ActorGuardScript := preload("res://scripts/terrain/NativeCollisionActorGuard.gd")
+const AdmissionBarrierScript := preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 
 const REPORT_SCHEMA := "n2-native-world-vertical-slice-fixture/v1"
 const RESULT_SCHEMA := "n2-native-vertical-slice-result/v1"
@@ -143,10 +144,23 @@ func _run() -> void:
 		return
 	_current_authority = same_shape_request.requestIdentity.duplicate(true)
 	(_body as Node).call("set_authority", _current_authority)
-	var occupied_guard := func(_owner: StaticBody3D, _identity: Dictionary) -> bool:
-		return false
+	var blocking_actor := CharacterBody3D.new()
+	var blocking_shape := CollisionShape3D.new()
+	blocking_shape.shape = BoxShape3D.new()
+	blocking_actor.add_child(blocking_shape)
+	add_child(blocking_actor)
+	await get_tree().physics_frame
+	var occupied_guard = AdmissionBarrierScript.new()
+	var occupied_begun: Dictionary = occupied_guard.begin(self, _body, same_shape_request.requestIdentity,
+		AABB(Vector3(-1, -1, -1), Vector3(2, 2, 2)))
+	if occupied_begun.get("status") != "ready":
+		_finish(false, "occupied_barrier_not_started", common.merged({"barrier":occupied_begun}, true))
+		return
 	var blocked_replacement: Dictionary = await (_body as Node).call("replace", native_same_shape,
 		same_shape_request.requestIdentity, no_probe, Callable(), occupied_guard)
+	occupied_guard.abort(same_shape_request.requestIdentity)
+	blocking_actor.queue_free()
+	await get_tree().physics_frame
 	if blocked_replacement.get("reason") != "replacement_occupied_before_install" \
 			or (_body as Node).call("physical_receipt", same_shape_request.requestIdentity).get("ready", false):
 		_finish(false, "occupied_replacement_not_rejected", common.merged({
@@ -498,9 +512,18 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 			and provenance.get("requestIdentity") == identity
 			and provenance.get("featureId") == "n2:blocker:tile-b:-24,-10",
 			"provenance": provenance}
-	var clear_guard := func(_owner: StaticBody3D, _identity: Dictionary) -> bool:
-		return true
-	var outcome: Dictionary = await (_body as Node).call("replace", native_result, request_identity, probe, before_ack, clear_guard)
+	var admission_barrier = AdmissionBarrierScript.new()
+	var begun: Dictionary = admission_barrier.begin(self, _body, request_identity,
+		AABB(Vector3(-100, -100, -100), Vector3(200, 200, 200)))
+	if begun.get("status") != "ready":
+		return {"ok":false, "reason":"fixture_barrier_not_started", "barrier":begun}
+	var outcome: Dictionary = await (_body as Node).call("replace", native_result, request_identity,
+		probe, before_ack, admission_barrier)
+	if bool(outcome.get("ok", false)):
+		if not admission_barrier.release(request_identity):
+			return {"ok":false, "reason":"fixture_barrier_unacknowledged"}
+	else:
+		admission_barrier.abort(request_identity)
 	var physical_receipt: Dictionary = (_body as Node).call("physical_receipt", request_identity)
 	if bool(outcome.get("ok", false)) != bool(physical_receipt.get("ready", false)):
 		return {"ok": false, "reason": "physical_receipt_disagrees_with_replacement",
@@ -533,11 +556,40 @@ func _actor_guard_contract() -> Dictionary:
 	var swept: Dictionary = ActorGuardScript.inspect([body], region, 0.25)
 	body.velocity = Vector3.ZERO
 	var clear: Dictionary = ActorGuardScript.inspect([body], region, 0.25)
+	var barrier = AdmissionBarrierScript.new()
+	var identity := {"ownerGeneration": 1, "sourceRevision": 1, "cancellationEpoch": 1}
+	var begun: Dictionary = barrier.begin(self, _body, identity, region)
+	var late_actor := CharacterBody3D.new()
+	var late_shape := CollisionShape3D.new()
+	late_shape.shape = BoxShape3D.new()
+	late_actor.add_child(late_shape)
+	add_child(late_actor)
+	await get_tree().physics_frame
+	var late_clearance: Dictionary = barrier.clearance(identity)
+	var late_motion_admitted: bool = barrier.admit_motion(late_actor, Vector3.ZERO)
+	var premature_release: bool = barrier.release(identity)
+	var aborted: bool = barrier.abort(identity)
+	late_actor.queue_free()
 	body.queue_free()
 	await get_tree().physics_frame
+	var capped_root := Node.new()
+	add_child(capped_root)
+	for _index in range(8193):
+		capped_root.add_child(Node.new())
+	var capped_barrier = AdmissionBarrierScript.new()
+	var capped: Dictionary = capped_barrier.begin(capped_root, _body, identity, region)
+	capped_root.queue_free()
+	await get_tree().process_frame
 	return {"ok": occupied.get("reason") == "actor_occupies_replacement" \
 		and swept.get("reason") == "actor_occupies_replacement" \
-		and bool(clear.get("clear", false)), "occupied":occupied, "swept":swept, "clear":clear}
+		and bool(clear.get("clear", false)) and begun.get("status") == "ready" \
+		and late_clearance.get("reason") == "actor_occupies_replacement" \
+		and not late_motion_admitted and not premature_release and aborted \
+		and capped.get("reason") == "actor_census_node_cap",
+		"occupied":occupied, "swept":swept, "clear":clear,
+		"lateActor": {"clearance":late_clearance, "motionAdmitted":late_motion_admitted,
+			"prematureRelease":premature_release, "aborted":aborted},
+		"nodeCap":capped}
 
 
 func _install_render(native_result: Dictionary) -> Dictionary:

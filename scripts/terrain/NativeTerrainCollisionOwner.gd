@@ -1,5 +1,7 @@
 extends StaticBody3D
 
+const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
+
 ## Sole project-owned physics body for one native terrain collision stream. The
 ## caller owns the source and supplies a real physics probe for acknowledgement.
 const MAX_SHAPES := 64
@@ -54,7 +56,7 @@ func stop_and_drain() -> void:
 
 
 func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Callable,
-		before_ack: Callable = Callable(), occupancy_guard: Callable = Callable()) -> Dictionary:
+		before_ack: Callable = Callable(), admission_barrier: RefCounted = null) -> Dictionary:
 	var started := Time.get_ticks_usec()
 	if not _identity_valid(identity):
 		return {"ok": false, "reason": "collision_identity_invalid"}
@@ -68,10 +70,13 @@ func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Ca
 		return {"ok": false, "reason": "stale_before_install" if not _current(result, identity) else "collision_owner_unavailable"}
 	if not acknowledgement_probe.is_valid():
 		return {"ok": false, "reason": "acknowledgement_probe_required"}
-	if not installed_shapes.is_empty() and not occupancy_guard.is_valid():
-		return {"ok": false, "reason": "replacement_occupancy_guard_required"}
-	if occupancy_guard.is_valid() and not bool(occupancy_guard.call(self, identity)):
-		return {"ok": false, "reason": "replacement_occupied_before_install"}
+	if not installed_shapes.is_empty() and not admission_barrier is AdmissionBarrier:
+		return {"ok": false, "reason": "replacement_admission_barrier_required"}
+	if admission_barrier is AdmissionBarrier:
+		var clearance: Dictionary = admission_barrier.clearance(identity)
+		if not bool(clearance.get("clear", false)):
+			return {"ok": false, "reason": "replacement_occupied_before_install",
+				"guardReason": clearance.get("reason", "unknown")}
 	var payload := _prepare_shapes(result, identity)
 	if not payload.ok:
 		return payload
@@ -92,7 +97,8 @@ func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Ca
 		await get_tree().physics_frame
 		if not _current(result, identity):
 			break
-		if occupancy_guard.is_valid() and not bool(occupancy_guard.call(self, identity)):
+		if admission_barrier is AdmissionBarrier \
+				and not bool(admission_barrier.clearance(identity).get("clear", false)):
 			occupied_during_ack = true
 			break
 		var observed: Variant = acknowledgement_probe.call(self, identity)
