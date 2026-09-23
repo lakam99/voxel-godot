@@ -12,6 +12,11 @@ func _bits(value: float) -> int:
 func _vector(value: Vector3) -> Array:
 	return [_bits(value.x), _bits(value.y), _bits(value.z)]
 
+func _world_aabb(bounds: AABB) -> Dictionary:
+	return {"minBits": _vector(bounds.position),
+		"maxBits": _vector(bounds.position + bounds.size),
+		"finite": bounds.position.is_finite() and bounds.size.is_finite()}
+
 func _mesh_record(node: MeshInstance3D, materials: Dictionary) -> Dictionary:
 	var mesh := node.mesh
 	var material_role := "missing"
@@ -62,14 +67,22 @@ func _row(main: Node3D, adapter: RefCounted, parent: Node3D, biome: String, seed
 	if body == null:
 		return {"label": label, "biome": biome, "error": "make_forage_returned_null"}
 	var meshes: Array[Dictionary] = []
+	var mesh_world_aabbs: Array[Dictionary] = []
 	var collider_record := {}
+	var collider_world_aabb := {}
 	for child in body.get_children():
 		if child is MeshInstance3D:
-			meshes.append(_mesh_record(child, main.materials))
+			var mesh_child := child as MeshInstance3D
+			meshes.append(_mesh_record(mesh_child, main.materials))
+			mesh_world_aabbs.append(_world_aabb(mesh_child.global_transform * mesh_child.mesh.get_aabb()))
 		elif child is CollisionShape3D:
-			var shape := child.shape as SphereShape3D
-			collider_record = {"shapeClass": child.shape.get_class(), "radiusBits": _bits(shape.radius) if shape != null else -1,
-				"positionBits": _vector(child.position), "disabled": child.disabled}
+			var collision_child := child as CollisionShape3D
+			var shape := collision_child.shape as SphereShape3D
+			collider_record = {"shapeClass": collision_child.shape.get_class(), "radiusBits": _bits(shape.radius) if shape != null else -1,
+				"positionBits": _vector(collision_child.position), "disabled": collision_child.disabled}
+			if shape != null:
+				var extent := Vector3.ONE * shape.radius
+				collider_world_aabb = _world_aabb(AABB(collision_child.global_position - extent, extent * 2.0))
 	var profile = main.biome_environment_catalog.profile_for_biome(biome)
 	return {"label": label, "biome": biome, "seed": seed, "id": prop_id,
 		"profile": profile.forage_spec(), "bodyClass": body.get_class(), "bodyName": String(body.name),
@@ -77,7 +90,9 @@ func _row(main: Node3D, adapter: RefCounted, parent: Node3D, biome: String, seed
 		"parentGlobalPositionBits": _vector(parent.global_position), "rotationBits": _vector(body.rotation),
 		"metadata": {"kind": body.get_meta("kind"), "prop_id": body.get_meta("prop_id"),
 			"drop": body.get_meta("drop"), "material": body.get_meta("material"), "drop_count": body.get_meta("drop_count")},
-		"meshes": meshes, "collider": collider_record, "physicalColliderPresent": not collider_record.is_empty(),
+		"meshes": meshes, "meshWorldAabbs": mesh_world_aabbs,
+		"collider": collider_record, "colliderWorldAabb": collider_world_aabb,
+		"physicalColliderPresent": not collider_record.is_empty(),
 		"navigationBlocksNpc": adapter.prop_blocks_npc(body), "finalRngState": str(rng.state)}
 
 func _initialize() -> void:
@@ -145,6 +160,10 @@ func _run() -> void:
 		var collider: Dictionary = row.collider
 		passed = passed and not row.has("error") and row.metadata.material == expected_materials[index]
 		passed = passed and row.meshes.size() == expected_meshes[index] and row.physicalColliderPresent
+		passed = passed and row.meshWorldAabbs.size() == row.meshes.size()
+		passed = passed and row.colliderWorldAabb.get("finite", false)
+		for world_aabb: Dictionary in row.meshWorldAabbs:
+			passed = passed and world_aabb.finite
 		passed = passed and bool(row.navigationBlocksNpc) == (index == 0)
 		passed = passed and row.bodyClass == "StaticBody3D"
 		passed = passed and row.bodyName == "Forage_%s" % expected_materials[index]
