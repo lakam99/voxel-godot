@@ -14,6 +14,7 @@ var viewer: VoxelViewer
 var format: VoxelFormat
 var camera: Camera3D
 var mesh_events := 0
+var mesh_positions: Array[Vector3i] = []
 var accepted := 0
 var max_pump_usec := 0
 var center_key: Dictionary = {}
@@ -60,8 +61,15 @@ func ray_hit() -> Dictionary:
 				return {"hit":true,"position":hit.position,"cell":Vector2i(x,z)}
 	return {"hit":false}
 
-func _on_mesh_block_entered(_position: Vector3i) -> void:
+func probe_hit(x: int, z: int) -> Dictionary:
+	var query := PhysicsRayQueryParameters3D.create(
+		Vector3(x,60,z)*CELL,Vector3(x,-24,z)*CELL)
+	query.collision_mask = 1
+	return world.get_world_3d().direct_space_state.intersect_ray(query)
+
+func _on_mesh_block_entered(position: Vector3i) -> void:
 	mesh_events += 1
+	mesh_positions.append(position)
 
 func _init() -> void:
 	call_deferred("run")
@@ -286,4 +294,144 @@ func run() -> void:
 	observations.append({"stage":"viewer_revisit","inserted":revisit_inserted.size(),
 		"previousGeneration":center_generation,"generation":revisit_generation,
 		"meshed":revisit_meshed,"collision":revisit_collision})
+	# The edit below raises the surface into data-block layer y=1. That layer
+	# needs its own y=2 input halo; the original 27-block probe only guaranteed
+	# meshing around the center y=0 layer.
+	for z in range(-1,2):
+		for x in range(-1,2):
+			var upper_block := Vector3i(x,2,z)
+			var demand: Dictionary = backend.request_voxel_block_shadow(block_request(upper_block),1,5)
+			check(demand.has("key"),"upper edit halo demand retained: %s" % upper_block)
+	var upper_inserted := {}
+	var upper_deadline := Time.get_ticks_msec() + 120000
+	while Time.get_ticks_msec() < upper_deadline and upper_inserted.size() < 9:
+		var event: Dictionary = backend.pump_voxel_block_shadow()
+		if event.get("status") == "ready" and event.get("state") == "prepared":
+			var key: Dictionary = event.get("key",{})
+			var position := block_position(key.get("origin",Vector3i.ZERO))
+			var inserted: bool = terrain.try_set_block_data(position,make_buffer(event))
+			backend.voxel_block_shadow_insertion_receipt(key,int(event.generation),inserted)
+			if inserted:
+				upper_inserted[position] = true
+				accepted += 1
+		await process_frame
+	check(upper_inserted.size() == 9,"upper edit halo inserted before source mutation")
+	# A durable source mutation must replace the retained artifact and the real
+	# collision surface, even while the viewer and actor remain in the scene.
+	var old_edit_hit := probe_hit(12,2)
+	check(old_edit_hit.get("collider") == terrain,"edit probe starts on terrain collider")
+	var old_away_hit := probe_hit(-4,0)
+	var old_edit_bytes: Dictionary = backend.encode_voxel_block_shadow(block_request(Vector3i(0,1,0)))
+	var mesh_events_before_edit := mesh_events
+	var old_probe_heights := {}
+	for z in range(0,5):
+		for x in range(10,15):
+			var hit := probe_hit(x,z)
+			if hit.get("collider") == terrain:
+				old_probe_heights[Vector2i(x,z)] = hit.position.y
+	var operations := []
+	for z in range(0,5):
+		for y in range(14,23):
+			for x in range(10,15):
+				operations.append({"namespace":"durable_terrain","kind":"set",
+					"cell":Vector3i(x,y,z),"state":{"materialId":13,
+						"biomeId":0,"solid":true,"density":1.35,"fluidId":0,
+						"light":Vector2i.ZERO,"metadata":{"source":"terrain_edit",
+							"terrainMeshAffects":true},"blockId":"retained_fixture_platform",
+						"editReason":"retained-native-headed-fixture"}})
+	var transaction := {"schema":"n3-native-typed-cell-transaction/v1",
+		"transactionId":"retained-native-headed-platform-v1","expectedRevision":0,
+		"operations":operations}
+	var committed: Dictionary = backend.commit_typed_cells(transaction)
+	check(committed.get("commitStatus") == "committed","durable platform edit committed")
+	var new_edit_bytes: Dictionary = backend.encode_voxel_block_shadow(block_request(Vector3i(0,1,0)))
+	var source_bytes_changed: bool = old_edit_bytes.get("sdf16Le") != new_edit_bytes.get("sdf16Le")
+	check(source_bytes_changed,"durable edit changes native SDF bytes")
+	var old_receipt: Dictionary = backend.voxel_block_shadow_mesh_receipt(
+		center_key,revisit_generation,true,true,true)
+	check(old_receipt.get("status") == "rejected","pre-edit native generation receipt rejected")
+	var edit_inserted := {}
+	var edited_generation := 0
+	var edited_upper_key: Dictionary = {}
+	var edited_upper_generation := 0
+	var edit_deadline := Time.get_ticks_msec() + 120000
+	while Time.get_ticks_msec() < edit_deadline and edit_inserted.size() < 36:
+		var event: Dictionary = backend.pump_voxel_block_shadow()
+		if event.get("status") == "ready" and event.get("state") == "prepared":
+			var key: Dictionary = event.get("key",{})
+			var position := block_position(key.get("origin",Vector3i.ZERO))
+			var inserted: bool = terrain.try_set_block_data(position,make_buffer(event))
+			var receipt: Dictionary = backend.voxel_block_shadow_insertion_receipt(
+				key,int(event.generation),inserted)
+			if inserted and receipt.get("status") == "ready":
+				edit_inserted[position] = true
+				accepted += 1
+				if position == Vector3i.ZERO:
+					edited_generation = int(event.generation)
+				if position == Vector3i(0,1,0):
+					edited_upper_key = key
+					edited_upper_generation = int(event.generation)
+		await process_frame
+	var edited_hit := {}
+	var edited_cell := Vector2i.ZERO
+	var edited_surface := false
+	for i in range(360):
+		await physics_frame
+		if i % 10 == 0:
+			for z in range(0,5):
+				for x in range(10,15):
+					var candidate := probe_hit(x,z)
+					var cell := Vector2i(x,z)
+					if candidate.get("collider") == terrain and old_probe_heights.has(cell) \
+							and candidate.position.y > float(old_probe_heights[cell]) + 4.0*CELL:
+						edited_hit = candidate
+						edited_cell = cell
+						edited_surface = true
+						break
+				if edited_surface:
+					break
+		if edited_surface:
+			break
+	var edit_actor_landed := false
+	if edited_surface:
+		var edit_actor := CharacterBody3D.new()
+		edit_actor.name = "EditedSurfacePhysicsProbe"
+		edit_actor.collision_layer = 2
+		edit_actor.collision_mask = 1
+		var edit_shape := CollisionShape3D.new()
+		var edit_capsule := CapsuleShape3D.new()
+		edit_capsule.radius = 0.35
+		edit_capsule.height = 1.8
+		edit_shape.shape = edit_capsule
+		edit_actor.add_child(edit_shape)
+		world.add_child(edit_actor)
+		edit_actor.global_position = edited_hit.position + Vector3.UP*3.0
+		for i in range(90):
+			await physics_frame
+			var contact := edit_actor.move_and_collide(Vector3.DOWN*0.35)
+			if contact != null and contact.get_collider() == terrain:
+				edit_actor_landed = true
+				break
+	check(edit_inserted.size() == 36,"edited source replaces all retained native halo blocks")
+	check(edited_generation > revisit_generation,"edited center receives fresh generation")
+	check(edited_surface,"durable edit raises real terrain collision surface")
+	check(edit_actor_landed,"actor lands on edited terrain collision")
+	var edited_upper_receipt: Dictionary = {}
+	if edited_surface and edit_actor_landed and not edited_upper_key.is_empty():
+		edited_upper_receipt = backend.voxel_block_shadow_mesh_receipt(
+			edited_upper_key,edited_upper_generation,true,true,true)
+	check(edited_upper_receipt.get("status") == "ready",
+		"edited upper block gains current mesh and physics receipt")
+	if edited_surface:
+		camera.global_position = edited_hit.position + Vector3(12,7,15)
+		camera.look_at(edited_hit.position + Vector3(0,1,0))
+	observations.append({"stage":"source_edit_replacement","commit":committed,
+		"oldReceipt":old_receipt,"inserted":edit_inserted.size(),
+		"oldGeneration":revisit_generation,"generation":edited_generation,
+		"oldHit":old_edit_hit,"newHit":edited_hit,"editedCell":edited_cell,
+		"actorLanded":edit_actor_landed,"sourceBytesChanged":source_bytes_changed,
+		"oldAwayHit":old_away_hit,"newAwayHit":probe_hit(-4,0),
+		"meshEventsBefore":mesh_events_before_edit,"meshEventsAfter":mesh_events,
+		"meshPositions":mesh_positions,"editedUpperReceipt":edited_upper_receipt,
+		"upperHaloResident":terrain.has_data_block(Vector3i(0,2,0))})
 	await finish()

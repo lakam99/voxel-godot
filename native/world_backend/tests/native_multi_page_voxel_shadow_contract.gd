@@ -135,6 +135,7 @@ func run() -> void:
 		# 1960 is the first cell of page 7; nearby lattice products expose
 		# Godot Vector3 float32 rounding and source-cell remapping.
 		for specification in [
+			["negative-page-seam-full16-lod1", Vector3i(-288, 0, -288), Vector3i.ONE * 16, 1],
 			["negative-page-seam-lod1", Vector3i(-281, -1, -281), Vector3i(2, 2, 2), 1],
 			["positive-page-seam-lod1", Vector3i(279, 0, 279), Vector3i(2, 1, 2), 1],
 			["float32-remap-positive-lod0", Vector3i(1959, -1, 1959), Vector3i(2, 2, 2), 0],
