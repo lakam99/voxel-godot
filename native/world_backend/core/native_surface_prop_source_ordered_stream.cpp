@@ -107,6 +107,9 @@ std::size_t native_surface_prop_compatibility_draw_count(
 NativeSurfacePropSourceOrderedStreamRejected::NativeSurfacePropSourceOrderedStreamRejected()
     : std::invalid_argument("incomplete native source-ordered surface-prop stream") {}
 
+NativeSurfacePropSourceOrderedStreamCancelled::NativeSurfacePropSourceOrderedStreamCancelled()
+    : std::runtime_error("native source-ordered surface-prop stream cancelled") {}
+
 NativeSurfacePropSourceOrderedStream::NativeSurfacePropSourceOrderedStream(
     const std::uint32_t rng_seed, const std::uint64_t final_rng_state,
     const std::int32_t chunk_x, const std::int32_t chunk_z, Sha256Digest world_digest,
@@ -122,13 +125,16 @@ NativeSurfacePropSourceOrderedStream NativeSurfacePropSourceOrderedStream::creat
     const Sha256Digest &expected_world_digest, const std::uint64_t expected_world_generation,
     const NativeEffectiveTerrainSource &terrain, const NativeBiomeEnvironmentCatalog &catalog,
     const NativeStructureExclusionSnapshot &exclusions, const NativeFeatureDeltaSnapshot &removed_props,
-    const NativeWildlifePresentationCatalog &wildlife_presentations) {
+    const NativeWildlifePresentationCatalog &wildlife_presentations,
+    const std::function<bool()> &should_cancel) {
     try {
+        if (should_cancel && should_cancel()) throw NativeSurfacePropSourceOrderedStreamCancelled();
         preflight(seed, chunk_x, chunk_z, expected_world_digest, expected_world_generation, terrain, exclusions);
         const auto seed_value = native_surface_prop_chunk_rng_seed(seed, chunk_x, chunk_z);
         GodotPcg32 rng(seed_value);
         std::array<NativeSurfacePropOrderedAttempt, NativeSurfacePropAttemptStream::ATTEMPT_COUNT> entries{};
         for (std::uint32_t ordinal = 0U; ordinal < entries.size(); ++ordinal) {
+            if (should_cancel && should_cancel()) throw NativeSurfacePropSourceOrderedStreamCancelled();
             NativeSurfacePropOrderedAttempt entry;
             entry.state_before_coordinates = rng.state();
             const auto x = native_surface_prop_checked_chunk_cell(chunk_x,
@@ -187,6 +193,7 @@ NativeSurfacePropSourceOrderedStream NativeSurfacePropSourceOrderedStream::creat
             entry.state_after_recipe = rng.state();
             entries[ordinal] = std::move(entry);
         }
+        if (should_cancel && should_cancel()) throw NativeSurfacePropSourceOrderedStreamCancelled();
         const auto source_receipt = NativeSurfacePropSourceReceipt::from_pin(terrain.pin(),
             NativeBiomeEnvironmentCatalog::SCHEMA_REVISION, catalog.content_digest());
         return NativeSurfacePropSourceOrderedStream(seed_value, rng.state(), chunk_x, chunk_z,

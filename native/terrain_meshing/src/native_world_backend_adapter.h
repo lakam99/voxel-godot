@@ -109,6 +109,11 @@ public:
 		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions,
 		std::int64_t p_ordinal, const godot::String &p_visual_source,
 		const godot::String &p_visual_asset_id) const;
+	godot::Dictionary begin_rock_ordered_source_async(
+		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
+		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions);
+	godot::Dictionary cancel_rock_ordered_source_async(std::int64_t p_ticket);
+	godot::Dictionary poll_rock_ordered_source_async(std::int64_t p_ticket);
 	godot::Dictionary admit_wildlife_presentation_catalog(const godot::Dictionary &p_bundle);
 	godot::Dictionary admit_structure_exclusion_chunk(const godot::Dictionary &p_capture) const;
 	godot::Dictionary compose_surface_prop_ordered_shadow(
@@ -215,6 +220,30 @@ private:
 	std::int64_t voxel_worker_shaping_page_count_ = 0;
 	std::int64_t voxel_worker_capture_usec_ = 0;
 	std::int64_t voxel_worker_encode_usec_ = 0;
+	std::thread rock_source_worker_;
+	std::atomic<bool> rock_source_worker_finished_{false};
+	std::shared_ptr<std::atomic<bool>> rock_source_worker_cancel_token_;
+	std::unique_ptr<NativeRockOrderedCache> rock_source_worker_result_;
+	std::exception_ptr rock_source_worker_error_;
+	bool rock_source_worker_cancelled_ = false;
+	bool rock_source_worker_cancel_requested_ = false;
+	std::int64_t rock_source_worker_ticket_ = 0;
+	std::int64_t next_rock_source_worker_ticket_ = 1;
+	std::int64_t rock_source_worker_capture_usec_ = 0;
+	std::int64_t rock_source_worker_compose_usec_ = 0;
+	std::int64_t rock_source_worker_started_usec_ = 0;
+	godot::Ref<NativeEffectiveTerrainPage> rock_source_worker_page_;
+	godot::Ref<NativeStructureExclusionChunk> rock_source_worker_exclusions_;
+	const voxel::world_backend::NativeStructureExclusionSnapshot *rock_source_worker_exclusion_snapshot_ = nullptr;
+	const voxel::world_backend::NativeEffectiveTerrainBatch *rock_source_worker_batch_ = nullptr;
+	const voxel::world_backend::NativeBiomeEnvironmentCatalog *rock_source_worker_biome_ = nullptr;
+	const voxel::world_backend::NativeFeatureDeltaSnapshot *rock_source_worker_removed_ = nullptr;
+	const voxel::world_backend::NativeWildlifePresentationCatalog *rock_source_worker_wildlife_ = nullptr;
+	const voxel::world_backend::NativeSurfaceRockAssetCatalog *rock_source_worker_visual_ = nullptr;
+	std::string rock_source_worker_biome_identity_;
+	std::string rock_source_worker_removed_identity_;
+	std::string rock_source_worker_visual_identity_;
+	std::string rock_source_worker_wildlife_identity_;
 };
 
 #endif

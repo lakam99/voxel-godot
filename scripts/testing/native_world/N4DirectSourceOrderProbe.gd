@@ -236,11 +236,11 @@ func run() -> void:
 		{"chunk": Vector2i.ZERO, "removed": ["atlas-1492:16,17:0"]},
 		{"chunk": Vector2i(-1, -1), "removed": []}]:
 		main.restore_removed_props(spec.removed)
-		cases.append(run_case(main, spec.chunk, spec.removed))
+		cases.append(await run_case(main, spec.chunk, spec.removed))
 	# This seed/chunk was found by a one-time, bounded native-outcome search.
 	# Pinning it keeps each later differential focused and reproducible.
 	var ore_chunk := Vector2i(3, 2)
-	var ore_case: Dictionary = run_case(main, ore_chunk, [])
+	var ore_case: Dictionary = await run_case(main, ore_chunk, [])
 	var ore_chunk_found := false
 	for row in ore_case.native:
 		if int(row.outcome) in [6, 7]:
@@ -252,7 +252,7 @@ func run() -> void:
 			if int(row.outcome) in [6, 7]:
 				var child_tombstone := String(row.durableId) + ":cluster1"
 				main.restore_removed_props([child_tombstone])
-				cases.append(run_case(main, ore_chunk, [child_tombstone]))
+				cases.append(await run_case(main, ore_chunk, [child_tombstone]))
 				main.restore_removed_props([])
 				break
 	# A blocker can originate outside the 28-cell source chunk but intersect
@@ -269,7 +269,7 @@ func run() -> void:
 		elif cell.y + margin >= 28: outside = Vector2i(cell.x, 28)
 		if outside.x == 2147483647: continue
 		main.structure_system.reserve_natural_prop_exclusion(outside.x, outside.y, 1, 1, "n4_edge_halo")
-		var edge_case: Dictionary = run_case(main, Vector2i.ZERO, [])
+		var edge_case: Dictionary = await run_case(main, Vector2i.ZERO, [])
 		edge_case["edgeBlockerCell"] = [outside.x, outside.y]
 		edge_case["edgeBlockerId"] = "n4_edge_halo:%d,%d:1x1" % [outside.x, outside.y]
 		cases.append(edge_case)
@@ -329,10 +329,13 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		if bool(tree_halo.get("ok", false)) else {}
 	var rng: RandomNumberGenerator = state.rng
 	var direct_rows := []
+	var published_body_refs := {}
+	var published_collider_refs := {}
 	var ordered_attempts: Array = ordered.get("attempts", [])
 	var rock_journal = RockJournal.new()
 	var rock_journal_binding: Dictionary = rock_journal.bind(main, backend,
-		bundle.terrain.page, structure_receipt.snapshot, ordered)
+		bundle.terrain.page, structure_receipt.snapshot, {}, chunk)
+	var rock_source_begin: Dictionary = rock_journal.prepare_source()
 	for index in range(28):
 		var before_state := rng.state
 		var preview := RandomNumberGenerator.new()
@@ -364,6 +367,10 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			direct_row["treeRequest"] = tree_request_projection(direct_tree_request)
 		var ore_children := []
 		for child in chunk.get_children():
+			if child is StaticBody3D and child.get_meta("prop_id", "") == id:
+				for part in child.get_children():
+					if part is CollisionShape3D:
+						published_collider_refs[id] = weakref(part)
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
 					and String(child.get_meta("material", "")) in \
 					["berryBush","aloePatch","mushroomCluster","frostHerbPatch"]:
@@ -377,16 +384,55 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
 					and String(child.get_meta("material", "")) == "rock":
 				direct_row["rock"] = rock_geometry(child)
+				published_body_refs[id] = weakref(child)
 			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
 					and String(child.get_meta("material", "")) == "tree":
 				direct_row["tree"] = tree_geometry(child)
 		if not ore_children.is_empty():
 			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
+	var rock_source_poll := {}
+	while rock_source_begin.get("status") == "pending":
+		rock_source_poll = rock_journal.poll_source()
+		if rock_source_poll.get("status") != "pending":
+			break
+		await process_frame
+	var rock_terminal_repoll: Dictionary = backend.poll_rock_ordered_source_async(
+		int(rock_source_poll.get("ticket", 0)))
+	var rock_journal_ready_repoll: Dictionary = rock_journal.poll_source()
 	var rock_journal_advances := []
 	while rock_journal.status().pending > 0 and rock_journal_advances.size() < 28:
 		rock_journal_advances.append(rock_journal.advance(1, 2000))
 	var rock_journal_status: Dictionary = rock_journal.status()
+	var cancel_retry_case := {}
+	if chunk_key == Vector2i.ZERO and removed.is_empty() \
+			and not bool(main.get_meta("n4_rock_cancel_retry_done", false)):
+		main.set_meta("n4_rock_cancel_retry_done", true)
+		var cancel_begin: Dictionary = rock_journal.prepare_source()
+		var cancel_request: Dictionary = rock_journal.cancel_source()
+		var cancel_terminal := {}
+		for _frame in range(120):
+			await process_frame
+			cancel_terminal = rock_journal.poll_source()
+			if cancel_terminal.get("status") != "pending": break
+		var cancel_repoll: Dictionary = rock_journal.poll_source()
+		var retry_begin: Dictionary = rock_journal.prepare_source()
+		var retry_terminal := {}
+		for _frame in range(120):
+			await process_frame
+			retry_terminal = rock_journal.poll_source()
+			if retry_terminal.get("status") != "pending": break
+		var retry_repoll: Dictionary = rock_journal.poll_source()
+		cancel_retry_case = {"beginStatus":cancel_begin.get("status"),
+			"cancelStatus":cancel_request.get("status"),
+			"terminalStatus":cancel_terminal.get("status"),
+			"terminalReason":cancel_terminal.get("reason"),
+			"repollReason":cancel_repoll.get("reason"),
+			"retryBeginStatus":retry_begin.get("status"),
+			"retryStatus":retry_terminal.get("status"),
+			"retryPollWorkerUsec":retry_terminal.get("workerUsec"),
+			"retryRepollStatus":retry_repoll.get("status"),
+			"retryRepollTicket":retry_repoll.get("ticket")}
 	var published_rock_footprints := []
 	for row in ordered.get("attempts", []):
 		var ordinal := int(row.ordinal)
@@ -589,10 +635,50 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		"direct":direct_rows,"native":native_rows,
 		"publishedRockFootprints":published_rock_footprints,
 		"rockJournalBinding":rock_journal_binding,
+		"rockSourceBegin":rock_source_begin,
+		"rockSourcePoll":rock_source_poll,
+		"rockTerminalRepoll":rock_terminal_repoll,
+		"rockJournalReadyRepoll":rock_journal_ready_repoll,
+		"rockCancelRetry":cancel_retry_case,
 		"rockJournalAdvances":rock_journal_advances,
 		"rockJournalStatus":rock_journal_status,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),
 		"childCount":chunk.get_child_count()}
+	var rock_lifecycle := {}
+	for publication in published_rock_footprints:
+		var body_ref = published_body_refs.get(publication.durableId)
+		var body = body_ref.get_ref() if body_ref is WeakRef else null
+		if not is_instance_valid(body): continue
+		var before_exit: Dictionary = rock_journal.receipt(publication.durableId)
+		body.queue_free()
+		await process_frame
+		var after_exit: Dictionary = rock_journal.receipt(publication.durableId)
+		rock_lifecycle = {"durableId":publication.durableId,
+			"beforeStatus":before_exit.get("status"),
+			"beforeFootprintIdentity":before_exit.get("footprintIdentity", ""),
+			"afterStatus":after_exit.get("status"),
+			"afterReason":after_exit.get("reason", ""),
+			"generation":after_exit.get("generation", -1)}
+		break
+	result["rockLifecycle"] = rock_lifecycle
+	var collider_lifecycle := {}
+	for publication in published_rock_footprints:
+		if String(publication.durableId) == String(rock_lifecycle.get("durableId", "")):
+			continue
+		var collider_ref = published_collider_refs.get(publication.durableId)
+		var collider = collider_ref.get_ref() if collider_ref is WeakRef else null
+		if not is_instance_valid(collider): continue
+		var before_removal: Dictionary = rock_journal.receipt(publication.durableId)
+		collider.queue_free()
+		await process_frame
+		var after_removal: Dictionary = rock_journal.receipt(publication.durableId)
+		collider_lifecycle = {"durableId":publication.durableId,
+			"beforeStatus":before_removal.get("status"),
+			"beforeFootprintIdentity":before_removal.get("footprintIdentity", ""),
+			"afterStatus":after_removal.get("status"),
+			"afterReason":after_removal.get("reason", "")}
+		break
+	result["colliderLifecycle"] = collider_lifecycle
 	result["rockJournalUnbind"] = rock_journal.unbind()
 	chunk.free()
 	return result
