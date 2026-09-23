@@ -5,6 +5,7 @@ const MAIN = preload("res://scripts/MainCore.gd")
 const STRUCTURES = preload("res://scripts/StructureSystem.gd")
 const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
 const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
+const RUNTIME_OWNER = preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
 
 class FakeWorkerBackend extends RefCounted:
 	var worker_in_flight := false
@@ -111,6 +112,22 @@ func run() -> void:
 	main.structure_system.citadel_terrain_admission.configure(main.seed_text, {}, policy)
 	main.world_generation_system = WORLD.new()
 	main.world_generation_system.setup(main)
+	var terrain_world := Node3D.new()
+	root.add_child(terrain_world)
+	var terrain := VoxelTerrain.new()
+	terrain.automatic_loading_enabled = false
+	terrain.mesh_block_size = 16
+	terrain.scale = Vector3.ONE * main.CELL
+	var terrain_format := VoxelFormat.new()
+	terrain_format.set_channel_depth(VoxelBuffer.CHANNEL_SDF, VoxelBuffer.DEPTH_16_BIT)
+	terrain_format.set_channel_depth(VoxelBuffer.CHANNEL_INDICES, VoxelBuffer.DEPTH_8_BIT)
+	terrain_format.set_channel_depth(VoxelBuffer.CHANNEL_DATA5, VoxelBuffer.DEPTH_8_BIT)
+	terrain.set_format(terrain_format)
+	var terrain_mesher := VoxelMesherTransvoxel.new()
+	terrain_mesher.texturing_mode = VoxelMesherTransvoxel.TEXTURES_SINGLE_S4
+	terrain_mesher.transitions_enabled = false
+	terrain.mesher = terrain_mesher
+	terrain_world.add_child(terrain)
 	var base: Dictionary = SOURCE.from_main(main)
 	check(base.get("status") == "ready", "fixture creates canonical native source descriptor")
 	check(not main.has_method("begin_native_terrain_load_preparation")
@@ -186,14 +203,29 @@ func run() -> void:
 		and transaction.snapshot().get("inputSnapshotRetained") == true
 		and caller_request.terrainVolume == original_volume,
 		"native commit explicitly validates the candidate source identity")
-	var transferred_backend = transaction.take_backend()
-	check(transferred_backend == backend and transaction.snapshot().get("state") == "transferred"
-		and transferred_backend.export_terrain_volume_v2().get("terrainVolume", {}) == original_volume
+	var runtime_owner = RUNTIME_OWNER.new()
+	var adopted: Dictionary = runtime_owner.setup_from_committed_transaction(
+		main, terrain, transaction, committed, 71, 10)
+	var adopted_state: Dictionary = runtime_owner.snapshot()
+	var adopted_save: Dictionary = runtime_owner.export_terrain_volume_v2()
+	check(adopted.get("status") == "ready"
+		and adopted.get("adoptedCommittedBackend") == true
+		and adopted_state.get("state") == "active"
+		and int(adopted_state.get("backendInstanceId", 0)) == int(committed.get("backendInstanceId", -1))
+		and transaction.snapshot().get("state") == "transferred"
+		and adopted_save.get("terrainVolume", {}) == original_volume
 		and caller_request.terrainVolume == original_volume
 		and transaction.snapshot().get("inputSnapshotRetained") == false,
-		"only committed backend transfers, preserving the complete save-v2 volume")
+		"runtime owner consumes the committed transaction receipt once and preserves exact v2 data")
 	check(transaction.take_backend() == null,
-		"backend transfer is single-owner and cannot be consumed twice")
+		"runtime owner adoption leaves no second backend transfer available")
+	var runtime_owner_stop: Dictionary = runtime_owner.stop()
+	for _frame in range(120):
+		if runtime_owner_stop.get("status") == "ready": break
+		await process_frame
+		runtime_owner_stop = runtime_owner.drain_step()
+	check(runtime_owner_stop.get("status") == "ready",
+		"runtime owner adopted from the load transaction drains cleanly")
 
 	var revoked_commit_source: Dictionary = _source(main, _volume(4))
 	var revoked_commit_transaction = TRANSACTION.new()
@@ -334,7 +366,8 @@ func run() -> void:
 			"advanceCount": transaction.snapshot().get("advanceCount", 0),
 			"maxAdvanceUsec": transaction.snapshot().get("maxAdvanceUsec", 0)},
 		"lifecycle": {"commitIdentity": candidate_identity,
-			"transferredBackendInstanceId": transferred_backend.get_instance_id(),
+			"transferredBackendInstanceId": adopted.get("backendInstanceId", 0),
+			"committedTransactionOwnerAdoption": adopted.get("status"),
 			"acceptingCancelDrained": accepting_cancelled.get("cleanupComplete", false),
 			"finalizingCancelDrained": finalized_cancelled.get("cleanupComplete", false),
 			"malformedDrainStatus": malformed_cleanup.get("status"),
