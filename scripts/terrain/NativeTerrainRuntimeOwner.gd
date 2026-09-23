@@ -13,6 +13,7 @@ const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
 const NumericSource = preload("res://scripts/terrain/NativeTerrainNumericSource.gd")
 const OccupancySource = preload("res://scripts/terrain/NativeTerrainOccupancySource.gd")
 const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
+const LegacyConverter = preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
 
 var _backend
 var _admission
@@ -27,6 +28,11 @@ var _failure := ""
 var _seed_text := ""
 var _source_identity := {}
 var _pending_edit_plan := {}
+var _legacy_converter
+var _legacy_main
+var _legacy_terrain: VoxelTerrain
+var _legacy_consumer_id := 0
+var _legacy_priority := 0
 
 func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
 		save_snapshot = null) -> Dictionary:
@@ -39,8 +45,23 @@ func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
 	if _admission == null: return _setup_failure("site_admission_missing")
 	var source: Dictionary = SourceRequest.from_main_with_current_volume(main) \
 		if save_snapshot == null else SourceRequest.from_main_with_v2_save(main, save_snapshot)
+	if source.get("reason") == "native_legacy_terrain_conversion_required":
+		_legacy_converter = LegacyConverter.new()
+		var started: Dictionary = _legacy_converter.setup(main, save_snapshot)
+		if started.get("status") != "ready":
+			return _setup_failure(String(started.get("reason", "legacy_conversion_failed")))
+		_legacy_main = main
+		_legacy_terrain = terrain
+		_legacy_consumer_id = consumer_id
+		_legacy_priority = priority
+		_state = "converting"
+		return {"status":"pending", "reason":"native_legacy_terrain_conversion_required"}
 	if source.get("status") != "ready":
 		return _setup_failure(String(source.get("reason", "native_source_request_failed")))
+	return _activate(source, terrain, consumer_id, priority)
+
+func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
+		priority: int) -> Dictionary:
 	_backend = ClassDB.instantiate("NativeWorldBackend")
 	if _backend == null: return _setup_failure("native_backend_unavailable")
 	var initialized: Dictionary = _backend.initialize_from_save_v2(source.request)
@@ -84,6 +105,24 @@ func replace_demand(primary: Dictionary, other_viewers: Array[Dictionary],
 		foreground_chunks, vertical_bounds)
 
 func advance() -> Dictionary:
+	if _state == "converting":
+		var converted: Dictionary = _legacy_converter.advance()
+		if converted.get("status") == "failed":
+			return _setup_failure(String(converted.get("reason", "legacy_conversion_failed")))
+		if converted.get("status") != "ready": return converted
+		var resolved: Dictionary = _legacy_converter.resolved_save()
+		if resolved.get("status") != "ready":
+			return _setup_failure(String(resolved.get("reason", "legacy_conversion_export_failed")))
+		var source: Dictionary = SourceRequest.from_main_with_v2_save(_legacy_main,
+			resolved.save)
+		if source.get("status") != "ready":
+			return _setup_failure(String(source.get("reason", "legacy_conversion_import_failed")))
+		var ready: Dictionary = _activate(source, _legacy_terrain, _legacy_consumer_id,
+			_legacy_priority)
+		_legacy_converter = null
+		_legacy_main = null
+		_legacy_terrain = null
+		return ready
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	# The same production site authority must advance its own source queue.
 	var site: Dictionary = _admission.advance()
@@ -248,6 +287,10 @@ func export_terrain_volume_v2() -> Dictionary:
 
 func stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
+	if _state == "converting":
+		_legacy_converter.cancel()
+		_release_owners()
+		return {"status":"ready", "drained":true}
 	if _state == "new":
 		_state = "drained"
 		return {"status":"ready", "drained":true}
@@ -289,6 +332,9 @@ func _active_failure(reason: String) -> Dictionary:
 	return {"status":"failed", "reason":reason}
 
 func _release_owners() -> void:
+	_legacy_converter = null
+	_legacy_main = null
+	_legacy_terrain = null
 	_publisher = null
 	_cells = null
 	_numeric = null

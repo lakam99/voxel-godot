@@ -2,6 +2,7 @@ extends SceneTree
 
 const OWNER = preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
 const MAIN = preload("res://scripts/MainCore.gd")
+const GAME_MAIN = preload("res://scripts/Main.gd")
 const STRUCTURES = preload("res://scripts/StructureSystem.gd")
 const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
 const VOLUME = preload("res://scripts/TerrainVolumeService.gd")
@@ -290,6 +291,54 @@ func run() -> void:
 		await process_frame
 		new_game_stop = new_game.drain_step()
 	check(new_game_stop.get("status") == "ready", "New Game owner drains")
+	var legacy_main = GAME_MAIN.new()
+	legacy_main.seed_text = "native-owner-legacy-continue"
+	legacy_main.seed_hash = legacy_main.hash_string(legacy_main.seed_text)
+	legacy_main.setup_noise()
+	legacy_main.structure_system = STRUCTURES.new()
+	legacy_main.structure_system.citadel_terrain_admission.configure(
+		legacy_main.seed_text, {}, {"regionCells":legacy_main.STRUCTURE_REGION_CELLS,
+			"spawnChance":legacy_main.STRUCTURE_SPAWN_CHANCE})
+	legacy_main.world_generation_system = WORLD.new()
+	legacy_main.world_generation_system.setup(legacy_main)
+	var legacy_column := Vector2i(-13, -11)
+	var legacy_height: float = legacy_main.world_generation_system.surface_y_for_cell(
+		Vector3i(legacy_column.x, 0, legacy_column.y)) - 4.0 * legacy_main.CELL
+	var legacy_save := {"version":2, "seed":legacy_main.seed_text,
+		"terrain":[{"x":legacy_column.x, "z":legacy_column.y, "surfaceY":legacy_height}]}
+	var converting = OWNER.new()
+	var convert_setup: Dictionary = converting.setup(legacy_main, terrain, 74, 10,
+		legacy_save)
+	check(convert_setup.get("status") == "pending"
+		and converting.snapshot().state == "converting"
+		and converting.export_terrain_volume_v2().get("status") != "ready",
+		"historical Continue retains loading request and withholds partial save")
+	var cancelled_convert = OWNER.new()
+	check(cancelled_convert.setup(legacy_main, terrain, 75, 10,
+		legacy_save).get("status") == "pending"
+		and cancelled_convert.stop().get("status") == "ready"
+		and cancelled_convert.snapshot().state == "drained"
+		and cancelled_convert.advance().get("status") == "failed",
+		"cancelled Continue releases conversion and cannot publish a partial owner")
+	var convert_tick: Dictionary = {}
+	for frame in range(300):
+		convert_tick = converting.advance()
+		if converting.snapshot().state == "active" or convert_tick.get("status") == "failed":
+			break
+		await process_frame
+	legacy_main.restore_volume_edits(legacy_save.terrain)
+	check(convert_tick.get("status") == "ready"
+		and converting.snapshot().state == "active"
+		and converting.export_terrain_volume_v2().get("terrainVolume", {})
+			== legacy_main.world_generation_system.save_terrain_volume_deltas(),
+		"historical Continue activates one native owner with exact v2 snapshot")
+	var convert_stop: Dictionary = converting.stop()
+	for frame in range(120):
+		if convert_stop.get("status") == "ready": break
+		await process_frame
+		convert_stop = converting.drain_step()
+	check(convert_stop.get("status") == "ready", "converted owner drains")
+	legacy_main.free()
 	world.queue_free()
 	main.free()
 	var report := {"schema":"n3-terrain-runtime-owner-contract/v1",
