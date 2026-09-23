@@ -251,7 +251,7 @@ func run() -> void:
 	check(empty_stop.get("status") == "ready", "empty producer drains")
 	var requests = ARTIFACT_REQUESTS.new()
 	check(requests.setup(backend, pages, main.structure_system.citadel_terrain_admission,
-		planner, main.CELL, 77).get("status") == "ready"
+		planner, main.CELL, 77, 4096).get("status") == "ready"
 		and requests.request_block(high_block).get("status") == "pending",
 		"composed source owner retains a demanded request")
 	var requested: Dictionary = {}
@@ -285,6 +285,29 @@ func run() -> void:
 		await process_frame
 		request_stop = requests.drain_step()
 	check(request_stop.get("status") == "ready", "composed request worker drains")
+	var bounded = ARTIFACT_REQUESTS.new()
+	check(bounded.setup(backend, pages, main.structure_system.citadel_terrain_admission,
+		planner, main.CELL, 78, 1).get("status") == "ready",
+		"resident capacity is explicit at the source request boundary")
+	var extra_viewers: Array[Dictionary] = [{"kind":"secondary", "id":"neighbor",
+		"position":Vector3(main.CELL * 16.0, 0, 0), "distance":0}]
+	var two_demand: Dictionary = planner.replace_sources(viewer, extra_viewers, [], [], bounds)
+	check(two_demand.get("status") == "ready"
+		and bounded.request_block(block).get("status") == "pending",
+		"oversized demand still retains explicitly requested block")
+	var backpressure: Dictionary = bounded.advance()
+	check(backpressure.get("status") == "pending"
+		and backpressure.get("reason") == "resident_mesh_capacity_backpressure"
+		and int(backpressure.get("requiredBlocks", 0)) == 2
+		and int(backpressure.get("retainedRequests", 0)) == 1
+		and bounded.collision_source_snapshot().get("status") == "pending",
+		"oversized closure is explicit retryable backpressure, never ready")
+	planner.replace_sources(viewer, [], [], [], bounds)
+	var resumed: Dictionary = bounded.advance()
+	check(resumed.get("status") == "pending"
+		and resumed.get("reason") != "resident_mesh_capacity_backpressure",
+		"retained request resumes after capacity-compatible demand")
+	bounded.stop()
 	var stopped: Dictionary = producer.stop()
 	for frame in range(120):
 		if stopped.get("status") == "ready": break

@@ -270,3 +270,11 @@ each producer and preserves its owner generation. It does not install or retire
 colliders, set `authority_ready`, or change Main/Continue. The focused service
 fixture covers request retention and demand-change producer replacement at
 `artifacts/native-world-backend/n3-triangle-artifact-1790178474287-be48d6b6/report.json`.
+The request boundary reads N5's current resident cap and returns explicit
+`resident_mesh_capacity_backpressure` with required block count, cap, demand
+identity and retained request count when the complete mesh closure is too
+large. It drains a superseded producer before applying that backpressure and
+never offers an oversized ready source snapshot to N5. This is a bounded
+service response, not spatial retirement or a solution for legitimate larger
+world demand. The two-block/one-block-cap focused preflight is covered in
+`artifacts/native-world-backend/n3-triangle-artifact-1790178589610-4fd2eab5/report.json`.

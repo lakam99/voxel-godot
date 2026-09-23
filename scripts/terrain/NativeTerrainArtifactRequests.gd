@@ -11,6 +11,7 @@ var _admission
 var _planner
 var _cell_meters := 0.0
 var _owner_generation := 0
+var _max_resident_blocks := 0
 var _cancellation_epoch := 0
 var _producer
 var _identity := {}
@@ -23,9 +24,10 @@ var _stop_issued := false
 var _stopping := false
 
 func setup(backend, pages, admission, planner, cell_meters: float,
-		owner_generation: int) -> Dictionary:
+		owner_generation: int, max_resident_blocks: int) -> Dictionary:
 	if _backend != null or backend == null or pages == null or admission == null \
-			or planner == null or cell_meters <= 0.0 or owner_generation <= 0:
+			or planner == null or cell_meters <= 0.0 or owner_generation <= 0 \
+			or max_resident_blocks <= 0:
 		return {"status":"failed", "reason":"artifact_request_owner_invalid"}
 	_backend = backend
 	_pages = pages
@@ -33,6 +35,7 @@ func setup(backend, pages, admission, planner, cell_meters: float,
 	_planner = planner
 	_cell_meters = cell_meters
 	_owner_generation = owner_generation
+	_max_resident_blocks = max_resident_blocks
 	return {"status":"ready"}
 
 func request_block(block: Vector3i) -> Dictionary:
@@ -60,6 +63,8 @@ func advance() -> Dictionary:
 	if changed or _draining:
 		var retired: Dictionary = _retire_producer()
 		if retired.get("status") != "ready": return retired
+	if (demand.blocks as Array).size() > _max_resident_blocks:
+		return _capacity_pending(demand)
 	if _producer == null:
 		var created: Dictionary = _create_producer(source, demand)
 		if created.get("status") != "ready": return created
@@ -95,6 +100,11 @@ func advance() -> Dictionary:
 	return accepted
 
 func collision_source_snapshot() -> Dictionary:
+	if _planner != null:
+		var demand: Dictionary = _planner.required_collision_mesh_blocks()
+		if demand.get("status") == "ready" \
+				and (demand.blocks as Array).size() > _max_resident_blocks:
+			return _capacity_pending(demand)
 	if _producer == null or _draining:
 		return {"status":"pending", "reason":"artifact_producer_unavailable"}
 	return _producer.collision_source_snapshot()
@@ -150,3 +160,11 @@ func _retire_producer() -> Dictionary:
 	_stop_issued = false
 	_active_block = null
 	return {"status":"ready", "drained":true}
+
+func _capacity_pending(demand: Dictionary) -> Dictionary:
+	return {"status":"pending", "reason":"resident_mesh_capacity_backpressure",
+		"requiredBlocks":(demand.blocks as Array).size(),
+		"maxResidentBlocks":_max_resident_blocks,
+		"retainedRequests":_requests.size(),
+		"demandRevision":int(demand.revision),
+		"closureToken":String(demand.closureToken)}
