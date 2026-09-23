@@ -1,0 +1,177 @@
+#include "test_harness.hpp"
+
+#include "../core/native_terrain_volume_v2_import_builder.hpp"
+
+#include <string>
+#include <utility>
+#include <vector>
+
+using namespace voxel::world_backend;
+
+namespace {
+
+NativeTypedWorldStateRecord record(const CellCoord cell) {
+    NativeCellStateInput input;
+    input.cell = cell;
+    input.material = TerrainMaterialId::stone;
+    input.biome = TerrainBiomeId::underground;
+    input.solid = true;
+    input.density = 1.25;
+    input.metadata = NativeValue::object({{"saveDelta", NativeValue::boolean(true)}});
+    input.block_id = NativeBlockIdentity::create("terrain.import.test");
+    input.edit_reason = "import_test";
+    input.generated = false;
+    input.edited = true;
+    return {NativeCellStateNamespace::durable_terrain,
+        NativeTypedWorldStatePersistence::durable, make_native_cell_state(input)};
+}
+
+NativeTerrainVolumeV2ImportIdentity identity(const std::uint64_t revision = 7U) {
+    return {"terrainVolume", 1U, 16U, revision};
+}
+
+NativeTerrainVolumeV2ImportChunk chunk(
+    const CellCoord section, const std::uint64_t revision,
+    std::vector<NativeTypedWorldStateRecord> records) {
+    return {section, revision, std::move(records)};
+}
+
+} // namespace
+
+VWB_TEST(native_terrain_volume_v2_import_builder_matches_decode_across_chunk_splits) {
+    const auto first = record({0, 0, 0});
+    const auto second = record({1, 0, 0});
+    const auto third = record({0, 0, 16});
+    NativeTerrainVolumeV2ImportBuilder whole;
+    whole.begin(identity());
+    whole.append({chunk({0, 0, 0}, 3U, {first, second}), chunk({0, 0, 1}, 4U, {third})});
+    VWB_EXPECT_EQ(3U, whole.record_count());
+    VWB_EXPECT_EQ(2U, whole.section_count());
+    const NativeTerrainVolumeV2 whole_result = whole.finalize();
+
+    NativeTerrainVolumeV2ImportBuilder split(2U);
+    split.begin(identity());
+    split.append({chunk({0, 0, 0}, 3U, {first})});
+    split.append({chunk({0, 0, 0}, 3U, {second}), chunk({0, 0, 1}, 4U, {third})});
+    const NativeTerrainVolumeV2 split_result = split.finalize();
+    VWB_EXPECT_EQ(whole_result, split_result);
+    VWB_EXPECT_EQ(whole_result, decode_native_terrain_volume_v2(encode_native_terrain_volume_v2(whole_result)));
+    VWB_EXPECT(!whole.active());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, whole.finalize());
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_rejects_identity_and_append_caps) {
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, NativeTerrainVolumeV2ImportBuilder(0U));
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+        NativeTerrainVolumeV2ImportBuilder(NativeTerrainVolumeV2ImportBuilder::MAX_RECORDS_PER_APPEND + 1U));
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, NativeTerrainVolumeV2ImportBuilder(1U, 0U));
+
+    NativeTerrainVolumeV2ImportBuilder bad_identity;
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, bad_identity.begin({"playerBlocks", 1U, 16U, 1U}));
+    VWB_EXPECT(!bad_identity.active());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, bad_identity.begin(identity()));
+
+    NativeTerrainVolumeV2ImportBuilder builder(1U);
+    builder.begin(identity());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+        builder.append({chunk({0, 0, 0}, 1U, {record({0, 0, 0}), record({1, 0, 0})})}));
+    VWB_EXPECT(!builder.active());
+    VWB_EXPECT_EQ(0U, builder.record_count());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_rejects_duplicate_reversed_and_missing_input) {
+    const auto zero = record({0, 0, 0});
+    const auto one = record({1, 0, 0});
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {zero})});
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {zero})}));
+        VWB_EXPECT_EQ(0U, builder.record_count());
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {one, zero})}));
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {})}));
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {zero})});
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 2U, {one})}));
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {zero})});
+        auto malformed = record({1, 0, 0});
+        malformed.state.local_cell.x = 16;
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {malformed})}));
+        VWB_EXPECT(!builder.active());
+        VWB_EXPECT_EQ(0U, builder.record_count());
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {one})}));
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+    }
+    {
+        NativeTerrainVolumeV2ImportBuilder builder(2U, 2U);
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {zero, one})});
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {record({2, 0, 0})})}));
+    }
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_accepts_full_production_capacity_in_bounded_appends) {
+    NativeTerrainVolumeV2ImportBuilder builder(
+        NativeTerrainVolumeV2ImportBuilder::MAX_RECORDS_PER_APPEND);
+    builder.begin(identity(19U));
+    for (std::int32_t section_x = 0; section_x < 16; ++section_x) {
+        std::vector<NativeTypedWorldStateRecord> records;
+        records.reserve(NativeTerrainVolumeV2Limits::MAX_CELLS_PER_SECTION);
+        for (std::int32_t z = 0; z < 16; ++z) {
+            for (std::int32_t y = 0; y < 16; ++y) {
+                for (std::int32_t x = 0; x < 16; ++x) {
+                    records.push_back(record({section_x * 16 + x, y, z}));
+                }
+            }
+        }
+        builder.append({chunk({section_x, 0, 0},
+            static_cast<std::uint64_t>(section_x + 1), std::move(records))});
+        VWB_EXPECT_EQ(static_cast<std::size_t>(section_x + 1) * 4096U, builder.record_count());
+    }
+    const NativeTerrainVolumeV2 full = builder.finalize();
+    VWB_EXPECT_EQ(NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS,
+        full.durable_snapshot.records().size());
+    VWB_EXPECT_EQ(16U, full.section_revisions.size());
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_abandons_only_unfinalized_input) {
+    NativeTerrainVolumeV2ImportBuilder builder;
+    builder.begin(identity());
+    builder.append({chunk({0, 0, 0}, 1U, {record({0, 0, 0})})});
+    VWB_EXPECT(builder.abandon());
+    VWB_EXPECT(!builder.abandon());
+    VWB_EXPECT_EQ(0U, builder.record_count());
+    VWB_EXPECT_EQ(0U, builder.section_count());
+    VWB_EXPECT(!builder.active());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+
+    NativeTerrainVolumeV2ImportBuilder finalized;
+    finalized.begin(identity());
+    const NativeTerrainVolumeV2 result = finalized.finalize();
+    VWB_EXPECT_EQ(7U, result.revision);
+    VWB_EXPECT(!finalized.abandon());
+}
