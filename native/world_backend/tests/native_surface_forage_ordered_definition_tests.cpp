@@ -2,8 +2,11 @@
 #include "native_biome_environment_oracle_fixture.hpp"
 #include "native_surface_prop_test_fixture.hpp"
 #include "../core/native_surface_forage_ordered_definition.hpp"
+#include "../core/native_surface_forage_footprint.hpp"
 #include "../core/sha256.hpp"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -261,5 +264,67 @@ VWB_TEST(native_ordered_forage_definition_projects_all_four_grammars_and_separat
         VWB_EXPECT_EQ(ordered.final_rng_state(), rebound_ordered.final_rng_state());
         VWB_EXPECT_THROW(NativeSurfaceForageOrderedDefinitionRejected,
             NativeSurfaceForageOrderedDefinition::create(ordered, rebound_placements, ordinal, terrain, catalog));
+    }
+}
+
+VWB_TEST(native_ordered_forage_footprints_follow_four_grammars_and_nav_policy) {
+    for (const auto grammar : {NativeForageGrammar::berry, NativeForageGrammar::aloe,
+            NativeForageGrammar::mushroom, NativeForageGrammar::frost_herb}) {
+        const auto definition = surface_prop_test_fixture::definition("forage-definition");
+        const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+            definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+        const auto catalog = NativeBiomeEnvironmentCatalog::create(profiles(grammar));
+        const auto ordered = NativeSurfacePropSourceOrderedStream::create(
+            terrain.pin().definition().raw_terrain_seed(), 0, 0, world_digest(), 1U,
+            terrain, catalog, exclusions(), NativeFeatureDeltaSnapshot::create({}, {}), wildlife());
+        const auto placements = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
+        const auto ordinal = forage_ordinal(ordered);
+        const auto forage = NativeSurfaceForageOrderedDefinition::create(
+            ordered, placements, ordinal, terrain, catalog);
+        const auto footprints = compose_native_surface_forage_footprint(
+            ordered, placements, ordinal, terrain, catalog);
+        const auto repeated = compose_native_surface_forage_footprint(
+            ordered, placements, ordinal, terrain, catalog);
+        VWB_EXPECT_EQ(footprints.content_digest(), repeated.content_digest());
+        VWB_EXPECT_EQ(1U, footprints.entries().size());
+        const auto *entry = footprints.find(forage.placement().durable_id);
+        VWB_EXPECT(entry != nullptr);
+        VWB_EXPECT_EQ(forage.content_digest(), entry->generated_definition_digest);
+        VWB_EXPECT_EQ(terrain.pin().physical_content_identity().digest, footprints.source_digest());
+        VWB_EXPECT_EQ(NATIVE_FEATURE_FOOTPRINT_ALL_CHANNELS, entry->declared_channel_mask);
+        const double cell_size = terrain.pin().definition().constants().cell_size_meters;
+        const auto covered = [&](NativeFeatureFootprintChannel channel, double x, double y, double z) {
+            const auto cx = static_cast<std::int32_t>(std::floor(x / cell_size));
+            const auto cy = static_cast<std::int32_t>(std::floor(y / cell_size));
+            const auto cz = static_cast<std::int32_t>(std::floor(z / cell_size));
+            for (const auto &run : entry->runs)
+                if (run.channel == channel && run.first.y == cy && run.first.z == cz
+                    && run.first.x <= cx && cx <= run.last_x_inclusive) return true;
+            return false;
+        };
+        const auto &anchor = forage.placement().world_anchor;
+        const double cr = forage.collider_radius();
+        VWB_EXPECT(covered(NativeFeatureFootprintChannel::collision,
+            anchor.x - cr, anchor.y + forage.collider_center_y(), anchor.z));
+        VWB_EXPECT(covered(NativeFeatureFootprintChannel::collision,
+            anchor.x, anchor.y + forage.collider_center_y() + cr, anchor.z));
+        VWB_EXPECT_EQ(forage.navigation_blocker(),
+            covered(NativeFeatureFootprintChannel::navigation,
+                anchor.x + cr, anchor.y + forage.collider_center_y(), anchor.z));
+        for (const auto &mesh : forage.meshes()) {
+            const double c = std::cos(forage.rotation_y()), s = std::sin(forage.rotation_y());
+            const double mx = anchor.x + c * mesh.position.x - s * mesh.position.z;
+            const double mz = anchor.z + s * mesh.position.x + c * mesh.position.z;
+            const double horizontal = mesh.kind == NativeForageMeshKind::sphere
+                ? mesh.radius : std::max(mesh.top_radius, mesh.bottom_radius);
+            VWB_EXPECT(covered(NativeFeatureFootprintChannel::render,
+                mx + horizontal * mesh.scale.x, anchor.y + mesh.position.y, mz));
+            VWB_EXPECT(covered(NativeFeatureFootprintChannel::render,
+                mx, anchor.y + mesh.position.y + mesh.height * mesh.scale.y * 0.5, mz));
+        }
+        for (const auto &run : entry->runs)
+            VWB_EXPECT(run.channel != NativeFeatureFootprintChannel::terrain_source);
+        VWB_EXPECT_THROW(NativeSurfaceForageOrderedDefinitionRejected,
+            compose_native_surface_forage_footprint(ordered, placements, 28U, terrain, catalog));
     }
 }

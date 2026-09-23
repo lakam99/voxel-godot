@@ -175,6 +175,7 @@ func make_wildlife(parent: Node, prop_id: String, position: Vector3, biome: Stri
     var profile := wildlife_profile(biome, rng)
     var cold := bool(profile.get("cold", false))
     var body := StaticBody3D.new()
+    body.add_to_group(&"world_moving_physics_actor")
     body.name = "Wildlife_%s" % String(profile.get("variant", "boar"))
     body.position = position
     body.rotation.y = rng.randf() * TAU

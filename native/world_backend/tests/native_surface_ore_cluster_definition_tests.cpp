@@ -476,7 +476,7 @@ VWB_TEST(native_surface_ore_footprints_cover_visual_and_physical_children) {
 
 VWB_TEST(native_surface_ore_world_bounds_quantize_negative_and_reject_unbounded) {
     const auto channel = NativeFeatureFootprintChannel::collision;
-    const auto runs = native_surface_ore_runs_for_bounds(
+    const auto runs = native_feature_runs_for_bounds(
         {-2.2, -0.4, -1.9, 0.1, 1.2, 0.2}, 1.0, channel);
     VWB_EXPECT_EQ(9U, runs.size());
     VWB_EXPECT_EQ(-3, runs.front().first.x);
@@ -485,27 +485,55 @@ VWB_TEST(native_surface_ore_world_bounds_quantize_negative_and_reject_unbounded)
     VWB_EXPECT_EQ(-1, runs.front().first.y);
     VWB_EXPECT_EQ(0, runs.back().first.z);
     VWB_EXPECT_EQ(1, runs.back().first.y);
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,0,1,1,1}, 0.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,0,1,1,1}, std::numeric_limits<double>::infinity(), channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({1,0,0,0,1,1}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,1,0,1,0,1}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,1,1,1,0}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({-1.0e20,0,0,1,1,1}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,0,1.0e20,1,1}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({std::numeric_limits<double>::quiet_NaN(),0,0,1,1,1},
+    const auto source_run = native_feature_runs_for_bounds({0,0,0,0,0,0}, 1.0,
+        NativeFeatureFootprintChannel::terrain_source);
+    VWB_EXPECT_EQ(NativeFeatureFootprintChannel::terrain_source, source_run.front().channel);
+    NativeFeatureWorldBounds expanded{0,0,0,0,0,0};
+    native_feature_bounds_include_sphere(expanded, -1.0, 2.0, 3.0, 0.5);
+    VWB_EXPECT_EQ(-1.5, expanded.min_x);
+    VWB_EXPECT_EQ(2.5, expanded.max_y);
+    native_feature_bounds_enclose_body_yaw(expanded, 0.0, 0.0);
+    VWB_EXPECT(expanded.min_z < -3.0 && expanded.max_z > 3.0);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_include_sphere(expanded, nan, 0, 0, 1));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_include_sphere(expanded, 0, nan, 0, 1));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_include_sphere(expanded, 0, 0, nan, 1));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_include_sphere(expanded, 0, 0, 0, inf));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_include_sphere(expanded, 0, 0, 0, -1));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_enclose_body_yaw(expanded, inf, 0));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_bounds_enclose_body_yaw(expanded, 0, inf));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1,1,1}, 1.0,
+            static_cast<NativeFeatureFootprintChannel>(99)));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1,1,1}, 0.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1,1,1}, std::numeric_limits<double>::infinity(), channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({1,0,0,0,1,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,1,0,1,0,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,1,1,1,0}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({-1.0e20,0,0,1,1,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1.0e20,1,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({std::numeric_limits<double>::quiet_NaN(),0,0,1,1,1},
             1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,0,1,4096,1}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,0,1,1,4096}, 1.0, channel));
-    VWB_EXPECT_THROW(NativeSurfaceOreFootprintRejected,
-        native_surface_ore_runs_for_bounds({0,0,0,1,64,64}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1,4096,1}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1,1,4096}, 1.0, channel));
+    VWB_EXPECT_THROW(NativeFeatureFootprintGeometryRejected,
+        native_feature_runs_for_bounds({0,0,0,1,64,64}, 1.0, channel));
 }

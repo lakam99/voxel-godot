@@ -5,6 +5,7 @@ const ActorGuard = preload("res://scripts/terrain/NativeCollisionActorGuard.gd")
 const MAX_SCENE_NODES := 8192
 const MAX_ACTORS := 512
 const FORECAST_SECONDS := 1.0 / 30.0
+const MOVING_STATIC_GROUP := &"world_moving_physics_actor"
 
 var _root: Node
 var _collision_owner: Node
@@ -12,6 +13,10 @@ var _identity := {}
 var _bounds := AABB()
 var _active := false
 var _admitted_actor_ids := {}
+
+
+func is_active() -> bool:
+	return _active
 
 
 func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB) -> Dictionary:
@@ -30,7 +35,7 @@ func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB
 	if census.get("status") != "ready":
 		_active = false
 		return census
-	for actor: CharacterBody3D in census.actors:
+	for actor: PhysicsBody3D in census.actors:
 		_admitted_actor_ids[actor.get_instance_id()] = true
 	return {"status": "ready", "actorCount": census.actors.size(),
 		"identity": _identity.duplicate(true)}
@@ -38,7 +43,7 @@ func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB
 
 ## Actor controllers must call this before applying a motion while the barrier
 ## is active. An unregistered actor is held until the next clearance census.
-func admit_motion(actor: CharacterBody3D, motion: Vector3) -> bool:
+func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 	if not _active:
 		return true
 	if actor == null or not is_instance_valid(actor) or not _admitted_actor_ids.has(actor.get_instance_id()) \
@@ -53,7 +58,7 @@ func clearance(identity: Dictionary) -> Dictionary:
 	var census := _census()
 	if census.get("status") != "ready":
 		return {"clear": false, "reason": census.get("reason", "actor_census_failed")}
-	for actor: CharacterBody3D in census.actors:
+	for actor: PhysicsBody3D in census.actors:
 		_admitted_actor_ids[actor.get_instance_id()] = true
 	return ActorGuard.inspect(census.actors, _bounds, FORECAST_SECONDS)
 
@@ -111,13 +116,13 @@ func _census() -> Dictionary:
 		return {"status": "failed", "reason": "actor_census_root_lost"}
 	var pending: Array[Node] = [_root]
 	var visited := 0
-	var actors: Array[CharacterBody3D] = []
+	var actors: Array[PhysicsBody3D] = []
 	while not pending.is_empty():
 		var node: Node = pending.pop_back()
 		visited += 1
 		if visited > MAX_SCENE_NODES:
 			return {"status": "failed", "reason": "actor_census_node_cap", "visitedNodes": visited}
-		if node is CharacterBody3D:
+		if node is CharacterBody3D or node is StaticBody3D and node.is_in_group(MOVING_STATIC_GROUP):
 			actors.append(node)
 			if actors.size() > MAX_ACTORS:
 				return {"status": "failed", "reason": "actor_census_actor_cap"}
