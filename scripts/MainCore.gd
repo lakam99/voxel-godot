@@ -16,6 +16,7 @@ const NativeCollisionAdmissionBarrierScript := preload("res://scripts/terrain/Na
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
+const NativeTerrainLoadTransactionScript := preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
 const NavigationMarkerIndexScript := preload("res://scripts/hud/NavigationMarkerIndex.gd")
 const INITIAL_NAVMESH_PRIME_TILE_LIMIT := 32
 const INITIAL_NAV_CHANGE_DRAIN_EVENT_LIMIT := 64
@@ -93,6 +94,9 @@ var moon_visual: MeshInstance3D
 var player: CharacterBody3D
 var _native_collision_admission_barrier: RefCounted
 var _native_collision_admission_owner_id := 0
+## Reserved loading-only composition seam. Normal boot leaves this null; it
+## never participates in terrain queries, collision publication, or readiness.
+var native_terrain_load_transaction
 var world_environment: WorldEnvironment
 var visual_style: Resource
 var sky_resource: Sky
