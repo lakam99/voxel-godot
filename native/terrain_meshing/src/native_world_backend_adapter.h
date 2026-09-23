@@ -6,6 +6,7 @@
 #include "native_feature_delta.hpp"
 #include "native_structure_exclusion_snapshot.hpp"
 #include "native_surface_prop_ordered_placement.hpp"
+#include "native_surface_prop_source_ordered_stream.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
 #include "native_surface_rock_footprint.hpp"
 #include "native_wildlife_presentation_receipt.hpp"
@@ -50,6 +51,18 @@ private:
 	std::unique_ptr<voxel::world_backend::NativeEffectiveTerrainBatch> batch_;
 };
 
+struct NativeRockOrderedCache {
+	const voxel::world_backend::NativeEffectiveTerrainBatch *batch;
+	const voxel::world_backend::NativeBiomeEnvironmentCatalog *biome;
+	const voxel::world_backend::NativeFeatureDeltaSnapshot *removed;
+	const voxel::world_backend::NativeWildlifePresentationCatalog *wildlife;
+	const voxel::world_backend::NativeSurfaceRockAssetCatalog *visual;
+	std::string biome_identity, removed_identity, visual_identity, wildlife_identity;
+	voxel::world_backend::WorldSourcePin pin;
+	voxel::world_backend::NativeSurfacePropSourceOrderedStream ordered;
+	voxel::world_backend::NativeSurfacePropOrderedPlacement placement;
+};
+
 class NativeStructureExclusionChunk : public godot::RefCounted {
 	GDCLASS(NativeStructureExclusionChunk, godot::RefCounted);
 
@@ -72,6 +85,7 @@ private:
 	std::int64_t revision_ = 0;
 	std::int64_t admission_generation_ = 0;
 	std::string capture_identity_;
+	std::unique_ptr<NativeRockOrderedCache> rock_ordered_cache_;
 };
 
 class NativeWorldBackend : public godot::RefCounted {

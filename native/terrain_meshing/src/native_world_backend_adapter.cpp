@@ -1473,6 +1473,7 @@ void NativeStructureExclusionChunk::admit(std::unique_ptr<NativeStructureExclusi
 		Vector2i p_chunk, std::int64_t p_owner_id, std::int64_t p_revision,
 		std::int64_t p_admission_generation, std::string p_capture_identity) {
 	if (snapshot_ || !p_snapshot) throw std::logic_error("native structure chunk admission is invalid");
+	rock_ordered_cache_.reset();
 	snapshot_ = std::move(p_snapshot);
 	chunk_ = p_chunk;
 	owner_id_ = p_owner_id;
@@ -2022,16 +2023,26 @@ Dictionary NativeWorldBackend::project_published_rock_footprint_shadow(
 				|| !(pin.shaping_registry_content_identity() == shaping_registry_->content_identity())
 				|| p_exclusions->snapshot_->world_digest() != state_->source_identity().digest)
 			throw std::invalid_argument("ordered surface pin or exclusions are stale");
-		const NativeEffectiveTerrainSource terrain(pin);
-		const NativeSurfacePropSourceOrderedStream ordered = NativeSurfacePropSourceOrderedStream::create(
-			state_->definition().raw_terrain_seed(), p_exclusions->chunk_.x, p_exclusions->chunk_.y,
-			state_->source_identity().digest, p_exclusions->snapshot_->world_generation(),
-			terrain, *biome_catalog_, *p_exclusions->snapshot_, *removed_props_, *wildlife_presentations_);
+		const NativeRockOrderedCache *cache = p_exclusions->rock_ordered_cache_.get();
+		if (cache == nullptr || cache->batch != p_page->batch_.get()
+				|| cache->biome != biome_catalog_.get() || cache->removed != removed_props_.get()
+				|| cache->wildlife != wildlife_presentations_.get() || cache->visual != visual_catalog_.get()
+				|| cache->biome_identity != biome_capture_identity_
+				|| cache->removed_identity != removed_fd1_identity_
+				|| cache->visual_identity != visual_capture_identity_
+				|| cache->wildlife_identity != presentation_capture_identity_
+				|| !(cache->pin.physical_content_identity() == pin.physical_content_identity())
+				|| cache->pin.terrain_delta_revision() != pin.terrain_delta_revision()
+				|| cache->pin.shaping_registry_revision() != pin.shaping_registry_revision()
+				|| cache->ordered.exclusion_digest() != p_exclusions->snapshot_->content_digest())
+			throw std::invalid_argument("ordered rock source artifact not prepared or stale");
+		const NativeEffectiveTerrainSource terrain(cache->pin);
+		const NativeSurfacePropSourceOrderedStream &ordered = cache->ordered;
 		if (p_ordinal < 0 || static_cast<std::size_t>(p_ordinal) >= ordered.attempts().size()
 				|| ordered.attempts()[static_cast<std::size_t>(p_ordinal)].outcome
 					!= NativeSurfacePropClassificationOutcome::ordinary_rock)
 			throw std::invalid_argument("ordinal is not an ordinary rock");
-		const NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
+		const NativeSurfacePropOrderedPlacement &placement = cache->placement;
 		const NativeSurfaceRockOrderedVisualPlan plan = NativeSurfaceRockOrderedVisualPlan::create(
 			ordered, placement, static_cast<std::uint32_t>(p_ordinal), terrain, *visual_catalog_);
 		const std::string source = bounded_utf8(p_visual_source, 64U, "visualSource", false);
@@ -2654,6 +2665,11 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 		result["attemptCount"] = static_cast<std::int64_t>(attempts.size());
 		result["completeFeatureManifest"] = false;
 		result["liveCaptureFreshnessProven"] = false;
+		p_exclusions->rock_ordered_cache_ = std::make_unique<NativeRockOrderedCache>(NativeRockOrderedCache{
+			p_page->batch_.get(), biome_catalog_.get(),
+			removed_props_.get(), wildlife_presentations_.get(), visual_catalog_.get(),
+			biome_capture_identity_, removed_fd1_identity_, visual_capture_identity_,
+			presentation_capture_identity_, pin, ordered, placement});
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);

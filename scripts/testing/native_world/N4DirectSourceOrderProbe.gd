@@ -6,6 +6,7 @@ const Structures := preload("res://scripts/StructureSystem.gd")
 const Admission := preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const Bundle := preload("res://scripts/world/ActiveSurfacePropOwnerBundle.gd")
 const TreeHalo := preload("res://scripts/world/ActiveStructureTreeHaloSnapshot.gd")
+const RockJournal := preload("res://scripts/world/NativeRockPublicationJournal.gd")
 
 func native_initialization(seed_text: String) -> Dictionary:
 	return {"schema":"n3-native-world-backend-initialize/v1", "seedText":seed_text,
@@ -308,9 +309,11 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		admissions["wildlife"] = backend.admit_wildlife_presentation_catalog(owner).get("status")
 	var structure_receipt: Dictionary = backend.admit_structure_exclusion_chunk(bundle.sources.exclusions) \
 		if bool(bundle.get("ok", false)) else {}
+	var ordered_started := Time.get_ticks_usec()
 	var ordered: Dictionary = backend.compose_surface_prop_ordered_shadow(
 		bundle.terrain.page, structure_receipt.snapshot) \
 		if structure_receipt.get("status") == "ready" else {}
+	var ordered_compose_usec := Time.get_ticks_usec() - ordered_started
 	var tree_requests: Array = ordered.get("treeHaloRequests", [])
 	var tree_halo: Dictionary = TreeHalo.capture(main.structure_system, tree_requests) \
 		if not tree_requests.is_empty() else {}
@@ -327,6 +330,9 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 	var rng: RandomNumberGenerator = state.rng
 	var direct_rows := []
 	var ordered_attempts: Array = ordered.get("attempts", [])
+	var rock_journal = RockJournal.new()
+	var rock_journal_binding: Dictionary = rock_journal.bind(main, backend,
+		bundle.terrain.page, structure_receipt.snapshot, ordered)
 	for index in range(28):
 		var before_state := rng.state
 		var preview := RandomNumberGenerator.new()
@@ -377,15 +383,17 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		if not ore_children.is_empty():
 			direct_row["oreChildren"] = ore_children
 		direct_rows.append(direct_row)
+	var rock_journal_advances := []
+	while rock_journal.status().pending > 0 and rock_journal_advances.size() < 28:
+		rock_journal_advances.append(rock_journal.advance(1, 2000))
+	var rock_journal_status: Dictionary = rock_journal.status()
 	var published_rock_footprints := []
 	for row in ordered.get("attempts", []):
 		var ordinal := int(row.ordinal)
 		if row.get("feature", {}).get("kind") != "rock" or not direct_rows[ordinal].has("rock"):
 			continue
 		var published: Dictionary = direct_rows[ordinal].rock
-		var projection: Dictionary = backend.project_published_rock_footprint_shadow(
-			bundle.terrain.page, structure_receipt.snapshot, ordinal,
-			published.visualSource, published.assetId)
+		var projection: Dictionary = rock_journal.receipt(published.durableId)
 		var fallback_probe := {}
 		if not String(row.feature.assetId).is_empty():
 			var feature: Dictionary = row.feature
@@ -409,6 +417,8 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		published_rock_footprints.append({"ordinal": ordinal,
 			"durableId": published.durableId, "visualSource": published.visualSource,
 			"assetId": published.assetId, "status": projection.get("status"),
+			"observedFromProductionEvent": projection.get("observedFromProductionEvent", false),
+			"observedBodyId": projection.get("observedBodyId", 0),
 			"featureId": projection.get("featureId"),
 			"footprintIdentity": projection.get("footprintIdentity"),
 			"runCount": (projection.get("runs", []) as Array).size(),
@@ -547,6 +557,7 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		"nativeInitialization":initialized.get("status"),
 		"bundleReady":bundle.get("ok",false),"admissions":admissions,
 		"structureAdmission":structure_receipt.get("status"),"orderedStatus":ordered.get("status"),
+		"orderedComposeUsec":ordered_compose_usec,
 		"structureOwnerId":structure_receipt.snapshot.status().get("ownerInstanceId") \
 			if structure_receipt.get("status") == "ready" else -1,
 		"structureAdmissionGeneration":structure_receipt.snapshot.status().get("admissionGeneration") \
@@ -577,7 +588,11 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 			if bool(tree_halo.get("ok", false)) else [],
 		"direct":direct_rows,"native":native_rows,
 		"publishedRockFootprints":published_rock_footprints,
+		"rockJournalBinding":rock_journal_binding,
+		"rockJournalAdvances":rock_journal_advances,
+		"rockJournalStatus":rock_journal_status,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),
 		"childCount":chunk.get_child_count()}
+	result["rockJournalUnbind"] = rock_journal.unbind()
 	chunk.free()
 	return result
