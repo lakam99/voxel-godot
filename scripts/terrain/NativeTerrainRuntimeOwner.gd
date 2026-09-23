@@ -16,6 +16,9 @@ const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPl
 const LegacyConverter = preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
 const ArtifactRequests = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
 const ResidentCollisionOwner = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
+const MAX_OWNER_GENERATION := 0x7fffffffffffffff
+
+static var _next_owner_generation := 1
 
 var _backend
 var _admission
@@ -73,32 +76,43 @@ func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
 	return _activate_initialized_backend(backend, terrain, consumer_id, priority,
 		String(source.request.seedText), initialized, false, 0)
 
-## Production loading prepares a private native candidate across frames and
-## transfers the exact backend only after its identity-checked transaction
-## commit. Adoption never re-imports the save and never consults script terrain.
-func setup_from_committed_backend(main, terrain: VoxelTerrain, backend,
+## Production loading prepares a private native candidate across frames. The
+## owner consumes the committed transaction itself so backend transfer is
+## single-use; a caller-authored receipt cannot replay an independently passed
+## backend. Adoption never re-imports the save or consults script terrain.
+func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 		commit_receipt: Dictionary, consumer_id: int, priority: int) -> Dictionary:
 	if _state != "new": return {"status":"failed", "reason":"owner_already_started"}
 	var inputs: Dictionary = _validate_setup_inputs(main, terrain, consumer_id)
 	if inputs.get("status") != "ready":
 		return _setup_failure(String(inputs.get("reason", "native_owner_inputs_invalid")))
+	if transaction == null or not transaction.has_method("snapshot") \
+			or not transaction.has_method("take_backend"):
+		return _setup_failure("committed_transaction_missing")
+	var transaction_state: Dictionary = transaction.call("snapshot")
+	var generation := int(commit_receipt.get("generation", 0))
+	if transaction_state.get("state") != "committed" \
+			or commit_receipt.get("status") != "ready" \
+			or commit_receipt.get("committed") != true \
+			or generation <= 0 \
+			or int(transaction_state.get("generation", 0)) != generation \
+			or int(transaction_state.get("backendInstanceId", 0)) \
+				!= int(commit_receipt.get("backendInstanceId", 0)) \
+			or transaction_state.get("sourceIdentity") != commit_receipt.get("sourceIdentity"):
+		return _setup_failure("committed_transaction_receipt_mismatch")
+	var backend = transaction.call("take_backend")
 	if backend == null or not backend.has_method("status"):
-		return _setup_failure("initialized_backend_missing")
+		return _setup_failure("committed_transaction_transfer_failed")
 	var initialized: Dictionary = backend.status()
 	var expected_seed := String(main.get("seed_text"))
 	var source_identity = initialized.get("sourceIdentity")
 	if initialized.get("status") != "ready" \
 			or String(initialized.get("sourceSeedText", "")) != expected_seed \
 			or not source_identity is Dictionary \
-			or (source_identity as Dictionary).is_empty():
-		return _setup_failure("initialized_backend_source_mismatch")
-	var generation := int(commit_receipt.get("generation", 0))
-	if commit_receipt.get("status") != "ready" \
-			or commit_receipt.get("committed") != true \
-			or generation <= 0 \
+			or (source_identity as Dictionary).is_empty() \
 			or int(commit_receipt.get("backendInstanceId", 0)) != backend.get_instance_id() \
 			or commit_receipt.get("sourceIdentity") != source_identity:
-		return _setup_failure("initialized_backend_receipt_mismatch")
+		return _transferred_backend_failure(backend, "initialized_backend_source_mismatch")
 	_admission = inputs.admission
 	return _activate_initialized_backend(backend, terrain, consumer_id, priority,
 		expected_seed, initialized, true, generation)
@@ -132,11 +146,9 @@ func _activate_initialized_backend(backend, terrain: VoxelTerrain, consumer_id: 
 	var occupancy_ready: Dictionary = _occupancy.bind(_cells)
 	if occupancy_ready.get("status") != "ready":
 		return _setup_failure(String(occupancy_ready.get("reason", "native_occupancy_source_failed")))
-	# Godot ObjectIDs are opaque 64-bit values and can appear negative when
-	# exposed through signed GDScript integers. Artifact generations require a
-	# positive token, so clear only the sign bit while retaining ObjectID identity.
-	_owner_generation = int(get_instance_id()) & 0x7fffffffffffffff
-	if _owner_generation == 0: _owner_generation = 1
+	_owner_generation = _claim_owner_generation()
+	if _owner_generation <= 0:
+		return _setup_failure("native_owner_generation_exhausted")
 	_artifact_requests = ArtifactRequests.new()
 	var artifacts_ready: Dictionary = _artifact_requests.setup(_backend, _pages,
 		_admission, _planner, DemandPlanner.CELL, _owner_generation,
@@ -160,11 +172,34 @@ func _validate_setup_inputs(main, terrain: VoxelTerrain, consumer_id: int) -> Di
 		return {"status":"failed", "reason":"manual_terrain_required"}
 	if consumer_id <= 0:
 		return {"status":"failed", "reason":"invalid_consumer_owner"}
+	if terrain.get_format() == null:
+		return {"status":"failed", "reason":"voxel_format_missing"}
 	var structures = main.get("structure_system")
 	var admission = structures.get("citadel_terrain_admission") if structures != null else null
 	if admission == null:
 		return {"status":"failed", "reason":"site_admission_missing"}
 	return {"status":"ready", "admission":admission}
+
+static func _claim_owner_generation() -> int:
+	if _next_owner_generation <= 0 or _next_owner_generation > MAX_OWNER_GENERATION:
+		return 0
+	var claimed := _next_owner_generation
+	if _next_owner_generation == MAX_OWNER_GENERATION:
+		_next_owner_generation = 0
+	else:
+		_next_owner_generation += 1
+	return claimed
+
+func _transferred_backend_failure(backend, reason: String) -> Dictionary:
+	# A committed staged import has no remaining import worker. If validation
+	# fails after single-use transfer, explicitly retain then release that backend
+	# here rather than leaving it orphaned or pretending the transaction owns it.
+	_backend = backend
+	_failure = reason
+	_release_owners()
+	_state = "failed"
+	return {"status":"failed", "reason":reason, "cleanupComplete":true,
+		"transferredBackendReleased":true}
 
 func replace_demand(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
