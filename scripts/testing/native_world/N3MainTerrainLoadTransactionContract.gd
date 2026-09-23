@@ -224,8 +224,35 @@ func run() -> void:
 		if runtime_owner_stop.get("status") == "ready": break
 		await process_frame
 		runtime_owner_stop = runtime_owner.drain_step()
-	check(runtime_owner_stop.get("status") == "ready",
+	var runtime_owner_drained: Dictionary = runtime_owner.snapshot()
+	check(runtime_owner_stop.get("status") == "ready"
+		and runtime_owner_stop.get("drained") == true
+		and runtime_owner_drained.get("state") == "drained"
+		and int(runtime_owner_drained.get("backendInstanceId", 0)) == 0,
 		"runtime owner adopted from the load transaction drains cleanly")
+
+	var revoked_transfer_source: Dictionary = _source(main, _volume(4))
+	var revoked_transfer_transaction = TRANSACTION.new()
+	revoked_transfer_transaction.start(revoked_transfer_source.request, 4,
+		revoked_transfer_source.snapshotOwner)
+	await _drive_to_candidate(revoked_transfer_transaction)
+	var revoked_transfer_receipt: Dictionary = revoked_transfer_transaction.commit(
+		revoked_transfer_transaction.candidate_source_identity())
+	revoked_transfer_source.snapshotOwner.invalidate("producer_released_before_transfer")
+	var revoked_transfer_owner = RUNTIME_OWNER.new()
+	var rejected_revoked_transfer: Dictionary = \
+		revoked_transfer_owner.setup_from_committed_transaction(main, terrain,
+			revoked_transfer_transaction, revoked_transfer_receipt, 72, 10)
+	check(revoked_transfer_receipt.get("status") == "ready"
+		and rejected_revoked_transfer.get("status") == "failed"
+		and rejected_revoked_transfer.get("reason") \
+			== "committed_transaction_snapshot_lease_revoked"
+		and rejected_revoked_transfer.get("cleanupComplete") == true
+		and rejected_revoked_transfer.get("transferredBackendReleased") == true
+		and revoked_transfer_transaction.snapshot().get("state") == "transferred"
+		and revoked_transfer_transaction.snapshot().get("inputSnapshotRetained") == false
+		and int(revoked_transfer_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"revoked snapshot lease after commit blocks owner activation and releases the backend")
 
 	var revoked_commit_source: Dictionary = _source(main, _volume(4))
 	var revoked_commit_transaction = TRANSACTION.new()
@@ -373,18 +400,19 @@ func run() -> void:
 			"malformedDrainStatus": malformed_cleanup.get("status"),
 			"malformedFailure": malformed_cleanup.get("reason", ""),
 			"staleGenerationRejected": stale_append.get("reason") == "stale_import_generation",
-		"leaseRevocationStopsAdmission": revoked_cleanup.get("drained", false),
-		"leaseRevokedCommitRejected": rejected_revoked_commit.get("reason"),
-		"workerInFlightDrainCalls": fake_backend.drain_calls,
-		"workerInFlightTrace": {"cancelled": fake_backend.cancelled,
-			"firstStatus": in_flight_poll.get("status"),
-			"firstJoined": in_flight_poll.get("workerJoined"),
-			"retainedDuringFirst": retained_during_first_poll,
-			"secondJoined": joined_poll.get("workerJoined"),
-			"secondDrained": joined_poll.get("drained"),
-			"thirdCleanupComplete": disposed_poll.get("cleanupComplete"),
-			"backendAfterDrain": fake_transaction.snapshot().get("backendInstanceId")},
-		"terminalDrainFailureSettled": terminal_drain.get("status") == "failed"},
+			"leaseRevocationStopsAdmission": revoked_cleanup.get("drained", false),
+			"leaseRevokedCommitRejected": rejected_revoked_commit.get("reason"),
+			"leaseRevokedTransferRejected": rejected_revoked_transfer.get("reason"),
+			"workerInFlightDrainCalls": fake_backend.drain_calls,
+			"workerInFlightTrace": {"cancelled": fake_backend.cancelled,
+				"firstStatus": in_flight_poll.get("status"),
+				"firstJoined": in_flight_poll.get("workerJoined"),
+				"retainedDuringFirst": retained_during_first_poll,
+				"secondJoined": joined_poll.get("workerJoined"),
+				"secondDrained": joined_poll.get("drained"),
+				"thirdCleanupComplete": disposed_poll.get("cleanupComplete"),
+				"backendAfterDrain": fake_transaction.snapshot().get("backendInstanceId")},
+			"terminalDrainFailureSettled": terminal_drain.get("status") == "failed"},
 		"timingInterpretation": "record-count and transaction diagnostics only; not a frame-time or headed responsiveness acceptance result",
 		"doesNotProve": "No production Main New Game/Continue wiring, immutable save publisher, headed frame cadence, physical collision readiness or full N3 authority cutover."}
 	var path := OS.get_environment("VWB_MAIN_LOAD_TRANSACTION_REPORT")

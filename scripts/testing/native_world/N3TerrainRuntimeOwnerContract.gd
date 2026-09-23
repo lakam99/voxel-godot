@@ -6,12 +6,74 @@ const GAME_MAIN = preload("res://scripts/Main.gd")
 const STRUCTURES = preload("res://scripts/StructureSystem.gd")
 const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
 const VOLUME = preload("res://scripts/TerrainVolumeService.gd")
+const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
+const LOAD_TRANSACTION = preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
 
 var failures: Array[String] = []
 var observations: Array[Dictionary] = []
 
 func check(value: bool, label: String) -> void:
 	if not value: failures.append(label)
+
+func drain_staging_failure(transaction, failure: Dictionary) -> Dictionary:
+	var result: Dictionary = failure.duplicate(true)
+	result["transaction"] = transaction
+	var state := String(transaction.snapshot().get("state", ""))
+	if state == "ownership_error":
+		result["ownerMustBeRetained"] = true
+		return result
+	if state == "committed":
+		# A contradictory post-commit result must not strand the committed owner.
+		var abandoned_backend = transaction.take_backend()
+		abandoned_backend = null
+		result["cleanupComplete"] = transaction.snapshot().get("state") == "transferred"
+		return result
+	if state in ["accepting", "finalize_start_pending", "finalizing", "candidate_ready"]:
+		transaction.cancel()
+	var cleanup: Dictionary = failure
+	for _frame in range(600):
+		var snapshot: Dictionary = transaction.snapshot()
+		if snapshot.get("state") in ["failed", "drained"] \
+				and int(snapshot.get("backendInstanceId", 0)) == 0:
+			result["cleanupComplete"] = true
+			result["cleanup"] = cleanup
+			return result
+		if snapshot.get("state") == "ownership_error":
+			result["ownerMustBeRetained"] = true
+			result["cleanup"] = cleanup
+			return result
+		cleanup = transaction.advance()
+		await process_frame
+	result["reason"] = "stage_failure_cleanup_timeout"
+	result["originalFailure"] = failure
+	result["cleanup"] = cleanup
+	result["ownerMustBeRetained"] = true
+	return result
+
+func stage_committed_backend(main, terrain_volume: Dictionary) -> Dictionary:
+	var save := {"version":2, "seed":String(main.get("seed_text")), "terrain":[],
+		"terrainVolume":terrain_volume}
+	var source: Dictionary = SOURCE.from_main_with_v2_save_snapshot(main, save)
+	if source.get("status") != "ready": return source
+	var transaction = LOAD_TRANSACTION.new()
+	var begun: Dictionary = transaction.start(source.request, 64, source.snapshotOwner)
+	if begun.get("status") != "pending": return await drain_staging_failure(transaction, begun)
+	var last: Dictionary = begun
+	for _frame in range(600):
+		last = transaction.advance()
+		if transaction.snapshot().get("state") == "candidate_ready": break
+		if last.get("status") == "failed":
+			return await drain_staging_failure(transaction, last)
+		await process_frame
+	if transaction.snapshot().get("state") != "candidate_ready":
+		return await drain_staging_failure(transaction,
+			{"status":"failed", "reason":"candidate_timeout", "last":last})
+	var identity: Dictionary = transaction.candidate_source_identity()
+	var committed: Dictionary = transaction.commit(identity)
+	if committed.get("status") != "ready" or committed.get("committed") != true:
+		return await drain_staging_failure(transaction, committed)
+	return {"status":"ready", "transaction":transaction, "receipt":committed,
+		"sourceIdentity":identity, "save":save}
 
 func _init() -> void:
 	call_deferred("run")
@@ -73,6 +135,36 @@ func run() -> void:
 	terrain.automatic_loading_enabled = false
 	var shared_volume_before: Dictionary = main.world_generation_system.terrain_volume_service \
 		.save_all_section_deltas()
+	var staged: Dictionary = await stage_committed_backend(main, shared_volume_before)
+	var staged_owner = OWNER.new()
+	var staged_setup: Dictionary = staged_owner.setup_from_committed_transaction(main, terrain,
+		staged.get("transaction"), staged.get("receipt", {}), 71, 10) \
+		if staged.get("status") == "ready" else staged
+	if staged_setup.get("status") != "ready":
+		observations.append({"case":"staged_owner_setup", "staged":staged, "result":staged_setup})
+	check(staged.get("status") == "ready" and staged_setup.get("status") == "ready"
+		and staged.transaction.snapshot().get("state") == "transferred"
+		and int(staged_setup.get("backendInstanceId", 0)) \
+			== int(staged.receipt.get("backendInstanceId", -1))
+		and staged_setup.get("sourceIdentity") == staged.get("sourceIdentity"),
+		"real staged transaction commits and transfers its exact backend to one owner")
+	var replay_owner = OWNER.new()
+	var replay: Dictionary = replay_owner.setup_from_committed_transaction(main, terrain,
+		staged.get("transaction"), staged.get("receipt", {}), 72, 10)
+	check(replay.get("status") == "failed"
+		and replay.get("reason") == "committed_transaction_receipt_mismatch"
+		and int(replay_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"transferred transaction cannot be replayed into a second owner")
+	var staged_stopped: Dictionary = staged_owner.stop()
+	for _frame in range(120):
+		if staged_stopped.get("status") == "ready": break
+		await process_frame
+		staged_stopped = staged_owner.drain_step()
+	check(staged_stopped.get("status") == "ready"
+		and staged_stopped.get("drained") == true
+		and staged_owner.snapshot().get("state") == "drained"
+		and int(staged_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"staged owner drains before the direct owner fixture starts")
 	var different_main = MAIN.new()
 	different_main.seed_text = main.seed_text
 	different_main.structure_system = STRUCTURES.new()
@@ -93,13 +185,38 @@ func run() -> void:
 		!= shared_volume_before, "isolated same-seed fixture carries different durable content")
 	check(main.world_generation_system.terrain_volume_service.save_all_section_deltas() \
 		== shared_volume_before, "different-save receipt fixture restores shared Main volume")
+	var different_volume: Dictionary = different_main.world_generation_system.terrain_volume_service \
+		.save_all_section_deltas()
+	var different_staged: Dictionary = await stage_committed_backend(different_main, different_volume)
+	var mismatched_owner = OWNER.new()
+	var mismatched: Dictionary = mismatched_owner.setup_from_committed_transaction(main, terrain,
+		different_staged.get("transaction"), staged.get("receipt", {}), 73, 10) \
+		if different_staged.get("status") == "ready" else different_staged
+	check(different_staged.get("status") == "ready"
+		and mismatched.get("status") == "failed"
+		and mismatched.get("reason") == "committed_transaction_receipt_mismatch"
+		and different_staged.transaction.snapshot().get("state") == "committed",
+		"same-seed different-save transaction rejects another backend receipt without consumption")
+	var original_seed := String(main.seed_text)
+	main.seed_text = "native-owner-post-transfer-seed-mismatch"
+	var cleanup_owner = OWNER.new()
+	var cleanup_failure: Dictionary = cleanup_owner.setup_from_committed_transaction(main, terrain,
+		different_staged.get("transaction"), different_staged.get("receipt", {}), 74, 10)
+	main.seed_text = original_seed
+	check(cleanup_failure.get("status") == "failed"
+		and cleanup_failure.get("reason") == "initialized_backend_source_mismatch"
+		and cleanup_failure.get("cleanupComplete") == true
+		and cleanup_failure.get("transferredBackendReleased") == true
+		and different_staged.transaction.snapshot().get("state") == "transferred"
+		and int(cleanup_owner.snapshot().get("backendInstanceId", 0)) == 0,
+		"post-transfer validation failure explicitly releases the committed backend")
 	different_main.free()
 	var owner = OWNER.new()
 	var owner_saved_volume: Dictionary = {}
 	var setup: Dictionary = owner.setup(main, terrain, 71, 10)
 	if setup.get("status") != "ready":
 		observations.append({"case":"direct_owner_setup", "result":setup})
-	check(setup.get("status") == "ready", "atomic native owner setup")
+	check(setup.get("status") == "ready", "atomic direct native owner setup")
 	check(int(setup.get("ownerGeneration", 0)) > 0,
 		"runtime owner receives a positive process-local generation")
 	if setup.get("status") == "ready":

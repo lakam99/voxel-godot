@@ -100,6 +100,16 @@ func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 				!= int(commit_receipt.get("backendInstanceId", 0)) \
 			or transaction_state.get("sourceIdentity") != commit_receipt.get("sourceIdentity"):
 		return _setup_failure("committed_transaction_receipt_mismatch")
+	if transaction_state.get("snapshotLeaseValid") != true:
+		# The producer must retain its immutable save snapshot until this exact
+		# ownership handoff. The native candidate is already committed, so consume
+		# the single-use transfer and release it explicitly instead of leaving a
+		# committed backend stranded in the transaction.
+		var revoked_backend = transaction.call("take_backend")
+		if revoked_backend == null or not revoked_backend.has_method("status"):
+			return _setup_failure("committed_transaction_transfer_failed")
+		return _transferred_backend_failure(revoked_backend,
+			"committed_transaction_snapshot_lease_revoked")
 	var backend = transaction.call("take_backend")
 	if backend == null or not backend.has_method("status"):
 		return _setup_failure("committed_transaction_transfer_failed")

@@ -56,12 +56,16 @@ The GDScript transaction does not `duplicate(true)` the save volume. The
 snapshot constructor copies only the source descriptor/finalized policy and
 issues a producer-owned `NativeWorldSaveSnapshotLease` retaining the exact
 save and volume. Save-v2 requests without a valid lease fail closed. Before
-each admission/finalization step and again at commit, the transaction checks
-lease validity, volume identity and the immutable volume revision. The save
+each admission/finalization step, again at commit, and at the runtime-owner
+transfer boundary, the transaction/owner pair checks lease validity, volume
+identity and the immutable volume revision. The save
 producer must call `lease.invalidate(reason)` *before* any nested volume
 mutation, and it must not keep a writable alias active during the lease. A
 revocation stops further admission and forces cancellation/drain; a candidate
-whose lease was revoked cannot commit. The lease is cooperative, not a Godot
+whose lease was revoked cannot commit. Revocation after commit but before
+transfer rejects owner activation, consumes the single-use transfer, and
+explicitly releases the already finalized backend so no committed owner is
+stranded. The lease is cooperative, not a Godot
 deep-freeze: Dictionary/Array are mutable reference values, so transaction
 code cannot detect an out-of-contract nested write that bypasses invalidation.
 The production Main/SaveSystem integration must therefore transfer a fresh
@@ -100,7 +104,7 @@ node tools/run-n3-main-terrain-load-transaction.mjs
 
 Its report is contract/service-level GDExtension evidence only. It must include
 bounded record admission, lease-revocation rejection before mixed-snapshot
-commit, precommit invisibility, explicit identity mismatch
+commit and after commit/before transfer, precommit invisibility, explicit identity mismatch
 and commit, exact v2 data preservation through transfer, cancellation during
 acceptance/finalization, malformed-input cleanup, stale-generation rejection,
 deterministic worker-in-flight cancellation/join/disposal ordering, terminal

@@ -15,9 +15,12 @@ There is no script generator or gameplay cell-query fallback in this owner.
 The owner now exposes a fail-closed adoption seam for the staged loading
 transaction. `setup_from_committed_transaction` validates the transaction's
 ready/committed receipt, positive import generation, exact backend instance,
-full native source identity and production seed, then consumes the backend
+valid producer snapshot lease, full native source identity and production seed,
+then consumes the backend
 through the transaction's single-use `take_backend` operation. Independently
-passing a backend and caller-authored receipt is not supported. The physical
+passing a backend and caller-authored receipt is not supported. A lease revoked
+after commit but before transfer cannot activate an owner: the boundary consumes
+and explicitly releases that committed backend. The physical
 source identity remains an additional invariant, not a claimed digest of the
 durable edit payload.
 
@@ -38,22 +41,29 @@ references. The production runtime still owns safe viewer removal, engine
 block unload, and an explicit retry loop if stop is pending.
 
 Focused service fixture: `node tools/run-n3-terrain-runtime-owner.mjs` passed
-in `artifacts/native-world-backend/n3-terrain-runtime-owner-1790204646563-915df236/report.json`
+in `artifacts/native-world-backend/n3-terrain-runtime-owner-1790206101790-14ba8358/report.json`
 (owned-process receipt:
-`artifacts/node-tools/process-runs/godot-oXvyMC/watchdog.json`). It uses a
+`artifacts/node-tools/process-runs/godot-Pp1ehd/watchdog.json`). It uses a
 production-shaped `MainCore`, `StructureSystem`/Citadel admission,
 `WorldGenerationSystem`, and `TerrainVolumeService` with a durable edited
 cell. It verifies automatic-loading setup rejection, one initialized native
 source identity, durable edited-cell and numeric/projection reads through
 the shared native backend, 27 data-block halo demand handed to the publisher,
-backend reference retirement after stop. The staged loader is still under
-review for immutable multi-frame save ownership and cancellation cleanup, so
-this focused owner report does not claim transaction-to-owner adoption. That
-end-to-end transaction test, including single-use transfer and replay
-rejection, remains required. This is service-level native binding evidence, not headed gameplay,
+backend reference retirement after stop. Focused owner and staged-load contracts
+now cover a real transaction-to-owner adoption, single-use replay rejection,
+cross-transaction receipt rejection, post-transfer source validation cleanup,
+and revoked-lease rejection at commit and transfer. This remains service-level
+native binding evidence, not headed gameplay,
 visual collision, streaming performance, or N3 cutover. The project compile
 smoke also passed with owned-process receipt
 `artifacts/node-tools/process-runs/godot-Ai5ZTY/watchdog.json`.
+
+The staged transaction evidence is
+`artifacts/native-world-backend/n3-main-load-transaction-1790206087871-760f9764/report.json`
+(owned-process receipt
+`artifacts/node-tools/process-runs/godot-n01Pwg/watchdog.json`). Its lifecycle
+record includes the successful committed-owner adoption and the explicit
+`leaseRevokedTransferRejected` result.
 
 Remaining integration: atomically replace the script generator and automatic
 loading in `VoxelTerrainRuntime`, feed real primary/secondary/retained/
