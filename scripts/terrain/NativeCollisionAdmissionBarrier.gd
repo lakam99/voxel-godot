@@ -2,7 +2,8 @@ class_name NativeCollisionAdmissionBarrier
 extends RefCounted
 
 const ActorGuard = preload("res://scripts/terrain/NativeCollisionActorGuard.gd")
-const MAX_SCENE_NODES := 8192
+const CENSUS_NODES_PER_STEP := 256
+const CENSUS_STEP_BUDGET_USEC := 3000
 const MAX_ACTORS := 512
 const FORECAST_SECONDS := 1.0 / 30.0
 const MOVING_STATIC_GROUP := &"world_moving_physics_actor"
@@ -13,6 +14,10 @@ var _identity := {}
 var _bounds := AABB()
 var _active := false
 var _admitted_actor_ids := {}
+var _actors := {}
+var _scan_pending: Array[Node] = []
+var _scan_complete := false
+var _membership_dirty := false
 
 
 func is_active() -> bool:
@@ -31,40 +36,94 @@ func begin(root: Node, collision_owner: Node, identity: Dictionary, bounds: AABB
 	_identity = identity.duplicate(true)
 	_bounds = bounds
 	_active = true
-	var census := _census()
-	if census.get("status") != "ready":
-		_active = false
-		return census
-	for actor: PhysicsBody3D in census.actors:
-		_admitted_actor_ids[actor.get_instance_id()] = true
-	return {"status": "ready", "actorCount": census.actors.size(),
-		"identity": _identity.duplicate(true)}
+	_scan_pending = [_root]
+	_scan_complete = false
+	_membership_dirty = false
+	_root.get_tree().node_added.connect(_on_node_added)
+	_root.get_tree().node_removed.connect(_on_node_removed)
+	return advance_census(identity)
 
 
-## Actor controllers must call this before applying a motion while the barrier
-## is active. An unregistered actor is held until the next clearance census.
+func advance_census(identity: Dictionary) -> Dictionary:
+	if not _active or identity != _identity:
+		return {"status": "failed", "reason": "barrier_revision_mismatch"}
+	if _root == null or not is_instance_valid(_root) or not _root.is_inside_tree():
+		return {"status": "failed", "reason": "actor_census_root_lost"}
+	var started_usec := Time.get_ticks_usec()
+	var visited := 0
+	while not _scan_pending.is_empty() and visited < CENSUS_NODES_PER_STEP \
+			and Time.get_ticks_usec() - started_usec < CENSUS_STEP_BUDGET_USEC:
+		var node: Node = _scan_pending.pop_back()
+		visited += 1
+		if not is_instance_valid(node) or node.is_queued_for_deletion():
+			continue
+		_register_if_moving(node)
+		for child in node.get_children():
+			if child is Node:
+				_scan_pending.append(child)
+	_scan_complete = _scan_pending.is_empty()
+	if _actors.size() > MAX_ACTORS:
+		return {"status": "failed", "reason": "actor_census_actor_cap"}
+	return {"status": "ready" if _scan_complete else "pending",
+		"actorCount": _actors.size(), "visitedNodes": visited,
+		"elapsedUsec": Time.get_ticks_usec() - started_usec,
+		"remainingNodes": _scan_pending.size(), "identity": _identity.duplicate(true)}
+
+
+func register_moving_actor(actor: PhysicsBody3D) -> bool:
+	if not _active or actor == null or not is_instance_valid(actor) \
+			or not actor.is_inside_tree() or not _root.is_ancestor_of(actor) \
+			or not (actor is CharacterBody3D or actor is StaticBody3D \
+			and actor.is_in_group(MOVING_STATIC_GROUP)):
+		return false
+	_register_if_moving(actor)
+	_membership_dirty = true
+	return _actors.size() <= MAX_ACTORS
+
+
+## Actor controllers must call this before motion. A not-yet-censused actor may
+## move only when its complete current shape and swept motion miss the region;
+## installation remains pending until the full actor census is complete.
 func admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
 	if not _active:
 		return true
-	if actor == null or not is_instance_valid(actor) or not _admitted_actor_ids.has(actor.get_instance_id()) \
-			or _root == null or not _root.is_ancestor_of(actor) or not motion.is_finite():
+	if actor == null or not is_instance_valid(actor) or _root == null \
+			or not is_instance_valid(_root) or not _root.is_inside_tree() \
+			or not _root.is_ancestor_of(actor) or not motion.is_finite():
 		return false
+	if not _admitted_actor_ids.has(actor.get_instance_id()):
+		_register_if_moving(actor)
+		if not _actors.has(actor.get_instance_id()):
+			return false
 	return not ActorGuard.motion_intersects(actor, _bounds, motion)
 
 
 func clearance(identity: Dictionary) -> Dictionary:
 	if not _active or identity != _identity:
 		return {"clear": false, "reason": "barrier_revision_mismatch"}
-	var census := _census()
-	if census.get("status") != "ready":
-		return {"clear": false, "reason": census.get("reason", "actor_census_failed")}
-	for actor: PhysicsBody3D in census.actors:
+	if _root == null or not is_instance_valid(_root) or not _root.is_inside_tree():
+		return {"clear": false, "reason": "actor_census_root_lost"}
+	if not _scan_complete:
+		return {"clear": false, "reason": "actor_census_pending"}
+	if _actors.size() > MAX_ACTORS:
+		return {"clear": false, "reason": "actor_census_actor_cap"}
+	var actors: Array[PhysicsBody3D] = []
+	for actor in _actors.values():
+		if not actor is PhysicsBody3D or not is_instance_valid(actor) \
+				or not actor.is_inside_tree() or not _root.is_ancestor_of(actor):
+			return {"clear": false, "reason": "actor_registry_invalid"}
+		actors.append(actor)
 		_admitted_actor_ids[actor.get_instance_id()] = true
-	return ActorGuard.inspect(census.actors, _bounds, FORECAST_SECONDS)
+	var proof: Dictionary = ActorGuard.inspect(actors, _bounds, FORECAST_SECONDS)
+	if bool(proof.get("clear", false)):
+		_membership_dirty = false
+	return proof
 
 
 func release(identity: Dictionary) -> bool:
 	if not _active or identity != _identity:
+		return false
+	if not bool(clearance(identity).get("clear", false)):
 		return false
 	var receipt: Dictionary = _collision_owner.call("physical_receipt", identity)
 	if not bool(receipt.get("ready", false)) or int(receipt.get("physicsFrame", -1)) < 0 \
@@ -96,37 +155,46 @@ func cancel_empty_startup(identity: Dictionary) -> bool:
 			or bool(_collision_owner.get("_installing")) \
 			or not (_collision_owner.get("installed_shapes") as Array).is_empty():
 		return false
-	var census := _census()
-	if census.get("status") != "ready" or not (census.get("actors", []) as Array).is_empty():
+	if not bool(clearance(identity).get("clear", false)) or not _actors.is_empty():
 		return false
 	_clear()
 	return true
 
 
 func _clear() -> void:
+	if _root != null and is_instance_valid(_root) and _root.is_inside_tree():
+		var tree := _root.get_tree()
+		if tree.node_added.is_connected(_on_node_added):
+			tree.node_added.disconnect(_on_node_added)
+		if tree.node_removed.is_connected(_on_node_removed):
+			tree.node_removed.disconnect(_on_node_removed)
 	_active = false
 	_root = null
 	_collision_owner = null
 	_identity.clear()
 	_admitted_actor_ids.clear()
+	_actors.clear()
+	_scan_pending.clear()
+	_scan_complete = false
+	_membership_dirty = false
 
 
-func _census() -> Dictionary:
-	if _root == null or not is_instance_valid(_root) or not _root.is_inside_tree():
-		return {"status": "failed", "reason": "actor_census_root_lost"}
-	var pending: Array[Node] = [_root]
-	var visited := 0
-	var actors: Array[PhysicsBody3D] = []
-	while not pending.is_empty():
-		var node: Node = pending.pop_back()
-		visited += 1
-		if visited > MAX_SCENE_NODES:
-			return {"status": "failed", "reason": "actor_census_node_cap", "visitedNodes": visited}
-		if node is CharacterBody3D or node is StaticBody3D and node.is_in_group(MOVING_STATIC_GROUP):
-			actors.append(node)
-			if actors.size() > MAX_ACTORS:
-				return {"status": "failed", "reason": "actor_census_actor_cap"}
-		for child in node.get_children():
-			if child is Node:
-				pending.append(child)
-	return {"status": "ready", "actors": actors, "visitedNodes": visited}
+func _register_if_moving(node: Node) -> void:
+	if node is CharacterBody3D or node is StaticBody3D and node.is_in_group(MOVING_STATIC_GROUP):
+		_actors[node.get_instance_id()] = node
+
+
+func _on_node_added(node: Node) -> void:
+	if not _active or node == null or not _root.is_ancestor_of(node):
+		return
+	if node is PhysicsBody3D or node is CollisionShape3D:
+		_register_if_moving(node)
+		_membership_dirty = true
+
+
+func _on_node_removed(node: Node) -> void:
+	if not _active or node == null:
+		return
+	if _actors.erase(node.get_instance_id()):
+		_admitted_actor_ids.erase(node.get_instance_id())
+		_membership_dirty = true

@@ -530,6 +530,8 @@ func _replace_collision(native_result: Dictionary, request_identity: Dictionary,
 	var admission_barrier = AdmissionBarrierScript.new()
 	var begun: Dictionary = admission_barrier.begin(self, _body, request_identity,
 		AABB(Vector3(-100, -100, -100), Vector3(200, 200, 200)))
+	while begun.get("status") == "pending":
+		begun = admission_barrier.advance_census(request_identity)
 	if begun.get("status") != "ready":
 		return {"ok":false, "reason":"fixture_barrier_not_started", "barrier":begun}
 	var outcome: Dictionary = await (_body as Node).call("replace", native_result, request_identity,
@@ -574,6 +576,8 @@ func _actor_guard_contract() -> Dictionary:
 	var barrier = AdmissionBarrierScript.new()
 	var identity := {"ownerGeneration": 1, "sourceRevision": 1, "cancellationEpoch": 1}
 	var begun: Dictionary = barrier.begin(self, _body, identity, region)
+	while begun.get("status") == "pending":
+		begun = barrier.advance_census(identity)
 	var late_actor := CharacterBody3D.new()
 	var late_shape := CollisionShape3D.new()
 	late_shape.shape = BoxShape3D.new()
@@ -628,10 +632,42 @@ func _actor_guard_contract() -> Dictionary:
 	main_facade.free()
 	var capped_root := Node.new()
 	add_child(capped_root)
-	for _index in range(8193):
+	for _index in range(300):
 		capped_root.add_child(Node.new())
+	var pending_actor := CharacterBody3D.new()
+	pending_actor.position = Vector3(10, 0, 0)
+	var pending_shape := CollisionShape3D.new()
+	pending_shape.shape = BoxShape3D.new()
+	pending_actor.add_child(pending_shape)
+	capped_root.add_child(pending_actor)
 	var capped_barrier = AdmissionBarrierScript.new()
 	var capped: Dictionary = capped_barrier.begin(capped_root, _body, identity, region)
+	var census_pending: bool = capped.get("status") == "pending" \
+		and int(capped.get("visitedNodes", 0)) <= 256
+	var far_motion_allowed: bool = capped_barrier.admit_motion(pending_actor, Vector3(1, 0, 0))
+	var entry_motion_held: bool = not capped_barrier.admit_motion(pending_actor, Vector3(-10, 0, 0))
+	var late_group_actor := StaticBody3D.new()
+	late_group_actor.position = Vector3(10, 0, 0)
+	var late_group_shape := CollisionShape3D.new()
+	late_group_shape.shape = BoxShape3D.new()
+	late_group_actor.add_child(late_group_shape)
+	capped_root.add_child(late_group_actor)
+	late_group_actor.add_to_group(&"world_moving_physics_actor")
+	var group_registration: bool = capped_barrier.register_moving_actor(late_group_actor)
+	var group_entry_held: bool = not capped_barrier.admit_motion(late_group_actor, Vector3(-10, 0, 0))
+	while capped.get("status") == "pending":
+		capped = capped_barrier.advance_census(identity)
+	var census_completed: bool = capped.get("status") == "ready" \
+		and int(capped.get("actorCount", -1)) == 2
+	late_group_actor.reparent(self)
+	var reparent_out_held: bool = not capped_barrier.admit_motion(late_group_actor, Vector3(1, 0, 0))
+	late_group_actor.reparent(capped_root)
+	var reparent_back_held: bool = not capped_barrier.admit_motion(late_group_actor, Vector3(-10, 0, 0))
+	var reparent_clearance: Dictionary = capped_barrier.clearance(identity)
+	pending_actor.queue_free()
+	late_group_actor.queue_free()
+	await get_tree().physics_frame
+	capped_barrier.cancel_empty_startup(identity)
 	capped_root.queue_free()
 	await get_tree().process_frame
 	return {"ok": occupied.get("reason") == "actor_occupies_replacement" \
@@ -644,7 +680,10 @@ func _actor_guard_contract() -> Dictionary:
 		and not static_cancel_admitted and facade_bound and not facade_sweep_admitted \
 		and not facade_early_unbind and facade_unbound and motor_held and correction_held \
 		and cancelled_empty_startup \
-		and capped.get("reason") == "actor_census_node_cap",
+		and census_pending and census_completed and far_motion_allowed \
+		and entry_motion_held and group_registration and group_entry_held \
+		and reparent_out_held and reparent_back_held \
+		and bool(reparent_clearance.get("clear", false)),
 		"occupied":occupied, "swept":swept, "clear":clear,
 		"lateActor": {"clearance":late_clearance, "motionAdmitted":late_motion_admitted,
 			"prematureRelease":premature_release, "prematureAbort":premature_abort,
@@ -654,7 +693,12 @@ func _actor_guard_contract() -> Dictionary:
 			"facadeBound":facade_bound, "facadeSweepAdmitted":facade_sweep_admitted,
 			"facadeEarlyUnbind":facade_early_unbind, "facadeUnbound":facade_unbound,
 			"motorHeld":motor_held, "correctionHeld":correction_held},
-		"nodeCap":capped}
+		"incrementalCensus":{"pending":census_pending,"completed":census_completed,
+			"farMotionAllowed":far_motion_allowed,"entryMotionHeld":entry_motion_held,
+			"lateGroupRegistered":group_registration,"lateGroupEntryHeld":group_entry_held,
+			"reparentOutHeld":reparent_out_held,"reparentBackHeld":reparent_back_held,
+			"reparentClearance":reparent_clearance,
+			"result":capped}}
 
 
 func _install_render(native_result: Dictionary) -> Dictionary:
