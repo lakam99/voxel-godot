@@ -66,20 +66,27 @@ static func from_main(main) -> Dictionary:
 # Continue must import exactly the durable v2 volume already restored by the
 # game's save owner. Voxel Tools generated blocks are never a save source.
 static func from_main_with_current_volume(main) -> Dictionary:
-	var built := from_main(main)
-	if built.get("status") != "ready":
-		return built
+	if main == null:
+		return _failed("main_missing")
 	var world = main.get("world_generation_system")
 	var service = world.get("terrain_volume_service") if world != null else null
 	if service == null or not service.has_method("save_all_section_deltas"):
 		return _failed("terrain_volume_owner_missing")
 	var volume = service.save_all_section_deltas()
+	return from_main_with_save_volume(main, volume)
+
+## Continue may pass the already-loaded v2 envelope directly to the native
+## owner. This adapter never regenerates or re-exports script volume state.
+static func from_main_with_save_volume(main, volume) -> Dictionary:
+	var built := from_main(main)
+	if built.get("status") != "ready":
+		return built
 	if not volume is Dictionary or volume.get("schemaVersion") != 1 or volume.get("sectionSize") != 16:
 		return _failed("terrain_volume_snapshot_invalid")
 	var request: Dictionary = built.request.duplicate(true)
 	request.schema = "n3-native-world-backend-initialize-from-save-v2/v1"
 	request["saveSeedText"] = request.seedText
-	request["terrainVolume"] = volume
+	request["terrainVolume"] = volume.duplicate(true)
 	return {"status":"ready", "request":request}
 
 static func _failed(reason: String) -> Dictionary:
