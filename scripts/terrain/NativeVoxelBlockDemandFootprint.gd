@@ -5,7 +5,9 @@ class_name NativeVoxelBlockDemandFootprint
 ## not publishable merely because its own data block was inserted. This helper
 ## returns the complete one-block input halo for a bounded set of mesh blocks.
 const MAX_MESH_BLOCKS := 64
-const MAX_DATA_BLOCKS := 512
+# The native retained queue currently holds at most 128 block keys. A single
+# admitted footprint must fit that cap before other consumers compete for it.
+const MAX_DATA_BLOCKS := 128
 
 static func data_blocks_for_mesh_blocks(mesh_blocks: Array[Vector3i]) -> Dictionary:
 	if mesh_blocks.is_empty() or mesh_blocks.size() > MAX_MESH_BLOCKS:

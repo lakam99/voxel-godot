@@ -76,12 +76,15 @@ contracts atomically, or replace those consumers together at their cutover.
   reserve/prepare the halo and record real admission/encode/copy/upload atom
   costs, not hide them outside the shared 6 ms gameplay envelope.
 - `NativeVoxelBlockDemandFootprint.data_blocks_for_mesh_blocks` now provides
-  a deterministic, capped one-block X/Y/Z halo for a supplied bounded set of
-  mesh blocks. Its pure contract passes nine cases, including a y=2 input
+  a deterministic, 128-data-block-capped one-block X/Y/Z halo for a supplied bounded set of
+  mesh blocks. Its pure contract passes eleven cases, including a y=2 input
   layer for an adjacent upper mesh block and negative coordinates. Report:
   `artifacts/native-world-backend/n3-block-demand-footprint-20260923.json`.
   It does not yet choose mesh blocks from runtime viewer/chunk demand or
   reserve the resulting native jobs; those integration steps remain open.
+  The cap matches the native retained queue's 128-entry ceiling, but existing
+  consumers can still make a newly requested footprint temporarily full;
+  admission must retain and retry any `queue_capacity` result.
 
 ## Integration order and fail-closed checks
 

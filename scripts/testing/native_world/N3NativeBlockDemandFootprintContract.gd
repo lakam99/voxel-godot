@@ -22,10 +22,18 @@ func _run() -> void:
 	var reversed: Dictionary = Footprint.data_blocks_for_mesh_blocks([Vector3i(0, 1, 0), Vector3i.ZERO])
 	_check("order_and_duplicate_independent", var_to_bytes(expanded) == var_to_bytes(reversed.get("blocks", [])))
 	_check("empty_demand_fails_closed", Footprint.data_blocks_for_mesh_blocks([]).get("reason") == "mesh_block_demand_limit")
+	var packed: Array[Vector3i] = []
+	for z in range(3):
+		for y in range(3):
+			for x in range(3):
+				packed.append(Vector3i(x, y, z))
+	_check("packed_125_block_halo_admitted", (Footprint.data_blocks_for_mesh_blocks(packed).get("blocks", []) as Array).size() == 125)
+	packed.append(Vector3i(4, 0, 0))
+	_check("beyond_native_128_entry_queue_rejected", Footprint.data_blocks_for_mesh_blocks(packed).get("reason") == "data_block_demand_limit")
 	var far: Array[Vector3i] = []
 	for x in range(64):
 		far.append(Vector3i(x * 4, 0, 0))
-	_check("byte_budget_fails_closed", Footprint.data_blocks_for_mesh_blocks(far).get("reason") == "data_block_demand_limit")
+	_check("sparse_capacity_fails_closed", Footprint.data_blocks_for_mesh_blocks(far).get("reason") == "data_block_demand_limit")
 	far.append(Vector3i(256, 0, 0))
 	_check("mesh_budget_fails_closed", Footprint.data_blocks_for_mesh_blocks(far).get("reason") == "mesh_block_demand_limit")
 	var passed := not checks.values().has(false)
