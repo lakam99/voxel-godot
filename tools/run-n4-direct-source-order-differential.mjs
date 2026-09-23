@@ -16,6 +16,7 @@ const processResult = await runGodotProcess(executable, command, {
   env: { ...process.env, N4_DIRECT_SOURCE_ORDER_PROBE_REPORT: probePath },
 });
 const failures = [];
+let forageDefinitionsCompared = 0;
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
@@ -45,9 +46,38 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
     }
     for (const field of ['stateBeforeCoordinates', 'stateAfterRecipe'])
       if (uint64(direct[field]) !== uint64(native[field])) failures.push(`${label} attempt ${index} ${field} mismatch`);
+    if (native.outcome === 8) {
+      const expected = native.feature, actual = direct.forage;
+      if (expected?.kind !== 'forage' || !actual) {
+        failures.push(`${label} attempt ${index} forage definition or live body missing`);
+      } else {
+        forageDefinitionsCompared++;
+        for (const field of ['materialId', 'dropId', 'dropCount'])
+          if (actual[field] !== expected[field]) failures.push(`${label} attempt ${index} forage ${field} mismatch`);
+        if (actual.rotationYBits !== expected.rotationYBits
+            || actual.collider?.radiusBits !== expected.colliderRadiusBits
+            || actual.collider?.centerYBits !== expected.colliderCenterYBits)
+          failures.push(`${label} attempt ${index} forage body/collider mismatch`);
+        if (actual.meshes.length !== expected.meshes?.length) {
+          failures.push(`${label} attempt ${index} forage mesh count mismatch`);
+        } else for (let meshIndex = 0; meshIndex < actual.meshes.length; meshIndex++) {
+          const a = actual.meshes[meshIndex], b = expected.meshes[meshIndex];
+          for (const field of ['kind', 'materialId', 'radialSegments'])
+            if (a[field] !== b[field]) failures.push(`${label} attempt ${index} mesh ${meshIndex} ${field} mismatch`);
+          for (const field of ['radius', 'height', 'topRadius', 'bottomRadius'])
+            if (field in a && a[`${field}Bits`] !== b[`${field}Bits`])
+              failures.push(`${label} attempt ${index} mesh ${meshIndex} ${field} bits mismatch`);
+          for (const field of ['positionBits', 'rotationBits', 'scaleBits'])
+            if (JSON.stringify(a[field]) !== JSON.stringify(b[field]))
+              failures.push(`${label} attempt ${index} mesh ${meshIndex} ${field} mismatch`);
+          if ('rings' in a && a.rings !== b.rings) failures.push(`${label} attempt ${index} mesh ${meshIndex} rings mismatch`);
+        }
+      }
+    }
   }
   if (uint64(sample.directFinalRngState) !== uint64(sample.nativeFinalRngState)) failures.push(`${label} final RNG state mismatch`);
 }
+if (forageDefinitionsCompared === 0) failures.push('No forage definitions were compared');
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -55,6 +85,7 @@ const report = {
   seed: probe?.seed ?? null, cases: probe?.cases?.map(({chunk, removed, direct, native}) => ({
     chunk, removed, attemptsCompared: Math.min(direct?.length ?? 0, native?.length ?? 0),
   })) ?? [],
+  forageDefinitionsCompared,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };

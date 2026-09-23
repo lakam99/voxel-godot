@@ -19,6 +19,49 @@ func native_initialization(seed_text: String) -> Dictionary:
 func _init() -> void:
 	call_deferred("run")
 
+func bits(value: float) -> int:
+	return PackedFloat32Array([value]).to_byte_array().decode_u32(0)
+
+func vector_bits(value: Vector3) -> Array:
+	return [bits(value.x), bits(value.y), bits(value.z)]
+
+func forage_geometry(body: StaticBody3D, materials: Dictionary) -> Dictionary:
+	var meshes := []
+	var collider := {}
+	for child in body.get_children():
+		if child is MeshInstance3D:
+			var role := ""
+			for material_id in materials:
+				if child.material_override == materials[material_id]:
+					role = String(material_id)
+					break
+			var mesh: Mesh = child.mesh
+			var row := {"kind":1 if mesh is SphereMesh else 2,
+				"position":[child.position.x,child.position.y,child.position.z],
+				"positionBits":vector_bits(child.position),
+				"rotation":[child.rotation.x,child.rotation.y,child.rotation.z],
+				"rotationBits":vector_bits(child.rotation),
+				"scale":[child.scale.x,child.scale.y,child.scale.z],
+				"scaleBits":vector_bits(child.scale),
+				"materialId":role}
+			if mesh is SphereMesh:
+				row.merge({"radius":mesh.radius,"height":mesh.height,
+					"radiusBits":bits(mesh.radius),"heightBits":bits(mesh.height),
+					"radialSegments":mesh.radial_segments,"rings":mesh.rings})
+			elif mesh is CylinderMesh:
+				row.merge({"topRadius":mesh.top_radius,"bottomRadius":mesh.bottom_radius,
+					"topRadiusBits":bits(mesh.top_radius),"bottomRadiusBits":bits(mesh.bottom_radius),
+					"heightBits":bits(mesh.height),
+					"height":mesh.height,"radialSegments":mesh.radial_segments})
+			meshes.append(row)
+		elif child is CollisionShape3D and child.shape is SphereShape3D:
+			collider = {"radius":child.shape.radius,"centerY":child.position.y,
+				"radiusBits":bits(child.shape.radius),"centerYBits":bits(child.position.y)}
+	return {"materialId":body.get_meta("material"),"dropId":body.get_meta("drop"),
+		"dropCount":body.get_meta("drop_count"),"rotationY":body.rotation.y,
+		"rotationYBits":bits(body.rotation.y),
+		"collider":collider,"meshes":meshes}
+
 func run() -> void:
 	var main = MainScript.new()
 	main.apply_world_seed("atlas-1492", false)
@@ -87,21 +130,55 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		var sample: Dictionary = main.surface_volume_spawn_sample_at_cell(x, z)
 		var child_count_before := chunk.get_child_count()
 		main.spawn_chunk_prop_attempt(state, index, rng)
-		direct_rows.append({"ordinal":index,"cell":[x,z],
-			"durableId":"%s:%d,%d:%d" % [main.seed_text,x,z,index],
-			"sourceSampleApplicable":not removed.has("%s:%d,%d:%d" % [main.seed_text,x,z,index]),
+		var id := "%s:%d,%d:%d" % [main.seed_text,x,z,index]
+		var direct_row := {"ordinal":index,"cell":[x,z],
+			"durableId":id,"sourceSampleApplicable":not removed.has(id),
 			"stateBeforeCoordinates":str(before_state),"stateAfterRecipe":str(rng.state),
 			"sourceBiome":String(sample.get("biome","")),
 			"sourceHeightMeters":float(sample.get("height",0.0)),
 			"surfaceFound":bool(sample.get("found",false)),
-			"childCountDelta":chunk.get_child_count()-child_count_before})
+			"childCountDelta":chunk.get_child_count()-child_count_before}
+		for child in chunk.get_children():
+			if child is StaticBody3D and child.get_meta("prop_id", "") == id \
+					and String(child.get_meta("material", "")) in \
+					["berryBush","aloePatch","mushroomCluster","frostHerbPatch"]:
+				direct_row["forage"] = forage_geometry(child, main.materials)
+		direct_rows.append(direct_row)
 	var native_rows := []
 	for row in ordered.get("attempts", []):
+		var feature: Dictionary = row.get("feature", {})
+		var projected_feature := {}
+		if feature.get("kind") == "forage":
+			var meshes := []
+			for mesh in feature.meshes:
+				meshes.append({"kind":mesh.kind,
+					"position":[mesh.position.x,mesh.position.y,mesh.position.z],
+					"positionBits":vector_bits(mesh.position),
+					"rotation":[mesh.rotation.x,mesh.rotation.y,mesh.rotation.z],
+					"rotationBits":vector_bits(mesh.rotation),
+					"scale":[mesh.scale.x,mesh.scale.y,mesh.scale.z],
+					"scaleBits":vector_bits(mesh.scale),
+					"materialId":mesh.materialId,"radius":mesh.radius,
+					"radiusBits":bits(mesh.radius),"heightBits":bits(mesh.height),
+					"height":mesh.height,"topRadius":mesh.topRadius,
+					"topRadiusBits":bits(mesh.topRadius),"bottomRadiusBits":bits(mesh.bottomRadius),
+					"bottomRadius":mesh.bottomRadius,
+					"radialSegments":mesh.radialSegments,"rings":mesh.rings})
+			projected_feature = {"kind":feature.kind,"contentIdentity":feature.contentIdentity,
+				"materialId":feature.materialId,"dropId":feature.dropId,
+				"dropCount":feature.dropCount,"rotationY":feature.rotationY,
+				"rotationYBits":bits(feature.rotationY),
+				"colliderRadius":feature.colliderRadius,
+				"colliderRadiusBits":bits(feature.colliderRadius),
+				"colliderCenterY":feature.colliderCenterY,
+				"colliderCenterYBits":bits(feature.colliderCenterY),
+				"physicalColliderPresent":feature.physicalColliderPresent,
+				"navigationBlocker":feature.navigationBlocker,"meshes":meshes}
 		native_rows.append({"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"durableId":row.durableId,"stateBeforeCoordinates":row.stateBeforeCoordinates,
 			"stateAfterRecipe":row.stateAfterRecipe,"sourceBiome":row.sourceBiome,
 			"sourceHeightMeters":row.sourceHeightMeters,"outcome":row.outcome,
-			"presence":row.presence})
+			"presence":row.presence,"feature":projected_feature})
 	var result := {"chunk":[chunk_key.x,chunk_key.y],"removed":removed,
 		"nativeInitialization":initialized.get("status"),
 		"bundleReady":bundle.get("ok",false),"admissions":admissions,

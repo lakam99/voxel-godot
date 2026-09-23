@@ -3,6 +3,7 @@
 #include "biome_region_field.hpp"
 #include "native_biome_environment_catalog.hpp"
 #include "native_feature_delta.hpp"
+#include "native_surface_forage_ordered_definition.hpp"
 #include "native_surface_prop_source_ordered_stream.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
@@ -2140,6 +2141,41 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 			row["presence"] = static_cast<std::int64_t>(placed.presence);
 			row["worldAnchor"] = Vector3(placed.world_anchor.x, placed.world_anchor.y,
 				placed.world_anchor.z);
+			if (source.outcome == NativeSurfacePropClassificationOutcome::forage_recipe) {
+				const NativeSurfaceForageOrderedDefinition forage =
+					NativeSurfaceForageOrderedDefinition::create(ordered, placement,
+						static_cast<std::uint32_t>(index), terrain, *biome_catalog_);
+				Dictionary feature;
+				feature["kind"] = "forage";
+				feature["contentIdentity"] = text(sha256_hex(forage.content_digest()));
+				feature["recipeId"] = text(forage.recipe().recipe_id);
+				feature["materialId"] = text(forage.recipe().material_id);
+				feature["dropId"] = text(forage.recipe().drop_id);
+				feature["dropCount"] = forage.drop_count();
+				feature["rotationY"] = forage.rotation_y();
+				feature["colliderRadius"] = forage.collider_radius();
+				feature["colliderCenterY"] = forage.collider_center_y();
+				feature["physicalColliderPresent"] = forage.physical_collider_present();
+				feature["navigationBlocker"] = forage.navigation_blocker();
+				Array meshes;
+				for (const NativeForageMesh &mesh : forage.meshes()) {
+					Dictionary visual;
+					visual["kind"] = static_cast<std::int64_t>(mesh.kind);
+					visual["position"] = Vector3(mesh.position.x, mesh.position.y, mesh.position.z);
+					visual["rotation"] = Vector3(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z);
+					visual["scale"] = Vector3(mesh.scale.x, mesh.scale.y, mesh.scale.z);
+					visual["radius"] = mesh.radius;
+					visual["height"] = mesh.height;
+					visual["topRadius"] = mesh.top_radius;
+					visual["bottomRadius"] = mesh.bottom_radius;
+					visual["radialSegments"] = mesh.radial_segments;
+					visual["rings"] = mesh.rings;
+					visual["materialId"] = text(mesh.material_id);
+					meshes.append(visual);
+				}
+				feature["meshes"] = meshes;
+				row["feature"] = feature;
+			}
 			attempts.append(row);
 		}
 		Dictionary result = envelope(operation, "ready");

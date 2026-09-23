@@ -355,6 +355,19 @@ does not consume a terrain sample; the probe compares only source values
 actually used by production. This remains direct-service evidence, not a
 headed game-flow or feature-geometry acceptance claim.
 
+The adapter now projects the existing native ordered forage definition into
+each forage shadow row: recipe/material/drop IDs, drop count, ordered meshes,
+body rotation and physical/nav collider facts. The rebuilt
+`n4-forage-adapter-shadow-01` gate passed at
+`artifacts/native-world-backend/n4-forage-adapter-shadow-01/report.json`.
+The direct production-method differential was extended to inspect actual
+`make_forage` bodies and passed all 84 attempts and 21 forage definitions at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-efdd6dbf-e638-464c-9762-8f88e541701a.json`.
+It compares material and drop metadata, all mesh kinds/materials/dimensions,
+transforms, body rotation and sphere collider using exact float32 bits.
+This proves the adapter projection against those direct-service cases, not
+atomic native feature publication, headed gameplay or N4 cutover.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
