@@ -45,6 +45,13 @@ function timing() {
     totalMilliseconds: 9 };
 }
 
+function installed(frame, identity, digest, artifact, retiredShapeCount) {
+  return { ok: true, acknowledgedPhysicsFrame: frame, currentShapeCount: 3, retiredShapeCount,
+    acknowledgement: { physicsFrame: frame, provenance: {
+      requestIdentity: identity, snapshotDigest: digest, artifactKey: artifact,
+    } } };
+}
+
 test('blocked fixture is valid only for the explicit unavailable N2 native seam', () => {
   const report = { schema: 'n2-native-world-vertical-slice-fixture/v1', finished: true, passed: false,
     reason: `missing_native_method:${expectedNativeMethod}`, godotVersion, evidence: { oracle: oracle(), expectedNativeApi: expectedApi() } };
@@ -58,20 +65,31 @@ test('passing fixture requires exact one-authority, parity, render, acknowledgem
     oracle: oracle(), expectedNativeApi: expectedApi(),
     authority: { staticBodyCount: 1, projectOwnedTerrainBodies: 1, voxelTerrainCollisionEnabled: false, installedShapeCount: 3 },
     render: { consumer: 'VoxelTerrain/VoxelBuffer/VoxelMesherTransvoxel', collisionDisabled: true, requiredSnapshotGap: '' },
-    nativeBaseline: { sampleCount: 33915, preparedPayloadBytes: 1000, resourceUsage: resourceUsage(1000), preparedPayloadAccounting: payloadAccounting(1000),
+    nativeBaseline: { sampleCount: 33915, snapshotDigest: '1'.repeat(64), collisionArtifactKey: '2'.repeat(64), preparedPayloadBytes: 1000, resourceUsage: resourceUsage(1000), preparedPayloadAccounting: payloadAccounting(1000),
       tileGeometrySha256: { '-3,-1': 'a'.repeat(64), '-2,-1': 'b'.repeat(64) } },
-    nativeEdited: { sampleCount: 33915, preparedPayloadBytes: 1001, resourceUsage: resourceUsage(1001), preparedPayloadAccounting: payloadAccounting(1001),
+    sameShapeCheck: { snapshotDigest: '3'.repeat(64), collisionArtifactKey: '4'.repeat(64) },
+    nativeEdited: { sampleCount: 33915, snapshotDigest: '5'.repeat(64), collisionArtifactKey: '6'.repeat(64), preparedPayloadBytes: 1001, resourceUsage: resourceUsage(1001), preparedPayloadAccounting: payloadAccounting(1001),
       tileGeometrySha256: { '-3,-1': 'c'.repeat(64), '-2,-1': 'd'.repeat(64) } },
-    acknowledgedPhysicsFrame: 7, physics: { ok: true }, staleBeforeAck: { reason: 'stale_before_acknowledgement' },
+    baselineInstall: installed(4, { ownerGeneration: 1, sourceRevision: 1, cancellationEpoch: 1 }, '1'.repeat(64), '2'.repeat(64), 0),
+    sameShapeInstall: installed(7, { ownerGeneration: 1, sourceRevision: 1, cancellationEpoch: 2 }, '3'.repeat(64), '4'.repeat(64), 3),
+    editedInstall: installed(10, { ownerGeneration: 1, sourceRevision: 2, cancellationEpoch: 2 }, '5'.repeat(64), '6'.repeat(64), 3),
+    blockedReplacement: { reason: 'replacement_occupied_before_install' }, sameShapeSameHits: true,
+    acknowledgedPhysicsFrame: 10, physics: { ok: true }, staleBeforeAck: { reason: 'stale_before_acknowledgement' },
       staleBeforeInstall: { reason: 'stale_before_install' },
       crossSeamPhysics: { changed: true, allHitsOwnedBySoleBody: true }, timing: timing(),
-      resourceLifecycle: { admittedRequests: 2, currentInFlightBuilds: 0, peakInFlightBuilds: 1,
+      resourceLifecycle: { admittedRequests: 3, currentInFlightBuilds: 0, peakInFlightBuilds: 1,
         currentPreparedResults: 0, peakPreparedResults: 1, currentPreparedBytes: 0, peakPreparedBytes: 1001,
         currentRetiredShapeSetsAwaitingRelease: 0, peakRetiredShapeSetsAwaitingRelease: 1 },
   } };
   assert.equal(validateFixtureReport(report).valid, true);
   report.evidence.authority.staticBodyCount = 2;
   assert(validateFixtureReport(report).errors.includes('one_authority_evidence_invalid'));
+  report.evidence.authority.staticBodyCount = 1;
+  report.evidence.sameShapeInstall.acknowledgement.provenance.requestIdentity.cancellationEpoch = 1;
+  assert(validateFixtureReport(report).errors.includes('sameShapeInstall_physical_revision_invalid'));
+  report.evidence.sameShapeInstall.acknowledgement.provenance.requestIdentity.cancellationEpoch = 2;
+  report.evidence.resourceLifecycle.admittedRequests = 2;
+  assert(validateFixtureReport(report).errors.includes('fixture_resource_lifecycle_invalid'));
 });
 
 test('N2 native build join requires passing coverage, immutable inputs, smoke, tests, and installed hashes', () => {

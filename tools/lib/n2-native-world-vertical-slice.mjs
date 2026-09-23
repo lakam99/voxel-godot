@@ -184,6 +184,30 @@ export function validateFixtureReport(report) {
         && /^[0-9a-f]{64}$/.test(evidence?.nativeEdited?.tileGeometrySha256?.[key] ?? '')
         && evidence.nativeBaseline.tileGeometrySha256[key] !== evidence.nativeEdited.tileGeometrySha256[key])) errors.push('both_tile_artifact_changes_invalid');
     if (!Number.isInteger(evidence?.acknowledgedPhysicsFrame) || evidence.acknowledgedPhysicsFrame < 0) errors.push('physics_acknowledgement_invalid');
+    const installs = [
+      ['baselineInstall', { ownerGeneration: 1, sourceRevision: 1, cancellationEpoch: 1 }, evidence?.nativeBaseline],
+      ['sameShapeInstall', { ownerGeneration: 1, sourceRevision: 1, cancellationEpoch: 2 }, evidence?.sameShapeCheck],
+      ['editedInstall', { ownerGeneration: 1, sourceRevision: 2, cancellationEpoch: 2 }, evidence?.nativeEdited],
+    ];
+    let lastFrame = -1;
+    for (const [name, identity, native] of installs) {
+      const row = evidence?.[name];
+      const proof = row?.acknowledgement;
+      const provenance = proof?.provenance;
+      if (row?.ok !== true || !Number.isInteger(row?.acknowledgedPhysicsFrame)
+          || row.acknowledgedPhysicsFrame <= lastFrame || proof?.physicsFrame !== row.acknowledgedPhysicsFrame
+          || JSON.stringify(provenance?.requestIdentity) !== JSON.stringify(identity)
+          || provenance?.snapshotDigest !== native?.snapshotDigest
+          || provenance?.artifactKey !== native?.collisionArtifactKey
+          || row?.currentShapeCount !== 3 || !Number.isInteger(row?.retiredShapeCount)
+          || row.retiredShapeCount !== (name === 'baselineInstall' ? 0 : 3)) {
+        errors.push(`${name}_physical_revision_invalid`);
+      }
+      lastFrame = row?.acknowledgedPhysicsFrame ?? lastFrame;
+    }
+    if (evidence?.acknowledgedPhysicsFrame !== evidence?.editedInstall?.acknowledgedPhysicsFrame
+        || evidence?.blockedReplacement?.reason !== 'replacement_occupied_before_install'
+        || evidence?.sameShapeSameHits !== true) errors.push('replacement_sequence_invalid');
     if (evidence?.physics?.ok !== true) errors.push('direct_physics_evidence_invalid');
     if (evidence?.staleBeforeAck?.reason !== 'stale_before_acknowledgement') errors.push('stale_before_ack_rejection_invalid');
     if (evidence?.staleBeforeInstall?.reason !== 'stale_before_install') errors.push('stale_before_install_rejection_invalid');
@@ -197,7 +221,7 @@ export function validateFixtureReport(report) {
     if (!timing || timingFields.some(field => !Number.isFinite(timing[field]) || timing[field] < 0)
         || timing.totalMilliseconds > 10000) errors.push('stage_timing_evidence_invalid');
     const lifecycle = evidence?.resourceLifecycle;
-    if (!lifecycle || lifecycle.admittedRequests !== 2 || lifecycle.currentInFlightBuilds !== 0
+    if (!lifecycle || lifecycle.admittedRequests !== 3 || lifecycle.currentInFlightBuilds !== 0
         || lifecycle.peakInFlightBuilds !== 1 || lifecycle.currentPreparedResults !== 0
         || lifecycle.peakPreparedResults !== 1 || lifecycle.currentPreparedBytes !== 0
         || !Number.isInteger(lifecycle.peakPreparedBytes) || lifecycle.peakPreparedBytes <= 0

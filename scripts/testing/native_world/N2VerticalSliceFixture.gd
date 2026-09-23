@@ -211,9 +211,11 @@ func _run() -> void:
 		and authority.voxelTerrainCollisionEnabled == false and _installed_shapes.size() == 3 \
 		and _acknowledged_physics_frame >= 0 and float(timing.totalMilliseconds) <= MAX_SECONDS * 1000.0 and lifecycle_ok
 	common["nativeBaseline"] = baseline_check
+	common["sameShapeCheck"] = same_shape_check
 	common["nativeEdited"] = edited_check
 	common["baselineInstall"] = baseline_install
 	common["sameShapeInstall"] = same_shape_install
+	common["blockedReplacement"] = blocked_replacement
 	common["sameShapePhysics"] = same_shape_seam
 	common["sameShapeSameHits"] = same_shape_same_hits
 	common["editedInstall"] = edited_install
