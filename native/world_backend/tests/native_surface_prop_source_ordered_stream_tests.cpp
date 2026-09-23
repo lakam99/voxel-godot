@@ -86,6 +86,23 @@ VWB_TEST(native_source_ordered_prop_stream_policy_helper_contract) {
             static_cast<NativeSurfacePropClassificationOutcome>(0U)));
 }
 
+VWB_TEST(native_source_ordered_prop_stream_checks_cancellation_between_attempts) {
+    const auto definition = surface_prop_test_fixture::definition("ordered-props-cancel");
+    const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+        definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+    const auto catalog = NativeBiomeEnvironmentCatalog::create(tests::godot_oracle_environment_profiles());
+    const auto structure = exclusions();
+    const auto removed = NativeFeatureDeltaSnapshot::create({}, {});
+    std::size_t checks = 0U;
+    VWB_EXPECT_THROW(NativeSurfacePropSourceOrderedStreamCancelled,
+        NativeSurfacePropSourceOrderedStream::create(
+            terrain.pin().definition().raw_terrain_seed(), 0, 0, world_digest(), 1U,
+            terrain, catalog, structure, removed, wildlife_catalog(), [&checks]() {
+                return ++checks >= 3U;
+            }));
+    VWB_EXPECT_EQ(3U, checks);
+}
+
 VWB_TEST(native_source_ordered_prop_stream_interleaves_all_28_attempts_and_parent_tombstone) {
     const auto definition = surface_prop_test_fixture::definition("ordered-props");
     const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(

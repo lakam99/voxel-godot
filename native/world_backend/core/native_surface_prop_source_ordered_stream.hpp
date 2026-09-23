@@ -12,6 +12,7 @@
 #include "native_wildlife_stream.hpp"
 
 #include <array>
+#include <functional>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -21,6 +22,11 @@ namespace voxel::world_backend {
 class NativeSurfacePropSourceOrderedStreamRejected final : public std::invalid_argument {
 public:
     NativeSurfacePropSourceOrderedStreamRejected();
+};
+
+class NativeSurfacePropSourceOrderedStreamCancelled final : public std::runtime_error {
+public:
+    NativeSurfacePropSourceOrderedStreamCancelled();
 };
 
 // Pure source-order policy helpers used by the stream and its contract tests.
@@ -57,7 +63,8 @@ public:
         const NativeBiomeEnvironmentCatalog &catalog,
         const NativeStructureExclusionSnapshot &exclusions,
         const NativeFeatureDeltaSnapshot &removed_props,
-        const NativeWildlifePresentationCatalog &wildlife_presentations);
+        const NativeWildlifePresentationCatalog &wildlife_presentations,
+        const std::function<bool()> &should_cancel = {});
 
     std::uint32_t rng_seed() const noexcept;
     std::uint64_t final_rng_state() const noexcept;

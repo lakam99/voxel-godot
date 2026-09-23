@@ -1559,6 +1559,8 @@ void NativeWorldBackend::_bind_methods() {
 NativeWorldBackend::~NativeWorldBackend() {
 	if (voxel_worker_cancel_token_) voxel_worker_cancel_token_->store(true, std::memory_order_relaxed);
 	if (voxel_worker_.joinable()) voxel_worker_.join();
+	if (rock_source_worker_cancel_token_)
+		rock_source_worker_cancel_token_->store(true, std::memory_order_relaxed);
 	if (rock_source_worker_.joinable()) rock_source_worker_.join();
 }
 
@@ -2134,8 +2136,18 @@ Dictionary NativeWorldBackend::begin_rock_ordered_source_async(
 		rock_source_worker_page_ = p_page;
 		rock_source_worker_exclusions_ = p_exclusions;
 		rock_source_worker_exclusion_snapshot_ = p_exclusions->snapshot_.get();
+		rock_source_worker_batch_ = p_page->batch_.get();
+		rock_source_worker_biome_ = biome_catalog_.get();
+		rock_source_worker_removed_ = removed_props_.get();
+		rock_source_worker_wildlife_ = wildlife_presentations_.get();
+		rock_source_worker_visual_ = visual_catalog_.get();
+		rock_source_worker_biome_identity_ = biome_capture_identity_;
+		rock_source_worker_removed_identity_ = removed_fd1_identity_;
+		rock_source_worker_visual_identity_ = visual_capture_identity_;
+		rock_source_worker_wildlife_identity_ = presentation_capture_identity_;
 		rock_source_worker_result_.reset();
 		rock_source_worker_error_ = nullptr;
+		rock_source_worker_cancelled_ = false;
 		rock_source_worker_finished_.store(false, std::memory_order_relaxed);
 		rock_source_worker_capture_usec_ = std::chrono::duration_cast<std::chrono::microseconds>(
 			std::chrono::steady_clock::now() - capture_started).count();
@@ -2143,24 +2155,30 @@ Dictionary NativeWorldBackend::begin_rock_ordered_source_async(
 		rock_source_worker_started_usec_ = static_cast<std::int64_t>(
 			std::chrono::duration_cast<std::chrono::microseconds>(capture_started.time_since_epoch()).count());
 		rock_source_worker_ticket_ = next_rock_source_worker_ticket_++;
+		rock_source_worker_cancel_token_ = std::make_shared<std::atomic<bool>>(false);
+		auto cancel_token = rock_source_worker_cancel_token_;
 		rock_source_worker_ = std::thread([this, pin = std::move(pin), exclusions = std::move(exclusions),
 			biome = std::move(biome), removed = std::move(removed), wildlife = std::move(wildlife),
 			seed, world_digest, chunk_x, chunk_z, world_generation, batch_identity, biome_catalog_ptr,
 			removed_identity_ptr, wildlife_identity_ptr, visual_identity_ptr, biome_capture_identity,
-			removed_identity, visual_identity, wildlife_identity]() mutable {
+			removed_identity, visual_identity, wildlife_identity, cancel_token]() mutable {
 			const auto compose_started = std::chrono::steady_clock::now();
 			try {
 				WorldSourcePin cache_pin = pin;
 				NativeEffectiveTerrainSource terrain(std::move(pin));
 				NativeSurfacePropSourceOrderedStream ordered = NativeSurfacePropSourceOrderedStream::create(
 					seed, chunk_x, chunk_z, world_digest, world_generation, terrain,
-					biome, exclusions, removed, wildlife);
+					biome, exclusions, removed, wildlife, [cancel_token]() {
+						return cancel_token->load(std::memory_order_relaxed);
+					});
 				NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(
 					ordered, terrain);
 				rock_source_worker_result_ = std::make_unique<NativeRockOrderedCache>(NativeRockOrderedCache{
 					batch_identity, biome_catalog_ptr, removed_identity_ptr, wildlife_identity_ptr,
 					visual_identity_ptr, biome_capture_identity, removed_identity, visual_identity,
 					wildlife_identity, std::move(cache_pin), std::move(ordered), std::move(placement)});
+			} catch (const NativeSurfacePropSourceOrderedStreamCancelled &) {
+				rock_source_worker_cancelled_ = true;
 			} catch (...) { rock_source_worker_error_ = std::current_exception(); }
 			rock_source_worker_compose_usec_ = std::chrono::duration_cast<std::chrono::microseconds>(
 				std::chrono::steady_clock::now() - compose_started).count();
@@ -2180,14 +2198,44 @@ Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t
 	constexpr const char *operation = "poll_rock_ordered_source_async";
 	if (p_ticket <= 0 || p_ticket != rock_source_worker_ticket_)
 		return envelope(operation, "failed", "unknown_ticket");
+	const auto &live_page = rock_source_worker_page_;
+	const auto &live_exclusions = rock_source_worker_exclusions_;
+	const bool stale_while_running = live_page.is_null() || live_exclusions.is_null()
+		|| !live_page->batch_ || !live_exclusions->snapshot_
+		|| live_exclusions->snapshot_.get() != rock_source_worker_exclusion_snapshot_
+		|| live_page->batch_.get() != rock_source_worker_batch_
+		|| !state_ || !shaping_registry_ || !biome_catalog_ || !removed_props_
+		|| !wildlife_presentations_ || !visual_catalog_
+		|| biome_catalog_.get() != rock_source_worker_biome_
+		|| removed_props_.get() != rock_source_worker_removed_
+		|| wildlife_presentations_.get() != rock_source_worker_wildlife_
+		|| visual_catalog_.get() != rock_source_worker_visual_
+		|| biome_capture_identity_ != rock_source_worker_biome_identity_
+		|| removed_fd1_identity_ != rock_source_worker_removed_identity_
+		|| visual_capture_identity_ != rock_source_worker_visual_identity_
+		|| presentation_capture_identity_ != rock_source_worker_wildlife_identity_
+		|| (live_page->batch_ && state_ && !(live_page->batch_->pin().definition().physical_content_identity()
+			== state_->source_identity()))
+		|| (live_page->batch_ && state_ && live_page->batch_->pin().terrain_delta_revision()
+			!= state_->terrain_delta_revision())
+		|| (live_page->batch_ && shaping_registry_
+			&& live_page->batch_->pin().shaping_registry_revision() != shaping_registry_->revision());
+	// The final pointer/content checks happen after the worker finishes; this
+	// early invalidation only requests bounded cancellation between attempts.
+	if (stale_while_running && rock_source_worker_cancel_token_)
+		rock_source_worker_cancel_token_->store(true, std::memory_order_relaxed);
 	if (!rock_source_worker_finished_.load(std::memory_order_acquire)) {
-		Dictionary result = envelope(operation, "pending", "worker_running");
+		Dictionary result = envelope(operation, "pending",
+			rock_source_worker_cancel_token_ && rock_source_worker_cancel_token_->load(std::memory_order_relaxed)
+				? "worker_cancellation_draining" : "worker_running");
 		result["ticket"] = p_ticket;
 		return result;
 	}
 	if (rock_source_worker_.joinable()) rock_source_worker_.join();
 	Dictionary result = envelope(operation, "failed", "worker_result_invalid");
 	try {
+		if (rock_source_worker_cancelled_)
+			throw std::invalid_argument("rock ordered source worker cancelled");
 		if (rock_source_worker_error_) std::rethrow_exception(rock_source_worker_error_);
 		const auto &page = rock_source_worker_page_;
 		const auto &exclusions = rock_source_worker_exclusions_;
@@ -2233,10 +2281,21 @@ Dictionary NativeWorldBackend::poll_rock_ordered_source_async(const std::int64_t
 		result = failure(operation, error);
 	}
 	rock_source_worker_error_ = nullptr;
+	rock_source_worker_cancelled_ = false;
 	rock_source_worker_finished_.store(false, std::memory_order_relaxed);
+	rock_source_worker_cancel_token_.reset();
 	rock_source_worker_page_.unref();
 	rock_source_worker_exclusions_.unref();
 	rock_source_worker_exclusion_snapshot_ = nullptr;
+	rock_source_worker_batch_ = nullptr;
+	rock_source_worker_biome_ = nullptr;
+	rock_source_worker_removed_ = nullptr;
+	rock_source_worker_wildlife_ = nullptr;
+	rock_source_worker_visual_ = nullptr;
+	rock_source_worker_biome_identity_.clear();
+	rock_source_worker_removed_identity_.clear();
+	rock_source_worker_visual_identity_.clear();
+	rock_source_worker_wildlife_identity_.clear();
 	return result;
 }
 
