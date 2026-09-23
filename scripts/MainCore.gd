@@ -722,9 +722,19 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
     var counter_key: String = {
         "terrain_chunks": "loadedChunkCount",
         "terrain_collision": "publishedChunkCount",
-        "navigation_tiles": "publishedTileCount"
+        "navigation_tiles": "publishedTileCount",
+        "navigation_changes": "processedEventCount"
     }.get(normalized_domain, "")
     var completed_count := int(normalized_metrics.get(counter_key, -1)) if counter_key != "" else -1
+    var required_count := int(normalized_metrics.get("requiredChunkCount", normalized_metrics.get("requiredTileCount", completed_count)))
+    if normalized_domain == "town_manifest" and normalized_metrics.get("publishedKeys") is Array:
+        completed_count = (normalized_metrics.get("publishedKeys") as Array).size()
+        required_count = (normalized_metrics.get("requiredKeys", []) as Array).size() \
+            if normalized_metrics.get("requiredKeys", []) is Array else completed_count
+    if normalized_domain == "scene" and normalized_metrics.get("audio") is Dictionary:
+        var audio_progress: Dictionary = normalized_metrics.get("audio")
+        completed_count = int(audio_progress.get("completedJobs", -1))
+        required_count = int(audio_progress.get("totalJobs", completed_count))
     var previous_count := int(startup_work_completed_counts.get(normalized_domain, -1))
     var previous_status := String(startup_readiness_domains.get(normalized_domain, {}).get("status", ""))
     var completed_owner := ""
@@ -735,7 +745,6 @@ func startup_loading_yield(message: String, domain := "general", status := "pend
         completed_owner = normalized_domain
     if completed_owner != "":
         startup_work_progress_revision += 1
-        var required_count := int(normalized_metrics.get("requiredChunkCount", normalized_metrics.get("requiredTileCount", completed_count)))
         startup_work_progress_receipt = {
             "completedRevision": startup_work_progress_revision,
             "owner": completed_owner,
