@@ -34,6 +34,12 @@ var environment_errors: Array[String] = []
 var main_callback_window_at_ready := {}
 var observed_timeline_rows: Array[Dictionary] = []
 var observed_timeline_keys := {}
+var progress_heartbeat_count := 0
+var progress_heartbeat_max_gap_ms := 0.0
+var progress_heartbeat_last_usec := 0
+var progress_heartbeat_last_owner := ""
+var progress_heartbeat_last_status := ""
+var progress_heartbeat_last_metrics := {}
 var timeline_observation_started := false
 var timeline_initial_snapshot_size := -1
 var timeline_initial_snapshot_at_capacity := false
@@ -113,6 +119,7 @@ func run() -> void:
 		return
 	input_started_usec = Time.get_ticks_usec()
 	last_frame_usec = input_started_usec
+	progress_heartbeat_last_usec = input_started_usec
 	dispatch_menu_mouse_button(button.get_global_rect().get_center(), true)
 	dispatch_menu_mouse_button(button.get_global_rect().get_center(), false)
 	write_progress("menu_input:%s" % launch_mode)
@@ -218,6 +225,16 @@ func capture_startup_timeline() -> void:
 			continue
 		observed_timeline_keys[key] = true
 		observed_timeline_rows.append(row.duplicate(true))
+		if input_started_usec > 0 and not loading_completed:
+			var observed_usec := Time.get_ticks_usec()
+			progress_heartbeat_max_gap_ms = maxf(progress_heartbeat_max_gap_ms,
+				float(observed_usec - progress_heartbeat_last_usec) / 1000.0)
+			progress_heartbeat_last_usec = observed_usec
+			progress_heartbeat_count += 1
+			progress_heartbeat_last_owner = String(row.get("domain", ""))
+			progress_heartbeat_last_status = String(row.get("status", ""))
+			progress_heartbeat_last_metrics = (row.get("metrics", {}) as Dictionary).duplicate(true) \
+				if row.get("metrics", {}) is Dictionary else {}
 
 func startup_timeline_observation() -> Dictionary:
 	var all_retained_rows_observed := true
@@ -278,8 +295,14 @@ func _on_loading_completed() -> void:
 	if loading_completed:
 		return
 	gameplay_ready_usec = Time.get_ticks_usec()
-	loading_completed = true
 	capture_startup_timeline()
+	if last_frame_usec > 0:
+		frame_gap_ms.append(float(gameplay_ready_usec - last_frame_usec) / 1000.0)
+		last_frame_usec = gameplay_ready_usec
+	if progress_heartbeat_last_usec > 0:
+		progress_heartbeat_max_gap_ms = maxf(progress_heartbeat_max_gap_ms,
+			float(gameplay_ready_usec - progress_heartbeat_last_usec) / 1000.0)
+	loading_completed = true
 	observe_main_callback_monitor(true)
 
 func _on_loading_failed(message: String) -> void:
@@ -377,7 +400,21 @@ func write_report(passed: bool, reason: String) -> void:
 			"startupTimeline": timeline,
 			"stageDistributions": stage_distribution(timeline),
 			"loadingCallbackIntervalMax": max_step,
-			"timelineObservation": startup_timeline_observation()
+			"timelineObservation": startup_timeline_observation(),
+			"timelineActivity": {
+				"source": "MainCore.startup_loading_timeline",
+				"count": progress_heartbeat_count,
+				"maxGapMs": progress_heartbeat_max_gap_ms,
+				"lastOwner": progress_heartbeat_last_owner,
+				"lastStatus": progress_heartbeat_last_status,
+				"lastMetrics": progress_heartbeat_last_metrics
+			},
+			"progressHeartbeat": {
+				"source": "unavailable",
+				"verified": false,
+				"reason": "no_common_authoritative_completed_work_revision",
+				"workProofRows": []
+			}
 		},
 		"mainCallbackWindowAtReady": main_callback_window_at_ready,
 		"loadingMainCallbackObservation": {
