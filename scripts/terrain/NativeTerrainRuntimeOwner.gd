@@ -30,6 +30,8 @@ var _state := "new"
 var _failure := ""
 var _seed_text := ""
 var _source_identity := {}
+var _load_generation := 0
+var _owner_generation := 0
 var _pending_edit_plan := {}
 var _legacy_converter
 var _legacy_main
@@ -40,12 +42,10 @@ var _legacy_priority := 0
 func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
 		save_snapshot = null) -> Dictionary:
 	if _state != "new": return {"status":"failed", "reason":"owner_already_started"}
-	if main == null or terrain == null or terrain.generator != null \
-			or terrain.automatic_loading_enabled:
-		return _setup_failure("manual_terrain_required")
-	var structures = main.get("structure_system")
-	_admission = structures.get("citadel_terrain_admission") if structures != null else null
-	if _admission == null: return _setup_failure("site_admission_missing")
+	var inputs: Dictionary = _validate_setup_inputs(main, terrain, consumer_id)
+	if inputs.get("status") != "ready":
+		return _setup_failure(String(inputs.get("reason", "native_owner_inputs_invalid")))
+	_admission = inputs.admission
 	var source: Dictionary = SourceRequest.from_main_with_current_volume(main) \
 		if save_snapshot == null else SourceRequest.from_main_with_v2_save(main, save_snapshot)
 	if source.get("reason") == "native_legacy_terrain_conversion_required":
@@ -65,13 +65,53 @@ func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
 
 func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
 		priority: int) -> Dictionary:
-	_backend = ClassDB.instantiate("NativeWorldBackend")
-	if _backend == null: return _setup_failure("native_backend_unavailable")
-	var initialized: Dictionary = _backend.initialize_from_save_v2(source.request)
+	var backend = ClassDB.instantiate("NativeWorldBackend")
+	if backend == null: return _setup_failure("native_backend_unavailable")
+	var initialized: Dictionary = backend.initialize_from_save_v2(source.request)
 	if initialized.get("status") != "ready":
 		return _setup_failure(String(initialized.get("reason", "native_initialize_failed")))
-	_seed_text = String(source.request.seedText)
+	return _activate_initialized_backend(backend, terrain, consumer_id, priority,
+		String(source.request.seedText), initialized, false, 0)
+
+## Production loading prepares a private native candidate across frames and
+## transfers the exact backend only after its identity-checked transaction
+## commit. Adoption never re-imports the save and never consults script terrain.
+func setup_from_committed_backend(main, terrain: VoxelTerrain, backend,
+		commit_receipt: Dictionary, consumer_id: int, priority: int) -> Dictionary:
+	if _state != "new": return {"status":"failed", "reason":"owner_already_started"}
+	var inputs: Dictionary = _validate_setup_inputs(main, terrain, consumer_id)
+	if inputs.get("status") != "ready":
+		return _setup_failure(String(inputs.get("reason", "native_owner_inputs_invalid")))
+	if backend == null or not backend.has_method("status"):
+		return _setup_failure("initialized_backend_missing")
+	var initialized: Dictionary = backend.status()
+	var expected_seed := String(main.get("seed_text"))
+	var source_identity = initialized.get("sourceIdentity")
+	if initialized.get("status") != "ready" \
+			or String(initialized.get("sourceSeedText", "")) != expected_seed \
+			or not source_identity is Dictionary \
+			or (source_identity as Dictionary).is_empty():
+		return _setup_failure("initialized_backend_source_mismatch")
+	var generation := int(commit_receipt.get("generation", 0))
+	if commit_receipt.get("status") != "ready" \
+			or commit_receipt.get("committed") != true \
+			or generation <= 0 \
+			or int(commit_receipt.get("backendInstanceId", 0)) != backend.get_instance_id() \
+			or commit_receipt.get("sourceIdentity") != source_identity:
+		return _setup_failure("initialized_backend_receipt_mismatch")
+	_admission = inputs.admission
+	return _activate_initialized_backend(backend, terrain, consumer_id, priority,
+		expected_seed, initialized, true, generation)
+
+func _activate_initialized_backend(backend, terrain: VoxelTerrain, consumer_id: int,
+		priority: int, expected_seed: String, initialized: Dictionary,
+		adopted_committed_backend: bool, load_generation: int) -> Dictionary:
+	if _backend != null or not _state in ["new", "converting"]:
+		return _setup_failure("initialized_backend_adoption_state_invalid")
+	_backend = backend
+	_seed_text = expected_seed
 	_source_identity = initialized.get("sourceIdentity", {}).duplicate(true)
+	_load_generation = load_generation
 	_pages = PageAdmission.new()
 	var page_ready: Dictionary = _pages.setup(_backend, _admission)
 	if page_ready.get("status") != "ready":
@@ -92,9 +132,14 @@ func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
 	var occupancy_ready: Dictionary = _occupancy.bind(_cells)
 	if occupancy_ready.get("status") != "ready":
 		return _setup_failure(String(occupancy_ready.get("reason", "native_occupancy_source_failed")))
+	# Godot ObjectIDs are opaque 64-bit values and can appear negative when
+	# exposed through signed GDScript integers. Artifact generations require a
+	# positive token, so clear only the sign bit while retaining ObjectID identity.
+	_owner_generation = int(get_instance_id()) & 0x7fffffffffffffff
+	if _owner_generation == 0: _owner_generation = 1
 	_artifact_requests = ArtifactRequests.new()
 	var artifacts_ready: Dictionary = _artifact_requests.setup(_backend, _pages,
-		_admission, _planner, DemandPlanner.CELL, get_instance_id(),
+		_admission, _planner, DemandPlanner.CELL, _owner_generation,
 		ResidentCollisionOwner.MAX_RESIDENT)
 	if artifacts_ready.get("status") != "ready":
 		return _setup_failure(String(artifacts_ready.get("reason", "native_artifact_requests_failed")))
@@ -104,7 +149,22 @@ func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
 		return _setup_failure(String(published.get("reason", "native_publisher_failed")))
 	_state = "active"
 	return {"status":"ready", "backendInstanceId":_backend.get_instance_id(),
-		"sourceIdentity":initialized.get("sourceIdentity", {}), "consumerId":consumer_id}
+		"sourceIdentity":_source_identity.duplicate(true), "consumerId":consumer_id,
+		"adoptedCommittedBackend":adopted_committed_backend,
+		"loadGeneration":_load_generation, "ownerGeneration":_owner_generation,
+		"sourceSeedText":_seed_text}
+
+func _validate_setup_inputs(main, terrain: VoxelTerrain, consumer_id: int) -> Dictionary:
+	if main == null or terrain == null or terrain.generator != null \
+			or terrain.automatic_loading_enabled:
+		return {"status":"failed", "reason":"manual_terrain_required"}
+	if consumer_id <= 0:
+		return {"status":"failed", "reason":"invalid_consumer_owner"}
+	var structures = main.get("structure_system")
+	var admission = structures.get("citadel_terrain_admission") if structures != null else null
+	if admission == null:
+		return {"status":"failed", "reason":"site_admission_missing"}
+	return {"status":"ready", "admission":admission}
 
 func replace_demand(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],

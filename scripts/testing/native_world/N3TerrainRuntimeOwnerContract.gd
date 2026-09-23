@@ -6,6 +6,7 @@ const GAME_MAIN = preload("res://scripts/Main.gd")
 const STRUCTURES = preload("res://scripts/StructureSystem.gd")
 const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
 const VOLUME = preload("res://scripts/TerrainVolumeService.gd")
+const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 
 var failures: Array[String] = []
 var observations: Array[Dictionary] = []
@@ -71,9 +72,60 @@ func run() -> void:
 		"automatic terrain rejected without fallback")
 	check(int(invalid.snapshot().backendInstanceId) == 0, "invalid setup owns no backend")
 	terrain.automatic_loading_enabled = false
+	var prepared_source: Dictionary = SOURCE.from_main_with_current_volume(main)
+	var prepared_backend = ClassDB.instantiate("NativeWorldBackend")
+	var prepared_initialization: Dictionary = prepared_backend.initialize_from_save_v2(
+		prepared_source.get("request", {})) if prepared_backend != null else {}
+	var prepared_commit_receipt := {"status":"ready", "committed":true,
+		"generation":41,
+		"backendInstanceId":prepared_backend.get_instance_id() if prepared_backend != null else 0,
+		"sourceIdentity":prepared_initialization.get("sourceIdentity", {})}
+	var prepared = OWNER.new()
+	var prepared_setup: Dictionary = prepared.setup_from_committed_backend(
+		main, terrain, prepared_backend, prepared_commit_receipt, 70, 10)
+	if prepared_setup.get("status") != "ready":
+		observations.append({"case":"committed_backend_adoption", "result":prepared_setup})
+	check(prepared_source.get("status") == "ready"
+		and prepared_initialization.get("status") == "ready"
+		and prepared_setup.get("status") == "ready"
+		and prepared_setup.get("adoptedCommittedBackend") == true
+		and int(prepared_setup.get("loadGeneration", 0)) == 41
+		and int(prepared_setup.get("backendInstanceId", 0)) == prepared_backend.get_instance_id()
+		and prepared.snapshot().backend.get("sourceSeedText") == main.seed_text,
+		"committed transaction backend transfers into the runtime owner without reimport")
+	var prepared_stop: Dictionary = prepared.stop()
+	for frame in range(120):
+		if prepared_stop.get("status") == "ready": break
+		await process_frame
+		prepared_stop = prepared.drain_step()
+	check(prepared_stop.get("status") == "ready" and prepared.snapshot().state == "drained",
+		"prepared source owner drains through ordinary lifecycle")
+	main.world_generation_system.terrain_volume_service.set_cell_state(Vector3i(31, 7, -9), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.0, "fluid":"", "blockId":"same-seed-different-save",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "contract", false)
+	var different_source: Dictionary = SOURCE.from_main_with_current_volume(main)
+	var mismatched_backend = ClassDB.instantiate("NativeWorldBackend")
+	var mismatched_initialized: Dictionary = mismatched_backend.initialize_from_save_v2(
+		different_source.get("request", {})) if mismatched_backend != null else {}
+	var mismatched_owner = OWNER.new()
+	var mismatched_setup: Dictionary = mismatched_owner.setup_from_committed_backend(
+		main, terrain, mismatched_backend, prepared_commit_receipt, 70, 10)
+	check(mismatched_initialized.get("status") == "ready"
+		and different_source.get("request", {}).get("seedText") \
+			== prepared_source.get("request", {}).get("seedText")
+		and mismatched_backend.export_terrain_volume_v2().get("terrainVolume") \
+			!= prepared_backend.export_terrain_volume_v2().get("terrainVolume")
+		and mismatched_setup.get("status") == "failed"
+		and mismatched_setup.get("reason") == "initialized_backend_receipt_mismatch"
+		and int(mismatched_owner.snapshot().backendInstanceId) == 0,
+		"same-seed different-save backend cannot satisfy another transaction receipt")
 	var owner = OWNER.new()
 	var owner_saved_volume: Dictionary = {}
 	var setup: Dictionary = owner.setup(main, terrain, 71, 10)
+	if setup.get("status") != "ready":
+		observations.append({"case":"direct_owner_setup", "result":setup})
 	check(setup.get("status") == "ready", "atomic native owner setup")
 	if setup.get("status") == "ready":
 		var snapshot: Dictionary = owner.snapshot()
@@ -264,6 +316,8 @@ func run() -> void:
 	var continued = OWNER.new()
 	var continued_setup: Dictionary = continued.setup(main, terrain, 72, 10,
 		{"version":2, "seed":main.seed_text, "terrain":[], "terrainVolume":owner_saved_volume})
+	if continued_setup.get("status") != "ready":
+		observations.append({"case":"continue_owner_setup", "result":continued_setup})
 	check(continued_setup.get("status") == "ready",
 		"Continue owner initializes from explicit saved v2 volume without script owner")
 	if continued_setup.get("status") == "ready":
@@ -281,6 +335,8 @@ func run() -> void:
 	main.world_generation_system.setup(main)
 	var new_game = OWNER.new()
 	var new_game_setup: Dictionary = new_game.setup(main, terrain, 73, 10)
+	if new_game_setup.get("status") != "ready":
+		observations.append({"case":"new_game_owner_setup", "result":new_game_setup})
 	check(new_game_setup.get("status") == "ready", "New Game owner initializes from empty durable volume")
 	if new_game_setup.get("status") == "ready":
 		var new_game_volume: Dictionary = new_game.export_terrain_volume_v2().get("terrainVolume", {})
@@ -326,6 +382,9 @@ func run() -> void:
 		if converting.snapshot().state == "active" or convert_tick.get("status") == "failed":
 			break
 		await process_frame
+	if convert_tick.get("status") != "ready":
+		observations.append({"case":"legacy_continue_activation", "result":convert_tick,
+			"snapshot":converting.snapshot()})
 	legacy_main.restore_volume_edits(legacy_save.terrain)
 	check(convert_tick.get("status") == "ready"
 		and converting.snapshot().state == "active"
