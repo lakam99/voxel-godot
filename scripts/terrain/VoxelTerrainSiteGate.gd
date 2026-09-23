@@ -19,13 +19,15 @@ var _requests: Dictionary = {}
 var _failure := ""
 var _stopped := false
 var _attached := 0
+var _manual_data_mode := false
 
-func setup(runtime: Node3D, terrain, admission, world) -> void:
+func setup(runtime: Node3D, terrain, admission, world, manual_data_mode: bool = false) -> void:
 	_runtime = runtime
 	_terrain = terrain
 	_admission = admission
 	_store = admission.profile_store
 	_world = world
+	_manual_data_mode = manual_data_mode
 	_terrain.automatic_loading_enabled = false
 	_runtime.get_tree().node_added.connect(_node_added)
 	_scan_existing(_runtime.get_tree().root)
@@ -65,7 +67,7 @@ func advance() -> void:
 			_owned.erase(id)
 		else:
 			_try_request(request)
-	_terrain.automatic_loading_enabled = _failure.is_empty() and _attached > 0
+	_terrain.automatic_loading_enabled = not _manual_data_mode and _failure.is_empty() and _attached > 0
 
 func _try_request(request: Dictionary) -> bool:
 	if not _failure.is_empty() or not current(): return false
