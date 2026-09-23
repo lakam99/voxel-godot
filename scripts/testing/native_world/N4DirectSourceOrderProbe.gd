@@ -293,6 +293,16 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 	var tree_requests: Array = ordered.get("treeHaloRequests", [])
 	var tree_halo: Dictionary = TreeHalo.capture(main.structure_system, tree_requests) \
 		if not tree_requests.is_empty() else {}
+	var tree_presence: Dictionary = backend.compose_surface_tree_presence_shadow(
+		bundle.terrain.page, structure_receipt.snapshot, tree_halo) \
+		if bool(tree_halo.get("ok", false)) else {}
+	var tampered_halo := tree_halo.duplicate(true)
+	if bool(tree_halo.get("ok", false)) and not tree_requests.is_empty():
+		tampered_halo.requests[0].naturalMarginCells = int(
+			tampered_halo.requests[0].naturalMarginCells) + 1
+	var tampered_presence: Dictionary = backend.compose_surface_tree_presence_shadow(
+		bundle.terrain.page, structure_receipt.snapshot, tampered_halo) \
+		if bool(tree_halo.get("ok", false)) else {}
 	var rng: RandomNumberGenerator = state.rng
 	var direct_rows := []
 	for index in range(28):
@@ -461,6 +471,13 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		"nativeInitialization":initialized.get("status"),
 		"bundleReady":bundle.get("ok",false),"admissions":admissions,
 		"structureAdmission":structure_receipt.get("status"),"orderedStatus":ordered.get("status"),
+		"structureOwnerId":structure_receipt.snapshot.status().get("ownerInstanceId") \
+			if structure_receipt.get("status") == "ready" else -1,
+		"structureAdmissionGeneration":structure_receipt.snapshot.status().get("admissionGeneration") \
+			if structure_receipt.get("status") == "ready" else -1,
+		"unionOwnerId":tree_halo.get("ownerInstanceId", -1),
+		"unionAdmissionGeneration":tree_halo.get("admissionGeneration", -1),
+		"unionAdmissionSeed":tree_halo.get("admissionSeed", ""),
 		"nativeTreeHaloRequests":tree_requests.map(func(row): return {
 			"ordinal":row.ordinal,"cell":[row.cell.x,row.cell.y],
 			"naturalMarginCells":row.naturalMarginCells,
@@ -471,7 +488,15 @@ func run_case(main: Object, chunk_key: Vector2i, removed: Array) -> Dictionary:
 		"treeHaloCaptureReady":bool(tree_halo.get("ok", false)),
 		"treeHaloCaptureCurrent":TreeHalo.is_current(main.structure_system, tree_halo) \
 			if bool(tree_halo.get("ok", false)) else false,
+		"treePresenceStatus":tree_presence.get("status"),
+		"treePresenceReason":tree_presence.get("reason"),
+		"treePresenceDecisions":tree_presence.get("decisions", []),
+		"tamperedTreePresenceStatus":tampered_presence.get("status"),
 		"treeHaloNaturalIds":tree_halo.halo.content.natural.map(func(row): return row.id) \
+			if bool(tree_halo.get("ok", false)) else [],
+		"treeHaloAbsentCitadelKeys":tree_halo.halo.content.citadel.filter(
+			func(row): return row.status == "absent" and not String(row.sourceKey).is_empty()
+		).map(func(row): return String(row.sourceKey)) \
 			if bool(tree_halo.get("ok", false)) else [],
 		"direct":direct_rows,"native":native_rows,
 		"nativeFinalRngState":ordered.get("finalRngState"),"directFinalRngState":str(rng.state),

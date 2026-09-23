@@ -60,6 +60,7 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
   const treeAttempts = (sample.native ?? []).filter(row => row.feature?.kind === 'treeDefinition');
   const requests = sample.nativeTreeHaloRequests ?? [];
   const godotMargins = sample.godotTreeHaloMargins ?? [];
+  const presenceDecisions = sample.treePresenceDecisions ?? [];
   if (requests.length !== treeAttempts.length)
     failures.push(`${label} tree halo request count ${requests.length} != definitions ${treeAttempts.length}`);
   const directTreeCount = (sample.direct ?? []).filter(row => !!row.tree).length;
@@ -67,6 +68,10 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
     failures.push(`${label} Godot tree halo margin count ${godotMargins.length} != direct tree bodies ${directTreeCount}`);
   if (requests.length > 0 && (!sample.treeHaloCaptureReady || !sample.treeHaloCaptureCurrent))
     failures.push(`${label} tree halo union was not captured fresh`);
+  if (requests.length > 0 && (sample.treePresenceStatus !== 'ready'
+      || sample.tamperedTreePresenceStatus !== 'failed'
+      || presenceDecisions.length !== treeAttempts.length))
+    failures.push(`${label} native tree presence/tamper admission failed: ${sample.treePresenceStatus}/${sample.treePresenceReason}/${sample.tamperedTreePresenceStatus}/${presenceDecisions.length}`);
   for (let i = 0; i < Math.min(requests.length, treeAttempts.length); i++) {
     const request = requests[i], tree = treeAttempts[i];
     const godot = godotMargins.find(row => row.ordinal === tree.ordinal);
@@ -183,6 +188,7 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
     if (native.outcome === 4 || native.outcome === 5) {
       const expected = native.feature, actual = direct.tree;
       const request = requests.find(row => row.ordinal === native.ordinal);
+      const decision = presenceDecisions.find(row => row.ordinal === native.ordinal);
       const blockedByEdge = !!(sample.edgeBlockerCell && request
         && Math.abs(sample.edgeBlockerCell[0] - native.cell[0]) <= request.naturalMarginCells
         && Math.abs(sample.edgeBlockerCell[1] - native.cell[1]) <= request.naturalMarginCells);
@@ -191,6 +197,12 @@ for (const [caseIndex, sample] of (probe?.cases ?? []).entries()) {
         failures.push(`${label} attempt ${index} native tree definition missing or presence prematurely decided`);
       } else {
         treeDefinitionsCompared++;
+        if (!decision || decision.durableId !== native.durableId
+            || decision.presence !== (actual ? 1 : 2))
+          failures.push(`${label} attempt ${index} native tree presence differs from direct body`);
+        if (sample.edgeBlockerId && blockedByEdge && baseline
+            && (decision?.blockerKind !== 1 || decision?.blockerId !== sample.edgeBlockerId))
+          failures.push(`${label} attempt ${index} native outside-chunk natural blocker identity mismatch`);
         if (sample.edgeBlockerCell && blockedByEdge && baseline && !actual) edgeTreesSuppressed++;
         if (sample.edgeBlockerCell && blockedByEdge && baseline && actual)
           failures.push(`${label} attempt ${index} outside-chunk blocker did not suppress baseline tree`);
@@ -224,6 +236,11 @@ if (treeDefinitionsCompared === 0 || treeBodiesCompared === 0)
   failures.push('No native tree definitions or direct tree bodies were compared');
 if (!probe?.edgeCaseReady) failures.push('No outside-chunk tree halo blocker case was captured');
 if (edgeTreesSuppressed === 0) failures.push('No baseline-present tree was suppressed by the outside-chunk blocker');
+const absentCitadelKeysCompared = (probe?.cases ?? [])
+  .reduce((count, sample) => count + (sample.treeHaloAbsentCitadelKeys?.length ?? 0), 0);
+// This fixture configures zero Citadel spawn chance and does not enqueue a
+// candidate region. Its legitimate source_not_requested absence has no key;
+// report keyed-absence coverage separately rather than claim it was exercised.
 const report = {
   schema: 'n4-direct-source-order-differential/v1',
   status: failures.length ? 'failed' : 'passed',
@@ -238,6 +255,7 @@ const report = {
   treeDefinitionsCompared,
   treeBodiesCompared,
   edgeTreesSuppressed,
+  absentCitadelKeysCompared,
   failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
   executable, command,
 };

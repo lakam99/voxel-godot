@@ -52,6 +52,7 @@ constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-r
 constexpr const char *WILDLIFE_PRESENTATION_RECEIPT_SCHEMA = "n4-wildlife-presentation-catalog-receipt/v1";
 constexpr const char *STRUCTURE_CHUNK_RECEIPT_SCHEMA = "n4-structure-exclusion-chunk-receipt/v1";
 constexpr const char *SURFACE_ORDERED_SHADOW_SCHEMA = "n4-surface-prop-ordered-shadow/v1";
+constexpr const char *TREE_PRESENCE_SHADOW_SCHEMA = "n4-surface-tree-presence-shadow/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
@@ -1467,6 +1468,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_structure_exclusion_chunk", "capture"), &NativeWorldBackend::admit_structure_exclusion_chunk);
 	ClassDB::bind_method(D_METHOD("compose_surface_prop_ordered_shadow", "page", "exclusions"),
 		&NativeWorldBackend::compose_surface_prop_ordered_shadow);
+	ClassDB::bind_method(D_METHOD("compose_surface_tree_presence_shadow", "page", "exclusions", "union_capture"),
+		&NativeWorldBackend::compose_surface_tree_presence_shadow);
 	ClassDB::bind_method(D_METHOD("wildlife_presentation_shadow", "variant"), &NativeWorldBackend::wildlife_presentation_shadow);
 	ClassDB::bind_method(D_METHOD("status"), &NativeWorldBackend::status);
 	ClassDB::bind_method(D_METHOD("shaping_requests", "primary_page"), &NativeWorldBackend::shaping_requests);
@@ -2413,6 +2416,263 @@ Dictionary NativeWorldBackend::compose_surface_prop_ordered_shadow(
 		result["attempts"] = attempts;
 		result["treeHaloRequests"] = tree_halo_requests;
 		result["attemptCount"] = static_cast<std::int64_t>(attempts.size());
+		result["completeFeatureManifest"] = false;
+		result["liveCaptureFreshnessProven"] = false;
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::compose_surface_tree_presence_shadow(
+		const Ref<NativeEffectiveTerrainPage> &p_page,
+		const Ref<NativeStructureExclusionChunk> &p_exclusions,
+		const Dictionary &p_union_capture) const {
+	constexpr const char *operation = "compose_surface_tree_presence_shadow";
+	if (!state_ || !shaping_registry_ || !biome_catalog_ || !removed_props_ || !wildlife_presentations_
+			|| p_page.is_null() || p_exclusions.is_null() || !p_page->batch_ || !p_exclusions->snapshot_)
+		return envelope(operation, "failed", "tree_presence_sources_not_ready");
+	try {
+		const WorldSourcePin &pin = p_page->batch_->pin();
+		if (!(pin.definition().physical_content_identity() == state_->source_identity())
+				|| pin.terrain_delta_revision() != state_->terrain_delta_revision()
+				|| pin.shaping_registry_revision() != shaping_registry_->revision()
+				|| !(pin.shaping_registry_content_identity() == shaping_registry_->content_identity())
+				|| p_exclusions->snapshot_->world_digest() != state_->source_identity().digest)
+			throw std::invalid_argument("tree presence source pin or exclusions are stale");
+		require_exact_keys(p_union_capture, {"ok", "schemaVersion", "scope", "ownerInstanceId",
+			"admissionSeed", "admissionGeneration", "requests", "coverage", "halo", "contentIdentity"},
+			"tree union capture");
+		if (!require_bool(p_union_capture["ok"], "union.ok")
+				|| require_i64(p_union_capture["schemaVersion"], "union.schemaVersion") != 1
+				|| require_bounded_utf8(p_union_capture["scope"], "union.scope", 64U, false)
+					!= "admitted_surface_tree_halo_union_only")
+			throw std::invalid_argument("unsupported tree union capture");
+		const std::int64_t owner_id = require_i64(p_union_capture["ownerInstanceId"], "union.ownerInstanceId");
+		const std::int64_t admission_generation = require_i64(p_union_capture["admissionGeneration"], "union.admissionGeneration");
+		if (owner_id == 0 || owner_id != p_exclusions->owner_id_
+				|| admission_generation <= 0 || admission_generation != p_exclusions->admission_generation_
+				|| require_bounded_utf8(p_union_capture["admissionSeed"], "union.admissionSeed",
+					MAX_SEED_TEXT_BYTES, false) != state_->definition().raw_terrain_seed().utf8)
+			throw std::invalid_argument("tree union owner or admission differs from pinned sources");
+		const NativeEffectiveTerrainSource terrain(pin);
+		const NativeSurfacePropSourceOrderedStream ordered = NativeSurfacePropSourceOrderedStream::create(
+			state_->definition().raw_terrain_seed(), p_exclusions->chunk_.x, p_exclusions->chunk_.y,
+			state_->source_identity().digest, p_exclusions->snapshot_->world_generation(),
+			terrain, *biome_catalog_, *p_exclusions->snapshot_, *removed_props_, *wildlife_presentations_);
+		const NativeSurfacePropOrderedPlacement placement = NativeSurfacePropOrderedPlacement::create(ordered, terrain);
+		Array expected_requests;
+		struct TreeSource { std::uint32_t ordinal; std::string durable_id; std::string biome; };
+		std::vector<TreeSource> trees;
+		for (std::size_t index = 0; index < ordered.attempts().size(); ++index) {
+			const auto &source = ordered.attempts()[index];
+			if (source.outcome != NativeSurfacePropClassificationOutcome::tree_22_draw
+					&& source.outcome != NativeSurfacePropClassificationOutcome::tree_36_draw) continue;
+			const auto profile = tree_ecology_profile(*biome_catalog_, source.source->biome_id);
+			const auto tree = NativeSurfaceTreeOrderedComposer::create(ordered, placement,
+				static_cast<std::uint32_t>(index), terrain, profile);
+			const auto margins = native_tree_exclusion_margins(tree.input().trunk_radius,
+				tree.input().canopy_radius, tree.input().exclusion_margin,
+				pin.definition().constants().cell_size_meters);
+			Dictionary row;
+			row["ordinal"] = static_cast<std::int64_t>(source.attempt.ordinal);
+			row["cell"] = Vector2i(source.attempt.cell_x, source.attempt.cell_z);
+			row["naturalMarginCells"] = margins.natural_cells;
+			row["structureMarginCells"] = margins.structure_cells;
+			expected_requests.append(row);
+			trees.push_back({static_cast<std::uint32_t>(index), source.attempt.durable_id, source.source->biome_id});
+		}
+		const Array requests = require_array(p_union_capture["requests"], "union.requests");
+		if (requests.size() == 0 || requests.size() > 28 || requests.size() != expected_requests.size())
+			throw std::invalid_argument("tree union request count differs from native source");
+		std::int64_t low_x = std::numeric_limits<std::int64_t>::max();
+		std::int64_t low_z = low_x;
+		std::int64_t high_x = std::numeric_limits<std::int64_t>::min();
+		std::int64_t high_z = high_x;
+		for (int64_t index = 0; index < requests.size(); ++index) {
+			const Dictionary row = require_dictionary(requests[index], "union.requests[]");
+			require_exact_keys(row, {"ordinal", "cell", "naturalMarginCells", "structureMarginCells"}, "tree union request");
+			const Dictionary expected = expected_requests[index];
+			if (require_i64(row["ordinal"], "request.ordinal") != require_i64(expected["ordinal"], "expected.ordinal")
+					|| require_vector2i(row["cell"], "request.cell") != require_vector2i(expected["cell"], "expected.cell")
+					|| require_i64(row["naturalMarginCells"], "request.naturalMarginCells")
+						!= require_i64(expected["naturalMarginCells"], "expected.naturalMarginCells")
+					|| require_i64(row["structureMarginCells"], "request.structureMarginCells")
+						!= require_i64(expected["structureMarginCells"], "expected.structureMarginCells"))
+				throw std::invalid_argument("tree union request differs from native post-draw tree");
+			const Vector2i cell = row["cell"];
+			const std::int64_t radius = std::max(require_i64(row["naturalMarginCells"], "request.naturalMarginCells"),
+				require_i64(row["structureMarginCells"], "request.structureMarginCells"));
+			low_x = std::min(low_x, static_cast<std::int64_t>(cell.x) - radius);
+			low_z = std::min(low_z, static_cast<std::int64_t>(cell.y) - radius);
+			high_x = std::max(high_x, static_cast<std::int64_t>(cell.x) + radius);
+			high_z = std::max(high_z, static_cast<std::int64_t>(cell.y) + radius);
+		}
+		if (p_union_capture["coverage"].get_type() != Variant::RECT2I)
+			throw std::invalid_argument("tree union coverage must be Rect2i");
+		const Rect2i coverage = p_union_capture["coverage"];
+		const std::int64_t center_x = static_cast<std::int64_t>(std::floor((low_x + high_x) * 0.5));
+		const std::int64_t center_z = static_cast<std::int64_t>(std::floor((low_z + high_z) * 0.5));
+		const std::int64_t radius = std::max({center_x - low_x, high_x - center_x, center_z - low_z, high_z - center_z});
+		if (radius < 0 || radius > 4096 || center_x < -1000000 || center_x > 1000000
+				|| center_z < -1000000 || center_z > 1000000
+				|| coverage != Rect2i(Vector2i(center_x, center_z), Vector2i(1, 1)).grow(static_cast<int>(radius)))
+			throw std::invalid_argument("tree union coverage differs from exact requests");
+		const Dictionary halo = require_dictionary(p_union_capture["halo"], "union.halo");
+		require_exact_keys(halo, {"ownerInstanceId", "ownerGeneration", "exclusionRevision", "cell",
+			"naturalMarginCells", "structureMarginCells", "ready", "boundsAdmission", "content", "contentDigest"},
+			"tree union halo");
+		if (!require_bool(halo["ready"], "halo.ready")
+				|| require_i64(halo["ownerInstanceId"], "halo.ownerInstanceId") != owner_id
+				|| require_i64(halo["ownerGeneration"], "halo.ownerGeneration") != static_cast<std::int64_t>(ordered.world_generation())
+				|| require_i64(halo["exclusionRevision"], "halo.exclusionRevision") != p_exclusions->revision_
+				|| require_vector2i(halo["cell"], "halo.cell") != Vector2i(center_x, center_z)
+				|| require_i64(halo["naturalMarginCells"], "halo.naturalMarginCells") != radius
+				|| require_i64(halo["structureMarginCells"], "halo.structureMarginCells") != radius)
+			throw std::invalid_argument("tree union halo authority or extent differs from pinned source");
+		const Dictionary bounds_admission = require_dictionary(halo["boundsAdmission"], "halo.boundsAdmission");
+		if (require_bounded_utf8(bounds_admission.get("status", Variant()), "halo.boundsAdmission.status", 16U, false) != "ready")
+			throw std::invalid_argument("tree union exact bounds admission is not ready");
+		const Dictionary content = require_dictionary(halo["content"], "halo.content");
+		require_exact_keys(content, {"natural", "terrain", "citadel"}, "tree union content");
+		Array halo_bytes;
+		halo_bytes.append(Vector2i(center_x, center_z));
+		halo_bytes.append(static_cast<std::int64_t>(radius));
+		halo_bytes.append(static_cast<std::int64_t>(radius));
+		halo_bytes.append(bounds_admission);
+		halo_bytes.append(content);
+		const String raw_digest = Marshalls::get_singleton()->raw_to_base64(UtilityFunctions::var_to_bytes(halo_bytes)).sha256_text();
+		if (require_bounded_utf8(halo["contentDigest"], "halo.contentDigest", 64U, false) != utf8(raw_digest))
+			throw std::invalid_argument("tree union raw halo content digest mismatch");
+		Array union_bytes;
+		union_bytes.append(requests); union_bytes.append(coverage);
+		union_bytes.append(p_union_capture["admissionSeed"]);
+		union_bytes.append(p_union_capture["admissionGeneration"]);
+		union_bytes.append(halo["contentDigest"]);
+		const String union_identity = Marshalls::get_singleton()->raw_to_base64(UtilityFunctions::var_to_bytes(union_bytes)).sha256_text();
+		if (require_bounded_utf8(p_union_capture["contentIdentity"], "union.contentIdentity", 64U, false) != utf8(union_identity))
+			throw std::invalid_argument("tree union capture identity mismatch");
+		std::vector<StructureExclusionRecord> natural;
+		const Array natural_rows = require_array(content["natural"], "halo.content.natural");
+		if (natural_rows.size() > 65536) throw std::length_error("tree natural halo exceeds record limit");
+		for (const Variant &value : natural_rows) {
+			const Dictionary row = require_dictionary(value, "halo.natural[]");
+			require_exact_keys(row, {"id", "source", "minX", "maxX", "minZ", "maxZ"}, "halo natural row");
+			static_cast<void>(require_bounded_utf8(row["source"], "halo.natural.source", 1024U));
+			natural.push_back({require_bounded_utf8(row["id"], "halo.natural.id", 1024U, false),
+				{require_i32(row["minX"], "halo.natural.minX"), require_i32(row["minZ"], "halo.natural.minZ"),
+					require_i32(row["maxX"], "halo.natural.maxX"), require_i32(row["maxZ"], "halo.natural.maxZ")}});
+		}
+		std::vector<StructureExclusionRecord> terrain_rows_native;
+		const Array terrain_rows = require_array(content["terrain"], "halo.content.terrain");
+		if (terrain_rows.size() > 65536) throw std::length_error("tree terrain halo exceeds record limit");
+		for (const Variant &value : terrain_rows) {
+			const Dictionary row = require_dictionary(value, "halo.terrain[]");
+			require_exact_keys(row, {"id", "source", "material", "baseX", "baseZ", "width", "depth",
+				"level", "floorY", "clearanceCells", "minCell", "maxCell"}, "halo terrain row");
+			static_cast<void>(require_bounded_utf8(row["source"], "halo.terrain.source", 1024U));
+			static_cast<void>(require_bounded_utf8(row["material"], "halo.terrain.material", 1024U));
+			static_cast<void>(require_i32(row["baseX"], "halo.terrain.baseX"));
+			static_cast<void>(require_i32(row["baseZ"], "halo.terrain.baseZ"));
+			static_cast<void>(require_i32(row["width"], "halo.terrain.width"));
+			static_cast<void>(require_i32(row["depth"], "halo.terrain.depth"));
+			static_cast<void>(require_number(row["level"], "halo.terrain.level"));
+			static_cast<void>(require_i32(row["floorY"], "halo.terrain.floorY"));
+			static_cast<void>(require_i32(row["clearanceCells"], "halo.terrain.clearanceCells"));
+			const Vector3i low = require_vector3i(row["minCell"], "halo.terrain.minCell");
+			const Vector3i high = require_vector3i(row["maxCell"], "halo.terrain.maxCell");
+			terrain_rows_native.push_back({require_bounded_utf8(row["id"], "halo.terrain.id", 1024U, false),
+				{low.x, low.z, high.x, high.z}});
+		}
+		std::vector<CitadelExclusionSource> citadels;
+		const Array citadel_rows = require_array(content["citadel"], "halo.content.citadel");
+		if (citadel_rows.size() > 64) throw std::length_error("tree Citadel halo exceeds region limit");
+		const auto region_for = [](const std::int64_t cell) {
+			return cell >= 0 ? cell / 2048 : (cell - 2047) / 2048;
+		};
+		const std::int64_t min_region_x = region_for(coverage.position.x);
+		const std::int64_t min_region_z = region_for(coverage.position.y);
+		const std::int64_t max_region_x = region_for(static_cast<std::int64_t>(coverage.get_end().x) - 1);
+		const std::int64_t max_region_z = region_for(static_cast<std::int64_t>(coverage.get_end().y) - 1);
+		if (citadel_rows.size() != (max_region_x - min_region_x + 1) * (max_region_z - min_region_z + 1))
+			throw std::invalid_argument("tree Citadel halo region coverage is incomplete");
+		std::int64_t citadel_index = 0;
+		for (const Variant &value : citadel_rows) {
+			const Dictionary row = require_dictionary(value, "halo.citadel[]");
+			require_exact_keys(row, {"region", "status", "reason", "sourceKey", "sourceGeneration",
+				"binding", "sourceSignature", "reservationCells"}, "halo Citadel row");
+			const Vector2i region = require_vector2i(row["region"], "halo.citadel.region");
+			if (region.x != min_region_x + citadel_index % (max_region_x - min_region_x + 1)
+					|| region.y != min_region_z + citadel_index / (max_region_x - min_region_x + 1))
+				throw std::invalid_argument("tree Citadel halo region sequence differs from coverage");
+			++citadel_index;
+			const std::string status = require_bounded_utf8(row["status"], "halo.citadel.status", 16U, false);
+			CitadelSourceStatus source_status;
+			if (status == "absent") source_status = CitadelSourceStatus::absent;
+			else if (status == "failed") source_status = CitadelSourceStatus::failed;
+			else if (status == "ready") source_status = CitadelSourceStatus::ready;
+			else if (status == "prepared") source_status = CitadelSourceStatus::prepared;
+			else throw std::invalid_argument("tree Citadel halo status is unsupported");
+			const Dictionary binding = require_dictionary(row["binding"], "halo.citadel.binding");
+			const std::int64_t source_generation = require_i64(row["sourceGeneration"], "halo.citadel.sourceGeneration");
+			const std::string source_key = require_bounded_utf8(row["sourceKey"], "halo.citadel.sourceKey", 1024U);
+			const std::string signature = require_bounded_utf8(row["sourceSignature"], "halo.citadel.sourceSignature", 1024U);
+			const std::string reason = require_bounded_utf8(row["reason"], "halo.citadel.reason", 1024U);
+			if (row["reservationCells"].get_type() != Variant::RECT2I)
+				throw std::invalid_argument("tree Citadel reservation must be Rect2i");
+			const Rect2i reservation = row["reservationCells"];
+			const std::int64_t end_x = static_cast<std::int64_t>(reservation.position.x) + reservation.size.x;
+			const std::int64_t end_z = static_cast<std::int64_t>(reservation.position.y) + reservation.size.y;
+			if (end_x > std::numeric_limits<std::int32_t>::max() || end_z > std::numeric_limits<std::int32_t>::max()
+					|| end_x < std::numeric_limits<std::int32_t>::min() || end_z < std::numeric_limits<std::int32_t>::min())
+				throw std::out_of_range("tree Citadel reservation exceeds int32");
+			if (source_status == CitadelSourceStatus::ready || source_status == CitadelSourceStatus::prepared) {
+				require_exact_keys(binding, {"siteId", "sourceKey", "generation"}, "halo Citadel binding");
+				if (require_bounded_utf8(binding["siteId"], "halo.citadel.siteId", 1024U, false).empty()
+						|| require_bounded_utf8(binding["sourceKey"], "halo.citadel.binding.sourceKey", 1024U, false) != source_key
+						|| require_i64(binding["generation"], "halo.citadel.binding.generation") != source_generation
+						|| source_generation <= 0 || source_generation != admission_generation)
+					throw std::invalid_argument("tree Citadel binding differs from admission");
+			} else if (!binding.is_empty() || source_generation != -1
+					|| (source_status == CitadelSourceStatus::failed && !source_key.empty()) || !signature.empty()
+					|| reservation != Rect2i())
+				throw std::invalid_argument("nonprepared tree Citadel row carries source binding");
+			citadels.push_back({region.x, region.y, source_status, reason, source_key, signature,
+				static_cast<std::uint64_t>(source_status == CitadelSourceStatus::ready
+					|| source_status == CitadelSourceStatus::prepared ? source_generation : 0),
+				{reservation.position.x, reservation.position.y, static_cast<std::int32_t>(end_x), static_cast<std::int32_t>(end_z)}});
+		}
+		const NativeTreeExclusionHaloCapture admitted = NativeTreeExclusionHaloCapture::create(
+			state_->source_identity().digest, ordered.world_generation(), ordered.exclusion_digest(),
+			{coverage.position.x, coverage.position.y, coverage.get_end().x - 1, coverage.get_end().y - 1},
+			std::move(natural), std::move(terrain_rows_native), std::move(citadels));
+		Array decisions;
+		for (const TreeSource &source : trees) {
+			const auto profile = tree_ecology_profile(*biome_catalog_, source.biome);
+			const auto decision = compose_native_surface_tree_presence(ordered, placement,
+				source.ordinal, terrain, profile, admitted);
+			Dictionary row;
+			row["ordinal"] = static_cast<std::int64_t>(source.ordinal);
+			row["durableId"] = text(source.durable_id);
+			row["presence"] = static_cast<std::int64_t>(decision.presence);
+			row["blockerKind"] = static_cast<std::int64_t>(decision.blocker_kind);
+			row["blockerId"] = text(decision.blocker_id);
+			row["naturalMarginCells"] = decision.natural_margin_cells;
+			row["structureMarginCells"] = decision.structure_margin_cells;
+			row["contentIdentity"] = text(sha256_hex(decision.content_digest));
+			decisions.append(row);
+		}
+		Dictionary result = envelope(operation, "ready");
+		result["receiptSchema"] = TREE_PRESENCE_SHADOW_SCHEMA;
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["terrainDeltaRevision"] = static_cast<std::int64_t>(pin.terrain_delta_revision());
+		result["shapingRegistryRevision"] = static_cast<std::int64_t>(pin.shaping_registry_revision());
+		result["structureContentIdentity"] = text(sha256_hex(ordered.exclusion_digest()));
+		result["structureOwnerGeneration"] = static_cast<std::int64_t>(ordered.world_generation());
+		result["structureExclusionRevision"] = p_exclusions->revision_;
+		result["unionCaptureIdentity"] = text(utf8(union_identity));
+		result["haloIdentity"] = text(sha256_hex(admitted.content_digest()));
+		result["decisions"] = decisions;
 		result["completeFeatureManifest"] = false;
 		result["liveCaptureFreshnessProven"] = false;
 		return result;

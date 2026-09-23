@@ -84,6 +84,10 @@ public:
 	godot::Dictionary compose_surface_prop_ordered_shadow(
 		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
 		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions) const;
+	godot::Dictionary compose_surface_tree_presence_shadow(
+		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
+		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions,
+		const godot::Dictionary &p_union_capture) const;
 	godot::Dictionary wildlife_presentation_shadow(const godot::String &p_variant) const;
 	godot::Dictionary status() const;
 	godot::Dictionary shaping_requests(const godot::Vector2i &p_primary_page) const;
