@@ -11,6 +11,7 @@ const OWNER = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 const BARRIER = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
 const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
+const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 func _init() -> void:
 	call_deferred("_run")
@@ -111,6 +112,9 @@ func _run() -> void:
 	var physical: Dictionary = owner.physical_receipt(layout.identity)
 	var aggregate: Dictionary = coordinator.aggregate_readiness(layout.identity)
 	var released: Dictionary = coordinator.release_barriers(layout.identity)
+	var active_retirement: Dictionary = await coordinator.retire_window(window.id)
+	var physical_after_active_rejection: Dictionary = owner.physical_receipt(
+		layout.identity)
 	var contact := false
 	var solid_count := 0
 	var empty_count := 0
@@ -143,6 +147,38 @@ func _run() -> void:
 	root_3d.add_child(guard_actor)
 	var crossing_motion: Vector3 = bounds.get_center() - guard_actor.position
 	var first_identity: Dictionary = layout.identity.duplicate(true)
+	var first_window_token: String = window.windowToken
+	var edit_state := {"materialId":3, "biomeId":13, "fluidId":0,
+		"solid":true, "density":1.5, "light":Vector2i.ZERO,
+		"metadata":{"saveDelta":true,"source":"terrain_edit"},
+		"blockId":"window-revision-edit", "editReason":"contract"}
+	var distant_cell := Vector3i(1000,-1,1000)
+	var distant_commit: Dictionary = backend.commit_durable_cells({
+		"schema":"n3-native-durable-cell-transaction/v1",
+		"transactionId":"windowed-physical:verified-distant-edit",
+		"expectedRevision":0,
+		"operations":[{"kind":"set", "cell":distant_cell,
+			"state":edit_state}]})
+	var distant_plan: Dictionary = EDIT_PLAN.for_committed_cells(
+		[distant_cell], distant_commit.get("affectedSections", []), 1,
+		String(backend.status().get("sourceIdentity", {}).get("hex", "")))
+	var verified_distant: Dictionary = broker.observe_verified_durable_edit(
+		distant_commit, distant_plan)
+	var retained_layout: Dictionary = {}
+	for frame in range(300):
+		broker.advance()
+		retained_layout = broker.collision_window_layout()
+		if retained_layout.get("status") == "ready" \
+				and retained_layout.get("identity", {}).get("sourceRevision") == 1:
+			break
+		await process_frame
+	var retained_window: Dictionary = retained_layout.get("windows", [{}])[0]
+	var retained_receipt: Dictionary = owner.physical_receipt(retained_window.get("identity", {}))
+	var retained_aggregate: Dictionary = coordinator.aggregate_readiness(
+		retained_layout.get("identity", {}))
+	var retained_source: Dictionary = facade.collision_source_snapshot()
+	layout = retained_layout
+	window = retained_window
 	var old_hold: Dictionary = coordinator.begin_window_barrier(window,
 		bounds, layout.identity)
 	var old_barrier: RefCounted = old_hold.get("barrier")
@@ -150,15 +186,11 @@ func _run() -> void:
 	while old_census.get("status") == "pending":
 		await process_frame
 		old_census = old_barrier.census_progress(layout.identity)
-	var edit_state := {"materialId":3, "biomeId":13, "fluidId":0,
-		"solid":true, "density":1.5, "light":Vector2i.ZERO,
-		"metadata":{"saveDelta":true,"source":"terrain_edit"},
-		"blockId":"window-revision-edit", "editReason":"contract"}
 	var committed: Dictionary = backend.commit_durable_cells({
 		"schema":"n3-native-durable-cell-transaction/v1",
 		"transactionId":"windowed-physical:revision-change",
-		"expectedRevision":0,
-		"operations":[{"kind":"set", "cell":Vector3i(1000,-1,1000),
+		"expectedRevision":1,
+		"operations":[{"kind":"set", "cell":Vector3i(0,base_y * 16,0),
 			"state":edit_state}]})
 	var replacement_layout: Dictionary = {}
 	for frame in range(300):
@@ -297,11 +329,23 @@ func _run() -> void:
 		and missing_aggregate.get("status") == "pending" \
 		and aggregate.get("status") == "ready" \
 		and released.get("status") == "ready" and contact \
+		and active_retirement.get("status") == "pending" \
+		and active_retirement.get("reason") == "physical_window_still_demanded" \
+		and bool(physical_after_active_rejection.get("ready", false)) \
 		and old_hold.get("status") == "ready" \
 		and committed.get("commitStatus") == "committed" \
 		and replacement_layout.get("status") == "ready" \
 		and first_identity.sourceRevision == 0 \
-		and replacement_layout.identity.sourceRevision == 1 \
+		and distant_commit.get("commitStatus") == "committed" \
+		and distant_plan.get("status") == "ready" \
+		and verified_distant.get("status") == "ready" \
+		and retained_window.get("windowToken") == first_window_token \
+		and retained_window.get("identity", {}).get("sourceRevision") == 0 \
+		and retained_window.get("localCurrentProof", {}).get("kind") == "verified_native_affected_mesh_exclusion/v1" \
+		and retained_source.get("status") == "ready" \
+		and bool(retained_receipt.get("ready", false)) \
+		and retained_aggregate.get("status") == "ready" \
+		and replacement_layout.identity.sourceRevision == 2 \
 		and replacement_layout.identity.cancellationEpoch \
 			> first_identity.cancellationEpoch \
 		and replacement_hold.get("status") == "ready" \
@@ -349,6 +393,12 @@ func _run() -> void:
 		"registered":registered, "missingAggregate":missing_aggregate,
 		"aggregate":aggregate,
 		"barrierReleased":released, "actorContact":contact,
+		"activeRetirementRejected":active_retirement,
+		"physicalAfterActiveRejection":physical_after_active_rejection,
+		"verifiedDistantRetention":{"commit":distant_commit,
+			"plan":distant_plan, "verified":verified_distant,
+			"layout":retained_layout, "physical":retained_receipt,
+			"aggregate":retained_aggregate, "source":retained_source},
 		"sourceRevisionReplacement": {"oldIdentity":first_identity,
 			"oldHold":old_hold.get("status"),
 			"committed":committed, "newLayout":replacement_layout,

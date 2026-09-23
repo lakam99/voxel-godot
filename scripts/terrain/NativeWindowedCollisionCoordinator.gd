@@ -3,6 +3,8 @@ class_name NativeWindowedCollisionCoordinator
 
 const Aggregate = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
 const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
+const MAX_RETIRED_BARRIERS := 64
+const MAX_ACTIVE_BARRIERS := 128
 
 ## Composes current N3 logical windows with N5 physical owners and owns the
 ## actor admission barriers. A window owner cannot release a global gate.
@@ -46,6 +48,13 @@ func begin_window_barrier(window: Dictionary, bounds: AABB,
 	if _stopping or _actor_root == null or not is_inside_tree() \
 			or not window.get("id") is Vector3i:
 		return {"status":"failed", "reason":"window_barrier_owner_invalid"}
+	if active_barrier_count() >= MAX_ACTIVE_BARRIERS:
+		return {"status":"pending", "reason":"window_barrier_retention_backpressure",
+			"activeBarrierCount":active_barrier_count()}
+	if _barriers.has(window.id) and _barriers[window.id].is_active() \
+			and _retired_barriers.size() >= MAX_RETIRED_BARRIERS:
+		return {"status":"pending", "reason":"window_barrier_retention_backpressure",
+			"retiredBarrierCount":_retired_barriers.size()}
 	var barrier = AdmissionBarrier.new()
 	var begun: Dictionary = barrier.begin(_actor_root, self, identity, bounds)
 	if begun.get("status") == "failed": return begun
@@ -95,7 +104,8 @@ func aggregate_readiness(identity: Dictionary) -> Dictionary:
 			continue
 		var owner: Node3D = _owners[window.id]
 		if is_instance_valid(owner):
-			receipts[window.id] = owner.physical_receipt(identity)
+			receipts[window.id] = owner.physical_receipt(
+				window.get("identity", {}))
 	return Aggregate.evaluate(layout, receipts)
 
 func physical_receipt(identity: Dictionary) -> Dictionary:
@@ -173,6 +183,15 @@ func register_moving_actor(actor: PhysicsBody3D) -> bool:
 func retire_window(id: Vector3i) -> Dictionary:
 	if _stopping or not _owners.has(id):
 		return {"status":"failed", "reason":"physical_window_not_registered"}
+	var token: String = _window_tokens[id]
+	var layout: Dictionary = _broker.collision_window_layout()
+	if layout.get("status") == "ready":
+		for window in layout.windows:
+			if window.get("windowToken") == token:
+				return {"status":"pending", "reason":"physical_window_still_demanded"}
+	elif layout.get("reason") != "collision_window_retirement_backpressure" \
+			or not (layout.get("retiredWindowTokens", []) as Array).has(token):
+		return {"status":"pending", "reason":"physical_window_retirement_not_requested"}
 	if not _barriers.has(id) or not _barriers[id].is_active():
 		return {"status":"pending", "reason":"window_actor_barrier_required"}
 	var barrier: RefCounted = _barriers[id]
@@ -180,7 +199,6 @@ func retire_window(id: Vector3i) -> Dictionary:
 	if not bool(barrier.clearance(identity).get("clear", false)):
 		return {"status":"pending", "reason":"window_actor_clearance_pending"}
 	var owner: Node3D = _owners[id]
-	var token: String = _window_tokens[id]
 	var drained: Dictionary = await owner.stop_and_drain()
 	if drained.get("status") != "ready" or not bool(drained.get("drained", false)) \
 			or int(drained.get("remainingBodies", -1)) != 0 \
@@ -205,13 +223,31 @@ func stop_and_drain() -> Dictionary:
 	for record in _retired_barriers:
 		var barrier: RefCounted = record.barrier
 		if barrier.is_active(): barrier.owner_stopped(self)
-	for owner in _owners.values():
-		if is_instance_valid(owner):
-			await owner.stop_and_drain()
-			owner.queue_free()
+	var incomplete: Array[Vector3i] = []
+	for id in _owners.keys():
+		var owner: Node3D = _owners[id]
+		if not is_instance_valid(owner):
+			incomplete.append(id)
+			continue
+		var drained: Dictionary = await owner.stop_and_drain()
+		if drained.get("status") != "ready" \
+				or not bool(drained.get("drained", false)) \
+				or int(drained.get("remainingBodies", -1)) != 0:
+			incomplete.append(id)
+			continue
+		owner.queue_free()
+		_owners.erase(id)
+		_window_tokens.erase(id)
+	if not incomplete.is_empty():
+		return {"status":"pending", "reason":"physical_window_drain_pending",
+			"incompleteWindowIds":incomplete,
+			"remainingOwners":_owners.size(),
+			"activeBarriers":active_barrier_count()}
 	await get_tree().process_frame
-	_owners.clear()
-	_window_tokens.clear()
+	if get_child_count() != 0:
+		return {"status":"pending", "reason":"physical_window_children_draining",
+			"remainingChildren":get_child_count(),
+			"activeBarriers":active_barrier_count()}
 	_barriers.clear()
 	_barrier_identities.clear()
 	_barrier_bounds.clear()

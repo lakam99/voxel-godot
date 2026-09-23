@@ -38,6 +38,8 @@ static func evaluate(layout: Dictionary, receipts_by_window: Dictionary) -> Dict
 		var window = windows[window_index]
 		if not window is Dictionary or not window.get("id") is Vector3i \
 				or not window.get("blocks") is Array \
+				or not window.get("identity") is Dictionary \
+				or not window.get("localCurrentProof") is Dictionary \
 				or int(window.get("windowIndex", -1)) != window_index \
 				or String(window.get("windowToken", "")).is_empty() \
 				or String(window.get("closureToken", "")).is_empty():
@@ -45,6 +47,21 @@ static func evaluate(layout: Dictionary, receipts_by_window: Dictionary) -> Dict
 		var id: Vector3i = window.id
 		var token: String = window.windowToken
 		var blocks: Array = window.blocks
+		var local_identity: Dictionary = window.identity
+		var proof: Dictionary = window.localCurrentProof
+		var global_revision := int(layout.identity.get("sourceRevision", -1))
+		var local_revision := int(local_identity.get("sourceRevision", -1))
+		if global_revision < 0 or local_revision < 0 \
+				or local_revision > global_revision \
+				or local_identity.get("sourceIdentity") != layout.sourceIdentity \
+				or int(proof.get("throughGlobalRevision", -1)) != global_revision \
+				or String(proof.get("digest", "")).is_empty() \
+				or (proof.get("kind") != "native_current_revision" \
+					and proof.get("kind") != "verified_native_affected_mesh_exclusion/v1") \
+				or (local_revision < global_revision \
+					and proof.get("kind") != "verified_native_affected_mesh_exclusion/v1"):
+			return {"status":"pending", "reason":"collision_window_local_proof_stale",
+				"windowId":id}
 		if seen_ids.has(id) or seen_tokens.has(token) or blocks.is_empty() \
 				or blocks.size() > MAX_WINDOW_BLOCKS:
 			return {"status":"failed", "reason":"collision_window_membership_invalid"}
@@ -71,7 +88,7 @@ static func evaluate(layout: Dictionary, receipts_by_window: Dictionary) -> Dict
 		var provenance: Dictionary = receipt.get("provenance", {})
 		var membership: Dictionary = provenance.get("membershipProvenance", {})
 		if int(receipt.get("physicsFrame", -1)) < 0 \
-				or provenance.get("requestIdentity") != layout.identity \
+				or provenance.get("requestIdentity") != local_identity \
 				or provenance.get("sourceIdentity") != layout.sourceIdentity \
 				or membership.get("authority") != "pinned_demand" \
 				or membership.get("windowToken") != token \
