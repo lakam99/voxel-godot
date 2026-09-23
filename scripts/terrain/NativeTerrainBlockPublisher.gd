@@ -10,6 +10,7 @@ const BLOCK_SIZE := 16
 const PAGE_CELLS := 280
 const SCHEMA := "n3-effective-voxel-block-request/v1"
 const MAX_DEMANDED_BLOCKS := 128
+const MAX_TRACKED_BLOCKS := 32768
 
 var _backend
 var _terrain: VoxelTerrain
@@ -18,6 +19,8 @@ var _format: VoxelFormat
 var _consumer_id := 0
 var _priority := 0
 var _blocks: Array[Vector3i] = []
+var _desired_set: Dictionary = {}
+var _waiting_source: Array[Vector3i] = []
 var _requested: Dictionary = {}
 var _inserted: Dictionary = {}
 var _retiring: Dictionary = {}
@@ -68,12 +71,70 @@ func demand_mesh_blocks(mesh_blocks: Array[Vector3i]) -> Dictionary:
 		wanted[block] = true
 	for block: Vector3i in _blocks:
 		if not wanted.has(block):
-			_retiring[block] = true
+			if _requested.has(block) or _inserted.has(block) or _orphaned.has(block):
+				_retiring[block] = true
+			else:
+				_retiring.erase(block)
 	for block: Vector3i in blocks:
 		_retiring.erase(block)
 	_blocks = blocks
+	_desired_set = wanted
+	_waiting_source.clear()
+	for block: Vector3i in blocks:
+		if not _requested.has(block):
+			_waiting_source.append(block)
 	_cursor = 0
 	return {"status":"ready", "dataBlocks":blocks.size(), "retiring":_retiring.size()}
+
+## The production demand owner sends bounded deltas from its reference-counted
+## viewer/chunk union. Unlike demand_mesh_blocks(), these calls do not replace
+## the whole desired set; a normal viewer can need thousands of data blocks.
+func apply_data_block_delta(add: Array[Vector3i], remove: Array[Vector3i]) -> Dictionary:
+	if not _active or _stopping or not _last_failure.is_empty():
+		return {"status":"failed", "reason":"publisher_not_accepting_demand"}
+	if add.size() > MAX_DEMANDED_BLOCKS or remove.size() > MAX_DEMANDED_BLOCKS:
+		return {"status":"failed", "reason":"data_block_batch_limit"}
+	var adding := {}
+	for block: Vector3i in add:
+		adding[block] = true
+	var removing := {}
+	for block: Vector3i in remove:
+		if adding.has(block):
+			return {"status":"failed", "reason":"contradictory_data_block_delta"}
+		removing[block] = true
+	var next_count := _desired_set.size()
+	for block: Vector3i in adding:
+		if not _desired_set.has(block):
+			next_count += 1
+	for block: Vector3i in removing:
+		if _desired_set.has(block):
+			next_count -= 1
+	if next_count > MAX_TRACKED_BLOCKS:
+		return {"status":"failed", "reason":"tracked_data_block_limit"}
+	for block: Vector3i in removing:
+		if not _desired_set.has(block):
+			continue
+		_desired_set.erase(block)
+		_blocks.erase(block)
+		_waiting_source.erase(block)
+		if _requested.has(block) or _inserted.has(block) or _orphaned.has(block):
+			_retiring[block] = true
+		else:
+			_retiring.erase(block)
+	for block: Vector3i in adding:
+		if not _desired_set.has(block):
+			_desired_set[block] = true
+			_blocks.append(block)
+			if not _requested.has(block):
+				_waiting_source.append(block)
+		_retiring.erase(block)
+	_blocks.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		return a.z < b.z or (a.z == b.z and (a.y < b.y or (a.y == b.y and a.x < b.x))))
+	_waiting_source.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
+		return a.z < b.z or (a.z == b.z and (a.y < b.y or (a.y == b.y and a.x < b.x))))
+	_cursor = 0
+	return {"status":"ready", "desiredDataBlocks":_blocks.size(),
+		"retiring":_retiring.size()}
 
 func observe_committed_edit(affected_blocks: Array[Vector3i], physical_probes: Dictionary = {}) -> Dictionary:
 	# Call immediately after the native commit, before any actor/nav readiness
@@ -118,8 +179,9 @@ func pump() -> Dictionary:
 	if retired.get("status") == "failed":
 		return retired
 	# Admission and request registration are each bounded to one block per pump.
-	if not _blocks.is_empty():
-		var block: Vector3i = _blocks[_cursor % _blocks.size()]
+	if not _waiting_source.is_empty():
+		var index := _cursor % _waiting_source.size()
+		var block: Vector3i = _waiting_source[index]
 		_cursor += 1
 		var source: Dictionary = _admit_pages(block)
 		if source.get("status") == "failed":
@@ -132,6 +194,8 @@ func pump() -> Dictionary:
 				return {"status":"failed", "reason":_last_failure, "block":block}
 			if request.has("key"):
 				_requested[block] = request.key
+				_waiting_source.remove_at(index)
+				_cursor = index
 	var event: Dictionary = _backend.pump_voxel_block_shadow()
 	if event.get("status") == "failed":
 		_last_failure = String(event.get("reason", "native_pump_failed"))
@@ -146,7 +210,7 @@ func pump() -> Dictionary:
 		# A prepared old frontier is not permission to replace its physical data.
 		# Its retained request is released only after the engine unloads it.
 		return {"status":"pending", "reason":"prepared_retiring_block", "block":block}
-	if not _requested.has(block) or not _blocks.has(block) or key != _requested[block]:
+	if not _requested.has(block) or not _desired_set.has(block) or key != _requested[block]:
 		_last_failure = "unexpected_shared_native_prepared_block"
 		return {"status":"failed", "reason":_last_failure, "key":key}
 	var buffer: VoxelBuffer = _format.create_buffer(Vector3i.ONE * BLOCK_SIZE)
@@ -287,6 +351,8 @@ func stop() -> Dictionary:
 	for block: Vector3i in _blocks:
 		_retiring[block] = true
 	_blocks.clear()
+	_desired_set.clear()
+	_waiting_source.clear()
 	if not _inserted.is_empty() or not _orphaned.is_empty():
 		return {"status":"pending", "reason":"physical_blocks_must_unload",
 			"remaining":_inserted.size() + _orphaned.size()}
@@ -318,6 +384,7 @@ func drain_step() -> Dictionary:
 
 func snapshot() -> Dictionary:
 	return {"active":_active, "demanded":_blocks.size(), "registered":_requested.size(),
+		"waitingSource":_waiting_source.size(),
 		"inserted":_inserted.size(), "retiring":_retiring.size(), "orphaned":_orphaned.size(),
 		"meshEntered":_meshed.size(), "editBlocked":_edit_blocked.size(), "failure":_last_failure}
 

@@ -1,6 +1,7 @@
 extends SceneTree
 
 const Publisher = preload("res://scripts/terrain/NativeTerrainBlockPublisher.gd")
+const DemandPlanner = preload("res://scripts/terrain/NativeTerrainDemandPlanner.gd")
 const Footprint = preload("res://scripts/terrain/NativeVoxelBlockDemandFootprint.gd")
 const Admission = preload("res://scripts/world/CitadelTerrainAdmission.gd")
 const PageBridge = preload("res://scripts/world/NativeShapingPageAdmission.gd")
@@ -87,8 +88,29 @@ func run() -> void:
 	check(publisher.snapshot().demanded == 27, "explicit_xyz_halo")
 	for i in range(4):
 		check(publisher.pump().get("status") != "failed", "synthetic_pending_source_retained_%d" % i)
-	check(publisher.snapshot().demanded == 27 and publisher.snapshot().registered == 0,
+	check(publisher.snapshot().demanded == 27 and publisher.snapshot().registered == 0
+		and publisher.snapshot().waitingSource == 27,
 		"pending_page_registers_no_native_block")
+	var first_batch: Array[Vector3i] = []
+	var second_batch: Array[Vector3i] = []
+	for i in range(100):
+		first_batch.append(Vector3i(1000 + i, 0, 0))
+	for i in range(29):
+		second_batch.append(Vector3i(1100 + i, 0, 0))
+	check(publisher.apply_data_block_delta(first_batch, []).get("status") == "ready"
+		and publisher.apply_data_block_delta(second_batch, []).get("status") == "ready"
+		and publisher.snapshot().demanded == 156,
+		"incremental_batches_retain_more_than_128_desired_blocks")
+	check(publisher.apply_data_block_delta([Vector3i(1000,0,0)], [Vector3i(1000,0,0)]).get("reason") \
+		== "contradictory_data_block_delta" and publisher.snapshot().demanded == 156,
+		"contradictory_delta_does_not_mutate_demand")
+	check(publisher.apply_data_block_delta(first_batch, []).get("status") == "ready"
+		and publisher.snapshot().demanded == 156,
+		"duplicate_delta_is_idempotent")
+	check(publisher.apply_data_block_delta([], first_batch).get("status") == "ready"
+		and publisher.apply_data_block_delta([], second_batch).get("status") == "ready"
+		and publisher.snapshot().demanded == 27 and publisher.snapshot().waitingSource == 27,
+		"incremental_demand_retires_without_dropping_base_halo")
 	delayed.open = true
 	var deadline := Time.get_ticks_msec() + 120000
 	var insertion_count := 0
@@ -386,6 +408,45 @@ func run() -> void:
 		await process_frame
 	observations.drain = drained
 	check(drained, "native_worker_drained_after_release")
+	# Link the production-sized pure union to the single publisher's bounded
+	# desired-set API without starting a thousand native encode jobs here.
+	var planned_publisher = Publisher.new()
+	var planned = DemandPlanner.new()
+	check(planned_publisher.setup(backend,terrain,bridge,1,10).get("status") == "ready"
+		and planned.setup(1).get("status") == "ready", "single_publisher_planner_link_bound")
+	var primary_spec := {"position":Vector3(128,12,128)*CELL,"distance":80}
+	check(planned.replace_sources(primary_spec, [], [], [], Vector2i(-16,48)).get("status") == "ready",
+		"startup_primary_union_planned")
+	var add_batches := 0
+	for i in range(32):
+		var delta: Dictionary = planned.next_delta()
+		if delta.get("status") == "idle": break
+		if delta.get("status") != "ready": break
+		var applied: Dictionary = planned_publisher.apply_data_block_delta(delta.addBlocks,delta.removeBlocks)
+		if applied.get("status") != "ready": break
+		planned.acknowledge_delta(int(delta.ticket),true)
+		add_batches += 1
+	check(add_batches == 10 and planned_publisher.snapshot().demanded == 1183
+		and planned_publisher.snapshot().waitingSource == 1183
+		and planned_publisher.snapshot().registered == 0,
+		"startup_primary_union_retained_in_bounded_deltas")
+	check(planned.replace_sources({}, [], [], [], Vector2i(-16,48)).get("status") == "ready",
+		"primary_union_retirement_planned")
+	var remove_batches := 0
+	for i in range(32):
+		var delta: Dictionary = planned.next_delta()
+		if delta.get("status") == "idle": break
+		if delta.get("status") != "ready": break
+		var applied: Dictionary = planned_publisher.apply_data_block_delta(delta.addBlocks,delta.removeBlocks)
+		if applied.get("status") != "ready": break
+		planned.acknowledge_delta(int(delta.ticket),true)
+		remove_batches += 1
+	observations.plannedUnion = {"addBatches":add_batches,"removeBatches":remove_batches,
+		"snapshot":planned_publisher.snapshot()}
+	check(remove_batches == 10 and planned_publisher.snapshot().demanded == 0
+		and planned_publisher.snapshot().registered == 0
+		and planned_publisher.stop().get("status") == "ready",
+		"unregistered_union_retires_without_native_requests")
 	admission.request_shutdown()
 	for i in range(240):
 		if admission.advance().get("shutdownComplete", false):

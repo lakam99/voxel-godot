@@ -33,9 +33,17 @@ duplicate-source rejection, priority, 64/64 moved-viewer handoff, explicit
 ack/retry, and non-mutating over-cap rejection. This is headless planning
 evidence only, not streaming or gameplay acceptance.
 
-Production integration must add an `apply_data_block_delta(add, remove)`-style
-desired-set API to the single publisher, with a ready acknowledgement meaning
-only that the desired-set mutation was retained. The publisher remains
+The single publisher now has `apply_data_block_delta(add, remove)`, with a
+ready acknowledgement meaning only that the desired-set mutation was retained.
+Its focused headed fixture accepted two incremental additions totaling 129
+data keys on top of an existing 27-key halo, then idempotently removed them.
+It also passed a linked 1,183-key startup primary desired-set handoff in ten
+bounded additions and ten removals, with no native registrations or physical
+publication in that large-union phase. Report:
+`artifacts/native-world-backend/n3-native-terrain-publisher-1790169703390-0bb46b8b/report.json`.
+The publisher tracks only as-yet-unregistered keys in its source-admission
+retry list, so pumping does not rescan thousands of already registered keys.
+It does not physically publish the full primary viewer. The publisher remains
 responsible for native request retries, generation-specific insertion and
 physics receipts, and delayed release until actual engine unload. The runtime
 must feed real viewer/foreground/retained inputs and retain an over-cap
