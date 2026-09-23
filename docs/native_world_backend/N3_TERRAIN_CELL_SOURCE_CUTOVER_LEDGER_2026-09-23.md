@@ -344,3 +344,102 @@ a missing-journal broker retiring it, and a local edit invalidating the
 affected window. This does not yet prove N5 aggregate physical acceptance
 under a new global revision; the joint fixture must compare the old physical
 owner receipt to local identity and the aggregate receipt to global identity.
+
+## Production Cutover Checkpoint: Ordered Owners And Atomic Staging
+
+Production remains fail-closed. `MainRuntimeTools.ensure_voxel_terrain_authority`
+currently installs the script `VoxelTerrainGenerator` into the Voxel Tools
+terrain runtime, while `NativeTerrainRuntimeOwner.setup` requires a manually
+populated `VoxelTerrain` with its generator absent and automatic loading
+disabled. Calling the owner from Main today would not transfer the active
+terrain/collision authority; it would create an incomplete or competing
+publisher. The N3 source-cell adapter parity report and N5 physics fixtures
+listed above do not establish a safe Main cutover.
+
+### Preconditions And Responsible Owners
+
+Complete these gates in order. A later gate cannot compensate for an earlier
+one:
+
+1. **Freeze source identity and load inputs — `WorldGenerationSystem` / Main
+   loading owner.** Finalize seed, generation and biome revisions/constants,
+   town/site inputs, and the one save-v2 terrain snapshot before constructing
+   the native effective source. New Game must use the canonical empty delta;
+   Continue must preserve current v2 precedence, including historical `terrain`
+   conversion and nonempty `terrainVolume` overrides. Pending source pages must
+   retain the load transaction and visible loading state until retry, cancel, or
+   structured failure.
+2. **Prove generated-cell and delta composition parity — N3 native source
+   owner.** Match production facts for material, biome, fluid, solidity,
+   density, light, and edited state across representative boundaries and seeds.
+   Explicitly reconcile cell-center versus lattice coordinates, negative floor
+   division, page/section dimensions, FastNoiseLite and hash behavior, fluid and
+   underground thresholds, identifiers, metadata, and durable-edit precedence.
+   No script-generated fallback may answer a native pending or failed query.
+3. **Provide retryable query and mutation lifecycle — Main loading / world
+   query facade owner.** The synchronous gameplay callers must either await a
+   retained result or receive an explicit unavailable state; no intent may be
+   dropped while a native page is pending. Cancellation and teardown must drain
+   outstanding work before releasing the owner. This is required before
+   `WorldGenerationSystem` can delegate cell queries and durable edits.
+4. **Bind one source to physical publication — N2 terrain publisher and N5
+   physical-window owner.** Manual voxel blocks, mesh, collision, unload,
+   revisit, and replacement must derive from the same pinned native source
+   revision. N5 must provide aggregate physical acknowledgement and actor
+   admission evidence; a service receipt or fixture-shaped acknowledgement is
+   insufficient. Keep the existing collision-backed world active until the
+   replacement artifact is acknowledged, and define rollback and stop/drain
+   behavior before switching.
+5. **Switch source, readiness, and save together — Main setup / save-v2 / N5.**
+   One cutover transaction must publish the native query source, physical
+   artifact, readiness state, and save export revision as a unit. Save snapshots
+   must export the same durable native deltas that queries and publication use.
+   If any acknowledgement is stale, missing, or rejected, retain the old
+   playable authority and retry or report a structured load failure.
+6. **Delete superseded authorities — owners from the call-site census.** Only
+   after the atomic switch and rollback window are accepted may the project
+   remove script cell generation, duplicate durable terrain restoration, copied
+   initial edits, and `VoxelTerrainGenerator`. Delete each path only after a
+   caller audit proves it has no production consumer. Keep scene policy and the
+   Godot-facing adapter where still required.
+
+### Atomic Staging Plan
+
+Stage A adds a retained Main load transaction and owner lifecycle behind the
+existing production source. It freezes source inputs and one v2 snapshot,
+retains pending work, exposes progress, and drains on cancellation. It does not
+publish native gameplay queries or collision, so the current source remains
+the only authority. Stage A is the first safe PR-sized implementation step:
+make transaction ownership and retry/cancel semantics concrete without
+changing visible terrain or readiness. It should carry focused no-lag
+measurement for frame time while pages are pending and during cancel/drain.
+
+Stage B routes cell reads and durable mutations through that retained owner.
+It cannot ship until gate 2 parity and gate 3 pending semantics pass. Stage C
+publishes manual voxel artifacts from the same source and waits for N2/N5
+physical acknowledgement while preserving the old collision world. Stage D
+atomically switches readiness and save export with the acknowledged physical
+artifact, with rollback until all stale work is drained. Stage E removes old
+generation and save paths after the call-site/deletion audit. Each stage must
+be independently reversible; no stage permits a script query to mask native
+pending/failure while native publication is active.
+
+### First Code PR Boundary
+
+The first code PR should implement only Stage A if Main loading can own the
+new lifecycle independently of `VoxelTerrainRuntime` setup. Before coding,
+split construction of the native cell source/owner lifecycle from activation
+of `NativeTerrainRuntimeOwner`'s manual `VoxelTerrain` publisher. If those APIs
+cannot be separated without changing the active publisher, keep this checkpoint
+as the first reviewable step and do not wire the owner into Main. A safe Stage A
+must not instantiate a second terrain/collision authority, change
+`startup_loading_completed`, change save contents, or alter generated queries.
+
+The checkpoint's current evidence is deliberately bounded: the N3 cell-source
+adapter report proves typed field parity for its fixed seed and listed cells;
+the two N3/N5 reports prove their focused physics fixtures. Neither proves
+Main New Game/Continue, end-to-end save-v2 parity, cancellation responsiveness,
+or an atomic source-to-collision cutover. No gameplay code or test-only runner
+is added by this ledger update. The first code PR must report its exact diff,
+commit, focused lifecycle evidence, and measured worst frame / pending-page
+lag before subsequent gates are considered.
