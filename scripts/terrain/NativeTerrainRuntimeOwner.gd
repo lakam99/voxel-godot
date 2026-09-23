@@ -14,6 +14,7 @@ const NumericSource = preload("res://scripts/terrain/NativeTerrainNumericSource.
 const OccupancySource = preload("res://scripts/terrain/NativeTerrainOccupancySource.gd")
 const EditPlan = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 const LegacyConverter = preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
+const ArtifactRequests = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
 
 var _backend
 var _admission
@@ -23,6 +24,7 @@ var _publisher
 var _cells
 var _numeric
 var _occupancy
+var _artifact_requests
 var _state := "new"
 var _failure := ""
 var _seed_text := ""
@@ -89,6 +91,11 @@ func _activate(source: Dictionary, terrain: VoxelTerrain, consumer_id: int,
 	var occupancy_ready: Dictionary = _occupancy.bind(_cells)
 	if occupancy_ready.get("status") != "ready":
 		return _setup_failure(String(occupancy_ready.get("reason", "native_occupancy_source_failed")))
+	_artifact_requests = ArtifactRequests.new()
+	var artifacts_ready: Dictionary = _artifact_requests.setup(_backend, _pages,
+		_admission, _planner, DemandPlanner.CELL, get_instance_id())
+	if artifacts_ready.get("status") != "ready":
+		return _setup_failure(String(artifacts_ready.get("reason", "native_artifact_requests_failed")))
 	_publisher = BlockPublisher.new()
 	var published: Dictionary = _publisher.setup(_backend, terrain, _pages, consumer_id, priority)
 	if published.get("status") != "ready":
@@ -103,6 +110,28 @@ func replace_demand(primary: Dictionary, other_viewers: Array[Dictionary],
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _planner.replace_sources(primary, other_viewers, retained_chunks,
 		foreground_chunks, vertical_bounds)
+
+## N5 may request a current source artifact, but this inert owner cannot claim
+## physical collision readiness or install a shape.
+func request_collision_artifact(block: Vector3i) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.request_block(block)
+
+func required_collision_mesh_blocks() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _planner.required_collision_mesh_blocks()
+
+func advance_collision_artifacts() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.advance()
+
+func collision_source_snapshot() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.collision_source_snapshot()
+
+func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.collision_artifact_row(block, identity)
 
 func advance() -> Dictionary:
 	if _state == "converting":
@@ -302,6 +331,9 @@ func stop() -> Dictionary:
 		_release_owners()
 		return {"status":"ready", "drained":true}
 	_state = "stopping"
+	if _artifact_requests != null:
+		var artifact_stopped: Dictionary = _artifact_requests.stop()
+		if artifact_stopped.get("status") != "ready": return artifact_stopped
 	var stopped: Dictionary = _publisher.stop()
 	if stopped.get("status") != "ready": return stopped
 	return drain_step()
@@ -313,6 +345,9 @@ func drain_step() -> Dictionary:
 		_release_owners()
 		return {"status":"ready", "drained":true}
 	if _state != "stopping": return {"status":"failed", "reason":"stop_before_drain"}
+	if _artifact_requests != null:
+		var artifact_drained: Dictionary = _artifact_requests.drain_step()
+		if artifact_drained.get("status") != "ready": return artifact_drained
 	var stopped: Dictionary = _publisher.stop()
 	if stopped.get("status") != "ready": return stopped
 	var drained: Dictionary = _publisher.drain_step()
@@ -348,6 +383,7 @@ func _release_owners() -> void:
 	_cells = null
 	_numeric = null
 	_occupancy = null
+	_artifact_requests = null
 	_planner = null
 	_pages = null
 	_backend = null

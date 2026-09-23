@@ -256,3 +256,17 @@ passes native payload/triangle attribution, empty blocks, stale worker drain,
 immutable row copy, no-op demand identity, negative/adjacent analytic seams,
 and a measured maximum `advance` step of 2,237 microseconds in that fixture.
 It does not prove headed loading cadence or full-world collision parity.
+
+The inert `NativeTerrainRuntimeOwner` now composes
+`NativeTerrainArtifactRequests` from its existing backend, shaping page
+admission, site admission and demand planner. N5 can read
+`required_collision_mesh_blocks()`, retain exact demanded blocks through
+`request_collision_artifact(block)`, make one bounded producer step through
+`advance_collision_artifacts()`, and fetch the current source snapshot and
+source-owned rows. A changed demand closure or native source revision drains
+the prior producer before a new pinned producer is created; requested blocks
+still in demand remain queued. The owner increments cancellation identity for
+each producer and preserves its owner generation. It does not install or retire
+colliders, set `authority_ready`, or change Main/Continue. The focused service
+fixture covers request retention and demand-change producer replacement at
+`artifacts/native-world-backend/n3-triangle-artifact-1790178474287-be48d6b6/report.json`.

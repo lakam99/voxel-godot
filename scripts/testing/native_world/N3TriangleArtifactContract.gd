@@ -7,6 +7,7 @@ const REQUEST = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const PAGES = preload("res://scripts/world/NativeShapingPageAdmission.gd")
 const PLANNER = preload("res://scripts/terrain/NativeTerrainDemandPlanner.gd")
 const PRODUCER = preload("res://scripts/terrain/NativeTerrainTriangleArtifactProducer.gd")
+const ARTIFACT_REQUESTS = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
 
 var failures: Array[String] = []
 
@@ -248,6 +249,42 @@ func run() -> void:
 		await process_frame
 		empty_stop = empty_producer.drain_step()
 	check(empty_stop.get("status") == "ready", "empty producer drains")
+	var requests = ARTIFACT_REQUESTS.new()
+	check(requests.setup(backend, pages, main.structure_system.citadel_terrain_admission,
+		planner, main.CELL, 77).get("status") == "ready"
+		and requests.request_block(high_block).get("status") == "pending",
+		"composed source owner retains a demanded request")
+	var requested: Dictionary = {}
+	for frame in range(300):
+		requested = requests.advance()
+		if requested.get("status") == "ready" and requested.has("row"): break
+		await process_frame
+	var request_snapshot: Dictionary = requests.collision_source_snapshot()
+	check(requested.get("status") == "ready"
+		and requested.get("row", {}).get("block") == high_block
+		and request_snapshot.get("status") == "ready"
+		and requests.collision_artifact_row(high_block,
+			request_snapshot.get("identity", {})).get("status") == "ready",
+		"composed queue forwards source-bound row and complete demand identity")
+	var changed_request_demand: Dictionary = planner.replace_sources(viewer, [], [], [], bounds)
+	check(changed_request_demand.get("status") == "ready"
+		and requests.request_block(block).get("status") == "pending",
+		"new demand request retained before previous producer retirement")
+	var replacement: Dictionary = {}
+	for frame in range(300):
+		replacement = requests.advance()
+		if replacement.get("status") == "ready" and replacement.has("row"): break
+		await process_frame
+	check(replacement.get("status") == "ready"
+		and replacement.get("row", {}).get("block") == block
+		and requests.collision_source_snapshot().get("status") == "ready",
+		"demand change retires old producer and retries new requested block")
+	var request_stop: Dictionary = requests.stop()
+	for frame in range(120):
+		if request_stop.get("status") == "ready": break
+		await process_frame
+		request_stop = requests.drain_step()
+	check(request_stop.get("status") == "ready", "composed request worker drains")
 	var stopped: Dictionary = producer.stop()
 	for frame in range(120):
 		if stopped.get("status") == "ready": break
