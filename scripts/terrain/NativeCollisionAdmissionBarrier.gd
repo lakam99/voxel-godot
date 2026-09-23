@@ -69,10 +69,30 @@ func release(identity: Dictionary) -> bool:
 	return true
 
 
-## Only the failed/rejected replacement path may abandon its held admission.
+## Only a pre-install rejection with the previous live physical shapes intact
+## may abandon admission. A rollback after shape mutation needs new proof.
 func abort(identity: Dictionary) -> bool:
 	if not _active or identity != _identity or _collision_owner == null \
-			or bool(_collision_owner.get("_installing")):
+			or not _collision_owner.has_method("preinstall_rejection_receipt"):
+		return false
+	var receipt: Dictionary = _collision_owner.call("preinstall_rejection_receipt", identity)
+	if not bool(receipt.get("safe", false)) \
+			or receipt.get("rejectedIdentity") != identity \
+			or receipt.get("retainedProvenance", {}).get("requestIdentity") == identity \
+			or int(receipt.get("oldPhysicsFrame", -1)) < 0:
+		return false
+	_clear()
+	return true
+
+
+## Startup-only cancellation, before any physical owner or admitted actor.
+func cancel_empty_startup(identity: Dictionary) -> bool:
+	if not _active or identity != _identity or _collision_owner == null \
+			or bool(_collision_owner.get("_installing")) \
+			or not (_collision_owner.get("installed_shapes") as Array).is_empty():
+		return false
+	var census := _census()
+	if census.get("status") != "ready" or not (census.get("actors", []) as Array).is_empty():
 		return false
 	_clear()
 	return true

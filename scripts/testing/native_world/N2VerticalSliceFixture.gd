@@ -158,10 +158,18 @@ func _run() -> void:
 		return
 	var blocked_replacement: Dictionary = await (_body as Node).call("replace", native_same_shape,
 		same_shape_request.requestIdentity, no_probe, Callable(), occupied_guard)
-	occupied_guard.abort(same_shape_request.requestIdentity)
+	var wrong_rejection_identity: Dictionary = same_shape_request.requestIdentity.duplicate(true)
+	wrong_rejection_identity["cancellationEpoch"] = 99
+	var wrong_rejection_receipt: Dictionary = (_body as Node).call("preinstall_rejection_receipt",
+		wrong_rejection_identity)
+	var blocked_abort: bool = occupied_guard.abort(same_shape_request.requestIdentity)
+	var replay_rejection_receipt: Dictionary = (_body as Node).call("preinstall_rejection_receipt",
+		same_shape_request.requestIdentity)
 	blocking_actor.queue_free()
 	await get_tree().physics_frame
 	if blocked_replacement.get("reason") != "replacement_occupied_before_install" \
+			or bool(wrong_rejection_receipt.get("safe", false)) or not blocked_abort \
+			or bool(replay_rejection_receipt.get("safe", false)) \
 			or (_body as Node).call("physical_receipt", same_shape_request.requestIdentity).get("ready", false):
 		_finish(false, "occupied_replacement_not_rejected", common.merged({
 			"blockedReplacement": blocked_replacement}, true))
@@ -236,6 +244,9 @@ func _run() -> void:
 	common["baselineInstall"] = baseline_install
 	common["sameShapeInstall"] = same_shape_install
 	common["blockedReplacement"] = blocked_replacement
+	common["blockedAbort"] = {"accepted":blocked_abort,
+		"wrongIdentitySafe":wrong_rejection_receipt.get("safe", false),
+		"replaySafe":replay_rejection_receipt.get("safe", false)}
 	common["sameShapePhysics"] = same_shape_seam
 	common["sameShapeSameHits"] = same_shape_same_hits
 	common["editedInstall"] = edited_install
@@ -568,10 +579,11 @@ func _actor_guard_contract() -> Dictionary:
 	var late_clearance: Dictionary = barrier.clearance(identity)
 	var late_motion_admitted: bool = barrier.admit_motion(late_actor, Vector3.ZERO)
 	var premature_release: bool = barrier.release(identity)
-	var aborted: bool = barrier.abort(identity)
 	late_actor.queue_free()
 	body.queue_free()
 	await get_tree().physics_frame
+	var premature_abort: bool = barrier.abort(identity)
+	var cancelled_empty_startup: bool = barrier.cancel_empty_startup(identity)
 	var capped_root := Node.new()
 	add_child(capped_root)
 	for _index in range(8193):
@@ -584,11 +596,13 @@ func _actor_guard_contract() -> Dictionary:
 		and swept.get("reason") == "actor_occupies_replacement" \
 		and bool(clear.get("clear", false)) and begun.get("status") == "ready" \
 		and late_clearance.get("reason") == "actor_occupies_replacement" \
-		and not late_motion_admitted and not premature_release and aborted \
+		and not late_motion_admitted and not premature_release and not premature_abort \
+		and cancelled_empty_startup \
 		and capped.get("reason") == "actor_census_node_cap",
 		"occupied":occupied, "swept":swept, "clear":clear,
 		"lateActor": {"clearance":late_clearance, "motionAdmitted":late_motion_admitted,
-			"prematureRelease":premature_release, "aborted":aborted},
+			"prematureRelease":premature_release, "prematureAbort":premature_abort,
+			"cancelledEmptyStartup":cancelled_empty_startup},
 		"nodeCap":capped}
 
 
