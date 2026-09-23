@@ -333,6 +333,19 @@ rejects the genuinely stale pre-edit pin. This establishes adapter execution,
 not an independent full Godot source-order differential, complete geometry,
 live freshness proof or production cutover.
 
+A repeatable direct production-method differential now invokes the real
+`Main.spawn_chunk_prop_attempt` loop and independently composes the native
+ordered shadow from a captured terrain/structure bundle. Command:
+`node tools/run-n4-direct-source-order-differential.mjs`. The first fresh
+report passed at
+`artifacts/native-world-backend/n4-direct-source-order-differential/report-7f64d69d-11ed-4d97-9854-66c538629e6e.json`:
+all 28 atlas-1492 chunk-(0,0) attempt ordinals, durable IDs, sampled cells,
+biomes, source heights, per-attempt 64-bit RNG states and final RNG state
+matched. The runner uses a unique probe path and treats engine warnings or
+failed owned-process cleanup as failures. This is direct-service evidence
+under an empty Citadel/town policy, not headed gameplay, feature geometry,
+live-capture freshness or N4 production cutover acceptance.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name
