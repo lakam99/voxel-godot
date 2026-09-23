@@ -18,8 +18,15 @@ static func capture(structures: Object, chunk: Vector2i) -> Dictionary:
 	var admission: Variant = structures.get("citadel_terrain_admission")
 	if not generation is int or generation <= 0 or not revision is int or revision < 0 \
 			or not admission is Object or not is_instance_valid(admission) \
-			or not admission.has_method("request_bounds") or not admission.has_method("source_state"):
+			or not admission.has_method("request_bounds") or not admission.has_method("source_state") \
+			or not admission.has_method("stats"):
 		return _failed("source_owner_not_ready")
+	var admission_state: Variant = admission.stats()
+	if not admission_state is Dictionary or not admission_state.get("worldSeed") is String \
+			or String(admission_state.worldSeed).is_empty() \
+			or not admission_state.get("generation") is int \
+			or int(admission_state.generation) <= 0:
+		return _failed("admission_identity_invalid")
 	var start_x := int(chunk.x) * CHUNK_CELLS
 	var start_z := int(chunk.y) * CHUNK_CELLS
 	if start_x < -1000000 or start_z < -1000000 \
@@ -47,13 +54,17 @@ static func capture(structures: Object, chunk: Vector2i) -> Dictionary:
 	if not is_instance_valid(structures) or structures.get_instance_id() != owner_id \
 			or structures.get("regional_source_generation") != generation \
 			or structures.get("surface_prop_exclusion_revision") != revision \
-			or structures.get("citadel_terrain_admission") != admission:
+			or structures.get("citadel_terrain_admission") != admission \
+			or admission.stats().get("worldSeed") != admission_state.worldSeed \
+			or admission.stats().get("generation") != admission_state.generation:
 		return _failed("source_changed_during_capture")
 	var content := {"natural":natural.rows, "terrain":terrain.rows, "citadel":citadels}
 	var identity := Marshalls.raw_to_base64(var_to_bytes([chunk, bounds, content])).sha256_text()
 	return {"ok":true, "schemaVersion":SCHEMA_VERSION,
 		"scope":"admitted_structure_exclusion_chunk_only", "ownerInstanceId":owner_id,
 		"ownerGeneration":generation, "exclusionRevision":revision,
+		"admissionSeed":admission_state.worldSeed,
+		"admissionGeneration":admission_state.generation,
 		"chunk":chunk, "bounds":bounds, "boundsAdmission":bounds_admission.duplicate(true),
 		"content":content.duplicate(true), "contentIdentity":identity}
 

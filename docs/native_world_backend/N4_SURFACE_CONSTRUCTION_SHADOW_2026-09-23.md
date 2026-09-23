@@ -263,6 +263,16 @@ passes 26/26 checks. This remains explicitly incomplete: it does not bind an
 effective terrain pin, capture dimension-dependent tree halos, produce an
 all-family native manifest or change the live prop loop.
 
+The next focused freshness check found a concrete reset alias: Citadel
+admission could be reconfigured under the same StructureSystem generation and
+produce identical empty chunk content. The chunk capture now records and
+rechecks the admission's world seed and own generation; the owner bundle also
+rejects an admission seed different from Main's. Direct Godot contracts pass
+76/76 structure-oracle checks at
+`artifacts/native-world-backend/n4-structure-exclusion-seed-generation-01.json`
+and the owner-bundle contract's reset, mismatched-seed and recapture checks.
+This closes receipt freshness only, not terrain or feature cutover.
+
 ## Integrated result and deletion review
 
 Command: `node tools/run-native-world-backend-tests.mjs --run-name

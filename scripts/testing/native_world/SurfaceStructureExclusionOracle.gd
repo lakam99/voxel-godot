@@ -19,6 +19,9 @@ const CELLS := [
 class Admission extends RefCounted:
 	var states := {}
 	var pending_bounds := false
+	var generation := 1
+	func stats() -> Dictionary:
+		return {"worldSeed":"oracle-seed", "generation":generation}
 	func request_bounds(_bounds: Rect2i) -> Dictionary:
 		return {"status":"pending" if pending_bounds else "ready",
 			"reason":"preparing_citadel_terrain" if pending_bounds else ""}
@@ -79,6 +82,9 @@ func run() -> void:
 		and real_chunk.boundsAdmission.status == "ready"
 		and real_chunk.content.citadel[0].reason == "source_not_requested"
 		and ChunkSnapshot.is_current(real_structures, real_chunk))
+	real_admission.configure("admission-context-oracle", {}, {"regionCells":384, "spawnChance":0.0})
+	check("admission_reconfigure_rejects_old_chunk", not ChunkSnapshot.is_current(real_structures, real_chunk))
+	check("reconfigured_admission_finalized", real_admission.finalize_town_inputs({}).status == "ready")
 	real_admission._fail(Vector2i.ZERO, "failed_site_outside_requested_bounds")
 	var real_failed_elsewhere := real_structures.capture_surface_tree_exclusion_halo(0,0,0,0)
 	check("real_failed_irrelevant_source_keeps_exact_bounds_ready", real_failed_elsewhere.ready

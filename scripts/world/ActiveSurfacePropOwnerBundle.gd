@@ -71,6 +71,7 @@ static func capture_chunk(main: Object, chunk: Vector2i) -> Dictionary:
 		return _failed("structure_owner_mismatch")
 	var exclusions: Dictionary = StructureChunkScript.capture(structures, chunk)
 	if not bool(exclusions.get("ok", false)) \
+			or exclusions.get("admissionSeed") != owner.seed \
 			or not is_current(main, owner) \
 			or main.get("structure_system") != structures \
 			or structures.get("main") != main \
@@ -93,6 +94,7 @@ static func chunk_is_current(main: Object, bundle: Dictionary) -> bool:
 	return structures is Object and is_instance_valid(structures) \
 		and structures.get("main") == main \
 		and bundle.exclusions.get("chunk") == bundle.chunk \
+		and bundle.exclusions.get("admissionSeed") == bundle.owner.get("seed") \
 		and is_current(main, bundle.owner) \
 		and StructureChunkScript.is_current(structures, bundle.exclusions)
 

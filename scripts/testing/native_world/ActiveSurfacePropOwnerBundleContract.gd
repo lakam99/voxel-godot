@@ -58,6 +58,15 @@ func run() -> void:
 	check("chunk_bundle_explicitly_incomplete", chunk_bundle.get("complete") == false \
 		and chunk_bundle.get("scope") == "owner_and_structure_chunk_only")
 	check("chunk_bundle_current", BundleScript.chunk_is_current(main, chunk_bundle))
+	admission.configure("different-seed", {}, {"regionCells":384, "spawnChance":0.0})
+	check("chunk_admission_seed_change_rejected", not BundleScript.chunk_is_current(main, chunk_bundle))
+	check("mismatched_admission_finalized", admission.finalize_town_inputs({}).status == "ready")
+	check("chunk_mismatched_seed_not_captured", not BundleScript.capture_chunk(main, Vector2i.ZERO).ok)
+	admission.configure(main.seed_text, {}, {"regionCells":384, "spawnChance":0.0})
+	check("matching_admission_finalized", admission.finalize_town_inputs({}).status == "ready")
+	check("chunk_same_seed_new_generation_rejected", not BundleScript.chunk_is_current(main, chunk_bundle))
+	chunk_bundle = BundleScript.capture_chunk(main, Vector2i.ZERO)
+	check("chunk_recap_after_admission_reset", BundleScript.chunk_is_current(main, chunk_bundle))
 	var changed_chunk := chunk_bundle.duplicate(true)
 	changed_chunk.exclusions.content.citadel[0].reason = "forged"
 	check("chunk_exclusion_tamper_rejected", not BundleScript.chunk_is_current(main, changed_chunk))
