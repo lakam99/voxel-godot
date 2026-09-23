@@ -54,3 +54,25 @@ static func motion_intersects(actor: PhysicsBody3D, affected_bounds: AABB,
 		if current.merge(AABB(current.position + motion, current.size)).intersects(affected_bounds):
 			return true
 	return not has_shape
+
+
+static func placement_intersects(actor: PhysicsBody3D, affected_bounds: AABB,
+		proposed_transform: Transform3D) -> bool:
+	if actor == null or not is_instance_valid(actor) \
+			or not proposed_transform.origin.is_finite() \
+			or not proposed_transform.basis.is_finite():
+		return true
+	var has_shape := false
+	for child in actor.get_children():
+		if not child is CollisionShape3D:
+			continue
+		var collision_shape: CollisionShape3D = child
+		if collision_shape.disabled or collision_shape.shape == null:
+			continue
+		var mesh := collision_shape.shape.get_debug_mesh()
+		if mesh == null:
+			return true
+		has_shape = true
+		if (proposed_transform * collision_shape.transform * mesh.get_aabb()).intersects(affected_bounds):
+			return true
+	return not has_shape

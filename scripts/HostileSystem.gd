@@ -128,6 +128,8 @@ func recycle_hostile_body(body: Node) -> bool:
     if variant == "":
         return false
     reset_hostile_runtime_body_state(body_3d)
+    if not hostile_placement_admitted(body_3d, Vector3(0.0, -10000.0, 0.0)):
+        return false
     body_3d.visible = false
     body_3d.position = Vector3(0.0, -10000.0, 0.0)
     body_3d.rotation = Vector3.ZERO
@@ -776,6 +778,7 @@ func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
     var spec: Dictionary = {}
     if body == null:
         body = StaticBody3D.new()
+        body.position = Vector3(0.0, -10000.0, 0.0)
         spec = visual_factory.build_visual(body, variant)
         add_child(body)
     else:
@@ -783,8 +786,12 @@ func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
     reset_hostile_runtime_body_state(body)
     body.add_to_group(&"world_moving_physics_actor")
     body.name = "Hostile_%s_%d" % [variant, enemies.size()]
-    body.position = position
     body.rotation = Vector3.ZERO
+    var placement_admitted := hostile_placement_admitted(body, position)
+    if placement_admitted:
+        body.position = position
+    else:
+        body.visible = false
     body.set_meta("kind", "hostile")
     body.set_meta("variant", variant)
     enemies.append({
@@ -795,6 +802,8 @@ func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
         "cooldown": 1.0,
         "wobble": randf() * TAU,
         "spawnOrigin": position,
+        "pendingSpawn": not placement_admitted,
+        "pendingSpawnPosition": position,
         "frenzy": false,
         "roamDirection": HostileRulesScript.random_roam_direction(),
         "roamTimer": 0.6 + randf() * 1.8,
@@ -806,6 +815,17 @@ func spawn_enemy(position: Vector3, variant := "shadow") -> StaticBody3D:
         "scriptedBattleStartedBy": ""
     })
     return body
+
+func hostile_placement_admitted(body: StaticBody3D, position: Vector3) -> bool:
+    if not native_collision_admission_required:
+        return true
+    if main == null or not main.has_method("native_collision_register_moving_actor") \
+            or not main.has_method("native_collision_admit_placement") \
+            or not bool(main.call("native_collision_register_moving_actor", body)):
+        return false
+    var proposed: Transform3D = (body.get_parent() as Node3D).global_transform \
+        * Transform3D(body.transform.basis, position)
+    return bool(main.call("native_collision_admit_placement", body, proposed))
 
 func can_spawn_rift_variant() -> bool:
     if main == null:
@@ -997,6 +1017,13 @@ func update_enemy(enemy: Dictionary, delta: float, night_factor: float) -> void:
     if body == null or not is_instance_valid(body):
         enemies.erase(enemy)
         return
+    if bool(enemy.get("pendingSpawn", false)):
+        var spawn_position: Vector3 = enemy.get("pendingSpawnPosition", body.position)
+        if not hostile_placement_admitted(body, spawn_position):
+            return
+        body.position = spawn_position
+        body.visible = true
+        enemy["pendingSpawn"] = false
     var scripted_phase := String(enemy.get("scriptedPhase", ""))
     if scripted_phase != "" and scripted_phase != "battle":
         update_scripted_enemy(enemy, body, delta, night_factor)

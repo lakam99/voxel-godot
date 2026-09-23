@@ -329,6 +329,13 @@ func native_collision_register_moving_actor(body: PhysicsBody3D) -> bool:
         return false
     return _native_collision_admission_barrier.register_moving_actor(body)
 
+func native_collision_admit_placement(body: PhysicsBody3D, proposed_transform: Transform3D) -> bool:
+    if _native_collision_admission_owner_id == 0:
+        return true
+    if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
+        return false
+    return _native_collision_admission_barrier.admit_placement(body, proposed_transform)
+
 func bind_native_collision_admission(owner: Node, barrier: RefCounted) -> bool:
     if owner == null or not is_instance_valid(owner) or owner.get_instance_id() <= 0 \
             or _native_collision_admission_owner_id != 0 \
