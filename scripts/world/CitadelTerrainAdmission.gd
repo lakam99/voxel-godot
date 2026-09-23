@@ -61,6 +61,9 @@ func finalize_town_inputs(towns: Dictionary) -> Dictionary:
 	_town_inputs_finalized = true
 	return {"status":"ready","towns":_towns}
 
+func source_policy_snapshot() -> Dictionary:
+	return _policy.duplicate(true)
+
 static func declared_influence(candidate: Dictionary) -> Rect2i:
 	return Rect2i(candidate.centerCell - Vector2i.ONE * Site.MAX_INFLUENCE_RADIUS_CELLS,
 		Vector2i.ONE * (Site.MAX_INFLUENCE_RADIUS_CELLS * 2 + 1))
