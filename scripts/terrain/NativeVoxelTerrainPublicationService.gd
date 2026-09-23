@@ -111,13 +111,15 @@ func advance(snapshot: Dictionary) -> Dictionary:
 		_accepted_revision)
 	var checked: Dictionary = _runtime.call("validate_native_publication_receipt", receipt)
 	if checked.get("status") != "ready":
-		return {"status":"failed", "reason":String(checked.get("reason", "native_publication_receipt_rejected")),
+		_failure = String(checked.get("reason", "native_publication_receipt_rejected"))
+		_state = "failed"
+		return {"status":"failed", "reason":_failure,
 			"demand":demand_result, "nativeStep":native_step, "receipt":receipt,
 			"runtimeValidation":checked}
 	receipt["runtimeValidation"] = checked.duplicate(true)
 	_latest_receipt = receipt.duplicate(true)
 	return {"status":"advanced", "demandStatus":String(demand_result.get("status", "pending")),
-		"demandRevision":int(candidate.get("demandRevision", -1)),
+		"demandRevision":_accepted_revision,
 		"pendingDemandRevision":int(_pending_demand.get("demandRevision", -1)),
 		"demand":demand_result, "nativeStep":native_step,
 		"receipt":receipt, "readinessClaim":{"data":bool(receipt.get("dataInserted", false)),
