@@ -17,6 +17,7 @@ var peak_retired_shape_sets := 0
 var _stopped := false
 var _installing := false
 var _pending_shapes: Array[CollisionShape3D] = []
+var _rejected_before_install_identity := {}
 
 
 ## A receipt is usable only after the physics probe has acknowledged the exact
@@ -33,12 +34,32 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 		"provenance": installed_provenance.duplicate(true)}
 
 
+func preinstall_rejection_receipt(identity: Dictionary) -> Dictionary:
+	if _stopped or _installing or identity != _rejected_before_install_identity \
+			or authority != identity or not is_inside_tree() or collision_layer == 0 \
+			or installed_shapes.is_empty() or installed_provenance.get("requestIdentity") == identity \
+			or not _nonempty_string(installed_provenance.get("snapshotDigest")) \
+			or not _nonempty_string(installed_provenance.get("collisionArtifactKey")) \
+			or acknowledged_physics_frame < 0:
+		return {"safe": false}
+	for shape in installed_shapes:
+		if not is_instance_valid(shape) or not shape.is_inside_tree() \
+				or shape.is_queued_for_deletion() or shape.disabled or shape.shape == null:
+			return {"safe": false}
+	_rejected_before_install_identity.clear()
+	return {"safe": true, "rejectedIdentity": identity.duplicate(true),
+		"retainedProvenance": installed_provenance.duplicate(true),
+		"oldPhysicsFrame": acknowledged_physics_frame}
+
+
 func set_authority(identity: Dictionary) -> void:
+	_rejected_before_install_identity.clear()
 	authority = identity.duplicate(true)
 
 
 func stop_and_drain() -> void:
 	_stopped = true
+	_rejected_before_install_identity.clear()
 	authority.clear()
 	for shape in installed_shapes:
 		shape.disabled = true
@@ -58,6 +79,7 @@ func stop_and_drain() -> void:
 func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Callable,
 		before_ack: Callable = Callable(), admission_barrier: RefCounted = null) -> Dictionary:
 	var started := Time.get_ticks_usec()
+	_rejected_before_install_identity.clear()
 	if not _identity_valid(identity):
 		return {"ok": false, "reason": "collision_identity_invalid"}
 	var source: Variant = result.get("source")
@@ -75,11 +97,13 @@ func replace(result: Dictionary, identity: Dictionary, acknowledgement_probe: Ca
 	if admission_barrier is AdmissionBarrier:
 		var clearance: Dictionary = admission_barrier.clearance(identity)
 		if not bool(clearance.get("clear", false)):
+			_rejected_before_install_identity = identity.duplicate(true)
 			return {"ok": false, "reason": "replacement_occupied_before_install",
 				"guardReason": clearance.get("reason", "unknown")}
 	var payload := _prepare_shapes(result, identity)
 	if not payload.ok:
 		return payload
+	_rejected_before_install_identity.clear()
 	_installing = true
 	var previous := installed_shapes.duplicate()
 	var replacements: Array[CollisionShape3D] = payload.shapes

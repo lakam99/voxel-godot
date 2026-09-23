@@ -209,6 +209,9 @@ export function validateFixtureReport(report) {
     }
     if (evidence?.acknowledgedPhysicsFrame !== evidence?.editedInstall?.acknowledgedPhysicsFrame
         || evidence?.blockedReplacement?.reason !== 'replacement_occupied_before_install'
+        || evidence?.blockedAbort?.accepted !== true
+        || evidence?.blockedAbort?.wrongIdentitySafe !== false
+        || evidence?.blockedAbort?.replaySafe !== false
         || evidence?.sameShapeSameHits !== true) errors.push('replacement_sequence_invalid');
     if (evidence?.physics?.ok !== true) errors.push('direct_physics_evidence_invalid');
     if (evidence?.actorGuard?.ok !== true || evidence.actorGuard.occupied?.reason !== 'actor_occupies_replacement'
@@ -217,7 +220,8 @@ export function validateFixtureReport(report) {
         || evidence.actorGuard.lateActor?.clearance?.reason !== 'actor_occupies_replacement'
         || evidence.actorGuard.lateActor?.motionAdmitted !== false
         || evidence.actorGuard.lateActor?.prematureRelease !== false
-        || evidence.actorGuard.lateActor?.aborted !== true
+        || evidence.actorGuard.lateActor?.prematureAbort !== false
+        || evidence.actorGuard.lateActor?.cancelledEmptyStartup !== true
         || evidence.actorGuard.nodeCap?.reason !== 'actor_census_node_cap') errors.push('actor_guard_fixture_invalid');
     if (evidence?.staleBeforeAck?.reason !== 'stale_before_acknowledgement') errors.push('stale_before_ack_rejection_invalid');
     if (evidence?.staleBeforeInstall?.reason !== 'stale_before_install') errors.push('stale_before_install_rejection_invalid');
