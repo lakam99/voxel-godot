@@ -101,12 +101,33 @@ contracts atomically, or replace those consumers together at their cutover.
   acknowledgement, then accepted the proven receipt and observed viewer
   unload/release/drain. Command:
   `node tools/run-n3-native-terrain-block-publisher.mjs`. Report:
-  `artifacts/native-world-backend/n3-native-terrain-publisher-1790166777903-0355ab15/report.json`.
-  It uses an already-ready source page and an exclusive backend. Production
-  viewer/chunk/foreground demand union, pending-source completion, live edit
-  replacement and reset are not yet connected. `stop()` releases demand but
-  does not clear injected VoxelTerrain data; runtime reset must also retire or
-  clear the paired physical terrain before acknowledging a new seed.
+  `artifacts/native-world-backend/n3-native-terrain-publisher-1790167849684-f2d7691f/report.json`.
+  A synthetic pending-page interval retained demand without registering a
+  native block. A shifted frontier inserted new blocks while the old frontier
+  remained physically resident and native-owned; stop waited for actual
+  engine unload before releasing all requests. The fixture uses one ready
+  source page and an exclusive backend. Production viewer/chunk/foreground
+  demand union, real pending-source completion, live edit replacement and reset
+  are not yet connected. Runtime reset must retire or clear the paired physical
+  terrain before acknowledging a new seed.
+- Retained native demand now uses a page-local physical-content pin and
+  authoritative affected-section invalidation. Distant shaping resolution and
+  durable edits preserve a prepared block; a local edit rejects its old receipt
+  and retries with edited bytes. Focused service report:
+  `artifacts/native-world-backend/n3-local-retained-demand-1790167723582-3295ccac/report.json`.
+  This is not an installed-engine edit-replacement or loaded-save throughput
+  result; old installed bytes must remain unpublished until a current physical
+  replacement is proven.
+- A committed durable-mirror receipt now carries the exact changed cells.
+  `NativeTerrainEditRepublicationPlan` maps those cells to replacement data
+  blocks, affected neighboring mesh blocks, and their full data-input halo,
+  with receipt matching and finite plan caps. Focused planner report:
+  `artifacts/native-world-backend/n3-edit-republication-plan-1790168077551-776f5a78/report.json`;
+  linked shadow-mirror report:
+  `artifacts/native-world-backend/n3-durable-edit-mirror-1790168114011-2af6c598/report.json`.
+  The normal runtime still scans script edited cells and pastes through
+  `VoxelTool`; native same-block physical replacement and actor-safe receipt
+  are prerequisites to deleting that path.
 
 ## Integration order and fail-closed checks
 
