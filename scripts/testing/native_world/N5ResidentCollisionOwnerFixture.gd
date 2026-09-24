@@ -401,7 +401,10 @@ func _physical_health_contract() -> Dictionary:
 	var body_owner = _make_health_owner(body_health_source, block, identity)
 	var body_baseline: Dictionary = body_owner.physical_receipt(identity)
 	var body_epoch: int = body_owner.physical_readiness_epoch()
+	var body_ref: StaticBody3D = body_owner._live[block].body
 	var body_retired: Dictionary = body_owner.retire_collision_entry(block)
+	var disposal_disabled_before_queued_free: bool = is_instance_valid(body_ref) \
+		and body_ref.collision_layer == 0 and body_ref.is_queued_for_deletion()
 	var body_before_ack: Dictionary = body_owner.physical_receipt(identity)
 	await get_tree().physics_frame
 	var freed_receipt: Dictionary = body_owner.physical_receipt(identity)
@@ -429,11 +432,10 @@ func _physical_health_contract() -> Dictionary:
 		and body_baseline.get("ready") == true and body_retired.get("status") == "pending" \
 		and body_owner.physical_readiness_epoch() > body_epoch \
 		and body_before_ack.get("ready") != true \
-		and body_before_ack.get("reason") == "physical_health_physics_ack_pending" \
+		and body_before_ack.get("reason") == "resident_collision_not_current" \
+		and disposal_disabled_before_queued_free \
 		and freed_receipt.get("ready") != true \
-		and freed_receipt.get("reason") == "resident_collision_entry_unhealthy" \
-		and freed_receipt.get("healthValidation", {}).get("healthFailure") \
-			in ["physical_body_invalid", "physical_body_queued_for_deletion"] \
+		and freed_receipt.get("reason") == "resident_collision_not_current" \
 		and layer_drain.get("status") == "ready" and body_drain.get("status") == "ready"
 	return {"passed":passed, "baseline":baseline, "disabled":disabled,
 		"disabledBeforeAck":disabled_before_ack,
@@ -443,6 +445,7 @@ func _physical_health_contract() -> Dictionary:
 		"shapeBeforeAck":shape_before_ack,
 		"shapeSetRejected":shape_set_rejected, "shapeReceipt":shape_receipt,
 		"bodyRetired":body_retired,
+		"bodyDisposalDisabledBeforeQueuedFree":disposal_disabled_before_queued_free,
 		"bodyBeforeAck":body_before_ack,
 		"freedReceipt":freed_receipt, "layerDrain":layer_drain,
 		"bodyDrain":body_drain}
@@ -624,7 +627,7 @@ func _disposal_failure_contract() -> Dictionary:
 		and not committed_body.is_queued_for_deletion()
 	var post_commit_drain: Dictionary = await post_commit.owner.stop_and_drain()
 
-	var abort_recovered := _make_deferred_release_fault_owner(
+	var abort_recovered := _make_shape_less_reserved_body_owner(
 		Vector3i(4105, 0, 0), "abort-recovered-token")
 	abort_recovered.owner._live.clear()
 	abort_recovered.owner._resident_blocks.clear()
@@ -651,7 +654,7 @@ func _disposal_failure_contract() -> Dictionary:
 		and abort_recovered.admission.cancel_calls == 0
 	var abort_recovery_drain: Dictionary = await abort_recovered.owner.stop_and_drain()
 
-	var abort_blocked := _make_deferred_release_fault_owner(
+	var abort_blocked := _make_shape_less_reserved_body_owner(
 		Vector3i(4106, 0, 0), "abort-blocked-token")
 	abort_blocked.owner._live.clear()
 	abort_blocked.owner._resident_blocks.clear()
@@ -747,6 +750,32 @@ func _make_deferred_release_fault_owner(block: Vector3i, token: String) -> Dicti
 	shape.shape = BoxShape3D.new()
 	body.add_child(shape)
 	var entry := {"body":body, "shapes":[shape], "retiredShapes":[],
+		"memoryToken":token, "expectedHit":true,
+		"probeFrom":Vector3(float(block.x) * 3.0 + 0.5, 2.8, 0.5),
+		"probeTo":Vector3(float(block.x) * 3.0 + 0.5, 0.2, 0.5)}
+	owner._live = {block:entry}
+	owner._resident_blocks.clear()
+	owner._resident_blocks.append(block)
+	admission.cancel_body = body
+	return {"owner":owner, "admission":admission, "entry":entry}
+
+
+func _make_shape_less_reserved_body_owner(block: Vector3i,
+		token: String) -> Dictionary:
+	var owner = OwnerScript.new()
+	add_child(owner)
+	var epoch := "fixture-owner-%s" % token
+	var admission := DeferredReleaseFault.new()
+	assert(owner.assign_retirement_owner_epoch(epoch),
+		"abort fixture assigns a unique retirement owner epoch")
+	assert(owner.bind_memory_admission(admission, "fixture-window-%s" % token,
+		epoch), "abort fixture binds injected admission ledger")
+	owner._membership_provenance = {"windowToken":"fixture-window-%s" % token}
+	var body := StaticBody3D.new()
+	body.collision_layer = OwnerScript.COLLISION_LAYER
+	body.collision_mask = 0
+	owner.add_child(body)
+	var entry := {"body":body, "shapes":[], "retiredShapes":[],
 		"memoryToken":token, "expectedHit":true,
 		"probeFrom":Vector3(float(block.x) * 3.0 + 0.5, 2.8, 0.5),
 		"probeTo":Vector3(float(block.x) * 3.0 + 0.5, 0.2, 0.5)}
