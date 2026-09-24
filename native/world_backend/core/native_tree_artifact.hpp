@@ -161,11 +161,11 @@ private:
     Sha256Digest content_digest_{};
 };
 
-// This first compiler slice consumes the already-native Norway-spruce worker
-// recipe.  Broadleaf/oak and savanna definitions still receive immutable,
-// source-bound artifacts with exact trunk collision and conservative extents,
-// but their status remains explicitly pending until those live grammars are
-// ported.  A pending artifact must never be published as a final render tree.
+// The compiler consumes native Norway-spruce and umbrella-thorn worker recipes.
+// Broadleaf/oak definitions still receive immutable, source-bound artifacts
+// with exact trunk collision and conservative extents, but remain explicitly
+// pending until that live grammar is ported. A pending artifact must never be
+// published as a final render tree.
 class NativeTreeArtifactBuilder final {
 public:
     static NativeTreeArtifact build(

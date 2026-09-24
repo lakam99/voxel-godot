@@ -1,6 +1,7 @@
 #include "native_tree_artifact.hpp"
 
 #include "native_conifer_worker_recipe.hpp"
+#include "native_savanna_worker_recipe.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,10 +25,8 @@ std::string tier_name(const NativeTreeRenderTier tier) {
 }
 
 NativeTreeArtifactStatus pending_status(const NativeTreeDefinitionInput &input) {
-    if (input.architecture == NativeTreeArchitecture::broadleaf
-        && input.species_grammar == "bushy_oak") return NativeTreeArtifactStatus::broadleaf_recipe_pending;
-    if (input.architecture == NativeTreeArchitecture::savanna
-        && input.species_grammar == "umbrella_thorn") return NativeTreeArtifactStatus::savanna_recipe_pending;
+    // Callers dispatch only broadleaf definitions here.
+    if (input.species_grammar == "bushy_oak") return NativeTreeArtifactStatus::broadleaf_recipe_pending;
     reject();
 }
 
@@ -227,6 +226,35 @@ NativeConiferWorkerRequest conifer_request(
     return request;
 }
 
+NativeSavannaWorkerRequest savanna_request(
+    const NativeTreeDefinitionInput &input, const std::string &tier) {
+    NativeSavannaWorkerRequest request;
+    request.tree_id = input.recipe_tree_id; request.world_seed = input.world_seed; request.biome = input.biome;
+    request.architecture = "savanna"; request.species_grammar = input.species_grammar;
+    request.age_band = input.age_band; request.render_lod_tier = tier; request.presentation = "runtime";
+    request.growth_stage = input.ecology.growth_stage; request.visual_height = input.visual_height;
+    request.trunk_radius = input.trunk_radius; request.canopy_radius = input.canopy_radius;
+    request.canopy_density = input.biome_parameters.canopy_density; request.age_years = input.ecology.age_years;
+    request.has_trunk_radius = true; request.has_canopy_radius = true; request.genetic_seed = input.ecology.genetic_seed;
+    request.biome_parameters.version = static_cast<int>(input.biome_parameters.revision);
+    request.biome_parameters.architecture = "savanna";
+    request.biome_parameters.height_min = input.biome_parameters.height_min;
+    request.biome_parameters.height_max = input.biome_parameters.height_max;
+    request.biome_parameters.trunk_radius_min = input.biome_parameters.trunk_radius_min;
+    request.biome_parameters.trunk_radius_max = input.biome_parameters.trunk_radius_max;
+    request.biome_parameters.canopy_radius_min = input.biome_parameters.canopy_radius_min;
+    request.biome_parameters.canopy_radius_max = input.biome_parameters.canopy_radius_max;
+    request.biome_parameters.canopy_density = input.biome_parameters.canopy_density;
+    request.biome_parameters.wind_response = input.biome_parameters.wind_response;
+    request.biome_parameters.visibility_range = input.biome_parameters.visibility_range;
+    request.biome_parameters.shadow_range = input.biome_parameters.shadow_range;
+    request.biome_parameters.exclusion_margin = input.biome_parameters.exclusion_margin;
+    request.world_position = {static_cast<float>(input.position.x), static_cast<float>(input.position.y),
+        static_cast<float>(input.position.z)};
+    request.world_rotation_y = input.rotation_y;
+    return request;
+}
+
 } // namespace
 
 class NativeTreeArtifactAccess final {
@@ -379,10 +407,44 @@ NativeTreeArtifact NativeTreeArtifactBuilder::build(
     const NativeTreeDefinition &definition, const NativeTreeRenderTier render_tier) {
     const std::string tier = tier_name(render_tier);
     const NativeTreeDefinitionInput &input = definition.input();
-    if (input.architecture != NativeTreeArchitecture::conifer) {
+    if (input.architecture == NativeTreeArchitecture::broadleaf) {
         const NativeTreeArtifactStatus status = pending_status(input);
         return make_artifact(definition, render_tier, status, {}, "native_tree_recipe_pending", 1U,
             "", "", {}, {}, {}, false, true);
+    }
+    if (input.architecture == NativeTreeArchitecture::savanna) {
+        if (input.species_grammar != "umbrella_thorn") reject();
+        if (!std::isfinite(static_cast<float>(input.visual_height))) reject();
+        if (!std::isfinite(static_cast<float>(input.canopy_radius))) reject();
+        const NativeSavannaWorkerRecipe recipe = NativeSavannaWorkerRecipeBuilder::build(
+            savanna_request(input, tier));
+        if (std::tie(recipe.height, recipe.trunk_radius, recipe.canopy_radius,
+                recipe.collision_trunk_radius, recipe.collision_trunk_height)
+            != std::tie(input.visual_height, input.trunk_radius, input.canopy_radius,
+                input.trunk_radius, input.collision_height)) reject();
+        std::vector<NativeTreeArtifactBranch> branches;
+        branches.reserve(recipe.branches.size());
+        for (const NativeSavannaBranch &branch : recipe.branches) {
+            branches.push_back({{branch.start.x, branch.start.y, branch.start.z},
+                {branch.end.x, branch.end.y, branch.end.z}, branch.radius_start, branch.radius_end,
+                branch.order, branch.parent_node, branch.child_node, branch.wind_weight});
+        }
+        std::vector<NativeTreeArtifactFoliage> foliage;
+        foliage.reserve(recipe.foliage.size());
+        for (const NativeSavannaFoliage &anchor : recipe.foliage) {
+            foliage.push_back({{anchor.position.x, anchor.position.y, anchor.position.z},
+                {anchor.rotation.x, anchor.rotation.y, anchor.rotation.z},
+                {anchor.scale.x, anchor.scale.y, anchor.scale.z}, anchor.wind_weight, anchor.variation,
+                anchor.cluster_variant, anchor.source_segment, anchor.source_order});
+        }
+        const NativeTreeArtifactImpostor impostor{static_cast<float>(input.visual_height),
+            static_cast<float>(input.trunk_radius), static_cast<float>(input.canopy_radius)};
+        const std::string identity = recipe.signature + ":" + recipe.topology_signature;
+        const Sha256Digest recipe_digest = sha256(std::vector<std::uint8_t>(identity.begin(), identity.end()));
+        return make_artifact(definition, render_tier, NativeTreeArtifactStatus::complete,
+            recipe_digest, "native_umbrella_thorn_worker_recipe", NativeSavannaWorkerRecipe::RECIPE_VERSION,
+            recipe.signature, recipe.topology_signature, std::move(branches), std::move(foliage), impostor,
+            true, false);
     }
     if (input.species_grammar != "norway_spruce") reject();
     if (!std::isfinite(static_cast<float>(input.visual_height))) reject();

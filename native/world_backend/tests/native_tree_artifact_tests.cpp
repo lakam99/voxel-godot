@@ -143,17 +143,13 @@ VWB_TEST(native_tree_artifact_is_deterministic_and_value_semantics_cover_every_p
     VWB_EXPECT(first != near);
 }
 
-VWB_TEST(native_tree_artifact_keeps_broadleaf_and_savanna_render_authority_explicitly_pending) {
+VWB_TEST(native_tree_artifact_keeps_broadleaf_render_authority_explicitly_pending) {
     const NativeTreeArtifact broadleaf = NativeTreeArtifactBuilder::build(tree(
         NativeTreeArchitecture::broadleaf, "ecological_broadleaf_tree", "bushy_oak"),
         NativeTreeRenderTier::near);
-    const NativeTreeArtifact savanna = NativeTreeArtifactBuilder::build(tree(
-        NativeTreeArchitecture::savanna, "ecological_savanna_tree", "umbrella_thorn"),
-        NativeTreeRenderTier::impostor);
     VWB_EXPECT(!broadleaf.complete());
     VWB_EXPECT_EQ(NativeTreeArtifactStatus::broadleaf_recipe_pending, broadleaf.status());
-    VWB_EXPECT_EQ(NativeTreeArtifactStatus::savanna_recipe_pending, savanna.status());
-    for (const NativeTreeArtifact *artifact : {&broadleaf, &savanna}) {
+    for (const NativeTreeArtifact *artifact : {&broadleaf}) {
         VWB_EXPECT(artifact->branches().empty());
         VWB_EXPECT(artifact->foliage().empty());
         VWB_EXPECT(artifact->recipe_signature().empty());
@@ -168,7 +164,33 @@ VWB_TEST(native_tree_artifact_keeps_broadleaf_and_savanna_render_authority_expli
             > artifact->footprint().render_bounds.minimum.x);
         VWB_EXPECT(artifact->content_digest() != Sha256Digest{});
     }
-    VWB_EXPECT(broadleaf.content_digest() != savanna.content_digest());
+}
+
+VWB_TEST(native_tree_artifact_compiles_complete_savanna_inputs_for_every_render_tier) {
+    const NativeTreeDefinition source = tree(
+        NativeTreeArchitecture::savanna, "ecological_savanna_tree", "umbrella_thorn");
+    Sha256Digest previous{};
+    for (const NativeTreeRenderTier tier : {NativeTreeRenderTier::near, NativeTreeRenderTier::mid,
+            NativeTreeRenderTier::far, NativeTreeRenderTier::impostor}) {
+        const NativeTreeArtifact artifact = NativeTreeArtifactBuilder::build(source, tier);
+        VWB_EXPECT(artifact.complete());
+        VWB_EXPECT_EQ(NativeTreeArtifactStatus::complete, artifact.status());
+        VWB_EXPECT_EQ(std::string("native_umbrella_thorn_worker_recipe"), artifact.recipe_builder_key());
+        VWB_EXPECT_EQ(std::uint32_t(10U), artifact.recipe_builder_revision());
+        VWB_EXPECT(!artifact.recipe_signature().empty());
+        VWB_EXPECT(!artifact.topology_signature().empty());
+        VWB_EXPECT(artifact.native_recipe_digest() != Sha256Digest{});
+        VWB_EXPECT_EQ(source.trunk_cylinder(), artifact.trunk_cylinder());
+        VWB_EXPECT(artifact.footprint().collision_complete && artifact.footprint().render_complete);
+        VWB_EXPECT(!artifact.footprint().render_bounds_provisional);
+        if (tier == NativeTreeRenderTier::impostor) {
+            VWB_EXPECT(artifact.branches().empty());VWB_EXPECT(artifact.foliage().empty());
+        } else {
+            VWB_EXPECT(!artifact.branches().empty());VWB_EXPECT(!artifact.foliage().empty());
+        }
+        if (previous != Sha256Digest{}) VWB_EXPECT(previous != artifact.content_digest());
+        previous = artifact.content_digest();
+    }
 }
 
 VWB_TEST(native_tree_artifact_rotated_owner_local_bounds_match_an_independent_yaw_fixture) {
@@ -281,4 +303,19 @@ VWB_TEST(native_tree_artifact_rejects_unknown_tiers_grammars_and_inconsistent_co
     enormous_canopy.canopy_radius = static_cast<double>(std::numeric_limits<float>::max()) * 2.0;
     VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
         NativeTreeDefinition::create(std::move(enormous_canopy)), NativeTreeRenderTier::impostor));
+
+    const NativeTreeDefinition savanna = tree(
+        NativeTreeArchitecture::savanna, "ecological_savanna_tree", "umbrella_thorn");
+    NativeTreeDefinitionInput savanna_collision = savanna.input();
+    savanna_collision.collision_height -= 0.5;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
+        NativeTreeDefinition::create(std::move(savanna_collision)), NativeTreeRenderTier::near));
+    NativeTreeDefinitionInput savanna_height = savanna.input();
+    savanna_height.visual_height = static_cast<double>(std::numeric_limits<float>::max()) * 2.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
+        NativeTreeDefinition::create(std::move(savanna_height)), NativeTreeRenderTier::impostor));
+    NativeTreeDefinitionInput savanna_canopy = savanna.input();
+    savanna_canopy.canopy_radius = static_cast<double>(std::numeric_limits<float>::max()) * 2.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
+        NativeTreeDefinition::create(std::move(savanna_canopy)), NativeTreeRenderTier::impostor));
 }
