@@ -261,16 +261,28 @@ func run() -> void:
 	var rejected_revoked_transfer: Dictionary = \
 		revoked_transfer_owner.setup_from_committed_transaction(main, terrain,
 			revoked_transfer_transaction, revoked_transfer_receipt, 72, 10)
+	var revoked_owner_before: Dictionary = revoked_transfer_owner.snapshot()
+	var revoked_owner_retirement: Dictionary = revoked_transfer_owner.stop()
+	for _frame in range(600):
+		if revoked_owner_retirement.get("drained", false) \
+				or revoked_owner_retirement.get("status") == "failed": break
+		await process_frame
+		revoked_owner_retirement = revoked_transfer_owner.drain_step()
 	check(revoked_transfer_receipt.get("status") == "ready"
 		and rejected_revoked_transfer.get("status") == "failed"
 		and rejected_revoked_transfer.get("reason") \
 			== "committed_transaction_snapshot_lease_revoked"
-		and rejected_revoked_transfer.get("cleanupComplete") == true
-		and rejected_revoked_transfer.get("transferredBackendReleased") == true
+		and rejected_revoked_transfer.get("cleanupPending") == true
+		and revoked_owner_before.get("state") == "failed_transfer_retirement"
+		and int(revoked_owner_before.get("backendInstanceId", 0)) \
+			== int(revoked_transfer_receipt.get("backendInstanceId", 0))
+		and revoked_owner_retirement.get("status") == "ready"
+		and revoked_owner_retirement.get("drained") == true
+		and revoked_owner_retirement.get("failedTransferRetired") == true
 		and revoked_transfer_transaction.snapshot().get("state") == "transferred"
 		and revoked_transfer_transaction.snapshot().get("inputSnapshotRetained") == false
 		and int(revoked_transfer_owner.snapshot().get("backendInstanceId", 0)) == 0,
-		"revoked snapshot lease after commit blocks owner activation and releases the backend")
+		"revoked snapshot lease after commit blocks activation until bounded backend retirement")
 
 	var revoked_commit_source: Dictionary = _source(main, _volume(4))
 	var revoked_commit_transaction = TRANSACTION.new()

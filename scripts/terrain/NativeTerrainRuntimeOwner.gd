@@ -43,6 +43,12 @@ var _legacy_consumer_id := 0
 var _legacy_priority := 0
 var _async_stop_requested := false
 var _async_stop_receipt: Dictionary = {}
+var _consumed_transfer_identity: Dictionary = {}
+var _failed_transfer_stop_requested := false
+var _failed_transfer_native_retirement_started := false
+var _planner_ready := false
+var _artifacts_ready := false
+var _publisher_ready := false
 
 func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
 		save_snapshot = null) -> Dictionary:
@@ -111,10 +117,13 @@ func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 		if revoked_backend == null or not revoked_backend.has_method("status"):
 			return _setup_failure("committed_transaction_transfer_failed")
 		return _transferred_backend_failure(revoked_backend,
-			"committed_transaction_snapshot_lease_revoked")
+			"committed_transaction_snapshot_lease_revoked", commit_receipt)
 	var backend = transaction.call("take_backend")
 	if backend == null or not backend.has_method("status"):
 		return _setup_failure("committed_transaction_transfer_failed")
+	_consumed_transfer_identity = {"backendInstanceId":backend.get_instance_id(),
+		"loadGeneration":generation,
+		"sourceIdentity":commit_receipt.get("sourceIdentity", {}).duplicate(true)}
 	var initialized: Dictionary = backend.status()
 	var expected_seed := String(main.get("seed_text"))
 	var source_identity = initialized.get("sourceIdentity")
@@ -124,7 +133,8 @@ func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 			or (source_identity as Dictionary).is_empty() \
 			or int(commit_receipt.get("backendInstanceId", 0)) != backend.get_instance_id() \
 			or commit_receipt.get("sourceIdentity") != source_identity:
-		return _transferred_backend_failure(backend, "initialized_backend_source_mismatch")
+		return _transferred_backend_failure(backend, "initialized_backend_source_mismatch",
+			commit_receipt)
 	_admission = inputs.admission
 	return _activate_initialized_backend(backend, terrain, consumer_id, priority,
 		expected_seed, initialized, true, generation)
@@ -133,6 +143,9 @@ func _activate_initialized_backend(backend, terrain: VoxelTerrain, consumer_id: 
 		priority: int, expected_seed: String, initialized: Dictionary,
 		adopted_committed_backend: bool, load_generation: int) -> Dictionary:
 	if _backend != null or not _state in ["new", "converting"]:
+		if adopted_committed_backend:
+			return _transferred_backend_failure(backend,
+				"initialized_backend_adoption_state_invalid", _consumed_transfer_identity)
 		return _setup_failure("initialized_backend_adoption_state_invalid")
 	_backend = backend
 	_seed_text = expected_seed
@@ -146,6 +159,7 @@ func _activate_initialized_backend(backend, terrain: VoxelTerrain, consumer_id: 
 	var plan_ready: Dictionary = _planner.setup(consumer_id)
 	if plan_ready.get("status") != "ready":
 		return _setup_failure(String(plan_ready.get("reason", "native_demand_planner_failed")))
+	_planner_ready = true
 	_cells = CellSource.new()
 	var cells_ready: Dictionary = _cells.bind(_backend)
 	if cells_ready.get("status") != "ready":
@@ -167,10 +181,12 @@ func _activate_initialized_backend(backend, terrain: VoxelTerrain, consumer_id: 
 		ResidentCollisionOwner.MAX_RESIDENT)
 	if artifacts_ready.get("status") != "ready":
 		return _setup_failure(String(artifacts_ready.get("reason", "native_artifact_requests_failed")))
+	_artifacts_ready = true
 	_publisher = BlockPublisher.new()
 	var published: Dictionary = _publisher.setup(_backend, terrain, _pages, consumer_id, priority)
 	if published.get("status") != "ready":
 		return _setup_failure(String(published.get("reason", "native_publisher_failed")))
+	_publisher_ready = true
 	_state = "active"
 	return {"status":"ready", "backendInstanceId":_backend.get_instance_id(),
 		"sourceIdentity":_source_identity.duplicate(true), "consumerId":consumer_id,
@@ -202,16 +218,27 @@ static func _claim_owner_generation() -> int:
 		_next_owner_generation += 1
 	return claimed
 
-func _transferred_backend_failure(backend, reason: String) -> Dictionary:
-	# A committed staged import has no remaining import worker. If validation
-	# fails after single-use transfer, explicitly retain then release that backend
-	# here rather than leaving it orphaned or pretending the transaction owns it.
+func _transferred_backend_failure(backend, reason: String,
+		commit_receipt: Dictionary) -> Dictionary:
 	_backend = backend
+	if _consumed_transfer_identity.is_empty():
+		_consumed_transfer_identity = {"backendInstanceId":backend.get_instance_id(),
+			"loadGeneration":int(commit_receipt.get("loadGeneration",
+				commit_receipt.get("generation", 0))),
+			"sourceIdentity":commit_receipt.get("sourceIdentity", {}).duplicate(true)}
+	return _begin_failed_transfer_retirement(reason)
+
+func _begin_failed_transfer_retirement(reason: String) -> Dictionary:
 	_failure = reason
-	_release_owners()
-	_state = "failed"
-	return {"status":"failed", "reason":reason, "cleanupComplete":true,
-		"transferredBackendReleased":true}
+	_source_identity = _consumed_transfer_identity.get("sourceIdentity", {}).duplicate(true)
+	_load_generation = int(_consumed_transfer_identity.get("loadGeneration", 0))
+	_state = "failed_transfer_retirement"
+	return {"status":"failed", "reason":reason, "cleanupPending":true,
+		"drained":false, "ownerMustBeRetained":true,
+		"backendInstanceId":int(_consumed_transfer_identity.get("backendInstanceId", 0)),
+		"loadGeneration":_load_generation,
+		"sourceIdentity":_source_identity.duplicate(true),
+		"ownerInstanceId":get_instance_id()}
 
 func replace_demand(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
@@ -494,7 +521,11 @@ func export_terrain_volume_v2() -> Dictionary:
 		"sourceIdentity":_source_identity.duplicate(true), "saveSeedText":_seed_text}
 
 func stop() -> Dictionary:
-	if _state == "drained": return {"status":"ready", "drained":true}
+	if _state == "drained":
+		return _async_stop_receipt.duplicate(true) if not _async_stop_receipt.is_empty() \
+			else {"status":"ready", "drained":true}
+	if _state == "failed_transfer_retirement":
+		return _request_failed_transfer_stop()
 	if _state == "converting":
 		var cancelled: Dictionary = _legacy_converter.cancel()
 		if cancelled.get("status") == "pending":
@@ -530,6 +561,8 @@ func stop() -> Dictionary:
 ## public convenience entry point and then continue with drain_step().
 func request_stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
+	if _state == "failed_transfer_retirement":
+		return _request_failed_transfer_stop()
 	var failed_owner_is_recoverable := _state == "failed" and _publisher != null \
 		and _artifact_requests != null and _planner != null
 	if _state != "active" and _state != "stopping_async" \
@@ -561,6 +594,8 @@ func request_stop() -> Dictionary:
 		"plannerStop":planner}
 
 func drain_step() -> Dictionary:
+	if _state == "failed_transfer_retirement":
+		return _drain_failed_transfer_step()
 	if _state == "stopping_async":
 		var artifact_step: Dictionary = _artifact_requests.drain_step()
 		if artifact_step.get("status") == "failed":
@@ -612,12 +647,103 @@ func drain_step() -> Dictionary:
 		return {"status":"ready", "drained":true}
 	return {"status":"failed", "reason":"stop_before_drain", "ownerState":_state}
 
+func _request_failed_transfer_stop() -> Dictionary:
+	if not _failed_transfer_stop_requested:
+		_failed_transfer_stop_requested = true
+		if _artifacts_ready:
+			var artifacts: Dictionary = _artifact_requests.request_stop()
+			if artifacts.get("status") == "failed": return artifacts
+		if _planner_ready:
+			var planner: Dictionary = _planner.request_stop()
+			if planner.get("status") == "failed": return planner
+		if _publisher_ready:
+			var publisher: Dictionary = _publisher.request_stop()
+			if publisher.get("status") == "failed": return publisher
+	return {"status":"pending", "reason":"failed_transfer_retirement_requested",
+		"drained":false, "ownerMustBeRetained":true,
+		"backendInstanceId":int(_consumed_transfer_identity.get("backendInstanceId", 0)),
+		"loadGeneration":_load_generation,
+		"sourceIdentity":_source_identity.duplicate(true)}
+
+func _drain_failed_transfer_step() -> Dictionary:
+	if not _failed_transfer_stop_requested:
+		return {"status":"failed", "reason":"failed_transfer_stop_required",
+			"ownerMustBeRetained":true}
+	var artifacts: Dictionary = _artifact_requests.drain_step() if _artifacts_ready \
+		else {"status":"ready", "nativeWorkersDrained":true,
+			"windowSourcesReleased":true, "leasesReleased":true}
+	if artifacts.get("status") == "failed": return artifacts
+	var planner: Dictionary = _planner.drain_stop_step() if _planner_ready \
+		else {"status":"ready", "demandReplacementDrained":true,
+			"requestLeasesReleased":true, "meshTransactionDrained":true,
+			"meshLayoutLeaseReleased":true, "plannerMapsReleased":true}
+	if planner.get("status") == "failed": return planner
+	var publisher: Dictionary = _publisher.drain_step() if _publisher_ready \
+		else {"status":"ready", "physicalBlocksUnloaded":true,
+			"nativeWorkersDrained":true, "remainingDemanded":0,
+			"remainingRequested":0, "remainingInserted":0,
+			"remainingOrphaned":0}
+	if publisher.get("status") == "failed": return publisher
+	if artifacts.get("status") != "ready" or planner.get("status") != "ready" \
+			or publisher.get("status") != "ready":
+		return {"status":"pending", "reason":"failed_transfer_components_draining",
+			"drained":false, "artifacts":artifacts, "planner":planner,
+			"publisher":publisher}
+	if not _failed_transfer_native_retirement_started:
+		var started: Dictionary = _backend.start_private_staged_save_retirement(_load_generation)
+		if started.get("status") != "pending":
+			return {"status":"failed", "reason":"failed_transfer_native_retirement_start_failed",
+				"nativeReceipt":started, "ownerMustBeRetained":true}
+		_failed_transfer_native_retirement_started = true
+		return {"status":"pending", "reason":"failed_transfer_native_retirement_started",
+			"drained":false, "nativeReceipt":started}
+	var retired: Dictionary = _backend.poll_private_staged_save_retirement()
+	if retired.get("status") == "pending":
+		return {"status":"pending", "reason":"failed_transfer_native_retirement_pending",
+			"drained":false, "nativeReceipt":retired}
+	if retired.get("status") != "ready":
+		return {"status":"failed", "reason":"failed_transfer_native_retirement_poll_failed",
+			"nativeReceipt":retired, "ownerMustBeRetained":true}
+	_async_stop_receipt = {"status":"ready", "drained":true,
+		"failedTransferRetired":true, "activationFailure":_failure,
+		"ownerInstanceId":get_instance_id(),
+		"backendInstanceId":int(_consumed_transfer_identity.get("backendInstanceId", 0)),
+		"loadGeneration":_load_generation,
+		"sourceIdentity":_source_identity.duplicate(true),
+		"physicalBlocksUnloaded":publisher.get("physicalBlocksUnloaded") == true,
+		"nativeWorkersDrained":artifacts.get("nativeWorkersDrained") == true \
+			and publisher.get("nativeWorkersDrained") == true,
+		"demandReleased":planner.get("demandReplacementDrained") == true \
+			and planner.get("plannerMapsReleased") == true \
+			and int(publisher.get("remainingDemanded", -1)) == 0 \
+			and int(publisher.get("remainingRequested", -1)) == 0 \
+			and int(publisher.get("remainingInserted", -1)) == 0 \
+			and int(publisher.get("remainingOrphaned", -1)) == 0,
+		"leasesReleased":artifacts.get("leasesReleased") == true \
+			and artifacts.get("windowSourcesReleased") == true \
+			and planner.get("requestLeasesReleased") == true \
+			and planner.get("meshLayoutLeaseReleased") == true,
+		"nativeRetirement":retired.duplicate(true)}
+	if not _async_stop_receipt.physicalBlocksUnloaded \
+			or not _async_stop_receipt.nativeWorkersDrained \
+			or not _async_stop_receipt.demandReleased \
+			or not _async_stop_receipt.leasesReleased \
+			or planner.get("meshTransactionDrained") != true:
+		return {"status":"failed", "reason":"failed_transfer_retirement_receipt_incomplete",
+			"retirementReceipt":_async_stop_receipt.duplicate(true),
+			"ownerMustBeRetained":true}
+	_release_owners()
+	_state = "drained"
+	return _async_stop_receipt.duplicate(true)
+
 func snapshot() -> Dictionary:
 	return {"state":_state, "failure":_failure,
 		"pendingEditBarrier":_pending_edit_plan.get("barrier", {}),
 		"backendInstanceId":_backend.get_instance_id() if _backend != null else 0,
 		"backend":_backend.status() if _backend != null else {},
 		"ownerGeneration":_owner_generation,
+		"loadGeneration":_load_generation,
+		"failedTransferIdentity":_consumed_transfer_identity.duplicate(true),
 		"sourceIdentity":_source_identity.duplicate(true),
 		"planner":_planner.diagnostics() if _planner != null else {},
 		"publisher":_publisher.snapshot() if _publisher != null else {},
@@ -625,6 +751,8 @@ func snapshot() -> Dictionary:
 		"asyncStopReceipt":_async_stop_receipt.duplicate(true)}
 
 func _setup_failure(reason: String) -> Dictionary:
+	if _backend != null and not _consumed_transfer_identity.is_empty():
+		return _begin_failed_transfer_retirement(reason)
 	_failure = reason
 	_release_owners()
 	_state = "failed"

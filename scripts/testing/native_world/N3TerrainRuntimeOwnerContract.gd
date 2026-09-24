@@ -322,13 +322,24 @@ func run() -> void:
 	var cleanup_failure: Dictionary = cleanup_owner.setup_from_committed_transaction(main, terrain,
 		different_staged.get("transaction"), different_staged.get("receipt", {}), 74, 10)
 	main.seed_text = original_seed
+	var cleanup_before: Dictionary = cleanup_owner.snapshot()
+	var cleanup_retirement: Dictionary = cleanup_owner.stop()
+	for _frame in range(600):
+		if cleanup_retirement.get("drained", false) or cleanup_retirement.get("status") == "failed": break
+		await process_frame
+		cleanup_retirement = cleanup_owner.drain_step()
 	check(cleanup_failure.get("status") == "failed"
 		and cleanup_failure.get("reason") == "initialized_backend_source_mismatch"
-		and cleanup_failure.get("cleanupComplete") == true
-		and cleanup_failure.get("transferredBackendReleased") == true
+		and cleanup_failure.get("cleanupPending") == true
+		and cleanup_before.get("state") == "failed_transfer_retirement"
+		and int(cleanup_before.get("backendInstanceId", 0)) \
+			== int(different_staged.get("receipt", {}).get("backendInstanceId", 0))
+		and cleanup_retirement.get("status") == "ready"
+		and cleanup_retirement.get("drained") == true
+		and cleanup_retirement.get("failedTransferRetired") == true
 		and different_staged.transaction.snapshot().get("state") == "transferred"
 		and int(cleanup_owner.snapshot().get("backendInstanceId", 0)) == 0,
-		"post-transfer validation failure explicitly releases the committed backend")
+		"post-transfer validation failure boundedly retires the committed backend")
 	different_main.free()
 	var owner = OWNER.new()
 	var owner_saved_volume: Dictionary = {}

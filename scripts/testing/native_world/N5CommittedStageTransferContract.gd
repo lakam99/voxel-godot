@@ -95,6 +95,81 @@ func drain_owner(owner, max_frames := 600) -> Dictionary:
 		result = owner.drain_step()
 	return {"status":"failed", "reason":"owner_drain_timeout"}
 
+func exercise_consumed_failure(kind: String) -> void:
+	var main = make_main("n5-consumed-failure-" + kind)
+	var save = make_save(main)
+	var terrain = make_manual_terrain(main)
+	var stage = Stage.new()
+	var started: Dictionary = stage.start(main, save)
+	var ready: Dictionary = await drive_stage(stage)
+	var handoff: Dictionary = stage.take_committed_transaction()
+	var transaction = handoff.get("transaction")
+	var receipt: Dictionary = handoff.get("receipt", {})
+	var original_backend_id := int(receipt.get("backendInstanceId", 0))
+	var original_generation := int(receipt.get("generation", 0))
+	var original_source = receipt.get("sourceIdentity")
+	if kind == "source_drift":
+		main.seed_text = "wrong-seed-after-transfer"
+	else:
+		main.structure_system.citadel_terrain_admission.world_seed = "wrong-admission-seed"
+	var owner = Owner.new()
+	var failed: Dictionary = owner.setup_from_committed_transaction(main, terrain,
+		transaction, receipt, 45, 0)
+	var after_failure: Dictionary = owner.snapshot()
+	var stage_pending: Dictionary = stage.stop()
+	var wrong_failure: Dictionary = failed.duplicate(true)
+	wrong_failure["backendInstanceId"] = original_backend_id + 1
+	var wrong_bind: Dictionary = stage.bind_failed_transferred_owner(owner, wrong_failure)
+	var bound: Dictionary = stage.bind_failed_transferred_owner(owner, failed)
+	var early_ack: Dictionary = stage.acknowledge_failed_transferred_owner_drain(owner,
+		{"status":"ready", "drained":true})
+	var reclaim: Dictionary = stage.reclaim_unadopted_transaction(transaction, receipt)
+	var expected_reason := "initialized_backend_source_mismatch" if kind == "source_drift" \
+		else "shaping_bridge_seed_mismatch"
+	check(started.get("status") == "pending" and ready.get("status") == "ready"
+		and handoff.get("status") == "ready" and original_backend_id != 0
+		and failed.get("status") == "failed" and failed.get("reason") == expected_reason
+		and failed.get("cleanupPending") == true and failed.get("drained") == false
+		and failed.get("ownerMustBeRetained") == true
+		and int(failed.get("backendInstanceId", 0)) == original_backend_id
+		and int(failed.get("loadGeneration", 0)) == original_generation
+		and failed.get("sourceIdentity") == original_source
+		and transaction.snapshot().get("state") == "transferred"
+		and after_failure.get("state") == "failed_transfer_retirement"
+		and int(after_failure.get("backendInstanceId", 0)) == original_backend_id
+		and stage_pending.get("status") == "pending" and stage_pending.get("drained") == false
+		and wrong_bind.get("status") == "failed" and bound.get("status") == "ready"
+		and early_ack.get("status") == "pending" and reclaim.get("status") == "failed",
+		kind + " retains exact consumed backend and denies early release")
+	var owner_drain: Dictionary = await drain_owner(owner)
+	var terminal: Dictionary = owner.snapshot().get("asyncStopReceipt", {})
+	var stale: Dictionary = terminal.duplicate(true)
+	stale["loadGeneration"] = original_generation + 1
+	var stale_ack: Dictionary = stage.acknowledge_failed_transferred_owner_drain(owner, stale)
+	var exact_ack: Dictionary = stage.acknowledge_failed_transferred_owner_drain(owner, terminal)
+	check(owner_drain.get("status") == "ready" and owner_drain.get("drained") == true
+		and terminal.get("failedTransferRetired") == true
+		and int(terminal.get("backendInstanceId", 0)) == original_backend_id
+		and int(terminal.get("loadGeneration", 0)) == original_generation
+		and terminal.get("sourceIdentity") == original_source
+		and terminal.get("physicalBlocksUnloaded") == true
+		and terminal.get("nativeWorkersDrained") == true
+		and terminal.get("demandReleased") == true
+		and terminal.get("leasesReleased") == true
+		and owner.snapshot().get("backendInstanceId") == 0
+		and stale_ack.get("status") == "pending" and stale_ack.get("drained") == false
+		and exact_ack.get("status") == "ready" and exact_ack.get("drained") == true
+		and stage.stop().get("drained") == true,
+		kind + " joins only actual bounded owner retirement")
+	observations[kind] = {"failure":failed, "beforeDrain":after_failure,
+		"stagePending":stage_pending, "wrongBind":wrong_bind,
+		"earlyAck":early_ack, "ownerDrain":owner_drain,
+		"staleAck":stale_ack, "exactAck":exact_ack,
+		"terminal":terminal}
+	terrain.free()
+	main.free()
+	await process_frame
+
 func run() -> void:
 	var main = make_main("n5-committed-stage-transfer")
 	var save = make_save(main)
@@ -265,6 +340,9 @@ func run() -> void:
 		and drift_drain.get("drained") == true,
 		"source drift rejects handoff and private stage retains drain ownership")
 	observations["drift"] = {"rejection":drift_handoff, "drain":drift_drain}
+
+	await exercise_consumed_failure("source_drift")
+	await exercise_consumed_failure("page_setup")
 
 	var report_path := OS.get_environment("VWB_N5_COMMITTED_STAGE_TRANSFER_REPORT")
 	terrain.free()

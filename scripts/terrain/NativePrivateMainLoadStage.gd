@@ -18,6 +18,7 @@ var _transferred_owner: WeakRef
 var _transfer_identity: Dictionary = {}
 var _adopted_owner_id := 0
 var _adopted_owner_generation := 0
+var _failed_owner_bound := false
 var _source_descriptor: Dictionary = {}
 var _source_seed := ""
 var _state := "new"
@@ -190,12 +191,79 @@ func bind_transferred_owner(owner: RefCounted, adoption_receipt: Dictionary) -> 
 	return {"status":"ready", "stageReleased":true, "ownershipTransferred":true,
 		"ownerInstanceId":_adopted_owner_id, "ownerGeneration":owner_generation}
 
+## A receiver that consumed the transaction before activation failed owns the
+## same backend until its bounded failure retirement completes. Bind the live
+## failed owner before accepting any terminal acknowledgement.
+func bind_failed_transferred_owner(owner: RefCounted,
+		failure_receipt: Dictionary) -> Dictionary:
+	if _state != "transferred" or _adopted_owner_id != 0 \
+			or not owner is RuntimeOwner or not owner.has_method("snapshot"):
+		return {"status":"failed", "reason":"failed_transferred_owner_bind_unavailable",
+			"ownerMustBeRetained":true}
+	var live: Dictionary = owner.snapshot()
+	if failure_receipt.get("status") != "failed" \
+			or failure_receipt.get("cleanupPending") != true \
+			or failure_receipt.get("drained") != false \
+			or int(failure_receipt.get("ownerInstanceId", 0)) != owner.get_instance_id() \
+			or int(failure_receipt.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or int(failure_receipt.get("loadGeneration", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or failure_receipt.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or live.get("state") != "failed_transfer_retirement" \
+			or int(live.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or int(live.get("loadGeneration", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or live.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or live.get("failure") != failure_receipt.get("reason"):
+		return {"status":"failed", "reason":"failed_transferred_owner_identity_mismatch",
+			"ownerMustBeRetained":true}
+	_transferred_owner = weakref(owner)
+	_adopted_owner_id = owner.get_instance_id()
+	_failed_owner_bound = true
+	return {"status":"ready", "stageReleased":true, "ownershipTransferred":true,
+		"drained":false, "ownerInstanceId":_adopted_owner_id,
+		"failedActivation":true}
+
+func acknowledge_failed_transferred_owner_drain(owner: RefCounted,
+		drain_receipt: Dictionary) -> Dictionary:
+	if _state != "transferred" or not _failed_owner_bound \
+			or owner == null or _transferred_owner == null \
+			or _transferred_owner.get_ref() != owner \
+			or owner.get_instance_id() != _adopted_owner_id:
+		return {"status":"pending", "reason":"failed_transferred_owner_not_bound_or_changed",
+			"drained":false, "ownerMustBeRetained":true}
+	var live: Dictionary = owner.snapshot()
+	var actual: Dictionary = live.get("asyncStopReceipt", {})
+	if live.get("state") != "drained" or int(live.get("backendInstanceId", -1)) != 0 \
+			or int(live.get("loadGeneration", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or live.get("failedTransferIdentity", {}).get("sourceIdentity") \
+				!= _transfer_identity.get("sourceIdentity") \
+			or int(live.get("failedTransferIdentity", {}).get("backendInstanceId", 0)) \
+				!= int(_transfer_identity.get("backendInstanceId", 0)) \
+			or actual != drain_receipt or actual.get("status") != "ready" \
+			or actual.get("drained") != true or actual.get("failedTransferRetired") != true \
+			or int(actual.get("ownerInstanceId", 0)) != _adopted_owner_id \
+			or int(actual.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or int(actual.get("loadGeneration", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or actual.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or actual.get("physicalBlocksUnloaded") != true \
+			or actual.get("nativeWorkersDrained") != true \
+			or actual.get("demandReleased") != true \
+			or actual.get("leasesReleased") != true:
+		return {"status":"pending", "reason":"failed_transferred_owner_drain_unverified",
+			"drained":false, "ownerMustBeRetained":true}
+	_transferred_owner = null
+	_transfer_identity = {}
+	_adopted_owner_id = 0
+	_failed_owner_bound = false
+	_state = "drained"
+	return {"status":"ready", "drained":true, "ownershipTransferred":true,
+		"failedActivation":true}
+
 ## The stage reports drained only after the exact adopted owner has completed
 ## its physical, worker, demand and lease retirement. Wrong or early receipts
 ## leave the transfer join pending so Main cannot mistake it for global drain.
 func acknowledge_transferred_owner_drain(owner: RefCounted,
 		drain_receipt: Dictionary) -> Dictionary:
-	if _state != "transferred" or _adopted_owner_id == 0 \
+	if _state != "transferred" or _adopted_owner_id == 0 or _failed_owner_bound \
 			or owner == null or _transferred_owner == null \
 			or _transferred_owner.get_ref() != owner \
 			or owner.get_instance_id() != _adopted_owner_id:
@@ -304,6 +372,7 @@ func snapshot() -> Dictionary:
 		"saveRetained":not _save.is_empty(),
 		"transferIdentity":_transfer_identity.duplicate(true),
 		"transferredOwnerBound":_adopted_owner_id != 0,
+		"failedOwnerBound":_failed_owner_bound,
 		"lastReleaseUsec":_last_release_usec,
 		"lastBackendReleaseUsec":_last_backend_release_usec,
 		"lastTransactionReleaseUsec":_last_transaction_release_usec,
