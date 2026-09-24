@@ -3,7 +3,9 @@ class_name NativeV2LegacyTerrainConverter
 
 ## Loading-only conversion for valid v2 saves with historical `terrain`
 ## columns and no terrainVolume. Uses native surface facts and typed deltas;
-## each advance admits at most one 64-cell transaction.
+## each advance admits at most one 64-cell transaction. The caller transfers
+## exclusive ownership of the decoded save until completion or drained cancel;
+## nested save values must not be mutated while this converter retains them.
 const SourceRequest = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const PageAdmission = preload("res://scripts/world/NativeShapingPageAdmission.gd")
 const CellSource = preload("res://scripts/terrain/NativeTerrainCellSource.gd")
@@ -38,14 +40,9 @@ func setup(main, save: Dictionary) -> Dictionary:
 			or not save.get("terrainVolume", {}) is Dictionary \
 			or not (save.get("terrainVolume", {}) as Dictionary).is_empty():
 		return _failed("legacy_terrain_only_save_required")
-	for entry in entries:
-		if not entry is Dictionary or not entry.get("x", 0) is int \
-				or not entry.get("z", 0) is int:
-			return _failed("legacy_terrain_entry_invalid")
-		var height = entry.get("surfaceY", entry.get("height", null))
-		if height != null and (not height is float and not height is int \
-				or not is_finite(float(height))):
-			return _failed("legacy_terrain_entry_invalid")
+	# Check one entry at setup; all later entries are validated when admitted.
+	# Scanning the whole historical column array here would stall a large load.
+	if not _valid_entry(entries[0]): return _failed("legacy_terrain_entry_invalid")
 	var source: Dictionary = SourceRequest.from_main_with_save_volume(main,
 		{"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]})
 	if source.get("status") != "ready": return _failed(String(source.get("reason", "native_source_invalid")))
@@ -63,8 +60,10 @@ func setup(main, save: Dictionary) -> Dictionary:
 	var bound: Dictionary = _pages.setup(_backend, _admission)
 	if bound.get("status") != "ready":
 		return _failed(String(bound.get("reason", "shaping_admission_missing")))
-	_entries = entries.duplicate(true)
-	_save_snapshot = save.duplicate(true)
+	# SaveSystem has already decoded this value tree. Retain that owner instead
+	# of recursively copying an arbitrarily large save on the loading frame.
+	_entries = entries
+	_save_snapshot = save
 	_state = "active"
 	return {"status":"ready", "entryCount":_entries.size()}
 
@@ -106,7 +105,7 @@ func advance() -> Dictionary:
 		return {"status":"pending", "reason":"native_legacy_export_in_flight"}
 	if _next_y > _last_y:
 		var entry = _entries[_entry_index]
-		if not entry is Dictionary:
+		if not _valid_entry(entry):
 			return _failed("legacy_terrain_entry_invalid")
 		_column = Vector2i(int(entry.get("x", 0)), int(entry.get("z", 0)))
 		var page := Vector2i(floori(float(_column.x) / CellSource.PAGE_CELLS),
@@ -172,6 +171,14 @@ func advance() -> Dictionary:
 func _commit_staged_on_worker() -> Dictionary:
 	return _backend.commit_staged_durable_cells()
 
+func _valid_entry(entry) -> bool:
+	if not entry is Dictionary or not entry.get("x", 0) is int \
+			or not entry.get("z", 0) is int:
+		return false
+	var height = entry.get("surfaceY", entry.get("height", null))
+	return height == null or ((height is float or height is int) \
+		and is_finite(float(height)))
+
 func _export_on_worker() -> Dictionary:
 	return _backend.export_terrain_volume_v2()
 
@@ -182,7 +189,9 @@ func export_volume() -> Dictionary:
 func resolved_save() -> Dictionary:
 	var exported: Dictionary = export_volume()
 	if exported.get("status") != "ready": return exported
-	var save: Dictionary = _save_snapshot.duplicate(true)
+	# Only the save envelope changes. Its other payloads stay under the same
+	# exclusive decoded-snapshot owner until the next staged import takes over.
+	var save: Dictionary = _save_snapshot.duplicate(false)
 	save["terrainVolume"] = exported.terrainVolume
 	save["terrain"] = []
 	return {"status":"ready", "save":save}

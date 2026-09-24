@@ -301,6 +301,20 @@ func run() -> void:
 		"terrain":[{"x":"bad", "z":column.z, "surfaceY":new_surface}]}
 	check(LEGACY_CONVERTER.new().setup(main, malformed).get("reason") == "legacy_terrain_entry_invalid",
 		"malformed historical entry rejected before native initialization")
+	var late_malformed := {"version":2, "seed":main.seed_text,
+		"terrain":[{"x":column.x, "z":column.z, "surfaceY":100000.0},
+			{"x":"bad", "z":column.z, "surfaceY":new_surface}]}
+	var late_converter = LEGACY_CONVERTER.new()
+	var late_start: Dictionary = late_converter.setup(main, late_malformed)
+	var late_result: Dictionary = {}
+	for _frame in range(300):
+		late_result = late_converter.advance()
+		if late_result.get("status") != "pending": break
+		await process_frame
+	check(late_start.get("status") == "ready"
+		and late_result.get("reason") == "legacy_terrain_entry_invalid"
+		and late_converter.export_volume().get("status") != "ready",
+		"later malformed historical entry rejects at bounded admission without publishing a volume")
 	main.structure_system.citadel_terrain_admission.configure("other-seed", {},
 		{"regionCells": main.STRUCTURE_REGION_CELLS, "spawnChance": main.STRUCTURE_SPAWN_CHANCE})
 	check(REQUEST.from_main(main).get("reason") == "site_admission_seed_mismatch", "seed mismatch fails")

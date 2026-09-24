@@ -84,7 +84,8 @@ func run() -> void:
 	var old_surface := float(main.world_generation_system.surface_y_for_cell(column))
 	var edited_surface := old_surface - 2.0 * float(main.CELL)
 	var legacy_save := {"version":2, "seed":main.seed_text,
-		"terrain":[{"x":column.x, "z":column.z, "surfaceY":edited_surface}]}
+		"terrain":[{"x":column.x, "z":column.z, "surfaceY":edited_surface}],
+		"inventory":{"retainedNestedPayload":[1, 2, 3]}}
 	var converter = CONVERTER.new()
 	var conversion_started: Dictionary = converter.setup(main, legacy_save)
 	var converted: Dictionary = await _drive_converter(converter)
@@ -95,6 +96,11 @@ func run() -> void:
 		and resolved.get("status") == "ready"
 		and canonical_save.get("terrain", []) == [],
 		"legacy v2 surface column converts into a canonical volume-backed save")
+	check(legacy_save.terrain.size() == 1
+		and is_same(canonical_save.inventory, legacy_save.inventory)
+		and is_same(canonical_save.inventory.retainedNestedPayload,
+			legacy_save.inventory.retainedNestedPayload),
+		"conversion retains the decoded nested snapshot and changes only its top-level envelope")
 
 	# Keep the old restore implementation as the parity oracle for this one
 	# historical negative-coordinate excavation.

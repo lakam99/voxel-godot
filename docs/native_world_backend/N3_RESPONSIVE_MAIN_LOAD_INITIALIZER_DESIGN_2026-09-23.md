@@ -2,6 +2,17 @@
 
 Status: focused transaction milestone; not a production cutover or N3 completion.
 
+The historical v2 `terrain`-only converter now retains the exclusively owned
+decoded snapshot instead of recursively cloning it during setup, and validates
+later columns on admission rather than scanning the whole array on the setup
+frame. `resolved_save()` copies only the top-level envelope and replaces its
+terrain fields; nested values remain under the caller's no-mutation ownership
+contract until the next staged transaction accepts them. This removes one
+unbounded Main-thread copy but does not yet wire the converter to Main or prove
+headed loading cadence. Focused parity and late-malformed-entry evidence:
+`node tools/run-n3-legacy-terrain-load-transaction.mjs` and
+`node tools/run-n3-native-world-source-request.mjs`.
+
 ## Ownership and call contract
 
 `NativeTerrainLoadTransaction` stages one `NativeWorldBackend` save-v2
