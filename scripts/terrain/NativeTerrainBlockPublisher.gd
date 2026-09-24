@@ -33,6 +33,7 @@ var _old_edit_sdf: Dictionary = {}
 var _changed_sdf: Dictionary = {}
 var _cursor := 0
 var _reconcile_cursor := 0
+var _shutdown_requested := false
 var _active := false
 var _stopping := false
 var _last_failure := ""
@@ -372,7 +373,19 @@ func stop() -> Dictionary:
 	_active = false
 	return {"status":"ready", "released":true}
 
+## Starts retirement without walking the entire desired set. drain_step() takes
+## at most one tracked block/native worker event per invocation.
+func request_stop() -> Dictionary:
+	if not _active: return {"status":"ready", "drained":true}
+	_stopping = true
+	_shutdown_requested = true
+	return {"status":"pending", "reason":"native_publisher_retirement_requested",
+		"remainingBlocks":_blocks.size(), "inserted":_inserted.size(),
+		"orphaned":_orphaned.size()}
+
 func drain_step() -> Dictionary:
+	if _shutdown_requested:
+		return _shutdown_drain_step()
 	if _active or _backend == null:
 		return {"status":"failed", "reason":"stop_before_drain"}
 	var event: Dictionary = _backend.pump_voxel_block_shadow()
@@ -381,6 +394,83 @@ func drain_step() -> Dictionary:
 	if event.get("status") == "pending" and event.get("reason") == "no_waiting_source":
 		return {"status":"ready", "drained":true}
 	return {"status":"pending", "drained":false, "reason":event.get("reason", "native_worker_draining")}
+
+func _shutdown_drain_step() -> Dictionary:
+	if not _active or _backend == null:
+		return {"status":"ready", "drained":true, "physicalBlocksUnloaded":true,
+			"nativeWorkersDrained":true}
+	if not _blocks.is_empty():
+		var block: Vector3i = _blocks.pop_back()
+		_desired_set.erase(block)
+		if _requested.has(block) or _inserted.has(block) or _orphaned.has(block):
+			_retiring[block] = true
+		return {"status":"pending", "reason":"native_block_retirement_queued",
+			"block":block, "remainingBlocks":_blocks.size()}
+	if not _waiting_source.is_empty():
+		var waiting: Vector3i = _waiting_source.pop_back()
+		return {"status":"pending", "reason":"native_waiting_source_released",
+			"block":waiting, "remainingWaitingSources":_waiting_source.size()}
+	if not _retiring.is_empty():
+		var retiring_block: Vector3i
+		for candidate in _retiring:
+			retiring_block = candidate
+			break
+		if _inserted.has(retiring_block) or _orphaned.has(retiring_block):
+			return _shutdown_reconcile_one(retiring_block)
+		if _requested.has(retiring_block):
+			var request_key := _request(retiring_block)
+			var release: Dictionary = _backend.release_voxel_block_shadow(request_key, _consumer_id)
+			if release.get("status") != "ready":
+				return {"status":"pending", "reason":"native_shutdown_release_pending",
+					"block":retiring_block, "receipt":release}
+			_requested.erase(retiring_block)
+		_retiring.erase(retiring_block)
+		return {"status":"pending", "reason":"native_block_release_acknowledged",
+			"block":retiring_block}
+	if not _inserted.is_empty() or not _orphaned.is_empty():
+		for candidate in _inserted:
+			return _shutdown_reconcile_one(candidate)
+		for candidate in _orphaned:
+			return _shutdown_reconcile_one(candidate)
+	if not _requested.is_empty():
+		for block in _requested:
+			_retiring[block] = true
+			return {"status":"pending", "reason":"native_untracked_request_retirement_queued",
+				"block":block}
+	var event: Dictionary = _backend.pump_voxel_block_shadow()
+	if event.get("status") == "failed": return event
+	if event.get("status") != "pending" or event.get("reason") != "no_waiting_source":
+		return {"status":"pending", "reason":"native_worker_retirement_pending",
+			"workerEvent":event}
+	_terrain.mesh_block_entered.disconnect(_mesh_entered)
+	_terrain.mesh_block_exited.disconnect(_mesh_exited)
+	_active = false
+	return {"status":"ready", "drained":true, "physicalBlocksUnloaded":true,
+		"nativeWorkersDrained":true, "remainingDemanded":0, "remainingRequested":0,
+		"remainingInserted":0, "remainingOrphaned":0}
+
+func _shutdown_reconcile_one(block: Vector3i) -> Dictionary:
+	if _terrain.has_data_block(block):
+		return {"status":"pending", "reason":"viewer_detach_or_physical_unload_required",
+			"block":block}
+	var installed: Dictionary = _inserted.get(block, _orphaned.get(block, {}))
+	var key: Dictionary = installed.get("key", {})
+	if key.is_empty():
+		return {"status":"failed", "reason":"native_shutdown_block_key_missing", "block":block}
+	var receipt: Dictionary = _backend.voxel_block_shadow_unloaded(key)
+	if receipt.get("status") != "ready":
+		return {"status":"failed", "reason":"native_shutdown_unload_receipt_failed",
+			"block":block, "receipt":receipt}
+	var exited: Dictionary = _backend.voxel_block_shadow_mesh_exited(key)
+	if exited.get("status") != "ready":
+		return {"status":"failed", "reason":"native_shutdown_mesh_exit_receipt_failed",
+			"block":block, "receipt":exited}
+	_inserted.erase(block)
+	_orphaned.erase(block)
+	_meshed.erase(block)
+	_retiring.erase(block)
+	return {"status":"pending", "reason":"native_physical_unload_acknowledged",
+		"block":block, "unloadReceipt":receipt, "meshExitReceipt":exited}
 
 func snapshot() -> Dictionary:
 	return {"active":_active, "demanded":_blocks.size(), "registered":_requested.size(),
@@ -395,7 +485,7 @@ func has_native_request(block: Vector3i) -> bool:
 	return _requested.has(block)
 
 func _retire_one() -> Dictionary:
-	for block: Vector3i in _retiring.keys():
+	for block: Vector3i in _retiring:
 		if _inserted.has(block) or _orphaned.has(block):
 			continue
 		if _requested.has(block):

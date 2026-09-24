@@ -41,6 +41,8 @@ var _legacy_main
 var _legacy_terrain: VoxelTerrain
 var _legacy_consumer_id := 0
 var _legacy_priority := 0
+var _async_stop_requested := false
+var _async_stop_receipt: Dictionary = {}
 
 func setup(main, terrain: VoxelTerrain, consumer_id: int, priority: int,
 		save_snapshot = null) -> Dictionary:
@@ -238,7 +240,8 @@ func collision_window_source(window_id: Vector3i, layout_token: String) -> Dicti
 
 func acknowledge_collision_window_retired(window_token: String,
 		retirement_receipt: Dictionary) -> Dictionary:
-	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	if not _state in ["active", "stopping_async"]:
+		return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.acknowledge_collision_window_retired(window_token,
 		retirement_receipt)
 
@@ -252,13 +255,15 @@ func claim_collision_window_retirement(window_token: String,
 
 func validate_collision_window_retirement(window_token: String,
 		lease_id: String) -> Dictionary:
-	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	if not _state in ["active", "stopping_async"]:
+		return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.validate_collision_window_retirement(window_token,
 		lease_id)
 
 func abort_collision_window_retirement(window_token: String, lease_id: String,
 		owner_unchanged: bool) -> Dictionary:
-	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	if not _state in ["active", "stopping_async"]:
+		return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.abort_collision_window_retirement(window_token,
 		lease_id, owner_unchanged)
 
@@ -472,6 +477,10 @@ func stop() -> Dictionary:
 	if _state == "new":
 		_state = "drained"
 		return {"status":"ready", "drained":true}
+	if _state == "active":
+		return request_stop()
+	if _state == "stopping_async":
+		return drain_step()
 	if _publisher == null:
 		_release_owners()
 		return {"status":"ready", "drained":true}
@@ -483,7 +492,61 @@ func stop() -> Dictionary:
 	if stopped.get("status") != "ready": return stopped
 	return drain_step()
 
+## Non-blocking shutdown request for composed runtimes. Retirement proceeds one
+## bounded owner drain step at a time; unlike stop(), this never spins until all
+## queued blocks/windows have been released.
+func request_stop() -> Dictionary:
+	if _state == "drained": return {"status":"ready", "drained":true}
+	if _state == "stopping_async":
+		return {"status":"pending", "reason":"native_owner_retirement_in_progress"}
+	if _state != "active": return {"status":"failed", "reason":"native_owner_not_active_for_async_stop"}
+	_async_stop_requested = true
+	_state = "stopping_async"
+	var artifacts: Dictionary = _artifact_requests.request_stop()
+	if artifacts.get("status") == "failed":
+		_failure = String(artifacts.get("reason", "native_artifact_stop_request_failed"))
+		return {"status":"failed", "reason":_failure}
+	var publisher: Dictionary = _publisher.request_stop()
+	if publisher.get("status") == "failed":
+		_failure = String(publisher.get("reason", "native_publisher_stop_request_failed"))
+		return {"status":"failed", "reason":_failure}
+	return {"status":"pending", "reason":"native_owner_retirement_requested",
+		"ownerGeneration":_owner_generation, "sourceIdentity":_source_identity.duplicate(true)}
+
 func drain_step() -> Dictionary:
+	if _state == "stopping_async":
+		var artifact_step: Dictionary = _artifact_requests.drain_step()
+		if artifact_step.get("status") == "failed":
+			return artifact_step
+		if artifact_step.get("status") != "ready":
+			return {"status":"pending", "reason":"native_artifact_retirement_pending",
+				"artifactStep":artifact_step}
+		var publisher_step: Dictionary = _publisher.drain_step()
+		if publisher_step.get("status") == "failed": return publisher_step
+		if publisher_step.get("status") != "ready":
+			return {"status":"pending", "reason":"native_block_retirement_pending",
+				"publisherStep":publisher_step}
+		var retired_generation := _owner_generation
+		var retired_source := _source_identity.duplicate(true)
+		_async_stop_receipt = {"status":"ready", "drained":true,
+			"physicalBlocksUnloaded":publisher_step.get("physicalBlocksUnloaded") == true,
+			"nativeWorkersDrained":artifact_step.get("nativeWorkersDrained") == true
+				and publisher_step.get("nativeWorkersDrained") == true,
+			"demandReleased":publisher_step.get("remainingDemanded") == 0
+				and publisher_step.get("remainingRequested") == 0
+				and publisher_step.get("remainingInserted") == 0
+				and publisher_step.get("remainingOrphaned") == 0,
+			"leasesReleased":artifact_step.get("leasesReleased") == true
+				and artifact_step.get("windowSourcesReleased") == true,
+			"ownerGeneration":retired_generation, "sourceIdentity":retired_source}
+		if not _async_stop_receipt.physicalBlocksUnloaded \
+				or not _async_stop_receipt.nativeWorkersDrained \
+				or not _async_stop_receipt.demandReleased \
+				or not _async_stop_receipt.leasesReleased:
+			return {"status":"failed", "reason":"native_owner_retirement_receipt_incomplete",
+				"retirementReceipt":_async_stop_receipt}
+		_release_owners()
+		return _async_stop_receipt.duplicate(true)
 	if _state == "stopping_conversion":
 		var drained: Dictionary = _legacy_converter.advance()
 		if drained.get("status") != "ready": return drained
@@ -506,8 +569,12 @@ func snapshot() -> Dictionary:
 		"pendingEditBarrier":_pending_edit_plan.get("barrier", {}),
 		"backendInstanceId":_backend.get_instance_id() if _backend != null else 0,
 		"backend":_backend.status() if _backend != null else {},
+		"ownerGeneration":_owner_generation,
+		"sourceIdentity":_source_identity.duplicate(true),
 		"planner":_planner.diagnostics() if _planner != null else {},
-		"publisher":_publisher.snapshot() if _publisher != null else {}}
+		"publisher":_publisher.snapshot() if _publisher != null else {},
+		"artifactRequests":_artifact_requests.snapshot() if _artifact_requests != null else {},
+		"asyncStopReceipt":_async_stop_receipt.duplicate(true)}
 
 func _setup_failure(reason: String) -> Dictionary:
 	_failure = reason

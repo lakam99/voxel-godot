@@ -38,6 +38,7 @@ var _last_verified_revision := -1
 var _local_proof_cache := {}
 var _proof_budget_frame := -1
 var _proof_used_usec := 0
+var _async_stop_requested := false
 
 func setup(backend, pages, admission, planner, cell_meters: float,
 		owner_generation: int, max_resident_blocks: int) -> Dictionary:
@@ -360,11 +361,57 @@ func stop() -> Dictionary:
 	if retired.get("status") == "ready": _release_windows()
 	return retired
 
+## Cheap stop request. Producer cancellation, worker acknowledgement and
+## window-source release are deliberately advanced by drain_step(), one unit at
+## a time, so the composed owner does not hide an unbounded stop loop.
+func request_stop() -> Dictionary:
+	_stopping = true
+	_async_stop_requested = true
+	return {"status":"pending", "reason":"artifact_retirement_requested",
+		"inflight":_producer != null, "windowRecords":_window_records.size()}
+
 func drain_step() -> Dictionary:
-	if not _stopping: return {"status":"failed", "reason":"artifact_stop_required"}
+	if not _async_stop_requested: return {"status":"failed", "reason":"artifact_stop_required"}
 	var retired: Dictionary = _retire_producer()
-	if retired.get("status") == "ready": _release_windows()
-	return retired
+	if retired.get("status") != "ready": return retired
+	var window_step := _release_one_window()
+	if window_step.get("status") != "ready": return window_step
+	if not _retirement_leases.is_empty():
+		return {"status":"pending", "reason":"artifact_retirement_leases_active",
+			"remainingLeases":_retirement_leases.size()}
+	if not _window_records.is_empty() or not _active_window_tokens.is_empty():
+		return {"status":"pending", "reason":"artifact_window_retirement_pending"}
+	return {"status":"ready", "drained":true, "nativeWorkersDrained":true,
+		"windowSourcesReleased":true, "leasesReleased":_retirement_leases.is_empty()}
+
+func snapshot() -> Dictionary:
+	return {"stopping":_stopping, "producerActive":_producer != null,
+		"activeBlock":_active_block, "windowRecords":_window_records.size(),
+		"activeWindows":_active_window_tokens.size(),
+		"retirementLeases":_retirement_leases.size(),
+		"pendingRetirementTokens":_pending_retirement_tokens.size()}
+
+func _release_one_window() -> Dictionary:
+	var token_to_release := ""
+	for token in _window_records:
+		if _retirement_leases.has(token):
+			return {"status":"pending", "reason":"artifact_window_lease_active",
+				"windowToken":token}
+		token_to_release = String(token)
+		break
+	if not token_to_release.is_empty():
+		var record: Dictionary = _window_records[token_to_release]
+		var facade = record.get("facade")
+		if facade != null: facade.detach()
+		_window_records.erase(token_to_release)
+		_active_window_tokens.erase(token_to_release)
+		_pending_retirement_tokens.erase(token_to_release)
+		return {"status":"pending", "reason":"artifact_window_source_released",
+			"windowToken":token_to_release, "remaining":_window_records.size()}
+	if not _pending_retirement_tokens.is_empty():
+		return {"status":"pending", "reason":"artifact_retirement_tokens_active",
+			"remaining":_pending_retirement_tokens.size()}
+	return {"status":"ready", "released":true}
 
 func _create_producer(source: Dictionary, demand: Dictionary) -> Dictionary:
 	if int(demand.get("revision", 0)) <= 0 or String(demand.get("closureToken", "")).is_empty():
@@ -563,7 +610,8 @@ func _retire_producer() -> Dictionary:
 	if not _stop_issued:
 		_draining = true
 		_stop_issued = true
-		var stopped: Dictionary = _producer.stop()
+		var stopped: Dictionary = _producer.request_stop() if _async_stop_requested \
+			else _producer.stop()
 		if stopped.get("status") != "ready": return stopped
 	var drained: Dictionary = _producer.drain_step()
 	if drained.get("status") != "ready": return drained

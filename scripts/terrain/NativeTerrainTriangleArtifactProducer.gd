@@ -431,6 +431,22 @@ func stop() -> Dictionary:
 	_planner = null
 	return {"status":"ready", "drained":true}
 
+## Non-blocking cancellation entrypoint used by the owner drain path. It only
+## requests cancellation; worker/ticket completion remains in drain_step().
+func request_stop() -> Dictionary:
+	_stopped = true
+	if _ticket != 0:
+		_backend.cancel_voxel_block_shadow_async(_ticket)
+		return {"status":"pending", "reason":"triangle_worker_cancel_requested",
+			"ticket":_ticket}
+	if _build_thread != null:
+		return {"status":"pending", "reason":"triangle_mesh_worker_join_pending"}
+	_backend = null
+	_pages = null
+	_admission = null
+	_planner = null
+	return {"status":"ready", "drained":true}
+
 func drain_step() -> Dictionary:
 	if not _stopped: return {"status":"failed", "reason":"triangle_stop_required"}
 	if _ticket != 0:

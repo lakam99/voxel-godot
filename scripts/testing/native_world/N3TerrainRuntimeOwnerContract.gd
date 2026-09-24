@@ -156,6 +156,9 @@ func run() -> void:
 		and int(replay_owner.snapshot().get("backendInstanceId", 0)) == 0,
 		"transferred transaction cannot be replayed into a second owner")
 	var staged_stopped: Dictionary = staged_owner.stop()
+	check(staged_stopped.get("status") == "pending"
+		and staged_owner.snapshot().get("state") == "stopping_async",
+		"active stop request is non-blocking and enters incremental retirement")
 	for _frame in range(120):
 		if staged_stopped.get("status") == "ready": break
 		await process_frame
@@ -386,13 +389,27 @@ func run() -> void:
 			"cellStatus":exported.get("status"), "numericStatus":numeric.get("status"),
 			"tickStatus":tick.get("status"),
 			"nativeRevision":snapshot.backend.get("terrainDeltaRevision")})
-	var stopped: Dictionary = owner.stop()
-	for frame in range(120):
-		if stopped.get("status") == "ready": break
-		await process_frame
+	var stop_requested: Dictionary = owner.request_stop()
+	check(stop_requested.get("status") == "pending",
+		"asynchronous stop request is non-blocking")
+	var stopped: Dictionary = {"status":"pending"}
+	var async_stop_steps := 0
+	for frame in range(600):
 		stopped = owner.drain_step()
+		async_stop_steps += 1
+		if stopped.get("status") == "ready": break
+		check(stopped.get("status") == "pending",
+			"bounded async stop step remains retryable")
+		await process_frame
 	check(stopped.get("status") == "ready" and stopped.get("drained") == true,
-		"stop drains owned native work")
+		"one-step drain retires owned native work")
+	check(stopped.get("physicalBlocksUnloaded") == true
+		and stopped.get("nativeWorkersDrained") == true
+		and stopped.get("demandReleased") == true
+		and stopped.get("leasesReleased") == true,
+		"async stop receipt proves physical, worker, demand and lease retirement")
+	check(async_stop_steps > 0 and async_stop_steps <= 600,
+		"shutdown progress is spread across bounded owner drain steps")
 	check(owner.snapshot().state == "drained"
 		and int(owner.snapshot().backendInstanceId) == 0,
 		"no retained backend after drain")

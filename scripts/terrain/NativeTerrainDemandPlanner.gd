@@ -188,7 +188,10 @@ func acknowledge_delta(ticket: int, accepted: bool) -> Dictionary:
 func diagnostics() -> Dictionary:
 	return {"consumerId":_consumer_id, "sources":_sources.size(),
 		"desiredDataBlocks":_desired.size(), "appliedDataBlocks":_applied.size(),
-		"deltaAckPending":not _issued.is_empty(), "maxUnionBlocks":MAX_UNION_BLOCKS}
+		"deltaAckPending":not _issued.is_empty(),
+		"demandRevision":_demand_revision, "closureToken":_closure_token,
+		"requiredMeshBlocks":_required_mesh_blocks.size(),
+		"maxUnionBlocks":MAX_UNION_BLOCKS}
 
 func source_ids() -> Array[String]:
 	var ids: Array[String] = []
