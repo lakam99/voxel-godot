@@ -254,6 +254,157 @@ func exercise_descriptor_drift(kind: String) -> void:
 	main.free()
 	await process_frame
 
+func exercise_continue_replay_revision_difference() -> void:
+	var seed := "n5-valid-continue-replay-revision"
+	var saved_main = make_main(seed)
+	var save = make_save(saved_main)
+	# A second ordinary edit to the same durable cell advances the save
+	# envelope revision without adding another record to replay.
+	saved_main.world_generation_system.terrain_volume_service.set_cell_state(
+		Vector3i(-17, -1, -1), {"material":"stone", "biome":"deep_underground",
+		"solid":true, "density":1.5, "fluid":"", "blockId":"stage-transfer-edit",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "fixture-second-edit", false)
+	save["terrainVolume"] = saved_main.world_generation_system.save_terrain_volume_deltas()
+	var imported_revision := int(save.get("terrainVolume", {}).get("revision", -1))
+	var main = make_main(seed)
+	main.world_generation_system.load_terrain_volume_deltas(save.get("terrainVolume", {}))
+	var replay_revision := int(main.world_generation_system.terrain_volume_revision())
+	var terrain = make_manual_terrain(main)
+	var stage = Stage.new()
+	var started: Dictionary = stage.start(main, save)
+	var ready: Dictionary = await drive_stage(stage)
+	var stage_before: Dictionary = stage.snapshot()
+	var handoff: Dictionary = stage.take_committed_transaction()
+	var transaction = handoff.get("transaction")
+	var receipt: Dictionary = handoff.get("receipt", {})
+	var owner = Owner.new()
+	var adopted: Dictionary = owner.setup_from_committed_transaction(main, terrain,
+		transaction, receipt, 48, 0)
+	var owner_before_drain: Dictionary = owner.snapshot()
+	var exported: Dictionary = owner.export_terrain_volume_v2() if adopted.get("status") == "ready" else {}
+	var bound: Dictionary = stage.bind_transferred_owner(owner, adopted)
+	var stage_pending: Dictionary = stage.stop()
+	var owner_drain: Dictionary = {}
+	if adopted.get("status") == "ready":
+		owner_drain = await drain_owner(owner)
+	elif transaction != null and transaction.snapshot().get("state") == "committed":
+		stage.reclaim_unadopted_transaction(transaction, receipt)
+		await drain_stage(stage)
+	elif owner.snapshot().get("state") == "failed_transfer_retirement":
+		stage.bind_failed_transferred_owner(owner, adopted)
+		owner_drain = await drain_owner(owner)
+		stage.acknowledge_failed_transferred_owner_drain(owner,
+			owner.snapshot().get("asyncStopReceipt", {}))
+	var terminal: Dictionary = owner.snapshot().get("asyncStopReceipt", {})
+	var acknowledged: Dictionary = stage.acknowledge_transferred_owner_drain(owner, terminal)
+	check(imported_revision > replay_revision and replay_revision > 0
+		and started.get("status") == "pending" and ready.get("status") == "ready"
+		and handoff.get("status") == "ready"
+		and int(stage_before.get("transaction", {}).get("durableSourceRevision", -1)) \
+			== replay_revision
+		and int(receipt.get("durableSourceRevision", -1)) == replay_revision
+		and transaction.snapshot().get("state") == "transferred"
+		and adopted.get("status") == "ready"
+		and adopted.get("adoptedCommittedBackend") == true
+		and int(owner_before_drain.get("backendInstanceId", 0)) \
+			== int(receipt.get("backendInstanceId", 0))
+		and adopted.get("sourceIdentity") == receipt.get("sourceIdentity")
+		and exported.get("status") == "ready"
+		and int(exported.get("terrainVolume", {}).get("revision", -1)) == imported_revision
+		and bound.get("status") == "ready"
+		and stage_pending.get("status") == "pending" and stage_pending.get("drained") == false
+		and owner_drain.get("status") == "ready" and owner_drain.get("drained") == true
+		and acknowledged.get("status") == "ready" and acknowledged.get("drained") == true
+		and stage.stop().get("drained") == true,
+		"real Continue replay with different stable Main revision adopts exact save volume")
+	observations["continueReplayRevisionDifference"] = {
+		"importedSaveRevision":imported_revision, "mainReplayRevision":replay_revision,
+		"started":started, "ready":ready, "handoffReceipt":receipt,
+		"adopted":adopted, "exportedRevision":int(exported.get("terrainVolume", {}).get("revision", -1)),
+		"bound":bound, "stagePending":stage_pending,
+		"ownerDrain":owner_drain, "acknowledged":acknowledged}
+	terrain.free()
+	main.free()
+	saved_main.free()
+	await process_frame
+
+func exercise_same_revision_service_replacement() -> void:
+	var main = make_main("n5-same-revision-service-replacement")
+	var save = make_save(main)
+	var terrain = make_manual_terrain(main)
+	var stage = Stage.new()
+	var started: Dictionary = stage.start(main, save)
+	var ready: Dictionary = await drive_stage(stage)
+	var handoff: Dictionary = stage.take_committed_transaction()
+	var transaction = handoff.get("transaction")
+	var receipt: Dictionary = handoff.get("receipt", {})
+	var original_backend_id := int(receipt.get("backendInstanceId", 0))
+	var original_source = receipt.get("sourceIdentity")
+	var original_owner_id := int(receipt.get("durableSourceOwnerId", 0))
+	var original_revision := int(receipt.get("durableSourceRevision", -1))
+	var original_descriptor: Dictionary = SourceRequest.from_finalized_main(main)
+	var original_volume: Dictionary = main.world_generation_system.save_terrain_volume_deltas()
+	var replacement = World.new()
+	replacement.setup(main)
+	replacement.terrain_volume_service.set_cell_state(Vector3i(51, -5, 9), {
+		"material":"stone", "biome":"deep_underground", "solid":true,
+		"density":1.25, "fluid":"", "blockId":"replacement-service-edit",
+		"light":{"sky":0,"block":0},
+		"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "fixture", false)
+	main.world_generation_system = replacement
+	var replacement_owner_id := int(replacement.terrain_volume_service.get_instance_id())
+	var replacement_revision := int(replacement.terrain_volume_revision())
+	var replacement_descriptor: Dictionary = SourceRequest.from_finalized_main(main)
+	var replacement_volume: Dictionary = replacement.save_terrain_volume_deltas()
+	var wrong_receipt: Dictionary = receipt.duplicate(true)
+	wrong_receipt["durableSourceOwnerId"] = replacement_owner_id
+	var wrong_borrow: Dictionary = transaction.borrow_committed_backend(wrong_receipt)
+	var wrong_frozen: Dictionary = transaction.committed_source_descriptor(wrong_receipt)
+	var wrong_reclaim: Dictionary = stage.reclaim_unadopted_transaction(transaction, wrong_receipt)
+	var owner = Owner.new()
+	var rejected: Dictionary = owner.setup_from_committed_transaction(main, terrain,
+		transaction, receipt, 49, 0)
+	var after_rejection: Dictionary = transaction.snapshot()
+	var pending: Dictionary = stage.stop()
+	var reclaimed: Dictionary = stage.reclaim_unadopted_transaction(transaction, receipt)
+	var drained: Dictionary = await drain_stage(stage)
+	check(started.get("status") == "pending" and ready.get("status") == "ready"
+		and handoff.get("status") == "ready" and original_backend_id != 0
+		and original_owner_id != 0 and replacement_owner_id != 0
+		and original_owner_id != replacement_owner_id
+		and original_revision == replacement_revision
+		and original_descriptor.get("request") == replacement_descriptor.get("request")
+		and original_volume.get("sections") != replacement_volume.get("sections")
+		and wrong_borrow.get("reason") == "committed_backend_receipt_mismatch"
+		and wrong_frozen.get("reason") == "committed_descriptor_receipt_mismatch"
+		and wrong_reclaim.get("status") == "failed"
+		and rejected.get("status") == "failed"
+		and rejected.get("reason") == "committed_transaction_durable_source_owner_changed"
+		and after_rejection.get("state") == "committed"
+		and int(after_rejection.get("backendInstanceId", 0)) == original_backend_id
+		and after_rejection.get("sourceIdentity") == original_source
+		and int(after_rejection.get("durableSourceOwnerId", 0)) == original_owner_id
+		and owner.snapshot().get("state") == "failed"
+		and int(owner.snapshot().get("backendInstanceId", -1)) == 0
+		and pending.get("status") == "pending" and pending.get("drained") == false
+		and reclaimed.get("status") == "ready" and reclaimed.get("reclaimed") == true
+		and drained.get("status") == "ready" and drained.get("drained") == true
+		and transaction.snapshot().get("state") == "transferred",
+		"same-revision replacement service cannot adopt or forge committed owner identity")
+	observations["sameRevisionServiceReplacement"] = {
+		"originalOwnerId":original_owner_id, "replacementOwnerId":replacement_owner_id,
+		"originalRevision":original_revision, "replacementRevision":replacement_revision,
+		"durableCellsDiffer":original_volume.get("sections") != replacement_volume.get("sections"),
+		"originalSource":original_source, "receipt":receipt,
+		"wrongBorrow":wrong_borrow, "wrongFrozen":wrong_frozen,
+		"wrongReclaim":wrong_reclaim, "rejected":rejected,
+		"afterRejection":after_rejection, "pending":pending,
+		"reclaimed":reclaimed, "drained":drained}
+	terrain.free()
+	main.free()
+	await process_frame
+
 func run() -> void:
 	var main = make_main("n5-committed-stage-transfer")
 	var save = make_save(main)
@@ -429,6 +580,8 @@ func run() -> void:
 	await exercise_consumed_failure("page_setup")
 	await exercise_descriptor_drift("town")
 	await exercise_descriptor_drift("durable")
+	await exercise_continue_replay_revision_difference()
+	await exercise_same_revision_service_replacement()
 
 	var report_path := OS.get_environment("VWB_N5_COMMITTED_STAGE_TRANSFER_REPORT")
 	terrain.free()

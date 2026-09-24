@@ -138,6 +138,12 @@ func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 		var durable_revision := int(frozen.get("durableSourceRevision", -1))
 		if durable_revision >= 0:
 			var world = main.get("world_generation_system")
+			var durable_owner_id := int(frozen.get("durableSourceOwnerId", 0))
+			var service = world.get("terrain_volume_service") if world != null else null
+			if durable_owner_id != 0 and (service == null \
+					or not is_instance_valid(service) \
+					or service.get_instance_id() != durable_owner_id):
+				return _setup_failure("committed_transaction_durable_source_owner_changed")
 			if world == null or not world.has_method("terrain_volume_revision") \
 					or int(world.terrain_volume_revision()) != durable_revision:
 				return _setup_failure("committed_transaction_durable_source_revision_changed")

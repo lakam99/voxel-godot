@@ -22,6 +22,7 @@ var _failed_owner_bound := false
 var _source_descriptor: Dictionary = {}
 var _source_seed := ""
 var _durable_source_revision := -1
+var _durable_source_owner_id := 0
 var _state := "new"
 var _failure := ""
 var _last_release_usec := 0
@@ -109,6 +110,8 @@ func take_committed_transaction() -> Dictionary:
 			or transaction_state.get("sourceIdentity") != _receipt.get("sourceIdentity") \
 			or _receipt.get("sourceDescriptor") != _source_descriptor \
 			or int(_receipt.get("durableSourceRevision", -2)) != _durable_source_revision \
+			or int(transaction_state.get("durableSourceOwnerId", 0)) != _durable_source_owner_id \
+			or int(_receipt.get("durableSourceOwnerId", 0)) != _durable_source_owner_id \
 			or int(_receipt.get("backendInstanceId", 0)) != _backend.get_instance_id():
 		return {"status":"failed", "reason":"private_committed_transfer_receipt_mismatch",
 			"ownerMustBeRetained":true}
@@ -119,7 +122,8 @@ func take_committed_transaction() -> Dictionary:
 		"generation":int(receipt.get("generation", 0)),
 		"sourceIdentity":receipt.get("sourceIdentity", {}).duplicate(true),
 		"sourceDescriptor":_source_descriptor.duplicate(true),
-		"durableSourceRevision":_durable_source_revision}
+		"durableSourceRevision":_durable_source_revision,
+		"durableSourceOwnerId":_durable_source_owner_id}
 	_transaction = null
 	_backend = null
 	_receipt = {}
@@ -128,6 +132,7 @@ func take_committed_transaction() -> Dictionary:
 	_source_descriptor = {}
 	_source_seed = ""
 	_durable_source_revision = -1
+	_durable_source_owner_id = 0
 	_state = "transferred"
 	return {"status":"ready", "transaction":transferred, "receipt":receipt,
 		"transactionId":transferred.get_instance_id(),
@@ -150,6 +155,8 @@ func reclaim_unadopted_transaction(transaction: RefCounted,
 			or int(state.get("generation", 0)) != int(_transfer_identity.get("generation", 0)) \
 			or int(state.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
 			or state.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or int(state.get("durableSourceOwnerId", 0)) \
+				!= int(_transfer_identity.get("durableSourceOwnerId", 0)) \
 			or commit_receipt.get("status") != "ready" \
 			or commit_receipt.get("committed") != true \
 			or int(commit_receipt.get("generation", 0)) != int(_transfer_identity.get("generation", 0)) \
@@ -157,7 +164,9 @@ func reclaim_unadopted_transaction(transaction: RefCounted,
 			or commit_receipt.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
 			or commit_receipt.get("sourceDescriptor") != _transfer_identity.get("sourceDescriptor") \
 			or int(commit_receipt.get("durableSourceRevision", -2)) \
-				!= int(_transfer_identity.get("durableSourceRevision", -1)):
+				!= int(_transfer_identity.get("durableSourceRevision", -1)) \
+			or int(commit_receipt.get("durableSourceOwnerId", 0)) \
+				!= int(_transfer_identity.get("durableSourceOwnerId", 0)):
 		return {"status":"failed", "reason":"transferred_owner_reclaim_identity_mismatch",
 			"ownerMustBeRetained":true}
 	var borrowed: Dictionary = transaction.borrow_committed_backend(commit_receipt)
@@ -378,6 +387,7 @@ func snapshot() -> Dictionary:
 	return {"state":_state, "failure":_failure,
 		"transaction":_transaction.snapshot() if _transaction != null else {},
 		"backendRetained":_backend != null,
+		"durableSourceOwnerId":_durable_source_owner_id,
 		"saveRetained":not _save.is_empty(),
 		"transferIdentity":_transfer_identity.duplicate(true),
 		"transferredOwnerBound":_adopted_owner_id != 0,
@@ -395,6 +405,10 @@ func current_source_valid() -> bool:
 	var world = _main.get("world_generation_system")
 	if world == null or not world.has_method("terrain_volume_revision") \
 			or int(world.terrain_volume_revision()) != _durable_source_revision:
+		return false
+	var service = world.get("terrain_volume_service")
+	if service == null or not is_instance_valid(service) \
+			or service.get_instance_id() != _durable_source_owner_id:
 		return false
 	var current: Dictionary = SourceRequest.from_finalized_main(_main)
 	if current.get("status") != "ready" or current.get("request") != _source_descriptor:
@@ -417,10 +431,15 @@ func _begin_import() -> Dictionary:
 	var world = _main.get("world_generation_system")
 	if world == null or not world.has_method("terrain_volume_revision"):
 		return _failed("private_durable_source_revision_missing")
+	var service = world.get("terrain_volume_service")
+	if service == null or not is_instance_valid(service) \
+			or service.get_instance_id() == 0:
+		return _failed("private_durable_source_owner_missing")
 	_durable_source_revision = int(world.terrain_volume_revision())
+	_durable_source_owner_id = service.get_instance_id()
 	_transaction = LoadTransaction.new()
 	var begun: Dictionary = _transaction.start(built.request, 256,
-		built.get("snapshotOwner"), _durable_source_revision)
+		built.get("snapshotOwner"), _durable_source_revision, _durable_source_owner_id)
 	if begun.get("status") != "pending": return _failed(String(begun.get("reason", "private_import_start_failed")))
 	_state = "importing"
 	return begun
@@ -434,6 +453,7 @@ func _finish_drain() -> Dictionary:
 	_source_descriptor = {}
 	_source_seed = ""
 	_durable_source_revision = -1
+	_durable_source_owner_id = 0
 	_state = "drained"
 	return {"status":"ready", "drained":true}
 
