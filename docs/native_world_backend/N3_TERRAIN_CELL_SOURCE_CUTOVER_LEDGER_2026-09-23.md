@@ -505,15 +505,16 @@ adapter, and loaded the just-built exported-release adapter. The exported
 release smoke proves the native module/class and existing save-v2 adapter
 boundary, but does not itself invoke the new projection method.
 
-The fail-closed full LLVM report is preserved at
-`artifacts/native-world-backend/n3-projection-shadow-coverage-retry-2026-09-23/report.json`.
-Its aggregate status remains blocked by older uncovered core paths outside this
-slice. A subsequent focused instrumented run at
-`artifacts/native-world-backend/n3-projection-shadow-focused-coverage/` proves
-352/352 branches (100%) across the two touched pure-core source/batch files;
-every new projection line and function executes. The only remaining uncovered
-lines/functions in those two files are the pre-existing continuous-surface
-wrapper/source pair and old reject-switch line attribution. These LLVM
-percentages cover the standalone pure core only. They do not instrument the
-GDExtension adapter C++; adapter evidence is the Godot contract above and must
-not be reported as 100% instrumented adapter coverage.
+The final tracked-only focused LLVM receipt is preserved at
+`artifacts/native-world-backend/n3-projection-shadow-focused-coverage-postcommit-654b6fc/focused-coverage-receipt.json`
+with SHA-256
+`89c93678b2f4741e336b9dbbc5bb1c4bea368cc511e5370c5dd8ffb5d2b2101b`.
+It records 535/535 standalone native tests and complete coverage across the two
+touched pure-core source/batch translation units: 1,025/1,025 lines, 79/79
+functions, and 352/352 branches. The forwarding-wrapper assertion that closes
+the denominator is part of the tracked native test suite; no transformed or
+untracked harness participates. These LLVM percentages cover the standalone
+pure core only and do not instrument the GDExtension adapter C++. The expanded
+adapter contract is runnable, but the final adapter rebuild and focused Godot
+contract execution remain required on the primary integration worktree; they
+must not be reported as 100% instrumented adapter coverage.
