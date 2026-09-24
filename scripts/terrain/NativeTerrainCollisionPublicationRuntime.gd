@@ -29,6 +29,8 @@ var _request_queue: Array = []
 var _request_cursor := 0
 var _partition_job: Dictionary = {}
 var _row_job: Dictionary = {}
+var _row_snapshot_frame := -1
+var _row_snapshots_in_frame := 0
 var _window_cursor := 0
 var _windows: Dictionary = {}
 var _closure: Dictionary = {"status":"pending", "reason":"not_started"}
@@ -67,7 +69,10 @@ func _process(_delta: float) -> void:
 
 func _advance() -> void:
 	_advancing = true
-	_step_stats = {"layoutChecks":0, "rowSnapshots":0,
+	var row_calls_this_frame := _row_snapshots_in_frame \
+		if _row_snapshot_frame == Engine.get_process_frames() else 0
+	_step_stats = {"layoutChecks":0, "rowSnapshots":row_calls_this_frame,
+		"rowSnapshotFrame":_row_snapshot_frame,
 		"windowsAdvanced":0, "artifactRequests":0}
 	var advanced: Dictionary = _runtime_owner.call("advance_collision_artifacts")
 	if advanced.get("status") == "failed":
@@ -475,10 +480,19 @@ func _advance_window_rows(ticket_result: Dictionary, window: Dictionary,
 		return {"status":"ready", "rows":_row_job.rows, "bounds":_row_job.bounds}
 	var rows: Array[Dictionary] = _row_job.rows
 	var cursor := int(_row_job.cursor)
-	var operations := 0
+	var frame := Engine.get_process_frames()
+	if frame != _row_snapshot_frame:
+		_row_snapshot_frame = frame
+		_row_snapshots_in_frame = 0
+	_step_stats.rowSnapshots = _row_snapshots_in_frame
+	_step_stats.rowSnapshotFrame = frame
 	while cursor < (window.blocks as Array).size() \
-			and operations < MAX_ROW_SNAPSHOTS_PER_FRAME:
+			and _row_snapshots_in_frame < MAX_ROW_SNAPSHOTS_PER_FRAME:
 		var block: Vector3i = window.blocks[cursor]
+		# An unresolved row is still a source call and consumes this frame's
+		# allowance. The cursor remains retryable on the next frame.
+		_row_snapshots_in_frame += 1
+		_step_stats.rowSnapshots = _row_snapshots_in_frame
 		var row_result: Dictionary = source.call("collision_artifact_row_snapshot",
 			block, window.get("identity", {}))
 		if row_result.get("status") != "ready":
@@ -493,8 +507,6 @@ func _advance_window_rows(ticket_result: Dictionary, window: Dictionary,
 		_row_job.bounds = row.bounds if cursor == 0 \
 			else (_row_job.bounds as AABB).merge(row.bounds)
 		cursor += 1
-		operations += 1
-		_step_stats.rowSnapshots = operations
 	_row_job.cursor = cursor
 	if cursor < (window.blocks as Array).size():
 		return {"status":"pending", "reason":"bounded_collision_row_assembly",
@@ -655,6 +667,8 @@ func closure_snapshot() -> Dictionary:
 	return _closure.duplicate(true)
 
 func work_step_snapshot() -> Dictionary:
+	# A caller may sample after the frame's work; include the frame token so
+	# the last observed count is never misread as current-frame work.
 	return _step_stats.duplicate(true)
 
 func admission_router() -> RefCounted:

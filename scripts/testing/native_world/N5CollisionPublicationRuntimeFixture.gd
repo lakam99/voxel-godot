@@ -58,6 +58,21 @@ class BrokerRuntimeFacade extends RefCounted:
 			epoch: String) -> Dictionary:
 		return broker.abort_collision_window_retirement(token, lease, epoch)
 
+class CountedRowSource extends RefCounted:
+	var calls := 0
+	var pending_block := Vector3i(-1, -1, -1)
+	var pending_once := false
+
+	func collision_artifact_row_snapshot(block: Vector3i,
+			_identity: Dictionary) -> Dictionary:
+		calls += 1
+		if pending_once and block == pending_block:
+			pending_once = false
+			return {"status":"pending", "reason":"fixture_row_pending"}
+		return {"status":"ready", "row":{"block":block,
+			"bounds":AABB(Vector3(float(block.x), float(block.y),
+				float(block.z)), Vector3.ONE)}}
+
 func _init() -> void:
 	call_deferred("_run")
 
@@ -65,6 +80,91 @@ func _observe_work(runtime: Node, maxima: Dictionary) -> void:
 	var step: Dictionary = runtime.work_step_snapshot()
 	for key in ["layoutChecks", "rowSnapshots", "windowsAdvanced", "artifactRequests"]:
 		maxima[key] = maxi(int(maxima.get(key, 0)), int(step.get(key, 0)))
+
+func _row_snapshot_budget_probe() -> Dictionary:
+	# Two 40-row windows advance without yielding. The second may consume
+	# only the 24 calls left in the same process frame.
+	var runtime = PUBLICATION.new()
+	runtime._step_stats = {"rowSnapshots":0}
+	var source = CountedRowSource.new()
+	var first_blocks: Array[Vector3i] = []
+	var second_blocks: Array[Vector3i] = []
+	for index in range(40):
+		first_blocks.append(Vector3i(index, 0, 0))
+		second_blocks.append(Vector3i(index + 100, 0, 0))
+	var ticket := {"ticket":"two-window-row-budget"}
+	var first := {"id":Vector3i.ZERO, "windowToken":"first",
+		"identity":{}, "blocks":first_blocks}
+	var second := {"id":Vector3i(1, 0, 0), "windowToken":"second",
+		"identity":{}, "blocks":second_blocks}
+	var first_result: Dictionary = runtime._advance_window_rows(ticket, first, source)
+	var second_result: Dictionary = runtime._advance_window_rows(ticket, second, source)
+	var first_frame_calls: int = int(source.calls)
+	var first_frame_step: Dictionary = runtime.work_step_snapshot()
+	var first_process_frame := Engine.get_process_frames()
+	for ignored in range(4):
+		await process_frame
+		if Engine.get_process_frames() != first_process_frame:
+			break
+	var resumed_process_frame := Engine.get_process_frames()
+	var stale_frame_step: Dictionary = runtime.work_step_snapshot()
+	var resumed: Dictionary = runtime._advance_window_rows(ticket, second, source)
+	var resumed_calls: int = int(source.calls)
+	var resumed_step: Dictionary = runtime.work_step_snapshot()
+	source.pending_block = Vector3i(200, 0, 0)
+	source.pending_once = true
+	var pending_window := {"id":Vector3i(2, 0, 0), "windowToken":"pending",
+		"identity":{}, "blocks":[source.pending_block]}
+	var pending_result: Dictionary = runtime._advance_window_rows(
+		ticket, pending_window, source)
+	var pending_calls: int = int(source.calls)
+	var pending_step: Dictionary = runtime.work_step_snapshot()
+	var retried: Dictionary = runtime._advance_window_rows(ticket, pending_window, source)
+	var retry_step: Dictionary = runtime.work_step_snapshot()
+	var result := {"firstStatus":first_result.get("status"),
+		"secondStatus":second_result.get("status"),
+		"secondReason":second_result.get("reason"),
+		"secondCursor":second_result.get("rowCursor"),
+		"firstFrameCalls":first_frame_calls,
+		"firstFrameStep":first_frame_step.get("rowSnapshots"),
+		"firstStepFrame":first_frame_step.get("rowSnapshotFrame"),
+		"firstProcessFrame":first_process_frame,
+		"resumedProcessFrame":resumed_process_frame,
+		"staleFrameStep":stale_frame_step.get("rowSnapshots"),
+		"staleStepFrame":stale_frame_step.get("rowSnapshotFrame"),
+		"resumedStatus":resumed.get("status"),
+		"resumedCalls":resumed_calls,
+		"resumedStep":resumed_step.get("rowSnapshots"),
+		"resumedStepFrame":resumed_step.get("rowSnapshotFrame"),
+		"pendingStatus":pending_result.get("status"),
+		"pendingCursor":pending_result.get("rowCursor"),
+		"pendingCalls":pending_calls,
+		"pendingStep":pending_step.get("rowSnapshots"),
+		"retryStatus":retried.get("status"),
+		"retryStep":retry_step.get("rowSnapshots")}
+	result["passed"] = first_result.get("status") == "ready" \
+		and second_result.get("status") == "pending" \
+		and second_result.get("reason") == "bounded_collision_row_assembly" \
+		and int(second_result.get("rowCursor", -1)) == 24 \
+		and first_frame_calls == PUBLICATION.MAX_ROW_SNAPSHOTS_PER_FRAME \
+		and int(first_frame_step.get("rowSnapshots", -1)) == first_frame_calls \
+		and int(first_frame_step.get("rowSnapshotFrame", -1)) == first_process_frame \
+		and resumed_process_frame > first_process_frame \
+		and int(stale_frame_step.get("rowSnapshots", -1)) == first_frame_calls \
+		and int(stale_frame_step.get("rowSnapshotFrame", -1)) == first_process_frame \
+		and resumed.get("status") == "ready" \
+		and resumed_calls == 80 \
+		and int(resumed_step.get("rowSnapshots", -1)) == 16 \
+		and int(resumed_step.get("rowSnapshotFrame", -1)) == resumed_process_frame \
+		and pending_result.get("status") == "pending" \
+		and int(pending_result.get("rowCursor", -1)) == 0 \
+		and pending_calls == 81 \
+		and int(pending_step.get("rowSnapshots", -1)) == 17 \
+		and retried.get("status") == "ready" \
+		and source.calls == 82 \
+		and int(retry_step.get("rowSnapshots", -1)) == 18
+	runtime.free()
+	return result
 
 func _memory(epoch: String):
 	var policy = MEMORY_POLICY.new()
@@ -83,6 +183,8 @@ func _memory(epoch: String):
 
 func _run() -> void:
 	var evidence := {}
+	var row_budget_probe: Dictionary = await _row_snapshot_budget_probe()
+	evidence["rowSnapshotBudgetProbe"] = row_budget_probe
 	var main = MAIN.new()
 	main.seed_text = "n5-collision-publication-runtime"
 	main.seed_hash = main.hash_string(main.seed_text)
@@ -452,6 +554,7 @@ func _run() -> void:
 		<= PUBLICATION.MAX_LAYOUT_CHECKS_PER_FRAME
 	checks["rowStepBounded"] = int(work_maxima.rowSnapshots) \
 		<= PUBLICATION.MAX_ROW_SNAPSHOTS_PER_FRAME
+	checks["aggregateRowFrameBounded"] = bool(row_budget_probe.get("passed", false))
 	checks["windowStepBounded"] = int(work_maxima.windowsAdvanced) \
 		<= PUBLICATION.MAX_WINDOWS_PER_FRAME
 	checks["requestStepBounded"] = int(work_maxima.artifactRequests) \
