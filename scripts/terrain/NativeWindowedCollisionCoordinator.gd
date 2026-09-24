@@ -35,6 +35,7 @@ var _retirement_inflight := {}
 var _barriers := {}
 var _barrier_identities := {}
 var _barrier_bounds := {}
+var _barrier_window_tokens := {}
 var _retired_barriers: Array[Dictionary] = []
 var _stopping := false
 var _aggregate_ticket := ""
@@ -334,7 +335,7 @@ func commit_staged_replacement(window: Dictionary, owner: Node3D,
 	if _displaced_owners.size() >= MAX_DISPLACED_OWNERS:
 		return {"status":"pending", "reason":"physical_window_displaced_owner_capacity"}
 	var old_barrier_record := _find_retired_barrier_record(id,
-		stage.get("oldWindow", {}).get("identity", {}))
+		String(stage.get("oldWindowToken", "")))
 	if old_barrier_record.is_empty():
 		return {"status":"pending", "reason":"physical_window_old_barrier_not_retained"}
 	var old_tuple := {"id":id, "owner":stage.oldOwner,
@@ -375,9 +376,10 @@ func _invalidate_aggregate_for_owner_switch() -> void:
 		"reason":"physical_owner_replacement_committed"}
 	_aggregate_last_step_frame = -1
 
-func _find_retired_barrier_record(id: Vector3i, identity: Dictionary) -> Dictionary:
+func _find_retired_barrier_record(id: Vector3i, window_token: String) -> Dictionary:
 	for record in _retired_barriers:
-		if record.get("windowId") == id and record.get("identity") == identity:
+		if record.get("windowId") == id \
+				and String(record.get("windowToken", "")) == window_token:
 			return record
 	return {}
 
@@ -388,7 +390,8 @@ func _displaced_barrier_clearance(id: Vector3i, displaced: Dictionary) -> Dictio
 	if old_identity.is_empty() or not old_bounds is AABB \
 			or not is_instance_valid(old_barrier):
 		return {"status":"pending", "reason":"displaced_old_barrier_missing"}
-	var retained := _find_retired_barrier_record(id, old_identity)
+	var retained := _find_retired_barrier_record(id,
+		String(displaced.get("windowToken", "")))
 	if retained.is_empty() or retained.get("barrier") != old_barrier \
 			or retained.get("bounds") != old_bounds or not old_barrier.is_active():
 		return {"status":"pending", "reason":"displaced_old_barrier_not_retained"}
@@ -427,10 +430,12 @@ func begin_window_barrier(window: Dictionary, bounds: AABB,
 	if _barriers.has(window.id) and _barriers[window.id].is_active():
 		_retired_barriers.append({"barrier":_barriers[window.id],
 			"identity":_barrier_identities[window.id], "windowId":window.id,
+			"windowToken":String(_barrier_window_tokens.get(window.id, "")),
 			"bounds":_barrier_bounds[window.id]})
 	_barriers[window.id] = barrier
 	_barrier_identities[window.id] = identity.duplicate(true)
 	_barrier_bounds[window.id] = bounds
+	_barrier_window_tokens[window.id] = String(window.get("windowToken", ""))
 	return {"status":begun.status, "windowId":window.id,
 		"barrier":barrier, "census":begun}
 
@@ -660,6 +665,7 @@ func release_barriers(identity: Dictionary) -> Dictionary:
 	_barriers.clear()
 	_barrier_identities.clear()
 	_barrier_bounds.clear()
+	_barrier_window_tokens.clear()
 	_retired_barriers.clear()
 	return {"status":"ready", "aggregate":aggregate_readiness(identity)}
 
@@ -961,6 +967,7 @@ func stop_and_drain() -> Dictionary:
 	_barriers.clear()
 	_barrier_identities.clear()
 	_barrier_bounds.clear()
+	_barrier_window_tokens.clear()
 	_retired_barriers.clear()
 	_retirement_leases.clear()
 	return {"status":"ready", "drained":true,
