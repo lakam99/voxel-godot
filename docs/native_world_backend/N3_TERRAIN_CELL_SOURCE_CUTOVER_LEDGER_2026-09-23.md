@@ -702,3 +702,27 @@ saves to lose them. This requires a distinct immutable generated-patch source
 with precedence durable explicit (including AIR) > generated patch > natural;
 it must be integrated before native effective-terrain cutover. Citadel exact
 building geometry remains a separate authority/tranche.
+
+The pure-core generated-terrain-patch candidate is now integrated as
+`eb508bb`, `89010a2`, `4242200`, and `a7096ac` (original isolated commits
+`7414091`, `7e64e0a`, `c0edd3c`, and `b5eb965`). Independent review approved
+only this pure-core shadow slice. On a disposable worktree based on primary
+`9e8ced3` plus these four patches, debug and release suites each passed
+589/589, Godot adapter smoke and release save-v2 export probe passed, and the
+changed candidate files have exact coverage: generated patch 868/868 lines
+and 398/398 branches; `NativeValue` 274/274 and 130/130; SHA-256 150/150 and
+26/26. The current-primary gate report is
+`C:/Users/arkam/.codex/worktrees/gpval-final-lf-20260924/artifacts/native-world-backend/generated-patch-current-primary-lf-retry1-20260924/report.json`
+(source receipt SHA-256
+`fc4fb266482dfba21c97bec887ad0c7915f7bf19ee858c7a3a1da17276fd4c7a`). Whole-
+core coverage remains `blocked` at 13,565/13,575 lines and 7,732/7,734
+branches by pre-existing save-v2 importer lines 109–113 and 166–170 plus
+branches 69/85; none of the candidate commits changes that importer. The
+candidate changes only core C++ files, core `NativeValue`/SHA helpers, the
+source manifest and native tests; it adds no production adapter/runtime/save
+or routing caller. This is not generated-patch source integration, physical
+parity, native authority cutover, or N3/N4/N5 completion. Remaining core
+limits include synchronous worst-case tombstone projection, caller-attested
+feature-definition digest until N4 binds the real producer, and no live
+`StructureSystem` differential. No broad suite will be repeated until a
+focused integration change needs it.
