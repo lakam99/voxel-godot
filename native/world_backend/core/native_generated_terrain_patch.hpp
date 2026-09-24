@@ -137,6 +137,7 @@ enum class NativeGeneratedTerrainPatchFailure : std::uint8_t {
     page_retained_bytes_limit = 30,
     manifest_peak_working_bytes_limit = 31,
     page_peak_working_bytes_limit = 32,
+    invalid_feature_definition_digest = 33,
 };
 
 class NativeGeneratedTerrainPatchError final : public std::runtime_error {
@@ -149,10 +150,13 @@ private:
 };
 
 struct NativeGeneratedTerrainPatchManifestDescriptor final {
-    static constexpr std::uint32_t SCHEMA_REVISION = 1U;
+    static constexpr std::uint32_t SCHEMA_REVISION = 2U;
 
     std::uint32_t schema_revision = SCHEMA_REVISION;
     WorldPhysicalContentIdentity world_physical_identity;
+    // Exact upstream generator/catalog definition-set identity. It is
+    // separate from this manifest's operation/content digest.
+    Sha256Digest generated_feature_definition_digest{};
     std::string region_id;
     NativeInclusiveCellBox complete_region_bounds;
     std::uint32_t producer_revision = 0;
@@ -174,6 +178,7 @@ public:
 
     std::uint32_t schema_revision() const noexcept;
     const WorldPhysicalContentIdentity &world_physical_identity() const noexcept;
+    const Sha256Digest &generated_feature_definition_digest() const noexcept;
     const std::string &region_id() const noexcept;
     const NativeInclusiveCellBox &complete_region_bounds() const noexcept;
     std::uint32_t producer_revision() const noexcept;
@@ -188,6 +193,8 @@ public:
     std::size_t retained_bytes() const noexcept;
     // Conservative maximum of final storage plus all simultaneously live
     // admission scratch buffers, checked before those buffers are allocated.
+    // SHA-256 consumes the retained canonical bytes in place with fixed stack
+    // padding, so it does not add canonical-size heap scratch here.
     std::size_t peak_working_bytes() const noexcept;
 
 private:
@@ -215,6 +222,8 @@ struct NativeGeneratedTerrainPatchHalo final {
 
 struct NativeGeneratedTerrainPageDomain final {
     std::string page_id;
+    // Required caller/source binding; projection rejects zero or mismatch.
+    Sha256Digest generated_feature_definition_digest{};
     // Opaque stable scope coordinate. It is identity/provenance, deliberately
     // not a section authority: terrain pages may span multiple 16-cell storage
     // sections and their vertical collision windows are caller-selected.
@@ -263,6 +272,10 @@ public:
     // Conservative normalized final-storage and construction-peak bounds.
     std::size_t retained_bytes() const noexcept;
     std::size_t peak_working_bytes() const noexcept;
+    // Count of UTF-8 bytes/terminators inspected while sorting, validating,
+    // and applying the bounded tombstone index. Useful for runtime telemetry
+    // and a direct assertion that projection work is no longer quadratic.
+    std::uint64_t tombstone_work_units() const noexcept;
     std::optional<NativeResolvedGeneratedTerrainPatchCell> resolve(CellCoord cell) const;
 
 private:
@@ -274,7 +287,8 @@ private:
         std::vector<std::uint8_t> canonical_binary,
         Sha256Digest projection_digest,
         std::size_t retained_bytes,
-        std::size_t peak_working_bytes);
+        std::size_t peak_working_bytes,
+        std::uint64_t tombstone_work_units);
 
     NativeGeneratedTerrainPageDomain domain_;
     NativeInclusiveCellBox projected_bounds_;
@@ -284,6 +298,7 @@ private:
     Sha256Digest projection_digest_{};
     std::size_t retained_bytes_ = 0U;
     std::size_t peak_working_bytes_ = 0U;
+    std::uint64_t tombstone_work_units_ = 0U;
 };
 
 } // namespace voxel::world_backend

@@ -1,5 +1,6 @@
 #include "sha256.hpp"
 
+#include <cstring>
 #include <stdexcept>
 
 namespace voxel::world_backend {
@@ -20,12 +21,6 @@ constexpr std::uint32_t rotate_right(const std::uint32_t value, const unsigned c
     return (value >> count) | (value << (32U - count));
 }
 
-void append_u64_big_endian(std::vector<std::uint8_t> &bytes, const std::uint64_t value) {
-    for (int shift = 56; shift >= 0; shift -= 8) {
-        bytes.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
-    }
-}
-
 } // namespace
 
 Sha256Digest sha256(const std::uint8_t *data, const std::size_t size) {
@@ -36,29 +31,18 @@ Sha256Digest sha256(const std::uint8_t *data, const std::size_t size) {
         throw std::length_error("SHA-256 input is too large");
     }
 
-    std::vector<std::uint8_t> padded;
-    padded.reserve(size + 72U);
-    if (size != 0U) {
-        padded.insert(padded.end(), data, data + size);
-    }
-    padded.push_back(0x80U);
-    while ((padded.size() % 64U) != 56U) {
-        padded.push_back(0U);
-    }
-    append_u64_big_endian(padded, static_cast<std::uint64_t>(size) * 8U);
-
     std::array<std::uint32_t, 8> state = {
         0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
         0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U,
     };
-    for (std::size_t block = 0; block < padded.size(); block += 64U) {
+    const auto process_block = [&](const std::uint8_t *block) {
         std::array<std::uint32_t, 64> schedule{};
         for (std::size_t index = 0; index < 16U; ++index) {
-            const std::size_t offset = block + index * 4U;
-            schedule[index] = (static_cast<std::uint32_t>(padded[offset]) << 24U)
-                | (static_cast<std::uint32_t>(padded[offset + 1U]) << 16U)
-                | (static_cast<std::uint32_t>(padded[offset + 2U]) << 8U)
-                | static_cast<std::uint32_t>(padded[offset + 3U]);
+            const std::size_t offset = index * 4U;
+            schedule[index] = (static_cast<std::uint32_t>(block[offset]) << 24U)
+                | (static_cast<std::uint32_t>(block[offset + 1U]) << 16U)
+                | (static_cast<std::uint32_t>(block[offset + 2U]) << 8U)
+                | static_cast<std::uint32_t>(block[offset + 3U]);
         }
         for (std::size_t index = 16U; index < schedule.size(); ++index) {
             const std::uint32_t s0 = rotate_right(schedule[index - 15U], 7U)
@@ -100,6 +84,26 @@ Sha256Digest sha256(const std::uint8_t *data, const std::size_t size) {
         state[5] += f;
         state[6] += g;
         state[7] += h;
+    };
+
+    // Hash complete input blocks in place. Padding uses at most two fixed
+    // stack blocks, so digesting a retained canonical artifact never creates
+    // a second canonical-size heap allocation.
+    const std::size_t complete_bytes = size - size % 64U;
+    for (std::size_t offset = 0U; offset < complete_bytes; offset += 64U) {
+        process_block(data + offset);
+    }
+    std::array<std::uint8_t, 128> tail{};
+    const std::size_t remainder = size - complete_bytes;
+    if (remainder != 0U) std::memcpy(tail.data(), data + complete_bytes, remainder);
+    tail[remainder] = 0x80U;
+    const std::size_t padded_tail_size = remainder < 56U ? 64U : 128U;
+    const std::uint64_t bit_size = static_cast<std::uint64_t>(size) * 8U;
+    for (std::size_t index = 0U; index < 8U; ++index) {
+        tail[padded_tail_size - 1U - index] = static_cast<std::uint8_t>(bit_size >> (index * 8U));
+    }
+    for (std::size_t offset = 0U; offset < padded_tail_size; offset += 64U) {
+        process_block(tail.data() + offset);
     }
 
     Sha256Digest digest{};

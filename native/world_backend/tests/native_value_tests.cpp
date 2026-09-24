@@ -27,6 +27,35 @@ public:
     std::vector<std::uint8_t> bytes;
 };
 
+std::size_t actual_compact_dynamic_bytes(const NativeValue &value) {
+    switch (value.kind()) {
+    case NativeValueKind::null_value:
+    case NativeValueKind::boolean:
+    case NativeValueKind::number:
+        return 0U;
+    case NativeValueKind::string: {
+        const std::string &text = value.as_string();
+        return text.capacity() <= 15U ? 0U : text.capacity() + 1U;
+    }
+    case NativeValueKind::array: {
+        const NativeValue::Array &values = value.as_array();
+        std::size_t result = values.capacity() * sizeof(NativeValue);
+        for (const NativeValue &entry : values) result += actual_compact_dynamic_bytes(entry);
+        return result;
+    }
+    case NativeValueKind::object: {
+        const NativeValue::Object &entries = value.as_object();
+        std::size_t result = entries.capacity() * sizeof(NativeValue::Object::value_type);
+        for (const auto &entry : entries) {
+            if (entry.first.capacity() > 15U) result += entry.first.capacity() + 1U;
+            result += actual_compact_dynamic_bytes(entry.second);
+        }
+        return result;
+    }
+    }
+    return 0U;
+}
+
 } // namespace
 
 VWB_TEST(native_value_admits_all_canonical_json_value_kinds_and_exact_structure) {
@@ -223,4 +252,37 @@ VWB_TEST(native_value_owner_metrics_sink_and_compact_copy_are_value_semantic) {
     roomy.write_canonical(sink);
     VWB_EXPECT_EQ(roomy_metrics.canonical_bytes, sink.bytes.size());
     VWB_EXPECT_EQ(roomy.canonical_binary(), sink.bytes);
+}
+
+VWB_TEST(native_value_compact_metric_bounds_actual_pinned_stl_storage_at_growth_thresholds) {
+    const std::vector<std::size_t> string_sizes = {0U, 1U, 14U, 15U, 16U, 17U, 30U, 31U, 32U,
+        33U, 62U, 63U, 64U, 65U, 1023U, 1024U, NativeValueLimits::MAX_STRING_BYTES};
+    for (const std::size_t size : string_sizes) {
+        const NativeValue compact = NativeValue::string(std::string(size, 's')).compact_copy();
+        VWB_EXPECT(actual_compact_dynamic_bytes(compact)
+            <= compact.canonical_metrics().compact_retained_dynamic_bytes);
+    }
+
+    NativeValue::Array inner;
+    inner.reserve(257U);
+    for (std::size_t index = 0U; index < 257U; ++index) {
+        inner.push_back(NativeValue::string(std::string(14U + index % 20U, 'a')));
+    }
+    NativeValue::Object object;
+    object.reserve(33U);
+    for (std::size_t index = 0U; index < 33U; ++index) {
+        std::string key = "capacity-key-" + std::to_string(100U + index);
+        object.emplace_back(std::move(key), index == 16U
+            ? NativeValue::array(inner)
+            : NativeValue::array({NativeValue::null(), NativeValue::number(static_cast<double>(index))}));
+    }
+    NativeValue::Array outer;
+    outer.reserve(65U);
+    outer.push_back(NativeValue::object(std::move(object)));
+    outer.push_back(NativeValue::array(std::move(inner)));
+    const NativeValue compact_nested = NativeValue::array(std::move(outer)).compact_copy();
+    const std::size_t actual = actual_compact_dynamic_bytes(compact_nested);
+    const std::size_t bound = compact_nested.canonical_metrics().compact_retained_dynamic_bytes;
+    VWB_EXPECT(actual <= bound);
+    VWB_EXPECT(compact_nested.as_array().capacity() <= compact_nested.as_array().size());
 }
