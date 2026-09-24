@@ -489,6 +489,44 @@ func _run() -> void:
 		return
 	layout = retained_layout
 	window = retained_window
+	# A second actor window can keep a multi-window release pending after the
+	# first window's retired barrier has already released. Exercise that partial
+	# lifecycle before replacing the first real physical owner below.
+	var second_window := {"id":Vector3i(4, 0, 0),
+		"windowToken":"fixture:second-actor-window"}
+	var second_window_bounds := AABB(Vector3(512, 0, 512), Vector3(4, 4, 4))
+	var second_window_actor := CharacterBody3D.new()
+	second_window_actor.position = second_window_bounds.get_center()
+	var second_window_shape := CollisionShape3D.new()
+	var second_window_sphere := SphereShape3D.new()
+	second_window_sphere.radius = 0.35
+	second_window_shape.shape = second_window_sphere
+	second_window_actor.add_child(second_window_shape)
+	root_3d.add_child(second_window_actor)
+	await physics_frame
+	var second_window_hold: Dictionary = coordinator.begin_window_barrier(
+		second_window, second_window_bounds, layout.identity)
+	var first_old_hold: Dictionary = coordinator.begin_window_barrier(
+		window, bounds, layout.identity)
+	var first_old_barrier: RefCounted = first_old_hold.get("barrier")
+	var first_rebind_hold: Dictionary = coordinator.begin_window_barrier(
+		window, bounds, layout.identity)
+	var second_window_clearance: Dictionary = second_window_hold.get("barrier").clearance(
+		layout.identity)
+	var partial_barrier_release: Dictionary = coordinator.release_barriers(layout.identity)
+	var first_old_barrier_released: bool = not first_old_barrier.is_active()
+	var first_old_record_removed := true
+	for retired_record in coordinator._retired_barriers:
+		if retired_record.get("barrier") == first_old_barrier:
+			first_old_record_removed = false
+	var owner_live_after_partial_release: bool = owner.is_inside_tree() \
+		and owner._live.size() == window.get("blocks", []).size()
+	second_window_actor.position = second_window_bounds.position + Vector3(8, 0, 8)
+	await physics_frame
+	var second_window_released: bool = second_window_hold.get("barrier").release(
+		layout.identity)
+	second_window_actor.queue_free()
+	await process_frame
 	var old_hold: Dictionary = coordinator.begin_window_barrier(window,
 		bounds.grow(0.5), layout.identity)
 	var old_barrier: RefCounted = old_hold.get("barrier")
@@ -1025,6 +1063,14 @@ func _run() -> void:
 		and retained_receipt.get("provenance", {}).get("localCurrentProof") \
 			== retained_proof \
 		and retained_aggregate.get("status") == "ready" \
+		and second_window_hold.get("status") == "ready" \
+		and first_old_hold.get("status") == "ready" \
+		and first_rebind_hold.get("status") == "ready" \
+		and not bool(second_window_clearance.get("clear", false)) \
+		and partial_barrier_release.get("status") == "pending" \
+		and partial_barrier_release.get("reason") == "window_actor_clearance_pending" \
+		and first_old_barrier_released and first_old_record_removed \
+		and owner_live_after_partial_release and second_window_released \
 		and original_replacement_layout.identity.sourceRevision == 2 \
 		and not bool(affected_window_rebind_rejected.get("ready", false)) \
 		and replacement_layout.identity.cancellationEpoch \
@@ -1178,6 +1224,15 @@ func _run() -> void:
 			"aggregate":retained_aggregate, "source":retained_source,
 			"actorContactAfterRebind":retained_contact},
 		"sourceRevisionReplacement": {"oldIdentity":first_identity,
+			"partialReleaseLifecycle":{"secondWindowHold":second_window_hold.get("status"),
+				"firstOldHold":first_old_hold.get("status"),
+				"firstRebindHold":first_rebind_hold.get("status"),
+				"secondWindowClearance":second_window_clearance,
+				"partialRelease":partial_barrier_release,
+				"firstOldBarrierReleased":first_old_barrier_released,
+				"firstOldRecordRemoved":first_old_record_removed,
+				"oldOwnerStillLive":owner_live_after_partial_release,
+				"secondWindowReleased":second_window_released},
 			"oldHold":old_hold.get("status"),
 			"committed":committed, "newLayout":replacement_layout,
 			"initialReplacementLayout":original_replacement_layout,

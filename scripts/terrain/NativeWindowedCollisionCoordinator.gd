@@ -693,19 +693,27 @@ func release_barriers(identity: Dictionary) -> Dictionary:
 	if not bool(physical_receipt(identity).get("ready", false)):
 		return {"status":"pending", "reason":"aggregate_collision_not_physical"}
 	var pending: Array[Vector3i] = []
+	var still_retired: Array[Dictionary] = []
 	for record in _retired_barriers:
 		var barrier: RefCounted = record.barrier
+		# A previous partial release may have completed this barrier while another
+		# window remained held. It no longer owns admission or retirement demand.
+		if not barrier.is_active():
+			continue
 		var displaced: Dictionary = _displaced_owners.get(record.windowId, {})
 		if displaced.get("windowToken") == record.get("windowToken"):
 			pending.append(record.windowId)
+			still_retired.append(record)
 			continue
 		var replacement: RefCounted = _barriers.get(record.windowId)
 		if replacement == null or not replacement.is_active() \
 				or not replacement.covers_bounds(identity, record.bounds) \
 				or not bool(replacement.clearance(identity).get("clear", false)) \
-				or barrier.is_active() and not barrier.release_after_replacement(
+				or not barrier.release_after_replacement(
 					record.identity, identity):
 			pending.append(record.windowId)
+			still_retired.append(record)
+	_retired_barriers = still_retired
 	if not pending.is_empty():
 		return {"status":"pending", "reason":"window_actor_clearance_pending",
 			"pendingWindowIds":pending}
