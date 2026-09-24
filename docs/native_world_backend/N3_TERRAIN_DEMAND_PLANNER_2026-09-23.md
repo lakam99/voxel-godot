@@ -50,3 +50,43 @@ must feed real viewer/foreground/retained inputs and retain an over-cap
 candidate until it can admit that viewer safely. The planner's conservative
 rectangle may overfetch; measure the exact engine residency and frame cost
 before narrowing it, never omit active mesh inputs to chase a smaller count.
+
+## 2026-09-24 bounded replacement handoff checkpoint
+
+`NativeTerrainRuntimeOwner` now exposes the planner's leased,
+frame-budgeted begin/advance/cancel replacement API. Its service fixture
+drives a 27-block request through that API and verifies the same owner and
+publisher receive it. This is an inert owner boundary: production
+`VoxelTerrainRuntime` has not adopted the owner, and the older synchronous
+`replace_demand` entry point remains for existing fixture callers. It is not
+N3 production cutover or streaming performance acceptance.
+
+An independent review found that superseding active request A with queued B,
+then requesting C before A drained, silently replaced B's token and payload.
+The replacement now returns `replacement_successor_slot_occupied` with
+`accepted:false`, `retryable:true`, and the two retained tokens. It does not
+consume a token or take ownership of C. The producer keeps C and retries after
+B reaches a terminal result. The focused contract proves A→B→C, B publication,
+and C's eventual retry; no request disappears.
+
+Focused commands passed with Dummy audio and `VOXEL_DISABLE_AUDIO_PLAYBACK=1`:
+
+- `node tools/run-n3-terrain-demand-replacement.mjs` —
+  `artifacts/native-world-backend/n3-terrain-demand-replacement-1790212784046-9b193263/report.json`;
+  maximum 256 work units per advance. This is a planner contract, not physical
+  publication evidence.
+- `node tools/run-n3-terrain-runtime-owner.mjs` —
+  `artifacts/native-world-backend/n3-terrain-runtime-owner-1790212773403-3be7561a/report.json`;
+  service-level owner/publication handoff only.
+- `node tools/run-project-compile-smoke.mjs` — passed after project import.
+
+Each completed runner reported natural exit and authoritative zero owned
+processes in its watchdog receipt. This fresh worktree had no installed
+GDExtension DLLs or Godot import cache. The Voxel Tools and custom native DLLs
+used for the service fixture were copied from the existing isolated N3
+worktree, then this project was imported. Those DLLs were **not rebuilt from
+this checkout's source**, so the service run does not certify current native
+source/binary identity. No C++ file changed in this checkpoint. A current
+debug/release build and source-bound receipt remain required before native
+cutover evidence. Godot's generated import metadata was restored; only the
+four intended source/test files and this ledger are part of the checkpoint.

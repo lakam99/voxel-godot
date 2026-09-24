@@ -220,6 +220,24 @@ func replace_demand(primary: Dictionary, other_viewers: Array[Dictionary],
 	return _planner.replace_sources(primary, other_viewers, retained_chunks,
 		foreground_chunks, vertical_bounds)
 
+## The production caller retains these request values and their lease until a
+## terminal replacement result. Large viewer footprints must use this bounded
+## path instead of the synchronous compatibility entry point above.
+func begin_demand_replacement(primary: Dictionary, other_viewers: Array[Dictionary],
+		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
+		vertical_bounds: Vector2i, request_lease, request_revision: int) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _planner.begin_replace_sources(primary, other_viewers, retained_chunks,
+		foreground_chunks, vertical_bounds, request_lease, request_revision)
+
+func advance_demand_replacement() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _planner.advance_replace_sources()
+
+func cancel_demand_replacement(token: int) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _planner.cancel_replace_sources(token)
+
 ## N5 may request a current source artifact, but this inert owner cannot claim
 ## physical collision readiness or install a shape.
 func request_collision_artifact(block: Vector3i) -> Dictionary:

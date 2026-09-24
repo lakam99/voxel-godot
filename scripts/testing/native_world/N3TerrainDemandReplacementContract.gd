@@ -210,11 +210,23 @@ func run() -> void:
 	check(replacement_begin.get("reason") == "replacement_supersede_drain_pending"
 		and replacement_begin.get("supersededToken") == abandoned_begin.get("token"),
 		"new request supersedes the old candidate while retaining it for drain")
+	var third_request := _make_request(
+		{}, [], [Vector2i(2, 0)], [], Vector2i(32, 32), 5)
+	var occupied: Dictionary = _begin(planner, third_request)
+	check(occupied.get("status") == "pending"
+		and occupied.get("reason") == "replacement_successor_slot_occupied"
+		and occupied.get("retryable") == true
+		and occupied.get("accepted") == false
+		and occupied.get("queuedToken") == replacement_begin.get("token")
+		and occupied.get("retiringToken") == abandoned_begin.get("token")
+		and not occupied.has("token"),
+		"third request receives an explicit retryable outcome without stealing the queued token")
 	var replacement_snapshot := _accepted_snapshot(planner)
 	var replacement: Dictionary = await _drive(planner, replacement_snapshot)
 	check(replacement.get("status") == "ready"
 		and int(replacement.get("token", 0)) == int(replacement_begin.get("token", -1))
-		and planner._sources.has("chunk:retained:-1:0"),
+		and planner._sources.has("chunk:retained:-1:0")
+		and not planner._sources.has("chunk:retained:2:0"),
 		"superseding request survives old-candidate retirement and becomes accepted")
 	var negative_source: Dictionary = planner._sources.get("chunk:retained:-1:0", {})
 	var negative_blocks := negative_source.keys()
@@ -229,6 +241,16 @@ func run() -> void:
 	check(has_negative and has_lower_input and has_upper_input
 		and negative_mesh.has(Vector3i(-2, 2, 0)),
 		"negative chunk coordinates and lower/upper data-input halos surround the y=2 mesh layer")
+	var third_begin: Dictionary = _begin(planner, third_request)
+	check(third_begin.get("status") == "pending"
+		and third_begin.get("reason") == "replacement_started"
+		and int(third_begin.get("token", 0)) == int(replacement_begin.get("token", 0)) + 1,
+		"rejected third request retries with a new token after queued successor publishes")
+	var third_result: Dictionary = await _drive(planner, _accepted_snapshot(planner))
+	check(third_result.get("status") == "ready"
+		and third_result.get("token") == third_begin.get("token")
+		and planner._sources.has("chunk:retained:2:0"),
+		"retried third request eventually publishes its own demand")
 
 	# Explicit cancellation drains candidate-owned data one bounded entry at a
 	# time and leaves accepted and applied facts intact.
@@ -457,6 +479,10 @@ func run() -> void:
 			"totalWorkOps":total_work_ops, "advanceCount":advance_count},
 		"checks":{"initialPlanAtomic":initial.get("status") == "ready",
 			"closureTokenMatchesSynchronous":sync_result.get("closureToken") == initial.get("closureToken"),
+			"occupiedSuccessorRetryable":occupied.get("reason") == "replacement_successor_slot_occupied"
+				and occupied.get("accepted") == false
+				and replacement.get("token") == replacement_begin.get("token")
+				and third_result.get("token") == third_begin.get("token"),
 			"capacityRetained":capacity.get("reason") == "desired_union_capacity",
 			"cancelDrained":cancelled.get("cancelled", false),
 			"sortScratchCancelDrained":sort_cancelled.get("cancelled", false)

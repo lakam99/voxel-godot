@@ -8,6 +8,7 @@ const WORLD = preload("res://scripts/WorldGenerationSystem.gd")
 const VOLUME = preload("res://scripts/TerrainVolumeService.gd")
 const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const LOAD_TRANSACTION = preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
+const DEMAND_LEASE = preload("res://scripts/terrain/NativeTerrainDemandRequestLease.gd")
 
 var failures: Array[String] = []
 var observations: Array[Dictionary] = []
@@ -375,10 +376,24 @@ func run() -> void:
 			"second edit retained behind unproven physical barrier")
 		check(int(owner.export_terrain_volume_v2().get("nativeRevision", -1)) == native_revision + 1,
 			"blocked second edit does not advance save owner")
-		var demand: Dictionary = owner.replace_demand(
-			{"position":Vector3.ZERO,"distance":0}, [], [], [], Vector2i(0, 0))
+		var primary := {"position":Vector3.ZERO,"distance":0}
+		var other_viewers: Array[Dictionary] = []
+		var retained_chunks: Array[Vector2i] = []
+		var foreground_chunks: Array[Vector2i] = []
+		var bounds := Vector2i(0, 0)
+		var demand_lease = DEMAND_LEASE.new()
+		check(demand_lease.acquire(owner, primary, other_viewers,
+			retained_chunks, foreground_chunks, bounds, 1),
+			"demand producer retains exact request values")
+		var demand: Dictionary = owner.begin_demand_replacement(primary,
+			other_viewers, retained_chunks, foreground_chunks, bounds, demand_lease, 1)
+		check(demand.get("status") == "pending", "bounded demand replacement admitted")
+		for _demand_step in range(600):
+			if demand.get("status") != "pending": break
+			demand = owner.advance_demand_replacement()
 		check(demand.get("status") == "ready" and demand.get("desiredDataBlocks") == 27,
-			"planner demand admitted into one owner")
+			"bounded planner demand admitted into one owner")
+		demand_lease.release_after_drain()
 		var tick: Dictionary = owner.advance()
 		check(tick.get("status") in ["ready", "pending"], "owner advances native demand")
 		check(int(owner.snapshot().publisher.get("demanded", 0)) == 27,

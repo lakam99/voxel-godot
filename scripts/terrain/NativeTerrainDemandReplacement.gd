@@ -39,6 +39,15 @@ func begin(primary: Dictionary, other_viewers: Array[Dictionary],
 	if other_viewers.size() > 4096 or retained_chunks.size() > 4096 \
 			or foreground_chunks.size() > 4096:
 		return {"status":"failed", "reason":"demand_source_count_capacity"}
+	# A retiring candidate owns one queued successor. Refuse a third request so
+	# its caller can retry after that successor is acknowledged; replacing the
+	# queued payload here would silently lose an already issued token.
+	if _job.has("queuedRequest"):
+		return {"status":"pending", "reason":"replacement_successor_slot_occupied",
+			"retryable":true, "accepted":false,
+			"queuedToken":int(_job.get("queuedToken", 0)),
+			"retiringToken":int(_job.get("token", 0)),
+			"maxWorkOpsPerAdvance":MAX_WORK_OPS_PER_ADVANCE}
 	var request := {"primary":primary, "otherViewers":other_viewers,
 		"retainedChunks":retained_chunks, "foregroundChunks":foreground_chunks,
 		"verticalBounds":vertical_bounds, "lease":lease,
