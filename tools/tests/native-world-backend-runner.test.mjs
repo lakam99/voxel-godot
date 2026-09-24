@@ -139,21 +139,39 @@ function coverageExport(filename, branches) {
   };
 }
 
-function lineCoverage(filename, records = ['DA:6,1']) {
-  return parseLcovLineCoverage([`SF:${filename}`, ...records, 'end_of_record', ''].join('\n'), [filename]);
+function lineCoverage(filename, records = ['DA:6,1'], linesFound, linesHit) {
+  const da = records.filter(record => record.startsWith('DA:'));
+  const found = linesFound ?? da.length;
+  const hit = linesHit ?? da.filter(record => Number(record.slice(3).split(',')[1]) > 0).length;
+  return parseLcovLineCoverage(
+    [`SF:${filename}`, ...records, `LF:${found}`, `LH:${hit}`, 'end_of_record', ''].join('\n'), [filename]);
 }
 
-test('LLVM lcov parser normalizes paths and fails closed on missing, duplicate, or invalid line records', () => {
+test('LLVM lcov parser normalizes paths and fails closed on malformed records and LF/LH', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
-  const normalized = parseLcovLineCoverage(
-    [`SF:${filename.toUpperCase()}`, 'DA:6,0', 'end_of_record', ''].join('\n'), [filename]);
-  assert.equal(normalized.get(filename.toLowerCase()).get(6), 0);
+  const normalized = lineCoverage(filename.toUpperCase(), ['DA:6,0']);
+  assert.equal(normalized.get(filename.toLowerCase()).lines.get(6), 0);
+  assert.equal(normalized.get(filename.toLowerCase()).linesFound, 1);
+  assert.equal(normalized.get(filename.toLowerCase()).linesHit, 0);
   assert.throws(() => parseLcovLineCoverage('', [filename]), /lcov line export is empty/);
-  assert.throws(() => parseLcovLineCoverage('SF:C:/n1/other.cpp\nDA:6,1\nend_of_record\n', [filename]), /omitted expected/);
+  assert.throws(() => parseLcovLineCoverage('SF:C:/n1/other.cpp\nDA:6,1\nLF:1\nLH:1\nend_of_record\n', [filename]), /omitted expected/);
   assert.throws(() => parseLcovLineCoverage(
-    [`SF:${filename}`, 'DA:6,0', 'DA:6,1', 'end_of_record', ''].join('\n'), [filename]), /duplicated line/);
+    [`SF:${filename}`, 'DA:6,0', 'DA:6,1', 'LF:1', 'LH:0', 'end_of_record', ''].join('\n'), [filename]), /duplicated line/);
   assert.throws(() => parseLcovLineCoverage(
-    [`SF:${filename}`, 'DA:0,-1', 'end_of_record', ''].join('\n'), [filename]), /invalid DA record/);
+    [`SF:${filename}`, 'DA:0,-1', 'LF:1', 'LH:0', 'end_of_record', ''].join('\n'), [filename]), /invalid DA record/);
+  for (const records of [
+    ['DA:6,1', 'LH:1'],
+    ['DA:6,1', 'LF:1'],
+    ['DA:6,1', 'LF:1', 'LF:1', 'LH:1'],
+    ['DA:6,1', 'LF:1', 'LH:1', 'LH:1'],
+    ['DA:6,1', 'LF:x', 'LH:1'],
+    ['DA:6,1', 'LF:1', 'LH:-1'],
+    ['DA:6,1', 'LF:9007199254740992', 'LH:1'],
+    ['DA:6,1', 'LF:1', 'LH:2'],
+  ]) {
+    assert.throws(() => parseLcovLineCoverage(
+      [`SF:${filename}`, ...records, 'end_of_record', ''].join('\n'), [filename]), /LF|LH/);
+  }
 });
 
 test('LLVM 23 branch tuple reads independent true and false edge counts', () => {
@@ -195,14 +213,20 @@ test('LLVM uncovered line serialization rejects disagreement with the authoritat
   assert.throws(() => coverageTotals(value, [filename], [filename], lineCoverage(filename)), /lcov line\/summary mismatch/);
 });
 
-test('LLVM lcov line serialization rejects omitted covered line records', () => {
+test('LLVM lcov line serialization accepts sparse covered DA and rejects zero-count or LF bounds disagreement', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
   const value = coverageExport(filename, []);
+  value.data[0].files[0].summary.lines = { count: 2, covered: 2 };
+  assert.doesNotThrow(() => coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,4'], 2, 2)));
   value.data[0].files[0].summary.lines = { count: 2, covered: 1 };
-  // The one uncovered record still agrees with LLVM's uncovered count, but a
-  // covered DA record is missing, so the per-file total must fail closed.
+  assert.deepEqual(coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,0'], 2, 1)).uncovered.lines, [{ file: filename, line: 10 }]);
   assert.throws(() => coverageTotals(value, [filename], [filename],
-    lineCoverage(filename, ['DA:10,0'])), /lcov line\/summary mismatch.*executable lines/);
+    lineCoverage(filename, ['DA:10,4'], 2, 1)), /DA identifies 0 missed physical lines/);
+  value.data[0].files[0].summary.lines = { count: 1, covered: 1 };
+  assert.throws(() => coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,1', 'DA:11,1'], 1, 1)), /DA count exceeds LF/);
 });
 
 test('LLVM branch tuple rejects invalid edge counts', () => {

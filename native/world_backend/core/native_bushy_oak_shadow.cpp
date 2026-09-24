@@ -37,20 +37,10 @@ std::string trim_ascii(const std::string &source) {
     return source.substr(first, last - first);
 }
 
-std::string lower_ascii(std::string source) {
-    for (char &character : source) {
-        const unsigned char value = static_cast<unsigned char>(character);
-        if (value >= 0x80U) reject();
-        character = static_cast<char>(std::tolower(value));
-    }
-    return source;
-}
-
 std::string lower_ascii_enum_token(std::string source) {
-    // Godot's String.to_lower accepts UTF-8 enum-shaped input. None of the
-    // admitted architecture/grammar/tier values contain non-ASCII codepoints,
-    // so preserve such bytes as an unknown token instead of rejecting valid
-    // UTF-8 at this normalization layer. ASCII letters still fold exactly.
+    // Godot's String.to_lower accepts UTF-8 input. Preserve non-ASCII bytes at
+    // this normalization layer while folding ASCII letters exactly; enum
+    // callers will subsequently treat an unrecognized token as unknown.
     for (char &character : source) {
         const unsigned char value = static_cast<unsigned char>(character);
         if (value < 0x80U) character = static_cast<char>(std::tolower(value));
@@ -245,7 +235,7 @@ NativeBushyOakWorkerShadow NativeBushyOakWorkerShadowBuilder::build(
     if (result.tree_id.empty()) return result;
     result.world_seed = trim_ascii(input.world_seed);
     if (result.world_seed.empty()) result.world_seed = "default";
-    result.biome = lower_ascii(trim_ascii(input.biome));
+    result.biome = lower_ascii_enum_token(trim_ascii(input.biome));
     result.biome_parameters = normalize_parameters(input.biome_parameters);
     result.architecture = lower_ascii_enum_token(trim_ascii(input.has_architecture
         ? input.architecture

@@ -301,6 +301,11 @@ VWB_TEST(native_bushy_oak_worker_shadow_normalizes_dimensions_and_rejects_invali
     request = base_request(); request.render_lod_tier = "f\xC3\xA1r";
     VWB_EXPECT_EQ(std::string("near"),
         NativeBushyOakWorkerShadowBuilder::build(request).render_lod_tier);
+    request = base_request(); request.biome = "For\xC3\xAAt";
+    VWB_EXPECT_EQ(std::string("for\xC3\xAAt"),
+        NativeBushyOakWorkerShadowBuilder::build(request).biome);
+    request = base_request(); request.biome = std::string("\xC3", 1);
+    VWB_EXPECT_THROW(std::invalid_argument, NativeBushyOakWorkerShadowBuilder::build(request));
     request = base_request(); request.growth_stage = std::numeric_limits<double>::quiet_NaN();
     VWB_EXPECT_THROW(NativeBushyOakShadowRejected, NativeBushyOakWorkerShadowBuilder::build(request));
     request = base_request(); request.canopy_density = std::numeric_limits<double>::quiet_NaN();

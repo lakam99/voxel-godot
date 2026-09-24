@@ -928,21 +928,38 @@ export function parseLcovLineCoverage(lcovText, expectedFiles) {
   const expected = new Set(expectedFiles.map(path => resolve(path).toLowerCase()));
   const files = new Map();
   let activePath = null;
-  let activeLines = null;
+  let activeRecord = null;
   for (const rawLine of lcovText.split(/\r?\n/)) {
     const line = rawLine.trimEnd();
     if (line.startsWith('SF:')) {
       if (activePath !== null) throw new Error('LLVM lcov started a source record before ending the previous record.');
       activePath = resolve(line.slice(3)).toLowerCase();
       if (!line.slice(3) || files.has(activePath)) throw new Error(`LLVM lcov has an empty or duplicate source record: ${line.slice(3)}.`);
-      activeLines = new Map();
+      activeRecord = { lines: new Map(), linesFound: null, linesHit: null };
       continue;
     }
     if (line === 'end_of_record') {
       if (activePath === null) throw new Error('LLVM lcov ended a source record without an SF entry.');
-      files.set(activePath, activeLines);
+      if (activeRecord.linesFound === null || activeRecord.linesHit === null) {
+        throw new Error(`LLVM lcov source record is missing LF or LH: ${activePath}.`);
+      }
+      if (activeRecord.linesHit > activeRecord.linesFound) {
+        throw new Error(`LLVM lcov LH exceeds LF for ${activePath}.`);
+      }
+      files.set(activePath, activeRecord);
       activePath = null;
-      activeLines = null;
+      activeRecord = null;
+      continue;
+    }
+    if (line.startsWith('LF:') || line.startsWith('LH:')) {
+      if (activePath === null) throw new Error('LLVM lcov emitted LF or LH outside a source record.');
+      const match = /^(LF|LH):(\d+)$/.exec(line);
+      if (!match) throw new Error(`LLVM lcov emitted an invalid ${line.slice(0, 2)} record: ${line}.`);
+      const value = Number(match[2]);
+      if (!Number.isSafeInteger(value)) throw new Error(`LLVM lcov emitted an invalid ${match[1]} value: ${line}.`);
+      const field = match[1] === 'LF' ? 'linesFound' : 'linesHit';
+      if (activeRecord[field] !== null) throw new Error(`LLVM lcov duplicated ${match[1]} for ${activePath}.`);
+      activeRecord[field] = value;
       continue;
     }
     if (!line.startsWith('DA:')) continue;
@@ -954,8 +971,8 @@ export function parseLcovLineCoverage(lcovText, expectedFiles) {
     if (!Number.isSafeInteger(sourceLine) || sourceLine < 1 || !Number.isSafeInteger(count)) {
       throw new Error(`LLVM lcov emitted an invalid line/count value: ${line}.`);
     }
-    if (activeLines.has(sourceLine)) throw new Error(`LLVM lcov duplicated line ${sourceLine} for ${activePath}.`);
-    activeLines.set(sourceLine, count);
+    if (activeRecord.lines.has(sourceLine)) throw new Error(`LLVM lcov duplicated line ${sourceLine} for ${activePath}.`);
+    activeRecord.lines.set(sourceLine, count);
   }
   if (activePath !== null) throw new Error(`LLVM lcov source record was not terminated: ${activePath}.`);
   const missing = [...expected].filter(path => !files.has(path));
@@ -1004,19 +1021,26 @@ export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = exp
   const uncoveredLines = [];
   const uncoveredBranches = [];
   for (const file of selected) {
-    const lineCounts = lineCoverage.get(resolve(file.filename).toLowerCase());
-    if (!(lineCounts instanceof Map)) throw new Error(`LLVM lcov omitted line counts for ${file.filename}.`);
+    const lineRecord = lineCoverage.get(resolve(file.filename).toLowerCase());
+    if (!lineRecord || !(lineRecord.lines instanceof Map)) throw new Error(`LLVM lcov omitted line counts for ${file.filename}.`);
+    const lineCounts = lineRecord.lines;
     const reportedLineCount = Number(file.summary.lines.count);
     const reportedCoveredLineCount = Number(file.summary.lines.covered);
-    if (lineCounts.size !== reportedLineCount) {
+    if (lineRecord.linesFound !== reportedLineCount || lineRecord.linesHit !== reportedCoveredLineCount) {
       throw new Error(`LLVM lcov line/summary mismatch for ${file.filename}: `
-        + `lcov identifies ${lineCounts.size} executable lines, summary identifies ${reportedLineCount}.`);
+        + `lcov LF/LH=${lineRecord.linesFound}/${lineRecord.linesHit}, `
+        + `summary=${reportedLineCount}/${reportedCoveredLineCount}.`);
+    }
+    if (lineCounts.size > lineRecord.linesFound) {
+      throw new Error(`LLVM lcov DA count exceeds LF for ${file.filename}: `
+        + `${lineCounts.size} > ${lineRecord.linesFound}.`);
     }
     const fileUncoveredLines = [...lineCounts].filter(([, count]) => count === 0);
-    const reportedUncoveredLineCount = reportedLineCount - reportedCoveredLineCount;
+    const reportedUncoveredLineCount = lineRecord.linesFound - lineRecord.linesHit;
     if (fileUncoveredLines.length !== reportedUncoveredLineCount) {
       throw new Error(`LLVM lcov line/summary mismatch for ${file.filename}: `
-        + `lcov identifies ${fileUncoveredLines.length} missed lines, summary identifies ${reportedUncoveredLineCount}.`);
+        + `DA identifies ${fileUncoveredLines.length} missed physical lines, `
+        + `LF-LH identifies ${reportedUncoveredLineCount}.`);
     }
     for (const [line] of fileUncoveredLines) uncoveredLines.push({ file: file.filename, line });
     for (const branch of normalizedBranchDetails(file)) {
