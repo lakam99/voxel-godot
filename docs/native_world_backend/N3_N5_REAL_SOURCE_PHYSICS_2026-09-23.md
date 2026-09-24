@@ -14,6 +14,33 @@ The headed report is `artifacts/native-world-backend/n3-n5-physical-handoff-1790
 
 This fixture is a source and physics service test that connects the producer directly to the owner. It does not exercise the composed `NativeTerrainRuntimeOwner` artifact broker or live gameplay. `productionCutover` remains false. The production runtime still uses Voxel Tools collision. The 4,096-block resident cap cannot cover a valid 4,913-block planner closure; deterministic physical partitions, safe retirement, and one logical complete readiness are required before startup or live edit binding. Main menu, Continue, NPC passage, and Gate 5 remain unaccepted.
 
+## Fresh primary replay after interface/test-contract correction — 2026-09-24
+
+The primary-tree replay first exposed two fixture contract mismatches, not a
+native terrain failure: its `SourceProxy` did not forward the producer's
+canonical `collision_artifact_row_snapshot()` API, and its pre-production
+empty-row assertion expected `pending` even though the resident owner rejects
+an empty request as `resident_request_capacity_invalid`. The fixture now
+forwards canonical rows and asserts that the owner remains fail-closed. The
+focused command passed after the correction:
+
+```powershell
+$env:VOXEL_DISABLE_AUDIO_PLAYBACK='1'; node tools/run-n3-n5-physical-handoff.mjs
+```
+
+Report: `artifacts/native-world-backend/n3-n5-physical-handoff-1790234823420-8426e3c2/report.json`;
+owned-process receipt:
+`artifacts/node-tools/process-runs/godot-nxQxDd/watchdog.json`;
+source commit: `3d20265`. The report confirms two producer rows, a complete
+two-block planner closure, first and second current physical receipts across a
+durable revision change, a real `CharacterBody3D` contact, and successful
+owner drain. This is direct producer-to-owner handoff with fixture-pinned
+demand only. It does not exercise the composed runtime artifact broker or Main
+startup/Continue, and the runner report itself does not embed Git/source/DLL
+hashes. The 4,096-resident limit versus the valid 4,913-block planner closure
+still blocks broad physical readiness; no production cutover or Gate 5 claim
+follows.
+
 ## Main-thread face extraction follow-up
 
 Attribution in `artifacts/native-world-backend/n3-n5-physical-handoff-1790179112024-b8d3781b/report.json` found a 36.945 ms producer `advance()` peak for 4,686 surface vertices: `Mesh.surface_get_arrays()` alone consumed 33.088 ms. The original `Mesh.get_faces()` path likewise consumed about 34 ms. Indexed expansion took only 0.425 ms. Both mesh readback APIs therefore produced a visible main-thread stall in this focused case.
