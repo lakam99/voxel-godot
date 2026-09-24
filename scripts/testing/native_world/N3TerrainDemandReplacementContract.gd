@@ -473,7 +473,7 @@ func run() -> void:
 			"requiredBlocksCapacityDrained":mesh_capacity_result.get("reason") == "mesh_window_capacity_invalid"
 				and not capacity_builder.has_pending_retirement()},
 		"boundedWorkFollowUps":[
-			"The legacy collision_mesh_window_layout() compatibility method remains synchronous. Migrate callers to begin/advance_collision_mesh_window_layout() before VTR wiring."],
+			"The synchronous collision_mesh_window_layout() compatibility method is retained only for reference/compatibility tests; production consumers use the bounded begin/advance API."],
 		"doesNotProve":"No VoxelTerrain/runtime integration, page/queue admission, publication/collision, or headed gameplay/performance acceptance."}
 	var report_path := OS.get_environment("VWB_TERRAIN_DEMAND_REPLACEMENT_REPORT")
 	if not report_path.is_empty():

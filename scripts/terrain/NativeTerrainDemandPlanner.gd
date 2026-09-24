@@ -280,6 +280,12 @@ func begin_collision_mesh_window_layout() -> Dictionary:
 func advance_collision_mesh_window_layout() -> Dictionary:
 	return _advance_mesh_snapshot("layout")
 
+## True while transferred or cancelled layout scratch still needs bounded
+## planner advances before another snapshot transaction can begin.
+func has_pending_collision_mesh_window_retirement() -> bool:
+	return _mesh_layout_builder != null \
+		and _mesh_layout_builder.has_pending_retirement()
+
 func cancel_collision_mesh_window_layout(token: int) -> Dictionary:
 	if _mesh_layout_builder == null or _mesh_layout_builder.current_kind() != "layout":
 		return {"status":"failed", "reason":"planner_not_configured"}

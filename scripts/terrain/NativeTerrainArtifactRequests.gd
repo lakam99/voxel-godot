@@ -29,6 +29,8 @@ var _draining := false
 var _stop_issued := false
 var _stopping := false
 var _window_layout := {}
+var _window_layout_job := {}
+var _window_layout_candidate := {}
 var _window_records := {}
 var _active_window_tokens := {}
 var _pending_retirement_tokens := {}
@@ -211,7 +213,7 @@ func collision_artifact_row_snapshot(block: Vector3i, identity: Dictionary) -> D
 	return _producer.collision_artifact_row_snapshot(block, identity)
 
 func collision_window_layout() -> Dictionary:
-	if _producer == null or _draining:
+	if _stopping or _producer == null or _draining:
 		return {"status":"pending", "reason":"artifact_producer_unavailable"}
 	return _refresh_window_layout()
 
@@ -265,7 +267,8 @@ func collision_window_source_snapshot(window_token: String) -> Dictionary:
 	var source: Dictionary = _producer.collision_source_snapshot()
 	if not source.has("identity") or source.get("identity") != record.identity:
 		return {"status":"pending", "reason":"collision_window_source_changed"}
-	var required: Array[Vector3i] = record.blocks
+	var required: Array[Vector3i] = []
+	for block: Vector3i in record.blocks: required.append(block)
 	var produced: Array[Vector3i] = []
 	var artifacts := {}
 	var stale_set := {}
@@ -412,6 +415,10 @@ func abort_collision_window_retirement(window_token: String, lease_id: String,
 
 func stop() -> Dictionary:
 	_stopping = true
+	if not _window_layout_job.is_empty() or (_planner != null \
+			and _planner.has_pending_collision_mesh_window_retirement()):
+		return request_stop()
+	_window_layout_candidate.clear()
 	var retired: Dictionary = _retire_producer()
 	if retired.get("status") == "ready": _release_windows()
 	return retired
@@ -422,11 +429,18 @@ func stop() -> Dictionary:
 func request_stop() -> Dictionary:
 	_stopping = true
 	_async_stop_requested = true
+	if not _window_layout_job.is_empty() \
+			and not bool(_window_layout_job.get("cancelling", false)):
+		_planner.cancel_collision_mesh_window_layout(
+			int(_window_layout_job.get("token", 0)))
+		_window_layout_job["cancelling"] = true
 	return {"status":"pending", "reason":"artifact_retirement_requested",
 		"inflight":_producer != null, "windowRecords":_window_records.size()}
 
 func drain_step() -> Dictionary:
 	if not _async_stop_requested: return {"status":"failed", "reason":"artifact_stop_required"}
+	var layout_drain: Dictionary = _drain_staged_window_layout()
+	if layout_drain.get("status") != "ready": return layout_drain
 	var retired: Dictionary = _retire_producer()
 	if retired.get("status") != "ready": return retired
 	var window_step := _release_one_window()
@@ -438,6 +452,35 @@ func drain_step() -> Dictionary:
 		return {"status":"pending", "reason":"artifact_window_retirement_pending"}
 	return {"status":"ready", "drained":true, "nativeWorkersDrained":true,
 		"windowSourcesReleased":true, "leasesReleased":_retirement_leases.is_empty()}
+
+func _drain_staged_window_layout() -> Dictionary:
+	if _planner == null:
+		_window_layout_job.clear()
+		_window_layout_candidate.clear()
+		return {"status":"ready", "drained":true}
+	if not _window_layout_job.is_empty():
+		var job: Dictionary = _window_layout_job
+		if not bool(job.get("cancelling", false)):
+			_planner.cancel_collision_mesh_window_layout(int(job.get("token", 0)))
+			job["cancelling"] = true
+			_window_layout_job = job
+	var drain_step: Dictionary = {}
+	if not _window_layout_job.is_empty() \
+			or _planner.has_pending_collision_mesh_window_retirement():
+		drain_step = _planner.advance_collision_mesh_window_layout()
+		if not _valid_layout_step_budget(drain_step):
+			return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
+				"step":drain_step}
+		if not _window_layout_job.is_empty() and (drain_step.get("status") == "ready" \
+				or drain_step.get("status") == "failed" or drain_step.get("status") == "idle"):
+			_window_layout_job.clear()
+		if not _window_layout_job.is_empty() \
+				or _planner.has_pending_collision_mesh_window_retirement():
+			return {"status":"pending", "reason":"artifact_layout_drain_pending",
+				"workOps":int(drain_step.get("workOps", 0)),
+				"maxWorkOps":int(drain_step.get("maxWorkOps", 0))}
+	_window_layout_candidate.clear()
+	return {"status":"ready", "drained":true}
 
 func snapshot() -> Dictionary:
 	return {"stopping":_stopping, "producerActive":_producer != null,
@@ -505,8 +548,11 @@ func _refresh_window_layout() -> Dictionary:
 	if not _window_layout.is_empty():
 		var held: Dictionary = _retention_status()
 		if held.get("status") != "ready": return held
-	var planned: Dictionary = _planner.collision_mesh_window_layout()
-	if planned.get("status") != "ready": return planned
+	var layout_result: Dictionary = _advance_staged_window_layout()
+	if layout_result.get("status") != "ready": return layout_result
+	var planned: Dictionary = layout_result.get("layout", {})
+	if planned.get("status") != "ready":
+		return {"status":"failed", "reason":"mesh_layout_result_invalid"}
 	var layout_token := ("%s:%s:%d:%d" % [String(planned.logicalClosureToken),
 		String(_identity.sourceIdentity.get("hex", "")),
 		int(_identity.sourceRevision), int(_identity.cancellationEpoch)]).sha256_text()
@@ -525,6 +571,7 @@ func _refresh_window_layout() -> Dictionary:
 	for index in range((planned.windows as Array).size()):
 		var window: Dictionary = planned.windows[index]
 		if (window.blocks as Array).size() > _max_resident_blocks:
+			_window_layout_candidate.clear()
 			return {"status":"failed", "reason":"collision_window_exceeds_owner_cap"}
 		var token := ("%s:%s:%d:%d" % [String(window.closureToken),
 			String(_identity.sourceIdentity.get("hex", "")),
@@ -604,8 +651,153 @@ func _refresh_window_layout() -> Dictionary:
 	_window_layout["sourceIdentity"] = _identity.sourceIdentity.duplicate(true)
 	_window_layout["identity"] = _identity.duplicate(true)
 	_window_layout["windows"] = windows
+	_window_layout_candidate.clear()
 	_local_proof_cache.clear()
 	return _retention_status()
+
+## Production consumers must never synchronously enumerate/sort the complete
+## demanded mesh set. Keep the planner lease and exact source identity with the
+## staged transaction until it publishes or its bounded cancellation drain ends.
+func _advance_staged_window_layout() -> Dictionary:
+	var demand: Dictionary = _demand_identity()
+	if demand.get("status") != "ready": return demand
+	var source: Dictionary = _backend.status()
+	if source.get("status") != "ready":
+		return {"status":"pending", "reason":"artifact_layout_source_pending"}
+	var source_identity: Dictionary = source.get("sourceIdentity", {})
+	var identity_matches: bool = _identity.get("sourceIdentity", {}) == source_identity \
+		and int(_identity.get("sourceRevision", -1)) \
+			== int(source.get("terrainDeltaRevision", -2))
+	var expected_layout_token := ("%s:%s:%d:%d" % [String(demand.closureToken),
+		String(_identity.get("sourceIdentity", {}).get("hex", "")),
+		int(_identity.get("sourceRevision", -1)),
+		int(_identity.get("cancellationEpoch", -1))]).sha256_text()
+	if not _window_layout_candidate.is_empty():
+		var candidate_current: bool = _identity == _window_layout_candidate.get("ownerIdentity", {}) \
+			and int(demand.get("revision", -1)) \
+				== int(_window_layout_candidate.get("demandRevision", -2)) \
+			and String(demand.get("closureToken", "")) \
+				== String(_window_layout_candidate.get("closureToken", "")) \
+			and source_identity == _window_layout_candidate.get("sourceIdentity", {}) \
+			and int(source.get("terrainDeltaRevision", -1)) \
+				== int(_window_layout_candidate.get("sourceRevision", -2))
+		if candidate_current:
+			return {"status":"ready", "layout":_window_layout_candidate.layout}
+		_window_layout_candidate.clear()
+	if _window_layout_job.is_empty() and identity_matches \
+			and _window_layout.get("layoutToken", "") == expected_layout_token:
+		return {"status":"ready", "layout":_window_layout}
+	if not _window_layout_job.is_empty():
+		var job: Dictionary = _window_layout_job
+		var current: bool = identity_matches \
+			and _identity == job.get("ownerIdentity", {}) \
+			and int(demand.get("revision", -1)) == int(job.get("demandRevision", -2)) \
+			and String(demand.get("closureToken", "")) == String(job.get("closureToken", "")) \
+			and source_identity == job.get("sourceIdentity", {}) \
+			and int(source.get("terrainDeltaRevision", -1)) == int(job.get("sourceRevision", -2)) \
+			and int(_identity.get("cancellationEpoch", -1)) == int(job.get("cancellationEpoch", -2))
+		if not current and not bool(job.get("cancelling", false)):
+			var cancelled: Dictionary = _planner.cancel_collision_mesh_window_layout(
+				int(job.get("token", 0)))
+			job.cancelling = true
+			_window_layout_job = job
+			job["cancelReason"] = String(cancelled.get("reason", "source_or_demand_stale"))
+			_window_layout_job = job
+		if bool(job.get("cancelling", false)):
+			# Cancellation may have reached a transferred result already; the
+			# planner advance still drains its retained scratch before retry.
+			var drained: Dictionary = _planner.advance_collision_mesh_window_layout()
+			if not _valid_layout_step_budget(drained):
+				return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
+					"step":drained}
+			if drained.get("status") == "ready" or drained.get("status") == "failed" \
+					or drained.get("status") == "idle":
+				_window_layout_job.clear()
+			return {"status":"pending", "reason":"mesh_layout_stale_drain",
+				"workOps":int(drained.get("workOps", 0)),
+				"maxWorkOps":int(drained.get("maxWorkOps", 0))}
+		if job.has("completed"):
+			if _planner.has_pending_collision_mesh_window_retirement():
+				var retirement_step: Dictionary = _planner.advance_collision_mesh_window_layout()
+				if not _valid_layout_step_budget(retirement_step):
+					return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
+						"step":retirement_step}
+				if _planner.has_pending_collision_mesh_window_retirement():
+					return {"status":"pending", "reason":"mesh_layout_published_scratch_drain",
+						"workOps":int(retirement_step.get("workOps", 0)),
+						"maxWorkOps":int(retirement_step.get("maxWorkOps", 0)),
+						"token":int(job.token)}
+			var completed_step: Dictionary = job.completed
+			var completed_job: Dictionary = job.duplicate(true)
+			_window_layout_job.clear()
+			return _consume_staged_layout_result(completed_step, completed_job)
+		var advanced: Dictionary = _planner.advance_collision_mesh_window_layout()
+		if not _valid_layout_step_budget(advanced):
+			return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
+				"step":advanced}
+		if advanced.get("status") == "failed":
+			_window_layout_job.clear()
+			return advanced
+		if advanced.get("status") != "ready":
+			return {"status":"pending", "reason":"mesh_layout_work_pending",
+				"workOps":int(advanced.get("workOps", 0)),
+				"maxWorkOps":int(advanced.get("maxWorkOps", 0)),
+				"token":int(job.token)}
+		job["completed"] = advanced
+		_window_layout_job = job
+		return {"status":"pending", "reason":"mesh_layout_published_scratch_drain",
+			"workOps":int(advanced.get("workOps", 0)),
+			"maxWorkOps":int(advanced.get("maxWorkOps", 0)),
+			"token":int(job.token)}
+	var started: Dictionary = _planner.begin_collision_mesh_window_layout()
+	if started.get("status") != "pending": return started
+	var token := int(started.get("token", 0))
+	if token <= 0:
+		return {"status":"failed", "reason":"mesh_layout_token_missing"}
+	_window_layout_job = {"token":token,
+		"demandRevision":int(demand.revision),
+		"closureToken":String(demand.closureToken),
+		"sourceIdentity":source_identity.duplicate(true),
+		"sourceRevision":int(source.get("terrainDeltaRevision", -1)),
+		"cancellationEpoch":int(_identity.get("cancellationEpoch", -1)),
+		"ownerIdentity":_identity.duplicate(true), "cancelling":false}
+	var first_step: Dictionary = _planner.advance_collision_mesh_window_layout()
+	if not _valid_layout_step_budget(first_step):
+		return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
+			"step":first_step}
+	if first_step.get("status") == "failed":
+		_window_layout_job.clear()
+		return first_step
+	if first_step.get("status") == "ready":
+		# Consume through the same identity validation on the next frame/call.
+		_window_layout_job["completed"] = first_step
+	return {"status":"pending", "reason":"mesh_layout_work_pending",
+		"workOps":int(first_step.get("workOps", 0)),
+		"maxWorkOps":int(first_step.get("maxWorkOps", 0)), "token":token}
+
+func _consume_staged_layout_result(result: Dictionary, job: Dictionary) -> Dictionary:
+	var completed: Dictionary = result.get("layout", {})
+	var valid_result := int(result.get("token", -1)) == int(job.token) \
+		and int(result.get("revision", -1)) == int(job.demandRevision) \
+		and String(result.get("closureToken", "")) == String(job.closureToken) \
+		and int(completed.get("logicalDemandRevision", -1)) == int(job.demandRevision) \
+		and String(completed.get("logicalClosureToken", "")) == String(job.closureToken)
+	if not valid_result:
+		return {"status":"pending", "reason":"mesh_layout_result_identity_stale"}
+	_window_layout_candidate = {"layout":completed.duplicate(true),
+		"demandRevision":int(job.demandRevision),
+		"closureToken":String(job.closureToken),
+		"sourceIdentity":job.get("sourceIdentity", {}).duplicate(true),
+		"sourceRevision":int(job.get("sourceRevision", -1)),
+		"cancellationEpoch":int(job.get("cancellationEpoch", -1)),
+		"ownerIdentity":job.get("ownerIdentity", {}).duplicate(true)}
+	return {"status":"ready", "layout":completed}
+
+func _valid_layout_step_budget(step: Dictionary) -> bool:
+	var operations := int(step.get("workOps", -1))
+	var maximum := int(step.get("maxWorkOps", -1))
+	return operations >= 0 and maximum > 0 and operations <= maximum \
+		and maximum <= 256
 
 func _cache_retained_row(row: Dictionary) -> void:
 	for window: Dictionary in _window_layout.get("windows", []):
@@ -696,6 +888,7 @@ func _release_windows() -> void:
 	_pending_retirement_tokens.clear()
 	_retirement_leases.clear()
 	_window_layout.clear()
+	_window_layout_candidate.clear()
 
 func _retention_status(projected_active: Dictionary = {}) -> Dictionary:
 	var active: Dictionary = projected_active if not projected_active.is_empty() else _active_window_tokens

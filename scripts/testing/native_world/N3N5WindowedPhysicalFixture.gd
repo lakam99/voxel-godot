@@ -13,6 +13,25 @@ const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadines
 const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
 const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
+func _await_window_layout(broker, initial: Dictionary, label: String) -> Dictionary:
+	var result := initial
+	var steps := 0
+	while result.get("status") != "ready" and steps < 30000:
+		assert(result.get("status") != "failed",
+			"%s staged layout failed: %s" % [label, str(result)])
+		if result.has("workOps"):
+			var work_ops := int(result.get("workOps", -1))
+			var max_work_ops := int(result.get("maxWorkOps", -1))
+			assert(work_ops >= 0 and max_work_ops == 256 and work_ops <= max_work_ops,
+				"%s staged layout exceeds 256 operations (%d/%d)" % [label,
+					work_ops, max_work_ops])
+		result = broker.collision_window_layout()
+		steps += 1
+		await process_frame
+	assert(result.get("status") == "ready",
+		"%s staged layout did not become ready in bounded wait" % label)
+	return result
+
 func _init() -> void:
 	call_deferred("_run")
 
@@ -287,6 +306,8 @@ func _run() -> void:
 				and changed_layout.get("layoutToken") != layout.layoutToken:
 			break
 		await process_frame
+	changed_layout = await _await_window_layout(broker, changed_layout,
+		"changed source revision")
 	var old_facade_pending: Dictionary = facade.collision_source_snapshot()
 	var changed_aggregate: Dictionary = coordinator.aggregate_readiness(
 		changed_layout.identity)

@@ -61,6 +61,45 @@ func _drain_requests(owner, initial: Dictionary, label: String) -> Dictionary:
 	check(result.get("status") == "ready", "%s drains with bounded progress" % label)
 	return result
 
+func _await_window_layout(broker, initial: Dictionary, label: String) -> Dictionary:
+	var result := initial
+	var steps := 0
+	while result.get("status") != "ready" and steps < 30000:
+		if result.get("status") == "failed": break
+		if result.has("workOps"):
+			var work := int(result.get("workOps", -1))
+			var maximum := int(result.get("maxWorkOps", -1))
+			check(work >= 0 and maximum == 256 and work <= maximum,
+				"%s layout step respects hard work bound (%d/%d)" % [label, work, maximum])
+			staged_demand_advances += 1
+			staged_demand_work_ops += work
+			staged_demand_max_work_ops = maxi(staged_demand_max_work_ops, work)
+		result = broker.collision_window_layout()
+		steps += 1
+		await process_frame
+	check(result.get("status") == "ready", "%s staged layout completes" % label)
+	return result
+
+func _await_window_layout_reason(broker, initial: Dictionary, reason: String,
+		label: String) -> Dictionary:
+	var result := initial
+	var steps := 0
+	while result.get("reason") != reason and steps < 30000:
+		if result.get("status") == "failed" or result.get("status") == "ready": break
+		if result.has("workOps"):
+			var work := int(result.get("workOps", -1))
+			var maximum := int(result.get("maxWorkOps", -1))
+			check(work >= 0 and maximum == 256 and work <= maximum,
+				"%s layout step respects hard work bound (%d/%d)" % [label, work, maximum])
+			staged_demand_advances += 1
+			staged_demand_work_ops += work
+			staged_demand_max_work_ops = maxi(staged_demand_max_work_ops, work)
+		result = broker.collision_window_layout()
+		steps += 1
+		await process_frame
+	check(result.get("reason") == reason, "%s reaches expected pending state" % label)
+	return result
+
 func _init() -> void:
 	call_deferred("run")
 
@@ -434,7 +473,8 @@ func run() -> void:
 		and bounded.request_block(block).get("status") == "pending",
 		"oversized demand still retains explicitly requested block")
 	var partition_step: Dictionary = bounded.advance()
-	var partition_layout: Dictionary = bounded.collision_window_layout()
+	var partition_layout: Dictionary = await _await_window_layout(bounded,
+		bounded.collision_window_layout(), "two-window partition")
 	check(partition_step.get("status") == "pending"
 		and int(partition_layout.get("requiredBlockCount", 0)) == 2
 		and int(partition_layout.get("windowCount", 0)) == 2
@@ -500,7 +540,10 @@ func run() -> void:
 	planner.replace_sources(viewer, extra_viewers, [], [], bounds)
 	var leased_revert_step: Dictionary = await _advance_staged_demand(bounded,
 		bounded.advance(), "leased demand reactivation")
-	var leased_revert_layout: Dictionary = bounded.collision_window_layout()
+	var leased_revert_layout: Dictionary = await _await_window_layout_reason(bounded,
+		bounded.collision_window_layout(), "collision_window_retirement_leased",
+		"leased demand reactivation")
+	leased_revert_step = leased_revert_layout
 	var lease_valid: Dictionary = bounded.validate_collision_window_retirement(
 		remote_token, String(bounded_lease.get("leaseId", "")),
 		"n3-fixture-owner-remote")
@@ -509,14 +552,8 @@ func run() -> void:
 				String(bounded_lease.get("leaseId", "")),
 				"n3-fixture-owner-remote")).get("status") == "ready",
 		"claimed old window accepts exact physical drain acknowledgment")
-	var resumed_layout: Dictionary = {}
-	for frame in range(300):
-		bounded.advance()
-		resumed_layout = bounded.collision_window_layout()
-		if resumed_layout.get("status") == "ready" \
-				and resumed_layout.get("windowCount") == 2:
-			break
-		await process_frame
+	var resumed_layout: Dictionary = await _await_window_layout(bounded,
+		bounded.collision_window_layout(), "leased retirement reactivation")
 	check(leased_revert_step.get("reason") == "collision_window_retirement_leased"
 		and leased_revert_layout.get("status") == "pending"
 		and lease_valid.get("status") == "ready"
@@ -540,7 +577,9 @@ func run() -> void:
 		"4913-block demand admitted to partition-capable broker")
 	var large_step: Dictionary = large_broker.advance()
 	large_step = await _advance_staged_demand(large_broker, large_step, "4913-block broker")
-	var large_layout: Dictionary = large_broker.collision_window_layout()
+	var large_layout: Dictionary = await _await_window_layout(large_broker,
+		large_broker.collision_window_layout(), "large partition")
+	large_step = large_broker.advance()
 	var large_union := {}
 	for window: Dictionary in large_layout.get("windows", []):
 		var facade: Dictionary = large_broker.collision_window_source(window.id,
@@ -577,12 +616,16 @@ func run() -> void:
 		"many spatial window sources admitted within data capacity")
 	var many_initial: Dictionary = many_broker.advance()
 	many_initial = await _advance_staged_demand(many_broker, many_initial, "66-window broker")
-	var many_layout: Dictionary = many_broker.collision_window_layout()
+	var many_layout: Dictionary = await _await_window_layout(many_broker,
+		many_broker.collision_window_layout(), "66-window source")
 	check(int(many_layout.get("windowCount", 0)) == 66,
 		"66 deterministic window records materialized: %s %s" % [str(many_demand), str(many_layout.get("windowCount", -1))])
 	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 	var held: Dictionary = many_broker.advance()
 	held = await _advance_staged_demand(many_broker, held, "first retirement target")
+	held = await _await_window_layout_reason(many_broker,
+		many_broker.collision_window_layout(), "collision_window_retirement_backpressure",
+		"first retirement target")
 	check(held.get("status") == "pending"
 		and held.get("reason") == "collision_window_retirement_backpressure"
 		and int(held.get("retiredWindows", 0)) == 65
@@ -596,6 +639,9 @@ func run() -> void:
 	many_planner.replace_sources({}, next_viewers, [], [], Vector2i(128,128))
 	var still_held: Dictionary = many_broker.advance()
 	still_held = await _advance_staged_demand(many_broker, still_held, "second retirement target")
+	still_held = await _await_window_layout_reason(many_broker,
+		many_broker.collision_window_layout(), "collision_window_retirement_backpressure",
+		"second retirement target")
 	check(still_held.get("status") == "pending"
 		and still_held.get("reason") == "collision_window_retirement_backpressure"
 		and int(still_held.get("retiredWindows", 0)) == 66
@@ -606,6 +652,9 @@ func run() -> void:
 	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 	var returned_held: Dictionary = many_broker.advance()
 	returned_held = await _advance_staged_demand(many_broker, returned_held, "restored retirement target")
+	returned_held = await _await_window_layout_reason(many_broker,
+		many_broker.collision_window_layout(), "collision_window_retirement_backpressure",
+		"restored retirement target")
 	check(returned_held.get("status") == "pending"
 		and int(returned_held.get("totalWindowRecords", -2)) == held_record_count,
 		"third demand change also retains exact bounded window record set")
@@ -620,7 +669,9 @@ func run() -> void:
 		many_planner.replace_sources(viewer, many_viewers, [], [], Vector2i(128,128))
 		var reverted_step: Dictionary = many_broker.advance()
 		reverted_step = await _advance_staged_demand(many_broker, reverted_step, "reverted retirement target")
-		var reverted_layout: Dictionary = many_broker.collision_window_layout()
+		var reverted_layout: Dictionary = await _await_window_layout(many_broker,
+			many_broker.collision_window_layout(), "reverted retirement layout")
+		reverted_step = many_broker.advance()
 		var reverted_facades := 0
 		for window: Dictionary in reverted_layout.get("windows", []):
 			var acquired: Dictionary = many_broker.collision_window_source(window.id,
@@ -639,6 +690,9 @@ func run() -> void:
 		many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 		var held_again: Dictionary = many_broker.advance()
 		held_again = await _advance_staged_demand(many_broker, held_again, "repeated retirement target")
+		held_again = await _await_window_layout_reason(many_broker,
+			many_broker.collision_window_layout(), "collision_window_retirement_backpressure",
+			"repeated retirement target")
 		check(held_again.get("reason") == "collision_window_retirement_backpressure"
 			and int(held_again.get("totalWindowRecords", -2)) == held_record_count,
 			"new retirement attempt remains bounded after revert")
@@ -654,7 +708,8 @@ func run() -> void:
 				_retirement_receipt(retired_window,
 					String(many_lease.get("leaseId", "")),
 					"n3-fixture-owner-retired")).get("status") == "ready"
-			and many_broker.collision_window_layout().get("status") == "ready",
+			and (await _await_window_layout(many_broker,
+				many_broker.collision_window_layout(), "retirement release")).get("status") == "ready",
 			"explicit physical drain acknowledgment releases bounded backpressure")
 	else:
 		check(false, "retirement backpressure missing tokens: %s" % str(held))
@@ -788,7 +843,8 @@ func run() -> void:
 	var local_invalidation_started := Time.get_ticks_usec()
 	local_edit_broker.advance()
 	var local_invalidation_advance_usec := Time.get_ticks_usec() - local_invalidation_started
-	var local_after: Dictionary = local_edit_broker.collision_window_layout()
+	var local_after: Dictionary = await _await_window_layout(local_edit_broker,
+		local_edit_broker.collision_window_layout(), "verified local edit")
 	check(local_commit.get("commitStatus") == "committed"
 		and local_verified.get("status") == "ready"
 		and local_before.windows[0].windowToken != local_after.windows[0].windowToken
