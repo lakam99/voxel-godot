@@ -237,3 +237,38 @@ This run proves bounded container work units and functional drain for that
 synthetic nested shape. It does not bound arbitrary scalar destruction or
 whole-game frame cadence. Its valid-save largest advance was 16,084 µs in
 this one process, so it makes no frame-budget acceptance claim.
+
+### Oversized nested values on the ordinary retirement path
+
+A subsequent synthetic fixture found that ordinary successful retirement
+still popped a decoded cell whose metadata held 512 nested entries in one
+work unit. The service now checks a container tree against a 128-value
+atomic cap. Small records keep the existing 64-record advance behavior;
+larger cell, section, legacy and remaining snapshot containers use the same
+64-unit iterative drain cursor as malformed input. The shared cursor drains
+one nested edge or leaf per unit. The 512-entry cell retained 505 entries
+after its first advance and completed in 57 advances. A separate oversized
+section plus top-level payload completed in 114 advances. The 65,536-record
+ordinary fixture still completed in 1,025 advances with 65,536 retired
+records. This is a node-count bound, not a byte-size bound for an individual
+string or scalar value.
+
+`node tools/run-n3-decoded-save-retirement.mjs` initially failed the added
+nested-cell check: the first advance completed with all 512 metadata entries
+unchanged. Report:
+`artifacts/native-world-backend/n3-decoded-save-retirement-1790235242915-49cc1f78/report.json`.
+After the cursor change it passed including nested cell, section, snapshot,
+malformed and 65,536-record checks. Report:
+`artifacts/native-world-backend/n3-decoded-save-retirement-1790235361222-e8ae92de/report.json`;
+owned receipt `artifacts/node-tools/process-runs/godot-UQ3UZ3/watchdog.json`
+proves natural exit and zero remaining job members. Its largest ordinary
+advance was 1,581 µs in that process. No whole-game frame-cadence claim
+follows from the synthetic fixture.
+
+The adjacent `node tools/run-n3-legacy-terrain-load-transaction.mjs` retry
+was inconclusive in this isolated worktree: Godot could not resolve
+`MainPropFactory.gd`, then the run-local stop request terminated the owned
+job before a report was written. Receipt:
+`artifacts/node-tools/process-runs/godot-Qx40hP/watchdog.json`. The earlier
+passing contract above remains the pre-change evidence; the combined branch
+still needs its own compile/transaction check.

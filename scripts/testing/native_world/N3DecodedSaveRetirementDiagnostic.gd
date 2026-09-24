@@ -150,12 +150,59 @@ func run() -> void:
 			"legacy_terrain_invalid")}
 	var invalid_start_passed: bool = invalid_start.volume.passed \
 		and invalid_start.sections.passed and invalid_start.legacy.passed
+	var nested_metadata: Dictionary = {}
+	for index in range(512):
+		nested_metadata[str(index)] = {"payload":[index]}
+	var nested_cells: Array = [{"cell":[0, 0, 0], "state":{"metadata":nested_metadata}}]
+	var nested_save := {"version":2, "seed":"n3-decoded-save-retirement",
+		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
+			"revision":1, "sections":[{"sectionKey":[0, 0, 0], "cells":nested_cells}]},
+		"terrain":[]}
+	var nested_retirement = RETIREMENT.new()
+	var nested_started: Dictionary = nested_retirement.start_owned_file_save(nested_save)
+	var nested_first: Dictionary = nested_retirement.advance()
+	var nested_after_first := nested_metadata.size()
+	var nested_steps := 1
+	var nested_last: Dictionary = nested_first
+	while nested_last.get("status") == "pending" and nested_steps < 1000:
+		nested_last = nested_retirement.advance()
+		nested_steps += 1
+	var nested_bounded: bool = nested_started.get("status") == "pending" \
+		and nested_first.get("status") == "pending" \
+		and nested_after_first > 0 and nested_after_first < 512 \
+		and nested_last.get("status") == "ready" \
+		and int(nested_last.get("removedRecords", -1)) == 1 \
+		and nested_metadata.is_empty()
+	var section_payload: Array = []
+	var snapshot_payload: Array = []
+	for index in range(512):
+		section_payload.append({"payload":[index]})
+		snapshot_payload.append({"payload":[index]})
+	var extra_save := {"version":2, "seed":"n3-decoded-save-retirement",
+		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
+			"revision":1, "sections":[{"cells":[], "extra":section_payload}]},
+		"terrain":[], "extra":snapshot_payload}
+	var extra_retirement = RETIREMENT.new()
+	var extra_started: Dictionary = extra_retirement.start_owned_file_save(extra_save)
+	var extra_first: Dictionary = extra_retirement.advance()
+	var extra_section_after_first := section_payload.size()
+	var extra_steps := 1
+	var extra_last: Dictionary = extra_first
+	while extra_last.get("status") == "pending" and extra_steps < 1000:
+		extra_last = extra_retirement.advance()
+		extra_steps += 1
+	var extra_bounded: bool = extra_started.get("status") == "pending" \
+		and extra_first.get("status") == "pending" \
+		and extra_section_after_first > 0 and extra_section_after_first < 512 \
+		and extra_last.get("status") == "ready" and extra_steps > 2 \
+		and section_payload.is_empty() and snapshot_payload.is_empty()
 	var passed: bool = started.get("status") == "pending" \
 		and last.get("status") == "ready" \
 		and int(last.get("removedRecords", -1)) == expected_cells \
 		and expected_cells == SECTION_CELLS * SECTION_COUNT \
 		and prior_to_outer_release.get("state") == "ready" \
-		and empty_bounded and malformed_bounded and invalid_start_passed
+		and empty_bounded and malformed_bounded and invalid_start_passed \
+		and nested_bounded and extra_bounded
 	var report := {"schema":"n3-decoded-save-retirement-diagnostic/v1",
 		"passed":passed, "records":expected_cells, "steps":steps,
 		"rawReleaseUsec":raw_release_usec, "ownedReleaseUsec":owned_release_usec,
@@ -169,6 +216,11 @@ func run() -> void:
 			"nestedRemainingAfterFirst":malformed_nested_after_first,
 			"steps":malformed_drain_steps, "final":malformed_last},
 		"invalidStart":{"passed":invalid_start_passed, "cases":invalid_start},
+		"nestedOwnedCell":{"passed":nested_bounded, "remainingAfterFirst":nested_after_first,
+			"steps":nested_steps, "final":nested_last},
+		"nestedExtraContainers":{"passed":extra_bounded,
+			"sectionRemainingAfterFirst":extra_section_after_first,
+			"steps":extra_steps, "final":extra_last},
 		"evidenceLevel":"synthetic service diagnostic",
 		"doesNotProve":["exclusive ownership in Main", "real file-backed save parity",
 			"whole-game frame cadence", "external snapshot override disposal"]}
