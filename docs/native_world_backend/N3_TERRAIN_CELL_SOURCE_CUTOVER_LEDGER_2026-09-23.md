@@ -580,3 +580,14 @@ receipts only (`productionCutover: false`): no VoxelTerrain runtime wiring,
 publication/collision, or headed gameplay/performance acceptance is proven.
 Synchronous `collision_mesh_window_layout()` remains an explicitly recorded
 follow-up before VTR wiring.
+
+The subsequent staged collision-window consumer slice (`67089eb`) replaces
+the production broker's synchronous layout call with bounded begin/advance/
+cancel work, atomic publication, and stop-time lease/scratch draining. Its
+focused staged-consumer and demand-replacement reports pass, but remain
+service/planner evidence only (`productionCutover: false`). The adapted N3N5
+windowed-physical runner did not produce a report before its 60-second
+watchdog timeout; its owned process was terminated and authoritative zero
+membership was proven (`artifacts/node-tools/process-runs/godot-FMVVaT/watchdog.json`).
+That run is timed out/unverified, not a pass, and no N3N5 physical-integration
+or production-cutover claim is made from it.

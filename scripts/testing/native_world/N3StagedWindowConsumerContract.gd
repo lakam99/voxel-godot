@@ -164,10 +164,15 @@ func run() -> void:
 		mid_stop_identity, 712)
 	var mid_stop_broker = mid_stop_binding.broker
 	var mid_stop_begin: Dictionary = mid_stop_broker._refresh_window_layout()
+	var direct_stop: Dictionary = mid_stop_broker.stop()
+	var direct_stop_deferred: bool = direct_stop.get("status") == "pending" \
+		and bool(mid_stop_broker._async_stop_requested) \
+		and not mid_stop_broker._window_layout_job.is_empty() \
+		and mid_stop_planner._mesh_layout_lease != null
 	var mid_stop_result: Dictionary = await _drain_stop(mid_stop_broker,
 		"mid-build layout cancellation")
 	check(mid_stop_binding.setup.get("status") == "ready"
-		and mid_stop_begin.get("status") == "pending"
+		and mid_stop_begin.get("status") == "pending" and direct_stop_deferred
 		and mid_stop_result.get("status") == "ready"
 		and mid_stop_planner._mesh_layout_lease == null
 		and not mid_stop_planner._mesh_layout_builder.is_active()
@@ -208,6 +213,8 @@ func run() -> void:
 			"changedRevisionParity":_same_layout(broker._window_layout, reference_second),
 			"midBuildStopDrained":mid_stop_result.get("status") == "ready"
 				and not mid_stop_planner.has_pending_collision_mesh_window_retirement(),
+			"directStopRemainsPendingUntilDrain":direct_stop_deferred
+				and mid_stop_result.get("status") == "ready",
 			"transferredScratchStopDrained":transferred_stop.get("status") == "ready"
 				and not transferred_planner.has_pending_collision_mesh_window_retirement(),
 			"synchronousConsumerCalls":spy.synchronous_layout_calls},
