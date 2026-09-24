@@ -107,6 +107,15 @@ public:
         const CellCoord &) const {
         return std::nullopt;
     }
+    // Allocation-free admission query for the corresponding physical cell.
+    // The declaration may be exact or conservative, but must cover the full
+    // retained NativeCellState returned by the subsequent fetch. A missing,
+    // zero, or understated declaration makes the source inadmissible.
+    virtual std::optional<std::size_t>
+    physical_terrain_cell_retained_bytes_excluding_scene_overlay_at(
+        const CellCoord &) const noexcept {
+        return std::nullopt;
+    }
     // The source must honor max_candidate_reads and report its exact reads.
     virtual std::optional<NativeTerrainEditSurfaceProjection> continuous_surface_projection_at(
         const NativeTerrainEditColumn &, std::size_t) const {
@@ -121,6 +130,9 @@ struct NativeTerrainEditCompileLimits {
     std::size_t max_projection_reads = 4'000'000U;
     std::size_t max_projection_reads_per_query = 4096U;
     std::size_t max_y_candidates = 4'000'000U;
+    std::size_t max_metadata_nodes = NativeValueLimits::MAX_NODES;
+    std::size_t max_metadata_text_bytes = 1024U * 1024U;
+    std::size_t max_metadata_depth = NativeValueLimits::MAX_DEPTH;
     // Conservative aggregate logical residency across planned columns,
     // physical-source cache, pending map, compatibility summaries, map/set
     // indexes, and final operation copies. Every concurrently retained copy is
@@ -185,6 +197,9 @@ struct NativeTerrainEditCompileSummary {
     std::size_t y_candidates = 0;
     std::size_t prepared_bytes = 0;
     bool source_pinned = false;
+    // Surface-deformation output is bound to a physical snapshot digest and
+    // may not use the revision-only legacy transaction conversion.
+    bool requires_identity_bound_commit = false;
     Sha256Digest source_snapshot_digest{};
     std::uint64_t source_revision = 0;
 };
@@ -223,6 +238,9 @@ enum class NativeTerrainEditCompileRejectReason : std::uint8_t {
     y_candidate_limit_exceeded = 14,
     prepared_byte_limit_exceeded = 15,
     mixed_surface_deformation = 16,
+    source_cell_size_missing = 17,
+    source_cell_size_mismatch = 18,
+    identity_bound_commit_required = 19,
 };
 
 class NativeTerrainEditCompileRejected final : public std::invalid_argument {
@@ -262,7 +280,7 @@ struct NativeTerrainEditCompileProgress {
 class NativeTerrainEditCompileJob final {
 public:
     NativeTerrainEditCompileJob(NativeTerrainEditCompileJob &&) noexcept;
-    NativeTerrainEditCompileJob &operator=(NativeTerrainEditCompileJob &&) noexcept;
+    NativeTerrainEditCompileJob &operator=(NativeTerrainEditCompileJob &&) noexcept = delete;
     NativeTerrainEditCompileJob(const NativeTerrainEditCompileJob &) = delete;
     NativeTerrainEditCompileJob &operator=(const NativeTerrainEditCompileJob &) = delete;
     ~NativeTerrainEditCompileJob();
@@ -287,7 +305,7 @@ private:
 
 class NativeTerrainEditResumableCompiler final {
 public:
-    static NativeTerrainEditCompileJob begin(NativeTerrainEditCompileRequest request);
+    static NativeTerrainEditCompileJob begin(const NativeTerrainEditCompileRequest &request);
 };
 
 } // namespace voxel::world_backend

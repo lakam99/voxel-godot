@@ -151,10 +151,19 @@ const allowDirtyDevelopment = process.argv.includes('--allow-dirty-development')
 if (statusBefore && !allowDirtyDevelopment) throw new Error('focused native receipt requires a clean worktree');
 
 const cl = where('cl.CMD');
+const clWrapperText = readFileSync(cl, 'utf8');
+const vcvarsMatch = clWrapperText.match(/call\s+"([^"]*vcvars64\.bat)"/i);
+if (!vcvarsMatch) throw new Error(`Unable to resolve vcvars64.bat from ${cl}`);
+const vcRoot = dirname(dirname(dirname(vcvarsMatch[1])));
+const msvcVersion = readFileSync(join(vcRoot, 'Auxiliary', 'Build',
+  'Microsoft.VCToolsVersion.default.txt'), 'utf8').trim();
+const msvcBin = join(vcRoot, 'Tools', 'MSVC', msvcVersion, 'bin', 'Hostx64', 'x64');
+const resolvedCl = join(msvcBin, 'cl.exe');
+const resolvedLink = join(msvcBin, 'link.exe');
 const clang = join(llvmRoot, 'bin', 'clang-cl.exe');
 const profdata = join(llvmRoot, 'bin', 'llvm-profdata.exe');
 const cov = join(llvmRoot, 'bin', 'llvm-cov.exe');
-const tools = [cl, clang, profdata, cov]
+const tools = [cl, resolvedCl, resolvedLink, clang, profdata, cov]
   .map(path => ({ path, bytes: statSync(path).size, sha256: sha256(path) }));
 const steps = [];
 let status = 'running';

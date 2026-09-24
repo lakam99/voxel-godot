@@ -11,10 +11,14 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 using namespace voxel::world_backend;
+
+static_assert(std::is_move_constructible_v<NativeTerrainEditCompileJob>);
+static_assert(!std::is_move_assignable_v<NativeTerrainEditCompileJob>);
 
 namespace {
 
@@ -103,6 +107,13 @@ public:
             {}, NativeValue::object({{"source", NativeValue::string("generated")}}));
     }
 
+    std::optional<std::size_t>
+    physical_terrain_cell_retained_bytes_excluding_scene_overlay_at(
+        const CellCoord &) const noexcept override {
+        ++size_queries_;
+        return declared_cell_bytes_;
+    }
+
     std::optional<NativeTerrainEditSurfaceProjection> continuous_surface_projection_at(
         const NativeTerrainEditColumn &column, const std::size_t allowance) const override {
         ++projection_queries_;
@@ -129,6 +140,8 @@ public:
     std::size_t read_count() const noexcept { return reads_; }
     std::size_t durable_read_count() const noexcept { return durable_reads_; }
     std::size_t projection_query_count() const noexcept { return projection_queries_; }
+    std::size_t size_query_count() const noexcept { return size_queries_; }
+    void declared_cell_bytes(std::optional<std::size_t> value) { declared_cell_bytes_ = value; }
     void projection(const NativeTerrainEditColumn column, const double surface, const std::size_t reads) {
         projections_[{column.x, column.z}] = {surface, reads};
     }
@@ -152,6 +165,7 @@ private:
     mutable std::size_t reads_ = 0;
     mutable std::size_t durable_reads_ = 0;
     mutable std::size_t projection_queries_ = 0;
+    mutable std::size_t size_queries_ = 0;
     std::uint64_t revision_ = 73U;
     std::map<std::pair<std::int32_t, std::int32_t>, std::pair<double, std::size_t>> projections_;
     double projection_surface_ = 2.0;
@@ -161,6 +175,7 @@ private:
     bool respect_projection_allowance_ = true;
     bool projection_throws_invalid_ = false;
     bool projection_throws_rejected_ = false;
+    std::optional<std::size_t> declared_cell_bytes_ = 16U * 1024U;
 };
 
 class DriftingPinnedSource final : public NativeTerrainEditPinnedSource {
@@ -207,6 +222,11 @@ public:
         const CellCoord &cell) const override {
         touched_ = true;
         return cell_state(cell, TerrainMaterialId::stone, true, 1.0);
+    }
+    std::optional<std::size_t>
+    physical_terrain_cell_retained_bytes_excluding_scene_overlay_at(
+        const CellCoord &) const noexcept override {
+        return 16U * 1024U;
     }
     std::optional<NativeTerrainEditSurfaceProjection> continuous_surface_projection_at(
         const NativeTerrainEditColumn &column, std::size_t) const override {
@@ -1125,8 +1145,64 @@ VWB_TEST(native_surface_deformation_matches_flat_legacy_shape_and_preserves_payl
     VWB_EXPECT_EQ(0U, source->read_count());
     VWB_EXPECT(source->durable_read_count() >= 4U);
 
-    const WorldTypedCellTransaction transaction = batch.make_transaction("surface:flat", 73U);
-    VWB_EXPECT_EQ(3U, transaction.operations.size());
+    try {
+        static_cast<void>(batch.make_transaction("surface:flat", 73U));
+        VWB_EXPECT(false);
+    } catch (const NativeTerrainEditCompileRejected &error) {
+        VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::identity_bound_commit_required,
+            error.reason());
+    }
+}
+
+VWB_TEST(native_surface_deformation_invalidates_no_fluid_columns_on_solidity_change) {
+    const NativeTerrainEditCompiledBatch batch = drain_deformation(
+        deformation_request(std::make_shared<FakePinnedSource>()), 2U);
+    VWB_EXPECT((batch.summary().fluid_transition_columns
+        == std::vector<NativeTerrainEditColumn>{{0, 0}}));
+    VWB_EXPECT((batch.summary().skylight_columns
+        == std::vector<NativeTerrainEditColumn>{{0, 0}}));
+}
+
+VWB_TEST(native_surface_deformation_skylight_predicate_matches_script_sources) {
+    auto run_pair = [](NativeValue target_metadata, NativeValue existing_metadata) {
+        auto source = std::make_shared<FakePinnedSource>(FakePinnedSource::Fallback::air);
+        source->add_durable(cell_state({0, 1, 0}, TerrainMaterialId::air, false, -1.0,
+            {}, existing_metadata));
+        source->add_durable(cell_state({0, 2, 0}, TerrainMaterialId::air, false, -1.0,
+            {}, existing_metadata));
+        NativeTerrainEditCompileRequest request = deformation_request(source);
+        request.shapes[0].target.metadata = std::move(target_metadata);
+        return drain_deformation(request, 2U);
+    };
+    auto run_hidden = [&run_pair](NativeValue metadata) {
+        return run_pair(metadata, metadata);
+    };
+    const NativeTerrainEditCompiledBatch structure = run_hidden(NativeValue::object({
+        {"source", NativeValue::string("structure_wall")},
+    }));
+    VWB_EXPECT(structure.summary().skylight_columns.empty());
+    const NativeTerrainEditCompiledBatch scene = run_hidden(NativeValue::object({
+        {"renderedBySceneBlock", NativeValue::boolean(true)},
+        {"source", NativeValue::string("scene_block")},
+    }));
+    VWB_EXPECT(scene.summary().skylight_columns.empty());
+    const NativeValue structure_target = NativeValue::object({
+        {"source", NativeValue::string("structure_wall")},
+    });
+    VWB_EXPECT_EQ(1U, run_pair(structure_target, NativeValue::object({}))
+        .summary().skylight_columns.size());
+    VWB_EXPECT_EQ(1U, run_pair(structure_target, NativeValue::object({
+        {"zzz", NativeValue::boolean(false)},
+    })).summary().skylight_columns.size());
+    VWB_EXPECT_EQ(1U, run_pair(structure_target, NativeValue::object({
+        {"source", NativeValue::number(4.0)},
+    })).summary().skylight_columns.size());
+    VWB_EXPECT_EQ(1U, run_pair(NativeValue::object({
+        {"source", NativeValue::string("short")},
+    }), NativeValue::object({})).summary().skylight_columns.size());
+    const NativeTerrainEditCompiledBatch player = drain_deformation(
+        deformation_request(std::make_shared<FakePinnedSource>()), 2U);
+    VWB_EXPECT_EQ(1U, player.summary().skylight_columns.size());
 }
 
 VWB_TEST(native_surface_deformation_uses_effective_projection_but_clones_only_durable_terrain) {
@@ -1303,9 +1379,13 @@ VWB_TEST(native_surface_deformation_rejects_invalid_ownership_shapes_projection_
     FakePinnedSource other;
     request.source = &other;
     expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
-    request = deformation_request(source);
-    request.shapes[0].target.solid.reset();
-    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    NativeTerrainEditCompileRequest derived_air = deformation_request(source);
+    derived_air.shapes[0].target.solid.reset();
+    const NativeTerrainEditCompiledBatch derived_air_batch = drain_deformation(derived_air, 2U);
+    const NativeTerrainEditCompiledBatch explicit_air_batch = drain_deformation(
+        deformation_request(std::make_shared<FakePinnedSource>()), 2U);
+    expect_same_batch(derived_air_batch, explicit_air_batch);
+    VWB_EXPECT(!derived_air_batch.compiled_operations()[1].operation.state->solid);
     request = deformation_request(source);
     request.shapes[0].drop_depth = std::numeric_limits<double>::quiet_NaN();
     expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
@@ -1387,9 +1467,154 @@ VWB_TEST(native_surface_deformation_rejects_invalid_ownership_shapes_projection_
         deformation_request(mismatch_cell));
 }
 
+VWB_TEST(native_surface_deformation_preflights_request_metadata_before_normalized_copy) {
+    auto source = std::make_shared<FakePinnedSource>();
+    NativeTerrainEditCompileRequest ordinary = deformation_request(source);
+    NativeTerrainEditCompileJob measured = NativeTerrainEditResumableCompiler::begin(ordinary);
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::running, measured.status());
+    const std::size_t admitted = measured.progress().prepared_bytes;
+    const std::size_t retained = measured.retained_entries_for_off_worker_destruction();
+    VWB_EXPECT(retained > 2U);
+    measured.cancel();
+    VWB_EXPECT_EQ(retained, measured.retained_entries_for_off_worker_destruction());
+
+    NativeTerrainEditCompileRequest spare = deformation_request(source);
+    spare.shapes.reserve(10000U);
+    NativeTerrainEditCompileJob spare_job = NativeTerrainEditResumableCompiler::begin(spare);
+    VWB_EXPECT_EQ(admitted, spare_job.progress().prepared_bytes);
+    spare_job.cancel();
+
+    NativeTerrainEditCompileRequest exact = deformation_request(source);
+    exact.limits.max_prepared_bytes = admitted;
+    NativeTerrainEditCompileJob exact_job = NativeTerrainEditResumableCompiler::begin(exact);
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::running, exact_job.status());
+    exact_job.cancel();
+    NativeTerrainEditCompileRequest under = deformation_request(source);
+    under.limits.max_prepared_bytes = admitted - 1U;
+    NativeTerrainEditCompileJob under_job = NativeTerrainEditResumableCompiler::begin(under);
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::rejected, under_job.status());
+    VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::prepared_byte_limit_exceeded,
+        *under_job.reject_reason());
+    VWB_EXPECT_EQ(0U, under_job.retained_entries_for_off_worker_destruction());
+    VWB_EXPECT_EQ(0U, source->projection_query_count());
+    VWB_EXPECT_EQ(0U, source->size_query_count());
+
+    NativeTerrainEditCompileRequest recursive = deformation_request(
+        std::make_shared<FakePinnedSource>());
+    recursive.shapes[0].target.block_id = NativeBlockIdentity::create("air.custom");
+    recursive.shapes[0].target.metadata = NativeValue::object({
+        {"nested", NativeValue::array({
+            NativeValue::null(), NativeValue::number(2.5),
+            NativeValue::object({{"leaf", NativeValue::string("value")}}),
+        })},
+        {"source", NativeValue::string("player_dig")},
+    });
+    VWB_EXPECT(!drain_deformation(recursive, 4U).compiled_operations().empty());
+    recursive.limits.max_metadata_depth = 1U;
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, recursive);
+    recursive.limits.max_metadata_depth = NativeValueLimits::MAX_DEPTH;
+    recursive.limits.max_metadata_text_bytes = 1U;
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, recursive);
+    recursive.limits.max_metadata_text_bytes = 50U;
+    recursive.shapes[0].target.metadata = NativeValue::object({
+        {"a", NativeValue::string(std::string(100U, 'x'))},
+        {"source", NativeValue::string("player_dig")},
+    });
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, recursive);
+    recursive.shapes[0].target.metadata = NativeValue::boolean(true);
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, recursive);
+
+    NativeTerrainEditCompileRequest injected_nodes = deformation_request(source);
+    injected_nodes.shapes[0].target.metadata = NativeValue::object({});
+    injected_nodes.limits.max_metadata_nodes = 4U;
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, injected_nodes);
+    injected_nodes.limits.max_metadata_nodes = NativeValueLimits::MAX_NODES;
+    injected_nodes.limits.max_metadata_text_bytes = 10U;
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, injected_nodes);
+
+    NativeValue::Object maximum;
+    maximum.reserve(NativeValueLimits::MAX_CONTAINER_ENTRIES);
+    for (std::size_t index = 0U; index < 1020U; ++index) {
+        std::string digits = std::to_string(index);
+        maximum.push_back({"a" + std::string(4U - digits.size(), '0') + digits,
+            NativeValue::boolean(false)});
+    }
+    maximum.push_back({"saveDelta", NativeValue::boolean(false)});
+    maximum.push_back({"source", NativeValue::string("player_dig")});
+    maximum.push_back({"surfaceProjectionAffects", NativeValue::boolean(false)});
+    maximum.push_back({"terrainMeshAffects", NativeValue::boolean(false)});
+    NativeTerrainEditCompileRequest near_max = deformation_request(
+        std::make_shared<FakePinnedSource>());
+    near_max.shapes[0].target.metadata = NativeValue::object(std::move(maximum));
+    near_max.limits.max_metadata_nodes = 1025U;
+    VWB_EXPECT(!drain_deformation(near_max, 32U).compiled_operations().empty());
+    near_max.limits.max_metadata_nodes = 1024U;
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, near_max);
+
+    NativeValue::Object over;
+    over.reserve(NativeValueLimits::MAX_CONTAINER_ENTRIES - 1U);
+    for (std::size_t index = 0U; index < 1021U; ++index) {
+        std::string digits = std::to_string(index);
+        over.push_back({"a" + std::string(4U - digits.size(), '0') + digits,
+            NativeValue::boolean(false)});
+    }
+    over.push_back({"source", NativeValue::string("player_dig")});
+    NativeTerrainEditCompileRequest injected_over = deformation_request(source);
+    injected_over.shapes[0].target.metadata = NativeValue::object(std::move(over));
+    expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, injected_over);
+    VWB_EXPECT_EQ(0U, source->projection_query_count());
+}
+
+VWB_TEST(native_surface_deformation_precharges_physical_cells_and_rejects_lying_sources) {
+    auto missing = std::make_shared<FakePinnedSource>();
+    missing->declared_cell_bytes(std::nullopt);
+    expect_job_reason(NativeTerrainEditCompileRejectReason::source_cell_size_missing,
+        deformation_request(missing));
+    VWB_EXPECT(missing->size_query_count() > 0U);
+    VWB_EXPECT_EQ(0U, missing->durable_read_count());
+
+    auto zero = std::make_shared<FakePinnedSource>();
+    zero->declared_cell_bytes(0U);
+    expect_job_reason(NativeTerrainEditCompileRejectReason::source_cell_size_missing,
+        deformation_request(zero));
+    VWB_EXPECT_EQ(0U, zero->durable_read_count());
+
+    auto too_large = std::make_shared<FakePinnedSource>();
+    too_large->declared_cell_bytes(64U * 1024U * 1024U);
+    expect_job_reason(NativeTerrainEditCompileRejectReason::prepared_byte_limit_exceeded,
+        deformation_request(too_large));
+    VWB_EXPECT_EQ(0U, too_large->durable_read_count());
+
+    auto overflow = std::make_shared<FakePinnedSource>();
+    overflow->declared_cell_bytes(std::numeric_limits<std::size_t>::max());
+    expect_job_reason(NativeTerrainEditCompileRejectReason::source_cell_size_mismatch,
+        deformation_request(overflow));
+    VWB_EXPECT_EQ(0U, overflow->durable_read_count());
+
+    auto lying = std::make_shared<FakePinnedSource>();
+    lying->declared_cell_bytes(1U);
+    expect_job_reason(NativeTerrainEditCompileRejectReason::source_cell_size_mismatch,
+        deformation_request(lying));
+    VWB_EXPECT(lying->durable_read_count() > 0U);
+
+    std::string spare_text("kept");
+    spare_text.reserve(48U * 1024U);
+    auto conservative = std::make_shared<FakePinnedSource>();
+    conservative->declared_cell_bytes(128U * 1024U);
+    conservative->add_durable(cell_state({0, 0, 0}, TerrainMaterialId::stone, true, 1.0,
+        {}, NativeValue::object({
+            {"custom", NativeValue::string(std::move(spare_text))},
+            {"nested", NativeValue::array({NativeValue::boolean(true)})},
+        })));
+    const NativeTerrainEditCompiledBatch batch = drain_deformation(
+        deformation_request(conservative), 2U);
+    VWB_EXPECT(!batch.compiled_operations().empty());
+    VWB_EXPECT(conservative->durable_read_count() > 0U);
+}
+
 VWB_TEST(native_surface_deformation_rejects_every_zero_limit_and_translates_source_errors) {
     auto source = std::make_shared<FakePinnedSource>();
-    for (std::size_t index = 0; index < 7U; ++index) {
+    for (std::size_t index = 0; index < 10U; ++index) {
         NativeTerrainEditCompileRequest request = deformation_request(source);
         if (index == 0U) request.limits.max_candidate_visits = 0U;
         else if (index == 1U) request.limits.max_operations = 0U;
@@ -1397,7 +1622,10 @@ VWB_TEST(native_surface_deformation_rejects_every_zero_limit_and_translates_sour
         else if (index == 3U) request.limits.max_projection_reads = 0U;
         else if (index == 4U) request.limits.max_projection_reads_per_query = 0U;
         else if (index == 5U) request.limits.max_y_candidates = 0U;
-        else request.limits.max_prepared_bytes = 0U;
+        else if (index == 6U) request.limits.max_prepared_bytes = 0U;
+        else if (index == 7U) request.limits.max_metadata_nodes = 0U;
+        else if (index == 8U) request.limits.max_metadata_text_bytes = 0U;
+        else request.limits.max_metadata_depth = 0U;
         expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
     }
     NativeTerrainEditCompileRequest invalid_cell_size = deformation_request(source);
@@ -1441,12 +1669,15 @@ VWB_TEST(native_surface_deformation_rejects_every_zero_limit_and_translates_sour
         deformation_request(invalid));
     NativeTerrainEditCompileJob zero = NativeTerrainEditResumableCompiler::begin(
         deformation_request(source));
+    const std::size_t zero_retained = zero.retained_entries_for_off_worker_destruction();
+    VWB_EXPECT(zero_retained > 0U);
     zero.advance(0U);
     VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::rejected, zero.status());
     VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::invalid_request, *zero.reject_reason());
+    VWB_EXPECT_EQ(zero_retained, zero.retained_entries_for_off_worker_destruction());
 }
 
-VWB_TEST(native_surface_deformation_detects_source_drift_and_commits_atomically_to_real_store) {
+VWB_TEST(native_surface_deformation_detects_source_drift_and_blocks_revision_only_commit) {
     auto digest = std::make_shared<SurfaceDriftingPinnedSource>(
         SurfaceDriftingPinnedSource::Drift::digest);
     expect_job_reason(NativeTerrainEditCompileRejectReason::source_drift,
@@ -1460,28 +1691,12 @@ VWB_TEST(native_surface_deformation_detects_source_drift_and_commits_atomically_
     source->revision(0U);
     const NativeTerrainEditCompiledBatch batch = drain_deformation(
         deformation_request(source), 2U);
-    WorldDeltaStore store;
-    const WorldTypedCellTransaction transaction = batch.make_transaction("surface:commit", 0U);
-    const WorldDeltaCommitReceipt committed = store.commit_typed_cells(transaction);
-    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, committed.status);
-    VWB_EXPECT_EQ(1U, store.revision());
-    const WorldDeltaCommitReceipt replay = store.commit_typed_cells(transaction);
-    VWB_EXPECT_EQ(WorldDeltaCommitStatus::idempotent_replay, replay.status);
-    WorldTypedCellTransaction conflict = transaction;
-    conflict.operations.pop_back();
     try {
-        static_cast<void>(store.commit_typed_cells(conflict));
+        static_cast<void>(batch.make_transaction("surface:commit", 0U));
         VWB_EXPECT(false);
-    } catch (const WorldDeltaRejected &error) {
-        VWB_EXPECT_EQ(WorldDeltaRejectReason::transaction_conflict, error.reason());
-    }
-    WorldTypedCellTransaction stale = transaction;
-    stale.transaction_id = "surface:stale";
-    try {
-        static_cast<void>(store.commit_typed_cells(stale));
-        VWB_EXPECT(false);
-    } catch (const WorldDeltaRejected &error) {
-        VWB_EXPECT_EQ(WorldDeltaRejectReason::revision_conflict, error.reason());
+    } catch (const NativeTerrainEditCompileRejected &error) {
+        VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::identity_bound_commit_required,
+            error.reason());
     }
 }
 
@@ -1494,8 +1709,11 @@ VWB_TEST(native_surface_deformation_cancel_and_reject_retain_large_state_for_off
     VWB_EXPECT(cancelled.progress().prepared_operations >= 50U);
     const std::size_t retained_before = cancelled.retained_entries_for_off_worker_destruction();
     VWB_EXPECT(retained_before >= 100U);
-    cancelled.cancel();
-    VWB_EXPECT_EQ(retained_before, cancelled.retained_entries_for_off_worker_destruction());
+    NativeTerrainEditCompileJob moved_cancel = std::move(cancelled);
+    VWB_EXPECT_EQ(0U, cancelled.retained_entries_for_off_worker_destruction());
+    VWB_EXPECT_EQ(retained_before, moved_cancel.retained_entries_for_off_worker_destruction());
+    moved_cancel.cancel();
+    VWB_EXPECT_EQ(retained_before, moved_cancel.retained_entries_for_off_worker_destruction());
 
     auto reject_source = std::make_shared<FakePinnedSource>();
     NativeTerrainEditCompileRequest request = deformation_request(
@@ -1542,10 +1760,6 @@ VWB_TEST(native_surface_deformation_job_move_and_result_state_are_explicit) {
     VWB_EXPECT(moved.take_completed_batch().has_value());
     VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::result_taken, moved.status());
     VWB_EXPECT(!moved.take_completed_batch().has_value());
-    NativeTerrainEditCompileJob assigned = NativeTerrainEditResumableCompiler::begin(
-        deformation_request(std::make_shared<FakePinnedSource>()));
-    assigned = std::move(moved);
-    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::result_taken, assigned.status());
 }
 
 VWB_TEST(native_surface_deformation_absent_source_metadata_and_unfiltered_output_are_exact) {

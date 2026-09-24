@@ -21,6 +21,11 @@ await rm(receiptPath, { force: true });
 
 const sources = [
   resolve(project, 'scripts/testing/native_world/N3NativeTerrainSurfaceDeformationOracleContract.gd'),
+  resolve(project, 'native/world_backend/tests/native_terrain_edit_shape_compiler_tests.cpp'),
+  resolve(project, 'tools/lib/godot-process.mjs'),
+  resolve(project, 'tools/lib/owned-process.mjs'),
+  resolve(project, 'tools/lib/voxel-tool-runtime.mjs'),
+  resolve(project, 'tools/run-godot-scene-watchdog.mjs'),
   fileURLToPath(import.meta.url),
 ];
 const record = async path => ({
@@ -35,6 +40,10 @@ const statusBefore = execFileSync('git', ['status', '--short'], { cwd: project, 
 const allowDirtyDevelopment = process.argv.includes('--allow-dirty-development');
 if (statusBefore && !allowDirtyDevelopment) throw new Error('oracle receipt requires a clean worktree');
 const godot = await findGodot(parsed.options.godotExe);
+const engineCandidate = godot.replace(/_console\.exe$/i, '.exe');
+const godotExecutables = [...new Set([godot, engineCandidate])];
+for (const executable of godotExecutables) await access(executable, fsConstants.F_OK);
+const godotBefore = await Promise.all(godotExecutables.map(record));
 const execution = await runGodotProcess(godot, [
   '--headless', '--path', project,
   '--script', 'res://scripts/testing/native_world/N3NativeTerrainSurfaceDeformationOracleContract.gd',
@@ -45,15 +54,21 @@ const execution = await runGodotProcess(godot, [
 await access(reportPath, fsConstants.F_OK);
 const report = JSON.parse(await readFile(reportPath, 'utf8'));
 const sourcesAfter = await Promise.all(sources.map(record));
+const godotAfter = await Promise.all(godotExecutables.map(record));
 const statusAfter = execFileSync('git', ['status', '--short'], { cwd: project, encoding: 'utf8' }).trim();
 const receipt = {
   schema: 'n3-native-terrain-surface-deformation-oracle-receipt/v1',
   status: execution.code === 0 && report.passed ? 'passed' : 'failed',
   evidenceClass: statusBefore ? 'development-diagnostic-dirty-source' : 'clean-source-attested',
   source: { commit, branch, status: statusBefore, inputs: sourceInputs },
+  tools: { godotExecutables: godotBefore },
+  nativeExpectedContract: sourceInputs.find(input =>
+    input.path === 'native/world_backend/tests/native_terrain_edit_shape_compiler_tests.cpp'),
   execution,
   report,
-  unchanged: statusAfter === statusBefore && JSON.stringify(sourcesAfter) === JSON.stringify(sourceInputs),
+  unchanged: statusAfter === statusBefore
+    && JSON.stringify(sourcesAfter) === JSON.stringify(sourceInputs)
+    && JSON.stringify(godotAfter) === JSON.stringify(godotBefore),
 };
 if (!receipt.unchanged) receipt.status = 'failed';
 await writeFile(receiptPath, JSON.stringify(receipt, null, 2) + '\n');
