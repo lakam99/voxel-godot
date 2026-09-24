@@ -640,3 +640,35 @@ is terminal and no retirement scratch remains. Publication still requires
 exact token, revision, and closure agreement. No N3N5 integration or production
 cutover claim is made until the focused regression and bounded physical
 contract pass.
+
+The staged-layout ownership/lifecycle correction (`af1a79b`, integrated on
+primary as `68633c5`) now requires the exact transaction token for planner
+layout advancement/cancellation, refuses to adopt foreign same-kind tokens,
+retries after proven orphan release, and keeps stop pending until a foreign
+staged owner drains. On the integrated primary build, the focused staged
+consumer contract passed at
+`artifacts/native-world-backend/n3-staged-window-consumer-1790222455832-1435b0c8/report.json`
+(371 advances, 90,575 total work, maximum 256), and demand replacement passed
+at
+`artifacts/native-world-backend/n3-terrain-demand-replacement-1790222455832-98689677/report.json`
+(1,250 advances, 383,610 total work, maximum 256). The staged contract covers
+shared producer/broker interleaving, foreign-owner stop wait, producer orphan
+retry, same-kind token rejection, transferred-result orphan recovery, stale
+candidate drain, cancellation, and revision parity. These remain focused
+service/planner receipts (`productionCutover: false`); physical collision,
+runtime wiring, and gameplay are not proven.
+
+An independent call-graph audit of primary `024f3ef` found aggregate frame
+boundedness is still open. `collision_window_layout()` is effectful: it can
+refresh and advance the shared builder by up to 256 operations per call, and
+production coordinator paths can request layout/readiness/retirement several
+times in one process or physics frame. Thus the per-call cap is not a frame
+cap. The getter's refresh also performs window proofs and retention scans;
+several of those phases and full layout/job copies are not included in
+`workOps` and are not cursorized. The durable direction is one centrally owned
+once-per-frame pump with a shared budget for layout and required-block work,
+side-effect-free snapshot getters, cursorized reconciliation/proof/publication,
+and immutable/cheap snapshot transfer. Focused tests must assert repeated
+getters do not advance work or mutate ownership, and that all producer kinds
+combined stay within one frame budget. No aggregate frame-boundedness or N3
+promotion claim is made yet.
