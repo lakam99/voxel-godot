@@ -10,6 +10,22 @@ const CharacterMotorScript := preload("res://scripts/npc_ai/motor/CharacterMotor
 const MotorProfileScript := preload("res://scripts/npc_ai/contracts/CharacterMotorProfile.gd")
 const MotorCommandScript := preload("res://scripts/npc_ai/contracts/CharacterMotorCommand.gd")
 
+## N2-only compatibility harness for the pre-N5 single-body admission contract.
+## It is deliberately not accepted by MainCore; production binds only the N5
+## aggregate router exercised by N3N5WindowedPhysicalFixture.
+class N2BarrierAdmissionFacade extends RefCounted:
+	var barrier: RefCounted
+
+	func native_collision_admit_motion(actor: PhysicsBody3D, motion: Vector3) -> bool:
+		return barrier != null and barrier.admit_motion(actor, motion)
+
+	func native_collision_admit_placement(actor: PhysicsBody3D,
+			transform: Transform3D) -> bool:
+		return barrier != null and barrier.admit_placement(actor, transform)
+
+	func native_collision_register_moving_actor(actor: PhysicsBody3D) -> bool:
+		return barrier != null and barrier.register_moving_actor(actor)
+
 const REPORT_SCHEMA := "n2-native-world-vertical-slice-fixture/v1"
 const RESULT_SCHEMA := "n2-native-vertical-slice-result/v1"
 const PREPARE_METHOD := "n2_prepare_vertical_slice"
@@ -601,14 +617,16 @@ func _actor_guard_contract() -> Dictionary:
 	var static_motion_admitted: bool = barrier.admit_motion(moving_static, Vector3.ZERO)
 	var static_cancel_admitted: bool = barrier.cancel_empty_startup(identity)
 	var main_facade = MainFacadeScript.new()
-	var facade_bound: bool = main_facade.bind_native_collision_admission(_body, barrier)
+	var raw_barrier_rejected: bool = not main_facade.bind_native_collision_admission(_body, barrier)
+	var n2_compatibility_facade := N2BarrierAdmissionFacade.new()
+	n2_compatibility_facade.barrier = barrier
 	moving_static.position = Vector3(10, 0, 0)
-	var placement_inside_held: bool = not main_facade.native_collision_admit_placement(
+	var placement_inside_held: bool = not n2_compatibility_facade.native_collision_admit_placement(
 		moving_static, Transform3D(Basis.IDENTITY, Vector3.ZERO))
-	var placement_outside_admitted: bool = main_facade.native_collision_admit_placement(
+	var placement_outside_admitted: bool = n2_compatibility_facade.native_collision_admit_placement(
 		moving_static, Transform3D(Basis.IDENTITY, Vector3(10, 0, 0)))
 	var static_sweep_admitted: bool = barrier.admit_motion(moving_static, Vector3(-10, 0, 0))
-	var facade_sweep_admitted: bool = main_facade.native_collision_admit_motion(moving_static, Vector3(-10, 0, 0))
+	var facade_sweep_admitted: bool = n2_compatibility_facade.native_collision_admit_motion(moving_static, Vector3(-10, 0, 0))
 	var facade_early_unbind: bool = main_facade.unbind_native_collision_admission(_body)
 	var motor_actor := CharacterBody3D.new()
 	motor_actor.position = Vector3(10, 0, 0)
@@ -622,10 +640,10 @@ func _actor_guard_contract() -> Dictionary:
 	var motor_profile = MotorProfileScript.npc_default()
 	motor_profile.use_terrain_grounding = false
 	var motor_command = MotorCommandScript.from_velocity(Vector3(-40, 0, 0))
-	var motor_state = motor.apply(motor_actor, motor_command, motor_profile, 0.25, main_facade)
+	var motor_state = motor.apply(motor_actor, motor_command, motor_profile, 0.25, n2_compatibility_facade)
 	var motor_held: bool = bool(motor_state.get("blocked")) and motor_actor.position.x >= 9.9
 	motor_actor.position = Vector3(0, 10, 0)
-	motor.move_vertical_toward(motor_actor, 0.0, main_facade)
+	motor.move_vertical_toward(motor_actor, 0.0, n2_compatibility_facade)
 	var correction_held: bool = motor_actor.position.y >= 9.9
 	motor_actor.queue_free()
 	moving_static.queue_free()
@@ -684,9 +702,9 @@ func _actor_guard_contract() -> Dictionary:
 		and not late_motion_admitted and not premature_release and not premature_abort \
 		and static_clearance.get("reason") == "actor_occupies_replacement" \
 		and not static_motion_admitted and not static_sweep_admitted \
-		and not static_cancel_admitted and facade_bound and not facade_sweep_admitted \
+		and not static_cancel_admitted and raw_barrier_rejected and not facade_sweep_admitted \
 		and placement_inside_held and placement_outside_admitted \
-		and not facade_early_unbind and facade_unbound and motor_held and correction_held \
+		and not facade_early_unbind and not facade_unbound and motor_held and correction_held \
 		and cancelled_empty_startup \
 		and census_pending and census_completed and far_motion_allowed \
 		and entry_motion_held and group_registration and group_entry_held \
@@ -698,7 +716,8 @@ func _actor_guard_contract() -> Dictionary:
 			"cancelledEmptyStartup":cancelled_empty_startup},
 		"movingStatic": {"clearance":static_clearance, "motionAdmitted":static_motion_admitted,
 			"sweepAdmitted":static_sweep_admitted, "cancelAdmitted":static_cancel_admitted,
-			"facadeBound":facade_bound, "facadeSweepAdmitted":facade_sweep_admitted,
+			"rawBarrierRejected":raw_barrier_rejected,
+			"compatSweepAdmitted":facade_sweep_admitted,
 			"placementInsideHeld":placement_inside_held,
 			"placementOutsideAdmitted":placement_outside_admitted,
 			"facadeEarlyUnbind":facade_early_unbind, "facadeUnbound":facade_unbound,

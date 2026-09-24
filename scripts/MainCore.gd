@@ -12,7 +12,7 @@ const GeneratedStructurePlayerClearanceScript := preload("res://scripts/world/Ge
 const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.gd")
 const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
 const ActorPhysicalStreamingDemandScript := preload("res://scripts/world/ActorPhysicalStreamingDemand.gd")
-const NativeCollisionAdmissionBarrierScript := preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
+const NativeCollisionAdmissionRouterScript := preload("res://scripts/terrain/NativeCollisionAdmissionRouter.gd")
 const NativePrivateMainLoadStageScript := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
 const NativeDecodedSaveRetirementScript := preload("res://scripts/terrain/NativeDecodedSaveRetirement.gd")
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
@@ -322,7 +322,7 @@ var block_meshes := {}
 func native_collision_admit_motion(body: PhysicsBody3D, motion: Vector3) -> bool:
     if _native_collision_admission_owner_id == 0:
         return true
-    if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
+    if not _native_collision_admission_barrier is NativeCollisionAdmissionRouterScript:
         return false
     return _native_collision_admission_barrier.admit_motion(body, motion)
 
@@ -332,22 +332,22 @@ func native_collision_admission_bound() -> bool:
 func native_collision_register_moving_actor(body: PhysicsBody3D) -> bool:
     if _native_collision_admission_owner_id == 0:
         return true
-    if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
+    if not _native_collision_admission_barrier is NativeCollisionAdmissionRouterScript:
         return false
     return _native_collision_admission_barrier.register_moving_actor(body)
 
 func native_collision_admit_placement(body: PhysicsBody3D, proposed_transform: Transform3D) -> bool:
     if _native_collision_admission_owner_id == 0:
         return true
-    if not _native_collision_admission_barrier is NativeCollisionAdmissionBarrierScript:
+    if not _native_collision_admission_barrier is NativeCollisionAdmissionRouterScript:
         return false
     return _native_collision_admission_barrier.admit_placement(body, proposed_transform)
 
 func bind_native_collision_admission(owner: Node, barrier: RefCounted) -> bool:
     if owner == null or not is_instance_valid(owner) or owner.get_instance_id() <= 0 \
             or _native_collision_admission_owner_id != 0 \
-            or not barrier is NativeCollisionAdmissionBarrierScript \
-            or not barrier.is_active():
+            or not barrier is NativeCollisionAdmissionRouterScript \
+            or not barrier.is_active() or not barrier.is_admission_ready():
         return false
     _native_collision_admission_owner_id = owner.get_instance_id()
     _native_collision_admission_barrier = barrier
@@ -355,11 +355,20 @@ func bind_native_collision_admission(owner: Node, barrier: RefCounted) -> bool:
         hostile_system.set_native_collision_admission_required(true)
     return true
 
+func refresh_native_collision_admission(owner: Node, router: RefCounted) -> bool:
+    if owner == null or not is_instance_valid(owner) \
+            or owner.get_instance_id() != _native_collision_admission_owner_id \
+            or not router is NativeCollisionAdmissionRouterScript \
+            or not router.is_active() or not router.is_admission_ready():
+        return false
+    _native_collision_admission_barrier = router
+    return true
+
 func unbind_native_collision_admission(owner: Node) -> bool:
     if owner == null or not is_instance_valid(owner) \
             or owner.get_instance_id() != _native_collision_admission_owner_id \
             or _native_collision_admission_barrier == null \
-            or _native_collision_admission_barrier.is_active():
+            or not _native_collision_admission_barrier.can_unbind():
         return false
     _native_collision_admission_owner_id = 0
     _native_collision_admission_barrier = null

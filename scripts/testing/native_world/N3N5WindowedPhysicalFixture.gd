@@ -14,6 +14,7 @@ const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordi
 const MEMORY_POLICY = preload("res://scripts/terrain/NativeCollisionMemoryPolicy.gd")
 const MEMORY_ADMISSION = preload("res://scripts/terrain/NativeCollisionMemoryAdmission.gd")
 const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
+const ADMISSION_ROUTER = preload("res://scripts/terrain/NativeCollisionAdmissionRouter.gd")
 
 class ArtifactKeyFaultSource extends RefCounted:
 	var source
@@ -212,6 +213,12 @@ func _run() -> void:
 		await process_frame
 		census = barrier.census_progress(layout.identity)
 	var missing_aggregate: Dictionary = coordinator.aggregate_readiness(layout.identity)
+	var unready_router = ADMISSION_ROUTER.new()
+	var unready_router_setup: Dictionary = unready_router.setup(coordinator, layout.identity)
+	var unready_main_bind := main.bind_native_collision_admission(root_3d,
+		unready_router) if unready_router_setup.get("status") == "ready" else false
+	var raw_barrier_rejected := not main.bind_native_collision_admission(root_3d,
+		barrier)
 	var published: Dictionary = {}
 	if bound and rows.size() == window.get("blocks", []).size():
 		published = await owner.publish({
@@ -229,6 +236,24 @@ func _run() -> void:
 	var same_window_memory: Dictionary = owner.memory_admission_receipt()
 	var physical: Dictionary = owner.physical_receipt(layout.identity)
 	var aggregate: Dictionary = coordinator.aggregate_readiness(layout.identity)
+	var admission_router = ADMISSION_ROUTER.new()
+	var router_setup: Dictionary = admission_router.setup(coordinator, layout.identity)
+	var aggregate_main_bound := main.bind_native_collision_admission(root_3d,
+		admission_router) if router_setup.get("status") == "ready" else false
+	var facade_actor := CharacterBody3D.new()
+	facade_actor.position = bounds.position - Vector3(5, 0, 0)
+	var facade_actor_shape := CollisionShape3D.new()
+	var facade_capsule := CapsuleShape3D.new()
+	facade_capsule.radius = 0.35
+	facade_capsule.height = 1.8
+	facade_actor_shape.shape = facade_capsule
+	facade_actor.add_child(facade_actor_shape)
+	root_3d.add_child(facade_actor)
+	await physics_frame
+	var aggregate_motion_held := not main.native_collision_admit_motion(facade_actor,
+		bounds.get_center() - facade_actor.position)
+	var aggregate_early_unbind := main.unbind_native_collision_admission(root_3d)
+	facade_actor.queue_free()
 	var released: Dictionary = coordinator.release_barriers(layout.identity)
 	var active_retirement: Dictionary = await coordinator.retire_window(window.id)
 	var physical_after_active_rejection: Dictionary = owner.physical_receipt(
@@ -908,6 +933,7 @@ func _run() -> void:
 		reactivated_layout.identity)
 	var retired_facade: Dictionary = facade.collision_source_snapshot()
 	var coordinator_drain: Dictionary = await coordinator.stop_and_drain()
+	var aggregate_unbound := main.unbind_native_collision_admission(root_3d)
 	var final_memory: Dictionary = memory_admission.snapshot() \
 		if memory_configured else {}
 	var broker_stop: Dictionary = broker.stop()
@@ -945,6 +971,9 @@ func _run() -> void:
 			"totalChargedBytes", 0)) \
 			>= 2 * int(initial_memory.get("totalChargedBytes", 0)) \
 		and missing_aggregate.get("status") == "pending" \
+		and unready_router_setup.get("status") == "ready" and not unready_main_bind \
+		and raw_barrier_rejected and router_setup.get("status") == "ready" \
+		and aggregate_main_bound and aggregate_motion_held and not aggregate_early_unbind \
 		and aggregate.get("status") == "ready" \
 		and released.get("status") == "ready" and contact \
 		and active_retirement.get("status") == "pending" \
@@ -1088,6 +1117,7 @@ func _run() -> void:
 		and cancelled_candidate.get("status") == "ready" \
 		and retired_facade.get("status") == "failed" \
 		and coordinator_drain.get("status") == "ready" \
+		and aggregate_unbound \
 		and coordinator_drain.get("remainingChildren") == 0 \
 		and coordinator_drain.get("activeBarriers") == 0 \
 		and broker_stop.get("status") == "ready"
@@ -1098,6 +1128,13 @@ func _run() -> void:
 		"facadeStatus":{"status":facade_status.get("status"),
 			"windowToken":facade_status.get("windowToken")},
 		"sourceSnapshot":snapshot, "rowCount":rows.size(),
+		"mainAdmission":{"unreadyRouterSetup":unready_router_setup,
+			"unreadyBindAccepted":unready_main_bind,
+			"rawBarrierRejected":raw_barrier_rejected,
+			"routerSetup":router_setup, "aggregateBindAccepted":aggregate_main_bound,
+			"motionHeldDuringBarrier":aggregate_motion_held,
+			"earlyUnbindAccepted":aggregate_early_unbind,
+			"unboundAfterCoordinatorDrain":aggregate_unbound},
 		"solidCount":solid_count, "emptyCount":empty_count,
 		"publication":published, "physicalReceipt":physical,
 		"initialMemory":initial_memory,

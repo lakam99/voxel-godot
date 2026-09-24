@@ -468,6 +468,9 @@ func active_barrier_count() -> int:
 		if barrier.is_active(): count += 1
 	return count
 
+func has_displaced_window(id: Vector3i) -> bool:
+	return _displaced_owners.has(id)
+
 func aggregate_readiness(identity: Dictionary) -> Dictionary:
 	if _stopping or _broker == null:
 		return {"status":"pending", "reason":"window_coordinator_stopping"}

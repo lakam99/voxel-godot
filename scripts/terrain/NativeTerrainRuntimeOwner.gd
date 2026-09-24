@@ -252,6 +252,13 @@ func collision_window_layout() -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.collision_window_layout()
 
+## Preserve the broker's immutable source+layout ticket at the runtime-owner
+## boundary. Aggregate physical publication must never validate a mutable
+## layout alone.
+func collision_window_layout_ticket() -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.collision_window_layout_ticket()
+
 func collision_window_source(window_id: Vector3i, layout_token: String) -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.collision_window_source(window_id, layout_token)
