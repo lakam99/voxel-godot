@@ -71,3 +71,33 @@ foreground demand and vertical bounds, keep over-cap proposals retryable,
 mirror post-setup edits and cell-query consumers to this owner, and validate
 engine mesh/physics receipts with a headed main-menu playtest. The same
 backend must own save/Continue and reset; no parallel source can remain.
+
+## 2026-09-24 asynchronous owner shutdown receipt
+
+Commit `941d02a` closes a focused lifecycle hole in the inert owner path. Stop
+now rejects planner admissions, cancels and drains an active broker-owned mesh
+layout, drains prior/accepted/active/queued planner state under the existing
+256-operation step bound, retains request leases until retirement, and only
+releases backend/owner references after all terminal receipts are explicit.
+`NativeTerrainBlockPublisher` persists an asynchronous terminal receipt only
+after the backend pump reports `no_waiting_source` and all publisher-tracked
+state is empty; later stop/drain calls replay that receipt. An inactive snapshot
+alone is not treated as proof of worker completion.
+
+Primary-tree focused evidence:
+
+- `node tools/run-n3-terrain-runtime-owner.mjs` passed at
+  `artifacts/native-world-backend/n3-terrain-runtime-owner-1790231115347-95cb5536/report.json`.
+  The fixture reaches a broker layout transaction at 256/256 work ops,
+  verifies same-token cancellation and invalidated-but-retained lease, then
+  drains planner and publisher in three owner drain steps.
+- `node tools/run-n3-terrain-demand-replacement.mjs` passed at
+  `artifacts/native-world-backend/n3-terrain-demand-replacement-1790231126099-b522cfb0/report.json`.
+  Its stop fixture drains a prior plan, active candidate, queued successor and
+  both request leases; 1,354 advances stay within the 256-op per-advance cap.
+
+This is focused shadow/service lifecycle evidence only. Production
+`VoxelTerrainRuntime` still does not own this native publisher, so this does
+not prove physical collision cutover, gameplay streaming, performance, or any
+original Gate 5 row. N3 cutover, full N5 integration, and final Gate 5 remain
+open.
