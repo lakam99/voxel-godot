@@ -34,6 +34,10 @@ test('coverage execution inherits the native test timeout and validates bounded 
   assert.equal(coverageExecutionTimeoutMilliseconds(), 300000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ nativeTestTimeoutSeconds: 360 }), 360000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: 300000 }), 300000);
+  assert.equal(coverageExecutionTimeoutMilliseconds({
+    nativeTestTimeoutSeconds: 360,
+    coverageExecuteTimeoutMs: 420000,
+  }), 420000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: '300000' }), 300000);
   for (const value of ['', '300000.5', 999, 900001, 1500, null]) {
     assert.throws(() => coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: value }),
