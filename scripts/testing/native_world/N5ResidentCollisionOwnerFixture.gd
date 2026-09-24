@@ -2,6 +2,7 @@ extends Node3D
 
 const OwnerScript = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 const BarrierScript = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
+const RetirementReceipt = preload("res://scripts/terrain/NativeCollisionRetirementReceipt.gd")
 
 class FakeSource:
 	extends RefCounted
@@ -38,6 +39,7 @@ func _ready() -> void:
 
 
 func _run() -> void:
+	var retirement_receipt_contract: Dictionary = _retirement_receipt_contract()
 	_owner = OwnerScript.new()
 	add_child(_owner)
 	if not _owner.bind_source(_source):
@@ -227,7 +229,8 @@ func _run() -> void:
 		and bool(pre_switch_drift.get("passed", false)) \
 		and bool(mid_switch_drift.get("passed", false)) \
 		and bool(bounded_prepare.get("passed", false)) \
-		and bool(bounded_drain.get("passed", false))
+		and bool(bounded_drain.get("passed", false)) \
+		and bool(retirement_receipt_contract.get("passed", false))
 	_finish(passed, {"startup": startup, "startupReady": startup_ready,
 		"actorLanded": actor_landed, "actorContact": actor_contact_detail,
 		"alteredCandidate": altered_candidate, "occupiedEdit": occupied_edit,
@@ -249,7 +252,101 @@ func _run() -> void:
 		"preSwitchDrift": pre_switch_drift,
 		"midSwitchDrift": mid_switch_drift,
 		"boundedPreparation": bounded_prepare,
-		"boundedDrain": bounded_drain})
+		"boundedDrain": bounded_drain,
+		"retirementReceipt": retirement_receipt_contract})
+
+
+func _retirement_receipt_contract() -> Dictionary:
+	var source_identity := {"hex":"n5-retirement-source"}
+	var identity := {"ownerGeneration":17, "sourceRevision":29,
+		"cancellationEpoch":31, "sourceEpoch":"17:n5-retirement-source",
+		"sourceIdentity":source_identity}
+	var membership := {"authority":"pinned_demand", "demandRevision":37,
+		"closureToken":"n5-retirement-closure", "windowToken":"n5-retirement-window"}
+	var blocks: Array[Vector3i] = [Vector3i(4, 0, -2), Vector3i(5, 0, -2)]
+	var record := {"identity":identity, "sourceIdentity":source_identity,
+		"membershipProvenance":membership, "blocks":blocks}
+	var lease := {"leaseId":"n5-retirement-lease",
+		"windowToken":membership.windowToken,
+		"expectedLayoutToken":"n5-new-layout",
+		"recordIdentity":identity.duplicate(true),
+		"sourceIdentity":source_identity.duplicate(true),
+		"membershipProvenance":membership.duplicate(true),
+		"residentBlocks":blocks.duplicate()}
+	var receipt := {"status":"ready", "drained":true, "remainingBodies":0,
+		"remainingPendingEntries":0, "remainingLiveEntries":0,
+		"sourceReleased":true, "barrierOwnershipReleased":true,
+		"windowToken":"n5-retirement-window", "retirementLeaseId":lease.leaseId,
+		"identity":identity.duplicate(true),
+		"sourceIdentity":source_identity.duplicate(true),
+		"membershipProvenance":membership.duplicate(true),
+		"residentBlockCount":blocks.size(), "residentBlocks":blocks.duplicate(),
+		"requiredResidentBlocks":blocks.duplicate()}
+	var valid_current := RetirementReceipt.matches_record(
+		membership.windowToken, receipt, record, lease)
+	var reordered_current := receipt.duplicate(true)
+	reordered_current.residentBlocks.reverse()
+	reordered_current.requiredResidentBlocks.reverse()
+	var canonical_order_accepted := RetirementReceipt.matches_record(
+		membership.windowToken, reordered_current, record, lease)
+	var stale_owner := receipt.duplicate(true)
+	stale_owner.identity.ownerGeneration += 1
+	var stale_owner_same_token_lease := not RetirementReceipt.matches_record(
+		membership.windowToken, stale_owner, record, lease)
+	var stale_source := receipt.duplicate(true)
+	stale_source.sourceIdentity.hex = "old-source"
+	var stale_source_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, stale_source, record, lease)
+	var stale_membership := receipt.duplicate(true)
+	stale_membership.membershipProvenance.closureToken = "old-closure"
+	var stale_membership_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, stale_membership, record, lease)
+	var wrong_blocks := receipt.duplicate(true)
+	wrong_blocks.residentBlocks[1] = Vector3i(99, 0, 0)
+	var wrong_block_membership_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, wrong_blocks, record, lease)
+	var duplicate_blocks := receipt.duplicate(true)
+	duplicate_blocks.residentBlocks[1] = duplicate_blocks.residentBlocks[0]
+	var duplicate_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, duplicate_blocks, record, lease)
+	var wrong_count := receipt.duplicate(true)
+	wrong_count.residentBlockCount -= 1
+	var count_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, wrong_count, record, lease)
+	var wrong_token := receipt.duplicate(true)
+	wrong_token.windowToken = "reused-token"
+	var token_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, wrong_token, record, lease)
+	var wrong_lease := receipt.duplicate(true)
+	wrong_lease.retirementLeaseId = "reused-lease"
+	var lease_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, wrong_lease, record, lease)
+	var stale_lease := lease.duplicate(true)
+	stale_lease.recordIdentity.ownerGeneration += 1
+	var stale_lease_rejected := not RetirementReceipt.lease_matches_record(
+		membership.windowToken, record, stale_lease)
+	var missing_required_members := receipt.duplicate(true)
+	missing_required_members.requiredResidentBlocks.pop_back()
+	var required_members_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, missing_required_members, record, lease)
+	return {"passed":valid_current and canonical_order_accepted \
+		and stale_owner_same_token_lease \
+		and stale_source_rejected and stale_membership_rejected \
+		and wrong_block_membership_rejected and duplicate_rejected \
+		and count_rejected and token_rejected and lease_rejected \
+		and stale_lease_rejected and required_members_rejected,
+		"validCurrentReceiptAccepted":valid_current,
+		"canonicalMembershipOrderAccepted":canonical_order_accepted,
+		"staleOwnerSameTokenLeaseRejected":stale_owner_same_token_lease,
+		"staleSourceIdentityRejected":stale_source_rejected,
+		"staleMembershipRejected":stale_membership_rejected,
+		"wrongResidentMembershipRejected":wrong_block_membership_rejected,
+		"duplicateResidentRejected":duplicate_rejected,
+		"residentCountRejected":count_rejected,
+		"windowTokenRejected":token_rejected,
+		"retirementLeaseRejected":lease_rejected,
+		"staleLeaseRecordRejected":stale_lease_rejected,
+		"requiredResidentMembershipRejected":required_members_rejected}
 
 
 func _bounded_prepare_case() -> Dictionary:
@@ -447,6 +544,9 @@ func _bounded_drain_case() -> Dictionary:
 		and (owner.get("_live") as Dictionary).is_empty() \
 		and bool(terminal.get("sourceReleased", false)) \
 		and bool(terminal.get("barrierOwnershipReleased", false)) \
+		and int(terminal.get("residentBlockCount", -1)) == blocks.size() \
+		and terminal.get("residentBlocks") == blocks \
+		and terminal.get("requiredResidentBlocks") == blocks \
 		and terminal.get("windowToken") == membership.windowToken \
 		and terminal.get("identity") == identity \
 		and terminal.get("sourceIdentity") == source_identity \

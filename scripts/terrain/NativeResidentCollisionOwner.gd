@@ -41,6 +41,7 @@ var _prepare_total_work_units := 0
 var _drain_last_queued_physics_frame := -1
 var _drain_window_token := ""
 var _drain_expected_resident_count := 0
+var _drain_resident_blocks: Array[Vector3i] = []
 var _drain_retired_candidate_count := 0
 var _drain_retired_live_count := 0
 
@@ -307,6 +308,7 @@ func request_stop() -> Dictionary:
 		_drain_last_queued_physics_frame = -1
 		_drain_window_token = String(_membership_provenance.get("windowToken", ""))
 		_drain_expected_resident_count = _resident_blocks.size()
+		_drain_resident_blocks = _resident_blocks.duplicate()
 		_drain_retired_candidate_count = 0
 		_drain_retired_live_count = 0
 		if _admission_barrier is AdmissionBarrier:
@@ -386,6 +388,8 @@ func drain_step() -> Dictionary:
 			"barrierOwnershipReleased": true,
 			"windowToken": _drain_window_token,
 			"residentBlockCount": _drain_expected_resident_count,
+			"residentBlocks": _drain_resident_blocks.duplicate(),
+			"requiredResidentBlocks": _drain_resident_blocks.duplicate(),
 			"retiredCandidateEntryCount": _drain_retired_candidate_count,
 			"retiredLiveEntryCount": _drain_retired_live_count,
 			"identity": _identity,

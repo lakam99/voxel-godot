@@ -5,6 +5,7 @@ class_name NativeTerrainArtifactRequests
 ## to the resident collision owner; this class only produces current rows.
 const Producer = preload("res://scripts/terrain/NativeTerrainTriangleArtifactProducer.gd")
 const WindowSource = preload("res://scripts/terrain/NativeTerrainCollisionWindowSource.gd")
+const RetirementReceipt = preload("res://scripts/terrain/NativeCollisionRetirementReceipt.gd")
 const MAX_RETIRED_WINDOWS := 64
 const MAX_RETIRED_VERTEX_BYTES := 268435456
 const MAX_VERIFIED_EDIT_REVISIONS := 256
@@ -320,10 +321,8 @@ func acknowledge_collision_window_retired(window_token: String,
 	if record.is_empty() or (_active_window_tokens.has(window_token) \
 			and not _pending_retirement_tokens.has(window_token)) \
 			or lease.is_empty() \
-			or String(retirement_receipt.get("retirementLeaseId", "")) != lease.get("leaseId") \
-			or not bool(retirement_receipt.get("drained", false)) \
-			or int(retirement_receipt.get("remainingBodies", -1)) != 0 \
-			or retirement_receipt.get("windowToken") != window_token:
+			or not RetirementReceipt.matches_record(window_token,
+				retirement_receipt, record, lease):
 		return {"status":"failed", "reason":"collision_window_retirement_not_proven"}
 	var facade = record.get("facade")
 	if facade != null: facade.detach()
@@ -339,9 +338,13 @@ func claim_collision_window_retirement(window_token: String,
 		return {"status":"failed", "reason":"collision_window_retirement_claim_invalid"}
 	var existing: Dictionary = _retirement_leases.get(window_token, {})
 	if not existing.is_empty():
-		if existing.get("expectedLayoutToken") == expected_layout_token:
+		var retained: Dictionary = _window_records.get(window_token, {})
+		if existing.get("expectedLayoutToken") == expected_layout_token \
+				and RetirementReceipt.lease_matches_record(window_token, retained, existing):
 			return {"status":"ready", "leaseId":existing.leaseId,
 				"windowToken":window_token}
+		if not RetirementReceipt.lease_matches_record(window_token, retained, existing):
+			return {"status":"failed", "reason":"collision_window_retirement_record_stale"}
 		return {"status":"pending", "reason":"collision_window_retirement_leased"}
 	var layout: Dictionary = collision_window_layout()
 	var telemetry: Dictionary = layout.get("retirementTelemetry", {})
@@ -354,8 +357,14 @@ func claim_collision_window_retirement(window_token: String,
 	_retirement_lease_sequence += 1
 	var lease_id := ("%d:%d:%s:%s" % [_owner_generation,
 		_retirement_lease_sequence, window_token, expected_layout_token]).sha256_text()
+	var record: Dictionary = _window_records[window_token]
 	_retirement_leases[window_token] = {"leaseId":lease_id,
-		"expectedLayoutToken":expected_layout_token}
+		"windowToken":window_token,
+		"expectedLayoutToken":expected_layout_token,
+		"recordIdentity":record.identity.duplicate(true),
+		"sourceIdentity":record.sourceIdentity.duplicate(true),
+		"membershipProvenance":record.membershipProvenance.duplicate(true),
+		"residentBlocks":(record.blocks as Array).duplicate()}
 	return {"status":"ready", "leaseId":lease_id, "windowToken":window_token}
 
 func validate_collision_window_retirement(window_token: String,
@@ -363,6 +372,10 @@ func validate_collision_window_retirement(window_token: String,
 	var lease: Dictionary = _retirement_leases.get(window_token, {})
 	if lease.is_empty() or lease.get("leaseId") != lease_id:
 		return {"status":"failed", "reason":"collision_window_retirement_lease_stale"}
+	var record: Dictionary = _window_records.get(window_token, {})
+	if record.is_empty() or not RetirementReceipt.lease_matches_record(
+		window_token, record, lease):
+		return {"status":"failed", "reason":"collision_window_retirement_record_stale"}
 	if _active_window_tokens.has(window_token):
 		return {"status":"failed", "reason":"leased_collision_window_reactivated"}
 	return {"status":"ready", "windowToken":window_token, "leaseId":lease_id}

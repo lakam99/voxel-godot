@@ -17,6 +17,8 @@ await mkdir(output, { recursive: true });
 
 const sourcePaths = [
   'scripts/terrain/NativeResidentCollisionOwner.gd',
+  'scripts/terrain/NativeTerrainArtifactRequests.gd',
+  'scripts/terrain/NativeCollisionRetirementReceipt.gd',
   'scripts/testing/native_world/N5ResidentCollisionOwnerFixture.gd',
   'scenes/testing/native_world/N5ResidentCollisionOwnerFixture.tscn',
   'tools/run-n5-resident-collision-owner.mjs',

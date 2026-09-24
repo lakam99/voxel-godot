@@ -379,6 +379,7 @@ func run() -> void:
 	var remote_source
 	var near_token := ""
 	var remote_token := ""
+	var remote_window: Dictionary = {}
 	for window: Dictionary in partition_layout.windows:
 		var acquired: Dictionary = bounded.collision_window_source(window.id,
 			String(partition_layout.layoutToken))
@@ -389,6 +390,7 @@ func run() -> void:
 		else:
 			remote_source = acquired.get("source")
 			remote_token = String(window.windowToken)
+			remote_window = window.duplicate(true)
 	var near_result := {}
 	for frame in range(300):
 		near_result = bounded.advance()
@@ -420,9 +422,8 @@ func run() -> void:
 	var lease_valid: Dictionary = bounded.validate_collision_window_retirement(
 		remote_token, String(bounded_lease.get("leaseId", "")))
 	check(bounded.acknowledge_collision_window_retired(remote_token,
-			{"windowToken":remote_token, "drained":true,
-				"remainingBodies":0,
-				"retirementLeaseId":bounded_lease.get("leaseId", "")}).get("status") == "ready",
+			_retirement_receipt(remote_window,
+				String(bounded_lease.get("leaseId", "")))).get("status") == "ready",
 		"claimed old window accepts exact physical drain acknowledgment")
 	var resumed_layout: Dictionary = {}
 	for frame in range(300):
@@ -521,6 +522,11 @@ func run() -> void:
 	var retired_tokens: Array = held.get("retiredWindowTokens", [])
 	if not retired_tokens.is_empty():
 		var retired_token := String(retired_tokens[0])
+		var retired_window: Dictionary = {}
+		for member: Dictionary in many_layout.get("windows", []):
+			if String(member.get("windowToken", "")) == retired_token:
+				retired_window = member.duplicate(true)
+				break
 		many_planner.replace_sources(viewer, many_viewers, [], [], Vector2i(128,128))
 		var reverted_step: Dictionary = many_broker.advance()
 		var reverted_layout: Dictionary = many_broker.collision_window_layout()
@@ -551,9 +557,8 @@ func run() -> void:
 		var many_lease: Dictionary = many_broker.claim_collision_window_retirement(
 			retired_token, String(held_again.get("layoutToken", "")))
 		check(many_broker.acknowledge_collision_window_retired(retired_token,
-				{"windowToken":retired_token, "drained":true,
-					"remainingBodies":0,
-					"retirementLeaseId":many_lease.get("leaseId", "")}).get("status") == "ready"
+				_retirement_receipt(retired_window,
+					String(many_lease.get("leaseId", "")))).get("status") == "ready"
 			and many_broker.collision_window_layout().get("status") == "ready",
 			"explicit physical drain acknowledgment releases bounded backpressure")
 	else:
@@ -738,3 +743,20 @@ func run() -> void:
 		var file := FileAccess.open(path, FileAccess.WRITE)
 		if file != null: file.store_string(JSON.stringify(report, "\t"))
 	quit(0 if failures.is_empty() else 1)
+
+
+func _retirement_receipt(window: Dictionary, lease_id: String) -> Dictionary:
+	var blocks: Array = window.get("blocks", []).duplicate()
+	var identity: Dictionary = window.get("identity", {}).duplicate(true)
+	var membership := {"authority":"pinned_demand", "demandRevision":0,
+		"closureToken":String(window.get("closureToken", "")),
+		"windowToken":String(window.get("windowToken", ""))}
+	return {"status":"ready", "drained":true, "remainingBodies":0,
+		"remainingPendingEntries":0, "remainingLiveEntries":0,
+		"sourceReleased":true, "barrierOwnershipReleased":true,
+		"windowToken":String(window.get("windowToken", "")),
+		"retirementLeaseId":lease_id, "identity":identity,
+		"sourceIdentity":identity.get("sourceIdentity", {}).duplicate(true),
+		"membershipProvenance":membership, "residentBlockCount":blocks.size(),
+		"residentBlocks":blocks.duplicate(),
+		"requiredResidentBlocks":blocks.duplicate()}
