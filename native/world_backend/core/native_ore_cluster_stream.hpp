@@ -23,6 +23,15 @@ struct NativeOreClusterChildStream final {
 class NativeOreClusterStreamRejected final : public std::invalid_argument {
 public: NativeOreClusterStreamRejected();
 };
+
+// Shared make_ore_cluster child stream. Surface clusters call this twice with
+// child_count=2; underground floor props call it once with child_count=1.
+// Keeping one decoder preserves the exact tombstone gate and draw order while
+// allowing both source families to retain their production cluster size.
+NativeOreClusterChildStream native_ore_cluster_child_stream(
+    const std::string &parent_id, NativeOreKind kind,
+    std::uint32_t child_index, std::uint32_t child_count,
+    const NativeFeatureDeltaSnapshot &removed_props, GodotPcg32 &rng);
 // Two-child recipe witness for make_ore_cluster(..., count = 2). The original
 // overload remains the intact-only shadow diagnostic. The typed-delta
 // overload preserves the live child tombstone gate before recipe draws, but

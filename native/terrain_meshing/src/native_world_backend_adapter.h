@@ -9,6 +9,7 @@
 #include "native_surface_prop_source_ordered_stream.hpp"
 #include "native_surface_rock_asset_catalog.hpp"
 #include "native_surface_rock_footprint.hpp"
+#include "native_underground_prop_stream.hpp"
 #include "native_wildlife_presentation_receipt.hpp"
 #include "native_terrain_shaping_registry.hpp"
 #include "native_world_backend_state.hpp"
@@ -126,6 +127,9 @@ public:
 	godot::Dictionary compose_surface_prop_ordered_shadow(
 		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
 		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions) const;
+	godot::Dictionary compose_underground_prop_ordered_shadow(
+		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
+		const godot::Vector2i &p_chunk) const;
 	godot::Dictionary compose_surface_tree_presence_shadow(
 		const godot::Ref<NativeEffectiveTerrainPage> &p_page,
 		const godot::Ref<NativeStructureExclusionChunk> &p_exclusions,

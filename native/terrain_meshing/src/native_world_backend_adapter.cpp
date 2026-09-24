@@ -14,6 +14,7 @@
 #include "native_surface_tree_ordered_composer.hpp"
 #include "native_surface_tree_presence.hpp"
 #include "native_surface_wildlife_ordered_definition.hpp"
+#include "native_underground_prop_stream.hpp"
 #include "sha256.hpp"
 #include "terrain_snapshot.hpp"
 
@@ -64,6 +65,7 @@ constexpr const char *VISUAL_CATALOG_RECEIPT_SCHEMA = "n4-visual-asset-catalog-r
 constexpr const char *WILDLIFE_PRESENTATION_RECEIPT_SCHEMA = "n4-wildlife-presentation-catalog-receipt/v1";
 constexpr const char *STRUCTURE_CHUNK_RECEIPT_SCHEMA = "n4-structure-exclusion-chunk-receipt/v1";
 constexpr const char *SURFACE_ORDERED_SHADOW_SCHEMA = "n4-surface-prop-ordered-shadow/v1";
+constexpr const char *UNDERGROUND_ORDERED_SHADOW_SCHEMA = "n4-underground-prop-ordered-shadow/v1";
 constexpr const char *TREE_PRESENCE_SHADOW_SCHEMA = "n4-surface-tree-presence-shadow/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
@@ -127,6 +129,22 @@ Vector3 world_vector(const WorldFloat32Position &p_value) {
 	return Vector3(p_value.x, p_value.y, p_value.z);
 }
 
+Array numeric_triplet(const double p_x, const double p_y, const double p_z) {
+	Array values;
+	values.append(p_x);
+	values.append(p_y);
+	values.append(p_z);
+	return values;
+}
+
+Array cell_array(const CellCoord &p_value) {
+	return numeric_triplet(p_value.x, p_value.y, p_value.z);
+}
+
+Array world_array(const WorldFloat32Position &p_value) {
+	return numeric_triplet(p_value.x, p_value.y, p_value.z);
+}
+
 Vector3 wildlife_vector(const NativeWildlifeVec3 &p_value) {
 	return Vector3(p_value.x, p_value.y, p_value.z);
 }
@@ -172,6 +190,31 @@ Dictionary ore_child_shadow(const NativeSurfaceOreChildDefinition &p_child) {
 	row["glints"] = glints;
 	row["colliderRadius"] = p_child.collider_radius;
 	row["colliderCenterY"] = p_child.collider_center_y;
+	return row;
+}
+
+Dictionary serializable_ore_child_shadow(const NativeSurfaceOreChildDefinition &p_child) {
+	Dictionary row = ore_child_shadow(p_child);
+	row["localPosition"] = world_array(p_child.local_position);
+	row["worldAnchor"] = world_array(p_child.world_anchor);
+	row["meshScale"] = world_array(p_child.mesh_scale);
+	row["seamMeshSize"] = world_array(p_child.seam_mesh_size);
+	Array seams;
+	for (const NativeSurfaceOreSeamDefinition &seam : p_child.seams) {
+		Dictionary entry;
+		entry["localPosition"] = world_array(seam.local_position);
+		entry["rotation"] = world_array(seam.rotation);
+		seams.append(entry);
+	}
+	row["seams"] = seams;
+	Array glints;
+	for (const NativeSurfaceOreGlintDefinition &glint : p_child.glints) {
+		Dictionary entry;
+		entry["localPosition"] = world_array(glint.local_position);
+		entry["scale"] = world_array(glint.scale);
+		glints.append(entry);
+	}
+	row["glints"] = glints;
 	return row;
 }
 
@@ -1757,6 +1800,8 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("admit_structure_exclusion_chunk", "capture"), &NativeWorldBackend::admit_structure_exclusion_chunk);
 	ClassDB::bind_method(D_METHOD("compose_surface_prop_ordered_shadow", "page", "exclusions"),
 		&NativeWorldBackend::compose_surface_prop_ordered_shadow);
+	ClassDB::bind_method(D_METHOD("compose_underground_prop_ordered_shadow", "page", "chunk"),
+		&NativeWorldBackend::compose_underground_prop_ordered_shadow);
 	ClassDB::bind_method(D_METHOD("compose_surface_tree_presence_shadow", "page", "exclusions", "union_capture"),
 		&NativeWorldBackend::compose_surface_tree_presence_shadow);
 	ClassDB::bind_method(D_METHOD("wildlife_presentation_shadow", "variant"), &NativeWorldBackend::wildlife_presentation_shadow);
@@ -3584,6 +3629,151 @@ Dictionary NativeWorldBackend::admit_structure_exclusion_chunk(const Dictionary 
 		Dictionary result = envelope(operation, "ready");
 		result["snapshot"] = admitted;
 		result["snapshotStatus"] = admitted->status();
+		return result;
+	} catch (const std::exception &error) {
+		return failure(operation, error);
+	}
+}
+
+Dictionary NativeWorldBackend::compose_underground_prop_ordered_shadow(
+		const Ref<NativeEffectiveTerrainPage> &p_page,
+		const Vector2i &p_chunk) const {
+	constexpr const char *operation = "compose_underground_prop_ordered_shadow";
+	if (!state_ || !shaping_registry_ || !biome_catalog_ || !removed_props_
+			|| !visual_catalog_ || p_page.is_null() || !p_page->batch_)
+		return envelope(operation, "failed", "underground_prop_sources_not_ready");
+	try {
+		const WorldSourcePin &pin = p_page->batch_->pin();
+		if (!(pin.definition().physical_content_identity() == state_->source_identity())
+				|| pin.terrain_delta_revision() != state_->terrain_delta_revision()
+				|| pin.shaping_registry_revision() != shaping_registry_->revision()
+				|| !(pin.shaping_registry_content_identity() == shaping_registry_->content_identity()))
+			throw std::invalid_argument("underground prop terrain pin is stale");
+		const NativeEffectiveTerrainSource terrain(pin);
+		const NativeUndergroundFloorScan scan = NativeUndergroundFloorScan::create(
+			state_->definition().raw_terrain_seed(), p_chunk.x, p_chunk.y, terrain);
+		const NativeUndergroundPropStream stream = NativeUndergroundPropStream::create(
+			state_->definition().raw_terrain_seed(), scan, terrain,
+			*biome_catalog_, *visual_catalog_, *removed_props_);
+		Array candidates;
+		for (const NativeUndergroundFloorCandidate &candidate : scan.candidates()) {
+			Dictionary row;
+			row["ordinal"] = static_cast<std::int64_t>(candidate.ordinal);
+			row["floorCell"] = cell_array(candidate.floor_cell);
+			row["airCell"] = cell_array(candidate.air_cell);
+			row["material"] = text(terrain_material_name(candidate.material));
+			row["candidateRoll"] = candidate.candidate_roll;
+			candidates.append(row);
+		}
+		Array attempts;
+		for (const NativeUndergroundPropAttempt &source : stream.attempts()) {
+			Dictionary row;
+			row["ordinal"] = static_cast<std::int64_t>(source.ordinal);
+			row["durableId"] = text(source.durable_id);
+			row["floorCell"] = cell_array(source.candidate.floor_cell);
+			row["airCell"] = cell_array(source.candidate.air_cell);
+			row["material"] = text(terrain_material_name(source.candidate.material));
+			row["parentTombstoned"] = source.parent_tombstoned;
+			row["outcome"] = static_cast<std::int64_t>(source.outcome);
+			row["stateBefore"] = text(std::to_string(source.state_before));
+			row["stateAfterSelection"] = text(std::to_string(source.state_after_selection));
+			row["stateAfterRecipe"] = text(std::to_string(source.state_after_recipe));
+			row["selectionRoll"] = source.selection_roll ? *source.selection_roll : -1.0F;
+			row["deepIronRoll"] = source.deep_iron_roll ? *source.deep_iron_roll : -1.0F;
+			row["chunkOrigin"] = world_array(source.chunk_origin);
+			row["localPosition"] = world_array(source.local_position);
+			row["worldAnchor"] = world_array(source.world_anchor);
+			row["contentIdentity"] = text(sha256_hex(source.content_digest));
+			if (source.ore) {
+				Dictionary feature;
+				feature["kind"] = "oreCluster";
+				feature["oreKind"] = static_cast<std::int64_t>(*source.ore_kind);
+				Array children;
+				children.append(serializable_ore_child_shadow(*source.ore));
+				feature["children"] = children;
+				row["feature"] = feature;
+			}
+			if (source.rock) {
+				const NativeSurfaceRockDefinitionInput &built = source.rock->definition.input();
+				const NativeSurfaceRockAssetSelection &selected = source.rock->selection;
+				Dictionary feature;
+				feature["kind"] = "rock";
+				feature["contentIdentity"] = text(sha256_hex(source.rock->definition.content_digest()));
+				feature["durableId"] = text(built.durable_feature_id);
+				feature["visualBiome"] = text(built.source_biome);
+				feature["rotationY"] = built.rotation_y;
+				feature["visualRadius"] = built.visual_radius;
+				feature["visualHeightFactor"] = built.visual_height_factor;
+				feature["visualScale"] = numeric_triplet(built.visual_scale_x,
+					built.visual_scale_y, built.visual_scale_z);
+				feature["colliderRadius"] = built.collision.radius;
+				feature["colliderCenterY"] = built.collision.center_y;
+				feature["visualIntent"] = static_cast<std::int64_t>(source.rock->visual_intent);
+				feature["assetId"] = text(selected.asset_id);
+				feature["assetPath"] = text(selected.asset_path);
+				feature["assetSize"] = world_array(selected.asset_size);
+				feature["profileScale"] = selected.rock_scale;
+				row["feature"] = feature;
+			}
+			if (source.forage) {
+				Dictionary feature;
+				feature["kind"] = "forage";
+				feature["recipeId"] = text(source.forage->recipe.recipe_id);
+				feature["materialId"] = text(source.forage->recipe.material_id);
+				feature["dropId"] = text(source.forage->recipe.drop_id);
+				feature["dropCount"] = source.forage->stream.drop_count;
+				feature["rotationY"] = source.forage->geometry.rotation_y;
+				feature["colliderRadius"] = source.forage->geometry.collider_radius;
+				feature["colliderCenterY"] = source.forage->geometry.collider_center_y;
+				feature["navigationBlocker"] = source.forage->geometry.navigation_blocker;
+				Array meshes;
+				for (const NativeForageMesh &mesh : source.forage->geometry.meshes) {
+					Dictionary visual;
+					visual["kind"] = static_cast<std::int64_t>(mesh.kind);
+					visual["position"] = numeric_triplet(mesh.position.x, mesh.position.y, mesh.position.z);
+					visual["rotation"] = numeric_triplet(mesh.rotation.x, mesh.rotation.y, mesh.rotation.z);
+					visual["scale"] = numeric_triplet(mesh.scale.x, mesh.scale.y, mesh.scale.z);
+					visual["radius"] = mesh.radius;
+					visual["height"] = mesh.height;
+					visual["topRadius"] = mesh.top_radius;
+					visual["bottomRadius"] = mesh.bottom_radius;
+					visual["radialSegments"] = mesh.radial_segments;
+					visual["rings"] = mesh.rings;
+					visual["materialId"] = text(mesh.material_id);
+					meshes.append(visual);
+				}
+				feature["meshes"] = meshes;
+				row["feature"] = feature;
+			}
+			attempts.append(row);
+		}
+		Dictionary result = envelope(operation, "ready");
+		result["receiptSchema"] = UNDERGROUND_ORDERED_SHADOW_SCHEMA;
+		Array chunk;
+		chunk.append(p_chunk.x);
+		chunk.append(p_chunk.y);
+		result["chunk"] = chunk;
+		result["sourceIdentity"] = identity_dictionary(state_->source_identity());
+		result["terrainDeltaRevision"] = static_cast<std::int64_t>(pin.terrain_delta_revision());
+		result["shapingRegistryRevision"] = static_cast<std::int64_t>(pin.shaping_registry_revision());
+		result["scanIdentity"] = text(sha256_hex(scan.content_digest()));
+		result["removedPropsIdentity"] = text(sha256_hex(stream.removed_props_digest()));
+		result["transitionContractIdentity"] = text(sha256_hex(stream.transition_contract_digest()));
+		result["rngSeed"] = static_cast<std::int64_t>(stream.rng_seed());
+		result["finalRngState"] = text(std::to_string(stream.final_rng_state()));
+		result["scannedCells"] = static_cast<std::int64_t>(scan.scanned_cells());
+		result["scannedColumns"] = static_cast<std::int64_t>(scan.scanned_columns());
+		result["candidates"] = candidates;
+		result["candidateCount"] = static_cast<std::int64_t>(candidates.size());
+		result["attempts"] = attempts;
+		result["attemptCount"] = static_cast<std::int64_t>(attempts.size());
+		result["publishable"] = stream.publishable();
+		result["channelFootprintsComplete"] = stream.channel_footprints_complete();
+		result["completeFeatureManifest"] = false;
+		result["productionCutover"] = false;
+		result["removedPropsMutated"] = false;
+		result["collidersInstalled"] = false;
+		result["routingInfluenced"] = false;
 		return result;
 	} catch (const std::exception &error) {
 		return failure(operation, error);

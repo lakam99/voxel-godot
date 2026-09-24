@@ -111,6 +111,20 @@ function parse(argv) {
   return options;
 }
 
+export function coverageExecutionTimeoutMilliseconds(options = {}) {
+  const raw = options.coverageExecuteTimeoutMs === undefined
+    ? 120000 : options.coverageExecuteTimeoutMs;
+  if ((typeof raw !== 'number' && typeof raw !== 'string')
+      || (typeof raw === 'string' && !/^\d+$/.test(raw))) {
+    throw new Error('coverageExecuteTimeoutMs must be an integer number of milliseconds.');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1000 || value > 900000 || value % 1000 !== 0) {
+    throw new Error('coverageExecuteTimeoutMs must be a whole-second value from 1000 through 900000.');
+  }
+  return value;
+}
+
 async function exists(path) {
   try { await access(path, fsConstants.F_OK); return true; } catch { return false; }
 }
@@ -974,10 +988,10 @@ async function clangCompile({ project, output, label, llvm, sources, executable 
 }
 
 async function collectLlvmCoverage({ project, output, label, llvm, executable, expectedFiles,
-  allowedCoreFiles = expectedFiles }) {
+  allowedCoreFiles = expectedFiles, executeTimeoutSeconds = 120 }) {
   const profileRaw = join(output, `${label}.profraw`);
   const profileData = join(output, `${label}.profdata`);
-  const test = await runOwned({ project, output, label: `${label}-execute`, executable, args: [], timeoutSeconds: 120,
+  const test = await runOwned({ project, output, label: `${label}-execute`, executable, args: [], timeoutSeconds: executeTimeoutSeconds,
     env: { ...process.env, LLVM_PROFILE_FILE: profileRaw } });
   if (!(await exists(profileRaw))) throw new Error(`${label} did not produce an LLVM raw profile.`);
   const merge = await runOwned({ project, output, label: `${label}-merge`, executable: llvm.llvmProfdata,
@@ -1008,6 +1022,7 @@ async function collectLlvmCoverage({ project, output, label, llvm, executable, e
 
 export async function runLlvmCoverage({ project, output, options, source }) {
   const llvm = await resolveLlvmToolchain({ project, output, options });
+  const coreExecutionTimeoutMs = coverageExecutionTimeoutMilliseconds(options);
   const coverageDirectory = join(output, 'llvm-coverage');
   await mkdir(coverageDirectory, { recursive: false });
   const canarySource = join(project, 'native', 'world_backend', 'coverage_canary', 'coverage_canary.cpp');
@@ -1028,7 +1043,8 @@ export async function runLlvmCoverage({ project, output, options, source }) {
   const executable = join(coverageDirectory, 'world_backend_core_tests.exe');
   const build = await clangCompile({ project, output, label: 'coverage-core-build', llvm, sources: [...coreSources, ...testSources], executable });
   const coverage = await collectLlvmCoverage({ project, output, label: 'coverage-core', llvm, executable,
-    expectedFiles: coreSources, allowedCoreFiles });
+    expectedFiles: coreSources, allowedCoreFiles,
+    executeTimeoutSeconds: coreExecutionTimeoutMs / 1000 });
   const complete = ['lines', 'functions', 'branches'].every(metric => coverage.totals[metric].count > 0 && coverage.totals[metric].covered === coverage.totals[metric].count);
   return {
     status: complete ? 'passed' : 'failed_threshold', requiredMetrics: ['line', 'function', 'branch'],
@@ -1040,7 +1056,9 @@ export async function runLlvmCoverage({ project, output, options, source }) {
       installMarker: llvm.installMarker ?? null,
     },
     canary: { status: 'passed', totals: canary.totals, uncovered: canary.uncovered, buildArgs: canaryBuild.args, artifacts: canary.artifacts },
-    core: { ...coverage, buildArgs: build.args, binary: { path: executable, sha256: await hashFile(executable) }, pdb: { path: build.pdb, sha256: await hashFile(build.pdb) } },
+    core: { ...coverage, executionTimeoutMilliseconds: coreExecutionTimeoutMs,
+      buildArgs: build.args, binary: { path: executable, sha256: await hashFile(executable) },
+      pdb: { path: build.pdb, sha256: await hashFile(build.pdb) } },
     denominatorValidated: true,
   };
 }
