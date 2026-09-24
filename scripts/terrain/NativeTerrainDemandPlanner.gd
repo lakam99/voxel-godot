@@ -34,6 +34,8 @@ var _mesh_layout_builder
 var _mesh_layout_lease
 var _incremental_active := false
 var _accepted_plan: Dictionary = {}
+var _stopping := false
+var _stop_receipt: Dictionary = {}
 
 func setup(consumer_id: int) -> Dictionary:
 	if consumer_id <= 0 or _consumer_id != 0:
@@ -51,6 +53,7 @@ func setup(consumer_id: int) -> Dictionary:
 func begin_replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
 		vertical_bounds: Vector2i, request_lease, request_revision: int) -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0:
 		return {"status":"failed", "reason":"planner_not_configured"}
 	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
@@ -63,6 +66,8 @@ func begin_replace_sources(primary: Dictionary, other_viewers: Array[Dictionary]
 	return result
 
 func advance_replace_sources() -> Dictionary:
+	if _stopping:
+		return {"status":"failed", "reason":"planner_stopping"}
 	if _replacement == null:
 		return {"status":"failed", "reason":"planner_not_configured"}
 	var result: Dictionary = _replacement.advance()
@@ -101,6 +106,72 @@ func cancel_replace_sources(token: int) -> Dictionary:
 		return {"status":"failed", "reason":"planner_not_configured"}
 	return _replacement.cancel(token)
 
+## Stop replacement admission and retain planner state until every request,
+## accepted plan and replacement candidate has retired under bounded advances.
+## ArtifactRequests remains the sole advancer of the shared mesh-layout builder.
+func request_stop() -> Dictionary:
+	if _consumer_id <= 0 or _replacement == null or _mesh_layout_builder == null:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	if _stopping:
+		return {"status":"pending", "reason":"planner_stop_already_requested"}
+	_stopping = true
+	_incremental_active = false
+	var mesh_lease_invalidated := false
+	if _mesh_layout_lease != null and _mesh_layout_lease.has_method("invalidate"):
+		_mesh_layout_lease.invalidate()
+		mesh_lease_invalidated = true
+	var replacement_step: Dictionary = _replacement.request_stop(_accepted_plan)
+	return {"status":"pending", "reason":"planner_retirement_requested",
+		"replacement":replacement_step,
+		"meshLayoutLeaseInvalidated":mesh_lease_invalidated}
+
+func drain_stop_step() -> Dictionary:
+	if not _stopping or _replacement == null or _mesh_layout_builder == null:
+		return {"status":"failed", "reason":"planner_stop_required"}
+	var replacement_step: Dictionary = _replacement.drain_stop_step()
+	if replacement_step.get("status") == "failed": return replacement_step
+	var transaction: Dictionary = _mesh_layout_builder.transaction_state()
+	var mesh_transaction_drained: bool = (transaction.get("status") == "idle" \
+		or transaction.get("status") == "transferred") \
+		and not bool(transaction.get("hasPendingRetirement", false))
+	var mesh_lease_released := _mesh_layout_lease == null
+	if replacement_step.get("status") != "ready" or not mesh_transaction_drained \
+			or not mesh_lease_released:
+		return {"status":"pending", "reason":"planner_retirement_pending",
+			"replacement":replacement_step, "meshTransaction":transaction,
+			"meshLeaseReleased":mesh_lease_released}
+	var replacement_drained: bool = _replacement.is_drained()
+	var leases_released: bool = bool(replacement_step.get("requestLeasesReleased", false)) \
+		and mesh_lease_released
+	if not replacement_drained or not leases_released:
+		return {"status":"failed", "reason":"planner_retirement_receipt_incomplete",
+			"replacement":replacement_step, "meshTransaction":transaction}
+	# Replacement retirement has cleared the maps shared with the accepted plan.
+	# Release any applied/delta snapshots and cache references before the owner
+	# nulls this planner.
+	_sources = {}
+	_mesh_sources = {}
+	_desired = {}
+	_required_mesh_blocks = {}
+	_desired_priority = {}
+	_applied = {}
+	_issued = {}
+	_accepted_plan = _empty_plan()
+	_mesh_window_layout = {}
+	_mesh_window_layout_revision = -1
+	_stop_receipt = {"status":"ready", "drained":true,
+		"demandReplacementDrained":replacement_drained,
+		"requestLeasesReleased":leases_released,
+		"meshTransactionDrained":mesh_transaction_drained,
+		"meshLayoutLeaseReleased":mesh_lease_released,
+		"plannerMapsReleased":_sources.is_empty() and _desired.is_empty() \
+			and _required_mesh_blocks.is_empty() and _applied.is_empty(),
+		"replacement":replacement_step, "meshTransaction":transaction}
+	return _stop_receipt.duplicate(true)
+
+func stop_receipt() -> Dictionary:
+	return _stop_receipt.duplicate(true)
+
 func _empty_plan() -> Dictionary:
 	return {"sources":{}, "meshSources":{}, "desired":{}, "priority":{},
 		"required":{}, "sourceOrder":[], "dataMembers":[], "meshMembers":[],
@@ -110,6 +181,7 @@ func _empty_plan() -> Dictionary:
 func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
 		vertical_bounds: Vector2i) -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0:
 		return {"status":"failed", "reason":"planner_not_configured"}
 	if _incremental_active or _replacement.has_pending_retirement() \
@@ -194,6 +266,7 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 		"consumerId":_consumer_id}
 
 func required_collision_mesh_blocks() -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0: return {"status":"failed", "reason":"planner_not_configured"}
 	var blocks: Array[Vector3i] = []
 	for block: Vector3i in _required_mesh_blocks: blocks.append(block)
@@ -204,6 +277,7 @@ func required_collision_mesh_blocks() -> Dictionary:
 ## Starts an incremental, revision-bound copy/sort of the accepted mesh demand.
 ## The returned blocks array is transferred to the caller; do not mutate it.
 func begin_required_collision_mesh_blocks() -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0 or _demand_revision <= 0:
 		return {"status":"pending", "reason":"mesh_demand_unset"}
 	if _incremental_active:
@@ -256,6 +330,7 @@ func cancel_required_collision_mesh_blocks(token: int) -> Dictionary:
 ## Begins a bounded replacement transaction for the full logical mesh layout.
 ## The final `layout` value is transferred to the caller; do not mutate it.
 func begin_collision_mesh_window_layout() -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0 or _demand_revision <= 0:
 		return {"status":"pending", "reason":"mesh_demand_unset"}
 	if _incremental_active:
@@ -306,6 +381,7 @@ func cancel_collision_mesh_window_layout(token: int) -> Dictionary:
 	return result
 
 func collision_mesh_window_layout() -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0 or _demand_revision <= 0:
 		return {"status":"pending", "reason":"mesh_demand_unset"}
 	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
@@ -348,6 +424,7 @@ func collision_mesh_window_layout() -> Dictionary:
 	return _mesh_window_layout.duplicate(true)
 
 func next_delta() -> Dictionary:
+	if _stopping: return {"status":"failed", "reason":"planner_stopping"}
 	if _consumer_id <= 0:
 		return {"status":"failed", "reason":"planner_not_configured"}
 	if not _issued.is_empty():

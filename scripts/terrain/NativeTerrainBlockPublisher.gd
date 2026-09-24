@@ -34,6 +34,7 @@ var _changed_sdf: Dictionary = {}
 var _cursor := 0
 var _reconcile_cursor := 0
 var _shutdown_requested := false
+var _async_shutdown_receipt: Dictionary = {}
 var _active := false
 var _stopping := false
 var _last_failure := ""
@@ -43,6 +44,9 @@ func setup(backend, terrain: VoxelTerrain, page_admission, consumer_id: int, pri
 		return {"status":"failed", "reason":"invalid_publisher_owner"}
 	if terrain.generator != null or terrain.automatic_loading_enabled:
 		return {"status":"failed", "reason":"manual_terrain_required"}
+	_async_shutdown_receipt.clear()
+	_shutdown_requested = false
+	_stopping = false
 	_backend = backend
 	_terrain = terrain
 	_pages = page_admission
@@ -376,14 +380,20 @@ func stop() -> Dictionary:
 ## Starts retirement without walking the entire desired set. drain_step() takes
 ## at most one tracked block/native worker event per invocation.
 func request_stop() -> Dictionary:
-	if not _active: return {"status":"ready", "drained":true}
+	if not _async_shutdown_receipt.is_empty():
+		return _async_shutdown_receipt.duplicate(true)
 	_stopping = true
 	_shutdown_requested = true
+	if not _active:
+		return {"status":"pending", "reason":"native_publisher_retirement_requested",
+			"alreadyInactive":true}
 	return {"status":"pending", "reason":"native_publisher_retirement_requested",
 		"remainingBlocks":_blocks.size(), "inserted":_inserted.size(),
 		"orphaned":_orphaned.size()}
 
 func drain_step() -> Dictionary:
+	if not _async_shutdown_receipt.is_empty():
+		return _async_shutdown_receipt.duplicate(true)
 	if _shutdown_requested:
 		return _shutdown_drain_step()
 	if _active or _backend == null:
@@ -396,9 +406,24 @@ func drain_step() -> Dictionary:
 	return {"status":"pending", "drained":false, "reason":event.get("reason", "native_worker_draining")}
 
 func _shutdown_drain_step() -> Dictionary:
-	if not _active or _backend == null:
-		return {"status":"ready", "drained":true, "physicalBlocksUnloaded":true,
-			"nativeWorkersDrained":true}
+	if _backend == null:
+		return {"status":"failed", "reason":"native_shutdown_backend_missing"}
+	if not _active:
+		var inactive_event: Dictionary = _backend.pump_voxel_block_shadow()
+		if inactive_event.get("status") == "failed": return inactive_event
+		if inactive_event.get("status") != "pending" \
+				or inactive_event.get("reason") != "no_waiting_source":
+			return {"status":"pending", "reason":"native_worker_retirement_pending",
+				"workerEvent":inactive_event}
+		if not _shutdown_tracked_state_empty():
+			return {"status":"failed", "reason":"native_shutdown_inactive_state_not_empty",
+				"publisherState":snapshot()}
+		_async_shutdown_receipt = {"status":"ready", "drained":true,
+			"physicalBlocksUnloaded":true, "nativeWorkersDrained":true,
+			"remainingDemanded":0, "remainingRequested":0,
+			"remainingInserted":0, "remainingOrphaned":0,
+			"terminalWorkerEvent":inactive_event}
+		return _async_shutdown_receipt.duplicate(true)
 	if not _blocks.is_empty():
 		var block: Vector3i = _blocks.pop_back()
 		_desired_set.erase(block)
@@ -442,12 +467,24 @@ func _shutdown_drain_step() -> Dictionary:
 	if event.get("status") != "pending" or event.get("reason") != "no_waiting_source":
 		return {"status":"pending", "reason":"native_worker_retirement_pending",
 			"workerEvent":event}
+	if not _shutdown_tracked_state_empty():
+		return {"status":"failed", "reason":"native_shutdown_state_not_empty",
+			"publisherState":snapshot()}
 	_terrain.mesh_block_entered.disconnect(_mesh_entered)
 	_terrain.mesh_block_exited.disconnect(_mesh_exited)
 	_active = false
-	return {"status":"ready", "drained":true, "physicalBlocksUnloaded":true,
+	_async_shutdown_receipt = {"status":"ready", "drained":true, "physicalBlocksUnloaded":true,
 		"nativeWorkersDrained":true, "remainingDemanded":0, "remainingRequested":0,
-		"remainingInserted":0, "remainingOrphaned":0}
+		"remainingInserted":0, "remainingOrphaned":0,
+		"terminalWorkerEvent":event}
+	return _async_shutdown_receipt.duplicate(true)
+
+func _shutdown_tracked_state_empty() -> bool:
+	return _blocks.is_empty() and _desired_set.is_empty() and _waiting_source.is_empty() \
+		and _retiring.is_empty() and _requested.is_empty() and _inserted.is_empty() \
+		and _orphaned.is_empty() and _meshed.is_empty() and _edit_blocked.is_empty() \
+		and _edit_probes.is_empty() and _sdf_bytes.is_empty() \
+		and _old_edit_sdf.is_empty() and _changed_sdf.is_empty()
 
 func _shutdown_reconcile_one(block: Vector3i) -> Dictionary:
 	if _terrain.has_data_block(block):

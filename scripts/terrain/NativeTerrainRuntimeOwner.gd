@@ -499,29 +499,32 @@ func stop() -> Dictionary:
 	if _state == "new":
 		_state = "drained"
 		return {"status":"ready", "drained":true}
-	if _state == "active" or (_state == "failed" and _backend != null \
-			and _publisher != null and _artifact_requests != null):
+	if _state == "active" or (_state == "failed" and _publisher != null \
+			and _artifact_requests != null and _planner != null):
 		return request_stop()
 	if _state == "stopping_async":
 		return drain_step()
 	if _publisher == null:
+		if _planner != null or _artifact_requests != null:
+			return {"status":"failed", "reason":"native_owner_shutdown_publisher_missing",
+				"ownerState":_state}
 		_release_owners()
 		return {"status":"ready", "drained":true}
-	_state = "stopping"
-	if _artifact_requests != null:
-		var artifact_stopped: Dictionary = _artifact_requests.stop()
-		if artifact_stopped.get("status") != "ready": return artifact_stopped
-	var stopped: Dictionary = _publisher.stop()
-	if stopped.get("status") != "ready": return stopped
-	return drain_step()
+	# Do not let a partially retained legacy owner escape the planner drain gate.
+	# If the shared stop coordinator is incomplete, fail closed instead of
+	# releasing publisher-owned state directly.
+	if _artifact_requests == null or _planner == null:
+		return {"status":"failed", "reason":"native_owner_shutdown_components_unavailable",
+			"ownerState":_state, "backendInstanceId":_backend.get_instance_id() if _backend != null else 0}
+	return request_stop()
 
 ## Non-blocking shutdown request for composed runtimes. Retirement proceeds one
-## bounded owner drain step at a time; unlike stop(), this never spins until all
-## queued blocks/windows have been released.
+## bounded owner drain step at a time; callers may use stop() as the equivalent
+## public convenience entry point and then continue with drain_step().
 func request_stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
-	var failed_owner_is_recoverable := _state == "failed" and _backend != null \
-		and _publisher != null and _artifact_requests != null
+	var failed_owner_is_recoverable := _state == "failed" and _publisher != null \
+		and _artifact_requests != null and _planner != null
 	if _state != "active" and _state != "stopping_async" \
 			and not failed_owner_is_recoverable:
 		return {"status":"failed", "reason":"native_owner_not_active_for_async_stop",
@@ -533,29 +536,42 @@ func request_stop() -> Dictionary:
 	if artifacts.get("status") == "failed":
 		return {"status":"failed", "reason":"native_artifact_stop_request_failed",
 			"cleanupReason":String(artifacts.get("reason", "unknown")), "failure":_failure}
+	if _planner == null:
+		return {"status":"failed", "reason":"native_planner_missing_during_stop",
+			"failure":_failure}
+	var planner: Dictionary = _planner.request_stop()
+	if planner.get("status") == "failed":
+		return {"status":"failed", "reason":"native_planner_stop_request_failed",
+			"cleanupReason":String(planner.get("reason", "unknown")),
+			"failure":_failure}
 	var publisher: Dictionary = _publisher.request_stop()
 	if publisher.get("status") == "failed":
 		return {"status":"failed", "reason":"native_publisher_stop_request_failed",
 			"cleanupReason":String(publisher.get("reason", "unknown")), "failure":_failure}
 	return {"status":"pending", "reason":"native_owner_retirement_requested",
 		"failure":_failure, "ownerGeneration":_owner_generation,
-		"sourceIdentity":_source_identity.duplicate(true)}
+		"sourceIdentity":_source_identity.duplicate(true),
+		"plannerStop":planner}
 
 func drain_step() -> Dictionary:
 	if _state == "stopping_async":
 		var artifact_step: Dictionary = _artifact_requests.drain_step()
 		if artifact_step.get("status") == "failed":
 			return artifact_step
-		if artifact_step.get("status") != "ready":
-			return {"status":"pending", "reason":"native_artifact_retirement_pending",
-				"artifactStep":artifact_step}
+		var planner_step: Dictionary = _planner.drain_stop_step() if _planner != null \
+			else {"status":"failed", "reason":"native_planner_missing_during_drain"}
+		if planner_step.get("status") == "failed": return planner_step
 		var publisher_step: Dictionary = _publisher.drain_step()
 		if publisher_step.get("status") == "failed": return publisher_step
-		if publisher_step.get("status") != "ready":
-			return {"status":"pending", "reason":"native_block_retirement_pending",
+		if artifact_step.get("status") != "ready" \
+				or planner_step.get("status") != "ready" \
+				or publisher_step.get("status") != "ready":
+			return {"status":"pending", "reason":"native_owner_retirement_pending",
+				"artifactStep":artifact_step, "plannerStep":planner_step,
 				"publisherStep":publisher_step}
 		var retired_generation := _owner_generation
 		var retired_source := _source_identity.duplicate(true)
+		var planner_receipt: Dictionary = _planner.stop_receipt()
 		_async_stop_receipt = {"status":"ready", "drained":true,
 			"physicalBlocksUnloaded":publisher_step.get("physicalBlocksUnloaded") == true,
 			"nativeWorkersDrained":artifact_step.get("nativeWorkersDrained") == true
@@ -563,14 +579,21 @@ func drain_step() -> Dictionary:
 			"demandReleased":publisher_step.get("remainingDemanded") == 0
 				and publisher_step.get("remainingRequested") == 0
 				and publisher_step.get("remainingInserted") == 0
-				and publisher_step.get("remainingOrphaned") == 0,
+				and publisher_step.get("remainingOrphaned") == 0
+				and planner_receipt.get("demandReplacementDrained") == true
+				and planner_receipt.get("plannerMapsReleased") == true,
 			"leasesReleased":artifact_step.get("leasesReleased") == true
-				and artifact_step.get("windowSourcesReleased") == true,
+				and artifact_step.get("windowSourcesReleased") == true
+				and planner_receipt.get("requestLeasesReleased") == true
+				and planner_receipt.get("meshLayoutLeaseReleased") == true,
+			"publisherDrain":publisher_step.duplicate(true),
+			"plannerRetirement":planner_receipt,
 			"ownerGeneration":retired_generation, "sourceIdentity":retired_source}
 		if not _async_stop_receipt.physicalBlocksUnloaded \
 				or not _async_stop_receipt.nativeWorkersDrained \
 				or not _async_stop_receipt.demandReleased \
-				or not _async_stop_receipt.leasesReleased:
+				or not _async_stop_receipt.leasesReleased \
+				or planner_receipt.get("meshTransactionDrained") != true:
 			return {"status":"failed", "reason":"native_owner_retirement_receipt_incomplete",
 				"retirementReceipt":_async_stop_receipt}
 		_release_owners()
@@ -580,17 +603,7 @@ func drain_step() -> Dictionary:
 		if drained.get("status") != "ready": return drained
 		_release_owners()
 		return {"status":"ready", "drained":true}
-	if _state != "stopping": return {"status":"failed", "reason":"stop_before_drain"}
-	if _artifact_requests != null:
-		var artifact_drained: Dictionary = _artifact_requests.drain_step()
-		if artifact_drained.get("status") != "ready": return artifact_drained
-	var stopped: Dictionary = _publisher.stop()
-	if stopped.get("status") != "ready": return stopped
-	var drained: Dictionary = _publisher.drain_step()
-	if drained.get("status") == "ready":
-		_release_owners()
-		return {"status":"ready", "drained":true}
-	return drained
+	return {"status":"failed", "reason":"stop_before_drain", "ownerState":_state}
 
 func snapshot() -> Dictionary:
 	return {"state":_state, "failure":_failure,

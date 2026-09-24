@@ -480,10 +480,111 @@ func run() -> void:
 		and not capacity_builder.has_pending_retirement(),
 		"required-block total capacity rejects oversized input after fully bounded drain")
 
+	# Owner shutdown must retire a pending prior accepted plan as well as the
+	# active candidate and its queued successor before releasing either lease.
+	var stop_planner = PLANNER.new()
+	check(stop_planner.setup(92).get("status") == "ready",
+		"stop/drain planner initializes")
+	var stop_initial_request := _make_request(
+		{"position":Vector3.ZERO, "distance":80}, [], [], [], Vector2i(-16, 48), 1)
+	var stop_initial_begin: Dictionary = _begin(stop_planner, stop_initial_request)
+	var stop_initial: Dictionary = await _drive(stop_planner)
+	check(stop_initial_begin.get("status") == "pending"
+		and stop_initial.get("status") == "ready",
+		"stop/drain planner accepts a sufficiently large prior plan")
+	stop_initial_request.lease.release_after_drain()
+	var stop_committed_request := _make_request(
+		{"position":Vector3.ZERO, "distance":0}, [], [], [], Vector2i.ZERO, 2)
+	var stop_committed_begin: Dictionary = _begin(stop_planner, stop_committed_request)
+	var stop_committed: Dictionary = await _drive(stop_planner)
+	check(stop_committed_begin.get("status") == "pending"
+		and stop_committed.get("status") == "ready"
+		and stop_planner._replacement.has_pending_retirement(),
+		"publishing the next plan retains the previous plan for bounded retirement")
+	stop_committed_request.lease.release_after_drain()
+	var stop_candidate_request := _make_request(
+		{"position":Vector3(400, 0, 0), "distance":48}, [], [], [], Vector2i.ZERO, 3)
+	var stop_candidate_begin: Dictionary = _begin(stop_planner, stop_candidate_request)
+	var stop_retired_partial: Dictionary = _step(stop_planner)
+	var prior_plan_still_pending: bool = stop_planner._replacement.has_pending_retirement()
+	var stop_successor_request := _make_request(
+		{"position":Vector3(-400, 0, 0), "distance":0}, [], [], [], Vector2i.ZERO, 4)
+	var stop_successor_begin: Dictionary = _begin(stop_planner, stop_successor_request)
+	check(stop_candidate_begin.get("reason") == "replacement_started"
+		and stop_retired_partial.get("status") == "pending"
+		and int(stop_retired_partial.get("workOps", -1)) <= WORK_LIMIT
+		and prior_plan_still_pending
+		and stop_successor_begin.get("reason") == "replacement_supersede_drain_pending",
+		"fixture holds a prior plan, active candidate, and queued successor simultaneously")
+	var stop_requested: Dictionary = stop_planner.request_stop()
+	check(stop_requested.get("status") == "pending"
+		and stop_candidate_request.lease.is_valid_for(stop_candidate_request.primary,
+			stop_candidate_request.viewers, stop_candidate_request.retained,
+			stop_candidate_request.foreground, stop_candidate_request.bounds,
+			stop_candidate_request.revision) == false
+		and not stop_successor_request.lease.is_valid_for(stop_successor_request.primary,
+			stop_successor_request.viewers, stop_successor_request.retained,
+			stop_successor_request.foreground, stop_successor_request.bounds,
+			stop_successor_request.revision),
+		"stop immediately rejects active and successor request leases")
+	var stop_result: Dictionary = {"status":"pending"}
+	var stop_drain_steps := 0
+	while stop_drain_steps < 100:
+		stop_result = stop_planner.drain_stop_step()
+		stop_drain_steps += 1
+		var stop_replacement_step: Dictionary = stop_result.get("replacement", {})
+		var stop_advance: Dictionary = stop_replacement_step.get("advance", {})
+		var stop_work_ops := int(stop_advance.get("workOps", -1))
+		check(stop_work_ops >= 0 and stop_work_ops <= WORK_LIMIT
+			and int(stop_advance.get("maxWorkOps", -1)) == WORK_LIMIT
+			and _sum_breakdown(stop_advance) == stop_work_ops,
+			"each stop/drain advance reports and respects the existing hard work bound")
+		observed_max_work_ops = maxi(observed_max_work_ops, stop_work_ops)
+		total_work_ops += maxi(0, stop_work_ops)
+		advance_count += 1
+		if stop_result.get("status") == "ready": break
+		check(stop_result.get("status") == "pending",
+			"planner stop remains pending until every owned plan/candidate entry retires")
+	var stop_replacement_receipt: Dictionary = stop_result.get("replacement", {})
+	var stop_planner_receipt: Dictionary = stop_planner.stop_receipt()
+	var stop_drain_observation := {"case":"stop_drain_receipt_diagnostic",
+		"stopResult":{"status":stop_result.get("status", ""),
+			"drained":stop_result.get("drained", false),
+			"requestLeasesReleased":stop_result.get("requestLeasesReleased", false),
+			"hadActiveCandidate":stop_result.get("hadActiveCandidate", false),
+			"hadQueuedSuccessor":stop_result.get("hadQueuedSuccessor", false),
+			"retiredWorkOps":stop_result.get("retiredWorkOps", -1)},
+		"nestedReplacementReceipt":stop_replacement_receipt.duplicate(true),
+		"plannerHasIsDrainedMethod":stop_planner.has_method("is_drained"),
+		"plannerStopReceipt":stop_planner_receipt.duplicate(true),
+		"plannerReceiptDrained":stop_planner_receipt.get("drained", false),
+		"plannerMapsReleased":stop_planner_receipt.get("plannerMapsReleased", false),
+		"plannerRequestLeasesReleased":stop_planner_receipt.get("requestLeasesReleased", false),
+		"plannerMeshLayoutLeaseReleased":stop_planner_receipt.get("meshLayoutLeaseReleased", false),
+		"plannerMeshTransactionDrained":stop_planner_receipt.get("meshTransactionDrained", false),
+		"candidateLeaseOwnerReleased":stop_candidate_request.lease.retained_owner() == null,
+		"successorLeaseOwnerReleased":stop_successor_request.lease.retained_owner() == null}
+	check(stop_result.get("status") == "ready"
+		and stop_result.get("drained") == true
+		and stop_replacement_receipt.get("requestLeasesReleased") == true
+		and stop_replacement_receipt.get("hadActiveCandidate") == true
+		and stop_replacement_receipt.get("hadQueuedSuccessor") == true
+		and int(stop_replacement_receipt.get("retiredWorkOps", 0)) > 0
+		and stop_planner_receipt.get("drained") == true
+		and stop_planner_receipt.get("plannerMapsReleased") == true
+		and stop_planner_receipt.get("requestLeasesReleased") == true
+		and stop_planner_receipt.get("meshLayoutLeaseReleased") == true
+		and stop_planner_receipt.get("meshTransactionDrained") == true
+		and stop_candidate_request.lease.retained_owner() == null
+		and stop_successor_request.lease.retained_owner() == null
+		and stop_replacement_receipt.get("status") == "ready",
+		"stop receipt follows prior-plan, candidate, successor retirement and lease release")
+
 	var report := {"schema":"n3-terrain-demand-replacement-contract/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
 		"evidenceLevel":"focused incremental pure planner contract",
-		"failures":failures, "metrics":{"workLimit":WORK_LIMIT,
+		"failures":failures, "observations":[stop_drain_observation],
+		"metrics":{"workLimit":WORK_LIMIT,
 			"observedMaxWorkOps":observed_max_work_ops,
 			"totalWorkOps":total_work_ops, "advanceCount":advance_count},
 		"checks":{"initialPlanAtomic":initial.get("status") == "ready",
@@ -506,7 +607,14 @@ func run() -> void:
 				and retry_required.get("blocks") == expected_required.get("blocks"),
 			"requiredBlocksRevisionLeaseRejected":revoked_required.get("reason") == "mesh_layout_snapshot_revoked",
 			"requiredBlocksCapacityDrained":mesh_capacity_result.get("reason") == "mesh_window_capacity_invalid"
-				and not capacity_builder.has_pending_retirement()},
+				and not capacity_builder.has_pending_retirement(),
+			"stopDrainsPreviousPlanActiveAndQueued":stop_result.get("status") == "ready"
+				and stop_replacement_receipt.get("hadActiveCandidate", false)
+				and stop_replacement_receipt.get("hadQueuedSuccessor", false)
+				and stop_planner_receipt.get("drained") == true
+				and stop_planner_receipt.get("plannerMapsReleased") == true
+				and stop_candidate_request.lease.retained_owner() == null
+				and stop_successor_request.lease.retained_owner() == null},
 		"boundedWorkFollowUps":[
 			"The synchronous collision_mesh_window_layout() compatibility method is retained only for reference/compatibility tests; production consumers use the bounded begin/advance API."],
 		"doesNotProve":"No VoxelTerrain/runtime integration, page/queue admission, publication/collision, or headed gameplay/performance acceptance."}

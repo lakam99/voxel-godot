@@ -18,7 +18,13 @@ var _accepted_revision := 0
 var _accepted_closure_token := ""
 var _job: Dictionary = {}
 var _retired_plan: Dictionary = {}
+var _stop_accepted_plan: Dictionary = {}
+var _stop_request_leases: Array = []
 var _next_token := 1
+var _stopping := false
+var _stop_had_active_candidate := false
+var _stop_had_queued_successor := false
+var _stop_retired_work_ops := 0
 
 func setup(consumer_id: int) -> Dictionary:
 	if consumer_id <= 0 or _consumer_id != 0:
@@ -30,6 +36,7 @@ func begin(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
 		vertical_bounds: Vector2i, lease, request_revision: int) -> Dictionary:
 	if _consumer_id <= 0: return {"status":"failed", "reason":"replacement_not_configured"}
+	if _stopping: return {"status":"failed", "reason":"replacement_stopping"}
 	if lease == null or not lease.has_method("is_valid_for") \
 			or not lease.is_valid_for(primary, other_viewers, retained_chunks,
 				foreground_chunks, vertical_bounds, request_revision):
@@ -71,6 +78,73 @@ func begin(primary: Dictionary, other_viewers: Array[Dictionary],
 		"token":token, "supersededToken":superseded_token,
 		"maxWorkOpsPerAdvance":MAX_WORK_OPS_PER_ADVANCE}
 
+## Stop accepts no new candidates, invalidates both borrowed requests, and
+## retains their leases until candidate/plan scratch has drained incrementally.
+func request_stop(accepted_plan: Dictionary) -> Dictionary:
+	if _stopping:
+		return {"status":"pending", "reason":"replacement_stop_already_requested",
+			"drained":_replacement_work_drained()}
+	_stopping = true
+	_stop_accepted_plan = accepted_plan
+	var active_token := int(_job.get("token", 0))
+	if not _job.is_empty() and String(_job.get("state", "")) != "transferred":
+		_stop_had_active_candidate = true
+		var active_request: Dictionary = _job.get("request", {})
+		_retain_stop_lease(active_request.get("lease"))
+		var queued_request: Dictionary = _job.get("queuedRequest", {})
+		_stop_had_queued_successor = not queued_request.is_empty()
+		_retain_stop_lease(queued_request.get("lease"))
+		_job.erase("queuedRequest")
+		_job.erase("queuedToken")
+		_job["state"] = "retiring"
+		_job["retirePhase"] = "dataMembers"
+		_job["terminal"] = {"status":"ready", "cancelled":true,
+			"reason":"replacement_owner_stopping", "token":int(_job.get("token", 0))}
+	else:
+		_job = {}
+	return {"status":"pending", "reason":"replacement_stop_drain_pending",
+		"activeToken":active_token,
+		"hadActiveCandidate":_stop_had_active_candidate,
+		"hadQueuedSuccessor":_stop_had_queued_successor,
+		"retainedRequestLeases":_stop_request_leases.size()}
+
+func drain_stop_step() -> Dictionary:
+	if not _stopping:
+		return {"status":"failed", "reason":"replacement_stop_required"}
+	var step: Dictionary = advance()
+	_stop_retired_work_ops += int(step.get("workBreakdown", {}).get("retiredEntries", 0))
+	if not _replacement_work_drained():
+		return {"status":"pending", "reason":"replacement_stop_drain_pending",
+			"advance":step, "retiredPlanPending":not _retired_plan.is_empty(),
+			"acceptedPlanPending":not _stop_accepted_plan.is_empty(),
+			"candidatePending":not _job.is_empty(),
+			"retiredWorkOps":_stop_retired_work_ops}
+	for lease in _stop_request_leases:
+		if lease != null and lease.has_method("release_after_drain"):
+			lease.release_after_drain()
+	_stop_request_leases.clear()
+	_accepted_required = {}
+	_accepted_revision = 0
+	_accepted_closure_token = ""
+	return {"status":"ready", "drained":true,
+		"requestLeasesReleased":_stop_request_leases.is_empty(),
+		"hadActiveCandidate":_stop_had_active_candidate,
+		"hadQueuedSuccessor":_stop_had_queued_successor,
+		"retiredWorkOps":_stop_retired_work_ops,
+		"advance":step}
+
+func is_drained() -> bool:
+	return _stopping and _replacement_work_drained() and _stop_request_leases.is_empty()
+
+func _replacement_work_drained() -> bool:
+	return _retired_plan.is_empty() and _stop_accepted_plan.is_empty() \
+		and (_job.is_empty() or String(_job.get("state", "")) == "transferred")
+
+func _retain_stop_lease(lease) -> void:
+	if lease == null: return
+	if not _stop_request_leases.has(lease): _stop_request_leases.append(lease)
+	if lease.has_method("invalidate"): lease.invalidate()
+
 func cancel(token: int) -> Dictionary:
 	if _job.is_empty(): return {"status":"failed", "reason":"replacement_token_stale"}
 	if int(_job.get("queuedToken", 0)) == token and _job.has("queuedRequest"):
@@ -102,7 +176,7 @@ func advance() -> Dictionary:
 		"sortComparisons":0, "sortReads":0, "sortWrites":0, "hashEntries":0,
 		"retiredEntries":0}
 	if (_job.is_empty() or String(_job.get("state", "")) == "transferred") \
-			and _retired_plan.is_empty():
+			and _retired_plan.is_empty() and _stop_accepted_plan.is_empty():
 		return _result({"status":"idle"}, work_ops, counts)
 	while work_ops < MAX_WORK_OPS_PER_ADVANCE:
 		if not _retired_plan.is_empty():
@@ -110,6 +184,12 @@ func advance() -> Dictionary:
 			work_ops += 1
 			counts.retiredEntries += 1
 			if _retire_complete(_retired_plan): _retired_plan = {}
+			continue
+		if _stopping and not _stop_accepted_plan.is_empty():
+			_retire_one(_stop_accepted_plan)
+			work_ops += 1
+			counts.retiredEntries += 1
+			if _retire_complete(_stop_accepted_plan): _stop_accepted_plan = {}
 			continue
 		if _job.is_empty() or String(_job.get("state", "")) == "transferred":
 			break
@@ -155,7 +235,8 @@ func advance() -> Dictionary:
 			return _result({"status":"ready", "token":ready_token,
 				"plan":plan, "demandRevision":int(plan.demandRevision),
 				"closureToken":String(plan.closureToken)}, work_ops, counts)
-	if _job.is_empty() or String(_job.get("state", "")) == "transferred":
+	if (_job.is_empty() or String(_job.get("state", "")) == "transferred") \
+			and _stop_accepted_plan.is_empty():
 		return _result({"status":"idle"}, work_ops, counts)
 	return _result({"status":"pending", "reason":"replacement_work_pending",
 		"token":int(_job.get("token", 0))}, work_ops, counts)

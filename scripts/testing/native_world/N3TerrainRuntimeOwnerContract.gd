@@ -9,6 +9,7 @@ const VOLUME = preload("res://scripts/TerrainVolumeService.gd")
 const SOURCE = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const LOAD_TRANSACTION = preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
 const DEMAND_LEASE = preload("res://scripts/terrain/NativeTerrainDemandRequestLease.gd")
+const DEMAND_REPLACEMENT_WORK_LIMIT := 256
 
 var failures: Array[String] = []
 var observations: Array[Dictionary] = []
@@ -149,6 +150,69 @@ func run() -> void:
 			== int(staged.receipt.get("backendInstanceId", -1))
 		and staged_setup.get("sourceIdentity") == staged.get("sourceIdentity"),
 		"real staged transaction commits and transfers its exact backend to one owner")
+	var staged_primary := {"position":Vector3.ZERO, "distance":0}
+	var staged_viewers: Array[Dictionary] = []
+	var staged_retained: Array[Vector2i] = []
+	var staged_foreground: Array[Vector2i] = [Vector2i(0, 0)]
+	var staged_bounds := Vector2i(0, 128)
+	var staged_demand_lease = DEMAND_LEASE.new()
+	check(staged_demand_lease.acquire(staged_owner, staged_primary, staged_viewers,
+		staged_retained, staged_foreground, staged_bounds, 1),
+		"staged owner demand source lease acquired")
+	var staged_demand: Dictionary = staged_owner.begin_demand_replacement(staged_primary,
+		staged_viewers, staged_retained, staged_foreground, staged_bounds,
+		staged_demand_lease, 1)
+	for _demand_step in range(120):
+		if staged_demand.get("status") != "pending": break
+		staged_demand = staged_owner.advance_demand_replacement()
+	check(staged_demand.get("status") == "ready",
+		"staged owner accepts minimal demand before layout shutdown fixture")
+	staged_demand_lease.release_after_drain()
+	var staged_layout_start: Dictionary = {"status":"pending", "reason":"layout_not_started"}
+	for _layout_setup_step in range(24):
+		staged_layout_start = staged_owner.advance_collision_artifacts()
+		if not staged_owner._artifact_requests._window_layout_job.is_empty(): break
+		if staged_layout_start.get("status") == "failed": break
+	var staged_layout_transaction: Dictionary = staged_owner._planner \
+		.collision_mesh_snapshot_transaction_state()
+	var staged_layout_job: Dictionary = staged_owner._artifact_requests._window_layout_job
+	var staged_layout_token := int(staged_layout_job.get("token", 0))
+	var staged_layout_builder = staged_owner._planner._mesh_layout_builder
+	var staged_publisher = staged_owner._publisher
+	var staged_layout_lease_valid: bool = staged_owner._planner._mesh_layout_lease != null \
+		and staged_owner._planner._mesh_layout_lease.is_valid_for(
+			staged_owner._planner._accepted_plan.get("requiredOrder", []),
+			staged_owner._planner._demand_revision, staged_owner._planner._closure_token)
+	var staged_builder_owns_lease: bool = staged_owner._planner._mesh_layout_builder._job.get("lease") \
+		== staged_owner._planner._mesh_layout_lease
+	observations.append({"case":"staged_layout_stop_fixture",
+		"layoutStart":staged_layout_start,
+		"layoutBuilderState":String(staged_layout_builder._job.get("state", "")),
+		"transaction":staged_layout_transaction,
+		"job":staged_layout_job.duplicate(true),
+		"plannerDemand":staged_owner._planner.diagnostics(),
+		"meshLayoutLeaseValid":staged_layout_lease_valid,
+		"builderOwnsLease":staged_builder_owns_lease})
+	check(staged_demand.get("status") == "ready"
+		and int(staged_demand.get("desiredDataBlocks", 0)) > 0
+		and int(staged_demand.get("requiredMeshBlocks", 0)) == 36,
+		"staged owner admits a bounded multi-step mesh footprint before layout shutdown fixture")
+	check(staged_layout_start.get("status") == "pending"
+		and staged_layout_start.get("reason") == "mesh_layout_work_pending"
+		and not staged_layout_job.is_empty()
+		and staged_layout_token > 0
+		and staged_layout_token == 2
+		and int(staged_layout_start.get("token", 0)) == staged_layout_token
+		and int(staged_layout_start.get("workOps", 0)) == 256
+		and int(staged_layout_start.get("maxWorkOps", 0)) == 256
+		and staged_layout_token == int(staged_layout_transaction.get("token", 0))
+		and staged_layout_transaction.get("kind") == "layout"
+		and staged_layout_transaction.get("status") == "active"
+		and staged_layout_transaction.get("hasPendingRetirement") == false
+		and staged_layout_builder._job.get("state") == "building"
+		and staged_layout_lease_valid
+		and staged_builder_owns_lease,
+		"active ArtifactRequests layout job owns a leased shared-builder transaction")
 	var replay_owner = OWNER.new()
 	var replay: Dictionary = replay_owner.setup_from_committed_transaction(main, terrain,
 		staged.get("transaction"), staged.get("receipt", {}), 72, 10)
@@ -157,18 +221,69 @@ func run() -> void:
 		and int(replay_owner.snapshot().get("backendInstanceId", 0)) == 0,
 		"transferred transaction cannot be replayed into a second owner")
 	var staged_stopped: Dictionary = staged_owner.stop()
+	var staged_stop_lease = staged_owner._planner._mesh_layout_lease
 	check(staged_stopped.get("status") == "pending"
-		and staged_owner.snapshot().get("state") == "stopping_async",
-		"active stop request is non-blocking and enters incremental retirement")
+		and staged_owner.snapshot().get("state") == "stopping_async"
+		and staged_owner._artifact_requests._window_layout_job.get("cancelling") == true
+		and int(staged_owner._artifact_requests._window_layout_job.get("token", 0))
+			== staged_layout_token
+		and staged_stop_lease != null
+		and not staged_stop_lease.is_valid_for(
+			staged_owner._planner._accepted_plan.get("requiredOrder", []),
+			staged_owner._planner._demand_revision, staged_owner._planner._closure_token)
+		and staged_layout_builder._job.get("state") == "retiring",
+		"active stop cancels the broker-owned mesh-layout transaction before planner drain")
+	var staged_cancel_drain_steps := 0
+	var staged_layout_max_drain_ops := 0
 	for _frame in range(120):
 		if staged_stopped.get("status") == "ready": break
 		await process_frame
 		staged_stopped = staged_owner.drain_step()
+		staged_cancel_drain_steps += 1
+		var artifact_drain_step: Dictionary = staged_stopped.get("artifactStep", {})
+		if artifact_drain_step.has("workOps"):
+			var layout_work_ops := int(artifact_drain_step.get("workOps", -1))
+			staged_layout_max_drain_ops = maxi(staged_layout_max_drain_ops, layout_work_ops)
+			check(layout_work_ops >= 0 and layout_work_ops <= 256
+				and int(artifact_drain_step.get("maxWorkOps", -1)) == 256,
+				"active layout cancellation stays within the builder's 256-op bound")
+	observations.append({"case":"staged_layout_stop_drain",
+		"drainSteps":staged_cancel_drain_steps,
+		"lastDrain":staged_stopped,
+		"owner":staged_owner.snapshot(),
+		"builderTransaction":staged_layout_builder.transaction_state(),
+		"builderJob":staged_layout_builder._job.duplicate(true),
+		"plannerLeaseReleased":staged_owner._planner == null
+			or staged_owner._planner._mesh_layout_lease == null})
 	check(staged_stopped.get("status") == "ready"
 		and staged_stopped.get("drained") == true
 		and staged_owner.snapshot().get("state") == "drained"
 		and int(staged_owner.snapshot().get("backendInstanceId", 0)) == 0,
 		"staged owner drains before the direct owner fixture starts")
+	var staged_planner_retirement: Dictionary = staged_stopped.get("plannerRetirement", {})
+	check(staged_planner_retirement.get("meshTransactionDrained") == true
+		and staged_planner_retirement.get("meshLayoutLeaseReleased") == true
+		and staged_planner_retirement.get("demandReplacementDrained") == true
+		and staged_planner_retirement.get("plannerMapsReleased") == true
+		and staged_owner._planner == null
+		and staged_cancel_drain_steps > 0,
+		"terminal owner receipt waits for active layout cancellation and planner retirement")
+	var staged_publisher_receipt: Dictionary = staged_stopped.get("publisherDrain", {})
+	check(staged_publisher_receipt.get("physicalBlocksUnloaded") == true
+		and staged_publisher_receipt.get("nativeWorkersDrained") == true
+		and staged_publisher_receipt.get("remainingDemanded") == 0
+		and staged_publisher_receipt.get("remainingRequested") == 0
+		and staged_publisher_receipt.get("remainingInserted") == 0
+		and staged_publisher_receipt.get("remainingOrphaned") == 0
+		and staged_publisher_receipt.get("terminalWorkerEvent", {}).get("reason") == "no_waiting_source",
+		"publisher receipt records the async no-waiting-source terminal proof")
+	check(staged_publisher.request_stop() == staged_publisher_receipt
+		and staged_publisher.drain_step() == staged_publisher_receipt,
+		"inactive publisher replays its exact async terminal receipt idempotently")
+	check(staged_layout_builder.transaction_state().get("status") == "idle"
+		and staged_layout_builder._job.is_empty()
+		and not staged_layout_builder.has_pending_retirement(),
+		"terminal layout stop leaves the shared builder idle with no retained scratch")
 	var different_main = MAIN.new()
 	different_main.seed_text = main.seed_text
 	different_main.structure_system = STRUCTURES.new()
@@ -217,6 +332,14 @@ func run() -> void:
 	different_main.free()
 	var owner = OWNER.new()
 	var owner_saved_volume: Dictionary = {}
+	var stop_active_primary: Dictionary = {}
+	var stop_other_viewers: Array[Dictionary] = []
+	var stop_retained_chunks: Array[Vector2i] = []
+	var stop_foreground_chunks: Array[Vector2i] = []
+	var stop_bounds := Vector2i.ZERO
+	var stop_active_lease = null
+	var stop_queued_primary: Dictionary = {}
+	var stop_queued_lease = null
 	var setup: Dictionary = owner.setup(main, terrain, 71, 10)
 	if setup.get("status") != "ready":
 		observations.append({"case":"direct_owner_setup", "result":setup})
@@ -394,6 +517,39 @@ func run() -> void:
 		check(demand.get("status") == "ready" and demand.get("desiredDataBlocks") == 27,
 			"bounded planner demand admitted into one owner")
 		demand_lease.release_after_drain()
+		stop_active_primary = {"position":Vector3(400, 0, 0), "distance":48}
+		stop_other_viewers = []
+		stop_retained_chunks = []
+		stop_foreground_chunks = []
+		stop_bounds = Vector2i.ZERO
+		stop_active_lease = DEMAND_LEASE.new()
+		check(stop_active_lease.acquire(owner, stop_active_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 2),
+			"active stop candidate lease retains its exact source request")
+		var stop_active_begin: Dictionary = owner.begin_demand_replacement(stop_active_primary,
+			stop_other_viewers, stop_retained_chunks, stop_foreground_chunks,
+			stop_bounds, stop_active_lease, 2)
+		var stop_active_partial: Dictionary = owner.advance_demand_replacement()
+		check(stop_active_begin.get("status") == "pending"
+			and stop_active_partial.get("status") == "pending"
+			and int(stop_active_partial.get("workOps", DEMAND_REPLACEMENT_WORK_LIMIT + 1))
+				<= DEMAND_REPLACEMENT_WORK_LIMIT,
+			"owner has a bounded active candidate when shutdown begins")
+		stop_queued_primary = {"position":Vector3(0, 0, 0), "distance":0}
+		stop_queued_lease = DEMAND_LEASE.new()
+		check(stop_queued_lease.acquire(owner, stop_queued_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 3),
+			"queued successor lease retains its exact source request")
+		var stop_queued_begin: Dictionary = owner.begin_demand_replacement(stop_queued_primary,
+			stop_other_viewers, stop_retained_chunks, stop_foreground_chunks,
+			stop_bounds, stop_queued_lease, 3)
+		check(stop_queued_begin.get("status") == "pending"
+			and stop_queued_begin.get("reason") == "replacement_supersede_drain_pending"
+			and stop_active_lease.is_valid_for(stop_active_primary, stop_other_viewers,
+				stop_retained_chunks, stop_foreground_chunks, stop_bounds, 2)
+			and stop_queued_lease.is_valid_for(stop_queued_primary, stop_other_viewers,
+				stop_retained_chunks, stop_foreground_chunks, stop_bounds, 3),
+			"successor is queued behind active candidate without premature lease revocation")
 		var tick: Dictionary = owner.advance()
 		check(tick.get("status") in ["ready", "pending"], "owner advances native demand")
 		check(int(owner.snapshot().publisher.get("demanded", 0)) == 27,
@@ -419,12 +575,16 @@ func run() -> void:
 		and owner.snapshot().get("failure") == "contract_active_advance_failure"
 		and int(owner.snapshot().get("backendInstanceId", 0)) != 0,
 		"active owner failure preserves original reason and retains resources for cleanup")
-	var stop_requested: Dictionary = owner.request_stop()
+	# A legacy/incomplete owner may have lost its top-level backend reference
+	# while the planner, publisher and artifact services still own live work.
+	# Public stop must route that case through the same receipt-gated drain.
+	owner._backend = null
+	var stop_requested: Dictionary = owner.stop()
 	check(stop_requested.get("status") == "pending",
-		"recoverable active failure accepts a non-blocking stop request")
+		"failed owner with residual services accepts a non-blocking public stop")
 	check(stop_requested.get("failure") == "contract_active_advance_failure"
 		and owner.snapshot().get("state") == "stopping_async",
-		"failure identity survives transition into asynchronous cleanup")
+		"incomplete legacy owner cannot bypass asynchronous planner cleanup")
 	var stopped: Dictionary = {"status":"pending"}
 	var async_stop_steps := 0
 	for frame in range(600):
@@ -441,6 +601,22 @@ func run() -> void:
 		and stopped.get("demandReleased") == true
 		and stopped.get("leasesReleased") == true,
 		"async stop receipt proves physical, worker, demand and lease retirement")
+	var planner_retirement: Dictionary = stopped.get("plannerRetirement", {})
+	var replacement_retirement: Dictionary = planner_retirement.get("replacement", {})
+	check(replacement_retirement.get("hadActiveCandidate") == true
+		and replacement_retirement.get("hadQueuedSuccessor") == true
+		and int(replacement_retirement.get("retiredWorkOps", 0)) > 0
+		and replacement_retirement.get("requestLeasesReleased") == true
+		and planner_retirement.get("demandReplacementDrained") == true
+		and planner_retirement.get("plannerMapsReleased") == true,
+		"terminal owner receipt waits for active/queued candidate drain and planner map release")
+	check(stop_active_lease.retained_owner() == null
+		and stop_queued_lease.retained_owner() == null
+		and not stop_active_lease.is_valid_for(stop_active_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 2)
+		and not stop_queued_lease.is_valid_for(stop_queued_primary, stop_other_viewers,
+			stop_retained_chunks, stop_foreground_chunks, stop_bounds, 3),
+		"active and queued demand lease references release only after terminal receipt")
 	check(async_stop_steps > 0 and async_stop_steps <= 600,
 		"shutdown progress is spread across bounded owner drain steps")
 	check(owner.snapshot().state == "drained"
