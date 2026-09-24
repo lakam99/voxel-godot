@@ -92,6 +92,29 @@ struct NativeTerrainEditSurfaceProjection {
     std::size_t candidate_reads = 0;
 };
 
+// Deterministic per-column arithmetic used by the surface-deformation
+// compiler. Exposing the immutable result keeps native/Godot parity evidence
+// on the production math path without adding a runtime publication API.
+struct NativeTerrainEditSurfaceDeformationColumnObservation {
+    double column_center_x = 0.0;
+    double column_center_z = 0.0;
+    double horizontal_distance = 0.0;
+    double safe_radius = 0.0;
+    double safe_drop = 0.0;
+    double falloff = 0.0;
+    bool falloff_accepted = false;
+    double surface_target_y = 0.0;
+    double impact_strength = 0.0;
+    double impact_target_y = 0.0;
+    double target_y = 0.0;
+    bool target_accepted = false;
+    std::int32_t high_y = 0;
+    std::int32_t low_y = 0;
+    double direct_y2_density = 0.0;
+    double direct_y1_density = 0.0;
+    double boundary_y0_density = 0.0;
+};
+
 // Implementations must retain one immutable effective-world snapshot for the
 // duration of compile(). The identity is copied into the result, making a
 // compiled operation batch auditable against the exact source it sampled.
@@ -271,6 +294,14 @@ private:
 class NativeTerrainEditShapeCompiler final {
 public:
     static NativeTerrainEditCompiledBatch compile(const NativeTerrainEditCompileRequest &request);
+    static NativeTerrainEditSurfaceDeformationColumnObservation
+    observe_surface_deformation_column(
+        Vec3d center,
+        double radius,
+        double drop_depth,
+        double cell_size,
+        NativeTerrainEditColumn column,
+        double surface_y);
 };
 
 enum class NativeTerrainEditCompileJobStatus : std::uint8_t {

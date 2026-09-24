@@ -26,6 +26,10 @@ RegisterTest::RegisterTest(const char *name, void (*body)()) {
 } // namespace voxel::world_backend::tests
 
 int main() {
+    if (const std::optional<int> emitted =
+            emit_native_surface_deformation_observations_if_requested(); emitted.has_value()) {
+        return *emitted;
+    }
     using voxel::world_backend::tests::registry;
     std::size_t passed = 0;
     std::vector<std::string> failures;

@@ -4,14 +4,18 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <memory>
 #include <new>
 #include <optional>
 #include <stdexcept>
+#include <sstream>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -390,7 +394,159 @@ std::uint64_t double_bits(const double value) {
     return result;
 }
 
+std::string little_endian_double_hex(const double value) {
+    std::uint8_t bytes[sizeof(value)]{};
+    std::memcpy(bytes, &value, sizeof(value));
+    std::ostringstream result;
+    result << std::hex << std::setfill('0');
+    for (const std::uint8_t byte : bytes) result << std::setw(2) << static_cast<unsigned>(byte);
+    return result.str();
+}
+
+struct SurfaceObservationCase {
+    const char *name;
+    Vec3d center;
+    double radius;
+    double drop_depth;
+    NativeTerrainEditColumn column;
+    double surface_y;
+};
+
+const std::vector<SurfaceObservationCase> &surface_observation_cases() {
+    static const std::vector<SurfaceObservationCase> cases{
+        {"falloffRejected", {0.5, 1.5, 0.5}, 1.01, 0.35, {1, 0}, 2.0},
+        {"float32Large", {16777216.5, 1.5, -16777216.5}, 0.75, 0.35,
+            {16777216, -16777216}, 2.0},
+        {"impactWins", {0.5, 1.5, 0.5}, 0.75, 0.35, {0, 0}, 2.0},
+        {"negativeClamp", {-0.5, 1.75, -0.5}, -50.0, -20.0, {-1, -1}, 2.25},
+        {"shallowTargetRejected", {0.5, 100.0, 0.5}, 1.1, 0.35, {1, 0}, 2.0},
+        {"surfaceDropWins", {0.5, 1.5, 0.5}, 0.75, 1.0, {0, 0}, 1.5},
+    };
+    return cases;
+}
+
+std::string surface_observation_json(
+    const NativeTerrainEditSurfaceDeformationColumnObservation &value) {
+    const auto bits = [](const double number) {
+        return '"' + little_endian_double_hex(number) + '"';
+    };
+    std::ostringstream json;
+    json << "{\"boundaryY0Density\":" << bits(value.boundary_y0_density)
+         << ",\"columnCenterX\":" << bits(value.column_center_x)
+         << ",\"columnCenterZ\":" << bits(value.column_center_z)
+         << ",\"directY1Density\":" << bits(value.direct_y1_density)
+         << ",\"directY2Density\":" << bits(value.direct_y2_density)
+         << ",\"falloff\":" << bits(value.falloff)
+         << ",\"falloffAccepted\":" << (value.falloff_accepted ? "true" : "false")
+         << ",\"highY\":" << value.high_y
+         << ",\"horizontalDistance\":" << bits(value.horizontal_distance)
+         << ",\"impactStrength\":" << bits(value.impact_strength)
+         << ",\"impactTarget\":" << bits(value.impact_target_y)
+         << ",\"lowY\":" << value.low_y
+         << ",\"safeDrop\":" << bits(value.safe_drop)
+         << ",\"safeRadius\":" << bits(value.safe_radius)
+         << ",\"surfaceTarget\":" << bits(value.surface_target_y)
+         << ",\"target\":" << bits(value.target_y)
+         << ",\"targetAccepted\":" << (value.target_accepted ? "true" : "false") << '}';
+    return json.str();
+}
+
+std::string native_surface_observations_json() {
+    std::ostringstream json;
+    json << '{';
+    bool first = true;
+    for (const SurfaceObservationCase &case_ : surface_observation_cases()) {
+        auto source = std::make_shared<FakePinnedSource>();
+        source->projection_defaults(case_.surface_y, 1U);
+        source->projection(case_.column, case_.surface_y, 1U);
+        const NativeTerrainEditCompiledBatch compiled = drain_deformation(
+            deformation_request(source, case_.center, case_.radius, case_.drop_depth), 7U);
+        VWB_EXPECT_EQ(1U, compiled.summary().shape_count);
+        const auto observation = NativeTerrainEditShapeCompiler::observe_surface_deformation_column(
+            case_.center, case_.radius, case_.drop_depth, 1.0, case_.column, case_.surface_y);
+        if (!first) json << ',';
+        first = false;
+        json << '"' << case_.name << "\":" << surface_observation_json(observation);
+    }
+    json << '}';
+    return json.str();
+}
+
+std::string text_sha256(const std::string &text) {
+    return sha256_hex(sha256(reinterpret_cast<const std::uint8_t *>(text.data()), text.size()));
+}
+
 } // namespace
+
+std::optional<int> emit_native_surface_deformation_observations_if_requested() {
+    char *raw_path = nullptr;
+    std::size_t path_size = 0U;
+    if (_dupenv_s(&raw_path, &path_size,
+            "N3_NATIVE_SURFACE_DEFORMATION_OBSERVATION_REPORT") != 0) return 5;
+    const std::unique_ptr<char, decltype(&std::free)> owned_path(raw_path, &std::free);
+    if (raw_path == nullptr || path_size <= 1U) return std::nullopt;
+    try {
+        const std::string observations = native_surface_observations_json();
+        const std::string digest = text_sha256(observations);
+        std::ofstream output(raw_path, std::ios::binary | std::ios::trunc);
+        if (!output) return 2;
+        output << "{\"schema\":\"n3-native-terrain-surface-deformation-observations/v1\""
+               << ",\"passed\":true,\"compilerCases\":6,\"observations\":" << observations
+               << ",\"observationsSha256\":\"" << digest << "\"}\n";
+        return output.good() ? 0 : 3;
+    } catch (...) {
+        return 4;
+    }
+}
+
+VWB_TEST(native_surface_deformation_observation_schema_matches_godot_oracle_hash) {
+    const std::string observations = native_surface_observations_json();
+    VWB_EXPECT_EQ(std::string("0c8d7cce1fffe881edb003f122deb55e2c27366db46fb6486de45463f25a3653"),
+        text_sha256(observations));
+}
+
+VWB_TEST(native_surface_deformation_observation_rejects_invalid_and_overflowing_inputs) {
+    const auto observe = [](Vec3d center, double radius, double drop, double cell_size,
+                             NativeTerrainEditColumn column, double surface) {
+        return NativeTerrainEditShapeCompiler::observe_surface_deformation_column(
+            center, radius, drop, cell_size, column, surface);
+    };
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, 1.0, 0.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, 1.0, nan, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, nan, 1.0, 1.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, nan, 1.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({nan, 1.5, 0.5}, 1.0, 1.0, 1.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, nan, 0.5}, 1.0, 1.0, 1.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, nan}, 1.0, 1.0, 1.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, 1.0, 1.0, {0, 0}, nan));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, 1.0, 1.0e38,
+            {std::numeric_limits<std::int32_t>::max(), 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, 1.0, 1.0e38,
+            {0, std::numeric_limits<std::int32_t>::max()}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({std::numeric_limits<double>::max(), 1.5, 0.5},
+            1.0, 1.0, 1.0, {0, 0}, 2.0));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, std::numeric_limits<double>::max(),
+            1.0, {0, 0}, -std::numeric_limits<double>::max()));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, 1.5, 0.5}, 1.0, 1.0, 1.0, {0, 0},
+            std::numeric_limits<double>::max()));
+    VWB_EXPECT_THROW(NativeTerrainEditCompileRejected,
+        observe({0.5, -2147483647.0, 0.5}, 1.0, 1.0, 1.0, {0, 0},
+            -2147483647.0));
+}
 
 VWB_TEST(native_terrain_edit_box_is_inclusive_reorders_negative_endpoints_and_emits_v2_transaction) {
     NativeTerrainEditStateTemplate target = stone_template(2.25);

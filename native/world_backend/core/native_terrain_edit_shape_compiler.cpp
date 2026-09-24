@@ -271,6 +271,69 @@ double clamp_density(const double value, const double minimum, const double maxi
     return std::max(minimum, std::min(value, maximum));
 }
 
+struct SurfaceHorizontalPlan {
+    double column_center_x = 0.0;
+    double column_center_z = 0.0;
+    double horizontal_distance = 0.0;
+    double falloff = 0.0;
+    bool accepted = false;
+};
+
+SurfaceHorizontalPlan surface_horizontal_plan(
+    const Vec3d center,
+    const double safe_radius,
+    const double cell_size,
+    const NativeTerrainEditColumn column) {
+    const float column_x = static_cast<float>(
+        (static_cast<double>(column.x) + 0.5) * cell_size);
+    const float column_z = static_cast<float>(
+        (static_cast<double>(column.z) + 0.5) * cell_size);
+    const float center_x = static_cast<float>(center.x);
+    const float center_z = static_cast<float>(center.z);
+    const float dx = column_x - center_x;
+    const float dz = column_z - center_z;
+    const float horizontal_distance = std::sqrt(dx * dx + dz * dz);
+    if (!std::isfinite(column_x) || !std::isfinite(column_z)
+        || !std::isfinite(horizontal_distance)) {
+        reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    const double t = std::clamp(
+        static_cast<double>(horizontal_distance) / safe_radius, 0.0, 1.0);
+    const double smooth = t * t * (3.0 - 2.0 * t);
+    const double falloff = 1.0 - smooth;
+    return {static_cast<double>(column_x), static_cast<double>(column_z),
+        static_cast<double>(horizontal_distance), falloff, falloff > 0.001};
+}
+
+struct SurfaceVerticalPlan {
+    double surface_target_y = 0.0;
+    double impact_strength = 0.0;
+    double impact_target_y = 0.0;
+    double target_y = 0.0;
+    bool accepted = false;
+    std::int32_t high_y = 0;
+    std::int32_t low_y = 0;
+};
+
+SurfaceVerticalPlan surface_vertical_plan(
+    const Vec3d center,
+    const double safe_drop,
+    const double cell_size,
+    const double falloff,
+    const double surface_y) {
+    const double surface_target_y = surface_y - safe_drop * falloff;
+    const double impact_strength = std::clamp(falloff * 1.35, 0.0, 1.0);
+    const double center_y = static_cast<double>(static_cast<float>(center.y));
+    const double impact_endpoint = center_y - safe_drop * 0.72;
+    const double impact_target_y = surface_y + (impact_endpoint - surface_y) * impact_strength;
+    const double target_y = std::min(surface_target_y, impact_target_y);
+    if (!std::isfinite(target_y)) reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    return {surface_target_y, impact_strength, impact_target_y, target_y,
+        target_y < surface_y - cell_size * 0.08,
+        checked_ceil_cell((surface_y + cell_size * 0.60) / cell_size),
+        checked_floor_cell((target_y - cell_size * 0.85) / cell_size)};
+}
+
 NativeValue classify_fluid_only_metadata(
     const NativeValue &metadata,
     const NativeCellState &before,
@@ -701,6 +764,39 @@ NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
         // exception types when compiler-added metadata crosses a bound.
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
+}
+
+NativeTerrainEditSurfaceDeformationColumnObservation
+NativeTerrainEditShapeCompiler::observe_surface_deformation_column(
+    const Vec3d center,
+    const double radius,
+    const double drop_depth,
+    const double cell_size,
+    const NativeTerrainEditColumn column,
+    const double surface_y) {
+    if (!std::isfinite(cell_size) || cell_size <= 0.0
+        || !std::isfinite(radius) || !std::isfinite(drop_depth)
+        || !std::isfinite(center.x) || !std::isfinite(center.y) || !std::isfinite(center.z)
+        || !std::isfinite(surface_y)) {
+        reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    const double safe_radius = std::max(radius, cell_size * 0.75);
+    const double safe_drop = std::max(drop_depth, cell_size * 0.35);
+    const SurfaceHorizontalPlan horizontal = surface_horizontal_plan(
+        center, safe_radius, cell_size, column);
+    const SurfaceVerticalPlan vertical = surface_vertical_plan(
+        center, safe_drop, cell_size, horizontal.falloff, surface_y);
+    return {horizontal.column_center_x, horizontal.column_center_z,
+        horizontal.horizontal_distance, safe_radius, safe_drop, horizontal.falloff,
+        horizontal.accepted, vertical.surface_target_y, vertical.impact_strength,
+        vertical.impact_target_y, vertical.target_y, vertical.accepted,
+        vertical.high_y, vertical.low_y,
+        clamp_density(vertical.target_y - 2.5 * cell_size,
+            -cell_size * 2.0, -cell_size * 0.05),
+        clamp_density(vertical.target_y - 1.5 * cell_size,
+            -cell_size * 2.0, -cell_size * 0.05),
+        clamp_density(vertical.target_y - 0.5 * cell_size,
+            cell_size * 0.05, cell_size * 1.35)};
 }
 
 namespace {
@@ -1242,23 +1338,12 @@ struct NativeTerrainEditCompileJob::Impl final {
             reject(NativeTerrainEditCompileRejectReason::candidate_limit_exceeded);
         }
 
-        const float column_x = static_cast<float>(
-            (static_cast<double>(column.x) + 0.5) * request.cell_size);
-        const float column_z = static_cast<float>(
-            (static_cast<double>(column.z) + 0.5) * request.cell_size);
-        const float center_x = static_cast<float>(shape().center.x);
-        const float center_z = static_cast<float>(shape().center.z);
-        const float dx = column_x - center_x;
-        const float dz = column_z - center_z;
-        const float horizontal_distance = std::sqrt(dx * dx + dz * dz);
-        if (static_cast<double>(horizontal_distance) > safe_radius) return;
-        const double t = std::clamp(static_cast<double>(horizontal_distance) / safe_radius, 0.0, 1.0);
-        const double smooth = t * t * (3.0 - 2.0 * t);
-        const double falloff = 1.0 - smooth;
-        if (falloff <= 0.001) return;
+        const SurfaceHorizontalPlan horizontal = surface_horizontal_plan(
+            shape().center, safe_radius, request.cell_size, column);
+        if (horizontal.horizontal_distance > safe_radius || !horizontal.accepted) return;
 
         pending_projection_column = column;
-        pending_projection_falloff = falloff;
+        pending_projection_falloff = horizontal.falloff;
         phase = Phase::project_column;
     }
 
@@ -1288,19 +1373,10 @@ struct NativeTerrainEditCompileJob::Impl final {
         progress.projection_candidate_reads = summary.projection_candidate_reads;
 
         const double surface_y = projection->surface_y;
-        const double surface_target_y = surface_y - safe_drop * falloff;
-        const double impact_strength = std::clamp(falloff * 1.35, 0.0, 1.0);
-        const double center_y = static_cast<double>(static_cast<float>(shape().center.y));
-        const double impact_endpoint = center_y - safe_drop * 0.72;
-        const double impact_target_y = surface_y + (impact_endpoint - surface_y) * impact_strength;
-        const double target_y = std::min(surface_target_y, impact_target_y);
-        if (!std::isfinite(target_y)) reject(NativeTerrainEditCompileRejectReason::invalid_request);
-        if (target_y >= surface_y - request.cell_size * 0.08) return;
-        const std::int32_t high_y = checked_ceil_cell(
-            (surface_y + request.cell_size * 0.60) / request.cell_size);
-        const std::int32_t low_y = checked_floor_cell(
-            (target_y - request.cell_size * 0.85) / request.cell_size);
-        const std::uint64_t y_count = inclusive_extent(high_y, low_y);
+        const SurfaceVerticalPlan vertical = surface_vertical_plan(
+            shape().center, safe_drop, request.cell_size, falloff, surface_y);
+        if (!vertical.accepted) return;
+        const std::uint64_t y_count = inclusive_extent(vertical.high_y, vertical.low_y);
         if (y_count > request.limits.max_y_candidates - summary.y_candidates) {
             reject(NativeTerrainEditCompileRejectReason::y_candidate_limit_exceeded);
         }
@@ -1311,7 +1387,8 @@ struct NativeTerrainEditCompileJob::Impl final {
         progress.y_candidates = summary.y_candidates;
         summary.candidate_visits += static_cast<std::size_t>(y_count);
         add_prepared_bytes(128U);
-        targets.push_back({column, surface_y, target_y, high_y, low_y});
+        targets.push_back({column, surface_y, vertical.target_y,
+            vertical.high_y, vertical.low_y});
     }
 
     void begin_cell_compilation() {
