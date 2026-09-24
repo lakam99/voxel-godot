@@ -217,6 +217,19 @@ func collision_window_layout() -> Dictionary:
 		return {"status":"pending", "reason":"artifact_producer_unavailable"}
 	return _refresh_window_layout()
 
+func collision_window_layout_ticket() -> Dictionary:
+	if _stopping or _producer == null or _draining or _window_layout.is_empty():
+		return {"status":"pending", "reason":"artifact_producer_unavailable"}
+	var source_ticket: Dictionary = _producer.collision_source_ticket()
+	if source_ticket.get("status") != "ready": return source_ticket
+	return {"status":"ready", "ticket":"%s|%s" % [
+		String(_window_layout.get("layoutToken", "")),
+		String(source_ticket.get("ticket", ""))],
+		"layout":_window_layout, "identity":_window_layout.get("identity", {}),
+		"layoutToken":String(_window_layout.get("layoutToken", "")),
+		"logicalClosureToken":String(_window_layout.get("logicalClosureToken", "")),
+		"sourceTicket":String(source_ticket.get("ticket", ""))}
+
 func collision_window_source(window_id: Vector3i, layout_token: String) -> Dictionary:
 	var layout: Dictionary = collision_window_layout()
 	if layout.get("status") != "ready" or layout.get("layoutToken") != layout_token:
@@ -292,6 +305,70 @@ func collision_window_source_snapshot(window_token: String) -> Dictionary:
 		"localCurrentProof":{"kind":"native_current_revision",
 			"throughGlobalRevision":int(_identity.sourceRevision),
 			"digest":String(record.proofDigest)}}
+
+## Cheap immutable ticket used by the N5 resident owner. Expensive source
+## enumeration and local-window reproving remain in the staged layout path.
+func collision_window_source_ticket(window_token: String) -> Dictionary:
+	var record: Dictionary = _window_records.get(window_token, {})
+	if record.is_empty() or not _active_window_tokens.has(window_token):
+		return {"status":"pending", "reason":"collision_window_source_superseded"}
+	if _producer == null or _draining or _stopping or _window_layout.is_empty():
+		return {"status":"pending", "reason":"collision_window_source_unavailable"}
+	if record.get("blocks") is not Array or record.blocks.is_empty() \
+			or not record.get("blockSet") is Dictionary \
+			or record.blockSet.size() != record.blocks.size():
+		return {"status":"failed", "reason":"collision_window_membership_invalid"}
+	var proof_revision := int(record.get("provenThroughRevision", -1))
+	var proof_digest := String(record.get("proofDigest", ""))
+	var source_ticket: Dictionary = _producer.collision_source_ticket()
+	var producer_current: bool = record.get("identity", {}) == _identity
+	if producer_current:
+		if source_ticket.get("status") != "ready": return source_ticket
+	else:
+		var source_status: Dictionary = _backend.status()
+		if proof_revision != int(_identity.get("sourceRevision", -1)) \
+				or proof_digest.is_empty() \
+				or source_status.get("status") != "ready" \
+				or int(source_status.get("terrainDeltaRevision", -2)) != proof_revision:
+			return {"status":"pending", "reason":"collision_window_local_proof_stale"}
+	if proof_revision != int(_identity.get("sourceRevision", -1)) or proof_digest.is_empty():
+		return {"status":"pending", "reason":"collision_window_local_proof_stale"}
+	return {"status":"ready", "ticket":"%s|%s|%s|%d|%s" % [
+		String(_window_layout.get("layoutToken", "")), window_token,
+		String(source_ticket.get("ticket", "retained")), proof_revision,
+		proof_digest],
+		"identity":record.identity, "sourceIdentity":record.sourceIdentity,
+		"sourceEpoch":String(record.identity.get("sourceEpoch", "")),
+		"nativeRevision":int(record.identity.get("sourceRevision", -1)),
+		"ownerGeneration":int(record.identity.get("ownerGeneration", -1)),
+		"cancellationEpoch":int(record.identity.get("cancellationEpoch", -1)),
+		"requiredResidentBlocks":record.blocks,
+		"membershipProvenance":record.membershipProvenance,
+		"layoutToken":String(_window_layout.get("layoutToken", "")),
+		"windowToken":window_token, "producerTicket":String(source_ticket.get("ticket", "")),
+		"producerCurrent":producer_current}
+
+func collision_window_source_ticket_current(window_token: String,
+		ticket: String) -> bool:
+	if ticket.is_empty(): return false
+	var current: Dictionary = collision_window_source_ticket(window_token)
+	return current.get("status") == "ready" and current.get("ticket") == ticket
+
+func collision_window_artifact_key(window_token: String, block: Vector3i,
+		ticket: String) -> Dictionary:
+	var current: Dictionary = collision_window_source_ticket(window_token)
+	if current.get("status") != "ready" or current.get("ticket") != ticket:
+		return {"status":"pending", "reason":"collision_window_ticket_stale"}
+	var record: Dictionary = _window_records.get(window_token, {})
+	if not (record.get("blockSet", {}) as Dictionary).has(block):
+		return {"status":"failed", "reason":"collision_window_block_invalid"}
+	if not bool(current.get("producerCurrent", false)):
+		var retained: Dictionary = (record.get("rows", {}) as Dictionary).get(block, {})
+		var retained_key := String(retained.get("artifactKey", ""))
+		return {"status":"ready", "artifactKey":retained_key} if not retained_key.is_empty() \
+			else {"status":"pending", "reason":"collision_window_retained_artifact_incomplete"}
+	return _producer.collision_source_artifact_key(block,
+		String(current.get("producerTicket", "")))
 
 func collision_window_artifact_row(window_token: String, block: Vector3i,
 		identity: Dictionary) -> Dictionary:
@@ -641,7 +718,9 @@ func _refresh_window_layout() -> Dictionary:
 		var new_proof_digest := ("%s:%s:%d" % [String(window.closureToken),
 			String(_identity.sourceIdentity.get("hex", "")),
 			int(_identity.sourceRevision)]).sha256_text()
-		var member := {"id":window.id, "blocks":window.blocks,
+		var immutable_blocks: Array = window.blocks.duplicate()
+		immutable_blocks.make_read_only()
+		var member := {"id":window.id, "blocks":immutable_blocks,
 			"closureToken":window.closureToken, "windowToken":token,
 			"windowIndex":index,
 			"identity":proven_records[token].identity.duplicate(true) if proven_records.has(token)
@@ -650,10 +729,14 @@ func _refresh_window_layout() -> Dictionary:
 					if proven_records.has(token) else "native_current_revision",
 				"throughGlobalRevision":int(_identity.sourceRevision),
 				"digest":String(proof.get("digest", new_proof_digest))}}
+		member.make_read_only()
 		windows.append(member)
 		if not _window_records.has(token):
+			var block_set := {}
+			for block: Vector3i in immutable_blocks: block_set[block] = true
 			new_records[token] = {"layoutToken":layout_token,
-				"identity":_identity.duplicate(true), "blocks":window.blocks,
+				"identity":_identity.duplicate(true), "blocks":immutable_blocks,
+				"blockSet":block_set,
 				"rows":{}, "facade":null,
 				"sourceIdentity":_identity.sourceIdentity.duplicate(true),
 				"shapingRevision":int(current_source.get("shapingRegistryRevision", -1)),
@@ -683,6 +766,8 @@ func _refresh_window_layout() -> Dictionary:
 	_window_layout["sourceIdentity"] = _identity.sourceIdentity.duplicate(true)
 	_window_layout["identity"] = _identity.duplicate(true)
 	_window_layout["windows"] = windows
+	(windows as Array).make_read_only()
+	_window_layout.make_read_only()
 	_window_layout_candidate.clear()
 	_local_proof_cache.clear()
 	return _retention_status()
@@ -972,7 +1057,7 @@ func _release_windows() -> void:
 	_active_window_tokens.clear()
 	_pending_retirement_tokens.clear()
 	_retirement_leases.clear()
-	_window_layout.clear()
+	_window_layout = {}
 	_window_layout_candidate.clear()
 
 func _retention_status(projected_active: Dictionary = {}) -> Dictionary:

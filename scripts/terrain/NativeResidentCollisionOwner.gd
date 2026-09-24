@@ -18,13 +18,17 @@ const PREPARE_VERTEX_BUDGET := 768
 const DRAIN_WORK_BUDGET := 64
 const DRAIN_BODY_BUDGET := 16
 const MAX_ACK_FRAMES := 6
+const VALIDATION_OPERATION_BUDGET := 128
+const VALIDATION_STEP_USEC_BUDGET := 1500
 
 var _source: Object
 var _live := {}
 var _identity := {}
 var _source_identity := {}
+var _source_ticket := ""
 var _membership_provenance := {}
 var _resident_blocks: Array[Vector3i] = []
+var _receipt_resident_blocks: Array[Vector3i] = []
 var _startup_staging := false
 var _busy := false
 var _failed := false
@@ -45,6 +49,7 @@ var _drain_expected_resident_count := 0
 var _drain_resident_blocks: Array[Vector3i] = []
 var _drain_retired_candidate_count := 0
 var _drain_retired_live_count := 0
+var _readiness_epoch := 0
 
 
 ## The coordinator assigns one immutable physical installation identity before
@@ -62,6 +67,9 @@ func assign_retirement_owner_epoch(epoch: String) -> bool:
 func retirement_owner_epoch() -> String:
 	return _retirement_owner_epoch
 
+func physical_readiness_epoch() -> int:
+	return _readiness_epoch
+
 
 func bind_source(source: Object) -> bool:
 	if _source != null or source == null \
@@ -77,18 +85,13 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 			or _live.size() != _resident_blocks.size() \
 			or not _source_current(identity):
 		return {"ready": false}
-	for block in _resident_blocks:
-		var entry: Dictionary = _live.get(block, {})
-		if entry.is_empty() or int(entry.get("physicsFrame", -1)) < 0 \
-				or not _entry_live(entry):
-			return {"ready": false}
 	return {"ready": true, "physicsFrame": Engine.get_physics_frames(),
 		"physicalOwnerEpoch": _retirement_owner_epoch,
 		"provenance": {"requestIdentity": _identity.duplicate(true),
 			"sourceIdentity": _source_identity.duplicate(true),
 			"membershipProvenance": _membership_provenance.duplicate(true)},
 		"residentBlockCount": _resident_blocks.size(),
-		"residentBlocks": _resident_blocks.duplicate()}
+		"residentBlocks": _receipt_resident_blocks}
 
 
 func startup_readiness(identity: Dictionary) -> Dictionary:
@@ -121,23 +124,31 @@ func affected_window_readiness(identity: Dictionary, blocks: Array[Vector3i]) ->
 func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	if _busy or _failed or _stopping or _stopped or _source == null or not is_inside_tree():
 		return {"status": "failed", "reason": "resident_owner_unavailable"}
-	var checked: Dictionary = _validate_request(request)
+	_busy = true
+	_readiness_epoch += 1
+	var checked: Dictionary = await _validate_request(request)
+	if _stopping:
+		return _finish_stopped_publish({})
 	if checked.get("status") != "ready":
+		_busy = false
 		return checked
-	var identity: Dictionary = request.identity
+	var identity: Dictionary = checked.requestIdentity
 	var affected: Array[Vector3i] = checked.affected
 	if not barrier is AdmissionBarrier or not barrier.is_active():
+		_busy = false
 		return {"status": "pending", "reason": "actor_admission_required"}
-	var affected_bounds: AABB = request.rows[0].bounds
-	for row in request.rows:
+	var rows: Array = checked.rows
+	var affected_bounds: AABB = rows[0].bounds
+	for row in rows:
 		affected_bounds = affected_bounds.merge(row.bounds)
 	if not barrier.covers_bounds(identity, affected_bounds):
+		_busy = false
 		return {"status": "failed", "reason": "actor_barrier_bounds_incomplete"}
 	var clearance: Dictionary = barrier.clearance(identity)
 	if not bool(clearance.get("clear", false)):
+		_busy = false
 		return {"status": "pending", "reason": "actor_clearance_pending",
 			"guardReason": clearance.get("reason", "")}
-	_busy = true
 	_admission_barrier = barrier
 	var candidates := {}
 	var rows_by_block := {}
@@ -146,7 +157,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	var max_ack_frames := 0
 	_prepare_max_work_units = 0
 	_prepare_total_work_units = 0
-	for row in request.rows:
+	for row in rows:
 		var candidate_entry: Dictionary = _new_candidate_entry(row)
 		candidates[row.block] = candidate_entry
 		_pending_candidate_keys.append(row.block)
@@ -249,7 +260,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 				"oldPhysicalRestored": restored.get("physicalReady", false),
 				"oldPhysicsFrame": restored.get("physicsFrame", -1)}
 		candidates[block]["physicsFrame"] = Engine.get_physics_frames()
-	var final_source: Dictionary = _validate_request(request)
+	var final_source: Dictionary = await _validate_request(request)
 	if final_source.get("status") != "ready":
 		var restored_stale: Dictionary = await _rollback(candidates, old)
 		if _stopping or bool(restored_stale.get("cancelled", false)):
@@ -262,6 +273,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	var previous_live := _live.duplicate()
 	var previous_identity := _identity.duplicate(true)
 	var previous_source_identity := _source_identity.duplicate(true)
+	var previous_source_ticket := _source_ticket
 	var previous_membership := _membership_provenance.duplicate(true)
 	var previous_resident := _resident_blocks.duplicate()
 	var previous_staging := _startup_staging
@@ -269,8 +281,11 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		_live[block] = candidates[block]
 	_identity = identity.duplicate(true)
 	_source_identity = checked.sourceIdentity.duplicate(true)
+	_source_ticket = String(checked.get("sourceTicket", ""))
 	_membership_provenance = checked.membership.duplicate(true)
 	_resident_blocks = checked.resident
+	_receipt_resident_blocks = _resident_blocks.duplicate()
+	_receipt_resident_blocks.make_read_only()
 	_startup_staging = _live.size() < _resident_blocks.size()
 	_restored_old_frame = -1
 	_busy = false
@@ -280,6 +295,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		_live = previous_live
 		_identity = previous_identity
 		_source_identity = previous_source_identity
+		_source_ticket = previous_source_ticket
 		_membership_provenance = previous_membership
 		_resident_blocks = previous_resident
 		_startup_staging = previous_staging
@@ -300,6 +316,8 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		"reason": "resident_startup_incomplete" if _startup_staging else "",
 		"physicalReceipt": receipt,
 		"affectedBlocks": affected.size(), "residentBlocks": _resident_blocks.size(),
+		"validationMaxOperations":int(checked.get("maxValidationOperations", 0)),
+		"validationMaxStepUsec":int(checked.get("maxValidationStepUsec", 0)),
 		"maxPrepareUsec": max_prepare_usec,
 		"totalPrepareUsec": total_prepare_usec,
 		"prepareMaxWorkUnits": _prepare_max_work_units,
@@ -323,6 +341,7 @@ func request_stop() -> Dictionary:
 		return _drain_receipt.duplicate(false)
 	if not _stopping:
 		_stopping = true
+		_readiness_epoch += 1
 		_drain_last_queued_physics_frame = -1
 		_drain_window_token = String(_membership_provenance.get("windowToken", ""))
 		_drain_expected_resident_count = _resident_blocks.size()
@@ -420,6 +439,7 @@ func drain_step() -> Dictionary:
 		_admission_barrier = null
 		_identity = {}
 		_source_identity = {}
+		_source_ticket = ""
 		_membership_provenance = {}
 		_stopped = true
 		_drain_receipt = receipt
@@ -494,14 +514,31 @@ func _validate_request(request: Dictionary) -> Dictionary:
 	if request.get("schema") != SCHEMA or not request.get("identity") is Dictionary \
 			or not request.get("rows") is Array or not request.get("affectedBlocks") is Array:
 		return {"status": "failed", "reason": "resident_request_schema_invalid"}
-	var identity: Dictionary = request.identity
+	# Reject untrusted declared sizes before traversing or allocating membership
+	# sets. The subsequent cursorized validator uses these same hard ceilings.
+	if request.affectedBlocks.is_empty() or request.affectedBlocks.size() > MAX_AFFECTED \
+			or request.rows.is_empty() or request.rows.size() > MAX_AFFECTED \
+			or not request.get("residentBlocks") is Array \
+			or request.residentBlocks.is_empty() \
+			or request.residentBlocks.size() > MAX_RESIDENT:
+		return {"status": "failed", "reason": "resident_request_capacity_invalid"}
+	var identity: Dictionary = request.identity.duplicate(true)
+	var requested_resident: Array = request.residentBlocks.duplicate()
+	var requested_affected: Array = request.affectedBlocks.duplicate()
+	var request_rows: Array = []
+	for input_row in request.rows:
+		request_rows.append(input_row.duplicate(false) if input_row is Dictionary else input_row)
 	for field in ["ownerGeneration", "sourceRevision", "cancellationEpoch"]:
 		if not identity.get(field) is int:
 			return {"status": "failed", "reason": "resident_identity_invalid"}
 	if not identity.get("sourceEpoch") is String \
 			or String(identity.sourceEpoch).is_empty():
 		return {"status": "failed", "reason": "resident_identity_invalid"}
-	var source_snapshot: Dictionary = _source.call("collision_source_snapshot")
+	var ticket_api: bool = _source.has_method("collision_source_ticket") \
+		and _source.has_method("collision_source_artifact_key") \
+		and _source.has_method("collision_source_ticket_current")
+	var source_snapshot: Dictionary = _source.call("collision_source_ticket") \
+		if ticket_api else _source.call("collision_source_snapshot")
 	if source_snapshot.get("status") == "pending":
 		return {"status": "pending", "reason": source_snapshot.get("reason",
 			"resident_source_pending")}
@@ -513,10 +550,13 @@ func _validate_request(request: Dictionary) -> Dictionary:
 			or int(source_snapshot.get("ownerGeneration", -1)) != int(identity.ownerGeneration) \
 			or int(source_snapshot.get("cancellationEpoch", -1)) != int(identity.cancellationEpoch) \
 			or not source_snapshot.get("requiredResidentBlocks") is Array \
-			or not source_snapshot.get("residentBlocks") is Array \
-			or not source_snapshot.get("artifacts") is Dictionary \
 			or not source_snapshot.get("membershipProvenance") is Dictionary:
 		return {"status": "failed", "reason": "resident_source_revision_mismatch"}
+	var cursor_state := {"operations":0, "stepStartedUsec":Time.get_ticks_usec(),
+		"sourceTicket":String(source_snapshot.get("ticket", "")),
+		"maxOperations":0, "maxStepUsec":0}
+	if String(source_snapshot.get("ticket", "")).is_empty() and ticket_api:
+		return {"status": "failed", "reason": "resident_source_ticket_missing"}
 	var membership: Dictionary = source_snapshot.membershipProvenance
 	if membership.get("authority") != "pinned_demand" \
 			or int(membership.get("demandRevision", -1)) < 0 \
@@ -524,40 +564,75 @@ func _validate_request(request: Dictionary) -> Dictionary:
 		return {"status": "failed", "reason": "resident_membership_provenance_missing"}
 	var resident: Array[Vector3i] = []
 	var resident_set := {}
+	if source_snapshot.requiredResidentBlocks.is_empty() \
+			or source_snapshot.requiredResidentBlocks.size() > MAX_RESIDENT:
+		return {"status": "failed", "reason": "resident_capacity_invalid"}
 	for block in source_snapshot.requiredResidentBlocks:
 		if not block is Vector3i or resident_set.has(block):
 			return {"status": "failed", "reason": "resident_membership_invalid"}
 		resident.append(block)
 		resident_set[block] = true
+		if not await _validation_step(cursor_state):
+			return {"status":"pending", "reason":"resident_validation_interrupted"}
 	if resident.is_empty() or resident.size() > MAX_RESIDENT:
 		return {"status": "failed", "reason": "resident_capacity_invalid"}
-	var produced: Array = source_snapshot.residentBlocks
-	var artifacts: Dictionary = source_snapshot.artifacts
-	if produced.size() != resident.size() or artifacts.size() != resident.size():
-		return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
-	var produced_set: Dictionary = _block_membership_set(produced)
-	if produced_set.size() != resident.size():
-		return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
-	for block in resident:
-		if not produced_set.has(block) or not artifacts.has(block) \
-				or String(artifacts[block]).is_empty():
+	var artifacts: Dictionary = source_snapshot.get("artifacts", {})
+	if not ticket_api:
+		var produced: Array = source_snapshot.get("residentBlocks", [])
+		if not artifacts is Dictionary or produced.size() != resident.size() \
+				or artifacts.size() != resident.size():
 			return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
-	var requested: Array = request.get("residentBlocks", [])
+		if produced.size() != resident.size():
+			return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
+		var produced_set := {}
+		for block in produced:
+			if not block is Vector3i or produced_set.has(block):
+				return {"status":"pending", "reason":"required_resident_artifacts_incomplete"}
+			produced_set[block] = true
+			if not await _validation_step(cursor_state):
+				return {"status":"pending", "reason":"resident_validation_interrupted"}
+		for block in resident:
+			if not produced_set.has(block) or not artifacts.has(block) \
+					or String(artifacts[block]).is_empty():
+				return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
+			if not await _validation_step(cursor_state):
+				return {"status":"pending", "reason":"resident_validation_interrupted"}
+	var requested: Array = requested_resident
 	if requested.size() != resident.size():
 		return {"status": "failed", "reason": "request_resident_membership_mismatch"}
-	var requested_set: Dictionary = _block_membership_set(requested)
+	var requested_set := {}
+	for block in requested:
+		if not block is Vector3i or requested_set.has(block):
+			return {"status": "failed", "reason": "request_resident_membership_mismatch"}
+		requested_set[block] = true
+		if not await _validation_step(cursor_state):
+			return {"status":"pending", "reason":"resident_validation_interrupted"}
 	if requested_set.size() != resident.size():
 		return {"status": "failed", "reason": "request_resident_membership_mismatch"}
 	for block in resident:
 		if not requested_set.has(block):
 			return {"status": "failed", "reason": "request_resident_membership_mismatch"}
+		if not await _validation_step(cursor_state):
+			return {"status":"pending", "reason":"resident_validation_interrupted"}
+	if ticket_api:
+		for block in resident:
+			var artifact: Dictionary = _source.call("collision_source_artifact_key",
+				block, String(source_snapshot.ticket))
+			if artifact.get("status") != "ready" or String(artifact.get("artifactKey", "")).is_empty():
+				return {"status": "pending", "reason": artifact.get("reason",
+				"required_resident_artifacts_incomplete")}
+			artifacts[block] = String(artifact.artifactKey)
+			if not await _validation_step(cursor_state):
+				return {"status":"pending", "reason":"resident_validation_interrupted"}
 	var affected: Array[Vector3i] = []
 	var affected_set := {}
-	for block in request.affectedBlocks:
+	for block in requested_affected:
 		if not block is Vector3i or not resident_set.has(block) or affected_set.has(block):
 			return {"status": "failed", "reason": "affected_membership_invalid"}
 		affected.append(block)
 		affected_set[block] = true
+		if not await _validation_step(cursor_state):
+			return {"status":"pending", "reason":"resident_validation_interrupted"}
 	if affected.is_empty() or affected.size() > MAX_AFFECTED:
 		return {"status": "failed", "reason": "affected_capacity_invalid"}
 	if _startup_staging and (identity != _identity \
@@ -573,10 +648,11 @@ func _validate_request(request: Dictionary) -> Dictionary:
 				return {"status": "failed", "reason": "staged_startup_block_repeated"}
 	var rows_seen := {}
 	var canonical_rows := {}
-	for row in request.rows:
+	var validated_rows: Array = []
+	for row in request_rows:
 		if not row is Dictionary or not row.get("block") is Vector3i \
 				or not affected_set.has(row.block) or rows_seen.has(row.block) \
-				or row.get("artifactKey") != source_snapshot.artifacts.get(row.block):
+				or row.get("artifactKey") != artifacts.get(row.block):
 			return {"status": "failed", "reason": "candidate_artifact_mismatch"}
 		if row.get("sourceIdentity") != source_snapshot.sourceIdentity \
 				or row.get("sourceEpoch") != identity.sourceEpoch \
@@ -603,6 +679,9 @@ func _validate_request(request: Dictionary) -> Dictionary:
 			return {"status": "failed", "reason": "candidate_source_row_mismatch"}
 		canonical_rows[row.block] = canonical_row
 		rows_seen[row.block] = true
+		validated_rows.append(row)
+		if not await _validation_step(cursor_state):
+			return {"status":"pending", "reason":"resident_validation_interrupted"}
 	if rows_seen.size() != affected.size():
 		return {"status": "failed", "reason": "candidate_affected_set_incomplete"}
 	for block in resident:
@@ -610,11 +689,40 @@ func _validate_request(request: Dictionary) -> Dictionary:
 			var old: Dictionary = _live.get(block, {})
 			if _startup_staging and old.is_empty() or _live.is_empty():
 				continue
-			if old.get("artifactKey") != source_snapshot.artifacts.get(block) or not _entry_live(old):
+			if old.get("artifactKey") != artifacts.get(block) or not _entry_live(old):
 				return {"status": "failed", "reason": "unchanged_resident_artifact_invalid"}
+			if not await _validation_step(cursor_state):
+				return {"status":"pending", "reason":"resident_validation_interrupted"}
 	return {"status": "ready", "affected": affected, "resident": resident,
+		"requestIdentity":identity.duplicate(true), "rows":validated_rows,
 		"sourceIdentity": source_snapshot.sourceIdentity,
-		"membership": membership, "canonicalRows": canonical_rows}
+		"membership": membership, "canonicalRows": canonical_rows,
+		"sourceTicket":String(source_snapshot.get("ticket", "")),
+		"artifactKeys":artifacts, "maxValidationOperations":cursor_state.maxOperations,
+		"maxValidationStepUsec":cursor_state.maxStepUsec}
+
+
+func _validation_step(state: Dictionary) -> bool:
+	state.operations = int(state.get("operations", 0)) + 1
+	state.maxOperations = maxi(int(state.get("maxOperations", 0)),
+		int(state.operations))
+	var elapsed := Time.get_ticks_usec() - int(state.get("stepStartedUsec", 0))
+	if int(state.operations) < VALIDATION_OPERATION_BUDGET \
+			and elapsed < VALIDATION_STEP_USEC_BUDGET:
+		return not _stopping
+	state.maxStepUsec = maxi(int(state.get("maxStepUsec", 0)), elapsed)
+	await get_tree().process_frame
+	if _stopping: return false
+	var ticket := String(state.get("sourceTicket", ""))
+	if not ticket.is_empty() and (_source == null \
+			or not _source.has_method("collision_source_ticket_current") \
+			or not bool(_source.call("collision_source_ticket_current", ticket))):
+		state.invalidated = true
+		return false
+	if _stopping: return false
+	state.operations = 0
+	state.stepStartedUsec = Time.get_ticks_usec()
+	return true
 
 
 func _new_candidate_entry(row: Dictionary) -> Dictionary:
@@ -782,6 +890,10 @@ func _probe_clear(entry: Dictionary) -> bool:
 
 
 func _source_current(identity: Dictionary) -> bool:
+	if not _source_ticket.is_empty():
+		return identity == _identity and _source != null and is_instance_valid(_source) \
+			and _source.has_method("collision_source_ticket_current") \
+			and bool(_source.call("collision_source_ticket_current", _source_ticket))
 	if not _source_revision_current(identity, _source_identity):
 		return false
 	var current: Dictionary = _source.call("collision_source_snapshot")
@@ -814,12 +926,21 @@ func _block_membership_set(blocks: Array) -> Dictionary:
 func _source_revision_current(identity: Dictionary, source_identity: Dictionary) -> bool:
 	if _source == null or not is_instance_valid(_source):
 		return false
+	if not _source_ticket.is_empty():
+		return identity == _identity and source_identity == _source_identity \
+			and _source.has_method("collision_source_ticket_current") \
+			and bool(_source.call("collision_source_ticket_current", _source_ticket))
 	var current: Dictionary = _source.call("collision_source_snapshot")
 	return current.get("status") == "ready" and current.get("identity") == identity \
 		and current.get("sourceIdentity") == source_identity
 
 
 func _candidate_source_current(identity: Dictionary, checked: Dictionary) -> bool:
+	if not String(checked.get("sourceTicket", "")).is_empty():
+		return identity == checked.get("requestIdentity", {}) \
+			and _source != null and _source.has_method("collision_source_ticket_current") \
+			and bool(_source.call("collision_source_ticket_current",
+				String(checked.sourceTicket)))
 	if not _source_revision_current(identity, checked.sourceIdentity):
 		return false
 	var current: Dictionary = _source.call("collision_source_snapshot")

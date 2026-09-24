@@ -17,6 +17,18 @@ func collision_source_snapshot() -> Dictionary:
 	if _broker == null: return {"status":"failed", "reason":"collision_window_source_inactive"}
 	return _broker.collision_window_source_snapshot(_window_token)
 
+func collision_source_ticket() -> Dictionary:
+	if _broker == null: return {"status":"failed", "reason":"collision_window_source_inactive"}
+	return _broker.collision_window_source_ticket(_window_token)
+
+func collision_source_ticket_current(ticket: String) -> bool:
+	return _broker != null and _broker.collision_window_source_ticket_current(
+		_window_token, ticket)
+
+func collision_source_artifact_key(block: Vector3i, ticket: String) -> Dictionary:
+	if _broker == null: return {"status":"failed", "reason":"collision_window_source_inactive"}
+	return _broker.collision_window_artifact_key(_window_token, block, ticket)
+
 func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary:
 	if _broker == null: return {"status":"failed", "reason":"collision_window_source_inactive"}
 	return _broker.collision_window_artifact_row(_window_token, block, identity)

@@ -8,6 +8,8 @@ const Aggregate = preload("res://scripts/terrain/NativeWindowedCollisionReadines
 const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const MAX_RETIRED_BARRIERS := 64
 const MAX_ACTIVE_BARRIERS := 128
+const AGGREGATE_VALIDATION_OPERATION_BUDGET := 128
+const AGGREGATE_VALIDATION_STEP_USEC_BUDGET := 1500
 
 ## Composes current N3 logical windows with N5 physical owners and owns the
 ## actor admission barriers. A window owner cannot release a global gate.
@@ -23,6 +25,18 @@ var _barrier_identities := {}
 var _barrier_bounds := {}
 var _retired_barriers: Array[Dictionary] = []
 var _stopping := false
+var _aggregate_ticket := ""
+var _aggregate_layout := {}
+var _aggregate_identity := {}
+var _aggregate_receipts := {}
+var _aggregate_owner_epochs := {}
+var _aggregate_cursor := {}
+var _aggregate_window_cursor := 0
+var _aggregate_result := {}
+var _aggregate_last_step_frame := -1
+
+func _process(_delta: float) -> void:
+	_advance_aggregate_validation()
 
 func setup(broker: Object, actor_root: Node) -> Dictionary:
 	if _broker != null or broker == null or actor_root == null \
@@ -115,6 +129,152 @@ func active_barrier_count() -> int:
 	return count
 
 func aggregate_readiness(identity: Dictionary) -> Dictionary:
+	if _stopping or _broker == null:
+		return {"status":"pending", "reason":"window_coordinator_stopping"}
+	var ticket_result: Dictionary = _broker.call("collision_window_layout_ticket") \
+		if _broker.has_method("collision_window_layout_ticket") \
+		else _broker.collision_window_layout()
+	if ticket_result.get("status") != "ready":
+		return {"status":"pending", "reason":ticket_result.get("reason",
+			"logical_collision_layout_pending")}
+	var layout: Dictionary = ticket_result.get("layout", ticket_result)
+	if layout.get("identity") != identity:
+		return {"status":"pending", "reason":"logical_collision_identity_changed"}
+	var ticket := String(ticket_result.get("ticket", ticket_result.get("layoutToken", "")))
+	if ticket.is_empty():
+		return {"status":"pending", "reason":"logical_collision_ticket_missing"}
+	if _aggregate_ticket != ticket:
+		_begin_aggregate_validation(ticket, layout, identity)
+	elif _aggregate_result.get("status") == "ready" \
+			and not _aggregate_owner_epochs_current():
+		_begin_aggregate_validation(ticket, layout, identity)
+	if _aggregate_result.get("status") == "failed" \
+			and _aggregate_result.get("ticket") == ticket:
+		return _aggregate_result.result
+	if _aggregate_result.get("status") == "ready" \
+			and _aggregate_result.get("ticket") == ticket \
+			and _aggregate_owner_epochs_current():
+		return _aggregate_result.result
+	_advance_aggregate_validation()
+	if _aggregate_result.get("status") == "failed" \
+			and _aggregate_result.get("ticket") == ticket:
+		return _aggregate_result.result
+	if _aggregate_result.get("status") == "ready" \
+			and _aggregate_result.get("ticket") == ticket \
+			and _aggregate_owner_epochs_current():
+		return _aggregate_result.result
+	return {"status":"pending", "reason":_aggregate_result.get("reason",
+		"collision_aggregate_validation_in_progress"),
+		"validationOperations":int(_aggregate_result.get("operations", 0)),
+		"validationOperationBudget":AGGREGATE_VALIDATION_OPERATION_BUDGET,
+		"validationStepUsecBudget":AGGREGATE_VALIDATION_STEP_USEC_BUDGET}
+
+func _begin_aggregate_validation(ticket: String, layout: Dictionary,
+		identity: Dictionary) -> void:
+	_aggregate_ticket = ticket
+	_aggregate_layout = layout
+	_aggregate_identity = identity.duplicate(true)
+	_aggregate_receipts = {}
+	_aggregate_owner_epochs = {}
+	_aggregate_cursor = {}
+	_aggregate_window_cursor = 0
+	_aggregate_result = {"status":"pending",
+		"reason":"collision_aggregate_validation_in_progress"}
+	_aggregate_last_step_frame = -1
+	var windows: Array = layout.get("windows", [])
+	var required: Array = layout.get("requiredBlocks", [])
+	if windows.size() > Aggregate.MAX_AGGREGATE_WINDOWS \
+			or required.size() > Aggregate.MAX_AGGREGATE_BLOCKS:
+		_aggregate_result = {"status":"failed", "ticket":ticket,
+			"result":{"status":"failed",
+				"reason":"logical_collision_layout_capacity_invalid"}}
+	elif _owners.size() != windows.size():
+		_aggregate_result = {"status":"pending",
+			"reason":"obsolete_physical_window_retirement_pending"}
+
+func _advance_aggregate_validation() -> void:
+	if _stopping or _aggregate_ticket.is_empty() \
+			or _aggregate_result.get("status") == "failed" \
+			or Engine.get_process_frames() == _aggregate_last_step_frame:
+		return
+	_aggregate_last_step_frame = Engine.get_process_frames()
+	if _broker.has_method("collision_window_layout_ticket"):
+		var live_ticket: Dictionary = _broker.call("collision_window_layout_ticket")
+		if live_ticket.get("status") != "ready" \
+				or live_ticket.get("ticket") != _aggregate_ticket:
+			_aggregate_ticket = ""
+			_aggregate_result = {"status":"pending",
+				"reason":"logical_collision_ticket_changed"}
+			return
+	var started := Time.get_ticks_usec()
+	var operations := 0
+	var windows: Array = _aggregate_layout.get("windows", [])
+	while _aggregate_cursor.is_empty() and _aggregate_window_cursor < windows.size() \
+			and operations < AGGREGATE_VALIDATION_OPERATION_BUDGET \
+			and Time.get_ticks_usec() - started < AGGREGATE_VALIDATION_STEP_USEC_BUDGET:
+		var window: Dictionary = windows[_aggregate_window_cursor]
+		var id: Vector3i = window.get("id", Vector3i.ZERO)
+		if not _owners.has(id) or _window_tokens.get(id) != window.get("windowToken"):
+			_aggregate_result = {"status":"pending",
+				"reason":"obsolete_physical_window_retirement_pending",
+				"windowId":id, "operations":operations + 1}
+			return
+		var owner: Node3D = _owners[id]
+		if is_instance_valid(owner):
+			_aggregate_receipts[id] = owner.physical_receipt(
+				window.get("identity", {}))
+			_aggregate_owner_epochs[id] = int(owner.call("physical_readiness_epoch")) \
+				if owner.has_method("physical_readiness_epoch") else -1
+		else:
+			_aggregate_receipts[id] = {"ready":false}
+		_aggregate_window_cursor += 1
+		operations += 1
+	if _aggregate_cursor.is_empty() and _aggregate_window_cursor >= windows.size():
+		_aggregate_cursor = Aggregate.begin_cursor(_aggregate_layout, _aggregate_receipts)
+		if _aggregate_cursor.get("status") != "pending":
+			_aggregate_result = {"status":"failed",
+				"reason":_aggregate_cursor.get("reason", "logical_collision_layout_invalid"),
+				"operations":operations}
+			return
+	if not _aggregate_cursor.is_empty() \
+			and Time.get_ticks_usec() - started < AGGREGATE_VALIDATION_STEP_USEC_BUDGET:
+		var remaining_ops := AGGREGATE_VALIDATION_OPERATION_BUDGET - operations
+		var remaining_usec := AGGREGATE_VALIDATION_STEP_USEC_BUDGET - (Time.get_ticks_usec() - started)
+		if remaining_ops <= 0 or remaining_usec <= 0: return
+		var cursor_result: Dictionary = Aggregate.advance_cursor(_aggregate_cursor,
+			remaining_ops, remaining_usec)
+		if cursor_result.get("status") == "ready" or cursor_result.get("status") == "failed":
+			if cursor_result.get("status") == "ready" \
+					and not _aggregate_owner_epochs_current():
+				_aggregate_ticket = ""
+				_aggregate_result = {"status":"pending",
+					"reason":"physical_owner_readiness_changed"}
+				return
+			_aggregate_result = {"status":cursor_result.status,
+				"result":cursor_result, "ticket":_aggregate_ticket,
+				"operations":operations + int(cursor_result.get("operations", 0))}
+		elif cursor_result.get("reason") == "collision_window_physics_pending":
+			_aggregate_result = {"status":"pending", "reason":cursor_result.reason,
+				"operations":operations + int(cursor_result.get("operations", 0))}
+			_aggregate_window_cursor = 0
+			_aggregate_receipts = {}
+			_aggregate_cursor = {}
+		else:
+			_aggregate_result = {"status":"pending",
+				"reason":cursor_result.get("reason",
+					"collision_aggregate_validation_in_progress"),
+				"operations":operations + int(cursor_result.get("operations", 0))}
+
+func _aggregate_owner_epochs_current() -> bool:
+	for id in _aggregate_owner_epochs:
+		var owner: Node3D = _owners.get(id)
+		if not is_instance_valid(owner) or not owner.has_method("physical_readiness_epoch") \
+				or int(owner.call("physical_readiness_epoch")) \
+				!= int(_aggregate_owner_epochs[id]):
+			return false
+	return true
+
+func _aggregate_readiness_legacy(identity: Dictionary) -> Dictionary:
 	if _stopping or _broker == null:
 		return {"status":"pending", "reason":"window_coordinator_stopping"}
 	var layout: Dictionary = _broker.collision_window_layout()

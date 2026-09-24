@@ -9,6 +9,34 @@ class FakeSource:
 	var current := {}
 	var rows := {}
 	var row_query_hook: Callable
+	var ticket_query_hook: Callable
+	var ticket_checks := 0
+	var ticket_snapshot_queries := 0
+	func collision_source_ticket() -> Dictionary:
+		ticket_snapshot_queries += 1
+		var snapshot: Dictionary = current.duplicate(false)
+		snapshot["ticket"] = _ticket_value()
+		return snapshot
+	func collision_source_ticket_current(ticket: String) -> bool:
+		ticket_checks += 1
+		if ticket_query_hook.is_valid(): ticket_query_hook.call(ticket)
+		return _ticket_value() == ticket
+	func collision_source_artifact_key(block: Vector3i, ticket: String) -> Dictionary:
+		if _ticket_value() != ticket:
+			return {"status":"pending", "reason":"fake_ticket_stale"}
+		var artifacts: Dictionary = current.get("artifacts", {})
+		if not artifacts.has(block): return {"status":"pending"}
+		return {"status":"ready", "artifactKey":String(artifacts[block])}
+	func _ticket_value() -> String:
+		var identity: Dictionary = current.get("identity", {})
+		var membership: Dictionary = current.get("membershipProvenance", {})
+		var source_identity: Dictionary = current.get("sourceIdentity", {})
+		return "fixture-ticket-%d-%d-%d-%s-%s" % [
+			int(identity.get("sourceRevision", -1)),
+			int(identity.get("cancellationEpoch", -1)),
+			int(membership.get("demandRevision", -1)),
+			String(membership.get("closureToken", "")),
+			String(source_identity.get("hex", ""))]
 	func collision_source_snapshot() -> Dictionary:
 		return current.duplicate(true)
 	func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary:
@@ -67,6 +95,7 @@ func _run() -> void:
 	var startup: Dictionary = await _owner.publish(_request(first, blocks, blocks,
 		initial_rows), startup_barrier)
 	var startup_ready: Dictionary = _owner.startup_readiness(first)
+	var revision_invalidation: Dictionary = _owner.physical_receipt(first)
 	var startup_released: bool = startup_barrier.release(first)
 	_actor.position = Vector3(0.35, 2, 0.5)
 	await get_tree().physics_frame
@@ -81,6 +110,7 @@ func _run() -> void:
 	var second := _identity(2)
 	var changed: Array[Vector3i] = [blocks[0]]
 	_source.current = _snapshot(second, blocks, "a2", "b1")
+	var old_revision_invalidated: bool = not bool(_owner.physical_receipt(first).get("ready", false))
 	var second_row: Dictionary = _row(blocks[0], "a2", 1.0, second)
 	_source.rows[blocks[0]] = second_row
 	var edit_barrier = BarrierScript.new()
@@ -159,12 +189,10 @@ func _run() -> void:
 		"residentBlocks": staged_blocks.duplicate(),
 		"membershipProvenance": {"authority": "pinned_demand", "demandRevision": 1,
 			"closureToken": "65-block-closure"}, "artifacts": staged_artifacts}
-	var missing_snapshot: Dictionary = staged_source.current.duplicate(true)
-	missing_snapshot.residentBlocks = staged_blocks.slice(0, 64)
-	staged_source.current = missing_snapshot
+	staged_source.current.artifacts.erase(staged_blocks[64])
 	var missing_artifact: Dictionary = await staged_owner.publish(_request(staged_identity,
 		staged_blocks, [staged_blocks[0]], [staged_rows[0]]))
-	staged_source.current.residentBlocks = staged_blocks.duplicate()
+	staged_source.current.artifacts[staged_blocks[64]] = "empty-64"
 	var staged_barrier = BarrierScript.new()
 	var stage_begin: Dictionary = staged_barrier.begin(self, staged_owner,
 		staged_identity, staged_rows[0].bounds.merge(staged_rows[64].bounds))
@@ -199,8 +227,10 @@ func _run() -> void:
 	var mid_switch_drift: Dictionary = await _mid_switch_drift_case()
 	var bounded_prepare: Dictionary = await _bounded_prepare_case()
 	var bounded_drain: Dictionary = await _bounded_drain_case()
+	var bounded_validation: Dictionary = await _bounded_validation_contract()
 	var passed: bool = startup.get("status") == "ready" \
-		and startup_ready.get("status") == "ready" and startup_released \
+		and startup_ready.get("status") == "ready" and revision_invalidation.get("ready", false) \
+		and old_revision_invalidated and startup_released \
 		and actor_landed and altered_candidate.get("status") == "failed" \
 		and altered_candidate.get("reason") == "candidate_source_row_mismatch" \
 		and occupied_edit.get("status") == "pending" \
@@ -230,8 +260,12 @@ func _run() -> void:
 		and bool(mid_switch_drift.get("passed", false)) \
 		and bool(bounded_prepare.get("passed", false)) \
 		and bool(bounded_drain.get("passed", false)) \
+		and bool(bounded_validation.get("passed", false)) \
 		and bool(retirement_receipt_contract.get("passed", false))
 	_finish(passed, {"startup": startup, "startupReady": startup_ready,
+		"sourceTicket": {"initialReady":revision_invalidation,
+			"oldRevisionInvalidated":old_revision_invalidated,
+			"ticketChecks":_source.ticket_checks},
 		"actorLanded": actor_landed, "actorContact": actor_contact_detail,
 		"alteredCandidate": altered_candidate, "occupiedEdit": occupied_edit,
 		"edit": edit, "editWindow": edit_window, "rejected": rejected,
@@ -253,7 +287,141 @@ func _run() -> void:
 		"midSwitchDrift": mid_switch_drift,
 		"boundedPreparation": bounded_prepare,
 		"boundedDrain": bounded_drain,
+		"boundedValidation": bounded_validation,
 		"retirementReceipt": retirement_receipt_contract})
+
+
+func _bounded_validation_contract() -> Dictionary:
+	var wide := _cursor_source(OwnerScript.MAX_RESIDENT, 30, "wide")
+	var wide_owner = OwnerScript.new()
+	add_child(wide_owner)
+	wide_owner.bind_source(wide.source)
+	var wide_request := _request(wide.identity, wide.blocks, [wide.blocks[0]], [wide.row])
+	var wide_check: Dictionary = await wide_owner._validate_request(wide_request)
+	var wide_drain: Dictionary = await wide_owner.stop_and_drain()
+	var over := _cursor_source(OwnerScript.MAX_RESIDENT + 1, 31, "over")
+	var over_owner = OwnerScript.new()
+	add_child(over_owner)
+	over_owner.bind_source(over.source)
+	var over_request := {"schema":"n5-resident-collision-publication/v1",
+		"identity":over.identity, "residentBlocks":over.blocks,
+		"affectedBlocks":[Vector3i.ZERO], "rows":[{}]}
+	var over_check: Dictionary = await over_owner._validate_request(over_request)
+	var early_source_calls := int(over.source.ticket_snapshot_queries)
+	var over_drain: Dictionary = await over_owner.stop_and_drain()
+	var caps := _cursor_source(1, 34, "caps")
+	var caps_owner = OwnerScript.new()
+	add_child(caps_owner)
+	caps_owner.bind_source(caps.source)
+	var sixty_five: Array = []
+	for index in range(OwnerScript.MAX_AFFECTED + 1):
+		sixty_five.append(Vector3i(index, 0, 0))
+	var row_oversize: Dictionary = await caps_owner._validate_request({
+		"schema":"n5-resident-collision-publication/v1", "identity":caps.identity,
+		"residentBlocks":[Vector3i.ZERO], "affectedBlocks":[Vector3i.ZERO],
+		"rows":sixty_five})
+	var affected_oversize: Dictionary = await caps_owner._validate_request({
+		"schema":"n5-resident-collision-publication/v1", "identity":caps.identity,
+		"residentBlocks":[Vector3i.ZERO], "affectedBlocks":sixty_five,
+		"rows":[caps.row]})
+	var caps_source_calls := int(caps.source.ticket_snapshot_queries)
+	var caps_drain: Dictionary = await caps_owner.stop_and_drain()
+	var drifting := _cursor_source(256, 32, "drift")
+	var drift_owner = OwnerScript.new()
+	add_child(drift_owner)
+	drift_owner.bind_source(drifting.source)
+	var drift_triggered := [false]
+	drifting.source.ticket_query_hook = func(_ticket: String):
+		if not bool(drift_triggered[0]):
+			drift_triggered[0] = true
+			drifting.source.current.membershipProvenance.closureToken = "changed-during-cursor"
+	var drift_result: Dictionary = await drift_owner.publish(
+		_request(drifting.identity, drifting.blocks, [drifting.blocks[0]], [drifting.row]))
+	drifting.source.ticket_query_hook = Callable()
+	var drift_shapes := drift_owner.get_child_count()
+	var drift_drain: Dictionary = await drift_owner.stop_and_drain()
+	var cancelling := _cursor_source(256, 33, "cancel")
+	var cancel_owner = OwnerScript.new()
+	add_child(cancel_owner)
+	cancel_owner.bind_source(cancelling.source)
+	var cancel_triggered := [false]
+	cancelling.source.ticket_query_hook = func(_ticket: String):
+		if not bool(cancel_triggered[0]):
+			cancel_triggered[0] = true
+			cancel_owner.request_stop()
+	var cancel_result: Dictionary = await cancel_owner.publish(
+		_request(cancelling.identity, cancelling.blocks,
+			[cancelling.blocks[0]], [cancelling.row]))
+	cancelling.source.ticket_query_hook = Callable()
+	var cancel_shapes := cancel_owner.get_child_count()
+	var cancel_drain: Dictionary = await cancel_owner.stop_and_drain()
+	wide_owner.queue_free()
+	over_owner.queue_free()
+	caps_owner.queue_free()
+	drift_owner.queue_free()
+	cancel_owner.queue_free()
+	await get_tree().process_frame
+	var passed: bool = wide_check.get("status") == "ready" \
+		and int(wide_check.get("maxValidationOperations", 0)) <= 128 \
+		and int(wide_check.get("maxValidationStepUsec", 0)) >= 0 \
+		and wide_drain.get("status") == "ready" \
+		and over_check.get("status") == "failed" \
+		and over_check.get("reason") == "resident_request_capacity_invalid" \
+		and early_source_calls == 0 and over_drain.get("status") == "ready" \
+		and row_oversize.get("reason") == "resident_request_capacity_invalid" \
+		and affected_oversize.get("reason") == "resident_request_capacity_invalid" \
+		and caps_source_calls == 0 and caps_drain.get("status") == "ready" \
+		and bool(drift_triggered[0]) and drift_result.get("status") == "pending" \
+		and drift_result.get("reason") == "resident_validation_interrupted" \
+		and drift_shapes == 0 and drift_drain.get("status") == "ready" \
+		and bool(cancel_triggered[0]) and cancel_result.get("reason") == "resident_owner_stopping" \
+		and cancel_shapes == 0 and cancel_drain.get("status") == "ready"
+	return {"passed":passed, "maxResidentCount":OwnerScript.MAX_RESIDENT,
+		"maxResident":{"status":wide_check.get("status"),
+			"maxOperations":wide_check.get("maxValidationOperations", -1),
+			"maxStepUsec":wide_check.get("maxValidationStepUsec", -1),
+			"ticketChecks":wide.source.ticket_checks,
+			"drainStatus":wide_drain.get("status")},
+		"oversize":{"status":over_check.get("status"),
+			"reason":over_check.get("reason"), "sourceTicketQueries":early_source_calls,
+			"drainStatus":over_drain.get("status"),
+			"oversizeRows":row_oversize.get("reason"),
+			"oversizeAffected":affected_oversize.get("reason"),
+			"affectedRowsSourceTicketQueries":caps_source_calls,
+			"affectedRowsDrainStatus":caps_drain.get("status")},
+		"revisionDrift":{"triggered":drift_triggered[0],
+			"result":drift_result, "candidateChildren":drift_shapes,
+			"drainStatus":drift_drain.get("status")},
+		"cancellation":{"triggered":cancel_triggered[0],
+			"result":cancel_result, "candidateChildren":cancel_shapes,
+		"drainStatus":cancel_drain.get("status")}}
+
+
+func _cursor_source(count: int, revision: int, label: String) -> Dictionary:
+	var source := FakeSource.new()
+	var identity := _identity(revision)
+	var source_identity := {"hex":"cursor-source-%s-%d" % [label, revision]}
+	var blocks: Array[Vector3i] = []
+	var artifacts := {}
+	for index in range(count):
+		var block := Vector3i(index, 0, 0)
+		blocks.append(block)
+		artifacts[block] = "%s-artifact-%d" % [label, index]
+	var row := _source_fields({"block":blocks[0], "artifactKey":artifacts[blocks[0]],
+		"vertices":PackedVector3Array(), "bounds":AABB(Vector3.ZERO, Vector3.ONE * 3.0),
+		"probeFrom":Vector3(0.5, 2.8, 0.5), "probeTo":Vector3(0.5, 0.2, 0.5),
+		"expectedHit":false}, identity, source_identity)
+	source.rows = {blocks[0]:row}
+	source.current = {"status":"ready", "identity":identity,
+		"sourceIdentity":source_identity, "sourceEpoch":identity.sourceEpoch,
+		"nativeRevision":revision, "ownerGeneration":identity.ownerGeneration,
+		"cancellationEpoch":identity.cancellationEpoch,
+		"requiredResidentBlocks":blocks, "residentBlocks":blocks,
+		"membershipProvenance":{"authority":"pinned_demand",
+			"demandRevision":revision, "closureToken":"%s-closure" % label},
+		"artifacts":artifacts}
+	return {"source":source, "identity":identity, "sourceIdentity":source_identity,
+		"blocks":blocks, "row":row}
 
 
 func _retirement_receipt_contract() -> Dictionary:

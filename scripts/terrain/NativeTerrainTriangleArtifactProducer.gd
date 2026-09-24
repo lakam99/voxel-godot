@@ -42,6 +42,7 @@ var _candidate_closure_token := ""
 var _candidate_demand_pending := false
 var _demand_prune_cursor := -1
 var _stopped := false
+var _collision_source_epoch := 1
 
 func setup(backend, page_admission, admission, planner, cell_meters: float,
 		identity: Dictionary) -> Dictionary:
@@ -544,6 +545,61 @@ func collision_source_snapshot() -> Dictionary:
 		"staleBlocks":stale_blocks,
 		"membershipProvenance":{"authority":"pinned_demand",
 			"demandRevision":_demand_revision, "closureToken":_closure_token}}
+
+## O(1) revision ticket for resident/window consumers. `blocks` is a borrowed
+## immutable demand snapshot; callers may retain it only while `ticket` matches.
+func collision_source_ticket() -> Dictionary:
+	if _stopped or _backend == null or _draining_failed_ticket \
+			or not _failure_reason.is_empty():
+		return {"status":"failed", "reason":"triangle_producer_inactive"}
+	if not _required_demand_snapshot_ready or _candidate_demand_pending \
+			or _demand_prune_cursor >= 0:
+		return {"status":"pending", "reason":"triangle_demand_snapshot_pending"}
+	var source: Dictionary = _backend.status()
+	if source.get("status") != "ready" or source.get("sourceIdentity") != _source_identity \
+			or int(source.get("terrainDeltaRevision", -1)) != int(_identity.sourceRevision):
+		return {"status":"pending", "reason":"triangle_source_revision_changed"}
+	return {"status":"ready", "ticket":_collision_source_ticket_key(source),
+		"identity":_identity, "sourceIdentity":_source_identity,
+		"sourceEpoch":String(_identity.sourceEpoch),
+		"nativeRevision":int(_identity.sourceRevision),
+		"ownerGeneration":int(_identity.ownerGeneration),
+		"cancellationEpoch":int(_identity.cancellationEpoch),
+		"demandRevision":_demand_revision, "closureToken":_closure_token,
+		"requiredResidentBlocks":_required_demand_blocks}
+
+func collision_source_ticket_current(ticket: String) -> bool:
+	if ticket.is_empty() or _stopped or _backend == null \
+			or _draining_failed_ticket or not _failure_reason.is_empty() \
+			or not _required_demand_snapshot_ready or _candidate_demand_pending \
+			or _demand_prune_cursor >= 0:
+		return false
+	var source: Dictionary = _backend.status()
+	return source.get("status") == "ready" \
+		and source.get("sourceIdentity") == _source_identity \
+		and int(source.get("terrainDeltaRevision", -1)) == int(_identity.sourceRevision) \
+		and _collision_source_ticket_key(source) == ticket
+
+func collision_source_artifact_key(block: Vector3i, ticket: String) -> Dictionary:
+	if not collision_source_ticket_current(ticket):
+		return {"status":"pending", "reason":"triangle_source_ticket_stale"}
+	if not _artifacts.has(block) or not _artifact_rows.has(block):
+		return {"status":"pending", "reason":"triangle_artifact_incomplete"}
+	var source: Dictionary = _backend.status()
+	if not _local_pins_current(block, source):
+		return {"status":"pending", "reason":"triangle_artifact_local_source_stale"}
+	return {"status":"ready", "artifactKey":String(_artifacts[block])}
+
+func _collision_source_ticket_key(source: Dictionary) -> String:
+	return "%s|%s|%d|%d|%d|%s|%d|%d|%d" % [
+		String(_identity.get("sourceEpoch", "")),
+		String(_source_identity.get("hex", "")),
+		int(_identity.get("sourceRevision", -1)),
+		int(source.get("terrainDeltaRevision", -1)),
+		int(source.get("shapingRegistryRevision", -1)),
+		String(_closure_token), _demand_revision,
+		int(_identity.get("ownerGeneration", -1)),
+		int(_identity.get("cancellationEpoch", -1))]
 
 func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary:
 	if _stopped or _backend == null or identity != _identity \

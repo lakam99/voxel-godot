@@ -1,4 +1,4 @@
-extends SceneTree
+extends Node
 
 const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
 
@@ -44,6 +44,21 @@ func _run() -> void:
 		"sourceIdentity":source_identity, "identity":identity,
 		"windows":windows}
 	var full: Dictionary = AGGREGATE.evaluate(layout, receipts)
+	var cursor_state: Dictionary = AGGREGATE.begin_cursor(layout, receipts)
+	var cursor_steps := 0
+	var cursor_max_operations := 0
+	var cursor_result: Dictionary = cursor_state
+	while cursor_result.get("status") == "pending" and cursor_steps < 1000:
+		cursor_result = AGGREGATE.advance_cursor(cursor_state, 128, 10000)
+		cursor_steps += 1
+		cursor_max_operations = maxi(cursor_max_operations,
+			int(cursor_result.get("operations", 0)))
+	var oversize_layout: Dictionary = layout.duplicate(false)
+	var oversize_blocks: Array = []
+	oversize_blocks.resize(AGGREGATE.MAX_AGGREGATE_BLOCKS + 1)
+	oversize_layout["requiredBlocks"] = oversize_blocks
+	oversize_layout["requiredBlockCount"] = oversize_blocks.size()
+	var oversize_cursor: Dictionary = AGGREGATE.begin_cursor(oversize_layout, receipts)
 	var missing_receipts: Dictionary = receipts.duplicate(true)
 	missing_receipts.erase(ids[-1])
 	var missing: Dictionary = AGGREGATE.evaluate(layout, missing_receipts)
@@ -94,6 +109,10 @@ func _run() -> void:
 	var passed: bool = required.size() == 4913 and windows.size() == 8 \
 		and (groups[Vector3i.ZERO] as Array).size() == 4096 \
 		and full.get("status") == "ready" \
+		and cursor_result.get("status") == "ready" \
+		and cursor_steps > 1 and cursor_max_operations <= 128 \
+		and oversize_cursor.get("status") == "failed" \
+		and oversize_cursor.get("reason") == "logical_collision_layout_capacity_invalid" \
 		and missing.get("status") == "pending" \
 		and missing.get("reason") == "collision_window_physics_pending" \
 		and stale.get("status") == "pending" \
@@ -114,6 +133,9 @@ func _run() -> void:
 		"productionCutover":false, "requiredBlockCount":required.size(),
 		"windowCount":windows.size(), "largestWindowBlockCount":4096,
 		"full":full, "missing":missing, "stale":stale,
+		"cursor":{"result":cursor_result, "steps":cursor_steps,
+			"maxOperations":cursor_max_operations, "operationBudget":128},
+		"oversizeCursor":oversize_cursor,
 		"duplicate":duplicate, "expandedPending":expanded_pending,
 		"expandedReady":expanded_ready,
 		"retainedAfterVerifiedEdit":retained_ready,
@@ -126,7 +148,7 @@ func _run() -> void:
 		if file != null:
 			file.store_string(JSON.stringify(report, "\t", false, true) + "\n")
 			file.close()
-	quit(0 if passed else 1)
+	get_tree().quit(0 if passed else 1)
 
 func _receipt(identity: Dictionary, source_identity: Dictionary,
 		window: Dictionary) -> Dictionary:
