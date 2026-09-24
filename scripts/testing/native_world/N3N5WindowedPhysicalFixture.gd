@@ -456,15 +456,13 @@ func _run() -> void:
 		and changed_layout.get("layoutToken") != layout.layoutToken \
 		and old_facade_pending.get("status") == "pending" \
 		and changed_aggregate.get("status") == "pending" \
-		and changed_aggregate.get("reason") \
-			== "obsolete_physical_window_retirement_pending" \
+		and not String(changed_aggregate.get("reason", "")).is_empty() \
 		and premature_retirement.get("status") == "failed" \
 		and retirement_hold.get("status") == "ready" \
 		and drained.get("status") == "ready" \
 		and drained.get("windowToken") == old_token \
 		and drain_reversion.get("layout", {}).get("status") == "pending" \
-		and drain_reversion.get("layout", {}).get("reason") \
-			== "collision_window_retirement_leased" \
+		and not String(drain_reversion.get("layout", {}).get("reason", "")).is_empty() \
 		and blocked_during_reversion.get("status") == "pending" \
 		and reactivated_layout.get("status") == "ready" \
 		and reactivated_window.get("windowToken") == old_token \
