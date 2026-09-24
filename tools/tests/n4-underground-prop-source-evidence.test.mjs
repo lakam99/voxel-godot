@@ -9,6 +9,7 @@ import { acquireN4UndergroundPropLease, assertN4CleanGitState,
   expandN4UndergroundPropSourcePaths, godotCompanionExecutable,
   expandN4ResourceDependencyClosure,
   n4GitState, n4GodotRuntimeInventory,
+  n4IsProceduralTreeFamily, n4TreeArchitectureFamilyTokens,
   n4UndergroundPropWatchdogIdentity, n4VisualRegistryRuntimeScenePaths,
   n4WindowsCommandLine, resolveN4ImportedArtifacts,
   withN4UndergroundPropLease } from '../lib/n4-underground-prop-source-evidence.mjs';
@@ -107,6 +108,19 @@ test('N4 source inventory expands all manifest groups and extension build inputs
     'native/terrain_meshing/src/register_types.cpp',
     'native/terrain_meshing/src/native_world_backend_adapter.cpp'])
     assert.ok(paths.includes(path), path);
+});
+
+test('N4 visual scene inventory mirrors the production procedural-tree predicate', async () => {
+  const source = await import('node:fs/promises').then(fs =>
+    fs.readFile(join(project, 'scripts/environment/TreeRuntimeRequestBuilder.gd'), 'utf8'));
+  const tokens = n4TreeArchitectureFamilyTokens(source);
+  assert.deepEqual([...tokens].sort(), ['broadleaf', 'conifer', 'savanna']);
+  assert.equal(n4IsProceduralTreeFamily('ecological_broadleaf_tree', tokens), true);
+  assert.equal(n4IsProceduralTreeFamily('mature_conifer_tree', tokens), true);
+  assert.equal(n4IsProceduralTreeFamily('savanna_tree', tokens), true);
+  assert.equal(n4IsProceduralTreeFamily('novel_tree', tokens), false);
+  const scenes = await n4VisualRegistryRuntimeScenePaths(project);
+  assert.equal(scenes.filter(path => path.endsWith('.glb')).length, 13);
 });
 
 test('N4 resource inventory recursively closes preload, extends, and resource paths', async t => {

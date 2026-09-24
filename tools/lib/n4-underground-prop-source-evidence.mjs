@@ -192,9 +192,35 @@ export async function expandN4ResourceDependencyClosure(project, initialPaths) {
   return Object.freeze([...seen].sort());
 }
 
+export function n4TreeArchitectureFamilyTokens(source) {
+  source = stripGdComments(source);
+  const signature = 'static func architecture_for_tree_family(family: String) -> String:';
+  const start = source.indexOf(signature);
+  demand(start >= 0, 'Tree family architecture authority was not found');
+  const bodyStart = start + signature.length;
+  const rest = source.slice(bodyStart);
+  const nextFunction = rest.search(/^\s*static func /m);
+  const body = nextFunction < 0 ? rest : rest.slice(0, nextFunction);
+  const tokens = [...body.matchAll(/\bfamily\.contains\(\s*["']([^"']+)["']\s*\)/g)]
+    .map(match => match[1]);
+  demand(tokens.length > 0 && new Set(tokens).size === tokens.length,
+    'Tree family architecture authority has no unique literal family matchers');
+  return Object.freeze(tokens);
+}
+
+export function n4IsProceduralTreeFamily(family, architectureTokens) {
+  demand(typeof family === 'string' && Array.isArray(architectureTokens)
+    && architectureTokens.length > 0,
+  'Tree family check requires a family and production architecture tokens');
+  return architectureTokens.some(token => family.includes(token));
+}
+
 export async function n4VisualRegistryRuntimeScenePaths(project) {
   const manifestPath = join(project, 'assets', 'visual', 'generated', 'visual-manifest.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  const treeBuilder = await readFile(join(project,
+    'scripts', 'environment', 'TreeRuntimeRequestBuilder.gd'), 'utf8');
+  const architectureTokens = n4TreeArchitectureFamilyTokens(treeBuilder);
   demand(Array.isArray(manifest.assets), 'Visual manifest assets are missing');
   const scenes = [];
   for (const asset of manifest.assets) {
@@ -204,10 +230,10 @@ export async function n4VisualRegistryRuntimeScenePaths(project) {
     const family = String(asset.family ?? '');
     const path = String(asset.path ?? '');
     demand(family.length > 0 && path.length > 0, 'Runtime visual asset identity is incomplete');
-    // This is the exact current counterpart of VisualAssetRegistry's procedural
-    // tree-family bypass: every complete-tree family in this manifest ends in
-    // `_tree`; all other runtime rows are ResourceLoader-loaded by setup().
-    if (family.endsWith('_tree')) continue;
+    // Mirror the production ResourceLoader bypass from
+    // TreeRuntimeRequestBuilder.architecture_for_tree_family. Unknown suffixes
+    // such as `novel_tree` are loaded just as they are by VisualAssetRegistry.
+    if (n4IsProceduralTreeFamily(family, architectureTokens)) continue;
     demand(path.startsWith('assets/visual/generated/') && path.endsWith('.glb')
       && !path.includes('\\') && !path.split('/').some(part => ['', '.', '..'].includes(part)),
     `Unsafe runtime visual scene path: ${path}`);
