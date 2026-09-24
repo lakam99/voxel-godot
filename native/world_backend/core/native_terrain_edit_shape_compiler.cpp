@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <utility>
 
@@ -291,7 +292,9 @@ void validate_shape(const NativeTerrainEditShape &shape, const double cell_size)
     if (shape.provenance_id.find('\0') != std::string::npos) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
-    if (shape.kind == NativeTerrainEditShapeKind::sphere && !shape.target.solid.has_value()) {
+    if ((shape.kind == NativeTerrainEditShapeKind::sphere
+            || shape.kind == NativeTerrainEditShapeKind::surface_deformation)
+        && !shape.target.solid.has_value()) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
     try {
@@ -305,12 +308,16 @@ void validate_shape(const NativeTerrainEditShape &shape, const double cell_size)
     } catch (const std::invalid_argument &) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
-    if (shape.kind == NativeTerrainEditShapeKind::sphere
+    if ((shape.kind == NativeTerrainEditShapeKind::sphere
+            || shape.kind == NativeTerrainEditShapeKind::surface_deformation)
         && (!std::isfinite(shape.center.x) || !std::isfinite(shape.center.y) || !std::isfinite(shape.center.z)
-            || !std::isfinite(shape.radius))) {
+            || !std::isfinite(shape.radius)
+            || (shape.kind == NativeTerrainEditShapeKind::surface_deformation
+                && !std::isfinite(shape.drop_depth)))) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
-    if (shape.kind == NativeTerrainEditShapeKind::sphere
+    if ((shape.kind == NativeTerrainEditShapeKind::sphere
+            || shape.kind == NativeTerrainEditShapeKind::surface_deformation)
         && (!std::isfinite(static_cast<float>(shape.center.x))
             || !std::isfinite(static_cast<float>(shape.center.y))
             || !std::isfinite(static_cast<float>(shape.center.z)))) {
@@ -320,7 +327,8 @@ void validate_shape(const NativeTerrainEditShape &shape, const double cell_size)
         static_cast<void>(metadata_boolean_or_false(shape.target.metadata, "deferSkyLight"));
     }
     if (shape.kind != NativeTerrainEditShapeKind::inclusive_box
-        && shape.kind != NativeTerrainEditShapeKind::sphere) {
+        && shape.kind != NativeTerrainEditShapeKind::sphere
+        && shape.kind != NativeTerrainEditShapeKind::surface_deformation) {
         reject(NativeTerrainEditCompileRejectReason::unsupported_shape);
     }
 }
@@ -450,6 +458,22 @@ NativeTerrainEditShape NativeTerrainEditShape::sphere(
     return result;
 }
 
+NativeTerrainEditShape NativeTerrainEditShape::surface_deformation(
+    const Vec3d center,
+    const double radius,
+    const double drop_depth,
+    NativeTerrainEditStateTemplate target,
+    std::string provenance_id) {
+    NativeTerrainEditShape result;
+    result.kind = NativeTerrainEditShapeKind::surface_deformation;
+    result.center = center;
+    result.radius = radius;
+    result.drop_depth = drop_depth;
+    result.target = std::move(target);
+    result.provenance_id = std::move(provenance_id);
+    return result;
+}
+
 NativeTerrainEditCompiledBatch::NativeTerrainEditCompiledBatch(
     std::vector<NativeTerrainEditCompiledOperation> operations,
     NativeTerrainEditCompileSummary summary)
@@ -494,9 +518,21 @@ NativeTerrainEditCompileRejectReason NativeTerrainEditCompileRejected::reason() 
 
 NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
     const NativeTerrainEditCompileRequest &request) {
+    const bool has_surface_deformation = std::any_of(
+        request.shapes.begin(), request.shapes.end(), [](const NativeTerrainEditShape &shape) {
+            return shape.kind == NativeTerrainEditShapeKind::surface_deformation;
+        });
+    if (has_surface_deformation) {
+        // Surface deformation can retain a large source cache and prepared
+        // state. It must use the resumable API so retirement stays off-frame.
+        reject(NativeTerrainEditCompileRejectReason::unsupported_shape);
+    }
     try {
     if (!std::isfinite(request.cell_size) || request.cell_size <= 0.0
-        || request.limits.max_candidate_visits == 0U || request.limits.max_operations == 0U) {
+        || request.limits.max_candidate_visits == 0U || request.limits.max_operations == 0U
+        || request.limits.max_columns == 0U || request.limits.max_projection_reads == 0U
+        || request.limits.max_projection_reads_per_query == 0U
+        || request.limits.max_y_candidates == 0U || request.limits.max_prepared_bytes == 0U) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
     NativeTerrainEditCompileSummary summary;
@@ -621,6 +657,577 @@ NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
         // exception types when compiler-added metadata crosses a bound.
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
+}
+
+namespace {
+
+std::int32_t checked_coordinate_offset(const std::int32_t value, const std::int32_t offset) {
+    const std::int64_t result = static_cast<std::int64_t>(value) + offset;
+    if (result < std::numeric_limits<std::int32_t>::min()
+        || result > std::numeric_limits<std::int32_t>::max()) {
+        reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    return static_cast<std::int32_t>(result);
+}
+
+std::size_t logical_state_bytes(
+    const NativeCellState &state, const std::string &provenance_id) {
+    // Stable logical payload accounting, independent of allocator capacity and
+    // C++ padding: fixed typed fields plus canonical variable-width payloads.
+    std::size_t bytes = 48U;
+    bytes += state.metadata.canonical_binary().size();
+    if (state.block_id.has_value()) {
+        bytes += state.block_id->value().size();
+    }
+    if (state.edit_reason.has_value()) {
+        bytes += state.edit_reason->size();
+    }
+    return bytes + provenance_id.size();
+}
+
+} // namespace
+
+struct NativeTerrainEditCompileJob::Impl final {
+    enum class Phase : std::uint8_t {
+        enumerate_columns,
+        project_column,
+        begin_cell_compilation,
+        compile_cells,
+        begin_finalization,
+        finalize_operations,
+        finalize_materials,
+        finalize_removed_materials,
+        finalize_changed_columns,
+        verify_source,
+    };
+
+    struct ColumnTarget {
+        NativeTerrainEditColumn column;
+        double surface_y = 0.0;
+        double target_y = 0.0;
+        std::int32_t high_y = 0;
+        std::int32_t low_y = 0;
+    };
+
+    explicit Impl(NativeTerrainEditCompileRequest value) : request(std::move(value)) {}
+
+    NativeTerrainEditCompileRequest request;
+    std::shared_ptr<const NativeTerrainEditPinnedSource> source;
+    NativeTerrainEditCompileJobStatus status = NativeTerrainEditCompileJobStatus::running;
+    NativeTerrainEditCompileProgress progress;
+    std::optional<NativeTerrainEditCompileRejectReason> rejection;
+    Phase phase = Phase::enumerate_columns;
+    Sha256Digest source_digest{};
+    std::uint64_t source_revision = 0;
+    double safe_radius = 0.0;
+    double safe_drop = 0.0;
+    std::int32_t min_x = 0;
+    std::int32_t max_x = 0;
+    std::int32_t min_z = 0;
+    std::int32_t max_z = 0;
+    std::int32_t next_x = 0;
+    std::int32_t next_z = 0;
+    bool columns_exhausted = false;
+    NativeTerrainEditColumn pending_projection_column;
+    double pending_projection_falloff = 0.0;
+    std::vector<ColumnTarget> targets;
+    std::size_t target_index = 0;
+    bool active_target = false;
+    std::int32_t next_y = 0;
+    std::map<CellCoord, PendingOperation, CellLess> pending;
+    SourceCellCache durable_cache;
+    std::map<CellCoord, PendingOperation, CellLess>::const_iterator pending_iterator;
+    std::vector<NativeTerrainEditCompiledOperation> operations;
+    std::map<TerrainMaterialId, std::size_t> material_counts;
+    std::map<TerrainMaterialId, std::size_t> removed_material_counts;
+    std::set<std::pair<std::int32_t, std::int32_t>> changed_columns;
+    std::set<std::pair<std::int32_t, std::int32_t>> legacy_columns_seen;
+    std::set<std::pair<std::int32_t, std::int32_t>> skylight_columns_seen;
+    std::set<std::pair<std::int32_t, std::int32_t>> fluid_columns_seen;
+    std::map<TerrainMaterialId, std::size_t>::const_iterator material_iterator;
+    std::map<TerrainMaterialId, std::size_t>::const_iterator removed_iterator;
+    std::set<std::pair<std::int32_t, std::int32_t>>::const_iterator changed_column_iterator;
+    NativeTerrainEditCompileSummary summary;
+
+    const NativeTerrainEditShape &shape() const { return request.shapes.front(); }
+
+    void fail(const NativeTerrainEditCompileRejectReason reason) noexcept {
+        rejection = reason;
+        status = NativeTerrainEditCompileJobStatus::rejected;
+        progress.status = status;
+    }
+
+    void initialize() {
+        if (!std::isfinite(request.cell_size) || request.cell_size <= 0.0
+            || request.limits.max_candidate_visits == 0U || request.limits.max_operations == 0U
+            || request.limits.max_columns == 0U || request.limits.max_projection_reads == 0U
+            || request.limits.max_projection_reads_per_query == 0U
+            || request.limits.max_y_candidates == 0U || request.limits.max_prepared_bytes == 0U) {
+            reject(NativeTerrainEditCompileRejectReason::invalid_request);
+        }
+        const std::size_t deformation_count = static_cast<std::size_t>(std::count_if(
+            request.shapes.begin(), request.shapes.end(), [](const NativeTerrainEditShape &candidate) {
+                return candidate.kind == NativeTerrainEditShapeKind::surface_deformation;
+            }));
+        if (deformation_count != 1U || request.shapes.size() != 1U) {
+            reject(NativeTerrainEditCompileRejectReason::mixed_surface_deformation);
+        }
+        validate_shape(shape(), request.cell_size);
+        const NativeValue::Object &target_metadata = shape().target.metadata.as_object();
+        const auto source_metadata = std::lower_bound(
+            target_metadata.begin(), target_metadata.end(), std::string("source"),
+            [](const auto &entry, const std::string &needle) { return entry.first < needle; });
+        if (source_metadata != target_metadata.end() && source_metadata->first == "source"
+            && source_metadata->second.kind() != NativeValueKind::string) {
+            // GDScript String(...) accepts a wider Variant algebra. The native
+            // typed slice admits only the production string/absent contract.
+            reject(NativeTerrainEditCompileRejectReason::invalid_request);
+        }
+        if (!request.owned_source) reject(NativeTerrainEditCompileRejectReason::source_required);
+        if (request.source != nullptr && request.source != request.owned_source.get()) {
+            reject(NativeTerrainEditCompileRejectReason::invalid_request);
+        }
+        source = request.owned_source;
+        request.source = source.get();
+        source_digest = source->snapshot_digest();
+        source_revision = source->source_revision();
+        summary.shape_count = 1U;
+        summary.source_pinned = true;
+        summary.source_transition_summary_available = true;
+        summary.source_snapshot_digest = source_digest;
+        summary.source_revision = source_revision;
+
+        const float center_x = static_cast<float>(shape().center.x);
+        const float center_z = static_cast<float>(shape().center.z);
+        safe_radius = std::max(shape().radius, request.cell_size * 0.75);
+        safe_drop = std::max(shape().drop_depth, request.cell_size * 0.35);
+        min_x = checked_coordinate_offset(checked_floor_cell(
+            (static_cast<double>(center_x) - safe_radius) / request.cell_size), -1);
+        max_x = checked_coordinate_offset(checked_ceil_cell(
+            (static_cast<double>(center_x) + safe_radius) / request.cell_size), 1);
+        min_z = checked_coordinate_offset(checked_floor_cell(
+            (static_cast<double>(center_z) - safe_radius) / request.cell_size), -1);
+        max_z = checked_coordinate_offset(checked_ceil_cell(
+            (static_cast<double>(center_z) + safe_radius) / request.cell_size), 1);
+        const std::uint64_t width = inclusive_extent(min_x, max_x);
+        const std::uint64_t depth = inclusive_extent(min_z, max_z);
+        if (width > request.limits.max_columns
+            || depth > request.limits.max_columns / width) {
+            reject(NativeTerrainEditCompileRejectReason::column_limit_exceeded);
+        }
+        next_x = min_x;
+        next_z = min_z;
+        progress.status = status;
+    }
+
+    void check_source_identity() const {
+        if (source->snapshot_digest() != source_digest
+            || source->source_revision() != source_revision) {
+            reject(NativeTerrainEditCompileRejectReason::source_drift);
+        }
+    }
+
+    const NativeCellState &durable_cell(const CellCoord &cell) {
+        const auto cached = durable_cache.find(cell);
+        if (cached != durable_cache.end()) return cached->second;
+        std::optional<NativeCellState> result =
+            source->physical_terrain_cell_excluding_scene_overlay_at(cell);
+        if (!result.has_value()) reject(NativeTerrainEditCompileRejectReason::source_cell_missing);
+        if (!(result->cell == cell)) reject(NativeTerrainEditCompileRejectReason::source_cell_mismatch);
+        add_prepared_bytes(128U + logical_state_bytes(*result, {}));
+        return durable_cache.emplace(cell, std::move(*result)).first->second;
+    }
+
+    void add_prepared_bytes(const std::size_t bytes) {
+        if (bytes > request.limits.max_prepared_bytes - summary.prepared_bytes) {
+            reject(NativeTerrainEditCompileRejectReason::prepared_byte_limit_exceeded);
+        }
+        summary.prepared_bytes += bytes;
+        progress.prepared_bytes = summary.prepared_bytes;
+    }
+
+    void add_legacy_column(
+        std::set<std::pair<std::int32_t, std::int32_t>> &seen,
+        std::vector<NativeTerrainEditColumn> &destination,
+        const NativeTerrainEditColumn column) {
+        const std::pair<std::int32_t, std::int32_t> key{column.x, column.z};
+        if (seen.find(key) == seen.cend()) {
+            add_prepared_bytes(80U);
+            seen.emplace(key);
+            destination.push_back(column);
+        }
+    }
+
+    void enumerate_one_column() {
+        if (columns_exhausted) {
+            phase = Phase::begin_cell_compilation;
+            return;
+        }
+        const NativeTerrainEditColumn column{next_x, next_z};
+        if (next_x == max_x) {
+            next_x = min_x;
+            if (next_z == max_z) columns_exhausted = true;
+            else next_z = checked_coordinate_offset(next_z, 1);
+        } else {
+            next_x = checked_coordinate_offset(next_x, 1);
+        }
+        ++summary.enumerated_columns;
+        ++progress.enumerated_columns;
+        ++summary.candidate_visits;
+        if (summary.candidate_visits > request.limits.max_candidate_visits) {
+            reject(NativeTerrainEditCompileRejectReason::candidate_limit_exceeded);
+        }
+
+        const float column_x = static_cast<float>(
+            (static_cast<double>(column.x) + 0.5) * request.cell_size);
+        const float column_z = static_cast<float>(
+            (static_cast<double>(column.z) + 0.5) * request.cell_size);
+        const float center_x = static_cast<float>(shape().center.x);
+        const float center_z = static_cast<float>(shape().center.z);
+        const float dx = column_x - center_x;
+        const float dz = column_z - center_z;
+        const float horizontal_distance = std::sqrt(dx * dx + dz * dz);
+        if (static_cast<double>(horizontal_distance) > safe_radius) return;
+        const double t = std::clamp(static_cast<double>(horizontal_distance) / safe_radius, 0.0, 1.0);
+        const double smooth = t * t * (3.0 - 2.0 * t);
+        const double falloff = 1.0 - smooth;
+        if (falloff <= 0.001) return;
+
+        pending_projection_column = column;
+        pending_projection_falloff = falloff;
+        phase = Phase::project_column;
+    }
+
+    void project_one_column() {
+        const NativeTerrainEditColumn column = pending_projection_column;
+        const double falloff = pending_projection_falloff;
+        phase = Phase::enumerate_columns;
+        if (summary.projection_candidate_reads >= request.limits.max_projection_reads) {
+            reject(NativeTerrainEditCompileRejectReason::projection_limit_exceeded);
+        }
+        const std::size_t remaining = request.limits.max_projection_reads
+            - summary.projection_candidate_reads;
+        const std::size_t allowance = std::min(
+            remaining, request.limits.max_projection_reads_per_query);
+        std::optional<NativeTerrainEditSurfaceProjection> projection =
+            source->continuous_surface_projection_at(column, allowance);
+        ++summary.projection_queries;
+        ++progress.projection_queries;
+        if (!projection.has_value()) reject(NativeTerrainEditCompileRejectReason::projection_missing);
+        if (!(projection->column == column) || !std::isfinite(projection->surface_y)) {
+            reject(NativeTerrainEditCompileRejectReason::source_cell_mismatch);
+        }
+        if (projection->candidate_reads > allowance) {
+            reject(NativeTerrainEditCompileRejectReason::projection_limit_exceeded);
+        }
+        summary.projection_candidate_reads += projection->candidate_reads;
+        progress.projection_candidate_reads = summary.projection_candidate_reads;
+
+        const double surface_y = projection->surface_y;
+        const double surface_target_y = surface_y - safe_drop * falloff;
+        const double impact_strength = std::clamp(falloff * 1.35, 0.0, 1.0);
+        const double center_y = static_cast<double>(static_cast<float>(shape().center.y));
+        const double impact_endpoint = center_y - safe_drop * 0.72;
+        const double impact_target_y = surface_y + (impact_endpoint - surface_y) * impact_strength;
+        const double target_y = std::min(surface_target_y, impact_target_y);
+        if (!std::isfinite(target_y)) reject(NativeTerrainEditCompileRejectReason::invalid_request);
+        if (target_y >= surface_y - request.cell_size * 0.08) return;
+        const std::int32_t high_y = checked_ceil_cell(
+            (surface_y + request.cell_size * 0.60) / request.cell_size);
+        const std::int32_t low_y = checked_floor_cell(
+            (target_y - request.cell_size * 0.85) / request.cell_size);
+        const std::uint64_t y_count = inclusive_extent(high_y, low_y);
+        if (y_count > request.limits.max_y_candidates - summary.y_candidates) {
+            reject(NativeTerrainEditCompileRejectReason::y_candidate_limit_exceeded);
+        }
+        if (y_count > request.limits.max_candidate_visits - summary.candidate_visits) {
+            reject(NativeTerrainEditCompileRejectReason::candidate_limit_exceeded);
+        }
+        summary.y_candidates += static_cast<std::size_t>(y_count);
+        progress.y_candidates = summary.y_candidates;
+        summary.candidate_visits += static_cast<std::size_t>(y_count);
+        add_prepared_bytes(128U);
+        targets.push_back({column, surface_y, target_y, high_y, low_y});
+    }
+
+    void begin_cell_compilation() {
+        target_index = 0U;
+        active_target = false;
+        phase = Phase::compile_cells;
+    }
+
+    void compile_one_cell() {
+        if (!active_target) {
+            if (target_index >= targets.size()) {
+                phase = Phase::begin_finalization;
+                return;
+            }
+            active_target = true;
+            next_y = targets[target_index].high_y;
+            return;
+        }
+        const ColumnTarget &target = targets[target_index];
+        if (next_y < target.low_y) {
+            active_target = false;
+            ++target_index;
+            return;
+        }
+        const std::int32_t y = next_y;
+        if (next_y == std::numeric_limits<std::int32_t>::min()) {
+            // The accepted low bound is also INT32_MIN; this candidate is last.
+            next_y = target.low_y;
+            active_target = false;
+            ++target_index;
+        } else {
+            --next_y;
+        }
+        const CellCoord cell{target.column.x, y, target.column.z};
+        const double center_y = (static_cast<double>(y) + 0.5) * request.cell_size;
+        const NativeCellState &existing = durable_cell(cell);
+        std::optional<NativeCellState> edited;
+        NativeTerrainEditCellClassification classification =
+            NativeTerrainEditCellClassification::direct_target;
+        if (center_y > target.target_y
+            && center_y <= target.surface_y + request.cell_size * 0.65) {
+            NativeValue metadata = shape().target.metadata;
+            if (!metadata_has_key(metadata, "source")) {
+                metadata = metadata_with(metadata, "source", NativeValue::string("player_dig"));
+            }
+            metadata = metadata_with(metadata, "terrainMeshAffects", NativeValue::boolean(true));
+            metadata = metadata_with(metadata, "surfaceProjectionAffects", NativeValue::boolean(true));
+            metadata = metadata_with(metadata, "saveDelta", NativeValue::boolean(true));
+            const double density = clamp_density(target.target_y - center_y,
+                -request.cell_size * 2.0, -request.cell_size * 0.05);
+            edited = make_native_cell_state(target_input(
+                shape().target, cell, density, shape().provenance_id, std::move(metadata)));
+        } else if (existing.solid && center_y <= target.target_y
+            && center_y >= target.target_y - request.cell_size * 1.25) {
+            classification = NativeTerrainEditCellClassification::excavation_boundary;
+            NativeValue metadata = metadata_with(existing.metadata, "source",
+                NativeValue::string("surface_excavation_boundary"));
+            metadata = metadata_with(metadata, "terrainMeshAffects", NativeValue::boolean(true));
+            metadata = metadata_with(metadata, "surfaceProjectionAffects", NativeValue::boolean(true));
+            metadata = metadata_with(metadata, "saveDelta", NativeValue::boolean(true));
+            const double density = clamp_density(target.target_y - center_y,
+                request.cell_size * 0.05, request.cell_size * 1.35);
+            edited = make_native_cell_state(cloned_input(
+                existing, density, shape().provenance_id, std::move(metadata)));
+        }
+        if (!edited.has_value()) return;
+        if (pending.size() >= request.limits.max_operations) {
+            reject(NativeTerrainEditCompileRejectReason::operation_limit_exceeded);
+        }
+        // Pending map node/state, legacy changed-cell vector entry, and their
+        // variable payloads are all resident together.
+        add_prepared_bytes(160U + logical_state_bytes(*edited, shape().provenance_id));
+        stage(pending, {std::move(*edited), shape().kind, classification, 0U,
+            shape().provenance_id}, summary);
+        add_prepared_bytes(16U);
+        summary.legacy_changed_cells.push_back(cell);
+        add_legacy_column(legacy_columns_seen, summary.legacy_changed_columns, target.column);
+        const NativeCellState &after = pending.find(cell)->second.state;
+        // Both direct and boundary states force terrainMeshAffects=true, so the
+        // legacy implementation always queues this edited column for skylight.
+        add_legacy_column(skylight_columns_seen, summary.skylight_columns, target.column);
+        if (existing.fluid != after.fluid) {
+            add_legacy_column(fluid_columns_seen, summary.fluid_transition_columns, target.column);
+        }
+        progress.prepared_operations = pending.size();
+    }
+
+    void begin_finalization() {
+        summary.unique_cells_before_filter = pending.size();
+        pending_iterator = pending.cbegin();
+        phase = Phase::finalize_operations;
+    }
+
+    void finalize_one_operation() {
+        if (pending_iterator == pending.cend()) {
+            summary.emitted_operations = operations.size();
+            material_iterator = material_counts.cbegin();
+            phase = Phase::finalize_materials;
+            return;
+        }
+        const CellCoord cell = pending_iterator->first;
+        const PendingOperation &value = pending_iterator->second;
+        ++pending_iterator;
+        const NativeCellState &original = durable_cell(cell);
+        const bool changed = !(original == value.state);
+        if (changed) {
+            ++summary.changed_cells;
+            const std::pair<std::int32_t, std::int32_t> column{cell.x, cell.z};
+            if (changed_columns.find(column) == changed_columns.cend()) {
+                add_prepared_bytes(64U);
+                changed_columns.emplace(column);
+            }
+            if (original.solid && !value.state.solid) {
+                if (removed_material_counts.find(original.material) == removed_material_counts.end()) {
+                    add_prepared_bytes(64U);
+                }
+                ++removed_material_counts[original.material];
+            }
+        }
+        if (request.omit_unchanged && !changed) {
+            ++summary.unchanged_filtered;
+            return;
+        }
+        NativeTerrainEditCompiledOperation compiled;
+        compiled.operation = {NativeCellStateNamespace::durable_terrain, cell,
+            WorldTypedCellOperationKind::set, value.state};
+        compiled.shape_kind = value.shape_kind;
+        compiled.classification = value.classification;
+        compiled.source_shape_index = value.source_shape_index;
+        compiled.provenance_id = value.provenance_id;
+        add_prepared_bytes(160U + logical_state_bytes(value.state, value.provenance_id));
+        operations.push_back(std::move(compiled));
+        if (material_counts.find(value.state.material) == material_counts.end()) {
+            add_prepared_bytes(64U);
+        }
+        ++material_counts[value.state.material];
+        if (value.classification == NativeTerrainEditCellClassification::direct_target) {
+            ++summary.direct_target_operations;
+        } else {
+            ++summary.excavation_boundary_operations;
+        }
+        if (value.state.solid) ++summary.solid_operations;
+        else ++summary.nonsolid_operations;
+    }
+
+    void finalize_one_material() {
+        if (material_iterator == material_counts.cend()) {
+            removed_iterator = removed_material_counts.cbegin();
+            phase = Phase::finalize_removed_materials;
+            return;
+        }
+        add_prepared_bytes(80U);
+        summary.material_counts.push_back({material_iterator->first, material_iterator->second});
+        ++material_iterator;
+    }
+
+    void finalize_one_removed_material() {
+        if (removed_iterator == removed_material_counts.cend()) {
+            changed_column_iterator = changed_columns.cbegin();
+            phase = Phase::finalize_changed_columns;
+            return;
+        }
+        add_prepared_bytes(80U);
+        summary.removed_material_counts.push_back({removed_iterator->first, removed_iterator->second});
+        ++removed_iterator;
+    }
+
+    void finalize_one_changed_column() {
+        if (changed_column_iterator == changed_columns.cend()) {
+            phase = Phase::verify_source;
+            return;
+        }
+        add_prepared_bytes(80U);
+        summary.changed_columns.push_back(
+            {changed_column_iterator->first, changed_column_iterator->second});
+        ++changed_column_iterator;
+    }
+
+    void process_one() {
+        if (phase == Phase::enumerate_columns) enumerate_one_column();
+        else if (phase == Phase::project_column) project_one_column();
+        else if (phase == Phase::begin_cell_compilation) begin_cell_compilation();
+        else if (phase == Phase::compile_cells) compile_one_cell();
+        else if (phase == Phase::begin_finalization) begin_finalization();
+        else if (phase == Phase::finalize_operations) finalize_one_operation();
+        else if (phase == Phase::finalize_materials) finalize_one_material();
+        else if (phase == Phase::finalize_removed_materials) finalize_one_removed_material();
+        else if (phase == Phase::finalize_changed_columns) finalize_one_changed_column();
+        else {
+            check_source_identity();
+            status = NativeTerrainEditCompileJobStatus::completed;
+            progress.status = status;
+        }
+    }
+};
+
+NativeTerrainEditCompileJob::NativeTerrainEditCompileJob(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+
+NativeTerrainEditCompileJob::NativeTerrainEditCompileJob(
+    NativeTerrainEditCompileJob &&) noexcept = default;
+
+NativeTerrainEditCompileJob &NativeTerrainEditCompileJob::operator=(
+    NativeTerrainEditCompileJob &&) noexcept = default;
+
+NativeTerrainEditCompileJob::~NativeTerrainEditCompileJob() = default;
+
+NativeTerrainEditCompileJobStatus NativeTerrainEditCompileJob::status() const noexcept {
+    return impl_ ? impl_->status : NativeTerrainEditCompileJobStatus::cancelled;
+}
+
+const NativeTerrainEditCompileProgress &NativeTerrainEditCompileJob::progress() const noexcept {
+    static const NativeTerrainEditCompileProgress empty{
+        NativeTerrainEditCompileJobStatus::cancelled, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U};
+    return impl_ ? impl_->progress : empty;
+}
+
+std::optional<NativeTerrainEditCompileRejectReason>
+NativeTerrainEditCompileJob::reject_reason() const noexcept {
+    return impl_ ? impl_->rejection : std::nullopt;
+}
+
+std::size_t NativeTerrainEditCompileJob::retained_entries_for_off_worker_destruction() const noexcept {
+    if (!impl_) return 0U;
+    return impl_->targets.size() + impl_->pending.size() + impl_->durable_cache.size()
+        + impl_->operations.size() + impl_->summary.legacy_changed_cells.size()
+        + impl_->summary.legacy_changed_columns.size() + impl_->summary.skylight_columns.size()
+        + impl_->summary.fluid_transition_columns.size() + impl_->material_counts.size()
+        + impl_->removed_material_counts.size() + impl_->changed_columns.size();
+}
+
+void NativeTerrainEditCompileJob::advance(const std::size_t max_work_units) {
+    if (!impl_ || impl_->status != NativeTerrainEditCompileJobStatus::running) return;
+    if (max_work_units == 0U) {
+        impl_->fail(NativeTerrainEditCompileRejectReason::invalid_request);
+        return;
+    }
+    try {
+        impl_->check_source_identity();
+        ++impl_->progress.advance_calls;
+        std::size_t processed = 0U;
+        while (processed < max_work_units
+            && impl_->status == NativeTerrainEditCompileJobStatus::running) {
+            impl_->process_one();
+            ++processed;
+            ++impl_->progress.work_units;
+        }
+    } catch (const NativeTerrainEditCompileRejected &error) {
+        impl_->fail(error.reason());
+    } catch (const std::invalid_argument &) {
+        impl_->fail(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+}
+
+void NativeTerrainEditCompileJob::cancel() noexcept {
+    if (!impl_ || impl_->status != NativeTerrainEditCompileJobStatus::running) return;
+    impl_->status = NativeTerrainEditCompileJobStatus::cancelled;
+    impl_->progress.status = impl_->status;
+}
+
+std::optional<NativeTerrainEditCompiledBatch>
+NativeTerrainEditCompileJob::take_completed_batch() {
+    if (!impl_ || impl_->status != NativeTerrainEditCompileJobStatus::completed) {
+        return std::nullopt;
+    }
+    impl_->status = NativeTerrainEditCompileJobStatus::result_taken;
+    impl_->progress.status = impl_->status;
+    return NativeTerrainEditCompiledBatch(
+        std::move(impl_->operations), std::move(impl_->summary));
+}
+
+NativeTerrainEditCompileJob NativeTerrainEditResumableCompiler::begin(
+    NativeTerrainEditCompileRequest request) {
+    auto impl = std::make_unique<NativeTerrainEditCompileJob::Impl>(std::move(request));
+    try {
+        impl->initialize();
+    } catch (const NativeTerrainEditCompileRejected &error) {
+        impl->fail(error.reason());
+    }
+    return NativeTerrainEditCompileJob(std::move(impl));
 }
 
 } // namespace voxel::world_backend

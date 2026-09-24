@@ -137,12 +137,18 @@ const selectedTests = [
 const runnerPath = fileURLToPath(import.meta.url);
 const trackedInputs = [...coreSources,
   ...manifest.coreHeaders.map(path => join(backend, path)),
-  ...selectedTests, manifestPath, runnerPath].sort();
+  ...selectedTests,
+  manifestPath,
+  runnerPath,
+  resolve(project, 'scripts/testing/native_world/N3NativeTerrainSurfaceDeformationOracleContract.gd'),
+  resolve(project, 'tools/run-n3-native-terrain-surface-deformation-oracle.mjs'),
+].sort();
 const sourcesBefore = trackedInputs.map(record);
 const commitBefore = git(['rev-parse', 'HEAD']);
 const branch = git(['branch', '--show-current']);
 const statusBefore = git(['status', '--short']);
-if (statusBefore) throw new Error('focused native receipt requires a clean worktree');
+const allowDirtyDevelopment = process.argv.includes('--allow-dirty-development');
+if (statusBefore && !allowDirtyDevelopment) throw new Error('focused native receipt requires a clean worktree');
 
 const cl = where('cl.CMD');
 const clang = join(llvmRoot, 'bin', 'clang-cl.exe');
@@ -254,6 +260,7 @@ if (commitAfter !== commitBefore || statusAfter !== statusBefore
 }
 const receipt = {
   schema: 'native-terrain-edit-shape-focused-receipt/v1',
+  evidenceClass: statusBefore ? 'development-diagnostic-dirty-source' : 'clean-source-attested',
   status,
   runName,
   startedFrom: { commit: commitBefore, branch, status: statusBefore },
