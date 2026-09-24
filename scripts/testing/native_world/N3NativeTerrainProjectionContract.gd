@@ -202,9 +202,9 @@ func run_contract() -> Dictionary:
 		"vertical cap")
 	check(page.project_surfaces(request) == result, "recovery after vertical cap")
 	var read_scan := {"startCell":Vector3i(x,10,z),"maxUpCells":8,
-		"maxDownCells":8,"intent":"gameplay","semanticRevision":1}
+		"maxDownCells":7,"intent":"gameplay","semanticRevision":1}
 	invalid = empty_request()
-	invalid.surfaceProjections = repeated(read_scan, 4096)
+	invalid.walkableProjections = repeated(read_scan, 4096)
 	failed(page.project_surfaces(invalid), "projection total cell-read limit",
 		"cell-read cap")
 	check(page.project_surfaces(request) == result, "recovery after cell-read cap")
