@@ -370,8 +370,12 @@ func run() -> void:
 	for step in range(5):
 		native_drained = step_service.drain_step(retirement_evidence(true))
 		if native_drained.get("cleanupComplete") == true: break
-	check(native_drained.get("cleanupComplete") == true,
-		"native-step failure cannot be declared terminal before physical drain proof")
+	check(native_drained.get("status") == "failed"
+			and native_drained.get("cleanupComplete") == true
+			and native_drained.get("retirementReceipt", {}).get("nativeRetirementValidated") == true
+			and step_service.snapshot().get("state") == "failed"
+			and step_owner.drain_count == 3,
+		"native-step failure reaches terminal failure only after bounded native retirement proof")
 	var report := {"schema":"n3-native-voxel-publication-service/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
 		"evidenceLevel":"synthetic focused orchestration contract",

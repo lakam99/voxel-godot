@@ -477,7 +477,8 @@ func stop() -> Dictionary:
 	if _state == "new":
 		_state = "drained"
 		return {"status":"ready", "drained":true}
-	if _state == "active":
+	if _state == "active" or (_state == "failed" and _backend != null \
+			and _publisher != null and _artifact_requests != null):
 		return request_stop()
 	if _state == "stopping_async":
 		return drain_step()
@@ -497,21 +498,26 @@ func stop() -> Dictionary:
 ## queued blocks/windows have been released.
 func request_stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
-	if _state == "stopping_async":
-		return {"status":"pending", "reason":"native_owner_retirement_in_progress"}
-	if _state != "active": return {"status":"failed", "reason":"native_owner_not_active_for_async_stop"}
-	_async_stop_requested = true
-	_state = "stopping_async"
+	var failed_owner_is_recoverable := _state == "failed" and _backend != null \
+		and _publisher != null and _artifact_requests != null
+	if _state != "active" and _state != "stopping_async" \
+			and not failed_owner_is_recoverable:
+		return {"status":"failed", "reason":"native_owner_not_active_for_async_stop",
+			"ownerState":_state, "backendInstanceId":_backend.get_instance_id() if _backend != null else 0}
+	if _state != "stopping_async":
+		_async_stop_requested = true
+		_state = "stopping_async"
 	var artifacts: Dictionary = _artifact_requests.request_stop()
 	if artifacts.get("status") == "failed":
-		_failure = String(artifacts.get("reason", "native_artifact_stop_request_failed"))
-		return {"status":"failed", "reason":_failure}
+		return {"status":"failed", "reason":"native_artifact_stop_request_failed",
+			"cleanupReason":String(artifacts.get("reason", "unknown")), "failure":_failure}
 	var publisher: Dictionary = _publisher.request_stop()
 	if publisher.get("status") == "failed":
-		_failure = String(publisher.get("reason", "native_publisher_stop_request_failed"))
-		return {"status":"failed", "reason":_failure}
+		return {"status":"failed", "reason":"native_publisher_stop_request_failed",
+			"cleanupReason":String(publisher.get("reason", "unknown")), "failure":_failure}
 	return {"status":"pending", "reason":"native_owner_retirement_requested",
-		"ownerGeneration":_owner_generation, "sourceIdentity":_source_identity.duplicate(true)}
+		"failure":_failure, "ownerGeneration":_owner_generation,
+		"sourceIdentity":_source_identity.duplicate(true)}
 
 func drain_step() -> Dictionary:
 	if _state == "stopping_async":

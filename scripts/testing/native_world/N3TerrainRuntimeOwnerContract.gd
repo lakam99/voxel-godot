@@ -389,9 +389,27 @@ func run() -> void:
 			"cellStatus":exported.get("status"), "numericStatus":numeric.get("status"),
 			"tickStatus":tick.get("status"),
 			"nativeRevision":snapshot.backend.get("terrainDeltaRevision")})
+	# Simulate a fatal failure reported by the real site-admission authority after
+	# this owner has been activated and has accepted native demand. The owner must
+	# retain the backend until explicit incremental retirement completes.
+	owner._admission._fatal = "contract_active_advance_failure"
+	var active_failure: Dictionary = owner.advance()
+	observations.append({"activeFailure":active_failure,
+		"ownerState":owner.snapshot().get("state"),
+		"ownerFailure":owner.snapshot().get("failure"),
+		"ownerBackendInstanceId":owner.snapshot().get("backendInstanceId", 0),
+		"admissionFailure":owner._admission.stats().get("failure", "")})
+	check(active_failure.get("status") == "failed"
+		and owner.snapshot().get("state") == "failed"
+		and owner.snapshot().get("failure") == "contract_active_advance_failure"
+		and int(owner.snapshot().get("backendInstanceId", 0)) != 0,
+		"active owner failure preserves original reason and retains resources for cleanup")
 	var stop_requested: Dictionary = owner.request_stop()
 	check(stop_requested.get("status") == "pending",
-		"asynchronous stop request is non-blocking")
+		"recoverable active failure accepts a non-blocking stop request")
+	check(stop_requested.get("failure") == "contract_active_advance_failure"
+		and owner.snapshot().get("state") == "stopping_async",
+		"failure identity survives transition into asynchronous cleanup")
 	var stopped: Dictionary = {"status":"pending"}
 	var async_stop_steps := 0
 	for frame in range(600):
