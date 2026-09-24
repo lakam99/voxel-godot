@@ -2,6 +2,8 @@ extends RefCounted
 class_name NativeTerrainDemandPlanner
 
 const REPLACEMENT := preload("res://scripts/terrain/NativeTerrainDemandReplacement.gd")
+const MESH_LAYOUT_BUILDER := preload("res://scripts/terrain/NativeTerrainCollisionMeshLayoutBuilder.gd")
+const MESH_LAYOUT_LEASE := preload("res://scripts/terrain/NativeTerrainMeshLayoutRequestLease.gd")
 
 ## Pure N3 demand planning. Sources reference-count one data-block union; only
 ## one publisher/native consumer owns that union. No engine or backend calls.
@@ -28,6 +30,8 @@ var _applied: Dictionary = {}
 var _issued: Dictionary = {}
 var _next_ticket := 1
 var _replacement
+var _mesh_layout_builder
+var _mesh_layout_lease
 var _incremental_active := false
 var _accepted_plan: Dictionary = {}
 
@@ -38,6 +42,7 @@ func setup(consumer_id: int) -> Dictionary:
 	_replacement = REPLACEMENT.new()
 	if _replacement.setup(consumer_id).get("status") != "ready":
 		return {"status":"failed", "reason":"replacement_setup_failed"}
+	_mesh_layout_builder = MESH_LAYOUT_BUILDER.new()
 	_accepted_plan = _empty_plan()
 	return {"status":"ready", "consumerId":_consumer_id}
 
@@ -48,6 +53,8 @@ func begin_replace_sources(primary: Dictionary, other_viewers: Array[Dictionary]
 		vertical_bounds: Vector2i, request_lease, request_revision: int) -> Dictionary:
 	if _consumer_id <= 0:
 		return {"status":"failed", "reason":"planner_not_configured"}
+	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
+		return {"status":"pending", "reason":"mesh_layout_transaction_active"}
 	if not _issued.is_empty():
 		return {"status":"pending", "reason":"delta_ack_pending", "ticket":_issued.ticket}
 	var result: Dictionary = _replacement.begin(primary, other_viewers, retained_chunks,
@@ -105,7 +112,8 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 		vertical_bounds: Vector2i) -> Dictionary:
 	if _consumer_id <= 0:
 		return {"status":"failed", "reason":"planner_not_configured"}
-	if _incremental_active or _replacement.has_pending_retirement():
+	if _incremental_active or _replacement.has_pending_retirement() \
+			or _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
 		return {"status":"pending", "reason":"incremental_replacement_active"}
 	if not _issued.is_empty():
 		return {"status":"pending", "reason":"delta_ack_pending", "ticket":_issued.ticket}
@@ -193,9 +201,58 @@ func required_collision_mesh_blocks() -> Dictionary:
 	return {"status":"ready", "revision":_demand_revision,
 		"closureToken":_closure_token, "blocks":blocks}
 
+## Begins a bounded replacement transaction for the full logical mesh layout.
+## The final `layout` value is transferred to the caller; do not mutate it.
+func begin_collision_mesh_window_layout() -> Dictionary:
+	if _consumer_id <= 0 or _demand_revision <= 0:
+		return {"status":"pending", "reason":"mesh_demand_unset"}
+	if _incremental_active:
+		return {"status":"pending", "reason":"demand_replacement_active"}
+	if _mesh_layout_builder.is_active():
+		return {"status":"pending", "reason":"mesh_layout_already_pending",
+			"token":_mesh_layout_builder.current_token()}
+	if not _mesh_window_layout.is_empty() \
+			and _mesh_window_layout_revision != _demand_revision:
+		_mesh_layout_builder.set_retired_layout(_mesh_window_layout)
+		_mesh_window_layout = {}
+		_mesh_window_layout_revision = -1
+	_mesh_layout_lease = MESH_LAYOUT_LEASE.new()
+	var required_order: Array = _accepted_plan.get("requiredOrder", [])
+	if not _mesh_layout_lease.acquire(required_order, _demand_revision, _closure_token):
+		_mesh_layout_lease = null
+		return {"status":"failed", "reason":"mesh_layout_snapshot_lease_failed"}
+	var started: Dictionary = _mesh_layout_builder.begin(required_order,
+		_demand_revision, _closure_token, _mesh_layout_lease)
+	if started.get("status") != "pending":
+		_mesh_layout_lease.release_after_drain()
+		_mesh_layout_lease = null
+	return started
+
+func advance_collision_mesh_window_layout() -> Dictionary:
+	if _mesh_layout_builder == null:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	_mesh_layout_builder.revoke_if_stale(
+		_accepted_plan.get("requiredOrder", []), _demand_revision, _closure_token)
+	var result: Dictionary = _mesh_layout_builder.advance()
+	if result.get("status") == "ready" or result.get("status") == "failed":
+		if _mesh_layout_lease != null:
+			_mesh_layout_lease.release_after_drain()
+		_mesh_layout_lease = null
+	return result
+
+func cancel_collision_mesh_window_layout(token: int) -> Dictionary:
+	if _mesh_layout_builder == null:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	var result: Dictionary = _mesh_layout_builder.cancel(token)
+	if result.get("status") == "pending" and _mesh_layout_lease != null:
+		_mesh_layout_lease.invalidate()
+	return result
+
 func collision_mesh_window_layout() -> Dictionary:
 	if _consumer_id <= 0 or _demand_revision <= 0:
 		return {"status":"pending", "reason":"mesh_demand_unset"}
+	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
+		return {"status":"pending", "reason":"mesh_layout_transaction_active"}
 	if _mesh_window_layout_revision == _demand_revision:
 		return _mesh_window_layout.duplicate(true)
 	var buckets := {}

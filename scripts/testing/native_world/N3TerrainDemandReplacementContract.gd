@@ -63,6 +63,22 @@ func _step(planner, accepted_while_pending: Dictionary = {}) -> Dictionary:
 			"accepted sources, desired/applied sets and closure stay unchanged while candidate is pending")
 	return result
 
+func _layout_step(planner, accepted_snapshot: Dictionary = {}) -> Dictionary:
+	var result: Dictionary = planner.advance_collision_mesh_window_layout()
+	var work_ops := int(result.get("workOps", -1))
+	advance_count += 1
+	check(work_ops >= 0 and work_ops <= WORK_LIMIT
+		and int(result.get("maxWorkOps", -1)) == WORK_LIMIT,
+		"layout advance, including terminal ticks, respects the hard work bound")
+	check(_sum_breakdown(result) == work_ops,
+		"layout work breakdown exactly accounts for every operation")
+	observed_max_work_ops = maxi(observed_max_work_ops, work_ops)
+	total_work_ops += maxi(0, work_ops)
+	if not accepted_snapshot.is_empty():
+		_assert_snapshot(planner, accepted_snapshot,
+			"layout construction and cancellation leave accepted demand unchanged")
+	return result
+
 func _drive(planner, snapshot: Dictionary = {}, max_advances := 20000) -> Dictionary:
 	var result := {}
 	for _index in range(max_advances):
@@ -72,6 +88,15 @@ func _drive(planner, snapshot: Dictionary = {}, max_advances := 20000) -> Dictio
 			return result
 		await process_frame
 	return {"status":"timeout", "reason":"demand_replacement_contract_timeout"}
+
+func _drive_layout(planner, snapshot: Dictionary = {}, max_advances := 20000) -> Dictionary:
+	var result := {}
+	for _index in range(max_advances):
+		result = _layout_step(planner, snapshot)
+		if result.get("status") == "ready" or result.get("status") == "failed":
+			return result
+		await process_frame
+	return {"status":"timeout", "reason":"mesh_layout_contract_timeout"}
 
 func _make_request(primary: Dictionary = {}, viewers: Array[Dictionary] = [],
 		retained: Array[Vector2i] = [], foreground: Array[Vector2i] = [],
@@ -84,6 +109,10 @@ func _begin(planner, request: Dictionary) -> Dictionary:
 	return planner.begin_replace_sources(request.primary, request.viewers,
 		request.retained, request.foreground, request.bounds,
 		request.lease, request.revision)
+
+func _begin_sync(planner, request: Dictionary) -> Dictionary:
+	return planner.replace_sources(request.primary, request.viewers,
+		request.retained, request.foreground, request.bounds)
 
 func run() -> void:
 	var planner = PLANNER.new()
@@ -261,6 +290,49 @@ func run() -> void:
 	_assert_snapshot(planner, before_revoke,
 		"revoked request drain preserves accepted and applied state")
 
+	# The staged window-layout builder reproduces the compatibility layout
+	# exactly, and cancellation/retry leaves the accepted demand snapshot alone.
+	var layout_request := _make_request(
+		{"position":Vector3.ZERO, "distance":80}, [], [], [], Vector2i(-16, 48), 1)
+	var sync_layout_planner = PLANNER.new()
+	sync_layout_planner.setup(91)
+	_begin_sync(sync_layout_planner, layout_request)
+	var expected_layout: Dictionary = sync_layout_planner.collision_mesh_window_layout()
+	var layout_planner = PLANNER.new()
+	layout_planner.setup(91)
+	_begin_sync(layout_planner, layout_request)
+	var before_layout := _accepted_snapshot(layout_planner)
+	var layout_begin: Dictionary = layout_planner.begin_collision_mesh_window_layout()
+	check(layout_begin.get("status") == "pending"
+		and layout_begin.get("reason") == "mesh_layout_started",
+		"logical mesh layout starts under a revision/token-bound planner lease")
+	for _index in range(2):
+		var partial_layout: Dictionary = _layout_step(layout_planner, before_layout)
+		check(partial_layout.get("status") == "pending",
+			"large mesh layout remains pending across bounded construction steps")
+		await process_frame
+	var cancelled_layout_begin: Dictionary = layout_planner.cancel_collision_mesh_window_layout(
+		int(layout_begin.token))
+	var cancelled_layout: Dictionary = await _drive_layout(layout_planner, before_layout)
+	check(cancelled_layout_begin.get("status") == "pending"
+		and cancelled_layout.get("status") == "ready"
+		and cancelled_layout.get("cancelled") == true,
+		"layout cancellation incrementally retires partial buckets and sort scratch")
+	var retry_layout_begin: Dictionary = layout_planner.begin_collision_mesh_window_layout()
+	var retry_layout: Dictionary = await _drive_layout(layout_planner, before_layout)
+	check(retry_layout_begin.get("status") == "pending"
+		and retry_layout.get("status") == "ready"
+		and retry_layout.get("layout") == expected_layout,
+		"layout retry matches every legacy schema, sorted block, window, and closure token")
+	var layout_retire_steps := 0
+	while layout_planner._mesh_layout_builder.has_pending_retirement() \
+			and layout_retire_steps < 20000:
+		_layout_step(layout_planner, before_layout)
+		layout_retire_steps += 1
+		await process_frame
+	check(not layout_planner._mesh_layout_builder.has_pending_retirement(),
+		"transferred layout scratch is released incrementally after atomic publication")
+
 	var report := {"schema":"n3-terrain-demand-replacement-contract/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
 		"evidenceLevel":"focused incremental pure planner contract",
@@ -275,10 +347,13 @@ func run() -> void:
 				and planner._replacement._job.get("sortSrc", []).is_empty()
 				and planner._replacement._job.get("sortDst", []).is_empty(),
 			"negativeCoordinatesAndVerticalHalo":has_negative and has_lower_input and has_upper_input,
-			"revocationRejected":revoked.get("reason") == "demand_request_lease_revoked"},
+			"revocationRejected":revoked.get("reason") == "demand_request_lease_revoked",
+			"layoutCancelAndRetry":cancelled_layout.get("cancelled", false)
+				and retry_layout.get("layout") == expected_layout,
+			"layoutRetirementDrained":not layout_planner._mesh_layout_builder.has_pending_retirement()},
 		"boundedWorkFollowUps":[
 			"required_collision_mesh_blocks() still copies and sorts the entire demanded mesh set synchronously; current consumers include NativeTerrainTriangleArtifactProducer and NativeTerrainArtifactRequests.",
-			"collision_mesh_window_layout() still constructs and sorts its full per-window layout synchronously. Budget both enumerations before VTR wiring."],
+			"The legacy collision_mesh_window_layout() compatibility method remains synchronous. Migrate callers to begin/advance_collision_mesh_window_layout() before VTR wiring."],
 		"doesNotProve":"No VoxelTerrain/runtime integration, page/queue admission, publication/collision, or headed gameplay/performance acceptance."}
 	var report_path := OS.get_environment("VWB_TERRAIN_DEMAND_REPLACEMENT_REPORT")
 	if not report_path.is_empty():
