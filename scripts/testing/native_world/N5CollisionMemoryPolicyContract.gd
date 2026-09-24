@@ -38,6 +38,39 @@ class IncompletePolicy extends RefCounted:
 		return {}
 
 
+class MutablePolicy extends RefCounted:
+	var backing
+	var exposed_limits := {}
+	var exposed_formula := ""
+	var exposed_identity := ""
+
+	func _init(value) -> void:
+		backing = value
+		exposed_limits = value.limits()
+		exposed_formula = value.formula_version()
+		exposed_identity = value.policy_identity()
+
+	func is_configured() -> bool:
+		return true
+
+	func estimate_window(rows: Array) -> Dictionary:
+		return backing.estimate_window(rows)
+
+	func limits() -> Dictionary:
+		return exposed_limits.duplicate(true)
+
+	func formula_version() -> String:
+		return exposed_formula
+
+	func policy_identity() -> String:
+		return exposed_identity
+
+	func mutate_after_setup() -> void:
+		exposed_limits.maxWindowChargedBytes = 1
+		exposed_limits.maxAggregateChargedBytes = 1
+		exposed_identity = "mutated-policy-identity"
+
+
 var failures: Array[String] = []
 
 
@@ -59,16 +92,52 @@ func _config(window_cap: int, aggregate_cap: int,
 		"maxReservations":max_reservations}
 
 
-func _ack(ledger_epoch: String, token: String, owner: String, window: String,
+func _ack(ledger_epoch: String, ledger_identity: String, token: String,
+		owner: String, window: String,
 		queued_physics: int, queued_process: int, ids: Array,
 		physics_frame := 11, process_frame := 21) -> Dictionary:
 	return {"schema":ADMISSION.RELEASE_ACK_SCHEMA, "ledgerEpoch":ledger_epoch,
+		"ledgerIdentity":ledger_identity,
 		"reservationToken":token, "ownerEpoch":owner, "windowToken":window,
 		"queuedPhysicsFrame":queued_physics, "queuedProcessFrame":queued_process,
 		"physicsFrame":physics_frame, "processFrame":process_frame,
 		"allBodiesAbsent":true, "deferredEntriesReleased":true,
 		"absentBodyInstanceIds":ids.duplicate(),
 		"observedColliderInstanceIds":[]}
+
+
+func _reserved_fixture(policy, suffix: String, rows: Array) -> Dictionary:
+	var ledger = ADMISSION.new()
+	var setup: Dictionary = ledger.setup(policy, "ledger-%s" % suffix,
+		"instance-%s" % suffix)
+	if setup.get("status") != "ready":
+		return {"status":"failed", "ledger":ledger, "setup":setup}
+	var reservation: Dictionary = ledger.reserve_candidate("owner", "window",
+		"candidate", rows)
+	return {"status":reservation.get("status"), "ledger":ledger,
+		"reservation":reservation}
+
+
+func _inject_candidate_clone(ledger, source_token: String,
+		reservation_id: String, window_token: String) -> String:
+	var sequence: int = ledger._next_sequence
+	var token: String = ledger._token_for_sequence(sequence)
+	var record: Dictionary = ledger._reservations[source_token].duplicate(true)
+	var semantic_key: String = ledger._semantic_key(String(record.ownerEpoch),
+		window_token, reservation_id)
+	record.token = token
+	record.sequence = sequence
+	record.windowToken = window_token
+	record.reservationId = reservation_id
+	record.semanticKey = semantic_key
+	ledger._reservations[token] = record
+	ledger._reservation_keys[semantic_key] = token
+	ledger._window_charged[window_token] = int(
+		ledger._window_charged.get(window_token, 0)) + int(record.chargedBytes)
+	ledger._total_charged += int(record.chargedBytes)
+	ledger._last_issued_sequence = sequence
+	ledger._next_sequence = sequence + 1
+	return token
 
 
 func _run() -> void:
@@ -153,20 +222,36 @@ func _run() -> void:
 	_check(exact_policy.configure(_config(16928, 16928, 4)).status == "ready",
 		"test policy admits the formula-exact two-generation overlap")
 	var incomplete_ledger = ADMISSION.new()
-	_check(incomplete_ledger.setup(IncompletePolicy.new(), "incomplete").reason \
+	_check(incomplete_ledger.setup(IncompletePolicy.new(), "incomplete",
+		"instance-incomplete").reason \
 		== "collision_memory_admission_setup_invalid",
 		"duck-typed policy setup requires formula and identity methods up front")
+	var missing_nonce_ledger = ADMISSION.new()
+	_check(missing_nonce_ledger.setup(exact_policy, "ledger-missing-nonce", "").reason \
+		== "collision_memory_admission_setup_invalid",
+		"ledger setup requires an explicit unique instance nonce")
 	var ledger = ADMISSION.new()
-	_check(ledger.setup(exact_policy, "ledger-A").status == "ready",
+	_check(ledger.setup(exact_policy, "ledger-A", "instance-A").status == "ready",
 		"ledger binds one immutable configured policy")
-	_check(ledger.setup(exact_policy, "ledger-B").status == "failed",
+	_check(ledger.setup(exact_policy, "ledger-B", "instance-B").status == "failed",
 		"ledger setup cannot be replaced")
 	var row_spec := [{"vertexCount":100, "expectedHit":true}]
+	var mutable_source = MutablePolicy.new(exact_policy)
+	var frozen_ledger = ADMISSION.new()
+	_check(frozen_ledger.setup(mutable_source, "ledger-frozen",
+		"instance-frozen").status == "ready",
+		"ledger captures a canonical policy value at setup")
+	mutable_source.mutate_after_setup()
+	_check(frozen_ledger.reserve_candidate("owner", "window", "candidate",
+		row_spec).status == "ready" \
+		and frozen_ledger.snapshot().policyIdentity == exact_policy.policy_identity(),
+		"mutable source changes cannot alter frozen limits or identity")
 	var foreign_formula = ADMISSION.new()
-	foreign_formula.setup(ForeignFormulaPolicy.new(exact_policy), "foreign-formula")
-	_check(foreign_formula.reserve_candidate("owner", "window", "candidate",
-		row_spec).reason == "collision_memory_formula_identity_mismatch",
-		"admission rejects a forged or mismatched formula receipt")
+	_check(foreign_formula.setup(ForeignFormulaPolicy.new(exact_policy),
+		"foreign-formula", "foreign-instance").status == "ready" \
+		and foreign_formula.reserve_candidate("owner", "window", "candidate",
+			row_spec).status == "ready",
+		"admission uses its frozen canonical policy instead of a mutable wrapper")
 	var old: Dictionary = ledger.reserve_candidate("owner-A", "window-A", "old", row_spec)
 	_check(old.status == "ready" and old.chargedBytes == 8464,
 		"candidate reserves exact bytes")
@@ -207,6 +292,11 @@ func _run() -> void:
 		== "collision_memory_body_count_mismatch" \
 		and ledger.snapshot() == before_bad_body_count,
 		"wrong body cardinality cannot construct or mutate a reservation")
+	var before_duplicate_body: Dictionary = ledger.snapshot()
+	_check(ledger.mark_candidate_constructed(replacement.token, "owner-A", [909]).reason \
+		== "collision_memory_body_owner_collision" \
+		and ledger.snapshot() == before_duplicate_body,
+		"one body instance cannot belong to two active reservations")
 	ledger.mark_candidate_constructed(replacement.token, "owner-A", [303])
 	_check(ledger.cancel_unconstructed(replacement.token, "owner-A").status == "failed",
 		"constructed resources cannot bypass deferred-free acknowledgement")
@@ -214,10 +304,11 @@ func _run() -> void:
 		10, 20)
 	_check(deferred.status == "ready" \
 		and ledger.snapshot().stateCounts.retired_deferred == 1 \
+		and ledger.snapshot().bodyOwnerCount == 2 \
 		and ledger.snapshot().totalChargedBytes == 16928,
-		"deferred resources retain their full charge")
-	var valid_ack := _ack("ledger-A", replacement.token, "owner-A", "window-A",
-		10, 20, [303])
+		"deferred resources retain their full charge and body ownership")
+	var valid_ack := _ack("ledger-A", String(ledger.snapshot().ledgerIdentity),
+		replacement.token, "owner-A", "window-A", 10, 20, [303])
 	var early_ack: Dictionary = valid_ack.duplicate(true)
 	early_ack.physicsFrame = 10
 	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
@@ -253,13 +344,32 @@ func _run() -> void:
 	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
 		observed_ack).reason == "collision_memory_retired_collider_observed",
 		"an observed retired collider retains the reservation")
+	var duplicate_observed_ack: Dictionary = valid_ack.duplicate(true)
+	duplicate_observed_ack.observedColliderInstanceIds = [404, 404]
+	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
+		duplicate_observed_ack).reason \
+			== "collision_memory_observed_body_ids_invalid",
+		"duplicate observed collider IDs cannot serve as release proof")
+	var nonpositive_observed_ack: Dictionary = valid_ack.duplicate(true)
+	nonpositive_observed_ack.observedColliderInstanceIds = [0]
+	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
+		nonpositive_observed_ack).reason \
+			== "collision_memory_observed_body_ids_invalid",
+		"nonpositive observed collider IDs cannot serve as release proof")
+	var string_observed_ack: Dictionary = valid_ack.duplicate(true)
+	string_observed_ack.observedColliderInstanceIds = ["404"]
+	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
+		string_observed_ack).reason \
+			== "collision_memory_observed_body_ids_invalid",
+		"non-integer observed collider IDs cannot serve as release proof")
 	var wrong_ids: Dictionary = valid_ack.duplicate(true)
 	wrong_ids.absentBodyInstanceIds = [101]
 	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
 		wrong_ids).reason == "collision_memory_release_body_set_mismatch",
 		"partial body absence cannot release bytes")
 	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
-		valid_ack).status == "ready" and ledger.snapshot().totalChargedBytes == 8464,
+		valid_ack).status == "ready" and ledger.snapshot().totalChargedBytes == 8464 \
+		and ledger.snapshot().bodyOwnerCount == 1,
 		"exact later physics/process/body acknowledgement releases deferred bytes")
 	_check(ledger.acknowledge_deferred_release(replacement.token, "owner-A",
 		valid_ack).reason == "collision_memory_reservation_stale",
@@ -268,16 +378,62 @@ func _run() -> void:
 		"live reservations keep drain pending")
 	_check(ledger.defer_release(old.token, "owner-A", 30, 40).status == "ready",
 		"live entry enters deferred state during stop")
-	var old_ack := _ack("ledger-A", old.token, "owner-A", "window-A", 30, 40,
-		[909], 31, 41)
+	var old_ack := _ack("ledger-A", String(ledger.snapshot().ledgerIdentity),
+		old.token, "owner-A", "window-A", 30, 40, [909], 31, 41)
 	_check(ledger.acknowledge_deferred_release(old.token, "owner-A", old_ack).status \
 		== "ready" and ledger.drain_receipt().status == "ready",
 		"zero-reservation drain is ready only after the final exact acknowledgement")
 
+	var same_epoch_a = ADMISSION.new()
+	var same_epoch_b = ADMISSION.new()
+	same_epoch_a.setup(exact_policy, "shared-caller-epoch", "instance-shared-A")
+	same_epoch_b.setup(exact_policy, "shared-caller-epoch", "instance-shared-B")
+	var same_a: Dictionary = same_epoch_a.reserve_candidate("owner", "window",
+		"candidate", row_spec)
+	var same_b: Dictionary = same_epoch_b.reserve_candidate("owner", "window",
+		"candidate", row_spec)
+	same_epoch_a.mark_candidate_constructed(same_a.token, "owner", [601])
+	same_epoch_b.mark_candidate_constructed(same_b.token, "owner", [602])
+	same_epoch_a.defer_release(same_a.token, "owner", 1, 2)
+	same_epoch_b.defer_release(same_b.token, "owner", 1, 2)
+	var foreign_ledger_ack := _ack("shared-caller-epoch",
+		String(same_epoch_a.snapshot().ledgerIdentity), same_b.token, "owner",
+		"window", 1, 2, [602], 3, 4)
+	_check(same_a.token != same_b.token \
+		and same_epoch_a.snapshot().ledgerIdentity \
+			!= same_epoch_b.snapshot().ledgerIdentity \
+		and same_epoch_b.acknowledge_deferred_release(same_b.token, "owner",
+			foreign_ledger_ack).reason == "collision_memory_release_ack_invalid" \
+		and same_epoch_b.snapshot().bodyOwnerCount == 1,
+		"same-epoch ledgers have non-interchangeable tokens and acknowledgements")
+	var delimiter_a = ADMISSION.new()
+	var delimiter_b = ADMISSION.new()
+	delimiter_a.setup(exact_policy, "a:b", "c")
+	delimiter_b.setup(exact_policy, "a", "b:c")
+	var delimiter_reservation_a: Dictionary = delimiter_a.reserve_candidate(
+		"owner", "window", "candidate", row_spec)
+	var delimiter_reservation_b: Dictionary = delimiter_b.reserve_candidate(
+		"owner", "window", "candidate", row_spec)
+	_check(delimiter_a.snapshot().ledgerIdentity \
+		!= delimiter_b.snapshot().ledgerIdentity \
+		and delimiter_reservation_a.token != delimiter_reservation_b.token,
+		"length framing distinguishes colon-ambiguous ledger tuples")
+	var unicode_a = ADMISSION.new()
+	var unicode_b = ADMISSION.new()
+	unicode_a.setup(exact_policy, "雪:界", "δ")
+	unicode_b.setup(exact_policy, "雪", "界:δ")
+	var unicode_reservation_a: Dictionary = unicode_a.reserve_candidate(
+		"owner", "window", "candidate", row_spec)
+	var unicode_reservation_b: Dictionary = unicode_b.reserve_candidate(
+		"owner", "window", "candidate", row_spec)
+	_check(unicode_a.snapshot().ledgerIdentity != unicode_b.snapshot().ledgerIdentity \
+		and unicode_reservation_a.token != unicode_reservation_b.token,
+		"length framing distinguishes Unicode delimiter-ambiguous ledger tuples")
+
 	var one_byte_policy = POLICY.new()
 	one_byte_policy.configure(_config(8464, 8464))
 	var one_byte_ledger = ADMISSION.new()
-	one_byte_ledger.setup(one_byte_policy, "ledger-boundary")
+	one_byte_ledger.setup(one_byte_policy, "ledger-boundary", "instance-boundary")
 	_check(one_byte_ledger.reserve_candidate("owner", "window", "exact", row_spec).status \
 		== "ready", "exact per-window and aggregate boundary is admitted")
 	var over_row := [{"vertexCount":101, "expectedHit":true}]
@@ -296,18 +452,24 @@ func _run() -> void:
 	var capacity_policy = POLICY.new()
 	capacity_policy.configure(_config(16928, 16928, 1))
 	var capacity_ledger = ADMISSION.new()
-	capacity_ledger.setup(capacity_policy, "ledger-capacity")
+	capacity_ledger.setup(capacity_policy, "ledger-capacity", "instance-capacity")
 	capacity_ledger.reserve_candidate("owner", "window", "first", row_spec)
 	var before_capacity_replay: Dictionary = capacity_ledger.snapshot()
 	var capacity_replay: Dictionary = capacity_ledger.reserve_candidate("owner",
 		"window", "first", row_spec)
+	var capacity_invalid: Dictionary = capacity_ledger.reserve_candidate("owner",
+		"other", "invalid", [{"vertexCount":0, "expectedHit":true}])
+	var capacity_oversize: Dictionary = capacity_ledger.reserve_candidate("owner",
+		"other", "oversize", [{"vertexCount":769, "expectedHit":true}])
 	var capacity_new: Dictionary = capacity_ledger.reserve_candidate("owner",
 		"window", "second", row_spec)
 	_check(capacity_replay.reason == "collision_memory_reservation_duplicate" \
+		and capacity_invalid.reason == "collision_memory_row_invalid" \
+		and capacity_oversize.reason == "collision_memory_request_exceeds_window_cap" \
 		and capacity_new.reason == "collision_memory_reservation_capacity" \
 		and capacity_new.retryable == true \
 		and capacity_ledger.snapshot() == before_capacity_replay,
-		"semantic replay is classified before retryable reservation capacity")
+		"intrinsic invalidity and semantic replay precede retryable capacity")
 
 	var arithmetic_policy = POLICY.new()
 	var arithmetic_config := _config(POLICY.MAX_I64, POLICY.MAX_I64, 4)
@@ -317,7 +479,7 @@ func _run() -> void:
 	arithmetic_config.physicsPayloadMultiplier = 1
 	arithmetic_policy.configure(arithmetic_config)
 	var arithmetic_ledger = ADMISSION.new()
-	arithmetic_ledger.setup(arithmetic_policy, "ledger-arithmetic")
+	arithmetic_ledger.setup(arithmetic_policy, "ledger-arithmetic", "instance-arithmetic")
 	var huge_empty := [{"vertexCount":0, "expectedHit":false}]
 	var huge_first: Dictionary = arithmetic_ledger.reserve_candidate("owner",
 		"window", "first", huge_empty)
@@ -331,7 +493,7 @@ func _run() -> void:
 	var sequence_policy = POLICY.new()
 	sequence_policy.configure(_config(20000, 40000))
 	var sequence_ledger = ADMISSION.new()
-	sequence_ledger.setup(sequence_policy, "ledger-sequence")
+	sequence_ledger.setup(sequence_policy, "ledger-sequence", "instance-sequence")
 	sequence_ledger._last_issued_sequence = ADMISSION.MAX_I64 - 1
 	sequence_ledger._next_sequence = ADMISSION.MAX_I64
 	var before_sequence: Dictionary = sequence_ledger.snapshot()
@@ -341,16 +503,20 @@ func _run() -> void:
 		and sequence_ledger.snapshot() == before_sequence,
 		"reservation sequence exhaustion fails closed without state mutation")
 	var discontinuous_ledger = ADMISSION.new()
-	discontinuous_ledger.setup(sequence_policy, "ledger-discontinuous")
+	discontinuous_ledger.setup(sequence_policy, "ledger-discontinuous",
+		"instance-discontinuous")
 	discontinuous_ledger._last_issued_sequence = 1
 	var before_discontinuous: Dictionary = discontinuous_ledger.snapshot()
-	_check(discontinuous_ledger.reserve_candidate("owner", "window", "rewound",
-		row_spec).reason == "collision_memory_sequence_discontinuous" \
+	var discontinuous: Dictionary = discontinuous_ledger.reserve_candidate("owner",
+		"window", "rewound", row_spec)
+	_check(discontinuous.reason == "collision_memory_ledger_invariant" \
+		and discontinuous.detail == "sequence_continuity" \
 		and discontinuous_ledger.snapshot() == before_discontinuous,
-		"sequence rewind fails closed without mutation")
+		"sequence rewind fails the pre-mutation audit without mutation")
 
 	var collision_ledger = ADMISSION.new()
-	collision_ledger.setup(sequence_policy, "ledger-token-collision")
+	collision_ledger.setup(sequence_policy, "ledger-token-collision",
+		"instance-token-collision")
 	var first_collision_reservation: Dictionary = collision_ledger.reserve_candidate(
 		"owner", "window", "first", row_spec)
 	var first_record: Dictionary = collision_ledger._reservations[
@@ -359,13 +525,15 @@ func _run() -> void:
 		collision_ledger._next_sequence)
 	collision_ledger._reservations[prospective_token] = first_record.duplicate(true)
 	var before_token_collision: Dictionary = collision_ledger.snapshot()
-	_check(collision_ledger.reserve_candidate("owner", "other", "second",
-		row_spec).reason == "collision_memory_reservation_token_collision" \
+	var token_collision: Dictionary = collision_ledger.reserve_candidate("owner",
+		"other", "second", row_spec)
+	_check(token_collision.reason == "collision_memory_ledger_invariant" \
+		and token_collision.detail == "token_sequence" \
 		and collision_ledger.snapshot() == before_token_collision,
-		"active structural token collision fails closed before mutation")
+		"structural token corruption fails the pre-mutation audit")
 
 	var churn_ledger = ADMISSION.new()
-	churn_ledger.setup(sequence_policy, "ledger-churn")
+	churn_ledger.setup(sequence_policy, "ledger-churn", "instance-churn")
 	var churn_tokens := {}
 	for cycle in range(256):
 		var churn: Dictionary = churn_ledger.reserve_candidate("owner", "window",
@@ -393,20 +561,175 @@ func _run() -> void:
 
 	var corrupt_policy = POLICY.new()
 	corrupt_policy.configure(_config(20000, 40000))
-	var corrupt_ledger = ADMISSION.new()
-	corrupt_ledger.setup(corrupt_policy, "ledger-corrupt")
-	var corrupt: Dictionary = corrupt_ledger.reserve_candidate("owner", "window",
-		"candidate", row_spec)
-	corrupt_ledger._window_charged["window"] = 0
-	var before_corrupt_release: Dictionary = corrupt_ledger.snapshot()
-	_check(corrupt_ledger.cancel_unconstructed(corrupt.token, "owner").reason \
+	var epoch_identity_fixture := _reserved_fixture(corrupt_policy,
+		"identity-epoch", row_spec)
+	var epoch_identity_ledger = epoch_identity_fixture.ledger
+	epoch_identity_ledger._ledger_epoch = "corrupt-epoch"
+	var before_epoch_identity: Dictionary = epoch_identity_ledger.snapshot()
+	var epoch_identity_result: Dictionary = epoch_identity_ledger.reserve_candidate(
+		"owner", "other", "next", row_spec)
+	_check(epoch_identity_result.reason == "collision_memory_ledger_invariant" \
+		and epoch_identity_result.detail == "ledger_identity" \
+		and epoch_identity_ledger.snapshot() == before_epoch_identity,
+		"mutated ledger epoch fails derived-identity audit without mutation")
+	var nonce_identity_fixture := _reserved_fixture(corrupt_policy,
+		"identity-nonce", row_spec)
+	var nonce_identity_ledger = nonce_identity_fixture.ledger
+	nonce_identity_ledger._instance_nonce = "corrupt-nonce"
+	var before_nonce_identity: Dictionary = nonce_identity_ledger.snapshot()
+	var nonce_identity_result: Dictionary = nonce_identity_ledger.reserve_candidate(
+		"owner", "other", "next", row_spec)
+	_check(nonce_identity_result.reason == "collision_memory_ledger_invariant" \
+		and nonce_identity_result.detail == "ledger_identity" \
+		and nonce_identity_ledger.snapshot() == before_nonce_identity,
+		"mutated ledger nonce fails derived-identity audit without mutation")
+	var direct_identity_fixture := _reserved_fixture(corrupt_policy,
+		"identity-direct", row_spec)
+	var direct_identity_ledger = direct_identity_fixture.ledger
+	direct_identity_ledger._ledger_identity = "corrupt-ledger-identity"
+	var before_direct_identity: Dictionary = direct_identity_ledger.snapshot()
+	var direct_identity_result: Dictionary = direct_identity_ledger.reserve_candidate(
+		"owner", "other", "next", row_spec)
+	_check(direct_identity_result.reason == "collision_memory_ledger_invariant" \
+		and direct_identity_result.detail == "ledger_identity" \
+		and direct_identity_ledger.snapshot() == before_direct_identity,
+		"mutated ledger identity fails derived-identity audit without mutation")
+	var undercount_fixture := _reserved_fixture(corrupt_policy, "undercount", row_spec)
+	var undercount_ledger = undercount_fixture.ledger
+	undercount_ledger._total_charged = 1
+	var before_undercount: Dictionary = undercount_ledger.snapshot()
+	_check(undercount_ledger.reserve_candidate("owner", "other", "next",
+		row_spec).reason == "collision_memory_ledger_invariant" \
+		and undercount_ledger.snapshot() == before_undercount,
+		"nonzero aggregate undercount blocks reserve without mutation")
+	var coherent_charge_fixture := _reserved_fixture(corrupt_policy,
+		"coherent-charge", row_spec)
+	var coherent_charge_ledger = coherent_charge_fixture.ledger
+	var coherent_charge_token := String(coherent_charge_fixture.reservation.token)
+	var coherent_charge_record: Dictionary = \
+		coherent_charge_ledger._reservations[coherent_charge_token]
+	var coherent_charge_estimate: Dictionary = coherent_charge_record.estimate
+	coherent_charge_estimate.physicalChargedBytes = 1
+	coherent_charge_record.estimate = coherent_charge_estimate
+	coherent_charge_record.chargedBytes = 1
+	coherent_charge_ledger._reservations[coherent_charge_token] = \
+		coherent_charge_record
+	coherent_charge_ledger._total_charged = 1
+	coherent_charge_ledger._window_charged["window"] = 1
+	var before_coherent_charge: Dictionary = coherent_charge_ledger.snapshot()
+	_check(coherent_charge_ledger.reserve_candidate("owner", "other", "next",
+		row_spec).reason == "collision_memory_ledger_invariant" \
+		and coherent_charge_ledger.snapshot() == before_coherent_charge,
+		"canonical rows reject coherently forged nonzero charge undercount")
+	var extra_window_fixture := _reserved_fixture(corrupt_policy, "extra-window",
+		row_spec)
+	var extra_window_ledger = extra_window_fixture.ledger
+	extra_window_ledger._window_charged["foreign-window"] = 1
+	var before_extra_window: Dictionary = extra_window_ledger.snapshot()
+	_check(extra_window_ledger.cancel_unconstructed(
+		extra_window_fixture.reservation.token, "owner").reason \
+			== "collision_memory_ledger_invariant" \
+		and extra_window_ledger.snapshot() == before_extra_window,
+		"extra window charge key blocks release without mutation")
+	var missing_window_fixture := _reserved_fixture(corrupt_policy,
+		"missing-window", row_spec)
+	var missing_window_ledger = missing_window_fixture.ledger
+	missing_window_ledger._window_charged.erase("window")
+	var before_missing_window: Dictionary = missing_window_ledger.snapshot()
+	_check(missing_window_ledger.reserve_candidate("owner", "other", "next",
+		row_spec).reason == "collision_memory_ledger_invariant" \
+		and missing_window_ledger.snapshot() == before_missing_window,
+		"missing window charge key blocks reserve without mutation")
+	var missing_semantic_fixture := _reserved_fixture(corrupt_policy,
+		"missing-semantic", row_spec)
+	var missing_semantic_ledger = missing_semantic_fixture.ledger
+	var semantic_key = missing_semantic_ledger._reservation_keys.keys()[0]
+	missing_semantic_ledger._reservation_keys.erase(semantic_key)
+	var before_missing_semantic: Dictionary = missing_semantic_ledger.snapshot()
+	_check(missing_semantic_ledger.cancel_unconstructed(
+		missing_semantic_fixture.reservation.token, "owner").reason \
+			== "collision_memory_ledger_invariant" \
+		and missing_semantic_ledger.snapshot() == before_missing_semantic,
+		"missing semantic index blocks release without mutation")
+	var foreign_semantic_fixture := _reserved_fixture(corrupt_policy,
+		"foreign-semantic", row_spec)
+	var foreign_semantic_ledger = foreign_semantic_fixture.ledger
+	var foreign_semantic_key = foreign_semantic_ledger._reservation_keys.keys()[0]
+	foreign_semantic_ledger._reservation_keys[foreign_semantic_key] = "foreign-token"
+	var before_foreign_semantic: Dictionary = foreign_semantic_ledger.snapshot()
+	_check(foreign_semantic_ledger.reserve_candidate("owner", "other", "next",
+		row_spec).reason == "collision_memory_ledger_invariant" \
+		and foreign_semantic_ledger.snapshot() == before_foreign_semantic,
+		"foreign semantic index blocks reserve without mutation")
+	var over_window_fixture := _reserved_fixture(corrupt_policy, "over-window",
+		row_spec)
+	var over_window_ledger = over_window_fixture.ledger
+	var over_window_source := String(over_window_fixture.reservation.token)
+	_inject_candidate_clone(over_window_ledger, over_window_source, "second",
+		"window")
+	_inject_candidate_clone(over_window_ledger, over_window_source, "third",
+		"window")
+	var before_over_window: Dictionary = over_window_ledger.snapshot()
+	var over_window_result: Dictionary = over_window_ledger.reserve_candidate(
+		"owner", "other", "next", row_spec)
+	_check(over_window_result.reason == "collision_memory_ledger_invariant" \
+		and over_window_result.detail == "window_cap" \
+		and over_window_ledger.snapshot() == before_over_window,
+		"coherently indexed reservations cannot exceed the frozen window cap")
+	var over_aggregate_fixture := _reserved_fixture(exact_policy,
+		"over-aggregate", row_spec)
+	var over_aggregate_ledger = over_aggregate_fixture.ledger
+	var over_aggregate_source := String(over_aggregate_fixture.reservation.token)
+	_inject_candidate_clone(over_aggregate_ledger, over_aggregate_source,
+		"second", "window-B")
+	_inject_candidate_clone(over_aggregate_ledger, over_aggregate_source,
+		"third", "window-C")
+	var before_over_aggregate: Dictionary = over_aggregate_ledger.snapshot()
+	var over_aggregate_result: Dictionary = over_aggregate_ledger.reserve_candidate(
+		"owner", "other", "next", row_spec)
+	_check(over_aggregate_result.reason == "collision_memory_ledger_invariant" \
+		and over_aggregate_result.detail == "aggregate_cap" \
+		and over_aggregate_ledger.snapshot() == before_over_aggregate,
+		"coherently indexed reservations cannot exceed the frozen aggregate cap")
+	var body_index_fixture := _reserved_fixture(corrupt_policy, "body-index", row_spec)
+	var body_index_ledger = body_index_fixture.ledger
+	body_index_ledger.mark_candidate_constructed(
+		body_index_fixture.reservation.token, "owner", [701])
+	body_index_ledger._body_owners.erase(701)
+	var before_body_index: Dictionary = body_index_ledger.snapshot()
+	_check(body_index_ledger.commit_live(body_index_fixture.reservation.token,
+		"owner").reason == "collision_memory_ledger_invariant" \
+		and body_index_ledger.snapshot() == before_body_index,
+		"missing body owner blocks transition without mutation")
+	var coherent_body_fixture := _reserved_fixture(corrupt_policy,
+		"coherent-body", row_spec)
+	var coherent_body_ledger = coherent_body_fixture.ledger
+	var coherent_body_token := String(coherent_body_fixture.reservation.token)
+	coherent_body_ledger.mark_candidate_constructed(coherent_body_token,
+		"owner", [702])
+	var coherent_body_record: Dictionary = \
+		coherent_body_ledger._reservations[coherent_body_token]
+	var coherent_body_estimate: Dictionary = coherent_body_record.estimate
+	coherent_body_estimate.expectedBodyCount = 0
+	coherent_body_record.estimate = coherent_body_estimate
+	coherent_body_record.bodyInstanceIds = []
+	coherent_body_ledger._reservations[coherent_body_token] = coherent_body_record
+	coherent_body_ledger._body_owners.erase(702)
+	var before_coherent_body: Dictionary = coherent_body_ledger.snapshot()
+	_check(coherent_body_ledger.commit_live(coherent_body_token, "owner").reason \
 		== "collision_memory_ledger_invariant" \
-		and corrupt_ledger.snapshot() == before_corrupt_release,
-		"inconsistent release accounting fails closed without further mutation")
+		and coherent_body_ledger.snapshot() == before_coherent_body,
+		"canonical rows reject coherently forged body-count and owner indexes")
 
-	var report := {"schema":"n5-collision-memory-policy-contract/v1",
+	var source_hashes = JSON.parse_string(OS.get_environment(
+		"N5_COLLISION_MEMORY_POLICY_SOURCE_HASHES"))
+	if not source_hashes is Dictionary: source_hashes = {}
+	var report := {"schema":"n5-collision-memory-policy-contract/v2",
 		"passed":failures.is_empty(), "evidenceLevel":"pure policy/ledger contract",
 		"productionWired":false, "productionCapsConfigured":false,
+		"sourceCommit":OS.get_environment(
+			"N5_COLLISION_MEMORY_POLICY_SOURCE_COMMIT"),
+		"sourceHashes":source_hashes,
 		"formulaVersion":POLICY.FORMULA_VERSION,
 		"policyIdentity":policy.policy_identity(), "failures":failures,
 		"finalDrain":ledger.drain_receipt()}

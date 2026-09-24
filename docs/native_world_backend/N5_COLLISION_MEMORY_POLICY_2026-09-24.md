@@ -24,7 +24,19 @@ from the formula version and every configuration field. Shape ceiling uses
 integer quotient/remainder only; it never converts large counts to float.
 
 `NativeCollisionMemoryAdmission` is a pure physical reservation ledger. It
-charges candidates before allocation. Entries transition through
+deep-copies the configured limits into a new canonical policy at setup; later
+mutation of the caller's policy object cannot alter admission. Setup also
+requires a caller-unique instance nonce. Ledger identity binds schema, caller
+epoch, nonce, and frozen policy identity, so tokens and release acks from two
+same-epoch ledger objects with distinct nonces are not interchangeable. This
+pure component validates that a nonce is present; the future coordinator owns
+process/restart uniqueness and must never reuse it.
+Ledger tuple fields are length-framed before hashing, so colons and Unicode in
+caller epochs/nonces cannot make different tuples share an identity. Every
+pre-mutation audit recomputes that identity from schema, epoch, nonce, and the
+frozen policy; direct or constituent-field corruption fails closed.
+
+The ledger charges candidates before allocation. Entries transition through
 `candidate_reserved`, `candidate_constructed`, `live_current`, and
 `retired_deferred`. Old live and replacement candidate charges overlap. A cap
 occupied by other reservations returns retryable backpressure without mutation;
@@ -42,6 +54,18 @@ before mutating the ledger. There is no lifetime token-history set: sequence
 high-water state is constant-size. A drained ledger is terminal for its epoch;
 the owner must create a new ledger object with a new epoch rather than resetting
 or rotating one in place.
+
+Every mutation first derives authoritative aggregate/window charges, semantic
+index entries, body-instance ownership, valid state/frame facts, and sequence
+continuity from the reservation set. Each reservation retains a bounded
+canonical copy of its admitted source rows; the audit recompiles the policy
+receipt from those rows rather than trusting stored charges or body counts. It
+also reapplies reservation, per-request, per-window, and aggregate policy caps.
+Any mismatch—including a coherently edited receipt/counter/index—fails closed
+without further mutation. The body-owner index is global across every
+reservation in one admission-ledger instance, not across independent ledgers;
+the future coordinator must therefore use one ledger for the ownership domain.
+A body instance remains owned until exact deferred-free ack.
 
 ## Intended staged integration
 
@@ -66,16 +90,25 @@ node tools/run-n5-collision-memory-policy-contract.mjs
 ```
 
 The contract covers formula identity, exact empty/nonempty charges, shape
-rounding, overflow, immutable configuration, exact caps, retryable denial,
-old+candidate overlap, all state transitions, owner/ledger/body/frame proof,
-deferred retention, replay rejection, corrupted-ledger fail-closure, and
-zero-reservation drain. It remains a pure Godot contract; it does not prove
-engine allocation size or teardown.
+rounding, overflow, frozen configuration, intrinsic validation before capacity,
+exact caps, retryable denial, old+candidate overlap, all state transitions,
+same-epoch ledger isolation, global body ownership, owner/ledger/body/frame
+proof, deferred retention, replay rejection, derived corrupted-ledger
+fail-closure, and zero-reservation drain. It remains a pure Godot contract; it
+does not measure or prove actual engine allocation size, physics-server memory,
+or teardown.
 
-Focused result: **PASS** on 2026-09-24 with Godot 4.6.1, Dummy audio, engine
+Historical focused result: **PASS** on 2026-09-24 with Godot 4.6.1, Dummy audio, engine
 exit `0`, no parse failures, no contract failures, and authoritative owned-job
-membership zero. This is bounded pure policy/ledger evidence only; the report
-explicitly records `productionWired:false` and `productionCapsConfigured:false`.
+membership zero at exact source commit
+`50035944ef575b72c764bef80796fac176f8dc8f` (based on
+`259d1f17a0f0d0036090f68529525f1eadc729a6`). Independent shadow review then
+classified that exact commit **NO-GO** because its integrity/policy/ledger/body
+isolation was incomplete. Therefore the historical PASS is not evidence for
+the current repair. The runner now writes the exact Git commit and
+SHA-256 of every policy/admission/contract/runner source into its report, and
+fails unless those hashes, the commit, v2 schema, evidence level, and negative
+production diagnostic flags match its own just-computed values.
 
 ```text
 report:
@@ -84,3 +117,96 @@ C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\art
 owned watchdog:
 C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\node-tools\process-runs\godot-2FEus5\watchdog.json
 ```
+
+Exploratory repaired focused result: **PASS** on 2026-09-24, engine exit `0`, schema and
+source attestation matched, no failures, cleanup passed, and authoritative
+owned-job membership reached zero. The repair was an uncommitted diff atop
+`50035944ef575b72c764bef80796fac176f8dc8f`, so the exact tested authority is
+the commit plus this source map:
+
+```text
+scripts/terrain/NativeCollisionMemoryPolicy.gd
+1ee4369cb1c137183d287af90976c7384956f680e8cbbb01f88a4b9f671953ce
+
+scripts/terrain/NativeCollisionMemoryAdmission.gd
+397c71eef218ce190c8727b29849736b6168b7a115910b40d9b2f0c78e00ea07
+
+scripts/testing/native_world/N5CollisionMemoryPolicyContract.gd
+7879e2c7f07cf751d0cb4f1646eb793a32f9b8cc0df82739a093c67c9d0df2b4
+
+tools/run-n5-collision-memory-policy-contract.mjs
+726d6bad5fa7d5d4ddbffa851d3e80eedb03508c3672a2312c5a01dc1957d347
+```
+
+That run is not promotable evidence: its runner only compared the pre-run hash
+map echoed through the report and did not re-hash after Godot exited. The
+hardened runner now freezes its source-freeze helper and both launch helpers as
+well as the four contract sources, recomputes all seven hashes and `HEAD` after
+exit, requires
+`pre == report == post`, reports every drifted path (or `git:HEAD`), and fails
+on any drift. A new source-frozen run is still required.
+
+```text
+report:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\native-world-backend\n5-collision-memory-policy-1790242641702-5dd18493\report.json
+
+owned watchdog:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\node-tools\process-runs\godot-wgc715\watchdog.json
+```
+
+This PASS remains bounded pure policy/ledger evidence. It does not configure
+production caps, wire a production owner, measure physics-server memory, prove
+engine teardown, close N5, or close Gate 5.
+
+Historical source-frozen repaired result: **PASS** on 2026-09-24. Pre-run, report, and
+post-run `HEAD` were all
+`50035944ef575b72c764bef80796fac176f8dc8f`; all seven frozen hashes matched;
+`changedPaths` was empty. The v2 report had zero failures and retained
+`productionWired:false` and `productionCapsConfigured:false`. The owned
+watchdog proved job membership zero, and an independent post-run CIM process
+query found zero residual Godot/core-test processes.
+
+```text
+scripts/terrain/NativeCollisionMemoryPolicy.gd
+1ee4369cb1c137183d287af90976c7384956f680e8cbbb01f88a4b9f671953ce
+scripts/terrain/NativeCollisionMemoryAdmission.gd
+397c71eef218ce190c8727b29849736b6168b7a115910b40d9b2f0c78e00ea07
+scripts/testing/native_world/N5CollisionMemoryPolicyContract.gd
+7879e2c7f07cf751d0cb4f1646eb793a32f9b8cc0df82739a093c67c9d0df2b4
+tools/run-n5-collision-memory-policy-contract.mjs
+cb293d097618173daa5245d91318f8b610a634165a339688ba91b0a0d98fb829
+tools/lib/godot-process.mjs
+2ffec3b281ca1a8e67499927498c496f0529f3dec1bc165cd5f8eb58f381cf38
+tools/lib/voxel-tool-runtime.mjs
+369d74359d70def1025ef7e3f645cb79b93da237376fff34fd48b9c6b775973c
+tools/lib/n5-collision-memory-source-freeze.mjs
+5c31cb849bfe5371db25b438662d9c0786da35fa0c87e694285b898087d0eb8c
+```
+
+```text
+report:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\native-world-backend\n5-collision-memory-policy-1790243290365-50dfdd3a\report.json
+
+owned watchdog:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\node-tools\process-runs\godot-OjD4nQ\watchdog.json
+```
+
+This source-frozen PASS promotes only the pure policy/admission precursor. It
+does not change the production limitations above. It is stale for the current
+diff because the subsequent derived-identity and runner-envelope repairs change
+frozen sources; a new runner-envelope PASS is required before promotion.
+
+The source-freeze/envelope Node contract is durably recorded as **8/8 PASS**:
+
+```text
+command:
+node --test tools/tests/n5-collision-memory-source-freeze.test.mjs
+
+TAP result:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\native-world-backend\n5-collision-memory-source-freeze-node-2026-09-24.tap
+```
+
+Those Node cases prove unchanged/drifted source inventories, HEAD drift,
+inventory mismatch, bounded cold-start configuration, and runner-envelope green,
+drift, and diagnostic-flag semantics. They do not parse or execute GDScript and
+do not replace the pending source-frozen Godot contract.
