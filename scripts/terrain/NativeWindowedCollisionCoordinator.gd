@@ -8,6 +8,8 @@ const Aggregate = preload("res://scripts/terrain/NativeWindowedCollisionReadines
 const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const MAX_RETIRED_BARRIERS := 64
 const MAX_ACTIVE_BARRIERS := 128
+const MAX_STAGED_REPLACEMENTS := 1
+const MAX_DISPLACED_OWNERS := 1
 const AGGREGATE_VALIDATION_OPERATION_BUDGET := 96
 const AGGREGATE_VALIDATION_STEP_USEC_BUDGET := 1500
 
@@ -17,6 +19,14 @@ var _broker: Object
 var _actor_root: Node
 var _memory_admission: Object
 var _owners := {}
+var _owner_windows := {}
+## One make-before-break candidate may exist at a time. It is deliberately
+## excluded from aggregate admission until commit_staged_replacement atomically
+## switches the authoritative owner tuple.
+var _staged_owners := {}
+## The displaced physical owner remains independently addressable until its
+## old window token has been drained and acknowledged by the broker.
+var _displaced_owners := {}
 var _owner_epochs := {}
 var _owner_epoch_sequence := 0
 var _window_tokens := {}
@@ -66,7 +76,8 @@ func is_active() -> bool:
 	return not _stopping and _broker != null and _actor_root != null
 
 func can_unbind() -> bool:
-	return _stopping and _owners.is_empty() and active_barrier_count() == 0
+	return _stopping and _owners.is_empty() and _staged_owners.is_empty() \
+		and _displaced_owners.is_empty() and active_barrier_count() == 0
 
 func _physical_admission_ready() -> bool:
 	if not is_active(): return false
@@ -101,9 +112,185 @@ func register_window(window: Dictionary, owner: Node3D) -> Dictionary:
 		_owner_epochs[window.id] = owner_epoch
 	_owners[window.id] = owner
 	_window_tokens[window.id] = window.windowToken
+	_owner_windows[window.id] = window.duplicate(true)
 	return {"status":"ready", "windowId":window.id,
 		"windowToken":window.windowToken,
 		"physicalOwnerEpoch":_owner_epochs[window.id]}
+
+## Prepare a full replacement beside the current physical owner. The active
+## registry remains unchanged; callers must publish and health-validate the
+## candidate before commit_staged_replacement.
+func stage_window_replacement(window: Dictionary, owner: Node3D) -> Dictionary:
+	if _stopping or owner == null or not owner.is_inside_tree() \
+			or not owner.has_method("physical_receipt") \
+			or not owner.has_method("assign_retirement_owner_epoch") \
+			or not owner.has_method("bind_memory_admission") \
+			or not owner.has_method("retirement_owner_epoch") \
+			or not owner.has_method("physical_readiness_epoch") \
+			or not window.get("id") is Vector3i \
+			or String(window.get("windowToken", "")).is_empty():
+		return {"status":"failed", "reason":"physical_window_replacement_invalid"}
+	if _staged_owners.size() >= MAX_STAGED_REPLACEMENTS:
+		return {"status":"pending", "reason":"physical_window_replacement_capacity",
+			"retryable":true, "candidateCount":_staged_owners.size()}
+	if not _owners.has(window.id) or _displaced_owners.has(window.id):
+		return {"status":"pending", "reason":"physical_window_replacement_owner_unavailable"}
+	var layout_ticket: Dictionary = _broker.call("collision_window_layout_ticket") \
+		if _broker.has_method("collision_window_layout_ticket") else {}
+	var layout: Dictionary = layout_ticket.get("layout", {})
+	if layout_ticket.get("status") != "ready" \
+			or layout.get("identity") != window.get("identity") \
+			or not (layout.get("windows", []) as Array).has(window):
+		return {"status":"pending", "reason":"physical_window_layout_changed"}
+	var id: Vector3i = window.id
+	var old_owner: Node3D = _owners[id]
+	if not is_instance_valid(old_owner) \
+			or String(old_owner.call("retirement_owner_epoch")) \
+			!= String(_owner_epochs.get(id, "")):
+		return {"status":"failed", "reason":"physical_window_owner_epoch_mismatch"}
+	var old_token := String(_window_tokens.get(id, ""))
+	if old_token.is_empty() or String(window.windowToken) == old_token:
+		return {"status":"failed", "reason":"physical_window_replacement_token_not_distinct"}
+	var owner_epoch := "%d:%d" % [get_instance_id(), _next_owner_epoch()]
+	if not bool(owner.call("assign_retirement_owner_epoch", owner_epoch)):
+		return {"status":"failed", "reason":"physical_window_memory_ledger_binding_rejected"}
+	var old_window: Dictionary = _owner_windows.get(id, {}).duplicate(true)
+	var stage := {"id":id, "owner":owner, "ownerEpoch":owner_epoch,
+		"window":window.duplicate(true), "windowToken":String(window.windowToken),
+		"layoutToken":String(layout_ticket.get("ticket", "")),
+		"sourceTicket":String(layout_ticket.get("sourceTicket", "")),
+		"oldOwner":old_owner, "oldOwnerEpoch":String(_owner_epochs[id]),
+		"oldWindowToken":old_token, "oldWindow":old_window}
+	_staged_owners[id] = stage
+	if old_window.is_empty():
+		return {"status":"failed", "reason":"physical_window_old_layout_missing",
+			"candidateRetainedForDrain":true, "physicalOwnerEpoch":owner_epoch}
+	if not bool(owner.call("bind_memory_admission", _memory_admission,
+			String(window.windowToken), owner_epoch)):
+		return {"status":"failed", "reason":"physical_window_memory_ledger_binding_rejected",
+			"candidateRetainedForDrain":true, "physicalOwnerEpoch":owner_epoch}
+	return {"status":"ready", "windowId":id,
+		"windowToken":stage.windowToken, "physicalOwnerEpoch":owner_epoch,
+		"oldWindowToken":stage.oldWindowToken,
+		"oldOwnerEpoch":stage.oldOwnerEpoch,
+		"layoutToken":stage.layoutToken}
+
+## Cancel only the exact staged candidate. The currently committed owner tuple
+## is checked before and after its bounded drain and is never touched here.
+func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
+	var stage: Dictionary = _staged_owners.get(id, {})
+	if stage.is_empty() or String(stage.get("ownerEpoch", "")) != owner_epoch:
+		return {"status":"failed", "reason":"physical_window_candidate_not_staged"}
+	if _owners.get(id) != stage.get("oldOwner") \
+			or _owner_epochs.get(id) != stage.get("oldOwnerEpoch") \
+			or _window_tokens.get(id) != stage.get("oldWindowToken"):
+		return {"status":"failed", "reason":"physical_window_committed_owner_changed"}
+	var drained: Dictionary = await _drain_noncurrent_owner(stage.owner,
+		String(stage.ownerEpoch), String(stage.windowToken))
+	if drained.get("status") != "ready":
+		return {"status":"pending", "reason":"physical_window_candidate_cancel_pending",
+			"drain":drained}
+	if _owners.get(id) != stage.get("oldOwner") \
+			or _owner_epochs.get(id) != stage.get("oldOwnerEpoch") \
+			or _window_tokens.get(id) != stage.get("oldWindowToken"):
+		return {"status":"failed", "reason":"physical_window_committed_owner_changed",
+			"drain":drained}
+	_staged_owners.erase(id)
+	return {"status":"ready", "windowId":id, "candidateOwnerEpoch":owner_epoch,
+		"oldOwnerEpoch":String(stage.oldOwnerEpoch), "drain":drained}
+
+## The switch is a single synchronous registry update after re-reading the
+## exact broker ticket, candidate receipt, old-owner tuple and closed barrier.
+## Until this returns ready, the old owner remains authoritative and installed.
+func commit_staged_replacement(window: Dictionary, owner: Node3D,
+		barrier: RefCounted) -> Dictionary:
+	if _stopping or not window.get("id") is Vector3i:
+		return {"status":"failed", "reason":"physical_window_replacement_unavailable"}
+	var id: Vector3i = window.id
+	var stage: Dictionary = _staged_owners.get(id, {})
+	if stage.is_empty() or stage.get("owner") != owner \
+			or stage.get("windowToken") != window.get("windowToken", "") \
+			or stage.get("window", {}).get("id") != window.get("id") \
+			or stage.get("window", {}).get("identity") != window.get("identity") \
+			or stage.get("window", {}).get("blocks") != window.get("blocks"):
+		return {"status":"failed", "reason":"physical_window_replacement_stage_mismatch"}
+	var layout_ticket: Dictionary = _broker.call("collision_window_layout_ticket")
+	if layout_ticket.get("status") != "ready" \
+			or layout_ticket.get("ticket") != stage.get("layoutToken") \
+			or layout_ticket.get("sourceTicket") != stage.get("sourceTicket"):
+		return {"status":"pending", "reason":"physical_window_replacement_ticket_changed"}
+	var layout: Dictionary = layout_ticket.get("layout", {})
+	if layout.get("identity") != window.get("identity") \
+			or not (layout.get("windows", []) as Array).has(window):
+		return {"status":"pending", "reason":"physical_window_replacement_layout_changed"}
+	if _owners.get(id) != stage.get("oldOwner") \
+			or _owner_epochs.get(id) != stage.get("oldOwnerEpoch") \
+			or _window_tokens.get(id) != stage.get("oldWindowToken") \
+			or not is_instance_valid(stage.get("oldOwner")) \
+			or String((stage.oldOwner as Node3D).call("retirement_owner_epoch")) \
+			!= String(stage.oldOwnerEpoch):
+		return {"status":"pending", "reason":"physical_window_old_owner_changed"}
+	if String(owner.call("retirement_owner_epoch")) != String(stage.ownerEpoch) \
+			or not is_instance_valid(barrier) or not barrier.is_active() \
+			or _barriers.get(id) != barrier \
+			or _barrier_identities.get(id) != layout.identity \
+			or not bool(barrier.clearance(layout.identity).get("clear", false)):
+		return {"status":"pending", "reason":"physical_window_replacement_barrier_pending"}
+	var receipt: Dictionary = owner.physical_receipt(window.identity)
+	if not bool(receipt.get("ready", false)) \
+			or receipt.get("physicalOwnerEpoch") != stage.ownerEpoch \
+			or receipt.get("provenance", {}).get("requestIdentity") != window.identity \
+			or receipt.get("residentBlocks") != window.get("blocks", []):
+		return {"status":"pending", "reason":receipt.get("reason",
+			"physical_window_replacement_receipt_pending"), "receipt":receipt}
+	var final_ticket: Dictionary = _broker.call("collision_window_layout_ticket")
+	if final_ticket.get("status") != "ready" \
+			or final_ticket.get("ticket") != stage.get("layoutToken") \
+			or final_ticket.get("sourceTicket") != stage.get("sourceTicket") \
+			or owner.physical_readiness_epoch() != receipt.get("healthEpoch") \
+			or String(owner.call("retirement_owner_epoch")) != String(stage.ownerEpoch) \
+			or not barrier.is_active() \
+			or not bool(barrier.clearance(layout.identity).get("clear", false)) \
+			or _owners.get(id) != stage.get("oldOwner") \
+			or _owner_epochs.get(id) != stage.get("oldOwnerEpoch") \
+			or _window_tokens.get(id) != stage.get("oldWindowToken"):
+		return {"status":"pending", "reason":"physical_window_replacement_commit_revalidation_failed"}
+	if _displaced_owners.size() >= MAX_DISPLACED_OWNERS:
+		return {"status":"pending", "reason":"physical_window_displaced_owner_capacity"}
+	var old_tuple := {"id":id, "owner":stage.oldOwner,
+		"ownerEpoch":String(stage.oldOwnerEpoch),
+		"windowToken":String(stage.oldWindowToken),
+		"window":stage.get("oldWindow", {})}
+	_displaced_owners[id] = old_tuple
+	_owners[id] = owner
+	_owner_epochs[id] = String(stage.ownerEpoch)
+	_window_tokens[id] = String(stage.windowToken)
+	_owner_windows[id] = window.duplicate(true)
+	_staged_owners.erase(id)
+	_invalidate_aggregate_for_owner_switch()
+	return {"status":"ready", "windowId":id,
+		"windowToken":String(stage.windowToken),
+		"physicalOwnerEpoch":String(stage.ownerEpoch),
+		"displacedWindowToken":String(stage.oldWindowToken),
+		"displacedOwnerEpoch":String(stage.oldOwnerEpoch),
+		"receipt":receipt, "layoutTicket":String(stage.layoutToken)}
+
+func _next_owner_epoch() -> int:
+	_owner_epoch_sequence += 1
+	return _owner_epoch_sequence
+
+func _invalidate_aggregate_for_owner_switch() -> void:
+	_aggregate_ticket = ""
+	_aggregate_source_ticket = ""
+	_aggregate_layout = {}
+	_aggregate_identity = {}
+	_aggregate_receipts = {}
+	_aggregate_owner_epochs = {}
+	_aggregate_cursor = {}
+	_aggregate_window_cursor = 0
+	_aggregate_result = {"status":"pending",
+		"reason":"physical_owner_replacement_committed"}
+	_aggregate_last_step_frame = -1
 
 func begin_window_barrier(window: Dictionary, bounds: AABB,
 		identity: Dictionary) -> Dictionary:
@@ -245,13 +432,22 @@ func _advance_aggregate_validation() -> void:
 			return
 		var owner: Node3D = _owners[id]
 		if is_instance_valid(owner):
-			_aggregate_receipts[id] = owner.physical_receipt_for_layout(
+			var receipt: Dictionary = owner.physical_receipt_for_layout(
 				window.get("identity", {}), window.get("localCurrentProof", {}),
 				_aggregate_layout.get("identity", {})) \
 				if owner.has_method("physical_receipt_for_layout") \
 				else owner.physical_receipt(window.get("identity", {}))
+			_aggregate_receipts[id] = receipt
 			_aggregate_owner_epochs[id] = int(owner.call("physical_readiness_epoch")) \
 				if owner.has_method("physical_readiness_epoch") else -1
+			if _owner_receipt_is_terminal(receipt):
+				var terminal := {"status":"failed",
+					"reason":receipt.get("reason", "physical_window_owner_terminal_failure"),
+					"windowId":id, "ownerReceipt":receipt}
+				_aggregate_result = {"status":"failed", "ticket":_aggregate_ticket,
+					"reason":terminal.reason, "result":terminal,
+					"operations":operations + 1}
+				return
 		else:
 			_aggregate_receipts[id] = {"ready":false}
 		_aggregate_window_cursor += 1
@@ -289,8 +485,13 @@ func _advance_aggregate_validation() -> void:
 		else:
 			_aggregate_result = {"status":"pending",
 				"reason":cursor_result.get("reason",
-					"collision_aggregate_validation_in_progress"),
+				"collision_aggregate_validation_in_progress"),
 				"operations":operations + int(cursor_result.get("operations", 0))}
+
+func _owner_receipt_is_terminal(receipt: Dictionary) -> bool:
+	if receipt.get("status") == "failed": return true
+	var health: Dictionary = receipt.get("healthValidation", {})
+	return health.get("status") == "failed"
 
 func _aggregate_owner_epochs_current() -> bool:
 	for id in _aggregate_owner_epochs:
@@ -379,8 +580,26 @@ func register_moving_actor(actor: PhysicsBody3D) -> bool:
 func retire_window(id: Vector3i) -> Dictionary:
 	if _stopping or not _owners.has(id):
 		return {"status":"failed", "reason":"physical_window_not_registered"}
-	var token: String = _window_tokens[id]
-	var owner_epoch: String = String(_owner_epochs.get(id, ""))
+	if _displaced_owners.has(id):
+		return {"status":"pending", "reason":"displaced_physical_owner_retirement_required"}
+	return await _retire_owner_tuple(id, _owners[id],
+		String(_window_tokens[id]), String(_owner_epochs.get(id, "")), false)
+
+func retire_displaced_window(id: Vector3i) -> Dictionary:
+	if _stopping or not _displaced_owners.has(id):
+		return {"status":"failed", "reason":"displaced_physical_window_not_registered"}
+	var displaced: Dictionary = _displaced_owners[id]
+	return await _retire_owner_tuple(id, displaced.owner,
+		String(displaced.windowToken), String(displaced.ownerEpoch), true)
+
+func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
+		owner_epoch: String, displaced: bool) -> Dictionary:
+	if displaced:
+		var captured: Dictionary = _displaced_owners.get(id, {})
+		if captured.get("owner") != owner or captured.get("windowToken") != token \
+				or captured.get("ownerEpoch") != owner_epoch \
+				or _owners.get(id) == owner or _window_tokens.get(id) == token:
+			return {"status":"failed", "reason":"displaced_physical_owner_tuple_invalid"}
 	if owner_epoch.is_empty():
 		return {"status":"failed", "reason":"physical_window_owner_epoch_missing"}
 	var layout: Dictionary = _broker.collision_window_layout()
@@ -420,7 +639,8 @@ func retire_window(id: Vector3i) -> Dictionary:
 				or valid_lease.get("physicalOwnerEpoch") != owner_epoch:
 			return {"status":"pending", "reason":"window_retirement_lease_stale",
 				"lease":valid_lease}
-	var owner: Node3D = _owners[id]
+	if not is_instance_valid(owner):
+		return {"status":"failed", "reason":"physical_window_owner_invalid"}
 	if String(owner.call("retirement_owner_epoch")) != owner_epoch:
 		return {"status":"failed", "reason":"physical_window_owner_epoch_mismatch"}
 	window_retirement_drain_started.emit(id, token, String(lease.leaseId))
@@ -440,6 +660,14 @@ func retire_window(id: Vector3i) -> Dictionary:
 				"drain":drained}
 		return {"status":"failed", "reason":"physical_window_drain_unproven_terminal_hold",
 			"drain":drained}
+	if displaced:
+		var retained_tuple: Dictionary = _displaced_owners.get(id, {})
+		if retained_tuple.get("owner") != owner \
+				or retained_tuple.get("windowToken") != token \
+				or retained_tuple.get("ownerEpoch") != owner_epoch \
+				or _owners.get(id) == owner or _window_tokens.get(id) == token:
+			return {"status":"pending", "reason":"displaced_physical_owner_changed",
+				"drain":drained}
 	var owner_memory: Dictionary = _memory_admission.call(
 		"owner_reservation_receipt", owner_epoch, token)
 	if owner_memory.get("status") != "ready" \
@@ -460,9 +688,22 @@ func retire_window(id: Vector3i) -> Dictionary:
 	if acknowledged.get("status") != "ready":
 		return {"status":"pending", "reason":"window_retirement_ack_pending",
 			"drain":drained, "acknowledgement":acknowledged}
-	_owners.erase(id)
-	_window_tokens.erase(id)
-	_owner_epochs.erase(id)
+	if displaced:
+		if _displaced_owners.get(id, {}).get("owner") != owner \
+				or _displaced_owners.get(id, {}).get("windowToken") != token \
+				or _displaced_owners.get(id, {}).get("ownerEpoch") != owner_epoch:
+			return {"status":"pending", "reason":"displaced_physical_owner_changed",
+				"drain":drained, "acknowledgement":acknowledged}
+		_displaced_owners.erase(id)
+	else:
+		if _owners.get(id) != owner or _window_tokens.get(id) != token \
+				or _owner_epochs.get(id) != owner_epoch:
+			return {"status":"pending", "reason":"physical_window_owner_changed",
+				"drain":drained, "acknowledgement":acknowledged}
+		_owners.erase(id)
+		_window_tokens.erase(id)
+		_owner_epochs.erase(id)
+		_owner_windows.erase(id)
 	_retirement_leases.erase(id)
 	owner.queue_free()
 	return {"status":"ready", "windowId":id, "windowToken":token,
@@ -505,6 +746,26 @@ func stop_and_drain() -> Dictionary:
 		_owners.erase(id)
 		_window_tokens.erase(id)
 		_owner_epochs.erase(id)
+		_owner_windows.erase(id)
+	for id in _staged_owners.keys():
+		var stage: Dictionary = _staged_owners[id]
+		var staged_owner: Node3D = stage.get("owner")
+		var staged_drain: Dictionary = await _drain_noncurrent_owner(staged_owner,
+			String(stage.get("ownerEpoch", "")), String(stage.get("windowToken", "")))
+		if staged_drain.get("status") != "ready":
+			incomplete.append(id)
+			continue
+		_staged_owners.erase(id)
+	for id in _displaced_owners.keys():
+		var displaced: Dictionary = _displaced_owners[id]
+		var displaced_owner: Node3D = displaced.get("owner")
+		var displaced_drain: Dictionary = await _drain_noncurrent_owner(
+			displaced_owner, String(displaced.get("ownerEpoch", "")),
+			String(displaced.get("windowToken", "")))
+		if displaced_drain.get("status") != "ready":
+			incomplete.append(id)
+			continue
+		_displaced_owners.erase(id)
 	if not incomplete.is_empty():
 		return {"status":"pending", "reason":"physical_window_drain_pending",
 			"incompleteWindowIds":incomplete,
@@ -530,3 +791,25 @@ func stop_and_drain() -> Dictionary:
 		"remainingChildren":get_child_count(),
 		"memoryAdmission":memory_drain,
 		"activeBarriers":active_barrier_count()}
+
+func _drain_noncurrent_owner(owner: Node3D, owner_epoch: String,
+		window_token: String) -> Dictionary:
+	if not is_instance_valid(owner) or owner_epoch.is_empty() \
+			or not owner.has_method("retirement_owner_epoch") \
+			or String(owner.call("retirement_owner_epoch")) != owner_epoch:
+		return {"status":"failed", "reason":"physical_window_owner_epoch_mismatch"}
+	var drained: Dictionary = await owner.stop_and_drain()
+	if drained.get("status") != "ready" or not bool(drained.get("drained", false)) \
+			or int(drained.get("remainingBodies", -1)) != 0 \
+			or drained.get("physicalOwnerEpoch") != owner_epoch:
+		return {"status":"pending", "reason":"physical_window_drain_pending",
+			"drain":drained}
+	var memory: Dictionary = _memory_admission.call("owner_reservation_receipt",
+		owner_epoch, window_token)
+	if memory.get("status") != "ready" \
+			or int(memory.get("reservationCount", -1)) != 0 \
+			or int(memory.get("chargedBytes", -1)) != 0:
+		return {"status":"pending", "reason":"physical_window_memory_charge_retained",
+			"drain":drained, "memoryAdmission":memory}
+	owner.queue_free()
+	return {"status":"ready", "drain":drained, "memoryAdmission":memory}
