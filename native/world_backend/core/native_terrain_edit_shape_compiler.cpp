@@ -944,16 +944,16 @@ RequestPreflight preflight_surface_request(const NativeTerrainEditCompileRequest
         || request.limits.max_metadata_depth == 0U) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
-    const std::size_t deformation_count = static_cast<std::size_t>(std::count_if(
-        request.shapes.begin(), request.shapes.end(), [](const NativeTerrainEditShape &candidate) {
-            return candidate.kind == NativeTerrainEditShapeKind::surface_deformation;
-        }));
-    if (deformation_count != 1U || request.shapes.size() != 1U) {
+    if (request.shapes.size() != 1U
+        || request.shapes.front().kind != NativeTerrainEditShapeKind::surface_deformation) {
         reject(NativeTerrainEditCompileRejectReason::mixed_surface_deformation);
     }
     if (!request.owned_source) reject(NativeTerrainEditCompileRejectReason::source_required);
     if (request.source != nullptr && request.source != request.owned_source.get()) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    if (!request.owned_source->has_bounded_prevalidated_surface_deformation_view()) {
+        reject(NativeTerrainEditCompileRejectReason::source_contract_missing);
     }
     const NativeTerrainEditShape &shape = request.shapes.front();
     const NativeValueFootprint metadata = native_value_footprint(
@@ -986,12 +986,21 @@ RequestPreflight preflight_surface_request(const NativeTerrainEditCompileRequest
         checked_add(result.retained_bytes,
             normalized_text_storage(shape.target.block_id->value().size()));
     }
-    // Conservatively retain validation high-water: make_native_cell_state()
-    // validates through one canonical buffer while its input and normalized
-    // request metadata coexist. This is charged once at begin even though the
-    // scratch dies before incremental work starts.
+    // validate_shape() constructs both an input state and its normalized
+    // result while the job-owned request remains live. Charge all three
+    // metadata/string owners, the two temporary cell bodies, and canonical
+    // validation scratch as one conservative begin() high-water. This is
+    // deliberately higher than the eventual retained request footprint.
+    checked_add(result.retained_bytes, 2U * NORMALIZED_CELL_FIXED_BYTES);
+    checked_add(result.retained_bytes, metadata.retained_bytes);
     checked_add(result.retained_bytes, metadata.retained_bytes);
     checked_add(result.retained_bytes, metadata.canonical_bytes);
+    checked_add(result.retained_bytes,
+        2U * normalized_text_storage(shape.provenance_id.size()));
+    const std::size_t block_identity_bytes = shape.target.block_id.has_value()
+        ? shape.target.block_id->value().size() : material_block_id(shape.target.material).size();
+    checked_add(result.retained_bytes,
+        2U * normalized_text_storage(block_identity_bytes));
     if (result.retained_bytes > request.limits.max_prepared_bytes) {
         reject(NativeTerrainEditCompileRejectReason::prepared_byte_limit_exceeded);
     }
@@ -1256,7 +1265,6 @@ struct NativeTerrainEditCompileJob::Impl final {
     void project_one_column() {
         const NativeTerrainEditColumn column = pending_projection_column;
         const double falloff = pending_projection_falloff;
-        phase = Phase::enumerate_columns;
         if (summary.projection_candidate_reads >= request.limits.max_projection_reads) {
             reject(NativeTerrainEditCompileRejectReason::projection_limit_exceeded);
         }
@@ -1275,6 +1283,7 @@ struct NativeTerrainEditCompileJob::Impl final {
         if (projection->candidate_reads > allowance) {
             reject(NativeTerrainEditCompileRejectReason::projection_limit_exceeded);
         }
+        phase = Phase::enumerate_columns;
         summary.projection_candidate_reads += projection->candidate_reads;
         progress.projection_candidate_reads = summary.projection_candidate_reads;
 
@@ -1576,6 +1585,10 @@ void NativeTerrainEditCompileJob::advance(const std::size_t max_work_units) {
         impl_->fail(error.reason());
     } catch (const std::invalid_argument &) {
         impl_->fail(NativeTerrainEditCompileRejectReason::invalid_request);
+    } catch (...) {
+        // A running job is fail-closed: no callback or allocation failure may
+        // escape and permit a retry from partially advanced internal state.
+        impl_->fail(NativeTerrainEditCompileRejectReason::source_callback_failure);
     }
 }
 

@@ -38,6 +38,10 @@ struct NativeTerrainEditStateTemplate {
     std::optional<double> density;
     TerrainFluidId fluid = TerrainFluidId::none;
     std::optional<NativeCellLight> light;
+    // This is a typed native boundary, not a Variant coercion boundary. For
+    // surface deformation, an optional `source` entry must already be a UTF-8
+    // string; non-string Godot values are normalized before constructing this
+    // request or rejected as invalid_request.
     NativeValue metadata = NativeValue::object({});
     // TerrainVolumeService defaults blockId to material when absent. The
     // compiler performs the same normalization so every emitted durable set
@@ -97,6 +101,16 @@ public:
     virtual Sha256Digest snapshot_digest() const noexcept = 0;
     virtual std::uint64_t source_revision() const noexcept = 0;
     virtual std::optional<NativeCellState> cell_at(const CellCoord &cell) const = 0;
+    // Surface deformation is admitted only against a prevalidated immutable
+    // view with bounded callbacks. A true result is a trust-boundary promise:
+    // physical retained-size lookup is allocation-free O(1), physical cell
+    // lookup is O(1) with retained storage no larger than its declaration, and
+    // projection performs no more than max_candidate_reads bounded source
+    // reads. Callback exceptions are terminal compile failures; callbacks are
+    // never retried within a job.
+    virtual bool has_bounded_prevalidated_surface_deformation_view() const noexcept {
+        return false;
+    }
     // Surface-deformation persistence must never clone a transient scene
     // overlay. A source which cannot expose the durable layer stays unavailable.
     // Effective physical terrain state after natural/site shaping, generated
@@ -241,6 +255,8 @@ enum class NativeTerrainEditCompileRejectReason : std::uint8_t {
     source_cell_size_missing = 17,
     source_cell_size_mismatch = 18,
     identity_bound_commit_required = 19,
+    source_contract_missing = 20,
+    source_callback_failure = 21,
 };
 
 class NativeTerrainEditCompileRejected final : public std::invalid_argument {

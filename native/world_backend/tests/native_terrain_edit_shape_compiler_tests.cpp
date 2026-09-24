@@ -9,7 +9,9 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <new>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -51,6 +53,7 @@ NativeCellState cell_state(
 class FakePinnedSource final : public NativeTerrainEditPinnedSource {
 public:
     enum class Fallback : std::uint8_t { solid_stone, air, missing };
+    enum class CallbackFailure : std::uint8_t { none, runtime_error, bad_alloc };
 
     explicit FakePinnedSource(const Fallback fallback = Fallback::solid_stone)
         : fallback_(fallback) {
@@ -60,6 +63,9 @@ public:
 
     Sha256Digest snapshot_digest() const noexcept override { return digest_; }
     std::uint64_t source_revision() const noexcept override { return revision_; }
+    bool has_bounded_prevalidated_surface_deformation_view() const noexcept override {
+        return bounded_prevalidated_;
+    }
 
     std::optional<NativeCellState> cell_at(const CellCoord &cell) const override {
         ++reads_;
@@ -93,6 +99,7 @@ public:
     std::optional<NativeCellState> physical_terrain_cell_excluding_scene_overlay_at(
         const CellCoord &cell) const override {
         ++durable_reads_;
+        throw_callback_failure(physical_failure_);
         for (const NativeCellState &value : durable_overrides_) {
             if (value.cell == cell) return value;
         }
@@ -117,6 +124,7 @@ public:
     std::optional<NativeTerrainEditSurfaceProjection> continuous_surface_projection_at(
         const NativeTerrainEditColumn &column, const std::size_t allowance) const override {
         ++projection_queries_;
+        throw_callback_failure(projection_failure_);
         if (projection_throws_rejected_) {
             throw NativeTerrainEditCompileRejected(
                 NativeTerrainEditCompileRejectReason::projection_limit_exceeded);
@@ -154,8 +162,18 @@ public:
     void respect_projection_allowance(const bool value) { respect_projection_allowance_ = value; }
     void projection_throws_invalid(const bool value) { projection_throws_invalid_ = value; }
     void projection_throws_rejected(const bool value) { projection_throws_rejected_ = value; }
+    void bounded_prevalidated(const bool value) { bounded_prevalidated_ = value; }
+    void projection_failure(const CallbackFailure value) { projection_failure_ = value; }
+    void physical_failure(const CallbackFailure value) { physical_failure_ = value; }
 
 private:
+    static void throw_callback_failure(const CallbackFailure failure) {
+        if (failure == CallbackFailure::runtime_error) {
+            throw std::runtime_error("injected source callback failure");
+        }
+        if (failure == CallbackFailure::bad_alloc) throw std::bad_alloc();
+    }
+
     Fallback fallback_;
     Sha256Digest digest_{};
     std::vector<NativeCellState> overrides_;
@@ -175,6 +193,9 @@ private:
     bool respect_projection_allowance_ = true;
     bool projection_throws_invalid_ = false;
     bool projection_throws_rejected_ = false;
+    bool bounded_prevalidated_ = true;
+    CallbackFailure projection_failure_ = CallbackFailure::none;
+    CallbackFailure physical_failure_ = CallbackFailure::none;
     std::optional<std::size_t> declared_cell_bytes_ = 16U * 1024U;
 };
 
@@ -214,6 +235,9 @@ public:
     }
     std::uint64_t source_revision() const noexcept override {
         return drift_ == Drift::revision && touched_ ? 2U : 1U;
+    }
+    bool has_bounded_prevalidated_surface_deformation_view() const noexcept override {
+        return true;
     }
     std::optional<NativeCellState> cell_at(const CellCoord &cell) const override {
         return cell_state(cell, TerrainMaterialId::stone, true, 1.0);
@@ -303,7 +327,11 @@ void expect_job_reason(
     while (job.status() == NativeTerrainEditCompileJobStatus::running) job.advance(budget);
     VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::rejected, job.status());
     VWB_EXPECT(job.reject_reason().has_value());
-    VWB_EXPECT_EQ(expected, *job.reject_reason());
+    if (job.reject_reason().has_value() && expected != *job.reject_reason()) {
+        throw std::runtime_error("compile reject reason mismatch: expected "
+            + std::to_string(static_cast<unsigned>(expected)) + ", received "
+            + std::to_string(static_cast<unsigned>(*job.reject_reason())));
+    }
     VWB_EXPECT(!job.take_completed_batch().has_value());
 }
 
@@ -1373,12 +1401,22 @@ VWB_TEST(native_surface_deformation_rejects_invalid_ownership_shapes_projection_
     request.shapes.clear();
     expect_job_reason(NativeTerrainEditCompileRejectReason::mixed_surface_deformation, request);
     request = deformation_request(source);
+    request.shapes = {NativeTerrainEditShape::inclusive_box(
+        {0, 0, 0}, {0, 0, 0}, stone_template(), "not-deformation")};
+    expect_job_reason(NativeTerrainEditCompileRejectReason::mixed_surface_deformation, request);
+    request = deformation_request(source);
     request.owned_source.reset();
     expect_job_reason(NativeTerrainEditCompileRejectReason::source_required, request);
     request = deformation_request(source);
     FakePinnedSource other;
     request.source = &other;
     expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    auto untrusted = std::make_shared<FakePinnedSource>();
+    untrusted->bounded_prevalidated(false);
+    expect_job_reason(NativeTerrainEditCompileRejectReason::source_contract_missing,
+        deformation_request(untrusted));
+    VWB_EXPECT_EQ(0U, untrusted->projection_query_count());
+    VWB_EXPECT_EQ(0U, untrusted->size_query_count());
     NativeTerrainEditCompileRequest derived_air = deformation_request(source);
     derived_air.shapes[0].target.solid.reset();
     const NativeTerrainEditCompiledBatch derived_air_batch = drain_deformation(derived_air, 2U);
@@ -1498,6 +1536,31 @@ VWB_TEST(native_surface_deformation_preflights_request_metadata_before_normalize
     VWB_EXPECT_EQ(0U, under_job.retained_entries_for_off_worker_destruction());
     VWB_EXPECT_EQ(0U, source->projection_query_count());
     VWB_EXPECT_EQ(0U, source->size_query_count());
+
+    auto boundary_source = std::make_shared<FakePinnedSource>();
+    NativeTerrainEditCompileRequest boundary = deformation_request(boundary_source);
+    boundary.shapes[0].provenance_id = std::string(4096U, 'p');
+    boundary.shapes[0].target.block_id = NativeBlockIdentity::create("air.surface_boundary");
+    boundary.shapes[0].target.metadata = NativeValue::object({
+        {"payload", NativeValue::string(std::string(60U * 1024U, 'm'))},
+        {"source", NativeValue::string("player_dig")},
+    });
+    NativeTerrainEditCompileJob boundary_measured =
+        NativeTerrainEditResumableCompiler::begin(boundary);
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::running, boundary_measured.status());
+    const std::size_t boundary_admitted = boundary_measured.progress().prepared_bytes;
+    VWB_EXPECT(boundary_admitted > 3U * 60U * 1024U);
+    boundary_measured.cancel();
+    boundary.limits.max_prepared_bytes = boundary_admitted;
+    NativeTerrainEditCompileJob boundary_exact =
+        NativeTerrainEditResumableCompiler::begin(boundary);
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::running, boundary_exact.status());
+    boundary_exact.cancel();
+    boundary.limits.max_prepared_bytes = boundary_admitted - 1U;
+    expect_job_reason(NativeTerrainEditCompileRejectReason::prepared_byte_limit_exceeded,
+        boundary);
+    VWB_EXPECT_EQ(0U, boundary_source->projection_query_count());
+    VWB_EXPECT_EQ(0U, boundary_source->size_query_count());
 
     NativeTerrainEditCompileRequest recursive = deformation_request(
         std::make_shared<FakePinnedSource>());
@@ -1667,6 +1730,43 @@ VWB_TEST(native_surface_deformation_rejects_every_zero_limit_and_translates_sour
     invalid->projection_throws_invalid(true);
     expect_job_reason(NativeTerrainEditCompileRejectReason::invalid_request,
         deformation_request(invalid));
+
+    auto runtime_failure = std::make_shared<FakePinnedSource>();
+    runtime_failure->projection_failure(FakePinnedSource::CallbackFailure::runtime_error);
+    NativeTerrainEditCompileJob runtime_job = NativeTerrainEditResumableCompiler::begin(
+        deformation_request(runtime_failure));
+    while (runtime_job.status() == NativeTerrainEditCompileJobStatus::running) {
+        runtime_job.advance(1U);
+    }
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::rejected, runtime_job.status());
+    VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::source_callback_failure,
+        *runtime_job.reject_reason());
+    const NativeTerrainEditCompileProgress runtime_progress = runtime_job.progress();
+    const std::size_t runtime_calls = runtime_failure->projection_query_count();
+    runtime_job.advance(64U);
+    VWB_EXPECT_EQ(runtime_calls, runtime_failure->projection_query_count());
+    VWB_EXPECT_EQ(runtime_progress.advance_calls, runtime_job.progress().advance_calls);
+    VWB_EXPECT_EQ(runtime_progress.work_units, runtime_job.progress().work_units);
+    VWB_EXPECT_EQ(runtime_progress.projection_queries, runtime_job.progress().projection_queries);
+
+    auto allocation_failure = std::make_shared<FakePinnedSource>();
+    allocation_failure->physical_failure(FakePinnedSource::CallbackFailure::bad_alloc);
+    NativeTerrainEditCompileJob allocation_job = NativeTerrainEditResumableCompiler::begin(
+        deformation_request(allocation_failure));
+    while (allocation_job.status() == NativeTerrainEditCompileJobStatus::running) {
+        allocation_job.advance(2U);
+    }
+    VWB_EXPECT_EQ(NativeTerrainEditCompileJobStatus::rejected, allocation_job.status());
+    VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::source_callback_failure,
+        *allocation_job.reject_reason());
+    const NativeTerrainEditCompileProgress allocation_progress = allocation_job.progress();
+    const std::size_t allocation_calls = allocation_failure->durable_read_count();
+    allocation_job.advance(64U);
+    VWB_EXPECT_EQ(allocation_calls, allocation_failure->durable_read_count());
+    VWB_EXPECT_EQ(allocation_progress.advance_calls, allocation_job.progress().advance_calls);
+    VWB_EXPECT_EQ(allocation_progress.work_units, allocation_job.progress().work_units);
+    VWB_EXPECT_EQ(allocation_progress.prepared_operations,
+        allocation_job.progress().prepared_operations);
     NativeTerrainEditCompileJob zero = NativeTerrainEditResumableCompiler::begin(
         deformation_request(source));
     const std::size_t zero_retained = zero.retained_entries_for_off_worker_destruction();
