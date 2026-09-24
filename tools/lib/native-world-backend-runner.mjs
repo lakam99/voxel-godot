@@ -111,9 +111,23 @@ function parse(argv) {
   return options;
 }
 
+export function nativeTestTimeoutSeconds(options = {}) {
+  const raw = options.nativeTestTimeoutSeconds === undefined
+    ? 300 : options.nativeTestTimeoutSeconds;
+  if ((typeof raw !== 'number' && typeof raw !== 'string')
+      || (typeof raw === 'string' && !/^\d+$/.test(raw))) {
+    throw new Error('nativeTestTimeoutSeconds must be an integer number of seconds.');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 900) {
+    throw new Error('nativeTestTimeoutSeconds must be from 1 through 900.');
+  }
+  return value;
+}
+
 export function coverageExecutionTimeoutMilliseconds(options = {}) {
   const raw = options.coverageExecuteTimeoutMs === undefined
-    ? 120000 : options.coverageExecuteTimeoutMs;
+    ? nativeTestTimeoutSeconds(options) * 1000 : options.coverageExecuteTimeoutMs;
   if ((typeof raw !== 'number' && typeof raw !== 'string')
       || (typeof raw === 'string' && !/^\d+$/.test(raw))) {
     throw new Error('coverageExecuteTimeoutMs must be an integer number of milliseconds.');
@@ -560,7 +574,8 @@ export async function runReleaseAdapterSmoke({ project, output, toolchainLock, p
   };
 }
 
-async function buildAndTest({ project, output, configuration, scons, compiler, projectInputs, source, dependency }) {
+async function buildAndTest({ project, output, configuration, scons, compiler, projectInputs, source, dependency,
+  testTimeoutSeconds }) {
   const nativeDirectory = join(project, 'native', 'terrain_meshing');
   const args = [...scons.prefix, '-Q', '-j2', 'platform=windows', `target=${configuration === 'release' ? 'template_release' : 'template_debug'}`,
     'arch=x86_64', 'api_version=4.6', `custom_tools=${join(nativeDirectory, 'scons_tools')}`];
@@ -652,7 +667,8 @@ async function buildAndTest({ project, output, configuration, scons, compiler, p
   }
   const executable = await findBuiltBinary(buildDirectory, /^world_backend_core_tests(?:\.exe)?$/i);
   const pdb = await findBuiltBinary(buildDirectory, /^world_backend_core_tests(?:\.exe)?\.pdb$|^world_backend_core_tests\.pdb$/i);
-  const test = await runOwned({ project, output, label: `test-${configuration}`, executable, args: [], timeoutSeconds: 120 });
+  const test = await runOwned({ project, output, label: `test-${configuration}`, executable, args: [],
+    timeoutSeconds: testTimeoutSeconds });
   const stdout = (await readFile(test.stdoutPath, 'utf8')).trim();
   const summary = JSON.parse(stdout.split(/\r?\n/).at(-1));
   if (summary.failed !== 0 || summary.passed !== summary.total) throw new Error(`${configuration} native unit-test summary is not passing.`);
@@ -667,7 +683,7 @@ async function buildAndTest({ project, output, configuration, scons, compiler, p
     },
     binary: { path: relative(project, executable).replaceAll('\\', '/'), sha256: await hashFile(executable), bytes: (await stat(executable)).size },
     pdb: { path: relative(project, pdb).replaceAll('\\', '/'), sha256: await hashFile(pdb), bytes: (await stat(pdb)).size },
-    tests: summary,
+    tests: { ...summary, timeoutSeconds: testTimeoutSeconds },
     ownedProcess: { build: relative(project, build.summaryPath).replaceAll('\\', '/'), test: relative(project, test.summaryPath).replaceAll('\\', '/') },
   };
   if (configuration !== 'coverage') {
@@ -1083,6 +1099,8 @@ async function microsoftCoverageProbe() {
 
 export async function runNativeWorldBackend(argv, dependencies = {}) {
   const options = parse(argv);
+  const testTimeoutSeconds = nativeTestTimeoutSeconds(options);
+  const coverageExecuteTimeoutMilliseconds = coverageExecutionTimeoutMilliseconds(options);
   const project = resolve(String(options.projectPath ?? defaultProject));
   const runName = String(options.runName ?? `n1-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`);
   const output = resolve(project, String(options.outputDirectory ?? join('artifacts', 'native-world-backend', runName)));
@@ -1095,6 +1113,10 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     git: { commit: await gitText(project, ['rev-parse', 'HEAD']), branch: await gitText(project, ['branch', '--show-current']), statusBefore: await gitText(project, ['status', '--short']) },
     source: {}, projectInputs: {},
     dependency: {}, toolchainLock: {}, compiler: await findCompilerIdentity(), compilerAfter: null,
+    timeouts: {
+      nativeTestSeconds: testTimeoutSeconds,
+      coverageCoreExecuteMilliseconds: coverageExecuteTimeoutMilliseconds,
+    },
     configurations: [], installed: [], adapterSmoke: null, releaseAdapterSmoke: null, coverage: null,
   };
   try {
@@ -1157,6 +1179,7 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
       receipt.configurations.push(await buildAndTest({
         project, output, configuration, scons, compiler: receipt.compiler,
         projectInputs: receipt.projectInputs.before, source: receipt.source, dependency: receipt.dependency,
+        testTimeoutSeconds,
       }));
     }
     receipt.installed = await installExtensions(project, receipt.configurations, receipt.projectInputs.before, receipt.source);

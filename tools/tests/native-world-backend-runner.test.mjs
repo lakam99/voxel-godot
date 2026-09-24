@@ -10,6 +10,7 @@ import {
   assertNormalizedUpstreamTextIdentity,
   expectedToolchainLockValue,
   inventoryProjectBuildInputs,
+  nativeTestTimeoutSeconds,
   normalizedUpstreamTextSha256,
   releaseSaveV2ProbeChecks,
   validateInstalledProvenance,
@@ -19,8 +20,19 @@ import {
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-test('coverage execution timeout preserves the default and validates bounded per-run overrides', () => {
-  assert.equal(coverageExecutionTimeoutMilliseconds(), 120000);
+test('native test timeout has current-suite headroom and validates bounded per-run overrides', () => {
+  assert.equal(nativeTestTimeoutSeconds(), 300);
+  assert.equal(nativeTestTimeoutSeconds({ nativeTestTimeoutSeconds: 360 }), 360);
+  assert.equal(nativeTestTimeoutSeconds({ nativeTestTimeoutSeconds: '360' }), 360);
+  for (const value of ['', '300.5', 0, 901, null]) {
+    assert.throws(() => nativeTestTimeoutSeconds({ nativeTestTimeoutSeconds: value }),
+      /nativeTestTimeoutSeconds/);
+  }
+});
+
+test('coverage execution inherits the native test timeout and validates bounded overrides', () => {
+  assert.equal(coverageExecutionTimeoutMilliseconds(), 300000);
+  assert.equal(coverageExecutionTimeoutMilliseconds({ nativeTestTimeoutSeconds: 360 }), 360000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: 300000 }), 300000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: '300000' }), 300000);
   for (const value of ['', '300000.5', 999, 900001, 1500, null]) {
