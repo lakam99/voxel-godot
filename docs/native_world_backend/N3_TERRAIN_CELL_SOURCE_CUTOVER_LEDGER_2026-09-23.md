@@ -726,18 +726,24 @@ and 398/398 branches; `NativeValue` 274/274 and 130/130; SHA-256 150/150 and
 26/26. The current-primary gate report is
 `C:/Users/arkam/.codex/worktrees/gpval-final-lf-20260924/artifacts/native-world-backend/generated-patch-current-primary-lf-retry1-20260924/report.json`
 (source receipt SHA-256
-`fc4fb266482dfba21c97bec887ad0c7915f7bf19ee858c7a3a1da17276fd4c7a`). Whole-
-core coverage remains `blocked` at 13,565/13,575 lines and 7,732/7,734
-branches by pre-existing save-v2 importer lines 109–113 and 166–170 plus
-branches 69/85; none of the candidate commits changes that importer. The
-candidate changes only core C++ files, core `NativeValue`/SHA helpers, the
-source manifest and native tests; it adds no production adapter/runtime/save
-or routing caller. This is not generated-patch source integration, physical
+`fc4fb266482dfba21c97bec887ad0c7915f7bf19ee858c7a3a1da17276fd4c7a`). That
+gate was `blocked` at 13,565/13,575 whole-core lines and 7,732/7,734 branches
+because of save-v2 importer lines 109–113 and 166–170 plus branches 69/85;
+none of the generated-patch candidate commits changed that importer. The
+independent importer-coverage repair is now integrated as `c3b1480`: its
+RAII rejection guard preserves bounded cleanup on unknown exceptions, and
+focused MSVC/LLVM importer suites pass 11/11 with exact importer coverage
+154/154 lines, 18/18 functions, and 98/98 branches. Canonical primary whole-
+core coverage has not yet been rerun on the combined source and remains
+unverified until the N5 source slice settles. The generated-patch candidate
+changes only core C++ files, core `NativeValue`/SHA helpers, the source
+manifest and native tests; it adds no production adapter/runtime/save or
+routing caller. This is not generated-patch source integration, physical
 parity, native authority cutover, or N3/N4/N5 completion. Remaining core
 limits include synchronous worst-case tombstone projection, caller-attested
 feature-definition digest until N4 binds the real producer, and no live
-`StructureSystem` differential. No broad suite will be repeated until a
-focused integration change needs it.
+`StructureSystem` differential. The canonical full native gate is deferred
+until the focused N5 source fix is integrated; avoid broad intermediate reruns.
 
 The native surface-deformation compiler candidate is also integrated as a
 pure-core/shadow slice in primary commits `7e9d84a`, `a2c1c24`, `233c339`,
