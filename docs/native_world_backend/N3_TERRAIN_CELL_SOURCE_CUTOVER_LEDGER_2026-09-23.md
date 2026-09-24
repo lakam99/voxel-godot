@@ -480,7 +480,10 @@ order and duplicates and bind source identity, pin identity, terrain-delta
 revision, shaping revision, and shaping identity. Retained state accounting
 includes the complete recursive metadata encoding plus block ID and edit
 reason; result dictionaries expose the same complete state, fluid/light, and
-occupancy facts.
+occupancy facts. Fixed payload accounting is exact and padding-independent:
+76 bytes for surface, 101 for walkable, and 102 for known-height before the
+retained dynamic states. Focused boundaries admit a 102-byte state-free
+known-height mismatch and reject it with a 101-byte cap.
 
 Focused evidence uses audio-disabled automation:
 
@@ -492,10 +495,11 @@ node tools/run-n3-native-terrain-projection-contract.mjs
 That Godot contract invokes the debug GDExtension projection adapter and proves
 schema/revision/identity, order/duplicates, full state payloads, fluid-aware
 walkability, no-result shape, old-pin immutability, malformed nested requests,
-and recovery after a mixed request is rejected atomically. Its passing report
-is preserved at
-`artifacts/native-world-backend/n3-terrain-projection-1790211759823-e7870de0/report.json`.
-The broader native
+and recovery after rejected channel, aggregate, vertical, cell-read, payload,
+and mixed-invalid requests. The prior passing report at
+`artifacts/native-world-backend/n3-terrain-projection-1790211759823-e7870de0/report.json`
+predates those expanded adapter-cap cases; they must be rerun from the final
+commit during integration. The broader native
 gate also passed 535/535 tests in both debug and release, loaded the debug
 adapter, and loaded the just-built exported-release adapter. The exported
 release smoke proves the native module/class and existing save-v2 adapter

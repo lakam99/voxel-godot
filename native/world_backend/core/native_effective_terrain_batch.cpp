@@ -415,10 +415,13 @@ NativeEffectiveTerrainProjectionBatchResult NativeEffectiveTerrainBatch::execute
         payload += count * bytes;
     };
     // Logical scalar/discriminator bytes only; NativeCellState dynamic values
-    // are charged exactly as each retained state is copied below.
-    add_fixed(request.surface_projections.size(), 82U);
+    // are charged exactly as each retained state is copied below.  These fixed
+    // charges are the serialized request plus result fields, not sizeof() with
+    // platform padding: surface 25 + 51, walkable 25 + 51 + 25, and known
+    // height 25 + 1 + 51 + 25.
+    add_fixed(request.surface_projections.size(), 76U);
     add_fixed(request.walkable_projections.size(), 101U);
-    add_fixed(request.known_height_projections.size(), 93U);
+    add_fixed(request.known_height_projections.size(), 102U);
 
     NativeEffectiveTerrainProjectionBatchResult result;
     result.primary_page = pin().primary_terrain_shaping().page_key();

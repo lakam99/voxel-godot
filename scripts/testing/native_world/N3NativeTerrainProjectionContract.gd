@@ -35,7 +35,7 @@ func state(cell: Vector3i, solid: bool, material_id: int, fluid_id: int, marker:
 	return {"materialId":material_id,"biomeId":0,"solid":solid,
 		"density":1.0 if solid else -0.5,"fluidId":fluid_id,"light":Vector2i(4,9),
 		"metadata":{"source":"terrain_edit","terrainMeshAffects":true,
-			"marker":marker,"nested":[{"value":17.25}]},
+			"marker":marker,"nested":[{"value":17.25}],"padding":"p".repeat(2048)},
 		"blockId":"projection_" + marker,"editReason":"projection-contract-" + marker}
 
 func transaction(page: Vector2i) -> Dictionary:
@@ -66,6 +66,12 @@ func scan(cell: Vector3i) -> Dictionary:
 func known(cell: Vector3i) -> Dictionary:
 	return {"columnCell":cell,"surfaceY":10.25*CELL,
 		"intent":"gameplay","semanticRevision":1}
+
+func repeated(value: Dictionary, count: int) -> Array:
+	var values: Array = []
+	values.resize(count)
+	values.fill(value)
+	return values
 
 func valid_identity(value: Variant, label: String) -> void:
 	check(value is Dictionary, label + " dictionary")
@@ -178,6 +184,36 @@ func run_contract() -> Dictionary:
 		"intent":"gameplay","semanticRevision":1}]
 	failed(page.project_surfaces(invalid), "finite", "nonfinite height")
 	invalid = empty_request()
+	invalid.surfaceProjections = repeated(surface, 4097)
+	failed(page.project_surfaces(invalid), "full-surface projection batch limit",
+		"surface channel cap")
+	check(page.project_surfaces(request) == result, "recovery after channel cap")
+	invalid = empty_request()
+	invalid.surfaceProjections = repeated(surface, 2049)
+	invalid.walkableProjections = repeated(surface, 2048)
+	failed(page.project_surfaces(invalid), "projection total batch limit",
+		"aggregate query cap")
+	check(page.project_surfaces(request) == result, "recovery after aggregate cap")
+	var broad_scan := {"startCell":Vector3i(x,10,z),"maxUpCells":512,
+		"maxDownCells":512,"intent":"gameplay","semanticRevision":1}
+	invalid = empty_request()
+	invalid.surfaceProjections = repeated(broad_scan, 4096)
+	failed(page.project_surfaces(invalid), "projection total vertical limit",
+		"vertical cap")
+	check(page.project_surfaces(request) == result, "recovery after vertical cap")
+	var read_scan := {"startCell":Vector3i(x,10,z),"maxUpCells":8,
+		"maxDownCells":8,"intent":"gameplay","semanticRevision":1}
+	invalid = empty_request()
+	invalid.surfaceProjections = repeated(read_scan, 4096)
+	failed(page.project_surfaces(invalid), "projection total cell-read limit",
+		"cell-read cap")
+	check(page.project_surfaces(request) == result, "recovery after cell-read cap")
+	invalid = empty_request()
+	invalid.knownHeightProjections = repeated(known_query, 4096)
+	failed(page.project_surfaces(invalid), "projection payload limit",
+		"known-height payload cap")
+	check(page.project_surfaces(request) == result, "recovery after payload cap")
+	invalid = empty_request()
 	invalid.surfaceProjections = [surface, {"startCell":Vector3i(1000000,10,1000000),
 		"maxUpCells":1,"maxDownCells":1,"intent":"gameplay","semanticRevision":1}]
 	failed(page.project_surfaces(invalid), "outside the primary page", "mixed atomic rejection")
@@ -193,7 +229,8 @@ func _initialize() -> void:
 		"passed":failures.is_empty(),"failures":failures,"details":details,
 		"productionCutover":false,
 		"proves":["native projection adapter schema/order/revision/identity",
-			"full effective states, fluid-preserving walkability, bounded work",
+			"full effective states, fluid-preserving walkability, observed work counters",
+			"adapter channel/aggregate/vertical/read/payload cap rejection and recovery",
 			"atomic malformed/mixed-query rejection and immutable pin behavior"],
 		"doesNotProve":["production WorldGenerationSystem activation",
 			"live navigation, collision publication, or gameplay acceptance"]}

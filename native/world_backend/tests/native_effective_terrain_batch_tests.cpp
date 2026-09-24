@@ -858,10 +858,10 @@ VWB_TEST(native_effective_projection_batch_preserves_order_full_states_fluid_and
     VWB_EXPECT(!projected.facts.air_state->solid);
     VWB_EXPECT_EQ(TerrainFluidId::water, projected.facts.air_state->fluid);
     VWB_EXPECT_EQ((NativeCellLight{3, 7}), projected.facts.air_state->light);
-    const std::size_t one_surface_payload = 82U
+    const std::size_t one_surface_payload = 76U
         + projection_state_payload(*projected.facts.solid_state)
         + projection_state_payload(*projected.facts.air_state);
-    VWB_EXPECT(one_surface_payload > 82U + 108U);
+    VWB_EXPECT(one_surface_payload > 76U + 108U);
     NativeEffectiveTerrainProjectionBatchRequest one_surface_request;
     one_surface_request.surface_projections = {surface};
     VWB_EXPECT_EQ(one_surface_payload,
@@ -1064,7 +1064,7 @@ VWB_TEST(native_effective_projection_batch_enforces_query_vertical_payload_and_a
         ready_pin(definition, {0, 0}, projection_deltas()), limits);
     VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_payload_limit,
         projection_rejected_reason(payload_batch, request));
-    limits.max_projection_payload_bytes = 81U;
+    limits.max_projection_payload_bytes = 75U;
     NativeEffectiveTerrainBatch fixed_payload_batch(
         ready_pin(definition, {0, 0}, projection_deltas()), limits);
     VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_payload_limit,
@@ -1074,6 +1074,26 @@ VWB_TEST(native_effective_projection_batch_enforces_query_vertical_payload_and_a
         ready_pin(definition, {0, 0}, projection_deltas()), limits);
     VWB_EXPECT_EQ(accepted.prepared_payload_bytes,
         exact_payload_batch.execute_projections(request).prepared_payload_bytes);
+
+    const NativeEffectiveKnownHeightProjectionQuery known_miss{
+        {21, 0, 0}, -1000000.0, WorldQueryIntent::gameplay, 1};
+    request = {};
+    request.known_height_projections = {known_miss};
+    const auto known_fixed = baseline.execute_projections(request);
+    VWB_EXPECT_EQ(102U, known_fixed.prepared_payload_bytes);
+    VWB_EXPECT_EQ(NativeKnownHeightProjectionStatus::mismatch,
+        known_fixed.known_height_projections[0].facts.status);
+    limits = {};
+    limits.max_projection_payload_bytes = 102U;
+    NativeEffectiveTerrainBatch exact_known_payload_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    VWB_EXPECT_EQ(102U,
+        exact_known_payload_batch.execute_projections(request).prepared_payload_bytes);
+    limits.max_projection_payload_bytes = 101U;
+    NativeEffectiveTerrainBatch over_known_payload_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_payload_limit,
+        projection_rejected_reason(over_known_payload_batch, request));
 
     request.surface_projections.push_back({
         {1000000, 10, 1000000}, 1, 1, WorldQueryIntent::gameplay, 1});
