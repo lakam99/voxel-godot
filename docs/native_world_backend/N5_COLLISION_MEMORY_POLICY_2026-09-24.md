@@ -211,4 +211,37 @@ C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\art
 Those Node cases prove unchanged/drifted source inventories, HEAD drift,
 inventory mismatch, bounded cold-start configuration, and runner-envelope green,
 drift, and diagnostic-flag semantics. They do not parse or execute GDScript and
-do not replace the pending source-frozen Godot contract.
+do not replace the source-frozen Godot contract.
+
+Final repaired precursor result: **PASS** on 2026-09-24 at isolated source
+commit `d5ab4c42013910ad9a473b0883a30f1545211386`. The durable runner envelope,
+Godot report and owned-process watchdog agree on engine exit `0`, no contract
+failures, exact pre/report/post commit identity, fourteen unchanged input hashes,
+an empty changed-path set, natural process exit, authoritative Job Object
+membership zero and a sealed final ledger with zero reservations and zero
+charged bytes. An independent post-run CIM query also found no residual
+Godot/core-test process. Independent review found no remaining P0/P1/P2 issue
+for this pure precursor scope.
+
+```text
+runner envelope:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\native-world-backend\n5-collision-memory-policy-1790244339404-38071565\runner-envelope.json
+
+Godot report:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\native-world-backend\n5-collision-memory-policy-1790244339404-38071565\godot-report.json
+
+owned watchdog:
+C:\Users\arkam\.codex\worktrees\n5-active-byte-audit\voxel-biome-world-godot\artifacts\node-tools\process-runs\godot-ZPKaWt\watchdog.json
+```
+
+The three reviewed source commits were integrated as `bfda0795`, `2f4032a4`
+and `aa98f475`. Although the isolated source commit is not an ancestor of the
+integration commit, `git diff --exit-code d5ab4c42 aa98f475 -- <all thirteen
+frozen repository inputs>` returned zero and the selected Godot executable hash
+also matched. Thus the integrated Git blobs are equivalent to the tested
+inputs; differing raw working-tree hashes across checkouts are line-ending
+serialization differences, not blob differences.
+
+This result still proves only the policy/admission precursor. It does not wire
+production collision, configure measured production caps, bound actual physics
+memory, establish cross-ledger global ownership, close N5, or close Gate 5.
