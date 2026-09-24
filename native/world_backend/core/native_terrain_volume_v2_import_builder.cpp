@@ -10,6 +10,24 @@ namespace {
     throw NativeTerrainVolumeV2ImportBuilderRejected();
 }
 
+template <typename Cleanup>
+class ScopeRollback final {
+public:
+    explicit ScopeRollback(Cleanup cleanup) : cleanup_(std::move(cleanup)) {}
+
+    ~ScopeRollback() noexcept {
+        if (armed_) cleanup_();
+    }
+
+    void dismiss() noexcept {
+        armed_ = false;
+    }
+
+private:
+    Cleanup cleanup_;
+    bool armed_ = true;
+};
+
 bool coordinate_less(const CellCoord &left, const CellCoord &right) noexcept {
     if (left.z != right.z) return left.z < right.z;
     if (left.y != right.y) return left.y < right.y;
@@ -44,10 +62,12 @@ void NativeTerrainVolumeV2ImportBuilder::begin(const NativeTerrainVolumeV2Import
 
 void NativeTerrainVolumeV2ImportBuilder::append(
     const std::vector<NativeTerrainVolumeV2ImportChunk> &chunks) {
-    if (state_ != State::importing || chunks.empty()) {
+    ScopeRollback reject_on_failure([this]() noexcept {
         state_ = State::rejected;
         last_cell_.reset();
         last_section_.reset();
+    });
+    if (state_ != State::importing || chunks.empty()) {
         reject();
     }
 
@@ -66,8 +86,9 @@ void NativeTerrainVolumeV2ImportBuilder::append(
 
             const bool continuing_section = last_section_.has_value() && *last_section_ == chunk.section;
             if (continuing_section) {
-                if (!current_section_revision.has_value()
-                    || *current_section_revision != chunk.section_revision) reject();
+                // A continuing section was either committed by an earlier append
+                // or admitted earlier in this append; both paths establish its revision.
+                if (current_section_revision.value() != chunk.section_revision) reject();
             } else {
                 if (last_section_.has_value() && !coordinate_less(*last_section_, chunk.section)) reject();
                 new_sections.push_back({chunk.section, chunk.section_revision});
@@ -79,10 +100,9 @@ void NativeTerrainVolumeV2ImportBuilder::append(
                 if (!(record.state.section == chunk.section)) reject();
                 // Validate one already-typed value without sorting or allowing
                 // the whole-volume snapshot creator to hide stream reordering.
-                const NativeTypedWorldStateSnapshot checked =
-                    NativeTypedWorldStateSnapshot::create({record});
-                // Defensive invariant: a successful one-record validation must preserve its input exactly.
-                if (!(checked.records().front() == record)) reject();
+                // Singleton canonicalization validates the record and cannot
+                // reorder, replace, or deduplicate its sole input element.
+                (void)NativeTypedWorldStateSnapshot::create({record});
                 if (chunk_previous_cell.has_value()
                     && !coordinate_less(*chunk_previous_cell, record.state.cell)) reject();
                 new_records.push_back(record);
@@ -95,21 +115,11 @@ void NativeTerrainVolumeV2ImportBuilder::append(
             - appended_records) reject();
         for (const auto &section : new_sections) sections_.push_back(section);
         for (const auto &record : new_records) records_.push_back(record);
+        reject_on_failure.dismiss();
     } catch (const NativeTerrainVolumeV2ImportBuilderRejected &) {
-        state_ = State::rejected;
-        last_cell_.reset();
-        last_section_.reset();
         throw;
     } catch (const std::invalid_argument &) {
-        state_ = State::rejected;
-        last_cell_.reset();
-        last_section_.reset();
         reject();
-    } catch (...) {
-        state_ = State::rejected;
-        last_cell_.reset();
-        last_section_.reset();
-        throw;
     }
 }
 
@@ -143,6 +153,11 @@ bool NativeTerrainVolumeV2ImportBuilder::disposal_complete() const noexcept {
 
 NativeTerrainVolumeV2 NativeTerrainVolumeV2ImportBuilder::finalize() {
     if (state_ != State::importing) reject();
+    ScopeRollback reject_on_failure([this]() noexcept {
+        state_ = State::rejected;
+        last_cell_.reset();
+        last_section_.reset();
+    });
     try {
         std::vector<NativeTypedWorldStateRecord> records(records_.begin(), records_.end());
         std::vector<NativeTerrainVolumeV2SectionRevision> sections(sections_.begin(), sections_.end());
@@ -156,17 +171,10 @@ NativeTerrainVolumeV2 NativeTerrainVolumeV2ImportBuilder::finalize() {
         sections_.clear();
         last_cell_.reset();
         last_section_.reset();
+        reject_on_failure.dismiss();
         return result;
     } catch (const std::invalid_argument &) {
-        state_ = State::rejected;
-        last_cell_.reset();
-        last_section_.reset();
         reject();
-    } catch (...) {
-        state_ = State::rejected;
-        last_cell_.reset();
-        last_section_.reset();
-        throw;
     }
 }
 

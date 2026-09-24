@@ -272,6 +272,45 @@ VWB_TEST(native_terrain_volume_v2_import_builder_defers_finalize_failure_cleanup
     VWB_EXPECT(builder.disposal_complete());
 }
 
+VWB_TEST(native_terrain_volume_v2_import_builder_terminalizes_known_failures_without_eager_cleanup) {
+    const auto first = record({0, 0, 0});
+    const auto second = record({1, 0, 0});
+
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {first})});
+
+        // A preflight rejection uses the same terminal rollback as a failure
+        // from inside validation and must retain admitted storage for bounded disposal.
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.append({}));
+        VWB_EXPECT(!builder.active());
+        VWB_EXPECT_EQ(1U, builder.record_count());
+        VWB_EXPECT_EQ(1U, builder.section_count());
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+        VWB_EXPECT(builder.disposal_complete());
+    }
+
+    {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        builder.append({chunk({0, 0, 0}, 1U, {first})});
+        auto malformed = second;
+        malformed.persistence = NativeTypedWorldStatePersistence::transient;
+
+        // Snapshot validation throws its own invalid_argument subtype. The
+        // public builder rejection is translated while the accepted prefix remains intact.
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+            builder.append({chunk({0, 0, 0}, 1U, {malformed})}));
+        VWB_EXPECT(!builder.active());
+        VWB_EXPECT_EQ(1U, builder.record_count());
+        VWB_EXPECT_EQ(1U, builder.section_count());
+        VWB_EXPECT_EQ(2U, builder.dispose_step(2U));
+        VWB_EXPECT(builder.disposal_complete());
+    }
+}
+
 VWB_TEST(native_terrain_volume_v2_import_builder_rejects_each_envelope_identity_boundary) {
     const std::vector<NativeTerrainVolumeV2ImportIdentity> invalid = {
         {"terrainVolume", 2U, 16U, 7U},
