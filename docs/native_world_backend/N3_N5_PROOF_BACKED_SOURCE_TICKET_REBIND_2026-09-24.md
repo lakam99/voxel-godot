@@ -107,3 +107,13 @@ The debug extension loaded by the primary replays has SHA256
 `47cf064f2c60736f71768f70aebb4b582b6ece7e6f0f8d1a1b3309edd4149cd4`.
 It was rebuilt from current native source before this GDScript-only N5
 integration. The release DLL has not been rebuilt or validated in this step.
+
+After the rebind integration, `node tools/run-n5-window-aggregate-contract.mjs`
+also passed on primary commit `5d3fd65`: the synthetic 4,913-block/eight-window
+cursor completed in 154 advances, 84 maximum operations and 243 µs maximum
+step (96-operation/1,500-µs configured caps); oversize input failed closed.
+Report `artifacts/native-world-backend/n5-window-aggregate-1790236900563-0bdc9af8/report.json`;
+owned receipt `artifacts/node-tools/process-runs/godot-RI8Z7U/watchdog.json`.
+This checks aggregate cursor scaling only. It does not prove installation,
+health receipts or physical contact for a 4,913-block native-produced demand;
+that remains the next N5 scale checkpoint.
