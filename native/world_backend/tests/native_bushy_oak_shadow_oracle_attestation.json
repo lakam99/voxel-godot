@@ -1,0 +1,43 @@
+{
+  "schema": "native-tree-oracle-attestation-config/v1",
+  "family": "bushy_oak_shadow",
+  "nativeEnvironment": "VWB_NATIVE_BUSHY_OAK_SHADOW_ORACLE",
+  "authoritySources": [
+    "scripts/environment/TreeSpawnService.gd",
+    "scripts/environment/tree_grammars/MathematicalTreePocRecipeBuilder.gd",
+    "scripts/environment/tree_grammars/MathematicalTreePocBushyOakRecipeBuilder.gd"
+  ],
+  "nativeAuthoritySources": [
+    "native/world_backend/core/godot_pcg_compat.cpp",
+    "native/world_backend/core/godot_pcg_compat.hpp",
+    "native/world_backend/core/native_bushy_oak_shadow.cpp",
+    "native/world_backend/core/native_bushy_oak_shadow.hpp",
+    "native/world_backend/core/native_conifer_recipe.hpp",
+    "native/world_backend/core/native_conifer_worker_recipe.hpp",
+    "native/world_backend/core/native_tree_worker_text_admission.hpp",
+    "native/world_backend/source-manifest.json",
+    "native/world_backend/tests/native_bushy_oak_shadow_oracle_observation.cpp",
+    "native/world_backend/tests/native_bushy_oak_shadow_tests.cpp",
+    "native/world_backend/tests/test_harness.hpp",
+    "native/world_backend/tests/test_main.cpp"
+  ],
+  "raw": {
+    "godotScript": "res://native/world_backend/tests/native_bushy_oak_shadow_recipe_oracle.gd",
+    "godotPrefix": "VWB_BUSHY_OAK_SHADOW_ORACLE:",
+    "nativePrefix": "VWB_NATIVE_BUSHY_OAK_SHADOW_ORACLE:",
+    "expectedCases": 3
+  },
+  "worker": {
+    "godotScript": "res://native/world_backend/tests/native_bushy_oak_shadow_worker_oracle.gd",
+    "godotPrefix": "VWB_BUSHY_OAK_SHADOW_WORKER_ORACLE:",
+    "nativePrefix": "VWB_NATIVE_BUSHY_OAK_SHADOW_WORKER_ORACLE:",
+    "expectedCases": 7,
+    "evidenceContract": {
+      "allowedRenderTiers": ["impostor"],
+      "requireZeroTopology": true,
+      "topologySignaturePrefix": "impostor:",
+      "requireIdentityKeys": true,
+      "requireFiniteNormalizedNumbers": true
+    }
+  }
+}
