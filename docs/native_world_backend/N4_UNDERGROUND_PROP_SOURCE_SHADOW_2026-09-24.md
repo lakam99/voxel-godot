@@ -354,6 +354,26 @@ production/cutover **NO-GO**. Its four P2 limits remain explicit:
 
 No promotion, deletion or production claim follows from this evidence.
 
+## Integration identity
+
+The reviewed eight-commit chain was integrated on the migration branch as
+`fa77090b`, `6b074e77`, `c7a4d4b9`, `c4e46d28`, `57bd0c39`, `14a39ca8`,
+`eb2ade9a` and `7ece9ec1`. The underground/ore native implementation and tests,
+adapter, Godot probe, runner, evidence helper and helper tests are Git-blob
+identical between tested source commit `4abf3c57` and integrated source commit
+`eb2ade9a`. The integrated fast evidence suites pass `27/27` (`12` N4 evidence
+tests plus `15` shared native-runner tests).
+
+This does not turn the isolated differential into a current-branch runtime
+receipt. A comparison of all `722` conservatively frozen repository paths found
+`12` differences already present on the newer integration lineage: conifer,
+savanna and tree-artifact sources/tests, the native test harness/main, the
+expanded source manifest and `NativeDecodedSaveRetirement.gd`. Those paths are
+outside this slice's underground-prop implementation, but their differing blobs
+mean the broad freeze cannot honestly be described as identical to the current
+integration commit. The final production/frozen-source campaign must rerun on
+the then-current complete branch rather than reuse this diagnostic receipt.
+
 ## Deletion ledger
 
 Nothing is deletable in this slice. Specifically retain:
