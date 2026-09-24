@@ -239,6 +239,11 @@ distinguish durable terrain parity from these pre-reset notifications.
 `convert_legacy_volume_edit_to_terrain_volume` also writes
 `volume_edit_markers` if no generation edit API exists; that marker path must
 not become a fallback terrain authority at the native cutover.
+`snapshot_terrain_volume` currently returns `{}` when the generation facade
+or export method is missing, and `restore_terrain_volume` skips reset/import
+when those methods are absent. The native authority switch needs an explicit
+save/load failure in these cases; otherwise a valid v2 save could be written
+or accepted without its durable terrain deltas.
 
 The caller audit used `rg` across production `scripts/*.gd` (excluding
 `scripts/testing/**`), then inspected `WorldGenerationSystem`'s public
