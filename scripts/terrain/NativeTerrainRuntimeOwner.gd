@@ -95,7 +95,8 @@ func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 	if inputs.get("status") != "ready":
 		return _setup_failure(String(inputs.get("reason", "native_owner_inputs_invalid")))
 	if transaction == null or not transaction.has_method("snapshot") \
-			or not transaction.has_method("take_backend"):
+			or not transaction.has_method("take_backend") \
+			or not transaction.has_method("committed_source_descriptor"):
 		return _setup_failure("committed_transaction_missing")
 	var transaction_state: Dictionary = transaction.call("snapshot")
 	var generation := int(commit_receipt.get("generation", 0))
@@ -118,6 +119,28 @@ func setup_from_committed_transaction(main, terrain: VoxelTerrain, transaction,
 			return _setup_failure("committed_transaction_transfer_failed")
 		return _transferred_backend_failure(revoked_backend,
 			"committed_transaction_snapshot_lease_revoked", commit_receipt)
+	var frozen: Dictionary = transaction.call("committed_source_descriptor", commit_receipt)
+	if frozen.get("status") != "ready":
+		return _setup_failure("committed_transaction_descriptor_receipt_mismatch")
+	var descriptor: Dictionary = frozen.get("sourceDescriptor", {})
+	var seed := String(descriptor.get("seedText", ""))
+	var admission = inputs.admission
+	# Seed/admission failures retain the existing consumed-backend failure path.
+	# With the same seed, descriptor and current durable revision must be checked
+	# before the single-use backend transfer.
+	if String(main.get("seed_text")) == seed \
+			and String(admission.world_seed) == seed \
+			and admission.profile_store != null \
+			and String(admission.profile_store.world_seed()) == seed:
+		var current: Dictionary = SourceRequest.from_finalized_main(main)
+		if current.get("status") != "ready" or current.get("request") != descriptor:
+			return _setup_failure("committed_transaction_source_descriptor_mismatch")
+		var durable_revision := int(frozen.get("durableSourceRevision", -1))
+		if durable_revision >= 0:
+			var world = main.get("world_generation_system")
+			if world == null or not world.has_method("terrain_volume_revision") \
+					or int(world.terrain_volume_revision()) != durable_revision:
+				return _setup_failure("committed_transaction_durable_source_revision_changed")
 	var backend = transaction.call("take_backend")
 	if backend == null or not backend.has_method("status"):
 		return _setup_failure("committed_transaction_transfer_failed")

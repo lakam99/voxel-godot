@@ -5,6 +5,7 @@ const Structures = preload("res://scripts/StructureSystem.gd")
 const World = preload("res://scripts/WorldGenerationSystem.gd")
 const Stage = preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
 const Owner = preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
+const SourceRequest = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 
 class BorrowFailureStage:
 	extends "res://scripts/terrain/NativePrivateMainLoadStage.gd"
@@ -166,6 +167,89 @@ func exercise_consumed_failure(kind: String) -> void:
 		"earlyAck":early_ack, "ownerDrain":owner_drain,
 		"staleAck":stale_ack, "exactAck":exact_ack,
 		"terminal":terminal}
+	terrain.free()
+	main.free()
+	await process_frame
+
+func exercise_descriptor_drift(kind: String) -> void:
+	var main = make_main("n5-descriptor-drift-" + kind)
+	var save = make_save(main)
+	var terrain = make_manual_terrain(main)
+	var stage = Stage.new()
+	var started: Dictionary = stage.start(main, save)
+	var ready: Dictionary = await drive_stage(stage)
+	var handoff: Dictionary = stage.take_committed_transaction()
+	var transaction = handoff.get("transaction")
+	var receipt: Dictionary = handoff.get("receipt", {})
+	var frozen: Dictionary = transaction.committed_source_descriptor(receipt)
+	var original_revision := int(receipt.get("durableSourceRevision", -1))
+	var bad_receipt: Dictionary = receipt.duplicate(true)
+	var wrong_descriptor: Dictionary = bad_receipt.get("sourceDescriptor", {}).duplicate(true)
+	wrong_descriptor["seedText"] = "forged-descriptor"
+	bad_receipt["sourceDescriptor"] = wrong_descriptor
+	var wrong_owner = Owner.new()
+	var wrong_setup: Dictionary = wrong_owner.setup_from_committed_transaction(main,
+		terrain, transaction, bad_receipt, 46, 0)
+	var transaction_after_wrong: Dictionary = transaction.snapshot()
+	var stale_reclaim: Dictionary = stage.reclaim_unadopted_transaction(transaction, bad_receipt)
+	var before_current: Dictionary = SourceRequest.from_finalized_main(main)
+	if kind == "town":
+		var admission = main.structure_system.citadel_terrain_admission
+		admission.configure(main.seed_text, {}, {"regionCells":main.STRUCTURE_REGION_CELLS,
+			"spawnChance":float(main.STRUCTURE_SPAWN_CHANCE)})
+		var finalized: Dictionary = admission.finalize_town_inputs({Vector2i(2, -1):{}})
+		check(finalized.get("status") == "ready", "same-seed town source re-finalizes")
+	else:
+		main.world_generation_system.terrain_volume_service.set_cell_state(
+			Vector3i(41, -4, 12), {"material":"stone", "biome":"deep_underground",
+			"solid":true, "density":1.25, "fluid":"", "blockId":"later-durable-edit",
+			"light":{"sky":0,"block":0},
+			"metadata":{"saveDelta":true,"source":"terrain_edit"}}, "fixture", false)
+	var after_current: Dictionary = SourceRequest.from_finalized_main(main)
+	var current_revision := int(main.world_generation_system.terrain_volume_revision())
+	var owner = Owner.new()
+	var rejected: Dictionary = owner.setup_from_committed_transaction(main, terrain,
+		transaction, receipt, 47, 0)
+	var transaction_after: Dictionary = transaction.snapshot()
+	var pending: Dictionary = stage.stop()
+	var reclaimed: Dictionary = stage.reclaim_unadopted_transaction(transaction, receipt)
+	var drained: Dictionary = await drain_stage(stage)
+	var expected_reason := "committed_transaction_source_descriptor_mismatch" if kind == "town" \
+		else "committed_transaction_durable_source_revision_changed"
+	check(started.get("status") == "pending" and ready.get("status") == "ready"
+		and handoff.get("status") == "ready"
+		and frozen.get("status") == "ready"
+		and frozen.get("sourceDescriptor") == receipt.get("sourceDescriptor")
+		and original_revision >= 0
+		and wrong_setup.get("reason") == "committed_transaction_descriptor_receipt_mismatch"
+		and transaction_after_wrong.get("state") == "committed"
+		and transaction_after_wrong.get("sourceIdentity") == receipt.get("sourceIdentity")
+		and stale_reclaim.get("status") == "failed"
+		and rejected.get("status") == "failed" and rejected.get("reason") == expected_reason
+		and transaction_after.get("state") == "committed"
+		and int(transaction_after.get("backendInstanceId", 0)) \
+			== int(receipt.get("backendInstanceId", 0))
+		and transaction_after.get("sourceIdentity") == receipt.get("sourceIdentity")
+		and owner.snapshot().get("state") == "failed"
+		and int(owner.snapshot().get("backendInstanceId", -1)) == 0
+		and pending.get("status") == "pending" and pending.get("drained") == false
+		and reclaimed.get("status") == "ready" and reclaimed.get("reclaimed") == true
+		and drained.get("status") == "ready" and drained.get("drained") == true
+		and transaction.snapshot().get("state") == "transferred"
+		and stage.stop().get("drained") == true
+		and ((kind == "town" and before_current.get("request") \
+			!= after_current.get("request") and current_revision == original_revision) \
+			or (kind == "durable" and before_current.get("request") \
+			== after_current.get("request") and current_revision > original_revision)),
+		kind + " drift denies adoption and reclaims exact committed backend")
+	observations["descriptor_" + kind] = {"frozen":frozen,
+		"originalDescriptor":before_current.get("request"),
+		"currentDescriptor":after_current.get("request"),
+		"originalRevision":original_revision, "currentRevision":current_revision,
+		"wrongSetup":wrong_setup, "staleReclaim":stale_reclaim,
+		"transactionAfterWrong":transaction_after_wrong,
+		"rejected":rejected, "pending":pending,
+		"transactionAfter":transaction_after, "reclaimed":reclaimed, "drained":drained}
 	terrain.free()
 	main.free()
 	await process_frame
@@ -343,6 +427,8 @@ func run() -> void:
 
 	await exercise_consumed_failure("source_drift")
 	await exercise_consumed_failure("page_setup")
+	await exercise_descriptor_drift("town")
+	await exercise_descriptor_drift("durable")
 
 	var report_path := OS.get_environment("VWB_N5_COMMITTED_STAGE_TRANSFER_REPORT")
 	terrain.free()

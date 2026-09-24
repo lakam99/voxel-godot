@@ -20,6 +20,8 @@ const SaveSnapshotLease = preload("res://scripts/terrain/NativeWorldSaveSnapshot
 var _backend
 var _backend_factory: Callable
 var _input_request: Dictionary = {}
+var _source_descriptor: Dictionary = {}
+var _durable_source_revision := -1
 var _input_owner
 var _snapshot_lease
 var _sections: Array
@@ -42,7 +44,7 @@ var _cancel_failure := ""
 ## subtree is deliberately not deep-copied here. Its owner must hold an
 ## immutable save snapshot until this transaction is committed or drained.
 func start(request: Dictionary, max_records_per_advance: int = DEFAULT_RECORDS_PER_ADVANCE,
-		snapshot_owner = null) -> Dictionary:
+		snapshot_owner = null, durable_source_revision: int = -1) -> Dictionary:
 	if _state != "new": return _failed("transaction_already_started")
 	if not request is Dictionary or request.is_empty(): return _failed("load_transaction_inputs_missing")
 	if max_records_per_advance <= 0 or max_records_per_advance > MAX_RECORDS_PER_ADVANCE:
@@ -83,6 +85,10 @@ func start(request: Dictionary, max_records_per_advance: int = DEFAULT_RECORDS_P
 	native_request["schema"] = SOURCE_SCHEMA
 	native_request["saveSeedText"] = seed
 	native_request = native_request.duplicate(true)
+	var descriptor: Dictionary = native_request.duplicate(true)
+	descriptor.erase("saveSeedText")
+	_source_descriptor = descriptor
+	_durable_source_revision = durable_source_revision
 	var import_identity := {"domain": "terrainVolume", "schemaVersion": 1,
 		"sectionSize": 16, "revision": int(volume.revision)}
 	_backend = _create_backend()
@@ -206,7 +212,32 @@ func commit(expected_source_identity: Dictionary) -> Dictionary:
 	_sections = []
 	return {"status": "ready", "committed": true, "generation": _generation,
 		"candidateVisible": true, "sourceIdentity": _candidate_source_identity.duplicate(true),
-		"backendInstanceId": _backend.get_instance_id()}
+		"backendInstanceId": _backend.get_instance_id(),
+		"sourceDescriptor": _source_descriptor.duplicate(true),
+		"durableSourceRevision": _durable_source_revision}
+
+## The bounded descriptor was frozen before native import. A receiver checks
+## this live transaction and receipt, then recomputes finalized Main inputs
+## before consuming the committed backend.
+func committed_source_descriptor(commit_receipt: Dictionary) -> Dictionary:
+	if _state != "committed" or _backend == null or not _snapshot_lease_is_valid():
+		return {"status":"failed", "reason":"committed_descriptor_unavailable"}
+	if commit_receipt.get("status") != "ready" \
+			or commit_receipt.get("committed") != true \
+			or int(commit_receipt.get("generation", -1)) != _generation \
+			or int(commit_receipt.get("backendInstanceId", 0)) != _backend.get_instance_id() \
+			or commit_receipt.get("sourceIdentity") != _candidate_source_identity \
+			or commit_receipt.get("sourceDescriptor") != _source_descriptor \
+			or int(commit_receipt.get("durableSourceRevision", -2)) != _durable_source_revision:
+		return {"status":"failed", "reason":"committed_descriptor_receipt_mismatch"}
+	var status: Dictionary = _backend.status()
+	if status.get("status") != "ready" \
+			or status.get("sourceIdentity") != _candidate_source_identity:
+		return {"status":"failed", "reason":"committed_descriptor_backend_mismatch"}
+	return {"status":"ready", "sourceDescriptor":_source_descriptor.duplicate(true),
+		"durableSourceRevision":_durable_source_revision,
+		"backendInstanceId":_backend.get_instance_id(),
+		"generation":_generation, "sourceIdentity":_candidate_source_identity.duplicate(true)}
 
 ## Transfer is available only after native identity-checked commit. The returned
 ## RefCounted backend now becomes the new runtime owner's responsibility.
@@ -232,7 +263,9 @@ func borrow_committed_backend(commit_receipt: Dictionary) -> Dictionary:
 			or commit_receipt.get("committed") != true \
 			or int(commit_receipt.get("generation", -1)) != _generation \
 			or int(commit_receipt.get("backendInstanceId", 0)) != _backend.get_instance_id() \
-			or commit_receipt.get("sourceIdentity") != _candidate_source_identity:
+			or commit_receipt.get("sourceIdentity") != _candidate_source_identity \
+			or commit_receipt.get("sourceDescriptor") != _source_descriptor \
+			or int(commit_receipt.get("durableSourceRevision", -2)) != _durable_source_revision:
 		return {"status":"failed", "reason":"committed_backend_receipt_mismatch"}
 	var status: Dictionary = _backend.status()
 	if status.get("status") != "ready" \
@@ -272,6 +305,7 @@ func snapshot() -> Dictionary:
 		"ownerMustBeRetained": _backend != null,
 		"candidateVisible": _state == "committed" or _state == "transferred",
 		"sourceIdentity": _candidate_source_identity.duplicate(true),
+		"durableSourceRevision":_durable_source_revision,
 		"failure": _failure,
 		"snapshotLeaseValid": _snapshot_lease_is_valid()}
 
