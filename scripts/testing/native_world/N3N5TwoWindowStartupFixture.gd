@@ -9,6 +9,23 @@ const PLANNER = preload("res://scripts/terrain/NativeTerrainDemandPlanner.gd")
 const BROKER = preload("res://scripts/terrain/NativeTerrainArtifactRequests.gd")
 const OWNER = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
+const MEMORY_POLICY = preload("res://scripts/terrain/NativeCollisionMemoryPolicy.gd")
+const MEMORY_ADMISSION = preload("res://scripts/terrain/NativeCollisionMemoryAdmission.gd")
+
+func _new_fixture_memory_admission(epoch: String):
+	var policy = MEMORY_POLICY.new()
+	var configured: Dictionary = policy.configure({
+		"maxVerticesPerRow":65536, "verticesPerShape":768,
+		"rowEntryBytes":1, "bodyEntryBytes":1, "shapeEntryBytes":1,
+		"physicsPayloadMultiplier":1, "maxRowsPerWindow":4096,
+		"maxWindowChargedBytes":400000000,
+		"maxAggregateChargedBytes":800000000,
+		"maxReservations":8192})
+	if configured.get("status") != "ready": return null
+	var admission = MEMORY_ADMISSION.new()
+	var setup: Dictionary = admission.setup(policy, epoch,
+		"two-window-fixture:%d" % Time.get_ticks_usec())
+	return admission if setup.get("status") == "ready" else null
 
 func _init() -> void:
 	call_deferred("_run")
@@ -76,7 +93,8 @@ func _run() -> void:
 	root.add_child(root_3d)
 	var coordinator = COORDINATOR.new()
 	root_3d.add_child(coordinator)
-	var setup: Dictionary = coordinator.setup(broker, root_3d)
+	var memory_admission = _new_fixture_memory_admission("n3n5-two-window-fixture")
+	var setup: Dictionary = coordinator.setup(broker, root_3d, memory_admission)
 	var publications := []
 	var rows_by_window := {}
 	var owners := {}
@@ -92,7 +110,7 @@ func _run() -> void:
 			var facade = facade_status.get("source")
 			var rows: Array[Dictionary] = []
 			for block: Vector3i in window.blocks:
-				var canonical: Dictionary = facade.collision_artifact_row(block,
+				var canonical: Dictionary = facade.collision_artifact_row_snapshot(block,
 					layout.identity)
 				if canonical.get("status") == "ready": rows.append(canonical.row)
 			rows_by_window[window.id] = rows

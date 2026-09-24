@@ -15,6 +15,7 @@ const AGGREGATE_VALIDATION_STEP_USEC_BUDGET := 1500
 ## actor admission barriers. A window owner cannot release a global gate.
 var _broker: Object
 var _actor_root: Node
+var _memory_admission: Object
 var _owners := {}
 var _owner_epochs := {}
 var _owner_epoch_sequence := 0
@@ -39,16 +40,24 @@ var _aggregate_last_step_frame := -1
 func _process(_delta: float) -> void:
 	_advance_aggregate_validation()
 
-func setup(broker: Object, actor_root: Node) -> Dictionary:
+func setup(broker: Object, actor_root: Node,
+		memory_admission: Object = null) -> Dictionary:
 	if _broker != null or broker == null or actor_root == null \
+			or memory_admission == null \
+			or not memory_admission.has_method("is_active") \
+			or not memory_admission.has_method("snapshot") \
+			or not memory_admission.has_method("owner_reservation_receipt") \
+			or not memory_admission.has_method("drain_receipt") \
 			or not broker.has_method("collision_window_layout") \
 			or not broker.has_method("acknowledge_collision_window_retired") \
 			or not broker.has_method("claim_collision_window_retirement") \
 			or not broker.has_method("validate_collision_window_retirement") \
-			or not broker.has_method("abort_collision_window_retirement"):
+			or not broker.has_method("abort_collision_window_retirement") \
+			or not bool(memory_admission.call("is_active")):
 		return {"status":"failed", "reason":"window_coordinator_source_invalid"}
 	_broker = broker
 	_actor_root = actor_root
+	_memory_admission = memory_admission
 	return {"status":"ready"}
 
 ## Admission target contract consumed by MainCore. It may bind during startup,
@@ -79,12 +88,16 @@ func register_window(window: Dictionary, owner: Node3D) -> Dictionary:
 	if _owners.has(window.id) and _owners[window.id] != owner:
 		return {"status":"pending", "reason":"old_physical_window_not_retired"}
 	if not _owners.has(window.id):
-		if not owner.has_method("assign_retirement_owner_epoch"):
+		if not owner.has_method("assign_retirement_owner_epoch") \
+				or not owner.has_method("bind_memory_admission"):
 			return {"status":"failed", "reason":"physical_window_owner_epoch_api_missing"}
 		_owner_epoch_sequence += 1
 		var owner_epoch := "%d:%d" % [get_instance_id(), _owner_epoch_sequence]
 		if not bool(owner.call("assign_retirement_owner_epoch", owner_epoch)):
 			return {"status":"failed", "reason":"physical_window_owner_epoch_rejected"}
+		if not bool(owner.call("bind_memory_admission", _memory_admission,
+				String(window.windowToken), owner_epoch)):
+			return {"status":"failed", "reason":"physical_window_memory_ledger_binding_rejected"}
 		_owner_epochs[window.id] = owner_epoch
 	_owners[window.id] = owner
 	_window_tokens[window.id] = window.windowToken
@@ -427,6 +440,13 @@ func retire_window(id: Vector3i) -> Dictionary:
 				"drain":drained}
 		return {"status":"failed", "reason":"physical_window_drain_unproven_terminal_hold",
 			"drain":drained}
+	var owner_memory: Dictionary = _memory_admission.call(
+		"owner_reservation_receipt", owner_epoch, token)
+	if owner_memory.get("status") != "ready" \
+			or int(owner_memory.get("reservationCount", -1)) != 0 \
+			or int(owner_memory.get("chargedBytes", -1)) != 0:
+		return {"status":"pending", "reason":"physical_window_memory_charge_retained",
+			"drain":drained, "memoryAdmission":owner_memory}
 	var lease_valid: Dictionary = _broker.validate_collision_window_retirement(
 		token, String(lease.leaseId), owner_epoch)
 	if lease_valid.get("status") != "ready" \
@@ -473,6 +493,14 @@ func stop_and_drain() -> Dictionary:
 				or drained.get("physicalOwnerEpoch") != owner_epoch:
 			incomplete.append(id)
 			continue
+		var owner_memory: Dictionary = _memory_admission.call(
+			"owner_reservation_receipt", owner_epoch,
+			String(_window_tokens.get(id, "")))
+		if owner_memory.get("status") != "ready" \
+				or int(owner_memory.get("reservationCount", -1)) != 0 \
+				or int(owner_memory.get("chargedBytes", -1)) != 0:
+			incomplete.append(id)
+			continue
 		owner.queue_free()
 		_owners.erase(id)
 		_window_tokens.erase(id)
@@ -487,6 +515,12 @@ func stop_and_drain() -> Dictionary:
 		return {"status":"pending", "reason":"physical_window_children_draining",
 			"remainingChildren":get_child_count(),
 			"activeBarriers":active_barrier_count()}
+	var memory_drain: Dictionary = _memory_admission.call("drain_receipt")
+	if memory_drain.get("status") != "ready" \
+			or not bool(memory_drain.get("drained", false)):
+		return {"status":"pending", "reason":"collision_memory_ledger_drain_pending",
+			"memoryAdmission":memory_drain,
+			"remainingChildren":get_child_count()}
 	_barriers.clear()
 	_barrier_identities.clear()
 	_barrier_bounds.clear()
@@ -494,4 +528,5 @@ func stop_and_drain() -> Dictionary:
 	_retirement_leases.clear()
 	return {"status":"ready", "drained":true,
 		"remainingChildren":get_child_count(),
+		"memoryAdmission":memory_drain,
 		"activeBarriers":active_barrier_count()}

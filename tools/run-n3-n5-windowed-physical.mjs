@@ -17,7 +17,11 @@ const execution = await runGodotProcess(await findGodot(), [
   'res://scripts/testing/native_world/N3N5WindowedPhysicalFixture.gd',
 ], {
   cwd: project,
-  timeoutSeconds: 60,
+  // This isolated worktree may have a cold Godot import cache. Bound one
+  // focused fixture generously enough for project bootstrap, while retaining
+  // an explicit shorter active-work deadline.
+  timeoutSeconds: 360,
+  workTimeoutSeconds: 300,
   reportPath,
   env: { ...process.env, N3_N5_WINDOWED_PHYSICAL_REPORT: reportPath },
 });

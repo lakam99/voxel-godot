@@ -236,6 +236,66 @@ func _run() -> void:
 	_check(ledger.setup(exact_policy, "ledger-B", "instance-B").status == "failed",
 		"ledger setup cannot be replaced")
 	var row_spec := [{"vertexCount":100, "expectedHit":true}]
+	var abort_policy = POLICY.new()
+	_check(abort_policy.configure(_config(50000, 100000, 8)).status == "ready",
+		"abort-body recovery policy is explicitly configured")
+	var abort_ledger = ADMISSION.new()
+	_check(abort_ledger.setup(abort_policy, "ledger-abort-body",
+		"instance-abort-body").status == "ready",
+		"abort-body recovery ledger binds its own identity")
+	var occupied: Dictionary = abort_ledger.reserve_candidate("owner-abort",
+		"window-abort", "occupied", row_spec)
+	_check(occupied.status == "ready" and abort_ledger.mark_candidate_constructed(
+		occupied.token, "owner-abort", [501]).status == "ready",
+		"occupied body fixture reaches constructed state")
+	var abort_body: Dictionary = abort_ledger.reserve_candidate("owner-abort",
+		"window-abort", "abort-body", row_spec)
+	var abort_charge_before: int = int(abort_ledger.snapshot().totalChargedBytes)
+	_check(abort_body.status == "ready" \
+		and abort_ledger.register_candidate_abort_body(abort_body.token,
+			"foreign-owner", [502]).reason == "collision_memory_owner_epoch_mismatch" \
+		and abort_ledger.register_candidate_abort_body(abort_body.token,
+			"owner-abort", []).reason == "collision_memory_body_count_mismatch" \
+		and abort_ledger.register_candidate_abort_body(abort_body.token,
+			"owner-abort", [0]).reason == "collision_memory_body_ids_invalid" \
+		and abort_ledger.register_candidate_abort_body(abort_body.token,
+			"owner-abort", [501]).reason == "collision_memory_body_owner_collision" \
+		and int(abort_ledger.snapshot().totalChargedBytes) == abort_charge_before,
+		"abort registration rejects foreign epoch, wrong count, collision without charge mutation")
+	var recovered_abort: Dictionary = abort_ledger.register_candidate_abort_body(
+		abort_body.token, "owner-abort", [502])
+	_check(recovered_abort.status == "ready" \
+		and recovered_abort.transition == "candidate_abort_body_registered" \
+		and recovered_abort.state == "candidate_constructed" \
+		and abort_ledger.cancel_unconstructed(abort_body.token,
+			"owner-abort").reason \
+			== "collision_memory_cancel_requires_unconstructed" \
+		and abort_ledger.snapshot().totalChargedBytes == abort_charge_before,
+		"exact abort-body identity enters deferred lifecycle without releasing charge early")
+	var abort_deferred: Dictionary = abort_ledger.defer_release(abort_body.token,
+		"owner-abort", 10, 20)
+	var abort_ack := _ack(String(abort_ledger.snapshot().ledgerEpoch),
+		String(abort_ledger.snapshot().ledgerIdentity), abort_body.token,
+		"owner-abort", "window-abort", 10, 20, [502])
+	_check(abort_deferred.status == "ready" \
+		and abort_ledger.acknowledge_deferred_release(abort_body.token,
+			"owner-abort", abort_ack).status == "ready" \
+		and int(abort_ledger.snapshot().totalChargedBytes) \
+			== int(occupied.chargedBytes),
+		"recovered shape-less body releases only through exact later deferred acknowledgement")
+	var duplicate_ids: Dictionary = abort_ledger.reserve_candidate("owner-abort",
+		"window-abort", "duplicate-abort-ids", [
+			{"vertexCount":100, "expectedHit":true},
+			{"vertexCount":100, "expectedHit":true}])
+	var duplicate_abort: Dictionary = abort_ledger.register_candidate_abort_body(
+		duplicate_ids.token, "owner-abort", [503, 503])
+	_check(duplicate_abort.reason == "collision_memory_body_ids_invalid" \
+		and abort_ledger.snapshot().stateCounts.candidate_reserved == 1 \
+		and abort_ledger.snapshot().totalChargedBytes \
+			== int(occupied.chargedBytes) + int(duplicate_ids.chargedBytes) \
+		and abort_ledger.cancel_unconstructed(duplicate_ids.token,
+			"owner-abort").status == "ready",
+		"duplicate abort body identities fail closed and preserve the reserved charge")
 	var mutable_source = MutablePolicy.new(exact_policy)
 	var frozen_ledger = ADMISSION.new()
 	_check(frozen_ledger.setup(mutable_source, "ledger-frozen",

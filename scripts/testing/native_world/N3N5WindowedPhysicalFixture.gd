@@ -11,6 +11,8 @@ const OWNER = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 const BARRIER = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
 const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
+const MEMORY_POLICY = preload("res://scripts/terrain/NativeCollisionMemoryPolicy.gd")
+const MEMORY_ADMISSION = preload("res://scripts/terrain/NativeCollisionMemoryAdmission.gd")
 const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 class ArtifactKeyFaultSource extends RefCounted:
@@ -61,6 +63,21 @@ func _await_window_layout(broker, initial: Dictionary, label: String) -> Diction
 	assert(result.get("status") == "ready",
 		"%s staged layout did not become ready in bounded wait" % label)
 	return result
+
+func _new_fixture_memory_admission(epoch: String):
+	var policy = MEMORY_POLICY.new()
+	var configured: Dictionary = policy.configure({
+		"maxVerticesPerRow":65536, "verticesPerShape":768,
+		"rowEntryBytes":1, "bodyEntryBytes":1, "shapeEntryBytes":1,
+		"physicsPayloadMultiplier":1, "maxRowsPerWindow":4096,
+		"maxWindowChargedBytes":400000000,
+		"maxAggregateChargedBytes":800000000,
+		"maxReservations":8192})
+	if configured.get("status") != "ready": return null
+	var admission = MEMORY_ADMISSION.new()
+	var setup: Dictionary = admission.setup(policy, epoch,
+		"n3n5-fixture:%d" % Time.get_ticks_usec())
+	return admission if setup.get("status") == "ready" else null
 
 func _init() -> void:
 	call_deferred("_run")
@@ -129,14 +146,17 @@ func _run() -> void:
 	var rows: Array[Dictionary] = []
 	if snapshot.get("status") == "ready":
 		for block: Vector3i in window.blocks:
-			var canonical: Dictionary = facade.collision_artifact_row(block,
+			var canonical: Dictionary = facade.collision_artifact_row_snapshot(block,
 				layout.identity)
 			if canonical.get("status") == "ready": rows.append(canonical.row)
 	var root_3d := Node3D.new()
 	root.add_child(root_3d)
 	var coordinator = COORDINATOR.new()
 	root_3d.add_child(coordinator)
-	var coordinator_setup: Dictionary = coordinator.setup(broker, root_3d)
+	var memory_admission = _new_fixture_memory_admission("n3n5-windowed-fixture")
+	var memory_configured := memory_admission != null
+	var coordinator_setup: Dictionary = coordinator.setup(broker, root_3d,
+		memory_admission)
 	var owner = OWNER.new()
 	coordinator.add_child(owner)
 	var owner_source := ArtifactKeyFaultSource.new(facade)
@@ -159,6 +179,15 @@ func _run() -> void:
 			"schema":"n5-resident-collision-publication/v1",
 			"identity":layout.identity, "residentBlocks":window.blocks,
 			"affectedBlocks":window.blocks, "rows":rows}, barrier)
+	var initial_memory: Dictionary = memory_admission.snapshot() \
+		if memory_configured else {}
+	var same_window_replacement: Dictionary = {}
+	if published.get("status") == "ready":
+		same_window_replacement = await owner.publish({
+			"schema":"n5-resident-collision-publication/v1",
+			"identity":layout.identity, "residentBlocks":window.blocks,
+			"affectedBlocks":window.blocks, "rows":rows}, barrier)
+	var same_window_memory: Dictionary = owner.memory_admission_receipt()
 	var physical: Dictionary = owner.physical_receipt(layout.identity)
 	var aggregate: Dictionary = coordinator.aggregate_readiness(layout.identity)
 	var released: Dictionary = coordinator.release_barriers(layout.identity)
@@ -419,7 +448,7 @@ func _run() -> void:
 	var replacement_rows: Array[Dictionary] = []
 	if replacement_snapshot.get("status") == "ready":
 		for block: Vector3i in replacement_window.blocks:
-			var row_status: Dictionary = replacement_facade.collision_artifact_row(
+			var row_status: Dictionary = replacement_facade.collision_artifact_row_snapshot(
 				block, replacement_layout.identity)
 			if row_status.get("status") == "ready":
 				replacement_rows.append(row_status.row)
@@ -432,6 +461,8 @@ func _run() -> void:
 	var before_replacement_install: Dictionary = coordinator.aggregate_readiness(
 		replacement_layout.identity)
 	var replacement_published: Dictionary = {}
+	var pre_replacement_memory: Dictionary = memory_admission.snapshot() \
+		if memory_configured else {}
 	if replacement_rows.size() == replacement_window.get("blocks", []).size():
 		replacement_published = await replacement_owner.publish({
 			"schema":"n5-resident-collision-publication/v1",
@@ -441,6 +472,8 @@ func _run() -> void:
 			"rows":replacement_rows}, replacement_barrier)
 	var replacement_aggregate: Dictionary = coordinator.aggregate_readiness(
 		replacement_layout.identity)
+	var post_replacement_memory: Dictionary = memory_admission.snapshot() \
+		if memory_configured else {}
 	var replacement_release: Dictionary = coordinator.release_barriers(
 		replacement_layout.identity)
 	var admitted_after_replacement: bool = coordinator.admit_motion(
@@ -521,7 +554,7 @@ func _run() -> void:
 	var reactivated_rows: Array[Dictionary] = []
 	if reactivated_snapshot.get("status") == "ready":
 		for block: Vector3i in reactivated_window.blocks:
-			var row_status: Dictionary = reactivated_facade.collision_artifact_row(
+			var row_status: Dictionary = reactivated_facade.collision_artifact_row_snapshot(
 				block, reactivated_window.identity)
 			if row_status.get("status") == "ready":
 				reactivated_rows.append(row_status.row)
@@ -554,6 +587,8 @@ func _run() -> void:
 		reactivated_layout.identity)
 	var retired_facade: Dictionary = facade.collision_source_snapshot()
 	var coordinator_drain: Dictionary = await coordinator.stop_and_drain()
+	var final_memory: Dictionary = memory_admission.snapshot() \
+		if memory_configured else {}
 	var broker_stop: Dictionary = broker.stop()
 	for frame in range(100):
 		if broker_stop.get("status") == "ready": break
@@ -567,6 +602,7 @@ func _run() -> void:
 		and planned.get("status") == "ready" \
 		and broker_setup.get("status") == "ready" \
 		and coordinator_setup.get("status") == "ready" \
+		and memory_configured \
 		and registered.get("status") == "ready" \
 		and initial_layout.get("status") == "pending" \
 		and initial_aggregate.get("status") == "pending" \
@@ -575,6 +611,18 @@ func _run() -> void:
 		and snapshot.get("status") == "ready" \
 		and rows.size() == 2 and solid_count == 1 and empty_count == 1 \
 		and published.get("status") == "ready" \
+		and same_window_replacement.get("status") == "ready" \
+		and int(initial_memory.get("totalChargedBytes", 0)) > 0 \
+		and int(same_window_memory.get("lastCandidateAdmission", {}).get(
+			"stateChargedBytes", {}).get("live_current", 0)) \
+			>= int(initial_memory.get("totalChargedBytes", 0)) \
+		and int(same_window_memory.get("lastCandidateAdmission", {}).get(
+			"stateChargedBytes", {}).get("candidate_reserved", 0)) > 0 \
+		and int(same_window_memory.get("ledger", {}).get("peakChargedBytes", 0)) \
+			> int(initial_memory.get("totalChargedBytes", 0)) \
+		and int(same_window_memory.get("lastCandidateAdmission", {}).get(
+			"totalChargedBytes", 0)) \
+			>= 2 * int(initial_memory.get("totalChargedBytes", 0)) \
 		and missing_aggregate.get("status") == "pending" \
 		and aggregate.get("status") == "ready" \
 		and released.get("status") == "ready" and contact \
@@ -622,10 +670,17 @@ func _run() -> void:
 		and premature_replacement_release.get("status") == "pending" \
 		and replaced_old.get("status") == "ready" \
 		and replaced_old.get("drain", {}).get("remainingBodies") == 0 \
+		and int(replaced_old.get("drain", {}).get("memoryAdmission", {}).get("reservationCount", -1)) == 0 \
 		and replacement_snapshot.get("status") == "ready" \
 		and replacement_bound and replacement_registered.get("status") == "ready" \
 		and before_replacement_install.get("status") == "pending" \
 		and replacement_published.get("status") == "ready" \
+		and int(pre_replacement_memory.get("totalChargedBytes", -1)) == 0 \
+		and int(post_replacement_memory.get("totalChargedBytes", 0)) > 0 \
+		and int(post_replacement_memory.get("peakChargedBytes", 0)) \
+			> int(initial_memory.get("totalChargedBytes", 0)) \
+		and int(final_memory.get("totalChargedBytes", -1)) == 0 \
+		and int(final_memory.get("reservationCount", -1)) == 0 \
 		and replacement_aggregate.get("status") == "ready" \
 		and replacement_release.get("status") == "ready" \
 		and admitted_after_replacement and placement_after_replacement \
@@ -666,6 +721,9 @@ func _run() -> void:
 		"sourceSnapshot":snapshot, "rowCount":rows.size(),
 		"solidCount":solid_count, "emptyCount":empty_count,
 		"publication":published, "physicalReceipt":physical,
+		"initialMemory":initial_memory,
+		"sameWindowReplacement":same_window_replacement,
+		"sameWindowMemory":same_window_memory,
 		"coordinatorSetup":coordinator_setup,
 		"registered":registered, "missingAggregate":missing_aggregate,
 		"aggregate":aggregate,
@@ -723,6 +781,10 @@ func _run() -> void:
 		"drained":drained, "retirement":retirement,
 		"retiredFacade":retired_facade,
 		"coordinatorDrain":coordinator_drain,
+		"memoryAdmissionConfigured":memory_configured,
+		"preReplacementMemory":pre_replacement_memory,
+		"postReplacementMemory":post_replacement_memory,
+		"finalMemory":final_memory,
 		"brokerStop":broker_stop})
 
 func _finish(passed: bool, evidence: Dictionary) -> void:

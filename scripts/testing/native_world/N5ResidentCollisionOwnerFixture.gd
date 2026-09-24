@@ -54,6 +54,80 @@ class FakeSource:
 		return {"status": "ready",
 			"row": (rows[block] as Dictionary).duplicate(false)}
 
+class DeferredReleaseFault:
+	extends RefCounted
+	var _limits := {"maxReservations":8}
+	var failures_remaining := 0
+	var abort_registration_fails := false
+	var reserve_calls := 0
+	var defer_calls := 0
+	var cancel_calls := 0
+	var abort_registration_calls := 0
+	var ack_failures_remaining := 0
+	var ack_calls := 0
+	var mark_constructed_calls := 0
+	var abort_body_ids_received: Array = []
+	var cancel_body: Object
+	var cancel_body_was_valid := false
+	var reservation_count := 1
+	var charged_bytes := 256
+	var _ledger_epoch := "n5-dispose-fault-epoch"
+	var _ledger_identity := "n5-dispose-fault-ledger"
+	func reserve_candidate(_owner: String, _window: String, _id: String,
+			_rows: Array) -> Dictionary:
+		reserve_calls += 1
+		return {"status":"failed", "reason":"unused_fixture_api"}
+	func mark_candidate_constructed(_token: String, _owner: String,
+			_body_ids: Array) -> Dictionary:
+		mark_constructed_calls += 1
+		return {"status":"failed", "reason":"fixture_mark_constructed_rejected"}
+	func register_candidate_abort_body(_token: String, _owner: String,
+			body_ids: Array) -> Dictionary:
+		abort_registration_calls += 1
+		abort_body_ids_received = body_ids.duplicate()
+		if abort_registration_fails:
+			return {"status":"failed", "reason":"fixture_abort_registration_rejected"}
+		if body_ids.size() != 1 or int(body_ids[0]) <= 0:
+			return {"status":"failed", "reason":"fixture_abort_body_identity_invalid"}
+		return {"status":"ready", "state":"candidate_constructed",
+			"bodyInstanceIds":body_ids.duplicate()}
+	func commit_live(_token: String, _owner: String) -> Dictionary:
+		return {"status":"failed", "reason":"unused_fixture_api"}
+	func cancel_unconstructed(_token: String, _owner: String) -> Dictionary:
+		cancel_calls += 1
+		cancel_body_was_valid = is_instance_valid(cancel_body)
+		reservation_count = maxi(0, reservation_count - 1)
+		charged_bytes = 0 if reservation_count == 0 else charged_bytes
+		return {"status":"ready"}
+	func defer_release(_token: String, _owner: String, _physics: int,
+			_process: int) -> Dictionary:
+		defer_calls += 1
+		if failures_remaining > 0:
+			failures_remaining -= 1
+			return {"status":"failed", "reason":"fixture_defer_rejected"}
+		return {"status":"ready"}
+	func acknowledge_deferred_release(_token: String, _owner: String,
+			_ack: Dictionary) -> Dictionary:
+		ack_calls += 1
+		if ack_failures_remaining > 0:
+			ack_failures_remaining -= 1
+			return {"status":"failed", "reason":"fixture_ack_rejected"}
+		reservation_count = maxi(0, reservation_count - 1)
+		charged_bytes = 0 if reservation_count == 0 else charged_bytes
+		return {"status":"ready"}
+	func snapshot() -> Dictionary:
+		return {"ledgerEpoch":_ledger_epoch,
+			"ledgerIdentity":_ledger_identity,
+			"reservationCount":reservation_count,
+			"totalChargedBytes":charged_bytes, "status":"ready"}
+	func owner_reservation_receipt(_owner: String, _window: String) -> Dictionary:
+		return {"status":"ready", "reservationCount":reservation_count,
+			"chargedBytes":charged_bytes}
+	func drain_receipt() -> Dictionary:
+		return {"status":"ready"}
+	func is_active() -> bool:
+		return true
+
 var _source := FakeSource.new()
 var _owner: Node3D
 var _actor: CharacterBody3D
@@ -214,6 +288,7 @@ func _run() -> void:
 	var staged_final_ready: Dictionary = staged_owner.startup_readiness(staged_identity)
 	var staged_final_release: bool = staged_barrier.release(staged_identity)
 	var physical_health: Dictionary = await _physical_health_contract()
+	var disposal_failure: Dictionary = await _disposal_failure_contract()
 	var main_drain: Dictionary = await _owner.stop_and_drain()
 	var staged_drain: Dictionary = await staged_owner.stop_and_drain()
 	var stop_during_prepare: Dictionary = await _shutdown_case("prepare")
@@ -250,6 +325,7 @@ func _run() -> void:
 		and staged_last.get("status") == "ready" \
 		and staged_final_ready.get("status") == "ready" and staged_final_release \
 		and bool(physical_health.get("passed", false)) \
+		and bool(disposal_failure.get("passed", false)) \
 		and main_drain.get("status") == "ready" and int(main_drain.get("remainingBodies", -1)) == 0 \
 		and staged_drain.get("status") == "ready" and int(staged_drain.get("remainingBodies", -1)) == 0 \
 		and bool(stop_during_prepare.get("passed", false)) \
@@ -279,6 +355,7 @@ func _run() -> void:
 			"earlyRelease": staged_early_release, "last": staged_last,
 			"finalReady": staged_final_ready, "finalRelease": staged_final_release},
 		"physicalHealth":physical_health,
+		"disposalFailureRetention":disposal_failure,
 		"drain": {"main": main_drain, "staged": staged_drain,
 			"duringPrepare": stop_during_prepare,
 			"duringPostPrepareValidation": stop_during_post_prepare,
@@ -369,6 +446,308 @@ func _physical_health_contract() -> Dictionary:
 		"bodyBeforeAck":body_before_ack,
 		"freedReceipt":freed_receipt, "layerDrain":layer_drain,
 		"bodyDrain":body_drain}
+
+
+func _disposal_failure_contract() -> Dictionary:
+	var direct := _make_deferred_release_fault_owner(
+		Vector3i(4100, 0, 0), "direct-retire-token")
+	var direct_owner = direct.owner
+	var direct_entry: Dictionary = direct.entry
+	direct.admission.failures_remaining = 1
+	var direct_result: Dictionary = direct_owner.retire_collision_entry(
+		Vector3i(4100, 0, 0))
+	var direct_retained := direct_owner._live.has(Vector3i(4100, 0, 0)) \
+		and int(direct_owner._disposal_retry_entries.size()) == 1 \
+		and is_instance_valid(direct_entry.body) \
+		and not direct_entry.body.is_queued_for_deletion()
+	var direct_drain: Dictionary = await direct_owner.stop_and_drain()
+	var transient_defer_recovered := direct_result.get("status") == "failed" \
+		and direct_drain.get("status") == "ready" \
+		and direct.admission.defer_calls == 2
+
+	var persistent_defer := _make_deferred_release_fault_owner(
+		Vector3i(4107, 0, 0), "persistent-defer-token")
+	persistent_defer.admission.failures_remaining = 10
+	var persistent_defer_drain: Dictionary = \
+		await persistent_defer.owner.stop_and_drain()
+	var persistent_defer_blocked := persistent_defer_drain.get("status") == "failed" \
+		and persistent_defer_drain.get("blocked") == true \
+		and persistent_defer_drain.get("terminalMemoryFailure", {}).get("phase") \
+			== "defer_release" \
+		and persistent_defer_drain.get("terminalMemoryFailure", {}).get("token") \
+			== "persistent-defer-token" \
+		and persistent_defer_drain.get("terminalMemoryFailure", {}).get("attempts") == 3 \
+		and persistent_defer.admission.defer_calls == 3 \
+		and persistent_defer.admission.reservation_count == 1 \
+		and persistent_defer.admission.charged_bytes > 0 \
+		and persistent_defer.owner._live.has(Vector3i(4107, 0, 0)) \
+		and is_instance_valid(persistent_defer.entry.body) \
+		and not persistent_defer.entry.body.is_queued_for_deletion() \
+		and persistent_defer.entry.body.collision_layer == 0 \
+		and persistent_defer.entry.body.collision_mask == 0 \
+		and persistent_defer.entry.shapes[0].disabled
+	var persistent_defer_again: Dictionary = persistent_defer.owner.drain_step()
+	var persistent_defer_sticky := persistent_defer_again.get("status") == "failed" \
+		and persistent_defer.admission.defer_calls == 3 \
+		and is_instance_valid(persistent_defer.entry.body)
+
+	var transient_ack := _make_deferred_release_fault_owner(
+		Vector3i(4108, 0, 0), "transient-ack-token")
+	transient_ack.admission.ack_failures_remaining = 1
+	var transient_ack_drain: Dictionary = await transient_ack.owner.stop_and_drain()
+	var transient_ack_recovered := transient_ack_drain.get("status") == "ready" \
+		and transient_ack.admission.ack_calls == 2 \
+		and transient_ack.admission.reservation_count == 0 \
+		and transient_ack.admission.charged_bytes == 0
+
+	var persistent_ack := _make_deferred_release_fault_owner(
+		Vector3i(4109, 0, 0), "persistent-ack-token")
+	var terminal_source := FakeSource.new()
+	assert(persistent_ack.owner.bind_source(terminal_source),
+		"persistent acknowledgement fixture binds a source before stop")
+	persistent_ack.admission.ack_failures_remaining = 10
+	var persistent_ack_drain: Dictionary = await persistent_ack.owner.stop_and_drain()
+	var persistent_ack_blocked := persistent_ack_drain.get("status") == "failed" \
+		and persistent_ack_drain.get("blocked") == true \
+		and persistent_ack_drain.get("terminalMemoryFailure", {}).get("phase") \
+			== "acknowledge_deferred_release" \
+		and persistent_ack_drain.get("terminalMemoryFailure", {}).get("token") \
+			== "persistent-ack-token" \
+		and persistent_ack_drain.get("terminalMemoryFailure", {}).get("attempts") == 3 \
+		and persistent_ack.admission.ack_calls == 3 \
+		and persistent_ack.admission.reservation_count == 1 \
+		and persistent_ack.admission.charged_bytes > 0 \
+		and persistent_ack.owner._retired_memory_entries.size() == 1
+	var persistent_ack_again: Dictionary = persistent_ack.owner.drain_step()
+	var persistent_ack_sticky := persistent_ack_again.get("status") == "failed" \
+		and persistent_ack.admission.ack_calls == 3 \
+		and persistent_ack.admission.reservation_count == 1 \
+		and persistent_ack.admission.charged_bytes > 0
+	var persistent_ack_publish: Dictionary = await persistent_ack.owner.publish({})
+	var persistent_ack_admission_blocked := persistent_ack.owner._failed \
+		and persistent_ack_publish.get("status") == "failed" \
+		and persistent_ack_publish.get("reason") \
+			== "resident_owner_memory_release_terminal_failure" \
+		and persistent_ack.admission.reserve_calls == 0 \
+		and persistent_ack.admission.reservation_count == 1 \
+		and persistent_ack.admission.charged_bytes > 0
+
+	var prepare := _make_deferred_release_fault_owner(
+		Vector3i(4101, 0, 0), "prepare-reject-token")
+	prepare.owner._live.clear()
+	prepare.owner._resident_blocks.clear()
+	prepare.admission.failures_remaining = 2
+	var invalid_row := {"vertices":PackedVector3Array([Vector3.ZERO]),
+		"bounds":AABB(Vector3.ZERO, Vector3.ONE)}
+	var prepare_result: Dictionary = await prepare.owner._prepare_row_bounded(
+		invalid_row, {}, prepare.entry)
+	var prepare_sweep: Dictionary = prepare.owner._dispose_candidates({
+		Vector3i(4101, 0, 0):prepare.entry})
+	prepare.owner._pending_candidates = {Vector3i(4101, 0, 0):prepare.entry}
+	prepare.owner._pending_candidate_keys = [Vector3i(4101, 0, 0)]
+	var prepare_retained := prepare_result.get("disposal", {}).get("status") == "failed" \
+		and prepare_sweep.get("status") == "failed" \
+		and prepare.owner._disposal_retry_entries.has("prepare-reject-token") \
+		and is_instance_valid(prepare.entry.body) \
+		and not prepare.entry.body.is_queued_for_deletion()
+	var prepare_drain: Dictionary = await prepare.owner.stop_and_drain()
+
+	var rollback := _make_deferred_release_fault_owner(
+		Vector3i(4102, 0, 0), "rollback-reject-token")
+	rollback.owner._live.clear()
+	rollback.owner._resident_blocks.clear()
+	rollback.admission.failures_remaining = 1
+	var rollback_result: Dictionary = await rollback.owner._rollback({
+		Vector3i(4102, 0, 0):rollback.entry}, {})
+	var rollback_retained := not bool(rollback_result.get(
+		"candidateDisposalReady", true)) \
+		and rollback.owner._disposal_retry_entries.has("rollback-reject-token") \
+		and is_instance_valid(rollback.entry.body) \
+		and not rollback.entry.body.is_queued_for_deletion()
+	rollback.owner._pending_candidates = {Vector3i(4102, 0, 0):rollback.entry}
+	rollback.owner._pending_candidate_keys = [Vector3i(4102, 0, 0)]
+	var rollback_drain: Dictionary = await rollback.owner.stop_and_drain()
+
+	var previous := _make_deferred_release_fault_owner(
+		Vector3i(4103, 0, 0), "previous-row-reject-token")
+	previous.owner._live.clear()
+	previous.owner._resident_blocks.clear()
+	previous.admission.failures_remaining = 1
+	var previous_result: Dictionary = previous.owner._dispose_previous_live_entries({
+		Vector3i(4103, 0, 0):previous.entry})
+	var previous_retained := previous_result.get("status") == "failed" \
+		and previous.owner._disposal_retry_entries.has("previous-row-reject-token") \
+		and is_instance_valid(previous.entry.body) \
+		and not previous.entry.body.is_queued_for_deletion()
+	var previous_drain: Dictionary = await previous.owner.stop_and_drain()
+
+	var post_commit := _make_deferred_release_fault_owner(
+		Vector3i(4104, 0, 0), "post-commit-old-token")
+	post_commit.admission.reservation_count = 2
+	post_commit.admission.charged_bytes = 512
+	post_commit.owner._live.clear()
+	post_commit.owner._resident_blocks.clear()
+	var committed_body := StaticBody3D.new()
+	committed_body.collision_layer = OwnerScript.COLLISION_LAYER
+	committed_body.collision_mask = 0
+	post_commit.owner.add_child(committed_body)
+	var committed_shape := CollisionShape3D.new()
+	committed_shape.shape = BoxShape3D.new()
+	committed_body.add_child(committed_shape)
+	var committed_entry := {"body":committed_body,
+		"shapes":[committed_shape], "retiredShapes":[],
+		"memoryToken":"post-commit-new-token", "expectedHit":true}
+	post_commit.owner._live = {Vector3i(4104, 0, 0):committed_entry}
+	post_commit.owner._resident_blocks = [Vector3i(4104, 0, 0)]
+	post_commit.owner._pending_candidates = {Vector3i(4104, 0, 0):committed_entry}
+	post_commit.owner._pending_candidate_keys = [Vector3i(4104, 0, 0)]
+	post_commit.owner.request_stop()
+	# Targeted branch contract for the two post-commit publish stop exits: both
+	# call _finish_stopped_committed_publish(old), whose ownership transfer is
+	# exercised here against populated live, pending, and old-entry structures.
+	var post_commit_stop: Dictionary = \
+		post_commit.owner._finish_stopped_committed_publish({
+			Vector3i(4104, 0, 0):post_commit.entry})
+	var post_commit_retained := post_commit_stop.get("status") == "failed" \
+		and post_commit.owner._pending_candidates.is_empty() \
+		and post_commit.owner._pending_candidate_keys.is_empty() \
+		and post_commit.owner._live.get(Vector3i(4104, 0, 0), {}).get("body") \
+			== committed_body \
+		and post_commit.owner._disposal_retry_entries.get(
+			"post-commit-old-token", {}).get("entry", {}).get("body") \
+			== post_commit.entry.body \
+		and not post_commit.entry.body.is_queued_for_deletion() \
+		and not committed_body.is_queued_for_deletion()
+	var post_commit_drain: Dictionary = await post_commit.owner.stop_and_drain()
+
+	var abort_recovered := _make_deferred_release_fault_owner(
+		Vector3i(4105, 0, 0), "abort-recovered-token")
+	abort_recovered.owner._live.clear()
+	abort_recovered.owner._resident_blocks.clear()
+	abort_recovered.owner._unconstructed_memory_tokens.append(
+		"abort-recovered-token")
+	abort_recovered.owner._pending_candidates = {
+		Vector3i(4105, 0, 0):abort_recovered.entry}
+	abort_recovered.owner._pending_candidate_keys = [Vector3i(4105, 0, 0)]
+	var original_construct_failure: Dictionary = \
+		abort_recovered.admission.mark_candidate_constructed(
+			"abort-recovered-token", abort_recovered.owner.retirement_owner_epoch(),
+			[abort_recovered.entry.body.get_instance_id()])
+	var recovered_result: Dictionary = abort_recovered.owner._fail_candidate_construction(
+		{Vector3i(4105, 0, 0):abort_recovered.entry}, abort_recovered.entry,
+		original_construct_failure)
+	var abort_recovery_valid := recovered_result.get("status") == "failed" \
+		and recovered_result.get("constructionFailure", {}).get("reason") \
+			== "fixture_mark_constructed_rejected" \
+		and recovered_result.get("abortBodyRegistration", {}).get("status") == "ready" \
+		and abort_recovered.admission.abort_body_ids_received == \
+			[abort_recovered.entry.body.get_instance_id()] \
+		and abort_recovered.admission.defer_calls == 1 \
+		and abort_recovered.admission.cancel_calls == 0
+	var abort_recovery_drain: Dictionary = await abort_recovered.owner.stop_and_drain()
+
+	var abort_blocked := _make_deferred_release_fault_owner(
+		Vector3i(4106, 0, 0), "abort-blocked-token")
+	abort_blocked.owner._live.clear()
+	abort_blocked.owner._resident_blocks.clear()
+	abort_blocked.owner._unconstructed_memory_tokens.append("abort-blocked-token")
+	abort_blocked.owner._pending_candidates = {
+		Vector3i(4106, 0, 0):abort_blocked.entry}
+	abort_blocked.owner._pending_candidate_keys = [Vector3i(4106, 0, 0)]
+	abort_blocked.admission.abort_registration_fails = true
+	var original_blocked_failure: Dictionary = \
+		abort_blocked.admission.mark_candidate_constructed("abort-blocked-token",
+			abort_blocked.owner.retirement_owner_epoch(),
+			[abort_blocked.entry.body.get_instance_id()])
+	var blocked_result: Dictionary = abort_blocked.owner._fail_candidate_construction(
+		{Vector3i(4106, 0, 0):abort_blocked.entry}, abort_blocked.entry,
+		original_blocked_failure)
+	var blocked_drain: Dictionary = await abort_blocked.owner.stop_and_drain()
+	var abort_failure_stays_blocked := blocked_result.get("reason") \
+		== "collision_memory_candidate_construction_unresolved" \
+		and blocked_drain.get("status") == "failed" \
+		and blocked_drain.get("blocked") == true \
+		and blocked_drain.get("drained") == false \
+		and blocked_drain.get("memoryAdmission", {}).get("ledger", {}).get(
+			"reservationCount", 0) == 1 \
+		and blocked_drain.get("memoryAdmission", {}).get("ledger", {}).get(
+			"totalChargedBytes", 0) > 0 \
+		and abort_blocked.owner._pending_candidates.has(Vector3i(4106, 0, 0)) \
+		and abort_blocked.owner._unconstructed_memory_tokens.has("abort-blocked-token") \
+		and is_instance_valid(abort_blocked.entry.body) \
+		and not abort_blocked.entry.body.is_queued_for_deletion() \
+		and abort_blocked.admission.defer_calls == 0 \
+		and abort_blocked.admission.cancel_calls == 0
+	var passed := direct_result.get("status") == "failed" and direct_retained \
+		and transient_defer_recovered and persistent_defer_blocked \
+		and persistent_defer_sticky and transient_ack_recovered \
+		and persistent_ack_blocked and persistent_ack_sticky \
+		and persistent_ack_admission_blocked \
+		and direct_drain.get("status") == "ready" \
+		and prepare_retained and prepare_drain.get("status") == "ready" \
+		and rollback_retained and rollback_drain.get("status") == "ready" \
+		and previous_retained and previous_drain.get("status") == "ready" \
+		and post_commit_retained and post_commit_drain.get("status") == "ready" \
+		and abort_recovery_valid and abort_recovery_drain.get("status") == "ready" \
+		and abort_failure_stays_blocked
+	return {"passed":passed,
+		"evidenceLevel":"injected defer-release rejection with real owner scene-tree drain; stub does not model ledger byte accounting",
+		"directRetirement":{"result":direct_result, "retained":direct_retained,
+			"drain":direct_drain,
+			"transientDeferRecovered":transient_defer_recovered},
+		"persistentDefer":{"drain":persistent_defer_drain,
+			"blocked":persistent_defer_blocked,
+			"sticky":persistent_defer_sticky,
+			"retryReceipt":persistent_defer_again},
+		"transientAck":{"drain":transient_ack_drain,
+			"recovered":transient_ack_recovered},
+		"persistentAck":{"drain":persistent_ack_drain,
+			"blocked":persistent_ack_blocked,
+			"sticky":persistent_ack_sticky,
+			"subsequentPublishBlocked":persistent_ack_admission_blocked,
+			"publish":persistent_ack_publish,
+			"retryReceipt":persistent_ack_again},
+		"prepareAndCandidateSweep":{"prepare":prepare_result,
+			"sweep":prepare_sweep, "retained":prepare_retained,
+			"drain":prepare_drain},
+		"rollback":{"result":rollback_result, "retained":rollback_retained,
+			"drain":rollback_drain},
+		"previousLiveReplacement":{"result":previous_result,
+			"retained":previous_retained, "drain":previous_drain},
+		"postCommitStop":{"result":post_commit_stop,
+			"retained":post_commit_retained, "drain":post_commit_drain,
+			"branchContract":"publish health-await and post-loop stop exits share _finish_stopped_committed_publish; fixture exercises its populated owner-state handoff, not the health-await scheduling itself"},
+		"candidateAbortRecovery":{"result":recovered_result,
+			"valid":abort_recovery_valid, "drain":abort_recovery_drain},
+		"candidateAbortBlocked":{"result":blocked_result,
+			"drain":blocked_drain, "retained":abort_failure_stays_blocked}}
+
+
+func _make_deferred_release_fault_owner(block: Vector3i, token: String) -> Dictionary:
+	var owner = OwnerScript.new()
+	add_child(owner)
+	var epoch := "fixture-owner-%s" % token
+	var admission := DeferredReleaseFault.new()
+	assert(owner.assign_retirement_owner_epoch(epoch),
+		"fault fixture assigns a unique retirement owner epoch")
+	assert(owner.bind_memory_admission(admission, "fixture-window-%s" % token,
+		epoch), "fault fixture binds injected admission ledger")
+	owner._membership_provenance = {"windowToken":"fixture-window-%s" % token}
+	var body := StaticBody3D.new()
+	body.collision_layer = OwnerScript.COLLISION_LAYER
+	body.collision_mask = 0
+	owner.add_child(body)
+	var shape := CollisionShape3D.new()
+	shape.shape = BoxShape3D.new()
+	body.add_child(shape)
+	var entry := {"body":body, "shapes":[shape], "retiredShapes":[],
+		"memoryToken":token, "expectedHit":true,
+		"probeFrom":Vector3(float(block.x) * 3.0 + 0.5, 2.8, 0.5),
+		"probeTo":Vector3(float(block.x) * 3.0 + 0.5, 0.2, 0.5)}
+	owner._live = {block:entry}
+	owner._resident_blocks = [block]
+	admission.cancel_body = body
+	return {"owner":owner, "admission":admission, "entry":entry}
 
 
 func _make_health_owner(source: FakeSource, block: Vector3i,
@@ -475,8 +854,10 @@ func _bounded_validation_contract() -> Dictionary:
 		and bool(health_cursor.get("passed", false)) \
 		and bool(health_shapes.get("passed", false)) \
 		and wide_drain.get("status") == "ready" \
-		and over_check.get("status") == "failed" \
-		and over_check.get("reason") == "resident_request_capacity_invalid" \
+		and over_check.get("status") == "pending" \
+		and over_check.get("reason") == "resident_window_capacity_backpressure" \
+		and bool(over_check.get("retryable", false)) \
+		and bool(over_check.get("demandRetained", false)) \
 		and early_source_calls == 0 and over_drain.get("status") == "ready" \
 		and row_oversize.get("reason") == "resident_request_capacity_invalid" \
 		and affected_oversize.get("reason") == "resident_request_capacity_invalid" \

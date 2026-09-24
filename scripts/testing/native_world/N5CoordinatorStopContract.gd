@@ -1,11 +1,31 @@
 extends SceneTree
 
 const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
+const MEMORY_POLICY = preload("res://scripts/terrain/NativeCollisionMemoryPolicy.gd")
+const MEMORY_ADMISSION = preload("res://scripts/terrain/NativeCollisionMemoryAdmission.gd")
+
+func _new_test_admission(epoch: String):
+	var policy = MEMORY_POLICY.new()
+	var configured: Dictionary = policy.configure({
+		"maxVerticesPerRow":65536, "verticesPerShape":768,
+		"rowEntryBytes":1, "bodyEntryBytes":1, "shapeEntryBytes":1,
+		"physicsPayloadMultiplier":1, "maxRowsPerWindow":4096,
+		"maxWindowChargedBytes":400000000,
+		"maxAggregateChargedBytes":800000000,
+		"maxReservations":8192})
+	if configured.get("status") != "ready": return null
+	var admission = MEMORY_ADMISSION.new()
+	var setup: Dictionary = admission.setup(policy, epoch,
+		"coordinator-stop-fixture:%d" % Time.get_ticks_usec())
+	return admission if setup.get("status") == "ready" else null
 
 class PendingOwner:
 	extends Node3D
 	var attempts := 0
 	var owner_epoch := ""
+	func bind_memory_admission(_admission: Object, _window_token: String,
+			_epoch: String) -> bool:
+		return true
 	func assign_retirement_owner_epoch(epoch: String) -> bool:
 		owner_epoch = epoch
 		return true
@@ -85,6 +105,9 @@ class FakeRetirementOwner:
 	var attempts := 0
 	var installed := true
 	var owner_epoch := ""
+	func bind_memory_admission(_admission: Object, _window_token: String,
+			_epoch: String) -> bool:
+		return true
 	func assign_retirement_owner_epoch(epoch: String) -> bool:
 		if not owner_epoch.is_empty(): return false
 		owner_epoch = epoch
@@ -135,7 +158,9 @@ func _run() -> void:
 	var identity := {"sourceRevision":1}
 	broker.layout = {"status":"ready", "windows":[window],
 		"identity":identity}
-	var setup: Dictionary = coordinator.setup(broker, root_3d)
+	var no_policy_setup: Dictionary = coordinator.setup(broker, root_3d)
+	var setup: Dictionary = coordinator.setup(broker, root_3d,
+		_new_test_admission("stop-main"))
 	var owner := PendingOwner.new()
 	coordinator.add_child(owner)
 	var registered: Dictionary = coordinator.register_window(window, owner)
@@ -160,7 +185,8 @@ func _run() -> void:
 	await process_frame
 	var distinct_coordinator = COORDINATOR.new()
 	root_3d.add_child(distinct_coordinator)
-	var distinct_setup: Dictionary = distinct_coordinator.setup(broker, root_3d)
+	var distinct_setup: Dictionary = distinct_coordinator.setup(broker, root_3d,
+		_new_test_admission("stop-distinct"))
 	var distinct_last: Dictionary = {}
 	for index in range(distinct_coordinator.MAX_ACTIVE_BARRIERS):
 		distinct_last = distinct_coordinator.begin_window_barrier(
@@ -191,7 +217,7 @@ func _run() -> void:
 		source_identity, "restored-layout")
 	retirement_broker.layout = retirement_broker.initial_layout.duplicate(true)
 	var retirement_setup: Dictionary = retirement_coordinator.setup(
-		retirement_broker, root_3d)
+		retirement_broker, root_3d, _new_test_admission("stop-retirement"))
 	var retiring_owner := FakeRetirementOwner.new()
 	retiring_owner.broker = retirement_broker
 	retiring_owner.window = original_window
@@ -264,6 +290,8 @@ func _run() -> void:
 	retirement_actor.queue_free()
 	root_3d.queue_free()
 	var passed: bool = setup.get("status") == "ready" \
+		and no_policy_setup.get("status") == "failed" \
+		and no_policy_setup.get("reason") == "window_coordinator_source_invalid" \
 		and registered.get("status") == "ready" \
 		and first_hold.get("status") == "ready" \
 		and held.get("status") == "ready" \

@@ -25,8 +25,16 @@ const HEALTH_VALIDATION_OPERATION_BUDGET := 96
 const HEALTH_VALIDATION_STEP_USEC_BUDGET := 1500
 const SOURCE_REBIND_OPERATION_BUDGET := 96
 const SOURCE_REBIND_STEP_USEC_BUDGET := 1500
+const MEMORY_RELEASE_MAX_ATTEMPTS := 3
 
 var _source: Object
+var _memory_admission: Object
+var _memory_window_token := ""
+var _memory_reservation_sequence := 0
+var _unconstructed_memory_tokens: Array[String] = []
+var _retired_memory_entries: Array[Dictionary] = []
+var _memory_accounting_failure := ""
+var _memory_last_candidate_admission := {}
 var _live := {}
 var _identity := {}
 var _source_identity := {}
@@ -41,6 +49,9 @@ var _stopping := false
 var _stopped := false
 var _pending_candidates := {}
 var _pending_candidate_keys: Array[Vector3i] = []
+var _disposal_retry_entries := {}
+var _drain_terminal_failure := {}
+var _memory_release_attempts := {}
 var _admission_barrier: RefCounted
 var _restored_old_frame := -1
 var _last_probe_hit := {}
@@ -72,6 +83,10 @@ var _receipt_global_identity := {}
 var _receipt_local_current_proof := {}
 
 
+func _process(_delta: float) -> void:
+	_advance_retired_memory_entries()
+
+
 ## The coordinator assigns one immutable physical installation identity before
 ## this node is registered as a resident window owner. It is deliberately
 ## separate from source ownerGeneration, which can be shared across Node
@@ -86,6 +101,26 @@ func assign_retirement_owner_epoch(epoch: String) -> bool:
 
 func retirement_owner_epoch() -> String:
 	return _retirement_owner_epoch
+
+## Injected only by the owning window coordinator. Direct fixture owners may
+## remain unbound, but coordinator-managed publication fails closed unless the
+## single coordinator ledger and exact window identity are attached.
+func bind_memory_admission(admission: Object, window_token: String,
+		owner_epoch: String) -> bool:
+	if admission == null or not admission.has_method("reserve_candidate") \
+			or not admission.has_method("mark_candidate_constructed") \
+			or not admission.has_method("register_candidate_abort_body") \
+			or not admission.has_method("commit_live") \
+			or not admission.has_method("cancel_unconstructed") \
+			or not admission.has_method("defer_release") \
+			or not admission.has_method("acknowledge_deferred_release") \
+			or window_token.is_empty() or owner_epoch.is_empty() \
+			or owner_epoch != _retirement_owner_epoch \
+			or _memory_admission != null or not _live.is_empty():
+		return false
+	_memory_admission = admission
+	_memory_window_token = window_token
+	return true
 
 func physical_readiness_epoch() -> int:
 	return _readiness_epoch
@@ -113,9 +148,14 @@ func retire_collision_entry_shape(block: Vector3i, shape_index: int) -> Dictiona
 		"healthEpoch":_readiness_epoch}
 
 func retire_collision_entry(block: Vector3i) -> Dictionary:
-	if _busy or _stopping or _stopped or not _live.has(block):
+	if _busy or _failed or _stopping or _stopped or not _live.has(block):
 		return {"status":"failed", "reason":"physical_entry_mutation_unavailable"}
-	_dispose(_live[block])
+	var entry: Dictionary = _live[block]
+	var disposed: Dictionary = _dispose(entry)
+	if disposed.get("status") != "ready":
+		return {"status":"failed", "reason":"physical_entry_retirement_dispose_rejected",
+			"dispose":disposed, "entryRetained":true}
+	_live.erase(block)
 	_invalidate_physical_health()
 	return {"status":"pending", "reason":"physical_entry_retirement_started",
 		"healthEpoch":_readiness_epoch}
@@ -162,7 +202,35 @@ func physical_receipt_for_layout(local_artifact_identity: Dictionary,
 	return _current_physical_receipt(local_artifact_identity)
 
 
-func _current_physical_receipt(identity: Dictionary) -> Dictionary:
+func _current_physical_receipt(identity: Dictionary,
+		allowed_overlap_live_tokens: Array = []) -> Dictionary:
+	if not _memory_accounting_failure.is_empty():
+		return {"ready":false, "reason":"resident_collision_memory_accounting_failed",
+			"memoryFailure":_memory_accounting_failure}
+	var memory_owner_receipt := {}
+	if _memory_admission != null:
+		var expected_live_tokens: Array[String] = []
+		for entry in _live.values():
+			var token := String(entry.get("memoryToken", ""))
+			if token.is_empty():
+				return {"ready":false,
+					"reason":"resident_collision_memory_token_missing"}
+			expected_live_tokens.append(token)
+		memory_owner_receipt = _memory_admission.call(
+			"owner_reservation_receipt", _retirement_owner_epoch,
+			_memory_window_token, expected_live_tokens,
+			allowed_overlap_live_tokens)
+		if memory_owner_receipt.get("status") != "ready" \
+				or int(memory_owner_receipt.get("stateCounts", {}).get(
+					"live_current", 0)) != (expected_live_tokens.size() \
+					+ allowed_overlap_live_tokens.size()) \
+				or int(memory_owner_receipt.get("stateCounts", {}).get(
+					"candidate_reserved", 0)) != 0 \
+				or int(memory_owner_receipt.get("stateCounts", {}).get(
+					"candidate_constructed", 0)) != 0:
+			return {"ready":false,
+				"reason":"resident_collision_memory_reservations_not_live",
+				"memoryAdmission":memory_owner_receipt}
 	if _health_validated_epoch != _readiness_epoch \
 			or _health_validated_source_ticket != _source_ticket:
 		var health: Dictionary = _advance_physical_health_validation(identity)
@@ -184,7 +252,8 @@ func _current_physical_receipt(identity: Dictionary) -> Dictionary:
 			"membershipProvenance": _membership_provenance.duplicate(true)},
 		"residentBlockCount": _resident_blocks.size(),
 		"residentBlocks": _receipt_resident_blocks,
-		"sourceTicketRebind":_source_rebind_receipt.duplicate(true)}
+		"sourceTicketRebind":_source_rebind_receipt.duplicate(true),
+		"memoryAdmission":memory_owner_receipt}
 
 
 func _advance_source_ticket_rebind(local_identity: Dictionary,
@@ -441,6 +510,10 @@ func affected_window_readiness(identity: Dictionary, blocks: Array[Vector3i]) ->
 ## request.rows is complete for affected blocks. The source snapshot is the
 ## independent membership/artifact authority for every resident block.
 func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
+	if not _drain_terminal_failure.is_empty():
+		return {"status":"failed",
+			"reason":"resident_owner_memory_release_terminal_failure",
+			"terminalMemoryFailure":_drain_terminal_failure.duplicate(true)}
 	if _busy or _failed or _stopping or _stopped or _source == null or not is_inside_tree():
 		return {"status": "failed", "reason": "resident_owner_unavailable"}
 	_busy = true
@@ -469,6 +542,40 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		return {"status": "pending", "reason": "actor_clearance_pending",
 			"guardReason": clearance.get("reason", "")}
 	_admission_barrier = barrier
+	var memory_tokens := {}
+	var memory_reservations: Array[String] = []
+	if _memory_admission != null:
+		for row in rows:
+			var canonical_row: Dictionary = checked.canonicalRows[row.block]
+			var vertices = canonical_row.get("vertices")
+			if not vertices is PackedVector3Array:
+				_cancel_unconstructed_memory(memory_reservations)
+				_busy = false
+				return {"status":"failed", "reason":"canonical_collision_vertices_invalid"}
+			_memory_reservation_sequence += 1
+			var reservation_id := "%s:%d:%s" % [_retirement_owner_epoch,
+				_memory_reservation_sequence, str(row.block)]
+			var reserved: Dictionary = _memory_admission.call("reserve_candidate",
+				_retirement_owner_epoch, _memory_window_token, reservation_id,
+				[{"vertexCount":vertices.size(),
+					"expectedHit":bool(canonical_row.get("expectedHit", false))}])
+			if reserved.get("status") != "ready":
+				_cancel_unconstructed_memory(memory_reservations)
+				_busy = false
+				return {"status":reserved.get("status", "failed"),
+					"reason":reserved.get("reason", "collision_memory_admission_failed"),
+					"retryable":bool(reserved.get("retryable", false)),
+					"memoryAdmission":reserved}
+			var reservation_token := String(reserved.get("token", ""))
+			if reservation_token.is_empty():
+				_cancel_unconstructed_memory(memory_reservations)
+				_busy = false
+				return {"status":"failed", "reason":"collision_memory_token_missing"}
+			memory_tokens[row.block] = reservation_token
+			memory_reservations.append(reservation_token)
+			_unconstructed_memory_tokens.append(reservation_token)
+	if _memory_admission != null:
+		_memory_last_candidate_admission = _memory_admission.call("snapshot")
 	var candidates := {}
 	var rows_by_block := {}
 	var max_prepare_usec := 0
@@ -477,11 +584,22 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	_prepare_max_work_units = 0
 	_prepare_total_work_units = 0
 	for row in rows:
-		var candidate_entry: Dictionary = _new_candidate_entry(row)
+		var candidate_entry: Dictionary = _new_candidate_entry(row,
+			String(memory_tokens.get(row.block, "")))
 		candidates[row.block] = candidate_entry
 		_pending_candidate_keys.append(row.block)
 		_pending_candidates = candidates
 		var canonical_row: Dictionary = checked.canonicalRows[row.block]
+		if _memory_admission != null:
+			var candidate_ids: Array = [candidate_entry.body.get_instance_id()] \
+				if is_instance_valid(candidate_entry.get("body")) else []
+			var constructed: Dictionary = _memory_admission.call(
+				"mark_candidate_constructed", candidate_entry.memoryToken,
+				_retirement_owner_epoch, candidate_ids)
+			if constructed.get("status") != "ready":
+				return _fail_candidate_construction(candidates, candidate_entry,
+					constructed)
+			_unconstructed_memory_tokens.erase(candidate_entry.memoryToken)
 		var prepared: Dictionary = await _prepare_row_bounded(row,
 			canonical_row, candidate_entry)
 		if _stopping:
@@ -490,7 +608,12 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			int(prepared.get("maxStepCpuUsec", 0)))
 		total_prepare_usec += int(prepared.get("totalCpuUsec", 0))
 		if prepared.get("status") != "ready":
-			_dispose_candidates(candidates)
+			var candidate_disposal: Dictionary = _dispose_candidates(candidates)
+			if candidate_disposal.get("status") != "ready":
+				_busy = false
+				return {"status":"failed", "reason":"candidate_disposal_rejected",
+					"prepare":prepared, "disposal":candidate_disposal,
+					"candidatesRetainedForDrain":_pending_candidates.size()}
 			_pending_candidates.clear()
 			_pending_candidate_keys.clear()
 			_busy = false
@@ -505,7 +628,12 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		if _stopping:
 			return _finish_stopped_publish(candidates)
 		if not prepared_row_current:
-			_dispose_candidates(candidates)
+			var candidate_disposal: Dictionary = _dispose_candidates(candidates)
+			if candidate_disposal.get("status") != "ready":
+				_busy = false
+				return {"status":"failed", "reason":"candidate_disposal_rejected",
+					"disposal":candidate_disposal,
+					"candidatesRetainedForDrain":_pending_candidates.size()}
 			_pending_candidates.clear()
 			_pending_candidate_keys.clear()
 			_busy = false
@@ -525,6 +653,11 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 				var restored_drift: Dictionary = await _rollback(candidates, old)
 				if _stopping or bool(restored_drift.get("cancelled", false)):
 					return _finish_stopped_publish(candidates)
+				if not bool(restored_drift.get("candidateDisposalReady", false)):
+					_busy = false
+					return {"status":"failed", "reason":"candidate_disposal_rejected",
+						"rollback":restored_drift,
+						"candidatesRetainedForDrain":_pending_candidates.size()}
 				_pending_candidates.clear()
 				_pending_candidate_keys.clear()
 				_busy = false
@@ -532,7 +665,12 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 					"reason": "candidate_source_row_drift",
 					"oldPhysicalRestored": restored_drift.get("physicalReady", false),
 					"oldPhysicsFrame": restored_drift.get("physicsFrame", -1)}
-			_dispose_candidates(candidates)
+			var candidate_disposal: Dictionary = _dispose_candidates(candidates)
+			if candidate_disposal.get("status") != "ready":
+				_busy = false
+				return {"status":"failed", "reason":"candidate_disposal_rejected",
+					"disposal":candidate_disposal,
+					"candidatesRetainedForDrain":_pending_candidates.size()}
 			_pending_candidates.clear()
 			_pending_candidate_keys.clear()
 			_busy = false
@@ -566,6 +704,11 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			var restored: Dictionary = await _rollback(candidates, old)
 			if _stopping or bool(restored.get("cancelled", false)):
 				return _finish_stopped_publish(candidates)
+			if not bool(restored.get("candidateDisposalReady", false)):
+				_busy = false
+				return {"status":"failed", "reason":"candidate_disposal_rejected",
+					"rollback":restored,
+					"candidatesRetainedForDrain":_pending_candidates.size()}
 			_pending_candidates.clear()
 			_pending_candidate_keys.clear()
 			_busy = false
@@ -584,6 +727,11 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		var restored_stale: Dictionary = await _rollback(candidates, old)
 		if _stopping or bool(restored_stale.get("cancelled", false)):
 			return _finish_stopped_publish(candidates)
+		if not bool(restored_stale.get("candidateDisposalReady", false)):
+			_busy = false
+			return {"status":"failed", "reason":"candidate_disposal_rejected",
+				"rollback":restored_stale,
+				"candidatesRetainedForDrain":_pending_candidates.size()}
 		_pending_candidates.clear()
 		_pending_candidate_keys.clear()
 		_busy = false
@@ -601,6 +749,35 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	var previous_staging := _startup_staging
 	for block in affected:
 		_live[block] = candidates[block]
+		if _memory_admission != null:
+			var committed: Dictionary = _memory_admission.call("commit_live",
+				String(candidates[block].get("memoryToken", "")),
+				_retirement_owner_epoch)
+			if committed.get("status") != "ready":
+				_memory_accounting_failure = String(committed.get("reason",
+					"collision_memory_live_transition_failed"))
+				_failed = true
+				_live = previous_live
+				_identity = previous_identity
+				_source_identity = previous_source_identity
+				_source_ticket = previous_source_ticket
+				_source_rebind_receipt = previous_rebind_receipt
+				_receipt_global_identity = previous_global_identity
+				_receipt_local_current_proof = previous_local_proof
+				_membership_provenance = previous_membership
+				_resident_blocks = previous_resident
+				_startup_staging = previous_staging
+				var rollback: Dictionary = await _rollback(candidates, old)
+				if _stopping or bool(rollback.get("cancelled", false)):
+					return _finish_stopped_publish(candidates)
+				# Keep the candidate map and keys owned by the normal stop/drain
+				# path. Ledger refusal must never orphan candidate bodies or tokens.
+				_pending_candidates = candidates
+				_busy = false
+				return {"status":"failed", "reason":"collision_memory_live_transition_failed",
+					"memoryAdmission":committed,
+					"oldPhysicalRestored":bool(rollback.get("physicalReady", false)),
+					"candidatesRetainedForDrain":_pending_candidates.size()}
 	_identity = identity.duplicate(true)
 	_source_identity = checked.sourceIdentity.duplicate(true)
 	_source_ticket = String(checked.get("sourceTicket", ""))
@@ -625,9 +802,17 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		if health.get("status") == "pending":
 			await get_tree().process_frame
 			if _stopping:
-				return _finish_stopped_publish(candidates)
+				return _finish_stopped_committed_publish(old)
+	if _stopping:
+		return _finish_stopped_committed_publish(old)
 	_busy = false
-	var receipt: Dictionary = physical_receipt(identity) if health.get("status") == "ready" \
+	var allowed_old_memory_tokens: Array[String] = []
+	for old_entry in old.values():
+		var old_memory_token := String(old_entry.get("memoryToken", ""))
+		if not old_memory_token.is_empty():
+			allowed_old_memory_tokens.append(old_memory_token)
+	var receipt: Dictionary = _current_physical_receipt(identity,
+		allowed_old_memory_tokens) if health.get("status") == "ready" \
 		else {"ready":false, "reason":health.get("reason",
 			"physical_health_validation_incomplete"), "healthValidation":health}
 	if not _startup_staging and not bool(receipt.get("ready", false)):
@@ -645,14 +830,32 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		var restored_unready: Dictionary = await _rollback(candidates, old)
 		if _stopping or bool(restored_unready.get("cancelled", false)):
 			return _finish_stopped_publish(candidates)
+		if not bool(restored_unready.get("candidateDisposalReady", false)):
+			_busy = false
+			return {"status":"failed", "reason":"candidate_disposal_rejected",
+				"rollback":restored_unready,
+				"candidatesRetainedForDrain":_pending_candidates.size()}
 		_pending_candidates.clear()
 		_pending_candidate_keys.clear()
 		_busy = false
 		return {"status": "pending", "reason": "physical_receipt_not_complete",
 			"oldPhysicalRestored": restored_unready.get("physicalReady", false)}
-	for block in affected:
-		if old.has(block):
-			_dispose(old[block])
+	var previous_live_disposal: Dictionary = _dispose_previous_live_entries(old)
+	if previous_live_disposal.get("status") != "ready":
+		# Candidate entries are now the live map's exact owners; release the
+		# temporary publish aliases while retry-map retains rejected old rows.
+		_pending_candidates.clear()
+		_pending_candidate_keys.clear()
+		_busy = false
+		return previous_live_disposal
+	if not _startup_staging:
+		receipt = physical_receipt(identity)
+		if not bool(receipt.get("ready", false)):
+			_pending_candidates.clear()
+			_pending_candidate_keys.clear()
+			_busy = false
+			return {"status":"pending", "reason":"physical_receipt_after_retirement_pending",
+				"physicalReceipt":receipt}
 	_pending_candidates.clear()
 	_pending_candidate_keys.clear()
 	return {"status": "pending" if _startup_staging else "ready",
@@ -673,6 +876,22 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		"maxAckFrames": max_ack_frames}
 
 
+func memory_admission_receipt() -> Dictionary:
+	if _memory_admission == null:
+		return {"status":"unconfigured", "productionCapsConfigured":false}
+	var ledger_receipt: Dictionary = _memory_admission.call("snapshot")
+	return {"status":"ready" if _memory_accounting_failure.is_empty() else "failed",
+		"failure":_memory_accounting_failure,
+		"windowToken":_memory_window_token,
+		"ownerEpoch":_retirement_owner_epoch,
+		"retiredEntryCount":_retired_memory_entries.size(),
+		"disposalRetryCount":_disposal_retry_entries.size(),
+		"lastCandidateAdmission":_memory_last_candidate_admission.duplicate(true),
+		"ledger":ledger_receipt,
+		"releaseEvidence":"scene_nodes_absent_after_process_and_physics_frames",
+		"allocatorBytesMeasured":false, "physics_server_bytes_measured":false}
+
+
 func restored_old_physics_frame() -> int:
 	return _restored_old_frame
 
@@ -680,7 +899,8 @@ func restored_old_physics_frame() -> int:
 func startup_empty_receipt(identity: Dictionary) -> Dictionary:
 	return {"empty": not _busy and not _stopping and not _stopped \
 		and identity.get("ownerGeneration") is int \
-		and _live.is_empty() and _pending_candidates.is_empty()}
+		and _live.is_empty() and _pending_candidates.is_empty() \
+		and _disposal_retry_entries.is_empty()}
 
 
 func request_stop() -> Dictionary:
@@ -697,9 +917,20 @@ func request_stop() -> Dictionary:
 		_drain_retired_live_count = 0
 		if _admission_barrier is AdmissionBarrier:
 			_admission_barrier.owner_stopped(self)
+	var preserved_reservations: Array[String] = []
+	for entry in _pending_candidates.values():
+		var token := String(entry.get("memoryToken", ""))
+		if not token.is_empty(): preserved_reservations.append(token)
+	for retry in _disposal_retry_entries.values():
+		var token := String(retry.get("entry", {}).get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
+	_cancel_unconstructed_memory(_unconstructed_memory_tokens.duplicate(),
+		preserved_reservations)
 	return {"status": "pending", "stopRequested": true,
 		"inFlightPublish": _busy,
 		"pendingEntries": _pending_candidates.size(),
+		"disposalRetryEntries":_disposal_retry_entries.size(),
 		"liveEntries": _live.size(), "remainingBodies": get_child_count(),
 		"sourceRetained": _source != null,
 		"barrierRetained": _admission_barrier != null,
@@ -713,12 +944,17 @@ func drain_step() -> Dictionary:
 		return _drain_receipt.duplicate(false)
 	if not _stopping:
 		request_stop()
+	if not _drain_terminal_failure.is_empty():
+		return _drain_blocked(String(_drain_terminal_failure.get("reason",
+			"collision_memory_release_retry_exhausted")), 0, 0, 0)
 	if _busy:
 		return _drain_progress("publish_in_flight", 0, 0, 0)
 	var work_used := 0
 	var visited := 0
 	var retired_bodies := 0
-	while work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
+	var blocked_candidate_reason := ""
+	while _drain_terminal_failure.is_empty() \
+			and work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
 			and not _pending_candidate_keys.is_empty():
 		var candidate_block: Vector3i = _pending_candidate_keys.back()
 		visited += 1
@@ -727,18 +963,23 @@ func drain_step() -> Dictionary:
 			work_used += 1
 			continue
 		var candidate_entry: Dictionary = _pending_candidates[candidate_block]
+		if bool(candidate_entry.get("memoryConstructionRejected", false)):
+			blocked_candidate_reason = "collision_memory_candidate_construction_unresolved"
+			break
 		var candidate_step: Dictionary = _advance_entry_drain(candidate_entry,
 			DRAIN_WORK_BUDGET - work_used - 1)
 		work_used += int(candidate_step.workUnits)
 		if bool(candidate_step.bodyQueued): retired_bodies += 1
 		if bool(candidate_step.done):
+			_disposal_retry_entries.erase(String(candidate_entry.get("memoryToken", "")))
 			_pending_candidates.erase(candidate_block)
 			_pending_candidate_keys.pop_back()
 			_drain_retired_candidate_count += 1
 			work_used += 1
 		if int(candidate_step.workUnits) <= 0 or not bool(candidate_step.done):
 			break
-	while work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
+	while _drain_terminal_failure.is_empty() \
+			and work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
 			and not _resident_blocks.is_empty():
 		var live_block: Vector3i = _resident_blocks.back()
 		visited += 1
@@ -752,15 +993,60 @@ func drain_step() -> Dictionary:
 		work_used += int(live_step.workUnits)
 		if bool(live_step.bodyQueued): retired_bodies += 1
 		if bool(live_step.done):
+			_disposal_retry_entries.erase(String(live_entry.get("memoryToken", "")))
 			_live.erase(live_block)
 			_resident_blocks.pop_back()
 			_drain_retired_live_count += 1
 			work_used += 1
 		if int(live_step.workUnits) <= 0 or not bool(live_step.done):
 			break
+	while _drain_terminal_failure.is_empty() \
+			and work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
+			and not _disposal_retry_entries.is_empty():
+		var retry_token := String(_disposal_retry_entries.keys()[0])
+		var retry_record: Dictionary = _disposal_retry_entries[retry_token]
+		if bool(retry_record.get("conflict", false)):
+			break
+		var retry_entry: Dictionary = retry_record.get("entry", {})
+		var already_owned := false
+		for owned_entry in _pending_candidates.values():
+			if String(owned_entry.get("memoryToken", "")) == retry_token:
+				already_owned = true
+				break
+		if not already_owned:
+			for owned_live_entry in _live.values():
+				if String(owned_live_entry.get("memoryToken", "")) == retry_token:
+					already_owned = true
+					break
+		if already_owned:
+			_disposal_retry_entries.erase(retry_token)
+			work_used += 1
+			continue
+		visited += 1
+		var retry_step: Dictionary = _advance_entry_drain(retry_entry,
+			DRAIN_WORK_BUDGET - work_used - 1)
+		work_used += int(retry_step.workUnits)
+		if bool(retry_step.bodyQueued): retired_bodies += 1
+		if bool(retry_step.done):
+			_disposal_retry_entries.erase(retry_token)
+			_drain_retired_live_count += 1
+			work_used += 1
+		if int(retry_step.workUnits) <= 0 or not bool(retry_step.done):
+			break
+	_advance_retired_memory_entries()
+	if not _drain_terminal_failure.is_empty():
+		return _drain_blocked(String(_drain_terminal_failure.get("reason",
+			"collision_memory_release_retry_exhausted")), work_used, visited,
+			retired_bodies)
+	if not blocked_candidate_reason.is_empty():
+		return _drain_blocked(blocked_candidate_reason, work_used, visited,
+			retired_bodies)
 	if _pending_candidates.is_empty() and _live.is_empty() \
 			and _pending_candidate_keys.is_empty() and _resident_blocks.is_empty() \
 			and get_child_count() == 0 \
+		and _retired_memory_entries.is_empty() \
+		and _disposal_retry_entries.is_empty() \
+		and _unconstructed_memory_tokens.is_empty() \
 		and (_drain_last_queued_physics_frame < 0 \
 				or Engine.get_physics_frames() > _drain_last_queued_physics_frame):
 		_identity.make_read_only()
@@ -768,7 +1054,8 @@ func drain_step() -> Dictionary:
 		_membership_provenance.make_read_only()
 		var receipt := {"status": "ready", "drained": true,
 			"remainingBodies": 0, "remainingPendingEntries": 0,
-			"remainingLiveEntries": 0, "sourceReleased": true,
+			"remainingLiveEntries": 0, "remainingDisposalRetryEntries":0,
+			"sourceReleased": true,
 			"barrierOwnershipReleased": true,
 			"windowToken": _drain_window_token,
 			"physicalOwnerEpoch": _retirement_owner_epoch,
@@ -777,11 +1064,22 @@ func drain_step() -> Dictionary:
 			"requiredResidentBlocks": _drain_resident_blocks.duplicate(),
 			"retiredCandidateEntryCount": _drain_retired_candidate_count,
 			"retiredLiveEntryCount": _drain_retired_live_count,
+			"memoryAdmission":memory_admission_receipt(),
 			"identity": _identity,
 			"sourceIdentity": _source_identity,
 			"membershipProvenance": _membership_provenance,
 			"drainWorkBudget": DRAIN_WORK_BUDGET,
 			"drainBodyBudget": DRAIN_BODY_BUDGET}
+		if _memory_admission != null:
+			var owner_memory: Dictionary = _memory_admission.call(
+				"owner_reservation_receipt", _retirement_owner_epoch,
+				_drain_window_token)
+			if owner_memory.get("status") != "ready" \
+					or int(owner_memory.get("reservationCount", -1)) != 0 \
+					or int(owner_memory.get("chargedBytes", -1)) != 0:
+				return _drain_progress("collision_memory_owner_reservations_retained",
+					work_used, visited, retired_bodies)
+			receipt["memoryAdmission"] = owner_memory
 		_source = null
 		_admission_barrier = null
 		_identity = {}
@@ -802,7 +1100,7 @@ func stop_and_drain() -> Dictionary:
 	request_stop()
 	while true:
 		var result: Dictionary = drain_step()
-		if result.get("status") == "ready":
+		if result.get("status") in ["ready", "failed"]:
 			return result
 		await get_tree().process_frame
 	return {"status": "pending", "reason": "resident_owner_drain_interrupted"}
@@ -812,6 +1110,33 @@ func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
 	var work_used := 0
 	if work_budget <= 0:
 		return {"done": false, "bodyQueued": false, "workUnits": 0}
+	if _memory_admission != null and not bool(entry.get("memoryDeferred", false)):
+		var deferred: Dictionary = _memory_admission.call("defer_release",
+			String(entry.get("memoryToken", "")), _retirement_owner_epoch,
+			Engine.get_physics_frames(), Engine.get_process_frames())
+		if deferred.get("status") != "ready":
+			_memory_accounting_failure = String(deferred.get("reason",
+				"collision_memory_drain_defer_failed"))
+			_failed = true
+			_disable_entry_collision(entry)
+			var terminal := _record_memory_release_rejection(
+				String(entry.get("memoryToken", "")),
+				"defer_release", _memory_accounting_failure)
+			return {"done":false, "bodyQueued":false, "workUnits":0,
+				"terminal":terminal}
+		entry.memoryDeferred = true
+		entry.memoryQueuedPhysicsFrame = Engine.get_physics_frames()
+		entry.memoryQueuedProcessFrame = Engine.get_process_frames()
+		entry.memoryBodyInstanceId = int(entry.body.get_instance_id()) \
+			if is_instance_valid(entry.get("body")) else 0
+		_retired_memory_entries.append({"entry":entry,
+			"token":String(entry.get("memoryToken", "")),
+			"ownerEpoch":_retirement_owner_epoch,
+			"windowToken":_memory_window_token,
+			"queuedPhysicsFrame":int(entry.memoryQueuedPhysicsFrame),
+			"queuedProcessFrame":int(entry.memoryQueuedProcessFrame),
+			"bodyInstanceIds":[int(entry.memoryBodyInstanceId)] \
+				if int(entry.memoryBodyInstanceId) > 0 else []})
 	var body = entry.get("body")
 	if is_instance_valid(body) and body is StaticBody3D:
 		if body.collision_layer != 0:
@@ -829,8 +1154,9 @@ func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
 			var shape_parent = shape.get_parent()
 			if shape_parent == body:
 				body.remove_child(shape)
-				shape.queue_free()
-				_invalidate_physical_health()
+			(entry.get("retiredShapes", []) as Array).append(shape)
+			if not shape.is_queued_for_deletion(): shape.queue_free()
+			_invalidate_physical_health()
 		shapes.pop_back()
 		work_used += 1
 	if not shapes.is_empty():
@@ -859,10 +1185,40 @@ func _drain_progress(reason: String, work_units: int, visited: int,
 		"drainBodyBudget": DRAIN_BODY_BUDGET,
 		"remainingPendingEntries": _pending_candidates.size(),
 		"remainingLiveEntries": _live.size(),
+		"remainingDisposalRetryEntries": _disposal_retry_entries.size(),
+		"memoryAccountingFailure":_memory_accounting_failure,
+		"terminalMemoryFailure":_drain_terminal_failure.duplicate(true),
+		"disposalRetryConflict":_disposal_retry_has_conflict(),
 		"remainingBodies": get_child_count(),
 		"inFlightPublish": _busy, "sourceRetained": _source != null,
 		"barrierRetained": _admission_barrier != null,
 		"windowToken": _drain_window_token}
+
+
+func _drain_blocked(reason: String, work_units: int, visited: int,
+		retired_bodies: int) -> Dictionary:
+	return {"status":"failed", "drained":false, "blocked":true,
+		"reason":reason, "drainWorkUnitsThisStep":work_units,
+		"visitedEntriesThisStep":visited,
+		"drainedBodiesThisStep":retired_bodies,
+		"remainingPendingEntries":_pending_candidates.size(),
+		"remainingLiveEntries":_live.size(),
+		"remainingDisposalRetryEntries":_disposal_retry_entries.size(),
+		"remainingBodies":get_child_count(),
+		"memoryAccountingFailure":_memory_accounting_failure,
+		"terminalMemoryFailure":_drain_terminal_failure.duplicate(true),
+		"retainedCandidateReservedTokens":_unconstructed_memory_tokens.duplicate(),
+		"memoryAdmission":memory_admission_receipt(),
+		"sourceRetained":_source != null,
+		"barrierRetained":_admission_barrier != null,
+		"windowToken":_drain_window_token}
+
+
+func _disposal_retry_has_conflict() -> bool:
+	for retry in _disposal_retry_entries.values():
+		if bool(retry.get("conflict", false)):
+			return true
+	return false
 
 
 func _validate_request(request: Dictionary) -> Dictionary:
@@ -874,9 +1230,12 @@ func _validate_request(request: Dictionary) -> Dictionary:
 	if request.affectedBlocks.is_empty() or request.affectedBlocks.size() > MAX_AFFECTED \
 			or request.rows.is_empty() or request.rows.size() > MAX_AFFECTED \
 			or not request.get("residentBlocks") is Array \
-			or request.residentBlocks.is_empty() \
-			or request.residentBlocks.size() > MAX_RESIDENT:
+			or request.residentBlocks.is_empty():
 		return {"status": "failed", "reason": "resident_request_capacity_invalid"}
+	if request.residentBlocks.size() > MAX_RESIDENT:
+		return {"status":"pending", "reason":"resident_window_capacity_backpressure",
+			"retryable":true, "requestedResidentBlocks":request.residentBlocks.size(),
+			"maxResidentBlocks":MAX_RESIDENT, "demandRetained":true}
 	var identity: Dictionary = request.identity.duplicate(true)
 	var requested_resident: Array = request.residentBlocks.duplicate()
 	var requested_affected: Array = request.affectedBlocks.duplicate()
@@ -919,9 +1278,13 @@ func _validate_request(request: Dictionary) -> Dictionary:
 		return {"status": "failed", "reason": "resident_membership_provenance_missing"}
 	var resident: Array[Vector3i] = []
 	var resident_set := {}
-	if source_snapshot.requiredResidentBlocks.is_empty() \
-			or source_snapshot.requiredResidentBlocks.size() > MAX_RESIDENT:
+	if source_snapshot.requiredResidentBlocks.is_empty():
 		return {"status": "failed", "reason": "resident_capacity_invalid"}
+	if source_snapshot.requiredResidentBlocks.size() > MAX_RESIDENT:
+		return {"status":"pending", "reason":"resident_window_capacity_backpressure",
+			"retryable":true,
+			"requestedResidentBlocks":source_snapshot.requiredResidentBlocks.size(),
+			"maxResidentBlocks":MAX_RESIDENT, "demandRetained":true}
 	for block in source_snapshot.requiredResidentBlocks:
 		if not block is Vector3i or resident_set.has(block):
 			return {"status": "failed", "reason": "resident_membership_invalid"}
@@ -930,7 +1293,9 @@ func _validate_request(request: Dictionary) -> Dictionary:
 		if not await _validation_step(cursor_state):
 			return {"status":"pending", "reason":"resident_validation_interrupted"}
 	if resident.is_empty() or resident.size() > MAX_RESIDENT:
-		return {"status": "failed", "reason": "resident_capacity_invalid"}
+		return {"status":"pending", "reason":"resident_window_capacity_backpressure",
+			"retryable":true, "requestedResidentBlocks":resident.size(),
+			"maxResidentBlocks":MAX_RESIDENT, "demandRetained":true}
 	var artifacts: Dictionary = source_snapshot.get("artifacts", {})
 	if not ticket_api:
 		var produced: Array = source_snapshot.get("residentBlocks", [])
@@ -1082,7 +1447,7 @@ func _validation_step(state: Dictionary) -> bool:
 	return true
 
 
-func _new_candidate_entry(row: Dictionary) -> Dictionary:
+func _new_candidate_entry(row: Dictionary, memory_token: String = "") -> Dictionary:
 	var body: StaticBody3D = null
 	if bool(row.expectedHit):
 		body = StaticBody3D.new()
@@ -1090,7 +1455,8 @@ func _new_candidate_entry(row: Dictionary) -> Dictionary:
 		body.collision_layer = 0
 		body.collision_mask = 0
 		add_child(body)
-	return {"body": body, "shapes": [], "artifactKey": row.artifactKey,
+	return {"body": body, "shapes": [], "retiredShapes": [],
+		"memoryToken":memory_token, "artifactKey": row.artifactKey,
 		"probeFrom": row.probeFrom, "probeTo": row.probeTo,
 		"expectedHit": row.expectedHit, "physicsFrame": -1}
 
@@ -1107,8 +1473,9 @@ func _prepare_row_bounded(row: Dictionary, canonical: Dictionary,
 			or not row.get("probeTo") is Vector3 \
 			or not bounds.has_point(row.probeFrom) or not bounds.has_point(row.probeTo) \
 			or row.get("expectedHit") != not vertices.is_empty():
-		_dispose(entry)
-		return {"status": "failed", "reason": "candidate_geometry_or_probe_invalid"}
+		var disposed_geometry: Dictionary = _dispose(entry)
+		return {"status": "failed", "reason": "candidate_geometry_or_probe_invalid",
+			"disposal":disposed_geometry}
 	var cursor := 0
 	var total_cpu_usec := 0
 	var max_step_cpu_usec := 0
@@ -1118,11 +1485,13 @@ func _prepare_row_bounded(row: Dictionary, canonical: Dictionary,
 		for index in range(cursor, end):
 			var vertex: Vector3 = vertices[index]
 			if vertex != canonical_vertices[index]:
-				_dispose(entry)
-				return {"status": "failed", "reason": "candidate_source_row_mismatch"}
+				var disposed_mismatch: Dictionary = _dispose(entry)
+				return {"status": "failed", "reason": "candidate_source_row_mismatch",
+					"disposal":disposed_mismatch}
 			if not vertex.is_finite() or not bounds.has_point(vertex):
-				_dispose(entry)
-				return {"status": "failed", "reason": "candidate_vertex_invalid"}
+				var disposed_vertex: Dictionary = _dispose(entry)
+				return {"status": "failed", "reason": "candidate_vertex_invalid",
+					"disposal":disposed_vertex}
 		var mesh := ConcavePolygonShape3D.new()
 		mesh.data = vertices.slice(cursor, end)
 		mesh.backface_collision = true
@@ -1139,8 +1508,9 @@ func _prepare_row_bounded(row: Dictionary, canonical: Dictionary,
 		cursor = end
 		await get_tree().process_frame
 		if _stopping:
-			_dispose(entry)
-			return {"status": "failed", "reason": "resident_owner_stopping"}
+			var disposed_stopping: Dictionary = _dispose(entry)
+			return {"status": "failed", "reason": "resident_owner_stopping",
+				"disposal":disposed_stopping}
 	return {"status": "ready", "entry": entry,
 		"maxStepCpuUsec": max_step_cpu_usec, "totalCpuUsec": total_cpu_usec}
 
@@ -1248,11 +1618,204 @@ func _set_enabled(entry: Dictionary, enabled: bool) -> void:
 			_invalidate_physical_health()
 
 
-func _dispose(entry: Dictionary) -> void:
-	if is_instance_valid(entry.get("body")) and entry.get("body") is StaticBody3D:
-		entry.body.collision_layer = 0
-		if not entry.body.is_queued_for_deletion():
-			entry.body.queue_free()
+func _disable_entry_collision(entry: Dictionary) -> void:
+	var changed := false
+	var body = entry.get("body")
+	if is_instance_valid(body) and body is StaticBody3D:
+		if body.collision_layer != 0:
+			body.collision_layer = 0
+			changed = true
+		if body.collision_mask != 0:
+			body.collision_mask = 0
+			changed = true
+	for shape in entry.get("shapes", []) + entry.get("retiredShapes", []):
+		if is_instance_valid(shape) and shape is CollisionShape3D \
+				and not shape.disabled:
+			shape.disabled = true
+			changed = true
+	if changed:
+		_invalidate_physical_health()
+
+
+func _dispose(entry: Dictionary) -> Dictionary:
+	if bool(entry.get("memoryDisposed", false)):
+		return {"status":"ready", "alreadyDisposed":true}
+	var body = entry.get("body")
+	var retired_shapes: Array = entry.get("retiredShapes", [])
+	if _memory_admission != null and not String(entry.get("memoryToken", "")).is_empty():
+		if not bool(entry.get("memoryDeferred", false)):
+			var deferred: Dictionary = _memory_admission.call("defer_release",
+				String(entry.memoryToken), _retirement_owner_epoch,
+				Engine.get_physics_frames(), Engine.get_process_frames())
+			if deferred.get("status") != "ready":
+				_memory_accounting_failure = String(deferred.get("reason",
+					"collision_memory_dispose_defer_failed"))
+				_failed = true
+				var terminal := _record_memory_release_rejection(
+					String(entry.get("memoryToken", "")),
+					"defer_release", _memory_accounting_failure)
+				var retained: Dictionary = _retain_disposal_retry(entry)
+				_disable_entry_collision(entry)
+				return {"status":"failed", "reason":_memory_accounting_failure,
+					"terminal":terminal,
+					"retryTracked":bool(retained.get("tracked", false)),
+					"memoryAdmission":deferred}
+			entry.memoryDeferred = true
+			entry.memoryQueuedPhysicsFrame = Engine.get_physics_frames()
+			entry.memoryQueuedProcessFrame = Engine.get_process_frames()
+			entry.memoryBodyInstanceId = int(body.get_instance_id()) \
+				if is_instance_valid(body) else 0
+			_retired_memory_entries.append({"entry":entry,
+				"token":String(entry.memoryToken),
+				"ownerEpoch":_retirement_owner_epoch,
+				"windowToken":_memory_window_token,
+				"queuedPhysicsFrame":int(entry.memoryQueuedPhysicsFrame),
+				"queuedProcessFrame":int(entry.memoryQueuedProcessFrame),
+				"bodyInstanceIds":[int(entry.memoryBodyInstanceId)] \
+					if int(entry.memoryBodyInstanceId) > 0 else []})
+	entry.memoryDisposed = true
+	if is_instance_valid(body) and body is StaticBody3D:
+		body.collision_layer = 0
+		if not body.is_queued_for_deletion(): body.queue_free()
+	for shape in entry.get("shapes", []):
+		if is_instance_valid(shape) and shape is CollisionShape3D \
+				and not shape.is_queued_for_deletion():
+			shape.queue_free()
+	for shape in retired_shapes:
+		if is_instance_valid(shape) and shape is CollisionShape3D \
+				and not shape.is_queued_for_deletion():
+			shape.queue_free()
+	entry["shapes"] = []
+	entry["retiredShapes"] = retired_shapes
+	return {"status":"ready", "disposed":true}
+
+
+func _retain_disposal_retry(entry: Dictionary) -> Dictionary:
+	var token := String(entry.get("memoryToken", ""))
+	if token.is_empty():
+		_memory_accounting_failure = "collision_memory_dispose_retry_token_missing"
+		_failed = true
+		return {"tracked":false, "reason":_memory_accounting_failure}
+	var body = entry.get("body")
+	var body_id := int(body.get_instance_id()) if is_instance_valid(body) else 0
+	if _disposal_retry_entries.has(token):
+		var existing: Dictionary = _disposal_retry_entries[token]
+		var existing_entry: Dictionary = existing.get("entry", {})
+		var existing_body = existing_entry.get("body")
+		var existing_body_id := int(existing_body.get_instance_id()) \
+			if is_instance_valid(existing_body) else 0
+		if existing_body_id == body_id and existing_entry.get("memoryToken") == token:
+			return {"tracked":true, "alreadyTracked":true}
+		var conflicts: Array = existing.get("conflicts", [])
+		if not conflicts.has(entry): conflicts.append(entry)
+		existing["conflicts"] = conflicts
+		existing["conflict"] = true
+		_disposal_retry_entries[token] = existing
+		_memory_accounting_failure = "collision_memory_dispose_retry_token_collision"
+		_failed = true
+		return {"tracked":true, "conflict":true,
+			"reason":_memory_accounting_failure}
+	var limits: Dictionary = _memory_admission.get("_limits") \
+		if _memory_admission != null else {}
+	var max_retries := mini(MAX_AFFECTED, int(limits.get("maxReservations", 0)))
+	if max_retries <= 0 or _disposal_retry_entries.size() >= max_retries:
+		_memory_accounting_failure = "collision_memory_dispose_retry_capacity_exhausted"
+		_failed = true
+		return {"tracked":false, "reason":_memory_accounting_failure}
+	_disposal_retry_entries[token] = {"entry":entry, "conflict":false,
+		"conflicts":[]}
+	return {"tracked":true}
+
+
+func _advance_retired_memory_entries() -> Dictionary:
+	if _memory_admission == null or _retired_memory_entries.is_empty():
+		return {"status":"ready"}
+	if not _drain_terminal_failure.is_empty():
+		return {"status":"failed", "terminal":_drain_terminal_failure.duplicate(true)}
+	var retained: Array[Dictionary] = []
+	for index in range(_retired_memory_entries.size()):
+		var record: Dictionary = _retired_memory_entries[index]
+		var entry: Dictionary = record.get("entry", {})
+		var nodes_absent := true
+		var body = entry.get("body")
+		if is_instance_valid(body): nodes_absent = false
+		for shape in entry.get("shapes", []):
+			if is_instance_valid(shape): nodes_absent = false
+		for shape in entry.get("retiredShapes", []):
+			if is_instance_valid(shape): nodes_absent = false
+		if not nodes_absent \
+				or Engine.get_physics_frames() <= int(record.queuedPhysicsFrame) \
+				or Engine.get_process_frames() <= int(record.queuedProcessFrame):
+			retained.append(record)
+			continue
+		entry["body"] = null
+		entry["shapes"] = []
+		entry["retiredShapes"] = []
+		var ack := {"schema":"n5-collision-memory-release-ack/v2",
+			"ledgerEpoch":_memory_admission.call("snapshot").get("ledgerEpoch", ""),
+			"ledgerIdentity":_memory_admission.call("snapshot").get("ledgerIdentity", ""),
+			"reservationToken":String(record.token),
+			"ownerEpoch":String(record.ownerEpoch),
+			"windowToken":String(record.windowToken),
+			"queuedPhysicsFrame":int(record.queuedPhysicsFrame),
+			"queuedProcessFrame":int(record.queuedProcessFrame),
+			"physicsFrame":Engine.get_physics_frames(),
+			"processFrame":Engine.get_process_frames(),
+			"allBodiesAbsent":true, "deferredEntriesReleased":true,
+			"absentBodyInstanceIds":record.bodyInstanceIds,
+			"observedColliderInstanceIds":[]}
+		var released: Dictionary = _memory_admission.call(
+			"acknowledge_deferred_release", String(record.token),
+			String(record.ownerEpoch), ack)
+		if released.get("status") != "ready":
+			_memory_accounting_failure = String(released.get("reason",
+				"collision_memory_release_ack_rejected"))
+			var terminal := _record_memory_release_rejection(
+				String(record.token), "acknowledge_deferred_release",
+				_memory_accounting_failure)
+			retained.append(record)
+			if terminal:
+				for remaining_index in range(index + 1,
+						_retired_memory_entries.size()):
+					retained.append(_retired_memory_entries[remaining_index])
+				break
+		else:
+			_memory_release_attempts.erase(String(record.token))
+	_retired_memory_entries = retained
+	return {"status":"failed" if not _drain_terminal_failure.is_empty() else "ready",
+		"terminal":_drain_terminal_failure.duplicate(true)}
+
+
+func _record_memory_release_rejection(token: String, phase: String,
+		detail: String) -> bool:
+	var token_attempts: Dictionary = _memory_release_attempts.get(token, {})
+	var attempts := int(token_attempts.get(phase, 0)) + 1
+	token_attempts[phase] = attempts
+	_memory_release_attempts[token] = token_attempts
+	if attempts < MEMORY_RELEASE_MAX_ATTEMPTS:
+		return false
+	var reason := "collision_memory_defer_retry_exhausted" \
+		if phase == "defer_release" else "collision_memory_release_ack_retry_exhausted"
+	_drain_terminal_failure = {"phase":phase, "reason":reason,
+		"detail":detail, "token":token,
+		"attempts":attempts}
+	_failed = true
+	return true
+
+
+func _cancel_unconstructed_memory(tokens: Array,
+		preserved_tokens: Array = []) -> void:
+	if _memory_admission == null: return
+	for token_value in tokens:
+		var token := String(token_value)
+		if token.is_empty(): continue
+		if preserved_tokens.has(token): continue
+		var cancelled: Dictionary = _memory_admission.call("cancel_unconstructed",
+			token, _retirement_owner_epoch)
+		if cancelled.get("status") != "ready":
+			_memory_accounting_failure = String(cancelled.get("reason",
+				"collision_memory_unconstructed_cancel_failed"))
+		_unconstructed_memory_tokens.erase(token)
 
 
 func _remove_live_shape(block: Vector3i, shape_index: int) -> bool:
@@ -1265,6 +1828,9 @@ func _remove_live_shape(block: Vector3i, shape_index: int) -> bool:
 		if shape.get_parent() == entry.get("body"):
 			entry.body.remove_child(shape)
 		if not shape.is_queued_for_deletion(): shape.queue_free()
+	var retired_shapes: Array = entry.get("retiredShapes", [])
+	retired_shapes.append(shape)
+	entry["retiredShapes"] = retired_shapes
 	shapes.remove_at(shape_index)
 	entry["shapes"] = shapes
 	_live[block] = entry
@@ -1272,25 +1838,131 @@ func _remove_live_shape(block: Vector3i, shape_index: int) -> bool:
 	return true
 
 
-func _dispose_candidates(candidates: Dictionary) -> void:
+func _dispose_candidates(candidates: Dictionary) -> Dictionary:
+	var preserved_reservations: Array[String] = []
+	var failures: Array[Dictionary] = []
 	for entry in candidates.values():
-		_dispose(entry)
+		var token := String(entry.get("memoryToken", ""))
+		if not token.is_empty(): preserved_reservations.append(token)
+		var disposed: Dictionary = _dispose(entry)
+		if disposed.get("status") != "ready": failures.append({
+			"token":token, "dispose":disposed})
+	_cancel_unconstructed_memory(_unconstructed_memory_tokens.duplicate(),
+		preserved_reservations)
+	return {"status":"failed" if not failures.is_empty() else "ready",
+		"failures":failures, "retainedCount":failures.size()}
+
+
+func _dispose_previous_live_entries(old_entries: Dictionary) -> Dictionary:
+	var old_blocks: Array = old_entries.keys()
+	for index in range(old_blocks.size()):
+		var block = old_blocks[index]
+		var old_disposal: Dictionary = _dispose(old_entries[block])
+		if old_disposal.get("status") != "ready":
+			var unattempted_retained: Array = []
+			for remaining_index in range(index + 1, old_blocks.size()):
+				var remaining_block = old_blocks[remaining_index]
+				var retained: Dictionary = _retain_disposal_retry(
+					old_entries[remaining_block])
+				unattempted_retained.append({"block":remaining_block,
+					"tracked":bool(retained.get("tracked", false)),
+					"result":retained})
+			return {"status":"failed", "reason":"previous_live_disposal_rejected",
+				"block":block, "disposal":old_disposal,
+				"unattemptedOldEntriesRetained":unattempted_retained,
+				"disposalRetryCount":_disposal_retry_entries.size()}
+	return {"status":"ready", "disposedCount":old_entries.size()}
 
 
 func _finish_stopped_publish(candidates: Dictionary) -> Dictionary:
+	var preserved_reservations: Array[String] = []
+	for entry in candidates.values():
+		var token := String(entry.get("memoryToken", ""))
+		if not token.is_empty(): preserved_reservations.append(token)
+	_cancel_unconstructed_memory(_unconstructed_memory_tokens.duplicate(),
+		preserved_reservations)
 	_pending_candidates = candidates
 	_busy = false
 	return {"status": "failed", "reason": "resident_owner_stopping",
 		"candidatesRetainedForDrain": _pending_candidates.size()}
 
 
+func _finish_stopped_committed_publish(old_entries: Dictionary) -> Dictionary:
+	# Both post-commit stop exits in publish (health-await and post-loop) route
+	# through this single ownership-transfer seam before returning to the caller.
+	var retained: Array[Dictionary] = []
+	for block in old_entries:
+		var retention: Dictionary = _retain_disposal_retry(old_entries[block])
+		retained.append({"block":block, "result":retention})
+	_pending_candidates.clear()
+	_pending_candidate_keys.clear()
+	_busy = false
+	return {"status":"failed", "reason":"resident_owner_stopping_after_commit",
+		"committedLiveEntriesRetained":_live.size(),
+		"oldEntriesRetainedForDrain":retained,
+		"disposalRetryCount":_disposal_retry_entries.size()}
+
+
+func _fail_candidate_construction(candidates: Dictionary, entry: Dictionary,
+		construction_result: Dictionary) -> Dictionary:
+	var token := String(entry.get("memoryToken", ""))
+	var original_reason := String(construction_result.get("reason",
+		"collision_memory_constructed_transition_failed"))
+	_memory_accounting_failure = original_reason
+	_failed = true
+	var body = entry.get("body")
+	var shapes: Array = entry.get("shapes", [])
+	var body_expected := bool(entry.get("expectedHit", false))
+	var body_state_valid := false
+	if body_expected:
+		body_state_valid = is_instance_valid(body) and body is StaticBody3D
+	else:
+		body_state_valid = body == null
+	if _memory_admission != null and not token.is_empty() \
+			and body_state_valid \
+			and shapes.is_empty() and entry.get("retiredShapes", []).is_empty():
+		var body_ids: Array = [body.get_instance_id()] if body_expected else []
+		var abort_registration: Dictionary = _memory_admission.call(
+			"register_candidate_abort_body", token, _retirement_owner_epoch,
+			body_ids)
+		if abort_registration.get("status") == "ready":
+			entry["memoryAbortBodyRegistered"] = true
+			_unconstructed_memory_tokens.erase(token)
+			var disposed: Dictionary = _dispose(entry)
+			request_stop()
+			var stopped := _finish_stopped_publish(candidates)
+			stopped["reason"] = "candidate_construction_transition_rejected_recovered"
+			stopped["constructionFailure"] = construction_result
+			stopped["abortBodyRegistration"] = abort_registration
+			stopped["disposal"] = disposed
+			stopped["abortBodyRegistered"] = true
+			return stopped
+		construction_result["abortBodyRegistration"] = abort_registration
+		_memory_accounting_failure = String(abort_registration.get("reason",
+			"collision_memory_abort_body_registration_failed"))
+	else:
+		construction_result["abortBodyRegistration"] = {"status":"failed",
+			"reason":"candidate_abort_body_not_shape_less_or_valid"}
+		_memory_accounting_failure = original_reason
+	entry["memoryConstructionRejected"] = true
+	request_stop()
+	var blocked := _finish_stopped_publish(candidates)
+	blocked["reason"] = "collision_memory_candidate_construction_unresolved"
+	blocked["constructionFailure"] = construction_result
+	blocked["retainedBodyInstanceId"] = body.get_instance_id() \
+		if is_instance_valid(body) else 0
+	return blocked
+
+
 func _rollback(candidates: Dictionary, old: Dictionary) -> Dictionary:
-	_dispose_candidates(candidates)
+	var candidate_disposal: Dictionary = _dispose_candidates(candidates)
 	for entry in old.values():
 		_set_enabled(entry, true)
 	await get_tree().physics_frame
 	if _stopping:
-		return {"physicalReady": false, "physicsFrame": -1, "cancelled": true}
+		return {"physicalReady": false, "physicsFrame": -1, "cancelled": true,
+			"candidateDisposalReady":candidate_disposal.get("status") == "ready",
+			"candidateDisposal":candidate_disposal}
 	var restored := true
 	for entry in old.values():
 		if not _probe(entry):
@@ -1301,7 +1973,9 @@ func _rollback(candidates: Dictionary, old: Dictionary) -> Dictionary:
 	_restored_old_frame = Engine.get_physics_frames() if restored else -1
 	if not restored:
 		_failed = true
-	return {"physicalReady": restored, "physicsFrame": _restored_old_frame}
+	return {"physicalReady": restored, "physicsFrame": _restored_old_frame,
+		"candidateDisposalReady":candidate_disposal.get("status") == "ready",
+		"candidateDisposal":candidate_disposal}
 
 
 func _probe_clear(entry: Dictionary) -> bool:

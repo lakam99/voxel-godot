@@ -22,9 +22,11 @@ var _reservations := {}
 var _reservation_keys := {}
 var _body_owners := {}
 var _window_charged := {}
+var _window_row_counts := {}
 var _total_charged := 0
 var _last_issued_sequence := 0
 var _next_sequence := 1
+var _peak_charged_bytes := 0
 var _sealed_after_drain := false
 
 
@@ -94,6 +96,10 @@ func reserve_candidate(owner_epoch: String, window_token: String,
 			"accepted":false, "snapshot":snapshot()}
 	if _reservations.size() >= int(_limits.maxReservations):
 		return _backpressure("collision_memory_reservation_capacity", window_token, 0)
+	var window_rows := int(_window_row_counts.get(window_token, 0))
+	if window_rows > int(_limits.maxRowsPerWindow) - canonical_rows.size():
+		return _backpressure("collision_memory_window_row_capacity", window_token,
+			charged)
 	var window_add := _checked_add(int(_window_charged.get(window_token, 0)), charged)
 	var total_add := _checked_add(_total_charged, charged)
 	if window_add.get("status") != "ready" or total_add.get("status") != "ready":
@@ -119,7 +125,9 @@ func reserve_candidate(owner_epoch: String, window_token: String,
 		"queuedProcessFrame":-1, "bodyInstanceIds":[]}
 	_reservation_keys[semantic_key] = token
 	_window_charged[window_token] = window_after
+	_window_row_counts[window_token] = window_rows + canonical_rows.size()
 	_total_charged = total_after
+	_peak_charged_bytes = maxi(_peak_charged_bytes, _total_charged)
 	_last_issued_sequence = _next_sequence
 	_next_sequence = int(following_sequence.value)
 	return {"status":"ready", "token":token, "state":"candidate_reserved",
@@ -128,6 +136,22 @@ func reserve_candidate(owner_epoch: String, window_token: String,
 
 func mark_candidate_constructed(token: String, owner_epoch: String,
 		body_instance_ids: Array) -> Dictionary:
+	return _register_candidate_body(token, owner_epoch, body_instance_ids,
+		"candidate_constructed")
+
+
+## The owner uses this only to dispose a shape-less body after ordinary
+## construction registration failed. It applies the identical token, epoch,
+## exact-count, positive-ID, and ownership-collision checks as normal setup;
+## success moves the reservation into the existing deferred-release lifecycle.
+func register_candidate_abort_body(token: String, owner_epoch: String,
+		body_instance_ids: Array) -> Dictionary:
+	return _register_candidate_body(token, owner_epoch, body_instance_ids,
+		"candidate_abort_body_registered")
+
+
+func _register_candidate_body(token: String, owner_epoch: String,
+		body_instance_ids: Array, transition: String) -> Dictionary:
 	var checked := _reservation(token, owner_epoch)
 	if checked.get("status") != "ready": return checked
 	var reservation: Dictionary = checked.reservation
@@ -146,6 +170,7 @@ func mark_candidate_constructed(token: String, owner_epoch: String,
 	_reservations[token] = reservation
 	for id in ids.ids: _body_owners[id] = token
 	return {"status":"ready", "token":token, "state":"candidate_constructed",
+		"transition":transition,
 		"chargedBytes":reservation.chargedBytes, "bodyInstanceIds":ids.ids,
 		"snapshot":snapshot()}
 
@@ -242,9 +267,59 @@ func snapshot() -> Dictionary:
 		"bodyOwnerCount":_body_owners.size(),
 		"lastIssuedSequence":_last_issued_sequence,
 		"nextSequence":_next_sequence,
+		"peakChargedBytes":_peak_charged_bytes,
 		"sealedAfterDrain":_sealed_after_drain,
 		"windowChargedBytes":_window_charged.duplicate(true),
+		"windowRowCounts":_window_row_counts.duplicate(true),
 		"stateCounts":counts, "stateChargedBytes":bytes}
+
+
+func is_active() -> bool:
+	return _active() and not _sealed_after_drain
+
+
+func owner_reservation_receipt(owner_epoch: String,
+		window_token: String = "", expected_live_tokens: Array = [],
+		allowed_overlap_live_tokens: Array = []) -> Dictionary:
+	if not _active() or owner_epoch.is_empty():
+		return {"status":"failed", "reason":"collision_memory_owner_receipt_invalid"}
+	var integrity := _audit_integrity()
+	if integrity.get("status") != "ready": return integrity
+	var count := 0
+	var charged := 0
+	var states := {}
+	var actual_live_tokens := {}
+	for reservation in _reservations.values():
+		if reservation.ownerEpoch != owner_epoch \
+				or not window_token.is_empty() \
+				and reservation.windowToken != window_token:
+			continue
+		count += 1
+		charged += int(reservation.chargedBytes)
+		var state := String(reservation.state)
+		states[state] = int(states.get(state, 0)) + 1
+		if state == "live_current": actual_live_tokens[String(reservation.token)] = true
+	var expected_live := {}
+	for token_value in expected_live_tokens + allowed_overlap_live_tokens:
+		if not token_value is String or String(token_value).is_empty() \
+				or expected_live.has(String(token_value)):
+			return {"status":"failed", "reason":"collision_memory_expected_token_invalid"}
+		expected_live[String(token_value)] = true
+	if actual_live_tokens != expected_live \
+			or int(states.get("candidate_reserved", 0)) > 0 \
+			or int(states.get("candidate_constructed", 0)) > 0:
+		return {"status":"pending",
+			"reason":"collision_memory_current_token_set_incomplete",
+			"ownerEpoch":owner_epoch, "windowToken":window_token,
+			"reservationCount":count, "chargedBytes":charged,
+			"stateCounts":states, "actualLiveTokens":actual_live_tokens.keys(),
+			"expectedLiveTokens":expected_live.keys(),
+			"ledgerIdentity":_ledger_identity}
+	return {"status":"ready", "ownerEpoch":owner_epoch,
+		"windowToken":window_token, "reservationCount":count,
+		"chargedBytes":charged, "stateCounts":states,
+		"liveTokens":actual_live_tokens.keys(),
+		"ledgerIdentity":_ledger_identity}
 
 
 func drain_receipt() -> Dictionary:
@@ -255,7 +330,8 @@ func drain_receipt() -> Dictionary:
 	if not _reservations.is_empty() or not _reservation_keys.is_empty() \
 			or not _body_owners.is_empty() \
 			or _total_charged != 0 \
-			or not _window_charged.is_empty():
+			or not _window_charged.is_empty() \
+			or not _window_row_counts.is_empty():
 		return {"status":"pending", "reason":"collision_memory_reservations_retained",
 			"snapshot":snapshot()}
 	_sealed_after_drain = true
@@ -307,12 +383,20 @@ func _release(token: String, reason: String) -> Dictionary:
 		return {"status":"failed", "reason":"collision_memory_ledger_invariant",
 			"snapshot":snapshot()}
 	var window_after := window_before - charged
+	var window_rows_before := int(_window_row_counts.get(window, -1))
+	var released_rows := int((reservation.get("canonicalRows", []) as Array).size())
+	if window_rows_before < released_rows:
+		return {"status":"failed", "reason":"collision_memory_window_row_invariant",
+			"snapshot":snapshot()}
+	var window_rows_after := window_rows_before - released_rows
 	var total_after := _total_charged - charged
 	_reservations.erase(token)
 	_reservation_keys.erase(semantic_key)
 	for id in reservation.get("bodyInstanceIds", []): _body_owners.erase(id)
 	if window_after == 0: _window_charged.erase(window)
 	else: _window_charged[window] = window_after
+	if window_rows_after == 0: _window_row_counts.erase(window)
+	else: _window_row_counts[window] = window_rows_after
 	_total_charged = total_after
 	return {"status":"ready", "released":true, "reason":reason,
 		"releasedBytes":charged, "snapshot":snapshot()}
@@ -337,6 +421,7 @@ func _audit_integrity() -> Dictionary:
 	var expected_semantic := {}
 	var expected_bodies := {}
 	var expected_windows := {}
+	var expected_window_rows := {}
 	var expected_total := 0
 	if _reservations.size() > int(_limits.maxReservations):
 		return _integrity_failure("reservation_cap")
@@ -430,6 +515,13 @@ func _audit_integrity() -> Dictionary:
 		if expected_total > int(_limits.maxAggregateChargedBytes):
 			return _integrity_failure("aggregate_cap")
 		var window := String(reservation.windowToken)
+		var row_result := _checked_add(int(expected_window_rows.get(window, 0)),
+			(canonical_rows_value as Array).size())
+		if row_result.get("status") != "ready":
+			return _integrity_failure("window_row_overflow")
+		expected_window_rows[window] = int(row_result.value)
+		if int(expected_window_rows[window]) > int(_limits.maxRowsPerWindow):
+			return _integrity_failure("window_row_cap")
 		var window_result := _checked_add(int(expected_windows.get(window, 0)),
 			int(reservation.chargedBytes))
 		if window_result.get("status") != "ready":
@@ -445,6 +537,8 @@ func _audit_integrity() -> Dictionary:
 		return _integrity_failure("aggregate_charge")
 	if expected_windows != _window_charged:
 		return _integrity_failure("window_charge")
+	if expected_window_rows != _window_row_counts:
+		return _integrity_failure("window_row_count")
 	if expected_semantic != _reservation_keys:
 		return _integrity_failure("semantic_index")
 	if expected_bodies != _body_owners:
