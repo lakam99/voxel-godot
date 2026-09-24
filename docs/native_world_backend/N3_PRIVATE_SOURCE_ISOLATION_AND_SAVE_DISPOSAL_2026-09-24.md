@@ -289,3 +289,19 @@ passed on commit `40d02ef`:
 Both are headless focused checks. The earlier parse failure was an import
 setup issue, not a demonstrated source regression. The combined integration
 branch still needs its own verification.
+
+The existing 4,096-record file-backed headed Continue fixture also passed
+on `1ff8d9a`:
+`node tools/run-n3-private-main-load-headed.mjs --dense-from
+C:\Users\arkam\.codex\worktrees\n3-save-disposal\voxel-biome-world-godot\artifacts\native-world-backend\n3-private-main-headed-1790231205110-d4f71d00
+--dense-records 4096`. Report:
+`artifacts/native-world-backend/n3-private-main-headed-1790235617062-e358b100/dense_continue-report.json`;
+owned receipt `artifacts/node-tools/process-runs/godot-vJ5RPw/watchdog.json`.
+The receipt records a natural exit and zero remaining owned processes. The
+fixture admitted and retired 4,096 records, and gameplay readiness became
+ready. Pending and ready loading captures are in that artifact directory.
+The save-retirement maximum advance was 1,419 µs, and its maximum recorded
+frame work was 3,852 µs; the overall maximum frame gap was 7,718 ms before
+private admission. This pinned synthetic save and loading overlay do not
+prove ordinary random-seed gameplay, whole-game cadence, or N3 authority
+cutover. The shared integration branch needs its own verification.
