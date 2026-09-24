@@ -256,10 +256,11 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 		# stopped candidate and its exact tuple staged so a later retry can prove it.
 		return {"status":"pending", "reason":"physical_window_candidate_retirement_layout_changed",
 			"drain":drained, "layout":final_layout}
-	drained["retirementLeaseId"] = lease_id
-	drained["physicalOwnerEpoch"] = String(stage.ownerEpoch)
+	var candidate_drain_receipt: Dictionary = drained.get("drain", {}).duplicate(true)
+	candidate_drain_receipt["retirementLeaseId"] = lease_id
+	candidate_drain_receipt["physicalOwnerEpoch"] = String(stage.ownerEpoch)
 	var acknowledged: Dictionary = _broker.acknowledge_collision_window_retired(
-		String(stage.windowToken), drained)
+		String(stage.windowToken), candidate_drain_receipt)
 	if acknowledged.get("status") != "ready" \
 			or acknowledged.get("retiredWindowToken") != String(stage.windowToken):
 		return {"status":"pending", "reason":"physical_window_candidate_retirement_ack_pending",
@@ -268,7 +269,9 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 	stage.owner.queue_free()
 	return {"status":"ready", "windowId":id, "candidateOwnerEpoch":owner_epoch,
 		"oldOwnerEpoch":String(stage.oldOwnerEpoch), "brokerRecordRetained":false,
-		"drain":drained, "acknowledgement":acknowledged}
+		"drain":drained, "candidateDrainReceipt":candidate_drain_receipt,
+		"retirementLease":claim, "leaseValidation":valid_lease,
+		"finalLayoutToken":layout_token, "acknowledgement":acknowledged}
 
 ## The switch is a single synchronous registry update after re-reading the
 ## exact broker ticket, candidate receipt, old-owner tuple and closed barrier.
