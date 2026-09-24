@@ -130,6 +130,24 @@ func run() -> void:
 	terrain_world.add_child(terrain)
 	var base: Dictionary = SOURCE.from_main(main)
 	check(base.get("status") == "ready", "fixture creates canonical native source descriptor")
+	var decoded_save: Dictionary = JSON.parse_string(JSON.stringify({"version":2,
+		"seed":main.seed_text, "terrain":[], "terrainVolume":_volume(4)}))
+	var decoded_source: Dictionary = SOURCE.from_main_with_v2_save_snapshot(main, decoded_save)
+	var decoded_transaction = TRANSACTION.new()
+	var decoded_started: Dictionary = decoded_transaction.start(decoded_source.get("request", {}),
+		4, decoded_source.get("snapshotOwner"))
+	var decoded_candidate: Dictionary = await _drive_to_candidate(decoded_transaction)
+	var decoded_committed: Dictionary = decoded_transaction.commit(
+		decoded_transaction.candidate_source_identity()) \
+		if decoded_candidate.get("reason") == "candidate_requires_explicit_commit" else {}
+	var decoded_backend = decoded_transaction.take_backend() if decoded_committed.get("status") == "ready" else null
+	check(decoded_source.get("status") == "ready"
+		and decoded_started.get("status") == "pending"
+		and decoded_candidate.get("reason") == "candidate_requires_explicit_commit"
+		and decoded_committed.get("status") == "ready"
+		and decoded_backend != null,
+		"JSON-decoded whole-number float revisions admit and commit through the bounded native importer")
+	decoded_backend = null
 	check(not main.has_method("begin_native_terrain_load_preparation")
 		and not main.has_method("advance_native_terrain_load_preparation")
 		and not main.has_method("stop_native_terrain_load_preparation"),

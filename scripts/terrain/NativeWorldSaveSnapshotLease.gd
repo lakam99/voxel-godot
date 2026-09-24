@@ -13,9 +13,19 @@ var _lease_revision := 1
 var _valid := false
 var _invalid_reason := ""
 
+const MAX_EXACT_JSON_INTEGER := 9007199254740992
+
+static func valid_json_revision(value) -> bool:
+	if value is int:
+		return value >= 0 and value <= MAX_EXACT_JSON_INTEGER
+	if value is float:
+		return is_finite(value) and value >= 0.0 \
+			and value <= float(MAX_EXACT_JSON_INTEGER) and floorf(value) == value
+	return false
+
 func acquire(owner, volume: Dictionary) -> bool:
 	if _valid or owner == null or volume.is_empty(): return false
-	if not volume.get("revision", null) is int or int(volume.revision) < 0: return false
+	if not valid_json_revision(volume.get("revision", null)): return false
 	_owner = owner
 	_volume = volume
 	_volume_revision = int(volume.revision)
@@ -24,6 +34,7 @@ func acquire(owner, volume: Dictionary) -> bool:
 
 func is_valid_for(volume: Dictionary) -> bool:
 	return _valid and is_same(volume, _volume) \
+		and valid_json_revision(volume.get("revision", null)) \
 		and int(volume.get("revision", -1)) == _volume_revision
 
 func invalidate(reason: String = "snapshot_mutated") -> Dictionary:

@@ -15,6 +15,7 @@ const MAX_TOTAL_RECORDS := 65536
 const MAX_CELLS_PER_SECTION := 4096
 const SOURCE_SCHEMA := "n3-native-world-backend-initialize/v1"
 const SAVE_SOURCE_SCHEMA := "n3-native-world-backend-initialize-from-save-v2/v1"
+const SaveSnapshotLease = preload("res://scripts/terrain/NativeWorldSaveSnapshotLease.gd")
 
 var _backend
 var _backend_factory: Callable
@@ -61,8 +62,7 @@ func start(request: Dictionary, max_records_per_advance: int = DEFAULT_RECORDS_P
 		return _failed("terrain_volume_snapshot_invalid")
 	if int(volume.get("schemaVersion", -1)) != 1 or int(volume.get("sectionSize", -1)) != 16:
 		return _failed("terrain_volume_snapshot_invalid")
-	if not volume.get("revision", null) is int or int(volume.revision) < 0 \
-			or int(volume.revision) > 9007199254740992:
+	if not SaveSnapshotLease.valid_json_revision(volume.get("revision", null)):
 		return _failed("terrain_volume_revision_invalid")
 	var sections_value = volume.get("sections", null)
 	if not sections_value is Array or sections_value.size() > MAX_TOTAL_RECORDS:

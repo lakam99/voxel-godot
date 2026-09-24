@@ -172,12 +172,20 @@ func _commit_staged_on_worker() -> Dictionary:
 	return _backend.commit_staged_durable_cells()
 
 func _valid_entry(entry) -> bool:
-	if not entry is Dictionary or not entry.get("x", 0) is int \
-			or not entry.get("z", 0) is int:
+	if not entry is Dictionary or not _valid_coordinate(entry.get("x", 0)) \
+			or not _valid_coordinate(entry.get("z", 0)):
 		return false
 	var height = entry.get("surfaceY", entry.get("height", null))
 	return height == null or ((height is float or height is int) \
 		and is_finite(float(height)))
+
+func _valid_coordinate(value) -> bool:
+	if value is int:
+		return value >= -2147483648 and value <= 2147483647
+	if value is float:
+		return is_finite(value) and floorf(value) == value \
+			and value >= -2147483648.0 and value <= 2147483647.0
+	return false
 
 func _export_on_worker() -> Dictionary:
 	return _backend.export_terrain_volume_v2()

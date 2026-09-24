@@ -6,6 +6,7 @@ const STRUCTURES := preload("res://scripts/StructureSystem.gd")
 const WORLD := preload("res://scripts/WorldGenerationSystem.gd")
 const VOLUME := preload("res://scripts/TerrainVolumeService.gd")
 const LEGACY_CONVERTER := preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
+const SAVE_LEASE := preload("res://scripts/terrain/NativeWorldSaveSnapshotLease.gd")
 
 var failures: Array[String] = []
 
@@ -107,6 +108,18 @@ func run() -> void:
 	var absent_v2 := {"version":2, "seed":main.seed_text, "terrain":[]}
 	var empty_v2 := {"version":2, "seed":main.seed_text, "terrain":[], "terrainVolume":{}}
 	var expected_empty := {"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}
+	var decoded_v2: Dictionary = JSON.parse_string(JSON.stringify({"version":2,
+		"seed":main.seed_text, "terrain":[], "terrainVolume":current_volume}))
+	var decoded_request: Dictionary = REQUEST.from_main_with_v2_save_snapshot(main, decoded_v2)
+	check(decoded_request.get("status") == "ready",
+		"JSON decoded v2 save acquires an immutable native import lease: %s revisionType=%s" % [
+			String(decoded_request.get("reason", "")), type_string(typeof(decoded_v2.terrainVolume.revision))])
+	check(SAVE_LEASE.valid_json_revision(0.0)
+		and SAVE_LEASE.valid_json_revision(9007199254740992.0)
+		and not SAVE_LEASE.valid_json_revision(0.5)
+		and not SAVE_LEASE.valid_json_revision(-1.0)
+		and not SAVE_LEASE.valid_json_revision(9007199254740994.0),
+		"decoded revision accepts only nonnegative exact whole-number JSON values")
 	for save in [absent_v2, empty_v2]:
 		var resolved: Dictionary = REQUEST.from_main_with_v2_save(main, save)
 		check(resolved.get("status") == "ready"

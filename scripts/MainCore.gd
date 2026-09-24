@@ -13,6 +13,7 @@ const GameLaunchOptionsScript := preload("res://scripts/world/GameLaunchOptions.
 const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStreamingCoordinator.gd")
 const ActorPhysicalStreamingDemandScript := preload("res://scripts/world/ActorPhysicalStreamingDemand.gd")
 const NativeCollisionAdmissionBarrierScript := preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
+const NativePrivateMainLoadStageScript := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
@@ -93,6 +94,8 @@ var moon_visual: MeshInstance3D
 var player: CharacterBody3D
 var _native_collision_admission_barrier: RefCounted
 var _native_collision_admission_owner_id := 0
+var _native_private_load_stage
+var _native_startup_save_snapshot: Dictionary = {}
 var world_environment: WorldEnvironment
 var visual_style: Resource
 var sky_resource: Sky
@@ -535,6 +538,14 @@ func _run_deferred_startup_boot() -> void:
     if not startup_result_is_ready(tutorial_result):
         await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
         return
+    if not skip_synchronous_world_boot:
+        var private_load_result: Dictionary = await stage_private_native_world_load(
+            _native_startup_save_snapshot if loaded else {})
+        _native_startup_save_snapshot = {}
+        if private_load_result.get("status") != "ready":
+            await stop_startup_loading(StartupReadinessResultScript.failed(
+                String(private_load_result.get("reason", "private_native_load_failed"))))
+            return
     if loaded:
         await startup_loading_yield("Saved world restored", "save_restore", "ready", {
             "requestedMode": requested_startup_mode,
@@ -771,6 +782,8 @@ func stop_startup_loading(result_value, fallback_reason := "startup_readiness_fa
 
 func apply_startup_loading_failure_state(result_value, fallback_reason := "startup_readiness_failed") -> String:
     var result := normalized_startup_result(result_value, fallback_reason)
+    if _native_private_load_stage == null:
+        _native_startup_save_snapshot = {}
     var reason := String(result.get("reason", fallback_reason)).strip_edges()
     if reason == "":
         reason = fallback_reason
@@ -2708,6 +2721,43 @@ func save_world(show_message := true) -> bool:
         update_hud("World saved" if ok else "Save failed")
     return ok
 
+## Stage A retains a private native candidate during ordinary loading. It
+## publishes no gameplay query, terrain block, collider, navigation or save.
+func stage_private_native_world_load(save_snapshot: Dictionary = {}) -> Dictionary:
+    if _native_private_load_stage != null:
+        var retired: Dictionary = _native_private_load_stage.stop()
+        while not retired.get("drained", false):
+            if retired.get("ownerMustBeRetained", false) and retired.get("status") == "failed":
+                return retired
+            await startup_loading_yield("Retiring private terrain candidate", "private_native_load", "pending")
+            retired = _native_private_load_stage.advance_stop()
+        _native_private_load_stage = null
+    await startup_loading_yield("Preparing private native terrain", "private_native_load", "pending")
+    if shutdown_requested: return {"status":"failed", "reason":"startup_cancelled"}
+    _native_private_load_stage = NativePrivateMainLoadStageScript.new()
+    var result: Dictionary = _native_private_load_stage.start(self, save_snapshot)
+    while result.get("status") == "pending" and not shutdown_requested:
+        var state: Dictionary = _native_private_load_stage.snapshot()
+        await startup_loading_yield("Preparing private native terrain", "private_native_load", "pending", {
+            "state":state.get("state", ""),
+            "recordsAdmitted":state.get("transaction", {}).get("recordsAdmitted", 0)})
+        if not shutdown_requested: result = _native_private_load_stage.advance()
+    if result.get("status") == "ready" and not shutdown_requested:
+        await startup_loading_yield("Private native terrain ready", "private_native_load", "ready", \
+            _native_private_load_stage.snapshot())
+        if not shutdown_requested and _native_private_load_stage.current_source_valid():
+            return result
+        result = {"status":"failed", "reason":"private_source_changed_after_commit"}
+    var stopped: Dictionary = _native_private_load_stage.stop()
+    while not stopped.get("drained", false):
+        if stopped.get("ownerMustBeRetained", false) and stopped.get("status") == "failed":
+            return stopped
+        await startup_loading_yield("Draining private native terrain", "private_native_load", "pending")
+        stopped = _native_private_load_stage.advance_stop()
+    _native_private_load_stage = null
+    return {"status":"failed", "reason":"startup_cancelled" if shutdown_requested \
+        else String(result.get("reason", "private_native_load_failed"))}
+
 func try_load_world(show_message := false) -> bool:
     # Initial boot restores data synchronously; its caller owns publication.
     # Runtime callers must await try_load_world_staged instead.
@@ -2724,6 +2774,7 @@ func try_load_world(show_message := false) -> bool:
         return false
     var loaded := apply_save_snapshot(snapshot)
     if loaded:
+        _native_startup_save_snapshot = snapshot
         reset_autosave_dirty_tracking(false)
     if show_message:
         update_hud("Loaded saved world" if loaded else "Load failed")
@@ -2967,6 +3018,11 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
     if not startup_result_is_ready(tutorial_result):
         await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
         return false
+    var private_load_result: Dictionary = await stage_private_native_world_load(snapshot)
+    if private_load_result.get("status") != "ready":
+        await stop_startup_loading(StartupReadinessResultScript.failed(
+            String(private_load_result.get("reason", "private_native_load_failed"))))
+        return false
     await startup_loading_yield("Saved world restored", "save_restore", "ready", {
         "seed": seed_text, "tutorial": tutorial_result.get("metrics", {}),
         "terrainAuthority": authority_result.get("metrics", {})
@@ -3028,6 +3084,11 @@ func run_new_game_staged(show_message: bool) -> bool:
         )
     if not startup_result_is_ready(tutorial_result):
         await stop_startup_loading(tutorial_result, "tutorial_startup_failed")
+        return false
+    var private_load_result: Dictionary = await stage_private_native_world_load()
+    if private_load_result.get("status") != "ready":
+        await stop_startup_loading(StartupReadinessResultScript.failed(
+            String(private_load_result.get("reason", "private_native_load_failed"))))
         return false
     await startup_loading_yield("Reloading terrain")
     reload_chunks(true)
@@ -3189,6 +3250,15 @@ func _graceful_quit_deferred(exit_code: int) -> void:
     # Drain it before retiring those same owners; never race two lifecycles.
     while startup_operation_active or runtime_loading_active or runtime_relocation_active:
         await get_tree().process_frame
+    if _native_private_load_stage != null:
+        var private_stopped: Dictionary = _native_private_load_stage.stop()
+        while not private_stopped.get("drained", false):
+            if private_stopped.get("ownerMustBeRetained", false) and private_stopped.get("status") == "failed":
+                await startup_loading_yield("Private native terrain drain failed", "private_native_load", "failed")
+                return
+            await startup_loading_yield("Draining private native terrain", "private_native_load", "pending")
+            private_stopped = _native_private_load_stage.advance_stop()
+        _native_private_load_stage = null
     # A cancelled initial load or reset has only partial durable state. Never
     # replace the last valid save with a snapshot of that unfinished world.
     var save_ready_world := not startup_loading_active and startup_loading_failure_result.is_empty() \

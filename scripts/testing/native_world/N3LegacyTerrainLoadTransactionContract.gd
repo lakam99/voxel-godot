@@ -7,6 +7,7 @@ const SOURCE := preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const CONVERTER := preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
 const TRANSACTION := preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
 const RUNTIME_OWNER := preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
+const PRIVATE_STAGE := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
 
 var failures: Array[String] = []
 
@@ -62,6 +63,13 @@ func _drive_candidate(transaction, max_frames := 1200) -> Dictionary:
 			return result
 		await process_frame
 	return {"status":"timeout", "reason":"legacy_candidate_contract_timeout"}
+
+func _drive_private_stage(stage, max_frames := 1200) -> Dictionary:
+	for _frame in range(max_frames):
+		var result: Dictionary = stage.advance()
+		if result.get("status") != "pending": return result
+		await process_frame
+	return {"status":"timeout", "reason":"private_stage_contract_timeout"}
 
 func run() -> void:
 	var started_usec := Time.get_ticks_usec()
@@ -144,6 +152,71 @@ func run() -> void:
 		stopped = owner.drain_step()
 	check(stopped.get("status") == "ready", "legacy transaction runtime owner drains cleanly")
 
+	var private_new = PRIVATE_STAGE.new()
+	var private_new_start: Dictionary = private_new.start(main)
+	var private_new_ready: Dictionary = await _drive_private_stage(private_new)
+	var private_new_retained: bool = private_new.snapshot().get("backendRetained") == true
+	var private_new_stopped: Dictionary = private_new.stop()
+	check(private_new_start.get("status") == "pending"
+		and private_new_ready.get("status") == "ready"
+		and private_new_retained
+		and private_new_stopped.get("drained") == true
+		and int(private_new_stopped.get("releaseUsec", -1)) >= 0,
+		"private New Game candidate commits and releases without publishing")
+	var stale_private = PRIVATE_STAGE.new()
+	var stale_started: Dictionary = stale_private.start(main)
+	var original_seed: String = main.seed_text
+	main.seed_text = "different-source-during-private-import"
+	var stale_result: Dictionary = await _drive_private_stage(stale_private)
+	main.seed_text = original_seed
+	var stale_stopped: Dictionary = stale_private.stop()
+	for _frame in range(120):
+		if stale_stopped.get("drained", false): break
+		stale_stopped = stale_private.advance_stop()
+		await process_frame
+	check(stale_started.get("status") == "pending"
+		and stale_result.get("reason") == "private_source_changed_during_import"
+		and stale_stopped.get("drained") == true,
+		"private candidate rejects changed current source and drains without publishing")
+	var private_continue = PRIVATE_STAGE.new()
+	var private_continue_start: Dictionary = private_continue.start(main, canonical_save)
+	var private_continue_ready: Dictionary = await _drive_private_stage(private_continue)
+	var private_continue_stopped: Dictionary = private_continue.stop()
+	check(private_continue_start.get("status") == "pending"
+		and private_continue_ready.get("status") == "ready"
+		and private_continue_stopped.get("drained") == true,
+		"private full-v2 Continue candidate imports and releases")
+	var private_historical = PRIVATE_STAGE.new()
+	var decoded_historical: Dictionary = JSON.parse_string(JSON.stringify(legacy_save))
+	var private_historical_start: Dictionary = private_historical.start(main, decoded_historical)
+	var private_historical_ready: Dictionary = await _drive_private_stage(private_historical)
+	var historical_admitted := int(private_historical.snapshot().get("transaction", {}).get("recordsAdmitted", 0))
+	var private_historical_stopped: Dictionary = private_historical.stop()
+	check(private_historical_start.get("reason") == "legacy_v2_conversion_pending"
+		and private_historical_ready.get("status") == "ready"
+		and historical_admitted > 0
+		and private_historical_stopped.get("drained") == true,
+		"private JSON-decoded historical-v2 Continue candidate converts and imports")
+	var private_cancelled = PRIVATE_STAGE.new()
+	var private_cancel_start: Dictionary = private_cancelled.start(main, canonical_save)
+	var private_cancel_request: Dictionary = private_cancelled.stop()
+	var private_cancel_result: Dictionary = private_cancel_request
+	for _frame in range(120):
+		if private_cancel_result.get("drained", false): break
+		private_cancel_result = private_cancelled.advance_stop()
+		await process_frame
+	check(private_cancel_start.get("status") == "pending"
+		and private_cancel_result.get("drained") == true
+		and private_cancelled.snapshot().get("backendRetained") == false,
+		"private candidate cancellation drains its retained native owner")
+	var private_legacy_cancel = PRIVATE_STAGE.new()
+	var legacy_cancel_start: Dictionary = private_legacy_cancel.start(main, legacy_save)
+	var legacy_cancel_result: Dictionary = private_legacy_cancel.stop()
+	check(legacy_cancel_start.get("status") == "pending"
+		and legacy_cancel_result.get("drained") == true
+		and private_legacy_cancel.snapshot().get("saveRetained") == false,
+		"private historical conversion cancellation releases its decoded save")
+
 	var report := {"schema":"n3-legacy-terrain-load-transaction/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
 		"evidenceLevel":"focused legacy-v2 conversion, exact restore parity, staged native transaction and committed owner contract",
@@ -157,6 +230,14 @@ func run() -> void:
 			"transactionState":transaction.snapshot().get("state", ""),
 			"exactRestoreParity":converted_volume == restored_volume,
 			"ownerMatchesRestore":owner_volume == restored_volume},
+		"privateStage":{"newGame":private_new_ready.get("status"),
+			"continue":private_continue_ready.get("status"),
+			"historicalContinue":private_historical_ready.get("status"),
+			"newGameReleaseUsec":private_new_stopped.get("releaseUsec", -1),
+			"continueReleaseUsec":private_continue_stopped.get("releaseUsec", -1),
+			"historicalReleaseUsec":private_historical_stopped.get("releaseUsec", -1),
+			"cancelDrained":private_cancel_result.get("drained", false),
+			"legacyCancelDrained":legacy_cancel_result.get("drained", false)},
 		"doesNotProve":"No Main New Game/Continue wiring, loading responsiveness, authoritative collision readiness, or headed gameplay acceptance."}
 	var report_path := OS.get_environment("VWB_LEGACY_LOAD_TRANSACTION_REPORT")
 	if not report_path.is_empty():

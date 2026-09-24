@@ -405,19 +405,19 @@ one:
 
 ### Atomic Staging Plan
 
-Stage A's intended contract is a retained Main load transaction behind the
-existing production source: freeze exact source inputs and one v2 snapshot,
-retain pending work, expose progress, and drain cancellation without publishing
-native gameplay queries or collision. An initial prototype wired synchronous
-native initialization into deferred Main startup, but review found that its
-snapshot construction/deep copies and `initialize_from_save_v2()` parse the
-whole durable volume inline. The explicit staged New Game and runtime Continue
-paths were also not wired to that transaction. That unsafe/partial Main hook
-has been removed. The fixture-fed transaction remains service evidence only;
-it is not Stage A completion. See
-`N3_RESPONSIVE_MAIN_LOAD_INITIALIZER_DESIGN_2026-09-23.md` for the measured
-limitation and the bounded native-import design required before re-integrating
-it with Main.
+Stage A now retains a private Main load transaction behind the existing
+production source for initial New Game, file-backed Continue, runtime
+Continue, and historical v2 `terrain`-only Continue. Bounded import, candidate
+identity commit, pending loading feedback, cancellation, and graceful-quit
+drain run through the composed `NativePrivateMainLoadStage`; it installs no
+gameplay source or physical publisher. A current source-descriptor check at
+commit and after the ready yield rejects a changed seed/town policy. The
+decoded save stays under a cooperative no-mutation ownership contract until
+native admission finishes. Focused and headed evidence is recorded in
+`N3_STAGE_A_PRIVATE_MAIN_LOAD_2026-09-24.md`. Bounded backend destruction,
+whole-frame cadence, and exclusive ownership for arbitrary caller-provided
+snapshot aliases remain cutover risks. Stage A is an integration checkpoint,
+not the N3 authority switch.
 
 Stage B routes cell reads and durable mutations through that retained owner.
 It cannot ship until gate 2 parity and gate 3 pending semantics pass. Stage C
@@ -428,26 +428,6 @@ artifact, with rollback until all stale work is drained. Stage E removes old
 generation and save paths after the call-site/deletion audit. Each stage must
 be independently reversible; no stage permits a script query to mask native
 pending/failure while native publication is active.
-
-### First Code PR Boundary
-
-The first code PR should implement only Stage A if Main loading can own the
-new lifecycle independently of `VoxelTerrainRuntime` setup. Before coding,
-split construction of the native cell source/owner lifecycle from activation
-of `NativeTerrainRuntimeOwner`'s manual `VoxelTerrain` publisher. If those APIs
-cannot be separated without changing the active publisher, keep this checkpoint
-as the first reviewable step and do not wire the owner into Main. A safe Stage A
-must not instantiate a second terrain/collision authority, change
-`startup_loading_completed`, change save contents, or alter generated queries.
-
-The checkpoint's current evidence is deliberately bounded: the N3 cell-source
-adapter report proves typed field parity for its fixed seed and listed cells;
-the two N3/N5 reports prove their focused physics fixtures. Neither proves
-Main New Game/Continue, end-to-end save-v2 parity, cancellation responsiveness,
-or an atomic source-to-collision cutover. No gameplay code or test-only runner
-is added by this ledger update. The first code PR must report its exact diff,
-commit, focused lifecycle evidence, and measured worst frame / pending-page
-lag before subsequent gates are considered.
 
 ## Shadow Projection Query Slice
 
@@ -778,3 +758,13 @@ reproduced the results. It adds no production adapter/publication caller;
 receipt-bound shadow arithmetic does not prove runtime collision, edits,
 rollback, physics, or gameplay cutover. Primary-tree focused reruns remain
 queued until the active N5 health review and matched-baseline lane are clear.
+## Stage A Checkpoint Boundary
+
+Main now owns a private native load candidate independently of
+`VoxelTerrainRuntime`'s active publisher. Its focused and headed receipts are
+listed in `N3_STAGE_A_PRIVATE_MAIN_LOAD_2026-09-24.md`. This checkpoint leaves
+`startup_loading_completed`, save contents, generated queries, and physical
+publication under the existing authorities. Stage B must measure frame cadence
+and pending-page lag while adding query routing; Stage C and D must establish
+source-to-collision acknowledgement and an atomic switch before any native
+gameplay authority claim.
