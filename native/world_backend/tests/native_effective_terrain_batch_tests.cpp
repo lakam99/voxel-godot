@@ -401,6 +401,8 @@ VWB_TEST(native_effective_batch_preserves_channel_order_duplicates_and_typed_fac
     NativeEffectiveTerrainBatch batch(ready_pin(definition, {0, 0}, layered_deltas()));
     VWB_EXPECT(batch.pin().terrain_shaping_page_count() > 0U);
     VWB_EXPECT_EQ(4096U, batch.limits().max_surface_columns);
+    VWB_EXPECT(std::isfinite(batch.sample_continuous_volume_surface_y(
+        {0, 0, WorldQueryIntent::gameplay})));
 
     NativeEffectiveTerrainBatchRequest request;
     request.surface_columns = {
