@@ -272,3 +272,20 @@ job before a report was written. Receipt:
 `artifacts/node-tools/process-runs/godot-Qx40hP/watchdog.json`. The earlier
 passing contract above remains the pre-change evidence; the combined branch
 still needs its own compile/transaction check.
+
+The isolated worktree lacked a Godot editor import cache. After
+`node tools/run-n3-stage-a-matched-startup.mjs --project
+C:\Users\arkam\.codex\worktrees\n3-malformed-drain\voxel-biome-world-godot
+--label candidate --import-only` completed (owned receipt
+`artifacts/node-tools/process-runs/godot-S3Jvqi/watchdog.json`), both checks
+passed on commit `40d02ef`:
+
+- `node tools/run-project-compile-smoke.mjs`, owned receipt
+  `artifacts/node-tools/process-runs/godot-WiqJh1/watchdog.json`.
+- `node tools/run-n3-legacy-terrain-load-transaction.mjs`, report
+  `artifacts/native-world-backend/n3-legacy-terrain-load-transaction-1790235531719-cff6c2a7/report.json`,
+  owned receipt `artifacts/node-tools/process-runs/godot-wCKg31/watchdog.json`.
+
+Both are headless focused checks. The earlier parse failure was an import
+setup issue, not a demonstrated source regression. The combined integration
+branch still needs its own verification.
