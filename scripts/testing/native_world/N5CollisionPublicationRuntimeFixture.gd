@@ -121,6 +121,27 @@ func _row_snapshot_budget_probe() -> Dictionary:
 	var pending_step: Dictionary = runtime.work_step_snapshot()
 	var retried: Dictionary = runtime._advance_window_rows(ticket, pending_window, source)
 	var retry_step: Dictionary = runtime.work_step_snapshot()
+	var mid_blocks: Array[Vector3i] = []
+	for index in range(5):
+		mid_blocks.append(Vector3i(index + 300, 0, 0))
+	source.pending_block = mid_blocks[3]
+	source.pending_once = true
+	var mid_window := {"id":Vector3i(3, 0, 0), "windowToken":"mid-pending",
+		"identity":{}, "blocks":mid_blocks}
+	var mid_pending: Dictionary = runtime._advance_window_rows(ticket, mid_window, source)
+	var mid_accepted: Array = (runtime._row_job.get("rows", []) as Array).duplicate()
+	var mid_saved_cursor := int(runtime._row_job.get("cursor", -1))
+	var mid_pending_calls: int = int(source.calls)
+	var mid_pending_step: Dictionary = runtime.work_step_snapshot()
+	var mid_resumed: Dictionary = runtime._advance_window_rows(ticket, mid_window, source)
+	var mid_resumed_step: Dictionary = runtime.work_step_snapshot()
+	var mid_rows: Array = mid_resumed.get("rows", [])
+	var mid_ordered := mid_rows.size() == mid_blocks.size()
+	if mid_ordered:
+		for index in range(mid_blocks.size()):
+			if mid_rows[index].get("block") != mid_blocks[index]:
+				mid_ordered = false
+				break
 	var result := {"firstStatus":first_result.get("status"),
 		"secondStatus":second_result.get("status"),
 		"secondReason":second_result.get("reason"),
@@ -141,7 +162,18 @@ func _row_snapshot_budget_probe() -> Dictionary:
 		"pendingCalls":pending_calls,
 		"pendingStep":pending_step.get("rowSnapshots"),
 		"retryStatus":retried.get("status"),
-		"retryStep":retry_step.get("rowSnapshots")}
+		"retryStep":retry_step.get("rowSnapshots"),
+		"midPendingStatus":mid_pending.get("status"),
+		"midPendingCursor":mid_pending.get("rowCursor"),
+		"midSavedCursor":mid_saved_cursor,
+		"midAcceptedRows":mid_accepted.size(),
+		"midPendingCalls":mid_pending_calls,
+		"midPendingStep":mid_pending_step.get("rowSnapshots"),
+		"midResumedStatus":mid_resumed.get("status"),
+		"midFinalRows":mid_rows.size(),
+		"midRowsOrdered":mid_ordered,
+		"midTotalCalls":source.calls,
+		"midResumedStep":mid_resumed_step.get("rowSnapshots")}
 	result["passed"] = first_result.get("status") == "ready" \
 		and second_result.get("status") == "pending" \
 		and second_result.get("reason") == "bounded_collision_row_assembly" \
@@ -161,8 +193,20 @@ func _row_snapshot_budget_probe() -> Dictionary:
 		and pending_calls == 81 \
 		and int(pending_step.get("rowSnapshots", -1)) == 17 \
 		and retried.get("status") == "ready" \
-		and source.calls == 82 \
-		and int(retry_step.get("rowSnapshots", -1)) == 18
+		and int(retry_step.get("rowSnapshots", -1)) == 18 \
+		and mid_pending.get("status") == "pending" \
+		and mid_pending.get("reason") == "fixture_row_pending" \
+		and int(mid_pending.get("rowCursor", -1)) == 3 \
+		and mid_saved_cursor == 3 and mid_accepted.size() == 3 \
+		and mid_accepted[0].get("block") == mid_blocks[0] \
+		and mid_accepted[2].get("block") == mid_blocks[2] \
+		and mid_pending_calls == 86 \
+		and int(mid_pending_step.get("rowSnapshots", -1)) == 22 \
+		and mid_resumed.get("status") == "ready" \
+		and mid_ordered and source.calls == 88 \
+		and int(mid_resumed_step.get("rowSnapshots", -1)) == 24 \
+		and int(mid_resumed_step.get("rowSnapshots", -1)) \
+			<= PUBLICATION.MAX_ROW_SNAPSHOTS_PER_FRAME
 	runtime.free()
 	return result
 

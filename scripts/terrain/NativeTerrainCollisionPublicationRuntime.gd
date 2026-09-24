@@ -507,7 +507,9 @@ func _advance_window_rows(ticket_result: Dictionary, window: Dictionary,
 		_row_job.bounds = row.bounds if cursor == 0 \
 			else (_row_job.bounds as AABB).merge(row.bounds)
 		cursor += 1
-	_row_job.cursor = cursor
+		# A later row may be pending. Keep accepted rows and their cursor in
+		# lockstep so retries never snapshot or append them a second time.
+		_row_job.cursor = cursor
 	if cursor < (window.blocks as Array).size():
 		return {"status":"pending", "reason":"bounded_collision_row_assembly",
 			"windowId":window.id, "rowCursor":cursor,
