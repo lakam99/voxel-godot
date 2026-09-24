@@ -101,7 +101,19 @@ func is_block_demanded(block: Vector3i) -> Dictionary:
 func _begin_demand_snapshot(revision: int, closure_token: String) -> Dictionary:
 	var started: Dictionary = _planner.begin_required_collision_mesh_blocks()
 	if started.get("status") != "pending": return started
-	_demand_snapshot_token = int(started.get("token", 0))
+	if String(started.get("reason", "")) != "required_mesh_blocks_started" \
+			or String(started.get("transactionKind", "")) != "requiredBlocks" \
+			or String(started.get("transactionStatus", "")) != "active":
+		return {"status":"pending", "reason":"triangle_demand_snapshot_transaction_busy",
+			"cause":started}
+	var token := int(started.get("token", 0))
+	var owner: Dictionary = _planner.collision_mesh_snapshot_transaction_state()
+	if token <= 0 or String(owner.get("kind", "")) != "requiredBlocks" \
+			or int(owner.get("token", 0)) != token \
+			or String(owner.get("status", "")) != "active":
+		return {"status":"pending", "reason":"triangle_demand_snapshot_begin_not_owned",
+			"cause":owner}
+	_demand_snapshot_token = token
 	_demand_snapshot_target_revision = revision
 	_demand_snapshot_target_token = closure_token
 	_demand_snapshot_cancel_requested = false
@@ -159,7 +171,23 @@ func _advance_demand_snapshot() -> Dictionary:
 		if not _demand_snapshot_cancel_requested:
 			_planner.cancel_required_collision_mesh_blocks(_demand_snapshot_token)
 			_demand_snapshot_cancel_requested = true
-		var cancelled: Dictionary = _planner.advance_required_collision_mesh_blocks()
+		var cancelled: Dictionary = _planner.advance_required_collision_mesh_blocks(
+			_demand_snapshot_token)
+		if cancelled.get("reason") == "mesh_snapshot_owner_mismatch":
+			var foreign: Dictionary = cancelled.get("transaction", {})
+			if String(foreign.get("kind", "")) == "requiredBlocks" \
+					and int(foreign.get("token", 0)) == _demand_snapshot_token:
+				return {"status":"failed", "reason":"triangle_demand_snapshot_owner_inconsistent",
+					"transaction":foreign}
+			if String(foreign.get("status", "")) == "idle" \
+					or (String(foreign.get("status", "")) == "transferred" \
+						and not bool(foreign.get("hasPendingRetirement", false))):
+				_demand_snapshot_token = 0
+				_demand_snapshot_cancel_requested = false
+				return _begin_demand_snapshot(target_revision, target_token)
+			return {"status":"pending", "reason":"triangle_demand_snapshot_orphan_waiting",
+				"transaction":foreign, "workOps":0,
+				"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
 		if cancelled.get("status") == "pending":
 			return {"status":"pending", "reason":"triangle_demand_snapshot_cancel_draining",
 				"workOps":int(cancelled.get("workOps", 0)),
@@ -167,7 +195,25 @@ func _advance_demand_snapshot() -> Dictionary:
 		_demand_snapshot_token = 0
 		_demand_snapshot_cancel_requested = false
 		return _begin_demand_snapshot(target_revision, target_token)
-	var advanced: Dictionary = _planner.advance_required_collision_mesh_blocks()
+	var advanced: Dictionary = _planner.advance_required_collision_mesh_blocks(
+		_demand_snapshot_token)
+	if advanced.get("reason") == "mesh_snapshot_owner_mismatch":
+		var foreign: Dictionary = advanced.get("transaction", {})
+		if String(foreign.get("kind", "")) == "requiredBlocks" \
+				and int(foreign.get("token", 0)) == _demand_snapshot_token:
+			return {"status":"failed", "reason":"triangle_demand_snapshot_owner_inconsistent",
+				"transaction":foreign}
+		if String(foreign.get("status", "")) == "idle" \
+				or (String(foreign.get("status", "")) == "transferred" \
+					and not bool(foreign.get("hasPendingRetirement", false))):
+			_demand_snapshot_token = 0
+			_demand_snapshot_cancel_requested = false
+			return {"status":"pending", "reason":"triangle_demand_snapshot_orphan_released",
+				"transaction":foreign, "workOps":0,
+				"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+		return {"status":"pending", "reason":"triangle_demand_snapshot_orphan_waiting",
+			"transaction":foreign, "workOps":0,
+			"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
 	if advanced.get("status") == "pending":
 		return {"status":"pending", "reason":"triangle_demand_snapshot_building",
 			"workOps":advanced.get("workOps", 0),
@@ -638,7 +684,8 @@ func drain_step() -> Dictionary:
 		_candidate_closure_token = ""
 		_demand_prune_cursor = -1
 	if _demand_snapshot_token != 0:
-		var demand_drain: Dictionary = _planner.advance_required_collision_mesh_blocks()
+		var demand_drain: Dictionary = _planner.advance_required_collision_mesh_blocks(
+			_demand_snapshot_token)
 		if demand_drain.get("status") == "pending":
 			return {"status":"pending", "reason":"triangle_demand_snapshot_draining",
 				"workOps":demand_drain.get("workOps", 0),

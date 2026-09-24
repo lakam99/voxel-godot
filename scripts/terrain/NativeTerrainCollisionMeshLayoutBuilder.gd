@@ -40,6 +40,8 @@ func _begin(required_order: Array, revision: int, closure_token: String,
 	_start(required_order, revision, closure_token, lease, token, kind)
 	return {"status":"pending", "reason":"mesh_layout_started" if kind == "layout" \
 		else "required_mesh_blocks_started", "token":token,
+		"transactionKind":kind, "transactionStatus":"active",
+		"revision":revision, "closureToken":closure_token,
 		"maxWorkOpsPerAdvance":MAX_WORK_OPS_PER_ADVANCE}
 
 func cancel(token: int) -> Dictionary:
@@ -62,6 +64,31 @@ func current_token() -> int:
 
 func current_kind() -> String:
 	return String(_job.get("kind", "")) if is_active() else ""
+
+## Reports the exact transaction that owns either the active builder or its
+## transferred-result retirement scratch. Consumers use this before advancing
+## the shared builder; kind alone is not sufficient because another same-kind
+## caller may own a different token.
+func transaction_state() -> Dictionary:
+	var has_scratch := has_pending_retirement()
+	if not _job.is_empty():
+		var job_state := String(_job.get("state", ""))
+		return {"status":"active" if job_state != "transferred" else "transferred",
+			"kind":String(_job.get("kind", "")),
+			"token":int(_job.get("token", 0)),
+			"revision":int(_job.get("revision", -1)),
+			"closureToken":String(_job.get("closureToken", "")),
+			"hasPendingRetirement":has_scratch}
+	if has_scratch:
+		return {"status":"retirement_pending",
+			"kind":String(_retired_work.get("kind", _retired_layout.get("kind", ""))),
+			"token":int(_retired_work.get("token", _retired_layout.get("token", 0))),
+			"revision":int(_retired_work.get("revision", _retired_layout.get("revision", -1))),
+			"closureToken":String(_retired_work.get("closureToken",
+				_retired_layout.get("closureToken", ""))),
+			"hasPendingRetirement":true}
+	return {"status":"idle", "kind":"", "token":0,
+		"revision":-1, "closureToken":"", "hasPendingRetirement":false}
 
 func is_valid_for(required_order: Array, revision: int, closure_token: String) -> bool:
 	return is_active() and is_same(_job.get("input", []), required_order) \
@@ -357,11 +384,15 @@ func _take_layout() -> Dictionary:
 		or String(_job.sortTarget) == "ids" \
 		or (String(_job.sortTarget) == "windowBlocks"
 			and is_same(_job.sortSrc, _job.buckets.get(_job.get("activeWindow"), [])))
-	_retired_work = {"buckets":_job.buckets, "windowIds":_job.windowIds,
+	_retired_work = {"kind":String(_job.kind), "token":int(_job.token),
+		"revision":int(_job.revision), "closureToken":String(_job.closureToken),
+		"buckets":_job.buckets, "windowIds":_job.windowIds,
 		"retireBucketIndex":_job.windowIds.size() - 1,
 		"sortSrc":[] if output_alias else _job.sortSrc,
 		"sortDst":_job.sortDst}
-	_job = {"state":"transferred"}
+	_job = {"state":"transferred", "kind":String(_job.kind),
+		"token":int(_job.token), "revision":int(_job.revision),
+		"closureToken":String(_job.closureToken)}
 	return layout
 
 func _take_required_blocks() -> Dictionary:
@@ -369,7 +400,9 @@ func _take_required_blocks() -> Dictionary:
 		"closureToken":String(_job.closureToken),
 		"blocks":_job.requiredBlocks}
 	_retired_work = {}
-	_job = {"state":"transferred"}
+	_job = {"state":"transferred", "kind":String(_job.kind),
+		"token":int(_job.token), "revision":int(_job.revision),
+		"closureToken":String(_job.closureToken)}
 	return result
 
 func _retire_work_one() -> void:

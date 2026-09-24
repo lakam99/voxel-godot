@@ -17,7 +17,7 @@ const execution = await runGodotProcess(await findGodot(), [
   'res://scripts/testing/native_world/N3StagedWindowConsumerContract.gd',
 ], {
   cwd: project,
-  timeoutSeconds: 60,
+  timeoutSeconds: 18,
   reportPath,
   env: { ...process.env, VWB_N3_STAGED_WINDOW_CONSUMER_REPORT: reportPath },
 });

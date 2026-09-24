@@ -210,7 +210,7 @@ func begin_required_collision_mesh_blocks() -> Dictionary:
 		return {"status":"pending", "reason":"demand_replacement_active"}
 	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
 		return {"status":"pending", "reason":"mesh_snapshot_transaction_active",
-			"token":_mesh_layout_builder.current_token()}
+			"transaction":_mesh_layout_builder.transaction_state()}
 	_mesh_layout_lease = MESH_LAYOUT_LEASE.new()
 	var required_order: Array = _accepted_plan.get("requiredOrder", [])
 	if not _mesh_layout_lease.acquire(required_order, _demand_revision, _closure_token):
@@ -223,15 +223,18 @@ func begin_required_collision_mesh_blocks() -> Dictionary:
 		_mesh_layout_lease = null
 	return started
 
-func advance_required_collision_mesh_blocks() -> Dictionary:
-	return _advance_mesh_snapshot("requiredBlocks")
+func advance_required_collision_mesh_blocks(expected_token: int) -> Dictionary:
+	return _advance_mesh_snapshot("requiredBlocks", expected_token)
 
-func _advance_mesh_snapshot(expected_kind: String) -> Dictionary:
+func _advance_mesh_snapshot(expected_kind: String, expected_token: int) -> Dictionary:
 	if _mesh_layout_builder == null:
 		return {"status":"failed", "reason":"planner_not_configured"}
-	if _mesh_layout_builder.is_active() \
-			and _mesh_layout_builder.current_kind() != expected_kind:
-		return {"status":"failed", "reason":"mesh_snapshot_kind_mismatch"}
+	var owner: Dictionary = _mesh_layout_builder.transaction_state()
+	if expected_token <= 0 or String(owner.get("kind", "")) != expected_kind \
+			or int(owner.get("token", 0)) != expected_token:
+		return {"status":"failed", "reason":"mesh_snapshot_owner_mismatch",
+			"expectedKind":expected_kind, "expectedToken":expected_token,
+			"transaction":owner}
 	_mesh_layout_builder.revoke_if_stale(
 		_accepted_plan.get("requiredOrder", []), _demand_revision, _closure_token)
 	var result: Dictionary = _mesh_layout_builder.advance()
@@ -259,7 +262,7 @@ func begin_collision_mesh_window_layout() -> Dictionary:
 		return {"status":"pending", "reason":"demand_replacement_active"}
 	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
 		return {"status":"pending", "reason":"mesh_layout_already_pending",
-			"token":_mesh_layout_builder.current_token()}
+			"transaction":_mesh_layout_builder.transaction_state()}
 	if not _mesh_window_layout.is_empty() \
 			and _mesh_window_layout_revision != _demand_revision:
 		_mesh_layout_builder.set_retired_layout(_mesh_window_layout)
@@ -277,8 +280,16 @@ func begin_collision_mesh_window_layout() -> Dictionary:
 		_mesh_layout_lease = null
 	return started
 
-func advance_collision_mesh_window_layout() -> Dictionary:
-	return _advance_mesh_snapshot("layout")
+func advance_collision_mesh_window_layout(expected_token: int) -> Dictionary:
+	return _advance_mesh_snapshot("layout", expected_token)
+
+## Exact owner of the shared staged builder, including transferred-result
+## scratch. A consumer must match both kind and token before advancing it.
+func collision_mesh_snapshot_transaction_state() -> Dictionary:
+	if _mesh_layout_builder == null:
+		return {"status":"unavailable", "kind":"", "token":0,
+			"hasPendingRetirement":false}
+	return _mesh_layout_builder.transaction_state()
 
 ## True while transferred or cancelled layout scratch still needs bounded
 ## planner advances before another snapshot transaction can begin.

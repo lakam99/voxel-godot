@@ -10,6 +10,8 @@ var failures: Array[String] = []
 var observed_max_work_ops := 0
 var total_work_ops := 0
 var advance_count := 0
+var layout_transaction_token := 0
+var required_transaction_token := 0
 
 func check(value: bool, label: String) -> void:
 	if not value: failures.append(label)
@@ -66,7 +68,8 @@ func _step(planner, accepted_while_pending: Dictionary = {}) -> Dictionary:
 	return result
 
 func _layout_step(planner, accepted_snapshot: Dictionary = {}) -> Dictionary:
-	var result: Dictionary = planner.advance_collision_mesh_window_layout()
+	var result: Dictionary = planner.advance_collision_mesh_window_layout(
+		layout_transaction_token)
 	var work_ops := int(result.get("workOps", -1))
 	advance_count += 1
 	check(work_ops >= 0 and work_ops <= WORK_LIMIT
@@ -101,7 +104,8 @@ func _drive_layout(planner, snapshot: Dictionary = {}, max_advances := 20000) ->
 	return {"status":"timeout", "reason":"mesh_layout_contract_timeout"}
 
 func _required_step(planner, snapshot: Dictionary = {}) -> Dictionary:
-	var result: Dictionary = planner.advance_required_collision_mesh_blocks()
+	var result: Dictionary = planner.advance_required_collision_mesh_blocks(
+		required_transaction_token)
 	var work_ops := int(result.get("workOps", -1))
 	advance_count += 1
 	check(work_ops >= 0 and work_ops <= WORK_LIMIT
@@ -352,6 +356,7 @@ func run() -> void:
 	_begin_sync(layout_planner, layout_request)
 	var before_layout := _accepted_snapshot(layout_planner)
 	var layout_begin: Dictionary = layout_planner.begin_collision_mesh_window_layout()
+	layout_transaction_token = int(layout_begin.get("token", 0))
 	check(layout_begin.get("status") == "pending"
 		and layout_begin.get("reason") == "mesh_layout_started",
 		"logical mesh layout starts under a revision/token-bound planner lease")
@@ -368,6 +373,7 @@ func run() -> void:
 		and cancelled_layout.get("cancelled") == true,
 		"layout cancellation incrementally retires partial buckets and sort scratch")
 	var retry_layout_begin: Dictionary = layout_planner.begin_collision_mesh_window_layout()
+	layout_transaction_token = int(retry_layout_begin.get("token", 0))
 	var retry_layout: Dictionary = await _drive_layout(layout_planner, before_layout)
 	check(retry_layout_begin.get("status") == "pending"
 		and retry_layout.get("status") == "ready"
@@ -387,6 +393,7 @@ func run() -> void:
 	var required_snapshot := _accepted_snapshot(layout_planner)
 	var expected_required: Dictionary = layout_planner.required_collision_mesh_blocks()
 	var required_begin: Dictionary = layout_planner.begin_required_collision_mesh_blocks()
+	required_transaction_token = int(required_begin.get("token", 0))
 	check(required_begin.get("status") == "pending",
 		"required-block enumeration begins under a revision/token-bound lease")
 	for _index in range(2):
@@ -410,6 +417,7 @@ func run() -> void:
 	check(not layout_planner._mesh_layout_builder.has_pending_retirement(),
 		"cancelled required-block scratch fully retires before another snapshot begins")
 	var retry_required_begin: Dictionary = layout_planner.begin_required_collision_mesh_blocks()
+	required_transaction_token = int(retry_required_begin.get("token", 0))
 	var retry_required: Dictionary = await _drive_required(layout_planner, required_snapshot)
 	check(retry_required_begin.get("status") == "pending"
 		and retry_required.get("status") == "ready"
@@ -429,6 +437,7 @@ func run() -> void:
 	# candidate without changing the last accepted demand identity.
 	var before_required_revoke := _accepted_snapshot(layout_planner)
 	var revoked_required_begin: Dictionary = layout_planner.begin_required_collision_mesh_blocks()
+	required_transaction_token = int(revoked_required_begin.get("token", 0))
 	_required_step(layout_planner, before_required_revoke)
 	layout_planner._mesh_layout_lease.invalidate()
 	var revoked_required: Dictionary = await _drive_required(layout_planner,

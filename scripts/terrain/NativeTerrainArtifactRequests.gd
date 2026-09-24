@@ -415,8 +415,11 @@ func abort_collision_window_retirement(window_token: String, lease_id: String,
 
 func stop() -> Dictionary:
 	_stopping = true
-	if not _window_layout_job.is_empty() or (_planner != null \
-			and _planner.has_pending_collision_mesh_window_retirement()):
+	var planner_transaction: Dictionary = _planner.collision_mesh_snapshot_transaction_state() \
+		if _planner != null else {"status":"idle", "hasPendingRetirement":false}
+	var staged_transaction_pending: bool = planner_transaction.get("status") == "active" \
+		or bool(planner_transaction.get("hasPendingRetirement", false))
+	if not _window_layout_job.is_empty() or staged_transaction_pending:
 		return request_stop()
 	_window_layout_candidate.clear()
 	var retired: Dictionary = _retire_producer()
@@ -431,18 +434,23 @@ func request_stop() -> Dictionary:
 	_async_stop_requested = true
 	if not _window_layout_job.is_empty() \
 			and not bool(_window_layout_job.get("cancelling", false)):
-		_planner.cancel_collision_mesh_window_layout(
-			int(_window_layout_job.get("token", 0)))
-		_window_layout_job["cancelling"] = true
+		var job: Dictionary = _window_layout_job
+		var owner: Dictionary = _planner.collision_mesh_snapshot_transaction_state()
+		if String(owner.get("kind", "")) == "layout" \
+				and int(owner.get("token", 0)) == int(job.get("token", 0)):
+			if String(owner.get("status", "")) == "active":
+				_planner.cancel_collision_mesh_window_layout(int(job.get("token", 0)))
+			job["cancelling"] = true
+			_window_layout_job = job
 	return {"status":"pending", "reason":"artifact_retirement_requested",
 		"inflight":_producer != null, "windowRecords":_window_records.size()}
 
 func drain_step() -> Dictionary:
 	if not _async_stop_requested: return {"status":"failed", "reason":"artifact_stop_required"}
-	var layout_drain: Dictionary = _drain_staged_window_layout()
-	if layout_drain.get("status") != "ready": return layout_drain
 	var retired: Dictionary = _retire_producer()
 	if retired.get("status") != "ready": return retired
+	var layout_drain: Dictionary = _drain_staged_window_layout()
+	if layout_drain.get("status") != "ready": return layout_drain
 	var window_step := _release_one_window()
 	if window_step.get("status") != "ready": return window_step
 	if not _retirement_leases.is_empty():
@@ -458,16 +466,39 @@ func _drain_staged_window_layout() -> Dictionary:
 		_window_layout_job.clear()
 		_window_layout_candidate.clear()
 		return {"status":"ready", "drained":true}
-	if not _window_layout_job.is_empty():
-		var job: Dictionary = _window_layout_job
-		if not bool(job.get("cancelling", false)):
-			_planner.cancel_collision_mesh_window_layout(int(job.get("token", 0)))
-			job["cancelling"] = true
-			_window_layout_job = job
+	var owner: Dictionary = _planner.collision_mesh_snapshot_transaction_state()
+	if _window_layout_job.is_empty():
+		var owner_released: bool = owner.get("status") == "idle" \
+			or (owner.get("status") == "transferred" \
+				and not bool(owner.get("hasPendingRetirement", false)))
+		if not owner_released or bool(owner.get("hasPendingRetirement", false)):
+			return {"status":"pending", "reason":"artifact_layout_foreign_transaction_drain",
+				"transaction":owner}
+		_window_layout_candidate.clear()
+		return {"status":"ready", "drained":true}
+	var job: Dictionary = _window_layout_job
+	var token := int(job.get("token", 0))
+	var owner_matches := String(owner.get("kind", "")) == "layout" \
+		and int(owner.get("token", 0)) == token
+	if not owner_matches:
+		_window_layout_job.clear()
+		var owner_released: bool = owner.get("status") == "idle" \
+			or (owner.get("status") == "transferred" \
+				and not bool(owner.get("hasPendingRetirement", false)))
+		if owner_released and not bool(owner.get("hasPendingRetirement", false)):
+			_window_layout_candidate.clear()
+			return {"status":"ready", "drained":true,
+				"orphanReleased":true, "transaction":owner}
+		return {"status":"pending", "reason":"artifact_layout_orphan_waiting",
+			"transaction":owner}
+	if not bool(job.get("cancelling", false)):
+		if String(owner.get("status", "")) == "active":
+			_planner.cancel_collision_mesh_window_layout(token)
+		job["cancelling"] = true
+		_window_layout_job = job
 	var drain_step: Dictionary = {}
-	if not _window_layout_job.is_empty() \
-			or _planner.has_pending_collision_mesh_window_retirement():
-		drain_step = _planner.advance_collision_mesh_window_layout()
+	if owner_matches:
+		drain_step = _planner.advance_collision_mesh_window_layout(token)
 		if not _valid_layout_step_budget(drain_step):
 			return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
 				"step":drain_step}
@@ -475,7 +506,8 @@ func _drain_staged_window_layout() -> Dictionary:
 				or drain_step.get("status") == "failed" or drain_step.get("status") == "idle"):
 			_window_layout_job.clear()
 		if not _window_layout_job.is_empty() \
-				or _planner.has_pending_collision_mesh_window_retirement():
+				or bool(_planner.collision_mesh_snapshot_transaction_state().get(
+					"hasPendingRetirement", false)):
 			return {"status":"pending", "reason":"artifact_layout_drain_pending",
 				"workOps":int(drain_step.get("workOps", 0)),
 				"maxWorkOps":int(drain_step.get("maxWorkOps", 0))}
@@ -696,17 +728,33 @@ func _advance_staged_window_layout() -> Dictionary:
 			and source_identity == job.get("sourceIdentity", {}) \
 			and int(source.get("terrainDeltaRevision", -1)) == int(job.get("sourceRevision", -2)) \
 			and int(_identity.get("cancellationEpoch", -1)) == int(job.get("cancellationEpoch", -2))
+		var token := int(job.get("token", 0))
+		var owner: Dictionary = _planner.collision_mesh_snapshot_transaction_state()
+		var owner_matches := String(owner.get("kind", "")) == "layout" \
+			and int(owner.get("token", 0)) == token
 		if not current and not bool(job.get("cancelling", false)):
-			var cancelled: Dictionary = _planner.cancel_collision_mesh_window_layout(
-				int(job.get("token", 0)))
+			if not owner_matches:
+				# The shared builder is idle or belongs to somebody else. This
+				# broker token can no longer be cancelled/drained safely.
+				_window_layout_job.clear()
+				return {"status":"pending", "reason":"mesh_layout_orphan_released",
+					"transaction":owner}
+			if String(owner.get("status", "")) == "active":
+				var cancelled: Dictionary = _planner.cancel_collision_mesh_window_layout(token)
+				job["cancelReason"] = String(cancelled.get("reason", "source_or_demand_stale"))
 			job.cancelling = true
 			_window_layout_job = job
-			job["cancelReason"] = String(cancelled.get("reason", "source_or_demand_stale"))
-			_window_layout_job = job
 		if bool(job.get("cancelling", false)):
-			# Cancellation may have reached a transferred result already; the
-			# planner advance still drains its retained scratch before retry.
-			var drained: Dictionary = _planner.advance_collision_mesh_window_layout()
+			owner = _planner.collision_mesh_snapshot_transaction_state()
+			owner_matches = String(owner.get("kind", "")) == "layout" \
+				and int(owner.get("token", 0)) == token
+			if not owner_matches:
+				_window_layout_job.clear()
+				return {"status":"pending", "reason":"mesh_layout_orphan_released",
+					"transaction":owner}
+			# Cancellation may reach a transferred result; only this exact token
+			# may advance and drain that transaction's retained scratch.
+			var drained: Dictionary = _planner.advance_collision_mesh_window_layout(token)
 			if not _valid_layout_step_budget(drained):
 				return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
 					"step":drained}
@@ -716,9 +764,18 @@ func _advance_staged_window_layout() -> Dictionary:
 			return {"status":"pending", "reason":"mesh_layout_stale_drain",
 				"workOps":int(drained.get("workOps", 0)),
 				"maxWorkOps":int(drained.get("maxWorkOps", 0))}
+		owner = _planner.collision_mesh_snapshot_transaction_state()
+		owner_matches = String(owner.get("kind", "")) == "layout" \
+			and int(owner.get("token", 0)) == token
+		if not owner_matches:
+			# A result can only be consumed from the matching transaction. If
+			# its token disappeared, the broker missed ownership and must retry.
+			_window_layout_job.clear()
+			return {"status":"pending", "reason":"mesh_layout_orphan_released",
+				"transaction":owner}
 		if job.has("completed"):
-			if _planner.has_pending_collision_mesh_window_retirement():
-				var retirement_step: Dictionary = _planner.advance_collision_mesh_window_layout()
+			if bool(owner.get("hasPendingRetirement", false)):
+				var retirement_step: Dictionary = _planner.advance_collision_mesh_window_layout(token)
 				if not _valid_layout_step_budget(retirement_step):
 					return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
 						"step":retirement_step}
@@ -731,7 +788,24 @@ func _advance_staged_window_layout() -> Dictionary:
 			var completed_job: Dictionary = job.duplicate(true)
 			_window_layout_job.clear()
 			return _consume_staged_layout_result(completed_step, completed_job)
-		var advanced: Dictionary = _planner.advance_collision_mesh_window_layout()
+		if String(owner.get("status", "")) != "active":
+			# The token is still recognizable but its result was transferred by a
+			# different caller. Drain only its own scratch; never adopt that result.
+			if String(owner.get("status", "")) == "transferred" \
+					and bool(owner.get("hasPendingRetirement", false)):
+				var orphan_drain: Dictionary = _planner.advance_collision_mesh_window_layout(token)
+				if not _valid_layout_step_budget(orphan_drain):
+					return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
+						"step":orphan_drain}
+				if bool(_planner.collision_mesh_snapshot_transaction_state().get(
+						"hasPendingRetirement", false)):
+					return {"status":"pending", "reason":"mesh_layout_orphan_scratch_drain",
+						"workOps":int(orphan_drain.get("workOps", 0)),
+						"maxWorkOps":int(orphan_drain.get("maxWorkOps", 0))}
+			_window_layout_job.clear()
+			return {"status":"pending", "reason":"mesh_layout_orphan_released",
+				"transaction":_planner.collision_mesh_snapshot_transaction_state()}
+		var advanced: Dictionary = _planner.advance_collision_mesh_window_layout(token)
 		if not _valid_layout_step_budget(advanced):
 			return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
 				"step":advanced}
@@ -751,9 +825,20 @@ func _advance_staged_window_layout() -> Dictionary:
 			"token":int(job.token)}
 	var started: Dictionary = _planner.begin_collision_mesh_window_layout()
 	if started.get("status") != "pending": return started
+	if String(started.get("reason", "")) != "mesh_layout_started" \
+			or String(started.get("transactionKind", "")) != "layout" \
+			or String(started.get("transactionStatus", "")) != "active":
+		return {"status":"pending", "reason":"mesh_layout_transaction_busy",
+			"transaction":started.get("transaction", {})}
 	var token := int(started.get("token", 0))
 	if token <= 0:
 		return {"status":"failed", "reason":"mesh_layout_token_missing"}
+	var started_owner: Dictionary = _planner.collision_mesh_snapshot_transaction_state()
+	if String(started_owner.get("kind", "")) != "layout" \
+			or int(started_owner.get("token", 0)) != token \
+			or String(started_owner.get("status", "")) != "active":
+		return {"status":"pending", "reason":"mesh_layout_begin_not_owned",
+			"transaction":started_owner}
 	_window_layout_job = {"token":token,
 		"demandRevision":int(demand.revision),
 		"closureToken":String(demand.closureToken),
@@ -761,7 +846,7 @@ func _advance_staged_window_layout() -> Dictionary:
 		"sourceRevision":int(source.get("terrainDeltaRevision", -1)),
 		"cancellationEpoch":int(_identity.get("cancellationEpoch", -1)),
 		"ownerIdentity":_identity.duplicate(true), "cancelling":false}
-	var first_step: Dictionary = _planner.advance_collision_mesh_window_layout()
+	var first_step: Dictionary = _planner.advance_collision_mesh_window_layout(token)
 	if not _valid_layout_step_budget(first_step):
 		return {"status":"failed", "reason":"mesh_layout_work_bound_violated",
 			"step":first_step}
