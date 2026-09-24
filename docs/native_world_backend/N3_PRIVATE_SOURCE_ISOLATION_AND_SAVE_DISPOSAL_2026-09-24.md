@@ -221,3 +221,19 @@ local-light publication.
 These are focused headless service and MainCore contracts. They do not prove
 whole-game frame cadence, arbitrary corrupt JSON scalar release cost, an
 ordinary headed failure/retry sequence, or any native gameplay authority.
+
+### Nested malformed-cell disposal follow-up
+
+The valid-start failure drain previously removed a section with a non-Array
+`cells` value as one work unit. A nested Dictionary there could be large.
+Structural failures during ordinary retirement now enter the same bounded
+JSON-container cursor used for invalid starts. A focused fixture with 512
+nested malformed entries retained 505 after its first advance and completed
+in 77 advances; the ordinary 65,536-record and empty-section checks still
+passed. Report:
+`artifacts/native-world-backend/n3-decoded-save-retirement-1790234061802-5450e473/report.json`;
+owned receipt `artifacts/node-tools/process-runs/godot-EsSNT5/watchdog.json`.
+This run proves bounded container work units and functional drain for that
+synthetic nested shape. It does not bound arbitrary scalar destruction or
+whole-game frame cadence. Its valid-save largest advance was 16,084 µs in
+this one process, so it makes no frame-budget acceptance claim.

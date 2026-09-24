@@ -53,6 +53,7 @@ func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 			_max_advance_usec = maxi(_max_advance_usec, Time.get_ticks_usec() - started)
 			_state = "failed"
 			_failure = "terrain_section_invalid"
+			_invalid_start = true
 			return {"status":"failed", "reason":_failure, "ownerMustBeRetained":true}
 		var cells_value = (section_value as Dictionary).get("cells", [])
 		if not cells_value is Array:
@@ -60,6 +61,7 @@ func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 			_max_advance_usec = maxi(_max_advance_usec, Time.get_ticks_usec() - started)
 			_state = "failed"
 			_failure = "terrain_cells_invalid"
+			_invalid_start = true
 			return {"status":"failed", "reason":_failure, "ownerMustBeRetained":true}
 		var cells: Array = cells_value
 		if cells.is_empty():

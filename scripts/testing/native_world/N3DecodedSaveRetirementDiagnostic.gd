@@ -100,7 +100,10 @@ func run() -> void:
 	var malformed_sections: Array = []
 	for index in range(128):
 		malformed_sections.append({"sectionKey":[index, 0, 0], "cells":[]})
-	malformed_sections.append({"sectionKey":[128, 0, 0], "cells":"invalid"})
+	var malformed_nested_cells: Dictionary = {}
+	for index in range(512):
+		malformed_nested_cells[str(index)] = {"payload":[index]}
+	malformed_sections.append({"sectionKey":[128, 0, 0], "cells":malformed_nested_cells})
 	var malformed_save := {"version":2, "seed":"n3-decoded-save-retirement",
 		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
 			"revision":1, "sections":malformed_sections}, "terrain":[]}
@@ -110,9 +113,10 @@ func run() -> void:
 	var malformed_retained: Dictionary = malformed_retirement.snapshot()
 	var malformed_first_drain: Dictionary = malformed_retirement.advance_failed_drain()
 	var malformed_after_first: Dictionary = malformed_retirement.snapshot()
+	var malformed_nested_after_first := malformed_nested_cells.size()
 	var malformed_drain_steps := 1
 	var malformed_last: Dictionary = malformed_first_drain
-	while malformed_last.get("status") == "pending" and malformed_drain_steps < 5:
+	while malformed_last.get("status") == "pending" and malformed_drain_steps < 1000:
 		malformed_last = malformed_retirement.advance_failed_drain()
 		malformed_drain_steps += 1
 	var malformed_bounded: bool = malformed_started.get("status") == "pending" \
@@ -120,10 +124,13 @@ func run() -> void:
 		and malformed_failed.get("ownerMustBeRetained") == true \
 		and malformed_retained.get("ownerRetained") == true \
 		and malformed_retained.get("state") == "failed" \
+		and malformed_retained.get("invalidStart") == true \
 		and malformed_first_drain.get("status") == "pending" \
-		and int(malformed_after_first.get("sectionsRemaining", -1)) == 65 \
+		and int(malformed_after_first.get("failureDrainDepth", 0)) > 0 \
+		and malformed_nested_after_first > 0 \
 		and malformed_last.get("drained") == true \
-		and malformed_drain_steps == 3 \
+		and malformed_drain_steps > 3 \
+		and malformed_nested_cells.is_empty() \
 		and malformed_retirement.snapshot().get("ownerRetained") == false
 	var invalid_volume: Array = []
 	var invalid_sections: Dictionary = {}
@@ -159,6 +166,7 @@ func run() -> void:
 		"malformedOwnerDrain":{"passed":malformed_bounded,
 			"failed":malformed_failed, "retained":malformed_retained,
 			"remainingAfterFirst":malformed_after_first.get("sectionsRemaining", -1),
+			"nestedRemainingAfterFirst":malformed_nested_after_first,
 			"steps":malformed_drain_steps, "final":malformed_last},
 		"invalidStart":{"passed":invalid_start_passed, "cases":invalid_start},
 		"evidenceLevel":"synthetic service diagnostic",
