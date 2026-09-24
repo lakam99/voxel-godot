@@ -171,6 +171,16 @@ public:
     static NativeTreeArtifact build(
         const NativeTreeDefinition &definition,
         NativeTreeRenderTier render_tier);
+private:
+    friend struct NativeTreeArtifactBuilderTestAccess;
+    static void validate_complete_for_test(
+        const NativeTreeDefinitionInput &definition,
+        NativeTreeTrunkCylinder trunk_cylinder,
+        NativeTreeRenderTier render_tier,
+        const std::vector<NativeTreeArtifactBranch> &branches,
+        const std::vector<NativeTreeArtifactFoliage> &foliage,
+        NativeTreeArtifactImpostor impostor,
+        const NativeTreeArtifactFootprint &footprint);
 };
 
 } // namespace voxel::world_backend

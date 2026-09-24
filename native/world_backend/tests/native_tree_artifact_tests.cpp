@@ -7,10 +7,27 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 using namespace voxel::world_backend;
+
+namespace voxel::world_backend {
+struct NativeTreeArtifactBuilderTestAccess final {
+    static void validate(
+        const NativeTreeDefinitionInput &definition,
+        const NativeTreeTrunkCylinder trunk_cylinder,
+        const NativeTreeRenderTier render_tier,
+        const std::vector<NativeTreeArtifactBranch> &branches,
+        const std::vector<NativeTreeArtifactFoliage> &foliage,
+        const NativeTreeArtifactImpostor impostor,
+        const NativeTreeArtifactFootprint &footprint) {
+        NativeTreeArtifactBuilder::validate_complete_for_test(
+            definition, trunk_cylinder, render_tier, branches, foliage, impostor, footprint);
+    }
+};
+}
 
 namespace {
 
@@ -318,4 +335,139 @@ VWB_TEST(native_tree_artifact_rejects_unknown_tiers_grammars_and_inconsistent_co
     savanna_canopy.canopy_radius = static_cast<double>(std::numeric_limits<float>::max()) * 2.0;
     VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
         NativeTreeDefinition::create(std::move(savanna_canopy)), NativeTreeRenderTier::impostor));
+}
+
+VWB_TEST(native_tree_artifact_complete_validation_rejects_invalid_compiler_outputs_before_canonicalization) {
+    const NativeTreeDefinition source = tree(
+        NativeTreeArchitecture::savanna, "ecological_savanna_tree", "umbrella_thorn");
+    const NativeTreeArtifact artifact = NativeTreeArtifactBuilder::build(source, NativeTreeRenderTier::near);
+    const auto validate = [&](const NativeTreeDefinitionInput &definition,
+            const NativeTreeTrunkCylinder cylinder,
+            const NativeTreeRenderTier tier,
+            const std::vector<NativeTreeArtifactBranch> &branches,
+            const std::vector<NativeTreeArtifactFoliage> &foliage,
+            const NativeTreeArtifactImpostor impostor,
+            const NativeTreeArtifactFootprint &footprint) {
+        NativeTreeArtifactBuilderTestAccess::validate(
+            definition, cylinder, tier, branches, foliage, impostor, footprint);
+    };
+    validate(artifact.definition(), artifact.trunk_cylinder(), artifact.render_tier(),
+        artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint());
+
+    auto definition = artifact.definition();
+    definition.visual_height = 0.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(definition, artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    definition = artifact.definition();definition.rotation_y = std::numeric_limits<double>::infinity();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(definition, artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    definition = artifact.definition();definition.coordinate_frame = static_cast<NativeTreeCoordinateFrame>(255);
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(definition, artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    auto cylinder = artifact.trunk_cylinder();
+    cylinder.center_y = 0.0F;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), cylinder,
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    auto impostor = artifact.impostor();
+    impostor.canopy_radius = std::numeric_limits<float>::infinity();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), impostor, artifact.footprint()));
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), {}, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        NativeTreeRenderTier::impostor, artifact.branches(), artifact.foliage(),
+        artifact.impostor(), artifact.footprint()));
+
+    auto branches = artifact.branches();
+    branches.front().start.x = std::numeric_limits<float>::infinity();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().radius_start = 0.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().radius_end = std::numeric_limits<double>::infinity();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().parent_node = -1;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().order = 5;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().child_node = -1;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().parent_node = 999999;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches[2].child_node = branches.front().child_node;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+    branches = artifact.branches();branches.front().wind_weight = 1.01;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), branches, artifact.foliage(), artifact.impostor(), artifact.footprint()));
+
+    auto foliage = artifact.foliage();foliage.front().rotation.y = std::numeric_limits<float>::quiet_NaN();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+    foliage = artifact.foliage();foliage.front().scale.z = 0.0F;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+    foliage = artifact.foliage();foliage.front().variation = -0.01;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+    foliage = artifact.foliage();foliage.front().source_segment = -1;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+    foliage = artifact.foliage();foliage.front().wind_weight = std::numeric_limits<double>::infinity();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+    foliage = artifact.foliage();foliage.front().cluster_variant = 4;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+    foliage = artifact.foliage();foliage.front().source_order = 5;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+
+    auto footprint = artifact.footprint();footprint.render_complete = false;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.coordinate_owner_id += ":wrong";
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.collision_complete = false;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.render_bounds_provisional = true;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.collision_bounds.minimum.z = std::numeric_limits<double>::infinity();
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.render_bounds.minimum.x = footprint.render_bounds.maximum.x + 1.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.collision_bounds.maximum.y += 1.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+    footprint = artifact.footprint();footprint.render_bounds.maximum.y += 1.0;
+    VWB_EXPECT_THROW(NativeTreeArtifactRejected, validate(artifact.definition(), artifact.trunk_cylinder(),
+        artifact.render_tier(), artifact.branches(), artifact.foliage(), artifact.impostor(), footprint));
+}
+
+VWB_TEST(native_tree_artifact_rejects_float_max_geometry_for_conifer_and_savanna) {
+    for (const auto &[architecture, family, grammar] : {
+            std::tuple{NativeTreeArchitecture::conifer, "ecological_conifer_tree", "norway_spruce"},
+            std::tuple{NativeTreeArchitecture::savanna, "ecological_savanna_tree", "umbrella_thorn"},
+        }) {
+        const NativeTreeDefinition source = tree(architecture, family, grammar);
+        NativeTreeDefinitionInput maximum = source.input();
+        maximum.canopy_radius = std::numeric_limits<float>::max();
+        VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
+            NativeTreeDefinition::create(maximum), NativeTreeRenderTier::near));
+        maximum.canopy_radius = std::nextafter(
+            static_cast<double>(std::numeric_limits<float>::max()), 0.0);
+        VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
+            NativeTreeDefinition::create(std::move(maximum)), NativeTreeRenderTier::near));
+    }
 }

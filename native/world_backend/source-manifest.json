@@ -182,6 +182,7 @@
     "tests/native_conifer_raw_runtime_reducer_tests.cpp",
     "tests/native_conifer_worker_recipe_tests.cpp",
     "tests/native_savanna_recipe_tests.cpp",
+    "tests/native_savanna_oracle_observation.cpp",
     "tests/native_savanna_worker_recipe_tests.cpp",
     "tests/native_natural_terrain_source_tests.cpp",
     "tests/native_ore_cluster_stream_tests.cpp",

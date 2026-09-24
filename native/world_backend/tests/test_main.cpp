@@ -27,6 +27,10 @@ RegisterTest::RegisterTest(const char *name, void (*body)()) {
 
 int main() {
     if (const std::optional<int> emitted =
+            emit_native_savanna_observations_if_requested(); emitted.has_value()) {
+        return *emitted;
+    }
+    if (const std::optional<int> emitted =
             emit_native_surface_deformation_observations_if_requested(); emitted.has_value()) {
         return *emitted;
     }

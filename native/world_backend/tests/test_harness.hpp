@@ -43,6 +43,7 @@ void expect_throw(Callable &&callable, const char *expression, const char *file,
 } // namespace voxel::world_backend::tests
 
 std::optional<int> emit_native_surface_deformation_observations_if_requested();
+std::optional<int> emit_native_savanna_observations_if_requested();
 
 #define VWB_TEST_CONCAT_INNER(a, b) a##b
 #define VWB_TEST_CONCAT(a, b) VWB_TEST_CONCAT_INNER(a, b)
