@@ -58,3 +58,43 @@ VWB_TEST(native_ore_cluster_stream_checks_each_child_tombstone_before_recipe_dra
         NativeFeatureDeltaSnapshot::create({{"other"}}, {}), unrelated_rng);
     VWB_EXPECT_EQ(intact.final_rng_state(), unrelated.final_rng_state());
 }
+
+VWB_TEST(native_ore_cluster_single_child_stream_reuses_exact_recipe_without_surface_cardinality) {
+    const auto intact_removed = NativeFeatureDeltaSnapshot::create({}, {});
+    GodotPcg32 one_rng(177U);
+    const auto one = native_ore_cluster_child_stream(
+        "underground", NativeOreKind::iron, 0U, 1U, intact_removed, one_rng);
+    GodotPcg32 surface_rng(177U);
+    const auto surface = NativeOreClusterStream::create(
+        "underground", NativeOreKind::iron, intact_removed, surface_rng);
+    VWB_EXPECT_EQ(surface.children()[0].durable_id, one.durable_id);
+    VWB_EXPECT_EQ(surface.children()[0].float_draws, one.float_draws);
+    VWB_EXPECT_EQ(surface.children()[0].drop_count, one.drop_count);
+    VWB_EXPECT_EQ(surface.children()[0].state_after, one.state_after);
+    VWB_EXPECT_EQ(one.state_after, one_rng.state());
+
+    GodotPcg32 tombstone_rng(177U);
+    const auto tombstoned = native_ore_cluster_child_stream("underground",
+        NativeOreKind::copper, 0U, 1U,
+        NativeFeatureDeltaSnapshot::create({{"underground"}}, {}), tombstone_rng);
+    VWB_EXPECT(tombstoned.skipped_by_tombstone);
+    VWB_EXPECT_EQ(tombstoned.state_before, tombstoned.state_after);
+    VWB_EXPECT(tombstoned.float_draws.empty());
+
+    GodotPcg32 invalid_rng(1U);
+    VWB_EXPECT_THROW(NativeOreClusterStreamRejected,
+        native_ore_cluster_child_stream("", NativeOreKind::iron, 0U, 1U,
+            intact_removed, invalid_rng));
+    VWB_EXPECT_THROW(NativeOreClusterStreamRejected,
+        native_ore_cluster_child_stream("id", static_cast<NativeOreKind>(99), 0U, 1U,
+            intact_removed, invalid_rng));
+    VWB_EXPECT_THROW(NativeOreClusterStreamRejected,
+        native_ore_cluster_child_stream("id", NativeOreKind::iron, 0U, 0U,
+            intact_removed, invalid_rng));
+    VWB_EXPECT_THROW(NativeOreClusterStreamRejected,
+        native_ore_cluster_child_stream("id", NativeOreKind::iron, 0U, 5U,
+            intact_removed, invalid_rng));
+    VWB_EXPECT_THROW(NativeOreClusterStreamRejected,
+        native_ore_cluster_child_stream("id", NativeOreKind::iron, 1U, 1U,
+            intact_removed, invalid_rng));
+}

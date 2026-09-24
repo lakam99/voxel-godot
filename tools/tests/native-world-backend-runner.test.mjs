@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   coverageTotals,
+  coverageExecutionTimeoutMilliseconds,
   parseLcovLineCoverage,
   assertNormalizedUpstreamTextIdentity,
   expectedToolchainLockValue,
@@ -17,6 +18,16 @@ import {
 } from '../lib/native-world-backend-runner.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+test('coverage execution timeout preserves the default and validates bounded per-run overrides', () => {
+  assert.equal(coverageExecutionTimeoutMilliseconds(), 120000);
+  assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: 300000 }), 300000);
+  assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: '300000' }), 300000);
+  for (const value of ['', '300000.5', 999, 900001, 1500, null]) {
+    assert.throws(() => coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: value }),
+      /coverageExecuteTimeoutMs/);
+  }
+});
 
 test('pinned upstream text identity normalizes CRLF only and rejects changed content', () => {
   const lf = Buffer.from('first line\nsecond line\n', 'utf8');
