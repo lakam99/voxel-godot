@@ -154,6 +154,25 @@ Completed manifest and source-bound evidence:
   `22c435a24303f16e0a99b0500f031e091be781999c89e11eb052915fa24ef5b4`);
   functional/overall exit `0`, natural exit, `cleanupPassed=true`,
   `authoritativeZeroProven=true`, and stderr empty;
+- the first exact-commit rerun at
+  `8d60de5694a28d0cb5ce0286f13e1ae2eb75caf4` also passed:
+  `report-c8935c9d-c5f6-4d93-8545-ee7e3ce3ffe5.json` (SHA-256
+  `4b0ef15b0e07cc2921c6f91aceb949bb5b40ce81a7cfba9be03a28a403bc4e26`),
+  with the same probe SHA-256 and 28 launch-relevant inputs unchanged. Its
+  exact receipt is `artifacts/node-tools/process-runs/godot-tFJUYl/watchdog.json`
+  (run ID `f3cf1cfc4962416ca0136d32cf9df4c0`, root PID `48700`, launch
+  `2026-09-24T09:42:48.982Z`, completion `2026-09-24T09:46:07.985Z`, zero
+  proof `job_membership_zero`). Job membership observed child `28896` and
+  then zero before that receipt was published;
+- a separate invocation began 48 seconds later at
+  `2026-09-24T09:46:55.852Z`. Its distinct receipt is
+  `artifacts/node-tools/process-runs/godot-6ZqwII/watchdog.json` (run ID
+  `db4bd41ee8bc4d40961681a4c30822c6`, root PID `36340`) and its distinct
+  `report-dde03899-0508-4122-9ad9-cecbcce86061.json` is failed after an
+  external stop, with no probe. This later run is not parity evidence and does
+  not contradict the earlier Job Object zero proof. That proof is explicitly
+  scoped to one Windows Job Object; command line and worktree alone are not a
+  process identity;
 - four cases compared `36`, `36`, `3` and `36` ordered attempts for chunks
   `(0,0)`, `(0,0)` with the root tombstoned, `(-1,-1)` and `(5,3)`.
   Candidate cells, stable IDs, source material, all PCG states, final state,
@@ -170,6 +189,15 @@ Completed manifest and source-bound evidence:
   cleanup/zero proven, stderr empty. Earlier missing-binary, missing-cache,
   interrupted-import and 90-second noncompletion receipts are retained as
   setup evidence and are not cited as parity evidence.
+
+The follow-up runner hardening freezes the complete direct oracle/capture graph,
+including `MainInteractionFlow.gd`, `WorldGenerationSystem.gd`, the relevant
+Main owners, terrain/biome generation, owner snapshots, structure admission,
+catalog resources, generated scene inputs, and owned-process implementation.
+It also copies the exact watchdog run ID, root PID, launch/completion timestamps,
+zero-proof source, authority and receipt path into every report, rejecting a
+missing or cross-receipt identity. This static hardening requires a newly
+coordinated differential before it can replace the exact-commit evidence above.
 
 Independent review is diagnostic-only **GO**, with no P0/P1 finding, and
 production/cutover **NO-GO**. Its four P2 limits remain explicit:

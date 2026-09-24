@@ -4,6 +4,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { findGodot, projectRoot } from './lib/voxel-tool-runtime.mjs';
 import { runGodotProcess } from './lib/godot-process.mjs';
+import { N4_UNDERGROUND_PROP_SOURCE_PATHS,
+  n4UndergroundPropWatchdogIdentity } from './lib/n4-underground-prop-source-evidence.mjs';
 
 const output = join(projectRoot, 'artifacts', 'native-world-backend',
   'n4-underground-prop-source-differential');
@@ -12,36 +14,7 @@ const token = randomUUID();
 const probePath = join(output, `probe-${token}.json`);
 const reportPath = join(output, `report-${token}.json`);
 const executable = await findGodot();
-const sourcePaths = [
-  'tools/run-n4-underground-prop-source-differential.mjs',
-  'scripts/testing/native_world/N4UndergroundPropSourceProbe.gd',
-  'scripts/MainPlaytestTools.gd',
-  'scripts/TerrainVolumeService.gd',
-  'scripts/environment/RockRecipeBuilder.gd',
-  'scripts/visual/VisualAssetRegistry.gd',
-  'assets/visual/generated/visual-manifest.json',
-  'assets/visual/generated/environment/rock_01.glb',
-  'assets/visual/generated/environment/rock_01.glb.import',
-  'assets/visual/generated/environment/rock_02.glb',
-  'assets/visual/generated/environment/rock_02.glb.import',
-  'assets/visual/generated/environment/rock_03.glb',
-  'assets/visual/generated/environment/rock_03.glb.import',
-  'assets/visual/generated/environment/rock_04.glb',
-  'assets/visual/generated/environment/rock_04.glb.import',
-  'assets/visual/generated/environment/rock_05.glb',
-  'assets/visual/generated/environment/rock_05.glb.import',
-  'assets/visual/generated/environment/rock_06.glb',
-  'assets/visual/generated/environment/rock_06.glb.import',
-  'scripts/world/ActiveSurfacePropOwnerBundle.gd',
-  'native/world_backend/core/native_underground_prop_stream.cpp',
-  'native/world_backend/core/native_underground_prop_stream.hpp',
-  'native/world_backend/core/native_ore_cluster_stream.cpp',
-  'native/world_backend/core/native_ore_cluster_stream.hpp',
-  'native/terrain_meshing/src/native_world_backend_adapter.cpp',
-  'native/terrain_meshing/src/native_world_backend_adapter.h',
-  'native/world_backend/source-manifest.json',
-  'addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll',
-];
+const sourcePaths = N4_UNDERGROUND_PROP_SOURCE_PATHS;
 const hashSources = async () => Object.fromEntries(await Promise.all(sourcePaths.map(async path =>
   [path, createHash('sha256').update(await readFile(join(projectRoot, path))).digest('hex')])));
 const gitHead = () => execFileSync('git', ['rev-parse', 'HEAD'], {
@@ -58,6 +31,10 @@ const processResult = await runGodotProcess(executable, command, {
   env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1',
     N4_UNDERGROUND_PROP_PROBE_REPORT: probePath },
 });
+let ownedProcessIdentity = null;
+let ownedProcessIdentityError = null;
+try { ownedProcessIdentity = n4UndergroundPropWatchdogIdentity(processResult); }
+catch (error) { ownedProcessIdentityError = error.message; }
 const sourceAfter = await hashSources();
 const gitHeadAfter = gitHead();
 const changedPaths = sourcePaths.filter(path => sourceBefore[path] !== sourceAfter[path]);
@@ -65,6 +42,8 @@ if (gitHeadBefore !== gitHeadAfter) changedPaths.unshift('git:HEAD');
 const sourceFreeze = { gitHead: gitHeadBefore, gitHeadAfter,
   files: sourceBefore, unchanged: changedPaths.length === 0, changedPaths };
 const failures = [];
+if (ownedProcessIdentityError)
+  failures.push(`Owned-process receipt identity invalid: ${ownedProcessIdentityError}`);
 if (!sourceFreeze.unchanged)
   failures.push(`Launch-relevant source drift: ${changedPaths.join(', ')}`);
 let probe;
@@ -242,7 +221,8 @@ const report = {
   productionCutover: false,
   diagnosticOnly: true,
   sourceFreeze,
-  failures: failures.slice(0, 40), probePath, processSummaryPath: processResult.summaryPath,
+  failures: failures.slice(0, 40), probePath, ownedProcess: ownedProcessIdentity,
+  processSummaryPath: ownedProcessIdentity?.summaryPath ?? processResult.summaryPath,
   executable, command,
 };
 await writeFile(reportPath, JSON.stringify(report, null, 2));
