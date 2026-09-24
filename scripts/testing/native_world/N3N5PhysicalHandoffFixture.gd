@@ -17,6 +17,8 @@ class SourceProxy:
 		return active.collision_source_snapshot()
 	func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary:
 		return active.collision_artifact_row(block, identity)
+	func collision_artifact_row_snapshot(block: Vector3i, identity: Dictionary) -> Dictionary:
+		return active.collision_artifact_row_snapshot(block, identity)
 
 var _started_usec := 0
 
@@ -267,8 +269,8 @@ func _run() -> void:
 	var passed: bool = backend_init.get("status") == "ready" \
 		and page_setup.get("status") == "ready" and planner_setup.get("status") == "ready" \
 		and planned.get("status") == "ready" and setup.get("status") == "ready" \
-		and early.get("status") == "pending" \
-		and early.get("reason") == "triangle_artifacts_incomplete" \
+		and early.get("status") == "failed" \
+		and early.get("reason") == "resident_request_capacity_invalid" \
 		and partial_snapshot.get("status") == "pending" \
 		and partial_snapshot.get("requiredResidentBlocks") == required.blocks \
 		and partial_snapshot.get("residentBlocks", []).size() == 1 \
