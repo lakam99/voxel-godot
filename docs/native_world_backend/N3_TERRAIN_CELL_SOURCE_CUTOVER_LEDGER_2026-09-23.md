@@ -693,6 +693,18 @@ budget assertion also remain untested. The N3N5 physical runner stopped at its
 These findings keep N5 physical readiness, N3N5 integration, and production
 cutover open.
 
+An independent shutdown audit also found the runtime owner's stop path can
+drop the planner while a public bounded demand replacement still owns active
+or queued work. `request_stop()` prevents further replacement advances, while
+`drain_step()` drains only artifact requests and publisher state before
+constructing a receipt and nulling `_planner`; it does not cancel/advance the
+planner's replacement job or drain a retired prior plan. N5 shutdown must
+include replacement cancellation/drain, queued-successor retirement, and
+request-lease release in its terminal receipt. The focused follow-up belongs
+in `N3TerrainRuntimeOwnerContract` and should cover active, queued, and
+post-publication retired-plan stop states. The current API gap keeps N5
+shutdown and cutover open.
+
 The generated-structure terrain patch authority was separately audited in
 [`N3_GENERATED_TERRAIN_PATCH_CUTOVER_AUDIT_2026-09-24.md`](N3_GENERATED_TERRAIN_PATCH_CUTOVER_AUDIT_2026-09-24.md).
 It documents a source-authority defect: generated foundations/caps/clearance
