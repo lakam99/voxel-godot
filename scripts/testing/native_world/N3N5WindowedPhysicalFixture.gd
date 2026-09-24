@@ -57,6 +57,33 @@ class CancellationDriftBroker extends RefCounted:
 			_expected_layout_token: String, _physical_owner_epoch: String) -> Dictionary:
 		return {"status":"pending", "reason":"synthetic_stale_retirement_lease"}
 
+class AckPendingBroker extends RefCounted:
+	var delegate: Object
+	var pending_ack := true
+	var first_ack := {}
+
+	func _init(value: Object) -> void:
+		delegate = value
+
+	func collision_window_layout() -> Dictionary:
+		return delegate.collision_window_layout()
+
+	func claim_collision_window_retirement(token: String, layout_token: String,
+			owner_epoch: String) -> Dictionary:
+		return delegate.claim_collision_window_retirement(token, layout_token, owner_epoch)
+
+	func validate_collision_window_retirement(token: String, lease_id: String,
+			owner_epoch: String) -> Dictionary:
+		return delegate.validate_collision_window_retirement(token, lease_id, owner_epoch)
+
+	func acknowledge_collision_window_retired(token: String,
+			receipt: Dictionary) -> Dictionary:
+		if pending_ack:
+			pending_ack = false
+			first_ack = {"status":"pending", "reason":"fixture_ack_deferred_once"}
+			return first_ack
+		return delegate.acknowledge_collision_window_retired(token, receipt)
+
 func _await_window_layout(broker, initial: Dictionary, label: String) -> Dictionary:
 	var result := initial
 	var steps := 0
@@ -236,6 +263,16 @@ func _run() -> void:
 	guard_shape.shape = guard_sphere
 	guard_actor.add_child(guard_shape)
 	root_3d.add_child(guard_actor)
+	var second_guard_actor := CharacterBody3D.new()
+	second_guard_actor.collision_mask = 2
+	second_guard_actor.position = bounds.position - Vector3(5, 0, 0)
+	var second_guard_shape := CollisionShape3D.new()
+	var second_guard_capsule := CapsuleShape3D.new()
+	second_guard_capsule.radius = 0.35
+	second_guard_capsule.height = 1.8
+	second_guard_shape.shape = second_guard_capsule
+	second_guard_actor.add_child(second_guard_shape)
+	root_3d.add_child(second_guard_actor)
 	var crossing_motion: Vector3 = bounds.get_center() - guard_actor.position
 	var first_identity: Dictionary = layout.identity.duplicate(true)
 	var first_window_token: String = window.windowToken
@@ -457,14 +494,15 @@ func _run() -> void:
 	var replacement_barrier: RefCounted = replacement_hold.get("barrier")
 	var replacement_barrier_bounds: AABB = bounds
 	var initial_replacement_barrier_bounds: AABB = bounds
-	var retired_old_barrier_identity: Dictionary = coordinator._retired_barriers.back().get(
-		"identity", {}) if not coordinator._retired_barriers.is_empty() else {}
+	var retired_old_barrier_record: Dictionary = coordinator._retired_barriers.back() \
+		if not coordinator._retired_barriers.is_empty() else {}
+	var retired_old_barrier_identity: Dictionary = retired_old_barrier_record.get(
+		"identity", {})
 	var incumbent_barrier_identity_differs_from_owner_identity: bool = \
 		retired_old_barrier_identity != window.get("identity", {})
 	var same_id_retired_barrier_token_matches_incumbent: bool = \
-		coordinator._retired_barriers.back().get("windowId") == window.id \
-		and coordinator._retired_barriers.back().get("windowToken") == window.windowToken \
-		if not coordinator._retired_barriers.is_empty() else false
+		retired_old_barrier_record.get("windowId") == window.id \
+		and retired_old_barrier_record.get("windowToken") == window.windowToken
 	var replacement_census: Dictionary = replacement_hold.get("census", {})
 	while replacement_census.get("status") == "pending":
 		await process_frame
@@ -553,13 +591,47 @@ func _run() -> void:
 			.get("retiredWindowTokens", [])).has(cancelled_candidate_token)
 	var candidate_record_retained_before_ack: bool = broker._window_records.has(
 		cancelled_candidate_token)
-	var candidate_drain_before_ack: Dictionary = cancellation_drift_negative.get(
-		"drain", {}).get("drain", {})
+	var ack_pending_broker := AckPendingBroker.new(broker)
+	var original_ack_broker: Object = coordinator._broker
+	coordinator._broker = ack_pending_broker
+	var cancellation_ack_deferred: Dictionary = {}
+	if cancelled_stage.get("status") == "ready":
+		cancellation_ack_deferred = await coordinator.cancel_staged_replacement(
+			replacement_window.id, String(cancelled_stage.get("physicalOwnerEpoch", "")))
+	coordinator._broker = original_ack_broker
+	var lease_after_deferred_ack := String(coordinator._staged_owners.get(
+		replacement_window.id, {}).get("retirementLeaseId", ""))
+	var candidate_record_retained_after_deferred_ack: bool = broker._window_records.has(
+		cancelled_candidate_token)
+	var ack_retry_edit_state: Dictionary = cancellation_edit_state.duplicate(true)
+	ack_retry_edit_state["materialId"] = 5
+	ack_retry_edit_state["blockId"] = "windowed-physical:ack-retry-layout-drift"
+	var ack_retry_commit: Dictionary = backend.commit_durable_cells({
+		"schema":"n3-native-durable-cell-transaction/v1",
+		"transactionId":"windowed-physical:candidate-cancellation-ack-retry",
+		"expectedRevision":3,
+		"operations":[{"kind":"set", "cell":Vector3i(0,base_y * 16,0),
+			"state":ack_retry_edit_state}]})
+	var ack_retry_layout: Dictionary = {}
+	for frame in range(300):
+		broker.advance()
+		ack_retry_layout = broker.collision_window_layout()
+		if ack_retry_layout.get("status") == "ready" \
+				and ack_retry_layout.get("identity", {}).get("sourceRevision") == 4 \
+				and ack_retry_layout.get("layoutToken") != cancellation_drift_layout.get("layoutToken"):
+			break
+		await process_frame
+	var candidate_retired_after_ack_layout_advance: bool = ack_retry_layout.get(
+		"retiredWindowTokens", ack_retry_layout.get("retirementTelemetry", {}) \
+			.get("retiredWindowTokens", [])).has(cancelled_candidate_token)
 	var cancelled_candidate: Dictionary = {}
-	var cancelled_candidate_layout: Dictionary = replacement_layout.duplicate(true)
 	if cancelled_stage.get("status") == "ready":
 		cancelled_candidate = await coordinator.cancel_staged_replacement(
 			replacement_window.id, String(cancelled_stage.get("physicalOwnerEpoch", "")))
+	cancellation_drift_layout = ack_retry_layout
+	var candidate_drain_before_ack: Dictionary = cancellation_ack_deferred.get(
+		"drain", {}).get("drain", {})
+	var cancelled_candidate_layout: Dictionary = cancellation_drift_layout.duplicate(true)
 	var candidate_record_removed_after_ack: bool = not broker._window_records.has(
 		cancelled_candidate_token)
 	var old_registry_after_cancel: bool = coordinator._owners.get(window.id) == owner
@@ -678,6 +750,7 @@ func _run() -> void:
 	var old_only_actor_position := Vector3(bounds.position.x - 0.25,
 		bounds.get_center().y, bounds.get_center().z)
 	guard_actor.position = old_only_actor_position
+	second_guard_actor.position = bounds.position - Vector3(5, 0, 0)
 	await physics_frame
 	var old_only_old_barrier_clearance: Dictionary = old_barrier.clearance(layout.identity)
 	var old_only_replacement_barrier_clearance: Dictionary = replacement_barrier.clearance(
@@ -685,6 +758,11 @@ func _run() -> void:
 	var initial_replacement_covers_old: bool = replacement_barrier.covers_bounds(
 		replacement_layout.identity, old_barrier_bounds)
 	var old_only_retirement: Dictionary = await coordinator.retire_displaced_window(window.id)
+	var second_actor_still_outside_old_bounds: bool = not old_barrier_bounds.has_point(
+		second_guard_actor.global_position)
+	var second_actor_registered: bool = coordinator.register_moving_actor(second_guard_actor)
+	var second_actor_motion_denied: bool = not coordinator.admit_motion(second_guard_actor,
+		old_only_actor_position - second_guard_actor.position)
 	var old_owner_live_during_old_only_hold: bool = owner.is_inside_tree() \
 		and owner._live.size() == window.get("blocks", []).size()
 	var old_solid_body_live_during_old_only_hold := false
@@ -695,6 +773,7 @@ func _run() -> void:
 			and old_body.is_inside_tree() and not old_body.is_queued_for_deletion() \
 			and old_body.get_parent() == owner
 	guard_actor.position = bounds.position - Vector3(5, 0, 0)
+	second_guard_actor.position = bounds.position - Vector3(6, 0, 0)
 	await physics_frame
 	var union_barrier_hold: Dictionary = coordinator.begin_window_barrier(
 		replacement_window, old_barrier_bounds, replacement_layout.identity)
@@ -723,6 +802,7 @@ func _run() -> void:
 		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
 	var barriers_after_release: int = coordinator.active_barrier_count()
 	guard_actor.queue_free()
+	second_guard_actor.queue_free()
 	await process_frame
 	owner = replacement_owner
 	facade = replacement_facade
@@ -994,6 +1074,18 @@ func _run() -> void:
 		and reactivated_aggregate.get("status") == "ready" \
 		and reactivated_release.get("status") == "ready" \
 		and retirement.get("status") == "ready" \
+		and incumbent_barrier_identity_differs_from_owner_identity \
+		and same_id_retired_barrier_token_matches_incumbent \
+		and second_actor_still_outside_old_bounds and second_actor_registered \
+		and second_actor_motion_denied \
+		and cancellation_ack_deferred.get("status") == "pending" \
+		and cancellation_ack_deferred.get("reason") \
+			== "physical_window_candidate_retirement_ack_pending" \
+		and not lease_after_deferred_ack.is_empty() \
+		and candidate_record_retained_after_deferred_ack \
+		and ack_retry_commit.get("status") == "ready" \
+		and candidate_retired_after_ack_layout_advance \
+		and cancelled_candidate.get("status") == "ready" \
 		and retired_facade.get("status") == "failed" \
 		and coordinator_drain.get("status") == "ready" \
 		and coordinator_drain.get("remainingChildren") == 0 \
@@ -1049,6 +1141,13 @@ func _run() -> void:
 					"candidateTokenRetired":candidate_token_retired_after_drift,
 					"brokerRecordPresentBeforeAck":candidate_record_retained_before_ack,
 					"physicalDrainReceiptBeforeAck":candidate_drain_before_ack,
+					"ackDeferred":cancellation_ack_deferred,
+					"leaseRetainedAfterAckDeferred":lease_after_deferred_ack,
+					"brokerRecordRetainedAfterAckDeferred": \
+						candidate_record_retained_after_deferred_ack,
+					"layoutAdvanceAfterAckDeferred":{"commit":ack_retry_commit,
+						"layout":ack_retry_layout,
+						"candidateStillRetired":candidate_retired_after_ack_layout_advance},
 					"cancellation":cancelled_candidate,
 					"brokerRecordRemovedAfterAck":candidate_record_removed_after_ack,
 					"incumbentStillLive":old_owner_live_after_cancel,
@@ -1073,7 +1172,10 @@ func _run() -> void:
 				"replacementBounds":initial_replacement_barrier_bounds,
 				"unionReplacementBounds":replacement_barrier_bounds,
 				"initialReplacementCoversOldBounds":initial_replacement_covers_old,
-			"actorPosition":old_only_actor_position,
+				"actorPosition":old_only_actor_position,
+				"secondActorOutsideOldBounds":second_actor_still_outside_old_bounds,
+				"secondActorRegistered":second_actor_registered,
+				"secondActorMotionDenied":second_actor_motion_denied,
 				"oldBarrierClearance":old_only_old_barrier_clearance,
 				"replacementBarrierClearance":old_only_replacement_barrier_clearance,
 				"incumbentBarrierIdentityDiffersFromOwnerIdentity": \
