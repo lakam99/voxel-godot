@@ -73,3 +73,37 @@ enable production native collision or change route, movement, door, or gameplay
 semantics. The real retained window contains two resident blocks, so this run
 proves complete bounded enumeration for that window but not a production-scale
 resident-set timing distribution.
+
+## Primary-worktree replay
+
+The candidate was independently reviewed on exact commit
+`fcfd4dd08a9f3b1092e46d8b12730810d504357d`: shadow GO, production NO-GO,
+with no P0/P1 findings. The reviewer confirmed the ticket/proof/source/owner/
+epoch/membership checks, bounded all-resident key scan, drift rejection,
+ticket-only adoption, forced body/shape revalidation, fail-closed negative
+cases, live contact and teardown. Review report:
+`C:\Users\arkam\.codex\worktrees\n5-proof-rebind\voxel-biome-world-godot\artifacts\reviewer\N5_PROOF_REBIND_INDEPENDENT_REVIEW_2026-09-24.md`.
+
+The exact candidate was cherry-picked to the primary tree as
+`1b7d635b8f03d8c485865a33e215b472e14c7121`. Both directly affected runners
+were replayed there with audio disabled and exited 0:
+
+- `node tools/run-n3-n5-windowed-physical.mjs`:
+  `artifacts/native-world-backend/n3-n5-windowed-physical-1790236788364-b5b37cb9/report.json`;
+  owned-process receipt `artifacts/node-tools/process-runs/godot-gQmI1Q/watchdog.json`.
+- `node tools/run-n3-n5-proof-rebind.mjs`:
+  `artifacts/native-world-backend/n3-n5-proof-rebind-1790236800469-0b1c9909/report.json`;
+  owned-process receipt `artifacts/node-tools/process-runs/godot-luYewq/watchdog.json`.
+
+The dedicated integrated report records local revision 0 retained under
+global revision 1, both resident keys validated, a ready aggregate, real
+post-rebind actor contact, and coordinator/broker drain. These remain
+fixture/shadow reports (`productionCutover: false`). The reviewer also notes
+that this two-block resident fixture does not close production-scale behavior,
+Main integration or original Gate 5; bounded multi-window closure and actual
+production binding remain open.
+
+The debug extension loaded by the primary replays has SHA256
+`47cf064f2c60736f71768f70aebb4b582b6ece7e6f0f8d1a1b3309edd4149cd4`.
+It was rebuilt from current native source before this GDScript-only N5
+integration. The release DLL has not been rebuilt or validated in this step.
