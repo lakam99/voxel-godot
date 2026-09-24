@@ -606,3 +606,27 @@ membership was proven in the worker worktree
 (`artifacts/node-tools/process-runs/godot-FMVVaT/watchdog.json`).
 That run is timed out/unverified, not a pass, and no N3N5 physical-integration
 or production-cutover claim is made from it.
+
+The demand-replacement follow-up (`34b1f8a`, integrated as `b9ec70a`) adds a
+single retryable successor slot and bounded begin/advance/cancel entry points
+to the runtime owner, preventing an already-issued demand token from being
+silently displaced. On the integrated primary build, the focused replacement
+contract passed at
+`artifacts/native-world-backend/n3-terrain-demand-replacement-1790220487394-6b09916b/report.json`
+(1,250 advances, 383,610 total work operations, maximum 256), and the native
+binding owner contract passed at
+`artifacts/native-world-backend/n3-terrain-runtime-owner-1790220509999-8597552c/report.json`.
+Both are focused service/planner evidence only (`productionCutover: false`).
+
+A reduced 18-second N3N5 diagnostic probe reached the changed-demand staged
+layout phase after backend initialization, initial layout, artifact rows, N5
+physical publication, and a distant durable edit had completed. For the
+shifted demand (revision 2, two required blocks), `replace_sources` returned
+ready but the staged layout was still pending after 300 frames with reason
+`mesh_layout_work_pending` and `workOps: 0`; the probe watchdog then fired
+before producing a terminal report. It was authoritatively cleaned up with
+zero owned-process membership. This narrows the timeout to changed-demand
+layout polling but does not distinguish slow frame yielding from an
+inconsistent/stuck transaction. It remains a timed-out diagnostic, not a gate
+result; the next focused step is to log builder phase/token/retirement state
+and both broker advance/layout statuses during that shifted-layout loop.
