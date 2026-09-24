@@ -14,3 +14,26 @@ $env:N5_RESIDENT_COLLISION_REPORT = 'C:\Users\arkam\Documents\Codex\2026-06-18\g
 The receipt is `artifacts/native-world-backend/n5-resident-owner-final-7.json`: `passed: true`, 2.85 seconds, and no Godot script errors in the headed command. This is a physical mechanism fixture, not normal gameplay, native triangle source integration, or Gate 5 acceptance.
 
 Production remains blocked. N3 has now integrated an exact native triangle producer with independently derived pinned resident closure and `collision_source_snapshot`/`collision_artifact_row` service methods, but this owner has not yet been exercised against that live producer. The owner currently caps one resident set at 4,096 blocks and has no demand-driven retirement. A valid planner request at 128-cell distance and vertical bounds -128..128 can require 4,913 mesh blocks, so spatial partitions or explicit retryable backpressure are needed before binding. The fixture's tiny shape preparation timings do not prove the 6 ms publication budget for real native meshes; record mesher, vertex copy, shape construction and physics synchronization separately. The production `VoxelTerrainRuntime` still generates Voxel Tools collision, and no player menu flow, Continue, live edit, NPC route, or normal-world actor passage has been accepted on this owner.
+
+An independent N5 review found that the prior receipt bound logical owner generation
+but not the physical `NativeResidentCollisionOwner` Node installation. A distinct
+coordinator-assigned `<instance id>:<registration sequence>` epoch now flows
+through window registration, resident owner receipts, broker retention/lease
+validation, and final acknowledgment. The focused owner report
+`artifacts/native-world-backend/n5-resident-collision-owner-1790217113789-71b1f538/report.json`
+passes; it rejects owner A's receipt for owner B even when logical owner,
+window token, source, membership and block rows are identical. The coordinator
+replacement contract also passed at
+`C:\Users\arkam\.codex\worktrees\n5-physical-owner-epoch\voxel-biome-world-godot\artifacts\native-world-backend\n5-coordinator-stop-physical-epoch.json`;
+I independently reran its Godot script on primary and observed exit code 0.
+Both are service/fixture evidence only (`productionCutover: false`). The focused
+N3 triangle artifact contract was updated to pass an explicit physical epoch
+and rejects replayed epochs for both lease validation and receipt acknowledgment;
+it passed at
+`artifacts/native-world-backend/n3-triangle-artifact-1790217091785-e635f0a9/report.json`.
+
+The review also found that validation and freshness checks still synchronously
+scan/build maps for up to 4,096 resident members. Cursorizing those scans would
+change broker/readiness contracts and remains a separate bounded-work issue;
+this receipt fix does not claim a bounded stop latency or close N5 production
+cutover.

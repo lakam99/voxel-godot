@@ -484,19 +484,30 @@ func run() -> void:
 		"distant demand retirement preserves unchanged near window identity")
 	check(bounded.acknowledge_collision_window_retired(remote_token, {}).get("status") == "failed"
 		and bounded.claim_collision_window_retirement(remote_token,
-			String(smaller_layout.get("layoutToken", ""))).get("status") == "ready",
+			String(smaller_layout.get("layoutToken", "")),
+			"n3-fixture-owner-remote").get("status") == "ready",
 		"old window retirement requires an explicit pre-drain lease")
 	var bounded_lease: Dictionary = bounded.claim_collision_window_retirement(
-		remote_token, String(smaller_layout.get("layoutToken", "")))
+		remote_token, String(smaller_layout.get("layoutToken", "")),
+		"n3-fixture-owner-remote")
+	check(bounded.validate_collision_window_retirement(remote_token,
+			String(bounded_lease.get("leaseId", "")), "n3-fixture-owner-replay").get("status") == "failed"
+		and bounded.acknowledge_collision_window_retired(remote_token,
+			_retirement_receipt(remote_window,
+				String(bounded_lease.get("leaseId", "")),
+				"n3-fixture-owner-replay")).get("status") == "failed",
+		"retirement lease and receipt reject a different physical owner epoch")
 	planner.replace_sources(viewer, extra_viewers, [], [], bounds)
 	var leased_revert_step: Dictionary = await _advance_staged_demand(bounded,
 		bounded.advance(), "leased demand reactivation")
 	var leased_revert_layout: Dictionary = bounded.collision_window_layout()
 	var lease_valid: Dictionary = bounded.validate_collision_window_retirement(
-		remote_token, String(bounded_lease.get("leaseId", "")))
+		remote_token, String(bounded_lease.get("leaseId", "")),
+		"n3-fixture-owner-remote")
 	check(bounded.acknowledge_collision_window_retired(remote_token,
 			_retirement_receipt(remote_window,
-				String(bounded_lease.get("leaseId", "")))).get("status") == "ready",
+				String(bounded_lease.get("leaseId", "")),
+				"n3-fixture-owner-remote")).get("status") == "ready",
 		"claimed old window accepts exact physical drain acknowledgment")
 	var resumed_layout: Dictionary = {}
 	for frame in range(300):
@@ -633,13 +644,16 @@ func run() -> void:
 			"new retirement attempt remains bounded after revert")
 		check(many_broker.acknowledge_collision_window_retired(retired_token, {}).get("status") == "failed"
 			and many_broker.claim_collision_window_retirement(retired_token,
-				String(held_again.get("layoutToken", ""))).get("status") == "ready",
+				String(held_again.get("layoutToken", "")),
+				"n3-fixture-owner-retired").get("status") == "ready",
 			"retired window must acquire lease before drain acknowledgment")
 		var many_lease: Dictionary = many_broker.claim_collision_window_retirement(
-			retired_token, String(held_again.get("layoutToken", "")))
+			retired_token, String(held_again.get("layoutToken", "")),
+			"n3-fixture-owner-retired")
 		check(many_broker.acknowledge_collision_window_retired(retired_token,
 				_retirement_receipt(retired_window,
-					String(many_lease.get("leaseId", "")))).get("status") == "ready"
+					String(many_lease.get("leaseId", "")),
+					"n3-fixture-owner-retired")).get("status") == "ready"
 			and many_broker.collision_window_layout().get("status") == "ready",
 			"explicit physical drain acknowledgment releases bounded backpressure")
 	else:
@@ -832,7 +846,8 @@ func run() -> void:
 	quit(0 if failures.is_empty() else 1)
 
 
-func _retirement_receipt(window: Dictionary, lease_id: String) -> Dictionary:
+func _retirement_receipt(window: Dictionary, lease_id: String,
+		physical_owner_epoch: String) -> Dictionary:
 	var blocks: Array = window.get("blocks", []).duplicate()
 	var identity: Dictionary = window.get("identity", {}).duplicate(true)
 	var membership := {"authority":"pinned_demand", "demandRevision":0,
@@ -842,6 +857,7 @@ func _retirement_receipt(window: Dictionary, lease_id: String) -> Dictionary:
 		"remainingPendingEntries":0, "remainingLiveEntries":0,
 		"sourceReleased":true, "barrierOwnershipReleased":true,
 		"windowToken":String(window.get("windowToken", "")),
+		"physicalOwnerEpoch":physical_owner_epoch,
 		"retirementLeaseId":lease_id, "identity":identity,
 		"sourceIdentity":identity.get("sourceIdentity", {}).duplicate(true),
 		"membershipProvenance":membership, "residentBlockCount":blocks.size(),
