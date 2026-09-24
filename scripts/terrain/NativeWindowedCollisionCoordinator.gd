@@ -232,8 +232,11 @@ func _advance_aggregate_validation() -> void:
 			return
 		var owner: Node3D = _owners[id]
 		if is_instance_valid(owner):
-			_aggregate_receipts[id] = owner.physical_receipt(
-				window.get("identity", {}))
+			_aggregate_receipts[id] = owner.physical_receipt_for_layout(
+				window.get("identity", {}), window.get("localCurrentProof", {}),
+				_aggregate_layout.get("identity", {})) \
+				if owner.has_method("physical_receipt_for_layout") \
+				else owner.physical_receipt(window.get("identity", {}))
 			_aggregate_owner_epochs[id] = int(owner.call("physical_readiness_epoch")) \
 				if owner.has_method("physical_readiness_epoch") else -1
 		else:

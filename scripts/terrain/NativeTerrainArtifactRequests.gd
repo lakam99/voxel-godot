@@ -333,17 +333,23 @@ func collision_window_source_ticket(window_token: String) -> Dictionary:
 			return {"status":"pending", "reason":"collision_window_local_proof_stale"}
 	if proof_revision != int(_identity.get("sourceRevision", -1)) or proof_digest.is_empty():
 		return {"status":"pending", "reason":"collision_window_local_proof_stale"}
+	var local_proof := {"kind":"native_current_revision" if producer_current \
+		else "verified_native_affected_mesh_exclusion/v1",
+		"throughGlobalRevision":proof_revision, "digest":proof_digest}
 	return {"status":"ready", "ticket":"%s|%s|%s|%d|%s" % [
 		String(_window_layout.get("layoutToken", "")), window_token,
 		String(source_ticket.get("ticket", "retained")), proof_revision,
 		proof_digest],
-		"identity":record.identity, "sourceIdentity":record.sourceIdentity,
+		"identity":record.identity.duplicate(true),
+		"sourceIdentity":record.sourceIdentity.duplicate(true),
+		"globalIdentity":_identity.duplicate(true),
+		"localCurrentProof":local_proof,
 		"sourceEpoch":String(record.identity.get("sourceEpoch", "")),
 		"nativeRevision":int(record.identity.get("sourceRevision", -1)),
 		"ownerGeneration":int(record.identity.get("ownerGeneration", -1)),
 		"cancellationEpoch":int(record.identity.get("cancellationEpoch", -1)),
-		"requiredResidentBlocks":record.blocks,
-		"membershipProvenance":record.membershipProvenance,
+		"requiredResidentBlocks":record.blocks.duplicate(),
+		"membershipProvenance":record.membershipProvenance.duplicate(true),
 		"layoutToken":String(_window_layout.get("layoutToken", "")),
 		"windowToken":window_token, "producerTicket":String(source_ticket.get("ticket", "")),
 		"producerCurrent":producer_current}

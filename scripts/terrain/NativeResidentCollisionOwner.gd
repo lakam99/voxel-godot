@@ -23,6 +23,8 @@ const VALIDATION_OPERATION_BUDGET := 128
 const VALIDATION_STEP_USEC_BUDGET := 1500
 const HEALTH_VALIDATION_OPERATION_BUDGET := 96
 const HEALTH_VALIDATION_STEP_USEC_BUDGET := 1500
+const SOURCE_REBIND_OPERATION_BUDGET := 96
+const SOURCE_REBIND_STEP_USEC_BUDGET := 1500
 
 var _source: Object
 var _live := {}
@@ -64,6 +66,10 @@ var _health_validated_epoch := -1
 var _health_validated_source_ticket := ""
 var _health_failure := {}
 var _health_required_physics_frame := 0
+var _source_rebind_state := {}
+var _source_rebind_receipt := {}
+var _receipt_global_identity := {}
+var _receipt_local_current_proof := {}
 
 
 ## The coordinator assigns one immutable physical installation identity before
@@ -129,6 +135,34 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 			or _live.size() != _resident_blocks.size() \
 			or not _source_current(identity):
 		return {"ready": false, "reason":"resident_collision_not_current"}
+	return _current_physical_receipt(identity)
+
+
+## A retained local artifact identity may remain physically current while the
+## global source revision advances. The broker must prove that every intervening
+## native edit excludes this exact window. This advances only the immutable
+## source ticket; it never relabels revision-N geometry as revision N+1.
+func physical_receipt_for_layout(local_artifact_identity: Dictionary,
+		local_current_proof: Dictionary, global_layout_identity: Dictionary) -> Dictionary:
+	if _busy or _failed or _stopping or _stopped \
+			or local_artifact_identity != _identity \
+			or _live.size() != _resident_blocks.size():
+		_source_rebind_state.clear()
+		return {"ready":false, "reason":"resident_collision_not_current"}
+	if not _source_current(local_artifact_identity):
+		var rebound := _advance_source_ticket_rebind(local_artifact_identity,
+			local_current_proof, global_layout_identity)
+		if rebound.get("status") != "ready":
+			return {"ready":false, "reason":rebound.get("reason",
+				"resident_source_ticket_rebind_pending"),
+				"sourceTicketRebind":rebound}
+	if _receipt_global_identity != global_layout_identity \
+			or _receipt_local_current_proof != local_current_proof:
+		return {"ready":false, "reason":"resident_source_ticket_rebind_stale"}
+	return _current_physical_receipt(local_artifact_identity)
+
+
+func _current_physical_receipt(identity: Dictionary) -> Dictionary:
 	if _health_validated_epoch != _readiness_epoch \
 			or _health_validated_source_ticket != _source_ticket:
 		var health: Dictionary = _advance_physical_health_validation(identity)
@@ -144,9 +178,120 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 			"stepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET},
 		"provenance": {"requestIdentity": _identity.duplicate(true),
 			"sourceIdentity": _source_identity.duplicate(true),
+			"globalLayoutIdentity":_receipt_global_identity.duplicate(true),
+			"localCurrentProof":_receipt_local_current_proof.duplicate(true),
+			"sourceTicket":_source_ticket,
 			"membershipProvenance": _membership_provenance.duplicate(true)},
 		"residentBlockCount": _resident_blocks.size(),
-		"residentBlocks": _receipt_resident_blocks}
+		"residentBlocks": _receipt_resident_blocks,
+		"sourceTicketRebind":_source_rebind_receipt.duplicate(true)}
+
+
+func _advance_source_ticket_rebind(local_identity: Dictionary,
+		proof: Dictionary, global_identity: Dictionary) -> Dictionary:
+	if _source == null or not is_instance_valid(_source) \
+			or not _source.has_method("collision_source_ticket") \
+			or not _source.has_method("collision_source_ticket_current") \
+			or not _source.has_method("collision_source_artifact_key"):
+		_source_rebind_state.clear()
+		return {"status":"failed", "reason":"resident_source_ticket_api_missing"}
+	var proof_revision := int(proof.get("throughGlobalRevision", -1))
+	var local_revision := int(local_identity.get("sourceRevision", -1))
+	if proof.get("kind") != "verified_native_affected_mesh_exclusion/v1" \
+			or String(proof.get("digest", "")).length() != 64 \
+			or proof_revision <= local_revision \
+			or proof_revision != int(global_identity.get("sourceRevision", -2)) \
+			or global_identity.get("sourceIdentity") != _source_identity \
+			or global_identity.get("sourceEpoch") != local_identity.get("sourceEpoch") \
+			or global_identity.get("ownerGeneration") != local_identity.get("ownerGeneration") \
+			or int(global_identity.get("cancellationEpoch", -1)) \
+				< int(local_identity.get("cancellationEpoch", -1)):
+		_source_rebind_state.clear()
+		return {"status":"failed", "reason":"resident_local_current_proof_invalid"}
+	var source_ticket: Dictionary = _source.call("collision_source_ticket")
+	if not _source_rebind_ticket_matches(source_ticket, local_identity, proof,
+			global_identity):
+		_source_rebind_state.clear()
+		return {"status":"pending", "reason":source_ticket.get("reason",
+			"resident_local_current_source_unproven")}
+	var ticket := String(source_ticket.get("ticket", ""))
+	if _source_rebind_state.get("ticket") != ticket \
+			or _source_rebind_state.get("localIdentity") != local_identity \
+			or _source_rebind_state.get("proof") != proof \
+			or _source_rebind_state.get("globalIdentity") != global_identity:
+		_source_rebind_state = {"ticket":ticket,
+			"localIdentity":local_identity.duplicate(true),
+			"proof":proof.duplicate(true),
+			"globalIdentity":global_identity.duplicate(true),
+			"cursor":0, "maxOperations":0, "maxStepUsec":0}
+	var started := Time.get_ticks_usec()
+	var operations := 0
+	while int(_source_rebind_state.cursor) < _receipt_resident_blocks.size() \
+			and operations < SOURCE_REBIND_OPERATION_BUDGET \
+			and Time.get_ticks_usec() - started < SOURCE_REBIND_STEP_USEC_BUDGET:
+		var block: Vector3i = _receipt_resident_blocks[int(_source_rebind_state.cursor)]
+		var artifact: Dictionary = _source.call("collision_source_artifact_key",
+			block, ticket)
+		if artifact.get("status") != "ready" \
+				or String(artifact.get("artifactKey", "")).is_empty() \
+				or not _live.has(block) \
+				or _live[block].get("artifactKey") != artifact.get("artifactKey"):
+			_source_rebind_state.clear()
+			return {"status":"failed", "reason":"resident_rebind_artifact_mismatch",
+				"block":block}
+		_source_rebind_state.cursor = int(_source_rebind_state.cursor) + 1
+		operations += 1
+	_source_rebind_state.maxOperations = maxi(
+		int(_source_rebind_state.maxOperations), operations)
+	_source_rebind_state.maxStepUsec = maxi(int(_source_rebind_state.maxStepUsec),
+		Time.get_ticks_usec() - started)
+	if int(_source_rebind_state.cursor) < _receipt_resident_blocks.size():
+		if not bool(_source.call("collision_source_ticket_current", ticket)):
+			_source_rebind_state.clear()
+			return {"status":"pending", "reason":"resident_source_ticket_rebind_drift"}
+		return {"status":"pending", "reason":"resident_source_ticket_rebind_scan_pending",
+			"validatedBlocks":int(_source_rebind_state.cursor),
+			"residentBlocks":_receipt_resident_blocks.size(),
+			"operations":operations,
+			"operationBudget":SOURCE_REBIND_OPERATION_BUDGET,
+			"stepUsecBudget":SOURCE_REBIND_STEP_USEC_BUDGET}
+	var after: Dictionary = _source.call("collision_source_ticket")
+	if after != source_ticket \
+			or not bool(_source.call("collision_source_ticket_current", ticket)) \
+			or _busy or not _pending_candidates.is_empty() \
+			or _live.size() != _resident_blocks.size():
+		_source_rebind_state.clear()
+		return {"status":"pending", "reason":"resident_source_ticket_rebind_drift"}
+	var rebind_evidence := {"status":"ready", "ticket":ticket,
+		"localArtifactIdentity":local_identity.duplicate(true),
+		"globalLayoutIdentity":global_identity.duplicate(true),
+		"localCurrentProof":proof.duplicate(true),
+		"validatedBlocks":_receipt_resident_blocks.size(),
+		"maxOperations":int(_source_rebind_state.maxOperations),
+		"maxStepUsec":int(_source_rebind_state.maxStepUsec),
+		"operationBudget":SOURCE_REBIND_OPERATION_BUDGET,
+		"stepUsecBudget":SOURCE_REBIND_STEP_USEC_BUDGET}
+	_source_ticket = ticket
+	_receipt_global_identity = global_identity.duplicate(true)
+	_receipt_local_current_proof = proof.duplicate(true)
+	_source_rebind_receipt = rebind_evidence.duplicate(true)
+	_source_rebind_state.clear()
+	_invalidate_physical_health()
+	return rebind_evidence
+
+
+func _source_rebind_ticket_matches(ticket: Dictionary, local_identity: Dictionary,
+		proof: Dictionary, global_identity: Dictionary) -> bool:
+	return ticket.get("status") == "ready" \
+		and not String(ticket.get("ticket", "")).is_empty() \
+		and ticket.get("identity") == local_identity \
+		and ticket.get("sourceIdentity") == _source_identity \
+		and ticket.get("globalIdentity") == global_identity \
+		and ticket.get("localCurrentProof") == proof \
+		and ticket.get("requiredResidentBlocks") == _resident_blocks \
+		and ticket.get("membershipProvenance") == _membership_provenance \
+		and bool(_source.call("collision_source_ticket_current",
+			String(ticket.get("ticket", ""))))
 
 ## One bounded cursor step over the exclusively-owned installed bodies. Node
 ## mutation and teardown must go through this owner; each supported mutation
@@ -448,6 +593,9 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	var previous_identity := _identity.duplicate(true)
 	var previous_source_identity := _source_identity.duplicate(true)
 	var previous_source_ticket := _source_ticket
+	var previous_rebind_receipt := _source_rebind_receipt.duplicate(true)
+	var previous_global_identity := _receipt_global_identity.duplicate(true)
+	var previous_local_proof := _receipt_local_current_proof.duplicate(true)
 	var previous_membership := _membership_provenance.duplicate(true)
 	var previous_resident := _resident_blocks.duplicate()
 	var previous_staging := _startup_staging
@@ -456,6 +604,9 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	_identity = identity.duplicate(true)
 	_source_identity = checked.sourceIdentity.duplicate(true)
 	_source_ticket = String(checked.get("sourceTicket", ""))
+	_source_rebind_receipt = {}
+	_receipt_global_identity = checked.get("globalIdentity", identity).duplicate(true)
+	_receipt_local_current_proof = checked.get("localCurrentProof", {}).duplicate(true)
 	_membership_provenance = checked.membership.duplicate(true)
 	_resident_blocks = checked.resident
 	_receipt_resident_blocks = _resident_blocks.duplicate()
@@ -485,6 +636,9 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		_identity = previous_identity
 		_source_identity = previous_source_identity
 		_source_ticket = previous_source_ticket
+		_source_rebind_receipt = previous_rebind_receipt
+		_receipt_global_identity = previous_global_identity
+		_receipt_local_current_proof = previous_local_proof
 		_membership_provenance = previous_membership
 		_resident_blocks = previous_resident
 		_startup_staging = previous_staging
@@ -633,6 +787,10 @@ func drain_step() -> Dictionary:
 		_identity = {}
 		_source_identity = {}
 		_source_ticket = ""
+		_source_rebind_receipt = {}
+		_receipt_global_identity = {}
+		_receipt_local_current_proof = {}
+		_source_rebind_state.clear()
 		_membership_provenance = {}
 		_stopped = true
 		_drain_receipt = receipt
@@ -895,6 +1053,8 @@ func _validate_request(request: Dictionary) -> Dictionary:
 		"sourceIdentity": source_snapshot.sourceIdentity,
 		"membership": membership, "canonicalRows": canonical_rows,
 		"sourceTicket":String(source_snapshot.get("ticket", "")),
+		"globalIdentity":source_snapshot.get("globalIdentity", identity).duplicate(true),
+		"localCurrentProof":source_snapshot.get("localCurrentProof", {}).duplicate(true),
 		"artifactKeys":artifacts, "maxValidationOperations":cursor_state.maxOperations,
 		"maxValidationStepUsec":cursor_state.maxStepUsec}
 

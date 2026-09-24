@@ -13,6 +13,36 @@ const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadines
 const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
 const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
+class ArtifactKeyFaultSource extends RefCounted:
+	var source
+	var fault_block: Variant = null
+
+	func _init(value) -> void:
+		source = value
+
+	func collision_source_snapshot() -> Dictionary:
+		return source.collision_source_snapshot()
+
+	func collision_source_ticket() -> Dictionary:
+		return source.collision_source_ticket()
+
+	func collision_source_ticket_current(ticket: String) -> bool:
+		return source.collision_source_ticket_current(ticket)
+
+	func collision_source_artifact_key(block: Vector3i, ticket: String) -> Dictionary:
+		var result: Dictionary = source.collision_source_artifact_key(block, ticket)
+		if block == fault_block and result.get("status") == "ready":
+			result = result.duplicate(true)
+			result.artifactKey = "fault:" + String(result.get("artifactKey", ""))
+		return result
+
+	func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary:
+		return source.collision_artifact_row(block, identity)
+
+	func collision_artifact_row_snapshot(block: Vector3i,
+			identity: Dictionary) -> Dictionary:
+		return source.collision_artifact_row_snapshot(block, identity)
+
 func _await_window_layout(broker, initial: Dictionary, label: String) -> Dictionary:
 	var result := initial
 	var steps := 0
@@ -109,7 +139,8 @@ func _run() -> void:
 	var coordinator_setup: Dictionary = coordinator.setup(broker, root_3d)
 	var owner = OWNER.new()
 	coordinator.add_child(owner)
-	var bound: bool = owner.bind_source(facade)
+	var owner_source := ArtifactKeyFaultSource.new(facade)
+	var bound: bool = owner.bind_source(owner_source)
 	var registered: Dictionary = coordinator.register_window(window, owner)
 	var bounds: AABB = rows[0].bounds if not rows.is_empty() \
 		else AABB(Vector3.ZERO, Vector3.ONE)
@@ -192,10 +223,136 @@ func _run() -> void:
 			break
 		await process_frame
 	var retained_window: Dictionary = retained_layout.get("windows", [{}])[0]
-	var retained_receipt: Dictionary = owner.physical_receipt(retained_window.get("identity", {}))
+	var retained_proof: Dictionary = retained_window.get("localCurrentProof", {})
+	var incomplete_proof_rejected: Dictionary = owner.physical_receipt_for_layout(
+		retained_window.get("identity", {}), {}, retained_layout.get("identity", {}))
+	var stale_proof := retained_proof.duplicate(true)
+	stale_proof.throughGlobalRevision = 0
+	var stale_proof_rejected: Dictionary = owner.physical_receipt_for_layout(
+		retained_window.get("identity", {}), stale_proof,
+		retained_layout.get("identity", {}))
+	var foreign_global_identity: Dictionary = retained_layout.get("identity", {}).duplicate(true)
+	foreign_global_identity.sourceIdentity = {"hex":"foreign-source"}
+	var foreign_proof_rejected: Dictionary = owner.physical_receipt_for_layout(
+		retained_window.get("identity", {}), retained_proof,
+		foreign_global_identity)
+	var relabelled_geometry_rejected: Dictionary = owner.physical_receipt_for_layout(
+		retained_layout.get("identity", {}), retained_proof,
+		retained_layout.get("identity", {}))
+	owner_source.fault_block = retained_window.get("blocks", [Vector3i.ZERO])[0]
+	var changed_key_rejected: Dictionary = owner.physical_receipt_for_layout(
+		retained_window.get("identity", {}), retained_proof,
+		retained_layout.get("identity", {}))
+	owner_source.fault_block = null
+	var retained_receipt: Dictionary = {}
+	for frame in range(100):
+		retained_receipt = owner.physical_receipt_for_layout(
+			retained_window.get("identity", {}), retained_proof,
+			retained_layout.get("identity", {}))
+		if bool(retained_receipt.get("ready", false)): break
+		await process_frame
+	var retained_contact := false
+	for row in rows:
+		if not bool(row.expectedHit): continue
+		var retained_actor := CharacterBody3D.new()
+		retained_actor.collision_mask = 2
+		retained_actor.position = row.probeFrom
+		var retained_shape := CollisionShape3D.new()
+		var retained_sphere := SphereShape3D.new()
+		retained_sphere.radius = main.CELL * 0.05
+		retained_shape.shape = retained_sphere
+		retained_actor.add_child(retained_shape)
+		root_3d.add_child(retained_actor)
+		await physics_frame
+		retained_contact = retained_actor.move_and_collide(
+			row.probeTo - row.probeFrom) != null
+		retained_actor.queue_free()
+		await process_frame
+		break
 	var retained_aggregate: Dictionary = coordinator.aggregate_readiness(
 		retained_layout.get("identity", {}))
 	var retained_source: Dictionary = facade.collision_source_snapshot()
+	if OS.get_environment("N3_N5_PROOF_REBIND_ONLY") == "1":
+		guard_actor.queue_free()
+		await process_frame
+		var focused_coordinator_drain: Dictionary = await coordinator.stop_and_drain()
+		var focused_broker_stop: Dictionary = broker.stop()
+		for frame in range(500):
+			if focused_broker_stop.get("status") == "ready": break
+			await process_frame
+			focused_broker_stop = broker.drain_step()
+		root_3d.queue_free()
+		main.free()
+		var rebind_scan: Dictionary = retained_receipt.get("sourceTicketRebind", {})
+		var focused_passed: bool = initialized.get("status") == "ready" \
+			and broker_setup.get("status") == "ready" \
+			and coordinator_setup.get("status") == "ready" \
+			and registered.get("status") == "ready" \
+			and rows.size() == 2 and solid_count == 1 and empty_count == 1 \
+			and published.get("status") == "ready" and contact \
+			and distant_commit.get("commitStatus") == "committed" \
+			and verified_distant.get("status") == "ready" \
+			and retained_layout.get("identity", {}).get("sourceRevision") == 1 \
+			and retained_window.get("identity", {}).get("sourceRevision") == 0 \
+			and retained_proof.get("kind") \
+				== "verified_native_affected_mesh_exclusion/v1" \
+			and not bool(incomplete_proof_rejected.get("ready", false)) \
+			and incomplete_proof_rejected.get("reason") \
+				== "resident_local_current_proof_invalid" \
+			and not bool(stale_proof_rejected.get("ready", false)) \
+			and stale_proof_rejected.get("reason") \
+				== "resident_local_current_proof_invalid" \
+			and not bool(foreign_proof_rejected.get("ready", false)) \
+			and foreign_proof_rejected.get("reason") \
+				== "resident_local_current_proof_invalid" \
+			and not bool(relabelled_geometry_rejected.get("ready", false)) \
+			and relabelled_geometry_rejected.get("reason") \
+				== "resident_collision_not_current" \
+			and not bool(changed_key_rejected.get("ready", false)) \
+			and changed_key_rejected.get("reason") \
+				== "resident_rebind_artifact_mismatch" \
+			and bool(retained_receipt.get("ready", false)) \
+			and retained_receipt.get("provenance", {}).get("requestIdentity") \
+				== retained_window.get("identity", {}) \
+			and retained_receipt.get("provenance", {}).get("globalLayoutIdentity") \
+				== retained_layout.get("identity", {}) \
+			and retained_receipt.get("provenance", {}).get("localCurrentProof") \
+				== retained_proof \
+			and rebind_scan.get("status") == "ready" \
+			and rebind_scan.get("localArtifactIdentity") \
+				== retained_window.get("identity", {}) \
+			and rebind_scan.get("globalLayoutIdentity") \
+				== retained_layout.get("identity", {}) \
+			and int(rebind_scan.get("validatedBlocks", -1)) \
+				== retained_window.get("blocks", []).size() \
+			and int(rebind_scan.get("maxOperations", -1)) \
+				<= OWNER.SOURCE_REBIND_OPERATION_BUDGET \
+			and int(rebind_scan.get("operationBudget", -1)) \
+				== OWNER.SOURCE_REBIND_OPERATION_BUDGET \
+			and int(rebind_scan.get("stepUsecBudget", -1)) \
+				== OWNER.SOURCE_REBIND_STEP_USEC_BUDGET \
+			and retained_contact and retained_aggregate.get("status") == "ready" \
+			and focused_coordinator_drain.get("status") == "ready" \
+			and focused_coordinator_drain.get("remainingChildren") == 0 \
+			and focused_coordinator_drain.get("activeBarriers") == 0 \
+			and focused_broker_stop.get("status") == "ready"
+		_finish(focused_passed, {"mode":"proof-backed-source-ticket-rebind",
+			"initial":{"layout":layout, "publication":published,
+				"contact":contact, "aggregate":aggregate},
+			"distantEdit":{"commit":distant_commit, "plan":distant_plan,
+				"observed":verified_distant},
+			"retained":{"layout":retained_layout, "source":retained_source,
+				"negativeProofs":{"incomplete":incomplete_proof_rejected,
+					"stale":stale_proof_rejected,
+					"foreign":foreign_proof_rejected,
+					"relabelledGeometry":relabelled_geometry_rejected,
+					"changedArtifactKey":changed_key_rejected},
+				"physical":retained_receipt,
+				"actorContactAfterRebind":retained_contact,
+				"aggregate":retained_aggregate},
+			"drain":{"coordinator":focused_coordinator_drain,
+				"broker":focused_broker_stop}})
+		return
 	layout = retained_layout
 	window = retained_window
 	var old_hold: Dictionary = coordinator.begin_window_barrier(window,
@@ -220,6 +377,10 @@ func _run() -> void:
 			break
 		await process_frame
 	var replacement_window: Dictionary = replacement_layout.get("windows", [{}])[0]
+	var affected_window_rebind_rejected: Dictionary = owner.physical_receipt_for_layout(
+		retained_window.get("identity", {}),
+		replacement_window.get("localCurrentProof", {}),
+		replacement_layout.get("identity", {}))
 	var replacement_hold: Dictionary = coordinator.begin_window_barrier(
 		replacement_window, bounds, replacement_layout.identity)
 	var replacement_barrier: RefCounted = replacement_hold.get("barrier")
@@ -430,10 +591,28 @@ func _run() -> void:
 		and retained_window.get("windowToken") == first_window_token \
 		and retained_window.get("identity", {}).get("sourceRevision") == 0 \
 		and retained_window.get("localCurrentProof", {}).get("kind") == "verified_native_affected_mesh_exclusion/v1" \
+		and not bool(incomplete_proof_rejected.get("ready", false)) \
+		and incomplete_proof_rejected.get("reason") == "resident_local_current_proof_invalid" \
+		and not bool(stale_proof_rejected.get("ready", false)) \
+		and stale_proof_rejected.get("reason") == "resident_local_current_proof_invalid" \
+		and not bool(foreign_proof_rejected.get("ready", false)) \
+		and foreign_proof_rejected.get("reason") == "resident_local_current_proof_invalid" \
+		and not bool(relabelled_geometry_rejected.get("ready", false)) \
+		and relabelled_geometry_rejected.get("reason") == "resident_collision_not_current" \
+		and not bool(changed_key_rejected.get("ready", false)) \
+		and changed_key_rejected.get("reason") == "resident_rebind_artifact_mismatch" \
 		and retained_source.get("status") == "ready" \
 		and bool(retained_receipt.get("ready", false)) \
+		and retained_contact \
+		and retained_receipt.get("provenance", {}).get("requestIdentity") \
+			== retained_window.get("identity", {}) \
+		and retained_receipt.get("provenance", {}).get("globalLayoutIdentity") \
+			== retained_layout.get("identity", {}) \
+		and retained_receipt.get("provenance", {}).get("localCurrentProof") \
+			== retained_proof \
 		and retained_aggregate.get("status") == "ready" \
 		and replacement_layout.identity.sourceRevision == 2 \
+		and not bool(affected_window_rebind_rejected.get("ready", false)) \
 		and replacement_layout.identity.cancellationEpoch \
 			> first_identity.cancellationEpoch \
 		and replacement_hold.get("status") == "ready" \
@@ -495,11 +674,18 @@ func _run() -> void:
 		"physicalAfterActiveRejection":physical_after_active_rejection,
 		"verifiedDistantRetention":{"commit":distant_commit,
 			"plan":distant_plan, "verified":verified_distant,
+			"negativeProofs":{"incomplete":incomplete_proof_rejected,
+				"stale":stale_proof_rejected,
+				"foreign":foreign_proof_rejected,
+				"relabelledGeometry":relabelled_geometry_rejected,
+				"changedArtifactKey":changed_key_rejected},
 			"layout":retained_layout, "physical":retained_receipt,
-			"aggregate":retained_aggregate, "source":retained_source},
+			"aggregate":retained_aggregate, "source":retained_source,
+			"actorContactAfterRebind":retained_contact},
 		"sourceRevisionReplacement": {"oldIdentity":first_identity,
 			"oldHold":old_hold.get("status"),
 			"committed":committed, "newLayout":replacement_layout,
+			"affectedWindowRebindRejected":affected_window_rebind_rejected,
 			"newHold":replacement_hold.get("status"),
 			"overlapBarriers":overlap_barriers,
 			"deniedBeforeDrain":denied_before_drain,
