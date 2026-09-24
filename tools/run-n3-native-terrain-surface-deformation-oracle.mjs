@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { findGodot, parseArguments } from './lib/voxel-tool-runtime.mjs';
 import { runGodotProcess } from './lib/godot-process.mjs';
 import { runOwnedProcess } from './lib/owned-process.mjs';
+import { requireNativeFocusedReceiptBinding } from './lib/native-surface-oracle-attestation.mjs';
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const parsed = parseArguments(process.argv.slice(2));
@@ -35,6 +36,8 @@ const sources = [
   resolve(project, 'tools/lib/owned-process.mjs'),
   resolve(project, 'tools/lib/voxel-tool-runtime.mjs'),
   resolve(project, 'tools/run-godot-scene-watchdog.mjs'),
+  resolve(project, 'tools/lib/native-surface-oracle-attestation.mjs'),
+  resolve(project, 'tools/test-native-surface-oracle-attestation.mjs'),
   fileURLToPath(import.meta.url),
 ];
 const record = async path => ({
@@ -46,8 +49,7 @@ const sourceInputs = await Promise.all(sources.map(record));
 const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: project, encoding: 'utf8' }).trim();
 const branch = execFileSync('git', ['branch', '--show-current'], { cwd: project, encoding: 'utf8' }).trim();
 const statusBefore = execFileSync('git', ['status', '--short'], { cwd: project, encoding: 'utf8' }).trim();
-const allowDirtyDevelopment = process.argv.includes('--allow-dirty-development');
-if (statusBefore && !allowDirtyDevelopment) throw new Error('oracle receipt requires a clean worktree');
+if (statusBefore) throw new Error('oracle receipt requires a clean worktree');
 const godot = await findGodot(parsed.options.godotExe);
 if (!parsed.options.nativeExe) throw new Error('Pass --native-exe PATH from a focused native receipt');
 if (!parsed.options.nativeReceipt) throw new Error('Pass --native-receipt PATH from the same focused native build');
@@ -60,7 +62,26 @@ await access(nativeReceiptPath, fsConstants.F_OK);
 const nativeExeBefore = await record(nativeExe);
 const nativeBuildReceiptRecord = await record(nativeReceiptPath);
 const nativeBuildReceipt = JSON.parse(await readFile(nativeReceiptPath, 'utf8'));
-if (nativeBuildReceipt.status !== 'passed') throw new Error('native focused receipt is not passed');
+if (!Array.isArray(nativeBuildReceipt.sourceInputs) || nativeBuildReceipt.sourceInputs.length === 0) {
+  throw new Error('native focused receipt has no source inventory');
+}
+const currentReceiptSources = await Promise.all(nativeBuildReceipt.sourceInputs.map(input => {
+  const path = resolve(project, input.path);
+  const withinProject = relative(project, path);
+  if (withinProject.startsWith('..') || isAbsolute(withinProject)) {
+    throw new Error(`native focused receipt source escapes project: ${input.path}`);
+  }
+  return record(path);
+}));
+const nativeBuildBinding = requireNativeFocusedReceiptBinding({
+  project,
+  headCommit: commit,
+  gitStatus: statusBefore,
+  receipt: nativeBuildReceipt,
+  nativeReceiptPath,
+  nativeExecutable: nativeExeBefore,
+  currentSourceInputs: currentReceiptSources,
+});
 const engineCandidate = godot.replace(/_console\.exe$/i, '.exe');
 const godotExecutables = [...new Set([godot, engineCandidate])];
 for (const executable of godotExecutables) await access(executable, fsConstants.F_OK);
@@ -142,6 +163,7 @@ const receipt = {
     nativeExecutable: nativeExeBefore,
     nativeBuildReceipt: nativeBuildReceiptRecord,
     nativeBuildToolchain: nativeBuildReceipt.tools,
+    nativeBuildBinding,
   },
   audioPolicy,
   nativeExpectedContract: sourceInputs.find(input =>

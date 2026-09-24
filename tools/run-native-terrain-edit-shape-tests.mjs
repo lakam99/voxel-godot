@@ -142,6 +142,8 @@ const trackedInputs = [...coreSources,
   runnerPath,
   resolve(project, 'scripts/testing/native_world/N3NativeTerrainSurfaceDeformationOracleContract.gd'),
   resolve(project, 'tools/run-n3-native-terrain-surface-deformation-oracle.mjs'),
+  resolve(project, 'tools/lib/native-surface-oracle-attestation.mjs'),
+  resolve(project, 'tools/test-native-surface-oracle-attestation.mjs'),
 ].sort();
 const sourcesBefore = trackedInputs.map(record);
 const commitBefore = git(['rev-parse', 'HEAD']);
@@ -171,6 +173,7 @@ let failure = null;
 let msvcTests = null;
 let llvmTests = null;
 let coverage = null;
+let buildArtifacts = null;
 
 try {
   const clangVersion = run('clang-version', clang, ['--version'], output);
@@ -253,6 +256,11 @@ try {
     ['report', llvmExe, `-instr-profile=${data}`, '--show-branch-summary', compilerPath, cellStatePath], output);
   steps.push(textReport);
   requirePassed(textReport);
+  buildArtifacts = {
+    msvcExecutable: record(msvcExe),
+    llvmExecutable: record(llvmExe),
+    msvcLinkResponse: record(msvcLinkResponse),
+  };
   status = 'passed';
 } catch (error) {
   status = 'failed';
@@ -279,6 +287,7 @@ const receipt = {
   steps,
   tests: { msvc: msvcTests, llvm: llvmTests },
   coverage,
+  buildArtifacts,
   unchanged: { commit: commitAfter === commitBefore, status: statusAfter === statusBefore,
     sourceHashes: JSON.stringify(sourcesAfter) === JSON.stringify(sourcesBefore) },
   failure,
