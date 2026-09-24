@@ -207,7 +207,8 @@ try {
     llvmObjectPaths.push(object);
   }
   const llvmLink = run('llvm-link', clang,
-    ['/nologo', ...llvmObjectPaths, `/Fe:${llvmExe}`, '/link', '/DEBUG:FULL', '/OPT:NOREF', '/OPT:NOICF',
+    ['/nologo', '/clang:-fprofile-instr-generate', ...llvmObjectPaths, `/Fe:${llvmExe}`,
+      '/link', '/DEBUG:FULL', '/OPT:NOREF', '/OPT:NOICF',
       `/PDB:${join(build, 'native-terrain-edit-shape-llvm-tests.pdb')}`], output, llvmEnvironment);
   steps.push(llvmLink);
   requirePassed(llvmLink);
