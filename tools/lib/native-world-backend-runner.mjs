@@ -111,9 +111,23 @@ function parse(argv) {
   return options;
 }
 
+export function nativeTestTimeoutSeconds(options = {}) {
+  const raw = options.nativeTestTimeoutSeconds === undefined
+    ? 300 : options.nativeTestTimeoutSeconds;
+  if ((typeof raw !== 'number' && typeof raw !== 'string')
+      || (typeof raw === 'string' && !/^\d+$/.test(raw))) {
+    throw new Error('nativeTestTimeoutSeconds must be an integer number of seconds.');
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1 || value > 900) {
+    throw new Error('nativeTestTimeoutSeconds must be from 1 through 900.');
+  }
+  return value;
+}
+
 export function coverageExecutionTimeoutMilliseconds(options = {}) {
   const raw = options.coverageExecuteTimeoutMs === undefined
-    ? 120000 : options.coverageExecuteTimeoutMs;
+    ? nativeTestTimeoutSeconds(options) * 1000 : options.coverageExecuteTimeoutMs;
   if ((typeof raw !== 'number' && typeof raw !== 'string')
       || (typeof raw === 'string' && !/^\d+$/.test(raw))) {
     throw new Error('coverageExecuteTimeoutMs must be an integer number of milliseconds.');
@@ -365,19 +379,32 @@ async function findGodot() {
   throw new Error('Godot console executable is unavailable for the N1 adapter smoke.');
 }
 
-async function runAdapterSmoke({ project, output, toolchainLock, projectInputs }) {
-  const godot = await findGodot();
-  const godotSha256 = await hashFile(godot);
-  if (godotSha256 !== toolchainLock.godot.consoleSha256) {
-    throw new Error('Godot console binary does not match the N1 toolchain lock.');
+const nativeAdapterExtensionPath = 'res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension';
+
+export function validateAdapterSmokeReport(value, toolchainLock = expectedToolchainLockValue) {
+  const version = value?.engineVersion ?? {};
+  const core = value?.core ?? {};
+  const n3Status = value?.n3OwnerStatus ?? {};
+  if (!value || value.schema !== 'native-world-backend-adapter-smoke-report/v1'
+      || value.passed !== true
+      || value.extensionPath !== nativeAdapterExtensionPath
+      || value.resourceExists !== true
+      || value.extensionManagerSingleton !== true
+      || ![0, 2].includes(value.explicitLoadStatus)
+      || !Array.isArray(value.loadedExtensions)
+      || value.loadedExtensions.some(path => typeof path !== 'string')
+      || !value.loadedExtensions.includes(nativeAdapterExtensionPath)
+      || value.classExists !== true || value.instantiated !== true
+      || value.n3OwnerClassExists !== true || value.n3PageClassExists !== true
+      || core.schema !== 'native-world-backend-adapter-smoke/v1'
+      || Number(core.floorDivide) !== -2 || Number(core.euclideanModulo) !== 15
+      || Number(core.emptySeedHash) !== 2166136261 || core.coreLinked !== true
+      || core.sourceDigest !== 'abbd66bd21010fe6f0a4b9406264fdefefa05bc793ed8a27ce2c7c59424736bf'
+      || n3Status.schema !== 'n3-native-world-backend-adapter/v1'
+      || n3Status.status !== 'uninitialized' || n3Status.shadowOnly !== true
+      || n3Status.productionCutover !== false) {
+    throw new Error('Native world backend Godot adapter smoke report is invalid.');
   }
-  const reportPath = join(output, 'adapter-smoke-report.json');
-  const run = await runOwned({ project, output, label: 'adapter-smoke', executable: godot,
-    args: ['--headless', '--path', project, '--script', 'res://scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'], timeoutSeconds: 120,
-    env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1', VWB_ADAPTER_SMOKE_REPORT: reportPath } });
-  const value = JSON.parse(await readFile(reportPath, 'utf8'));
-  if (!value.passed) throw new Error('Native world backend Godot adapter smoke did not pass.');
-  const version = value.engineVersion ?? {};
   if (Number(version.major) !== toolchainLock.godot.major
       || Number(version.minor) !== toolchainLock.godot.minor
       || Number(version.patch) !== toolchainLock.godot.patch
@@ -385,10 +412,48 @@ async function runAdapterSmoke({ project, output, toolchainLock, projectInputs }
       || String(version.hash) !== toolchainLock.godot.engineCommitSha) {
     throw new Error('Godot runtime version does not match the N1 toolchain lock.');
   }
+  return value;
+}
+
+async function runAdapterSmoke({ project, output, toolchainLock, projectInputs, installed }) {
+  const godot = await findGodot();
+  const godotSha256 = await hashFile(godot);
+  if (godotSha256 !== toolchainLock.godot.consoleSha256) {
+    throw new Error('Godot console binary does not match the N1 toolchain lock.');
+  }
+  const descriptorPath = join(project, 'addons', 'terrain_meshing_backend', 'terrain_meshing_backend.gdextension');
+  const descriptor = await fileRecord(project, descriptorPath);
+  const frozenDescriptor = projectInputs.extensionBuildInputs.find(item => item.path === descriptor.path);
+  if (!frozenDescriptor || !isDeepStrictEqual(descriptor, frozenDescriptor)) {
+    throw new Error('Adapter extension descriptor does not match the frozen project input.');
+  }
+  const installedDebug = installed.filter(item => item.configuration === 'debug' && item.kind === 'dll');
+  if (installedDebug.length !== 1) throw new Error('Adapter smoke requires exactly one installed Debug DLL receipt.');
+  const installedDebugPath = join(project, 'addons', 'terrain_meshing_backend', 'bin', installedDebug[0].name);
+  const installedDebugRecord = await fileRecord(project, installedDebugPath);
+  if (installedDebugRecord.sha256 !== installedDebug[0].sha256
+      || installedDebugRecord.bytes !== installedDebug[0].bytes) {
+    throw new Error('Adapter smoke installed Debug DLL differs from its installation receipt.');
+  }
+  const reportPath = join(output, 'adapter-smoke-report.json');
+  const run = await runOwned({ project, output, label: 'adapter-smoke', executable: godot,
+    args: ['--headless', '--path', project, '--script', 'res://scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'], timeoutSeconds: 120,
+    env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1', VWB_ADAPTER_SMOKE_REPORT: reportPath } });
+  const value = validateAdapterSmokeReport(JSON.parse(await readFile(reportPath, 'utf8')), toolchainLock);
   return {
     evidenceScope: 'Godot 4.6.1 load, explicit adapter invocation, and unload integration smoke.',
     standaloneCoverage: false,
     inputsDigestSha256: projectInputs.digestSha256,
+    extensionLoadBinding: {
+      extensionPath: nativeAdapterExtensionPath,
+      descriptor,
+      installedDebugDll: {
+        ...installedDebugRecord,
+        buildManifestSha256: installedDebug[0].buildManifestSha256,
+        inputsDigestSha256: installedDebug[0].inputsDigestSha256,
+        pureCoreInputsDigestSha256: installedDebug[0].pureCoreInputsDigestSha256,
+      },
+    },
     adapterInputs: [
       'native/terrain_meshing/src/terrain_meshing_backend.cpp',
       'native/terrain_meshing/src/terrain_meshing_backend.h',
@@ -560,7 +625,8 @@ export async function runReleaseAdapterSmoke({ project, output, toolchainLock, p
   };
 }
 
-async function buildAndTest({ project, output, configuration, scons, compiler, projectInputs, source, dependency }) {
+async function buildAndTest({ project, output, configuration, scons, compiler, projectInputs, source, dependency,
+  testTimeoutSeconds }) {
   const nativeDirectory = join(project, 'native', 'terrain_meshing');
   const args = [...scons.prefix, '-Q', '-j2', 'platform=windows', `target=${configuration === 'release' ? 'template_release' : 'template_debug'}`,
     'arch=x86_64', 'api_version=4.6', `custom_tools=${join(nativeDirectory, 'scons_tools')}`];
@@ -652,7 +718,8 @@ async function buildAndTest({ project, output, configuration, scons, compiler, p
   }
   const executable = await findBuiltBinary(buildDirectory, /^world_backend_core_tests(?:\.exe)?$/i);
   const pdb = await findBuiltBinary(buildDirectory, /^world_backend_core_tests(?:\.exe)?\.pdb$|^world_backend_core_tests\.pdb$/i);
-  const test = await runOwned({ project, output, label: `test-${configuration}`, executable, args: [], timeoutSeconds: 120 });
+  const test = await runOwned({ project, output, label: `test-${configuration}`, executable, args: [],
+    timeoutSeconds: testTimeoutSeconds });
   const stdout = (await readFile(test.stdoutPath, 'utf8')).trim();
   const summary = JSON.parse(stdout.split(/\r?\n/).at(-1));
   if (summary.failed !== 0 || summary.passed !== summary.total) throw new Error(`${configuration} native unit-test summary is not passing.`);
@@ -667,7 +734,7 @@ async function buildAndTest({ project, output, configuration, scons, compiler, p
     },
     binary: { path: relative(project, executable).replaceAll('\\', '/'), sha256: await hashFile(executable), bytes: (await stat(executable)).size },
     pdb: { path: relative(project, pdb).replaceAll('\\', '/'), sha256: await hashFile(pdb), bytes: (await stat(pdb)).size },
-    tests: summary,
+    tests: { ...summary, timeoutSeconds: testTimeoutSeconds },
     ownedProcess: { build: relative(project, build.summaryPath).replaceAll('\\', '/'), test: relative(project, test.summaryPath).replaceAll('\\', '/') },
   };
   if (configuration !== 'coverage') {
@@ -861,21 +928,38 @@ export function parseLcovLineCoverage(lcovText, expectedFiles) {
   const expected = new Set(expectedFiles.map(path => resolve(path).toLowerCase()));
   const files = new Map();
   let activePath = null;
-  let activeLines = null;
+  let activeRecord = null;
   for (const rawLine of lcovText.split(/\r?\n/)) {
     const line = rawLine.trimEnd();
     if (line.startsWith('SF:')) {
       if (activePath !== null) throw new Error('LLVM lcov started a source record before ending the previous record.');
       activePath = resolve(line.slice(3)).toLowerCase();
       if (!line.slice(3) || files.has(activePath)) throw new Error(`LLVM lcov has an empty or duplicate source record: ${line.slice(3)}.`);
-      activeLines = new Map();
+      activeRecord = { lines: new Map(), linesFound: null, linesHit: null };
       continue;
     }
     if (line === 'end_of_record') {
       if (activePath === null) throw new Error('LLVM lcov ended a source record without an SF entry.');
-      files.set(activePath, activeLines);
+      if (activeRecord.linesFound === null || activeRecord.linesHit === null) {
+        throw new Error(`LLVM lcov source record is missing LF or LH: ${activePath}.`);
+      }
+      if (activeRecord.linesHit > activeRecord.linesFound) {
+        throw new Error(`LLVM lcov LH exceeds LF for ${activePath}.`);
+      }
+      files.set(activePath, activeRecord);
       activePath = null;
-      activeLines = null;
+      activeRecord = null;
+      continue;
+    }
+    if (line.startsWith('LF:') || line.startsWith('LH:')) {
+      if (activePath === null) throw new Error('LLVM lcov emitted LF or LH outside a source record.');
+      const match = /^(LF|LH):(\d+)$/.exec(line);
+      if (!match) throw new Error(`LLVM lcov emitted an invalid ${line.slice(0, 2)} record: ${line}.`);
+      const value = Number(match[2]);
+      if (!Number.isSafeInteger(value)) throw new Error(`LLVM lcov emitted an invalid ${match[1]} value: ${line}.`);
+      const field = match[1] === 'LF' ? 'linesFound' : 'linesHit';
+      if (activeRecord[field] !== null) throw new Error(`LLVM lcov duplicated ${match[1]} for ${activePath}.`);
+      activeRecord[field] = value;
       continue;
     }
     if (!line.startsWith('DA:')) continue;
@@ -887,8 +971,8 @@ export function parseLcovLineCoverage(lcovText, expectedFiles) {
     if (!Number.isSafeInteger(sourceLine) || sourceLine < 1 || !Number.isSafeInteger(count)) {
       throw new Error(`LLVM lcov emitted an invalid line/count value: ${line}.`);
     }
-    if (activeLines.has(sourceLine)) throw new Error(`LLVM lcov duplicated line ${sourceLine} for ${activePath}.`);
-    activeLines.set(sourceLine, count);
+    if (activeRecord.lines.has(sourceLine)) throw new Error(`LLVM lcov duplicated line ${sourceLine} for ${activePath}.`);
+    activeRecord.lines.set(sourceLine, count);
   }
   if (activePath !== null) throw new Error(`LLVM lcov source record was not terminated: ${activePath}.`);
   const missing = [...expected].filter(path => !files.has(path));
@@ -937,19 +1021,26 @@ export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = exp
   const uncoveredLines = [];
   const uncoveredBranches = [];
   for (const file of selected) {
-    const lineCounts = lineCoverage.get(resolve(file.filename).toLowerCase());
-    if (!(lineCounts instanceof Map)) throw new Error(`LLVM lcov omitted line counts for ${file.filename}.`);
+    const lineRecord = lineCoverage.get(resolve(file.filename).toLowerCase());
+    if (!lineRecord || !(lineRecord.lines instanceof Map)) throw new Error(`LLVM lcov omitted line counts for ${file.filename}.`);
+    const lineCounts = lineRecord.lines;
     const reportedLineCount = Number(file.summary.lines.count);
     const reportedCoveredLineCount = Number(file.summary.lines.covered);
-    if (lineCounts.size !== reportedLineCount) {
+    if (lineRecord.linesFound !== reportedLineCount || lineRecord.linesHit !== reportedCoveredLineCount) {
       throw new Error(`LLVM lcov line/summary mismatch for ${file.filename}: `
-        + `lcov identifies ${lineCounts.size} executable lines, summary identifies ${reportedLineCount}.`);
+        + `lcov LF/LH=${lineRecord.linesFound}/${lineRecord.linesHit}, `
+        + `summary=${reportedLineCount}/${reportedCoveredLineCount}.`);
+    }
+    if (lineCounts.size > lineRecord.linesFound) {
+      throw new Error(`LLVM lcov DA count exceeds LF for ${file.filename}: `
+        + `${lineCounts.size} > ${lineRecord.linesFound}.`);
     }
     const fileUncoveredLines = [...lineCounts].filter(([, count]) => count === 0);
-    const reportedUncoveredLineCount = reportedLineCount - reportedCoveredLineCount;
+    const reportedUncoveredLineCount = lineRecord.linesFound - lineRecord.linesHit;
     if (fileUncoveredLines.length !== reportedUncoveredLineCount) {
       throw new Error(`LLVM lcov line/summary mismatch for ${file.filename}: `
-        + `lcov identifies ${fileUncoveredLines.length} missed lines, summary identifies ${reportedUncoveredLineCount}.`);
+        + `DA identifies ${fileUncoveredLines.length} missed physical lines, `
+        + `LF-LH identifies ${reportedUncoveredLineCount}.`);
     }
     for (const [line] of fileUncoveredLines) uncoveredLines.push({ file: file.filename, line });
     for (const branch of normalizedBranchDetails(file)) {
@@ -1083,6 +1174,8 @@ async function microsoftCoverageProbe() {
 
 export async function runNativeWorldBackend(argv, dependencies = {}) {
   const options = parse(argv);
+  const testTimeoutSeconds = nativeTestTimeoutSeconds(options);
+  const coverageExecuteTimeoutMilliseconds = coverageExecutionTimeoutMilliseconds(options);
   const project = resolve(String(options.projectPath ?? defaultProject));
   const runName = String(options.runName ?? `n1-${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`);
   const output = resolve(project, String(options.outputDirectory ?? join('artifacts', 'native-world-backend', runName)));
@@ -1095,6 +1188,10 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     git: { commit: await gitText(project, ['rev-parse', 'HEAD']), branch: await gitText(project, ['branch', '--show-current']), statusBefore: await gitText(project, ['status', '--short']) },
     source: {}, projectInputs: {},
     dependency: {}, toolchainLock: {}, compiler: await findCompilerIdentity(), compilerAfter: null,
+    timeouts: {
+      nativeTestSeconds: testTimeoutSeconds,
+      coverageCoreExecuteMilliseconds: coverageExecuteTimeoutMilliseconds,
+    },
     configurations: [], installed: [], adapterSmoke: null, releaseAdapterSmoke: null, coverage: null,
   };
   try {
@@ -1157,11 +1254,13 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
       receipt.configurations.push(await buildAndTest({
         project, output, configuration, scons, compiler: receipt.compiler,
         projectInputs: receipt.projectInputs.before, source: receipt.source, dependency: receipt.dependency,
+        testTimeoutSeconds,
       }));
     }
     receipt.installed = await installExtensions(project, receipt.configurations, receipt.projectInputs.before, receipt.source);
     receipt.adapterSmoke = await runAdapterSmoke({
       project, output, toolchainLock: toolchainLockValue, projectInputs: receipt.projectInputs.before,
+      installed: receipt.installed,
     });
     receipt.releaseAdapterSmoke = await runReleaseAdapterSmoke({
       project, output, toolchainLock: toolchainLockValue, projectInputs: receipt.projectInputs.before,

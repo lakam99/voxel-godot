@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {runOwnedProcess} from './lib/owned-process.mjs';
+import {requireWorkerEvidenceContract} from './lib/native-tree-oracle-evidence.mjs';
 
 const scriptFile = fileURLToPath(import.meta.url);
 
@@ -34,7 +35,7 @@ function normalizedCounts(value) {
   return ['trunk', 'primary', 'secondary', 'tertiary', 'twig'].map(order => Number(value[order] ?? 0));
 }
 function normalizeRaw(row) {
-  return {
+  const normalized = {
     seed: Number(row.seed), maturity: Number(row.maturity), signature: row.signature,
     height: Number(row.height), trunkRadius: Number(row.trunkRadius), canopyRadius: Number(row.canopyRadius),
     crownBase: Number(row.crownBase), crownHeight: Number(row.crownHeight), branchCount: Number(row.branchCount),
@@ -47,6 +48,15 @@ function normalizeRaw(row) {
     branchSelectionHash: Number(row.branchSelectionHash), foliageSelectionHash: Number(row.foliageSelectionHash),
     branchHashCheckpoints: row.branchHashCheckpoints, foliageHashCheckpoints: row.foliageHashCheckpoints,
   };
+  // Shadow compilers may source-bind exact scalar/RNG/budget projections while
+  // deliberately omitting topology. Keep those extra facts in the shared
+  // attestation shape only when both oracle families emit them.
+  if (row.crownPhase !== undefined) normalized.crownPhase = Number(row.crownPhase);
+  if (row.crownCenter !== undefined) normalized.crownCenter = normalizeVector(row.crownCenter);
+  if (row.crownRadii !== undefined) normalized.crownRadii = normalizeVector(row.crownRadii);
+  if (row.growthProfile !== undefined) normalized.growthProfile = normalizeVector(row.growthProfile);
+  if (row.renderBudgets !== undefined) normalized.renderBudgets = normalizeVector(row.renderBudgets);
+  return normalized;
 }
 function normalizeVector(value) {
   return (value ?? []).map(Number);
@@ -75,7 +85,9 @@ function normalizeWorker(row, index) {
   const normalized = row.normalized ?? {}, policy = row.renderPolicy ?? {}, interaction = row.interaction ?? {};
   const review = Boolean(row.review ?? variation.presentation === 'review');
   return {
-    caseIndex: Number(row.caseIndex ?? index), signature: row.signature, topologySignature: row.topologySignature,
+    caseIndex: Number(row.caseIndex ?? index),
+    recipeIdentityKey: row.recipeIdentityKey, requestKey: row.requestKey,
+    signature: row.signature, topologySignature: row.topologySignature,
     sourceBranches: Number(row.sourceBranches), sourceFoliage: Number(row.sourceFoliage),
     branches: Number(row.branches), foliage: Number(row.foliage),
     branchSelectionHash: Number(row.branchSelectionHash), foliageSelectionHash: Number(row.foliageSelectionHash),
@@ -173,6 +185,7 @@ let execution = null;
 const sourceFiles = [projectScript(project, config.raw.godotScript), projectScript(project, config.worker.godotScript),
   ...config.authoritySources.map(file => path.join(project, ...file.split('/'))),
   ...config.nativeAuthoritySources.map(file => path.join(project, ...file.split('/'))),
+  path.join(project, 'tools/lib/native-tree-oracle-evidence.mjs'),
   path.join(project, 'tools/lib/owned-process.mjs'), path.join(project, 'tools/lib/owned-native-host.mjs'),
   path.join(project, 'tools/lib/owned-live-clock.mjs'), path.join(project, 'tools/native/OwnedProcessNative.cs'),
   path.join(project, 'tools/native/OwnedProcessHost.cs'), configFile, scriptFile];
@@ -226,6 +239,8 @@ if (rawGodot.length !== config.raw.expectedCases || rawNative.length !== config.
 if (workerGodot.length !== config.worker.expectedCases || workerNative.length !== config.worker.expectedCases) {
   throw new Error(`expected ${config.worker.expectedCases} worker rows, got Godot=${workerGodot.length} native=${workerNative.length}`);
 }
+requireWorkerEvidenceContract(workerGodot, config.worker.evidenceContract, 'Godot');
+requireWorkerEvidenceContract(workerNative, config.worker.evidenceContract, 'native');
 for (let index = 0; index < rawGodot.length; index += 1) exact(`raw case ${index}`, rawGodot[index], rawNative[index]);
 for (let index = 0; index < workerGodot.length; index += 1) exact(`worker case ${index}`, workerGodot[index], workerNative[index]);
 

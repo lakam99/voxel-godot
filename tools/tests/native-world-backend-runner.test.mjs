@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -10,8 +11,10 @@ import {
   assertNormalizedUpstreamTextIdentity,
   expectedToolchainLockValue,
   inventoryProjectBuildInputs,
+  nativeTestTimeoutSeconds,
   normalizedUpstreamTextSha256,
   releaseSaveV2ProbeChecks,
+  validateAdapterSmokeReport,
   validateInstalledProvenance,
   validateReleaseSaveV2ProbeReport,
   validateToolchainLockValue,
@@ -19,14 +22,89 @@ import {
 
 const project = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
-test('coverage execution timeout preserves the default and validates bounded per-run overrides', () => {
-  assert.equal(coverageExecutionTimeoutMilliseconds(), 120000);
+test('native test timeout has current-suite headroom and validates bounded per-run overrides', () => {
+  assert.equal(nativeTestTimeoutSeconds(), 300);
+  assert.equal(nativeTestTimeoutSeconds({ nativeTestTimeoutSeconds: 360 }), 360);
+  assert.equal(nativeTestTimeoutSeconds({ nativeTestTimeoutSeconds: '360' }), 360);
+  for (const value of ['', '300.5', 0, 901, null]) {
+    assert.throws(() => nativeTestTimeoutSeconds({ nativeTestTimeoutSeconds: value }),
+      /nativeTestTimeoutSeconds/);
+  }
+});
+
+test('coverage execution inherits the native test timeout and validates bounded overrides', () => {
+  assert.equal(coverageExecutionTimeoutMilliseconds(), 300000);
+  assert.equal(coverageExecutionTimeoutMilliseconds({ nativeTestTimeoutSeconds: 360 }), 360000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: 300000 }), 300000);
+  assert.equal(coverageExecutionTimeoutMilliseconds({
+    nativeTestTimeoutSeconds: 360,
+    coverageExecuteTimeoutMs: 420000,
+  }), 420000);
   assert.equal(coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: '300000' }), 300000);
   for (const value of ['', '300000.5', 999, 900001, 1500, null]) {
     assert.throws(() => coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: value }),
       /coverageExecuteTimeoutMs/);
   }
+});
+
+function validAdapterSmokeReport() {
+  const extensionPath = 'res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension';
+  return {
+    schema: 'native-world-backend-adapter-smoke-report/v1', passed: true,
+    extensionPath, resourceExists: true, extensionManagerSingleton: true,
+    explicitLoadStatus: 0, loadedExtensions: [extensionPath],
+    classExists: true, instantiated: true, n3OwnerClassExists: true, n3PageClassExists: true,
+    core: {
+      schema: 'native-world-backend-adapter-smoke/v1', floorDivide: -2, euclideanModulo: 15,
+      emptySeedHash: 2166136261, coreLinked: true,
+      sourceDigest: 'abbd66bd21010fe6f0a4b9406264fdefefa05bc793ed8a27ce2c7c59424736bf',
+    },
+    n3OwnerStatus: {
+      schema: 'n3-native-world-backend-adapter/v1', status: 'uninitialized',
+      shadowOnly: true, productionCutover: false,
+    },
+    engineVersion: {
+      major: expectedToolchainLockValue.godot.major, minor: expectedToolchainLockValue.godot.minor,
+      patch: expectedToolchainLockValue.godot.patch, status: expectedToolchainLockValue.godot.status,
+      hash: expectedToolchainLockValue.godot.engineCommitSha,
+    },
+  };
+}
+
+test('adapter smoke validation requires exact explicit-load and adapter evidence', () => {
+  const valid = validAdapterSmokeReport();
+  assert.equal(validateAdapterSmokeReport(valid), valid);
+  assert.doesNotThrow(() => validateAdapterSmokeReport({ ...valid, explicitLoadStatus: 2 }));
+  for (const mutate of [
+    value => { value.passed = false; },
+    value => { value.extensionPath = 'res://addons/wrong.gdextension'; },
+    value => { value.resourceExists = false; },
+    value => { value.extensionManagerSingleton = false; },
+    value => { value.explicitLoadStatus = 1; },
+    value => { value.loadedExtensions = []; },
+    value => { value.classExists = false; },
+    value => { value.core.coreLinked = false; },
+    value => { value.n3OwnerStatus.productionCutover = true; },
+  ]) {
+    const fabricated = structuredClone(valid);
+    mutate(fabricated);
+    assert.throws(() => validateAdapterSmokeReport(fabricated), /adapter smoke report is invalid/);
+  }
+  const wrongVersion = structuredClone(valid);
+  wrongVersion.engineVersion.hash = 'wrong';
+  assert.throws(() => validateAdapterSmokeReport(wrongVersion), /runtime version/);
+});
+
+test('adapter smoke source explicitly loads the exact frozen extension before class checks', () => {
+  const source = readFileSync(resolve(project,
+    'scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'), 'utf8');
+  assert.match(source,
+    /const EXTENSION_PATH := "res:\/\/addons\/terrain_meshing_backend\/terrain_meshing_backend\.gdextension"/);
+  const load = source.indexOf('manager.call("load_extension", EXTENSION_PATH)');
+  const classQuery = source.indexOf('ClassDB.class_exists("TerrainMeshingBackend")');
+  assert(load >= 0 && classQuery > load);
+  assert.match(source, /explicit_load_status in \[EXTENSION_LOAD_STATUS_OK, EXTENSION_LOAD_STATUS_ALREADY_LOADED\]/);
+  assert.match(source, /EXTENSION_PATH in loaded_extensions/);
 });
 
 test('pinned upstream text identity normalizes CRLF only and rejects changed content', () => {
@@ -61,21 +139,39 @@ function coverageExport(filename, branches) {
   };
 }
 
-function lineCoverage(filename, records = ['DA:6,1']) {
-  return parseLcovLineCoverage([`SF:${filename}`, ...records, 'end_of_record', ''].join('\n'), [filename]);
+function lineCoverage(filename, records = ['DA:6,1'], linesFound, linesHit) {
+  const da = records.filter(record => record.startsWith('DA:'));
+  const found = linesFound ?? da.length;
+  const hit = linesHit ?? da.filter(record => Number(record.slice(3).split(',')[1]) > 0).length;
+  return parseLcovLineCoverage(
+    [`SF:${filename}`, ...records, `LF:${found}`, `LH:${hit}`, 'end_of_record', ''].join('\n'), [filename]);
 }
 
-test('LLVM lcov parser normalizes paths and fails closed on missing, duplicate, or invalid line records', () => {
+test('LLVM lcov parser normalizes paths and fails closed on malformed records and LF/LH', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
-  const normalized = parseLcovLineCoverage(
-    [`SF:${filename.toUpperCase()}`, 'DA:6,0', 'end_of_record', ''].join('\n'), [filename]);
-  assert.equal(normalized.get(filename.toLowerCase()).get(6), 0);
+  const normalized = lineCoverage(filename.toUpperCase(), ['DA:6,0']);
+  assert.equal(normalized.get(filename.toLowerCase()).lines.get(6), 0);
+  assert.equal(normalized.get(filename.toLowerCase()).linesFound, 1);
+  assert.equal(normalized.get(filename.toLowerCase()).linesHit, 0);
   assert.throws(() => parseLcovLineCoverage('', [filename]), /lcov line export is empty/);
-  assert.throws(() => parseLcovLineCoverage('SF:C:/n1/other.cpp\nDA:6,1\nend_of_record\n', [filename]), /omitted expected/);
+  assert.throws(() => parseLcovLineCoverage('SF:C:/n1/other.cpp\nDA:6,1\nLF:1\nLH:1\nend_of_record\n', [filename]), /omitted expected/);
   assert.throws(() => parseLcovLineCoverage(
-    [`SF:${filename}`, 'DA:6,0', 'DA:6,1', 'end_of_record', ''].join('\n'), [filename]), /duplicated line/);
+    [`SF:${filename}`, 'DA:6,0', 'DA:6,1', 'LF:1', 'LH:0', 'end_of_record', ''].join('\n'), [filename]), /duplicated line/);
   assert.throws(() => parseLcovLineCoverage(
-    [`SF:${filename}`, 'DA:0,-1', 'end_of_record', ''].join('\n'), [filename]), /invalid DA record/);
+    [`SF:${filename}`, 'DA:0,-1', 'LF:1', 'LH:0', 'end_of_record', ''].join('\n'), [filename]), /invalid DA record/);
+  for (const records of [
+    ['DA:6,1', 'LH:1'],
+    ['DA:6,1', 'LF:1'],
+    ['DA:6,1', 'LF:1', 'LF:1', 'LH:1'],
+    ['DA:6,1', 'LF:1', 'LH:1', 'LH:1'],
+    ['DA:6,1', 'LF:x', 'LH:1'],
+    ['DA:6,1', 'LF:1', 'LH:-1'],
+    ['DA:6,1', 'LF:9007199254740992', 'LH:1'],
+    ['DA:6,1', 'LF:1', 'LH:2'],
+  ]) {
+    assert.throws(() => parseLcovLineCoverage(
+      [`SF:${filename}`, ...records, 'end_of_record', ''].join('\n'), [filename]), /LF|LH/);
+  }
 });
 
 test('LLVM 23 branch tuple reads independent true and false edge counts', () => {
@@ -117,14 +213,20 @@ test('LLVM uncovered line serialization rejects disagreement with the authoritat
   assert.throws(() => coverageTotals(value, [filename], [filename], lineCoverage(filename)), /lcov line\/summary mismatch/);
 });
 
-test('LLVM lcov line serialization rejects omitted covered line records', () => {
+test('LLVM lcov line serialization accepts sparse covered DA and rejects zero-count or LF bounds disagreement', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
   const value = coverageExport(filename, []);
+  value.data[0].files[0].summary.lines = { count: 2, covered: 2 };
+  assert.doesNotThrow(() => coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,4'], 2, 2)));
   value.data[0].files[0].summary.lines = { count: 2, covered: 1 };
-  // The one uncovered record still agrees with LLVM's uncovered count, but a
-  // covered DA record is missing, so the per-file total must fail closed.
+  assert.deepEqual(coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,0'], 2, 1)).uncovered.lines, [{ file: filename, line: 10 }]);
   assert.throws(() => coverageTotals(value, [filename], [filename],
-    lineCoverage(filename, ['DA:10,0'])), /lcov line\/summary mismatch.*executable lines/);
+    lineCoverage(filename, ['DA:10,4'], 2, 1)), /DA identifies 0 missed physical lines/);
+  value.data[0].files[0].summary.lines = { count: 1, covered: 1 };
+  assert.throws(() => coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,1', 'DA:11,1'], 1, 1)), /DA count exceeds LF/);
 });
 
 test('LLVM branch tuple rejects invalid edge counts', () => {
