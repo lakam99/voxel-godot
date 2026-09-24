@@ -201,6 +201,55 @@ func required_collision_mesh_blocks() -> Dictionary:
 	return {"status":"ready", "revision":_demand_revision,
 		"closureToken":_closure_token, "blocks":blocks}
 
+## Starts an incremental, revision-bound copy/sort of the accepted mesh demand.
+## The returned blocks array is transferred to the caller; do not mutate it.
+func begin_required_collision_mesh_blocks() -> Dictionary:
+	if _consumer_id <= 0 or _demand_revision <= 0:
+		return {"status":"pending", "reason":"mesh_demand_unset"}
+	if _incremental_active:
+		return {"status":"pending", "reason":"demand_replacement_active"}
+	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
+		return {"status":"pending", "reason":"mesh_snapshot_transaction_active",
+			"token":_mesh_layout_builder.current_token()}
+	_mesh_layout_lease = MESH_LAYOUT_LEASE.new()
+	var required_order: Array = _accepted_plan.get("requiredOrder", [])
+	if not _mesh_layout_lease.acquire(required_order, _demand_revision, _closure_token):
+		_mesh_layout_lease = null
+		return {"status":"failed", "reason":"mesh_snapshot_lease_failed"}
+	var started: Dictionary = _mesh_layout_builder.begin_required_blocks(
+		required_order, _demand_revision, _closure_token, _mesh_layout_lease)
+	if started.get("status") != "pending":
+		_mesh_layout_lease.release_after_drain()
+		_mesh_layout_lease = null
+	return started
+
+func advance_required_collision_mesh_blocks() -> Dictionary:
+	return _advance_mesh_snapshot("requiredBlocks")
+
+func _advance_mesh_snapshot(expected_kind: String) -> Dictionary:
+	if _mesh_layout_builder == null:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	if _mesh_layout_builder.is_active() \
+			and _mesh_layout_builder.current_kind() != expected_kind:
+		return {"status":"failed", "reason":"mesh_snapshot_kind_mismatch"}
+	_mesh_layout_builder.revoke_if_stale(
+		_accepted_plan.get("requiredOrder", []), _demand_revision, _closure_token)
+	var result: Dictionary = _mesh_layout_builder.advance()
+	if result.get("status") == "ready" or result.get("status") == "failed":
+		if _mesh_layout_lease != null:
+			_mesh_layout_lease.release_after_drain()
+		_mesh_layout_lease = null
+	return result
+
+func cancel_required_collision_mesh_blocks(token: int) -> Dictionary:
+	if _mesh_layout_builder == null \
+			or _mesh_layout_builder.current_kind() != "requiredBlocks":
+		return {"status":"failed", "reason":"mesh_snapshot_token_stale"}
+	var result: Dictionary = _mesh_layout_builder.cancel(token)
+	if result.get("status") == "pending" and _mesh_layout_lease != null:
+		_mesh_layout_lease.invalidate()
+	return result
+
 ## Begins a bounded replacement transaction for the full logical mesh layout.
 ## The final `layout` value is transferred to the caller; do not mutate it.
 func begin_collision_mesh_window_layout() -> Dictionary:
@@ -208,7 +257,7 @@ func begin_collision_mesh_window_layout() -> Dictionary:
 		return {"status":"pending", "reason":"mesh_demand_unset"}
 	if _incremental_active:
 		return {"status":"pending", "reason":"demand_replacement_active"}
-	if _mesh_layout_builder.is_active():
+	if _mesh_layout_builder.is_active() or _mesh_layout_builder.has_pending_retirement():
 		return {"status":"pending", "reason":"mesh_layout_already_pending",
 			"token":_mesh_layout_builder.current_token()}
 	if not _mesh_window_layout.is_empty() \
@@ -229,19 +278,10 @@ func begin_collision_mesh_window_layout() -> Dictionary:
 	return started
 
 func advance_collision_mesh_window_layout() -> Dictionary:
-	if _mesh_layout_builder == null:
-		return {"status":"failed", "reason":"planner_not_configured"}
-	_mesh_layout_builder.revoke_if_stale(
-		_accepted_plan.get("requiredOrder", []), _demand_revision, _closure_token)
-	var result: Dictionary = _mesh_layout_builder.advance()
-	if result.get("status") == "ready" or result.get("status") == "failed":
-		if _mesh_layout_lease != null:
-			_mesh_layout_lease.release_after_drain()
-		_mesh_layout_lease = null
-	return result
+	return _advance_mesh_snapshot("layout")
 
 func cancel_collision_mesh_window_layout(token: int) -> Dictionary:
-	if _mesh_layout_builder == null:
+	if _mesh_layout_builder == null or _mesh_layout_builder.current_kind() != "layout":
 		return {"status":"failed", "reason":"planner_not_configured"}
 	var result: Dictionary = _mesh_layout_builder.cancel(token)
 	if result.get("status") == "pending" and _mesh_layout_lease != null:

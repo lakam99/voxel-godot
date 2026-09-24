@@ -15,6 +15,14 @@ var _retired_work: Dictionary = {}
 var _next_token := 1
 
 func begin(required_order: Array, revision: int, closure_token: String, lease) -> Dictionary:
+	return _begin(required_order, revision, closure_token, lease, "layout")
+
+func begin_required_blocks(required_order: Array, revision: int,
+		closure_token: String, lease) -> Dictionary:
+	return _begin(required_order, revision, closure_token, lease, "requiredBlocks")
+
+func _begin(required_order: Array, revision: int, closure_token: String,
+		lease, kind: String) -> Dictionary:
 	if revision <= 0:
 		return {"status":"failed", "reason":"mesh_demand_unset"}
 	if lease == null or not lease.has_method("is_valid_for") \
@@ -29,8 +37,9 @@ func begin(required_order: Array, revision: int, closure_token: String, lease) -
 			"token":int(_job.get("token", 0))}
 	var token := _next_token
 	_next_token += 1
-	_start(required_order, revision, closure_token, lease, token)
-	return {"status":"pending", "reason":"mesh_layout_started", "token":token,
+	_start(required_order, revision, closure_token, lease, token, kind)
+	return {"status":"pending", "reason":"mesh_layout_started" if kind == "layout" \
+		else "required_mesh_blocks_started", "token":token,
 		"maxWorkOpsPerAdvance":MAX_WORK_OPS_PER_ADVANCE}
 
 func cancel(token: int) -> Dictionary:
@@ -50,6 +59,9 @@ func is_active() -> bool:
 
 func current_token() -> int:
 	return int(_job.get("token", 0)) if is_active() else 0
+
+func current_kind() -> String:
+	return String(_job.get("kind", "")) if is_active() else ""
 
 func is_valid_for(required_order: Array, revision: int, closure_token: String) -> bool:
 	return is_active() and is_same(_job.get("input", []), required_order) \
@@ -121,6 +133,12 @@ func advance() -> Dictionary:
 			continue
 		if step.get("status") == "ready":
 			var token := int(_job.token)
+			if String(_job.kind) == "requiredBlocks":
+				var required: Dictionary = _take_required_blocks()
+				return _result({"status":"ready", "token":token,
+					"revision":int(required.revision),
+					"closureToken":String(required.closureToken),
+					"blocks":required.blocks}, work_ops, counts)
 			var layout: Dictionary = _take_layout()
 			return _result({"status":"ready", "token":token,
 				"revision":int(layout.logicalDemandRevision),
@@ -131,8 +149,9 @@ func advance() -> Dictionary:
 	return _result({"status":"pending", "reason":"mesh_layout_work_pending",
 		"token":int(_job.get("token", 0))}, work_ops, counts)
 
-func _start(required_order: Array, revision: int, closure_token: String, lease, token: int) -> void:
-	_job = {"state":"building", "phase":"copy", "token":token,
+func _start(required_order: Array, revision: int, closure_token: String, lease,
+		token: int, kind: String) -> void:
+	_job = {"state":"building", "phase":"copy", "kind":kind, "token":token,
 		"input":required_order, "revision":revision, "closureToken":closure_token,
 		"lease":lease,
 		"inputCursor":0, "requiredBlocks":[], "windowIds":[], "buckets":{},
@@ -159,7 +178,16 @@ func _copy_step(job: Dictionary) -> Dictionary:
 	if cursor >= source.size():
 		_begin_sort(job, "required")
 		return {"status":"pending", "work":false}
+	if String(job.kind) == "requiredBlocks" \
+			and int(job.requiredBlocks.size()) >= MAX_REQUIRED_MESH_BLOCKS:
+		return {"status":"failed", "reason":"mesh_window_capacity_invalid", "work":false}
 	var block: Vector3i = source[cursor]
+	if String(job.kind) == "requiredBlocks":
+		var output: Array = job.requiredBlocks
+		output.append(block)
+		job.requiredBlocks = output
+		job.inputCursor = cursor + 1
+		return {"status":"pending", "work":true, "bucket":"inputBlocks"}
 	var window := Vector3i(floori(float(block.x) / WINDOW_EDGE_BLOCKS),
 		floori(float(block.y) / WINDOW_EDGE_BLOCKS),
 		floori(float(block.z) / WINDOW_EDGE_BLOCKS))
@@ -258,7 +286,10 @@ func _finish_sort(job: Dictionary, sorted: Array) -> void:
 	match String(job.sortTarget):
 		"required":
 			job.requiredBlocks = sorted
-			_begin_sort(job, "ids")
+			if String(job.kind) == "requiredBlocks":
+				job.phase = "ready"
+			else:
+				_begin_sort(job, "ids")
 		"ids":
 			job.windowIds = sorted
 			job.windowCursor = 0
@@ -332,6 +363,14 @@ func _take_layout() -> Dictionary:
 		"sortDst":_job.sortDst}
 	_job = {"state":"transferred"}
 	return layout
+
+func _take_required_blocks() -> Dictionary:
+	var result := {"revision":int(_job.revision),
+		"closureToken":String(_job.closureToken),
+		"blocks":_job.requiredBlocks}
+	_retired_work = {}
+	_job = {"state":"transferred"}
+	return result
 
 func _retire_work_one() -> void:
 	var buckets: Dictionary = _retired_work.get("buckets", {})

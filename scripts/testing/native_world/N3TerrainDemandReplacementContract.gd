@@ -2,6 +2,8 @@ extends SceneTree
 
 const PLANNER := preload("res://scripts/terrain/NativeTerrainDemandPlanner.gd")
 const LEASE := preload("res://scripts/terrain/NativeTerrainDemandRequestLease.gd")
+const MESH_LEASE := preload("res://scripts/terrain/NativeTerrainMeshLayoutRequestLease.gd")
+const MESH_BUILDER := preload("res://scripts/terrain/NativeTerrainCollisionMeshLayoutBuilder.gd")
 const WORK_LIMIT := 256
 
 var failures: Array[String] = []
@@ -97,6 +99,31 @@ func _drive_layout(planner, snapshot: Dictionary = {}, max_advances := 20000) ->
 			return result
 		await process_frame
 	return {"status":"timeout", "reason":"mesh_layout_contract_timeout"}
+
+func _required_step(planner, snapshot: Dictionary = {}) -> Dictionary:
+	var result: Dictionary = planner.advance_required_collision_mesh_blocks()
+	var work_ops := int(result.get("workOps", -1))
+	advance_count += 1
+	check(work_ops >= 0 and work_ops <= WORK_LIMIT
+		and int(result.get("maxWorkOps", -1)) == WORK_LIMIT,
+		"required-block advance, including terminal ticks, respects the hard work bound")
+	check(_sum_breakdown(result) == work_ops,
+		"required-block work breakdown exactly accounts for every operation")
+	observed_max_work_ops = maxi(observed_max_work_ops, work_ops)
+	total_work_ops += maxi(0, work_ops)
+	if not snapshot.is_empty():
+		_assert_snapshot(planner, snapshot,
+			"required-block copy/sort and cancellation leave accepted demand unchanged")
+	return result
+
+func _drive_required(planner, snapshot: Dictionary = {}, max_advances := 20000) -> Dictionary:
+	var result := {}
+	for _index in range(max_advances):
+		result = _required_step(planner, snapshot)
+		if result.get("status") == "ready" or result.get("status") == "failed":
+			return result
+		await process_frame
+	return {"status":"timeout", "reason":"required_blocks_contract_timeout"}
 
 func _make_request(primary: Dictionary = {}, viewers: Array[Dictionary] = [],
 		retained: Array[Vector2i] = [], foreground: Array[Vector2i] = [],
@@ -333,6 +360,95 @@ func run() -> void:
 	check(not layout_planner._mesh_layout_builder.has_pending_retirement(),
 		"transferred layout scratch is released incrementally after atomic publication")
 
+	# Full demanded-mesh enumeration now uses the same bounded incremental
+	# snapshot machinery while preserving the compatibility method's exact list.
+	var required_snapshot := _accepted_snapshot(layout_planner)
+	var expected_required: Dictionary = layout_planner.required_collision_mesh_blocks()
+	var required_begin: Dictionary = layout_planner.begin_required_collision_mesh_blocks()
+	check(required_begin.get("status") == "pending",
+		"required-block enumeration begins under a revision/token-bound lease")
+	for _index in range(2):
+		var partial_required: Dictionary = _required_step(layout_planner, required_snapshot)
+		check(partial_required.get("status") == "pending",
+			"required-block snapshot remains pending across bounded construction steps")
+		await process_frame
+	var cancelled_required_begin: Dictionary = layout_planner.cancel_required_collision_mesh_blocks(
+		int(required_begin.token))
+	var cancelled_required: Dictionary = await _drive_required(layout_planner, required_snapshot)
+	check(cancelled_required_begin.get("status") == "pending"
+		and cancelled_required.get("status") == "ready"
+		and cancelled_required.get("cancelled") == true,
+		"required-block cancellation incrementally drains copied and bucket entries")
+	var required_retire_steps := 0
+	while layout_planner._mesh_layout_builder.has_pending_retirement() \
+			and required_retire_steps < 20000:
+		_required_step(layout_planner, required_snapshot)
+		required_retire_steps += 1
+		await process_frame
+	check(not layout_planner._mesh_layout_builder.has_pending_retirement(),
+		"cancelled required-block scratch fully retires before another snapshot begins")
+	var retry_required_begin: Dictionary = layout_planner.begin_required_collision_mesh_blocks()
+	var retry_required: Dictionary = await _drive_required(layout_planner, required_snapshot)
+	check(retry_required_begin.get("status") == "pending"
+		and retry_required.get("status") == "ready"
+		and retry_required.get("blocks") == expected_required.get("blocks")
+		and retry_required.get("revision") == expected_required.get("revision")
+		and retry_required.get("closureToken") == expected_required.get("closureToken"),
+		"required-block retry exactly matches synchronous sorted blocks and revision identity")
+	while layout_planner._mesh_layout_builder.has_pending_retirement() \
+			and required_retire_steps < 40000:
+		_required_step(layout_planner, required_snapshot)
+		required_retire_steps += 1
+		await process_frame
+	check(not layout_planner._mesh_layout_builder.has_pending_retirement(),
+		"published required-block builder scratch retires incrementally")
+
+	# Revoking the accepted request lease during a snapshot must fail that
+	# candidate without changing the last accepted demand identity.
+	var before_required_revoke := _accepted_snapshot(layout_planner)
+	var revoked_required_begin: Dictionary = layout_planner.begin_required_collision_mesh_blocks()
+	_required_step(layout_planner, before_required_revoke)
+	layout_planner._mesh_layout_lease.invalidate()
+	var revoked_required: Dictionary = await _drive_required(layout_planner,
+		before_required_revoke)
+	check(revoked_required_begin.get("status") == "pending"
+		and revoked_required.get("status") == "failed"
+		and revoked_required.get("reason") == "mesh_layout_snapshot_revoked",
+		"required-block builder rejects revoked demand revision/token leases")
+	check(not layout_planner._mesh_layout_builder.has_pending_retirement(),
+		"revoked required-block candidate is fully drained before returning terminal failure")
+
+	# Exercise the required-set hard capacity separately with a bounded builder
+	# fixture; no planner accepted state is altered by this synthetic input.
+	var oversized_order: Array[Vector3i] = []
+	for block_index in range(32769):
+		oversized_order.append(Vector3i(block_index, 0, 0))
+	var capacity_lease = MESH_LEASE.new()
+	capacity_lease.acquire(oversized_order, 1, "capacity-fixture")
+	var capacity_builder = MESH_BUILDER.new()
+	var mesh_capacity_begin: Dictionary = capacity_builder.begin_required_blocks(
+		oversized_order, 1, "capacity-fixture", capacity_lease)
+	var mesh_capacity_result := {}
+	var capacity_advances := 0
+	while capacity_advances < 1000:
+		mesh_capacity_result = capacity_builder.advance()
+		capacity_advances += 1
+		var capacity_work := int(mesh_capacity_result.get("workOps", -1))
+		check(capacity_work >= 0 and capacity_work <= WORK_LIMIT
+			and int(mesh_capacity_result.get("maxWorkOps", -1)) == WORK_LIMIT,
+			"capacity and retirement advances respect the hard work bound")
+		check(_sum_breakdown(mesh_capacity_result) == capacity_work,
+			"capacity work breakdown exactly accounts for every operation")
+		observed_max_work_ops = maxi(observed_max_work_ops, capacity_work)
+		total_work_ops += maxi(0, capacity_work)
+		if mesh_capacity_result.get("status") == "failed": break
+		await process_frame
+	check(mesh_capacity_begin.get("status") == "pending"
+		and mesh_capacity_result.get("status") == "failed"
+		and mesh_capacity_result.get("reason") == "mesh_window_capacity_invalid"
+		and not capacity_builder.has_pending_retirement(),
+		"required-block total capacity rejects oversized input after fully bounded drain")
+
 	var report := {"schema":"n3-terrain-demand-replacement-contract/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
 		"evidenceLevel":"focused incremental pure planner contract",
@@ -350,9 +466,14 @@ func run() -> void:
 			"revocationRejected":revoked.get("reason") == "demand_request_lease_revoked",
 			"layoutCancelAndRetry":cancelled_layout.get("cancelled", false)
 				and retry_layout.get("layout") == expected_layout,
-			"layoutRetirementDrained":not layout_planner._mesh_layout_builder.has_pending_retirement()},
+			"layoutRetirementDrained":not layout_planner._mesh_layout_builder.has_pending_retirement(),
+			"requiredBlocksCancelAndRetry":cancelled_required.get("cancelled", false)
+				and retry_required.get("blocks") == expected_required.get("blocks"),
+			"requiredBlocksRevisionLeaseRejected":revoked_required.get("reason") == "mesh_layout_snapshot_revoked",
+			"requiredBlocksCapacityDrained":mesh_capacity_result.get("reason") == "mesh_window_capacity_invalid"
+				and not capacity_builder.has_pending_retirement()},
 		"boundedWorkFollowUps":[
-			"required_collision_mesh_blocks() still copies and sorts the entire demanded mesh set synchronously; current consumers include NativeTerrainTriangleArtifactProducer and NativeTerrainArtifactRequests.",
+			"Production consumers still call the synchronous required_collision_mesh_blocks() compatibility method; migrate NativeTerrainTriangleArtifactProducer and NativeTerrainArtifactRequests to the staged API before VTR wiring.",
 			"The legacy collision_mesh_window_layout() compatibility method remains synchronous. Migrate callers to begin/advance_collision_mesh_window_layout() before VTR wiring."],
 		"doesNotProve":"No VoxelTerrain/runtime integration, page/queue admission, publication/collision, or headed gameplay/performance acceptance."}
 	var report_path := OS.get_environment("VWB_TERRAIN_DEMAND_REPLACEMENT_REPORT")
