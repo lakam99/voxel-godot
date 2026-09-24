@@ -199,7 +199,10 @@ inheritance path reached by the probe, and the direct/transitive visual-registry
 tree recipe, grammar, factory and shader inputs. It also freezes the exact
 Terrain Meshing debug DLL and Voxel Tools editor DLL.
 
-All eleven consumed GLB descriptors are parsed rather than guessed. The runner
+All eighteen consumed GLB descriptors are parsed rather than guessed: thirteen
+runtime non-tree scenes selected by `VisualAssetRegistry.setup()` from the
+visual manifest (six rocks, four bushes and three stump/log assets), plus the
+five animated-registry scenes exercised by the probe. The runner
 requires their exact referenced `.godot/imported/*.scn` files to exist and
 hashes each imported PackedScene before and after the run; descriptor target
 changes, missing artifacts and byte drift fail the receipt. The external Godot
@@ -228,7 +231,7 @@ launch/completion timestamps, Windows Job Object ownership authority, natural
 root exit and authoritative zero membership.
 
 Focused Node command `node --test
-tools/tests/n4-underground-prop-source-evidence.test.mjs` passes `10/10`. These
+tools/tests/n4-underground-prop-source-evidence.test.mjs` passes `11/11`. These
 tests cover complete source/build expansion, imported-artifact resolution and
 missing/path-mismatch rejection, runtime binary/version identity, clean-status
 rejection, concurrent zero-launch exclusion, release/reacquire, stale-owner

@@ -7,8 +7,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { acquireN4UndergroundPropLease, assertN4CleanGitState,
   expandN4UndergroundPropSourcePaths, godotCompanionExecutable,
-  n4GitState, n4GodotRuntimeInventory, N4_UNDERGROUND_PROP_SOURCE_PATHS,
-  n4UndergroundPropWatchdogIdentity, n4WindowsCommandLine, resolveN4ImportedArtifacts,
+  expandN4ResourceDependencyClosure,
+  n4GitState, n4GodotRuntimeInventory,
+  n4UndergroundPropWatchdogIdentity, n4VisualRegistryRuntimeScenePaths,
+  n4WindowsCommandLine, resolveN4ImportedArtifacts,
   withN4UndergroundPropLease } from '../lib/n4-underground-prop-source-evidence.mjs';
 
 const project = fileURLToPath(new URL('../../', import.meta.url));
@@ -79,11 +81,16 @@ test('N4 exact command reconstruction matches Windows CreateProcess quoting', ()
   '"C:\\Program Files\\Godot.exe" --path "C:\\a path\\\\" "quoted\\"value" ""');
 });
 
-test('N4 source freeze pairs every consumed generated scene with its import descriptor', () => {
-  const scenes = N4_UNDERGROUND_PROP_SOURCE_PATHS.filter(path => path.endsWith('.glb'));
-  assert.equal(scenes.length, 11);
+test('N4 source freeze pairs every consumed generated scene with its import descriptor', async () => {
+  const paths = await expandN4UndergroundPropSourcePaths(project);
+  const scenes = paths.filter(path => path.endsWith('.glb'));
+  assert.equal(scenes.length, 18);
   for (const scene of scenes)
-    assert.ok(N4_UNDERGROUND_PROP_SOURCE_PATHS.includes(`${scene}.import`), scene);
+    assert.ok(paths.includes(`${scene}.import`), scene);
+  const registryScenes = await n4VisualRegistryRuntimeScenePaths(project);
+  assert.equal(registryScenes.filter(path => path.endsWith('.glb')).length, 13);
+  for (const id of ['bush_01', 'bush_04', 'stump_log_01', 'stump_log_03'])
+    assert.ok(registryScenes.includes(`assets/visual/generated/environment/${id}.glb`));
 });
 
 test('N4 source inventory expands all manifest groups and extension build inputs', async () => {
@@ -102,11 +109,28 @@ test('N4 source inventory expands all manifest groups and extension build inputs
     assert.ok(paths.includes(path), path);
 });
 
+test('N4 resource inventory recursively closes preload, extends, and resource paths', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'n4-resource-closure-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'scripts/sub'), { recursive: true });
+  await mkdir(join(root, 'resources'), { recursive: true });
+  await writeFile(join(root, 'scripts/main.gd'), 'extends "res://scripts/base.gd"\nconst D = preload("res://scripts/sub/dep.gd")\nvar dynamic = "res://%s" % name\n# const ignored = preload("res://scripts/commented-out.gd")\n');
+  await writeFile(join(root, 'scripts/base.gd'), 'extends RefCounted\n');
+  await writeFile(join(root, 'scripts/sub/dep.gd'), 'const R = preload("res://resources/item.tres")\n');
+  await writeFile(join(root, 'resources/item.tres'), '[resource]\nscript = ExtResource("1")\n[ext_resource path="res://scripts/base.gd" type="Script" id="1"]\n');
+  const closure = await expandN4ResourceDependencyClosure(root, ['scripts/main.gd']);
+  assert.deepEqual(closure, ['resources/item.tres', 'scripts/base.gd',
+    'scripts/main.gd', 'scripts/sub/dep.gd']);
+  await rm(join(root, 'scripts/base.gd'));
+  await assert.rejects(expandN4ResourceDependencyClosure(root, ['scripts/main.gd']),
+    /Missing res dependency/);
+});
+
 test('N4 imported artifact resolution binds descriptor path and required artifact', async t => {
   const root = await mkdtemp(join(tmpdir(), 'n4-import-test-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const paths = [];
-  for (let index = 0; index < 11; index++) {
+  for (let index = 0; index < 18; index++) {
     const descriptor = `asset-${index}.glb.import`;
     const artifact = `.godot/imported/asset-${index}.scn`;
     paths.push(descriptor);
@@ -115,7 +139,7 @@ test('N4 imported artifact resolution binds descriptor path and required artifac
     await writeFile(join(root, artifact), `artifact-${index}`);
   }
   const resolved = await resolveN4ImportedArtifacts(root, paths);
-  assert.equal(resolved.length, 11);
+  assert.equal(resolved.length, 18);
   await rm(join(root, resolved[0]));
   await assert.rejects(resolveN4ImportedArtifacts(root, paths), /Missing imported PackedScene/);
   await writeFile(join(root, resolved[0]), 'restored');

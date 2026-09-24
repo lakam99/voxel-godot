@@ -83,11 +83,6 @@ export const N4_UNDERGROUND_PROP_SOURCE_PATHS = Object.freeze([
     .map(name => `resources/visual/biomes/${name}.tres`),
   'scripts/visual/VisualAssetRegistry.gd',
   'assets/visual/generated/visual-manifest.json',
-  ...Array.from({ length: 6 }, (_, index) => {
-    const suffix = String(index + 1).padStart(2, '0');
-    return [`assets/visual/generated/environment/rock_${suffix}.glb`,
-      `assets/visual/generated/environment/rock_${suffix}.glb.import`];
-  }).flat(),
   'scripts/visual/AnimatedAssetRegistry.gd',
   ...['door_open_close', 'chest_open_close', 'boar_idle_walk', 'deer_idle_walk',
     'hare_idle_walk'].flatMap(name => [`assets/generated/animated/${name}.glb`,
@@ -131,6 +126,101 @@ async function extensionInputs(project) {
   return paths.sort();
 }
 
+const resourceTextExtensions = new Set(['.gd', '.tres', '.tscn', '.gdshader', '.godot']);
+const extensionOf = path => {
+  const slashIndex = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+  const dotIndex = path.lastIndexOf('.');
+  return dotIndex > slashIndex ? path.slice(dotIndex).toLowerCase() : '';
+};
+const stripGdComments = text => {
+  let result = '', quote = null, escaped = false;
+  for (let index = 0; index < text.length; index++) {
+    const character = text[index];
+    if (quote !== null) {
+      result += character;
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      result += character;
+      continue;
+    }
+    if (character === '#') {
+      while (index < text.length && text[index] !== '\n') index++;
+      if (index < text.length) result += '\n';
+      continue;
+    }
+    result += character;
+  }
+  return result;
+};
+
+export async function expandN4ResourceDependencyClosure(project, initialPaths) {
+  const seen = new Set(initialPaths);
+  const queue = [...initialPaths];
+  for (let index = 0; index < queue.length; index++) {
+    const owner = queue[index];
+    if (!resourceTextExtensions.has(extensionOf(owner))) continue;
+    const rawText = await readFile(join(project, owner), 'utf8');
+    const text = extensionOf(owner) === '.gd' ? stripGdComments(rawText) : rawText;
+    const dependencies = new Set();
+    const patterns = [
+      /(?:preload|load)\(\s*["']res:\/\/([^"']+)["']\s*\)/g,
+      /^\s*extends\s+["']res:\/\/([^"']+)["']/gm,
+    ];
+    if (extensionOf(owner) !== '.gd') patterns.push(
+      /\bpath=["']res:\/\/([^"']+)["']/g,
+      /=\s*["']res:\/\/([^"']+)["']/g);
+    for (const pattern of patterns) {
+      for (const match of text.matchAll(pattern)) {
+        const path = slash(match[1]);
+        if (!path.startsWith('.godot/')) dependencies.add(path);
+      }
+    }
+    for (const dependency of [...dependencies].sort()) {
+      demand(!dependency.startsWith('/') && !dependency.includes('\\')
+        && !dependency.split('/').some(part => ['', '.', '..'].includes(part)),
+      `Unsafe res dependency in ${owner}: ${dependency}`);
+      demand(await exists(join(project, dependency)),
+        `Missing res dependency from ${owner}: ${dependency}`);
+      if (!seen.has(dependency)) { seen.add(dependency); queue.push(dependency); }
+    }
+  }
+  return Object.freeze([...seen].sort());
+}
+
+export async function n4VisualRegistryRuntimeScenePaths(project) {
+  const manifestPath = join(project, 'assets', 'visual', 'generated', 'visual-manifest.json');
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+  demand(Array.isArray(manifest.assets), 'Visual manifest assets are missing');
+  const scenes = [];
+  for (const asset of manifest.assets) {
+    demand(asset && typeof asset === 'object' && !Array.isArray(asset),
+      'Visual manifest contains a non-object asset row');
+    if (asset.runtimeEnabled === false) continue;
+    const family = String(asset.family ?? '');
+    const path = String(asset.path ?? '');
+    demand(family.length > 0 && path.length > 0, 'Runtime visual asset identity is incomplete');
+    // This is the exact current counterpart of VisualAssetRegistry's procedural
+    // tree-family bypass: every complete-tree family in this manifest ends in
+    // `_tree`; all other runtime rows are ResourceLoader-loaded by setup().
+    if (family.endsWith('_tree')) continue;
+    demand(path.startsWith('assets/visual/generated/') && path.endsWith('.glb')
+      && !path.includes('\\') && !path.split('/').some(part => ['', '.', '..'].includes(part)),
+    `Unsafe runtime visual scene path: ${path}`);
+    demand(await exists(join(project, path)), `Missing runtime visual scene: ${path}`);
+    demand(await exists(join(project, `${path}.import`)),
+      `Missing runtime visual scene descriptor: ${path}.import`);
+    scenes.push(path, `${path}.import`);
+  }
+  demand(scenes.length === 26 && new Set(scenes).size === scenes.length,
+    `Expected 13 runtime visual scenes and descriptors, got ${scenes.length / 2}`);
+  return Object.freeze(scenes.sort());
+}
+
 export async function expandN4UndergroundPropSourcePaths(project) {
   const manifest = JSON.parse(await readFile(
     join(project, 'native', 'world_backend', 'source-manifest.json'), 'utf8'));
@@ -154,17 +244,19 @@ export async function expandN4UndergroundPropSourcePaths(project) {
       declared.push(path);
     }
   }
-  const result = [...N4_UNDERGROUND_PROP_SOURCE_PATHS, ...declared,
+  const direct = [...N4_UNDERGROUND_PROP_SOURCE_PATHS,
+    ...await n4VisualRegistryRuntimeScenePaths(project), ...declared,
     ...await extensionInputs(project)];
-  demand(new Set(result).size === result.length, 'N4 source inventory contains duplicates');
-  for (const path of result)
+  demand(new Set(direct).size === direct.length, 'N4 source inventory contains duplicates');
+  for (const path of direct)
     demand(await exists(join(project, path)), `Missing N4 source input: ${path}`);
+  const result = await expandN4ResourceDependencyClosure(project, direct);
   return Object.freeze(result);
 }
 
 export async function resolveN4ImportedArtifacts(project, sourcePaths) {
   const descriptors = sourcePaths.filter(path => path.endsWith('.glb.import'));
-  demand(descriptors.length === 11, `Expected 11 GLB import descriptors, got ${descriptors.length}`);
+  demand(descriptors.length === 18, `Expected 18 GLB import descriptors, got ${descriptors.length}`);
   const artifacts = [];
   for (const descriptor of descriptors) {
     const text = await readFile(join(project, descriptor), 'utf8');
