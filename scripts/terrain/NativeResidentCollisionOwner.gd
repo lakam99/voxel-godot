@@ -11,6 +11,10 @@ const COLLISION_LAYER := 2
 const MAX_RESIDENT := 4096
 const MAX_AFFECTED := 64
 const MAX_VERTICES_PER_BLOCK := 65536
+# Each preparation advance validates and hands at most this many source
+# vertices to one ConcavePolygonShape3D. Large artifacts become several
+# child shapes on the same StaticBody3D; the triangle set is unchanged.
+const PREPARE_VERTEX_BUDGET := 768
 const MAX_ACK_FRAMES := 6
 
 var _source: Object
@@ -29,6 +33,8 @@ var _admission_barrier: RefCounted
 var _restored_old_frame := -1
 var _last_probe_hit := {}
 var _drain_receipt := {}
+var _prepare_max_work_units := 0
+var _prepare_total_work_units := 0
 
 
 func bind_source(source: Object) -> bool:
@@ -111,12 +117,18 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	var max_prepare_usec := 0
 	var total_prepare_usec := 0
 	var max_ack_frames := 0
+	_prepare_max_work_units = 0
+	_prepare_total_work_units = 0
 	for row in request.rows:
-		var prepare_started := Time.get_ticks_usec()
-		var prepared: Dictionary = _prepare_row(row)
-		var prepare_usec := Time.get_ticks_usec() - prepare_started
-		max_prepare_usec = maxi(max_prepare_usec, prepare_usec)
-		total_prepare_usec += prepare_usec
+		var candidate_entry: Dictionary = _new_candidate_entry(row)
+		candidates[row.block] = candidate_entry
+		_pending_candidates = candidates
+		var canonical_row: Dictionary = checked.canonicalRows[row.block]
+		var prepared: Dictionary = await _prepare_row_bounded(row,
+			canonical_row, candidate_entry)
+		max_prepare_usec = maxi(max_prepare_usec,
+			int(prepared.get("maxStepCpuUsec", 0)))
+		total_prepare_usec += int(prepared.get("totalCpuUsec", 0))
 		if prepared.get("status") != "ready":
 			_dispose_candidates(candidates)
 			_busy = false
@@ -124,13 +136,12 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		candidates[row.block] = prepared.entry
 		rows_by_block[row.block] = row
 		_pending_candidates = candidates
-		await get_tree().process_frame
 		if _stopping:
 			_dispose_candidates(candidates)
 			_pending_candidates.clear()
 			_busy = false
 			return {"status": "failed", "reason": "resident_owner_stopping"}
-		if not _source_row_current(row.block, identity, row):
+		if not await _source_row_current(row.block, identity, row):
 			_dispose_candidates(candidates)
 			_pending_candidates.clear()
 			_busy = false
@@ -141,7 +152,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			old[block] = _live[block]
 	var switched_any := false
 	for block in affected:
-		if not _source_row_current(block, identity, rows_by_block[block]):
+		if not await _source_row_current(block, identity, rows_by_block[block]):
 			if switched_any:
 				var restored_drift: Dictionary = await _rollback(candidates, old)
 				_pending_candidates.clear()
@@ -171,8 +182,10 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 				_pending_candidates.clear()
 				_busy = false
 				return {"status": "failed", "reason": "resident_owner_stopping"}
-			source_current = _candidate_source_current(identity, checked) \
-				and _source_row_current(block, identity, rows_by_block[block])
+			source_current = _candidate_source_current(identity, checked)
+			if source_current:
+				source_current = await _source_row_current(block, identity,
+					rows_by_block[block])
 			actor_clear = bool(barrier.clearance(identity).get("clear", false))
 			physics_probe = _probe(candidates[block])
 			if not source_current or not actor_clear or physics_probe:
@@ -238,6 +251,9 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		"affectedBlocks": affected.size(), "residentBlocks": _resident_blocks.size(),
 		"maxPrepareUsec": max_prepare_usec,
 		"totalPrepareUsec": total_prepare_usec,
+		"prepareMaxWorkUnits": _prepare_max_work_units,
+		"prepareTotalWorkUnits": _prepare_total_work_units,
+		"prepareVertexBudget": PREPARE_VERTEX_BUDGET,
 		"maxAckFrames": max_ack_frames}
 
 
@@ -356,6 +372,7 @@ func _validate_request(request: Dictionary) -> Dictionary:
 			if _live.has(block):
 				return {"status": "failed", "reason": "staged_startup_block_repeated"}
 	var rows_seen := {}
+	var canonical_rows := {}
 	for row in request.rows:
 		if not row is Dictionary or not row.get("block") is Vector3i \
 				or not affected_set.has(row.block) or rows_seen.has(row.block) \
@@ -373,9 +390,18 @@ func _validate_request(request: Dictionary) -> Dictionary:
 				or row.get("empty") != not bool(row.get("expectedHit", false)) \
 				or not _world_block_bounds_valid(row):
 			return {"status": "failed", "reason": "candidate_source_coordinates_invalid"}
-		var canonical: Dictionary = _source.call("collision_artifact_row", row.block, identity)
-		if canonical.get("status") != "ready" or canonical.get("row") != row:
+		if not _source.has_method("collision_artifact_row_snapshot"):
+			return {"status": "failed", "reason": "canonical_collision_snapshot_api_missing"}
+		var canonical: Dictionary = _source.call("collision_artifact_row_snapshot",
+			row.block, identity)
+		var canonical_row: Dictionary = canonical.get("row", {})
+		if canonical.get("status") != "ready" or canonical_row.is_empty() \
+				or not _row_metadata_matches(row, canonical_row) \
+				or not canonical_row.get("vertices") is PackedVector3Array \
+				or (canonical_row.vertices as PackedVector3Array).size() \
+				!= (row.vertices as PackedVector3Array).size():
 			return {"status": "failed", "reason": "candidate_source_row_mismatch"}
+		canonical_rows[row.block] = canonical_row
 		rows_seen[row.block] = true
 	if rows_seen.size() != affected.size():
 		return {"status": "failed", "reason": "candidate_affected_set_incomplete"}
@@ -388,40 +414,70 @@ func _validate_request(request: Dictionary) -> Dictionary:
 				return {"status": "failed", "reason": "unchanged_resident_artifact_invalid"}
 	return {"status": "ready", "affected": affected, "resident": resident,
 		"sourceIdentity": source_snapshot.sourceIdentity,
-		"membership": membership}
+		"membership": membership, "canonicalRows": canonical_rows}
 
 
-func _prepare_row(row: Dictionary) -> Dictionary:
-	var vertices = row.get("vertices")
-	var bounds = row.get("bounds")
-	if not vertices is PackedVector3Array \
-			or vertices.size() % 3 != 0 or vertices.size() > MAX_VERTICES_PER_BLOCK \
-			or not bounds is AABB or not row.get("probeFrom") is Vector3 \
-			or not row.get("probeTo") is Vector3 \
-			or not bounds.has_point(row.probeFrom) or not bounds.has_point(row.probeTo) \
-			or row.get("expectedHit") != not vertices.is_empty():
-		return {"status": "failed", "reason": "candidate_geometry_or_probe_invalid"}
-	for vertex in vertices:
-		if not vertex.is_finite():
-			return {"status": "failed", "reason": "candidate_vertex_nonfinite"}
+func _new_candidate_entry(row: Dictionary) -> Dictionary:
 	var body: StaticBody3D = null
-	var shape: CollisionShape3D = null
-	if not vertices.is_empty():
+	if bool(row.expectedHit):
 		body = StaticBody3D.new()
 		body.name = "NativeCollision_%s" % str(row.block)
 		body.collision_layer = 0
 		body.collision_mask = 0
-		shape = CollisionShape3D.new()
-		var mesh := ConcavePolygonShape3D.new()
-		mesh.data = vertices
-		mesh.backface_collision = true
-		shape.shape = mesh
-		body.add_child(shape)
 		add_child(body)
-	return {"status": "ready", "entry": {"body": body, "shape": shape,
-		"artifactKey": row.artifactKey, "probeFrom": row.probeFrom,
-		"probeTo": row.probeTo, "expectedHit": row.expectedHit,
-		"physicsFrame": -1}}
+	return {"body": body, "shapes": [], "artifactKey": row.artifactKey,
+		"probeFrom": row.probeFrom, "probeTo": row.probeTo,
+		"expectedHit": row.expectedHit, "physicsFrame": -1}
+
+
+func _prepare_row_bounded(row: Dictionary, canonical: Dictionary,
+		entry: Dictionary) -> Dictionary:
+	var vertices = row.get("vertices")
+	var canonical_vertices = canonical.get("vertices")
+	var bounds = row.get("bounds")
+	if not vertices is PackedVector3Array or not canonical_vertices is PackedVector3Array \
+			or vertices.size() % 3 != 0 or vertices.size() > MAX_VERTICES_PER_BLOCK \
+				or canonical_vertices.size() != vertices.size() \
+			or not bounds is AABB or not row.get("probeFrom") is Vector3 \
+			or not row.get("probeTo") is Vector3 \
+			or not bounds.has_point(row.probeFrom) or not bounds.has_point(row.probeTo) \
+			or row.get("expectedHit") != not vertices.is_empty():
+		_dispose(entry)
+		return {"status": "failed", "reason": "candidate_geometry_or_probe_invalid"}
+	var cursor := 0
+	var total_cpu_usec := 0
+	var max_step_cpu_usec := 0
+	while cursor < vertices.size():
+		var step_started_usec := Time.get_ticks_usec()
+		var end := mini(cursor + PREPARE_VERTEX_BUDGET, vertices.size())
+		for index in range(cursor, end):
+			var vertex: Vector3 = vertices[index]
+			if vertex != canonical_vertices[index]:
+				_dispose(entry)
+				return {"status": "failed", "reason": "candidate_source_row_mismatch"}
+			if not vertex.is_finite() or not bounds.has_point(vertex):
+				_dispose(entry)
+				return {"status": "failed", "reason": "candidate_vertex_invalid"}
+		var mesh := ConcavePolygonShape3D.new()
+		mesh.data = vertices.slice(cursor, end)
+		mesh.backface_collision = true
+		var shape := CollisionShape3D.new()
+		shape.shape = mesh
+		(entry.shapes as Array).append(shape)
+		entry.body.add_child(shape)
+		var work_units := end - cursor
+		var step_cpu_usec := Time.get_ticks_usec() - step_started_usec
+		total_cpu_usec += step_cpu_usec
+		max_step_cpu_usec = maxi(max_step_cpu_usec, step_cpu_usec)
+		_prepare_max_work_units = maxi(_prepare_max_work_units, work_units)
+		_prepare_total_work_units += work_units
+		cursor = end
+		await get_tree().process_frame
+		if _stopping:
+			_dispose(entry)
+			return {"status": "failed", "reason": "resident_owner_stopping"}
+	return {"status": "ready", "entry": entry,
+		"maxStepCpuUsec": max_step_cpu_usec, "totalCpuUsec": total_cpu_usec}
 
 
 func _world_block_bounds_valid(row: Dictionary) -> bool:
@@ -435,8 +491,15 @@ func _world_block_bounds_valid(row: Dictionary) -> bool:
 	var origin := Vector3(row.block) * bounds.size.x
 	if bounds.position.distance_to(origin) > maxf(0.001, bounds.size.x * 0.0001):
 		return false
-	for vertex in row.vertices:
-		if not vertex.is_finite() or not bounds.has_point(vertex):
+	return true
+
+
+func _row_metadata_matches(left: Dictionary, right: Dictionary) -> bool:
+	for field in ["block", "artifactKey", "bounds", "probeFrom", "probeTo",
+			"expectedHit", "sourceIdentity", "pinIdentity", "blockContentIdentity",
+			"nativeRevision", "shapingRegistryRevision", "sourceEpoch",
+			"ownerGeneration", "cancellationEpoch", "coordinateFrame", "empty"]:
+		if left.get(field) != right.get(field):
 			return false
 	return true
 
@@ -456,10 +519,16 @@ func _probe(entry: Dictionary) -> bool:
 func _entry_live(entry: Dictionary) -> bool:
 	if not bool(entry.get("expectedHit", false)):
 		return entry.get("body") == null
-	return is_instance_valid(entry.get("body")) and entry.get("body") is StaticBody3D \
-		and entry.body.is_inside_tree() and entry.body.collision_layer == COLLISION_LAYER \
-		and is_instance_valid(entry.get("shape")) and entry.get("shape") is CollisionShape3D \
-		and not entry.shape.disabled and entry.shape.shape != null
+	if not is_instance_valid(entry.get("body")) or not entry.body is StaticBody3D \
+			or not entry.body.is_inside_tree() \
+			or entry.body.collision_layer != COLLISION_LAYER \
+			or not entry.get("shapes") is Array or (entry.shapes as Array).is_empty():
+		return false
+	for shape in entry.shapes:
+		if not is_instance_valid(shape) or not shape is CollisionShape3D \
+				or shape.disabled or shape.shape == null:
+			return false
+	return true
 
 
 func _set_enabled(entry: Dictionary, enabled: bool) -> void:
@@ -539,5 +608,31 @@ func _candidate_source_current(identity: Dictionary, checked: Dictionary) -> boo
 func _source_row_current(block: Vector3i, identity: Dictionary, row: Dictionary) -> bool:
 	if _source == null or not is_instance_valid(_source):
 		return false
-	var current: Dictionary = _source.call("collision_artifact_row", block, identity)
-	return current.get("status") == "ready" and current.get("row") == row
+	if not _source.has_method("collision_artifact_row_snapshot"):
+		return false
+	var current: Dictionary = _source.call("collision_artifact_row_snapshot", block,
+		identity)
+	var canonical: Dictionary = current.get("row", {})
+	if current.get("status") != "ready" or canonical.is_empty() \
+			or not _row_metadata_matches(row, canonical) \
+			or not row.get("vertices") is PackedVector3Array \
+			or not canonical.get("vertices") is PackedVector3Array:
+		return false
+	var vertices: PackedVector3Array = row.vertices
+	var canonical_vertices: PackedVector3Array = canonical.vertices
+	if vertices.size() != canonical_vertices.size():
+		return false
+	var cursor := 0
+	while cursor < vertices.size():
+		var end := mini(cursor + PREPARE_VERTEX_BUDGET, vertices.size())
+		for index in range(cursor, end):
+			if vertices[index] != canonical_vertices[index]:
+				return false
+		var work_units := end - cursor
+		_prepare_max_work_units = maxi(_prepare_max_work_units, work_units)
+		_prepare_total_work_units += work_units
+		cursor = end
+		await get_tree().process_frame
+		if _stopping:
+			return false
+	return true

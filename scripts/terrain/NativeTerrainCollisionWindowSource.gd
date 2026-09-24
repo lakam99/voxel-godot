@@ -21,5 +21,9 @@ func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary
 	if _broker == null: return {"status":"failed", "reason":"collision_window_source_inactive"}
 	return _broker.collision_window_artifact_row(_window_token, block, identity)
 
+func collision_artifact_row_snapshot(block: Vector3i, identity: Dictionary) -> Dictionary:
+	if _broker == null: return {"status":"failed", "reason":"collision_window_source_inactive"}
+	return _broker.collision_window_artifact_row_snapshot(_window_token, block, identity)
+
 func detach() -> void:
 	_broker = null

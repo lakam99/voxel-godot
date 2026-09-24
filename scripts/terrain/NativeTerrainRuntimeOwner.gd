@@ -279,6 +279,10 @@ func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.collision_artifact_row(block, identity)
 
+func collision_artifact_row_snapshot(block: Vector3i, identity: Dictionary) -> Dictionary:
+	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
+	return _artifact_requests.collision_artifact_row_snapshot(block, identity)
+
 func advance() -> Dictionary:
 	if _state == "converting":
 		var converted: Dictionary = _legacy_converter.advance()

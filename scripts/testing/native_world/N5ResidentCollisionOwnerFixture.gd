@@ -16,6 +16,14 @@ class FakeSource:
 		if current.get("identity") != identity or not rows.has(block):
 			return {"status": "pending"}
 		return {"status": "ready", "row": (rows[block] as Dictionary).duplicate(true)}
+	func collision_artifact_row_snapshot(block: Vector3i,
+			identity: Dictionary) -> Dictionary:
+		if row_query_hook.is_valid():
+			row_query_hook.call(block)
+		if current.get("identity") != identity or not rows.has(block):
+			return {"status": "pending"}
+		return {"status": "ready",
+			"row": (rows[block] as Dictionary).duplicate(false)}
 
 var _source := FakeSource.new()
 var _owner: Node3D
@@ -65,6 +73,8 @@ func _run() -> void:
 		"finalY": _actor.position.y}
 	var actor_landed: bool = actor_contact != null and actor_contact.get_collider() is StaticBody3D \
 		and _actor.position.y >= 0.45
+	_actor.position = Vector3(100, 0, 0)
+	await get_tree().physics_frame
 	var second := _identity(2)
 	var changed: Array[Vector3i] = [blocks[0]]
 	_source.current = _snapshot(second, blocks, "a2", "b1")
@@ -82,6 +92,8 @@ func _run() -> void:
 	altered_row.vertices = altered_vertices
 	var altered_candidate: Dictionary = await _owner.publish(_request(second, blocks,
 		changed, [altered_row]), edit_barrier)
+	_actor.position = Vector3(0.35, 2, 0.5)
+	await get_tree().physics_frame
 	var occupied_edit: Dictionary = await _owner.publish(_request(second, blocks,
 		changed, [second_row]), edit_barrier)
 	_actor.position = Vector3(100, 0, 0)
@@ -177,6 +189,7 @@ func _run() -> void:
 	var same_revision_drift: Dictionary = await _source_drift_case()
 	var pre_switch_drift: Dictionary = await _pre_switch_drift_case()
 	var mid_switch_drift: Dictionary = await _mid_switch_drift_case()
+	var bounded_prepare: Dictionary = await _bounded_prepare_case()
 	var passed: bool = startup.get("status") == "ready" \
 		and startup_ready.get("status") == "ready" and startup_released \
 		and actor_landed and altered_candidate.get("status") == "failed" \
@@ -202,7 +215,8 @@ func _run() -> void:
 		and bool(stop_during_ack.get("passed", false)) \
 		and bool(same_revision_drift.get("passed", false)) \
 		and bool(pre_switch_drift.get("passed", false)) \
-		and bool(mid_switch_drift.get("passed", false))
+		and bool(mid_switch_drift.get("passed", false)) \
+		and bool(bounded_prepare.get("passed", false))
 	_finish(passed, {"startup": startup, "startupReady": startup_ready,
 		"actorLanded": actor_landed, "actorContact": actor_contact_detail,
 		"alteredCandidate": altered_candidate, "occupiedEdit": occupied_edit,
@@ -218,7 +232,91 @@ func _run() -> void:
 			"duringPrepare": stop_during_prepare, "duringAck": stop_during_ack},
 		"sameRevisionDrift": same_revision_drift,
 		"preSwitchDrift": pre_switch_drift,
-		"midSwitchDrift": mid_switch_drift})
+		"midSwitchDrift": mid_switch_drift,
+		"boundedPreparation": bounded_prepare})
+
+
+func _bounded_prepare_case() -> Dictionary:
+	var source := FakeSource.new()
+	var owner = OwnerScript.new()
+	add_child(owner)
+	owner.bind_source(source)
+	var identity := _identity(11)
+	var block := Vector3i(900, 0, 0)
+	var row := _row(block, "bounded-prepare", 0.5, identity)
+	var source_vertices := PackedVector3Array()
+	for quad_index in range(384):
+		var quad_left := 2700.0 + 3.0 * float(quad_index) / 384.0
+		var quad_right := 2700.0 + 3.0 * float(quad_index + 1) / 384.0
+		source_vertices.append_array(PackedVector3Array([
+			Vector3(quad_left, 0.5, 0.0), Vector3(quad_right, 0.5, 0.0),
+			Vector3(quad_right, 0.5, 1.0), Vector3(quad_left, 0.5, 0.0),
+			Vector3(quad_right, 0.5, 1.0), Vector3(quad_left, 0.5, 1.0)]))
+	row.vertices = source_vertices
+	row.block = block
+	row.artifactKey = "bounded-prepare"
+	row.bounds = AABB(Vector3(2700, 0, 0), Vector3(3, 3, 3))
+	row.probeFrom = Vector3(2700.35, 2.8, 0.5)
+	row.probeTo = Vector3(2700.35, 0.2, 0.5)
+	row = _source_fields(row, identity, {"hex": "fixture-source-11"})
+	source.rows = {block: row}
+	source.current = {"status": "ready", "identity": identity,
+		"sourceIdentity": {"hex": "fixture-source-11"},
+		"sourceEpoch": identity.sourceEpoch, "nativeRevision": identity.sourceRevision,
+		"ownerGeneration": identity.ownerGeneration,
+		"cancellationEpoch": identity.cancellationEpoch,
+		"requiredResidentBlocks": [block], "residentBlocks": [block],
+		"membershipProvenance": {"authority": "pinned_demand", "demandRevision": 11,
+			"closureToken": "bounded-prepare-closure"},
+		"artifacts": {block: "bounded-prepare"}}
+	var barrier = BarrierScript.new()
+	var begun: Dictionary = barrier.begin(self, owner, identity, row.bounds)
+	while begun.get("status") == "pending":
+		await get_tree().process_frame
+		begun = barrier.census_progress(identity)
+	var outcome: Dictionary = await owner.publish(_request(identity, [block],
+		[block], [row]), barrier)
+	var flattened := PackedVector3Array()
+	var emitted_shape_sizes: Array[int] = []
+	var published_body: StaticBody3D = null
+	for body in owner.get_children():
+		if body is StaticBody3D:
+			published_body = body
+			for child in body.get_children():
+				if child is CollisionShape3D and child.shape is ConcavePolygonShape3D:
+					var shape_vertices: PackedVector3Array = child.shape.data
+					emitted_shape_sizes.append(shape_vertices.size())
+					flattened.append_array(shape_vertices)
+	var seam_hits: Array[Dictionary] = []
+	if published_body != null:
+		for seam_x in [2701.0, 2702.0]:
+			for side in [-1.0, 1.0]:
+				var sample_x: float = seam_x + side * 0.002
+				var query := PhysicsRayQueryParameters3D.create(
+					Vector3(sample_x, 2.8, 0.5), Vector3(sample_x, 0.2, 0.5), 2)
+				var hit: Dictionary = get_world_3d().direct_space_state.intersect_ray(query)
+				seam_hits.append({"seamX": seam_x, "side": side,
+					"colliderMatches": hit.get("collider") == published_body})
+	var released: bool = barrier.release(identity)
+	var drained: Dictionary = await owner.stop_and_drain()
+	var chunks_within_budget := true
+	for size in emitted_shape_sizes:
+		if size <= 0 or size > OwnerScript.PREPARE_VERTEX_BUDGET or size % 3 != 0:
+			chunks_within_budget = false
+	var seam_probes_hit := seam_hits.size() == 4
+	for seam_hit in seam_hits:
+		seam_probes_hit = seam_probes_hit and bool(seam_hit.colliderMatches)
+	return {"passed": outcome.get("status") == "ready" \
+		and int(outcome.get("prepareVertexBudget", -1)) == OwnerScript.PREPARE_VERTEX_BUDGET \
+		and int(outcome.get("prepareMaxWorkUnits", -1)) <= OwnerScript.PREPARE_VERTEX_BUDGET \
+		and flattened == source_vertices and emitted_shape_sizes.size() == 3 \
+		and chunks_within_budget and seam_probes_hit \
+		and released and drained.get("status") == "ready",
+		"outcome": outcome, "emittedShapeSizes": emitted_shape_sizes,
+		"exactGeometryPreserved": flattened == source_vertices,
+		"chunksWithinBudget": chunks_within_budget,
+		"seamProbeHits": seam_hits,
+		"barrierReleased": released, "drain": drained}
 
 
 func _mid_switch_drift_case() -> Dictionary:

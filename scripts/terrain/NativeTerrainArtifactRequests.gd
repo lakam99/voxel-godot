@@ -194,6 +194,11 @@ func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary
 		return {"status":"failed", "reason":"artifact_producer_unavailable"}
 	return _producer.collision_artifact_row(block, identity)
 
+func collision_artifact_row_snapshot(block: Vector3i, identity: Dictionary) -> Dictionary:
+	if _producer == null or _draining:
+		return {"status":"failed", "reason":"artifact_producer_unavailable"}
+	return _producer.collision_artifact_row_snapshot(block, identity)
+
 func collision_window_layout() -> Dictionary:
 	if _producer == null or _draining:
 		return {"status":"pending", "reason":"artifact_producer_unavailable"}
@@ -290,6 +295,23 @@ func collision_window_artifact_row(window_token: String, block: Vector3i,
 			return {"status":"pending", "reason":"collision_window_local_proof_stale"}
 		return {"status":"ready", "row":(record.rows[block] as Dictionary).duplicate(true)}
 	return _producer.collision_artifact_row(block, identity)
+
+func collision_window_artifact_row_snapshot(window_token: String, block: Vector3i,
+		identity: Dictionary) -> Dictionary:
+	var record: Dictionary = _window_records.get(window_token, {})
+	if record.is_empty() or not (record.blocks as Array).has(block):
+		return {"status":"failed", "reason":"collision_window_block_invalid"}
+	if _producer == null or _draining or not _active_window_tokens.has(window_token) \
+			or identity != record.identity:
+		return {"status":"pending", "reason":"collision_window_source_superseded",
+			"retainedRow":(record.rows as Dictionary).get(block, {}).duplicate(false)}
+	if record.identity != _identity:
+		var current: Dictionary = _backend.status()
+		if int(record.get("provenThroughRevision", -1)) != int(_identity.sourceRevision) \
+				or _prove_local_window(record, current).get("status") != "ready":
+			return {"status":"pending", "reason":"collision_window_local_proof_stale"}
+		return {"status":"ready", "row":(record.rows[block] as Dictionary).duplicate(false)}
+	return _producer.collision_artifact_row_snapshot(block, identity)
 
 func acknowledge_collision_window_retired(window_token: String,
 		retirement_receipt: Dictionary) -> Dictionary:

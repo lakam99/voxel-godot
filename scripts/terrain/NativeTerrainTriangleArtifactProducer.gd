@@ -372,6 +372,25 @@ func collision_artifact_row(block: Vector3i, identity: Dictionary) -> Dictionary
 		return {"status":"failed", "reason":"triangle_artifact_local_source_stale"}
 	return {"status":"ready", "row":(_artifact_rows[block] as Dictionary).duplicate(true)}
 
+
+## Borrowed immutable row for staged consumers. The producer retains the packed
+## vertex buffer for the lifetime of this source revision; callers must not
+## mutate it. The shallow dictionary copy keeps descriptor isolation without
+## cloning the potentially large PackedVector3Array on the main thread.
+func collision_artifact_row_snapshot(block: Vector3i, identity: Dictionary) -> Dictionary:
+	if _stopped or _backend == null or identity != _identity \
+			or _required_blocks().get("status") != "ready" \
+			or not _artifact_rows.has(block):
+		return {"status":"failed", "reason":"triangle_artifact_not_current"}
+	var source: Dictionary = _backend.status()
+	if source.get("status") != "ready" or source.get("sourceIdentity") != _source_identity \
+			or int(source.get("terrainDeltaRevision", -1)) \
+			!= int(_identity.sourceRevision):
+		return {"status":"failed", "reason":"triangle_artifact_source_stale"}
+	if not _local_pins_current(block, source):
+		return {"status":"failed", "reason":"triangle_artifact_local_source_stale"}
+	return {"status":"ready", "row":(_artifact_rows[block] as Dictionary).duplicate(false)}
+
 func _current_local_page_pins(block: Vector3i) -> Dictionary:
 	var before: Dictionary = _backend.status()
 	if before.get("status") != "ready": return {"status":"pending"}
