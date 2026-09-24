@@ -229,7 +229,7 @@ func _initialize() -> void:
 		"passed":failures.is_empty(),"failures":failures,"details":details,
 		"productionCutover":false,
 		"proves":["native projection adapter schema/order/revision/identity",
-			"full effective states, fluid-preserving walkability, observed work counters",
+			"full effective states, fluid-preserving walkability, admitted candidate/cell-read budgets",
 			"adapter channel/aggregate/vertical/read/payload cap rejection and recovery",
 			"atomic malformed/mixed-query rejection and immutable pin behavior"],
 		"doesNotProve":["production WorldGenerationSystem activation",
