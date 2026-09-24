@@ -1,6 +1,7 @@
 #include "native_effective_terrain_source.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -102,6 +103,78 @@ bool affects_surface_projection(const NativeCellState &state) {
     if (const NativeValue *declared = metadata_value(state, "terrainMeshAffects"))
         return metadata_boolean(*declared);
     return true;
+}
+
+struct ProjectionScanBounds {
+    std::int32_t top = 0;
+    std::int32_t bottom = 0;
+    std::size_t candidates = 0;
+};
+
+void validate_projection_query_header(
+    const NativeEffectiveSurfaceProjectionQuery &query) {
+    validate_world_query(WorldLatticeQuery{query.start_cell, query.intent});
+    if (query.intent != WorldQueryIntent::gameplay
+        || query.semantic_revision
+            != NativeEffectiveSurfaceProjectionQuery::SEMANTIC_REVISION) {
+        throw std::invalid_argument("native effective surface projection query is invalid");
+    }
+}
+
+void validate_known_height_query_header(
+    const NativeEffectiveKnownHeightProjectionQuery &query) {
+    validate_world_query(WorldLatticeQuery{query.column_cell, query.intent});
+    if (query.intent != WorldQueryIntent::gameplay
+        || query.semantic_revision
+            != NativeEffectiveKnownHeightProjectionQuery::SEMANTIC_REVISION
+        || !std::isfinite(query.surface_y)) {
+        throw std::invalid_argument("native effective known-height projection query is invalid");
+    }
+}
+
+ProjectionScanBounds projection_scan_bounds(
+    const WorldSourceConstants &constants,
+    const NativeEffectiveSurfaceProjectionQuery &query) {
+    validate_projection_query_header(query);
+    const double cell_size = constants.cell_size_meters;
+    const std::int32_t admitted_world_top = checked_cell_coordinate(std::ceil(
+        (constants.maximum_surface_meters + cell_size * 4.0) / cell_size));
+    if (admitted_world_top == std::numeric_limits<std::int32_t>::max()) {
+        throw std::invalid_argument("native effective surface projection top has no air cell");
+    }
+    const std::int64_t world_top = admitted_world_top;
+    const std::int64_t up = std::max<std::int64_t>(1, query.max_up_cells);
+    const std::int64_t down = std::max<std::int64_t>(1, query.max_down_cells);
+    const std::int64_t top = std::min(
+        world_top, static_cast<std::int64_t>(query.start_cell.y) + up);
+    const std::int64_t bottom = std::max(
+        static_cast<std::int64_t>(constants.world_bottom_cell_y),
+        static_cast<std::int64_t>(query.start_cell.y) - down);
+    const std::size_t count = top < bottom ? 0U
+        : static_cast<std::size_t>(top - bottom + 1);
+    if (count > NativeEffectiveTerrainSource::MAX_PROJECTION_VERTICAL_CANDIDATES) {
+        throw std::length_error("native effective surface projection vertical scan exceeds source limit");
+    }
+    return {static_cast<std::int32_t>(top), static_cast<std::int32_t>(bottom), count};
+}
+
+NativeTerrainOccupancyFacts occupancy_facts(
+    const CellCoord cell, const NativeCellState &state,
+    const NativeCellState &below, const NativeCellState &above) {
+    NativeTerrainOccupancyFacts result;
+    result.cell = cell;
+    result.solid = state.solid;
+    result.air = !state.solid;
+    result.material = state.material;
+    result.biome = state.biome;
+    result.fluid = state.fluid;
+    result.light = state.light;
+    result.floor_solid = below.solid;
+    result.ceiling_solid = above.solid;
+    // Projection callers have already proven standing air and solid support;
+    // headroom is the only remaining walkability decision at this boundary.
+    result.walkable_air = !above.solid;
+    return result;
 }
 
 } // namespace
@@ -377,6 +450,138 @@ NativeSurfacePropSpawnFacts NativeEffectiveTerrainSource::sample_surface_prop_sp
         result.material = solid.material;
         result.solid_cell = solid_cell;
         result.air_cell = air_cell;
+        return result;
+    }
+    return result;
+}
+
+std::size_t NativeEffectiveTerrainSource::surface_projection_candidate_capacity(
+    const NativeEffectiveSurfaceProjectionQuery &query) const {
+    require_primary_page_query(pin_, query.start_cell.x, query.start_cell.z);
+    return projection_scan_bounds(pin_.definition().constants(), query).candidates;
+}
+
+std::size_t NativeEffectiveTerrainSource::known_height_projection_candidate_capacity(
+    const NativeEffectiveKnownHeightProjectionQuery &query) const {
+    validate_known_height_query_header(query);
+    require_primary_page_query(pin_, query.column_cell.x, query.column_cell.z);
+    const double floored_probe = std::floor(
+        query.surface_y / pin_.definition().constants().cell_size_meters);
+    if (floored_probe < static_cast<double>(std::numeric_limits<std::int32_t>::min()) + 2.0
+        || floored_probe > static_cast<double>(std::numeric_limits<std::int32_t>::max()) - 2.0) {
+        throw std::invalid_argument("native effective known-height projection is outside cell domain");
+    }
+    return KNOWN_HEIGHT_PROJECTION_CANDIDATES;
+}
+
+NativeEffectiveSurfaceProjectionFacts NativeEffectiveTerrainSource::sample_surface_projection(
+    const NativeEffectiveSurfaceProjectionQuery &query) const {
+    require_primary_page_query(pin_, query.start_cell.x, query.start_cell.z);
+    const ProjectionScanBounds bounds = projection_scan_bounds(
+        pin_.definition().constants(), query);
+    NativeEffectiveSurfaceProjectionFacts result;
+    result.column_cell = query.start_cell;
+    if (bounds.candidates == 0U) return result;
+    const double cell_size = pin_.definition().constants().cell_size_meters;
+    for (std::int64_t y = bounds.top; y >= bounds.bottom; --y) {
+        const CellCoord solid_cell{
+            query.start_cell.x, static_cast<std::int32_t>(y), query.start_cell.z};
+        const CellCoord air_cell{
+            query.start_cell.x, static_cast<std::int32_t>(y + 1), query.start_cell.z};
+        const NativeCellState solid = sample_cell_state(
+            {solid_cell, WorldQueryIntent::gameplay});
+        if (!solid.solid) continue;
+        const NativeCellState air = sample_cell_state(
+            {air_cell, WorldQueryIntent::gameplay});
+        if (air.solid) continue;
+        result.found = true;
+        result.solid_cell = solid_cell;
+        result.air_cell = air_cell;
+        result.position = {
+            static_cast<float>((static_cast<double>(air_cell.x) + 0.5) * cell_size),
+            static_cast<float>(static_cast<double>(air_cell.y) * cell_size),
+            static_cast<float>((static_cast<double>(air_cell.z) + 0.5) * cell_size),
+        };
+        result.solid_state = solid;
+        result.air_state = air;
+        return result;
+    }
+    return result;
+}
+
+NativeEffectiveWalkableProjectionFacts
+NativeEffectiveTerrainSource::sample_walkable_surface_near(
+    const NativeEffectiveSurfaceProjectionQuery &query) const {
+    NativeEffectiveWalkableProjectionFacts result;
+    result.projection = sample_surface_projection(query);
+    if (!result.projection.found) return result;
+    const CellCoord above_cell{
+        result.projection.air_cell.x,
+        checked_cell_coordinate(static_cast<double>(result.projection.air_cell.y) + 1.0),
+        result.projection.air_cell.z,
+    };
+    const NativeCellState above = sample_cell_state(
+        {above_cell, WorldQueryIntent::gameplay});
+    result.headroom_state = above;
+    // sample_surface_projection already proved the standing cell is air.
+    result.walkable = !above.solid;
+    result.occupancy = occupancy_facts(
+        result.projection.air_cell, *result.projection.air_state,
+        *result.projection.solid_state, above);
+    return result;
+}
+
+NativeEffectiveKnownHeightProjectionFacts
+NativeEffectiveTerrainSource::sample_navigation_surface_at_known_height(
+    const NativeEffectiveKnownHeightProjectionQuery &query) const {
+    static_cast<void>(known_height_projection_candidate_capacity(query));
+    const double cell_size = pin_.definition().constants().cell_size_meters;
+    const double floored_probe = std::floor(query.surface_y / cell_size);
+    const std::int32_t probe_y = static_cast<std::int32_t>(floored_probe);
+    NativeEffectiveKnownHeightProjectionFacts result;
+    result.projection.column_cell = {
+        query.column_cell.x, 0, query.column_cell.z};
+    // This deliberately matches range(probe_y, probe_y - 3, -1): three
+    // candidates, each proven by support, standing-air, and headroom cells.
+    // TerrainVolumeService's nearby prose still says "four"; executable
+    // semantics and the shadow parity contract are authoritative here.
+    std::array<std::optional<NativeCellState>, 5> states;
+    const auto state_at = [&](const std::int32_t y) -> const NativeCellState & {
+        const std::size_t index = static_cast<std::size_t>(y - (probe_y - 2));
+        if (!states[index]) {
+            states[index] = sample_cell_state(
+                {{query.column_cell.x, y, query.column_cell.z},
+                    WorldQueryIntent::gameplay});
+        }
+        return *states[index];
+    };
+    for (std::int32_t offset = 0;
+         offset < static_cast<std::int32_t>(KNOWN_HEIGHT_PROJECTION_CANDIDATES);
+         ++offset) {
+        const CellCoord solid_cell{
+            query.column_cell.x, probe_y - offset, query.column_cell.z};
+        const CellCoord air_cell{
+            query.column_cell.x, probe_y - offset + 1, query.column_cell.z};
+        const CellCoord above_cell{
+            query.column_cell.x, probe_y - offset + 2, query.column_cell.z};
+        const NativeCellState solid = state_at(solid_cell.y);
+        const NativeCellState air = state_at(air_cell.y);
+        const NativeCellState above = state_at(above_cell.y);
+        if (!solid.solid || air.solid || above.solid) continue;
+        result.status = NativeKnownHeightProjectionStatus::ready;
+        result.projection.found = true;
+        result.projection.solid_cell = solid_cell;
+        result.projection.air_cell = air_cell;
+        result.projection.position = {
+            static_cast<float>(static_cast<double>(query.column_cell.x) * cell_size),
+            static_cast<float>(query.surface_y),
+            static_cast<float>(static_cast<double>(query.column_cell.z) * cell_size),
+        };
+        result.projection.solid_state = solid;
+        result.projection.air_state = air;
+        result.headroom_state = above;
+        result.walkable = true;
+        result.occupancy = occupancy_facts(air_cell, air, solid, above);
         return result;
     }
     return result;

@@ -20,6 +20,15 @@ struct NativeEffectiveTerrainBatchLimits {
     // Logical retained bytes, independent of allocator capacity and padding.
     // See NativeEffectiveTerrainBatch::execute for the exact accounting model.
     std::size_t max_prepared_payload_bytes = 16U * 1024U * 1024U;
+    std::size_t max_surface_projections = 4096;
+    std::size_t max_walkable_projections = 4096;
+    std::size_t max_known_height_projections = 4096;
+    std::size_t max_projection_total_queries = 4096;
+    std::size_t max_projection_vertical_candidates_per_query = 512;
+    std::size_t max_projection_total_vertical_candidates = 65536;
+    std::size_t max_projection_cell_reads_per_query = 1025;
+    std::size_t max_projection_total_cell_reads = 131072;
+    std::size_t max_projection_payload_bytes = 16U * 1024U * 1024U;
 };
 
 enum class NativeEffectiveTerrainBatchRejectReason : std::uint8_t {
@@ -30,6 +39,15 @@ enum class NativeEffectiveTerrainBatchRejectReason : std::uint8_t {
     surface_projection_numeric_limit = 5,
     total_limit = 6,
     prepared_payload_limit = 7,
+    surface_projection_limit = 8,
+    walkable_projection_limit = 9,
+    known_height_projection_limit = 10,
+    projection_total_limit = 11,
+    projection_vertical_per_query_limit = 12,
+    projection_vertical_total_limit = 13,
+    projection_payload_limit = 14,
+    projection_cell_reads_per_query_limit = 15,
+    projection_cell_reads_total_limit = 16,
 };
 
 class NativeEffectiveTerrainBatchRejected final : public std::length_error {
@@ -137,6 +155,44 @@ struct NativeEffectiveTerrainBatchResult {
     std::vector<NativeEffectiveSurfaceProjectionBatchRecord> surface_projection_numeric;
 };
 
+struct NativeEffectiveTerrainProjectionBatchRequest {
+    std::vector<NativeEffectiveSurfaceProjectionQuery> surface_projections;
+    std::vector<NativeEffectiveSurfaceProjectionQuery> walkable_projections;
+    std::vector<NativeEffectiveKnownHeightProjectionQuery> known_height_projections;
+};
+
+struct NativeEffectiveFullSurfaceProjectionBatchRecord {
+    NativeEffectiveSurfaceProjectionQuery requested;
+    NativeEffectiveSurfaceProjectionFacts facts;
+};
+
+struct NativeEffectiveWalkableProjectionBatchRecord {
+    NativeEffectiveSurfaceProjectionQuery requested;
+    NativeEffectiveWalkableProjectionFacts facts;
+};
+
+struct NativeEffectiveKnownHeightProjectionBatchRecord {
+    NativeEffectiveKnownHeightProjectionQuery requested;
+    NativeEffectiveKnownHeightProjectionFacts facts;
+};
+
+struct NativeEffectiveTerrainProjectionBatchResult {
+    static constexpr std::uint32_t SCHEMA_REVISION = 1;
+    std::uint32_t schema_revision = SCHEMA_REVISION;
+    NativeTerrainPageKey primary_page;
+    WorldPhysicalContentIdentity definition_physical_identity;
+    WorldPhysicalContentIdentity pin_physical_identity;
+    std::uint64_t terrain_delta_revision = 0;
+    std::uint64_t shaping_registry_revision = 0;
+    WorldPhysicalContentIdentity shaping_registry_content_identity;
+    std::size_t admitted_vertical_candidates = 0;
+    std::size_t admitted_cell_reads = 0;
+    std::size_t prepared_payload_bytes = 0;
+    std::vector<NativeEffectiveFullSurfaceProjectionBatchRecord> surface_projections;
+    std::vector<NativeEffectiveWalkableProjectionBatchRecord> walkable_projections;
+    std::vector<NativeEffectiveKnownHeightProjectionBatchRecord> known_height_projections;
+};
+
 // Immutable, pin-owning batch facade. execute() has the strong exception
 // guarantee: limits and every query are resolved into a local result, so an
 // invalid member can never expose a partially filled result to the caller.
@@ -152,6 +208,8 @@ public:
     const WorldSourcePin &pin() const noexcept;
     const NativeEffectiveTerrainBatchLimits &limits() const noexcept;
     NativeEffectiveTerrainBatchResult execute(const NativeEffectiveTerrainBatchRequest &request) const;
+    NativeEffectiveTerrainProjectionBatchResult execute_projections(
+        const NativeEffectiveTerrainProjectionBatchRequest &request) const;
     double sample_continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
 
 private:

@@ -53,6 +53,8 @@ constexpr const char *INITIALIZE_SCHEMA = "n3-native-world-backend-initialize/v1
 constexpr const char *INITIALIZE_FROM_SAVE_V2_SCHEMA = "n3-native-world-backend-initialize-from-save-v2/v1";
 constexpr const char *BATCH_REQUEST_SCHEMA = "n3-effective-terrain-batch-request/v1";
 constexpr const char *BATCH_RESULT_SCHEMA = "n3-effective-terrain-batch-result/v1";
+constexpr const char *PROJECTION_BATCH_REQUEST_SCHEMA = "n3-effective-terrain-projection-batch-request/v1";
+constexpr const char *PROJECTION_BATCH_RESULT_SCHEMA = "n3-effective-terrain-projection-batch-result/v1";
 constexpr const char *VOXEL_BLOCK_REQUEST_SCHEMA = "n3-effective-voxel-block-request/v1";
 constexpr const char *VOXEL_BLOCK_RESULT_SCHEMA = "n3-effective-voxel-block-result/v1";
 constexpr const char *VOXEL_BLOCK_ASYNC_SCHEMA = "n3-voxel-block-shadow-async/v1";
@@ -65,6 +67,7 @@ constexpr const char *SURFACE_ORDERED_SHADOW_SCHEMA = "n4-surface-prop-ordered-s
 constexpr const char *TREE_PRESENCE_SHADOW_SCHEMA = "n4-surface-tree-presence-shadow/v1";
 constexpr std::size_t MAX_BATCH_CHANNEL_QUERIES = 4096U;
 constexpr std::size_t MAX_BATCH_TOTAL_QUERIES = 16384U;
+constexpr std::size_t MAX_PROJECTION_BATCH_QUERIES = 4096U;
 constexpr std::size_t MAX_TOWN_OVERRIDES = 4096U;
 constexpr std::size_t MAX_SHAPING_RESOLUTIONS = 64U;
 constexpr std::size_t MAX_TYPED_CELL_OPERATIONS = 4096U;
@@ -1173,6 +1176,121 @@ NativeEffectiveTerrainBatchRequest parse_batch_request(const Dictionary &p_reque
 	return request;
 }
 
+NativeEffectiveTerrainProjectionBatchRequest parse_projection_batch_request(
+		const Dictionary &p_request) {
+	require_exact_keys(p_request, {"schema", "surfaceProjections", "walkableProjections",
+		"knownHeightProjections"}, "projection batch request");
+	if (require_protocol_string(p_request.get("schema", Variant()), "schema")
+			!= PROJECTION_BATCH_REQUEST_SCHEMA) {
+		throw std::invalid_argument("unsupported native effective terrain projection batch schema");
+	}
+	const Array surfaces = require_array(
+		p_request.get("surfaceProjections", Variant()), "surfaceProjections");
+	const Array walkable = require_array(
+		p_request.get("walkableProjections", Variant()), "walkableProjections");
+	const Array known = require_array(
+		p_request.get("knownHeightProjections", Variant()), "knownHeightProjections");
+	std::size_t total = 0U;
+	for (const int64_t size : {surfaces.size(), walkable.size(), known.size()}) {
+		if (size < 0 || static_cast<std::size_t>(size) > MAX_PROJECTION_BATCH_QUERIES
+				|| static_cast<std::size_t>(size) > MAX_PROJECTION_BATCH_QUERIES - total) {
+			throw std::length_error("native effective terrain projection adapter query limit exceeded");
+		}
+		total += static_cast<std::size_t>(size);
+	}
+	NativeEffectiveTerrainProjectionBatchRequest request;
+	request.surface_projections.reserve(static_cast<std::size_t>(surfaces.size()));
+	request.walkable_projections.reserve(static_cast<std::size_t>(walkable.size()));
+	request.known_height_projections.reserve(static_cast<std::size_t>(known.size()));
+	const auto parse_scan = [](const Variant &p_value, const char *p_field) {
+		const Dictionary value = require_dictionary(p_value, p_field);
+		require_exact_keys(value, {"startCell", "maxUpCells", "maxDownCells", "intent",
+			"semanticRevision"}, p_field);
+		NativeEffectiveSurfaceProjectionQuery query;
+		query.start_cell = cell_coord(require_vector3i(value.get("startCell", Variant()), "projection.startCell"));
+		query.max_up_cells = require_i32(value.get("maxUpCells", Variant()), "projection.maxUpCells");
+		query.max_down_cells = require_i32(value.get("maxDownCells", Variant()), "projection.maxDownCells");
+		query.intent = parse_intent(value.get("intent", Variant()), "projection.intent");
+		query.semantic_revision = require_u32(
+			value.get("semanticRevision", Variant()), "projection.semanticRevision");
+		return query;
+	};
+	for (int64_t index = 0; index < surfaces.size(); ++index)
+		request.surface_projections.push_back(parse_scan(surfaces[index], "surfaceProjections[]"));
+	for (int64_t index = 0; index < walkable.size(); ++index)
+		request.walkable_projections.push_back(parse_scan(walkable[index], "walkableProjections[]"));
+	for (int64_t index = 0; index < known.size(); ++index) {
+		const Dictionary value = require_dictionary(known[index], "knownHeightProjections[]");
+		require_exact_keys(value, {"columnCell", "surfaceY", "intent", "semanticRevision"},
+			"knownHeightProjections[]");
+		NativeEffectiveKnownHeightProjectionQuery query;
+		query.column_cell = cell_coord(require_vector3i(
+			value.get("columnCell", Variant()), "knownHeightProjection.columnCell"));
+		query.surface_y = require_number(
+			value.get("surfaceY", Variant()), "knownHeightProjection.surfaceY");
+		query.intent = parse_intent(
+			value.get("intent", Variant()), "knownHeightProjection.intent");
+		query.semantic_revision = require_u32(value.get("semanticRevision", Variant()),
+			"knownHeightProjection.semanticRevision");
+		request.known_height_projections.push_back(query);
+	}
+	return request;
+}
+
+Dictionary projection_request_dictionary(
+		const NativeEffectiveSurfaceProjectionQuery &p_query) {
+	Dictionary result;
+	result["startCell"] = vector3i(p_query.start_cell);
+	result["maxUpCells"] = p_query.max_up_cells;
+	result["maxDownCells"] = p_query.max_down_cells;
+	result["intent"] = intent_name(p_query.intent);
+	result["semanticRevision"] = static_cast<int64_t>(p_query.semantic_revision);
+	return result;
+}
+
+Dictionary known_height_request_dictionary(
+		const NativeEffectiveKnownHeightProjectionQuery &p_query) {
+	Dictionary result;
+	result["columnCell"] = vector3i(p_query.column_cell);
+	result["surfaceY"] = p_query.surface_y;
+	result["intent"] = intent_name(p_query.intent);
+	result["semanticRevision"] = static_cast<int64_t>(p_query.semantic_revision);
+	return result;
+}
+
+Dictionary occupancy_dictionary(const NativeTerrainOccupancyFacts &p_facts) {
+	Dictionary light;
+	light["sky"] = static_cast<int64_t>(p_facts.light.sky);
+	light["block"] = static_cast<int64_t>(p_facts.light.block);
+	Dictionary result;
+	result["cell"] = vector3i(p_facts.cell);
+	result["solid"] = p_facts.solid;
+	result["air"] = p_facts.air;
+	result["material"] = MATERIAL_NAMES[static_cast<std::uint8_t>(p_facts.material)];
+	result["biome"] = BIOME_NAMES[static_cast<std::uint8_t>(p_facts.biome)];
+	result["fluid"] = FLUID_NAMES[static_cast<std::uint8_t>(p_facts.fluid)];
+	result["light"] = light;
+	result["floorSolid"] = p_facts.floor_solid;
+	result["ceilingSolid"] = p_facts.ceiling_solid;
+	result["walkableAir"] = p_facts.walkable_air;
+	return result;
+}
+
+Dictionary projection_facts_dictionary(const NativeEffectiveSurfaceProjectionFacts &p_facts) {
+	Dictionary result;
+	result["found"] = p_facts.found;
+	result["columnCell"] = vector3i(p_facts.column_cell);
+	result["solidCell"] = p_facts.found ? Variant(vector3i(p_facts.solid_cell)) : Variant();
+	result["airCell"] = p_facts.found ? Variant(vector3i(p_facts.air_cell)) : Variant();
+	result["position"] = p_facts.found ? Variant(Vector3(
+		p_facts.position.x, p_facts.position.y, p_facts.position.z)) : Variant();
+	result["solidState"] = p_facts.solid_state
+		? Variant(state_dictionary(*p_facts.solid_state)) : Variant();
+	result["airState"] = p_facts.air_state
+		? Variant(state_dictionary(*p_facts.air_state)) : Variant();
+	return result;
+}
+
 NativeCellStateNamespace parse_cell_namespace(const Variant &p_value, const char *p_field) {
 	const String value = require_protocol_string(p_value, p_field);
 	if (value == "durable_terrain") return NativeCellStateNamespace::durable_terrain;
@@ -1337,6 +1455,7 @@ struct NativeTerrainVolumeV2FinalizeJob {
 void NativeEffectiveTerrainPage::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("status"), &NativeEffectiveTerrainPage::status);
 	ClassDB::bind_method(D_METHOD("sample_batch", "request"), &NativeEffectiveTerrainPage::sample_batch);
+	ClassDB::bind_method(D_METHOD("project_surfaces", "request"), &NativeEffectiveTerrainPage::project_surfaces);
 	ClassDB::bind_method(D_METHOD("sample_continuous_surface", "column"), &NativeEffectiveTerrainPage::sample_continuous_surface);
 	ClassDB::bind_method(D_METHOD("encode_voxel_block", "request"), &NativeEffectiveTerrainPage::encode_voxel_block);
 }
@@ -1359,6 +1478,16 @@ Dictionary NativeEffectiveTerrainPage::status() const {
 	result["shapingRegistryRevision"] = static_cast<int64_t>(pin.shaping_registry_revision());
 	result["shapingRegistryIdentity"] = identity_dictionary(pin.shaping_registry_content_identity());
 	result["shapingPageCount"] = static_cast<int64_t>(pin.terrain_shaping_page_count());
+	result["projectionBatchSupported"] = true;
+	result["projectionBatchRequestSchema"] = PROJECTION_BATCH_REQUEST_SCHEMA;
+	result["projectionBatchResultSchema"] = PROJECTION_BATCH_RESULT_SCHEMA;
+	Dictionary projection_limits;
+	projection_limits["maxQueries"] = static_cast<int64_t>(MAX_PROJECTION_BATCH_QUERIES);
+	projection_limits["maxVerticalCandidatesPerQuery"] = static_cast<int64_t>(
+		NativeEffectiveTerrainSource::MAX_PROJECTION_VERTICAL_CANDIDATES);
+	projection_limits["knownHeightCandidates"] = static_cast<int64_t>(
+		NativeEffectiveTerrainSource::KNOWN_HEIGHT_PROJECTION_CANDIDATES);
+	result["projectionLimits"] = projection_limits;
 	return result;
 }
 
@@ -1439,6 +1568,70 @@ Dictionary NativeEffectiveTerrainPage::sample_batch(const Dictionary &p_request)
 		return result;
 	} catch (const std::exception &error) {
 		return failure("sample_batch", error);
+	}
+}
+
+Dictionary NativeEffectiveTerrainPage::project_surfaces(const Dictionary &p_request) const {
+	if (!batch_) return envelope("project_surfaces", "failed", "page_has_no_pin");
+	try {
+		const NativeEffectiveTerrainProjectionBatchResult value =
+			batch_->execute_projections(parse_projection_batch_request(p_request));
+		Dictionary result = envelope("project_surfaces", "ready");
+		result["resultSchema"] = PROJECTION_BATCH_RESULT_SCHEMA;
+		result["schemaRevision"] = static_cast<int64_t>(value.schema_revision);
+		result["primaryPage"] = Vector2i(value.primary_page.x, value.primary_page.z);
+		result["sourceIdentity"] = identity_dictionary(value.definition_physical_identity);
+		result["pinIdentity"] = identity_dictionary(value.pin_physical_identity);
+		result["terrainDeltaRevision"] = static_cast<int64_t>(value.terrain_delta_revision);
+		result["shapingRegistryRevision"] = static_cast<int64_t>(value.shaping_registry_revision);
+		result["shapingRegistryIdentity"] = identity_dictionary(
+			value.shaping_registry_content_identity);
+		result["admittedVerticalCandidates"] = static_cast<int64_t>(
+			value.admitted_vertical_candidates);
+		result["admittedCellReads"] = static_cast<int64_t>(value.admitted_cell_reads);
+		result["preparedPayloadBytes"] = static_cast<int64_t>(value.prepared_payload_bytes);
+		Array surfaces;
+		for (const NativeEffectiveFullSurfaceProjectionBatchRecord &record
+				: value.surface_projections) {
+			Dictionary item = projection_facts_dictionary(record.facts);
+			item["requested"] = projection_request_dictionary(record.requested);
+			surfaces.append(item);
+		}
+		result["surfaceProjections"] = surfaces;
+		Array walkable;
+		for (const NativeEffectiveWalkableProjectionBatchRecord &record
+				: value.walkable_projections) {
+			Dictionary item = projection_facts_dictionary(record.facts.projection);
+			item["requested"] = projection_request_dictionary(record.requested);
+			item["walkable"] = record.facts.walkable;
+			item["headroomState"] = record.facts.headroom_state
+				? Variant(state_dictionary(*record.facts.headroom_state)) : Variant();
+			item["occupancy"] = record.facts.occupancy
+				? Variant(occupancy_dictionary(*record.facts.occupancy)) : Variant();
+			walkable.append(item);
+		}
+		result["walkableProjections"] = walkable;
+		Array known;
+		for (const NativeEffectiveKnownHeightProjectionBatchRecord &record
+				: value.known_height_projections) {
+			Dictionary item = projection_facts_dictionary(record.facts.projection);
+			item["requested"] = known_height_request_dictionary(record.requested);
+			item["status"] = record.facts.status == NativeKnownHeightProjectionStatus::ready
+				? String("ready") : String("mismatch");
+			item["reason"] = record.facts.status == NativeKnownHeightProjectionStatus::ready
+				? String() : String("known_surface_boundary_occupancy_mismatch");
+			item["volumeRevision"] = static_cast<int64_t>(value.terrain_delta_revision);
+			item["walkable"] = record.facts.walkable;
+			item["headroomState"] = record.facts.headroom_state
+				? Variant(state_dictionary(*record.facts.headroom_state)) : Variant();
+			item["occupancy"] = record.facts.occupancy
+				? Variant(occupancy_dictionary(*record.facts.occupancy)) : Variant();
+			known.append(item);
+		}
+		result["knownHeightProjections"] = known;
+		return result;
+	} catch (const std::exception &error) {
+		return failure("project_surfaces", error);
 	}
 }
 

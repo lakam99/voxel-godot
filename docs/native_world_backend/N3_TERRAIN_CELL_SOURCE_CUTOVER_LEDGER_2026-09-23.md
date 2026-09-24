@@ -448,3 +448,68 @@ or an atomic source-to-collision cutover. No gameplay code or test-only runner
 is added by this ledger update. The first code PR must report its exact diff,
 commit, focused lifecycle evidence, and measured worst frame / pending-page
 lag before subsequent gates are considered.
+
+## Shadow Projection Query Slice
+
+N3 now has a shadow-only, immutable-pin projection batch beside the existing
+numeric batch. It does not activate `WorldGenerationSystem`, terrain runtime,
+collision publication, navigation, routing, Main, or NPC code. The batch
+accepts caller-owned start cells and bounded up/down distances, returns the
+first solid-to-air boundary with both complete effective cell states, and has
+a separate walkable result with headroom and occupancy. Fluid remains present
+in the standing state and occupancy; like the current script authority, fluid
+alone does not reject walkability.
+
+The ordinary projection returns cell-centred X/Z and the air cell's lower-face
+Y. The known-height projection preserves corner-aligned X/Z and the caller's
+exact smooth Y. Known-height parity follows the executable script loop
+`range(probe_y, probe_y - 3, -1)`: exactly three candidate boundaries and five
+unique cached cell reads. The nearby script comment that says “four cells” is
+stale and is intentionally not treated as executable behavior. Both query
+forms clamp to the admitted world top/bottom, normalize each negative or zero
+up/down distance with `max(1, value)`, preserve negative coordinates, and fail
+closed outside the pin's primary page or semantic/domain contract.
+
+The adapter contract is
+`n3-effective-terrain-projection-batch-request/v1` to
+`n3-effective-terrain-projection-batch-result/v1`. It enforces exact top-level
+and nested keys/types, channel and aggregate query caps before allocation,
+per-query and aggregate candidate/read budgets, a logical payload-byte cap,
+and atomic rejection without exposing partial output. Results preserve request
+order and duplicates and bind source identity, pin identity, terrain-delta
+revision, shaping revision, and shaping identity. Retained state accounting
+includes the complete recursive metadata encoding plus block ID and edit
+reason; result dictionaries expose the same complete state, fluid/light, and
+occupancy facts.
+
+Focused evidence uses audio-disabled automation:
+
+```powershell
+$env:VOXEL_DISABLE_AUDIO_PLAYBACK='1'
+node tools/run-n3-native-terrain-projection-contract.mjs
+```
+
+That Godot contract invokes the debug GDExtension projection adapter and proves
+schema/revision/identity, order/duplicates, full state payloads, fluid-aware
+walkability, no-result shape, old-pin immutability, malformed nested requests,
+and recovery after a mixed request is rejected atomically. Its passing report
+is preserved at
+`artifacts/native-world-backend/n3-terrain-projection-1790211759823-e7870de0/report.json`.
+The broader native
+gate also passed 535/535 tests in both debug and release, loaded the debug
+adapter, and loaded the just-built exported-release adapter. The exported
+release smoke proves the native module/class and existing save-v2 adapter
+boundary, but does not itself invoke the new projection method.
+
+The fail-closed full LLVM report is preserved at
+`artifacts/native-world-backend/n3-projection-shadow-coverage-retry-2026-09-23/report.json`.
+Its aggregate status remains blocked by older uncovered core paths outside this
+slice. A subsequent focused instrumented run at
+`artifacts/native-world-backend/n3-projection-shadow-focused-coverage/` proves
+352/352 branches (100%) across the two touched pure-core source/batch files;
+every new projection line and function executes. The only remaining uncovered
+lines/functions in those two files are the pre-existing continuous-surface
+wrapper/source pair and old reject-switch line attribution. These LLVM
+percentages cover the standalone pure core only. They do not instrument the
+GDExtension adapter C++; adapter evidence is the Godot contract above and must
+not be reported as 100% instrumented adapter coverage.

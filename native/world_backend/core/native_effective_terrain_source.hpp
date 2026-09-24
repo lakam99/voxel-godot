@@ -2,6 +2,7 @@
 
 #include "native_natural_terrain_source.hpp"
 #include "native_terrain_shaping_snapshot.hpp"
+#include <cstddef>
 #include <optional>
 
 namespace voxel::world_backend {
@@ -60,6 +61,70 @@ struct NativeSurfacePropSpawnFacts {
     std::uint64_t shaping_registry_revision = 0;
 };
 
+// Full terrain-volume projections preserve the live TerrainVolumeService
+// coordinate conventions.  The ordinary projection anchors X/Z at the air
+// cell centre and Y at its lower face.  The known-height projection instead
+// retains the caller's exact smooth Y and corner-aligned X/Z position.
+struct NativeEffectiveSurfaceProjectionQuery {
+    static constexpr std::uint32_t SEMANTIC_REVISION = 1;
+    CellCoord start_cell;
+    std::int32_t max_up_cells = 32;
+    std::int32_t max_down_cells = 96;
+    WorldQueryIntent intent = WorldQueryIntent::gameplay;
+    std::uint32_t semantic_revision = SEMANTIC_REVISION;
+};
+
+struct NativeEffectiveKnownHeightProjectionQuery {
+    static constexpr std::uint32_t SEMANTIC_REVISION = 1;
+    CellCoord column_cell;
+    double surface_y = 0.0;
+    WorldQueryIntent intent = WorldQueryIntent::gameplay;
+    std::uint32_t semantic_revision = SEMANTIC_REVISION;
+};
+
+struct NativeTerrainOccupancyFacts {
+    CellCoord cell;
+    bool solid = false;
+    bool air = true;
+    TerrainMaterialId material = TerrainMaterialId::air;
+    TerrainBiomeId biome = TerrainBiomeId::plains;
+    TerrainFluidId fluid = TerrainFluidId::none;
+    NativeCellLight light;
+    bool floor_solid = false;
+    bool ceiling_solid = false;
+    bool walkable_air = false;
+};
+
+struct NativeEffectiveSurfaceProjectionFacts {
+    bool found = false;
+    CellCoord column_cell;
+    CellCoord solid_cell;
+    CellCoord air_cell;
+    WorldFloat32Position position;
+    std::optional<NativeCellState> solid_state;
+    std::optional<NativeCellState> air_state;
+};
+
+struct NativeEffectiveWalkableProjectionFacts {
+    NativeEffectiveSurfaceProjectionFacts projection;
+    bool walkable = false;
+    std::optional<NativeCellState> headroom_state;
+    std::optional<NativeTerrainOccupancyFacts> occupancy;
+};
+
+enum class NativeKnownHeightProjectionStatus : std::uint8_t {
+    ready = 1,
+    mismatch = 2,
+};
+
+struct NativeEffectiveKnownHeightProjectionFacts {
+    NativeKnownHeightProjectionStatus status = NativeKnownHeightProjectionStatus::mismatch;
+    NativeEffectiveSurfaceProjectionFacts projection;
+    bool walkable = false;
+    std::optional<NativeCellState> headroom_state;
+    std::optional<NativeTerrainOccupancyFacts> occupancy;
+};
+
 NativeResolvedSurfaceProjectionQuery resolve_native_surface_projection_query(
     const WorldSourceDefinition &definition, const WorldLatticeQuery &query);
 
@@ -68,6 +133,10 @@ NativeResolvedSurfaceProjectionQuery resolve_native_surface_projection_query(
 // blocks: feature instances are not terrain cells.
 class NativeEffectiveTerrainSource final {
 public:
+    // Hard source-level bound.  Batch limits may narrow it, but no direct
+    // caller can request an unbounded synchronous vertical scan.
+    static constexpr std::size_t MAX_PROJECTION_VERTICAL_CANDIDATES = 512;
+    static constexpr std::size_t KNOWN_HEIGHT_PROJECTION_CANDIDATES = 3;
     // Ephemeral reuse within one lattice x/z column of one immutable pin.
     // The first sample establishes the float32-remapped source column.
     class LatticeColumnScratch {
@@ -96,6 +165,10 @@ public:
 
     const WorldSourcePin &pin() const noexcept;
     LatticeColumnScratch prepare_lattice_column(std::int32_t x, std::int32_t z) const;
+    std::size_t surface_projection_candidate_capacity(
+        const NativeEffectiveSurfaceProjectionQuery &query) const;
+    std::size_t known_height_projection_candidate_capacity(
+        const NativeEffectiveKnownHeightProjectionQuery &query) const;
 
     NativeSurfaceColumnFacts sample_surface_column(const WorldSurfaceColumnQuery &query) const;
     TerrainBiomeId sample_surface_biome(const WorldSurfaceColumnQuery &query) const;
@@ -106,6 +179,12 @@ public:
     double sample_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     double sample_continuous_volume_surface_y(const WorldSurfaceColumnQuery &query) const;
     NativeSurfacePropSpawnFacts sample_surface_prop_spawn(const WorldSurfaceColumnQuery &query) const;
+    NativeEffectiveSurfaceProjectionFacts sample_surface_projection(
+        const NativeEffectiveSurfaceProjectionQuery &query) const;
+    NativeEffectiveWalkableProjectionFacts sample_walkable_surface_near(
+        const NativeEffectiveSurfaceProjectionQuery &query) const;
+    NativeEffectiveKnownHeightProjectionFacts sample_navigation_surface_at_known_height(
+        const NativeEffectiveKnownHeightProjectionQuery &query) const;
     NativeEffectiveCellStateFacts sample_cell_state_facts(const WorldCellCenterQuery &query) const;
     NativeCellState sample_cell_state(const WorldCellCenterQuery &query) const;
 

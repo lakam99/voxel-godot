@@ -262,6 +262,112 @@ WorldDeltaPinnedSnapshot empty_deltas() {
     return store.pin();
 }
 
+WorldSourceDefinition tall_definition() {
+    WorldSourceDescriptor descriptor;
+    descriptor.raw_terrain_seed = admit_raw_terrain_seed("effective-batch-tall");
+    descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed("effective-batch-tall");
+    descriptor.revisions.terrain_generator_revision = 8;
+    descriptor.revisions.lattice_query_revision = 6;
+    descriptor.revisions.cell_center_query_revision = 7;
+    descriptor.revisions.surface_column_query_revision = 8;
+    descriptor.constants.world_bottom_cell_y = -1000;
+    descriptor.constants.minimum_surface_meters = 1000.0;
+    descriptor.constants.maximum_surface_meters = 1000.0;
+    return WorldSourceDefinition(std::move(descriptor));
+}
+
+WorldSourceDefinition int32_top_definition() {
+    WorldSourceDescriptor descriptor;
+    descriptor.raw_terrain_seed = admit_raw_terrain_seed("effective-batch-int32-top");
+    descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed(
+        "effective-batch-int32-top");
+    descriptor.revisions.terrain_generator_revision = 8;
+    descriptor.revisions.lattice_query_revision = 6;
+    descriptor.revisions.cell_center_query_revision = 7;
+    descriptor.revisions.surface_column_query_revision = 8;
+    descriptor.constants.minimum_surface_meters = 13.0;
+    descriptor.constants.maximum_surface_meters =
+        (static_cast<double>(std::numeric_limits<std::int32_t>::max()) - 4.0)
+            * descriptor.constants.cell_size_meters;
+    return WorldSourceDefinition(std::move(descriptor));
+}
+
+std::size_t projection_state_payload(const NativeCellState &state) {
+    return 54U + state.metadata.canonical_binary().size()
+        + (state.block_id ? state.block_id->value().size() : 0U)
+        + (state.edit_reason ? state.edit_reason->size() : 0U);
+}
+
+WorldDeltaPinnedSnapshot projection_deltas() {
+    std::vector<NativeTypedWorldStateRecord> records;
+    const auto append = [&](const CellCoord cell, const double density,
+                            const TerrainMaterialId material,
+                            const TerrainFluidId fluid = TerrainFluidId::none,
+                            const NativeCellLight light = NativeCellLight{}) {
+        records.push_back({
+            NativeCellStateNamespace::durable_terrain,
+            NativeTypedWorldStatePersistence::durable,
+            edit(cell, NativeCellStateNamespace::durable_terrain, density,
+                material, TerrainBiomeId::plains, fluid, light),
+        });
+    };
+    append({20, 10, 0}, 1.0, TerrainMaterialId::stone);
+    records.back().state.metadata = NativeValue::object({
+        {"arrayValue", NativeValue::array({
+            NativeValue::boolean(false), NativeValue::string("nested")})},
+        {"nullValue", NativeValue::null()},
+        {"numberValue", NativeValue::number(17.25)},
+        {"objectValue", NativeValue::object({
+            {"child", NativeValue::number(-2.5)}})},
+        {"source", NativeValue::string("terrain_edit")},
+        {"terrainMeshAffects", NativeValue::boolean(true)},
+    });
+    append({20, 11, 0}, -0.5, TerrainMaterialId::water,
+        TerrainFluidId::water, {3, 7});
+    append({20, 12, 0}, -0.5, TerrainMaterialId::air);
+    append({21, 10, 0}, 1.0, TerrainMaterialId::stone);
+    for (std::int32_t y = 11; y <= 14; ++y)
+        append({21, y, 0}, -0.5, TerrainMaterialId::air);
+    append({22, 9, 0}, 1.0, TerrainMaterialId::stone);
+    for (std::int32_t y = 10; y <= 14; ++y)
+        append({22, y, 0}, -0.5, TerrainMaterialId::air);
+    append({23, 9, 0}, 1.0, TerrainMaterialId::stone);
+    append({23, 10, 0}, 1.0, TerrainMaterialId::stone);
+    append({24, 12, 0}, 1.0, TerrainMaterialId::stone);
+    append({25, 8, 0}, 1.0, TerrainMaterialId::stone);
+    append({25, 9, 0}, -0.5, TerrainMaterialId::air);
+    for (std::int32_t y = 8; y <= 12; ++y)
+        append({26, y, 0}, -0.5, TerrainMaterialId::air);
+    append({-1, 14, -1}, 1.0, TerrainMaterialId::stone);
+    append({-1, 15, -1}, -0.5, TerrainMaterialId::air);
+    append({-2, -63, -1}, 1.0, TerrainMaterialId::bedrock);
+    append({-2, -62, -1}, -0.5, TerrainMaterialId::air);
+    append({27, 10, 0}, 1.0, TerrainMaterialId::stone);
+    append({27, 11, 0}, -0.5, TerrainMaterialId::air);
+    append({27, 12, 0}, 1.0, TerrainMaterialId::stone);
+    append({28, 11, 0}, 1.0, TerrainMaterialId::stone);
+    append({28, 12, 0}, -0.5, TerrainMaterialId::air);
+    append({28, 13, 0}, -0.5, TerrainMaterialId::air);
+    append({29, 9, 0}, 1.0, TerrainMaterialId::stone);
+    append({29, 10, 0}, 1.0, TerrainMaterialId::stone);
+    append({29, 11, 0}, -0.5, TerrainMaterialId::air);
+    append({29, 12, 0}, -0.5, TerrainMaterialId::air);
+    WorldDeltaStore store;
+    WorldTypedStateAdmission admission;
+    admission.transaction_id = "effective-batch:projection";
+    admission.durable_snapshot = NativeTypedWorldStateSnapshot::create(
+        std::move(records));
+    admission.transient_overlays.push_back({
+        NativeCellStateNamespace::scene_overlay,
+        NativeTypedWorldStatePersistence::transient,
+        edit({23, 10, 0}, NativeCellStateNamespace::scene_overlay, -0.5,
+            TerrainMaterialId::air, TerrainBiomeId::plains,
+            TerrainFluidId::none, {15, 0}),
+    });
+    static_cast<void>(store.admit_typed_state(admission));
+    return store.pin();
+}
+
 NativeEffectiveTerrainBatchRejectReason rejected_reason(
     const NativeEffectiveTerrainBatch &batch,
     const NativeEffectiveTerrainBatchRequest &request) {
@@ -273,6 +379,19 @@ NativeEffectiveTerrainBatchRejectReason rejected_reason(
     }
     VWB_EXPECT(false);
     return NativeEffectiveTerrainBatchRejectReason::total_limit;
+}
+
+NativeEffectiveTerrainBatchRejectReason projection_rejected_reason(
+    const NativeEffectiveTerrainBatch &batch,
+    const NativeEffectiveTerrainProjectionBatchRequest &request) {
+    try {
+        static_cast<void>(batch.execute_projections(request));
+    } catch (const NativeEffectiveTerrainBatchRejected &error) {
+        VWB_EXPECT(std::string(error.what()).find("limit exceeded") != std::string::npos);
+        return error.reason();
+    }
+    VWB_EXPECT(false);
+    return NativeEffectiveTerrainBatchRejectReason::projection_total_limit;
 }
 
 } // namespace
@@ -702,4 +821,308 @@ VWB_TEST(native_effective_batch_rejects_mixed_invalid_queries_without_observable
     VWB_EXPECT(recovered.lattice_numeric.empty());
     VWB_EXPECT(recovered.world_numeric.empty());
     VWB_EXPECT(recovered.surface_projection_numeric.empty());
+}
+
+VWB_TEST(native_effective_projection_batch_preserves_order_full_states_fluid_and_positions) {
+    const auto definition = flat_definition();
+    NativeEffectiveTerrainBatch batch(
+        ready_pin(definition, {0, 0}, projection_deltas()));
+    NativeEffectiveTerrainProjectionBatchRequest request;
+    const NativeEffectiveSurfaceProjectionQuery surface{
+        {20, 10, 0}, 1, 1, WorldQueryIntent::gameplay, 1};
+    request.surface_projections = {surface, surface};
+    request.walkable_projections = {surface, surface};
+    const double known_y = 12.25 * definition.constants().cell_size_meters;
+    request.known_height_projections = {
+        {{21, 99, 0}, known_y, WorldQueryIntent::gameplay, 1},
+        {{22, -99, 0}, known_y, WorldQueryIntent::gameplay, 1},
+        {{21, 99, 0}, known_y, WorldQueryIntent::gameplay, 1},
+    };
+    const auto result = batch.execute_projections(request);
+    VWB_EXPECT_EQ(NativeEffectiveTerrainProjectionBatchResult::SCHEMA_REVISION,
+        result.schema_revision);
+    VWB_EXPECT_EQ(batch.pin().physical_content_identity(), result.pin_physical_identity);
+    VWB_EXPECT_EQ(batch.pin().terrain_delta_revision(), result.terrain_delta_revision);
+    VWB_EXPECT_EQ(21U, result.admitted_vertical_candidates);
+    VWB_EXPECT_EQ(41U, result.admitted_cell_reads);
+    VWB_EXPECT(result.prepared_payload_bytes > 0U);
+    VWB_EXPECT_EQ(2U, result.surface_projections.size());
+    VWB_EXPECT_EQ(2U, result.walkable_projections.size());
+    VWB_EXPECT_EQ(3U, result.known_height_projections.size());
+
+    const auto &projected = result.surface_projections[0];
+    VWB_EXPECT(projected.facts.found);
+    VWB_EXPECT_EQ((CellCoord{20, 10, 0}), projected.facts.solid_cell);
+    VWB_EXPECT_EQ((CellCoord{20, 11, 0}), projected.facts.air_cell);
+    VWB_EXPECT(projected.facts.solid_state->solid);
+    VWB_EXPECT(!projected.facts.air_state->solid);
+    VWB_EXPECT_EQ(TerrainFluidId::water, projected.facts.air_state->fluid);
+    VWB_EXPECT_EQ((NativeCellLight{3, 7}), projected.facts.air_state->light);
+    const std::size_t one_surface_payload = 82U
+        + projection_state_payload(*projected.facts.solid_state)
+        + projection_state_payload(*projected.facts.air_state);
+    VWB_EXPECT(one_surface_payload > 82U + 108U);
+    NativeEffectiveTerrainProjectionBatchRequest one_surface_request;
+    one_surface_request.surface_projections = {surface};
+    VWB_EXPECT_EQ(one_surface_payload,
+        batch.execute_projections(one_surface_request).prepared_payload_bytes);
+    VWB_EXPECT_EQ(projected.facts.solid_cell,
+        result.surface_projections[1].facts.solid_cell);
+    VWB_EXPECT_EQ(projected.facts.air_state,
+        result.surface_projections[1].facts.air_state);
+    const float expected_center_x = static_cast<float>(20.5
+        * definition.constants().cell_size_meters);
+    VWB_EXPECT_EQ(expected_center_x, projected.facts.position.x);
+    VWB_EXPECT_EQ(static_cast<float>(11.0 * definition.constants().cell_size_meters),
+        projected.facts.position.y);
+
+    const auto &walkable = result.walkable_projections[0].facts;
+    VWB_EXPECT(walkable.projection.found && walkable.walkable);
+    VWB_EXPECT(walkable.headroom_state.has_value());
+    VWB_EXPECT(!walkable.headroom_state->solid);
+    VWB_EXPECT(walkable.occupancy.has_value());
+    VWB_EXPECT(walkable.occupancy->walkable_air);
+    VWB_EXPECT(walkable.occupancy->floor_solid);
+    VWB_EXPECT(!walkable.occupancy->ceiling_solid);
+    // Legacy walkability is solidity/headroom based: fluid in the standing
+    // cell remains visible in the full state but does not make it unwalkable.
+    VWB_EXPECT_EQ(TerrainFluidId::water, walkable.occupancy->fluid);
+
+    const auto &third_candidate = result.known_height_projections[0].facts;
+    VWB_EXPECT_EQ(NativeKnownHeightProjectionStatus::ready, third_candidate.status);
+    VWB_EXPECT_EQ((CellCoord{21, 10, 0}), third_candidate.projection.solid_cell);
+    VWB_EXPECT_EQ((CellCoord{21, 11, 0}), third_candidate.projection.air_cell);
+    VWB_EXPECT(third_candidate.walkable && third_candidate.occupancy->walkable_air);
+    VWB_EXPECT_EQ(static_cast<float>(21.0 * definition.constants().cell_size_meters),
+        third_candidate.projection.position.x);
+    VWB_EXPECT_EQ(static_cast<float>(known_y), third_candidate.projection.position.y);
+    // A fourth candidate at y=9 would succeed in this column.  The current
+    // GDScript range has exactly three candidates, notwithstanding its stale
+    // nearby "four cells" comment, so the native shadow must mismatch.
+    const auto &no_fourth = result.known_height_projections[1].facts;
+    VWB_EXPECT_EQ(NativeKnownHeightProjectionStatus::mismatch, no_fourth.status);
+    VWB_EXPECT(!no_fourth.projection.found);
+    VWB_EXPECT(!no_fourth.headroom_state.has_value());
+    VWB_EXPECT(!no_fourth.occupancy.has_value());
+    VWB_EXPECT_EQ(third_candidate.projection.solid_cell,
+        result.known_height_projections[2].facts.projection.solid_cell);
+}
+
+VWB_TEST(native_effective_projection_batch_matches_edit_precedence_clamps_and_empty_results) {
+    const auto definition = flat_definition();
+    NativeEffectiveTerrainBatch batch(
+        ready_pin(definition, {0, 0}, projection_deltas()));
+    NativeEffectiveTerrainProjectionBatchRequest request;
+    request.surface_projections = {
+        {{24, 10, 0}, 4, 4, WorldQueryIntent::gameplay, 1},
+        {{25, 10, 0}, 4, 4, WorldQueryIntent::gameplay, 1},
+        {{23, 10, 0}, 1, 1, WorldQueryIntent::gameplay, 1},
+        {{26, 10, 0}, 1, 1, WorldQueryIntent::gameplay, 1},
+        {{29, 8, 0}, 1, 1, WorldQueryIntent::gameplay, 1},
+        {{20, -1000, 0}, 1, 1, WorldQueryIntent::gameplay, 1},
+    };
+    request.walkable_projections = {
+        {{27, 10, 0}, 1, 1, WorldQueryIntent::gameplay, 1},
+        {{26, 10, 0}, 1, 1, WorldQueryIntent::gameplay, 1},
+    };
+    request.known_height_projections = {
+        {{28, 0, 0}, 12.25 * definition.constants().cell_size_meters,
+            WorldQueryIntent::gameplay, 1},
+        {{29, 0, 0}, 9.25 * definition.constants().cell_size_meters,
+            WorldQueryIntent::gameplay, 1},
+        {{27, 0, 0}, 10.25 * definition.constants().cell_size_meters,
+            WorldQueryIntent::gameplay, 1},
+    };
+    const auto result = batch.execute_projections(request);
+    VWB_EXPECT_EQ((CellCoord{24, 12, 0}),
+        result.surface_projections[0].facts.solid_cell);
+    VWB_EXPECT_EQ((CellCoord{25, 8, 0}),
+        result.surface_projections[1].facts.solid_cell);
+    VWB_EXPECT_EQ((CellCoord{23, 9, 0}),
+        result.surface_projections[2].facts.solid_cell);
+    VWB_EXPECT(!result.surface_projections[2].facts.solid_state->generated);
+    VWB_EXPECT(!result.surface_projections[3].facts.found);
+    VWB_EXPECT(!result.surface_projections[3].facts.solid_state.has_value());
+    VWB_EXPECT(!result.surface_projections[3].facts.air_state.has_value());
+    VWB_EXPECT(!result.surface_projections[4].facts.found);
+    VWB_EXPECT(!result.surface_projections[5].facts.found);
+    VWB_EXPECT(!result.walkable_projections[0].facts.walkable);
+    VWB_EXPECT(result.walkable_projections[0].facts.occupancy.has_value());
+    VWB_EXPECT(result.walkable_projections[0].facts.occupancy->ceiling_solid);
+    VWB_EXPECT(!result.walkable_projections[0].facts.occupancy->walkable_air);
+    VWB_EXPECT(!result.walkable_projections[1].facts.projection.found);
+    VWB_EXPECT(!result.walkable_projections[1].facts.occupancy.has_value());
+    VWB_EXPECT_EQ(NativeKnownHeightProjectionStatus::ready,
+        result.known_height_projections[0].facts.status);
+    VWB_EXPECT_EQ((CellCoord{28, 11, 0}),
+        result.known_height_projections[0].facts.projection.solid_cell);
+    VWB_EXPECT_EQ(NativeKnownHeightProjectionStatus::mismatch,
+        result.known_height_projections[1].facts.status);
+    VWB_EXPECT_EQ(NativeKnownHeightProjectionStatus::mismatch,
+        result.known_height_projections[2].facts.status);
+
+    NativeEffectiveTerrainBatch negative(
+        ready_pin(definition, {-1, -1}, projection_deltas()));
+    request = {};
+    request.surface_projections = {
+        {{-1, 13, -1}, std::numeric_limits<std::int32_t>::max(), -9,
+            WorldQueryIntent::gameplay, 1},
+        {{-2, -63, -1}, -4, std::numeric_limits<std::int32_t>::max(),
+            WorldQueryIntent::gameplay, 1},
+    };
+    const auto clamped = negative.execute_projections(request);
+    VWB_EXPECT_EQ((CellCoord{-1, 14, -1}),
+        clamped.surface_projections[0].facts.solid_cell);
+    VWB_EXPECT_EQ((CellCoord{-2, -63, -1}),
+        clamped.surface_projections[1].facts.solid_cell);
+    VWB_EXPECT_EQ(static_cast<float>(-0.5 * definition.constants().cell_size_meters),
+        clamped.surface_projections[0].facts.position.x);
+    VWB_EXPECT_EQ(6U, clamped.admitted_vertical_candidates);
+
+    // maxi(1, maxUp/maxDown) is part of the GDScript contract.
+    request.surface_projections[0].max_up_cells = 1;
+    request.surface_projections[0].max_down_cells = 1;
+    request.surface_projections[1].max_up_cells = 1;
+    request.surface_projections[1].max_down_cells = 1;
+    const auto normalized = negative.execute_projections(request);
+    VWB_EXPECT_EQ(clamped.surface_projections[0].facts.solid_cell,
+        normalized.surface_projections[0].facts.solid_cell);
+    VWB_EXPECT_EQ(clamped.surface_projections[1].facts.solid_cell,
+        normalized.surface_projections[1].facts.solid_cell);
+}
+
+VWB_TEST(native_effective_projection_batch_enforces_query_vertical_payload_and_atomic_limits) {
+    const auto definition = flat_definition();
+    NativeEffectiveTerrainBatchLimits limits;
+    limits.max_surface_projections = 1;
+    limits.max_walkable_projections = 1;
+    limits.max_known_height_projections = 1;
+    NativeEffectiveTerrainBatch batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    const NativeEffectiveSurfaceProjectionQuery query{
+        {20, 10, 0}, 1, 1, WorldQueryIntent::gameplay, 1};
+    const NativeEffectiveKnownHeightProjectionQuery known{
+        {21, 0, 0}, 12.25 * definition.constants().cell_size_meters,
+        WorldQueryIntent::gameplay, 1};
+    NativeEffectiveTerrainProjectionBatchRequest request;
+    request.surface_projections = {query, query};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::surface_projection_limit,
+        projection_rejected_reason(batch, request));
+    request = {}; request.walkable_projections = {query, query};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::walkable_projection_limit,
+        projection_rejected_reason(batch, request));
+    request = {}; request.known_height_projections = {known, known};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::known_height_projection_limit,
+        projection_rejected_reason(batch, request));
+
+    limits.max_projection_total_queries = 1;
+    NativeEffectiveTerrainBatch total_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    request = {}; request.surface_projections = {query}; request.walkable_projections = {query};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_total_limit,
+        projection_rejected_reason(total_batch, request));
+
+    limits.max_projection_total_queries = 4096;
+    limits.max_projection_vertical_candidates_per_query = 2;
+    NativeEffectiveTerrainBatch per_query_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    request = {}; request.known_height_projections = {known};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_vertical_per_query_limit,
+        projection_rejected_reason(per_query_batch, request));
+
+    limits.max_projection_vertical_candidates_per_query = 512;
+    limits.max_projection_total_vertical_candidates = 5;
+    request.known_height_projections = {known, known};
+    limits.max_known_height_projections = 2;
+    NativeEffectiveTerrainBatch vertical_total_batch_two(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_vertical_total_limit,
+        projection_rejected_reason(vertical_total_batch_two, request));
+
+    limits.max_projection_total_vertical_candidates = 65536;
+    limits.max_projection_cell_reads_per_query = 4;
+    NativeEffectiveTerrainBatch cell_reads_per_query_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    request.known_height_projections = {known};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_cell_reads_per_query_limit,
+        projection_rejected_reason(cell_reads_per_query_batch, request));
+    limits.max_projection_cell_reads_per_query = 1025;
+    limits.max_projection_total_cell_reads = 9;
+    NativeEffectiveTerrainBatch cell_reads_total_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    request.known_height_projections = {known, known};
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_cell_reads_total_limit,
+        projection_rejected_reason(cell_reads_total_batch, request));
+
+    NativeEffectiveTerrainBatch baseline(
+        ready_pin(definition, {0, 0}, projection_deltas()));
+    request = {}; request.surface_projections = {query};
+    const auto accepted = baseline.execute_projections(request);
+    limits = {};
+    limits.max_projection_payload_bytes = accepted.prepared_payload_bytes - 1U;
+    NativeEffectiveTerrainBatch payload_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_payload_limit,
+        projection_rejected_reason(payload_batch, request));
+    limits.max_projection_payload_bytes = 81U;
+    NativeEffectiveTerrainBatch fixed_payload_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    VWB_EXPECT_EQ(NativeEffectiveTerrainBatchRejectReason::projection_payload_limit,
+        projection_rejected_reason(fixed_payload_batch, request));
+    limits.max_projection_payload_bytes = accepted.prepared_payload_bytes;
+    NativeEffectiveTerrainBatch exact_payload_batch(
+        ready_pin(definition, {0, 0}, projection_deltas()), limits);
+    VWB_EXPECT_EQ(accepted.prepared_payload_bytes,
+        exact_payload_batch.execute_projections(request).prepared_payload_bytes);
+
+    request.surface_projections.push_back({
+        {1000000, 10, 1000000}, 1, 1, WorldQueryIntent::gameplay, 1});
+    VWB_EXPECT_THROW(std::out_of_range, baseline.execute_projections(request));
+    request = {}; request.surface_projections = {query};
+    VWB_EXPECT_EQ(1U, baseline.execute_projections(request).surface_projections.size());
+}
+
+VWB_TEST(native_effective_projection_queries_reject_invalid_semantics_and_domain) {
+    const auto definition = flat_definition();
+    NativeEffectiveTerrainBatch batch(
+        ready_pin(definition, {0, 0}, projection_deltas()));
+    NativeEffectiveTerrainProjectionBatchRequest request;
+    request.surface_projections.push_back(
+        {{20, 10, 0}, 1, 1, WorldQueryIntent::terrain_collision, 1});
+    VWB_EXPECT_THROW(std::invalid_argument, batch.execute_projections(request));
+    request.surface_projections[0].intent = WorldQueryIntent::gameplay;
+    request.surface_projections[0].semantic_revision = 2;
+    VWB_EXPECT_THROW(std::invalid_argument, batch.execute_projections(request));
+    request = {};
+    request.known_height_projections.push_back(
+        {{21, 0, 0}, std::numeric_limits<double>::quiet_NaN(),
+            WorldQueryIntent::gameplay, 1});
+    VWB_EXPECT_THROW(std::invalid_argument, batch.execute_projections(request));
+    request.known_height_projections[0].surface_y = 13.0;
+    request.known_height_projections[0].intent = WorldQueryIntent::terrain_collision;
+    VWB_EXPECT_THROW(std::invalid_argument, batch.execute_projections(request));
+    request.known_height_projections[0].intent = WorldQueryIntent::gameplay;
+    request.known_height_projections[0].semantic_revision = 2;
+    VWB_EXPECT_THROW(std::invalid_argument, batch.execute_projections(request));
+    request.known_height_projections[0].semantic_revision = 1;
+    request.known_height_projections[0].surface_y =
+        static_cast<double>(std::numeric_limits<std::int32_t>::max())
+            * definition.constants().cell_size_meters;
+    VWB_EXPECT_THROW(std::invalid_argument, batch.execute_projections(request));
+
+    const auto tall = tall_definition();
+    NativeEffectiveTerrainBatch tall_batch(
+        ready_pin(tall, {0, 0}, empty_deltas()));
+    request = {};
+    request.surface_projections.push_back(
+        {{0, 0, 0}, 1000, 1000, WorldQueryIntent::gameplay, 1});
+    VWB_EXPECT_THROW(std::length_error, tall_batch.execute_projections(request));
+
+    const auto int32_top = int32_top_definition();
+    NativeEffectiveTerrainBatch int32_top_batch(
+        ready_pin(int32_top, {0, 0}, empty_deltas()));
+    request.surface_projections[0] =
+        {{0, 0, 0}, 1, 1, WorldQueryIntent::gameplay, 1};
+    VWB_EXPECT_THROW(std::invalid_argument,
+        int32_top_batch.execute_projections(request));
 }
