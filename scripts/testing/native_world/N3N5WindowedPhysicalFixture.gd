@@ -457,6 +457,14 @@ func _run() -> void:
 	var replacement_barrier: RefCounted = replacement_hold.get("barrier")
 	var replacement_barrier_bounds: AABB = bounds
 	var initial_replacement_barrier_bounds: AABB = bounds
+	var retired_old_barrier_identity: Dictionary = coordinator._retired_barriers.back().get(
+		"identity", {}) if not coordinator._retired_barriers.is_empty() else {}
+	var incumbent_barrier_identity_differs_from_owner_identity: bool = \
+		retired_old_barrier_identity != window.get("identity", {})
+	var same_id_retired_barrier_token_matches_incumbent: bool = \
+		coordinator._retired_barriers.back().get("windowId") == window.id \
+		and coordinator._retired_barriers.back().get("windowToken") == window.windowToken \
+		if not coordinator._retired_barriers.is_empty() else false
 	var replacement_census: Dictionary = replacement_hold.get("census", {})
 	while replacement_census.get("status") == "pending":
 		await process_frame
@@ -1065,9 +1073,13 @@ func _run() -> void:
 				"replacementBounds":initial_replacement_barrier_bounds,
 				"unionReplacementBounds":replacement_barrier_bounds,
 				"initialReplacementCoversOldBounds":initial_replacement_covers_old,
-				"actorPosition":old_only_actor_position,
+			"actorPosition":old_only_actor_position,
 				"oldBarrierClearance":old_only_old_barrier_clearance,
 				"replacementBarrierClearance":old_only_replacement_barrier_clearance,
+				"incumbentBarrierIdentityDiffersFromOwnerIdentity": \
+					incumbent_barrier_identity_differs_from_owner_identity,
+				"sameIdRetiredBarrierTokenMatchesIncumbent": \
+					same_id_retired_barrier_token_matches_incumbent,
 				"retirementDeferred":old_only_retirement,
 				"oldOwnerStillLive":old_owner_live_during_old_only_hold,
 				"oldSolidBodyStillLive":old_solid_body_live_during_old_only_hold},
