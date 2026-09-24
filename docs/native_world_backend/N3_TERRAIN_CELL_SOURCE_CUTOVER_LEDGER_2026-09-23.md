@@ -738,3 +738,19 @@ limits include synchronous worst-case tombstone projection, caller-attested
 feature-definition digest until N4 binds the real producer, and no live
 `StructureSystem` differential. No broad suite will be repeated until a
 focused integration change needs it.
+
+The native surface-deformation compiler candidate is also integrated as a
+pure-core/shadow slice in primary commits `7e9d84a`, `a2c1c24`, `233c339`,
+`4ec5092`, and `dcf6571` (isolated commits `f79be92`, `9afa71e`, `ef24070`,
+`e211896`, and `f00c0a3`). Independent review approved shadow integration
+only. The candidate receipts are
+`artifacts/native-world-backend/n3-surface-final-f00c0a3/report.json`
+(66/66 focused compiler tests in debug and release, exact 100% compiler and
+cell-state coverage) and
+`artifacts/native-world-backend/n3-surface-cross-attestation-f00c0a3/receipt.json`
+(native↔Godot arithmetic cross-attestation bound to the exact executed build
+receipt). The candidate's source/worktree was clean and the focused reviewer
+reproduced the results. It adds no production adapter/publication caller;
+receipt-bound shadow arithmetic does not prove runtime collision, edits,
+rollback, physics, or gameplay cutover. Primary-tree focused reruns remain
+queued until the active N5 health review and matched-baseline lane are clear.
