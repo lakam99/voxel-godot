@@ -733,9 +733,15 @@ none of the generated-patch candidate commits changed that importer. The
 independent importer-coverage repair is now integrated as `c3b1480`: its
 RAII rejection guard preserves bounded cleanup on unknown exceptions, and
 focused MSVC/LLVM importer suites pass 11/11 with exact importer coverage
-154/154 lines, 18/18 functions, and 98/98 branches. Canonical primary whole-
-core coverage has not yet been rerun on the combined source and remains
-unverified until the canonical native gate is run. The generated-patch candidate
+154/154 lines, 18/18 functions, and 98/98 branches. The canonical primary gate
+now passes on the combined source in
+`artifacts/native-world-backend/n1-importer-coverage-primary-01/report.json`:
+debug and release each passed 611/611; the manifest denominator is validated;
+whole-core coverage is 14,437/14,437 lines, 1,761/1,761 functions and
+8,098/8,098 branches; all uncovered arrays are empty; and source/project
+inputs are unchanged. The run confirms the importer misses are closed and
+the LCOV-derived uncovered-line report agrees with per-file summaries. The
+generated-patch candidate
 changes only core C++ files, core `NativeValue`/SHA helpers, the source
 manifest and native tests; it adds no production adapter/runtime/save or
 routing caller. This is not generated-patch source integration, physical
@@ -754,7 +760,8 @@ share a 96-operation cursor budget (65,536 accepted, 65,537 rejected). The
 assumes post-publication mutation uses owner APIs. These are fixture-level
 checks, not production cutover. N5 stop/drain still needs planner replacement
 cancellation and lease retirement before its terminal receipt. The canonical
-full native gate can now be run once on the settled core/importer sources.
+full native gate above validates this settled core/importer source set only;
+it is not the original Gate 5 or a production cutover.
 
 The native surface-deformation compiler candidate is also integrated as a
 pure-core/shadow slice in primary commits `7e9d84a`, `a2c1c24`, `233c339`,
