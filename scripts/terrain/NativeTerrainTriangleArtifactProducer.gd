@@ -7,6 +7,7 @@ class_name NativeTerrainTriangleArtifactProducer
 const SCHEMA := "n3-effective-voxel-block-request/v1"
 const BLOCK_CELLS := 16
 const MAX_VERTICES := 65536
+const MAX_DEMAND_SNAPSHOT_WORK_OPS := 257
 
 var _backend
 var _admission
@@ -29,20 +30,33 @@ var _artifact_rows := {}
 var _validated_local_pins := {}
 var _demand_revision := -1
 var _closure_token := ""
+var _required_demand_blocks: Array = []
+var _required_demand_snapshot_ready := false
+var _demand_snapshot_token := 0
+var _demand_snapshot_target_revision := -1
+var _demand_snapshot_target_token := ""
+var _demand_snapshot_cancel_requested := false
+var _candidate_demand_blocks: Array = []
+var _candidate_demand_revision := -1
+var _candidate_closure_token := ""
+var _candidate_demand_pending := false
+var _demand_prune_cursor := -1
 var _stopped := false
 
 func setup(backend, page_admission, admission, planner, cell_meters: float,
 		identity: Dictionary) -> Dictionary:
 	if _backend != null or backend == null or page_admission == null or admission == null \
 			or planner == null \
-			or not planner.has_method("required_collision_mesh_blocks") or cell_meters <= 0.0 \
+			or not planner.has_method("begin_required_collision_mesh_blocks") \
+			or not planner.has_method("advance_required_collision_mesh_blocks") \
+			or not planner.has_method("diagnostics") or cell_meters <= 0.0 \
 			or not _identity_valid(identity):
 		return {"status":"failed", "reason":"triangle_producer_owner_invalid"}
 	var status: Dictionary = backend.status()
 	if status.get("status") != "ready" or not status.get("sourceIdentity") is Dictionary:
 		return {"status":"failed", "reason":"triangle_source_unavailable"}
-	var demanded: Dictionary = planner.required_collision_mesh_blocks()
-	if demanded.get("status") != "ready" or int(demanded.get("revision", 0)) <= 0 \
+	var demanded: Dictionary = planner.diagnostics()
+	if int(demanded.get("demandRevision", 0)) <= 0 \
 			or String(demanded.get("closureToken", "")).is_empty():
 		return {"status":"failed", "reason":"triangle_demand_unavailable"}
 	_backend = backend
@@ -50,7 +64,7 @@ func setup(backend, page_admission, admission, planner, cell_meters: float,
 	_pages = page_admission
 	_admission = admission
 	_planner = planner
-	_demand_revision = int(demanded.revision)
+	_demand_revision = int(demanded.demandRevision)
 	_closure_token = String(demanded.closureToken)
 	_cell_meters = cell_meters
 	_identity = identity.duplicate(true)
@@ -64,8 +78,133 @@ func setup(backend, page_admission, admission, planner, cell_meters: float,
 	_mesher.mesh_optimization_enabled = false
 	if _mesher.get_minimum_padding() != 1 or _mesher.get_maximum_padding() != 2:
 		return {"status":"failed", "reason":"transvoxel_padding_contract_changed"}
+	var snapshot_started: Dictionary = _begin_demand_snapshot(
+		_demand_revision, _closure_token)
+	if snapshot_started.get("status") != "pending":
+		return {"status":"failed", "reason":"triangle_demand_snapshot_start_failed",
+			"cause":snapshot_started}
 	return {"status":"ready", "sourceIdentity":status.sourceIdentity,
-		"identity":_identity.duplicate(true)}
+		"identity":_identity.duplicate(true), "demandSnapshotPending":true}
+
+func advance_demand_snapshot() -> Dictionary:
+	return _advance_demand_snapshot()
+
+func demand_snapshot() -> Dictionary:
+	return _required_blocks()
+
+func is_block_demanded(block: Vector3i) -> Dictionary:
+	var required: Dictionary = _required_blocks()
+	if required.get("status") != "ready": return required
+	return {"status":"ready", "demanded":_contains_block(required.blocks, block),
+		"revision":_demand_revision, "closureToken":_closure_token}
+
+func _begin_demand_snapshot(revision: int, closure_token: String) -> Dictionary:
+	var started: Dictionary = _planner.begin_required_collision_mesh_blocks()
+	if started.get("status") != "pending": return started
+	_demand_snapshot_token = int(started.get("token", 0))
+	_demand_snapshot_target_revision = revision
+	_demand_snapshot_target_token = closure_token
+	_demand_snapshot_cancel_requested = false
+	return started
+
+func _advance_demand_snapshot() -> Dictionary:
+	if _planner == null: return {"status":"failed", "reason":"triangle_planner_unavailable"}
+	var identity: Dictionary = _planner.diagnostics()
+	var target_revision := int(identity.get("demandRevision", -1))
+	var target_token := String(identity.get("closureToken", ""))
+	if _candidate_demand_pending:
+		if target_revision != _candidate_demand_revision \
+				or target_token != _candidate_closure_token:
+			if not _candidate_demand_blocks.is_empty():
+				_candidate_demand_blocks.pop_back()
+				return {"status":"pending", "reason":"triangle_demand_candidate_retiring",
+					"workOps":1, "maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+			_candidate_demand_pending = false
+			return _begin_demand_snapshot(target_revision, target_token)
+		if _demand_prune_cursor >= 0:
+			var stale_block: Vector3i = _required_demand_blocks[_demand_prune_cursor]
+			_demand_prune_cursor -= 1
+			if not _contains_block(_candidate_demand_blocks, stale_block):
+				_artifacts.erase(stale_block)
+				_artifact_rows.erase(stale_block)
+				_validated_local_pins.erase(stale_block)
+			if _demand_prune_cursor >= 0:
+				return {"status":"pending", "reason":"triangle_demand_artifact_prune_pending",
+					"remaining":_demand_prune_cursor + 1,
+					"workOps":1, "maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+		_required_demand_blocks = _candidate_demand_blocks
+		_required_demand_blocks.make_read_only()
+		_candidate_demand_blocks = []
+		_demand_revision = _candidate_demand_revision
+		_closure_token = _candidate_closure_token
+		_candidate_demand_revision = -1
+		_candidate_closure_token = ""
+		_candidate_demand_pending = false
+		_required_demand_snapshot_ready = true
+		return {"status":"pending", "reason":"triangle_demand_snapshot_published",
+			"workOps":1, "maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+	if _demand_snapshot_token == 0:
+		if _required_demand_snapshot_ready and _demand_revision == target_revision \
+				and _closure_token == target_token \
+				and not _candidate_demand_pending:
+			return {"status":"ready", "revision":_demand_revision,
+				"closureToken":_closure_token}
+		var started := _begin_demand_snapshot(target_revision, target_token)
+		if started.get("status") == "failed": return started
+		return {"status":"pending", "reason":"triangle_demand_snapshot_started",
+			"cause":started, "workOps":0,
+			"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+	if target_revision != _demand_snapshot_target_revision \
+			or target_token != _demand_snapshot_target_token:
+		if not _demand_snapshot_cancel_requested:
+			_planner.cancel_required_collision_mesh_blocks(_demand_snapshot_token)
+			_demand_snapshot_cancel_requested = true
+		var cancelled: Dictionary = _planner.advance_required_collision_mesh_blocks()
+		if cancelled.get("status") == "pending":
+			return {"status":"pending", "reason":"triangle_demand_snapshot_cancel_draining",
+				"workOps":int(cancelled.get("workOps", 0)),
+				"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+		_demand_snapshot_token = 0
+		_demand_snapshot_cancel_requested = false
+		return _begin_demand_snapshot(target_revision, target_token)
+	var advanced: Dictionary = _planner.advance_required_collision_mesh_blocks()
+	if advanced.get("status") == "pending":
+		return {"status":"pending", "reason":"triangle_demand_snapshot_building",
+			"workOps":advanced.get("workOps", 0),
+			"maxWorkOps":advanced.get("maxWorkOps", 0)}
+	_demand_snapshot_token = 0
+	_demand_snapshot_cancel_requested = false
+	if advanced.get("status") != "ready":
+		return advanced
+	if int(advanced.get("revision", -1)) != target_revision \
+			or String(advanced.get("closureToken", "")) != target_token:
+		return {"status":"pending", "reason":"triangle_demand_snapshot_stale",
+			"workOps":int(advanced.get("workOps", 0)),
+			"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+	_candidate_demand_blocks = advanced.get("blocks", [])
+	_candidate_demand_revision = target_revision
+	_candidate_closure_token = target_token
+	_candidate_demand_pending = true
+	_demand_prune_cursor = _required_demand_blocks.size() - 1
+	return {"status":"pending", "reason":"triangle_demand_snapshot_candidate_ready",
+		"workOps":int(advanced.get("workOps", 0)),
+		"maxWorkOps":MAX_DEMAND_SNAPSHOT_WORK_OPS}
+
+func _contains_block(blocks: Array, sought: Vector3i) -> bool:
+	# The staged planner builder publishes the exact canonical z/y/x ordering
+	# also used by its synchronous compatibility API; do not pass arbitrary arrays.
+	var low := 0
+	var high := blocks.size() - 1
+	while low <= high:
+		var mid := (low + high) >> 1
+		var candidate: Vector3i = blocks[mid]
+		if candidate == sought: return true
+		if _block_before(candidate, sought): low = mid + 1
+		else: high = mid - 1
+	return false
+
+func _block_before(a: Vector3i, b: Vector3i) -> bool:
+	return a.z < b.z or (a.z == b.z and (a.y < b.y or (a.y == b.y and a.x < b.x)))
 
 func request_block(block: Vector3i) -> Dictionary:
 	if _stopped or _backend == null: return {"status":"failed", "reason":"triangle_producer_inactive"}
@@ -73,7 +212,13 @@ func request_block(block: Vector3i) -> Dictionary:
 		return {"status":"failed", "reason":"triangle_producer_failed_or_draining"}
 	if _pending_block != null: return {"status":"pending", "reason":"triangle_block_in_flight"}
 	var required: Dictionary = _required_blocks()
-	if required.get("status") != "ready" or not (required.blocks as Array).has(block):
+	if required.get("status") != "ready":
+		if required.get("status") == "pending":
+			_pending_block = block
+			return {"status":"pending", "reason":"triangle_demand_snapshot_pending",
+				"block":block}
+		return {"status":"failed", "reason":"triangle_block_not_in_pinned_demand"}
+	if not _contains_block(required.blocks, block):
 		return {"status":"failed", "reason":"triangle_block_not_in_pinned_demand"}
 	_pending_block = block
 	return {"status":"pending", "reason":"triangle_block_requested", "block":block}
@@ -98,17 +243,8 @@ func rebind_demand() -> Dictionary:
 		_build_thread = null
 		_build_context.clear()
 	_pending_block = null
-	var demanded: Dictionary = _planner.required_collision_mesh_blocks()
+	var demanded: Dictionary = _advance_demand_snapshot()
 	if demanded.get("status") != "ready": return demanded
-	_demand_revision = int(demanded.revision)
-	_closure_token = String(demanded.closureToken)
-	var allowed := {}
-	for block: Vector3i in demanded.blocks: allowed[block] = true
-	for block: Vector3i in _artifacts.keys():
-		if allowed.has(block): continue
-		_artifacts.erase(block)
-		_artifact_rows.erase(block)
-		_validated_local_pins.erase(block)
 	return {"status":"ready", "demandRevision":_demand_revision,
 		"closureToken":_closure_token, "retainedArtifacts":_artifacts.size()}
 
@@ -133,9 +269,14 @@ func advance() -> Dictionary:
 		_pending_block = null
 		return {"status":"failed", "reason":_failure_reason}
 	if not _failure_reason.is_empty(): return {"status":"failed", "reason":_failure_reason}
+	var demand_progress: Dictionary = _advance_demand_snapshot()
+	if demand_progress.get("status") != "ready": return demand_progress
 	if _pending_block == null: return {"status":"pending", "reason":"triangle_block_not_requested"}
 	var required: Dictionary = _required_blocks()
 	if required.get("status") != "ready": return _failure("triangle_demand_changed")
+	if not _contains_block(required.blocks, _pending_block):
+		_pending_block = null
+		return {"status":"failed", "reason":"triangle_block_not_in_pinned_demand"}
 	var source: Dictionary = _backend.status()
 	if source.get("status") != "ready" or source.get("sourceIdentity") != _source_identity \
 			or int(source.get("terrainDeltaRevision", -1)) \
@@ -431,14 +572,25 @@ func _local_pins_current(block: Vector3i, source: Dictionary) -> bool:
 	return valid
 
 func _required_blocks() -> Dictionary:
-	var current: Dictionary = _planner.required_collision_mesh_blocks()
-	if current.get("status") != "ready" or int(current.get("revision", -1)) != _demand_revision \
+	if _planner == null or not _required_demand_snapshot_ready \
+			or _demand_snapshot_token != 0 or _candidate_demand_pending:
+		return {"status":"pending", "reason":"triangle_demand_snapshot_pending"}
+	var current: Dictionary = _planner.diagnostics()
+	if int(current.get("demandRevision", -1)) != _demand_revision \
 			or String(current.get("closureToken", "")) != _closure_token:
 		return {"status":"pending", "reason":"triangle_demand_changed"}
-	return current
+	return {"status":"ready", "revision":_demand_revision,
+		"closureToken":_closure_token, "blocks":_required_demand_blocks}
 
 func stop() -> Dictionary:
 	_stopped = true
+	if _candidate_demand_pending:
+		return {"status":"pending", "reason":"triangle_demand_candidate_draining"}
+	if _demand_snapshot_token != 0:
+		if not _demand_snapshot_cancel_requested:
+			_planner.cancel_required_collision_mesh_blocks(_demand_snapshot_token)
+			_demand_snapshot_cancel_requested = true
+		return {"status":"pending", "reason":"triangle_demand_snapshot_draining"}
 	if _ticket != 0:
 		_backend.cancel_voxel_block_shadow_async(_ticket)
 		return {"status":"pending", "reason":"triangle_worker_draining"}
@@ -454,6 +606,14 @@ func stop() -> Dictionary:
 ## requests cancellation; worker/ticket completion remains in drain_step().
 func request_stop() -> Dictionary:
 	_stopped = true
+	if _candidate_demand_pending:
+		return {"status":"pending", "reason":"triangle_demand_candidate_cancel_requested"}
+	if _demand_snapshot_token != 0:
+		if not _demand_snapshot_cancel_requested:
+			_planner.cancel_required_collision_mesh_blocks(_demand_snapshot_token)
+			_demand_snapshot_cancel_requested = true
+		return {"status":"pending", "reason":"triangle_demand_snapshot_cancel_requested",
+			"token":_demand_snapshot_token}
 	if _ticket != 0:
 		_backend.cancel_voxel_block_shadow_async(_ticket)
 		return {"status":"pending", "reason":"triangle_worker_cancel_requested",
@@ -468,6 +628,23 @@ func request_stop() -> Dictionary:
 
 func drain_step() -> Dictionary:
 	if not _stopped: return {"status":"failed", "reason":"triangle_stop_required"}
+	if _candidate_demand_pending:
+		if not _candidate_demand_blocks.is_empty():
+			_candidate_demand_blocks.pop_back()
+			return {"status":"pending", "reason":"triangle_demand_candidate_draining",
+				"remaining":_candidate_demand_blocks.size()}
+		_candidate_demand_pending = false
+		_candidate_demand_revision = -1
+		_candidate_closure_token = ""
+		_demand_prune_cursor = -1
+	if _demand_snapshot_token != 0:
+		var demand_drain: Dictionary = _planner.advance_required_collision_mesh_blocks()
+		if demand_drain.get("status") == "pending":
+			return {"status":"pending", "reason":"triangle_demand_snapshot_draining",
+				"workOps":demand_drain.get("workOps", 0),
+				"maxWorkOps":demand_drain.get("maxWorkOps", 0)}
+		_demand_snapshot_token = 0
+		_demand_snapshot_cancel_requested = false
 	if _ticket != 0:
 		var result: Dictionary = _backend.poll_voxel_block_shadow_async(_ticket)
 		if result.get("status") != "ready": return result

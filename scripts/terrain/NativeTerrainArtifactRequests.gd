@@ -44,7 +44,8 @@ var _async_stop_requested := false
 func setup(backend, pages, admission, planner, cell_meters: float,
 		owner_generation: int, max_resident_blocks: int) -> Dictionary:
 	if _backend != null or backend == null or pages == null or admission == null \
-			or planner == null or cell_meters <= 0.0 or owner_generation <= 0 \
+			or planner == null or not planner.has_method("diagnostics") \
+			or cell_meters <= 0.0 or owner_generation <= 0 \
 			or max_resident_blocks <= 0:
 		return {"status":"failed", "reason":"artifact_request_owner_invalid"}
 	_backend = backend
@@ -104,9 +105,11 @@ func observe_verified_durable_edit(receipt: Dictionary,
 func request_block(block: Vector3i) -> Dictionary:
 	if _stopping or _backend == null:
 		return {"status":"failed", "reason":"artifact_requests_inactive"}
-	var demand: Dictionary = _planner.required_collision_mesh_blocks()
-	if demand.get("status") != "ready" or not (demand.blocks as Array).has(block):
-		return {"status":"failed", "reason":"artifact_block_not_demanded"}
+	var membership := {"status":"pending", "reason":"artifact_demand_snapshot_pending"}
+	if _producer != null:
+		membership = _producer.is_block_demanded(block)
+		if membership.get("status") == "ready" and not membership.get("demanded", false):
+			return {"status":"failed", "reason":"artifact_block_not_demanded"}
 	for window: Dictionary in _window_layout.get("windows", []):
 		if not (window.blocks as Array).has(block): continue
 		var record: Dictionary = _window_records.get(window.windowToken, {})
@@ -115,12 +118,13 @@ func request_block(block: Vector3i) -> Dictionary:
 			return {"status":"ready", "reason":"locally_proven_artifact_retained",
 				"block":block, "windowToken":window.windowToken}
 	_requests[block] = true
-	return {"status":"pending", "reason":"artifact_request_retained", "block":block}
+	return {"status":"pending", "reason":"artifact_request_retained", "block":block,
+		"demandPending":_producer == null or membership.get("status") != "ready"}
 
 func advance() -> Dictionary:
 	if _stopping or _backend == null:
 		return {"status":"failed", "reason":"artifact_requests_inactive"}
-	var demand: Dictionary = _planner.required_collision_mesh_blocks()
+	var demand: Dictionary = _demand_identity()
 	var source: Dictionary = _backend.status()
 	if demand.get("status") != "ready" or source.get("status") != "ready":
 		return {"status":"pending", "reason":"artifact_source_or_demand_pending"}
@@ -141,6 +145,8 @@ func advance() -> Dictionary:
 	if _producer == null:
 		var created: Dictionary = _create_producer(source, demand)
 		if created.get("status") != "ready": return created
+	var demand_snapshot: Dictionary = _producer.advance_demand_snapshot()
+	if demand_snapshot.get("status") != "ready": return demand_snapshot
 	var layout_ready: Dictionary = _refresh_window_layout()
 	if layout_ready.get("status") != "ready": return layout_ready
 	var snapshot: Dictionary = _producer.collision_source_snapshot()
@@ -158,11 +164,11 @@ func advance() -> Dictionary:
 			return {"status":"pending", "reason":"artifact_retry_retained",
 				"sourceFailure":result.get("reason", "")}
 		return result
-	var required := {}
-	for block: Vector3i in demand.blocks: required[block] = true
 	var blocks: Array[Vector3i] = []
 	for block: Vector3i in _requests:
-		if required.has(block): blocks.append(block)
+		var membership: Dictionary = _producer.is_block_demanded(block)
+		if membership.get("status") == "ready" and membership.get("demanded", false):
+			blocks.append(block)
 		else: _requests.erase(block)
 	blocks.sort_custom(func(a: Vector3i, b: Vector3i) -> bool:
 		return a.z < b.z or (a.z == b.z and (a.y < b.y or (a.y == b.y and a.x < b.x))))
@@ -180,12 +186,16 @@ func advance() -> Dictionary:
 
 func collision_source_snapshot() -> Dictionary:
 	if _planner != null:
-		var demand: Dictionary = _planner.required_collision_mesh_blocks()
+		var demand: Dictionary = _demand_identity()
 		if demand.get("status") == "ready" \
-				and (demand.blocks as Array).size() > _max_resident_blocks:
+				and int(demand.get("requiredMeshBlocks", 0)) > _max_resident_blocks:
 			return {"status":"pending", "reason":"partitioned_source_requires_window",
-				"requiredBlocks":(demand.blocks as Array).size(),
+				"requiredBlocks":int(demand.get("requiredMeshBlocks", 0)),
 				"windowLayout":collision_window_layout()}
+		if _producer == null or demand.get("status") != "ready" \
+				or int(demand.get("revision", -1)) != _demand_revision \
+				or String(demand.get("closureToken", "")) != _closure_token:
+			return {"status":"pending", "reason":"artifact_demand_snapshot_pending"}
 	if _producer == null or _draining:
 		return {"status":"pending", "reason":"artifact_producer_unavailable"}
 	return _producer.collision_source_snapshot()
@@ -467,6 +477,17 @@ func _create_producer(source: Dictionary, demand: Dictionary) -> Dictionary:
 		_producer = null
 		return ready
 	return {"status":"ready", "identity":_identity.duplicate(true)}
+
+func _demand_identity() -> Dictionary:
+	if _planner == null: return {"status":"pending", "reason":"artifact_demand_unavailable"}
+	var snapshot: Dictionary = _planner.diagnostics()
+	var revision := int(snapshot.get("demandRevision", -1))
+	var closure_token := String(snapshot.get("closureToken", ""))
+	if revision <= 0 or closure_token.is_empty():
+		return {"status":"pending", "reason":"artifact_demand_unavailable"}
+	return {"status":"ready", "revision":revision,
+		"closureToken":closure_token,
+		"requiredMeshBlocks":int(snapshot.get("requiredMeshBlocks", 0))}
 
 func _refresh_window_layout() -> Dictionary:
 	# Once old physical owners exceed the retention budget, no subsequent

@@ -11,9 +11,55 @@ const ARTIFACT_REQUESTS = preload("res://scripts/terrain/NativeTerrainArtifactRe
 const EDIT_PLAN = preload("res://scripts/terrain/NativeTerrainEditRepublicationPlan.gd")
 
 var failures: Array[String] = []
+var staged_demand_advances := 0
+var staged_demand_work_ops := 0
+var staged_demand_max_work_ops := 0
 
 func check(value: bool, label: String) -> void:
 	if not value: failures.append(label)
+
+func _is_staged_demand_step(result: Dictionary) -> bool:
+	if result.get("status") != "pending": return false
+	var reason := String(result.get("reason", ""))
+	return reason.begins_with("triangle_demand_snapshot_") \
+		or reason.begins_with("triangle_demand_candidate_") \
+		or reason.begins_with("triangle_demand_artifact_prune_")
+
+func _advance_staged_demand(worker, initial: Dictionary, label: String) -> Dictionary:
+	var result := initial
+	var steps := 0
+	while _is_staged_demand_step(result) and steps < 4096:
+		var work_ops := int(result.get("workOps", 0))
+		var work_limit := int(result.get("maxWorkOps", 0))
+		check(work_limit > 0 and work_ops <= work_limit,
+			"%s staged advance respects work budget (%d/%d)" % [label, work_ops, work_limit])
+		staged_demand_advances += 1
+		staged_demand_work_ops += work_ops
+		staged_demand_max_work_ops = maxi(staged_demand_max_work_ops, work_ops)
+		result = worker.advance()
+		steps += 1
+		await process_frame
+	check(not _is_staged_demand_step(result),
+			"%s staged demand makes bounded forward progress" % label)
+	return result
+
+func _drain_requests(owner, initial: Dictionary, label: String) -> Dictionary:
+	var result := initial
+	var steps := 0
+	while result.get("status") != "ready" and steps < 4096:
+		if result.has("workOps"):
+			var work_ops := int(result.get("workOps", 0))
+			var work_limit := int(result.get("maxWorkOps", 0))
+			check(work_limit > 0 and work_ops <= work_limit,
+				"%s drain respects work budget (%d/%d)" % [label, work_ops, work_limit])
+			staged_demand_advances += 1
+			staged_demand_work_ops += work_ops
+			staged_demand_max_work_ops = maxi(staged_demand_max_work_ops, work_ops)
+		result = owner.drain_step()
+		steps += 1
+		await process_frame
+	check(result.get("status") == "ready", "%s drains with bounded progress" % label)
+	return result
 
 func _init() -> void:
 	call_deferred("run")
@@ -109,6 +155,13 @@ func run() -> void:
 		and snapshot.get("artifacts", {}).get(block) == row.get("artifactKey")
 		and snapshot.get("membershipProvenance", {}).get("closureToken") == planned.get("closureToken"),
 		"complete source snapshot keeps required and produced membership separate")
+	var producer_demand: Dictionary = producer.demand_snapshot()
+	check(producer_demand.get("status") == "ready"
+		and producer_demand.get("blocks", []) == [block]
+		and (producer_demand.get("blocks", []) as Array).is_read_only()
+		and producer.is_block_demanded(block).get("demanded", false)
+		and not producer.is_block_demanded(Vector3i(1, block.y, 0)).get("demanded", true),
+		"accepted demand snapshot is exact, canonical, isolated, and searchable")
 	var vertices: PackedVector3Array = row.get("vertices", PackedVector3Array())
 	check(vertices.size() % 3 == 0 and vertices.size() <= 65536,
 		"triangle topology and capacity are bounded")
@@ -147,7 +200,12 @@ func run() -> void:
 		and switched_producer.request_block(block).get("status") == "pending",
 		"source-switch advance probe starts from pinned backend")
 	switched_producer._backend = other_backend
-	check(switched_producer.advance().get("reason") == "triangle_source_revision_changed",
+	var switched_result: Dictionary = {}
+	for frame in range(300):
+		switched_result = switched_producer.advance()
+		if switched_result.get("status") == "failed": break
+		await process_frame
+	check(switched_result.get("reason") == "triangle_source_revision_changed",
 		"advance rejects same-revision different-seed backend")
 	switched_producer.stop()
 	other_main.free()
@@ -191,10 +249,11 @@ func run() -> void:
 		planner, main.CELL, identity).get("status") == "ready"
 		and stale_producer.request_block(block).get("status") == "pending",
 		"second producer captures source before edited revision")
-	var in_flight: Dictionary = {}
+	var in_flight: Dictionary = await _advance_staged_demand(stale_producer,
+		stale_producer.advance(), "stale producer encode")
 	for frame in range(100):
-		in_flight = stale_producer.advance()
 		if in_flight.get("reason") == "triangle_encode_in_flight": break
+		in_flight = stale_producer.advance()
 		await process_frame
 	var edit_state := {"materialId":3, "biomeId":13, "fluidId":0,
 		"solid":true, "density":1.5, "light":Vector2i.ZERO,
@@ -217,9 +276,13 @@ func run() -> void:
 		committed, edit_plan)
 	var distant_proof_started := Time.get_ticks_usec()
 	var distant_advance: Dictionary = distant_broker.advance()
+	distant_advance = await _advance_staged_demand(distant_broker,
+		distant_advance, "distant verified edit")
 	var distant_proof_advance_usec := Time.get_ticks_usec() - distant_proof_started
 	var distant_after_layout: Dictionary = distant_broker.collision_window_layout()
 	var unverified_advance: Dictionary = unverified_broker.advance()
+	unverified_advance = await _advance_staged_demand(unverified_broker,
+		unverified_advance, "unverified edit")
 	var unverified_after: Dictionary = unverified_broker.collision_window_layout()
 	check(committed.get("commitStatus") == "committed"
 		and edit_plan.get("status") == "ready"
@@ -250,19 +313,21 @@ func run() -> void:
 		and stale_producer.request_block(block).get("status") == "failed",
 		"stale worker cannot later attach old triangles to a new block")
 	stale_producer.stop()
-	var distant_stop: Dictionary = distant_broker.stop()
-	for frame in range(120):
-		if distant_stop.get("status") == "ready": break
-		await process_frame
-		distant_stop = distant_broker.drain_step()
+	var distant_stop: Dictionary = await _drain_requests(distant_broker,
+		distant_broker.request_stop(), "distant edit broker")
 	check(distant_stop.get("status") == "ready", "distant edit broker drains")
-	check(unverified_broker.stop().get("status") == "ready", "unverified edit broker drains")
+	var unverified_stop: Dictionary = await _drain_requests(unverified_broker,
+		unverified_broker.request_stop(), "unverified edit broker")
+	check(unverified_stop.get("status") == "ready", "unverified edit broker drains")
 	var changed: Dictionary = planner.replace_sources({"position":Vector3(-main.CELL,0,-main.CELL),
 		"distance":0}, [], [], [], bounds)
 	check(changed.get("status") == "ready"
 		and changed.get("demandRevision") != planned.get("demandRevision")
 		and producer.collision_source_snapshot().get("status") != "ready",
 		"negative demand change invalidates prior source snapshot")
+	var changed_block := Vector3i(-1, block.y, -1)
+	check(producer.request_block(changed_block).get("status") == "pending",
+		"request arriving between revision change and staged begin is retained")
 	var readded: Dictionary = planner.replace_sources(viewer, [], [], [], bounds)
 	check(readded.get("demandRevision") != planned.get("demandRevision")
 		and readded.get("closureToken") != planned.get("closureToken"),
@@ -270,9 +335,13 @@ func run() -> void:
 	var new_epoch_producer = PRODUCER.new()
 	var new_identity := {"ownerGeneration":2, "sourceRevision":1,
 		"cancellationEpoch":2, "sourceEpoch":"n3-triangle-source-2"}
-	check(new_epoch_producer.setup(backend, pages,
+	var new_epoch_setup: Dictionary = new_epoch_producer.setup(backend, pages,
 		main.structure_system.citadel_terrain_admission, planner, main.CELL,
-		new_identity).get("status") == "ready"
+		new_identity)
+	var new_epoch_snapshot: Dictionary = await _advance_staged_demand(new_epoch_producer,
+		new_epoch_producer.advance(), "new source epoch")
+	check(new_epoch_setup.get("status") == "ready"
+		and new_epoch_snapshot.get("reason") == "triangle_block_not_requested"
 		and new_epoch_producer.collision_source_snapshot().get("identity", {}).get("sourceEpoch")
 			== "n3-triangle-source-2",
 		"new source epoch cannot inherit prior physical identity")
@@ -351,11 +420,8 @@ func run() -> void:
 		and broker_idle.get("reason") == "artifact_queue_idle"
 		and broker_idle.get("sourceComplete") == true,
 		"idle request queue cannot masquerade as physical readiness")
-	var request_stop: Dictionary = requests.stop()
-	for frame in range(120):
-		if request_stop.get("status") == "ready": break
-		await process_frame
-		request_stop = requests.drain_step()
+	var request_stop: Dictionary = await _drain_requests(requests,
+		requests.request_stop(), "composed request worker")
 	check(request_stop.get("status") == "ready", "composed request worker drains")
 	var bounded = ARTIFACT_REQUESTS.new()
 	check(bounded.setup(backend, pages, main.structure_system.citadel_terrain_admission,
@@ -401,8 +467,14 @@ func run() -> void:
 		and remote_source.collision_source_snapshot().get("status") == "pending",
 		"one complete spatial window does not falsely complete other window")
 	planner.replace_sources(viewer, [], [], [], bounds)
-	var resumed: Dictionary = bounded.advance()
+	var resumed: Dictionary = await _advance_staged_demand(bounded,
+		bounded.advance(), "distant demand retirement")
 	var smaller_layout: Dictionary = bounded.collision_window_layout()
+	for frame in range(300):
+		if smaller_layout.get("status") == "ready": break
+		resumed = bounded.advance()
+		smaller_layout = bounded.collision_window_layout()
+		await process_frame
 	check(resumed.get("status") == "pending"
 		and smaller_layout.get("layoutToken") != partition_layout.get("layoutToken")
 		and (smaller_layout.windows as Array).size() == 1
@@ -417,7 +489,8 @@ func run() -> void:
 	var bounded_lease: Dictionary = bounded.claim_collision_window_retirement(
 		remote_token, String(smaller_layout.get("layoutToken", "")))
 	planner.replace_sources(viewer, extra_viewers, [], [], bounds)
-	var leased_revert_step: Dictionary = bounded.advance()
+	var leased_revert_step: Dictionary = await _advance_staged_demand(bounded,
+		bounded.advance(), "leased demand reactivation")
 	var leased_revert_layout: Dictionary = bounded.collision_window_layout()
 	var lease_valid: Dictionary = bounded.validate_collision_window_retirement(
 		remote_token, String(bounded_lease.get("leaseId", "")))
@@ -441,11 +514,8 @@ func run() -> void:
 		and (resumed_layout.windows as Array).any(
 			func(window: Dictionary) -> bool: return window.windowToken == remote_token),
 		"demand reactivation waits for leased drain, then materializes a fresh logical window")
-	var bounded_stop: Dictionary = bounded.stop()
-	for frame in range(120):
-		if bounded_stop.get("status") == "ready": break
-		await process_frame
-		bounded_stop = bounded.drain_step()
+	var bounded_stop: Dictionary = await _drain_requests(bounded,
+		bounded.request_stop(), "partitioned broker")
 	check(bounded_stop.get("status") == "ready", "partitioned broker worker drains")
 	var large_planner = PLANNER.new()
 	large_planner.setup(79)
@@ -458,6 +528,7 @@ func run() -> void:
 			main.CELL, 80, 4096).get("status") == "ready",
 		"4913-block demand admitted to partition-capable broker")
 	var large_step: Dictionary = large_broker.advance()
+	large_step = await _advance_staged_demand(large_broker, large_step, "4913-block broker")
 	var large_layout: Dictionary = large_broker.collision_window_layout()
 	var large_union := {}
 	for window: Dictionary in large_layout.get("windows", []):
@@ -473,7 +544,11 @@ func run() -> void:
 		and int(large_layout.get("windowCount", 0)) == 8
 		and large_union.size() == 4913,
 		"4913-block broker exposes complete bounded spatial windows without false readiness")
-	check(large_broker.stop().get("status") == "ready", "large broker stops without workers")
+	var large_stop: Dictionary = large_broker.request_stop()
+	for frame in range(120):
+		if large_stop.get("status") == "ready": break
+		large_stop = large_broker.drain_step()
+	check(large_stop.get("status") == "ready", "large broker stops without workers")
 	var many_planner = PLANNER.new()
 	many_planner.setup(82)
 	var many_viewers: Array[Dictionary] = []
@@ -489,12 +564,14 @@ func run() -> void:
 			main.structure_system.citadel_terrain_admission, many_planner,
 			main.CELL, 83, 4096).get("status") == "ready",
 		"many spatial window sources admitted within data capacity")
-	many_broker.advance()
+	var many_initial: Dictionary = many_broker.advance()
+	many_initial = await _advance_staged_demand(many_broker, many_initial, "66-window broker")
 	var many_layout: Dictionary = many_broker.collision_window_layout()
 	check(int(many_layout.get("windowCount", 0)) == 66,
 		"66 deterministic window records materialized: %s %s" % [str(many_demand), str(many_layout.get("windowCount", -1))])
 	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 	var held: Dictionary = many_broker.advance()
+	held = await _advance_staged_demand(many_broker, held, "first retirement target")
 	check(held.get("status") == "pending"
 		and held.get("reason") == "collision_window_retirement_backpressure"
 		and int(held.get("retiredWindows", 0)) == 65
@@ -507,6 +584,7 @@ func run() -> void:
 		"distance":0}]
 	many_planner.replace_sources({}, next_viewers, [], [], Vector2i(128,128))
 	var still_held: Dictionary = many_broker.advance()
+	still_held = await _advance_staged_demand(many_broker, still_held, "second retirement target")
 	check(still_held.get("status") == "pending"
 		and still_held.get("reason") == "collision_window_retirement_backpressure"
 		and int(still_held.get("retiredWindows", 0)) == 66
@@ -516,6 +594,7 @@ func run() -> void:
 		"third rejected target refreshes exact pending retirement set without growth")
 	many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 	var returned_held: Dictionary = many_broker.advance()
+	returned_held = await _advance_staged_demand(many_broker, returned_held, "restored retirement target")
 	check(returned_held.get("status") == "pending"
 		and int(returned_held.get("totalWindowRecords", -2)) == held_record_count,
 		"third demand change also retains exact bounded window record set")
@@ -529,6 +608,7 @@ func run() -> void:
 				break
 		many_planner.replace_sources(viewer, many_viewers, [], [], Vector2i(128,128))
 		var reverted_step: Dictionary = many_broker.advance()
+		reverted_step = await _advance_staged_demand(many_broker, reverted_step, "reverted retirement target")
 		var reverted_layout: Dictionary = many_broker.collision_window_layout()
 		var reverted_facades := 0
 		for window: Dictionary in reverted_layout.get("windows", []):
@@ -547,6 +627,7 @@ func run() -> void:
 			"reverted current window revokes projected retirement intent")
 		many_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
 		var held_again: Dictionary = many_broker.advance()
+		held_again = await _advance_staged_demand(many_broker, held_again, "repeated retirement target")
 		check(held_again.get("reason") == "collision_window_retirement_backpressure"
 			and int(held_again.get("totalWindowRecords", -2)) == held_record_count,
 			"new retirement attempt remains bounded after revert")
@@ -563,7 +644,11 @@ func run() -> void:
 			"explicit physical drain acknowledgment releases bounded backpressure")
 	else:
 		check(false, "retirement backpressure missing tokens: %s" % str(held))
-	check(many_broker.stop().get("status") == "ready", "many-window broker stops")
+	var many_stop: Dictionary = many_broker.request_stop()
+	for frame in range(120):
+		if many_stop.get("status") == "ready": break
+		many_stop = many_broker.drain_step()
+	check(many_stop.get("status") == "ready", "many-window broker stops")
 	var worker_planner = PLANNER.new()
 	worker_planner.setup(81)
 	worker_planner.replace_sources(viewer, [], [], [], bounds)
@@ -575,13 +660,14 @@ func run() -> void:
 		main.CELL, worker_identity).get("status") == "ready"
 		and worker_producer.request_block(block).get("status") == "pending",
 		"surface producer starts for demand-change worker drain")
-	var face_in_flight := false
+	var worker_step: Dictionary = await _advance_staged_demand(worker_producer,
+		worker_producer.advance(), "worker drain producer")
+	var face_in_flight: bool = worker_step.get("reason") == "triangle_mesh_in_flight"
 	for frame in range(300):
-		var worker_step: Dictionary = worker_producer.advance()
-		if worker_step.get("reason") == "triangle_mesh_in_flight":
-			face_in_flight = true
-			break
-		if worker_step.get("status") == "failed" or worker_step.get("status") == "ready": break
+		if face_in_flight or worker_step.get("status") == "failed" \
+				or worker_step.get("status") == "ready": break
+		worker_step = worker_producer.advance()
+		face_in_flight = worker_step.get("reason") == "triangle_mesh_in_flight"
 		await process_frame
 	check(face_in_flight, "demand change reaches actual mesh face worker")
 	worker_planner.replace_sources(viewer, [], [], [], Vector2i(128,128))
@@ -695,11 +781,8 @@ func run() -> void:
 		and local_facade.source.collision_source_snapshot().get("status") != "ready"
 		and local_after.identity.sourceRevision == 2,
 		"verified local edit invalidates affected collision window and advances global revision")
-	var local_edit_stop: Dictionary = local_edit_broker.stop()
-	for frame in range(120):
-		if local_edit_stop.get("status") == "ready": break
-		await process_frame
-		local_edit_stop = local_edit_broker.drain_step()
+	var local_edit_stop: Dictionary = await _drain_requests(local_edit_broker,
+		local_edit_broker.request_stop(), "local edit broker")
 	check(local_edit_stop.get("status") == "ready", "local edit broker drains")
 	var stopped: Dictionary = producer.stop()
 	for frame in range(120):
@@ -711,6 +794,10 @@ func run() -> void:
 	var report := {"schema":"n3-triangle-artifact-contract/v1",
 		"passed":failures.is_empty(), "evidenceLevel":"native-voxel-tools-service-contract",
 		"productionCutover":false, "failures":failures,
+		"stagedDemand":{"advanceCount":staged_demand_advances,
+			"totalWorkOps":staged_demand_work_ops,
+			"maxObservedWorkOps":staged_demand_max_work_ops,
+			"workLimit":256},
 		"maxAdvanceUsec":max_step_usec, "vertexCount":vertices.size(),
 		"bufferUsec":produced.get("bufferUsec", 0),
 		"meshUsec":produced.get("meshUsec", 0),
