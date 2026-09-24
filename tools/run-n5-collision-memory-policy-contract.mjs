@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -17,6 +17,7 @@ const output = join(project, 'artifacts', 'native-world-backend',
   `n5-collision-memory-policy-${Date.now()}-${randomUUID().slice(0, 8)}`);
 const godotReportPath = join(output, 'godot-report.json');
 const envelopePath = join(output, 'runner-envelope.json');
+const godotExecutable = await findGodot();
 const sourcePaths = [
   'scripts/terrain/NativeCollisionMemoryPolicy.gd',
   'scripts/terrain/NativeCollisionMemoryAdmission.gd',
@@ -25,10 +26,18 @@ const sourcePaths = [
   'tools/lib/godot-process.mjs',
   'tools/lib/voxel-tool-runtime.mjs',
   'tools/lib/n5-collision-memory-source-freeze.mjs',
+  'tools/run-godot-scene-watchdog.mjs',
+  'tools/lib/owned-process.mjs',
+  'tools/lib/owned-native-host.mjs',
+  'tools/lib/owned-live-clock.mjs',
+  'tools/native/OwnedProcessNative.cs',
+  'tools/native/OwnedProcessHost.cs',
+  godotExecutable,
 ];
 async function hashSources(paths) {
   return Object.fromEntries(await Promise.all(paths.map(async path => [
-    path, createHash('sha256').update(await readFile(join(project, path))).digest('hex'),
+    path, createHash('sha256').update(await readFile(
+      isAbsolute(path) ? path : join(project, path))).digest('hex'),
   ])));
 }
 function readHead() {
@@ -39,7 +48,7 @@ function readHead() {
 const preSourceHashes = await hashSources(sourcePaths);
 const preSourceCommit = readHead();
 await mkdir(output, { recursive: true });
-const execution = await runGodotProcess(await findGodot(), [
+const execution = await runGodotProcess(godotExecutable, [
   '--audio-driver', 'Dummy', '--headless', '--path', project, '--script',
   'res://scripts/testing/native_world/N5CollisionMemoryPolicyContract.gd',
 ], {
@@ -80,6 +89,7 @@ const envelope = buildN5CollisionMemoryRunnerEnvelope({
   postHashes: postSourceHashes,
   godotReportPath,
   watchdogPath: execution.summaryPath,
+  godotExecutable,
 });
 const temporaryEnvelopePath = `${envelopePath}.${randomUUID()}.tmp`;
 await writeFile(temporaryEnvelopePath, `${JSON.stringify(envelope, null, 2)}\n`);

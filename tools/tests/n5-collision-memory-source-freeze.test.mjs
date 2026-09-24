@@ -58,6 +58,15 @@ test('N5 runner allows cold project bootstrap but keeps a bounded owned process'
   assert.match(runner, /runGodotProcess\(/);
   assert.match(runner, /runner-envelope\.json/);
   assert.match(runner, /await rename\(temporaryEnvelopePath, envelopePath\)/);
+  for (const required of [
+    'tools/run-godot-scene-watchdog.mjs',
+    'tools/lib/owned-process.mjs',
+    'tools/lib/owned-native-host.mjs',
+    'tools/lib/owned-live-clock.mjs',
+    'tools/native/OwnedProcessNative.cs',
+    'tools/native/OwnedProcessHost.cs',
+  ]) assert.ok(runner.includes(`'${required}'`), `missing frozen ${required}`);
+  assert.match(runner, /sourcePaths = \[[\s\S]*godotExecutable,[\s\S]*\]/);
 });
 
 const validGodotReport = {

@@ -140,9 +140,11 @@ tools/run-n5-collision-memory-policy-contract.mjs
 
 That run is not promotable evidence: its runner only compared the pre-run hash
 map echoed through the report and did not re-hash after Godot exited. The
-hardened runner now freezes its source-freeze helper and both launch helpers as
-well as the four contract sources, recomputes all seven hashes and `HEAD` after
-exit, requires
+hardened runner now freezes the four contract sources, source-freeze helper,
+Godot launcher/runtime, watchdog, owned-process owner, native-host builder,
+live-clock validator, both C# native-host sources, and the exact selected Godot
+console executable. It recomputes all fourteen hashes and `HEAD` after exit,
+requires
 `pre == report == post`, reports every drifted path (or `git:HEAD`), and fails
 on any drift. A new source-frozen run is still required.
 

@@ -39,7 +39,7 @@ export function auditN5CollisionMemorySourceFreeze({
 export function buildN5CollisionMemoryRunnerEnvelope({
   executionCode, godotReport, godotReportReadError = null, sourceFreeze,
   preCommit, postCommit, preHashes, postHashes, godotReportPath,
-  watchdogPath,
+  watchdogPath, godotExecutable,
 }) {
   const contractMatches = godotReport?.schema === 'n5-collision-memory-policy-contract/v2'
     && godotReport?.evidenceLevel === 'pure policy/ledger contract'
@@ -60,6 +60,7 @@ export function buildN5CollisionMemoryRunnerEnvelope({
     godotReportReadError,
     godotReportPath,
     watchdogPath,
+    godotExecutable,
     sourceFreeze,
     preSourceCommit: preCommit,
     postSourceCommit: postCommit,
