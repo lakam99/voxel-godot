@@ -578,8 +578,10 @@ the worker's original focused reports used the same copied binary, not a
 worker-built DLL. These are focused planner and Voxel Tools service-contract
 receipts only (`productionCutover: false`): no VoxelTerrain runtime wiring,
 publication/collision, or headed gameplay/performance acceptance is proven.
-Synchronous `collision_mesh_window_layout()` remains an explicitly recorded
-follow-up before VTR wiring.
+At this earlier checkpoint the production consumer still synchronously called
+`collision_mesh_window_layout()`; the subsequent staged-consumer slice below
+replaces that call. The synchronous method remains only as a compatibility and
+test reference.
 
 The subsequent staged collision-window consumer slice (`67089eb`) replaces
 the production broker's synchronous layout call with bounded begin/advance/
