@@ -29,6 +29,7 @@ var _source := FakeSource.new()
 var _owner: Node3D
 var _actor: CharacterBody3D
 var _started_usec := 0
+var _captured_drains := {}
 
 
 func _ready() -> void:
@@ -184,8 +185,13 @@ func _run() -> void:
 	var staged_final_release: bool = staged_barrier.release(staged_identity)
 	var main_drain: Dictionary = await _owner.stop_and_drain()
 	var staged_drain: Dictionary = await staged_owner.stop_and_drain()
-	var stop_during_prepare: Dictionary = await _shutdown_case(false)
-	var stop_during_ack: Dictionary = await _shutdown_case(true)
+	var stop_during_prepare: Dictionary = await _shutdown_case("prepare")
+	var stop_during_post_prepare: Dictionary = await _shutdown_case(
+		"post_prepare_validation")
+	var stop_during_pre_switch: Dictionary = await _shutdown_case(
+		"pre_switch_validation")
+	var stop_during_ack: Dictionary = await _shutdown_case("ack_validation")
+	var stop_during_rollback: Dictionary = await _shutdown_case("rollback")
 	var same_revision_drift: Dictionary = await _source_drift_case()
 	var pre_switch_drift: Dictionary = await _pre_switch_drift_case()
 	var mid_switch_drift: Dictionary = await _mid_switch_drift_case()
@@ -212,7 +218,10 @@ func _run() -> void:
 		and main_drain.get("status") == "ready" and int(main_drain.get("remainingBodies", -1)) == 0 \
 		and staged_drain.get("status") == "ready" and int(staged_drain.get("remainingBodies", -1)) == 0 \
 		and bool(stop_during_prepare.get("passed", false)) \
+		and bool(stop_during_post_prepare.get("passed", false)) \
+		and bool(stop_during_pre_switch.get("passed", false)) \
 		and bool(stop_during_ack.get("passed", false)) \
+		and bool(stop_during_rollback.get("passed", false)) \
 		and bool(same_revision_drift.get("passed", false)) \
 		and bool(pre_switch_drift.get("passed", false)) \
 		and bool(mid_switch_drift.get("passed", false)) \
@@ -229,7 +238,11 @@ func _run() -> void:
 			"earlyRelease": staged_early_release, "last": staged_last,
 			"finalReady": staged_final_ready, "finalRelease": staged_final_release},
 		"drain": {"main": main_drain, "staged": staged_drain,
-			"duringPrepare": stop_during_prepare, "duringAck": stop_during_ack},
+			"duringPrepare": stop_during_prepare,
+			"duringPostPrepareValidation": stop_during_post_prepare,
+			"duringPreSwitchValidation": stop_during_pre_switch,
+			"duringAck": stop_during_ack,
+			"duringRollback": stop_during_rollback},
 		"sameRevisionDrift": same_revision_drift,
 		"preSwitchDrift": pre_switch_drift,
 		"midSwitchDrift": mid_switch_drift,
@@ -489,18 +502,168 @@ func _source_drift_case() -> Dictionary:
 		"drained": drained}
 
 
-func _shutdown_case(during_ack: bool) -> Dictionary:
+func _capture_first_drain(owner: Node3D, token: String) -> void:
+	_captured_drains[token] = await owner.stop_and_drain()
+
+
+func _capture_rollback_drain(owner: Node3D, token: String,
+		prior_live_body_ids: Dictionary, candidate_body: StaticBody3D,
+		rollback_wait_observed: Array) -> void:
+	var old_live_enabled := false
+	for child in owner.get_children():
+		if child is StaticBody3D and prior_live_body_ids.has(child.get_instance_id()) \
+				and child.collision_layer == 2:
+			old_live_enabled = true
+			break
+	var candidate_retired := not is_instance_valid(candidate_body) \
+		or candidate_body.collision_layer == 0 and candidate_body.is_queued_for_deletion()
+	rollback_wait_observed[0] = bool(owner.get("_busy")) \
+		and old_live_enabled and candidate_retired
+	_captured_drains[token] = await owner.stop_and_drain()
+
+
+func _shutdown_case(phase: String) -> Dictionary:
 	var source := FakeSource.new()
 	var owner = OwnerScript.new()
 	add_child(owner)
 	owner.bind_source(source)
 	var identity := _identity(1)
-	var blocks: Array[Vector3i] = [Vector3i(500 if during_ack else 400, 0, 0)]
-	var row: Dictionary = _row(blocks[0], "shutdown-artifact", 0.5,
-		identity, {"hex": "shutdown-source"})
+	var phase_x := {"prepare": 400, "post_prepare_validation": 500,
+		"pre_switch_validation": 600, "ack_validation": 700,
+		"rollback": 800}
+	var blocks: Array[Vector3i] = [Vector3i(int(phase_x.get(phase, 900)), 0, 0)]
+	var seeded_live := true
+	var seed_outcome := {}
+	var seed_released := false
+	if phase == "rollback":
+		var seed_row: Dictionary = _row(blocks[0], "shutdown-live-seed", 0.5,
+			identity, {"hex": "shutdown-live-source"})
+		source.rows[blocks[0]] = seed_row
+		source.current = _shutdown_snapshot(identity, blocks,
+			"shutdown-live-seed", "shutdown-live-source", "shutdown-live-closure")
+		var seed_barrier = BarrierScript.new()
+		var seed_begun: Dictionary = seed_barrier.begin(self, owner, identity,
+			seed_row.bounds)
+		while seed_begun.get("status") == "pending":
+			await get_tree().process_frame
+			seed_begun = seed_barrier.census_progress(identity)
+		seed_outcome = await owner.publish(_request(identity, blocks, blocks,
+			[seed_row]), seed_barrier)
+		seed_released = seed_barrier.release(identity)
+		seeded_live = seed_outcome.get("status") == "ready" and seed_released
+		identity = _identity(2)
+	var source_hex := "shutdown-source-%s" % phase
+	var row: Dictionary = _row(blocks[0], "shutdown-artifact", 1.0,
+		identity, {"hex": source_hex})
 	source.rows[blocks[0]] = row
-	source.current = {"status": "ready", "identity": identity,
-		"sourceIdentity": {"hex": "shutdown-source"},
+	source.current = _shutdown_snapshot(identity, blocks, "shutdown-artifact",
+		source_hex, "shutdown-closure-%s" % phase)
+	var barrier = BarrierScript.new()
+	var begun: Dictionary = barrier.begin(self, owner, identity, row.bounds)
+	while begun.get("status") == "pending":
+		await get_tree().process_frame
+		begun = barrier.census_progress(identity)
+	var token := "%s-%d" % [phase, Time.get_ticks_usec()]
+	var stop_triggered := [false]
+	var enabled_candidate_observed := [false]
+	var rollback_failure_forced := [false]
+	var rollback_wait_observed := [false]
+	var candidate_body: Array[StaticBody3D] = [null]
+	var row_queries := [0]
+	var prior_live_body_ids := {}
+	if phase == "rollback":
+		for child in owner.get_children():
+			if child is StaticBody3D:
+				prior_live_body_ids[child.get_instance_id()] = true
+	var schedule_stop := func():
+		if bool(stop_triggered[0]):
+			return
+		stop_triggered[0] = true
+		_capture_first_drain(owner, token)
+	if phase == "prepare":
+		get_tree().process_frame.connect(schedule_stop, CONNECT_ONE_SHOT)
+	elif phase in ["post_prepare_validation", "pre_switch_validation"]:
+		var target_query := 2 if phase == "post_prepare_validation" else 3
+		source.row_query_hook = func(_block: Vector3i):
+			row_queries[0] = int(row_queries[0]) + 1
+			if int(row_queries[0]) == target_query:
+				get_tree().process_frame.connect(schedule_stop, CONNECT_ONE_SHOT)
+	elif phase in ["ack_validation", "rollback"]:
+		source.row_query_hook = func(block: Vector3i):
+			row_queries[0] = int(row_queries[0]) + 1
+			for child in owner.get_children():
+				if child is StaticBody3D and child.collision_layer == 2 \
+						and not prior_live_body_ids.has(child.get_instance_id()):
+					enabled_candidate_observed[0] = true
+					candidate_body[0] = child
+					if phase == "rollback":
+						_actor.position = row.bounds.position + Vector3(0.5, 0.5, 0.5)
+						rollback_failure_forced[0] = true
+						var stop_after_row_validation := func():
+							stop_triggered[0] = true
+							call_deferred("_capture_rollback_drain", owner, token,
+								prior_live_body_ids, candidate_body[0],
+								rollback_wait_observed)
+						get_tree().process_frame.connect(stop_after_row_validation,
+							CONNECT_ONE_SHOT)
+					else:
+						schedule_stop.call()
+					return
+	var outcome: Dictionary = await owner.publish(_request(identity, blocks, blocks,
+		[row]), barrier)
+	source.row_query_hook = Callable()
+	for _wait_frame in range(30):
+		if _captured_drains.has(token):
+			break
+		await get_tree().process_frame
+	var first_stop_completed := _captured_drains.has(token)
+	var drained: Dictionary
+	if first_stop_completed:
+		drained = _captured_drains[token]
+		_captured_drains.erase(token)
+	else:
+		drained = await owner.stop_and_drain()
+	var owner_failed_after_stop := bool(owner.get("_failed"))
+	var later: Dictionary = await owner.publish(_request(identity, blocks, blocks, [row]), barrier)
+	var phase_observed := true
+	if phase in ["post_prepare_validation", "pre_switch_validation"]:
+		phase_observed = int(row_queries[0]) == (2 if phase == "post_prepare_validation" else 3)
+	elif phase in ["ack_validation", "rollback"]:
+		phase_observed = bool(enabled_candidate_observed[0])
+	if phase == "rollback":
+		phase_observed = phase_observed and bool(rollback_failure_forced[0]) \
+			and bool(rollback_wait_observed[0])
+	var terminal_hold := not barrier.admit_motion(_actor, Vector3.ZERO)
+	_actor.position = Vector3(100, 0, 0)
+	await get_tree().physics_frame
+	return {"passed": seeded_live and bool(stop_triggered[0]) and first_stop_completed \
+		and phase_observed and outcome.get("status") == "failed" \
+		and outcome.get("reason") == "resident_owner_stopping" \
+		and not outcome.has("oldPhysicalUnchanged") \
+		and not outcome.has("oldPhysicalRestored") \
+		and drained.get("status") == "ready" \
+		and int(drained.get("remainingBodies", -1)) == 0 \
+		and not owner_failed_after_stop \
+		and later.get("status") == "failed" \
+		and later.get("reason") == "resident_owner_unavailable" \
+		and terminal_hold,
+		"phase": phase, "stopTriggered": stop_triggered[0],
+		"firstStopCompleted": first_stop_completed,
+		"phaseObserved": phase_observed, "rowQueries": row_queries[0],
+		"enabledCandidateObserved": enabled_candidate_observed[0],
+		"rollbackFailureForced": rollback_failure_forced[0],
+		"rollbackWaitObserved": rollback_wait_observed[0],
+		"seededLive": seeded_live, "seedOutcome": seed_outcome,
+		"seedReleased": seed_released,
+		"ownerFailedAfterStop": owner_failed_after_stop,
+		"outcome": outcome, "drained": drained, "later": later,
+		"terminalHold": terminal_hold}
+
+
+func _shutdown_snapshot(identity: Dictionary, blocks: Array[Vector3i],
+		artifact_key: String, source_hex: String, closure_token: String) -> Dictionary:
+	return {"status": "ready", "identity": identity,
+		"sourceIdentity": {"hex": source_hex},
 		"sourceEpoch": identity.sourceEpoch,
 		"nativeRevision": identity.sourceRevision,
 		"ownerGeneration": identity.ownerGeneration,
@@ -508,30 +671,8 @@ func _shutdown_case(during_ack: bool) -> Dictionary:
 		"requiredResidentBlocks": blocks.duplicate(),
 		"residentBlocks": blocks.duplicate(),
 		"membershipProvenance": {"authority": "pinned_demand", "demandRevision": 1,
-			"closureToken": "shutdown-closure"},
-		"artifacts": {blocks[0]: "shutdown-artifact"}}
-	var barrier = BarrierScript.new()
-	var begun: Dictionary = barrier.begin(self, owner, identity, row.bounds)
-	while begun.get("status") == "pending":
-		await get_tree().process_frame
-		begun = barrier.census_progress(identity)
-	var stopper := func(): owner.stop_and_drain()
-	if during_ack:
-		get_tree().physics_frame.connect(stopper, CONNECT_ONE_SHOT)
-	else:
-		get_tree().process_frame.connect(stopper, CONNECT_ONE_SHOT)
-	var outcome: Dictionary = await owner.publish(_request(identity, blocks, blocks,
-		[row]), barrier)
-	var drained: Dictionary = await owner.stop_and_drain()
-	var later: Dictionary = await owner.publish(_request(identity, blocks, blocks, [row]), barrier)
-	return {"passed": outcome.get("status") == "failed" \
-		and outcome.get("reason") == "resident_owner_stopping" \
-		and drained.get("status") == "ready" \
-		and int(drained.get("remainingBodies", -1)) == 0 \
-		and later.get("status") == "failed" \
-		and not barrier.admit_motion(_actor, Vector3.ZERO),
-		"outcome": outcome, "drained": drained, "later": later,
-		"terminalHold": not barrier.admit_motion(_actor, Vector3.ZERO)}
+			"closureToken": closure_token},
+		"artifacts": {blocks[0]: artifact_key}}
 
 
 func _identity(revision: int) -> Dictionary:

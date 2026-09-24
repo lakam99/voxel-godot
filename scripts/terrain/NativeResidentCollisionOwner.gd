@@ -126,6 +126,8 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		var canonical_row: Dictionary = checked.canonicalRows[row.block]
 		var prepared: Dictionary = await _prepare_row_bounded(row,
 			canonical_row, candidate_entry)
+		if _stopping:
+			return _finish_stopped_publish(candidates)
 		max_prepare_usec = maxi(max_prepare_usec,
 			int(prepared.get("maxStepCpuUsec", 0)))
 		total_prepare_usec += int(prepared.get("totalCpuUsec", 0))
@@ -137,11 +139,12 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		rows_by_block[row.block] = row
 		_pending_candidates = candidates
 		if _stopping:
-			_dispose_candidates(candidates)
-			_pending_candidates.clear()
-			_busy = false
-			return {"status": "failed", "reason": "resident_owner_stopping"}
-		if not await _source_row_current(row.block, identity, row):
+			return _finish_stopped_publish(candidates)
+		var prepared_row_current: bool = await _source_row_current(
+			row.block, identity, row)
+		if _stopping:
+			return _finish_stopped_publish(candidates)
+		if not prepared_row_current:
 			_dispose_candidates(candidates)
 			_pending_candidates.clear()
 			_busy = false
@@ -152,9 +155,15 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			old[block] = _live[block]
 	var switched_any := false
 	for block in affected:
-		if not await _source_row_current(block, identity, rows_by_block[block]):
+		var pre_switch_row_current: bool = await _source_row_current(
+			block, identity, rows_by_block[block])
+		if _stopping:
+			return _finish_stopped_publish(candidates)
+		if not pre_switch_row_current:
 			if switched_any:
 				var restored_drift: Dictionary = await _rollback(candidates, old)
+				if _stopping or bool(restored_drift.get("cancelled", false)):
+					return _finish_stopped_publish(candidates)
 				_pending_candidates.clear()
 				_busy = false
 				return {"status": "pending" if bool(restored_drift.get("physicalReady", false)) else "failed",
@@ -178,14 +187,13 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			await get_tree().physics_frame
 			ack_frames += 1
 			if _stopping:
-				_dispose_candidates(candidates)
-				_pending_candidates.clear()
-				_busy = false
-				return {"status": "failed", "reason": "resident_owner_stopping"}
+				return _finish_stopped_publish(candidates)
 			source_current = _candidate_source_current(identity, checked)
 			if source_current:
 				source_current = await _source_row_current(block, identity,
 					rows_by_block[block])
+				if _stopping:
+					return _finish_stopped_publish(candidates)
 			actor_clear = bool(barrier.clearance(identity).get("clear", false))
 			physics_probe = _probe(candidates[block])
 			if not source_current or not actor_clear or physics_probe:
@@ -193,6 +201,8 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		max_ack_frames = maxi(max_ack_frames, ack_frames)
 		if not source_current or not actor_clear or not physics_probe:
 			var restored: Dictionary = await _rollback(candidates, old)
+			if _stopping or bool(restored.get("cancelled", false)):
+				return _finish_stopped_publish(candidates)
 			_pending_candidates.clear()
 			_busy = false
 			return {"status": "pending" if bool(restored.get("physicalReady", false)) else "failed",
@@ -208,6 +218,8 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	var final_source: Dictionary = _validate_request(request)
 	if final_source.get("status") != "ready":
 		var restored_stale: Dictionary = await _rollback(candidates, old)
+		if _stopping or bool(restored_stale.get("cancelled", false)):
+			return _finish_stopped_publish(candidates)
 		_pending_candidates.clear()
 		_busy = false
 		return {"status": "pending", "reason": "candidate_source_changed_before_commit",
@@ -237,6 +249,8 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		_resident_blocks = previous_resident
 		_startup_staging = previous_staging
 		var restored_unready: Dictionary = await _rollback(candidates, old)
+		if _stopping or bool(restored_unready.get("cancelled", false)):
+			return _finish_stopped_publish(candidates)
 		_pending_candidates.clear()
 		_busy = false
 		return {"status": "pending", "reason": "physical_receipt_not_complete",
@@ -548,11 +562,20 @@ func _dispose_candidates(candidates: Dictionary) -> void:
 		_dispose(entry)
 
 
+func _finish_stopped_publish(candidates: Dictionary) -> Dictionary:
+	_dispose_candidates(candidates)
+	_pending_candidates.clear()
+	_busy = false
+	return {"status": "failed", "reason": "resident_owner_stopping"}
+
+
 func _rollback(candidates: Dictionary, old: Dictionary) -> Dictionary:
 	_dispose_candidates(candidates)
 	for entry in old.values():
 		_set_enabled(entry, true)
 	await get_tree().physics_frame
+	if _stopping:
+		return {"physicalReady": false, "physicsFrame": -1, "cancelled": true}
 	var restored := true
 	for entry in old.values():
 		if not _probe(entry):
