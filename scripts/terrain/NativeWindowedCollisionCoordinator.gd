@@ -14,6 +14,8 @@ const MAX_ACTIVE_BARRIERS := 128
 var _broker: Object
 var _actor_root: Node
 var _owners := {}
+var _owner_epochs := {}
+var _owner_epoch_sequence := 0
 var _window_tokens := {}
 var _retirement_leases := {}
 var _barriers := {}
@@ -52,6 +54,7 @@ func _physical_admission_ready() -> bool:
 func register_window(window: Dictionary, owner: Node3D) -> Dictionary:
 	if _stopping or owner == null or not owner.is_inside_tree() \
 			or not owner.has_method("physical_receipt") \
+			or not owner.has_method("retirement_owner_epoch") \
 			or not window.get("id") is Vector3i \
 			or String(window.get("windowToken", "")).is_empty():
 		return {"status":"failed", "reason":"physical_window_registration_invalid"}
@@ -60,10 +63,19 @@ func register_window(window: Dictionary, owner: Node3D) -> Dictionary:
 		return {"status":"pending", "reason":"physical_window_layout_changed"}
 	if _owners.has(window.id) and _owners[window.id] != owner:
 		return {"status":"pending", "reason":"old_physical_window_not_retired"}
+	if not _owners.has(window.id):
+		if not owner.has_method("assign_retirement_owner_epoch"):
+			return {"status":"failed", "reason":"physical_window_owner_epoch_api_missing"}
+		_owner_epoch_sequence += 1
+		var owner_epoch := "%d:%d" % [get_instance_id(), _owner_epoch_sequence]
+		if not bool(owner.call("assign_retirement_owner_epoch", owner_epoch)):
+			return {"status":"failed", "reason":"physical_window_owner_epoch_rejected"}
+		_owner_epochs[window.id] = owner_epoch
 	_owners[window.id] = owner
 	_window_tokens[window.id] = window.windowToken
 	return {"status":"ready", "windowId":window.id,
-		"windowToken":window.windowToken}
+		"windowToken":window.windowToken,
+		"physicalOwnerEpoch":_owner_epochs[window.id]}
 
 func begin_window_barrier(window: Dictionary, bounds: AABB,
 		identity: Dictionary) -> Dictionary:
@@ -209,6 +221,9 @@ func retire_window(id: Vector3i) -> Dictionary:
 	if _stopping or not _owners.has(id):
 		return {"status":"failed", "reason":"physical_window_not_registered"}
 	var token: String = _window_tokens[id]
+	var owner_epoch: String = String(_owner_epochs.get(id, ""))
+	if owner_epoch.is_empty():
+		return {"status":"failed", "reason":"physical_window_owner_epoch_missing"}
 	var layout: Dictionary = _broker.collision_window_layout()
 	var lease: Dictionary = _retirement_leases.get(id, {})
 	if lease.is_empty():
@@ -227,27 +242,34 @@ func retire_window(id: Vector3i) -> Dictionary:
 	if lease.is_empty():
 		var layout_token := String(layout.get("layoutToken", ""))
 		var claim: Dictionary = _broker.claim_collision_window_retirement(token,
-			layout_token)
+			layout_token, owner_epoch)
 		if claim.get("status") != "ready":
 			return {"status":"pending", "reason":claim.get("reason",
 				"window_retirement_lease_pending"), "lease":claim}
+		if claim.get("physicalOwnerEpoch") != owner_epoch:
+			return {"status":"failed", "reason":"window_retirement_owner_epoch_mismatch",
+				"lease":claim}
 		lease = {"leaseId":String(claim.get("leaseId", "")),
-			"layoutToken":layout_token}
+			"layoutToken":layout_token, "physicalOwnerEpoch":owner_epoch}
 		if String(lease.leaseId).is_empty():
 			return {"status":"pending", "reason":"window_retirement_lease_invalid"}
 		_retirement_leases[id] = lease
 	else:
 		var valid_lease: Dictionary = _broker.validate_collision_window_retirement(
-			token, String(lease.leaseId))
-		if valid_lease.get("status") != "ready":
+			token, String(lease.leaseId), owner_epoch)
+		if valid_lease.get("status") != "ready" \
+				or valid_lease.get("physicalOwnerEpoch") != owner_epoch:
 			return {"status":"pending", "reason":"window_retirement_lease_stale",
 				"lease":valid_lease}
 	var owner: Node3D = _owners[id]
+	if String(owner.call("retirement_owner_epoch")) != owner_epoch:
+		return {"status":"failed", "reason":"physical_window_owner_epoch_mismatch"}
 	window_retirement_drain_started.emit(id, token, String(lease.leaseId))
 	var drained: Dictionary = await owner.stop_and_drain()
 	if drained.get("status") != "ready" or not bool(drained.get("drained", false)) \
 			or int(drained.get("remainingBodies", -1)) != 0 \
-			or drained.get("windowToken") != token:
+			or drained.get("windowToken") != token \
+			or drained.get("physicalOwnerEpoch") != owner_epoch:
 		if bool(drained.get("ownerUnchanged", false)) \
 				and _broker.abort_collision_window_retirement(token,
 					String(lease.leaseId), true).get("status") == "ready":
@@ -260,11 +282,13 @@ func retire_window(id: Vector3i) -> Dictionary:
 		return {"status":"failed", "reason":"physical_window_drain_unproven_terminal_hold",
 			"drain":drained}
 	var lease_valid: Dictionary = _broker.validate_collision_window_retirement(
-		token, String(lease.leaseId))
-	if lease_valid.get("status") != "ready":
+		token, String(lease.leaseId), owner_epoch)
+	if lease_valid.get("status") != "ready" \
+			or lease_valid.get("physicalOwnerEpoch") != owner_epoch:
 		return {"status":"pending", "reason":"window_retirement_lease_stale",
 			"drain":drained, "lease":lease_valid}
 	drained["retirementLeaseId"] = lease.leaseId
+	drained["physicalOwnerEpoch"] = owner_epoch
 	var acknowledged: Dictionary = _broker.acknowledge_collision_window_retired(
 		token, drained)
 	if acknowledged.get("status") != "ready":
@@ -272,6 +296,7 @@ func retire_window(id: Vector3i) -> Dictionary:
 			"drain":drained, "acknowledgement":acknowledged}
 	_owners.erase(id)
 	_window_tokens.erase(id)
+	_owner_epochs.erase(id)
 	_retirement_leases.erase(id)
 	owner.queue_free()
 	return {"status":"ready", "windowId":id, "windowToken":token,
@@ -287,18 +312,25 @@ func stop_and_drain() -> Dictionary:
 	var incomplete: Array[Vector3i] = []
 	for id in _owners.keys():
 		var owner: Node3D = _owners[id]
+		var owner_epoch := String(_owner_epochs.get(id, ""))
 		if not is_instance_valid(owner):
+			incomplete.append(id)
+			continue
+		if owner_epoch.is_empty() or not owner.has_method("retirement_owner_epoch") \
+				or String(owner.call("retirement_owner_epoch")) != owner_epoch:
 			incomplete.append(id)
 			continue
 		var drained: Dictionary = await owner.stop_and_drain()
 		if drained.get("status") != "ready" \
 				or not bool(drained.get("drained", false)) \
-				or int(drained.get("remainingBodies", -1)) != 0:
+				or int(drained.get("remainingBodies", -1)) != 0 \
+				or drained.get("physicalOwnerEpoch") != owner_epoch:
 			incomplete.append(id)
 			continue
 		owner.queue_free()
 		_owners.erase(id)
 		_window_tokens.erase(id)
+		_owner_epochs.erase(id)
 	if not incomplete.is_empty():
 		return {"status":"pending", "reason":"physical_window_drain_pending",
 			"incompleteWindowIds":incomplete,

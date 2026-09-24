@@ -248,17 +248,17 @@ func acknowledge_collision_window_retired(window_token: String,
 ## N5 claims retirement through this facade so the runtime owner remains the
 ## source-of-truth boundary for every broker lease and drain acknowledgment.
 func claim_collision_window_retirement(window_token: String,
-		expected_layout_token: String) -> Dictionary:
+		expected_layout_token: String, physical_owner_epoch: String) -> Dictionary:
 	if _state != "active": return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.claim_collision_window_retirement(window_token,
-		expected_layout_token)
+		expected_layout_token, physical_owner_epoch)
 
 func validate_collision_window_retirement(window_token: String,
-		lease_id: String) -> Dictionary:
+		lease_id: String, physical_owner_epoch: String) -> Dictionary:
 	if not _state in ["active", "stopping_async"]:
 		return {"status":"failed", "reason":"owner_not_active"}
 	return _artifact_requests.validate_collision_window_retirement(window_token,
-		lease_id)
+		lease_id, physical_owner_epoch)
 
 func abort_collision_window_retirement(window_token: String, lease_id: String,
 		owner_unchanged: bool) -> Dictionary:

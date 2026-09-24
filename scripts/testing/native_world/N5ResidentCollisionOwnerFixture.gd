@@ -263,10 +263,23 @@ func _retirement_receipt_contract() -> Dictionary:
 		"sourceIdentity":source_identity}
 	var membership := {"authority":"pinned_demand", "demandRevision":37,
 		"closureToken":"n5-retirement-closure", "windowToken":"n5-retirement-window"}
+	var physical_owner_a = OwnerScript.new()
+	var physical_owner_b = OwnerScript.new()
+	var physical_owners_distinct: bool = physical_owner_a != physical_owner_b
+	var owner_a_assigned: bool = physical_owner_a.assign_retirement_owner_epoch(
+		"coordinator-a:install-1")
+	var owner_b_assigned: bool = physical_owner_b.assign_retirement_owner_epoch(
+		"coordinator-a:install-2")
+	var owner_a_epoch: String = physical_owner_a.retirement_owner_epoch()
+	var owner_b_epoch: String = physical_owner_b.retirement_owner_epoch()
+	physical_owner_a.free()
+	physical_owner_b.free()
 	var blocks: Array[Vector3i] = [Vector3i(4, 0, -2), Vector3i(5, 0, -2)]
 	var record := {"identity":identity, "sourceIdentity":source_identity,
-		"membershipProvenance":membership, "blocks":blocks}
+		"membershipProvenance":membership, "blocks":blocks,
+		"physicalOwnerEpoch":owner_a_epoch}
 	var lease := {"leaseId":"n5-retirement-lease",
+		"physicalOwnerEpoch":owner_a_epoch,
 		"windowToken":membership.windowToken,
 		"expectedLayoutToken":"n5-new-layout",
 		"recordIdentity":identity.duplicate(true),
@@ -280,6 +293,7 @@ func _retirement_receipt_contract() -> Dictionary:
 		"identity":identity.duplicate(true),
 		"sourceIdentity":source_identity.duplicate(true),
 		"membershipProvenance":membership.duplicate(true),
+		"physicalOwnerEpoch":owner_a_epoch,
 		"residentBlockCount":blocks.size(), "residentBlocks":blocks.duplicate(),
 		"requiredResidentBlocks":blocks.duplicate()}
 	var valid_current := RetirementReceipt.matches_record(
@@ -293,6 +307,17 @@ func _retirement_receipt_contract() -> Dictionary:
 	stale_owner.identity.ownerGeneration += 1
 	var stale_owner_same_token_lease := not RetirementReceipt.matches_record(
 		membership.windowToken, stale_owner, record, lease)
+	var owner_b_record: Dictionary = record.duplicate(true)
+	owner_b_record.physicalOwnerEpoch = owner_b_epoch
+	var owner_b_lease: Dictionary = lease.duplicate(true)
+	owner_b_lease.physicalOwnerEpoch = owner_b_epoch
+	var owner_b_receipt_replay_rejected := not RetirementReceipt.matches_record(
+		membership.windowToken, receipt, owner_b_record, owner_b_lease)
+	var owner_b_current_receipt := receipt.duplicate(true)
+	owner_b_current_receipt.physicalOwnerEpoch = owner_b_epoch
+	var owner_b_current_accepted := RetirementReceipt.matches_record(
+		membership.windowToken, owner_b_current_receipt, owner_b_record,
+		owner_b_lease)
 	var stale_source := receipt.duplicate(true)
 	stale_source.sourceIdentity.hex = "old-source"
 	var stale_source_rejected := not RetirementReceipt.matches_record(
@@ -330,7 +355,9 @@ func _retirement_receipt_contract() -> Dictionary:
 	var required_members_rejected := not RetirementReceipt.matches_record(
 		membership.windowToken, missing_required_members, record, lease)
 	return {"passed":valid_current and canonical_order_accepted \
+		and physical_owners_distinct and owner_a_assigned and owner_b_assigned \
 		and stale_owner_same_token_lease \
+		and owner_b_receipt_replay_rejected and owner_b_current_accepted \
 		and stale_source_rejected and stale_membership_rejected \
 		and wrong_block_membership_rejected and duplicate_rejected \
 		and count_rejected and token_rejected and lease_rejected \
@@ -338,6 +365,10 @@ func _retirement_receipt_contract() -> Dictionary:
 		"validCurrentReceiptAccepted":valid_current,
 		"canonicalMembershipOrderAccepted":canonical_order_accepted,
 		"staleOwnerSameTokenLeaseRejected":stale_owner_same_token_lease,
+		"distinctPhysicalOwnerInstances":physical_owners_distinct,
+		"bothOwnerEpochsAssigned":owner_a_assigned and owner_b_assigned,
+		"distinctPhysicalOwnerReceiptReplayRejected":owner_b_receipt_replay_rejected,
+		"distinctPhysicalOwnerCurrentReceiptAccepted":owner_b_current_accepted,
 		"staleSourceIdentityRejected":stale_source_rejected,
 		"staleMembershipRejected":stale_membership_rejected,
 		"wrongResidentMembershipRejected":wrong_block_membership_rejected,

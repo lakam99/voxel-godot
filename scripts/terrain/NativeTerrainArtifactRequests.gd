@@ -343,16 +343,20 @@ func acknowledge_collision_window_retired(window_token: String,
 	return {"status":"ready", "retiredWindowToken":window_token}
 
 func claim_collision_window_retirement(window_token: String,
-		expected_layout_token: String) -> Dictionary:
+		expected_layout_token: String, physical_owner_epoch: String) -> Dictionary:
 	if _stopping or _backend == null or not _window_records.has(window_token):
 		return {"status":"failed", "reason":"collision_window_retirement_claim_invalid"}
+	if physical_owner_epoch.is_empty():
+		return {"status":"failed", "reason":"collision_window_owner_epoch_missing"}
 	var existing: Dictionary = _retirement_leases.get(window_token, {})
 	if not existing.is_empty():
 		var retained: Dictionary = _window_records.get(window_token, {})
 		if existing.get("expectedLayoutToken") == expected_layout_token \
-				and RetirementReceipt.lease_matches_record(window_token, retained, existing):
+				and existing.get("physicalOwnerEpoch") == physical_owner_epoch \
+			and RetirementReceipt.lease_matches_record(window_token, retained, existing):
 			return {"status":"ready", "leaseId":existing.leaseId,
-				"windowToken":window_token}
+				"windowToken":window_token,
+				"physicalOwnerEpoch":physical_owner_epoch}
 		if not RetirementReceipt.lease_matches_record(window_token, retained, existing):
 			return {"status":"failed", "reason":"collision_window_retirement_record_stale"}
 		return {"status":"pending", "reason":"collision_window_retirement_leased"}
@@ -368,19 +372,24 @@ func claim_collision_window_retirement(window_token: String,
 	var lease_id := ("%d:%d:%s:%s" % [_owner_generation,
 		_retirement_lease_sequence, window_token, expected_layout_token]).sha256_text()
 	var record: Dictionary = _window_records[window_token]
+	record["physicalOwnerEpoch"] = physical_owner_epoch
+	_window_records[window_token] = record
 	_retirement_leases[window_token] = {"leaseId":lease_id,
 		"windowToken":window_token,
 		"expectedLayoutToken":expected_layout_token,
+		"physicalOwnerEpoch":physical_owner_epoch,
 		"recordIdentity":record.identity.duplicate(true),
 		"sourceIdentity":record.sourceIdentity.duplicate(true),
 		"membershipProvenance":record.membershipProvenance.duplicate(true),
 		"residentBlocks":(record.blocks as Array).duplicate()}
-	return {"status":"ready", "leaseId":lease_id, "windowToken":window_token}
+	return {"status":"ready", "leaseId":lease_id, "windowToken":window_token,
+		"physicalOwnerEpoch":physical_owner_epoch}
 
 func validate_collision_window_retirement(window_token: String,
-		lease_id: String) -> Dictionary:
+		lease_id: String, physical_owner_epoch: String) -> Dictionary:
 	var lease: Dictionary = _retirement_leases.get(window_token, {})
-	if lease.is_empty() or lease.get("leaseId") != lease_id:
+	if lease.is_empty() or lease.get("leaseId") != lease_id \
+			or lease.get("physicalOwnerEpoch") != physical_owner_epoch:
 		return {"status":"failed", "reason":"collision_window_retirement_lease_stale"}
 	var record: Dictionary = _window_records.get(window_token, {})
 	if record.is_empty() or not RetirementReceipt.lease_matches_record(
@@ -388,7 +397,8 @@ func validate_collision_window_retirement(window_token: String,
 		return {"status":"failed", "reason":"collision_window_retirement_record_stale"}
 	if _active_window_tokens.has(window_token):
 		return {"status":"failed", "reason":"leased_collision_window_reactivated"}
-	return {"status":"ready", "windowToken":window_token, "leaseId":lease_id}
+	return {"status":"ready", "windowToken":window_token, "leaseId":lease_id,
+		"physicalOwnerEpoch":physical_owner_epoch}
 
 ## A lease can be cancelled only before physical drain starts or when the
 ## owner proves its collision bodies remain installed and unchanged.

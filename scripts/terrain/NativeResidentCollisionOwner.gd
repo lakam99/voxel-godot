@@ -40,10 +40,27 @@ var _prepare_max_work_units := 0
 var _prepare_total_work_units := 0
 var _drain_last_queued_physics_frame := -1
 var _drain_window_token := ""
+var _retirement_owner_epoch := ""
 var _drain_expected_resident_count := 0
 var _drain_resident_blocks: Array[Vector3i] = []
 var _drain_retired_candidate_count := 0
 var _drain_retired_live_count := 0
+
+
+## The coordinator assigns one immutable physical installation identity before
+## this node is registered as a resident window owner. It is deliberately
+## separate from source ownerGeneration, which can be shared across Node
+## replacement.
+func assign_retirement_owner_epoch(epoch: String) -> bool:
+	if epoch.is_empty() or not _retirement_owner_epoch.is_empty() \
+			or _stopping or _stopped or _busy or not _live.is_empty():
+		return false
+	_retirement_owner_epoch = epoch
+	return true
+
+
+func retirement_owner_epoch() -> String:
+	return _retirement_owner_epoch
 
 
 func bind_source(source: Object) -> bool:
@@ -66,6 +83,7 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 				or not _entry_live(entry):
 			return {"ready": false}
 	return {"ready": true, "physicsFrame": Engine.get_physics_frames(),
+		"physicalOwnerEpoch": _retirement_owner_epoch,
 		"provenance": {"requestIdentity": _identity.duplicate(true),
 			"sourceIdentity": _source_identity.duplicate(true),
 			"membershipProvenance": _membership_provenance.duplicate(true)},
@@ -387,6 +405,7 @@ func drain_step() -> Dictionary:
 			"remainingLiveEntries": 0, "sourceReleased": true,
 			"barrierOwnershipReleased": true,
 			"windowToken": _drain_window_token,
+			"physicalOwnerEpoch": _retirement_owner_epoch,
 			"residentBlockCount": _drain_expected_resident_count,
 			"residentBlocks": _drain_resident_blocks.duplicate(),
 			"requiredResidentBlocks": _drain_resident_blocks.duplicate(),

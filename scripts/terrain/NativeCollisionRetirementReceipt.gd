@@ -10,6 +10,7 @@ static func matches_record(window_token: String, receipt: Dictionary,
 	var source_identity: Variant = record.get("sourceIdentity")
 	var membership: Variant = record.get("membershipProvenance")
 	var blocks: Variant = record.get("blocks")
+	var physical_owner_epoch: Variant = record.get("physicalOwnerEpoch")
 	var receipt_blocks: Variant = receipt.get("residentBlocks")
 	var receipt_required: Variant = receipt.get("requiredResidentBlocks")
 	if not identity is Dictionary or not source_identity is Dictionary \
@@ -19,6 +20,7 @@ static func matches_record(window_token: String, receipt: Dictionary,
 			or not receipt.get("identity") is Dictionary \
 			or not receipt.get("sourceIdentity") is Dictionary \
 			or not receipt.get("membershipProvenance") is Dictionary \
+			or not physical_owner_epoch is String or String(physical_owner_epoch).is_empty() \
 			or not lease_matches_record(window_token, record, lease):
 		return false
 	if String(receipt.get("retirementLeaseId", "")) \
@@ -32,6 +34,7 @@ static func matches_record(window_token: String, receipt: Dictionary,
 			or not bool(receipt.get("sourceReleased", false)) \
 			or not bool(receipt.get("barrierOwnershipReleased", false)) \
 			or receipt.get("windowToken") != window_token \
+			or receipt.get("physicalOwnerEpoch") != physical_owner_epoch \
 			or int(receipt.get("residentBlockCount", -1)) != blocks.size() \
 			or receipt.get("identity") != identity \
 			or receipt.get("sourceIdentity") != source_identity \
@@ -53,14 +56,17 @@ static func lease_matches_record(window_token: String, record: Dictionary,
 	var source_identity: Variant = record.get("sourceIdentity")
 	var membership: Variant = record.get("membershipProvenance")
 	var blocks: Variant = record.get("blocks")
+	var physical_owner_epoch: Variant = record.get("physicalOwnerEpoch")
 	var leased_blocks: Variant = lease.get("residentBlocks")
 	if not identity is Dictionary or not source_identity is Dictionary \
 			or not membership is Dictionary or not blocks is Array \
+			or not physical_owner_epoch is String or String(physical_owner_epoch).is_empty() \
 			or not leased_blocks is Array or blocks.is_empty() \
 			or lease.get("windowToken") != window_token \
 			or String(lease.get("leaseId", "")).is_empty() \
 			or String(lease.get("expectedLayoutToken", "")).is_empty() \
 			or lease.get("recordIdentity") != identity \
+			or lease.get("physicalOwnerEpoch") != physical_owner_epoch \
 			or lease.get("sourceIdentity") != source_identity \
 			or lease.get("membershipProvenance") != membership:
 		return false

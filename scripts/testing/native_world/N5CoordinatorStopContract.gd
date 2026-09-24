@@ -5,6 +5,12 @@ const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordi
 class PendingOwner:
 	extends Node3D
 	var attempts := 0
+	var owner_epoch := ""
+	func assign_retirement_owner_epoch(epoch: String) -> bool:
+		owner_epoch = epoch
+		return true
+	func retirement_owner_epoch() -> String:
+		return owner_epoch
 	func physical_receipt(_identity: Dictionary) -> Dictionary:
 		return {"ready":false}
 	func stop_and_drain() -> Dictionary:
@@ -12,7 +18,8 @@ class PendingOwner:
 		if attempts == 1:
 			return {"status":"pending", "reason":"physics_sync_pending"}
 		return {"status":"ready", "drained":true,
-			"remainingBodies":0, "windowToken":"fake-window"}
+			"remainingBodies":0, "windowToken":"fake-window",
+			"physicalOwnerEpoch":owner_epoch}
 
 class FakeBroker:
 	extends RefCounted
@@ -23,10 +30,10 @@ class FakeBroker:
 			_receipt: Dictionary) -> Dictionary:
 		return {"status":"ready"}
 	func claim_collision_window_retirement(_token: String,
-			layout_token: String) -> Dictionary:
+			layout_token: String, owner_epoch: String) -> Dictionary:
 		return {"status":"ready", "leaseId":"stop-contract:%s" % layout_token}
 	func validate_collision_window_retirement(_token: String,
-			lease_id: String) -> Dictionary:
+			lease_id: String, _owner_epoch: String) -> Dictionary:
 		return {"status":"ready", "leaseId":lease_id}
 	func abort_collision_window_retirement(_token: String,
 			_lease_id: String, owner_unchanged: bool) -> Dictionary:
@@ -37,23 +44,30 @@ class FakeRetirementBroker:
 	var layout := {}
 	var initial_layout := {}
 	var lease_id := "retirement-lease"
+	var physical_owner_epoch := ""
 	func collision_window_layout() -> Dictionary:
 		return layout.duplicate(true)
 	func acknowledge_collision_window_retired(token: String,
 			receipt: Dictionary) -> Dictionary:
 		if token != "leased-window" or receipt.get("retirementLeaseId") != lease_id:
 			return {"status":"failed", "reason":"lease_receipt_mismatch"}
+		if receipt.get("physicalOwnerEpoch") != physical_owner_epoch:
+			return {"status":"failed", "reason":"physical_owner_epoch_mismatch"}
 		layout = initial_layout.duplicate(true)
 		return {"status":"ready", "retiredWindowToken":token}
 	func claim_collision_window_retirement(token: String,
-			layout_token: String) -> Dictionary:
+			layout_token: String, owner_epoch: String) -> Dictionary:
 		if token != "leased-window" or layout_token != "shifted-layout":
 			return {"status":"failed", "reason":"unexpected_lease_claim"}
-		return {"status":"ready", "leaseId":lease_id}
+		physical_owner_epoch = owner_epoch
+		return {"status":"ready", "leaseId":lease_id,
+			"physicalOwnerEpoch":owner_epoch}
 	func validate_collision_window_retirement(token: String,
-			candidate_lease: String) -> Dictionary:
+			candidate_lease: String, owner_epoch: String) -> Dictionary:
 		return {"status":"ready" if token == "leased-window" \
-			and candidate_lease == lease_id else "failed"}
+			and candidate_lease == lease_id \
+		and owner_epoch == physical_owner_epoch else "failed",
+		"physicalOwnerEpoch":physical_owner_epoch}
 	func abort_collision_window_retirement(_token: String,
 			_lease: String, owner_unchanged: bool) -> Dictionary:
 		return {"status":"ready" if owner_unchanged else "failed"}
@@ -70,10 +84,19 @@ class FakeRetirementOwner:
 	var identity := {}
 	var attempts := 0
 	var installed := true
+	var owner_epoch := ""
+	func assign_retirement_owner_epoch(epoch: String) -> bool:
+		if not owner_epoch.is_empty(): return false
+		owner_epoch = epoch
+		return true
+	func retirement_owner_epoch() -> String:
+		return owner_epoch
 	func physical_receipt(request_identity: Dictionary) -> Dictionary:
 		if not installed or request_identity != identity:
 			return {"ready":false, "reason":"fake_collision_absent"}
-		return _receipt(identity, window)
+		var receipt := _receipt(identity, window)
+		receipt["physicalOwnerEpoch"] = owner_epoch
+		return receipt
 	func stop_and_drain() -> Dictionary:
 		attempts += 1
 		if attempts == 1:
@@ -82,7 +105,8 @@ class FakeRetirementOwner:
 			return {"status":"pending", "reason":"fake_physics_sync_pending"}
 		installed = false
 		return {"status":"ready", "drained":true,
-			"remainingBodies":0, "windowToken":window.windowToken}
+			"remainingBodies":0, "windowToken":window.windowToken,
+			"physicalOwnerEpoch":owner_epoch}
 	func publish_again() -> Dictionary:
 		installed = true
 		return {"status":"ready"}
@@ -216,6 +240,11 @@ func _run() -> void:
 	retirement_coordinator.add_child(replacement_owner)
 	var replacement_registration: Dictionary = retirement_coordinator.register_window(
 		reactivated_window, replacement_owner)
+	var distinct_physical_owner_epochs: bool = \
+		String(retiring_registered.get("physicalOwnerEpoch", "")).is_empty() == false \
+		and String(replacement_registration.get("physicalOwnerEpoch", "")).is_empty() == false \
+		and retiring_registered.get("physicalOwnerEpoch") \
+			!= replacement_registration.get("physicalOwnerEpoch")
 	var replacement_hold: Dictionary = retirement_coordinator.begin_window_barrier(
 		reactivated_window, retirement_bounds, retirement_identity)
 	var replacement_barrier: RefCounted = replacement_hold.get("barrier")
@@ -265,6 +294,7 @@ func _run() -> void:
 		and no_owner_aggregate.get("status") == "pending" \
 		and denied_without_replacement \
 		and replacement_registration.get("status") == "ready" \
+		and distinct_physical_owner_epochs \
 		and replacement_install.get("status") == "ready" \
 		and replacement_ready.get("status") == "ready" \
 		and replacement_release.get("status") == "ready" \
@@ -286,6 +316,7 @@ func _run() -> void:
 		"secondDrain":second_retire,
 		"noOwnerAggregate":no_owner_aggregate,
 		"deniedWithoutReplacement":denied_without_replacement,
+		"distinctPhysicalOwnerEpochs":distinct_physical_owner_epochs,
 		"replacementAggregate":replacement_ready,
 		"replacementRelease":replacement_release,
 		"admittedAfterReplacement":admitted_after_replacement}
