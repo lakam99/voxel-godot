@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   coverageTotals,
+  parseLcovLineCoverage,
   assertNormalizedUpstreamTextIdentity,
   expectedToolchainLockValue,
   inventoryProjectBuildInputs,
@@ -49,6 +50,23 @@ function coverageExport(filename, branches) {
   };
 }
 
+function lineCoverage(filename, records = ['DA:6,1']) {
+  return parseLcovLineCoverage([`SF:${filename}`, ...records, 'end_of_record', ''].join('\n'), [filename]);
+}
+
+test('LLVM lcov parser normalizes paths and fails closed on missing, duplicate, or invalid line records', () => {
+  const filename = resolve('C:/n1/coverage_canary.cpp');
+  const normalized = parseLcovLineCoverage(
+    [`SF:${filename.toUpperCase()}`, 'DA:6,0', 'end_of_record', ''].join('\n'), [filename]);
+  assert.equal(normalized.get(filename.toLowerCase()).get(6), 0);
+  assert.throws(() => parseLcovLineCoverage('', [filename]), /lcov line export is empty/);
+  assert.throws(() => parseLcovLineCoverage('SF:C:/n1/other.cpp\nDA:6,1\nend_of_record\n', [filename]), /omitted expected/);
+  assert.throws(() => parseLcovLineCoverage(
+    [`SF:${filename}`, 'DA:6,0', 'DA:6,1', 'end_of_record', ''].join('\n'), [filename]), /duplicated line/);
+  assert.throws(() => parseLcovLineCoverage(
+    [`SF:${filename}`, 'DA:0,-1', 'end_of_record', ''].join('\n'), [filename]), /invalid DA record/);
+});
+
 test('LLVM 23 branch tuple reads independent true and false edge counts', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
   const value = coverageTotals(coverageExport(filename, [
@@ -56,25 +74,50 @@ test('LLVM 23 branch tuple reads independent true and false edge counts', () => 
     [13, 12, 13, 41, 0, 1, 0, 0, 4],
     [8, 9, 8, 52, 1, 4, 0, 0, 4],
     [8, 41, 8, 62, 9, 348, 0, 0, 4],
-  ]), [filename]);
+  ]), [filename], [filename], lineCoverage(filename));
   assert.deepEqual(value.uncovered.branches, [
     { file: filename, line: 6, column: 9, trueCount: 1, falseCount: 0 },
     { file: filename, line: 13, column: 12, trueCount: 0, falseCount: 1 },
   ]);
 });
 
+test('LLVM uncovered line serialization ignores branch-only misses and follows the line export', () => {
+  const filename = resolve('C:/n1/coverage_canary.cpp');
+  const value = coverageExport(filename, [[11, 9, 11, 18, 1, 0, 0, 0, 4]]);
+  value.data[0].files[0].summary.lines = { count: 2, covered: 1 };
+  value.data[0].files[0].segments = [
+    [10, 3, 0, true, true, false], // source-region segment: uncovered executable line
+    [11, 3, 4, true, true, false], // source-region segment: covered executable line
+    [11, 8, 0, true, true, true], // gap artifact, not line coverage
+    [11, 9, 0, true, false, false], // branch boundary artifact, despite its zero counter
+  ];
+  assert.deepEqual(coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,0', 'DA:11,4'])).uncovered.lines, [
+    { file: filename, line: 10 },
+  ]);
+  assert.equal(coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,0', 'DA:11,4'])).uncovered.branches.length, 1);
+});
+
+test('LLVM uncovered line serialization rejects disagreement with the authoritative line summary', () => {
+  const filename = resolve('C:/n1/coverage_canary.cpp');
+  const value = coverageExport(filename, []);
+  value.data[0].files[0].summary.lines = { count: 2, covered: 1 };
+  assert.throws(() => coverageTotals(value, [filename], [filename], lineCoverage(filename)), /lcov line\/summary mismatch/);
+});
+
 test('LLVM branch tuple rejects invalid edge counts', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
   assert.throws(() => coverageTotals(coverageExport(filename, [
     [6, 9, 6, 18, -1, 2, 0, 0, 4],
-  ]), [filename]), /Invalid LLVM branch true\/false-edge counts/);
+  ]), [filename], [filename], lineCoverage(filename)), /Invalid LLVM branch true\/false-edge counts/);
 });
 
 test('LLVM branch tuple rejects summary and detail disagreement', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
   const value = coverageExport(filename, [[6, 9, 6, 18, 1, 0, 0, 0, 4]]);
   value.data[0].files[0].summary.branches.covered = 2;
-  assert.throws(() => coverageTotals(value, [filename]), /branch summary\/detail mismatch/);
+  assert.throws(() => coverageTotals(value, [filename], [filename], lineCoverage(filename)), /branch summary\/detail mismatch/);
 });
 
 test('LLVM duplicate expansion tuples aggregate by source identity before summary validation', () => {
@@ -84,9 +127,9 @@ test('LLVM duplicate expansion tuples aggregate by source identity before summar
     [6, 9, 6, 18, 0, 2, 0, 0, 4],
   ]);
   value.data[0].files[0].summary.branches = { count: 2, covered: 2 };
-  assert.deepEqual(coverageTotals(value, [filename]).uncovered.branches, []);
+  assert.deepEqual(coverageTotals(value, [filename], [filename], lineCoverage(filename)).uncovered.branches, []);
   value.data[0].files[0].summary.branches.covered = 1;
-  assert.throws(() => coverageTotals(value, [filename]), /branch summary\/detail mismatch/);
+  assert.throws(() => coverageTotals(value, [filename], [filename], lineCoverage(filename)), /branch summary\/detail mismatch/);
 });
 
 test('LLVM coverage permits only explicitly manifested core headers outside the source denominator', () => {
@@ -94,8 +137,8 @@ test('LLVM coverage permits only explicitly manifested core headers outside the 
   const header = resolve('C:/repo/native/world_backend/core/thirdparty/dependency.hpp');
   const value = coverageExport(source, []);
   value.data[0].files.push({ ...structuredClone(value.data[0].files[0]), filename: header });
-  assert.doesNotThrow(() => coverageTotals(value, [source], [source, header]));
-  assert.throws(() => coverageTotals(value, [source]), /unmanifested core sources/);
+  assert.doesNotThrow(() => coverageTotals(value, [source], [source, header], lineCoverage(source)));
+  assert.throws(() => coverageTotals(value, [source], [source], lineCoverage(source)), /unmanifested core sources/);
 });
 
 test('toolchain lock validation fails closed on pin or license-path drift', () => {

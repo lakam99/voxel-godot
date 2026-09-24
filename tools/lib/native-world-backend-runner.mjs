@@ -842,8 +842,49 @@ async function resolveLlvmToolchain({ project, output, options }) {
   throw new Error(`Pinned LLVM coverage toolchain is absent. Re-run with --fetch-llvm or --llvm-root PATH. Expected ${llvmArchiveUrl} (${llvmArchiveBytes} bytes, SHA-256 ${llvmArchiveSha256}).`);
 }
 
-export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = expectedFiles) {
+export function parseLcovLineCoverage(lcovText, expectedFiles) {
+  if (typeof lcovText !== 'string' || !lcovText.length) throw new Error('LLVM lcov line export is empty.');
+  const expected = new Set(expectedFiles.map(path => resolve(path).toLowerCase()));
+  const files = new Map();
+  let activePath = null;
+  let activeLines = null;
+  for (const rawLine of lcovText.split(/\r?\n/)) {
+    const line = rawLine.trimEnd();
+    if (line.startsWith('SF:')) {
+      if (activePath !== null) throw new Error('LLVM lcov started a source record before ending the previous record.');
+      activePath = resolve(line.slice(3)).toLowerCase();
+      if (!line.slice(3) || files.has(activePath)) throw new Error(`LLVM lcov has an empty or duplicate source record: ${line.slice(3)}.`);
+      activeLines = new Map();
+      continue;
+    }
+    if (line === 'end_of_record') {
+      if (activePath === null) throw new Error('LLVM lcov ended a source record without an SF entry.');
+      files.set(activePath, activeLines);
+      activePath = null;
+      activeLines = null;
+      continue;
+    }
+    if (!line.startsWith('DA:')) continue;
+    if (activePath === null) throw new Error('LLVM lcov emitted a line count outside a source record.');
+    const match = /^DA:(\d+),(\d+)(?:,[^,]*)?$/.exec(line);
+    if (!match) throw new Error(`LLVM lcov emitted an invalid DA record: ${line}.`);
+    const sourceLine = Number(match[1]);
+    const count = Number(match[2]);
+    if (!Number.isSafeInteger(sourceLine) || sourceLine < 1 || !Number.isSafeInteger(count)) {
+      throw new Error(`LLVM lcov emitted an invalid line/count value: ${line}.`);
+    }
+    if (activeLines.has(sourceLine)) throw new Error(`LLVM lcov duplicated line ${sourceLine} for ${activePath}.`);
+    activeLines.set(sourceLine, count);
+  }
+  if (activePath !== null) throw new Error(`LLVM lcov source record was not terminated: ${activePath}.`);
+  const missing = [...expected].filter(path => !files.has(path));
+  if (missing.length) throw new Error(`LLVM lcov omitted expected first-party sources: ${missing.join(', ')}.`);
+  return files;
+}
+
+export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = expectedFiles, lineCoverage = null) {
   if (exportJson.type !== 'llvm.coverage.json.export' || !Array.isArray(exportJson.data) || exportJson.data.length !== 1) throw new Error('Unexpected llvm-cov JSON schema.');
+  if (!(lineCoverage instanceof Map)) throw new Error('Authoritative LLVM lcov line coverage is required.');
   const files = exportJson.data[0].files ?? [];
   const byPath = new Map(files.map(file => [resolve(file.filename).toLowerCase(), file]));
   const selected = expectedFiles.map(path => {
@@ -882,13 +923,17 @@ export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = exp
   const uncoveredLines = [];
   const uncoveredBranches = [];
   for (const file of selected) {
-    const lineCounts = new Map();
-    for (const segment of file.segments ?? []) {
-      if (!segment[3]) continue;
-      const line = Number(segment[0]);
-      lineCounts.set(line, Math.max(lineCounts.get(line) ?? 0, Number(segment[2])));
+    const lineCounts = lineCoverage.get(resolve(file.filename).toLowerCase());
+    if (!(lineCounts instanceof Map)) throw new Error(`LLVM lcov omitted line counts for ${file.filename}.`);
+    const reportedLineCount = Number(file.summary.lines.count);
+    const reportedCoveredLineCount = Number(file.summary.lines.covered);
+    const fileUncoveredLines = [...lineCounts].filter(([, count]) => count === 0);
+    const reportedUncoveredLineCount = reportedLineCount - reportedCoveredLineCount;
+    if (fileUncoveredLines.length !== reportedUncoveredLineCount) {
+      throw new Error(`LLVM lcov line/summary mismatch for ${file.filename}: `
+        + `lcov identifies ${fileUncoveredLines.length} missed lines, summary identifies ${reportedUncoveredLineCount}.`);
     }
-    for (const [line, count] of lineCounts) if (count === 0) uncoveredLines.push({ file: file.filename, line });
+    for (const [line] of fileUncoveredLines) uncoveredLines.push({ file: file.filename, line });
     for (const branch of normalizedBranchDetails(file)) {
       if (branch.trueCount === 0 || branch.falseCount === 0) uncoveredBranches.push({
         file: file.filename, ...branch,
@@ -935,19 +980,25 @@ async function collectLlvmCoverage({ project, output, label, llvm, executable, e
     args: ['merge', '-sparse', profileRaw, '-o', profileData], timeoutSeconds: 120 });
   const exportRun = await runOwned({ project, output, label: `${label}-export`, executable: llvm.llvmCov,
     args: ['export', executable, `-instr-profile=${profileData}`, '-format=text'], timeoutSeconds: 120 });
+  const lineExportRun = await runOwned({ project, output, label: `${label}-line-export`, executable: llvm.llvmCov,
+    args: ['export', executable, `-instr-profile=${profileData}`, '-format=lcov'], timeoutSeconds: 120 });
   const reportRun = await runOwned({ project, output, label: `${label}-report`, executable: llvm.llvmCov,
     args: ['report', executable, `-instr-profile=${profileData}`, '--show-branch-summary', ...expectedFiles], timeoutSeconds: 120 });
   const exportJson = JSON.parse(await readFile(exportRun.stdoutPath, 'utf8'));
-  const coverage = coverageTotals(exportJson, expectedFiles, allowedCoreFiles);
+  const lcovText = await readFile(lineExportRun.stdoutPath, 'utf8');
+  const lineCoverage = parseLcovLineCoverage(lcovText, expectedFiles);
+  const coverage = coverageTotals(exportJson, expectedFiles, allowedCoreFiles, lineCoverage);
   return {
     ...coverage,
     artifacts: {
       profileRaw: { path: profileRaw, sha256: await hashFile(profileRaw) },
       profileData: { path: profileData, sha256: await hashFile(profileData) },
       exportJson: { path: exportRun.stdoutPath, sha256: await hashFile(exportRun.stdoutPath) },
+      lineExport: { path: lineExportRun.stdoutPath, sha256: await hashFile(lineExportRun.stdoutPath) },
       textReport: { path: reportRun.stdoutPath, sha256: await hashFile(reportRun.stdoutPath) },
     },
-    ownedProcess: { execute: test.summaryPath, merge: merge.summaryPath, export: exportRun.summaryPath, report: reportRun.summaryPath },
+    ownedProcess: { execute: test.summaryPath, merge: merge.summaryPath, export: exportRun.summaryPath,
+      lineExport: lineExportRun.summaryPath, report: reportRun.summaryPath },
   };
 }
 

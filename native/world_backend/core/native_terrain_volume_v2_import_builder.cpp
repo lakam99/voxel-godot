@@ -81,6 +81,7 @@ void NativeTerrainVolumeV2ImportBuilder::append(
                 // the whole-volume snapshot creator to hide stream reordering.
                 const NativeTypedWorldStateSnapshot checked =
                     NativeTypedWorldStateSnapshot::create({record});
+                // Defensive invariant: a successful one-record validation must preserve its input exactly.
                 if (!(checked.records().front() == record)) reject();
                 if (chunk_previous_cell.has_value()
                     && !coordinate_less(*chunk_previous_cell, record.state.cell)) reject();

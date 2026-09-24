@@ -173,6 +173,29 @@ VWB_TEST(native_terrain_volume_v2_import_builder_rejects_duplicate_reversed_and_
     }
 }
 
+VWB_TEST(native_terrain_volume_v2_import_builder_rejects_same_section_revision_change_and_drains) {
+    NativeTerrainVolumeV2ImportBuilder builder;
+    builder.begin(identity());
+    builder.append({chunk({0, 0, 0}, 1U, {record({0, 0, 0})})});
+
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+        builder.append({chunk({0, 0, 0}, 2U, {record({1, 0, 0})})}));
+    VWB_EXPECT(!builder.active());
+    VWB_EXPECT_EQ(1U, builder.record_count());
+    VWB_EXPECT_EQ(1U, builder.section_count());
+    VWB_EXPECT(!builder.disposal_complete());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.finalize());
+
+    VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+    VWB_EXPECT_EQ(0U, builder.record_count());
+    VWB_EXPECT_EQ(1U, builder.section_count());
+    VWB_EXPECT(!builder.disposal_complete());
+    VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
+    VWB_EXPECT_EQ(0U, builder.record_count());
+    VWB_EXPECT_EQ(0U, builder.section_count());
+    VWB_EXPECT(builder.disposal_complete());
+}
+
 VWB_TEST(native_terrain_volume_v2_import_builder_accepts_full_production_capacity_in_bounded_appends) {
     NativeTerrainVolumeV2ImportBuilder builder(
         NativeTerrainVolumeV2ImportBuilder::MAX_RECORDS_PER_APPEND);
