@@ -31,6 +31,7 @@ var _owner_epochs := {}
 var _owner_epoch_sequence := 0
 var _window_tokens := {}
 var _retirement_leases := {}
+var _retirement_inflight := {}
 var _barriers := {}
 var _barrier_identities := {}
 var _barrier_bounds := {}
@@ -77,7 +78,8 @@ func is_active() -> bool:
 
 func can_unbind() -> bool:
 	return _stopping and _owners.is_empty() and _staged_owners.is_empty() \
-		and _displaced_owners.is_empty() and active_barrier_count() == 0
+		and _displaced_owners.is_empty() and _retirement_inflight.is_empty() \
+		and active_barrier_count() == 0
 
 func _physical_admission_ready() -> bool:
 	if not is_active(): return false
@@ -135,6 +137,8 @@ func stage_window_replacement(window: Dictionary, owner: Node3D) -> Dictionary:
 			"retryable":true, "candidateCount":_staged_owners.size()}
 	if not _owners.has(window.id) or _displaced_owners.has(window.id):
 		return {"status":"pending", "reason":"physical_window_replacement_owner_unavailable"}
+	if _retirement_leases.has(window.id) or _retirement_inflight.has(window.id):
+		return {"status":"pending", "reason":"physical_window_incumbent_retirement_inflight"}
 	var layout_ticket: Dictionary = _broker.call("collision_window_layout_ticket") \
 		if _broker.has_method("collision_window_layout_ticket") else {}
 	var layout: Dictionary = layout_ticket.get("layout", {})
@@ -186,7 +190,7 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 			or _window_tokens.get(id) != stage.get("oldWindowToken"):
 		return {"status":"failed", "reason":"physical_window_committed_owner_changed"}
 	var drained: Dictionary = await _drain_noncurrent_owner(stage.owner,
-		String(stage.ownerEpoch), String(stage.windowToken))
+		String(stage.ownerEpoch), String(stage.windowToken), false)
 	if drained.get("status") != "ready":
 		return {"status":"pending", "reason":"physical_window_candidate_cancel_pending",
 			"drain":drained}
@@ -195,9 +199,79 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 			or _window_tokens.get(id) != stage.get("oldWindowToken"):
 		return {"status":"failed", "reason":"physical_window_committed_owner_changed",
 			"drain":drained}
+	var layout: Dictionary = _broker.collision_window_layout()
+	if layout.get("status") != "ready":
+		return {"status":"pending", "reason":"physical_window_candidate_cancel_layout_pending",
+			"drain":drained, "layout":layout}
+	var candidate_active := false
+	var other_active_token := ""
+	for current_window in layout.get("windows", []):
+		if current_window.get("id") != id: continue
+		var current_token := String(current_window.get("windowToken", ""))
+		if current_token == String(stage.windowToken): candidate_active = true
+		elif not current_token.is_empty(): other_active_token = current_token
+	if candidate_active:
+		if not other_active_token.is_empty():
+			return {"status":"pending", "reason":"physical_window_candidate_layout_ambiguous",
+				"activeReplacementToken":other_active_token, "drain":drained}
+		_staged_owners.erase(id)
+		stage.owner.queue_free()
+		return {"status":"ready", "windowId":id, "candidateOwnerEpoch":owner_epoch,
+			"oldOwnerEpoch":String(stage.oldOwnerEpoch), "brokerRecordRetained":true,
+			"drain":drained}
+	var telemetry: Dictionary = layout.get("retirementTelemetry", {})
+	var retired_tokens: Array = layout.get("retiredWindowTokens",
+		telemetry.get("retiredWindowTokens", []))
+	if not retired_tokens.has(String(stage.windowToken)):
+		return {"status":"pending", "reason":"physical_window_candidate_retirement_unproven",
+			"drain":drained, "layoutToken":layout.get("layoutToken", "")}
+	var layout_token := String(layout.get("layoutToken", ""))
+	if layout_token.is_empty():
+		return {"status":"pending", "reason":"physical_window_candidate_retirement_layout_missing",
+			"drain":drained}
+	var claim: Dictionary = _broker.claim_collision_window_retirement(
+		String(stage.windowToken), layout_token, String(stage.ownerEpoch))
+	if claim.get("status") != "ready" \
+			or claim.get("windowToken") != String(stage.windowToken) \
+			or claim.get("physicalOwnerEpoch") != String(stage.ownerEpoch) \
+			or String(claim.get("leaseId", "")).is_empty():
+		return {"status":"pending", "reason":"physical_window_candidate_retirement_lease_pending",
+			"drain":drained, "lease":claim}
+	var lease_id := String(claim.leaseId)
+	var valid_lease: Dictionary = _broker.validate_collision_window_retirement(
+		String(stage.windowToken), lease_id, String(stage.ownerEpoch))
+	if valid_lease.get("status") != "ready" \
+			or valid_lease.get("windowToken") != String(stage.windowToken) \
+			or valid_lease.get("physicalOwnerEpoch") != String(stage.ownerEpoch):
+		return {"status":"pending", "reason":"physical_window_candidate_retirement_lease_stale",
+			"drain":drained, "lease":valid_lease}
+	var final_layout: Dictionary = _broker.collision_window_layout()
+	var final_telemetry: Dictionary = final_layout.get("retirementTelemetry", {})
+	var final_retired: Array = final_layout.get("retiredWindowTokens",
+		final_telemetry.get("retiredWindowTokens", []))
+	if final_layout.get("status") != "ready" \
+			or final_layout.get("layoutToken") != layout_token \
+			or not final_retired.has(String(stage.windowToken)):
+		# A changed layout invalidates the lease's retirement context. Keep the
+		# stopped candidate and its exact tuple staged so a later retry can prove it.
+		return {"status":"pending", "reason":"physical_window_candidate_retirement_layout_changed",
+			"drain":drained, "layout":final_layout}
+	var candidate_drain_receipt: Dictionary = drained.get("drain", {}).duplicate(true)
+	candidate_drain_receipt["retirementLeaseId"] = lease_id
+	candidate_drain_receipt["physicalOwnerEpoch"] = String(stage.ownerEpoch)
+	var acknowledged: Dictionary = _broker.acknowledge_collision_window_retired(
+		String(stage.windowToken), candidate_drain_receipt)
+	if acknowledged.get("status") != "ready" \
+			or acknowledged.get("retiredWindowToken") != String(stage.windowToken):
+		return {"status":"pending", "reason":"physical_window_candidate_retirement_ack_pending",
+			"drain":drained, "acknowledgement":acknowledged}
 	_staged_owners.erase(id)
+	stage.owner.queue_free()
 	return {"status":"ready", "windowId":id, "candidateOwnerEpoch":owner_epoch,
-		"oldOwnerEpoch":String(stage.oldOwnerEpoch), "drain":drained}
+		"oldOwnerEpoch":String(stage.oldOwnerEpoch), "brokerRecordRetained":false,
+		"drain":drained, "candidateDrainReceipt":candidate_drain_receipt,
+		"retirementLease":claim, "leaseValidation":valid_lease,
+		"finalLayoutToken":layout_token, "acknowledgement":acknowledged}
 
 ## The switch is a single synchronous registry update after re-reading the
 ## exact broker ticket, candidate receipt, old-owner tuple and closed barrier.
@@ -214,6 +288,8 @@ func commit_staged_replacement(window: Dictionary, owner: Node3D,
 			or stage.get("window", {}).get("identity") != window.get("identity") \
 			or stage.get("window", {}).get("blocks") != window.get("blocks"):
 		return {"status":"failed", "reason":"physical_window_replacement_stage_mismatch"}
+	if _retirement_leases.has(id) or _retirement_inflight.has(id):
+		return {"status":"pending", "reason":"physical_window_incumbent_retirement_inflight"}
 	var layout_ticket: Dictionary = _broker.call("collision_window_layout_ticket")
 	if layout_ticket.get("status") != "ready" \
 			or layout_ticket.get("ticket") != stage.get("layoutToken") \
@@ -257,10 +333,17 @@ func commit_staged_replacement(window: Dictionary, owner: Node3D,
 		return {"status":"pending", "reason":"physical_window_replacement_commit_revalidation_failed"}
 	if _displaced_owners.size() >= MAX_DISPLACED_OWNERS:
 		return {"status":"pending", "reason":"physical_window_displaced_owner_capacity"}
+	var old_barrier_record := _find_retired_barrier_record(id,
+		stage.get("oldWindow", {}).get("identity", {}))
+	if old_barrier_record.is_empty():
+		return {"status":"pending", "reason":"physical_window_old_barrier_not_retained"}
 	var old_tuple := {"id":id, "owner":stage.oldOwner,
 		"ownerEpoch":String(stage.oldOwnerEpoch),
 		"windowToken":String(stage.oldWindowToken),
-		"window":stage.get("oldWindow", {})}
+		"window":stage.get("oldWindow", {}),
+		"oldBarrier":old_barrier_record.barrier,
+		"oldBarrierIdentity":old_barrier_record.identity.duplicate(true),
+		"oldBarrierBounds":old_barrier_record.bounds}
 	_displaced_owners[id] = old_tuple
 	_owners[id] = owner
 	_owner_epochs[id] = String(stage.ownerEpoch)
@@ -291,6 +374,40 @@ func _invalidate_aggregate_for_owner_switch() -> void:
 	_aggregate_result = {"status":"pending",
 		"reason":"physical_owner_replacement_committed"}
 	_aggregate_last_step_frame = -1
+
+func _find_retired_barrier_record(id: Vector3i, identity: Dictionary) -> Dictionary:
+	for record in _retired_barriers:
+		if record.get("windowId") == id and record.get("identity") == identity:
+			return record
+	return {}
+
+func _displaced_barrier_clearance(id: Vector3i, displaced: Dictionary) -> Dictionary:
+	var old_identity: Dictionary = displaced.get("oldBarrierIdentity", {})
+	var old_bounds: Variant = displaced.get("oldBarrierBounds")
+	var old_barrier: Variant = displaced.get("oldBarrier")
+	if old_identity.is_empty() or not old_bounds is AABB \
+			or not is_instance_valid(old_barrier):
+		return {"status":"pending", "reason":"displaced_old_barrier_missing"}
+	var retained := _find_retired_barrier_record(id, old_identity)
+	if retained.is_empty() or retained.get("barrier") != old_barrier \
+			or retained.get("bounds") != old_bounds or not old_barrier.is_active():
+		return {"status":"pending", "reason":"displaced_old_barrier_not_retained"}
+	var replacement: Variant = _barriers.get(id)
+	var identity: Dictionary = _barrier_identities.get(id, {})
+	if not is_instance_valid(replacement) or not replacement.is_active() \
+			or identity.is_empty() or not replacement.covers_bounds(identity, old_bounds):
+		return {"status":"pending", "reason":"displaced_replacement_barrier_does_not_cover_old_bounds",
+			"oldBounds":old_bounds}
+	var old_clearance: Dictionary = old_barrier.clearance(old_identity)
+	if not bool(old_clearance.get("clear", false)):
+		return {"status":"pending", "reason":"displaced_old_barrier_clearance_pending",
+			"oldClearance":old_clearance}
+	var replacement_clearance: Dictionary = replacement.clearance(identity)
+	if not bool(replacement_clearance.get("clear", false)):
+		return {"status":"pending", "reason":"displaced_replacement_barrier_clearance_pending",
+			"replacementClearance":replacement_clearance}
+	return {"status":"ready", "oldIdentity":old_identity,
+		"replacementIdentity":identity, "oldBounds":old_bounds}
 
 func begin_window_barrier(window: Dictionary, bounds: AABB,
 		identity: Dictionary) -> Dictionary:
@@ -518,6 +635,11 @@ func release_barriers(identity: Dictionary) -> Dictionary:
 	var pending: Array[Vector3i] = []
 	for record in _retired_barriers:
 		var barrier: RefCounted = record.barrier
+		var displaced: Dictionary = _displaced_owners.get(record.windowId, {})
+		if displaced.get("oldBarrier") == barrier \
+				and displaced.get("oldBarrierIdentity") == record.get("identity"):
+			pending.append(record.windowId)
+			continue
 		var replacement: RefCounted = _barriers.get(record.windowId)
 		if replacement == null or not replacement.is_active() \
 				or not replacement.covers_bounds(identity, record.bounds) \
@@ -582,24 +704,56 @@ func retire_window(id: Vector3i) -> Dictionary:
 		return {"status":"failed", "reason":"physical_window_not_registered"}
 	if _displaced_owners.has(id):
 		return {"status":"pending", "reason":"displaced_physical_owner_retirement_required"}
-	return await _retire_owner_tuple(id, _owners[id],
-		String(_window_tokens[id]), String(_owner_epochs.get(id, "")), false)
+	if _staged_owners.has(id):
+		return {"status":"pending", "reason":"physical_window_replacement_staged"}
+	var current_layout: Dictionary = _broker.collision_window_layout()
+	if current_layout.get("status") == "ready":
+		for current_window in current_layout.get("windows", []):
+			if current_window.get("id") == id \
+					and String(current_window.get("windowToken", "")) \
+					!= String(_window_tokens.get(id, "")):
+				return {"status":"pending",
+					"reason":"physical_window_replacement_staging_required",
+					"incumbentWindowToken":String(_window_tokens.get(id, "")),
+					"replacementWindowToken":String(current_window.get("windowToken", ""))}
+	var owner: Node3D = _owners[id]
+	var token := String(_window_tokens[id])
+	var owner_epoch := String(_owner_epochs.get(id, ""))
+	var inflight := {"owner":owner, "windowToken":token, "ownerEpoch":owner_epoch}
+	_retirement_inflight[id] = inflight
+	var retired: Dictionary = await _retire_owner_tuple(id, owner, token, owner_epoch, false)
+	if _retirement_inflight.get(id) == inflight:
+		_retirement_inflight.erase(id)
+	return retired
 
 func retire_displaced_window(id: Vector3i) -> Dictionary:
 	if _stopping or not _displaced_owners.has(id):
 		return {"status":"failed", "reason":"displaced_physical_window_not_registered"}
+	if _retirement_inflight.has(id):
+		return {"status":"pending", "reason":"physical_window_retirement_inflight"}
 	var displaced: Dictionary = _displaced_owners[id]
-	return await _retire_owner_tuple(id, displaced.owner,
+	var inflight := {"owner":displaced.owner,
+		"windowToken":String(displaced.windowToken),
+		"ownerEpoch":String(displaced.ownerEpoch)}
+	_retirement_inflight[id] = inflight
+	var retired: Dictionary = await _retire_owner_tuple(id, displaced.owner,
 		String(displaced.windowToken), String(displaced.ownerEpoch), true)
+	if _retirement_inflight.get(id) == inflight:
+		_retirement_inflight.erase(id)
+	return retired
 
 func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
 		owner_epoch: String, displaced: bool) -> Dictionary:
+	var displaced_clearance: Dictionary = {}
 	if displaced:
 		var captured: Dictionary = _displaced_owners.get(id, {})
 		if captured.get("owner") != owner or captured.get("windowToken") != token \
 				or captured.get("ownerEpoch") != owner_epoch \
 				or _owners.get(id) == owner or _window_tokens.get(id) == token:
 			return {"status":"failed", "reason":"displaced_physical_owner_tuple_invalid"}
+		displaced_clearance = _displaced_barrier_clearance(id, captured)
+		if displaced_clearance.get("status") != "ready":
+			return displaced_clearance
 	if owner_epoch.is_empty():
 		return {"status":"failed", "reason":"physical_window_owner_epoch_missing"}
 	var layout: Dictionary = _broker.collision_window_layout()
@@ -607,6 +761,11 @@ func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
 	if lease.is_empty():
 		if layout.get("status") == "ready":
 			for window in layout.windows:
+				if not displaced and window.get("id") == id \
+						and String(window.get("windowToken", "")) != token:
+					return {"status":"pending",
+						"reason":"physical_window_replacement_staging_required",
+						"replacementWindowToken":String(window.get("windowToken", ""))}
 				if window.get("windowToken") == token:
 					return {"status":"pending", "reason":"physical_window_still_demanded"}
 		elif layout.get("reason") != "collision_window_retirement_backpressure":
@@ -617,6 +776,10 @@ func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
 	var identity: Dictionary = _barrier_identities[id]
 	if not bool(barrier.clearance(identity).get("clear", false)):
 		return {"status":"pending", "reason":"window_actor_clearance_pending"}
+	if displaced:
+		displaced_clearance = _displaced_barrier_clearance(id,
+			_displaced_owners.get(id, {}))
+		if displaced_clearance.get("status") != "ready": return displaced_clearance
 	if lease.is_empty():
 		var layout_token := String(layout.get("layoutToken", ""))
 		var claim: Dictionary = _broker.claim_collision_window_retirement(token,
@@ -668,6 +831,10 @@ func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
 				or _owners.get(id) == owner or _window_tokens.get(id) == token:
 			return {"status":"pending", "reason":"displaced_physical_owner_changed",
 				"drain":drained}
+		displaced_clearance = _displaced_barrier_clearance(id, retained_tuple)
+		if displaced_clearance.get("status") != "ready":
+			return {"status":"pending", "reason":"displaced_barrier_clearance_changed",
+				"drain":drained, "clearance":displaced_clearance}
 	var owner_memory: Dictionary = _memory_admission.call(
 		"owner_reservation_receipt", owner_epoch, token)
 	if owner_memory.get("status") != "ready" \
@@ -681,6 +848,12 @@ func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
 			or lease_valid.get("physicalOwnerEpoch") != owner_epoch:
 		return {"status":"pending", "reason":"window_retirement_lease_stale",
 			"drain":drained, "lease":lease_valid}
+	if displaced:
+		var final_clearance: Dictionary = _displaced_barrier_clearance(id,
+			_displaced_owners.get(id, {}))
+		if final_clearance.get("status") != "ready":
+			return {"status":"pending", "reason":"displaced_barrier_clearance_changed",
+				"drain":drained, "clearance":final_clearance}
 	drained["retirementLeaseId"] = lease.leaseId
 	drained["physicalOwnerEpoch"] = owner_epoch
 	var acknowledged: Dictionary = _broker.acknowledge_collision_window_retired(
@@ -711,6 +884,9 @@ func _retire_owner_tuple(id: Vector3i, owner: Node3D, token: String,
 
 func stop_and_drain() -> Dictionary:
 	_stopping = true
+	if not _retirement_inflight.is_empty():
+		return {"status":"pending", "reason":"physical_window_retirement_inflight",
+			"inflightWindowIds":_retirement_inflight.keys()}
 	for barrier in _barriers.values():
 		if barrier.is_active(): barrier.owner_stopped(self)
 	for record in _retired_barriers:
@@ -793,7 +969,7 @@ func stop_and_drain() -> Dictionary:
 		"activeBarriers":active_barrier_count()}
 
 func _drain_noncurrent_owner(owner: Node3D, owner_epoch: String,
-		window_token: String) -> Dictionary:
+		window_token: String, free_on_success: bool = true) -> Dictionary:
 	if not is_instance_valid(owner) or owner_epoch.is_empty() \
 			or not owner.has_method("retirement_owner_epoch") \
 			or String(owner.call("retirement_owner_epoch")) != owner_epoch:
@@ -811,5 +987,5 @@ func _drain_noncurrent_owner(owner: Node3D, owner_epoch: String,
 			or int(memory.get("chargedBytes", -1)) != 0:
 		return {"status":"pending", "reason":"physical_window_memory_charge_retained",
 			"drain":drained, "memoryAdmission":memory}
-	owner.queue_free()
+	if free_on_success: owner.queue_free()
 	return {"status":"ready", "drain":drained, "memoryAdmission":memory}
