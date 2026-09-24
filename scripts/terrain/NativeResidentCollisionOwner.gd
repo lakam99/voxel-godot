@@ -171,7 +171,12 @@ func bind_source(source: Object) -> bool:
 
 
 func physical_receipt(identity: Dictionary) -> Dictionary:
-	if _busy or _failed or _stopping or _stopped or identity != _identity \
+	if _failed or _stopped or not _drain_terminal_failure.is_empty():
+		return {"ready":false, "status":"failed",
+			"reason":"resident_collision_owner_terminal_failure",
+			"memoryFailure":_memory_accounting_failure,
+			"drainFailure":_drain_terminal_failure.duplicate(true)}
+	if _busy or _stopping or identity != _identity \
 			or _live.size() != _resident_blocks.size() \
 			or not _source_current(identity):
 		return {"ready": false, "reason":"resident_collision_not_current"}
@@ -184,7 +189,13 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 ## source ticket; it never relabels revision-N geometry as revision N+1.
 func physical_receipt_for_layout(local_artifact_identity: Dictionary,
 		local_current_proof: Dictionary, global_layout_identity: Dictionary) -> Dictionary:
-	if _busy or _failed or _stopping or _stopped \
+	if _failed or _stopped or not _drain_terminal_failure.is_empty():
+		_source_rebind_state.clear()
+		return {"ready":false, "status":"failed",
+			"reason":"resident_collision_owner_terminal_failure",
+			"memoryFailure":_memory_accounting_failure,
+			"drainFailure":_drain_terminal_failure.duplicate(true)}
+	if _busy or _stopping \
 			or local_artifact_identity != _identity \
 			or _live.size() != _resident_blocks.size():
 		_source_rebind_state.clear()
@@ -205,7 +216,8 @@ func physical_receipt_for_layout(local_artifact_identity: Dictionary,
 func _current_physical_receipt(identity: Dictionary,
 		allowed_overlap_live_tokens: Array = []) -> Dictionary:
 	if not _memory_accounting_failure.is_empty():
-		return {"ready":false, "reason":"resident_collision_memory_accounting_failed",
+		return {"ready":false, "status":"failed",
+			"reason":"resident_collision_memory_accounting_failed",
 			"memoryFailure":_memory_accounting_failure}
 	var memory_owner_receipt := {}
 	if _memory_admission != null:
@@ -235,7 +247,8 @@ func _current_physical_receipt(identity: Dictionary,
 			or _health_validated_source_ticket != _source_ticket:
 		var health: Dictionary = _advance_physical_health_validation(identity)
 		if health.get("status") != "ready":
-			return {"ready":false, "reason":health.get("reason",
+			return {"ready":false, "status":health.get("status", "pending"),
+				"reason":health.get("reason",
 				"physical_health_validation_pending"),
 				"healthValidation":health}
 	return {"ready": true, "physicsFrame": Engine.get_physics_frames(),

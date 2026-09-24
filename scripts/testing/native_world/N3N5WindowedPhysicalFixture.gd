@@ -302,6 +302,26 @@ func _run() -> void:
 		retained_layout.get("identity", {}))
 	var retained_source: Dictionary = facade.collision_source_snapshot()
 	if OS.get_environment("N3_N5_PROOF_REBIND_ONLY") == "1":
+		var unhealthy_block: Vector3i = Vector3i.ZERO
+		for row in rows:
+			if bool(row.get("expectedHit", false)):
+				unhealthy_block = row.block
+				break
+		var terminal_owner_shape_retirement: Dictionary = \
+			owner.retire_collision_entry_shape(unhealthy_block, 0)
+		var terminal_owner_receipt: Dictionary = {}
+		for frame in range(40):
+			terminal_owner_receipt = owner.physical_receipt_for_layout(
+				retained_window.identity, retained_proof, retained_layout.identity)
+			if terminal_owner_receipt.get("healthValidation", {}).get("status") == "failed":
+				break
+			await process_frame
+		var terminal_owner_aggregate: Dictionary = {}
+		for frame in range(40):
+			terminal_owner_aggregate = coordinator.aggregate_readiness(
+				retained_layout.identity)
+			if terminal_owner_aggregate.get("status") == "failed": break
+			await process_frame
 		guard_actor.queue_free()
 		await process_frame
 		var focused_coordinator_drain: Dictionary = await coordinator.stop_and_drain()
@@ -361,6 +381,11 @@ func _run() -> void:
 			and int(rebind_scan.get("stepUsecBudget", -1)) \
 				== OWNER.SOURCE_REBIND_STEP_USEC_BUDGET \
 			and retained_contact and retained_aggregate.get("status") == "ready" \
+			and terminal_owner_shape_retirement.get("status") == "pending" \
+			and terminal_owner_receipt.get("healthValidation", {}).get("status") == "failed" \
+			and terminal_owner_aggregate.get("status") == "failed" \
+			and terminal_owner_aggregate.get("reason") \
+				== "resident_collision_entry_unhealthy" \
 			and focused_coordinator_drain.get("status") == "ready" \
 			and focused_coordinator_drain.get("remainingChildren") == 0 \
 			and focused_coordinator_drain.get("activeBarriers") == 0 \
@@ -379,6 +404,9 @@ func _run() -> void:
 				"physical":retained_receipt,
 				"actorContactAfterRebind":retained_contact,
 				"aggregate":retained_aggregate},
+			"terminalOwnerFailure":{"shapeRetirement":terminal_owner_shape_retirement,
+				"physicalReceipt":terminal_owner_receipt,
+				"aggregate":terminal_owner_aggregate},
 			"drain":{"coordinator":focused_coordinator_drain,
 				"broker":focused_broker_stop}})
 		return
@@ -425,11 +453,6 @@ func _run() -> void:
 		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
 	var premature_replacement_release: Dictionary = coordinator.release_barriers(
 		replacement_layout.identity)
-	var replaced_old: Dictionary = await coordinator.retire_window(window.id)
-	var denied_after_drain: bool = not coordinator.admit_motion(
-		guard_actor, crossing_motion)
-	var denied_placement_after: bool = not coordinator.admit_placement(
-		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
 	var replacement_requests := []
 	for block: Vector3i in replacement_window.blocks:
 		replacement_requests.append(broker.request_block(block))
@@ -454,15 +477,39 @@ func _run() -> void:
 				replacement_rows.append(row_status.row)
 	var replacement_owner = OWNER.new()
 	coordinator.add_child(replacement_owner)
-	var replacement_bound: bool = replacement_owner.bind_source(
-		replacement_facade)
-	var replacement_registered: Dictionary = coordinator.register_window(
+	var replacement_bound: bool = replacement_owner.bind_source(replacement_facade)
+	var cancelled_stage: Dictionary = coordinator.stage_window_replacement(
+		replacement_window, replacement_owner)
+	var pre_replacement_memory: Dictionary = memory_admission.snapshot() \
+		if memory_configured else {}
+	var cancelled_candidate_publish: Dictionary = {}
+	if replacement_rows.size() == replacement_window.get("blocks", []).size():
+		cancelled_candidate_publish = await replacement_owner.publish({
+			"schema":"n5-resident-collision-publication/v1",
+			"identity":replacement_layout.identity,
+			"residentBlocks":replacement_window.blocks,
+			"affectedBlocks":replacement_window.blocks,
+			"rows":replacement_rows}, replacement_barrier)
+	var cancelled_candidate_receipt: Dictionary = replacement_owner.physical_receipt(
+		replacement_window.identity)
+	var cancelled_candidate: Dictionary = {}
+	if cancelled_stage.get("status") == "ready":
+		cancelled_candidate = await coordinator.cancel_staged_replacement(
+			replacement_window.id, String(cancelled_stage.get("physicalOwnerEpoch", "")))
+	var old_registry_after_cancel: bool = coordinator._owners.get(window.id) == owner
+	var old_owner_live_after_cancel: bool = owner.is_inside_tree() \
+		and owner._live.size() == window.get("blocks", []).size()
+	var memory_after_candidate_cancel: Dictionary = memory_admission.snapshot() \
+		if memory_configured else {}
+	await process_frame
+	replacement_owner = OWNER.new()
+	coordinator.add_child(replacement_owner)
+	replacement_bound = replacement_owner.bind_source(replacement_facade)
+	var replacement_staged: Dictionary = coordinator.stage_window_replacement(
 		replacement_window, replacement_owner)
 	var before_replacement_install: Dictionary = coordinator.aggregate_readiness(
 		replacement_layout.identity)
 	var replacement_published: Dictionary = {}
-	var pre_replacement_memory: Dictionary = memory_admission.snapshot() \
-		if memory_configured else {}
 	if replacement_rows.size() == replacement_window.get("blocks", []).size():
 		replacement_published = await replacement_owner.publish({
 			"schema":"n5-resident-collision-publication/v1",
@@ -470,10 +517,63 @@ func _run() -> void:
 			"residentBlocks":replacement_window.blocks,
 			"affectedBlocks":replacement_window.blocks,
 			"rows":replacement_rows}, replacement_barrier)
-	var replacement_aggregate: Dictionary = coordinator.aggregate_readiness(
-		replacement_layout.identity)
+	var candidate_receipt: Dictionary = replacement_owner.physical_receipt(
+		replacement_window.identity)
+	var old_owner_live_through_candidate_ack: bool = owner.is_inside_tree() \
+		and owner._live.size() == window.get("blocks", []).size()
+	var old_owner_live_debug := {"ownerInsideTree":owner.is_inside_tree(),
+		"liveEntryCount":owner._live.size(),
+		"expectedEntryCount":window.get("blocks", []).size(),
+		"bodies":[]}
+	for old_entry in owner._live.values():
+		var old_body = old_entry.get("body")
+		old_owner_live_debug.bodies.append({"valid":is_instance_valid(old_body),
+			"insideTree":is_instance_valid(old_body) and old_body.is_inside_tree(),
+			"queued":is_instance_valid(old_body) and old_body.is_queued_for_deletion(),
+			"expectedHit":bool(old_entry.get("expectedHit", false)),
+			"parentIsOwner":is_instance_valid(old_body) and old_body.get_parent() == owner})
+		if bool(old_entry.get("expectedHit", false)):
+			old_owner_live_through_candidate_ack = old_owner_live_through_candidate_ack \
+				and is_instance_valid(old_body) and old_body.is_inside_tree() \
+				and not old_body.is_queued_for_deletion() and old_body.get_parent() == owner
+		else:
+			old_owner_live_through_candidate_ack = old_owner_live_through_candidate_ack \
+				and not is_instance_valid(old_body) \
+				and old_entry.get("shapes", []).is_empty()
+	var old_epoch_before_switch := String(owner.retirement_owner_epoch())
+	var old_registry_unchanged: bool = coordinator._owners.get(window.id) == owner
+	var staged_layout_ticket := String(coordinator._staged_owners[window.id].layoutToken)
+	coordinator._staged_owners[window.id].layoutToken = "drifted:" + staged_layout_ticket
+	var drifted_ticket_commit: Dictionary = coordinator.commit_staged_replacement(
+		replacement_window, replacement_owner, replacement_barrier)
+	var old_registry_after_drift_rejection: bool = coordinator._owners.get(window.id) == owner
+	coordinator._staged_owners[window.id].layoutToken = staged_layout_ticket
+	var stale_candidate_window := replacement_window.duplicate(true)
+	stale_candidate_window.windowToken = "stale:" + String(stale_candidate_window.windowToken)
+	var stale_stage_commit: Dictionary = coordinator.commit_staged_replacement(
+		stale_candidate_window, replacement_owner, replacement_barrier)
+	var old_registry_after_rejected_commit: bool = coordinator._owners.get(window.id) == owner
+	var replacement_switch: Dictionary = {}
+	if replacement_published.get("status") == "ready" \
+			and candidate_receipt.get("ready", false):
+		replacement_switch = coordinator.commit_staged_replacement(
+			replacement_window, replacement_owner, replacement_barrier)
+	var replacement_aggregate: Dictionary = {"status":"pending"}
+	for frame in range(120):
+		replacement_aggregate = coordinator.aggregate_readiness(
+			replacement_layout.identity)
+		if replacement_aggregate.get("status") != "pending": break
+		await process_frame
 	var post_replacement_memory: Dictionary = memory_admission.snapshot() \
 		if memory_configured else {}
+	var displaced_owner_retained_after_switch: bool = coordinator._displaced_owners \
+		.get(window.id, {}).get("owner") == owner \
+		and owner.is_inside_tree() and owner._live.size() == window.blocks.size()
+	var replaced_old: Dictionary = await coordinator.retire_displaced_window(window.id)
+	var denied_after_drain: bool = not coordinator.admit_motion(
+		guard_actor, crossing_motion)
+	var denied_placement_after: bool = not coordinator.admit_placement(
+		guard_actor, Transform3D(Basis.IDENTITY, bounds.get_center()))
 	var replacement_release: Dictionary = coordinator.release_barriers(
 		replacement_layout.identity)
 	var admitted_after_replacement: bool = coordinator.admit_motion(
@@ -668,15 +768,34 @@ func _run() -> void:
 		and denied_before_drain and denied_after_drain \
 		and denied_placement_before and denied_placement_after \
 		and premature_replacement_release.get("status") == "pending" \
+		and replacement_staged.get("status") == "ready" \
+		and old_registry_unchanged and old_registry_after_rejected_commit \
+		and cancelled_stage.get("status") == "ready" \
+		and cancelled_candidate_publish.get("status") == "ready" \
+		and cancelled_candidate_receipt.get("ready", false) \
+		and cancelled_candidate.get("status") == "ready" \
+		and old_registry_after_cancel and old_owner_live_after_cancel \
+		and int(memory_after_candidate_cancel.get("totalChargedBytes", -1)) \
+			== int(pre_replacement_memory.get("totalChargedBytes", -2)) \
+		and drifted_ticket_commit.get("status") == "pending" \
+		and old_registry_after_drift_rejection \
+		and stale_stage_commit.get("status") == "failed" \
+		and old_owner_live_through_candidate_ack \
+		and old_epoch_before_switch == replacement_staged.get("oldOwnerEpoch") \
+		and candidate_receipt.get("ready", false) \
+		and replacement_switch.get("status") == "ready" \
+		and displaced_owner_retained_after_switch \
 		and replaced_old.get("status") == "ready" \
 		and replaced_old.get("drain", {}).get("remainingBodies") == 0 \
+		and replaced_old.get("windowToken") == replacement_staged.get("oldWindowToken") \
 		and int(replaced_old.get("drain", {}).get("memoryAdmission", {}).get("reservationCount", -1)) == 0 \
 		and replacement_snapshot.get("status") == "ready" \
-		and replacement_bound and replacement_registered.get("status") == "ready" \
+		and replacement_bound and replacement_staged.get("status") == "ready" \
 		and before_replacement_install.get("status") == "pending" \
 		and replacement_published.get("status") == "ready" \
-		and int(pre_replacement_memory.get("totalChargedBytes", -1)) == 0 \
-		and int(post_replacement_memory.get("totalChargedBytes", 0)) > 0 \
+		and int(pre_replacement_memory.get("totalChargedBytes", 0)) > 0 \
+		and int(post_replacement_memory.get("totalChargedBytes", 0)) \
+			> int(pre_replacement_memory.get("totalChargedBytes", 0)) \
 		and int(post_replacement_memory.get("peakChargedBytes", 0)) \
 			> int(initial_memory.get("totalChargedBytes", 0)) \
 		and int(final_memory.get("totalChargedBytes", -1)) == 0 \
@@ -749,11 +868,30 @@ func _run() -> void:
 			"deniedBeforeDrain":denied_before_drain,
 			"deniedPlacementBefore":denied_placement_before,
 			"prematureRelease":premature_replacement_release,
+			"stagedCandidate":replacement_staged,
+			"cancelledCandidate":{"stage":cancelled_stage,
+				"publication":cancelled_candidate_publish,
+				"receipt":cancelled_candidate_receipt,
+				"cancel":cancelled_candidate,
+				"oldRegistryPreserved":old_registry_after_cancel,
+				"oldOwnerStillLive":old_owner_live_after_cancel,
+				"memoryAfterCancel":memory_after_candidate_cancel},
+			"driftedTicketCommitRejected":drifted_ticket_commit,
+			"oldRegistryPreservedAfterTicketDrift":old_registry_after_drift_rejection,
+			"staleCommitRejected":stale_stage_commit,
+			"oldRegistryUnchangedBeforeSwitch":old_registry_unchanged,
+			"oldRegistryUnchangedAfterRejectedCommit":old_registry_after_rejected_commit,
+			"oldOwnerLiveThroughCandidateAck":old_owner_live_through_candidate_ack,
+			"oldOwnerLiveDebug":old_owner_live_debug,
+			"oldOwnerEpochBeforeSwitch":old_epoch_before_switch,
+			"candidateReceiptBeforeSwitch":candidate_receipt,
+			"atomicSwitch":replacement_switch,
+			"displacedOwnerRetainedAfterSwitch":displaced_owner_retained_after_switch,
 			"oldOwnerRetired":replaced_old,
 			"deniedAfterDrain":denied_after_drain,
 			"deniedPlacementAfter":denied_placement_after,
 			"newSnapshot":replacement_snapshot,
-			"newOwnerRegistered":replacement_registered,
+			"newOwnerStaged":replacement_staged,
 			"beforeInstall":before_replacement_install,
 			"newPublication":replacement_published,
 			"newAggregate":replacement_aggregate,
