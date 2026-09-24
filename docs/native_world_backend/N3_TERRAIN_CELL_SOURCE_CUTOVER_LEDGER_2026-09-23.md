@@ -225,6 +225,21 @@ finds no crossing must be classified as a placement/projection failure or a
 documented source result; it cannot silently become a second heightfield
 authority. This is a caller/deletion observation, not a changed runtime rule.
 
+### Save restore side effects at the native owner switch
+
+`MainSaveState.apply_save_snapshot` invokes `restore_volume_edits(terrain)`
+before `restore_terrain_volume(terrainVolume)`. When a full nonempty v2 volume
+is present, the second call resets the script volume and supersedes the
+historical column edits as durable terrain state. The first call can still
+notify `NpcSystem.notify_navigation_terrain_edited` once per historical
+column. The native Continue path must preserve full-volume precedence while
+publishing navigation and collision changes only from the final admitted
+source revision. Tests should include a v2 save containing both fields to
+distinguish durable terrain parity from these pre-reset notifications.
+`convert_legacy_volume_edit_to_terrain_volume` also writes
+`volume_edit_markers` if no generation edit API exists; that marker path must
+not become a fallback terrain authority at the native cutover.
+
 The caller audit used `rg` across production `scripts/*.gd` (excluding
 `scripts/testing/**`), then inspected `WorldGenerationSystem`'s public
 forwarders and `TerrainVolumeService`'s owner methods. `NpcNavigationTestRunner`
