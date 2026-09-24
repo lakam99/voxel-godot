@@ -544,7 +544,8 @@ func _disposal_failure_contract() -> Dictionary:
 	var prepare_sweep: Dictionary = prepare.owner._dispose_candidates({
 		Vector3i(4101, 0, 0):prepare.entry})
 	prepare.owner._pending_candidates = {Vector3i(4101, 0, 0):prepare.entry}
-	prepare.owner._pending_candidate_keys = [Vector3i(4101, 0, 0)]
+	prepare.owner._pending_candidate_keys.clear()
+	prepare.owner._pending_candidate_keys.append(Vector3i(4101, 0, 0))
 	var prepare_retained: bool = prepare_result.get("disposal", {}).get("status") == "failed" \
 		and prepare_sweep.get("status") == "failed" \
 		and prepare.owner._disposal_retry_entries.has("prepare-reject-token") \
@@ -565,7 +566,8 @@ func _disposal_failure_contract() -> Dictionary:
 		and is_instance_valid(rollback.entry.body) \
 		and not rollback.entry.body.is_queued_for_deletion()
 	rollback.owner._pending_candidates = {Vector3i(4102, 0, 0):rollback.entry}
-	rollback.owner._pending_candidate_keys = [Vector3i(4102, 0, 0)]
+	rollback.owner._pending_candidate_keys.clear()
+	rollback.owner._pending_candidate_keys.append(Vector3i(4102, 0, 0))
 	var rollback_drain: Dictionary = await rollback.owner.stop_and_drain()
 
 	var previous := _make_deferred_release_fault_owner(
@@ -601,7 +603,8 @@ func _disposal_failure_contract() -> Dictionary:
 	post_commit.owner._resident_blocks.clear()
 	post_commit.owner._resident_blocks.append(Vector3i(4104, 0, 0))
 	post_commit.owner._pending_candidates = {Vector3i(4104, 0, 0):committed_entry}
-	post_commit.owner._pending_candidate_keys = [Vector3i(4104, 0, 0)]
+	post_commit.owner._pending_candidate_keys.clear()
+	post_commit.owner._pending_candidate_keys.append(Vector3i(4104, 0, 0))
 	post_commit.owner.request_stop()
 	# Targeted branch contract for the two post-commit publish stop exits: both
 	# call _finish_stopped_committed_publish(old), whose ownership transfer is
@@ -629,7 +632,8 @@ func _disposal_failure_contract() -> Dictionary:
 		"abort-recovered-token")
 	abort_recovered.owner._pending_candidates = {
 		Vector3i(4105, 0, 0):abort_recovered.entry}
-	abort_recovered.owner._pending_candidate_keys = [Vector3i(4105, 0, 0)]
+	abort_recovered.owner._pending_candidate_keys.clear()
+	abort_recovered.owner._pending_candidate_keys.append(Vector3i(4105, 0, 0))
 	var original_construct_failure: Dictionary = \
 		abort_recovered.admission.mark_candidate_constructed(
 			"abort-recovered-token", abort_recovered.owner.retirement_owner_epoch(),
@@ -654,7 +658,8 @@ func _disposal_failure_contract() -> Dictionary:
 	abort_blocked.owner._unconstructed_memory_tokens.append("abort-blocked-token")
 	abort_blocked.owner._pending_candidates = {
 		Vector3i(4106, 0, 0):abort_blocked.entry}
-	abort_blocked.owner._pending_candidate_keys = [Vector3i(4106, 0, 0)]
+	abort_blocked.owner._pending_candidate_keys.clear()
+	abort_blocked.owner._pending_candidate_keys.append(Vector3i(4106, 0, 0))
 	abort_blocked.admission.abort_registration_fails = true
 	var original_blocked_failure: Dictionary = \
 		abort_blocked.admission.mark_candidate_constructed("abort-blocked-token",
@@ -772,8 +777,11 @@ func _make_health_owner(source: FakeSource, block: Vector3i,
 	health_owner._source_ticket = source._ticket_value()
 	health_owner._membership_provenance = source.current.membershipProvenance.duplicate(true)
 	var resident_blocks: Array[Vector3i] = [block]
-	health_owner._resident_blocks = resident_blocks
-	health_owner._receipt_resident_blocks = resident_blocks.duplicate()
+	health_owner._resident_blocks.clear()
+	health_owner._receipt_resident_blocks.clear()
+	for resident_block: Vector3i in resident_blocks:
+		health_owner._resident_blocks.append(resident_block)
+		health_owner._receipt_resident_blocks.append(resident_block)
 	health_owner._receipt_resident_blocks.make_read_only()
 	health_owner._readiness_epoch = 1
 	return health_owner
@@ -902,8 +910,11 @@ func _bounded_physical_health_cursor_case() -> Dictionary:
 	owner._source_identity = fixture.sourceIdentity.duplicate(true)
 	owner._source_ticket = fixture.source._ticket_value()
 	owner._membership_provenance = fixture.source.current.membershipProvenance.duplicate(true)
-	owner._resident_blocks = fixture.blocks
-	owner._receipt_resident_blocks = fixture.blocks.duplicate()
+	owner._resident_blocks.clear()
+	owner._receipt_resident_blocks.clear()
+	for resident_block: Vector3i in fixture.blocks:
+		owner._resident_blocks.append(resident_block)
+		owner._receipt_resident_blocks.append(resident_block)
 	owner._receipt_resident_blocks.make_read_only()
 	owner._readiness_epoch = 1
 	owner._live = {}
@@ -939,8 +950,11 @@ func _bounded_health_shape_cursor_case() -> Dictionary:
 	owner._source_identity = fixture.sourceIdentity.duplicate(true)
 	owner._source_ticket = fixture.source._ticket_value()
 	owner._membership_provenance = fixture.source.current.membershipProvenance.duplicate(true)
-	owner._resident_blocks = fixture.blocks
-	owner._receipt_resident_blocks = fixture.blocks.duplicate()
+	owner._resident_blocks.clear()
+	owner._receipt_resident_blocks.clear()
+	for resident_block: Vector3i in fixture.blocks:
+		owner._resident_blocks.append(resident_block)
+		owner._receipt_resident_blocks.append(resident_block)
 	owner._receipt_resident_blocks.make_read_only()
 	owner._readiness_epoch = 1
 	owner._live = {}
