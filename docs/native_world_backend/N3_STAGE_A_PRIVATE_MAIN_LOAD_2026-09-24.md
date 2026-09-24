@@ -76,6 +76,48 @@ The snapshot lease is cooperative:
 `snapshot_override` callers can still hold writable nested aliases and must
 not mutate them during import. The private stage therefore cannot be promoted
 to save or gameplay authority without a stronger owner boundary. N3 Stages
-B-E and the original final acceptance remain open. The current branch also
-needs synchronization with later N3/N5 owner API commits before downstream
-cutover work and frozen final evidence.
+B-E and the original final acceptance remain open. The primary migration
+branch has since synchronized the staged owner API chain through
+`75b72d2f5ed28d674096d3d5f64e9c80ca086675`; this enables downstream integration
+work but does not itself cut over Main or close N3, N5, or Gate 5.
+
+## Committed stage-transfer identity checkpoint — 2026-09-24
+
+The primary branch fast-forwarded from `0c4dc7c47c75c95d7ede60b03ea47ad7b3ea1f37`
+to `75b72d2f5ed28d674096d3d5f64e9c80ca086675`. The reviewed chain adds a
+single-use stage-to-owner transfer, fail-closed post-consumption retirement,
+finalized-source checks, and a same-process `TerrainVolumeService` instance
+identity pin alongside Main's mutation revision. The incoming Continue save
+volume remains the durable native import source; its revision need not equal the
+script mirror's replay revision. The identity pin only detects replacement or
+mutation of that mirror during the handoff interval.
+
+Focused verification on the isolated worker worktree
+`C:\Users\arkam\.codex\worktrees\n5-valid-continue-revision\voxel-biome-world-godot`:
+
+- `node tools/run-n5-committed-stage-transfer.mjs` passed with no contract
+  failures. It proved an unchanged Continue replay with save revision `R=2`
+  and script mirror revision `Q=1` adopts the exact backend and exports the
+  save revision; replacing the mirror with a different service at the same
+  `Q` rejected owner adoption before backend consumption and allowed exact
+  transaction reclaim and drain. Report:
+  `artifacts/native-world-backend/n5-committed-stage-transfer-1790283845029-68850c05/report.json`.
+- `node tools/run-n3-main-load-transaction.mjs` passed with no contract
+  failures, including the existing direct-transaction compatibility path.
+  Report:
+  `artifacts/native-world-backend/n3-main-load-transaction-1790283811501-2fb5ffba/report.json`.
+- Owned watchdogs `godot-OE7NWX` and `godot-YpCXEt` recorded functional and
+  overall exit `0`, cleanup passed, authoritative Job Object membership zero,
+  and no final job members.
+- Independent review at exact `75b72d2f5ed28d674096d3d5f64e9c80ca086675`
+  issued a scoped GO for the instance-identity handoff repair. It did not
+  issue N5 stage acceptance.
+
+The JSON reports do not embed a Git SHA; the reports and watchdogs are retained
+in the isolated worktree above, and the independent reviewer inspected the
+exact commit. This checkpoint is focused transaction/owner evidence only. It
+does not prove production Main wiring, live physics readiness, player/NPC
+cutover, feature collision, bounded streaming under traversal, or deletion of
+the old Voxel Tools collision path. No gameplay authority was switched and no
+legacy path was deleted by this change. The migration and original Gate 5
+remain open.
