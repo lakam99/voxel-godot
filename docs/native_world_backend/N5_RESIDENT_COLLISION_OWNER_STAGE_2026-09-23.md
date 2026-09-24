@@ -37,3 +37,36 @@ scan/build maps for up to 4,096 resident members. Cursorizing those scans would
 change broker/readiness contracts and remains a separate bounded-work issue;
 this receipt fix does not claim a bounded stop latency or close N5 production
 cutover.
+
+## Aggregate collision-memory admission remains open
+
+The current count limits do not impose a hard byte ceiling on prepared, active,
+or retiring collision. `NativeResidentCollisionOwner.MAX_VERTICES_PER_BLOCK` is
+65,536, or up to 786,432 bytes of packed `Vector3` triangle positions at 12
+bytes/vertex. At those per-block maxima, one 4,096-block owner admits about 3
+GiB of source triangle payload before physics-server allocation, temporary
+copies, or old-plus-candidate replacement overlap. A 64-block replacement may
+prepare roughly 48 MiB of new vertex payload while the old installation remains
+active. `NativeWindowedCollisionReadiness` permits 128 windows of up to 4,096
+blocks each; logical partitioning alone therefore does not impose a global
+memory bound (the theoretical packed source ceiling is about 48 GiB).
+
+`NativeTerrainArtifactRequests.MAX_RETIRED_VERTEX_BYTES` (256 MiB) is narrower:
+it accounts for broker-held, inactive source-row vertex payload only. It does
+not cover active-window rows, `ConcavePolygonShape3D` input/cooked storage,
+temporary copies, or deferred frees. The resident owner's body-count drain is
+not a byte receipt, and `queue_free()` does not itself prove the physics-side
+memory has been released.
+
+Before production N5 cutover, add a shared coordinator/service-owned byte
+ledger with hard global and per-window admission. Derive reservations from
+validated native artifact rows and conservatively account for peak old-plus-
+candidate overlap before copying/cooking shapes. If the budget is unavailable,
+retain the demand and return retryable pending backpressure without publishing
+partial readiness. Transfer reservations at commit; keep old and aborted
+candidate bytes charged until physics-safe destruction is acknowledged; require
+all reservations to reach zero on stop/drain. Extend the focused owner and
+window aggregate tests for exact/over-budget admission, cross-window
+competition, replacement overlap/retry, rollback, deferred frees, and zero-byte
+shutdown. The current eight-block/four-window physical tranche draft explicitly
+does not prove a full 4,913-block physical installation or this byte budget.
