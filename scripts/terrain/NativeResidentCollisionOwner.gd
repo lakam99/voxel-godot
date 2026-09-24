@@ -15,6 +15,8 @@ const MAX_VERTICES_PER_BLOCK := 65536
 # vertices to one ConcavePolygonShape3D. Large artifacts become several
 # child shapes on the same StaticBody3D; the triangle set is unchanged.
 const PREPARE_VERTEX_BUDGET := 768
+const DRAIN_WORK_BUDGET := 64
+const DRAIN_BODY_BUDGET := 16
 const MAX_ACK_FRAMES := 6
 
 var _source: Object
@@ -29,12 +31,18 @@ var _failed := false
 var _stopping := false
 var _stopped := false
 var _pending_candidates := {}
+var _pending_candidate_keys: Array[Vector3i] = []
 var _admission_barrier: RefCounted
 var _restored_old_frame := -1
 var _last_probe_hit := {}
 var _drain_receipt := {}
 var _prepare_max_work_units := 0
 var _prepare_total_work_units := 0
+var _drain_last_queued_physics_frame := -1
+var _drain_window_token := ""
+var _drain_expected_resident_count := 0
+var _drain_retired_candidate_count := 0
+var _drain_retired_live_count := 0
 
 
 func bind_source(source: Object) -> bool:
@@ -122,6 +130,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	for row in request.rows:
 		var candidate_entry: Dictionary = _new_candidate_entry(row)
 		candidates[row.block] = candidate_entry
+		_pending_candidate_keys.append(row.block)
 		_pending_candidates = candidates
 		var canonical_row: Dictionary = checked.canonicalRows[row.block]
 		var prepared: Dictionary = await _prepare_row_bounded(row,
@@ -133,6 +142,8 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		total_prepare_usec += int(prepared.get("totalCpuUsec", 0))
 		if prepared.get("status") != "ready":
 			_dispose_candidates(candidates)
+			_pending_candidates.clear()
+			_pending_candidate_keys.clear()
 			_busy = false
 			return prepared
 		candidates[row.block] = prepared.entry
@@ -147,6 +158,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		if not prepared_row_current:
 			_dispose_candidates(candidates)
 			_pending_candidates.clear()
+			_pending_candidate_keys.clear()
 			_busy = false
 			return {"status": "pending", "reason": "candidate_source_row_drift"}
 	var old := {}
@@ -165,6 +177,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 				if _stopping or bool(restored_drift.get("cancelled", false)):
 					return _finish_stopped_publish(candidates)
 				_pending_candidates.clear()
+				_pending_candidate_keys.clear()
 				_busy = false
 				return {"status": "pending" if bool(restored_drift.get("physicalReady", false)) else "failed",
 					"reason": "candidate_source_row_drift",
@@ -172,6 +185,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 					"oldPhysicsFrame": restored_drift.get("physicsFrame", -1)}
 			_dispose_candidates(candidates)
 			_pending_candidates.clear()
+			_pending_candidate_keys.clear()
 			_busy = false
 			return {"status": "pending", "reason": "candidate_source_row_drift",
 				"oldPhysicalUnchanged": true}
@@ -204,6 +218,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			if _stopping or bool(restored.get("cancelled", false)):
 				return _finish_stopped_publish(candidates)
 			_pending_candidates.clear()
+			_pending_candidate_keys.clear()
 			_busy = false
 			return {"status": "pending" if bool(restored.get("physicalReady", false)) else "failed",
 				"reason": "candidate_physics_unacknowledged",
@@ -221,6 +236,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		if _stopping or bool(restored_stale.get("cancelled", false)):
 			return _finish_stopped_publish(candidates)
 		_pending_candidates.clear()
+		_pending_candidate_keys.clear()
 		_busy = false
 		return {"status": "pending", "reason": "candidate_source_changed_before_commit",
 			"oldPhysicalRestored": restored_stale.get("physicalReady", false)}
@@ -252,6 +268,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		if _stopping or bool(restored_unready.get("cancelled", false)):
 			return _finish_stopped_publish(candidates)
 		_pending_candidates.clear()
+		_pending_candidate_keys.clear()
 		_busy = false
 		return {"status": "pending", "reason": "physical_receipt_not_complete",
 			"oldPhysicalRestored": restored_unready.get("physicalReady", false)}
@@ -259,6 +276,7 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 		if old.has(block):
 			_dispose(old[block])
 	_pending_candidates.clear()
+	_pending_candidate_keys.clear()
 	return {"status": "pending" if _startup_staging else "ready",
 		"reason": "resident_startup_incomplete" if _startup_staging else "",
 		"physicalReceipt": receipt,
@@ -281,33 +299,172 @@ func startup_empty_receipt(identity: Dictionary) -> Dictionary:
 		and _live.is_empty() and _pending_candidates.is_empty()}
 
 
-func stop_and_drain() -> Dictionary:
+func request_stop() -> Dictionary:
 	if _stopped:
-		return _drain_receipt.duplicate(true)
-	_stopping = true
-	var retired_window_token := String(_membership_provenance.get("windowToken", ""))
-	if _admission_barrier is AdmissionBarrier:
-		_admission_barrier.owner_stopped(self)
-	for entry in _pending_candidates.values():
-		_dispose(entry)
-	for entry in _live.values():
-		_dispose(entry)
-	while _busy:
+		return _drain_receipt.duplicate(false)
+	if not _stopping:
+		_stopping = true
+		_drain_last_queued_physics_frame = -1
+		_drain_window_token = String(_membership_provenance.get("windowToken", ""))
+		_drain_expected_resident_count = _resident_blocks.size()
+		_drain_retired_candidate_count = 0
+		_drain_retired_live_count = 0
+		if _admission_barrier is AdmissionBarrier:
+			_admission_barrier.owner_stopped(self)
+	return {"status": "pending", "stopRequested": true,
+		"inFlightPublish": _busy,
+		"pendingEntries": _pending_candidates.size(),
+		"liveEntries": _live.size(), "remainingBodies": get_child_count(),
+		"sourceRetained": _source != null,
+		"barrierRetained": _admission_barrier != null,
+		"windowToken": _drain_window_token}
+
+
+## One nonblocking bounded drain quantum. The caller retries on a later frame;
+## source and admission-barrier references survive until the exact final receipt.
+func drain_step() -> Dictionary:
+	if _stopped:
+		return _drain_receipt.duplicate(false)
+	if not _stopping:
+		request_stop()
+	if _busy:
+		return _drain_progress("publish_in_flight", 0, 0, 0)
+	var work_used := 0
+	var visited := 0
+	var retired_bodies := 0
+	while work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
+			and not _pending_candidate_keys.is_empty():
+		var candidate_block: Vector3i = _pending_candidate_keys.back()
+		visited += 1
+		if not _pending_candidates.has(candidate_block):
+			_pending_candidate_keys.pop_back()
+			work_used += 1
+			continue
+		var candidate_entry: Dictionary = _pending_candidates[candidate_block]
+		var candidate_step: Dictionary = _advance_entry_drain(candidate_entry,
+			DRAIN_WORK_BUDGET - work_used - 1)
+		work_used += int(candidate_step.workUnits)
+		if bool(candidate_step.bodyQueued): retired_bodies += 1
+		if bool(candidate_step.done):
+			_pending_candidates.erase(candidate_block)
+			_pending_candidate_keys.pop_back()
+			_drain_retired_candidate_count += 1
+			work_used += 1
+		if int(candidate_step.workUnits) <= 0 or not bool(candidate_step.done):
+			break
+	while work_used < DRAIN_WORK_BUDGET and retired_bodies < DRAIN_BODY_BUDGET \
+			and not _resident_blocks.is_empty():
+		var live_block: Vector3i = _resident_blocks.back()
+		visited += 1
+		if not _live.has(live_block):
+			_resident_blocks.pop_back()
+			work_used += 1
+			continue
+		var live_entry: Dictionary = _live[live_block]
+		var live_step: Dictionary = _advance_entry_drain(live_entry,
+			DRAIN_WORK_BUDGET - work_used - 1)
+		work_used += int(live_step.workUnits)
+		if bool(live_step.bodyQueued): retired_bodies += 1
+		if bool(live_step.done):
+			_live.erase(live_block)
+			_resident_blocks.pop_back()
+			_drain_retired_live_count += 1
+			work_used += 1
+		if int(live_step.workUnits) <= 0 or not bool(live_step.done):
+			break
+	if _pending_candidates.is_empty() and _live.is_empty() \
+			and _pending_candidate_keys.is_empty() and _resident_blocks.is_empty() \
+			and get_child_count() == 0 \
+		and (_drain_last_queued_physics_frame < 0 \
+				or Engine.get_physics_frames() > _drain_last_queued_physics_frame):
+		_identity.make_read_only()
+		_source_identity.make_read_only()
+		_membership_provenance.make_read_only()
+		var receipt := {"status": "ready", "drained": true,
+			"remainingBodies": 0, "remainingPendingEntries": 0,
+			"remainingLiveEntries": 0, "sourceReleased": true,
+			"barrierOwnershipReleased": true,
+			"windowToken": _drain_window_token,
+			"residentBlockCount": _drain_expected_resident_count,
+			"retiredCandidateEntryCount": _drain_retired_candidate_count,
+			"retiredLiveEntryCount": _drain_retired_live_count,
+			"identity": _identity,
+			"sourceIdentity": _source_identity,
+			"membershipProvenance": _membership_provenance,
+			"drainWorkBudget": DRAIN_WORK_BUDGET,
+			"drainBodyBudget": DRAIN_BODY_BUDGET}
+		_source = null
+		_admission_barrier = null
+		_identity = {}
+		_source_identity = {}
+		_membership_provenance = {}
+		_stopped = true
+		_drain_receipt = receipt
+		return _drain_receipt.duplicate(false)
+	return _drain_progress("draining", work_used, visited, retired_bodies)
+
+
+func stop_and_drain() -> Dictionary:
+	request_stop()
+	while true:
+		var result: Dictionary = drain_step()
+		if result.get("status") == "ready":
+			return result
 		await get_tree().process_frame
-	await get_tree().physics_frame
-	await get_tree().process_frame
-	_pending_candidates.clear()
-	_live.clear()
-	_resident_blocks.clear()
-	_identity.clear()
-	_source_identity.clear()
-	_membership_provenance.clear()
-	_source = null
-	_admission_barrier = null
-	_stopped = true
-	_drain_receipt = {"status": "ready", "drained": true,
-		"remainingBodies": get_child_count(), "windowToken": retired_window_token}
-	return _drain_receipt.duplicate(true)
+	return {"status": "pending", "reason": "resident_owner_drain_interrupted"}
+
+
+func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
+	var work_used := 0
+	if work_budget <= 0:
+		return {"done": false, "bodyQueued": false, "workUnits": 0}
+	var body = entry.get("body")
+	if is_instance_valid(body) and body is StaticBody3D:
+		body.collision_layer = 0
+	if not bool(entry.get("drainStarted", false)):
+		entry.drainStarted = true
+		work_used += 1
+	if work_used >= work_budget:
+		return {"done": false, "bodyQueued": false, "workUnits": work_used}
+	var shapes: Array = entry.get("shapes", [])
+	while not shapes.is_empty() and work_used < work_budget:
+		var shape = shapes.back()
+		if is_instance_valid(shape) and shape is CollisionShape3D:
+			var shape_parent = shape.get_parent()
+			if shape_parent == body:
+				body.remove_child(shape)
+				shape.queue_free()
+		shapes.pop_back()
+		work_used += 1
+	if not shapes.is_empty():
+		return {"done": false, "bodyQueued": false, "workUnits": work_used}
+	if work_used >= work_budget:
+		return {"done": false, "bodyQueued": false, "workUnits": work_used}
+	var body_queued := false
+	if is_instance_valid(body) and body is StaticBody3D \
+			and not body.is_queued_for_deletion():
+		body.queue_free()
+		body_queued = true
+		_drain_last_queued_physics_frame = maxi(_drain_last_queued_physics_frame,
+			Engine.get_physics_frames())
+		work_used += 1
+	return {"done": true, "bodyQueued": body_queued, "workUnits": maxi(work_used, 1)}
+
+
+func _drain_progress(reason: String, work_units: int, visited: int,
+		retired_bodies: int) -> Dictionary:
+	return {"status": "pending", "reason": reason,
+		"drainWorkUnitsThisStep": work_units,
+		"visitedEntriesThisStep": visited,
+		"drainedBodiesThisStep": retired_bodies,
+		"drainWorkBudget": DRAIN_WORK_BUDGET,
+		"drainBodyBudget": DRAIN_BODY_BUDGET,
+		"remainingPendingEntries": _pending_candidates.size(),
+		"remainingLiveEntries": _live.size(),
+		"remainingBodies": get_child_count(),
+		"inFlightPublish": _busy, "sourceRetained": _source != null,
+		"barrierRetained": _admission_barrier != null,
+		"windowToken": _drain_window_token}
 
 
 func _validate_request(request: Dictionary) -> Dictionary:
@@ -563,10 +720,10 @@ func _dispose_candidates(candidates: Dictionary) -> void:
 
 
 func _finish_stopped_publish(candidates: Dictionary) -> Dictionary:
-	_dispose_candidates(candidates)
-	_pending_candidates.clear()
+	_pending_candidates = candidates
 	_busy = false
-	return {"status": "failed", "reason": "resident_owner_stopping"}
+	return {"status": "failed", "reason": "resident_owner_stopping",
+		"candidatesRetainedForDrain": _pending_candidates.size()}
 
 
 func _rollback(candidates: Dictionary, old: Dictionary) -> Dictionary:

@@ -196,6 +196,7 @@ func _run() -> void:
 	var pre_switch_drift: Dictionary = await _pre_switch_drift_case()
 	var mid_switch_drift: Dictionary = await _mid_switch_drift_case()
 	var bounded_prepare: Dictionary = await _bounded_prepare_case()
+	var bounded_drain: Dictionary = await _bounded_drain_case()
 	var passed: bool = startup.get("status") == "ready" \
 		and startup_ready.get("status") == "ready" and startup_released \
 		and actor_landed and altered_candidate.get("status") == "failed" \
@@ -225,7 +226,8 @@ func _run() -> void:
 		and bool(same_revision_drift.get("passed", false)) \
 		and bool(pre_switch_drift.get("passed", false)) \
 		and bool(mid_switch_drift.get("passed", false)) \
-		and bool(bounded_prepare.get("passed", false))
+		and bool(bounded_prepare.get("passed", false)) \
+		and bool(bounded_drain.get("passed", false))
 	_finish(passed, {"startup": startup, "startupReady": startup_ready,
 		"actorLanded": actor_landed, "actorContact": actor_contact_detail,
 		"alteredCandidate": altered_candidate, "occupiedEdit": occupied_edit,
@@ -246,7 +248,8 @@ func _run() -> void:
 		"sameRevisionDrift": same_revision_drift,
 		"preSwitchDrift": pre_switch_drift,
 		"midSwitchDrift": mid_switch_drift,
-		"boundedPreparation": bounded_prepare})
+		"boundedPreparation": bounded_prepare,
+		"boundedDrain": bounded_drain})
 
 
 func _bounded_prepare_case() -> Dictionary:
@@ -330,6 +333,148 @@ func _bounded_prepare_case() -> Dictionary:
 		"chunksWithinBudget": chunks_within_budget,
 		"seamProbeHits": seam_hits,
 		"barrierReleased": released, "drain": drained}
+
+
+func _bounded_drain_case() -> Dictionary:
+	var source := FakeSource.new()
+	var owner = OwnerScript.new()
+	add_child(owner)
+	owner.bind_source(source)
+	var identity := _identity(12)
+	var source_identity := {"hex": "70-live-body-source"}
+	var membership := {"authority": "pinned_demand", "demandRevision": 12,
+		"closureToken": "70-live-body-closure", "windowToken": "window-n5-70"}
+	var blocks: Array[Vector3i] = []
+	var rows: Array[Dictionary] = []
+	var artifacts := {}
+	for index in range(70):
+		var block := Vector3i(1200 + index, 0, 0)
+		var artifact := "live-body-%d" % index
+		var row := _row(block, artifact, 0.5, identity, source_identity)
+		var drain_vertices := PackedVector3Array()
+		for quad_index in range(256):
+			var x0 := float(block.x * 3) + float(quad_index) * (3.0 / 256.0)
+			var x1 := float(block.x * 3) + float(quad_index + 1) * (3.0 / 256.0)
+			drain_vertices.append_array(PackedVector3Array([
+				Vector3(x0, 0.5, 0), Vector3(x1, 0.5, 0), Vector3(x1, 0.5, 1),
+				Vector3(x0, 0.5, 0), Vector3(x1, 0.5, 1), Vector3(x0, 0.5, 1)]))
+		row.vertices = drain_vertices
+		row.bounds = AABB(Vector3(float(block.x * 3), 0, 0), Vector3(3, 3, 3))
+		row.probeFrom = Vector3(float(block.x * 3) + 0.35, 2.8, 0.5)
+		row.probeTo = Vector3(float(block.x * 3) + 0.35, 0.2, 0.5)
+		row.empty = false
+		blocks.append(block)
+		rows.append(row)
+		artifacts[block] = artifact
+		source.rows[block] = row
+	source.current = {"status": "ready", "identity": identity,
+		"sourceIdentity": source_identity, "sourceEpoch": identity.sourceEpoch,
+		"nativeRevision": identity.sourceRevision,
+		"ownerGeneration": identity.ownerGeneration,
+		"cancellationEpoch": identity.cancellationEpoch,
+		"requiredResidentBlocks": blocks.duplicate(),
+		"residentBlocks": blocks.duplicate(), "membershipProvenance": membership,
+		"artifacts": artifacts}
+	var barrier = BarrierScript.new()
+	var bounds: AABB = rows[0].bounds.merge(rows[69].bounds)
+	var begun: Dictionary = barrier.begin(self, owner, identity, bounds)
+	while begun.get("status") == "pending":
+		await get_tree().process_frame
+		begun = barrier.census_progress(identity)
+	var first_blocks: Array[Vector3i] = blocks.slice(0, 64)
+	var first_rows: Array[Dictionary] = rows.slice(0, 64)
+	var first_batch: Dictionary = await owner.publish(_request(identity, blocks,
+		first_blocks, first_rows), barrier)
+	var last_blocks: Array[Vector3i] = blocks.slice(64, 70)
+	var last_rows: Array[Dictionary] = rows.slice(64, 70)
+	var last_batch: Dictionary = await owner.publish(_request(identity, blocks,
+		last_blocks, last_rows), barrier)
+	var bodies_before_stop := owner.get_child_count()
+	var live_before_stop := int((owner.get("_live") as Dictionary).size())
+	var shapes_before_stop := 0
+	for live_value in (owner.get("_live") as Dictionary).values():
+		shapes_before_stop += (live_value as Dictionary).get("shapes", []).size()
+	var source_before_stop = owner.get("_source")
+	var barrier_before_stop = owner.get("_admission_barrier")
+	var stop_request: Dictionary = owner.request_stop()
+	var unchanged_on_request: bool = owner.get_child_count() == bodies_before_stop \
+		and int((owner.get("_live") as Dictionary).size()) == live_before_stop \
+		and owner.get("_source") == source_before_stop \
+		and owner.get("_admission_barrier") == barrier_before_stop
+	var admission_held := not barrier.admit_motion(_actor, Vector3.ZERO)
+	var steps: Array[Dictionary] = []
+	var bounded_steps := true
+	var refs_retained_until_ready := true
+	var key_retirement_bounded := true
+	var max_work_units := 0
+	var max_retired_bodies := 0
+	var max_retired_keys := 0
+	var terminal: Dictionary = {"status": "pending"}
+	for _attempt in range(64):
+		var pending_keys_before := (owner.get("_pending_candidate_keys") as Array).size()
+		var live_keys_before := (owner.get("_resident_blocks") as Array).size()
+		terminal = owner.drain_step()
+		steps.append(terminal)
+		var work_units := int(terminal.get("drainWorkUnitsThisStep", 0))
+		var retired_bodies := int(terminal.get("drainedBodiesThisStep", 0))
+		var keys_retired := pending_keys_before \
+			- (owner.get("_pending_candidate_keys") as Array).size() \
+			+ live_keys_before - (owner.get("_resident_blocks") as Array).size()
+		max_work_units = maxi(max_work_units, work_units)
+		max_retired_bodies = maxi(max_retired_bodies, retired_bodies)
+		max_retired_keys = maxi(max_retired_keys, keys_retired)
+		if work_units > OwnerScript.DRAIN_WORK_BUDGET \
+				or retired_bodies > OwnerScript.DRAIN_BODY_BUDGET:
+			bounded_steps = false
+		if keys_retired > work_units:
+			key_retirement_bounded = false
+		if terminal.get("status") == "ready":
+			break
+		refs_retained_until_ready = refs_retained_until_ready \
+			and owner.get("_source") == source \
+			and owner.get("_admission_barrier") == barrier \
+			and bool(terminal.get("sourceRetained", false)) \
+			and bool(terminal.get("barrierRetained", false))
+		await get_tree().process_frame
+	var receipt_exact: bool = terminal.get("status") == "ready" \
+		and bool(terminal.get("drained", false)) \
+		and int(terminal.get("remainingBodies", -1)) == 0 \
+		and int(terminal.get("remainingPendingEntries", -1)) == 0 \
+		and int(terminal.get("remainingLiveEntries", -1)) == 0 \
+		and (owner.get("_pending_candidate_keys") as Array).is_empty() \
+		and (owner.get("_resident_blocks") as Array).is_empty() \
+		and (owner.get("_pending_candidates") as Dictionary).is_empty() \
+		and (owner.get("_live") as Dictionary).is_empty() \
+		and bool(terminal.get("sourceReleased", false)) \
+		and bool(terminal.get("barrierOwnershipReleased", false)) \
+		and terminal.get("windowToken") == membership.windowToken \
+		and terminal.get("identity") == identity \
+		and terminal.get("sourceIdentity") == source_identity \
+		and terminal.get("membershipProvenance") == membership
+	var internal_refs_released := owner.get("_source") == null \
+		and owner.get("_admission_barrier") == null \
+		and (owner.get("_identity") as Dictionary).is_empty() \
+		and (owner.get("_source_identity") as Dictionary).is_empty() \
+		and (owner.get("_membership_provenance") as Dictionary).is_empty()
+	return {"passed": first_batch.get("status") == "pending" \
+		and last_batch.get("status") == "ready" and bodies_before_stop == 70 \
+		and shapes_before_stop == 140 \
+		and live_before_stop == 70 and stop_request.get("status") == "pending" \
+		and unchanged_on_request and admission_held and bounded_steps \
+		and key_retirement_bounded and refs_retained_until_ready \
+		and receipt_exact and internal_refs_released,
+		"firstBatch": first_batch.get("status"), "lastBatch": last_batch.get("status"),
+		"bodiesBeforeStop": bodies_before_stop, "liveEntriesBeforeStop": live_before_stop,
+		"childShapesBeforeStop": shapes_before_stop,
+		"stopRequest": stop_request, "unchangedOnRequest": unchanged_on_request,
+		"admissionHeld": admission_held, "boundedSteps": bounded_steps,
+		"keyRetirementBounded": key_retirement_bounded,
+		"maxWorkUnits": max_work_units, "maxRetiredBodies": max_retired_bodies,
+		"maxRetiredKeys": max_retired_keys,
+		"stepCount": steps.size(), "steps": steps,
+		"referencesRetainedUntilReady": refs_retained_until_ready,
+		"receiptExact": receipt_exact, "internalRefsReleased": internal_refs_released,
+		"childShapesPerBody": 2, "receipt": terminal}
 
 
 func _mid_switch_drift_case() -> Dictionary:
