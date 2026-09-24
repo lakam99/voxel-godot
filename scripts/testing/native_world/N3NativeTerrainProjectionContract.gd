@@ -185,13 +185,13 @@ func run_contract() -> Dictionary:
 	failed(page.project_surfaces(invalid), "finite", "nonfinite height")
 	invalid = empty_request()
 	invalid.surfaceProjections = repeated(surface, 4097)
-	failed(page.project_surfaces(invalid), "full-surface projection batch limit",
+	failed(page.project_surfaces(invalid), "projection adapter query limit exceeded",
 		"surface channel cap")
 	check(page.project_surfaces(request) == result, "recovery after channel cap")
 	invalid = empty_request()
 	invalid.surfaceProjections = repeated(surface, 2049)
 	invalid.walkableProjections = repeated(surface, 2048)
-	failed(page.project_surfaces(invalid), "projection total batch limit",
+	failed(page.project_surfaces(invalid), "projection adapter query limit exceeded",
 		"aggregate query cap")
 	check(page.project_surfaces(request) == result, "recovery after aggregate cap")
 	var broad_scan := {"startCell":Vector3i(x,10,z),"maxUpCells":512,
@@ -230,7 +230,7 @@ func _initialize() -> void:
 		"productionCutover":false,
 		"proves":["native projection adapter schema/order/revision/identity",
 			"full effective states, fluid-preserving walkability, admitted candidate/cell-read budgets",
-			"adapter channel/aggregate/vertical/read/payload cap rejection and recovery",
+			"adapter preallocation channel/aggregate rejection plus vertical/read/payload rejection and recovery",
 			"atomic malformed/mixed-query rejection and immutable pin behavior"],
 		"doesNotProve":["production WorldGenerationSystem activation",
 			"live navigation, collision publication, or gameplay acceptance"]}
