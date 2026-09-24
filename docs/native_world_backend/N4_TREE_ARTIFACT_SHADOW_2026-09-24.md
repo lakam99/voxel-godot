@@ -53,6 +53,16 @@ world render bounds and translation.
   over the accepted domain. The added GDScript oracle sources are not invoked by
   a registered differential runner, and worker topology-completeness booleans
   need independent graph-property checks.
+- A later independent review found a more fundamental artifact-validity gap:
+  finite but unrepresentably large dimensions (including `DBL_MAX`) can scale
+  branch/foliage coordinates beyond float range; narrowing may produce
+  non-finite geometry while the recipe is still marked valid. No extreme-finite
+  regression or post-adaptation finite-geometry invariant currently prevents
+  this. This overrides the earlier focused 11/11 result for promotion purposes:
+  the Savanna shadow is **NO-GO** until checked input/narrowing or complete
+  output validation is implemented and tested. The oracle provenance gap also
+  remains: the standalone GDScript scripts are not executed by a discoverable,
+  source-bound differential runner.
 - Live tree visual publication and physics installation are unproven.
 - Durable tree removal/tombstone publication and save/reload are unproven.
 
