@@ -62,9 +62,8 @@ struct NativeSavannaWorkerRecipe final {
 
 class NativeSavannaWorkerRecipeBuilder final {
 public:
-    // Internal pure-core compiler entry point. Engine adapters must enter via
-    // a bounded NativeTreeDefinition contract: this request owns no serialized
-    // text-size limit and must not be exposed as an unbounded runtime API.
+    // Internal pure-core compiler entry point. Direct requests are admitted
+    // through the same UTF-8 and bounded-identity contract as artifacts.
     static NativeSavannaWorkerRecipe build(const NativeSavannaWorkerRequest &input);
 };
 

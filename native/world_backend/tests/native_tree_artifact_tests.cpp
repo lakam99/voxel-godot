@@ -19,12 +19,14 @@ struct NativeTreeArtifactBuilderTestAccess final {
         const NativeTreeDefinitionInput &definition,
         const NativeTreeTrunkCylinder trunk_cylinder,
         const NativeTreeRenderTier render_tier,
+        const std::uint32_t source_branch_count,
         const std::vector<NativeTreeArtifactBranch> &branches,
         const std::vector<NativeTreeArtifactFoliage> &foliage,
         const NativeTreeArtifactImpostor impostor,
         const NativeTreeArtifactFootprint &footprint) {
         NativeTreeArtifactBuilder::validate_complete_for_test(
-            definition, trunk_cylinder, render_tier, branches, foliage, impostor, footprint);
+            definition, trunk_cylinder, render_tier, source_branch_count,
+            branches, foliage, impostor, footprint);
     }
 };
 }
@@ -95,6 +97,7 @@ VWB_TEST(native_tree_artifact_compiles_complete_revision_bound_conifer_inputs_fo
         VWB_EXPECT(artifact.native_recipe_digest() != Sha256Digest{});
         VWB_EXPECT_EQ(source.input(), artifact.definition());
         VWB_EXPECT_EQ(source.trunk_cylinder(), artifact.trunk_cylinder());
+        VWB_EXPECT_EQ(tier == NativeTreeRenderTier::impostor, artifact.source_branch_count() == 0U);
         VWB_EXPECT(artifact.footprint().collision_complete);
         VWB_EXPECT(artifact.footprint().render_complete);
         VWB_EXPECT_EQ(NativeTreeCoordinateFrame::world, artifact.footprint().coordinate_frame);
@@ -198,6 +201,7 @@ VWB_TEST(native_tree_artifact_compiles_complete_savanna_inputs_for_every_render_
         VWB_EXPECT(!artifact.topology_signature().empty());
         VWB_EXPECT(artifact.native_recipe_digest() != Sha256Digest{});
         VWB_EXPECT_EQ(source.trunk_cylinder(), artifact.trunk_cylinder());
+        VWB_EXPECT_EQ(tier == NativeTreeRenderTier::impostor, artifact.source_branch_count() == 0U);
         VWB_EXPECT(artifact.footprint().collision_complete && artifact.footprint().render_complete);
         VWB_EXPECT(!artifact.footprint().render_bounds_provisional);
         if (tier == NativeTreeRenderTier::impostor) {
@@ -349,7 +353,8 @@ VWB_TEST(native_tree_artifact_complete_validation_rejects_invalid_compiler_outpu
             const NativeTreeArtifactImpostor impostor,
             const NativeTreeArtifactFootprint &footprint) {
         NativeTreeArtifactBuilderTestAccess::validate(
-            definition, cylinder, tier, branches, foliage, impostor, footprint);
+            definition, cylinder, tier, artifact.source_branch_count(),
+            branches, foliage, impostor, footprint);
     };
     validate(artifact.definition(), artifact.trunk_cylinder(), artifact.render_tier(),
         artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint());
@@ -469,5 +474,45 @@ VWB_TEST(native_tree_artifact_rejects_float_max_geometry_for_conifer_and_savanna
             static_cast<double>(std::numeric_limits<float>::max()), 0.0);
         VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilder::build(
             NativeTreeDefinition::create(std::move(maximum)), NativeTreeRenderTier::near));
+    }
+}
+
+VWB_TEST(native_tree_artifact_foliage_source_segments_are_bounded_by_the_unreduced_grammar) {
+    for (const auto &[architecture, family, grammar] : {
+            std::tuple{NativeTreeArchitecture::conifer, "ecological_conifer_tree", "norway_spruce"},
+            std::tuple{NativeTreeArchitecture::savanna, "ecological_savanna_tree", "umbrella_thorn"},
+        }) {
+        const NativeTreeDefinition source = tree(architecture, family, grammar);
+        for (const NativeTreeRenderTier tier : {NativeTreeRenderTier::near,
+                NativeTreeRenderTier::mid, NativeTreeRenderTier::far}) {
+            const NativeTreeArtifact artifact = NativeTreeArtifactBuilder::build(source, tier);
+            VWB_EXPECT(artifact.source_branch_count() >= artifact.branches().size());
+            VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilderTestAccess::validate(
+                artifact.definition(), artifact.trunk_cylinder(), tier,
+                static_cast<std::uint32_t>(artifact.branches().size() - 1U),
+                artifact.branches(), artifact.foliage(), artifact.impostor(), artifact.footprint()));
+            auto foliage = artifact.foliage();
+            foliage.front().source_segment = static_cast<std::int32_t>(artifact.source_branch_count() - 1U);
+            NativeTreeArtifactBuilderTestAccess::validate(artifact.definition(), artifact.trunk_cylinder(),
+                tier, artifact.source_branch_count(), artifact.branches(), foliage,
+                artifact.impostor(), artifact.footprint());
+            foliage.front().source_segment = static_cast<std::int32_t>(artifact.source_branch_count());
+            VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilderTestAccess::validate(
+                artifact.definition(), artifact.trunk_cylinder(), tier, artifact.source_branch_count(),
+                artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+            foliage.front().source_segment = std::numeric_limits<std::int32_t>::max();
+            VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilderTestAccess::validate(
+                artifact.definition(), artifact.trunk_cylinder(), tier, artifact.source_branch_count(),
+                artifact.branches(), foliage, artifact.impostor(), artifact.footprint()));
+        }
+        const NativeTreeArtifact impostor = NativeTreeArtifactBuilder::build(
+            source, NativeTreeRenderTier::impostor);
+        VWB_EXPECT_EQ(std::uint32_t(0U), impostor.source_branch_count());
+        NativeTreeArtifactBuilderTestAccess::validate(impostor.definition(), impostor.trunk_cylinder(),
+            NativeTreeRenderTier::impostor, 0U, impostor.branches(), impostor.foliage(),
+            impostor.impostor(), impostor.footprint());
+        VWB_EXPECT_THROW(NativeTreeArtifactRejected, NativeTreeArtifactBuilderTestAccess::validate(
+            impostor.definition(), impostor.trunk_cylinder(), NativeTreeRenderTier::impostor, 1U,
+            impostor.branches(), impostor.foliage(), impostor.impostor(), impostor.footprint()));
     }
 }

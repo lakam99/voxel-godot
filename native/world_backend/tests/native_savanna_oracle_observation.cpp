@@ -214,6 +214,34 @@ void print_checkpoints(const std::vector<Checkpoint> &values) {
     std::cout << ']';
 }
 
+void print_vec(const NativeSavannaVec3 &value) {
+    std::cout << '[' << value.x << ',' << value.y << ',' << value.z << ']';
+}
+
+void print_first_branch(const NativeSavannaWorkerRecipe &recipe) {
+    if (recipe.branches.empty()) { std::cout << "{}"; return; }
+    const NativeSavannaBranch &branch = recipe.branches.front();
+    std::cout << "{\"start\":"; print_vec(branch.start);
+    std::cout << ",\"end\":"; print_vec(branch.end);
+    std::cout << ",\"radiusStart\":" << branch.radius_start
+              << ",\"radiusEnd\":" << branch.radius_end
+              << ",\"order\":" << branch.order << ",\"parentNode\":" << branch.parent_node
+              << ",\"childNode\":" << branch.child_node << ",\"stratumBias\":" << branch.stratum_bias
+              << ",\"windWeight\":" << branch.wind_weight << '}';
+}
+
+void print_first_foliage(const NativeSavannaWorkerRecipe &recipe) {
+    if (recipe.foliage.empty()) { std::cout << "{}"; return; }
+    const NativeSavannaFoliage &anchor = recipe.foliage.front();
+    std::cout << "{\"position\":"; print_vec(anchor.position);
+    std::cout << ",\"rotation\":"; print_vec(anchor.rotation);
+    std::cout << ",\"scale\":"; print_vec(anchor.scale);
+    std::cout << ",\"windWeight\":" << anchor.wind_weight << ",\"variation\":" << anchor.variation
+              << ",\"exposure\":" << anchor.exposure << ",\"clusterVariant\":" << anchor.cluster_variant
+              << ",\"sourceSegment\":" << anchor.source_segment << ",\"sourceOrder\":"
+              << anchor.source_order << '}';
+}
+
 void emit_raw(const RawObservation &row) {
     const auto &recipe = row.recipe;
     std::cout << std::setprecision(17) << "VWB_NATIVE_SAVANNA_ORACLE:{\"seed\":" << row.seed
@@ -252,17 +280,43 @@ void emit_worker(const WorkerObservation &row) {
               << ",\"branches\":" << recipe.branches.size() << ",\"foliage\":" << recipe.foliage.size()
               << ",\"branchSelectionHash\":" << row.branch_selection_hash
               << ",\"foliageSelectionHash\":" << row.foliage_selection_hash
+              << ",\"normalized\":{\"treeId\":\"" << recipe.tree_id << "\",\"worldSeed\":\""
+              << recipe.world_seed << "\",\"biome\":\"" << recipe.biome << "\",\"architecture\":\""
+              << recipe.architecture << "\",\"speciesGrammar\":\"" << recipe.species_grammar
+              << "\",\"ageBand\":\"" << recipe.age_band << "\",\"ageYears\":" << recipe.age_years
+              << ",\"growthStage\":" << recipe.growth_stage << ",\"geneticSeed\":" << recipe.genetic_seed
+              << ",\"height\":" << recipe.height << ",\"trunkRadius\":" << recipe.trunk_radius
+              << ",\"canopyRadius\":" << recipe.canopy_radius << ",\"canopyDensity\":"
+              << recipe.canopy_density << '}'
               << ",\"renderTier\":\"" << recipe.render_lod_tier << "\",\"branchBudget\":"
               << recipe.render_branch_budget << ",\"foliageBudget\":" << recipe.render_foliage_budget
               << ",\"visibilityRange\":" << recipe.render_visibility_range
               << ",\"shadowRange\":" << recipe.render_shadow_range
               << ",\"windResponse\":" << recipe.render_wind_response
+              << ",\"renderPolicy\":{\"visibilityRange\":" << recipe.render_visibility_range
+              << ",\"shadowRange\":" << recipe.render_shadow_range << ",\"windResponse\":"
+              << recipe.render_wind_response << ",\"shadowPolicy\":\"near_only\",\"lodTier\":\""
+              << recipe.render_lod_tier << "\"}"
               << ",\"review\":" << (recipe.review ? "true" : "false")
               << ",\"impostor\":" << (recipe.impostor ? "true" : "false")
+              << ",\"runtimeContinuousBole\":" << (recipe.runtime_continuous_bole ? "true" : "false")
+              << ",\"pocContinuousWood\":" << (recipe.poc_continuous_wood ? "true" : "false")
+              << ",\"continuousTrunkPath\":" << (recipe.continuous_trunk_path ? "true" : "false")
+              << ",\"graphConnected\":" << (recipe.graph_connected ? "true" : "false")
+              << ",\"foliageDerivedFromFineSegments\":"
+              << (recipe.foliage_derived_from_fine_segments ? "true" : "false")
               << ",\"collisionRadius\":" << recipe.collision_trunk_radius
               << ",\"collisionHeight\":" << recipe.collision_trunk_height
+              << ",\"interaction\":{\"treeId\":\"" << recipe.tree_id << "\",\"worldPosition\":";
+    print_vec(recipe.interaction_world_position);
+    std::cout << ",\"worldRotationY\":" << recipe.interaction_world_rotation_y
+              << ",\"rootButtressCount\":0}"
               << ",\"crownHabit\":\"" << recipe.crown_habit << "\",\"methodology\":\""
-              << recipe.methodology << "\"}\n";
+              << recipe.methodology << "\",\"firstBranch\":";
+    print_first_branch(recipe);
+    std::cout << ",\"firstFoliage\":";
+    print_first_foliage(recipe);
+    std::cout << "}\n";
 }
 
 } // namespace

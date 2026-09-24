@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <initializer_list>
 #include <limits>
 #include <tuple>
 #include <unordered_set>
@@ -120,27 +121,31 @@ NativeTreeArtifactBounds impostor_render_bounds(
         {input.position.x + radius, input.position.y + top, input.position.z + radius}};
 }
 
+bool all_true(const std::initializer_list<bool> facts) noexcept {
+    for (const bool fact : facts) if (!fact) return false;
+    return true;
+}
+
 bool finite_point(const NativeTreePoint3 &value) noexcept {
-    return std::isfinite(value.x) & std::isfinite(value.y) & std::isfinite(value.z);
+    return all_true({std::isfinite(value.x), std::isfinite(value.y), std::isfinite(value.z)});
 }
 
 bool finite_vec(const NativeTreeArtifactVec3 &value) noexcept {
-    return std::isfinite(value.x) & std::isfinite(value.y) & std::isfinite(value.z);
+    return all_true({std::isfinite(value.x), std::isfinite(value.y), std::isfinite(value.z)});
 }
 
 bool positive_finite(const double value) noexcept {
-    return std::isfinite(value) & (value > 0.0);
+    return all_true({std::isfinite(value), value > 0.0});
 }
 
 bool unit_finite(const double value) noexcept {
-    return std::isfinite(value) & (value >= 0.0) & (value <= 1.0);
+    return all_true({std::isfinite(value), value >= 0.0, value <= 1.0});
 }
 
 bool valid_bounds(const NativeTreeArtifactBounds &value) noexcept {
-    return finite_point(value.minimum) & finite_point(value.maximum)
-        & (value.minimum.x <= value.maximum.x)
-        & (value.minimum.y <= value.maximum.y)
-        & (value.minimum.z <= value.maximum.z);
+    return all_true({finite_point(value.minimum), finite_point(value.maximum),
+        value.minimum.x <= value.maximum.x, value.minimum.y <= value.maximum.y,
+        value.minimum.z <= value.maximum.z});
 }
 
 bool valid_coordinate_frame(const NativeTreeCoordinateFrame value) noexcept {
@@ -151,35 +156,37 @@ void validate_complete_artifact(
     const NativeTreeDefinitionInput &input,
     const NativeTreeTrunkCylinder &cylinder,
     const NativeTreeRenderTier tier,
+    const std::uint32_t source_branch_count,
     const std::vector<NativeTreeArtifactBranch> &branches,
     const std::vector<NativeTreeArtifactFoliage> &foliage,
     const NativeTreeArtifactImpostor &impostor,
     const NativeTreeArtifactFootprint &footprint) {
-    const bool valid_definition = valid_coordinate_frame(input.coordinate_frame)
-        & finite_point(input.position) & std::isfinite(input.rotation_y)
-        & positive_finite(input.visual_height) & positive_finite(input.trunk_radius)
-        & positive_finite(input.canopy_radius) & positive_finite(input.collision_height)
-        & (input.canopy_radius >= input.trunk_radius) & (input.collision_height <= input.visual_height);
+    const bool valid_definition = all_true({valid_coordinate_frame(input.coordinate_frame),
+        finite_point(input.position), std::isfinite(input.rotation_y), positive_finite(input.visual_height),
+        positive_finite(input.trunk_radius), positive_finite(input.canopy_radius),
+        positive_finite(input.collision_height), input.canopy_radius >= input.trunk_radius,
+        input.collision_height <= input.visual_height});
     if (!valid_definition) reject();
 
-    const bool valid_cylinder = positive_finite(cylinder.radius) & positive_finite(cylinder.height)
-        & positive_finite(cylinder.center_y)
-        & (cylinder.radius == static_cast<float>(input.trunk_radius))
-        & (cylinder.height == static_cast<float>(input.collision_height))
-        & (cylinder.center_y == cylinder.height * 0.5F);
+    const bool valid_cylinder = all_true({positive_finite(cylinder.radius), positive_finite(cylinder.height),
+        positive_finite(cylinder.center_y), cylinder.radius == static_cast<float>(input.trunk_radius),
+        cylinder.height == static_cast<float>(input.collision_height),
+        cylinder.center_y == cylinder.height * 0.5F});
     if (!valid_cylinder) reject();
 
-    const bool valid_impostor = positive_finite(impostor.height)
-        & positive_finite(impostor.trunk_radius) & positive_finite(impostor.canopy_radius)
-        & (impostor.height == static_cast<float>(input.visual_height))
-        & (impostor.trunk_radius == static_cast<float>(input.trunk_radius))
-        & (impostor.canopy_radius == static_cast<float>(input.canopy_radius));
+    const bool valid_impostor = all_true({positive_finite(impostor.height),
+        positive_finite(impostor.trunk_radius), positive_finite(impostor.canopy_radius),
+        impostor.height == static_cast<float>(input.visual_height),
+        impostor.trunk_radius == static_cast<float>(input.trunk_radius),
+        impostor.canopy_radius == static_cast<float>(input.canopy_radius)});
     if (!valid_impostor) reject();
 
     const bool impostor_tier = tier == NativeTreeRenderTier::impostor;
-    const bool valid_counts = (branches.size() <= std::numeric_limits<std::uint32_t>::max())
-        & (foliage.size() <= std::numeric_limits<std::uint32_t>::max())
-        & (impostor_tier ? (branches.empty() & foliage.empty()) : (!branches.empty() & !foliage.empty()));
+    const bool valid_tier_counts = impostor_tier
+        ? all_true({branches.empty(), foliage.empty(), source_branch_count == 0U})
+        : all_true({!branches.empty(), !foliage.empty(), source_branch_count >= branches.size()});
+    const bool valid_counts = all_true({branches.size() <= std::numeric_limits<std::uint32_t>::max(),
+        foliage.size() <= std::numeric_limits<std::uint32_t>::max(), valid_tier_counts});
     if (!valid_counts) reject();
 
     // Both native grammars append a segment only after its parent node exists.
@@ -189,32 +196,32 @@ void validate_complete_artifact(
     // duplicates, orphans and cycles without assuming dense node identifiers.
     std::unordered_set<int> reachable_nodes{0};
     for (const NativeTreeArtifactBranch &branch : branches) {
-        const bool valid = finite_vec(branch.start) & finite_vec(branch.end)
-            & positive_finite(branch.radius_start) & positive_finite(branch.radius_end)
-            & (branch.order >= 0) & (branch.order <= 4)
-            & (branch.parent_node >= 0) & (branch.child_node > 0)
-            & (branch.child_node != branch.parent_node)
-            & unit_finite(branch.wind_weight);
+        const bool valid = all_true({finite_vec(branch.start), finite_vec(branch.end),
+            positive_finite(branch.radius_start), positive_finite(branch.radius_end),
+            branch.order >= 0, branch.order <= 4, branch.parent_node >= 0, branch.child_node > 0,
+            branch.child_node != branch.parent_node, unit_finite(branch.wind_weight)});
         if (!valid) reject();
         if (reachable_nodes.find(branch.parent_node) == reachable_nodes.end()) reject();
         if (!reachable_nodes.insert(branch.child_node).second) reject();
     }
     for (const NativeTreeArtifactFoliage &anchor : foliage) {
-        const bool valid = finite_vec(anchor.position) & finite_vec(anchor.rotation) & finite_vec(anchor.scale)
-            & (anchor.scale.x > 0.0F) & (anchor.scale.y > 0.0F) & (anchor.scale.z > 0.0F)
-            & unit_finite(anchor.wind_weight) & unit_finite(anchor.variation)
-            & (anchor.cluster_variant >= 0) & (anchor.cluster_variant <= 3)
+        const bool valid = all_true({finite_vec(anchor.position), finite_vec(anchor.rotation),
+            finite_vec(anchor.scale), anchor.scale.x > 0.0F, anchor.scale.y > 0.0F, anchor.scale.z > 0.0F,
+            unit_finite(anchor.wind_weight), unit_finite(anchor.variation),
+            anchor.cluster_variant >= 0, anchor.cluster_variant <= 3,
             // source_segment is an index in the unreduced grammar graph. LOD
             // foliage reduction is independent of wood reduction, so it need
             // not name a retained branch, but it must remain a real source ID.
-            & (anchor.source_segment >= 0) & (anchor.source_order >= 0) & (anchor.source_order <= 4);
+            anchor.source_segment >= 0,
+            static_cast<std::uint64_t>(anchor.source_segment) < source_branch_count,
+            anchor.source_order >= 0, anchor.source_order <= 4});
         if (!valid) reject();
     }
 
-    const bool valid_footprint = (footprint.coordinate_frame == input.coordinate_frame)
-        & (footprint.coordinate_owner_id == input.coordinate_owner_id)
-        & footprint.collision_complete & footprint.render_complete & !footprint.render_bounds_provisional
-        & valid_bounds(footprint.collision_bounds) & valid_bounds(footprint.render_bounds);
+    const bool valid_footprint = all_true({footprint.coordinate_frame == input.coordinate_frame,
+        footprint.coordinate_owner_id == input.coordinate_owner_id, footprint.collision_complete,
+        footprint.render_complete, !footprint.render_bounds_provisional,
+        valid_bounds(footprint.collision_bounds), valid_bounds(footprint.render_bounds)});
     if (!valid_footprint) reject();
     if (!(footprint.collision_bounds == collision_bounds(input, cylinder))) reject();
     const NativeTreeArtifactBounds expected_render = impostor_tier
@@ -266,6 +273,7 @@ std::vector<std::uint8_t> canonical(
     const std::string &topology_signature,
     const NativeTreeDefinitionInput &definition,
     const NativeTreeTrunkCylinder &cylinder,
+    const std::uint32_t source_branch_count,
     const std::vector<NativeTreeArtifactBranch> &branches,
     const std::vector<NativeTreeArtifactFoliage> &foliage,
     const NativeTreeArtifactImpostor &impostor,
@@ -280,6 +288,7 @@ std::vector<std::uint8_t> canonical(
     writer.u8(static_cast<std::uint8_t>(definition.coordinate_frame)); writer.text(definition.coordinate_owner_id);
     write_point(writer, definition.position); writer.number(definition.rotation_y);
     writer.scalar(cylinder.radius); writer.scalar(cylinder.height); writer.scalar(cylinder.center_y);
+    writer.u32(source_branch_count);
     writer.u32(static_cast<std::uint32_t>(branches.size()));
     for (const NativeTreeArtifactBranch &branch : branches) {
         write_vec(writer, branch.start); write_vec(writer, branch.end);
@@ -374,6 +383,7 @@ public:
         std::string topology_signature,
         NativeTreeDefinitionInput input,
         const NativeTreeTrunkCylinder cylinder,
+        const std::uint32_t source_branch_count,
         std::vector<NativeTreeArtifactBranch> branches,
         std::vector<NativeTreeArtifactFoliage> foliage,
         const NativeTreeArtifactImpostor impostor,
@@ -382,7 +392,7 @@ public:
         const Sha256Digest digest) {
         return NativeTreeArtifact(status, tier, source_digest, recipe_digest,
             std::move(builder_key), builder_revision, std::move(recipe_signature),
-            std::move(topology_signature), std::move(input), cylinder, std::move(branches),
+            std::move(topology_signature), std::move(input), cylinder, source_branch_count, std::move(branches),
             std::move(foliage), impostor, std::move(footprint), std::move(bytes), digest);
     }
 };
@@ -398,6 +408,7 @@ NativeTreeArtifact make_artifact(
     const std::uint32_t builder_revision,
     std::string recipe_signature,
     std::string topology_signature,
+    const std::uint32_t source_branch_count,
     std::vector<NativeTreeArtifactBranch> branches,
     std::vector<NativeTreeArtifactFoliage> foliage,
     const NativeTreeArtifactImpostor impostor,
@@ -418,15 +429,17 @@ NativeTreeArtifact make_artifact(
     footprint.render_complete = render_complete;
     footprint.render_bounds_provisional = render_bounds_provisional;
     if (status == NativeTreeArtifactStatus::complete) {
-        validate_complete_artifact(input, cylinder, tier, branches, foliage, impostor, footprint);
+        validate_complete_artifact(input, cylinder, tier, source_branch_count,
+            branches, foliage, impostor, footprint);
     }
     std::vector<std::uint8_t> bytes = canonical(status, tier, definition.content_digest(), recipe_digest,
         builder_key, builder_revision, recipe_signature, topology_signature, input, cylinder,
+        source_branch_count,
         branches, foliage, impostor, footprint);
     const Sha256Digest digest = sha256(bytes);
     return NativeTreeArtifactAccess::make(status, tier, definition.content_digest(), recipe_digest,
         std::move(builder_key), builder_revision, std::move(recipe_signature), std::move(topology_signature),
-        input, cylinder, std::move(branches), std::move(foliage), impostor, std::move(footprint),
+        input, cylinder, source_branch_count, std::move(branches), std::move(foliage), impostor, std::move(footprint),
         std::move(bytes), digest);
 }
 
@@ -436,12 +449,14 @@ void NativeTreeArtifactBuilder::validate_complete_for_test(
     const NativeTreeDefinitionInput &definition,
     const NativeTreeTrunkCylinder trunk_cylinder,
     const NativeTreeRenderTier render_tier,
+    const std::uint32_t source_branch_count,
     const std::vector<NativeTreeArtifactBranch> &branches,
     const std::vector<NativeTreeArtifactFoliage> &foliage,
     const NativeTreeArtifactImpostor impostor,
     const NativeTreeArtifactFootprint &footprint) {
     validate_complete_artifact(
-        definition, trunk_cylinder, render_tier, branches, foliage, impostor, footprint);
+        definition, trunk_cylinder, render_tier, source_branch_count,
+        branches, foliage, impostor, footprint);
 }
 
 bool NativeTreeArtifactVec3::operator==(const NativeTreeArtifactVec3 &other) const noexcept {
@@ -486,6 +501,7 @@ NativeTreeArtifact::NativeTreeArtifact(
     std::string topology_signature,
     NativeTreeDefinitionInput definition,
     const NativeTreeTrunkCylinder trunk_cylinder,
+    const std::uint32_t source_branch_count,
     std::vector<NativeTreeArtifactBranch> branches,
     std::vector<NativeTreeArtifactFoliage> foliage,
     const NativeTreeArtifactImpostor impostor,
@@ -496,7 +512,8 @@ NativeTreeArtifact::NativeTreeArtifact(
       native_recipe_digest_(native_recipe_digest), recipe_builder_key_(std::move(recipe_builder_key)),
       recipe_builder_revision_(recipe_builder_revision), recipe_signature_(std::move(recipe_signature)),
       topology_signature_(std::move(topology_signature)), definition_(std::move(definition)),
-      trunk_cylinder_(trunk_cylinder), branches_(std::move(branches)), foliage_(std::move(foliage)),
+      trunk_cylinder_(trunk_cylinder), source_branch_count_(source_branch_count),
+      branches_(std::move(branches)), foliage_(std::move(foliage)),
       impostor_(impostor), footprint_(std::move(footprint)), canonical_binary_(std::move(canonical_binary)),
       content_digest_(content_digest) {}
 
@@ -511,6 +528,7 @@ const std::string &NativeTreeArtifact::recipe_signature() const noexcept { retur
 const std::string &NativeTreeArtifact::topology_signature() const noexcept { return topology_signature_; }
 const NativeTreeDefinitionInput &NativeTreeArtifact::definition() const noexcept { return definition_; }
 NativeTreeTrunkCylinder NativeTreeArtifact::trunk_cylinder() const noexcept { return trunk_cylinder_; }
+std::uint32_t NativeTreeArtifact::source_branch_count() const noexcept { return source_branch_count_; }
 const std::vector<NativeTreeArtifactBranch> &NativeTreeArtifact::branches() const noexcept { return branches_; }
 const std::vector<NativeTreeArtifactFoliage> &NativeTreeArtifact::foliage() const noexcept { return foliage_; }
 const NativeTreeArtifactImpostor &NativeTreeArtifact::impostor() const noexcept { return impostor_; }
@@ -529,7 +547,7 @@ NativeTreeArtifact NativeTreeArtifactBuilder::build(
     if (input.architecture == NativeTreeArchitecture::broadleaf) {
         const NativeTreeArtifactStatus status = pending_status(input);
         return make_artifact(definition, render_tier, status, {}, "native_tree_recipe_pending", 1U,
-            "", "", {}, {}, {}, false, true);
+            "", "", 0U, {}, {}, {}, false, true);
     }
     if (input.architecture == NativeTreeArchitecture::savanna) {
         if (input.species_grammar != "umbrella_thorn") reject();
@@ -560,9 +578,13 @@ NativeTreeArtifact NativeTreeArtifactBuilder::build(
             static_cast<float>(input.trunk_radius), static_cast<float>(input.canopy_radius)};
         const std::string identity = recipe.signature + ":" + recipe.topology_signature;
         const Sha256Digest recipe_digest = sha256(std::vector<std::uint8_t>(identity.begin(), identity.end()));
+        // Both pure grammars hard-cap their source graphs to a few thousand
+        // segments, well inside the artifact's canonical uint32 count.
         return make_artifact(definition, render_tier, NativeTreeArtifactStatus::complete,
             recipe_digest, "native_umbrella_thorn_worker_recipe", NativeSavannaWorkerRecipe::RECIPE_VERSION,
-            recipe.signature, recipe.topology_signature, std::move(branches), std::move(foliage), impostor,
+            recipe.signature, recipe.topology_signature,
+            static_cast<std::uint32_t>(recipe.source_branch_count),
+            std::move(branches), std::move(foliage), impostor,
             true, false);
     }
     if (input.species_grammar != "norway_spruce") reject();
@@ -599,9 +621,12 @@ NativeTreeArtifact NativeTreeArtifactBuilder::build(
     const std::string recipe_identity = recipe.signature + ":" + recipe.topology_signature;
     const Sha256Digest recipe_digest = sha256(std::vector<std::uint8_t>(
         recipe_identity.begin(), recipe_identity.end()));
+    // The conifer grammar has the same construction-time bounded graph contract.
     return make_artifact(definition, render_tier, NativeTreeArtifactStatus::complete,
         recipe_digest, "native_norway_spruce_worker_recipe", NativeConiferWorkerRecipe::RECIPE_VERSION,
-        recipe.signature, recipe.topology_signature, std::move(branches), std::move(foliage), impostor,
+        recipe.signature, recipe.topology_signature,
+        static_cast<std::uint32_t>(recipe.source_branch_count),
+        std::move(branches), std::move(foliage), impostor,
         true, false);
 }
 

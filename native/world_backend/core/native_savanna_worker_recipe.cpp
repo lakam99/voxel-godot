@@ -1,6 +1,7 @@
 #include "native_savanna_worker_recipe.hpp"
 
 #include "native_conifer_raw_runtime_reducer.hpp"
+#include "native_tree_worker_text_admission.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -37,6 +38,8 @@ std::string fixed(double value,int digits) {
     return std::string(buffer.data(),static_cast<std::size_t>(required));
 }
 std::uint32_t unicode_stable_hash(const std::string &source) {
+    // The shared worker boundary already admitted every request field. Only
+    // ASCII compiler-owned separators and suffixes are added before hashing.
     std::uint32_t value=2166136261U;
     for(std::size_t index=0;index<source.size();) {
         const unsigned char first=static_cast<unsigned char>(source[index]);
@@ -44,17 +47,11 @@ std::uint32_t unicode_stable_hash(const std::string &source) {
         if(first<0x80U) {codepoint=first;length=1;}
         else if((first&0xe0U)==0xc0U) {codepoint=first&0x1fU;length=2;}
         else if((first&0xf0U)==0xe0U) {codepoint=first&0x0fU;length=3;}
-        else if((first&0xf8U)==0xf0U) {codepoint=first&0x07U;length=4;}
-        else throw std::invalid_argument("savanna identity is not UTF-8");
+        else {codepoint=first&0x07U;length=4;}
         for(std::size_t offset=1;offset<length;++offset) {
             const unsigned char next=static_cast<unsigned char>(source[index+offset]);
-            if((next&0xc0U)!=0x80U) throw std::invalid_argument("savanna identity is not UTF-8");
             codepoint=(codepoint<<6U)|(next&0x3fU);
         }
-        if((length==2 && codepoint<0x80U) || (length==3 && codepoint<0x800U)
-            || (length==4 && codepoint<0x10000U) || codepoint>0x10ffffU
-            || (codepoint>=0xd800U && codepoint<=0xdfffU))
-            throw std::invalid_argument("savanna identity has invalid Unicode");
         value=(value^codepoint)*16777619U;index+=length;
     }
     return value;
@@ -114,6 +111,9 @@ NativeConiferRecipe reduction_source(std::vector<NativeSavannaBranch> branches,
 }
 
 NativeSavannaWorkerRecipe NativeSavannaWorkerRecipeBuilder::build(const NativeSavannaWorkerRequest &input) {
+    admit_native_tree_worker_text({input.tree_id, input.world_seed, input.biome, input.architecture,
+        input.species_grammar, input.age_band, input.render_lod_tier, input.presentation,
+        input.biome_parameters.architecture});
     NativeSavannaWorkerRecipe out;out.tree_id=trim(input.tree_id);
     if(out.tree_id.empty()) return out;
     out.world_seed=trim(input.world_seed);if(out.world_seed.empty()) out.world_seed="default";
@@ -178,6 +178,7 @@ NativeSavannaWorkerRecipe NativeSavannaWorkerRecipeBuilder::build(const NativeSa
     }
     const std::size_t pre_render_count=out.branches.size();
     const std::string request_key=identity_key(out,input.presentation)+":"+out.render_lod_tier;
+    admit_native_tree_worker_serialized_identity(request_key);
     out.signature="tree-v10-"+hex8(unicode_stable_hash(request_key+":"+out.topology_signature+":"+
         std::to_string(pre_render_count)));
     if(!out.review && !out.impostor) {

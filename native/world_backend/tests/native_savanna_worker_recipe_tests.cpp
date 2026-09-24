@@ -120,7 +120,7 @@ VWB_TEST(native_savanna_worker_normalizes_dimensions_identity_and_invalid_inputs
     VWB_EXPECT(std::abs(normalized.canopy_radius-0.396)<1e-12);
     VWB_EXPECT(normalized.genetic_seed!=0);
     request=base();request.genetic_seed=0;request.render_lod_tier="impostor";
-    for(const std::string seed:{std::string("\x80",1),std::string("\xC3",1),std::string("\xC3\x41",2),
+    for(const std::string &seed:{std::string("\x80",1),std::string("\xC3",1),std::string("\xC3\x41",2),
             std::string("\xC0\x80",2),std::string("\xE0\x80\x80",3),std::string("\xF0\x80\x80\x80",4),
             std::string("\xF4\x90\x80\x80",4),std::string("\xED\xA0\x80",3)}) {
         request.world_seed=seed;VWB_EXPECT_THROW(std::invalid_argument,NativeSavannaWorkerRecipeBuilder::build(request));
@@ -128,4 +128,28 @@ VWB_TEST(native_savanna_worker_normalizes_dimensions_identity_and_invalid_inputs
     request.world_seed="caf\xC3\xA9";VWB_EXPECT(NativeSavannaWorkerRecipeBuilder::build(request).valid);
     request.world_seed="\xE2\x98\x83";VWB_EXPECT(NativeSavannaWorkerRecipeBuilder::build(request).valid);
     request.world_seed="\xF0\x9F\x8C\xB3";VWB_EXPECT(NativeSavannaWorkerRecipeBuilder::build(request).valid);
+    request=base();request.world_seed=std::string("\xC3",1);request.genetic_seed=7;
+    VWB_EXPECT_THROW(std::invalid_argument,NativeSavannaWorkerRecipeBuilder::build(request));
+    request=base();request.render_lod_tier="impostor";request.tree_id=std::string(256,'a');
+    VWB_EXPECT(NativeSavannaWorkerRecipeBuilder::build(request).valid);
+    request.tree_id.push_back('a');
+    VWB_EXPECT_THROW(std::invalid_argument,NativeSavannaWorkerRecipeBuilder::build(request));
+    request=base();request.render_lod_tier="impostor";
+    request.tree_id=std::string(256,'a');request.world_seed=std::string(256,'b');
+    request.biome=std::string(256,'c');request.age_band=std::string(256,'d');
+    request.presentation=std::string(1,'e');
+    VWB_EXPECT_THROW(std::invalid_argument,NativeSavannaWorkerRecipeBuilder::build(request));
+    request=base();request.render_lod_tier="impostor";
+    request.visual_height=std::numeric_limits<double>::max();
+    request.trunk_radius=std::numeric_limits<double>::max();
+    request.canopy_radius=std::numeric_limits<double>::max();
+    request.biome_parameters.height_min=std::numeric_limits<double>::max();
+    request.biome_parameters.height_max=std::numeric_limits<double>::max();
+    request.biome_parameters.trunk_radius_min=std::numeric_limits<double>::max();
+    request.biome_parameters.trunk_radius_max=std::numeric_limits<double>::max();
+    request.biome_parameters.canopy_radius_min=std::numeric_limits<double>::max();
+    request.biome_parameters.canopy_radius_max=std::numeric_limits<double>::max();
+    request.biome_parameters.visibility_range=std::numeric_limits<double>::max();
+    request.biome_parameters.shadow_range=std::numeric_limits<double>::max();
+    VWB_EXPECT_THROW(std::invalid_argument,NativeSavannaWorkerRecipeBuilder::build(request));
 }

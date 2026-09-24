@@ -134,6 +134,7 @@
     "core/native_surface_tree_definition_composer.hpp",
     "core/native_tree_artifact.hpp",
     "core/native_tree_definition.hpp",
+    "core/native_tree_worker_text_admission.hpp",
     "core/native_terrain_shaping_snapshot.hpp",
     "core/native_terrain_shaping_registry.hpp",
     "core/native_terrain_edit_shape_compiler.hpp",

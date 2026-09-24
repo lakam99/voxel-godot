@@ -1,5 +1,6 @@
 #include "native_conifer_worker_recipe.hpp"
 #include "native_conifer_raw_runtime_reducer.hpp"
+#include "native_tree_worker_text_admission.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -37,6 +38,9 @@ std::string f(double value,int digits) {
     return std::string(buffer.data(),static_cast<std::size_t>(required));
 }
 std::uint32_t unicode_stable_hash(const std::string &source) {
+    // Request text is admitted once at the builder boundary. Every suffix
+    // concatenated below is ASCII, so decoding here cannot encounter malformed
+    // UTF-8 and need not retain a second, partially divergent validator.
     std::uint32_t value=2166136261U;
     for (std::size_t i=0;i<source.size();) {
         const unsigned char c=static_cast<unsigned char>(source[i]);
@@ -44,19 +48,11 @@ std::uint32_t unicode_stable_hash(const std::string &source) {
         if (c<0x80U) {codepoint=c;length=1;}
         else if ((c&0xe0U)==0xc0U) {codepoint=c&0x1fU;length=2;}
         else if ((c&0xf0U)==0xe0U) {codepoint=c&0x0fU;length=3;}
-        else if ((c&0xf8U)==0xf0U) {codepoint=c&0x07U;length=4;}
-        else throw std::invalid_argument("conifer identity is not UTF-8");
-        // Both callers hash composite identities with an ASCII suffix. A
-        // truncated user field therefore meets that suffix and fails the
-        // continuation-byte check below; i+length cannot exceed source.size().
+        else {codepoint=c&0x07U;length=4;}
         for (std::size_t j=1;j<length;++j) {
             const unsigned char next=static_cast<unsigned char>(source[i+j]);
-            if ((next&0xc0U)!=0x80U) throw std::invalid_argument("conifer identity is not UTF-8");
             codepoint=(codepoint<<6U)|(next&0x3fU);
         }
-        if ((length==2 && codepoint<0x80U) || (length==3 && codepoint<0x800U)
-            || (length==4 && codepoint<0x10000U) || codepoint>0x10ffffU
-            || (codepoint>=0xd800U && codepoint<=0xdfffU)) throw std::invalid_argument("conifer identity has invalid Unicode");
         value=(value^codepoint)*16777619U; i+=length;
     }
     return value;
@@ -113,6 +109,9 @@ void adapt(NativeConiferWorkerRecipe &out,const std::vector<NativeConiferBranch>
 }
 
 NativeConiferWorkerRecipe NativeConiferWorkerRecipeBuilder::build(const NativeConiferWorkerRequest &input) {
+    admit_native_tree_worker_text({input.tree_id, input.world_seed, input.biome, input.architecture,
+        input.species_grammar, input.age_band, input.render_lod_tier, input.presentation,
+        input.biome_parameters.architecture});
     NativeConiferWorkerRecipe out;
     out.tree_id=trim(input.tree_id);
     if (out.tree_id.empty()) return out; // TreeSpawnService.normalize_request returns {}.
@@ -193,6 +192,7 @@ NativeConiferWorkerRecipe NativeConiferWorkerRecipeBuilder::build(const NativeCo
     }
     const std::size_t pre_render_branch_count=out.branches.size();
     const std::string request_key=identity_key(out,input.presentation)+":"+out.render_lod_tier;
+    admit_native_tree_worker_serialized_identity(request_key);
     out.signature="tree-v10-"+hex8(unicode_stable_hash(request_key+":"+out.topology_signature+":"+
         std::to_string(pre_render_branch_count)));
     if (!out.review && !out.impostor) {

@@ -183,7 +183,7 @@ VWB_TEST(native_conifer_worker_rejects_invalid_inputs_and_empty_identity) {
 
 VWB_TEST(native_conifer_worker_rejects_malformed_utf8_identity_and_accepts_unicode_scalars) {
     auto r=base();r.genetic_seed=0;r.render_lod_tier="impostor";
-    for (const std::string seed:{
+    for (const std::string &seed:{
             std::string("\x80",1),std::string("\xC3",1),std::string("\xC3\x41",2),
             std::string("\xC0\x80",2),std::string("\xE0\x80\x80",3),
             std::string("\xF0\x80\x80\x80",4),std::string("\xF4\x90\x80\x80",4),
@@ -197,4 +197,26 @@ VWB_TEST(native_conifer_worker_rejects_malformed_utf8_identity_and_accepts_unico
     VWB_EXPECT(NativeConiferWorkerRecipeBuilder::build(r).valid);
     r.world_seed="\xF0\x9F\x8C\xB2";
     VWB_EXPECT(NativeConiferWorkerRecipeBuilder::build(r).valid);
+    r=base();r.world_seed=std::string("\xC3",1);r.genetic_seed=7;
+    VWB_EXPECT_THROW(std::invalid_argument,NativeConiferWorkerRecipeBuilder::build(r));
+    r=base();r.render_lod_tier="impostor";r.tree_id=std::string(256,'a');
+    VWB_EXPECT(NativeConiferWorkerRecipeBuilder::build(r).valid);
+    r.tree_id.push_back('a');
+    VWB_EXPECT_THROW(std::invalid_argument,NativeConiferWorkerRecipeBuilder::build(r));
+    r=base();r.render_lod_tier="impostor";
+    r.tree_id=std::string(256,'a');r.world_seed=std::string(256,'b');
+    r.biome=std::string(256,'c');r.age_band=std::string(256,'d');r.presentation=std::string(1,'e');
+    VWB_EXPECT_THROW(std::invalid_argument,NativeConiferWorkerRecipeBuilder::build(r));
+    r=base();r.render_lod_tier="impostor";
+    r.visual_height=std::numeric_limits<double>::max();r.trunk_radius=std::numeric_limits<double>::max();
+    r.canopy_radius=std::numeric_limits<double>::max();
+    r.biome_parameters.height_min=std::numeric_limits<double>::max();
+    r.biome_parameters.height_max=std::numeric_limits<double>::max();
+    r.biome_parameters.trunk_radius_min=std::numeric_limits<double>::max();
+    r.biome_parameters.trunk_radius_max=std::numeric_limits<double>::max();
+    r.biome_parameters.canopy_radius_min=std::numeric_limits<double>::max();
+    r.biome_parameters.canopy_radius_max=std::numeric_limits<double>::max();
+    r.biome_parameters.visibility_range=std::numeric_limits<double>::max();
+    r.biome_parameters.shadow_range=std::numeric_limits<double>::max();
+    VWB_EXPECT_THROW(std::invalid_argument,NativeConiferWorkerRecipeBuilder::build(r));
 }

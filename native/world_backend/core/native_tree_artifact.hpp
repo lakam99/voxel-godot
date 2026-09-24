@@ -97,8 +97,8 @@ public:
 
 class NativeTreeArtifact final {
 public:
-    static constexpr std::uint32_t SCHEMA_REVISION = 1U;
-    static constexpr std::uint32_t BUILDER_REVISION = 1U;
+    static constexpr std::uint32_t SCHEMA_REVISION = 2U;
+    static constexpr std::uint32_t BUILDER_REVISION = 2U;
 
     NativeTreeArtifactStatus status() const noexcept;
     NativeTreeRenderTier render_tier() const noexcept;
@@ -111,6 +111,7 @@ public:
     const std::string &topology_signature() const noexcept;
     const NativeTreeDefinitionInput &definition() const noexcept;
     NativeTreeTrunkCylinder trunk_cylinder() const noexcept;
+    std::uint32_t source_branch_count() const noexcept;
     const std::vector<NativeTreeArtifactBranch> &branches() const noexcept;
     const std::vector<NativeTreeArtifactFoliage> &foliage() const noexcept;
     const NativeTreeArtifactImpostor &impostor() const noexcept;
@@ -136,6 +137,7 @@ private:
         std::string topology_signature,
         NativeTreeDefinitionInput definition,
         NativeTreeTrunkCylinder trunk_cylinder,
+        std::uint32_t source_branch_count,
         std::vector<NativeTreeArtifactBranch> branches,
         std::vector<NativeTreeArtifactFoliage> foliage,
         NativeTreeArtifactImpostor impostor,
@@ -153,6 +155,7 @@ private:
     std::string topology_signature_;
     NativeTreeDefinitionInput definition_;
     NativeTreeTrunkCylinder trunk_cylinder_;
+    std::uint32_t source_branch_count_ = 0U;
     std::vector<NativeTreeArtifactBranch> branches_;
     std::vector<NativeTreeArtifactFoliage> foliage_;
     NativeTreeArtifactImpostor impostor_;
@@ -177,6 +180,7 @@ private:
         const NativeTreeDefinitionInput &definition,
         NativeTreeTrunkCylinder trunk_cylinder,
         NativeTreeRenderTier render_tier,
+        std::uint32_t source_branch_count,
         const std::vector<NativeTreeArtifactBranch> &branches,
         const std::vector<NativeTreeArtifactFoliage> &foliage,
         NativeTreeArtifactImpostor impostor,

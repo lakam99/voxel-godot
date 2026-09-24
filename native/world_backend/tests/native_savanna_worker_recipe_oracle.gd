@@ -3,6 +3,38 @@ extends SceneTree
 # Independent direct TreeSpawnService worker recipe fixture. Never calls C++.
 const Service = preload("res://scripts/environment/TreeSpawnService.gd")
 
+func vector_observation(value: Variant) -> Array:
+	var vector: Vector3 = value as Vector3
+	return [vector.x, vector.y, vector.z]
+
+func branch_observation(value: Dictionary) -> Dictionary:
+	if value.is_empty(): return {}
+	return {
+		"start": vector_observation(value.get("start", Vector3.ZERO)),
+		"end": vector_observation(value.get("end", Vector3.ZERO)),
+		"radiusStart": float(value.get("radiusStart", 0.0)),
+		"radiusEnd": float(value.get("radiusEnd", 0.0)),
+		"order": int(value.get("order", -1)),
+		"parentNode": int(value.get("parentNode", -1)),
+		"childNode": int(value.get("childNode", -1)),
+		"stratumBias": float(value.get("stratumBias", 0.0)),
+		"windWeight": float(value.get("windWeight", 0.0)),
+	}
+
+func foliage_observation(value: Dictionary) -> Dictionary:
+	if value.is_empty(): return {}
+	return {
+		"position": vector_observation(value.get("position", Vector3.ZERO)),
+		"rotation": vector_observation(value.get("rotation", Vector3.ZERO)),
+		"scale": vector_observation(value.get("scale", Vector3.ZERO)),
+		"windWeight": float(value.get("windWeight", 0.0)),
+		"variation": float(value.get("variation", 0.0)),
+		"exposure": float(value.get("exposure", 0.0)),
+		"clusterVariant": int(value.get("clusterVariant", -1)),
+		"sourceSegment": int(value.get("sourceSegment", -1)),
+		"sourceOrder": int(value.get("sourceOrder", -1)),
+	}
+
 func _initialize() -> void:
 	var service = Service.new()
 	var base := {
@@ -47,9 +79,30 @@ func _initialize() -> void:
 			"branches": branches.size(), "foliage": foliage.size(),
 			"branchSelectionHash": service.stable_hash(",".join(branch_parts)),
 			"foliageSelectionHash": service.stable_hash(",".join(foliage_parts)),
-			"renderLod": recipe.get("renderLod", {}), "runtimeImpostor": recipe.get("runtimeImpostor", null),
+			"normalized": {
+				"treeId": recipe.get("treeId", ""), "worldSeed": request.get("worldSeed", ""),
+				"biome": recipe.get("biome", ""), "architecture": recipe.get("architecture", ""),
+				"speciesGrammar": recipe.get("speciesGrammar", ""), "ageBand": recipe.get("ageBand", ""),
+				"ageYears": recipe.get("ageYears", 0.0), "growthStage": recipe.get("growthStage", 0.0),
+				"geneticSeed": recipe.get("geneticSeed", 0), "height": recipe.get("height", 0.0),
+				"trunkRadius": recipe.get("trunkRadius", 0.0), "canopyRadius": recipe.get("canopyRadius", 0.0),
+				"canopyDensity": recipe.get("canopyDensity", 0.0),
+			},
+			"renderLod": recipe.get("renderLod", {}), "renderPolicy": recipe.get("renderPolicy", {}),
+			"runtimeImpostor": recipe.get("runtimeImpostor", null),
+			"runtimeContinuousBole": recipe.get("runtimeContinuousBole", false),
+			"pocContinuousWood": recipe.get("pocContinuousWood", false),
+			"continuousTrunkPath": recipe.get("continuousTrunkPath", (recipe.get("stats", {}) as Dictionary).get("continuousTrunkPath", false)),
+			"graphConnected": recipe.get("graphConnected", (recipe.get("stats", {}) as Dictionary).get("connected", false)),
+			"foliageDerivedFromFineSegments": recipe.get("foliageDerivedFromFineSegments", (recipe.get("stats", {}) as Dictionary).get("foliageDerivedFromFineSegments", false)),
 			"collision": recipe.get("collision", {}), "crownHabit": recipe.get("crownHabit", ""),
-			"methodology": recipe.get("methodology", ""), "firstBranch": first_branch,
-			"firstFoliage": first_foliage, "stats": recipe.get("stats", {})
+			"interaction": {
+				"treeId": (recipe.get("interactionFacts", {}) as Dictionary).get("treeId", ""),
+				"worldPosition": vector_observation((recipe.get("interactionFacts", {}) as Dictionary).get("worldPosition", Vector3.ZERO)),
+				"worldRotationY": (recipe.get("interactionFacts", {}) as Dictionary).get("worldRotationY", 0.0),
+				"rootButtressCount": ((recipe.get("interactionFacts", {}) as Dictionary).get("rootButtresses", []) as Array).size(),
+			},
+			"methodology": recipe.get("methodology", ""), "firstBranch": branch_observation(first_branch),
+			"firstFoliage": foliage_observation(first_foliage), "stats": recipe.get("stats", {})
 		}))
 	quit()
