@@ -183,6 +183,27 @@ projection and does not prove engine collision or nav readiness.
 | `save_terrain_volume_deltas`, `load_terrain_volume_deltas`, section delta/revision | `MainSaveState` New Game/Continue, `SubsurfaceSystem` authority check, `VoxelTerrainRuntime` edit discovery, terrain/fluid publication | Preserve v2 envelope and pin one native revision for export/import. Delete full script snapshot/`edited_cells` scan only after native edit, save and publisher receipts are connected. Never persist Voxel Tools injected blocks as generated world deltas. |
 | Light/fluid source and dirty-section APIs | `WorldGenerationSystem`, `VoxelTerrainRuntime` and gameplay lighting/fluid consumers | Retain orchestration where appropriate, but move canonical light/fluid source facts and delta invalidation to native before declaring N3 complete. |
 
+### Direct script-volume bypasses of the generation facade
+
+A follow-up production search for `terrain_volume_service` found callers that
+read the concrete script owner rather than only the `WorldGenerationSystem`
+API. The eventual cutover must replace these identity and delta contracts as
+part of the same owner switch; changing facade methods alone leaves a second
+script authority live.
+
+| Direct caller | Current dependency | Cutover/deletion check |
+| --- | --- | --- |
+| `VoxelWorldGenerationContext.setup_from_main` | Copies `edited_cells` into `initial_terrain_edits` for each cloned Voxel Tools worker context. | Supply one pinned native delta/source snapshot to the viewer consumer, then remove the copied script edit map. Do not retain both script and native edit composition. |
+| `VoxelTerrainRuntime` | Reads script revision and `edited_cells` for startup edited-chunk demand, edit diff/signatures and loaded-block edit queues; also uses script surface projection for startup bounds and collision proof. | Replace each revision/delta/projection read with a source and installed-physical receipt before deleting `volume_service()`, `collect_volume_edit_changes`, and the old collision proof path. The native cell facade alone cannot establish installed collision. |
+| `NavigationTileCapture` | Pins a weak script-volume instance and its revision as part of tile capture currency. | Bind the capture to current native source/delta and physical/navigation publication revisions when N6 replaces topology; retain current NPC policy and routing behavior. This is an audit entry, not permission to edit protected NPC code during N3. |
+| `StructureSystem._regional_edit_revision` | Uses script-volume instance ID and global revision in regional dependency identity. | Replace with current native owner/source revision and actual regional edit dependency at the structure authority cutover; avoid invalidating unrelated regions from a global counter. |
+| `NativeWorldSourceRequest.from_main_with_current_volume` | Re-exports `TerrainVolumeService.save_all_section_deltas()` to form a native request. | Production Continue must pass the decoded v2 save and native owner directly; delete this script re-export bridge once no caller needs it. |
+| `TerrainVolumeRestoreCursor` | Builds a detached `TerrainVolumeService` for script restore, separate from the live owner. | Keep only while script restore is the production comparator. Remove at native save authority cutover after v2 historical conversion and rollback/teardown receipts pass. |
+
+These are observed source references, not an exhaustive deletion proof. The
+final audit must also search indirect dynamic calls and compare real callers
+after the native owner replaces the Voxel Tools generator/collision path.
+
 The caller audit used `rg` across production `scripts/*.gd` (excluding
 `scripts/testing/**`), then inspected `WorldGenerationSystem`'s public
 forwarders and `TerrainVolumeService`'s owner methods. `NpcNavigationTestRunner`
