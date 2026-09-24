@@ -239,6 +239,57 @@ recovery, exact Windows command-line reconstruction and watchdog receipt
 binding. They do not execute GDScript or replace
 the newly required coordinated exact-commit differential.
 
+The final coordinated exact-commit differential passed at
+`940d2da39eb988e793e6dda7b883de3845ada7e9` (tree
+`bd3c7ae12669a9ba8e7302f61d23f2d7e89ef0c1`):
+
+- report
+  `artifacts/native-world-backend/n4-underground-prop-source-differential/report-adfdf8ce-f445-4ac1-b1ca-0013f0c9ce52.json`
+  has SHA-256
+  `71a849fbf47d9aac6c3aad9bc7801909c0104c49367352617528901255a15097`
+  and status `passed`;
+- probe
+  `artifacts/native-world-backend/n4-underground-prop-source-differential/probe-adfdf8ce-f445-4ac1-b1ca-0013f0c9ce52.json`
+  has SHA-256
+  `1dcba139f6e835a51d766a99503e12237bf873984152a4cd848d20b7c95901be`;
+- watchdog `artifacts/node-tools/process-runs/godot-E7Hy1V/watchdog.json`
+  has SHA-256
+  `0b3be5230b5635db1b57a4a3951ed5b749dc728312fdbe4f40979feb1f170ccd`,
+  run ID `743b1aaa53334b71ae51eb15833204d3`, root PID `47864`, launch
+  `2026-09-24T10:20:42.003Z` and completion
+  `2026-09-24T10:24:00.150Z`. It records functional/overall exit `0`, natural
+  root exit, no timeout or forced cleanup, `cleanupPassed=true`,
+  `authoritativeZeroProven=true`, and `zeroProofSource=job_membership_zero`.
+  Job membership observed companion PID `44860` after root exit and then an
+  empty membership before report publication;
+- the launch lease records runner PID `44800`, process-start identity
+  `2026-09-24T10:20:40.2315690Z`, the canonical worktree and the exact runner
+  ID. It was absent after publication, and a separate read-only process audit
+  found no surviving runner, probe console or companion engine process;
+- source freeze contains `722` exact paths and all `18` resolved imported
+  PackedScenes. Pre/post HEAD, tree and porcelain status match; both statuses
+  are empty, `unchanged=true`, and `changedPaths=[]`;
+- the receipt binds Godot `4.6.1.stable.official.14d19694e`, console SHA-256
+  `bd9e27c6994a128aaab45cdda4d372de87b91900618ba2de55c6aa29248d5b56`,
+  companion engine SHA-256
+  `1e5efe381f62ee1cea6bc18caac71c0c74bd6e68e6af5c6efb3dbe76628f61c7`,
+  staged Terrain Meshing debug DLL SHA-256
+  `1b15eb9223a59ff000ce3f982f6ba3414439d2f564fa1a415b14b4970e5f2134`
+  and Voxel Tools editor DLL SHA-256
+  `b24cc4eb8d22c27ce5babf1cf23190571d4acca9b2d215cf9c9adf00614bfc97`.
+  It also hashes the named debug/LLVM/release native build receipts. The staged
+  debug DLL matches the recorded debug build output, but DLL/source
+  correspondence remains the separate prior build-receipt claim and was not
+  reproven by this runtime differential;
+- the four cases compare `36`, `36`, `3` and `36` ordered attempts for chunks
+  `(0,0)`, `(0,0)` with the root tombstoned, `(-1,-1)` and `(5,3)`. There are
+  no failures and the observed families are `none`, `rock`, `forage`,
+  `copperOre` and `ironOre`.
+
+This final receipt is direct production-method/service differential evidence
+only. It is diagnostic, not headed gameplay acceptance, not production
+publication or scheduling parity, and not a cutover authorization.
+
 Independent review is diagnostic-only **GO**, with no P0/P1 finding, and
 production/cutover **NO-GO**. Its four P2 limits remain explicit:
 
