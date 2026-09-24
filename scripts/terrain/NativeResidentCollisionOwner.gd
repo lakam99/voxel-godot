@@ -50,6 +50,8 @@ var _stopped := false
 var _pending_candidates := {}
 var _pending_candidate_keys: Array[Vector3i] = []
 var _disposal_retry_entries := {}
+var _disposal_retry_orphans: Array[Dictionary] = []
+var _disposal_retry_overflow: Array[Dictionary] = []
 var _drain_terminal_failure := {}
 var _memory_release_attempts := {}
 var _admission_barrier: RefCounted
@@ -569,8 +571,17 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 			var reservation_token := String(reserved.get("token", ""))
 			if reservation_token.is_empty():
 				_cancel_unconstructed_memory(memory_reservations)
+				_memory_accounting_failure = "collision_memory_token_missing"
+				_failed = true
+				if _drain_terminal_failure.is_empty():
+					_drain_terminal_failure = {"phase":"candidate_reservation",
+						"reason":_memory_accounting_failure,
+						"ownerEpoch":_retirement_owner_epoch,
+						"windowToken":_memory_window_token,
+						"reservationId":reservation_id}
 				_busy = false
-				return {"status":"failed", "reason":"collision_memory_token_missing"}
+				return {"status":"failed", "reason":_memory_accounting_failure,
+					"terminalMemoryFailure":_drain_terminal_failure.duplicate(true)}
 			memory_tokens[row.block] = reservation_token
 			memory_reservations.append(reservation_token)
 			_unconstructed_memory_tokens.append(reservation_token)
@@ -886,6 +897,9 @@ func memory_admission_receipt() -> Dictionary:
 		"ownerEpoch":_retirement_owner_epoch,
 		"retiredEntryCount":_retired_memory_entries.size(),
 		"disposalRetryCount":_disposal_retry_entries.size(),
+		"disposalRetryOrphanCount":_disposal_retry_orphans.size(),
+		"disposalRetryOverflowCount":_disposal_retry_overflow.size(),
+		"terminalFailure":_drain_terminal_failure.duplicate(true),
 		"lastCandidateAdmission":_memory_last_candidate_admission.duplicate(true),
 		"ledger":ledger_receipt,
 		"releaseEvidence":"scene_nodes_absent_after_process_and_physics_frames",
@@ -900,7 +914,10 @@ func startup_empty_receipt(identity: Dictionary) -> Dictionary:
 	return {"empty": not _busy and not _stopping and not _stopped \
 		and identity.get("ownerGeneration") is int \
 		and _live.is_empty() and _pending_candidates.is_empty() \
-		and _disposal_retry_entries.is_empty()}
+		and _disposal_retry_entries.is_empty() \
+		and _disposal_retry_orphans.is_empty() \
+		and _disposal_retry_overflow.is_empty() \
+		and _unconstructed_memory_tokens.is_empty()}
 
 
 func request_stop() -> Dictionary:
@@ -925,12 +942,22 @@ func request_stop() -> Dictionary:
 		var token := String(retry.get("entry", {}).get("memoryToken", ""))
 		if not token.is_empty() and not preserved_reservations.has(token):
 			preserved_reservations.append(token)
+	for orphan in _disposal_retry_orphans:
+		var token := String(orphan.get("entry", {}).get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
+	for overflow in _disposal_retry_overflow:
+		var token := String(overflow.get("entry", {}).get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
 	_cancel_unconstructed_memory(_unconstructed_memory_tokens.duplicate(),
 		preserved_reservations)
 	return {"status": "pending", "stopRequested": true,
 		"inFlightPublish": _busy,
 		"pendingEntries": _pending_candidates.size(),
 		"disposalRetryEntries":_disposal_retry_entries.size(),
+		"disposalRetryOrphans":_disposal_retry_orphans.size(),
+		"disposalRetryOverflow":_disposal_retry_overflow.size(),
 		"liveEntries": _live.size(), "remainingBodies": get_child_count(),
 		"sourceRetained": _source != null,
 		"barrierRetained": _admission_barrier != null,
@@ -949,6 +976,31 @@ func drain_step() -> Dictionary:
 			"collision_memory_release_retry_exhausted")), 0, 0, 0)
 	if _busy:
 		return _drain_progress("publish_in_flight", 0, 0, 0)
+	var preserved_reservations: Array[String] = []
+	for entry in _pending_candidates.values():
+		var token := String(entry.get("memoryToken", ""))
+		if not token.is_empty(): preserved_reservations.append(token)
+	for entry in _live.values():
+		var token := String(entry.get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
+	for retry in _disposal_retry_entries.values():
+		var token := String(retry.get("entry", {}).get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
+	for orphan in _disposal_retry_orphans:
+		var token := String(orphan.get("entry", {}).get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
+	for overflow in _disposal_retry_overflow:
+		var token := String(overflow.get("entry", {}).get("memoryToken", ""))
+		if not token.is_empty() and not preserved_reservations.has(token):
+			preserved_reservations.append(token)
+	_cancel_unconstructed_memory(_unconstructed_memory_tokens.duplicate(),
+		preserved_reservations)
+	if not _drain_terminal_failure.is_empty():
+		return _drain_blocked(String(_drain_terminal_failure.get("reason",
+			"collision_memory_cancel_retry_exhausted")), 0, 0, 0)
 	var work_used := 0
 	var visited := 0
 	var retired_bodies := 0
@@ -1046,6 +1098,8 @@ func drain_step() -> Dictionary:
 			and get_child_count() == 0 \
 		and _retired_memory_entries.is_empty() \
 		and _disposal_retry_entries.is_empty() \
+		and _disposal_retry_orphans.is_empty() \
+		and _disposal_retry_overflow.is_empty() \
 		and _unconstructed_memory_tokens.is_empty() \
 		and (_drain_last_queued_physics_frame < 0 \
 				or Engine.get_physics_frames() > _drain_last_queued_physics_frame):
@@ -1110,6 +1164,14 @@ func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
 	var work_used := 0
 	if work_budget <= 0:
 		return {"done": false, "bodyQueued": false, "workUnits": 0}
+	var token := String(entry.get("memoryToken", ""))
+	if _memory_admission != null and token.is_empty():
+		_memory_accounting_failure = "collision_memory_drain_token_missing"
+		_disable_entry_collision(entry)
+		_set_disposal_tracking_terminal(entry, _memory_accounting_failure)
+		_retain_disposal_retry(entry)
+		return {"done":false, "bodyQueued":false, "workUnits":0,
+			"reason":_memory_accounting_failure}
 	if _memory_admission != null and not bool(entry.get("memoryDeferred", false)):
 		var deferred: Dictionary = _memory_admission.call("defer_release",
 			String(entry.get("memoryToken", "")), _retirement_owner_epoch,
@@ -1186,6 +1248,8 @@ func _drain_progress(reason: String, work_units: int, visited: int,
 		"remainingPendingEntries": _pending_candidates.size(),
 		"remainingLiveEntries": _live.size(),
 		"remainingDisposalRetryEntries": _disposal_retry_entries.size(),
+		"remainingDisposalRetryOrphans":_disposal_retry_orphans.size(),
+		"remainingDisposalRetryOverflow":_disposal_retry_overflow.size(),
 		"memoryAccountingFailure":_memory_accounting_failure,
 		"terminalMemoryFailure":_drain_terminal_failure.duplicate(true),
 		"disposalRetryConflict":_disposal_retry_has_conflict(),
@@ -1204,6 +1268,8 @@ func _drain_blocked(reason: String, work_units: int, visited: int,
 		"remainingPendingEntries":_pending_candidates.size(),
 		"remainingLiveEntries":_live.size(),
 		"remainingDisposalRetryEntries":_disposal_retry_entries.size(),
+		"remainingDisposalRetryOrphans":_disposal_retry_orphans.size(),
+		"remainingDisposalRetryOverflow":_disposal_retry_overflow.size(),
 		"remainingBodies":get_child_count(),
 		"memoryAccountingFailure":_memory_accounting_failure,
 		"terminalMemoryFailure":_drain_terminal_failure.duplicate(true),
@@ -1642,6 +1708,22 @@ func _dispose(entry: Dictionary) -> Dictionary:
 		return {"status":"ready", "alreadyDisposed":true}
 	var body = entry.get("body")
 	var retired_shapes: Array = entry.get("retiredShapes", [])
+	var token := String(entry.get("memoryToken", ""))
+	if not _drain_terminal_failure.is_empty():
+		var retained_after_terminal: Dictionary = _retain_disposal_retry(entry)
+		_disable_entry_collision(entry)
+		return {"status":"failed", "reason":"collision_memory_release_terminal_failure",
+			"retryTracked":bool(retained_after_terminal.get("tracked", false)),
+			"terminalMemoryFailure":_drain_terminal_failure.duplicate(true)}
+	if _memory_admission != null and token.is_empty():
+		_memory_accounting_failure = "collision_memory_dispose_retry_token_missing"
+		_failed = true
+		var retained_missing: Dictionary = _retain_disposal_retry(entry)
+		_set_disposal_tracking_terminal(entry, _memory_accounting_failure)
+		_disable_entry_collision(entry)
+		return {"status":"failed", "reason":_memory_accounting_failure,
+			"retryTracked":bool(retained_missing.get("tracked", false)),
+			"terminalMemoryFailure":_drain_terminal_failure.duplicate(true)}
 	if _memory_admission != null and not String(entry.get("memoryToken", "")).is_empty():
 		if not bool(entry.get("memoryDeferred", false)):
 			var deferred: Dictionary = _memory_admission.call("defer_release",
@@ -1691,11 +1773,15 @@ func _dispose(entry: Dictionary) -> Dictionary:
 
 
 func _retain_disposal_retry(entry: Dictionary) -> Dictionary:
+	_disable_entry_collision(entry)
 	var token := String(entry.get("memoryToken", ""))
 	if token.is_empty():
 		_memory_accounting_failure = "collision_memory_dispose_retry_token_missing"
 		_failed = true
-		return {"tracked":false, "reason":_memory_accounting_failure}
+		var orphaned := _retain_disposal_orphan(entry, _memory_accounting_failure)
+		_set_disposal_tracking_terminal(entry, _memory_accounting_failure)
+		return {"tracked":bool(orphaned.get("tracked", false)),
+			"orphaned":true, "reason":_memory_accounting_failure}
 	var body = entry.get("body")
 	var body_id := int(body.get_instance_id()) if is_instance_valid(body) else 0
 	if _disposal_retry_entries.has(token):
@@ -1713,6 +1799,7 @@ func _retain_disposal_retry(entry: Dictionary) -> Dictionary:
 		_disposal_retry_entries[token] = existing
 		_memory_accounting_failure = "collision_memory_dispose_retry_token_collision"
 		_failed = true
+		_set_disposal_tracking_terminal(entry, _memory_accounting_failure)
 		return {"tracked":true, "conflict":true,
 			"reason":_memory_accounting_failure}
 	var limits: Dictionary = _memory_admission.get("_limits") \
@@ -1721,10 +1808,53 @@ func _retain_disposal_retry(entry: Dictionary) -> Dictionary:
 	if max_retries <= 0 or _disposal_retry_entries.size() >= max_retries:
 		_memory_accounting_failure = "collision_memory_dispose_retry_capacity_exhausted"
 		_failed = true
-		return {"tracked":false, "reason":_memory_accounting_failure}
+		var orphaned := _retain_disposal_orphan(entry, _memory_accounting_failure)
+		_set_disposal_tracking_terminal(entry, _memory_accounting_failure)
+		return {"tracked":bool(orphaned.get("tracked", false)),
+			"orphaned":true, "reason":_memory_accounting_failure}
 	_disposal_retry_entries[token] = {"entry":entry, "conflict":false,
 		"conflicts":[]}
 	return {"tracked":true}
+
+
+func _retain_disposal_orphan(entry: Dictionary, reason: String) -> Dictionary:
+	var body = entry.get("body")
+	var body_id := int(body.get_instance_id()) if is_instance_valid(body) else 0
+	for orphan in _disposal_retry_orphans:
+		var orphan_entry: Dictionary = orphan.get("entry", {})
+		var orphan_body = orphan_entry.get("body")
+		var orphan_body_id := int(orphan_body.get_instance_id()) \
+			if is_instance_valid(orphan_body) else 0
+		if orphan_body_id == body_id and orphan_entry == entry:
+			return {"tracked":true, "alreadyTracked":true}
+	if _disposal_retry_orphans.size() >= MAX_RESIDENT + MAX_AFFECTED:
+		for overflow in _disposal_retry_overflow:
+			if overflow.get("entry", {}) == entry:
+				return {"tracked":true, "alreadyTracked":true, "overflow":true}
+		# A terminal retry condition freezes new publication. The owner can have
+		# at most MAX_RESIDENT live rows and MAX_AFFECTED candidate aliases; this
+		# additional affected-sized margin keeps refs even if an invalid source
+		# set reaches the orphan bound before its caller unwinds.
+		if _disposal_retry_overflow.size() >= MAX_AFFECTED:
+			return {"tracked":false,
+				"reason":"collision_memory_dispose_orphan_capacity_exhausted"}
+		_disposal_retry_overflow.append({"entry":entry, "reason":reason,
+			"bodyInstanceId":body_id})
+		return {"tracked":true, "overflow":true}
+	_disposal_retry_orphans.append({"entry":entry, "reason":reason,
+		"bodyInstanceId":body_id})
+	return {"tracked":true}
+
+
+func _set_disposal_tracking_terminal(entry: Dictionary, reason: String) -> void:
+	if not _drain_terminal_failure.is_empty(): return
+	var body = entry.get("body")
+	_drain_terminal_failure = {"phase":"disposal_retry_tracking",
+		"reason":reason,
+		"token":String(entry.get("memoryToken", "")),
+		"bodyInstanceId":int(body.get_instance_id()) if is_instance_valid(body) else 0,
+		"attempts":1}
+	_failed = true
 
 
 func _advance_retired_memory_entries() -> Dictionary:
@@ -1794,8 +1924,11 @@ func _record_memory_release_rejection(token: String, phase: String,
 	_memory_release_attempts[token] = token_attempts
 	if attempts < MEMORY_RELEASE_MAX_ATTEMPTS:
 		return false
-	var reason := "collision_memory_defer_retry_exhausted" \
-		if phase == "defer_release" else "collision_memory_release_ack_retry_exhausted"
+	var reason := "collision_memory_defer_retry_exhausted"
+	if phase == "acknowledge_deferred_release":
+		reason = "collision_memory_release_ack_retry_exhausted"
+	elif phase == "cancel_unconstructed":
+		reason = "collision_memory_cancel_retry_exhausted"
 	_drain_terminal_failure = {"phase":phase, "reason":reason,
 		"detail":detail, "token":token,
 		"attempts":attempts}
@@ -1804,18 +1937,35 @@ func _record_memory_release_rejection(token: String, phase: String,
 
 
 func _cancel_unconstructed_memory(tokens: Array,
-		preserved_tokens: Array = []) -> void:
-	if _memory_admission == null: return
+		preserved_tokens: Array = []) -> Dictionary:
+	if _memory_admission == null: return {"status":"unconfigured"}
+	var attempted := {}
+	var failures: Array[Dictionary] = []
 	for token_value in tokens:
 		var token := String(token_value)
-		if token.is_empty(): continue
+		if token.is_empty() or attempted.has(token): continue
+		attempted[token] = true
 		if preserved_tokens.has(token): continue
 		var cancelled: Dictionary = _memory_admission.call("cancel_unconstructed",
 			token, _retirement_owner_epoch)
 		if cancelled.get("status") != "ready":
 			_memory_accounting_failure = String(cancelled.get("reason",
 				"collision_memory_unconstructed_cancel_failed"))
-		_unconstructed_memory_tokens.erase(token)
+			_failed = true
+			if not _unconstructed_memory_tokens.has(token):
+				_unconstructed_memory_tokens.append(token)
+			var terminal := _record_memory_release_rejection(token,
+				"cancel_unconstructed", _memory_accounting_failure)
+			failures.append({"token":token, "result":cancelled,
+				"terminal":terminal})
+			if terminal: break
+		else:
+			_unconstructed_memory_tokens.erase(token)
+			_memory_release_attempts.erase(token)
+	return {"status":"failed" if not failures.is_empty() else "ready",
+		"failures":failures,
+		"retainedTokens":_unconstructed_memory_tokens.duplicate(),
+		"terminal":_drain_terminal_failure.duplicate(true)}
 
 
 func _remove_live_shape(block: Vector3i, shape_index: int) -> bool:

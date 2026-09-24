@@ -3,6 +3,8 @@ extends Node3D
 const OwnerScript = preload("res://scripts/terrain/NativeResidentCollisionOwner.gd")
 const BarrierScript = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const RetirementReceipt = preload("res://scripts/terrain/NativeCollisionRetirementReceipt.gd")
+const AdmissionScript = preload("res://scripts/terrain/NativeCollisionMemoryAdmission.gd")
+const PolicyScript = preload("res://scripts/terrain/NativeCollisionMemoryPolicy.gd")
 
 class FakeSource:
 	extends RefCounted
@@ -62,6 +64,8 @@ class DeferredReleaseFault:
 	var reserve_calls := 0
 	var defer_calls := 0
 	var cancel_calls := 0
+	var cancel_failures_remaining := 0
+	var return_empty_token := false
 	var abort_registration_calls := 0
 	var ack_failures_remaining := 0
 	var ack_calls := 0
@@ -76,6 +80,8 @@ class DeferredReleaseFault:
 	func reserve_candidate(_owner: String, _window: String, _id: String,
 			_rows: Array) -> Dictionary:
 		reserve_calls += 1
+		if return_empty_token:
+			return {"status":"ready", "token":""}
 		return {"status":"failed", "reason":"unused_fixture_api"}
 	func mark_candidate_constructed(_token: String, _owner: String,
 			_body_ids: Array) -> Dictionary:
@@ -96,6 +102,9 @@ class DeferredReleaseFault:
 	func cancel_unconstructed(_token: String, _owner: String) -> Dictionary:
 		cancel_calls += 1
 		cancel_body_was_valid = is_instance_valid(cancel_body)
+		if cancel_failures_remaining > 0:
+			cancel_failures_remaining -= 1
+			return {"status":"failed", "reason":"fixture_cancel_rejected"}
 		reservation_count = maxi(0, reservation_count - 1)
 		charged_bytes = 0 if reservation_count == 0 else charged_bytes
 		return {"status":"ready"}
@@ -298,6 +307,7 @@ func _run() -> void:
 		"pre_switch_validation")
 	var stop_during_ack: Dictionary = await _shutdown_case("ack_validation")
 	var stop_during_rollback: Dictionary = await _shutdown_case("rollback")
+	var stop_after_commit: Dictionary = await _shutdown_case("post_commit_health")
 	var same_revision_drift: Dictionary = await _source_drift_case()
 	var pre_switch_drift: Dictionary = await _pre_switch_drift_case()
 	var mid_switch_drift: Dictionary = await _mid_switch_drift_case()
@@ -333,6 +343,7 @@ func _run() -> void:
 		and bool(stop_during_pre_switch.get("passed", false)) \
 		and bool(stop_during_ack.get("passed", false)) \
 		and bool(stop_during_rollback.get("passed", false)) \
+		and bool(stop_after_commit.get("passed", false)) \
 		and bool(same_revision_drift.get("passed", false)) \
 		and bool(pre_switch_drift.get("passed", false)) \
 		and bool(mid_switch_drift.get("passed", false)) \
@@ -361,7 +372,8 @@ func _run() -> void:
 			"duringPostPrepareValidation": stop_during_post_prepare,
 			"duringPreSwitchValidation": stop_during_pre_switch,
 			"duringAck": stop_during_ack,
-			"duringRollback": stop_during_rollback},
+			"duringRollback": stop_during_rollback,
+			"postCommitHealthAwait": stop_after_commit},
 		"sameRevisionDrift": same_revision_drift,
 		"preSwitchDrift": pre_switch_drift,
 		"midSwitchDrift": mid_switch_drift,
@@ -535,6 +547,146 @@ func _disposal_failure_contract() -> Dictionary:
 		and persistent_ack.admission.reservation_count == 1 \
 		and persistent_ack.admission.charged_bytes > 0
 
+	var transient_cancel := _make_unconstructed_cancel_owner("transient-cancel-token")
+	transient_cancel.admission.cancel_failures_remaining = 1
+	var transient_cancel_drain: Dictionary = await transient_cancel.owner.stop_and_drain()
+	var transient_cancel_recovered: bool = transient_cancel_drain.get("status") == "ready" \
+		and transient_cancel.admission.cancel_calls == 2 \
+		and transient_cancel.admission.reservation_count == 0 \
+		and transient_cancel.admission.charged_bytes == 0 \
+		and transient_cancel.owner._unconstructed_memory_tokens.is_empty()
+	var persistent_cancel := _make_unconstructed_cancel_owner("persistent-cancel-token")
+	persistent_cancel.admission.cancel_failures_remaining = 10
+	var persistent_cancel_drain: Dictionary = await persistent_cancel.owner.stop_and_drain()
+	var persistent_cancel_blocked: bool = persistent_cancel_drain.get("status") == "failed" \
+		and persistent_cancel_drain.get("blocked") == true \
+		and persistent_cancel_drain.get("terminalMemoryFailure", {}).get("phase") \
+			== "cancel_unconstructed" \
+		and persistent_cancel_drain.get("terminalMemoryFailure", {}).get("token") \
+			== "persistent-cancel-token" \
+		and persistent_cancel.admission.cancel_calls == 3 \
+		and persistent_cancel.admission.reservation_count == 1 \
+		and persistent_cancel.admission.charged_bytes > 0 \
+		and persistent_cancel.owner._unconstructed_memory_tokens.has(\
+			"persistent-cancel-token")
+
+	var missing_token_owner := _make_deferred_release_fault_owner(
+		Vector3i(4112, 0, 0), "originally-present-token")
+	missing_token_owner.entry.memoryToken = ""
+	var missing_token_dispose: Dictionary = missing_token_owner.owner._dispose(
+		missing_token_owner.entry)
+	var missing_token_blocked: bool = missing_token_dispose.get("status") == "failed" \
+		and missing_token_dispose.get("retryTracked") == true \
+		and missing_token_owner.owner._failed \
+		and missing_token_owner.owner._drain_terminal_failure.get("reason") \
+			== "collision_memory_dispose_retry_token_missing" \
+		and missing_token_owner.owner._disposal_retry_orphans.size() == 1 \
+		and is_instance_valid(missing_token_owner.entry.body) \
+		and not missing_token_owner.entry.body.is_queued_for_deletion() \
+		and missing_token_owner.entry.body.collision_layer == 0 \
+		and missing_token_owner.entry.shapes[0].disabled
+
+	var unbound_retry_owner = OwnerScript.new()
+	add_child(unbound_retry_owner)
+	var unbound_retry_body := StaticBody3D.new()
+	unbound_retry_body.collision_layer = OwnerScript.COLLISION_LAYER
+	unbound_retry_owner.add_child(unbound_retry_body)
+	var unbound_retry_shape := CollisionShape3D.new()
+	unbound_retry_shape.shape = BoxShape3D.new()
+	unbound_retry_body.add_child(unbound_retry_shape)
+	var unbound_retry_entry := {"body":unbound_retry_body,
+		"shapes":[unbound_retry_shape], "retiredShapes":[], "memoryToken":""}
+	var unbound_retry_result: Dictionary = unbound_retry_owner._retain_disposal_retry(
+		unbound_retry_entry)
+	var unbound_retry_blocked: bool = unbound_retry_result.get("tracked") == true \
+		and unbound_retry_result.get("orphaned") == true \
+		and unbound_retry_owner._failed \
+		and unbound_retry_owner._disposal_retry_orphans.size() == 1 \
+		and not unbound_retry_body.is_queued_for_deletion()
+
+	var empty_token_source := FakeSource.new()
+	var empty_token_owner = OwnerScript.new()
+	add_child(empty_token_owner)
+	var empty_token_identity := _identity(1)
+	var empty_token_block := Vector3i(4113, 0, 0)
+	var empty_token_blocks: Array[Vector3i] = []
+	empty_token_blocks.append(empty_token_block)
+	var empty_token_rows: Array[Dictionary] = []
+	var empty_token_row: Dictionary = _row(empty_token_block,
+		"empty-token-artifact", 0.5, empty_token_identity)
+	empty_token_rows.append(empty_token_row)
+	empty_token_source.rows[empty_token_block] = empty_token_row
+	empty_token_source.current = _shutdown_snapshot(empty_token_identity,
+		empty_token_blocks, "empty-token-artifact",
+		String(empty_token_row.get("sourceIdentity", {}).get("hex", "")),
+		"empty-token-closure")
+	empty_token_owner.bind_source(empty_token_source)
+	var empty_token_admission := DeferredReleaseFault.new()
+	empty_token_admission.return_empty_token = true
+	var empty_token_epoch := "fixture-empty-token-owner"
+	assert(empty_token_owner.assign_retirement_owner_epoch(empty_token_epoch),
+		"empty-token fixture assigns owner epoch")
+	assert(empty_token_owner.bind_memory_admission(empty_token_admission,
+		"fixture-empty-token-window", empty_token_epoch),
+		"empty-token fixture binds admission ledger")
+	var empty_token_barrier = BarrierScript.new()
+	var empty_token_begin: Dictionary = empty_token_barrier.begin(self,
+		empty_token_owner, empty_token_identity, empty_token_row.bounds)
+	while empty_token_begin.get("status") == "pending":
+		await get_tree().process_frame
+		empty_token_begin = empty_token_barrier.census_progress(empty_token_identity)
+	var empty_token_publish: Dictionary = await empty_token_owner.publish(
+		_request(empty_token_identity, empty_token_blocks,
+			empty_token_blocks, empty_token_rows), empty_token_barrier)
+	var empty_token_second_publish: Dictionary = await empty_token_owner.publish({})
+	var empty_token_drain: Dictionary = await empty_token_owner.stop_and_drain()
+	var bound_empty_token_blocked: bool = empty_token_publish.get("status") == "failed" \
+		and empty_token_publish.get("reason") == "collision_memory_token_missing" \
+		and empty_token_owner._failed \
+		and empty_token_owner._drain_terminal_failure.get("phase") \
+			== "candidate_reservation" \
+		and empty_token_admission.reserve_calls == 1 \
+		and empty_token_owner.get_child_count() == 0 \
+		and empty_token_second_publish.get("reason") \
+			== "resident_owner_memory_release_terminal_failure" \
+		and empty_token_drain.get("status") == "failed" \
+		and empty_token_admission.reservation_count == 1 \
+		and empty_token_admission.charged_bytes > 0
+
+	var capacity := _make_deferred_release_fault_owner(
+		Vector3i(4110, 0, 0), "retry-capacity-owner-token")
+	capacity.admission._limits.maxReservations = 1
+	var capacity_entry := _entry_for_fault_owner(capacity, "retry-capacity-overflow-token")
+	var capacity_first: Dictionary = capacity.owner._retain_disposal_retry(capacity.entry)
+	var capacity_overflow: Dictionary = capacity.owner._retain_disposal_retry(capacity_entry)
+	var capacity_blocked: bool = capacity_first.get("tracked") == true \
+		and capacity_overflow.get("orphaned") == true \
+		and capacity.owner._disposal_retry_entries.size() == 1 \
+		and capacity.owner._disposal_retry_orphans.size() == 1 \
+		and not capacity_entry.body.is_queued_for_deletion() \
+		and capacity.owner._drain_terminal_failure.get("reason") \
+			== "collision_memory_dispose_retry_capacity_exhausted"
+	var capacity_blocked_drain: Dictionary = await capacity.owner.stop_and_drain()
+	capacity_blocked = capacity_blocked and capacity_blocked_drain.get("status") == "failed" \
+		and is_instance_valid(capacity_entry.body) \
+		and is_instance_valid(capacity.entry.body)
+
+	var conflict := _make_deferred_release_fault_owner(
+		Vector3i(4111, 0, 0), "retry-conflicting-token")
+	var conflict_entry := _entry_for_fault_owner(conflict, "retry-conflicting-token")
+	var conflict_first: Dictionary = conflict.owner._retain_disposal_retry(conflict.entry)
+	var conflict_second: Dictionary = conflict.owner._retain_disposal_retry(conflict_entry)
+	var conflict_blocked_drain: Dictionary = await conflict.owner.stop_and_drain()
+	var retry_collision_blocked: bool = conflict_first.get("tracked") == true \
+		and conflict_second.get("conflict") == true \
+		and conflict.owner._disposal_retry_entries.get("retry-conflicting-token", {}) \
+			.get("conflicts", []).size() == 1 \
+		and conflict_blocked_drain.get("status") == "failed" \
+		and is_instance_valid(conflict.entry.body) \
+		and is_instance_valid(conflict_entry.body) \
+		and not conflict.entry.body.is_queued_for_deletion() \
+		and not conflict_entry.body.is_queued_for_deletion()
+
 	var prepare := _make_deferred_release_fault_owner(
 		Vector3i(4101, 0, 0), "prepare-reject-token")
 	prepare.owner._live.clear()
@@ -692,6 +844,9 @@ func _disposal_failure_contract() -> Dictionary:
 		and persistent_defer_sticky and transient_ack_recovered \
 		and persistent_ack_blocked and persistent_ack_sticky \
 		and persistent_ack_admission_blocked \
+		and transient_cancel_recovered and persistent_cancel_blocked \
+		and missing_token_blocked and unbound_retry_blocked \
+		and bound_empty_token_blocked and capacity_blocked and retry_collision_blocked \
 		and direct_drain.get("status") == "ready" \
 		and prepare_retained and prepare_drain.get("status") == "ready" \
 		and rollback_retained and rollback_drain.get("status") == "ready" \
@@ -700,7 +855,7 @@ func _disposal_failure_contract() -> Dictionary:
 		and abort_recovery_valid and abort_recovery_drain.get("status") == "ready" \
 		and abort_failure_stays_blocked
 	return {"passed":passed,
-		"evidenceLevel":"injected defer-release rejection with real owner scene-tree drain; stub does not model ledger byte accounting",
+		"evidenceLevel":"injected release/cancel failures with real owner scene-tree drain; no-ledger direct dispose is a fixture/service mode, while retry tracking and bound empty-token admission fail closed; stub does not model ledger byte accounting",
 		"directRetirement":{"result":direct_result, "retained":direct_retained,
 			"drain":direct_drain,
 			"transientDeferRecovered":transient_defer_recovered},
@@ -716,6 +871,21 @@ func _disposal_failure_contract() -> Dictionary:
 			"subsequentPublishBlocked":persistent_ack_admission_blocked,
 			"publish":persistent_ack_publish,
 			"retryReceipt":persistent_ack_again},
+		"transientCancel":{"drain":transient_cancel_drain,
+			"recovered":transient_cancel_recovered},
+		"persistentCancel":{"drain":persistent_cancel_drain,
+			"blocked":persistent_cancel_blocked},
+		"missingRetryToken":{"dispose":missing_token_dispose,
+			"blocked":missing_token_blocked},
+		"unboundRetryToken":{"result":unbound_retry_result,
+			"blocked":unbound_retry_blocked},
+		"boundEmptyAdmissionToken":{"publish":empty_token_publish,
+			"secondPublish":empty_token_second_publish,
+			"drain":empty_token_drain,"blocked":bound_empty_token_blocked},
+		"retryCapacity":{"first":capacity_first, "overflow":capacity_overflow,
+			"blocked":capacity_blocked, "drain":capacity_blocked_drain},
+		"retryTokenCollision":{"first":conflict_first, "second":conflict_second,
+			"blocked":retry_collision_blocked, "drain":conflict_blocked_drain},
 		"prepareAndCandidateSweep":{"prepare":prepare_result,
 			"sweep":prepare_sweep, "retained":prepare_retained,
 			"drain":prepare_drain},
@@ -758,6 +928,52 @@ func _make_deferred_release_fault_owner(block: Vector3i, token: String) -> Dicti
 	owner._resident_blocks.append(block)
 	admission.cancel_body = body
 	return {"owner":owner, "admission":admission, "entry":entry}
+
+
+func _new_fixture_ledger(epoch: String) -> Object:
+	# These intentionally small synthetic values exercise the owner lifecycle;
+	# they are not measurements or production memory limits.
+	var policy = PolicyScript.new()
+	var configured: Dictionary = policy.configure({
+		"maxVerticesPerRow":64, "verticesPerShape":16,
+		"rowEntryBytes":64, "bodyEntryBytes":64, "shapeEntryBytes":64,
+		"physicsPayloadMultiplier":2, "maxRowsPerWindow":64,
+		"maxWindowChargedBytes":1048576,
+		"maxAggregateChargedBytes":4194304, "maxReservations":128})
+	assert(configured.get("status") == "ready",
+		"synthetic N5 fixture policy configures")
+	var admission = AdmissionScript.new()
+	var setup: Dictionary = admission.setup(policy, epoch,
+		"fixture-instance-%s" % epoch)
+	assert(setup.get("status") == "ready",
+		"synthetic N5 fixture ledger configures")
+	return admission
+
+
+func _make_unconstructed_cancel_owner(token: String) -> Dictionary:
+	var owner = OwnerScript.new()
+	add_child(owner)
+	var epoch := "fixture-owner-%s" % token
+	var admission := DeferredReleaseFault.new()
+	assert(owner.assign_retirement_owner_epoch(epoch),
+		"cancel fixture assigns a unique retirement owner epoch")
+	assert(owner.bind_memory_admission(admission, "fixture-window-%s" % token,
+		epoch), "cancel fixture binds injected admission ledger")
+	owner._unconstructed_memory_tokens.append(token)
+	return {"owner":owner, "admission":admission}
+
+
+func _entry_for_fault_owner(fault: Dictionary, token: String) -> Dictionary:
+	var owner = fault.owner
+	var body := StaticBody3D.new()
+	body.collision_layer = OwnerScript.COLLISION_LAYER
+	body.collision_mask = 0
+	owner.add_child(body)
+	var shape := CollisionShape3D.new()
+	shape.shape = BoxShape3D.new()
+	body.add_child(shape)
+	return {"body":body, "shapes":[shape], "retiredShapes":[],
+		"memoryToken":token, "expectedHit":true}
 
 
 func _make_shape_less_reserved_body_owner(block: Vector3i,
@@ -1595,20 +1811,60 @@ func _capture_rollback_drain(owner: Node3D, token: String,
 	_captured_drains[token] = await owner.stop_and_drain()
 
 
+func _capture_post_commit_drain(owner: Node3D, token: String,
+		identity: Dictionary, block: Vector3i, prior_live_body_ids: Dictionary,
+		stop_triggered: Array, observation: Array) -> void:
+	for _frame in range(180):
+		var candidate: Dictionary = owner.get("_live").get(block, {})
+		var candidate_body = candidate.get("body")
+		var old_body_present := false
+		for child in owner.get_children():
+			if child is StaticBody3D \
+					and prior_live_body_ids.has(child.get_instance_id()):
+				old_body_present = true
+				break
+		if bool(owner.get("_busy")) and owner.get("_identity") == identity \
+				and is_instance_valid(candidate_body) \
+				and not prior_live_body_ids.has(candidate_body.get_instance_id()) \
+				and old_body_present:
+			stop_triggered[0] = true
+			observation[0] = {"observedPostCommitHealthAwait":true,
+				"busy":bool(owner.get("_busy")),
+				"identityCommitted":owner.get("_identity").duplicate(true),
+				"candidateBodyInstanceId":candidate_body.get_instance_id(),
+				"oldBodyStillPresent":old_body_present,
+				"requiredPhysicsFrame":int(owner.get("_health_required_physics_frame")),
+				"physicsFrame":Engine.get_physics_frames()}
+			_captured_drains[token] = await owner.stop_and_drain()
+			return
+		await get_tree().process_frame
+	observation[0] = {"observedPostCommitHealthAwait":false,
+		"reason":"post_commit_state_not_observed"}
+
+
 func _shutdown_case(phase: String) -> Dictionary:
 	var source := FakeSource.new()
 	var owner = OwnerScript.new()
 	add_child(owner)
 	owner.bind_source(source)
+	var token := "%s-%d" % [phase, Time.get_ticks_usec()]
+	if phase == "post_commit_health":
+		var owner_epoch := "fixture-owner-%s" % token
+		var admission: Object = _new_fixture_ledger("fixture-ledger-%s" % token)
+		assert(owner.assign_retirement_owner_epoch(owner_epoch),
+			"post-commit fixture assigns owner epoch")
+		assert(owner.bind_memory_admission(admission,
+			"fixture-window-%s" % token, owner_epoch),
+			"post-commit fixture binds real admission ledger")
 	var identity := _identity(1)
 	var phase_x := {"prepare": 400, "post_prepare_validation": 500,
 		"pre_switch_validation": 600, "ack_validation": 700,
-		"rollback": 800}
+		"rollback": 800, "post_commit_health": 900}
 	var blocks: Array[Vector3i] = [Vector3i(int(phase_x.get(phase, 900)), 0, 0)]
 	var seeded_live := true
 	var seed_outcome := {}
 	var seed_released := false
-	if phase == "rollback":
+	if phase in ["rollback", "post_commit_health"]:
 		var seed_row: Dictionary = _row(blocks[0], "shutdown-live-seed", 0.5,
 			identity, {"hex": "shutdown-live-source"})
 		source.rows[blocks[0]] = seed_row
@@ -1636,15 +1892,15 @@ func _shutdown_case(phase: String) -> Dictionary:
 	while begun.get("status") == "pending":
 		await get_tree().process_frame
 		begun = barrier.census_progress(identity)
-	var token := "%s-%d" % [phase, Time.get_ticks_usec()]
 	var stop_triggered := [false]
+	var post_commit_observation := [{}]
 	var enabled_candidate_observed := [false]
 	var rollback_failure_forced := [false]
 	var rollback_wait_observed := [false]
 	var candidate_body: Array[StaticBody3D] = [null]
 	var row_queries := [0]
 	var prior_live_body_ids := {}
-	if phase == "rollback":
+	if phase in ["rollback", "post_commit_health"]:
 		for child in owner.get_children():
 			if child is StaticBody3D:
 				prior_live_body_ids[child.get_instance_id()] = true
@@ -1682,6 +1938,10 @@ func _shutdown_case(phase: String) -> Dictionary:
 					else:
 						schedule_stop.call()
 					return
+	elif phase == "post_commit_health":
+		call_deferred("_capture_post_commit_drain", owner, token, identity,
+			blocks[0], prior_live_body_ids, stop_triggered,
+			post_commit_observation)
 	var outcome: Dictionary = await owner.publish(_request(identity, blocks, blocks,
 		[row]), barrier)
 	source.row_query_hook = Callable()
@@ -1703,15 +1963,20 @@ func _shutdown_case(phase: String) -> Dictionary:
 		phase_observed = int(row_queries[0]) == (2 if phase == "post_prepare_validation" else 3)
 	elif phase in ["ack_validation", "rollback"]:
 		phase_observed = bool(enabled_candidate_observed[0])
+	elif phase == "post_commit_health":
+		phase_observed = bool(post_commit_observation[0].get(
+			"observedPostCommitHealthAwait", false))
 	if phase == "rollback":
 		phase_observed = phase_observed and bool(rollback_failure_forced[0]) \
 			and bool(rollback_wait_observed[0])
 	var terminal_hold := not barrier.admit_motion(_actor, Vector3.ZERO)
 	_actor.position = Vector3(100, 0, 0)
 	await get_tree().physics_frame
+	var expected_stop_reason := "resident_owner_stopping_after_commit" \
+		if phase == "post_commit_health" else "resident_owner_stopping"
 	return {"passed": seeded_live and bool(stop_triggered[0]) and first_stop_completed \
 		and phase_observed and outcome.get("status") == "failed" \
-		and outcome.get("reason") == "resident_owner_stopping" \
+		and outcome.get("reason") == expected_stop_reason \
 		and not outcome.has("oldPhysicalUnchanged") \
 		and not outcome.has("oldPhysicalRestored") \
 		and drained.get("status") == "ready" \
@@ -1723,6 +1988,7 @@ func _shutdown_case(phase: String) -> Dictionary:
 		"phase": phase, "stopTriggered": stop_triggered[0],
 		"firstStopCompleted": first_stop_completed,
 		"phaseObserved": phase_observed, "rowQueries": row_queries[0],
+		"postCommitObservation":post_commit_observation[0],
 		"enabledCandidateObserved": enabled_candidate_observed[0],
 		"rollbackFailureForced": rollback_failure_forced[0],
 		"rollbackWaitObserved": rollback_wait_observed[0],
