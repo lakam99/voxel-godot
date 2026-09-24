@@ -735,15 +735,26 @@ RAII rejection guard preserves bounded cleanup on unknown exceptions, and
 focused MSVC/LLVM importer suites pass 11/11 with exact importer coverage
 154/154 lines, 18/18 functions, and 98/98 branches. Canonical primary whole-
 core coverage has not yet been rerun on the combined source and remains
-unverified until the N5 source slice settles. The generated-patch candidate
+unverified until the canonical native gate is run. The generated-patch candidate
 changes only core C++ files, core `NativeValue`/SHA helpers, the source
 manifest and native tests; it adds no production adapter/runtime/save or
 routing caller. This is not generated-patch source integration, physical
 parity, native authority cutover, or N3/N4/N5 completion. Remaining core
 limits include synchronous worst-case tombstone projection, caller-attested
 feature-definition digest until N4 binds the real producer, and no live
-`StructureSystem` differential. The canonical full native gate is deferred
-until the focused N5 source fix is integrated; avoid broad intermediate reruns.
+`StructureSystem` differential. The focused N5 physical health/cap repair is
+now integrated in `2db4778` and `552cddf`. Primary-tree resident-owner and
+aggregate-window contracts pass at
+`artifacts/native-world-backend/n5-resident-collision-owner-1790226528344-48d5a289/report.json`
+and `artifacts/native-world-backend/n5-window-aggregate-1790226540162-959041ec/report.json`.
+The resident check counts each shape as an operation and gates receipts on
+post-mutation physics acknowledgement; the coordinator and exact-cap fixture
+share a 96-operation cursor budget (65,536 accepted, 65,537 rejected). The
+1.5ms step target is advisory, not a hard wall-clock bound. Readiness caching
+assumes post-publication mutation uses owner APIs. These are fixture-level
+checks, not production cutover. N5 stop/drain still needs planner replacement
+cancellation and lease retirement before its terminal receipt. The canonical
+full native gate can now be run once on the settled core/importer sources.
 
 The native surface-deformation compiler candidate is also integrated as a
 pure-core/shadow slice in primary commits `7e9d84a`, `a2c1c24`, `233c339`,
