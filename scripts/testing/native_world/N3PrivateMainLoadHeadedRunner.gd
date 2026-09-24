@@ -49,6 +49,7 @@ func _run() -> void:
 	elif bool(main.get("startup_loading_active")) and _failure.is_empty(): _failure = "startup_timeout"
 	elif not _ready_seen and _failure.is_empty(): _failure = "private_candidate_missing"
 	var runtime_continue := false
+	var override_retained := false
 	var save_written := false
 	var save_decoded := false
 	var pre_runtime_flags := {}
@@ -62,6 +63,8 @@ func _run() -> void:
 		save_written = main.save_system.save(String(main.get("seed_text")), save)
 		var decoded: Dictionary = main.save_system.load(String(main.get("seed_text"))) if save_written else {}
 		save_decoded = int(decoded.get("version", -1)) == 2
+		var override_sections_before: int = (decoded.get("terrainVolume", {}) as Dictionary).get("sections", []).size() \
+			if decoded.get("terrainVolume", {}) is Dictionary else -1
 		pre_runtime_flags = {"startupOperation":bool(main.get("startup_operation_active")),
 			"startupLoading":bool(main.get("startup_loading_active")),
 			"runtimeLoading":bool(main.get("runtime_loading_active")),
@@ -69,6 +72,9 @@ func _run() -> void:
 			"saveSeed":String(decoded.get("seed", "")),
 			"worldSeed":String(main.get("seed_text"))}
 		runtime_continue = bool(await main.try_load_world_staged(false, decoded)) if save_decoded else false
+		override_retained = decoded.has("terrainVolume") and decoded.has("terrain") \
+			and decoded.get("terrainVolume", {}) is Dictionary \
+			and (decoded.get("terrainVolume", {}) as Dictionary).get("sections", []).size() == override_sections_before
 		var final_stage = main.get("_native_private_load_stage")
 		if final_stage != null:
 			final_generation = int(final_stage.snapshot().get("transaction", {}).get("generation", 0))
@@ -91,9 +97,12 @@ func _run() -> void:
 				"elapsedMs":row.get("elapsedMs", 0), "stepMs":row.get("stepMs", 0)})
 	var gameplay_row: Dictionary = domains.get("gameplay", {}) if domains.get("gameplay", {}) is Dictionary else {}
 	var save_row: Dictionary = domains.get("save_restore", {}) if domains.get("save_restore", {}) is Dictionary else {}
+	var retirement_row: Dictionary = domains.get("save_retirement", {}) \
+		if domains.get("save_retirement", {}) is Dictionary else {}
 	var admitted_records := int(stage_state.get("transaction", {}).get("recordsAdmitted", 0))
 	var report := {"schema":"n3-private-main-load-headed/v1",
 		"passed":_failure.is_empty() and _pending_seen and _ready_seen \
+			and (String(retirement_row.get("status", "")) == "ready" if is_continue else override_retained) \
 			and (is_continue or (save_written and save_decoded and runtime_continue)) \
 			and String(gameplay_row.get("status", "")) == "ready" \
 			and (not is_continue or String(save_row.get("status", "")) == "ready") \
@@ -115,8 +124,10 @@ func _run() -> void:
 		"gameplayReadiness":{"status":gameplay_row.get("status", ""),
 			"elapsedMs":gameplay_row.get("elapsedMs", 0), "stepMs":gameplay_row.get("stepMs", 0)},
 		"saveRestoreReadiness":save_row.get("status", ""),
+		"saveRetirement":retirement_row,
+		"snapshotOverrideRetained":override_retained,
 		"sourceAuthority":"script_and_voxel_tools_unchanged",
-		"doesNotProve":"No fresh-process Continue, collision cutover, native gameplay query publication, or full N3 acceptance."}
+		"doesNotProve":"No maximum-size file-backed Continue, collision cutover, native gameplay query publication, whole-game frame cadence, or full N3 acceptance."}
 	if not _report_path.is_empty():
 		var file := FileAccess.open(_report_path, FileAccess.WRITE)
 		if file != null: file.store_string(JSON.stringify(report, "\t"))

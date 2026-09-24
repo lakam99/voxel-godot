@@ -91,6 +91,22 @@ func run() -> void:
 		"spawnChance":float(main.STRUCTURE_SPAWN_CHANCE)})
 	main.world_generation_system = WORLD.new()
 	main.world_generation_system.setup(main)
+	var admission = main.structure_system.citadel_terrain_admission
+	var unfinalized_towns: Dictionary = admission._towns.duplicate(true)
+	var unfinalized_generation: int = int(admission._generation)
+	var premature_private = PRIVATE_STAGE.new()
+	var premature_result: Dictionary = premature_private.start(main)
+	var premature_stopped: Dictionary = premature_private.stop()
+	check(premature_result.get("reason") == "citadel_town_inputs_unfinalized"
+		and premature_stopped.get("drained") == true
+		and admission._towns == unfinalized_towns
+		and not admission._town_inputs_finalized
+		and int(admission._generation) == unfinalized_generation,
+		"private stage failure leaves unfinalized production town inputs untouched")
+	var production_finalized: Dictionary = admission.finalize_town_inputs(main.town_region_cache)
+	check(production_finalized.get("status") == "ready", "production owner finalizes town inputs explicitly")
+	var finalized_towns: Dictionary = admission._towns.duplicate(true)
+	var finalized_generation: int = int(admission._generation)
 	var terrain_root := Node3D.new()
 	root.add_child(terrain_root)
 	var terrain = _make_terrain(main)
@@ -184,7 +200,10 @@ func run() -> void:
 		await process_frame
 	check(stale_started.get("status") == "pending"
 		and stale_result.get("reason") == "private_source_changed_during_import"
-		and stale_stopped.get("drained") == true,
+		and stale_stopped.get("drained") == true
+		and admission._towns == finalized_towns
+		and admission._town_inputs_finalized
+		and int(admission._generation) == finalized_generation,
 		"private candidate rejects changed current source and drains without publishing")
 	var private_continue = PRIVATE_STAGE.new()
 	var private_continue_start: Dictionary = private_continue.start(main, canonical_save)
@@ -215,7 +234,10 @@ func run() -> void:
 		await process_frame
 	check(private_cancel_start.get("status") == "pending"
 		and private_cancel_result.get("drained") == true
-		and private_cancelled.snapshot().get("backendRetained") == false,
+		and private_cancelled.snapshot().get("backendRetained") == false
+		and admission._towns == finalized_towns
+		and admission._town_inputs_finalized
+		and int(admission._generation) == finalized_generation,
 		"private candidate cancellation drains its retained native owner")
 	var private_legacy_cancel = PRIVATE_STAGE.new()
 	var legacy_cancel_start: Dictionary = private_legacy_cancel.start(main, legacy_save)

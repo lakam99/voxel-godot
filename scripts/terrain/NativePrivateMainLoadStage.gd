@@ -33,7 +33,7 @@ func start(main, save_snapshot: Dictionary = {}) -> Dictionary:
 			and _save.get("terrain", []) is Array \
 			and not (_save.get("terrain", []) as Array).is_empty():
 		_converter = LegacyConverter.new()
-		var begun: Dictionary = _converter.setup(_main, _save)
+		var begun: Dictionary = _converter.setup(_main, _save, true)
 		if begun.get("status") != "ready": return _failed(String(begun.get("reason", "legacy_conversion_failed")))
 		_state = "converting"
 		return {"status":"pending", "reason":"legacy_v2_conversion_pending"}
@@ -151,7 +151,7 @@ func snapshot() -> Dictionary:
 func current_source_valid() -> bool:
 	if _main == null or not is_instance_valid(_main): return false
 	if String(_main.get("seed_text")) != _source_seed: return false
-	var current: Dictionary = SourceRequest.from_main(_main)
+	var current: Dictionary = SourceRequest.from_finalized_main(_main)
 	if current.get("status") != "ready" or current.get("request") != _source_descriptor:
 		return false
 	if not _save.is_empty() and (int(_save.get("version", -1)) != 2 \
@@ -160,8 +160,8 @@ func current_source_valid() -> bool:
 	return true
 
 func _begin_import() -> Dictionary:
-	var built: Dictionary = SourceRequest.from_main(_main) if _save.is_empty() \
-		else SourceRequest.from_main_with_v2_save_snapshot(_main, _save)
+	var built: Dictionary = SourceRequest.from_finalized_main(_main) if _save.is_empty() \
+		else SourceRequest.from_main_with_v2_save_snapshot(_main, _save, true)
 	if built.get("status") != "ready": return _failed(String(built.get("reason", "private_source_request_failed")))
 	var descriptor: Dictionary = built.request.duplicate(false)
 	descriptor.erase("terrainVolume")

@@ -9,6 +9,14 @@ const SAVE_SNAPSHOT_LEASE := preload("res://scripts/terrain/NativeWorldSaveSnaps
 # Constructs the native initialization envelope from the same finalized inputs
 # used by production site admission. This does not request or sample terrain.
 static func from_main(main) -> Dictionary:
+	return _from_main(main, false)
+
+## Private candidates may only read the production owner's finalized input.
+## Rechecking source identity must never finalize or mutate shared admission.
+static func from_finalized_main(main) -> Dictionary:
+	return _from_main(main, true)
+
+static func _from_main(main, finalized_only: bool) -> Dictionary:
 	if main == null:
 		return _failed("main_missing")
 	var seed := String(main.get("seed_text"))
@@ -22,7 +30,8 @@ static func from_main(main) -> Dictionary:
 		return _failed("site_admission_missing")
 	if String(admission.world_seed) != seed or String(admission.profile_store.world_seed()) != seed:
 		return _failed("site_admission_seed_mismatch")
-	var finalized: Dictionary = admission.finalize_town_inputs(main.get("town_region_cache"))
+	var finalized: Dictionary = admission.finalized_town_inputs_snapshot() \
+		if finalized_only else admission.finalize_town_inputs(main.get("town_region_cache"))
 	if String(finalized.get("status", "")) != "ready":
 		return _failed(String(finalized.get("reason", "town_inputs_not_ready")))
 	var towns = finalized.get("towns")
@@ -78,8 +87,8 @@ static func from_main_with_current_volume(main) -> Dictionary:
 
 ## Continue may pass the already-loaded v2 envelope directly to the native
 ## owner. This adapter never regenerates or re-exports script volume state.
-static func from_main_with_save_volume(main, volume) -> Dictionary:
-	var built := from_main(main)
+static func from_main_with_save_volume(main, volume, finalized_only := false) -> Dictionary:
+	var built := from_finalized_main(main) if finalized_only else from_main(main)
 	if built.get("status") != "ready":
 		return built
 	if not volume is Dictionary or volume.get("schemaVersion") != 1 or volume.get("sectionSize") != 16:
@@ -120,7 +129,7 @@ static func from_main_with_v2_save(main, save) -> Dictionary:
 ## transaction alive through commit/take_backend or acknowledged cancellation
 ## drain. Unlike from_main_with_v2_save(), this constructor never recursively
 ## clones the potentially large section/cell payload.
-static func from_main_with_v2_save_snapshot(main, save) -> Dictionary:
+static func from_main_with_v2_save_snapshot(main, save, finalized_only := false) -> Dictionary:
 	if not save is Dictionary or int(save.get("version", -1)) != 2:
 		return _failed("save_v2_required")
 	if main == null:
@@ -138,7 +147,7 @@ static func from_main_with_v2_save_snapshot(main, save) -> Dictionary:
 		if not terrain_value.is_empty():
 			return {"status":"pending", "reason":"native_legacy_terrain_conversion_required"}
 		volume = {"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}
-	var built := from_main(main)
+	var built := from_finalized_main(main) if finalized_only else from_main(main)
 	if built.get("status") != "ready":
 		return built
 	var request: Dictionary = built.request.duplicate(true)

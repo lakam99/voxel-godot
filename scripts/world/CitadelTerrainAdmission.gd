@@ -71,6 +71,12 @@ func finalize_town_inputs(towns: Dictionary) -> Dictionary:
 	_town_inputs_finalized = true
 	return {"status":"ready","towns":_towns}
 
+func finalized_town_inputs_snapshot() -> Dictionary:
+	if not _town_inputs_finalized:
+		return {"status":"failed", "reason":"citadel_town_inputs_unfinalized"}
+	return {"status":"ready", "towns":_towns.duplicate(true),
+		"generation":_generation, "worldSeed":world_seed}
+
 func source_policy_snapshot() -> Dictionary:
 	return _policy.duplicate(true)
 

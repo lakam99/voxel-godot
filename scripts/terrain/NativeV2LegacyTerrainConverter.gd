@@ -30,7 +30,7 @@ var _exported_volume := {}
 var _cancel_requested := false
 var _save_snapshot := {}
 
-func setup(main, save: Dictionary) -> Dictionary:
+func setup(main, save: Dictionary, finalized_only := false) -> Dictionary:
 	if _state != "new": return _failed("converter_already_started")
 	if main == null or int(save.get("version", -1)) != 2 \
 			or String(save.get("seed", main.get("seed_text"))) != String(main.get("seed_text")):
@@ -44,7 +44,7 @@ func setup(main, save: Dictionary) -> Dictionary:
 	# Scanning the whole historical column array here would stall a large load.
 	if not _valid_entry(entries[0]): return _failed("legacy_terrain_entry_invalid")
 	var source: Dictionary = SourceRequest.from_main_with_save_volume(main,
-		{"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]})
+		{"schemaVersion":1, "sectionSize":16, "revision":0, "sections":[]}, finalized_only)
 	if source.get("status") != "ready": return _failed(String(source.get("reason", "native_source_invalid")))
 	_cell_meters = float(source.request.constants.cellSizeMeters)
 	if _cell_meters <= 0.0 or DurableCodec.BIOMES.find("underground_air") < 0:

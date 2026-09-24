@@ -14,6 +14,7 @@ const WorldStreamingCoordinatorScript := preload("res://scripts/world/WorldStrea
 const ActorPhysicalStreamingDemandScript := preload("res://scripts/world/ActorPhysicalStreamingDemand.gd")
 const NativeCollisionAdmissionBarrierScript := preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const NativePrivateMainLoadStageScript := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
+const NativeDecodedSaveRetirementScript := preload("res://scripts/terrain/NativeDecodedSaveRetirement.gd")
 const GeneratedContentViewPriorityScript := preload("res://scripts/world/GeneratedContentViewPriority.gd")
 const RegionalNavigationPublicationScript := preload("res://scripts/world/RegionalNavigationPublication.gd")
 const WorldLoadingOverlayScript := preload("res://scripts/world/WorldLoadingOverlay.gd")
@@ -539,8 +540,15 @@ func _run_deferred_startup_boot() -> void:
         await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
         return
     if not skip_synchronous_world_boot:
+        var town_inputs_result: Dictionary = finalize_production_town_inputs_for_loading()
+        if town_inputs_result.get("status") != "ready":
+            await stop_startup_loading(StartupReadinessResultScript.failed(
+                String(town_inputs_result.get("reason", "town_inputs_not_ready"))))
+            return
         var private_load_result: Dictionary = await stage_private_native_world_load(
             _native_startup_save_snapshot if loaded else {})
+        if private_load_result.get("status") == "ready" and loaded:
+            private_load_result = await retire_owned_decoded_save_terrain(_native_startup_save_snapshot)
         _native_startup_save_snapshot = {}
         if private_load_result.get("status") != "ready":
             await stop_startup_loading(StartupReadinessResultScript.failed(
@@ -2723,6 +2731,38 @@ func save_world(show_message := true) -> bool:
 
 ## Stage A retains a private native candidate during ordinary loading. It
 ## publishes no gameplay query, terrain block, collider, navigation or save.
+func finalize_production_town_inputs_for_loading() -> Dictionary:
+    var admission = structure_system.get("citadel_terrain_admission") if structure_system != null else null
+    if admission == null:
+        return {"status":"failed", "reason":"site_admission_missing"}
+    return admission.finalize_town_inputs(town_region_cache)
+
+func retire_owned_decoded_save_terrain(snapshot: Dictionary) -> Dictionary:
+    var retirement = NativeDecodedSaveRetirementScript.new()
+    var result: Dictionary = retirement.start_owned_file_save(snapshot)
+    var advances := 0
+    var frames := 0
+    var max_frame_work_usec := 0
+    while result.get("status") == "pending":
+        if frames == 0 or frames % 32 == 0:
+            await startup_loading_yield("Retiring decoded save terrain", "save_retirement", "pending",
+                retirement.snapshot())
+        else:
+            await get_tree().process_frame
+        var frame_started := Time.get_ticks_usec()
+        while result.get("status") == "pending" \
+                and Time.get_ticks_usec() - frame_started < 3000:
+            result = retirement.advance()
+            advances += 1
+        max_frame_work_usec = maxi(max_frame_work_usec, Time.get_ticks_usec() - frame_started)
+        frames += 1
+    if result.get("status") == "ready":
+        result["advances"] = advances
+        result["frames"] = frames
+        result["maxFrameWorkUsec"] = max_frame_work_usec
+        await startup_loading_yield("Decoded save terrain retired", "save_retirement", "ready", result)
+    return result
+
 func stage_private_native_world_load(save_snapshot: Dictionary = {}) -> Dictionary:
     if _native_private_load_stage != null:
         var retired: Dictionary = _native_private_load_stage.stop()
@@ -3018,11 +3058,22 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
     if not startup_result_is_ready(tutorial_result):
         await stop_startup_loading(tutorial_result, "tutorial_restore_readiness_failed")
         return false
+    var town_inputs_result: Dictionary = finalize_production_town_inputs_for_loading()
+    if town_inputs_result.get("status") != "ready":
+        await stop_startup_loading(StartupReadinessResultScript.failed(
+            String(town_inputs_result.get("reason", "town_inputs_not_ready"))))
+        return false
     var private_load_result: Dictionary = await stage_private_native_world_load(snapshot)
     if private_load_result.get("status") != "ready":
         await stop_startup_loading(StartupReadinessResultScript.failed(
             String(private_load_result.get("reason", "private_native_load_failed"))))
         return false
+    if snapshot_override.is_empty():
+        var retired_save: Dictionary = await retire_owned_decoded_save_terrain(snapshot)
+        if retired_save.get("status") != "ready":
+            await stop_startup_loading(StartupReadinessResultScript.failed(
+                String(retired_save.get("reason", "decoded_save_retirement_failed"))))
+            return false
     await startup_loading_yield("Saved world restored", "save_restore", "ready", {
         "seed": seed_text, "tutorial": tutorial_result.get("metrics", {}),
         "terrainAuthority": authority_result.get("metrics", {})
@@ -3084,6 +3135,11 @@ func run_new_game_staged(show_message: bool) -> bool:
         )
     if not startup_result_is_ready(tutorial_result):
         await stop_startup_loading(tutorial_result, "tutorial_startup_failed")
+        return false
+    var town_inputs_result: Dictionary = finalize_production_town_inputs_for_loading()
+    if town_inputs_result.get("status") != "ready":
+        await stop_startup_loading(StartupReadinessResultScript.failed(
+            String(town_inputs_result.get("reason", "town_inputs_not_ready"))))
         return false
     var private_load_result: Dictionary = await stage_private_native_world_load()
     if private_load_result.get("status") != "ready":
