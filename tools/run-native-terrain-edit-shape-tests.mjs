@@ -139,11 +139,10 @@ const statusBefore = git(['status', '--short']);
 if (statusBefore) throw new Error('focused native receipt requires a clean worktree');
 
 const cl = where('cl.CMD');
-const linker = where('link.exe');
 const clang = join(llvmRoot, 'bin', 'clang-cl.exe');
 const profdata = join(llvmRoot, 'bin', 'llvm-profdata.exe');
 const cov = join(llvmRoot, 'bin', 'llvm-cov.exe');
-const tools = [cl, linker, clang, profdata, cov]
+const tools = [cl, clang, profdata, cov]
   .map(path => ({ path, bytes: statSync(path).size, sha256: sha256(path) }));
 const steps = [];
 let status = 'running';
@@ -174,9 +173,19 @@ try {
     requirePassed(step);
     msvcObjectPaths.push(object);
   }
-  const msvcLink = run('msvc-link', linker,
-    ['/NOLOGO', ...msvcObjectPaths, `/OUT:${msvcExe}`, '/DEBUG:FULL', '/OPT:NOREF', '/OPT:NOICF',
-      `/PDB:${join(build, 'native-terrain-edit-shape-msvc-tests.pdb')}`], output);
+  const msvcLinkResponse = join(build, 'msvc-link.rsp');
+  writeFileSync(msvcLinkResponse, [
+    '/nologo',
+    ...msvcObjectPaths.map(path => `"${path}"`),
+    `"/Fe:${msvcExe}"`,
+    '/link',
+    '/DEBUG:FULL',
+    '/OPT:NOREF',
+    '/OPT:NOICF',
+    `"/PDB:${join(build, 'native-terrain-edit-shape-msvc-tests.pdb')}"`,
+  ].join('\n'));
+  const msvcLink = run('msvc-link', cl, [`@${msvcLinkResponse}`], output, process.env, true);
+  msvcLink.responseFile = record(msvcLinkResponse);
   steps.push(msvcLink);
   requirePassed(msvcLink);
   const msvcExecute = run('msvc-execute', msvcExe, [], output);
