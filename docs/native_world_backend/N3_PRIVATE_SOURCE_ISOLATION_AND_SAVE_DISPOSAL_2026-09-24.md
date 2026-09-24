@@ -305,3 +305,28 @@ frame work was 3,852 µs; the overall maximum frame gap was 7,718 ms before
 private admission. This pinned synthetic save and loading overlay do not
 prove ordinary random-seed gameplay, whole-game cadence, or N3 authority
 cutover. The shared integration branch needs its own verification.
+
+### Primary-worktree replay and review
+
+The primary branch integrated the bounded retirement change as commits
+`3e85e0f`, `9b5ea20`, and `91cf079`. The focused retirement diagnostic passed
+again on the primary tree:
+`artifacts/native-world-backend/n3-decoded-save-retirement-1790235636296-636abc1f/report.json`.
+The focused legacy-load transaction initially stopped because the installed
+debug GDExtension predated the already source-bound
+`start_private_staged_save_retirement` method; its owned-process receipt
+proved zero remaining processes but correctly did not yield a test report.
+After `node tools/build-native-terrain-meshing.mjs --target template_debug
+--api-version 4.6` installed the current-source debug extension (SHA256
+`47cf064f2c60736f71768f70aebb4b582b6ece7e6f0f8d1a1b3309edd4149cd4`), the
+same focused transaction passed:
+`artifacts/native-world-backend/n3-legacy-terrain-load-transaction-1790236198133-5ae1c07e/report.json`;
+owned receipt `artifacts/node-tools/process-runs/godot-lHf9Rx/watchdog.json`.
+
+Independent read-only lifecycle review found no concrete defect in this
+bounded disposal path and issued GO for this N3 milestone only. It does not
+establish native terrain authority or full N3 cutover. The synthetic headed
+Continue result's 7,718 ms maximum frame gap remains a performance warning;
+the report does not attribute that full interval to JSON decoding or save
+retirement. Ordinary random-world saves, smooth-loading acceptance and the
+N3 source-authority/caller-deletion audit remain open.
