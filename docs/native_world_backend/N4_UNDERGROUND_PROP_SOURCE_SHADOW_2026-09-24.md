@@ -231,15 +231,19 @@ launch/completion timestamps, Windows Job Object ownership authority, natural
 root exit and authoritative zero membership.
 
 Focused Node command `node --test
-tools/tests/n4-underground-prop-source-evidence.test.mjs` passes `11/11`. These
+tools/tests/n4-underground-prop-source-evidence.test.mjs` passes `12/12`. These
 tests cover complete source/build expansion, imported-artifact resolution and
 missing/path-mismatch rejection, runtime binary/version identity, clean-status
 rejection, concurrent zero-launch exclusion, release/reacquire, stale-owner
 recovery, exact Windows command-line reconstruction and watchdog receipt
-binding. They do not execute GDScript or replace
+binding. They also derive the exact literal `family.contains(...)` tokens from
+production `TreeRuntimeRequestBuilder.architecture_for_tree_family`, preserve
+the current thirteen ResourceLoader-backed registry scenes, and prove an
+unknown `novel_tree` remains ResourceLoader-backed rather than being omitted by
+a suffix heuristic. They do not execute GDScript or replace
 the newly required coordinated exact-commit differential.
 
-The final coordinated exact-commit differential passed at
+The preceding exact-commit differential passed at
 `940d2da39eb988e793e6dda7b883de3845ada7e9` (tree
 `bd3c7ae12669a9ba8e7302f61d23f2d7e89ef0c1`):
 
@@ -285,6 +289,52 @@ The final coordinated exact-commit differential passed at
   `(0,0)`, `(0,0)` with the root tombstoned, `(-1,-1)` and `(5,3)`. There are
   no failures and the observed families are `none`, `rock`, `forage`,
   `copperOre` and `ironOre`.
+
+This preceding receipt is retained as historical direct
+production-method/service differential evidence. It predates the
+production-predicate registry-family inventory hardening at `4abf3c57`.
+
+The final coordinated exact-HEAD differential passed at
+`4abf3c577698718d7bc8d6989e92dd223d54f9cb` (tree
+`4df42ed99b6d321f5dd202c159c4119a70afae77`):
+
+- report
+  `artifacts/native-world-backend/n4-underground-prop-source-differential/report-d5568bad-01d5-4bc9-808d-e3b775959942.json`
+  has SHA-256
+  `b082ce9f5c27e6d0352ab619cdf6396bd3408ad586a8c2ae8916c9a323b68303`
+  and status `passed`;
+- probe
+  `artifacts/native-world-backend/n4-underground-prop-source-differential/probe-d5568bad-01d5-4bc9-808d-e3b775959942.json`
+  has SHA-256
+  `1dcba139f6e835a51d766a99503e12237bf873984152a4cd848d20b7c95901be`;
+- watchdog `artifacts/node-tools/process-runs/godot-ASFugw/watchdog.json`
+  has SHA-256
+  `1787dafa46b8f41c2c4af3cdf2f536f09972ae7c7418c3bac39996b0eda56660`,
+  run ID `7a06018697114be0b1b150a143ac157c`, root PID `13664`, launch
+  `2026-09-24T10:29:19.103Z` and completion
+  `2026-09-24T10:32:37.552Z`. It records functional/overall exit `0`, natural
+  root exit, no timeout or forced cleanup, empty stderr, `cleanupPassed=true`,
+  `authoritativeZeroProven=true`, and `zeroProofSource=job_membership_zero`.
+  Job membership observed companion PID `36508` after root exit and then an
+  empty membership before publication;
+- the launch lease records runner PID `16836`, process-start identity
+  `2026-09-24T10:29:17.9580280Z`, the canonical worktree and exact runner ID.
+  It was absent after publication. Independent PID and command-line queries
+  found no surviving runner, probe console or companion engine process;
+- source freeze contains `722` exact paths, all `18` resolved imported
+  PackedScenes, all `222` native manifest paths and all seven named native
+  build receipts. Pre/post HEAD, tree and porcelain status match; both statuses
+  are empty, `unchanged=true`, and `changedPaths=[]`;
+- Godot remains `4.6.1.stable.official.14d19694e`; the console, companion
+  engine, staged Terrain Meshing debug DLL and Voxel Tools editor DLL hashes
+  exactly match the preceding receipt. The staged debug DLL matches its
+  recorded debug build output. DLL/source correspondence remains the separate
+  prior MSVC/LLVM build-receipt claim and was not reproven by this runtime
+  differential;
+- the four cases again compare `36`, `36`, `3` and `36` ordered attempts for
+  chunks `(0,0)`, `(0,0)` with the root tombstoned, `(-1,-1)` and `(5,3)`.
+  There are no failures and the observed families are `none`, `rock`,
+  `forage`, `copperOre` and `ironOre`.
 
 This final receipt is direct production-method/service differential evidence
 only. It is diagnostic, not headed gameplay acceptance, not production
