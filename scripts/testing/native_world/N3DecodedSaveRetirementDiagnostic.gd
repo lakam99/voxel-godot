@@ -77,12 +77,40 @@ func run() -> void:
 		and empty_last.get("status") == "ready" \
 		and int(empty_last.get("removedRecords", -1)) == 1 \
 		and empty_steps == 5
+	var malformed_sections: Array = []
+	for index in range(128):
+		malformed_sections.append({"sectionKey":[index, 0, 0], "cells":[]})
+	malformed_sections.append({"sectionKey":[128, 0, 0], "cells":"invalid"})
+	var malformed_save := {"version":2, "seed":"n3-decoded-save-retirement",
+		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
+			"revision":1, "sections":malformed_sections}, "terrain":[]}
+	var malformed_retirement = RETIREMENT.new()
+	var malformed_started: Dictionary = malformed_retirement.start_owned_file_save(malformed_save)
+	var malformed_failed: Dictionary = malformed_retirement.advance()
+	var malformed_retained: Dictionary = malformed_retirement.snapshot()
+	var malformed_first_drain: Dictionary = malformed_retirement.advance_failed_drain()
+	var malformed_after_first: Dictionary = malformed_retirement.snapshot()
+	var malformed_drain_steps := 1
+	var malformed_last: Dictionary = malformed_first_drain
+	while malformed_last.get("status") == "pending" and malformed_drain_steps < 5:
+		malformed_last = malformed_retirement.advance_failed_drain()
+		malformed_drain_steps += 1
+	var malformed_bounded: bool = malformed_started.get("status") == "pending" \
+		and malformed_failed.get("reason") == "terrain_cells_invalid" \
+		and malformed_failed.get("ownerMustBeRetained") == true \
+		and malformed_retained.get("ownerRetained") == true \
+		and malformed_retained.get("state") == "failed" \
+		and malformed_first_drain.get("status") == "pending" \
+		and int(malformed_after_first.get("sectionsRemaining", -1)) == 65 \
+		and malformed_last.get("drained") == true \
+		and malformed_drain_steps == 3 \
+		and malformed_retirement.snapshot().get("ownerRetained") == false
 	var passed: bool = started.get("status") == "pending" \
 		and last.get("status") == "ready" \
 		and int(last.get("removedRecords", -1)) == expected_cells \
 		and expected_cells == SECTION_CELLS * SECTION_COUNT \
 		and prior_to_outer_release.get("state") == "ready" \
-		and empty_bounded
+		and empty_bounded and malformed_bounded
 	var report := {"schema":"n3-decoded-save-retirement-diagnostic/v1",
 		"passed":passed, "records":expected_cells, "steps":steps,
 		"rawReleaseUsec":raw_release_usec, "ownedReleaseUsec":owned_release_usec,
@@ -90,6 +118,10 @@ func run() -> void:
 			"initialSections":257, "remainingAfterFirst":empty_after_first.get("sectionsRemaining", -1),
 			"legacyAfterFirst":empty_after_first.get("legacyRemaining", -1),
 			"steps":empty_steps, "final":empty_last},
+		"malformedOwnerDrain":{"passed":malformed_bounded,
+			"failed":malformed_failed, "retained":malformed_retained,
+			"remainingAfterFirst":malformed_after_first.get("sectionsRemaining", -1),
+			"steps":malformed_drain_steps, "final":malformed_last},
 		"evidenceLevel":"synthetic service diagnostic",
 		"doesNotProve":["exclusive ownership in Main", "real file-backed save parity",
 			"whole-game frame cadence", "external snapshot override disposal"]}

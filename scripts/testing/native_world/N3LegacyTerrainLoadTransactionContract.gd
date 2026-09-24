@@ -8,6 +8,31 @@ const CONVERTER := preload("res://scripts/terrain/NativeV2LegacyTerrainConverter
 const TRANSACTION := preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
 const RUNTIME_OWNER := preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
 const PRIVATE_STAGE := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
+const TITLE_MENU := preload("res://scripts/TitleMenu.gd")
+
+class RejectedSaveStub:
+	extends RefCounted
+	var snapshot: Dictionary = {}
+	func load(_seed: String) -> Dictionary:
+		return snapshot
+
+class FailedMainOwnerFixture:
+	extends Node
+	var startup_loading_failure_result := {"reason":"fixture_load_failed"}
+	var startup_operation_active := false
+	var runtime_loading_active := false
+	var shutdown_requested := false
+	var drain_allowed := false
+	var drain_calls := 0
+	var terrain_drain_calls := 0
+	func drain_private_save_owners_before_free() -> Dictionary:
+		drain_calls += 1
+		return {"status":"ready", "drained":true} if drain_allowed else \
+			{"status":"failed", "reason":"fixture_owner_busy", "ownerMustBeRetained":true}
+	func wait_for_terrain_workers_before_quit() -> void:
+		terrain_drain_calls += 1
+	func wait_for_npc_navigation_before_quit() -> void:
+		pass
 
 var failures: Array[String] = []
 
@@ -84,6 +109,22 @@ func run() -> void:
 	var main = MAIN.new()
 	main.seed_text = "n3-legacy-load-transaction-parity"
 	main.seed_hash = main.hash_string(main.seed_text)
+	var rejected_save := {"version":2, "seed":"different-seed",
+		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
+			"revision":1, "sections":[{"cells":[]}]}, "terrain":[]}
+	var rejected_loader = RejectedSaveStub.new()
+	rejected_loader.snapshot = rejected_save
+	main.save_system = rejected_loader
+	main.autosave_enabled = true
+	main.startup_loading_active = true
+	var rejected_load: bool = main.try_load_world()
+	var rejected_owner_retained: bool = not rejected_load \
+		and main._native_startup_save_snapshot == rejected_save
+	check(rejected_owner_retained,
+		"Main retains decoded file save before a rejected script restore")
+	main._native_startup_save_snapshot = {}
+	main.startup_loading_active = false
+	main.save_system = null
 	main.setup_noise()
 	main.structure_system = STRUCTURES.new()
 	main.structure_system.citadel_terrain_admission.configure(main.seed_text, {}, {
@@ -103,6 +144,16 @@ func run() -> void:
 		and not admission._town_inputs_finalized
 		and int(admission._generation) == unfinalized_generation,
 		"private stage failure leaves unfinalized production town inputs untouched")
+	var shadow_decision: Dictionary = main.private_native_load_decision(premature_result, false)
+	var authority_decision: Dictionary = main.private_native_load_decision(premature_result, true)
+	check(shadow_decision.get("status") == "ready"
+		and shadow_decision.get("shadowFailure") == true
+		and shadow_decision.get("sourceAuthority") == "script_and_voxel_tools_unchanged"
+		and main.startup_loading_failure_result.is_empty(),
+		"failed private shadow candidate permits legacy gameplay authority")
+	check(authority_decision.get("status") == "failed"
+		and authority_decision.get("shadowFailure") == false,
+		"future authoritative native candidate remains fail closed")
 	var production_finalized: Dictionary = admission.finalize_town_inputs(main.town_region_cache)
 	check(production_finalized.get("status") == "ready", "production owner finalizes town inputs explicitly")
 	var finalized_towns: Dictionary = admission._towns.duplicate(true)
@@ -246,6 +297,20 @@ func run() -> void:
 		and legacy_cancel_result.get("drained") == true
 		and private_legacy_cancel.snapshot().get("saveRetained") == false,
 		"private historical conversion cancellation releases its decoded save")
+	var menu = TITLE_MENU.new()
+	root.add_child(menu)
+	var failed_owner = FailedMainOwnerFixture.new()
+	menu.add_child(failed_owner)
+	var refused_free: bool = await menu.retire_failed_game_instances()
+	var owner_retained: bool = not refused_free and is_instance_valid(failed_owner) \
+		and not failed_owner.is_queued_for_deletion() \
+		and failed_owner.drain_calls == 1 and failed_owner.terrain_drain_calls == 0
+	failed_owner.drain_allowed = true
+	var acknowledged_free: bool = await menu.retire_failed_game_instances()
+	check(owner_retained and acknowledged_free and not is_instance_valid(failed_owner),
+		"title menu refuses failed Main replacement until private save owner drains")
+	menu.queue_free()
+	await process_frame
 
 	var report := {"schema":"n3-legacy-terrain-load-transaction/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
@@ -268,7 +333,13 @@ func run() -> void:
 			"historicalReleaseUsec":private_historical_stopped.get("releaseUsec", -1),
 			"cancelDrained":private_cancel_result.get("drained", false),
 			"legacyCancelDrained":legacy_cancel_result.get("drained", false)},
-		"doesNotProve":"No Main New Game/Continue wiring, loading responsiveness, authoritative collision readiness, or headed gameplay acceptance."}
+		"shadowFailureDecision":{"privateStageReason":premature_result.get("reason", ""),
+			"scriptAuthorityStatus":shadow_decision.get("status", ""),
+			"authoritativeStatus":authority_decision.get("status", "")},
+		"failedMainRetirement":{"refusedBeforeDrain":owner_retained,
+			"freedAfterDrain":acknowledged_free,
+			"rejectedRestoreOwnerRetained":rejected_owner_retained},
+		"doesNotProve":"No actual Main boot under injected private failure, loading responsiveness, authoritative collision readiness, or headed gameplay acceptance."}
 	var report_path := OS.get_environment("VWB_LEGACY_LOAD_TRANSACTION_REPORT")
 	if not report_path.is_empty():
 		var file := FileAccess.open(report_path, FileAccess.WRITE)

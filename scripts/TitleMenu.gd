@@ -261,7 +261,9 @@ func _on_quit_pressed() -> void:
 
 func _deferred_quit() -> void:
     await get_tree().process_frame
-    await retire_failed_game_instances()
+    if not await retire_failed_game_instances():
+        _show_failed_owner_drain()
+        return
     get_tree().quit(0)
 
 func launch_game(mode: String) -> void:
@@ -278,7 +280,9 @@ func launch_game(mode: String) -> void:
 
 func _deferred_launch_game(mode: String) -> void:
     await get_tree().process_frame
-    await retire_failed_game_instances()
+    if not await retire_failed_game_instances():
+        _show_failed_owner_drain()
+        return
     if quit_requested:
         get_tree().quit(0)
         return
@@ -299,7 +303,7 @@ func _deferred_launch_game(mode: String) -> void:
         main.connect("startup_loading_failed", Callable(self, "_on_game_loading_failed"))
     add_child(main)
 
-func retire_failed_game_instances() -> void:
+func retire_failed_game_instances() -> bool:
     # A failed boot can still own terrain/navigation workers. Retire that
     # source before a retry creates another world in this menu.
     for child in get_children():
@@ -311,12 +315,25 @@ func retire_failed_game_instances() -> void:
         child.set("shutdown_requested", true)
         while bool(child.get("startup_operation_active")) or bool(child.get("runtime_loading_active")):
             await get_tree().process_frame
+        if child.has_method("drain_private_save_owners_before_free"):
+            var private_drain: Dictionary = await child.call("drain_private_save_owners_before_free")
+            if not private_drain.get("drained", false):
+                return false
         var audio = child.get("audio_effects")
         if is_instance_valid(audio): audio.shutdown_audio()
         await child.wait_for_terrain_workers_before_quit()
         await child.wait_for_npc_navigation_before_quit()
         child.queue_free()
         await get_tree().process_frame
+    return true
+
+func _show_failed_owner_drain() -> void:
+    status_label.text = "World cleanup failed"
+    loading_overlay.visible = false
+    launching = false
+    new_game_button.disabled = false
+    continue_button.disabled = saved_seed == ""
+    quit_button.disabled = false
 
 func _on_game_loading_step(message: String) -> void:
     if status_label == null or not is_instance_valid(status_label):

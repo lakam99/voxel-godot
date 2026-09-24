@@ -30,6 +30,7 @@ const STREAMING_FORECAST_SECONDS := 1.5
 const STREAMING_FORECAST_MAX_CELLS := 16.0
 const STREAMING_STATIONARY_FORECAST_SECONDS := 1.0
 const GAMEPLAY_REGIONAL_NAVIGATION_BUDGET_USEC := 1500
+const PRIVATE_NATIVE_LOAD_AUTHORITATIVE := false
 
 var seed_text := "atlas-1492"
 var seed_hash := 1
@@ -97,6 +98,8 @@ var _native_collision_admission_barrier: RefCounted
 var _native_collision_admission_owner_id := 0
 var _native_private_load_stage
 var _native_startup_save_snapshot: Dictionary = {}
+var _native_runtime_file_save_snapshot: Dictionary = {}
+var _native_decoded_save_retirement
 var world_environment: WorldEnvironment
 var visual_style: Resource
 var sky_resource: Sky
@@ -489,6 +492,14 @@ func _run_deferred_startup_boot() -> void:
     var loaded := false
     if requested_startup_mode != "new_game":
         loaded = try_load_world()
+    if not loaded and not _native_startup_save_snapshot.is_empty():
+        var rejected_save_drain: Dictionary = await retire_owned_decoded_save_terrain(
+            _native_startup_save_snapshot)
+        if rejected_save_drain.get("drained", false):
+            _native_startup_save_snapshot = {}
+        else:
+            await startup_loading_yield("Rejected decoded save retained",
+                "save_retirement", "excluded", rejected_save_drain)
     if requested_startup_mode == "continue" and not loaded:
         await stop_startup_loading(StartupReadinessResultScript.failed(
             "continue_save_restore_failed",
@@ -547,12 +558,22 @@ func _run_deferred_startup_boot() -> void:
             return
         var private_load_result: Dictionary = await stage_private_native_world_load(
             _native_startup_save_snapshot if loaded else {})
-        if private_load_result.get("status") == "ready" and loaded:
-            private_load_result = await retire_owned_decoded_save_terrain(_native_startup_save_snapshot)
-        _native_startup_save_snapshot = {}
-        if private_load_result.get("status") != "ready":
+        var private_decision: Dictionary = private_native_load_decision(
+            private_load_result, PRIVATE_NATIVE_LOAD_AUTHORITATIVE)
+        if private_decision.get("shadowFailure", false):
+            await startup_loading_yield("Private native terrain unavailable", "private_native_load",
+                "excluded", private_decision)
+        if loaded and not private_load_result.get("ownerMustBeRetained", false):
+            var retired_save: Dictionary = await retire_owned_decoded_save_terrain(
+                _native_startup_save_snapshot)
+            if retired_save.get("drained", false):
+                _native_startup_save_snapshot = {}
+            if retired_save.get("status") != "ready":
+                await startup_loading_yield("Decoded save retirement unavailable",
+                    "save_retirement", "excluded", retired_save)
+        if private_decision.get("status") != "ready":
             await stop_startup_loading(StartupReadinessResultScript.failed(
-                String(private_load_result.get("reason", "private_native_load_failed"))))
+                String(private_decision.get("reason", "private_native_load_failed"))))
             return
     if loaded:
         await startup_loading_yield("Saved world restored", "save_restore", "ready", {
@@ -790,8 +811,8 @@ func stop_startup_loading(result_value, fallback_reason := "startup_readiness_fa
 
 func apply_startup_loading_failure_state(result_value, fallback_reason := "startup_readiness_failed") -> String:
     var result := normalized_startup_result(result_value, fallback_reason)
-    if _native_private_load_stage == null:
-        _native_startup_save_snapshot = {}
+    # A decoded file save may still be owned by private import or retirement.
+    # Its aliases are released only after those owners acknowledge drain.
     var reason := String(result.get("reason", fallback_reason)).strip_edges()
     if reason == "":
         reason = fallback_reason
@@ -2737,8 +2758,22 @@ func finalize_production_town_inputs_for_loading() -> Dictionary:
         return {"status":"failed", "reason":"site_admission_missing"}
     return admission.finalize_town_inputs(town_region_cache)
 
+func private_native_load_decision(result: Dictionary, authoritative: bool) -> Dictionary:
+    if result.get("status") == "ready":
+        return {"status":"ready", "shadowFailure":false}
+    var reason := String(result.get("reason", "private_native_load_failed"))
+    if shutdown_requested or authoritative:
+        return {"status":"failed", "reason":reason, "shadowFailure":false}
+    return {"status":"ready", "reason":reason, "shadowFailure":true,
+        "sourceAuthority":"script_and_voxel_tools_unchanged",
+        "privateOwnerRetained":bool(result.get("ownerMustBeRetained", false))}
+
 func retire_owned_decoded_save_terrain(snapshot: Dictionary) -> Dictionary:
+    if _native_decoded_save_retirement != null:
+        return {"status":"failed", "reason":"decoded_save_retirement_owner_already_active",
+            "ownerMustBeRetained":true}
     var retirement = NativeDecodedSaveRetirementScript.new()
+    _native_decoded_save_retirement = retirement
     var result: Dictionary = retirement.start_owned_file_save(snapshot)
     var advances := 0
     var frames := 0
@@ -2760,7 +2795,24 @@ func retire_owned_decoded_save_terrain(snapshot: Dictionary) -> Dictionary:
         result["advances"] = advances
         result["frames"] = frames
         result["maxFrameWorkUsec"] = max_frame_work_usec
+        result["drained"] = true
+        _native_decoded_save_retirement = null
         await startup_loading_yield("Decoded save terrain retired", "save_retirement", "ready", result)
+    elif retirement.snapshot().get("state") == "failed":
+        var failure_reason := String(result.get("reason", "decoded_save_retirement_failed"))
+        await startup_loading_yield("Draining invalid decoded save terrain",
+            "save_retirement", "pending", retirement.snapshot())
+        var drained: Dictionary = retirement.advance_failed_drain()
+        while drained.get("status") == "pending":
+            await get_tree().process_frame
+            drained = retirement.advance_failed_drain()
+        if drained.get("drained", false):
+            _native_decoded_save_retirement = null
+            return {"status":"failed", "reason":failure_reason, "drained":true}
+        return {"status":"failed", "reason":failure_reason,
+            "ownerMustBeRetained":true, "drainFailure":drained}
+    else:
+        result["ownerMustBeRetained"] = true
     return result
 
 func stage_private_native_world_load(save_snapshot: Dictionary = {}) -> Dictionary:
@@ -2783,10 +2835,11 @@ func stage_private_native_world_load(save_snapshot: Dictionary = {}) -> Dictiona
             "recordsAdmitted":state.get("transaction", {}).get("recordsAdmitted", 0)})
         if not shutdown_requested: result = _native_private_load_stage.advance()
     if result.get("status") == "ready" and not shutdown_requested:
-        await startup_loading_yield("Private native terrain ready", "private_native_load", "ready", \
-            _native_private_load_stage.snapshot())
-        if not shutdown_requested and _native_private_load_stage.current_source_valid():
-            return result
+        if _native_private_load_stage.current_source_valid():
+            await startup_loading_yield("Private native terrain ready", "private_native_load", "ready", \
+                _native_private_load_stage.snapshot())
+            if not shutdown_requested and _native_private_load_stage.current_source_valid():
+                return result
         result = {"status":"failed", "reason":"private_source_changed_after_commit"}
     var stopped: Dictionary = _native_private_load_stage.stop()
     while not stopped.get("drained", false):
@@ -2812,9 +2865,9 @@ func try_load_world(show_message := false) -> bool:
         if show_message:
             update_hud("No save for %s" % seed_text)
         return false
+    _native_startup_save_snapshot = snapshot
     var loaded := apply_save_snapshot(snapshot)
     if loaded:
-        _native_startup_save_snapshot = snapshot
         reset_autosave_dirty_tracking(false)
     if show_message:
         update_hud("Loaded saved world" if loaded else "Load failed")
@@ -2823,6 +2876,8 @@ func try_load_world(show_message := false) -> bool:
 func try_load_world_staged(show_message := false, snapshot_override: Dictionary = {}) -> bool:
     # The optional in-memory snapshot uses the same runtime cutover as F9.
     if startup_operation_active or startup_loading_active or runtime_loading_active or shutdown_requested:
+        return false
+    if _native_decoded_save_retirement != null or not _native_runtime_file_save_snapshot.is_empty():
         return false
     if snapshot_override.is_empty() and (save_system == null or (not autosave_enabled and not show_message)):
         return false
@@ -3014,6 +3069,8 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
         if show_message:
             update_hud("No save for %s" % seed_text if snapshot.is_empty() else "Load failed: save seed mismatch")
         return false
+    if snapshot_override.is_empty():
+        _native_runtime_file_save_snapshot = snapshot
     begin_startup_loading_timeline()
     playtest_progress("runtime_load_staged_start")
     await startup_loading_yield("Clearing previous world", "world_reset", "pending")
@@ -3064,16 +3121,22 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
             String(town_inputs_result.get("reason", "town_inputs_not_ready"))))
         return false
     var private_load_result: Dictionary = await stage_private_native_world_load(snapshot)
-    if private_load_result.get("status") != "ready":
+    var private_decision: Dictionary = private_native_load_decision(
+        private_load_result, PRIVATE_NATIVE_LOAD_AUTHORITATIVE)
+    if private_decision.get("shadowFailure", false):
+        await startup_loading_yield("Private native terrain unavailable", "private_native_load",
+            "excluded", private_decision)
+    if private_decision.get("status") != "ready":
         await stop_startup_loading(StartupReadinessResultScript.failed(
-            String(private_load_result.get("reason", "private_native_load_failed"))))
+            String(private_decision.get("reason", "private_native_load_failed"))))
         return false
-    if snapshot_override.is_empty():
+    if snapshot_override.is_empty() and not private_load_result.get("ownerMustBeRetained", false):
         var retired_save: Dictionary = await retire_owned_decoded_save_terrain(snapshot)
+        if retired_save.get("drained", false):
+            _native_runtime_file_save_snapshot = {}
         if retired_save.get("status") != "ready":
-            await stop_startup_loading(StartupReadinessResultScript.failed(
-                String(retired_save.get("reason", "decoded_save_retirement_failed"))))
-            return false
+            await startup_loading_yield("Decoded save retirement unavailable",
+                "save_retirement", "excluded", retired_save)
     await startup_loading_yield("Saved world restored", "save_restore", "ready", {
         "seed": seed_text, "tutorial": tutorial_result.get("metrics", {}),
         "terrainAuthority": authority_result.get("metrics", {})
@@ -3142,9 +3205,14 @@ func run_new_game_staged(show_message: bool) -> bool:
             String(town_inputs_result.get("reason", "town_inputs_not_ready"))))
         return false
     var private_load_result: Dictionary = await stage_private_native_world_load()
-    if private_load_result.get("status") != "ready":
+    var private_decision: Dictionary = private_native_load_decision(
+        private_load_result, PRIVATE_NATIVE_LOAD_AUTHORITATIVE)
+    if private_decision.get("shadowFailure", false):
+        await startup_loading_yield("Private native terrain unavailable", "private_native_load",
+            "excluded", private_decision)
+    if private_decision.get("status") != "ready":
         await stop_startup_loading(StartupReadinessResultScript.failed(
-            String(private_load_result.get("reason", "private_native_load_failed"))))
+            String(private_decision.get("reason", "private_native_load_failed"))))
         return false
     await startup_loading_yield("Reloading terrain")
     reload_chunks(true)
@@ -3301,20 +3369,55 @@ func request_graceful_quit(exit_code := 0) -> void:
         player.set_physics_process(false)
     call_deferred("_graceful_quit_deferred", exit_code)
 
+func drain_private_save_owners_before_free() -> Dictionary:
+    if _native_private_load_stage != null:
+        var private_stopped: Dictionary = _native_private_load_stage.stop()
+        while not private_stopped.get("drained", false):
+            if private_stopped.get("ownerMustBeRetained", false) and private_stopped.get("status") == "failed":
+                return {"status":"failed", "reason":"private_native_terrain_drain_failed",
+                    "ownerMustBeRetained":true}
+            await startup_loading_yield("Draining private native terrain", "private_native_load", "pending")
+            private_stopped = _native_private_load_stage.advance_stop()
+        _native_private_load_stage = null
+    if _native_decoded_save_retirement != null:
+        var retirement_state: Dictionary = _native_decoded_save_retirement.snapshot()
+        if retirement_state.get("state") not in ["failed", "draining"]:
+            return {"status":"failed", "reason":"decoded_save_retirement_owner_still_active",
+                "ownerMustBeRetained":true}
+        var failed_drain: Dictionary = _native_decoded_save_retirement.advance_failed_drain()
+        while failed_drain.get("status") == "pending":
+            await get_tree().process_frame
+            failed_drain = _native_decoded_save_retirement.advance_failed_drain()
+        if not failed_drain.get("drained", false):
+            return {"status":"failed", "reason":"decoded_save_drain_failed",
+                "ownerMustBeRetained":true, "drain":failed_drain}
+        _native_decoded_save_retirement = null
+    if not _native_startup_save_snapshot.is_empty():
+        var startup_save_drain: Dictionary = await retire_owned_decoded_save_terrain(
+            _native_startup_save_snapshot)
+        if not startup_save_drain.get("drained", false):
+            return {"status":"failed", "reason":"startup_save_drain_failed",
+                "ownerMustBeRetained":true, "drain":startup_save_drain}
+        _native_startup_save_snapshot = {}
+    if not _native_runtime_file_save_snapshot.is_empty():
+        var runtime_save_drain: Dictionary = await retire_owned_decoded_save_terrain(
+            _native_runtime_file_save_snapshot)
+        if not runtime_save_drain.get("drained", false):
+            return {"status":"failed", "reason":"runtime_save_drain_failed",
+                "ownerMustBeRetained":true, "drain":runtime_save_drain}
+        _native_runtime_file_save_snapshot = {}
+    return {"status":"ready", "drained":true}
+
 func _graceful_quit_deferred(exit_code: int) -> void:
     # A startup/reset coroutine owns its source registries until it returns.
     # Drain it before retiring those same owners; never race two lifecycles.
     while startup_operation_active or runtime_loading_active or runtime_relocation_active:
         await get_tree().process_frame
-    if _native_private_load_stage != null:
-        var private_stopped: Dictionary = _native_private_load_stage.stop()
-        while not private_stopped.get("drained", false):
-            if private_stopped.get("ownerMustBeRetained", false) and private_stopped.get("status") == "failed":
-                await startup_loading_yield("Private native terrain drain failed", "private_native_load", "failed")
-                return
-            await startup_loading_yield("Draining private native terrain", "private_native_load", "pending")
-            private_stopped = _native_private_load_stage.advance_stop()
-        _native_private_load_stage = null
+    var private_drain: Dictionary = await drain_private_save_owners_before_free()
+    if not private_drain.get("drained", false):
+        await startup_loading_yield("Private save owner drain failed", "save_retirement",
+            "failed", private_drain)
+        return
     # A cancelled initial load or reset has only partial durable state. Never
     # replace the last valid save with a snapshot of that unfinished world.
     var save_ready_world := not startup_loading_active and startup_loading_failure_result.is_empty() \

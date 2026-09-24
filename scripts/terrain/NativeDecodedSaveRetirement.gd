@@ -11,6 +11,7 @@ var _snapshot: Dictionary = {}
 var _sections: Array = []
 var _legacy: Array = []
 var _state := "new"
+var _failure := ""
 var _removed_records := 0
 var _max_advance_usec := 0
 
@@ -39,10 +40,18 @@ func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 	while work_units < max_records and not _sections.is_empty():
 		var section_value = _sections.back()
 		if not section_value is Dictionary:
-			return {"status":"failed", "reason":"terrain_section_invalid", "ownerMustBeRetained":true}
+			_removed_records += removed
+			_max_advance_usec = maxi(_max_advance_usec, Time.get_ticks_usec() - started)
+			_state = "failed"
+			_failure = "terrain_section_invalid"
+			return {"status":"failed", "reason":_failure, "ownerMustBeRetained":true}
 		var cells_value = (section_value as Dictionary).get("cells", [])
 		if not cells_value is Array:
-			return {"status":"failed", "reason":"terrain_cells_invalid", "ownerMustBeRetained":true}
+			_removed_records += removed
+			_max_advance_usec = maxi(_max_advance_usec, Time.get_ticks_usec() - started)
+			_state = "failed"
+			_failure = "terrain_cells_invalid"
+			return {"status":"failed", "reason":_failure, "ownerMustBeRetained":true}
 		var cells: Array = cells_value
 		if cells.is_empty():
 			_sections.pop_back()
@@ -71,7 +80,39 @@ func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 		"maxAdvanceUsec":_max_advance_usec,
 		"finalReleaseUsec":Time.get_ticks_usec() - release_started}
 
+func advance_failed_drain(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
+	if _state == "ready": return {"status":"ready", "drained":true, "reason":_failure}
+	if _state not in ["failed", "draining"] or max_records <= 0 or max_records > MAX_RECORDS_PER_ADVANCE:
+		return {"status":"failed", "reason":"retirement_drain_budget_or_state_invalid",
+			"ownerMustBeRetained":true}
+	_state = "draining"
+	var work_units := 0
+	while work_units < max_records and not _sections.is_empty():
+		var section_value = _sections.back()
+		if section_value is Dictionary and (section_value as Dictionary).get("cells", []) is Array:
+			var cells: Array = (section_value as Dictionary).get("cells", [])
+			if not cells.is_empty():
+				cells.pop_back()
+				work_units += 1
+				continue
+		_sections.pop_back()
+		work_units += 1
+	while work_units < max_records and not _legacy.is_empty():
+		_legacy.pop_back()
+		work_units += 1
+	if not _sections.is_empty() or not _legacy.is_empty():
+		return {"status":"pending", "reason":"failed_save_terrain_drain_pending",
+			"ownerMustBeRetained":true}
+	_snapshot.erase("terrainVolume")
+	_snapshot.erase("terrain")
+	_sections = []
+	_legacy = []
+	_snapshot = {}
+	_state = "ready"
+	return {"status":"ready", "drained":true, "reason":_failure}
+
 func snapshot() -> Dictionary:
 	return {"state":_state, "removedRecords":_removed_records,
 		"sectionsRemaining":_sections.size(), "legacyRemaining":_legacy.size(),
-		"maxAdvanceUsec":_max_advance_usec, "ownerRetained":not _snapshot.is_empty()}
+		"maxAdvanceUsec":_max_advance_usec, "ownerRetained":not _snapshot.is_empty(),
+		"failure":_failure}
