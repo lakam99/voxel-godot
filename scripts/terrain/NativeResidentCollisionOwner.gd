@@ -15,11 +15,14 @@ const MAX_VERTICES_PER_BLOCK := 65536
 # vertices to one ConcavePolygonShape3D. Large artifacts become several
 # child shapes on the same StaticBody3D; the triangle set is unchanged.
 const PREPARE_VERTEX_BUDGET := 768
+const MAX_SHAPES_PER_BLOCK := 86
 const DRAIN_WORK_BUDGET := 64
 const DRAIN_BODY_BUDGET := 16
 const MAX_ACK_FRAMES := 6
 const VALIDATION_OPERATION_BUDGET := 128
 const VALIDATION_STEP_USEC_BUDGET := 1500
+const HEALTH_VALIDATION_OPERATION_BUDGET := 96
+const HEALTH_VALIDATION_STEP_USEC_BUDGET := 1500
 
 var _source: Object
 var _live := {}
@@ -50,6 +53,13 @@ var _drain_resident_blocks: Array[Vector3i] = []
 var _drain_retired_candidate_count := 0
 var _drain_retired_live_count := 0
 var _readiness_epoch := 0
+var _health_scan_blocks: Array[Vector3i] = []
+var _health_scan_cursor := 0
+var _health_scan_epoch := -1
+var _health_scan_identity := {}
+var _health_validated_epoch := -1
+var _health_validated_source_ticket := ""
+var _health_failure := {}
 
 
 ## The coordinator assigns one immutable physical installation identity before
@@ -70,6 +80,36 @@ func retirement_owner_epoch() -> String:
 func physical_readiness_epoch() -> int:
 	return _readiness_epoch
 
+## Owner-mediated maintenance APIs. Callers must not mutate published StaticBody3D
+## or CollisionShape3D nodes directly; these methods invalidate cached physical
+## health before returning, and the next receipt stays pending until a bounded
+## live-state sweep validates the complete resident set.
+func set_collision_entry_enabled(block: Vector3i, enabled: bool) -> Dictionary:
+	if _busy or _stopping or _stopped or not _live.has(block):
+		return {"status":"failed", "reason":"physical_entry_mutation_unavailable"}
+	var entry: Dictionary = _live[block]
+	if enabled and not _entry_shapes_usable(entry, entry.get("body")):
+		return {"status":"failed", "reason":"physical_entry_not_healthy_for_enable"}
+	_set_enabled(entry, enabled)
+	return {"status":"ready", "enabled":enabled, "healthEpoch":_readiness_epoch}
+
+func retire_collision_entry_shape(block: Vector3i, shape_index: int) -> Dictionary:
+	if _busy or _stopping or _stopped or not _live.has(block):
+		return {"status":"failed", "reason":"physical_entry_mutation_unavailable"}
+	_set_enabled(_live[block], false)
+	if not _remove_live_shape(block, shape_index):
+		return {"status":"failed", "reason":"physical_shape_retirement_invalid"}
+	return {"status":"pending", "reason":"physical_shape_retired_health_invalidated",
+		"healthEpoch":_readiness_epoch}
+
+func retire_collision_entry(block: Vector3i) -> Dictionary:
+	if _busy or _stopping or _stopped or not _live.has(block):
+		return {"status":"failed", "reason":"physical_entry_mutation_unavailable"}
+	_dispose(_live[block])
+	_invalidate_physical_health()
+	return {"status":"pending", "reason":"physical_entry_retirement_started",
+		"healthEpoch":_readiness_epoch}
+
 
 func bind_source(source: Object) -> bool:
 	if _source != null or source == null \
@@ -84,14 +124,100 @@ func physical_receipt(identity: Dictionary) -> Dictionary:
 	if _busy or _failed or _stopping or _stopped or identity != _identity \
 			or _live.size() != _resident_blocks.size() \
 			or not _source_current(identity):
-		return {"ready": false}
+		return {"ready": false, "reason":"resident_collision_not_current"}
+	if _health_validated_epoch != _readiness_epoch \
+			or _health_validated_source_ticket != _source_ticket:
+		var health: Dictionary = _advance_physical_health_validation(identity)
+		if health.get("status") != "ready":
+			return {"ready":false, "reason":health.get("reason",
+				"physical_health_validation_pending"),
+				"healthValidation":health}
 	return {"ready": true, "physicsFrame": Engine.get_physics_frames(),
 		"physicalOwnerEpoch": _retirement_owner_epoch,
+		"healthEpoch":_readiness_epoch,
+		"healthValidatedCount":_receipt_resident_blocks.size(),
+		"healthValidationBudget":{"operationBudget":HEALTH_VALIDATION_OPERATION_BUDGET,
+			"stepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET},
 		"provenance": {"requestIdentity": _identity.duplicate(true),
 			"sourceIdentity": _source_identity.duplicate(true),
 			"membershipProvenance": _membership_provenance.duplicate(true)},
 		"residentBlockCount": _resident_blocks.size(),
 		"residentBlocks": _receipt_resident_blocks}
+
+## One bounded cursor step over the exclusively-owned installed bodies. Node
+## mutation and teardown must go through this owner; each supported mutation
+## invalidates the epoch-cached proof before a caller can reuse a receipt.
+func _advance_physical_health_validation(identity: Dictionary) -> Dictionary:
+	if _health_validated_epoch == _readiness_epoch \
+			and _health_validated_source_ticket == _source_ticket:
+		return {"status":"ready", "cached":true,
+			"healthEpoch":_readiness_epoch}
+	if not _health_failure.is_empty() \
+			and int(_health_failure.get("healthEpoch", -1)) == _readiness_epoch:
+		return _health_failure.duplicate(false)
+	if _health_scan_epoch != _readiness_epoch or _health_scan_identity != identity:
+		_health_scan_blocks = _receipt_resident_blocks
+		_health_scan_cursor = 0
+		_health_scan_epoch = _readiness_epoch
+		_health_scan_identity = identity.duplicate(true)
+	var started := Time.get_ticks_usec()
+	var operations := 0
+	while _health_scan_cursor < _health_scan_blocks.size() \
+			and operations < HEALTH_VALIDATION_OPERATION_BUDGET \
+			and Time.get_ticks_usec() - started < HEALTH_VALIDATION_STEP_USEC_BUDGET:
+		var block: Vector3i = _health_scan_blocks[_health_scan_cursor]
+		var entry: Dictionary = _live.get(block, {})
+		operations += 1
+		var health_failure := "physical_entry_missing" if entry.is_empty() \
+			else _entry_health_failure(entry)
+		if not health_failure.is_empty():
+			_readiness_epoch += 1
+			_health_validated_epoch = -1
+			_health_validated_source_ticket = ""
+			_health_scan_blocks = []
+			_health_scan_cursor = 0
+			_health_scan_epoch = -1
+			_health_failure = {"status":"failed",
+				"reason":"resident_collision_entry_unhealthy",
+				"healthFailure":health_failure,
+				"block":block, "healthEpoch":_readiness_epoch}
+			return _health_failure.duplicate(false)
+		_health_scan_cursor += 1
+	if _health_scan_cursor >= _health_scan_blocks.size():
+		if _health_scan_epoch != _readiness_epoch \
+				or _health_scan_identity != identity or not _source_current(identity):
+			_health_scan_blocks = []
+			_health_scan_cursor = 0
+			_health_scan_epoch = -1
+			return {"status":"pending", "reason":"physical_health_validation_drift",
+				"operations":operations}
+		_health_validated_epoch = _readiness_epoch
+		_health_validated_source_ticket = _source_ticket
+		_health_failure = {}
+		_health_scan_blocks = []
+		_health_scan_cursor = 0
+		_health_scan_epoch = -1
+		return {"status":"ready", "operations":operations,
+			"maxOperations":HEALTH_VALIDATION_OPERATION_BUDGET,
+			"maxStepUsec":Time.get_ticks_usec() - started,
+			"maxStepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET,
+			"healthEpoch":_readiness_epoch}
+	return {"status":"pending", "reason":"physical_health_validation_pending",
+		"cursor":_health_scan_cursor, "total":_health_scan_blocks.size(),
+		"operations":operations,
+		"maxOperations":HEALTH_VALIDATION_OPERATION_BUDGET,
+		"maxStepUsec":Time.get_ticks_usec() - started,
+		"maxStepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET,
+		"healthEpoch":_health_scan_epoch}
+
+func _invalidate_physical_health() -> void:
+	_readiness_epoch += 1
+	_health_validated_epoch = -1
+	_health_validated_source_ticket = ""
+	_health_failure = {}
+	_health_scan_blocks = []
+	_health_scan_cursor = 0
+	_health_scan_epoch = -1
 
 
 func startup_readiness(identity: Dictionary) -> Dictionary:
@@ -288,8 +414,23 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	_receipt_resident_blocks.make_read_only()
 	_startup_staging = _live.size() < _resident_blocks.size()
 	_restored_old_frame = -1
+	_invalidate_physical_health()
+	var health: Dictionary = {"status":"pending"}
+	var health_steps := 0
+	var max_health_step_usec := 0
+	while health.get("status") == "pending" and health_steps < MAX_RESIDENT + 4:
+		health = _advance_physical_health_validation(identity)
+		max_health_step_usec = maxi(max_health_step_usec,
+			int(health.get("maxStepUsec", 0)))
+		health_steps += 1
+		if health.get("status") == "pending":
+			await get_tree().process_frame
+			if _stopping:
+				return _finish_stopped_publish(candidates)
 	_busy = false
-	var receipt: Dictionary = physical_receipt(identity)
+	var receipt: Dictionary = physical_receipt(identity) if health.get("status") == "ready" \
+		else {"ready":false, "reason":health.get("reason",
+			"physical_health_validation_incomplete"), "healthValidation":health}
 	if not _startup_staging and not bool(receipt.get("ready", false)):
 		_busy = true
 		_live = previous_live
@@ -315,6 +456,10 @@ func publish(request: Dictionary, barrier: RefCounted = null) -> Dictionary:
 	return {"status": "pending" if _startup_staging else "ready",
 		"reason": "resident_startup_incomplete" if _startup_staging else "",
 		"physicalReceipt": receipt,
+		"physicalHealthValidation":{"status":health.get("status", "failed"),
+			"steps":health_steps, "maxStepUsec":max_health_step_usec,
+			"operationBudget":HEALTH_VALIDATION_OPERATION_BUDGET,
+			"stepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET},
 		"affectedBlocks": affected.size(), "residentBlocks": _resident_blocks.size(),
 		"validationMaxOperations":int(checked.get("maxValidationOperations", 0)),
 		"validationMaxStepUsec":int(checked.get("maxValidationStepUsec", 0)),
@@ -463,7 +608,9 @@ func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
 		return {"done": false, "bodyQueued": false, "workUnits": 0}
 	var body = entry.get("body")
 	if is_instance_valid(body) and body is StaticBody3D:
-		body.collision_layer = 0
+		if body.collision_layer != 0:
+			body.collision_layer = 0
+			_invalidate_physical_health()
 	if not bool(entry.get("drainStarted", false)):
 		entry.drainStarted = true
 		work_used += 1
@@ -477,6 +624,7 @@ func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
 			if shape_parent == body:
 				body.remove_child(shape)
 				shape.queue_free()
+				_invalidate_physical_health()
 		shapes.pop_back()
 		work_used += 1
 	if not shapes.is_empty():
@@ -487,6 +635,7 @@ func _advance_entry_drain(entry: Dictionary, work_budget: int) -> Dictionary:
 	if is_instance_valid(body) and body is StaticBody3D \
 			and not body.is_queued_for_deletion():
 		body.queue_free()
+		_invalidate_physical_health()
 		body_queued = true
 		_drain_last_queued_physics_frame = maxi(_drain_last_queued_physics_frame,
 			Engine.get_physics_frames())
@@ -825,23 +974,57 @@ func _probe(entry: Dictionary) -> bool:
 
 
 func _entry_live(entry: Dictionary) -> bool:
+	return _entry_health_failure(entry).is_empty()
+
+
+func _entry_health_failure(entry: Dictionary) -> String:
 	if not bool(entry.get("expectedHit", false)):
-		return entry.get("body") == null
-	if not is_instance_valid(entry.get("body")) or not entry.body is StaticBody3D \
-			or not entry.body.is_inside_tree() \
-			or entry.body.collision_layer != COLLISION_LAYER \
-			or not entry.get("shapes") is Array or (entry.shapes as Array).is_empty():
+		return "" if entry.get("body") == null \
+			and entry.get("shapes", []).is_empty() else "unexpected_empty_block_body"
+	var body = entry.get("body")
+	if not is_instance_valid(body) or not body is StaticBody3D:
+		return "physical_body_invalid"
+	if not body.is_inside_tree(): return "physical_body_not_in_tree"
+	if body.is_queued_for_deletion(): return "physical_body_queued_for_deletion"
+	if body.get_parent() != self: return "physical_body_owner_mismatch"
+	if body.collision_layer != COLLISION_LAYER or body.collision_mask != 0:
+		return "physical_body_layer_mismatch"
+	if not entry.get("shapes") is Array or (entry.shapes as Array).is_empty() \
+			or (entry.shapes as Array).size() > MAX_SHAPES_PER_BLOCK:
+		return "physical_shape_set_invalid"
+	for shape in entry.shapes:
+		if not is_instance_valid(shape) or not shape is CollisionShape3D:
+			return "physical_shape_invalid"
+		if not shape.is_inside_tree(): return "physical_shape_not_in_tree"
+		if shape.is_queued_for_deletion(): return "physical_shape_queued_for_deletion"
+		if shape.get_parent() != body: return "physical_shape_owner_mismatch"
+		if shape.disabled: return "physical_shape_disabled"
+		if shape.shape == null: return "physical_shape_resource_missing"
+	return ""
+
+
+func _entry_shapes_usable(entry: Dictionary, body) -> bool:
+	if not is_instance_valid(body) or not body is StaticBody3D \
+			or not body.is_inside_tree() or body.is_queued_for_deletion() \
+			or body.get_parent() != self \
+			or body.collision_mask != 0 \
+			or not entry.get("shapes") is Array or (entry.shapes as Array).is_empty() \
+			or (entry.shapes as Array).size() > MAX_SHAPES_PER_BLOCK:
 		return false
 	for shape in entry.shapes:
 		if not is_instance_valid(shape) or not shape is CollisionShape3D \
-				or shape.disabled or shape.shape == null:
+				or not shape.is_inside_tree() or shape.is_queued_for_deletion() \
+				or shape.get_parent() != body or shape.disabled or shape.shape == null:
 			return false
 	return true
 
 
 func _set_enabled(entry: Dictionary, enabled: bool) -> void:
 	if is_instance_valid(entry.get("body")) and entry.get("body") is StaticBody3D:
-		entry.body.collision_layer = COLLISION_LAYER if enabled else 0
+		var layer := COLLISION_LAYER if enabled else 0
+		if entry.body.collision_layer != layer:
+			entry.body.collision_layer = layer
+			_invalidate_physical_health()
 
 
 func _dispose(entry: Dictionary) -> void:
@@ -849,6 +1032,23 @@ func _dispose(entry: Dictionary) -> void:
 		entry.body.collision_layer = 0
 		if not entry.body.is_queued_for_deletion():
 			entry.body.queue_free()
+
+
+func _remove_live_shape(block: Vector3i, shape_index: int) -> bool:
+	if _busy or _stopping or _stopped or not _live.has(block): return false
+	var entry: Dictionary = _live[block]
+	var shapes: Array = entry.get("shapes", [])
+	if shape_index < 0 or shape_index >= shapes.size(): return false
+	var shape = shapes[shape_index]
+	if is_instance_valid(shape) and shape is CollisionShape3D:
+		if shape.get_parent() == entry.get("body"):
+			entry.body.remove_child(shape)
+		if not shape.is_queued_for_deletion(): shape.queue_free()
+	shapes.remove_at(shape_index)
+	entry["shapes"] = shapes
+	_live[block] = entry
+	_invalidate_physical_health()
+	return true
 
 
 func _dispose_candidates(candidates: Dictionary) -> void:

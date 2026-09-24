@@ -26,6 +26,7 @@ var _barrier_bounds := {}
 var _retired_barriers: Array[Dictionary] = []
 var _stopping := false
 var _aggregate_ticket := ""
+var _aggregate_source_ticket := ""
 var _aggregate_layout := {}
 var _aggregate_identity := {}
 var _aggregate_receipts := {}
@@ -131,12 +132,15 @@ func active_barrier_count() -> int:
 func aggregate_readiness(identity: Dictionary) -> Dictionary:
 	if _stopping or _broker == null:
 		return {"status":"pending", "reason":"window_coordinator_stopping"}
-	var ticket_result: Dictionary = _broker.call("collision_window_layout_ticket") \
-		if _broker.has_method("collision_window_layout_ticket") \
-		else _broker.collision_window_layout()
+	if not _broker.has_method("collision_window_layout_ticket"):
+		return {"status":"pending", "reason":"immutable_collision_source_ticket_required"}
+	var ticket_result: Dictionary = _broker.call("collision_window_layout_ticket")
 	if ticket_result.get("status") != "ready":
 		return {"status":"pending", "reason":ticket_result.get("reason",
 			"logical_collision_layout_pending")}
+	var source_ticket := String(ticket_result.get("sourceTicket", ""))
+	if source_ticket.is_empty():
+		return {"status":"pending", "reason":"immutable_collision_source_ticket_missing"}
 	var layout: Dictionary = ticket_result.get("layout", ticket_result)
 	if layout.get("identity") != identity:
 		return {"status":"pending", "reason":"logical_collision_identity_changed"}
@@ -144,10 +148,10 @@ func aggregate_readiness(identity: Dictionary) -> Dictionary:
 	if ticket.is_empty():
 		return {"status":"pending", "reason":"logical_collision_ticket_missing"}
 	if _aggregate_ticket != ticket:
-		_begin_aggregate_validation(ticket, layout, identity)
+		_begin_aggregate_validation(ticket, source_ticket, layout, identity)
 	elif _aggregate_result.get("status") == "ready" \
 			and not _aggregate_owner_epochs_current():
-		_begin_aggregate_validation(ticket, layout, identity)
+		_begin_aggregate_validation(ticket, source_ticket, layout, identity)
 	if _aggregate_result.get("status") == "failed" \
 			and _aggregate_result.get("ticket") == ticket:
 		return _aggregate_result.result
@@ -169,9 +173,10 @@ func aggregate_readiness(identity: Dictionary) -> Dictionary:
 		"validationOperationBudget":AGGREGATE_VALIDATION_OPERATION_BUDGET,
 		"validationStepUsecBudget":AGGREGATE_VALIDATION_STEP_USEC_BUDGET}
 
-func _begin_aggregate_validation(ticket: String, layout: Dictionary,
-		identity: Dictionary) -> void:
+func _begin_aggregate_validation(ticket: String, source_ticket: String,
+		layout: Dictionary, identity: Dictionary) -> void:
 	_aggregate_ticket = ticket
+	_aggregate_source_ticket = source_ticket
 	_aggregate_layout = layout
 	_aggregate_identity = identity.duplicate(true)
 	_aggregate_receipts = {}
@@ -198,14 +203,20 @@ func _advance_aggregate_validation() -> void:
 			or Engine.get_process_frames() == _aggregate_last_step_frame:
 		return
 	_aggregate_last_step_frame = Engine.get_process_frames()
-	if _broker.has_method("collision_window_layout_ticket"):
-		var live_ticket: Dictionary = _broker.call("collision_window_layout_ticket")
-		if live_ticket.get("status") != "ready" \
-				or live_ticket.get("ticket") != _aggregate_ticket:
-			_aggregate_ticket = ""
-			_aggregate_result = {"status":"pending",
-				"reason":"logical_collision_ticket_changed"}
-			return
+	if not _broker.has_method("collision_window_layout_ticket"):
+		_aggregate_ticket = ""
+		_aggregate_result = {"status":"pending",
+			"reason":"immutable_collision_source_ticket_required"}
+		return
+	var live_ticket: Dictionary = _broker.call("collision_window_layout_ticket")
+	if live_ticket.get("status") != "ready" \
+			or live_ticket.get("ticket") != _aggregate_ticket \
+			or live_ticket.get("sourceTicket") != _aggregate_source_ticket:
+		_aggregate_ticket = ""
+		_aggregate_source_ticket = ""
+		_aggregate_result = {"status":"pending",
+			"reason":"logical_collision_ticket_changed"}
+		return
 	var started := Time.get_ticks_usec()
 	var operations := 0
 	var windows: Array = _aggregate_layout.get("windows", [])
@@ -273,34 +284,6 @@ func _aggregate_owner_epochs_current() -> bool:
 				!= int(_aggregate_owner_epochs[id]):
 			return false
 	return true
-
-func _aggregate_readiness_legacy(identity: Dictionary) -> Dictionary:
-	if _stopping or _broker == null:
-		return {"status":"pending", "reason":"window_coordinator_stopping"}
-	var layout: Dictionary = _broker.collision_window_layout()
-	if layout.get("status") != "ready":
-		return {"status":"pending", "reason":layout.get("reason",
-			"logical_collision_layout_pending")}
-	if layout.get("identity") != identity:
-		return {"status":"pending", "reason":"logical_collision_identity_changed"}
-	var current_tokens := {}
-	for window in layout.windows:
-		current_tokens[window.id] = window.windowToken
-	for id in _owners:
-		if current_tokens.get(id) != _window_tokens.get(id):
-			return {"status":"pending",
-				"reason":"obsolete_physical_window_retirement_pending",
-				"windowId":id}
-	var receipts := {}
-	for window in layout.windows:
-		if not _owners.has(window.id) \
-				or _window_tokens.get(window.id) != window.windowToken:
-			continue
-		var owner: Node3D = _owners[window.id]
-		if is_instance_valid(owner):
-			receipts[window.id] = owner.physical_receipt(
-				window.get("identity", {}))
-	return Aggregate.evaluate(layout, receipts)
 
 func physical_receipt(identity: Dictionary) -> Dictionary:
 	var aggregate: Dictionary = aggregate_readiness(identity)

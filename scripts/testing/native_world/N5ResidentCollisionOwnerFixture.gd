@@ -213,6 +213,7 @@ func _run() -> void:
 		staged_blocks, last_batch, [staged_rows[64]]), staged_barrier)
 	var staged_final_ready: Dictionary = staged_owner.startup_readiness(staged_identity)
 	var staged_final_release: bool = staged_barrier.release(staged_identity)
+	var physical_health: Dictionary = await _physical_health_contract()
 	var main_drain: Dictionary = await _owner.stop_and_drain()
 	var staged_drain: Dictionary = await staged_owner.stop_and_drain()
 	var stop_during_prepare: Dictionary = await _shutdown_case("prepare")
@@ -248,6 +249,7 @@ func _run() -> void:
 		and staged_early_ready.get("status") == "pending" and not staged_early_release \
 		and staged_last.get("status") == "ready" \
 		and staged_final_ready.get("status") == "ready" and staged_final_release \
+		and bool(physical_health.get("passed", false)) \
 		and main_drain.get("status") == "ready" and int(main_drain.get("remainingBodies", -1)) == 0 \
 		and staged_drain.get("status") == "ready" and int(staged_drain.get("remainingBodies", -1)) == 0 \
 		and bool(stop_during_prepare.get("passed", false)) \
@@ -276,6 +278,7 @@ func _run() -> void:
 			"first": staged_first, "earlyReady": staged_early_ready,
 			"earlyRelease": staged_early_release, "last": staged_last,
 			"finalReady": staged_final_ready, "finalRelease": staged_final_release},
+		"physicalHealth":physical_health,
 		"drain": {"main": main_drain, "staged": staged_drain,
 			"duringPrepare": stop_during_prepare,
 			"duringPostPrepareValidation": stop_during_post_prepare,
@@ -291,7 +294,91 @@ func _run() -> void:
 		"retirementReceipt": retirement_receipt_contract})
 
 
+func _physical_health_contract() -> Dictionary:
+	var block := Vector3i(3000, 0, 0)
+	var identity := _identity(51)
+	var source_blocks: Array[Vector3i] = [block, block + Vector3i(1, 0, 0)]
+	var health_source := FakeSource.new()
+	health_source.current = _snapshot(identity, source_blocks,
+		"health-body", "health-other")
+	var layer_owner = _make_health_owner(health_source, block, identity)
+	var baseline: Dictionary = layer_owner.physical_receipt(identity)
+	var baseline_epoch: int = layer_owner.physical_readiness_epoch()
+	var disabled: Dictionary = layer_owner.set_collision_entry_enabled(block, false)
+	var disabled_receipt: Dictionary = layer_owner.physical_receipt(identity)
+	var reenabled: Dictionary = layer_owner.set_collision_entry_enabled(block, true)
+	var restored: Dictionary = layer_owner.physical_receipt(identity)
+	var shape_retired: Dictionary = layer_owner.retire_collision_entry_shape(block, 0)
+	var shape_receipt: Dictionary = layer_owner.physical_receipt(identity)
+	var shape_set_rejected: bool = not layer_owner._entry_shapes_usable(
+		layer_owner._live[block], layer_owner._live[block].body)
+	var body_health_source := FakeSource.new()
+	body_health_source.current = _snapshot(identity, source_blocks,
+		"health-body-free", "health-other")
+	var body_owner = _make_health_owner(body_health_source, block, identity)
+	var body_baseline: Dictionary = body_owner.physical_receipt(identity)
+	var body_epoch: int = body_owner.physical_readiness_epoch()
+	var body_retired: Dictionary = body_owner.retire_collision_entry(block)
+	var freed_receipt: Dictionary = body_owner.physical_receipt(identity)
+	var layer_drain: Dictionary = await layer_owner.stop_and_drain()
+	var body_drain: Dictionary = await body_owner.stop_and_drain()
+	var passed: bool = baseline.get("ready") == true \
+		and disabled.get("status") == "ready" \
+		and layer_owner.physical_readiness_epoch() > baseline_epoch \
+		and disabled_receipt.get("ready") != true \
+		and disabled_receipt.get("reason") == "resident_collision_entry_unhealthy" \
+		and disabled_receipt.get("healthValidation", {}).get("healthFailure") \
+			== "physical_body_layer_mismatch" \
+		and reenabled.get("status") == "ready" and restored.get("ready") == true \
+		and shape_retired.get("status") == "pending" \
+		and shape_set_rejected \
+		and shape_receipt.get("ready") != true \
+		and shape_receipt.get("reason") == "resident_collision_entry_unhealthy" \
+		and body_baseline.get("ready") == true and body_retired.get("status") == "pending" \
+		and body_owner.physical_readiness_epoch() > body_epoch \
+		and freed_receipt.get("ready") != true \
+		and freed_receipt.get("reason") == "resident_collision_entry_unhealthy" \
+		and freed_receipt.get("healthValidation", {}).get("healthFailure") \
+			== "physical_body_queued_for_deletion" \
+		and layer_drain.get("status") == "ready" and body_drain.get("status") == "ready"
+	return {"passed":passed, "baseline":baseline, "disabled":disabled,
+		"disabledReceipt":disabled_receipt, "reenabled":reenabled,
+		"restored":restored, "shapeRetired":shape_retired,
+		"shapeSetRejected":shape_set_rejected, "shapeReceipt":shape_receipt,
+		"bodyRetired":body_retired,
+		"freedReceipt":freed_receipt, "layerDrain":layer_drain,
+		"bodyDrain":body_drain}
+
+
+func _make_health_owner(source: FakeSource, block: Vector3i,
+		identity: Dictionary):
+	var health_owner = OwnerScript.new()
+	add_child(health_owner)
+	assert(health_owner.bind_source(source), "health fixture binds immutable source ticket")
+	var body := StaticBody3D.new()
+	body.collision_layer = OwnerScript.COLLISION_LAYER
+	body.collision_mask = 0
+	health_owner.add_child(body)
+	var shape := CollisionShape3D.new()
+	shape.shape = BoxShape3D.new()
+	body.add_child(shape)
+	var source_identity: Dictionary = source.current.sourceIdentity
+	health_owner._live = {block:{"body":body, "shapes":[shape],
+		"artifactKey":source.current.artifacts[block], "expectedHit":true}}
+	health_owner._identity = identity.duplicate(true)
+	health_owner._source_identity = source_identity.duplicate(true)
+	health_owner._source_ticket = source._ticket_value()
+	health_owner._membership_provenance = source.current.membershipProvenance.duplicate(true)
+	var resident_blocks: Array[Vector3i] = [block]
+	health_owner._resident_blocks = resident_blocks
+	health_owner._receipt_resident_blocks = resident_blocks.duplicate()
+	health_owner._receipt_resident_blocks.make_read_only()
+	health_owner._readiness_epoch = 1
+	return health_owner
+
+
 func _bounded_validation_contract() -> Dictionary:
+	var health_cursor := _bounded_physical_health_cursor_case()
 	var wide := _cursor_source(OwnerScript.MAX_RESIDENT, 30, "wide")
 	var wide_owner = OwnerScript.new()
 	add_child(wide_owner)
@@ -363,7 +450,7 @@ func _bounded_validation_contract() -> Dictionary:
 	await get_tree().process_frame
 	var passed: bool = wide_check.get("status") == "ready" \
 		and int(wide_check.get("maxValidationOperations", 0)) <= 128 \
-		and int(wide_check.get("maxValidationStepUsec", 0)) >= 0 \
+		and bool(health_cursor.get("passed", false)) \
 		and wide_drain.get("status") == "ready" \
 		and over_check.get("status") == "failed" \
 		and over_check.get("reason") == "resident_request_capacity_invalid" \
@@ -377,9 +464,12 @@ func _bounded_validation_contract() -> Dictionary:
 		and bool(cancel_triggered[0]) and cancel_result.get("reason") == "resident_owner_stopping" \
 		and cancel_shapes == 0 and cancel_drain.get("status") == "ready"
 	return {"passed":passed, "maxResidentCount":OwnerScript.MAX_RESIDENT,
+		"physicalHealthCursor":health_cursor,
 		"maxResident":{"status":wide_check.get("status"),
 			"maxOperations":wide_check.get("maxValidationOperations", -1),
 			"maxStepUsec":wide_check.get("maxValidationStepUsec", -1),
+			"maxStepUsecBudget":OwnerScript.VALIDATION_STEP_USEC_BUDGET,
+			"wallClockHardPreemption":false,
 			"ticketChecks":wide.source.ticket_checks,
 			"drainStatus":wide_drain.get("status")},
 		"oversize":{"status":over_check.get("status"),
@@ -395,6 +485,42 @@ func _bounded_validation_contract() -> Dictionary:
 		"cancellation":{"triggered":cancel_triggered[0],
 			"result":cancel_result, "candidateChildren":cancel_shapes,
 		"drainStatus":cancel_drain.get("status")}}
+
+
+func _bounded_physical_health_cursor_case() -> Dictionary:
+	var fixture := _cursor_source(OwnerScript.MAX_RESIDENT, 35, "health-wide")
+	var owner = OwnerScript.new()
+	owner.bind_source(fixture.source)
+	owner._identity = fixture.identity.duplicate(true)
+	owner._source_identity = fixture.sourceIdentity.duplicate(true)
+	owner._source_ticket = fixture.source._ticket_value()
+	owner._membership_provenance = fixture.source.current.membershipProvenance.duplicate(true)
+	owner._resident_blocks = fixture.blocks
+	owner._receipt_resident_blocks = fixture.blocks.duplicate()
+	owner._receipt_resident_blocks.make_read_only()
+	owner._readiness_epoch = 1
+	owner._live = {}
+	for block: Vector3i in fixture.blocks:
+		owner._live[block] = {"expectedHit":false, "body":null, "shapes":[]}
+	var result: Dictionary = {"status":"pending"}
+	var steps := 0
+	var max_operations := 0
+	var max_step_usec := 0
+	while result.get("status") == "pending" and steps < 64:
+		result = owner._advance_physical_health_validation(fixture.identity)
+		steps += 1
+		max_operations = maxi(max_operations, int(result.get("operations", 0)))
+		max_step_usec = maxi(max_step_usec, int(result.get("maxStepUsec", 0)))
+	var passed: bool = result.get("status") == "ready" and steps > 1 \
+		and max_operations <= OwnerScript.HEALTH_VALIDATION_OPERATION_BUDGET \
+		and owner._health_validated_epoch == owner.physical_readiness_epoch()
+	owner.free()
+	return {"passed":passed, "result":result, "steps":steps,
+		"residentCount":fixture.blocks.size(), "maxOperations":max_operations,
+		"operationBudget":OwnerScript.HEALTH_VALIDATION_OPERATION_BUDGET,
+		"maxStepUsec":max_step_usec,
+		"stepUsecBudget":OwnerScript.HEALTH_VALIDATION_STEP_USEC_BUDGET,
+		"wallClockHardPreemption":false}
 
 
 func _cursor_source(count: int, revision: int, label: String) -> Dictionary:

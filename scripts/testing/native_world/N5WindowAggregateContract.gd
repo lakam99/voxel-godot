@@ -47,9 +47,12 @@ func _run() -> void:
 	var cursor_state: Dictionary = AGGREGATE.begin_cursor(layout, receipts)
 	var cursor_steps := 0
 	var cursor_max_operations := 0
+	var cursor_max_usec := 0
 	var cursor_result: Dictionary = cursor_state
 	while cursor_result.get("status") == "pending" and cursor_steps < 1000:
-		cursor_result = AGGREGATE.advance_cursor(cursor_state, 128, 10000)
+		var step_started := Time.get_ticks_usec()
+		cursor_result = AGGREGATE.advance_cursor(cursor_state, 96, 1500)
+		cursor_max_usec = maxi(cursor_max_usec, Time.get_ticks_usec() - step_started)
 		cursor_steps += 1
 		cursor_max_operations = maxi(cursor_max_operations,
 			int(cursor_result.get("operations", 0)))
@@ -59,6 +62,21 @@ func _run() -> void:
 	oversize_layout["requiredBlocks"] = oversize_blocks
 	oversize_layout["requiredBlockCount"] = oversize_blocks.size()
 	var oversize_cursor: Dictionary = AGGREGATE.begin_cursor(oversize_layout, receipts)
+	var at_capacity := _exact_capacity_fixture(identity, source_identity)
+	var at_capacity_state: Dictionary = AGGREGATE.begin_cursor(
+		at_capacity.layout, at_capacity.receipts)
+	var at_capacity_cursor: Dictionary = at_capacity_state
+	var at_capacity_steps := 0
+	var at_capacity_max_operations := 0
+	var at_capacity_max_usec := 0
+	while at_capacity_cursor.get("status") == "pending" and at_capacity_steps < 2500:
+		var cap_step_started := Time.get_ticks_usec()
+		at_capacity_cursor = AGGREGATE.advance_cursor(at_capacity_state, 96, 1500)
+		at_capacity_max_usec = maxi(at_capacity_max_usec,
+			Time.get_ticks_usec() - cap_step_started)
+		at_capacity_steps += 1
+		at_capacity_max_operations = maxi(at_capacity_max_operations,
+			int(at_capacity_cursor.get("operations", 0)))
 	var missing_receipts: Dictionary = receipts.duplicate(true)
 	missing_receipts.erase(ids[-1])
 	var missing: Dictionary = AGGREGATE.evaluate(layout, missing_receipts)
@@ -110,9 +128,13 @@ func _run() -> void:
 		and (groups[Vector3i.ZERO] as Array).size() == 4096 \
 		and full.get("status") == "ready" \
 		and cursor_result.get("status") == "ready" \
-		and cursor_steps > 1 and cursor_max_operations <= 128 \
+		and cursor_steps > 1 and cursor_max_operations <= 96 \
 		and oversize_cursor.get("status") == "failed" \
 		and oversize_cursor.get("reason") == "logical_collision_layout_capacity_invalid" \
+		and at_capacity.layout.requiredBlockCount == AGGREGATE.MAX_AGGREGATE_BLOCKS \
+		and at_capacity_cursor.get("status") == "ready" \
+		and at_capacity_cursor.get("requiredBlockCount") == AGGREGATE.MAX_AGGREGATE_BLOCKS \
+		and at_capacity_steps > 1 and at_capacity_max_operations <= 96 \
 		and missing.get("status") == "pending" \
 		and missing.get("reason") == "collision_window_physics_pending" \
 		and stale.get("status") == "pending" \
@@ -134,8 +156,15 @@ func _run() -> void:
 		"windowCount":windows.size(), "largestWindowBlockCount":4096,
 		"full":full, "missing":missing, "stale":stale,
 		"cursor":{"result":cursor_result, "steps":cursor_steps,
-			"maxOperations":cursor_max_operations, "operationBudget":128},
+			"maxOperations":cursor_max_operations, "operationBudget":96,
+			"maxStepUsec":cursor_max_usec, "stepUsecBudget":1500,
+			"wallClockHardPreemption":false},
 		"oversizeCursor":oversize_cursor,
+		"atCapacityCursor":{"result":at_capacity_cursor, "steps":at_capacity_steps,
+			"maxOperations":at_capacity_max_operations, "operationBudget":96,
+			"maxStepUsec":at_capacity_max_usec, "stepUsecBudget":1500,
+			"wallClockHardPreemption":false,
+			"requiredBlockCount":at_capacity.layout.requiredBlockCount},
 		"duplicate":duplicate, "expandedPending":expanded_pending,
 		"expandedReady":expanded_ready,
 		"retainedAfterVerifiedEdit":retained_ready,
@@ -160,3 +189,33 @@ func _receipt(identity: Dictionary, source_identity: Dictionary,
 			"membershipProvenance":{"authority":"pinned_demand",
 				"demandRevision":0, "closureToken":window.closureToken,
 				"windowToken":window.windowToken}}}
+
+func _exact_capacity_fixture(identity: Dictionary,
+		source_identity: Dictionary) -> Dictionary:
+	var required: Array[Vector3i] = []
+	var windows: Array = []
+	var receipts := {}
+	for group in range(16):
+		var window_id := Vector3i(group, 0, 0)
+		var token := "exact-cap-window-%d" % group
+		var blocks: Array[Vector3i] = []
+		for z in range(16):
+			for y in range(16):
+				for x in range(16):
+					var block := Vector3i(group * 16 + x, y, z)
+					blocks.append(block)
+					required.append(block)
+		var window := {"id":window_id, "blocks":blocks,
+			"closureToken":token, "windowToken":token,
+			"windowIndex":group, "identity":identity.duplicate(true),
+			"localCurrentProof":{"kind":"native_current_revision",
+				"throughGlobalRevision":3, "digest":"exact-cap:%s" % token}}
+		windows.append(window)
+		receipts[window_id] = _receipt(identity, source_identity, window)
+	var layout := {"status":"ready", "schema":"n3-mesh-window-layout/v1",
+		"logicalDemandRevision":22, "logicalClosureToken":"exact-65536",
+		"layoutToken":"exact-65536-layout", "requiredBlockCount":required.size(),
+		"requiredBlocks":required, "windowEdgeBlocks":16,
+		"maxWindowBlocks":4096, "windowCount":windows.size(),
+		"sourceIdentity":source_identity, "identity":identity, "windows":windows}
+	return {"layout":layout, "receipts":receipts}
