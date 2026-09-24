@@ -692,3 +692,13 @@ budget assertion also remain untested. The N3N5 physical runner stopped at its
 25-second diagnostic cap without a report, so it is inconclusive, not a pass.
 These findings keep N5 physical readiness, N3N5 integration, and production
 cutover open.
+
+The generated-structure terrain patch authority was separately audited in
+[`N3_GENERATED_TERRAIN_PATCH_CUTOVER_AUDIT_2026-09-24.md`](N3_GENERATED_TERRAIN_PATCH_CUTOVER_AUDIT_2026-09-24.md).
+It documents a source-authority defect: generated foundations/caps/clearance
+currently share `TerrainVolumeService.edited_cells` with durable explicit
+edits, allowing generated writes to replace durable AIR/solid deltas and later
+saves to lose them. This requires a distinct immutable generated-patch source
+with precedence durable explicit (including AIR) > generated patch > natural;
+it must be integrated before native effective-terrain cutover. Citadel exact
+building geometry remains a separate authority/tranche.
