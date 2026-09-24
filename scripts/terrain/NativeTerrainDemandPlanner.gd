@@ -1,6 +1,8 @@
 extends RefCounted
 class_name NativeTerrainDemandPlanner
 
+const REPLACEMENT := preload("res://scripts/terrain/NativeTerrainDemandReplacement.gd")
+
 ## Pure N3 demand planning. Sources reference-count one data-block union; only
 ## one publisher/native consumer owns that union. No engine or backend calls.
 const CELL := 1.35
@@ -14,6 +16,7 @@ const MAX_MESH_WINDOW_BLOCKS := 4096
 
 var _consumer_id := 0
 var _sources: Dictionary = {}
+var _mesh_sources: Dictionary = {}
 var _desired: Dictionary = {}
 var _required_mesh_blocks: Dictionary = {}
 var _demand_revision := 0
@@ -24,18 +27,86 @@ var _desired_priority: Dictionary = {}
 var _applied: Dictionary = {}
 var _issued: Dictionary = {}
 var _next_ticket := 1
+var _replacement
+var _incremental_active := false
+var _accepted_plan: Dictionary = {}
 
 func setup(consumer_id: int) -> Dictionary:
 	if consumer_id <= 0 or _consumer_id != 0:
 		return {"status":"failed", "reason":"invalid_consumer_owner"}
 	_consumer_id = consumer_id
+	_replacement = REPLACEMENT.new()
+	if _replacement.setup(consumer_id).get("status") != "ready":
+		return {"status":"failed", "reason":"replacement_setup_failed"}
+	_accepted_plan = _empty_plan()
 	return {"status":"ready", "consumerId":_consumer_id}
+
+## Frame-budgeted source replacement. Request data is borrowed under a
+## producer-issued lease; the producer must invalidate before nested mutation.
+func begin_replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
+		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
+		vertical_bounds: Vector2i, request_lease, request_revision: int) -> Dictionary:
+	if _consumer_id <= 0:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	if not _issued.is_empty():
+		return {"status":"pending", "reason":"delta_ack_pending", "ticket":_issued.ticket}
+	var result: Dictionary = _replacement.begin(primary, other_viewers, retained_chunks,
+		foreground_chunks, vertical_bounds, request_lease, request_revision)
+	if result.get("status") == "pending": _incremental_active = true
+	return result
+
+func advance_replace_sources() -> Dictionary:
+	if _replacement == null:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	var result: Dictionary = _replacement.advance()
+	if result.get("status") == "ready" and result.has("plan"):
+		var plan: Dictionary = result.plan
+		var previous := _accepted_plan
+		_accepted_plan = plan
+		_sources = plan.sources
+		_mesh_sources = plan.meshSources
+		_desired = plan.desired
+		_desired_priority = plan.priority
+		_required_mesh_blocks = plan.required
+		_demand_revision = int(plan.demandRevision)
+		_closure_token = String(plan.closureToken)
+		_mesh_window_layout_revision = -1
+		_replacement.accept_current_plan(_required_mesh_blocks, _demand_revision, _closure_token)
+		_replacement.set_retirement_plan(previous)
+		_incremental_active = false
+		var published := result.duplicate(false)
+		published.erase("plan")
+		published["sourceCount"] = _sources.size()
+		published["desiredDataBlocks"] = _desired.size()
+		published["appliedDataBlocks"] = _applied.size()
+		published["requiredMeshBlocks"] = _required_mesh_blocks.size()
+		published["demandRevision"] = _demand_revision
+		published["closureToken"] = _closure_token
+		published["consumerId"] = _consumer_id
+		return published
+	if result.get("status") == "ready" or (result.get("status") == "failed"
+			and not result.get("acceptedPlanRetained", false)):
+		_incremental_active = false
+	return result
+
+func cancel_replace_sources(token: int) -> Dictionary:
+	if _replacement == null:
+		return {"status":"failed", "reason":"planner_not_configured"}
+	return _replacement.cancel(token)
+
+func _empty_plan() -> Dictionary:
+	return {"sources":{}, "meshSources":{}, "desired":{}, "priority":{},
+		"required":{}, "sourceOrder":[], "dataMembers":[], "meshMembers":[],
+		"desiredOrder":[], "requiredOrder":[], "demandRevision":0,
+		"closureToken":""}
 
 func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 		retained_chunks: Array[Vector2i], foreground_chunks: Array[Vector2i],
 		vertical_bounds: Vector2i) -> Dictionary:
 	if _consumer_id <= 0:
 		return {"status":"failed", "reason":"planner_not_configured"}
+	if _incremental_active or _replacement.has_pending_retirement():
+		return {"status":"pending", "reason":"incremental_replacement_active"}
 	if not _issued.is_empty():
 		return {"status":"pending", "reason":"delta_ack_pending", "ticket":_issued.ticket}
 	if vertical_bounds.x > vertical_bounds.y or vertical_bounds.y - vertical_bounds.x > 256:
@@ -65,17 +136,27 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 		if foreground_result.status != "ready": return foreground_result
 	var union := {}
 	var priorities := {}
+	var source_order: Array[String] = []
+	var data_members: Array[Dictionary] = []
+	var desired_order: Array[Vector3i] = []
 	for source_id in planned_sources:
+		source_order.append(String(source_id))
 		var priority := _source_priority(String(source_id))
 		for block: Vector3i in planned_sources[source_id]:
+			data_members.append({"source":String(source_id), "block":block})
+			if not union.has(block): desired_order.append(block)
 			union[block] = true
 			priorities[block] = maxi(int(priorities.get(block, 0)), priority)
 			if union.size() > MAX_UNION_BLOCKS:
 				return {"status":"pending", "reason":"desired_union_capacity",
 					"attemptedBlocks":union.size(), "maxBlocks":MAX_UNION_BLOCKS}
 	var next_required := {}
+	var mesh_members: Array[Dictionary] = []
+	var required_order: Array[Vector3i] = []
 	for source_id in planned_mesh_sources:
 		for block: Vector3i in planned_mesh_sources[source_id]:
+			mesh_members.append({"source":String(source_id), "block":block})
+			if not next_required.has(block): required_order.append(block)
 			next_required[block] = true
 	if next_required != _required_mesh_blocks:
 		_required_mesh_blocks = next_required
@@ -88,8 +169,16 @@ func replace_sources(primary: Dictionary, other_viewers: Array[Dictionary],
 			key_parts.append("%d,%d,%d" % [block.x, block.y, block.z])
 		_closure_token = ":".join(key_parts).sha256_text()
 	_sources = planned_sources
+	_mesh_sources = planned_mesh_sources
 	_desired = union
 	_desired_priority = priorities
+	_accepted_plan = {"sources":_sources, "meshSources":_mesh_sources,
+		"desired":_desired, "priority":_desired_priority,
+		"required":_required_mesh_blocks, "sourceOrder":source_order,
+		"dataMembers":data_members, "meshMembers":mesh_members,
+		"desiredOrder":desired_order, "requiredOrder":required_order,
+		"demandRevision":_demand_revision, "closureToken":_closure_token}
+	_replacement.accept_current_plan(_required_mesh_blocks, _demand_revision, _closure_token)
 	return {"status":"ready", "sourceCount":_sources.size(),
 		"desiredDataBlocks":_desired.size(), "appliedDataBlocks":_applied.size(),
 		"requiredMeshBlocks":_required_mesh_blocks.size(),
@@ -188,10 +277,9 @@ func acknowledge_delta(ticket: int, accepted: bool) -> Dictionary:
 func diagnostics() -> Dictionary:
 	return {"consumerId":_consumer_id, "sources":_sources.size(),
 		"desiredDataBlocks":_desired.size(), "appliedDataBlocks":_applied.size(),
-		"deltaAckPending":not _issued.is_empty(),
+		"deltaAckPending":not _issued.is_empty(), "maxUnionBlocks":MAX_UNION_BLOCKS,
 		"demandRevision":_demand_revision, "closureToken":_closure_token,
-		"requiredMeshBlocks":_required_mesh_blocks.size(),
-		"maxUnionBlocks":MAX_UNION_BLOCKS}
+		"requiredMeshBlocks":_required_mesh_blocks.size()}
 
 func source_ids() -> Array[String]:
 	var ids: Array[String] = []
