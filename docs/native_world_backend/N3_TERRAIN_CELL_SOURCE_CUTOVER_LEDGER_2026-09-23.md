@@ -584,10 +584,23 @@ follow-up before VTR wiring.
 The subsequent staged collision-window consumer slice (`67089eb`) replaces
 the production broker's synchronous layout call with bounded begin/advance/
 cancel work, atomic publication, and stop-time lease/scratch draining. Its
-focused staged-consumer and demand-replacement reports pass, but remain
-service/planner evidence only (`productionCutover: false`). The adapted N3N5
-windowed-physical runner did not produce a report before its 60-second
+focused staged-consumer, demand-replacement, and triangle-artifact reports pass
+on the integrated primary build (`1cde42d`):
+
+- `artifacts/native-world-backend/n3-staged-window-consumer-1790219285586-0a56b71d/report.json`
+- `artifacts/native-world-backend/n3-terrain-demand-replacement-1790219292279-8bee3422/report.json`
+- `artifacts/native-world-backend/n3-triangle-artifact-1790219307396-4d131f0a/report.json`
+
+The consumer contract observed 348 advances / 88,560 work operations (maximum
+256), including stale-source cancellation, changed-revision parity, direct
+`stop()` remaining pending until drain, and both mid-build and transferred-
+scratch shutdown. Demand replacement observed 1,247 advances / 383,030 work
+operations (maximum 256). Triangle artifact observed 2,361 advances / 561,833
+work operations (maximum 256). These remain service/planner and
+Voxel-Tools-service evidence only (`productionCutover: false`). The adapted
+N3N5 windowed-physical runner did not produce a report before its 60-second
 watchdog timeout; its owned process was terminated and authoritative zero
-membership was proven (`artifacts/node-tools/process-runs/godot-FMVVaT/watchdog.json`).
+membership was proven in the worker worktree
+(`artifacts/node-tools/process-runs/godot-FMVVaT/watchdog.json`).
 That run is timed out/unverified, not a pass, and no N3N5 physical-integration
 or production-cutover claim is made from it.
