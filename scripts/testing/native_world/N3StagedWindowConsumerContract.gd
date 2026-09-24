@@ -77,6 +77,18 @@ func _new_broker(planner, source, identity: Dictionary,
 	broker._identity = identity.duplicate(true)
 	return {"broker":broker, "setup":setup}
 
+func _transaction_progress(planner) -> Dictionary:
+	var builder = planner._mesh_layout_builder
+	var job: Dictionary = builder._job
+	return {"owner":planner.collision_mesh_snapshot_transaction_state(),
+		"phase":String(job.get("phase", "")),
+		"inputCursor":int(job.get("inputCursor", -1)),
+		"windowCursor":int(job.get("windowCursor", -1)),
+		"sortWidth":int(job.get("sortWidth", -1)),
+		"sortI":int(job.get("sortI", -1)),
+		"sortJ":int(job.get("sortJ", -1)),
+		"sortK":int(job.get("sortK", -1))}
+
 func _drain_stop(broker, label: String) -> Dictionary:
 	var result: Dictionary = broker.request_stop()
 	for _step in range(1200):
@@ -220,6 +232,13 @@ func run() -> void:
 		{"ownerGeneration":714, "sourceRevision":0, "cancellationEpoch":1,
 			"sourceEpoch":"n3-staged-owner-interleaving"})
 	var required_token := int(shared_producer._demand_snapshot_token)
+	var required_progress_before := _transaction_progress(shared_planner)
+	var wrong_required_advance: Dictionary = shared_planner.advance_required_collision_mesh_blocks(
+		required_token + 1000)
+	var required_progress_after := _transaction_progress(shared_planner)
+	var required_stale_token_rejected: bool = wrong_required_advance.get("status") == "failed" \
+		and wrong_required_advance.get("reason") == "mesh_snapshot_owner_mismatch" \
+		and required_progress_before == required_progress_after
 	var blocked_layout: Dictionary = shared_broker._refresh_window_layout()
 	var blocked_owner: Dictionary = blocked_layout.get("transaction", {})
 	var shared_diagnostics: Dictionary = shared_planner.diagnostics()
@@ -242,6 +261,7 @@ func run() -> void:
 		"retry after required-block owner completes")
 	check(shared_demand.get("status") == "ready"
 		and producer_setup.get("status") == "ready" and required_token > 0
+		and required_stale_token_rejected
 		and broker_did_not_adopt_required and required_result.get("status") == "ready"
 		and shared_sync_demand.get("status") == "ready"
 		and shared_layout_result.get("status") == "ready"
@@ -338,6 +358,13 @@ func run() -> void:
 	var same_kind_broker = same_kind_binding.broker
 	var foreign_layout: Dictionary = same_kind_planner.begin_collision_mesh_window_layout()
 	var foreign_token := int(foreign_layout.get("token", 0))
+	var layout_progress_before := _transaction_progress(same_kind_planner)
+	var wrong_layout_advance: Dictionary = same_kind_planner.advance_collision_mesh_window_layout(
+		foreign_token + 1000)
+	var layout_progress_after := _transaction_progress(same_kind_planner)
+	var layout_stale_token_rejected: bool = wrong_layout_advance.get("status") == "failed" \
+		and wrong_layout_advance.get("reason") == "mesh_snapshot_owner_mismatch" \
+		and layout_progress_before == layout_progress_after
 	var rejected_same_kind: Dictionary = same_kind_broker._refresh_window_layout()
 	var same_kind_not_adopted: bool = same_kind_broker._window_layout_job.is_empty() \
 		and int(rejected_same_kind.get("transaction", {}).get("token", 0)) == foreign_token
@@ -350,7 +377,8 @@ func run() -> void:
 	var same_kind_result: Dictionary = await _drive(same_kind_broker,
 		"retry after foreign same-kind owner completes")
 	check(foreign_layout.get("status") == "pending" and foreign_token > 0
-		and same_kind_not_adopted and foreign_result.get("status") == "ready"
+		and layout_stale_token_rejected and same_kind_not_adopted
+		and foreign_result.get("status") == "ready"
 		and same_kind_result.get("status") == "ready"
 		and _same_layout(same_kind_broker._window_layout, same_kind_reference),
 		"same-kind foreign token is not adopted and broker retries to exact parity")
@@ -456,6 +484,7 @@ func run() -> void:
 		"sharedBuilderOwnerInterleaving":broker_did_not_adopt_required
 			and required_result.get("status") == "ready"
 			and _same_layout(shared_broker._window_layout, shared_reference),
+		"staleRequiredTokenRejectedWithoutProgress":required_stale_token_rejected,
 		"stopWaitsForeignTransaction":stop_waited_without_touching_foreign
 			and foreign_stop_producer_result.get("status") == "ready"
 			and foreign_stop_drained.get("status") == "ready",
@@ -465,6 +494,7 @@ func run() -> void:
 			and restarted_token > foreign_after_abandon_token
 			and producer_orphan_result.get("status") == "ready",
 		"sameKindTokenOwnership":same_kind_not_adopted
+			and layout_stale_token_rejected
 			and foreign_result.get("status") == "ready"
 			and _same_layout(same_kind_broker._window_layout, same_kind_reference),
 		"orphanTransferredRetry":unpublished_before_retry
