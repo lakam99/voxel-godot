@@ -499,10 +499,6 @@ NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
         || request.limits.max_candidate_visits == 0U || request.limits.max_operations == 0U) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
-    if (request.omit_unchanged && request.source == nullptr) {
-        reject(NativeTerrainEditCompileRejectReason::source_required);
-    }
-
     NativeTerrainEditCompileSummary summary;
     summary.shape_count = request.shapes.size();
     summary.source_pinned = request.source != nullptr;
@@ -523,6 +519,9 @@ NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
             continue;
         }
         validate_shape(shape, request.cell_size);
+        if (request.omit_unchanged && request.source == nullptr) {
+            reject(NativeTerrainEditCompileRejectReason::source_required);
+        }
         std::pair<CellCoord, CellCoord> shape_bounds{shape.first, shape.second};
         if (shape.kind == NativeTerrainEditShapeKind::sphere) {
             if (request.source == nullptr) reject(NativeTerrainEditCompileRejectReason::source_required);

@@ -269,14 +269,18 @@ VWB_TEST(native_terrain_edit_positive_sphere_rejects_ambiguous_absent_solid_for_
 VWB_TEST(native_terrain_edit_nonpositive_sphere_is_empty_before_state_or_source_validation) {
     NativeTerrainEditStateTemplate invalid;
     invalid.material = static_cast<TerrainMaterialId>(255U);
-    NativeTerrainEditCompileRequest request = request_without_filter({
+    NativeTerrainEditCompileRequest request;
+    request.cell_size = 1.0;
+    request.shapes = {
         NativeTerrainEditShape::sphere(
             {std::numeric_limits<double>::infinity(), 0.0, 0.0}, 0.0, invalid, std::string("bad\0id", 6)),
         NativeTerrainEditShape::sphere(
             {0.0, std::numeric_limits<double>::quiet_NaN(), 0.0}, -1.0, invalid, ""),
         NativeTerrainEditShape::sphere(
             {0.0, 0.0, 0.0}, -std::numeric_limits<double>::infinity(), invalid, ""),
-    });
+    };
+    VWB_EXPECT(request.omit_unchanged);
+    VWB_EXPECT(request.source == nullptr);
     const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
     VWB_EXPECT(batch.compiled_operations().empty());
     VWB_EXPECT_EQ(3U, batch.summary().shape_count);
@@ -830,7 +834,8 @@ VWB_TEST(native_terrain_edit_rejects_invalid_requests_sources_shapes_and_limits_
 VWB_TEST(native_terrain_edit_empty_batch_is_valid_but_cannot_form_a_delta_transaction) {
     NativeTerrainEditCompileRequest request;
     request.cell_size = 1.0;
-    request.omit_unchanged = false;
+    VWB_EXPECT(request.omit_unchanged);
+    VWB_EXPECT(request.source == nullptr);
     const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
     VWB_EXPECT(batch.compiled_operations().empty());
     VWB_EXPECT_EQ(0U, batch.summary().shape_count);
