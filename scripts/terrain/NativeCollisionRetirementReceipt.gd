@@ -6,6 +6,7 @@ class_name NativeCollisionRetirementReceipt
 ## replacement, so bind the full source, membership and block identity too.
 static func matches_record(window_token: String, receipt: Dictionary,
 		record: Dictionary, lease: Dictionary) -> bool:
+	if not String(receipt.get("retirementKind", "")).is_empty(): return false
 	var identity: Variant = record.get("identity")
 	var source_identity: Variant = record.get("sourceIdentity")
 	var membership: Variant = record.get("membershipProvenance")
@@ -48,6 +49,57 @@ static func matches_record(window_token: String, receipt: Dictionary,
 		and received_required.size() == blocks.size() \
 		and expected_blocks == received_blocks \
 		and expected_blocks == received_required
+
+
+## A staged owner can be cancelled before its first publication. Its drain
+## cannot contain a published-window identity or resident block list. Require
+## the coordinator's exact stage binding plus an empty physical and memory
+## drain instead of pretending that it published the broker's block set.
+static func matches_unpublished_candidate(window_token: String,
+		receipt: Dictionary, record: Dictionary, lease: Dictionary) -> bool:
+	if not lease_matches_record(window_token, record, lease) \
+			or receipt.get("retirementKind") != "unpublished_staged_candidate/v1" \
+			or receipt.get("candidateWindowToken") != window_token \
+			or receipt.get("physicalOwnerEpoch") != lease.get("physicalOwnerEpoch") \
+			or receipt.get("retirementLeaseId") != lease.get("leaseId") \
+			or receipt.get("candidateRecordIdentity") != record.get("identity") \
+			or receipt.get("candidateSourceIdentity") != record.get("sourceIdentity") \
+			or receipt.get("candidateClosureToken") != \
+				record.get("membershipProvenance", {}).get("closureToken"):
+		return false
+	var blocks: Variant = receipt.get("candidateRecordBlocks")
+	if not blocks is Array or blocks.is_empty(): return false
+	var expected: Array[String] = _canonical_block_ids(record.get("blocks", []))
+	var staged: Array[String] = _canonical_block_ids(blocks)
+	if expected.size() != (record.get("blocks", []) as Array).size() \
+			or staged.size() != blocks.size() or expected != staged:
+		return false
+	var memory: Variant = receipt.get("memoryAdmission")
+	if not memory is Dictionary or memory.get("status") != "ready" \
+			or memory.get("ownerEpoch") != lease.get("physicalOwnerEpoch") \
+			or memory.get("windowToken") != window_token \
+			or int(memory.get("reservationCount", -1)) != 0 \
+			or int(memory.get("chargedBytes", -1)) != 0 \
+			or memory.get("stateCounts") != {} \
+			or memory.get("liveTokens") != [] \
+			or String(memory.get("ledgerIdentity", "")).is_empty():
+		return false
+	return receipt.get("status") == "ready" \
+		and bool(receipt.get("drained", false)) \
+		and int(receipt.get("remainingBodies", -1)) == 0 \
+		and int(receipt.get("remainingPendingEntries", -1)) == 0 \
+		and int(receipt.get("remainingLiveEntries", -1)) == 0 \
+		and int(receipt.get("remainingDisposalRetryEntries", -1)) == 0 \
+		and int(receipt.get("retiredLiveEntryCount", -1)) == 0 \
+		and bool(receipt.get("sourceReleased", false)) \
+		and bool(receipt.get("barrierOwnershipReleased", false)) \
+		and String(receipt.get("windowToken", "")) == "" \
+		and int(receipt.get("residentBlockCount", -1)) == 0 \
+		and receipt.get("residentBlocks") == [] \
+		and receipt.get("requiredResidentBlocks") == [] \
+		and receipt.get("identity") == {} \
+		and receipt.get("sourceIdentity") == {} \
+		and receipt.get("membershipProvenance") == {}
 
 
 static func lease_matches_record(window_token: String, record: Dictionary,

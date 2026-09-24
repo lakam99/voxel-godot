@@ -277,6 +277,23 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 	var candidate_drain_receipt: Dictionary = drained.get("drain", {}).duplicate(true)
 	candidate_drain_receipt["retirementLeaseId"] = lease_id
 	candidate_drain_receipt["physicalOwnerEpoch"] = String(stage.ownerEpoch)
+	# The first publication may never have happened. The owner then drains
+	# with empty source fields; attest the exact staged broker record separately.
+	if int(candidate_drain_receipt.get("residentBlockCount", -1)) == 0 \
+			and candidate_drain_receipt.get("residentBlocks") == [] \
+			and String(candidate_drain_receipt.get("windowToken", "")) == "":
+		candidate_drain_receipt["retirementKind"] = "unpublished_staged_candidate/v1"
+		candidate_drain_receipt["candidateWindowToken"] = String(stage.windowToken)
+		candidate_drain_receipt["candidateRecordIdentity"] = \
+			(stage.window.get("identity", {}) as Dictionary).duplicate(true)
+		candidate_drain_receipt["candidateSourceIdentity"] = \
+			(stage.window.get("identity", {}).get("sourceIdentity", {}) as Dictionary).duplicate(true)
+		candidate_drain_receipt["candidateClosureToken"] = \
+			String(stage.window.get("closureToken", ""))
+		candidate_drain_receipt["candidateRecordBlocks"] = \
+			(stage.window.get("blocks", []) as Array).duplicate()
+		candidate_drain_receipt["memoryAdmission"] = \
+			drained.get("memoryAdmission", {}).duplicate(true)
 	var acknowledged: Dictionary = _broker.acknowledge_collision_window_retired(
 		String(stage.windowToken), candidate_drain_receipt)
 	if acknowledged.get("status") != "ready" \

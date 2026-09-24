@@ -414,11 +414,16 @@ func acknowledge_collision_window_retired(window_token: String,
 		retirement_receipt: Dictionary) -> Dictionary:
 	var record: Dictionary = _window_records.get(window_token, {})
 	var lease: Dictionary = _retirement_leases.get(window_token, {})
-	if record.is_empty() or (_active_window_tokens.has(window_token) \
+	if record.is_empty() or (retirement_receipt.get("retirementKind") \
+			== "unpublished_staged_candidate/v1" \
+			and _active_window_tokens.has(window_token)) \
+			or (_active_window_tokens.has(window_token) \
 			and not _pending_retirement_tokens.has(window_token)) \
 			or lease.is_empty() \
-			or not RetirementReceipt.matches_record(window_token,
-				retirement_receipt, record, lease):
+			or not (RetirementReceipt.matches_record(window_token,
+				retirement_receipt, record, lease) \
+				or RetirementReceipt.matches_unpublished_candidate(window_token,
+					retirement_receipt, record, lease)):
 		return {"status":"failed", "reason":"collision_window_retirement_not_proven"}
 	var facade = record.get("facade")
 	if facade != null: facade.detach()
