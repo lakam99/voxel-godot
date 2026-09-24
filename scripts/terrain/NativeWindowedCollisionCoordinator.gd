@@ -368,17 +368,15 @@ func commit_staged_replacement(window: Dictionary, owner: Node3D,
 		return {"status":"pending", "reason":"physical_window_replacement_commit_revalidation_failed"}
 	if _displaced_owners.size() >= MAX_DISPLACED_OWNERS:
 		return {"status":"pending", "reason":"physical_window_displaced_owner_capacity"}
-	var old_barrier_record := _find_retired_barrier_record(id,
+	var old_barrier_records := _retired_barrier_records(id,
 		String(stage.get("oldWindowToken", "")))
-	if old_barrier_record.is_empty():
+	if old_barrier_records.is_empty():
 		return {"status":"pending", "reason":"physical_window_old_barrier_not_retained"}
 	var old_tuple := {"id":id, "owner":stage.oldOwner,
 		"ownerEpoch":String(stage.oldOwnerEpoch),
 		"windowToken":String(stage.oldWindowToken),
 		"window":stage.get("oldWindow", {}),
-		"oldBarrier":old_barrier_record.barrier,
-		"oldBarrierIdentity":old_barrier_record.identity.duplicate(true),
-		"oldBarrierBounds":old_barrier_record.bounds}
+		"oldBarrierRecords":old_barrier_records}
 	_displaced_owners[id] = old_tuple
 	_owners[id] = owner
 	_owner_epochs[id] = String(stage.ownerEpoch)
@@ -410,41 +408,61 @@ func _invalidate_aggregate_for_owner_switch() -> void:
 		"reason":"physical_owner_replacement_committed"}
 	_aggregate_last_step_frame = -1
 
-func _find_retired_barrier_record(id: Vector3i, window_token: String) -> Dictionary:
+func _retired_barrier_records(id: Vector3i, window_token: String) -> Array[Dictionary]:
+	var matches: Array[Dictionary] = []
 	for record in _retired_barriers:
 		if record.get("windowId") == id \
 				and String(record.get("windowToken", "")) == window_token:
-			return record
-	return {}
+			matches.append({"barrier":record.get("barrier"),
+				"identity":record.get("identity", {}).duplicate(true),
+				"bounds":record.get("bounds")})
+	return matches
 
 func _displaced_barrier_clearance(id: Vector3i, displaced: Dictionary) -> Dictionary:
-	var old_identity: Dictionary = displaced.get("oldBarrierIdentity", {})
-	var old_bounds: Variant = displaced.get("oldBarrierBounds")
-	var old_barrier: Variant = displaced.get("oldBarrier")
-	if old_identity.is_empty() or not old_bounds is AABB \
-			or not is_instance_valid(old_barrier):
+	var old_records: Array = displaced.get("oldBarrierRecords", [])
+	if old_records.is_empty():
 		return {"status":"pending", "reason":"displaced_old_barrier_missing"}
-	var retained := _find_retired_barrier_record(id,
+	var retained := _retired_barrier_records(id,
 		String(displaced.get("windowToken", "")))
-	if retained.is_empty() or retained.get("barrier") != old_barrier \
-			or retained.get("bounds") != old_bounds or not old_barrier.is_active():
+	if retained.size() != old_records.size():
 		return {"status":"pending", "reason":"displaced_old_barrier_not_retained"}
 	var replacement: Variant = _barriers.get(id)
 	var identity: Dictionary = _barrier_identities.get(id, {})
 	if not is_instance_valid(replacement) or not replacement.is_active() \
-			or identity.is_empty() or not replacement.covers_bounds(identity, old_bounds):
-		return {"status":"pending", "reason":"displaced_replacement_barrier_does_not_cover_old_bounds",
-			"oldBounds":old_bounds}
-	var old_clearance: Dictionary = old_barrier.clearance(old_identity)
-	if not bool(old_clearance.get("clear", false)):
-		return {"status":"pending", "reason":"displaced_old_barrier_clearance_pending",
-			"oldClearance":old_clearance}
+			or identity.is_empty():
+		return {"status":"pending", "reason":"displaced_replacement_barrier_missing"}
+	var covered_bounds := AABB()
+	for old_record in old_records:
+		var old_barrier: Variant = old_record.get("barrier")
+		var old_identity: Dictionary = old_record.get("identity", {})
+		var old_bounds: Variant = old_record.get("bounds")
+		if old_identity.is_empty() or not old_bounds is AABB \
+				or not is_instance_valid(old_barrier) or not old_barrier.is_active():
+			return {"status":"pending", "reason":"displaced_old_barrier_not_retained"}
+		var found := false
+		for current_record in retained:
+			if current_record.get("barrier") == old_barrier \
+					and current_record.get("identity") == old_identity \
+					and current_record.get("bounds") == old_bounds:
+				found = true
+				break
+		if not found:
+			return {"status":"pending", "reason":"displaced_old_barrier_not_retained"}
+		if not replacement.covers_bounds(identity, old_bounds):
+			return {"status":"pending", "reason":"displaced_replacement_barrier_does_not_cover_old_bounds",
+				"oldBounds":old_bounds}
+		var old_clearance: Dictionary = old_barrier.clearance(old_identity)
+		if not bool(old_clearance.get("clear", false)):
+			return {"status":"pending", "reason":"displaced_old_barrier_clearance_pending",
+				"oldClearance":old_clearance}
+		covered_bounds = old_bounds if covered_bounds == AABB() \
+			else covered_bounds.merge(old_bounds)
 	var replacement_clearance: Dictionary = replacement.clearance(identity)
 	if not bool(replacement_clearance.get("clear", false)):
 		return {"status":"pending", "reason":"displaced_replacement_barrier_clearance_pending",
 			"replacementClearance":replacement_clearance}
-	return {"status":"ready", "oldIdentity":old_identity,
-		"replacementIdentity":identity, "oldBounds":old_bounds}
+	return {"status":"ready", "replacementIdentity":identity,
+		"oldBounds":covered_bounds, "oldBarrierCount":old_records.size()}
 
 func begin_window_barrier(window: Dictionary, bounds: AABB,
 		identity: Dictionary) -> Dictionary:
@@ -678,8 +696,7 @@ func release_barriers(identity: Dictionary) -> Dictionary:
 	for record in _retired_barriers:
 		var barrier: RefCounted = record.barrier
 		var displaced: Dictionary = _displaced_owners.get(record.windowId, {})
-		if displaced.get("oldBarrier") == barrier \
-				and displaced.get("oldBarrierIdentity") == record.get("identity"):
+		if displaced.get("windowToken") == record.get("windowToken"):
 			pending.append(record.windowId)
 			continue
 		var replacement: RefCounted = _barriers.get(record.windowId)

@@ -254,6 +254,9 @@ func _run() -> void:
 		bounds.get_center() - facade_actor.position)
 	var aggregate_early_unbind := main.unbind_native_collision_admission(root_3d)
 	facade_actor.queue_free()
+	var release_before_actor_deletion: Dictionary = coordinator.release_barriers(
+		layout.identity)
+	await process_frame
 	var released: Dictionary = coordinator.release_barriers(layout.identity)
 	var active_retirement: Dictionary = await coordinator.retire_window(window.id)
 	var physical_after_active_rejection: Dictionary = owner.physical_receipt(
@@ -797,9 +800,6 @@ func _run() -> void:
 		old_solid_body_live_during_old_only_hold = is_instance_valid(old_body) \
 			and old_body.is_inside_tree() and not old_body.is_queued_for_deletion() \
 			and old_body.get_parent() == owner
-	guard_actor.position = bounds.position - Vector3(5, 0, 0)
-	second_guard_actor.position = bounds.position - Vector3(6, 0, 0)
-	await physics_frame
 	var union_barrier_hold: Dictionary = coordinator.begin_window_barrier(
 		replacement_window, old_barrier_bounds, replacement_layout.identity)
 	var union_replacement_barrier: RefCounted = union_barrier_hold.get("barrier")
@@ -808,6 +808,19 @@ func _run() -> void:
 		await process_frame
 		union_barrier_census = union_replacement_barrier.census_progress(
 			replacement_layout.identity)
+	var union_retirement_with_actor: Dictionary = await coordinator.retire_displaced_window(
+		window.id)
+	var old_owner_live_during_union_hold: bool = owner.is_inside_tree() \
+		and owner._live.size() == window.get("blocks", []).size()
+	for old_entry in owner._live.values():
+		if not bool(old_entry.get("expectedHit", false)): continue
+		var old_body = old_entry.get("body")
+		old_owner_live_during_union_hold = old_owner_live_during_union_hold \
+			and is_instance_valid(old_body) and old_body.is_inside_tree() \
+			and not old_body.is_queued_for_deletion() and old_body.get_parent() == owner
+	guard_actor.position = bounds.position - Vector3(5, 0, 0)
+	second_guard_actor.position = bounds.position - Vector3(6, 0, 0)
+	await physics_frame
 	var union_replacement_clearance: Dictionary = union_replacement_barrier.clearance(
 		replacement_layout.identity)
 	var union_replacement_covers_old: bool = union_replacement_barrier.covers_bounds(
@@ -975,6 +988,9 @@ func _run() -> void:
 		and raw_barrier_rejected and router_setup.get("status") == "ready" \
 		and aggregate_main_bound and aggregate_motion_held and not aggregate_early_unbind \
 		and aggregate.get("status") == "ready" \
+		and release_before_actor_deletion.get("status") == "pending" \
+		and release_before_actor_deletion.get("reason") \
+			== "window_actor_clearance_pending" \
 		and released.get("status") == "ready" and contact \
 		and active_retirement.get("status") == "pending" \
 		and active_retirement.get("reason") == "physical_window_still_demanded" \
@@ -1076,6 +1092,10 @@ func _run() -> void:
 		and old_owner_live_during_old_only_hold \
 		and old_solid_body_live_during_old_only_hold \
 		and union_barrier_hold.get("status") == "ready" \
+		and union_retirement_with_actor.get("status") == "pending" \
+		and union_retirement_with_actor.get("reason") \
+			== "displaced_old_barrier_clearance_pending" \
+		and old_owner_live_during_union_hold \
 		and union_replacement_covers_old \
 		and bool(union_replacement_clearance.get("clear", false)) \
 		and replacement_release.get("status") == "ready" \
@@ -1143,6 +1163,7 @@ func _run() -> void:
 		"coordinatorSetup":coordinator_setup,
 		"registered":registered, "missingAggregate":missing_aggregate,
 		"aggregate":aggregate,
+		"barrierReleaseBeforeActorDeletion":release_before_actor_deletion,
 		"barrierReleased":released, "actorContact":contact,
 		"activeRetirementRejected":active_retirement,
 		"physicalAfterActiveRejection":physical_after_active_rejection,
@@ -1221,7 +1242,9 @@ func _run() -> void:
 					same_id_retired_barrier_token_matches_incumbent,
 				"retirementDeferred":old_only_retirement,
 				"oldOwnerStillLive":old_owner_live_during_old_only_hold,
-				"oldSolidBodyStillLive":old_solid_body_live_during_old_only_hold},
+				"oldSolidBodyStillLive":old_solid_body_live_during_old_only_hold,
+				"unionRetirementWithActor":union_retirement_with_actor,
+				"oldOwnerStillLiveDuringUnionHold":old_owner_live_during_union_hold},
 			"deniedAfterDrain":denied_after_drain,
 			"deniedPlacementAfter":denied_placement_after,
 			"newSnapshot":replacement_snapshot,
