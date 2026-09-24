@@ -623,14 +623,20 @@ layout phase after backend initialization, initial layout, artifact rows, N5
 physical publication, and a distant durable edit had completed. For the
 shifted demand (revision 2, two required blocks), `replace_sources` returned
 ready but the staged layout remained pending. A second capped probe sampled
-the state at steps 25 through 275 and established an orphaned transaction:
-the broker retained token 7 and returned `pending/mesh_layout_work_pending`
-with zero work, while the planner builder was idle (`is_active: false`, empty
-kind, token 0, no pending retirement). Both are diagnostics, not gate passes;
-the second run hit its 18-second cap and was authoritatively cleaned up with
-zero owned-process membership. The production fix must make layout advancement
-transaction-token-aware, clear/retry an orphan only after proving the matching
-builder transaction is idle/terminal, and continue to require token/revision/
-closure agreement before publication. No N3N5 integration or production
+the state at steps 25 through 275 and established an orphaned transaction: the
+broker retained token 7 and returned `pending/mesh_layout_work_pending` with
+zero work, while the planner builder was idle (`is_active: false`, empty kind,
+token 0, no pending retirement). Code inspection then found the ownership
+race: required-block and layout wrappers share one builder, and `begin` can
+return generic `pending` plus another active kind's token; callers currently
+treat any pending response as acceptance of their own transaction. If the
+actual owner completes and transfers the result first, the mistaken caller
+advances an idle builder and can wait forever. Both probes are diagnostics, not
+gate passes; the second run hit its 18-second cap and was authoritatively
+cleaned up with zero owned-process membership. The production fix must make
+begin acceptance explicit and kind-bound, validate the expected token/kind on
+advancement, and clear or retry only after proving that the owned transaction
+is terminal and no retirement scratch remains. Publication still requires
+exact token, revision, and closure agreement. No N3N5 integration or production
 cutover claim is made until the focused regression and bounded physical
 contract pass.
