@@ -55,11 +55,15 @@ var _drain_retired_live_count := 0
 var _readiness_epoch := 0
 var _health_scan_blocks: Array[Vector3i] = []
 var _health_scan_cursor := 0
+var _health_scan_entry := {}
+var _health_scan_shape_cursor := 0
+var _health_scan_shape_checks := 0
 var _health_scan_epoch := -1
 var _health_scan_identity := {}
 var _health_validated_epoch := -1
 var _health_validated_source_ticket := ""
 var _health_failure := {}
+var _health_required_physics_frame := 0
 
 
 ## The coordinator assigns one immutable physical installation identity before
@@ -155,39 +159,59 @@ func _advance_physical_health_validation(identity: Dictionary) -> Dictionary:
 	if not _health_failure.is_empty() \
 			and int(_health_failure.get("healthEpoch", -1)) == _readiness_epoch:
 		return _health_failure.duplicate(false)
+	if Engine.get_physics_frames() < _health_required_physics_frame:
+		return {"status":"pending", "reason":"physical_health_physics_ack_pending",
+			"requiredPhysicsFrame":_health_required_physics_frame,
+			"currentPhysicsFrame":Engine.get_physics_frames(), "operations":0}
 	if _health_scan_epoch != _readiness_epoch or _health_scan_identity != identity:
 		_health_scan_blocks = _receipt_resident_blocks
 		_health_scan_cursor = 0
+		_health_scan_entry = {}
+		_health_scan_shape_cursor = 0
+		_health_scan_shape_checks = 0
 		_health_scan_epoch = _readiness_epoch
 		_health_scan_identity = identity.duplicate(true)
 	var started := Time.get_ticks_usec()
 	var operations := 0
-	while _health_scan_cursor < _health_scan_blocks.size() \
-			and operations < HEALTH_VALIDATION_OPERATION_BUDGET \
+	while operations < HEALTH_VALIDATION_OPERATION_BUDGET \
 			and Time.get_ticks_usec() - started < HEALTH_VALIDATION_STEP_USEC_BUDGET:
+		if not _health_scan_entry.is_empty():
+			var shapes: Array = _health_scan_entry.get("shapes", [])
+			if _health_scan_shape_cursor >= shapes.size():
+				_health_scan_cursor += 1
+				_health_scan_entry = {}
+				_health_scan_shape_cursor = 0
+				continue
+			var shape = shapes[_health_scan_shape_cursor]
+			var shape_failure := _entry_shape_health_failure(shape,
+				_health_scan_entry.get("body"))
+			operations += 1
+			_health_scan_shape_checks += 1
+			if not shape_failure.is_empty():
+				return _cache_physical_health_failure(
+					_health_scan_blocks[_health_scan_cursor], shape_failure)
+			_health_scan_shape_cursor += 1
+			continue
+		if _health_scan_cursor >= _health_scan_blocks.size(): break
 		var block: Vector3i = _health_scan_blocks[_health_scan_cursor]
 		var entry: Dictionary = _live.get(block, {})
 		operations += 1
 		var health_failure := "physical_entry_missing" if entry.is_empty() \
-			else _entry_health_failure(entry)
+			else _entry_health_header_failure(entry)
 		if not health_failure.is_empty():
-			_readiness_epoch += 1
-			_health_validated_epoch = -1
-			_health_validated_source_ticket = ""
-			_health_scan_blocks = []
-			_health_scan_cursor = 0
-			_health_scan_epoch = -1
-			_health_failure = {"status":"failed",
-				"reason":"resident_collision_entry_unhealthy",
-				"healthFailure":health_failure,
-				"block":block, "healthEpoch":_readiness_epoch}
-			return _health_failure.duplicate(false)
-		_health_scan_cursor += 1
+			return _cache_physical_health_failure(block, health_failure)
+		if bool(entry.get("expectedHit", false)):
+			_health_scan_entry = entry
+			_health_scan_shape_cursor = 0
+		else:
+			_health_scan_cursor += 1
 	if _health_scan_cursor >= _health_scan_blocks.size():
 		if _health_scan_epoch != _readiness_epoch \
 				or _health_scan_identity != identity or not _source_current(identity):
 			_health_scan_blocks = []
 			_health_scan_cursor = 0
+			_health_scan_entry = {}
+			_health_scan_shape_cursor = 0
 			_health_scan_epoch = -1
 			return {"status":"pending", "reason":"physical_health_validation_drift",
 				"operations":operations}
@@ -196,27 +220,51 @@ func _advance_physical_health_validation(identity: Dictionary) -> Dictionary:
 		_health_failure = {}
 		_health_scan_blocks = []
 		_health_scan_cursor = 0
+		_health_scan_entry = {}
+		_health_scan_shape_cursor = 0
 		_health_scan_epoch = -1
 		return {"status":"ready", "operations":operations,
 			"maxOperations":HEALTH_VALIDATION_OPERATION_BUDGET,
 			"maxStepUsec":Time.get_ticks_usec() - started,
 			"maxStepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET,
-			"healthEpoch":_readiness_epoch}
+			"healthEpoch":_readiness_epoch,
+			"shapeChecks":_health_scan_shape_checks}
 	return {"status":"pending", "reason":"physical_health_validation_pending",
 		"cursor":_health_scan_cursor, "total":_health_scan_blocks.size(),
+		"shapeCursor":_health_scan_shape_cursor,
+		"shapeChecks":_health_scan_shape_checks,
 		"operations":operations,
 		"maxOperations":HEALTH_VALIDATION_OPERATION_BUDGET,
 		"maxStepUsec":Time.get_ticks_usec() - started,
 		"maxStepUsecBudget":HEALTH_VALIDATION_STEP_USEC_BUDGET,
 		"healthEpoch":_health_scan_epoch}
 
+func _cache_physical_health_failure(block: Vector3i, failure: String) -> Dictionary:
+	_readiness_epoch += 1
+	_health_validated_epoch = -1
+	_health_validated_source_ticket = ""
+	_health_scan_blocks = []
+	_health_scan_cursor = 0
+	_health_scan_entry = {}
+	_health_scan_shape_cursor = 0
+	_health_scan_epoch = -1
+	_health_failure = {"status":"failed",
+		"reason":"resident_collision_entry_unhealthy",
+		"healthFailure":failure,
+		"block":block, "healthEpoch":_readiness_epoch}
+	return _health_failure.duplicate(false)
+
 func _invalidate_physical_health() -> void:
 	_readiness_epoch += 1
 	_health_validated_epoch = -1
 	_health_validated_source_ticket = ""
 	_health_failure = {}
+	_health_required_physics_frame = Engine.get_physics_frames() + 1
 	_health_scan_blocks = []
 	_health_scan_cursor = 0
+	_health_scan_entry = {}
+	_health_scan_shape_cursor = 0
+	_health_scan_shape_checks = 0
 	_health_scan_epoch = -1
 
 
@@ -978,6 +1026,16 @@ func _entry_live(entry: Dictionary) -> bool:
 
 
 func _entry_health_failure(entry: Dictionary) -> String:
+	var header_failure := _entry_health_header_failure(entry)
+	if not header_failure.is_empty(): return header_failure
+	if not bool(entry.get("expectedHit", false)): return ""
+	for shape in entry.shapes:
+		var shape_failure := _entry_shape_health_failure(shape, entry.body)
+		if not shape_failure.is_empty(): return shape_failure
+	return ""
+
+
+func _entry_health_header_failure(entry: Dictionary) -> String:
 	if not bool(entry.get("expectedHit", false)):
 		return "" if entry.get("body") == null \
 			and entry.get("shapes", []).is_empty() else "unexpected_empty_block_body"
@@ -992,14 +1050,17 @@ func _entry_health_failure(entry: Dictionary) -> String:
 	if not entry.get("shapes") is Array or (entry.shapes as Array).is_empty() \
 			or (entry.shapes as Array).size() > MAX_SHAPES_PER_BLOCK:
 		return "physical_shape_set_invalid"
-	for shape in entry.shapes:
-		if not is_instance_valid(shape) or not shape is CollisionShape3D:
-			return "physical_shape_invalid"
-		if not shape.is_inside_tree(): return "physical_shape_not_in_tree"
-		if shape.is_queued_for_deletion(): return "physical_shape_queued_for_deletion"
-		if shape.get_parent() != body: return "physical_shape_owner_mismatch"
-		if shape.disabled: return "physical_shape_disabled"
-		if shape.shape == null: return "physical_shape_resource_missing"
+	return ""
+
+
+func _entry_shape_health_failure(shape, body) -> String:
+	if not is_instance_valid(shape) or not shape is CollisionShape3D:
+		return "physical_shape_invalid"
+	if not shape.is_inside_tree(): return "physical_shape_not_in_tree"
+	if shape.is_queued_for_deletion(): return "physical_shape_queued_for_deletion"
+	if shape.get_parent() != body: return "physical_shape_owner_mismatch"
+	if shape.disabled: return "physical_shape_disabled"
+	if shape.shape == null: return "physical_shape_resource_missing"
 	return ""
 
 

@@ -8,7 +8,7 @@ const Aggregate = preload("res://scripts/terrain/NativeWindowedCollisionReadines
 const AdmissionBarrier = preload("res://scripts/terrain/NativeCollisionAdmissionBarrier.gd")
 const MAX_RETIRED_BARRIERS := 64
 const MAX_ACTIVE_BARRIERS := 128
-const AGGREGATE_VALIDATION_OPERATION_BUDGET := 128
+const AGGREGATE_VALIDATION_OPERATION_BUDGET := 96
 const AGGREGATE_VALIDATION_STEP_USEC_BUDGET := 1500
 
 ## Composes current N3 logical windows with N5 physical owners and owns the

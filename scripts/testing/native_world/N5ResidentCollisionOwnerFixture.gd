@@ -305,10 +305,16 @@ func _physical_health_contract() -> Dictionary:
 	var baseline: Dictionary = layer_owner.physical_receipt(identity)
 	var baseline_epoch: int = layer_owner.physical_readiness_epoch()
 	var disabled: Dictionary = layer_owner.set_collision_entry_enabled(block, false)
+	var disabled_before_ack: Dictionary = layer_owner.physical_receipt(identity)
+	await get_tree().physics_frame
 	var disabled_receipt: Dictionary = layer_owner.physical_receipt(identity)
 	var reenabled: Dictionary = layer_owner.set_collision_entry_enabled(block, true)
+	var reenabled_before_ack: Dictionary = layer_owner.physical_receipt(identity)
+	await get_tree().physics_frame
 	var restored: Dictionary = layer_owner.physical_receipt(identity)
 	var shape_retired: Dictionary = layer_owner.retire_collision_entry_shape(block, 0)
+	var shape_before_ack: Dictionary = layer_owner.physical_receipt(identity)
+	await get_tree().physics_frame
 	var shape_receipt: Dictionary = layer_owner.physical_receipt(identity)
 	var shape_set_rejected: bool = not layer_owner._entry_shapes_usable(
 		layer_owner._live[block], layer_owner._live[block].body)
@@ -319,33 +325,48 @@ func _physical_health_contract() -> Dictionary:
 	var body_baseline: Dictionary = body_owner.physical_receipt(identity)
 	var body_epoch: int = body_owner.physical_readiness_epoch()
 	var body_retired: Dictionary = body_owner.retire_collision_entry(block)
+	var body_before_ack: Dictionary = body_owner.physical_receipt(identity)
+	await get_tree().physics_frame
 	var freed_receipt: Dictionary = body_owner.physical_receipt(identity)
 	var layer_drain: Dictionary = await layer_owner.stop_and_drain()
 	var body_drain: Dictionary = await body_owner.stop_and_drain()
 	var passed: bool = baseline.get("ready") == true \
 		and disabled.get("status") == "ready" \
 		and layer_owner.physical_readiness_epoch() > baseline_epoch \
+		and disabled_before_ack.get("ready") != true \
+		and disabled_before_ack.get("reason") == "physical_health_physics_ack_pending" \
 		and disabled_receipt.get("ready") != true \
 		and disabled_receipt.get("reason") == "resident_collision_entry_unhealthy" \
 		and disabled_receipt.get("healthValidation", {}).get("healthFailure") \
 			== "physical_body_layer_mismatch" \
-		and reenabled.get("status") == "ready" and restored.get("ready") == true \
+		and reenabled.get("status") == "ready" \
+		and reenabled_before_ack.get("ready") != true \
+		and reenabled_before_ack.get("reason") == "physical_health_physics_ack_pending" \
+		and restored.get("ready") == true \
 		and shape_retired.get("status") == "pending" \
+		and shape_before_ack.get("ready") != true \
+		and shape_before_ack.get("reason") == "physical_health_physics_ack_pending" \
 		and shape_set_rejected \
 		and shape_receipt.get("ready") != true \
 		and shape_receipt.get("reason") == "resident_collision_entry_unhealthy" \
 		and body_baseline.get("ready") == true and body_retired.get("status") == "pending" \
 		and body_owner.physical_readiness_epoch() > body_epoch \
+		and body_before_ack.get("ready") != true \
+		and body_before_ack.get("reason") == "physical_health_physics_ack_pending" \
 		and freed_receipt.get("ready") != true \
 		and freed_receipt.get("reason") == "resident_collision_entry_unhealthy" \
 		and freed_receipt.get("healthValidation", {}).get("healthFailure") \
-			== "physical_body_queued_for_deletion" \
+			in ["physical_body_invalid", "physical_body_queued_for_deletion"] \
 		and layer_drain.get("status") == "ready" and body_drain.get("status") == "ready"
 	return {"passed":passed, "baseline":baseline, "disabled":disabled,
+		"disabledBeforeAck":disabled_before_ack,
 		"disabledReceipt":disabled_receipt, "reenabled":reenabled,
+		"reenabledBeforeAck":reenabled_before_ack,
 		"restored":restored, "shapeRetired":shape_retired,
+		"shapeBeforeAck":shape_before_ack,
 		"shapeSetRejected":shape_set_rejected, "shapeReceipt":shape_receipt,
 		"bodyRetired":body_retired,
+		"bodyBeforeAck":body_before_ack,
 		"freedReceipt":freed_receipt, "layerDrain":layer_drain,
 		"bodyDrain":body_drain}
 
@@ -379,6 +400,7 @@ func _make_health_owner(source: FakeSource, block: Vector3i,
 
 func _bounded_validation_contract() -> Dictionary:
 	var health_cursor := _bounded_physical_health_cursor_case()
+	var health_shapes := await _bounded_health_shape_cursor_case()
 	var wide := _cursor_source(OwnerScript.MAX_RESIDENT, 30, "wide")
 	var wide_owner = OwnerScript.new()
 	add_child(wide_owner)
@@ -451,6 +473,7 @@ func _bounded_validation_contract() -> Dictionary:
 	var passed: bool = wide_check.get("status") == "ready" \
 		and int(wide_check.get("maxValidationOperations", 0)) <= 128 \
 		and bool(health_cursor.get("passed", false)) \
+		and bool(health_shapes.get("passed", false)) \
 		and wide_drain.get("status") == "ready" \
 		and over_check.get("status") == "failed" \
 		and over_check.get("reason") == "resident_request_capacity_invalid" \
@@ -465,6 +488,7 @@ func _bounded_validation_contract() -> Dictionary:
 		and cancel_shapes == 0 and cancel_drain.get("status") == "ready"
 	return {"passed":passed, "maxResidentCount":OwnerScript.MAX_RESIDENT,
 		"physicalHealthCursor":health_cursor,
+		"physicalHealthShapeCursor":health_shapes,
 		"maxResident":{"status":wide_check.get("status"),
 			"maxOperations":wide_check.get("maxValidationOperations", -1),
 			"maxStepUsec":wide_check.get("maxValidationStepUsec", -1),
@@ -517,6 +541,59 @@ func _bounded_physical_health_cursor_case() -> Dictionary:
 	owner.free()
 	return {"passed":passed, "result":result, "steps":steps,
 		"residentCount":fixture.blocks.size(), "maxOperations":max_operations,
+		"operationBudget":OwnerScript.HEALTH_VALIDATION_OPERATION_BUDGET,
+		"maxStepUsec":max_step_usec,
+		"stepUsecBudget":OwnerScript.HEALTH_VALIDATION_STEP_USEC_BUDGET,
+		"wallClockHardPreemption":false}
+
+
+func _bounded_health_shape_cursor_case() -> Dictionary:
+	var fixture := _cursor_source(2, 36, "shape-health")
+	var owner = OwnerScript.new()
+	add_child(owner)
+	owner.bind_source(fixture.source)
+	owner._identity = fixture.identity.duplicate(true)
+	owner._source_identity = fixture.sourceIdentity.duplicate(true)
+	owner._source_ticket = fixture.source._ticket_value()
+	owner._membership_provenance = fixture.source.current.membershipProvenance.duplicate(true)
+	owner._resident_blocks = fixture.blocks
+	owner._receipt_resident_blocks = fixture.blocks.duplicate()
+	owner._receipt_resident_blocks.make_read_only()
+	owner._readiness_epoch = 1
+	owner._live = {}
+	for block: Vector3i in fixture.blocks:
+		var body := StaticBody3D.new()
+		body.collision_layer = OwnerScript.COLLISION_LAYER
+		body.collision_mask = 0
+		owner.add_child(body)
+		var shapes: Array = []
+		for index in range(OwnerScript.MAX_SHAPES_PER_BLOCK):
+			var shape := CollisionShape3D.new()
+			shape.shape = BoxShape3D.new()
+			body.add_child(shape)
+			shapes.append(shape)
+		owner._live[block] = {"expectedHit":true, "body":body,
+			"shapes":shapes, "artifactKey":fixture.source.current.artifacts[block]}
+	var result: Dictionary = {"status":"pending"}
+	var steps := 0
+	var max_operations := 0
+	var max_step_usec := 0
+	while result.get("status") == "pending" and steps < 8:
+		result = owner._advance_physical_health_validation(fixture.identity)
+		steps += 1
+		max_operations = maxi(max_operations, int(result.get("operations", 0)))
+		max_step_usec = maxi(max_step_usec, int(result.get("maxStepUsec", 0)))
+	var shape_checks := int(result.get("shapeChecks", 0))
+	var passed: bool = result.get("status") == "ready" and steps > 1 \
+		and max_operations <= OwnerScript.HEALTH_VALIDATION_OPERATION_BUDGET \
+		and shape_checks == 2 * OwnerScript.MAX_SHAPES_PER_BLOCK \
+		and owner._health_validated_epoch == owner.physical_readiness_epoch()
+	owner.queue_free()
+	await get_tree().process_frame
+	return {"passed":passed, "result":result, "steps":steps,
+		"residentCount":fixture.blocks.size(),
+		"shapesPerResident":OwnerScript.MAX_SHAPES_PER_BLOCK,
+		"shapeChecks":shape_checks, "maxOperations":max_operations,
 		"operationBudget":OwnerScript.HEALTH_VALIDATION_OPERATION_BUDGET,
 		"maxStepUsec":max_step_usec,
 		"stepUsecBudget":OwnerScript.HEALTH_VALIDATION_STEP_USEC_BUDGET,

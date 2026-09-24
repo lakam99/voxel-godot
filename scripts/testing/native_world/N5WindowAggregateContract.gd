@@ -1,6 +1,7 @@
 extends Node
 
 const AGGREGATE = preload("res://scripts/terrain/NativeWindowedCollisionReadiness.gd")
+const COORDINATOR = preload("res://scripts/terrain/NativeWindowedCollisionCoordinator.gd")
 
 func _init() -> void:
 	call_deferred("_run")
@@ -125,6 +126,7 @@ func _run() -> void:
 	unproved_layout.windows[0].localCurrentProof.digest = ""
 	var unproved: Dictionary = AGGREGATE.evaluate(unproved_layout, receipts)
 	var passed: bool = required.size() == 4913 and windows.size() == 8 \
+		and COORDINATOR.AGGREGATE_VALIDATION_OPERATION_BUDGET == 96 \
 		and (groups[Vector3i.ZERO] as Array).size() == 4096 \
 		and full.get("status") == "ready" \
 		and cursor_result.get("status") == "ready" \
@@ -153,6 +155,7 @@ func _run() -> void:
 	var report := {"schema":"n5-window-aggregate-contract/v1",
 		"passed":passed, "evidenceLevel":"synthetic aggregate contract",
 		"productionCutover":false, "requiredBlockCount":required.size(),
+		"productionOperationBudget":COORDINATOR.AGGREGATE_VALIDATION_OPERATION_BUDGET,
 		"windowCount":windows.size(), "largestWindowBlockCount":4096,
 		"full":full, "missing":missing, "stale":stale,
 		"cursor":{"result":cursor_result, "steps":cursor_steps,
