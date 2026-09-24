@@ -1,12 +1,15 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
 import { findGodot, projectRoot } from './lib/voxel-tool-runtime.mjs';
 import { runGodotProcess } from './lib/godot-process.mjs';
-import { N4_UNDERGROUND_PROP_SOURCE_PATHS,
-  n4UndergroundPropWatchdogIdentity } from './lib/n4-underground-prop-source-evidence.mjs';
+import { acquireN4UndergroundPropLease, assertN4CleanGitState,
+  expandN4UndergroundPropSourcePaths, n4BuildReceiptInventory,
+  n4GitState, n4GodotRuntimeInventory, n4UndergroundPropWatchdogIdentity,
+  resolveN4ImportedArtifacts } from './lib/n4-underground-prop-source-evidence.mjs';
 
+const lease = await acquireN4UndergroundPropLease({ project: projectRoot });
+try {
 const output = join(projectRoot, 'artifacts', 'native-world-backend',
   'n4-underground-prop-source-differential');
 await mkdir(output, { recursive: true });
@@ -14,14 +17,15 @@ const token = randomUUID();
 const probePath = join(output, `probe-${token}.json`);
 const reportPath = join(output, `report-${token}.json`);
 const executable = await findGodot();
-const sourcePaths = N4_UNDERGROUND_PROP_SOURCE_PATHS;
-const hashSources = async () => Object.fromEntries(await Promise.all(sourcePaths.map(async path =>
+const gitStateBefore = assertN4CleanGitState(n4GitState(projectRoot), 'pre-run');
+const sourcePaths = await expandN4UndergroundPropSourcePaths(projectRoot);
+const hashPaths = async paths => Object.fromEntries(await Promise.all(paths.map(async path =>
   [path, createHash('sha256').update(await readFile(join(projectRoot, path))).digest('hex')])));
-const gitHead = () => execFileSync('git', ['rev-parse', 'HEAD'], {
-  cwd: projectRoot, encoding: 'utf8', windowsHide: true,
-}).trim();
-const sourceBefore = await hashSources();
-const gitHeadBefore = gitHead();
+const sourceBefore = await hashPaths(sourcePaths);
+const importedPathsBefore = await resolveN4ImportedArtifacts(projectRoot, sourcePaths);
+const importedBefore = await hashPaths(importedPathsBefore);
+const runtimeBefore = await n4GodotRuntimeInventory(executable);
+const buildReceiptsBefore = await n4BuildReceiptInventory(projectRoot);
 const command = ['--headless', '--audio-driver', 'Dummy', '--path', projectRoot,
   '--script', 'res://scripts/testing/native_world/N4UndergroundPropSourceProbe.gd'];
 const processResult = await runGodotProcess(executable, command, {
@@ -33,19 +37,51 @@ const processResult = await runGodotProcess(executable, command, {
 });
 let ownedProcessIdentity = null;
 let ownedProcessIdentityError = null;
-try { ownedProcessIdentity = n4UndergroundPropWatchdogIdentity(processResult); }
+try { ownedProcessIdentity = n4UndergroundPropWatchdogIdentity(processResult,
+  { projectPath: projectRoot, executable, args: command }); }
 catch (error) { ownedProcessIdentityError = error.message; }
-const sourceAfter = await hashSources();
-const gitHeadAfter = gitHead();
+const sourcePathsAfter = await expandN4UndergroundPropSourcePaths(projectRoot);
+const sourceAfter = await hashPaths(sourcePathsAfter);
+const importedPathsAfter = await resolveN4ImportedArtifacts(projectRoot, sourcePathsAfter);
+const importedAfter = await hashPaths(importedPathsAfter);
+const runtimeAfter = await n4GodotRuntimeInventory(executable);
+const buildReceiptsAfter = await n4BuildReceiptInventory(projectRoot);
+const gitStateAfter = n4GitState(projectRoot);
 const changedPaths = sourcePaths.filter(path => sourceBefore[path] !== sourceAfter[path]);
-if (gitHeadBefore !== gitHeadAfter) changedPaths.unshift('git:HEAD');
-const sourceFreeze = { gitHead: gitHeadBefore, gitHeadAfter,
-  files: sourceBefore, unchanged: changedPaths.length === 0, changedPaths };
+if (JSON.stringify(sourcePaths) !== JSON.stringify(sourcePathsAfter)) changedPaths.push('source:inventory');
+if (JSON.stringify(importedPathsBefore) !== JSON.stringify(importedPathsAfter))
+  changedPaths.push('imported:inventory');
+for (const path of importedPathsBefore)
+  if (importedBefore[path] !== importedAfter[path]) changedPaths.push(path);
+if (JSON.stringify(runtimeBefore) !== JSON.stringify(runtimeAfter)) changedPaths.push('runtime:godot');
+if (JSON.stringify(buildReceiptsBefore) !== JSON.stringify(buildReceiptsAfter))
+  changedPaths.push('native:build-receipts');
+if (!gitStateAfter.clean) changedPaths.push('git:status');
+if (gitStateBefore.head !== gitStateAfter.head) changedPaths.push('git:HEAD');
+if (gitStateBefore.tree !== gitStateAfter.tree) changedPaths.push('git:tree');
+const sourceFreeze = { gitHead: gitStateBefore.head, gitHeadAfter: gitStateAfter.head,
+  gitTree: gitStateBefore.tree, gitTreeAfter: gitStateAfter.tree,
+  gitStatusBefore: gitStateBefore.status, gitStatusAfter: gitStateAfter.status,
+  files: sourceBefore, importedArtifacts: importedBefore,
+  godotRuntime: runtimeBefore, nativeBuildReceipts: buildReceiptsBefore,
+  installedDebugDllSha256:
+    sourceBefore['addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll'],
+  voxelToolsEditorDllSha256:
+    sourceBefore['addons/zylann.voxel/bin/libvoxel.windows.editor.x86_64.dll'],
+  stagedDebugDllMatchesRecordedBuildOutput:
+    sourceBefore['addons/terrain_meshing_backend/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll']
+      === buildReceiptsBefore['native/terrain_meshing/bin/terrain_meshing_backend.windows.template_debug.x86_64.dll']?.sha256,
+  dllSourceCorrespondenceProvenByThisRun: false,
+  dllSourceCorrespondenceAuthority:
+    'Separate prior MSVC/LLVM build receipts; this differential does not rebuild the staged DLL.',
+  unchanged: changedPaths.length === 0, changedPaths: [...new Set(changedPaths)] };
 const failures = [];
 if (ownedProcessIdentityError)
   failures.push(`Owned-process receipt identity invalid: ${ownedProcessIdentityError}`);
 if (!sourceFreeze.unchanged)
   failures.push(`Launch-relevant source drift: ${changedPaths.join(', ')}`);
+if (!sourceFreeze.stagedDebugDllMatchesRecordedBuildOutput)
+  failures.push('Staged debug DLL does not match the recorded debug build output');
 let probe;
 try { probe = JSON.parse(await readFile(probePath, 'utf8')); }
 catch (error) { failures.push(`Probe report unavailable: ${error.message}`); }
@@ -223,8 +259,15 @@ const report = {
   sourceFreeze,
   failures: failures.slice(0, 40), probePath, ownedProcess: ownedProcessIdentity,
   processSummaryPath: ownedProcessIdentity?.summaryPath ?? processResult.summaryPath,
-  executable, command,
+  executable, command, lease: { schema: lease.schema, key: lease.key,
+    runnerId: lease.runnerId, canonicalProject: lease.canonicalProject,
+    pid: lease.pid, startIdentity: lease.startIdentity, acquiredAtUtc: lease.acquiredAtUtc },
 };
-await writeFile(reportPath, JSON.stringify(report, null, 2));
+const temporaryReportPath = `${reportPath}.${randomUUID()}.tmp`;
+await writeFile(temporaryReportPath, `${JSON.stringify(report, null, 2)}\n`, { flag: 'wx' });
+await rename(temporaryReportPath, reportPath);
 console.log(`${report.status}: ${reportPath}`);
 if (failures.length) { console.error(failures.slice(0, 10).join('\n')); process.exitCode = 1; }
+} finally {
+  await lease.release();
+}
