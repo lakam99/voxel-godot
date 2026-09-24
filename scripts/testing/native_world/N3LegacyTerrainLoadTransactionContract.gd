@@ -9,12 +9,21 @@ const TRANSACTION := preload("res://scripts/terrain/NativeTerrainLoadTransaction
 const RUNTIME_OWNER := preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
 const PRIVATE_STAGE := preload("res://scripts/terrain/NativePrivateMainLoadStage.gd")
 const TITLE_MENU := preload("res://scripts/TitleMenu.gd")
+const SHUTDOWN_PROBE := preload("res://scripts/testing/native_world/N3PrivateSaveShutdownProbe.gd")
 
 class RejectedSaveStub:
 	extends RefCounted
 	var snapshot: Dictionary = {}
 	func load(_seed: String) -> Dictionary:
 		return snapshot
+	func has_async_save_pending() -> bool:
+		return false
+
+class PublicationProbe:
+	extends RefCounted
+	var calls := 0
+	func advance_citadel_publication() -> void:
+		calls += 1
 
 class FailedMainOwnerFixture:
 	extends Node
@@ -311,6 +320,53 @@ func run() -> void:
 		"title menu refuses failed Main replacement until private save owner drains")
 	menu.queue_free()
 	await process_frame
+	var shutdown_probe = SHUTDOWN_PROBE.new()
+	var publication_probe = PublicationProbe.new()
+	shutdown_probe.shutdown_requested = true
+	shutdown_probe.streaming_active = true
+	shutdown_probe.structure_system = publication_probe
+	root.add_child(shutdown_probe)
+	await process_frame
+	for _frame in range(4):
+		if not shutdown_probe.startup_operation_active: break
+		await process_frame
+	var invalid_start_sections: Dictionary = {}
+	for index in range(129):
+		invalid_start_sections[str(index)] = [index]
+	shutdown_probe._native_startup_save_snapshot = {"version":2,
+		"seed":"invalid", "terrainVolume":{"sections":invalid_start_sections}, "terrain":[]}
+	var invalid_main_drain: Dictionary = await shutdown_probe.drain_private_save_owners_before_free()
+	var shutdown_drain_safe: bool = invalid_main_drain.get("drained") == true \
+		and shutdown_probe._native_startup_save_snapshot.is_empty() \
+		and shutdown_probe._native_decoded_save_retirement == null \
+		and publication_probe.calls == 0 and shutdown_probe.streaming_dispatches == 0
+	check(shutdown_drain_safe,
+		"failed Main drains malformed-start owner without publishing structure or streaming demand")
+	shutdown_probe.shutdown_requested = false
+	shutdown_probe.streaming_active = false
+	shutdown_probe.seed_text = "runtime-expected-seed"
+	var wrong_seed_sections: Array = []
+	for index in range(129):
+		wrong_seed_sections.append({"sectionKey":[index, 0, 0], "cells":[]})
+	var wrong_seed_save := {"version":2, "seed":"runtime-wrong-seed",
+		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
+			"revision":1, "sections":wrong_seed_sections}, "terrain":[]}
+	var runtime_loader = RejectedSaveStub.new()
+	runtime_loader.snapshot = wrong_seed_save
+	shutdown_probe.save_system = runtime_loader
+	var previous_processing := {"process":false, "input":false, "physics":false,
+		"playerPhysics":false, "npcPhysics":[], "npcExecutionOwner":null,
+		"npcExecutionEnabled":false}
+	var wrong_seed_loaded: bool = await shutdown_probe.run_runtime_world_load_staged(
+		false, {}, previous_processing)
+	var wrong_seed_drained: bool = not wrong_seed_loaded \
+		and shutdown_probe._native_runtime_file_save_snapshot.is_empty() \
+		and wrong_seed_sections.is_empty()
+	check(wrong_seed_drained,
+		"runtime wrong-seed file save drains decoded terrain before returning")
+	shutdown_probe.shutdown_requested = true
+	shutdown_probe.queue_free()
+	await process_frame
 
 	var report := {"schema":"n3-legacy-terrain-load-transaction/v1",
 		"passed":failures.is_empty(), "productionCutover":false,
@@ -338,7 +394,9 @@ func run() -> void:
 			"authoritativeStatus":authority_decision.get("status", "")},
 		"failedMainRetirement":{"refusedBeforeDrain":owner_retained,
 			"freedAfterDrain":acknowledged_free,
-			"rejectedRestoreOwnerRetained":rejected_owner_retained},
+			"rejectedRestoreOwnerRetained":rejected_owner_retained,
+			"malformedStartDrainedWithoutDispatch":shutdown_drain_safe,
+			"runtimeWrongSeedDrained":wrong_seed_drained},
 		"doesNotProve":"No actual Main boot under injected private failure, loading responsiveness, authoritative collision readiness, or headed gameplay acceptance."}
 	var report_path := OS.get_environment("VWB_LEGACY_LOAD_TRANSACTION_REPORT")
 	if not report_path.is_empty():

@@ -12,23 +12,32 @@ var _sections: Array = []
 var _legacy: Array = []
 var _state := "new"
 var _failure := ""
+var _invalid_start := false
+var _failure_drain_stack: Array = []
 var _removed_records := 0
 var _max_advance_usec := 0
 
 func start_owned_file_save(snapshot: Dictionary) -> Dictionary:
 	if _state != "new": return {"status":"failed", "reason":"retirement_already_started"}
-	if snapshot.is_empty(): return {"status":"failed", "reason":"owned_save_missing"}
-	var volume_value = snapshot.get("terrainVolume", {})
-	if not volume_value is Dictionary: return {"status":"failed", "reason":"terrain_volume_invalid"}
-	var sections_value = (volume_value as Dictionary).get("sections", [])
-	if not sections_value is Array: return {"status":"failed", "reason":"terrain_sections_invalid"}
-	var legacy_value = snapshot.get("terrain", [])
-	if not legacy_value is Array: return {"status":"failed", "reason":"legacy_terrain_invalid"}
 	_snapshot = snapshot
+	if snapshot.is_empty(): return _start_failed("owned_save_missing")
+	var volume_value = snapshot.get("terrainVolume", {})
+	if not volume_value is Dictionary: return _start_failed("terrain_volume_invalid")
+	var sections_value = (volume_value as Dictionary).get("sections", [])
+	if not sections_value is Array: return _start_failed("terrain_sections_invalid")
+	var legacy_value = snapshot.get("terrain", [])
+	if not legacy_value is Array: return _start_failed("legacy_terrain_invalid")
 	_sections = sections_value
 	_legacy = legacy_value
 	_state = "retiring"
 	return {"status":"pending", "reason":"owned_save_terrain_retirement_pending"}
+
+func _start_failed(reason: String) -> Dictionary:
+	_failure = reason
+	_invalid_start = true
+	_state = "failed"
+	return {"status":"failed", "reason":reason,
+		"ownerMustBeRetained":not _snapshot.is_empty()}
 
 func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 	if _state == "ready": return {"status":"ready", "removedRecords":_removed_records}
@@ -86,6 +95,8 @@ func advance_failed_drain(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Diction
 		return {"status":"failed", "reason":"retirement_drain_budget_or_state_invalid",
 			"ownerMustBeRetained":true}
 	_state = "draining"
+	if _invalid_start:
+		return _advance_invalid_start_drain(max_records)
 	var work_units := 0
 	while work_units < max_records and not _sections.is_empty():
 		var section_value = _sections.back()
@@ -111,8 +122,60 @@ func advance_failed_drain(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Diction
 	_state = "ready"
 	return {"status":"ready", "drained":true, "reason":_failure}
 
+func _advance_invalid_start_drain(max_records: int) -> Dictionary:
+	if _failure_drain_stack.is_empty() and not _snapshot.is_empty():
+		_failure_drain_stack.append(_snapshot)
+	var work_units := 0
+	while work_units < max_records and not _failure_drain_stack.is_empty():
+		var container = _failure_drain_stack.back()
+		if container is Array:
+			var values: Array = container
+			if values.is_empty():
+				_failure_drain_stack.pop_back()
+				work_units += 1
+				continue
+			var value = values.back()
+			if (value is Array and not (value as Array).is_empty()) \
+					or (value is Dictionary and not (value as Dictionary).is_empty()):
+				_failure_drain_stack.append(value)
+				work_units += 1
+				continue
+			values.pop_back()
+			work_units += 1
+		elif container is Dictionary:
+			var values: Dictionary = container
+			if values.is_empty():
+				_failure_drain_stack.pop_back()
+				work_units += 1
+				continue
+			var key: Variant = null
+			for candidate in values:
+				key = candidate
+				break
+			var value = values[key]
+			if (value is Array and not (value as Array).is_empty()) \
+					or (value is Dictionary and not (value as Dictionary).is_empty()):
+				_failure_drain_stack.append(value)
+				work_units += 1
+				continue
+			values.erase(key)
+			work_units += 1
+		else:
+			_failure_drain_stack.pop_back()
+			work_units += 1
+	if not _failure_drain_stack.is_empty() or not _snapshot.is_empty():
+		return {"status":"pending", "reason":"invalid_owned_save_drain_pending",
+			"ownerMustBeRetained":true}
+	_failure_drain_stack = []
+	_sections = []
+	_legacy = []
+	_snapshot = {}
+	_state = "ready"
+	return {"status":"ready", "drained":true, "reason":_failure}
+
 func snapshot() -> Dictionary:
 	return {"state":_state, "removedRecords":_removed_records,
 		"sectionsRemaining":_sections.size(), "legacyRemaining":_legacy.size(),
 		"maxAdvanceUsec":_max_advance_usec, "ownerRetained":not _snapshot.is_empty(),
-		"failure":_failure}
+		"failure":_failure, "invalidStart":_invalid_start,
+		"failureDrainDepth":_failure_drain_stack.size()}

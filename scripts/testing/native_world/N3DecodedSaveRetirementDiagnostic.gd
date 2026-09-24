@@ -28,6 +28,26 @@ func _save() -> Dictionary:
 		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
 			"revision":9, "sections":sections}, "terrain":[]}
 
+func _invalid_start_case(save: Dictionary, expected_reason: String) -> Dictionary:
+	var retirement = RETIREMENT.new()
+	var started: Dictionary = retirement.start_owned_file_save(save)
+	var retained: Dictionary = retirement.snapshot()
+	var first: Dictionary = retirement.advance_failed_drain()
+	var result: Dictionary = first
+	var steps := 1
+	while result.get("status") == "pending" and steps < 200:
+		result = retirement.advance_failed_drain()
+		steps += 1
+	return {"passed":started.get("status") == "failed"
+		and started.get("reason") == expected_reason
+		and started.get("ownerMustBeRetained") == true
+		and retained.get("state") == "failed" and retained.get("ownerRetained") == true
+		and first.get("status") == "pending" and steps > 1
+		and result.get("drained") == true
+		and retirement.snapshot().get("ownerRetained") == false,
+		"reason":started.get("reason", ""), "steps":steps,
+		"retained":retained, "first":first, "final":result}
+
 func run() -> void:
 	var raw: Dictionary = _save()
 	var raw_sections: Array = raw.terrainVolume.sections
@@ -105,12 +125,30 @@ func run() -> void:
 		and malformed_last.get("drained") == true \
 		and malformed_drain_steps == 3 \
 		and malformed_retirement.snapshot().get("ownerRetained") == false
+	var invalid_volume: Array = []
+	var invalid_sections: Dictionary = {}
+	var invalid_legacy: Dictionary = {}
+	for index in range(129):
+		invalid_volume.append({"payload":[index]})
+		invalid_sections[str(index)] = [index]
+		invalid_legacy[str(index)] = [index]
+	var invalid_start := {
+		"volume":_invalid_start_case({"version":2, "seed":"invalid",
+			"terrainVolume":invalid_volume, "terrain":[]}, "terrain_volume_invalid"),
+		"sections":_invalid_start_case({"version":2, "seed":"invalid",
+			"terrainVolume":{"sections":invalid_sections}, "terrain":[]},
+			"terrain_sections_invalid"),
+		"legacy":_invalid_start_case({"version":2, "seed":"invalid",
+			"terrainVolume":{"sections":[]}, "terrain":invalid_legacy},
+			"legacy_terrain_invalid")}
+	var invalid_start_passed: bool = invalid_start.volume.passed \
+		and invalid_start.sections.passed and invalid_start.legacy.passed
 	var passed: bool = started.get("status") == "pending" \
 		and last.get("status") == "ready" \
 		and int(last.get("removedRecords", -1)) == expected_cells \
 		and expected_cells == SECTION_CELLS * SECTION_COUNT \
 		and prior_to_outer_release.get("state") == "ready" \
-		and empty_bounded and malformed_bounded
+		and empty_bounded and malformed_bounded and invalid_start_passed
 	var report := {"schema":"n3-decoded-save-retirement-diagnostic/v1",
 		"passed":passed, "records":expected_cells, "steps":steps,
 		"rawReleaseUsec":raw_release_usec, "ownedReleaseUsec":owned_release_usec,
@@ -122,6 +160,7 @@ func run() -> void:
 			"failed":malformed_failed, "retained":malformed_retained,
 			"remainingAfterFirst":malformed_after_first.get("sectionsRemaining", -1),
 			"steps":malformed_drain_steps, "final":malformed_last},
+		"invalidStart":{"passed":invalid_start_passed, "cases":invalid_start},
 		"evidenceLevel":"synthetic service diagnostic",
 		"doesNotProve":["exclusive ownership in Main", "real file-backed save parity",
 			"whole-game frame cadence", "external snapshot override disposal"]}

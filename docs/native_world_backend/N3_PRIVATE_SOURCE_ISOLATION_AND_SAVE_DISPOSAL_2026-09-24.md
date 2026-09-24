@@ -190,3 +190,34 @@ Both receipts prove natural exit and authoritative zero remaining owned
 processes. These focused contracts do not prove a real Main boot with an
 injected private failure, headed failure presentation, a maximum-size
 file-backed failure path, or native terrain/collision/save authority cutover.
+
+### Invalid-start and failed-instance drain review repair
+
+Independent review of the shadow-failure commit found that malformed
+`terrainVolume`, `sections` or legacy `terrain` could fail before the
+retirement service retained the decoded snapshot. The service now takes the
+snapshot first, marks an invalid start as failed, and drains its JSON
+containers through a cursor capped at 64 work units per advance. Main can
+therefore drain that failed owner before a title-menu retry/free. A runtime
+file-backed snapshot is retained before seed validation; a wrong-seed
+snapshot is retired before the quiesced world resumes. In-memory overrides
+remain borrowed. During shutdown, startup progress still records a row and
+yields a frame, but does not advance Citadel publication, streaming demand or
+local-light publication.
+
+- `node tools/run-n3-decoded-save-retirement.mjs` passed all three invalid
+  initial payload types, each retained through first failure and drained over
+  multiple bounded advances; the prior malformed-cell, 65,536 valid-record
+  and 257 empty-section checks still passed. Report:
+  `artifacts/native-world-backend/n3-decoded-save-retirement-1790233309276-7f5ae1ab/report.json`;
+  owned receipt `artifacts/node-tools/process-runs/godot-7zTt8C/watchdog.json`.
+- `node tools/run-n3-legacy-terrain-load-transaction.mjs` passed a MainCore
+  failed-instance drain with invalid initial sections, zero structure and
+  streaming dispatch while shutdown is set, and file-backed wrong-seed
+  runtime restore with its decoded sections empty before return. Report:
+  `artifacts/native-world-backend/n3-legacy-terrain-load-transaction-1790233321595-fe848af0/report.json`;
+  owned receipt `artifacts/node-tools/process-runs/godot-eOCsCZ/watchdog.json`.
+
+These are focused headless service and MainCore contracts. They do not prove
+whole-game frame cadence, arbitrary corrupt JSON scalar release cost, an
+ordinary headed failure/retry sequence, or any native gameplay authority.

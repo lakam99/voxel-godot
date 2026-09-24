@@ -740,15 +740,16 @@ func begin_startup_loading_timeline() -> void:
 func startup_loading_yield(message: String, domain := "general", status := "pending", metrics := {}) -> void:
     # Main/native processing can be disabled during staged seed reset. Keep
     # old publication work draining without dispatching against a partial world.
-    if structure_system != null:
-        structure_system.advance_citadel_publication()
-    if streaming_active:
-        apply_streaming_region_demand()
+    if not shutdown_requested:
+        if structure_system != null:
+            structure_system.advance_citadel_publication()
+        if streaming_active:
+            apply_streaming_region_demand()
     # Local-light rigs can be published while the regular gameplay process is
     # disabled. Apply the same visibility and shadow budgets during loading so
     # newly prepared structures cannot turn a loading frame into an unbounded
     # omni-shadow render pass.
-    if player != null:
+    if player != null and not shutdown_requested:
         update_local_light_rig_lod(0.25)
     var now_usec := Time.get_ticks_usec()
     if startup_loading_started_usec <= 0:
@@ -3053,7 +3054,17 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
         await stop_startup_loading(StartupReadinessResultScript.failed("startup_cancelled"))
         return false
     var snapshot: Dictionary = snapshot_override if not snapshot_override.is_empty() else save_system.load(seed_text)
+    if snapshot_override.is_empty() and not snapshot.is_empty():
+        _native_runtime_file_save_snapshot = snapshot
     if snapshot.is_empty() or String(snapshot.get("seed", seed_text)) != seed_text:
+        if not _native_runtime_file_save_snapshot.is_empty():
+            var rejected_save_drain: Dictionary = await retire_owned_decoded_save_terrain(
+                _native_runtime_file_save_snapshot)
+            if rejected_save_drain.get("drained", false):
+                _native_runtime_file_save_snapshot = {}
+            else:
+                await startup_loading_yield("Rejected runtime save retained",
+                    "save_retirement", "excluded", rejected_save_drain)
         if hud != null and hud.has_method("hide_loading_overlay"):
             hud.hide_loading_overlay()
         set_process(bool(previous_processing.process))
@@ -3069,8 +3080,6 @@ func run_runtime_world_load_staged(show_message: bool, snapshot_override: Dictio
         if show_message:
             update_hud("No save for %s" % seed_text if snapshot.is_empty() else "Load failed: save seed mismatch")
         return false
-    if snapshot_override.is_empty():
-        _native_runtime_file_save_snapshot = snapshot
     begin_startup_loading_timeline()
     playtest_progress("runtime_load_staged_start")
     await startup_loading_yield("Clearing previous world", "world_reset", "pending")
