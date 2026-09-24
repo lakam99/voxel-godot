@@ -927,6 +927,10 @@ export function coverageTotals(exportJson, expectedFiles, allowedCoreFiles = exp
     if (!(lineCounts instanceof Map)) throw new Error(`LLVM lcov omitted line counts for ${file.filename}.`);
     const reportedLineCount = Number(file.summary.lines.count);
     const reportedCoveredLineCount = Number(file.summary.lines.covered);
+    if (lineCounts.size !== reportedLineCount) {
+      throw new Error(`LLVM lcov line/summary mismatch for ${file.filename}: `
+        + `lcov identifies ${lineCounts.size} executable lines, summary identifies ${reportedLineCount}.`);
+    }
     const fileUncoveredLines = [...lineCounts].filter(([, count]) => count === 0);
     const reportedUncoveredLineCount = reportedLineCount - reportedCoveredLineCount;
     if (fileUncoveredLines.length !== reportedUncoveredLineCount) {

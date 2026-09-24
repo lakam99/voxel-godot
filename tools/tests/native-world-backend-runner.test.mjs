@@ -106,6 +106,16 @@ test('LLVM uncovered line serialization rejects disagreement with the authoritat
   assert.throws(() => coverageTotals(value, [filename], [filename], lineCoverage(filename)), /lcov line\/summary mismatch/);
 });
 
+test('LLVM lcov line serialization rejects omitted covered line records', () => {
+  const filename = resolve('C:/n1/coverage_canary.cpp');
+  const value = coverageExport(filename, []);
+  value.data[0].files[0].summary.lines = { count: 2, covered: 1 };
+  // The one uncovered record still agrees with LLVM's uncovered count, but a
+  // covered DA record is missing, so the per-file total must fail closed.
+  assert.throws(() => coverageTotals(value, [filename], [filename],
+    lineCoverage(filename, ['DA:10,0'])), /lcov line\/summary mismatch.*executable lines/);
+});
+
 test('LLVM branch tuple rejects invalid edge counts', () => {
   const filename = resolve('C:/n1/coverage_canary.cpp');
   assert.throws(() => coverageTotals(coverageExport(filename, [
