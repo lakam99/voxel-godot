@@ -512,15 +512,21 @@ func _validate_request(request: Dictionary) -> Dictionary:
 	var artifacts: Dictionary = source_snapshot.artifacts
 	if produced.size() != resident.size() or artifacts.size() != resident.size():
 		return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
+	var produced_set: Dictionary = _block_membership_set(produced)
+	if produced_set.size() != resident.size():
+		return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
 	for block in resident:
-		if not produced.has(block) or not artifacts.has(block) \
+		if not produced_set.has(block) or not artifacts.has(block) \
 				or String(artifacts[block]).is_empty():
 			return {"status": "pending", "reason": "required_resident_artifacts_incomplete"}
 	var requested: Array = request.get("residentBlocks", [])
 	if requested.size() != resident.size():
 		return {"status": "failed", "reason": "request_resident_membership_mismatch"}
+	var requested_set: Dictionary = _block_membership_set(requested)
+	if requested_set.size() != resident.size():
+		return {"status": "failed", "reason": "request_resident_membership_mismatch"}
 	for block in resident:
-		if not requested.has(block):
+		if not requested_set.has(block):
 			return {"status": "failed", "reason": "request_resident_membership_mismatch"}
 	var affected: Array[Vector3i] = []
 	var affected_set := {}
@@ -761,11 +767,25 @@ func _source_current(identity: Dictionary) -> bool:
 	if blocks.size() != _resident_blocks.size() or required.size() != _resident_blocks.size() \
 			or current.get("membershipProvenance") != _membership_provenance:
 		return false
+	var blocks_set: Dictionary = _block_membership_set(blocks)
+	var required_set: Dictionary = _block_membership_set(required)
+	if blocks_set.size() != _resident_blocks.size() \
+			or required_set.size() != _resident_blocks.size():
+		return false
 	for block in _resident_blocks:
-		if not blocks.has(block) or not required.has(block) or not _live.has(block) \
+		if not blocks_set.has(block) or not required_set.has(block) or not _live.has(block) \
 				or current.get("artifacts", {}).get(block) != _live[block].artifactKey:
 			return false
 	return true
+
+
+func _block_membership_set(blocks: Array) -> Dictionary:
+	var result := {}
+	for block in blocks:
+		if not block is Vector3i or result.has(block):
+			return {}
+		result[block] = true
+	return result
 
 
 func _source_revision_current(identity: Dictionary, source_identity: Dictionary) -> bool:
