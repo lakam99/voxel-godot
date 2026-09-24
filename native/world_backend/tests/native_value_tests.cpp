@@ -19,6 +19,14 @@ NativeValue nested_arrays(const std::size_t depth) {
     return value;
 }
 
+class CollectingSink final : public NativeValueCanonicalSink {
+public:
+    void append(const std::uint8_t *data, const std::size_t size) override {
+        bytes.insert(bytes.end(), data, data + size);
+    }
+    std::vector<std::uint8_t> bytes;
+};
+
 } // namespace
 
 VWB_TEST(native_value_admits_all_canonical_json_value_kinds_and_exact_structure) {
@@ -169,6 +177,10 @@ VWB_TEST(native_value_rejects_the_variant_exceptional_state_before_tag_dispatch)
     NativeValue serialization_probe = NativeValue::null();
     VWB_EXPECT(NativeValueTestAccess::force_valueless_by_exception(serialization_probe));
     VWB_EXPECT_THROW(NativeValueRejected, serialization_probe.canonical_binary());
+    VWB_EXPECT_THROW(NativeValueRejected, serialization_probe.canonical_metrics());
+    CollectingSink sink;
+    VWB_EXPECT_THROW(NativeValueRejected, serialization_probe.write_canonical(sink));
+    VWB_EXPECT_THROW(NativeValueRejected, serialization_probe.compact_copy());
 }
 
 VWB_TEST(native_value_assignment_stages_copy_and_exchanges_moved_storage) {
@@ -182,4 +194,33 @@ VWB_TEST(native_value_assignment_stages_copy_and_exchanges_moved_storage) {
     move_target = NativeValue::array({NativeValue::null()});
     VWB_EXPECT_EQ(NativeValueKind::array, move_target.kind());
     VWB_EXPECT_EQ(NativeValueKind::null_value, move_target.as_array()[0].kind());
+}
+
+VWB_TEST(native_value_owner_metrics_sink_and_compact_copy_are_value_semantic) {
+    NativeValue::Array roomy_array;
+    roomy_array.reserve(100000U);
+    roomy_array.push_back(NativeValue::boolean(false));
+    roomy_array.push_back(NativeValue::number(3.25));
+    NativeValue::Object roomy_object;
+    roomy_object.reserve(10000U);
+    std::string roomy_key(1000U, 'k');
+    roomy_key.resize(3U);
+    roomy_object.emplace_back(std::move(roomy_key), NativeValue::array(std::move(roomy_array)));
+    const NativeValue roomy = NativeValue::object(std::move(roomy_object));
+    const NativeValue compact = roomy.compact_copy();
+    VWB_EXPECT_EQ(roomy, compact);
+    VWB_EXPECT(compact.as_object().capacity() < roomy.as_object().capacity());
+    VWB_EXPECT(compact.as_object()[0].second.as_array().capacity()
+        < roomy.as_object()[0].second.as_array().capacity());
+
+    const NativeValueCanonicalMetrics roomy_metrics = roomy.canonical_metrics();
+    const NativeValueCanonicalMetrics compact_metrics = compact.canonical_metrics();
+    VWB_EXPECT_EQ(roomy_metrics.canonical_bytes, compact_metrics.canonical_bytes);
+    VWB_EXPECT_EQ(roomy_metrics.utf8_bytes, compact_metrics.utf8_bytes);
+    VWB_EXPECT_EQ(roomy_metrics.compact_retained_dynamic_bytes,
+        compact_metrics.compact_retained_dynamic_bytes);
+    CollectingSink sink;
+    roomy.write_canonical(sink);
+    VWB_EXPECT_EQ(roomy_metrics.canonical_bytes, sink.bytes.size());
+    VWB_EXPECT_EQ(roomy.canonical_binary(), sink.bytes);
 }

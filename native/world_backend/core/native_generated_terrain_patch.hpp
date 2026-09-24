@@ -90,13 +90,16 @@ struct NativeGeneratedTerrainPatchLimits final {
     // larger retained-representation ceiling.
     static constexpr std::size_t MAX_MANIFEST_CANONICAL_BYTES = 1024U * 1024U;
     static constexpr std::size_t MAX_MANIFEST_RETAINED_BYTES = 16U * 1024U * 1024U;
+    static constexpr std::size_t MAX_MANIFEST_PEAK_WORKING_BYTES = 17U * 1024U * 1024U;
     static constexpr std::uint64_t MAX_OPERATION_CELL_VOLUME = 4ULL * 1024ULL * 1024ULL;
     static constexpr std::uint64_t MAX_AGGREGATE_CELL_VOLUME = 64ULL * 1024ULL * 1024ULL;
     static constexpr std::size_t MAX_AFFECTED_SECTIONS = 65536U;
+    static constexpr std::size_t MAX_SECTION_WORKING_ENTRIES = 262144U;
     static constexpr std::size_t MAX_PAGE_PROJECTED_OPERATIONS = 2048U;
     static constexpr std::size_t MAX_PAGE_TOMBSTONES = 4096U;
     static constexpr std::uint64_t MAX_PAGE_PROJECTED_CELL_VOLUME = 8ULL * 1024ULL * 1024ULL;
     static constexpr std::size_t MAX_PAGE_RETAINED_BYTES = 4U * 1024U * 1024U;
+    static constexpr std::size_t MAX_PAGE_PEAK_WORKING_BYTES = 5U * 1024U * 1024U;
     static constexpr std::uint8_t MAX_MESH_HALO_CELLS = 16U;
     static constexpr std::int32_t SECTION_SIZE = 16;
 };
@@ -132,6 +135,8 @@ enum class NativeGeneratedTerrainPatchFailure : std::uint8_t {
     page_operation_limit = 28,
     page_volume_limit = 29,
     page_retained_bytes_limit = 30,
+    manifest_peak_working_bytes_limit = 31,
+    page_peak_working_bytes_limit = 32,
 };
 
 class NativeGeneratedTerrainPatchError final : public std::runtime_error {
@@ -178,7 +183,12 @@ public:
     const std::vector<std::uint8_t> &canonical_binary() const noexcept;
     const Sha256Digest &content_digest() const noexcept;
     std::string content_digest_hex() const;
+    // Conservative component-owned final-storage bound after compact
+    // normalization; independent of caller capacity and allocation history.
     std::size_t retained_bytes() const noexcept;
+    // Conservative maximum of final storage plus all simultaneously live
+    // admission scratch buffers, checked before those buffers are allocated.
+    std::size_t peak_working_bytes() const noexcept;
 
 private:
     NativeGeneratedTerrainPatchManifest(
@@ -186,13 +196,15 @@ private:
         std::vector<CellCoord> affected_sections,
         std::vector<std::uint8_t> canonical_binary,
         Sha256Digest content_digest,
-        std::size_t retained_bytes);
+        std::size_t retained_bytes,
+        std::size_t peak_working_bytes);
 
     NativeGeneratedTerrainPatchManifestDescriptor descriptor_;
     std::vector<CellCoord> affected_sections_;
     std::vector<std::uint8_t> canonical_binary_;
     Sha256Digest content_digest_{};
     std::size_t retained_bytes_ = 0U;
+    std::size_t peak_working_bytes_ = 0U;
 };
 
 struct NativeGeneratedTerrainPatchHalo final {
@@ -248,7 +260,9 @@ public:
     const std::vector<std::uint8_t> &canonical_binary() const noexcept;
     const Sha256Digest &projection_digest() const noexcept;
     std::string projection_digest_hex() const;
+    // Conservative normalized final-storage and construction-peak bounds.
     std::size_t retained_bytes() const noexcept;
+    std::size_t peak_working_bytes() const noexcept;
     std::optional<NativeResolvedGeneratedTerrainPatchCell> resolve(CellCoord cell) const;
 
 private:
@@ -259,7 +273,8 @@ private:
         std::vector<CellCoord> affected_sections,
         std::vector<std::uint8_t> canonical_binary,
         Sha256Digest projection_digest,
-        std::size_t retained_bytes);
+        std::size_t retained_bytes,
+        std::size_t peak_working_bytes);
 
     NativeGeneratedTerrainPageDomain domain_;
     NativeInclusiveCellBox projected_bounds_;
@@ -268,6 +283,7 @@ private:
     std::vector<std::uint8_t> canonical_binary_;
     Sha256Digest projection_digest_{};
     std::size_t retained_bytes_ = 0U;
+    std::size_t peak_working_bytes_ = 0U;
 };
 
 } // namespace voxel::world_backend

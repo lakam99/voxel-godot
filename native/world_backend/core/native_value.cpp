@@ -107,23 +107,32 @@ void validate_root(const NativeValue &value) {
     validate_value(value, 0U, nodes);
 }
 
-void append_u32(std::vector<std::uint8_t> &out, const std::uint32_t value) {
-    for (int shift = 24; shift >= 0; shift -= 8) out.push_back(static_cast<std::uint8_t>((value >> shift) & 0xffU));
+void append_u32(NativeValueCanonicalSink &sink, const std::uint32_t value) {
+    std::uint8_t bytes[4];
+    for (int index = 0, shift = 24; shift >= 0; ++index, shift -= 8) {
+        bytes[index] = static_cast<std::uint8_t>((value >> shift) & 0xffU);
+    }
+    sink.append(bytes, sizeof(bytes));
 }
 
-void append_bytes(std::vector<std::uint8_t> &out, const std::string &value) {
-    append_u32(out, static_cast<std::uint32_t>(value.size()));
-    out.insert(out.end(), value.begin(), value.end());
+void append_bytes(NativeValueCanonicalSink &sink, const std::string &value) {
+    append_u32(sink, static_cast<std::uint32_t>(value.size()));
+    sink.append(reinterpret_cast<const std::uint8_t *>(value.data()), value.size());
 }
 
-void append_value(std::vector<std::uint8_t> &out, const NativeValue &value) {
+void append_tag(NativeValueCanonicalSink &sink, const BinaryTag tag) {
+    const std::uint8_t byte = static_cast<std::uint8_t>(tag);
+    sink.append(&byte, 1U);
+}
+
+void append_value(NativeValueCanonicalSink &sink, const NativeValue &value) {
     const NativeValueKind kind = value.kind();
     if (kind == NativeValueKind::null_value) {
-        out.push_back(static_cast<std::uint8_t>(BinaryTag::null_value));
+        append_tag(sink, BinaryTag::null_value);
         return;
     }
     if (kind == NativeValueKind::boolean) {
-        out.push_back(static_cast<std::uint8_t>(value.as_boolean() ? BinaryTag::true_value : BinaryTag::false_value));
+        append_tag(sink, value.as_boolean() ? BinaryTag::true_value : BinaryTag::false_value);
         return;
     }
     if (kind == NativeValueKind::number) {
@@ -132,30 +141,112 @@ void append_value(std::vector<std::uint8_t> &out, const NativeValue &value) {
         std::uint64_t bits = 0U;
         const double number = value.as_number();
         std::memcpy(&bits, &number, sizeof(bits));
-        out.push_back(static_cast<std::uint8_t>(BinaryTag::number));
-        for (int shift = 56; shift >= 0; shift -= 8) out.push_back(static_cast<std::uint8_t>((bits >> shift) & 0xffU));
+        append_tag(sink, BinaryTag::number);
+        std::uint8_t bytes[8];
+        for (int index = 0, shift = 56; shift >= 0; ++index, shift -= 8) {
+            bytes[index] = static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+        }
+        sink.append(bytes, sizeof(bytes));
         return;
     }
     if (kind == NativeValueKind::string) {
-        out.push_back(static_cast<std::uint8_t>(BinaryTag::string));
-        append_bytes(out, value.as_string());
+        append_tag(sink, BinaryTag::string);
+        append_bytes(sink, value.as_string());
         return;
     }
     if (kind == NativeValueKind::array) {
-        out.push_back(static_cast<std::uint8_t>(BinaryTag::array));
-        append_u32(out, static_cast<std::uint32_t>(value.as_array().size()));
-        for (const NativeValue &child : value.as_array()) append_value(out, child);
+        append_tag(sink, BinaryTag::array);
+        append_u32(sink, static_cast<std::uint32_t>(value.as_array().size()));
+        for (const NativeValue &child : value.as_array()) append_value(sink, child);
         return;
     }
     // Factories and private storage admit only the six tags above; object is
     // therefore the sole remaining serializer case, never a fallback policy.
-    out.push_back(static_cast<std::uint8_t>(BinaryTag::object));
-    append_u32(out, static_cast<std::uint32_t>(value.as_object().size()));
+    append_tag(sink, BinaryTag::object);
+    append_u32(sink, static_cast<std::uint32_t>(value.as_object().size()));
     for (const auto &entry : value.as_object()) {
-        append_bytes(out, entry.first);
-        append_value(out, entry.second);
+        append_bytes(sink, entry.first);
+        append_value(sink, entry.second);
     }
 }
+
+std::size_t compact_string_dynamic_bytes(const std::size_t size) noexcept {
+    // MSVC's basic_string uses 15 inline chars and 16-byte allocation
+    // granularity. Count no heap for inline values and round every larger
+    // payload (including its terminator) to the next 16-byte bucket.
+    return size <= 15U ? 0U : ((size | 15U) + 1U);
+}
+
+NativeValueCanonicalMetrics measure_value(const NativeValue &value) {
+    const NativeValueKind kind = value.kind();
+    if (kind == NativeValueKind::null_value || kind == NativeValueKind::boolean) return {1U, 0U, 0U};
+    if (kind == NativeValueKind::number) return {9U, 0U, 0U};
+    if (kind == NativeValueKind::string) {
+        return {5U + value.as_string().size(), value.as_string().size(),
+            compact_string_dynamic_bytes(value.as_string().size())};
+    }
+    NativeValueCanonicalMetrics result{5U, 0U, 0U};
+    if (kind == NativeValueKind::array) {
+        result.compact_retained_dynamic_bytes = value.as_array().size() * sizeof(NativeValue);
+        for (const NativeValue &child : value.as_array()) {
+            const NativeValueCanonicalMetrics child_metrics = measure_value(child);
+            result.canonical_bytes += child_metrics.canonical_bytes;
+            result.utf8_bytes += child_metrics.utf8_bytes;
+            result.compact_retained_dynamic_bytes += child_metrics.compact_retained_dynamic_bytes;
+        }
+        return result;
+    }
+    result.compact_retained_dynamic_bytes = value.as_object().size() * sizeof(NativeValue::Object::value_type);
+    for (const auto &entry : value.as_object()) {
+        result.canonical_bytes += 4U + entry.first.size();
+        result.utf8_bytes += entry.first.size();
+        result.compact_retained_dynamic_bytes += compact_string_dynamic_bytes(entry.first.size());
+        const NativeValueCanonicalMetrics child_metrics = measure_value(entry.second);
+        result.canonical_bytes += child_metrics.canonical_bytes;
+        result.utf8_bytes += child_metrics.utf8_bytes;
+        result.compact_retained_dynamic_bytes += child_metrics.compact_retained_dynamic_bytes;
+    }
+    return result;
+}
+
+std::string compact_string(const std::string &value) {
+    std::string result(value.data(), value.size());
+    result.shrink_to_fit();
+    return result;
+}
+
+NativeValue compact_value(const NativeValue &value) {
+    const NativeValueKind kind = value.kind();
+    if (kind == NativeValueKind::null_value) return NativeValue::null();
+    if (kind == NativeValueKind::boolean) return NativeValue::boolean(value.as_boolean());
+    if (kind == NativeValueKind::number) return NativeValue::number(value.as_number());
+    if (kind == NativeValueKind::string) return NativeValue::string(compact_string(value.as_string()));
+    if (kind == NativeValueKind::array) {
+        NativeValue::Array result;
+        result.reserve(value.as_array().size());
+        for (const NativeValue &child : value.as_array()) result.push_back(compact_value(child));
+        result.shrink_to_fit();
+        return NativeValue::array(std::move(result));
+    }
+    NativeValue::Object result;
+    result.reserve(value.as_object().size());
+    for (const auto &entry : value.as_object()) {
+        result.emplace_back(compact_string(entry.first), compact_value(entry.second));
+    }
+    result.shrink_to_fit();
+    return NativeValue::object(std::move(result));
+}
+
+class VectorCanonicalSink final : public NativeValueCanonicalSink {
+public:
+    explicit VectorCanonicalSink(const std::size_t exact_size) { bytes_.reserve(exact_size); }
+    void append(const std::uint8_t *data, const std::size_t size) override {
+        bytes_.insert(bytes_.end(), data, data + size);
+    }
+    std::vector<std::uint8_t> finish() { return std::move(bytes_); }
+private:
+    std::vector<std::uint8_t> bytes_;
+};
 
 } // namespace
 
@@ -214,13 +305,32 @@ const NativeValue::Array &NativeValue::as_array() const { return std::get<Array>
 const NativeValue::Object &NativeValue::as_object() const { return std::get<Object>(storage_); }
 
 std::vector<std::uint8_t> NativeValue::canonical_binary() const {
+    const NativeValueCanonicalMetrics metrics = canonical_metrics();
+    VectorCanonicalSink sink(metrics.canonical_bytes);
+    write_canonical(sink);
+    return sink.finish();
+}
+
+NativeValueCanonicalMetrics NativeValue::canonical_metrics() const {
     if (storage_.valueless_by_exception()) reject("valueless native value");
-    // validate_root dispatches through kind(), which repeats the defensive
-    // valueless rejection before inspecting a tag.
     validate_root(*this);
-    std::vector<std::uint8_t> result = {'N', 'V', '1'};
-    append_value(result, *this);
+    NativeValueCanonicalMetrics result = measure_value(*this);
+    result.canonical_bytes += 3U;
     return result;
+}
+
+void NativeValue::write_canonical(NativeValueCanonicalSink &sink) const {
+    if (storage_.valueless_by_exception()) reject("valueless native value");
+    validate_root(*this);
+    static constexpr std::uint8_t marker[] = {'N', 'V', '1'};
+    sink.append(marker, sizeof(marker));
+    append_value(sink, *this);
+}
+
+NativeValue NativeValue::compact_copy() const {
+    if (storage_.valueless_by_exception()) reject("valueless native value");
+    validate_root(*this);
+    return compact_value(*this);
 }
 
 bool NativeValue::operator==(const NativeValue &other) const noexcept { return storage_ == other.storage_; }

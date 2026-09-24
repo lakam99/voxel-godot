@@ -40,6 +40,21 @@ struct NativeValueLimits final {
     static constexpr std::size_t MAX_CONTAINER_ENTRIES = 1024U;
 };
 
+// NativeValue owns the NV1 wire contract. Consumers can measure once and
+// stream the exact canonical bytes into their own already-bounded writer
+// without duplicating the recursive tag/length rules.
+struct NativeValueCanonicalMetrics final {
+    std::size_t canonical_bytes = 0U;
+    std::size_t utf8_bytes = 0U;
+    std::size_t compact_retained_dynamic_bytes = 0U;
+};
+
+class NativeValueCanonicalSink {
+public:
+    virtual ~NativeValueCanonicalSink() = default;
+    virtual void append(const std::uint8_t *data, std::size_t size) = 0;
+};
+
 class NativeValueRejected final : public std::invalid_argument {
 public:
     NativeValueRejected();
@@ -79,6 +94,15 @@ public:
     // finite doubles, and recursively encoded ordered children.  -0.0 is
     // normalized to +0.0 at admission so equality and identity agree.
     std::vector<std::uint8_t> canonical_binary() const;
+    NativeValueCanonicalMetrics canonical_metrics() const;
+    void write_canonical(NativeValueCanonicalSink &sink) const;
+
+    // Returns a value-semantic deep copy whose strings and containers are
+    // rebuilt from logical sizes rather than inheriting caller spare capacity.
+    // canonical_metrics().compact_retained_dynamic_bytes is a conservative
+    // bound for the dynamic storage of this compact representation under the
+    // pinned MSVC STL used by both supported compiler frontends.
+    NativeValue compact_copy() const;
 
     bool operator==(const NativeValue &other) const noexcept;
     bool operator!=(const NativeValue &other) const noexcept;

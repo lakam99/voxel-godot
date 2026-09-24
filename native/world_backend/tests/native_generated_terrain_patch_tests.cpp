@@ -132,16 +132,6 @@ NativeValue null_object_metadata() {
     return NativeValue::object({{"values", NativeValue::object(std::move(values))}});
 }
 
-NativeValue retained_capacity_padding_metadata(const NativeValue &values, const std::size_t padding_length) {
-    std::string padding(NativeValueLimits::MAX_STRING_BYTES, 'p');
-    padding.resize(padding_length);
-    NativeValue::Object entries;
-    entries.reserve(2U);
-    entries.emplace_back("pad", NativeValue::string(std::move(padding)));
-    entries.emplace_back("values", values);
-    return NativeValue::object(std::move(entries));
-}
-
 std::vector<NativeGeneratedTerrainPatchOperation> null_array_operations(
     const std::size_t count, const std::size_t full_extra_count = 0U,
     const std::size_t partial_extra_count = 0U) {
@@ -725,23 +715,70 @@ VWB_TEST(generated_patch_operation_count_and_utf8_caps_are_bounded_before_admiss
 }
 
 VWB_TEST(generated_patch_canonical_and_page_retained_byte_caps_are_enforced) {
-    NativeValue::Array excessive_capacity_values;
-    excessive_capacity_values.reserve(
-        NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES / sizeof(NativeValue) + 1U);
-    NativeValue::Object excessive_capacity_metadata;
-    excessive_capacity_metadata.reserve(1U);
-    excessive_capacity_metadata.emplace_back(
-        "values", NativeValue::array(std::move(excessive_capacity_values)));
-    NativeGeneratedTerrainCellTemplate excessive_capacity_state = solid_state();
-    excessive_capacity_state.metadata = NativeValue::object(std::move(excessive_capacity_metadata));
-    std::vector<NativeGeneratedTerrainPatchOperation> excessive_capacity_operations;
-    excessive_capacity_operations.push_back(operation("excessive-capacity", 0U,
-        {{0, 0, 0}, {0, 0, 0}}, std::move(excessive_capacity_state)));
-    NativeGeneratedTerrainPatchManifestDescriptor excessive_capacity_descriptor =
-        descriptor(std::move(excessive_capacity_operations));
-    expect_failure(NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit,
-        [&]() { static_cast<void>(NativeGeneratedTerrainPatchManifest::admit(
-            excessive_capacity_descriptor)); });
+    NativeValue::Array roomy_values;
+    roomy_values.reserve(100000U);
+    roomy_values.push_back(NativeValue::null());
+    NativeValue::Object roomy_metadata;
+    roomy_metadata.reserve(10000U);
+    roomy_metadata.emplace_back("values", NativeValue::array(std::move(roomy_values)));
+    NativeGeneratedTerrainCellTemplate roomy_state = solid_state();
+    roomy_state.metadata = NativeValue::object(std::move(roomy_metadata));
+    std::string roomy_owner(10000U, 'x');
+    roomy_owner.resize(16U);
+    roomy_owner.back() = '1';
+    std::vector<NativeGeneratedTerrainPatchOperation> roomy_operations;
+    roomy_operations.reserve(10000U);
+    roomy_operations.push_back(operation(std::move(roomy_owner), 0U,
+        {{0, 0, 0}, {0, 0, 0}}, std::move(roomy_state)));
+    roomy_operations[0].lifecycle = NativeGeneratedTerrainPatchLifecycle::follows_feature_tombstone;
+    NativeGeneratedTerrainPatchManifestDescriptor roomy_descriptor = descriptor(std::move(roomy_operations));
+    roomy_descriptor.region_id.assign(10000U, 'r');
+    roomy_descriptor.region_id.resize(16U);
+    NativeGeneratedTerrainPatchManifestDescriptor compact_descriptor = roomy_descriptor;
+    VWB_EXPECT(roomy_descriptor.operations.capacity() > compact_descriptor.operations.capacity());
+    VWB_EXPECT(roomy_descriptor.operations[0].state.metadata.as_object().capacity()
+        > compact_descriptor.operations[0].state.metadata.as_object().capacity());
+    const auto roomy_manifest = NativeGeneratedTerrainPatchManifest::admit(roomy_descriptor);
+    const auto compact_manifest = NativeGeneratedTerrainPatchManifest::admit(compact_descriptor);
+    VWB_EXPECT_EQ(roomy_manifest.canonical_binary(), compact_manifest.canonical_binary());
+    VWB_EXPECT_EQ(roomy_manifest.content_digest(), compact_manifest.content_digest());
+    VWB_EXPECT_EQ(roomy_manifest.retained_bytes(), compact_manifest.retained_bytes());
+    VWB_EXPECT_EQ(roomy_manifest.peak_working_bytes(), compact_manifest.peak_working_bytes());
+    VWB_EXPECT(roomy_manifest.operations().capacity() <= roomy_manifest.operations().size());
+
+    NativeGeneratedTerrainPageDomain roomy_domain = page();
+    roomy_domain.page_id.assign(10000U, 'p');
+    roomy_domain.page_id.resize(16U);
+    NativeGeneratedTerrainPageDomain compact_domain = roomy_domain;
+    const auto roomy_page = NativeGeneratedTerrainPatchPageSnapshot::project(roomy_manifest, roomy_domain);
+    const auto compact_page = NativeGeneratedTerrainPatchPageSnapshot::project(compact_manifest, compact_domain);
+    VWB_EXPECT_EQ(roomy_page.canonical_binary(), compact_page.canonical_binary());
+    VWB_EXPECT_EQ(roomy_page.projection_digest(), compact_page.projection_digest());
+    VWB_EXPECT_EQ(roomy_page.retained_bytes(), compact_page.retained_bytes());
+    VWB_EXPECT_EQ(roomy_page.peak_working_bytes(), compact_page.peak_working_bytes());
+
+    std::string roomy_tombstone(10000U, 'x');
+    roomy_tombstone.resize(16U);
+    roomy_tombstone.back() = '1';
+    std::vector<std::string> roomy_tombstones;
+    roomy_tombstones.reserve(10000U);
+    roomy_tombstones.push_back(std::move(roomy_tombstone));
+    const std::vector<std::string> compact_tombstones = roomy_tombstones;
+    const auto roomy_tombstoned_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        roomy_manifest, roomy_domain, roomy_tombstones);
+    const auto compact_tombstoned_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        compact_manifest, compact_domain, compact_tombstones);
+    VWB_EXPECT_EQ(roomy_tombstoned_page.projection_digest(), compact_tombstoned_page.projection_digest());
+    VWB_EXPECT_EQ(roomy_tombstoned_page.retained_bytes(), compact_tombstoned_page.retained_bytes());
+    VWB_EXPECT_EQ(roomy_tombstoned_page.peak_working_bytes(), compact_tombstoned_page.peak_working_bytes());
+
+    roomy_descriptor.operations.resize(NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_OPERATIONS + 1U,
+        roomy_descriptor.operations[0]);
+    compact_descriptor = roomy_descriptor;
+    expect_failure(NativeGeneratedTerrainPatchFailure::operation_count_limit,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchManifest::admit(roomy_descriptor)); });
+    expect_failure(NativeGeneratedTerrainPatchFailure::operation_count_limit,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchManifest::admit(compact_descriptor)); });
 
     const NativeValue bulky = numeric_metadata();
     std::vector<NativeGeneratedTerrainPatchOperation> canonical_heavy;
@@ -778,82 +815,110 @@ VWB_TEST(generated_patch_canonical_and_page_retained_byte_caps_are_enforced) {
     expect_failure(NativeGeneratedTerrainPatchFailure::canonical_bytes_limit,
         [&]() { static_cast<void>(admit(object_heavy)); });
 
-    auto manifest_retained_boundary = null_array_operations(300U);
-    const NativeValue values = null_array();
-    constexpr std::size_t PADDED_OPERATIONS = 61U;
-    for (std::size_t index = 0U; index < PADDED_OPERATIONS; ++index) {
-        manifest_retained_boundary[index].state.metadata =
-            retained_capacity_padding_metadata(values, 0U);
-    }
-    NativeGeneratedTerrainPatchManifestDescriptor retained_descriptor =
-        descriptor(std::move(manifest_retained_boundary));
-    const auto reserved_capacity_manifest = NativeGeneratedTerrainPatchManifest::admit(retained_descriptor);
-    const std::size_t manifest_padding = NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES
-        - reserved_capacity_manifest.retained_bytes();
-    VWB_EXPECT(manifest_padding < NativeValueLimits::MAX_STRING_BYTES);
-    retained_descriptor.operations[PADDED_OPERATIONS - 1U].state.metadata =
-        retained_capacity_padding_metadata(values, manifest_padding);
-    const auto exact_retained_manifest = NativeGeneratedTerrainPatchManifest::admit(retained_descriptor);
+    auto prepare_tunable_owners = [](std::vector<NativeGeneratedTerrainPatchOperation> &operations) {
+        for (std::size_t index = 0U; index < 3U; ++index) {
+            operations[index].owner_feature_id = std::string(15U, static_cast<char>('a' + index));
+            operations[index].owner_feature_id.push_back(static_cast<char>('0' + index));
+        }
+    };
+    auto distribute_owner_padding = [&](std::vector<NativeGeneratedTerrainPatchOperation> &operations,
+                                        std::size_t padding) {
+        for (std::size_t index = 0U; index < 3U && padding != 0U; ++index) {
+            const std::size_t amount = std::min<std::size_t>(15U, padding);
+            operations[index].owner_feature_id.append(amount, 'x');
+            padding -= amount;
+        }
+        VWB_EXPECT_EQ(0U, padding);
+    };
+
+    constexpr std::size_t MANIFEST_OPERATION_COUNT = 300U;
+    auto manifest_base_operations = null_array_operations(MANIFEST_OPERATION_COUNT);
+    prepare_tunable_owners(manifest_base_operations);
+    const auto manifest_base = admit(manifest_base_operations);
+    auto manifest_one_full_operations = null_array_operations(MANIFEST_OPERATION_COUNT, 1U);
+    prepare_tunable_owners(manifest_one_full_operations);
+    const auto manifest_one_full = admit(manifest_one_full_operations);
+    const std::size_t manifest_full_delta = manifest_one_full.retained_bytes() - manifest_base.retained_bytes();
+    const std::size_t manifest_full_count =
+        (NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES - manifest_base.retained_bytes())
+        / manifest_full_delta;
+    auto manifest_full_operations = null_array_operations(MANIFEST_OPERATION_COUNT, manifest_full_count);
+    prepare_tunable_owners(manifest_full_operations);
+    const auto manifest_full = admit(manifest_full_operations);
+    auto manifest_one_node_operations = null_array_operations(MANIFEST_OPERATION_COUNT, manifest_full_count, 1U);
+    prepare_tunable_owners(manifest_one_node_operations);
+    const auto manifest_one_node = admit(manifest_one_node_operations);
+    auto manifest_two_node_operations = null_array_operations(MANIFEST_OPERATION_COUNT, manifest_full_count, 2U);
+    prepare_tunable_owners(manifest_two_node_operations);
+    const auto manifest_two_node = admit(manifest_two_node_operations);
+    const std::size_t manifest_first_node_delta =
+        manifest_one_node.retained_bytes() - manifest_full.retained_bytes();
+    const std::size_t manifest_additional_node_delta =
+        manifest_two_node.retained_bytes() - manifest_one_node.retained_bytes();
+    const std::size_t manifest_remaining_after_full =
+        NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES - manifest_full.retained_bytes();
+    const std::size_t manifest_partial_count = 1U
+        + (manifest_remaining_after_full - manifest_first_node_delta) / manifest_additional_node_delta;
+    auto manifest_exact_operations = null_array_operations(
+        MANIFEST_OPERATION_COUNT, manifest_full_count, manifest_partial_count);
+    prepare_tunable_owners(manifest_exact_operations);
+    const auto manifest_partial = admit(manifest_exact_operations);
+    const std::size_t manifest_owner_padding =
+        NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES - manifest_partial.retained_bytes();
+    VWB_EXPECT(manifest_owner_padding <= 45U);
+    distribute_owner_padding(manifest_exact_operations, manifest_owner_padding);
+    const auto exact_retained_manifest = admit(manifest_exact_operations);
     VWB_EXPECT_EQ(NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES,
         exact_retained_manifest.retained_bytes());
-    retained_descriptor.operations[PADDED_OPERATIONS - 1U].state.metadata =
-        retained_capacity_padding_metadata(values, manifest_padding + 1U);
+    manifest_exact_operations[0].owner_feature_id.push_back('z');
     expect_failure(NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit,
-        [&]() { static_cast<void>(NativeGeneratedTerrainPatchManifest::admit(retained_descriptor)); });
+        [&]() { static_cast<void>(admit(manifest_exact_operations)); });
 
-    // Tune the page to within one NativeValue node of its cap using compact
-    // null arrays, then use a fixed-capacity page ID to supply the exact final
-    // byte count without retaining another operation copy first.
     constexpr std::size_t PAGE_OPERATION_COUNT = 80U;
-    const auto base_page_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT));
-    NativeGeneratedTerrainPageDomain fixed_capacity_domain = page();
-    fixed_capacity_domain.page_id.assign(NativeGeneratedTerrainPatchLimits::MAX_TEXT_FIELD_BYTES, 'p');
-    fixed_capacity_domain.page_id.resize(1U);
-    const auto base_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        base_page_manifest, fixed_capacity_domain);
-
-    auto one_full_extra = null_array_operations(PAGE_OPERATION_COUNT, 1U);
-    const auto one_full_manifest = admit(one_full_extra);
-    const auto one_full_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        one_full_manifest, fixed_capacity_domain);
-    const std::size_t full_extra_delta = one_full_page.retained_bytes() - base_page.retained_bytes();
-    const std::size_t full_extra_count =
-        (NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - base_page.retained_bytes()) / full_extra_delta;
-    VWB_EXPECT(full_extra_count < PAGE_OPERATION_COUNT);
-
-    const auto full_extra_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT, full_extra_count));
-    const auto full_extra_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        full_extra_manifest, fixed_capacity_domain);
-    const auto one_node_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT, full_extra_count, 1U));
-    const auto one_node_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        one_node_manifest, fixed_capacity_domain);
-    const auto two_node_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT, full_extra_count, 2U));
-    const auto two_node_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        two_node_manifest, fixed_capacity_domain);
-    const std::size_t first_node_delta = one_node_page.retained_bytes() - full_extra_page.retained_bytes();
-    const std::size_t additional_node_delta = two_node_page.retained_bytes() - one_node_page.retained_bytes();
-    const std::size_t remaining_after_full =
-        NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - full_extra_page.retained_bytes();
-    VWB_EXPECT(remaining_after_full >= first_node_delta);
-    const std::size_t partial_extra_count = 1U
-        + (remaining_after_full - first_node_delta) / additional_node_delta;
-    VWB_EXPECT(partial_extra_count <= NativeValueLimits::MAX_CONTAINER_ENTRIES);
-
-    const auto partial_manifest = admit(
-        null_array_operations(PAGE_OPERATION_COUNT, full_extra_count, partial_extra_count));
-    const auto partial_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        partial_manifest, fixed_capacity_domain);
-    const std::size_t page_id_padding =
-        NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - partial_page.retained_bytes();
-    VWB_EXPECT(page_id_padding + 1U < NativeGeneratedTerrainPatchLimits::MAX_TEXT_FIELD_BYTES);
-    fixed_capacity_domain.page_id.resize(1U + page_id_padding);
-    const auto exact_page = NativeGeneratedTerrainPatchPageSnapshot::project(
-        partial_manifest, fixed_capacity_domain);
+    auto page_base_operations = null_array_operations(PAGE_OPERATION_COUNT);
+    prepare_tunable_owners(page_base_operations);
+    const auto page_base_manifest = admit(page_base_operations);
+    const auto page_base = NativeGeneratedTerrainPatchPageSnapshot::project(page_base_manifest, page());
+    auto page_one_full_operations = null_array_operations(PAGE_OPERATION_COUNT, 1U);
+    prepare_tunable_owners(page_one_full_operations);
+    const auto page_one_full_manifest = admit(page_one_full_operations);
+    const auto page_one_full = NativeGeneratedTerrainPatchPageSnapshot::project(page_one_full_manifest, page());
+    const std::size_t page_full_delta = page_one_full.retained_bytes() - page_base.retained_bytes();
+    const std::size_t page_full_count =
+        (NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - page_base.retained_bytes()) / page_full_delta;
+    auto page_full_operations = null_array_operations(PAGE_OPERATION_COUNT, page_full_count);
+    prepare_tunable_owners(page_full_operations);
+    const auto page_full_manifest = admit(page_full_operations);
+    const auto page_full = NativeGeneratedTerrainPatchPageSnapshot::project(page_full_manifest, page());
+    auto page_one_node_operations = null_array_operations(PAGE_OPERATION_COUNT, page_full_count, 1U);
+    prepare_tunable_owners(page_one_node_operations);
+    const auto page_one_node_manifest = admit(page_one_node_operations);
+    const auto page_one_node = NativeGeneratedTerrainPatchPageSnapshot::project(page_one_node_manifest, page());
+    auto page_two_node_operations = null_array_operations(PAGE_OPERATION_COUNT, page_full_count, 2U);
+    prepare_tunable_owners(page_two_node_operations);
+    const auto page_two_node_manifest = admit(page_two_node_operations);
+    const auto page_two_node = NativeGeneratedTerrainPatchPageSnapshot::project(page_two_node_manifest, page());
+    const std::size_t page_first_node_delta = page_one_node.retained_bytes() - page_full.retained_bytes();
+    const std::size_t page_additional_node_delta = page_two_node.retained_bytes() - page_one_node.retained_bytes();
+    const std::size_t page_remaining_after_full =
+        NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - page_full.retained_bytes();
+    const std::size_t page_partial_count = 1U
+        + (page_remaining_after_full - page_first_node_delta) / page_additional_node_delta;
+    auto page_exact_operations = null_array_operations(PAGE_OPERATION_COUNT, page_full_count, page_partial_count);
+    prepare_tunable_owners(page_exact_operations);
+    const auto page_partial_manifest = admit(page_exact_operations);
+    const auto page_partial = NativeGeneratedTerrainPatchPageSnapshot::project(page_partial_manifest, page());
+    const std::size_t page_owner_padding =
+        NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - page_partial.retained_bytes();
+    VWB_EXPECT(page_owner_padding <= 45U);
+    distribute_owner_padding(page_exact_operations, page_owner_padding);
+    const auto page_exact_manifest = admit(page_exact_operations);
+    const auto exact_page = NativeGeneratedTerrainPatchPageSnapshot::project(page_exact_manifest, page());
     VWB_EXPECT_EQ(NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES, exact_page.retained_bytes());
-    fixed_capacity_domain.page_id.push_back('p');
+    page_exact_operations[0].owner_feature_id.push_back('z');
+    const auto page_over_manifest = admit(page_exact_operations);
     expect_failure(NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit,
-        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(
-            partial_manifest, fixed_capacity_domain)); });
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(page_over_manifest, page())); });
 }
 
 VWB_TEST(generated_patch_page_validates_domain_halo_tombstone_and_coordinate_overflow) {
@@ -883,6 +948,35 @@ VWB_TEST(generated_patch_page_validates_domain_halo_tombstone_and_coordinate_ove
         expect_failure(NativeGeneratedTerrainPatchFailure::coordinate_overflow,
             [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(manifest, page(bounds, 1U))); });
     }
+}
+
+VWB_TEST(generated_patch_peak_working_caps_preflight_sections_and_projected_references) {
+    std::vector<NativeGeneratedTerrainPatchOperation> excessive_section_emissions;
+    for (std::uint32_t index = 0U; index < 3U; ++index) {
+        excessive_section_emissions.push_back(operation("section-emission:" + std::to_string(index), index,
+            {{0, 0, 0}, {100000 * NativeGeneratedTerrainPatchLimits::SECTION_SIZE - 1, 0, 0}}));
+    }
+    expect_failure(NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit,
+        [&]() { static_cast<void>(admit(excessive_section_emissions)); });
+
+    auto manifest_peak = null_array_operations(280U);
+    auto long_thin = operation("section-working", 999U,
+        {{0, 0, 0}, {261800 * NativeGeneratedTerrainPatchLimits::SECTION_SIZE - 1, 0, 0}});
+    manifest_peak.push_back(std::move(long_thin));
+    expect_failure(NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit,
+        [&]() { static_cast<void>(admit(manifest_peak)); });
+
+    std::vector<NativeGeneratedTerrainPatchOperation> page_peak;
+    page_peak.reserve(NativeGeneratedTerrainPatchLimits::MAX_PAGE_PROJECTED_OPERATIONS);
+    for (std::uint32_t index = 0U;
+         index < NativeGeneratedTerrainPatchLimits::MAX_PAGE_PROJECTED_OPERATIONS; ++index) {
+        page_peak.push_back(operation("page-peak:" + std::to_string(index), index,
+            {{0, 0, 0}, {2047, 0, 0}}));
+    }
+    const auto manifest = admit(page_peak);
+    NativeGeneratedTerrainPageDomain wide_page = page({{0, 0, 0}, {2047, 0, 0}});
+    expect_failure(NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(manifest, wide_page)); });
 }
 
 VWB_TEST(generated_patch_page_operation_and_projected_volume_caps_are_enforced) {

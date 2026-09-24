@@ -6,7 +6,6 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
-#include <set>
 #include <utility>
 
 namespace voxel::world_backend {
@@ -75,6 +74,10 @@ std::size_t checked_size_add(const std::size_t left, const std::size_t right,
         ? NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_UTF8_BYTES
         : failure == NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit
         ? NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES
+        : failure == NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit
+        ? NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_PEAK_WORKING_BYTES
+        : failure == NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit
+        ? NativeGeneratedTerrainPatchLimits::MAX_PAGE_PEAK_WORKING_BYTES
         : NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES;
     // Every accumulator is born below its selected hard cap and can only be
     // advanced through this function.  Subtraction is therefore safe and
@@ -84,118 +87,33 @@ std::size_t checked_size_add(const std::size_t left, const std::size_t right,
 }
 
 std::size_t checked_size_multiply(const std::size_t left, const std::size_t right,
-    const NativeGeneratedTerrainPatchFailure failure) {
-    const std::size_t limit = failure == NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit
-        ? NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES
-        : NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES;
-    if (left != 0U && right > limit / left) reject(failure);
+    const NativeGeneratedTerrainPatchFailure) {
+    // Every caller supplies operands already bounded by an admitted operation,
+    // operation-count cap, or section-working-entry cap. Their documented
+    // maxima multiply below size_t on both supported 64-bit toolchains; the
+    // result is then advanced through checked_size_add before allocation.
     return left * right;
 }
 
-struct NativeValueMeasure final {
-    std::size_t canonical_bytes = 0U;
-    std::size_t utf8_bytes = 0U;
-    // Conservative dynamic storage retained by a NativeValue copy.  The
-    // owning NativeValue object itself is part of its operation (or parent
-    // vector slot), so this counts container slots and string capacities only.
-    std::size_t retained_dynamic_bytes = 0U;
-};
-
-NativeValueMeasure measure_native_value_payload(const NativeValue &value) {
-    const NativeValueKind kind = value.kind();
-    if (kind == NativeValueKind::null_value || kind == NativeValueKind::boolean) return {1U, 0U, 0U};
-    if (kind == NativeValueKind::number) return {9U, 0U, 0U};
-    if (kind == NativeValueKind::string) {
-        return {checked_size_add(5U, value.as_string().size(),
-                    NativeGeneratedTerrainPatchFailure::canonical_bytes_limit),
-            value.as_string().size(),
-            checked_size_add(value.as_string().capacity(), 1U,
-                NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit)};
-    }
-    std::size_t canonical = 5U;
-    std::size_t utf8 = 0U;
-    std::size_t retained_dynamic = 0U;
-    if (kind == NativeValueKind::array) {
-        retained_dynamic = checked_size_multiply(value.as_array().capacity(), sizeof(NativeValue),
-            NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
-        for (const NativeValue &child : value.as_array()) {
-            const NativeValueMeasure child_measure = measure_native_value_payload(child);
-            canonical = checked_size_add(canonical, child_measure.canonical_bytes,
-                NativeGeneratedTerrainPatchFailure::canonical_bytes_limit);
-            utf8 = checked_size_add(utf8, child_measure.utf8_bytes,
-                NativeGeneratedTerrainPatchFailure::utf8_bytes_limit);
-            retained_dynamic = checked_size_add(retained_dynamic, child_measure.retained_dynamic_bytes,
-                NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
-        }
-        return {canonical, utf8, retained_dynamic};
-    }
-    retained_dynamic = checked_size_multiply(value.as_object().capacity(),
-        sizeof(NativeValue::Object::value_type),
-        NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
-    for (const auto &entry : value.as_object()) {
-        canonical = checked_size_add(canonical, 4U + entry.first.size(),
-            NativeGeneratedTerrainPatchFailure::canonical_bytes_limit);
-        utf8 = checked_size_add(utf8, entry.first.size(),
-            NativeGeneratedTerrainPatchFailure::utf8_bytes_limit);
-        retained_dynamic = checked_size_add(retained_dynamic,
-            checked_size_add(entry.first.capacity(), 1U,
-                NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit),
-            NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
-        const NativeValueMeasure child_measure = measure_native_value_payload(entry.second);
-        canonical = checked_size_add(canonical, child_measure.canonical_bytes,
-            NativeGeneratedTerrainPatchFailure::canonical_bytes_limit);
-        utf8 = checked_size_add(utf8, child_measure.utf8_bytes,
-            NativeGeneratedTerrainPatchFailure::utf8_bytes_limit);
-        retained_dynamic = checked_size_add(retained_dynamic, child_measure.retained_dynamic_bytes,
-            NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
-    }
-    return {canonical, utf8, retained_dynamic};
-}
+using NativeValueMeasure = NativeValueCanonicalMetrics;
 
 NativeValueMeasure measure_native_value(const NativeValue &value) {
-    NativeValueMeasure result = measure_native_value_payload(value);
-    result.canonical_bytes = checked_size_add(result.canonical_bytes, 3U,
-        NativeGeneratedTerrainPatchFailure::canonical_bytes_limit);
-    return result;
+    return value.canonical_metrics();
 }
 
-void append_native_value_payload(CanonicalWriter &writer, const NativeValue &value) {
-    const NativeValueKind kind = value.kind();
-    if (kind == NativeValueKind::null_value) {
-        writer.append_u8(0U);
-        return;
+class CanonicalWriterNativeValueSink final : public NativeValueCanonicalSink {
+public:
+    explicit CanonicalWriterNativeValueSink(CanonicalWriter &writer) : writer_(writer) {}
+    void append(const std::uint8_t *data, const std::size_t size) override {
+        writer_.append_raw(data, size);
     }
-    if (kind == NativeValueKind::boolean) {
-        writer.append_u8(value.as_boolean() ? 2U : 1U);
-        return;
-    }
-    if (kind == NativeValueKind::number) {
-        writer.append_u8(3U);
-        writer.append_f64(value.as_number());
-        return;
-    }
-    if (kind == NativeValueKind::string) {
-        writer.append_u8(4U);
-        writer.append_text(value.as_string());
-        return;
-    }
-    writer.append_u8(kind == NativeValueKind::array ? 5U : 6U);
-    if (kind == NativeValueKind::array) {
-        writer.append_u32(static_cast<std::uint32_t>(value.as_array().size()));
-        for (const NativeValue &child : value.as_array()) append_native_value_payload(writer, child);
-        return;
-    }
-    writer.append_u32(static_cast<std::uint32_t>(value.as_object().size()));
-    for (const auto &entry : value.as_object()) {
-        writer.append_text(entry.first);
-        append_native_value_payload(writer, entry.second);
-    }
-}
+private:
+    CanonicalWriter &writer_;
+};
 
 void append_native_value(CanonicalWriter &writer, const NativeValue &value) {
-    static constexpr std::uint8_t marker[] = {'N', 'V', '1'};
-    writer.append_raw(marker, sizeof(marker));
-    append_native_value_payload(writer, value);
+    CanonicalWriterNativeValueSink sink(writer);
+    value.write_canonical(sink);
 }
 
 bool digest_is_zero(const Sha256Digest &digest) noexcept {
@@ -207,6 +125,16 @@ bool utf8_less(const std::string &left, const std::string &right) noexcept {
         [](const char left_byte, const char right_byte) {
             return static_cast<unsigned char>(left_byte) < static_cast<unsigned char>(right_byte);
         });
+}
+
+std::size_t compact_string_dynamic_bytes(const std::size_t size) noexcept {
+    return size <= 15U ? 0U : ((size | 15U) + 1U);
+}
+
+std::string compact_string(const std::string &value) {
+    std::string result(value.data(), value.size());
+    result.shrink_to_fit();
+    return result;
 }
 
 void validate_text(const std::string &text) {
@@ -274,11 +202,32 @@ struct CellCoordLess final {
     }
 };
 
+std::size_t section_emission_count(
+    const NativeInclusiveCellBox &box, const NativeGeneratedTerrainPatchFailure peak_failure) {
+    const CellCoord minimum{
+        section_coordinate(box.minimum.x), section_coordinate(box.minimum.y),
+        section_coordinate(box.minimum.z)};
+    const CellCoord maximum{
+        section_coordinate(box.maximum.x), section_coordinate(box.maximum.y),
+        section_coordinate(box.maximum.z)};
+    const std::size_t x = static_cast<std::size_t>(
+        static_cast<std::int64_t>(maximum.x) - static_cast<std::int64_t>(minimum.x) + 1);
+    const std::size_t y = static_cast<std::size_t>(
+        static_cast<std::int64_t>(maximum.y) - static_cast<std::int64_t>(minimum.y) + 1);
+    const std::size_t z = static_cast<std::size_t>(
+        static_cast<std::int64_t>(maximum.z) - static_cast<std::int64_t>(minimum.z) + 1);
+    const std::size_t xy = checked_size_multiply(x, y, peak_failure);
+    const std::size_t count = checked_size_multiply(xy, z, peak_failure);
+    return count;
+}
+
 template <bool EnforceLimit, typename Range, typename Bounds>
 std::vector<CellCoord> collect_affected_sections(
-    const Range &entries, Bounds bounds, const NativeGeneratedTerrainPatchFailure failure) {
+    const Range &entries, Bounds bounds, const std::size_t emission_count,
+    const NativeGeneratedTerrainPatchFailure failure) {
     if constexpr (!EnforceLimit) static_cast<void>(failure);
-    std::set<CellCoord, CellCoordLess> unique;
+    std::vector<CellCoord> working;
+    working.reserve(emission_count);
     for (const auto &entry : entries) {
         const NativeInclusiveCellBox &box = bounds(entry);
         const CellCoord minimum{
@@ -290,16 +239,20 @@ std::vector<CellCoord> collect_affected_sections(
         for (std::int64_t z = minimum.z; z <= maximum.z; ++z) {
             for (std::int64_t y = minimum.y; y <= maximum.y; ++y) {
                 for (std::int64_t x = minimum.x; x <= maximum.x; ++x) {
-                    unique.insert({static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+                    working.push_back({static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
                         static_cast<std::int32_t>(z)});
-                    if constexpr (EnforceLimit) {
-                        if (unique.size() > NativeGeneratedTerrainPatchLimits::MAX_AFFECTED_SECTIONS) reject(failure);
-                    }
                 }
             }
         }
     }
-    return {unique.begin(), unique.end()};
+    std::sort(working.begin(), working.end(), CellCoordLess{});
+    working.erase(std::unique(working.begin(), working.end()), working.end());
+    if constexpr (EnforceLimit) {
+        if (working.size() > NativeGeneratedTerrainPatchLimits::MAX_AFFECTED_SECTIONS) reject(failure);
+    }
+    std::vector<CellCoord> compact(working.begin(), working.end());
+    compact.shrink_to_fit();
+    return compact;
 }
 
 bool valid_material(const TerrainMaterialId value) noexcept {
@@ -431,13 +384,36 @@ std::size_t operation_logical_retained_size(
     const NativeGeneratedTerrainPatchOperation &operation, const NativeValueMeasure metadata_measure,
     const NativeGeneratedTerrainPatchFailure failure) {
     std::size_t size = sizeof(NativeGeneratedTerrainPatchOperation);
-    size = checked_size_add(size,
-        checked_size_add(operation.owner_feature_id.capacity(), 1U, failure), failure);
+    size = checked_size_add(size, compact_string_dynamic_bytes(operation.owner_feature_id.size()), failure);
     if (operation.state.block_identity.has_value()) {
         size = checked_size_add(size,
-            checked_size_add(operation.state.block_identity->capacity(), 1U, failure), failure);
+            compact_string_dynamic_bytes(operation.state.block_identity->size()), failure);
     }
-    return checked_size_add(size, metadata_measure.retained_dynamic_bytes, failure);
+    return checked_size_add(size, metadata_measure.compact_retained_dynamic_bytes, failure);
+}
+
+NativeGeneratedTerrainPatchOperation compact_operation_copy(
+    const NativeGeneratedTerrainPatchOperation &operation) {
+    NativeGeneratedTerrainPatchOperation result;
+    result.source_layer = operation.source_layer;
+    result.owner_feature_id = compact_string(operation.owner_feature_id);
+    result.recipe_revision = operation.recipe_revision;
+    result.deterministic_order = operation.deterministic_order;
+    result.operation_ordinal = operation.operation_ordinal;
+    result.role = operation.role;
+    result.lifecycle = operation.lifecycle;
+    result.bounds = operation.bounds;
+    result.state.material = operation.state.material;
+    result.state.biome = operation.state.biome;
+    result.state.solid = operation.state.solid;
+    result.state.density = operation.state.density;
+    result.state.fluid = operation.state.fluid;
+    result.state.light = operation.state.light;
+    if (operation.state.block_identity.has_value()) {
+        result.state.block_identity = compact_string(*operation.state.block_identity);
+    }
+    result.state.metadata = operation.state.metadata.compact_copy();
+    return result;
 }
 
 void append_state(CanonicalWriter &writer, const NativeGeneratedTerrainCellTemplate &state) {
@@ -505,8 +481,8 @@ NativeInclusiveCellBox expand_box(
 }
 
 bool tombstoned(const std::vector<std::string> &tombstones, const std::string &id) {
-    return std::binary_search(tombstones.begin(), tombstones.end(), id,
-        [](const std::string &left, const std::string &right) { return utf8_less(left, right); });
+    return std::any_of(tombstones.begin(), tombstones.end(),
+        [&](const std::string &candidate) { return candidate == id; });
 }
 
 struct ProjectedOperationReference final {
@@ -579,10 +555,11 @@ NativeGeneratedTerrainPatchManifest::NativeGeneratedTerrainPatchManifest(
     std::vector<CellCoord> affected_sections,
     std::vector<std::uint8_t> canonical_binary,
     const Sha256Digest content_digest,
-    const std::size_t retained_bytes)
+    const std::size_t retained_bytes,
+    const std::size_t peak_working_bytes)
     : descriptor_(std::move(descriptor)), affected_sections_(std::move(affected_sections)),
       canonical_binary_(std::move(canonical_binary)), content_digest_(content_digest),
-      retained_bytes_(retained_bytes) {}
+      retained_bytes_(retained_bytes), peak_working_bytes_(peak_working_bytes) {}
 
 NativeGeneratedTerrainPatchManifest NativeGeneratedTerrainPatchManifest::admit(
     const NativeGeneratedTerrainPatchManifestDescriptor &descriptor) {
@@ -608,9 +585,10 @@ NativeGeneratedTerrainPatchManifest NativeGeneratedTerrainPatchManifest::admit(
         NativeGeneratedTerrainPatchFailure::canonical_bytes_limit);
     std::size_t retained_bytes = checked_size_add(
         sizeof(NativeGeneratedTerrainPatchManifest),
-        checked_size_add(descriptor.region_id.capacity(), 1U,
-            NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit),
+        compact_string_dynamic_bytes(descriptor.region_id.size()),
         NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+    std::size_t section_emissions = 0U;
+    std::size_t largest_operation_retained = 0U;
     for (const NativeGeneratedTerrainPatchOperation &operation : descriptor.operations) {
         if (operation.source_layer != NativeTerrainSourceLayer::generated_feature_terrain) {
             reject(NativeGeneratedTerrainPatchFailure::invalid_source_layer);
@@ -644,11 +622,38 @@ NativeGeneratedTerrainPatchManifest NativeGeneratedTerrainPatchManifest::admit(
         canonical_size = checked_size_add(canonical_size,
             operation_canonical_size(operation, metadata_measure),
             NativeGeneratedTerrainPatchFailure::canonical_bytes_limit);
-        retained_bytes = checked_size_add(retained_bytes,
-            operation_logical_retained_size(operation, metadata_measure,
-                NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit),
+        const std::size_t operation_retained = operation_logical_retained_size(operation, metadata_measure,
             NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+        largest_operation_retained = std::max(largest_operation_retained, operation_retained);
+        retained_bytes = checked_size_add(retained_bytes, operation_retained,
+            NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+        const std::size_t operation_section_emissions = section_emission_count(
+            operation.bounds, NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
+        if (section_emissions > NativeGeneratedTerrainPatchLimits::MAX_SECTION_WORKING_ENTRIES
+            - operation_section_emissions) {
+            reject(NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
+        }
+        section_emissions += operation_section_emissions;
     }
+
+    const std::size_t section_storage_bound = checked_size_multiply(
+        section_emissions, sizeof(CellCoord),
+        NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+    retained_bytes = checked_size_add(retained_bytes, section_storage_bound,
+        NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+    retained_bytes = checked_size_add(retained_bytes, canonical_size,
+        NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+    const std::size_t index_storage = checked_size_multiply(
+        descriptor.operations.size(), sizeof(std::size_t),
+        NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
+    std::size_t peak_working_bytes = checked_size_add(retained_bytes, index_storage,
+        NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
+    peak_working_bytes = checked_size_add(peak_working_bytes, index_storage,
+        NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
+    peak_working_bytes = checked_size_add(peak_working_bytes, section_storage_bound,
+        NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
+    peak_working_bytes = checked_size_add(peak_working_bytes, largest_operation_retained,
+        NativeGeneratedTerrainPatchFailure::manifest_peak_working_bytes_limit);
 
     std::vector<std::size_t> identity_order(descriptor.operations.size());
     for (std::size_t index = 0U; index < identity_order.size(); ++index) identity_order[index] = index;
@@ -683,29 +688,25 @@ NativeGeneratedTerrainPatchManifest NativeGeneratedTerrainPatchManifest::admit(
     std::vector<CellCoord> sections = collect_affected_sections<true>(
         descriptor.operations, [](const NativeGeneratedTerrainPatchOperation &operation) -> const NativeInclusiveCellBox & {
             return operation.bounds;
-        }, NativeGeneratedTerrainPatchFailure::affected_sections_limit);
-    retained_bytes = checked_size_add(retained_bytes,
-        checked_size_multiply(sections.size(), sizeof(CellCoord),
-            NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit),
-        NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
-    retained_bytes = checked_size_add(retained_bytes, canonical_size,
-        NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit);
+        }, section_emissions, NativeGeneratedTerrainPatchFailure::affected_sections_limit);
 
     NativeGeneratedTerrainPatchManifestDescriptor retained_descriptor;
     retained_descriptor.schema_revision = descriptor.schema_revision;
     retained_descriptor.world_physical_identity = descriptor.world_physical_identity;
-    retained_descriptor.region_id = descriptor.region_id;
+    retained_descriptor.region_id = compact_string(descriptor.region_id);
     retained_descriptor.complete_region_bounds = descriptor.complete_region_bounds;
     retained_descriptor.producer_revision = descriptor.producer_revision;
     retained_descriptor.feature_source_revision = descriptor.feature_source_revision;
     retained_descriptor.operations.reserve(descriptor.operations.size());
     for (const std::size_t index : precedence_order) {
-        retained_descriptor.operations.push_back(descriptor.operations[index]);
+        retained_descriptor.operations.push_back(compact_operation_copy(descriptor.operations[index]));
     }
+    retained_descriptor.operations.shrink_to_fit();
     std::vector<std::uint8_t> canonical = manifest_binary(retained_descriptor, canonical_size);
     const Sha256Digest digest = sha256(canonical);
     return NativeGeneratedTerrainPatchManifest(
-        std::move(retained_descriptor), std::move(sections), std::move(canonical), digest, retained_bytes);
+        std::move(retained_descriptor), std::move(sections), std::move(canonical), digest,
+        retained_bytes, peak_working_bytes);
 }
 
 std::uint32_t NativeGeneratedTerrainPatchManifest::schema_revision() const noexcept { return descriptor_.schema_revision; }
@@ -734,6 +735,7 @@ const std::vector<std::uint8_t> &NativeGeneratedTerrainPatchManifest::canonical_
 const Sha256Digest &NativeGeneratedTerrainPatchManifest::content_digest() const noexcept { return content_digest_; }
 std::string NativeGeneratedTerrainPatchManifest::content_digest_hex() const { return sha256_hex(content_digest_); }
 std::size_t NativeGeneratedTerrainPatchManifest::retained_bytes() const noexcept { return retained_bytes_; }
+std::size_t NativeGeneratedTerrainPatchManifest::peak_working_bytes() const noexcept { return peak_working_bytes_; }
 
 NativeGeneratedTerrainPatchPageSnapshot::NativeGeneratedTerrainPatchPageSnapshot(
     NativeGeneratedTerrainPageDomain domain,
@@ -742,10 +744,12 @@ NativeGeneratedTerrainPatchPageSnapshot::NativeGeneratedTerrainPatchPageSnapshot
     std::vector<CellCoord> affected_sections,
     std::vector<std::uint8_t> canonical_binary,
     const Sha256Digest projection_digest,
-    const std::size_t retained_bytes)
+    const std::size_t retained_bytes,
+    const std::size_t peak_working_bytes)
     : domain_(std::move(domain)), projected_bounds_(projected_bounds), operations_(std::move(operations)),
       affected_sections_(std::move(affected_sections)), canonical_binary_(std::move(canonical_binary)),
-      projection_digest_(projection_digest), retained_bytes_(retained_bytes) {}
+      projection_digest_(projection_digest), retained_bytes_(retained_bytes),
+      peak_working_bytes_(peak_working_bytes) {}
 
 NativeGeneratedTerrainPatchPageSnapshot NativeGeneratedTerrainPatchPageSnapshot::project(
     const NativeGeneratedTerrainPatchManifest &manifest,
@@ -761,20 +765,18 @@ NativeGeneratedTerrainPatchPageSnapshot NativeGeneratedTerrainPatchPageSnapshot:
     if (tombstoned_feature_ids.size() > NativeGeneratedTerrainPatchLimits::MAX_PAGE_TOMBSTONES) {
         reject(NativeGeneratedTerrainPatchFailure::invalid_tombstone);
     }
-    for (const std::string &id : tombstoned_feature_ids) {
+    for (std::size_t index = 0U; index < tombstoned_feature_ids.size(); ++index) {
+        const std::string &id = tombstoned_feature_ids[index];
         try {
             validate_text(id);
         } catch (const NativeGeneratedTerrainPatchError &) {
             reject(NativeGeneratedTerrainPatchFailure::invalid_tombstone);
         }
-    }
-    std::vector<std::string> sorted_tombstones = tombstoned_feature_ids;
-    std::sort(sorted_tombstones.begin(), sorted_tombstones.end(), utf8_less);
-    if (std::adjacent_find(sorted_tombstones.begin(), sorted_tombstones.end())
-        != sorted_tombstones.end()) {
-        reject(NativeGeneratedTerrainPatchFailure::invalid_tombstone);
-    }
-    for (const std::string &id : sorted_tombstones) {
+        for (std::size_t previous = 0U; previous < index; ++previous) {
+            if (tombstoned_feature_ids[previous] == id) {
+                reject(NativeGeneratedTerrainPatchFailure::invalid_tombstone);
+            }
+        }
         const bool known = std::any_of(manifest.operations().begin(), manifest.operations().end(),
             [&](const NativeGeneratedTerrainPatchOperation &operation) {
                 return operation.owner_feature_id == id;
@@ -786,10 +788,10 @@ NativeGeneratedTerrainPatchPageSnapshot NativeGeneratedTerrainPatchPageSnapshot:
     if (!contains_box(manifest.complete_region_bounds(), projected_bounds)) {
         reject(NativeGeneratedTerrainPatchFailure::invalid_page_domain);
     }
-    std::vector<ProjectedOperationReference> projected_references;
-    projected_references.reserve(std::min(manifest.operations().size(),
-        NativeGeneratedTerrainPatchLimits::MAX_PAGE_PROJECTED_OPERATIONS));
     std::uint64_t projected_volume = 0U;
+    std::size_t projected_count = 0U;
+    std::size_t section_emissions = 0U;
+    std::size_t largest_operation_retained = 0U;
     std::size_t canonical_size = 119U;
     canonical_size = checked_size_add(canonical_size, manifest.region_id().size(),
         NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
@@ -797,19 +799,19 @@ NativeGeneratedTerrainPatchPageSnapshot NativeGeneratedTerrainPatchPageSnapshot:
         NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
     std::size_t retained_bytes = checked_size_add(
         sizeof(NativeGeneratedTerrainPatchPageSnapshot),
-        checked_size_add(domain.page_id.capacity(), 1U,
-            NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit),
+        compact_string_dynamic_bytes(domain.page_id.size()),
         NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
     for (const NativeGeneratedTerrainPatchOperation &operation : manifest.operations()) {
         if (operation.lifecycle == NativeGeneratedTerrainPatchLifecycle::follows_feature_tombstone
-            && tombstoned(sorted_tombstones, operation.owner_feature_id)) {
+            && tombstoned(tombstoned_feature_ids, operation.owner_feature_id)) {
             continue;
         }
         const std::optional<NativeInclusiveCellBox> clipped = intersect_boxes(operation.bounds, projected_bounds);
         if (!clipped.has_value()) continue;
-        if (projected_references.size() == NativeGeneratedTerrainPatchLimits::MAX_PAGE_PROJECTED_OPERATIONS) {
+        if (projected_count == NativeGeneratedTerrainPatchLimits::MAX_PAGE_PROJECTED_OPERATIONS) {
             reject(NativeGeneratedTerrainPatchFailure::page_operation_limit);
         }
+        ++projected_count;
         const std::uint64_t volume = checked_box_volume(*clipped);
         if (projected_volume > NativeGeneratedTerrainPatchLimits::MAX_PAGE_PROJECTED_CELL_VOLUME - volume) {
             reject(NativeGeneratedTerrainPatchFailure::page_volume_limit);
@@ -819,36 +821,62 @@ NativeGeneratedTerrainPatchPageSnapshot NativeGeneratedTerrainPatchPageSnapshot:
         canonical_size = checked_size_add(canonical_size,
             operation_canonical_size(operation, metadata_measure),
             NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
-        retained_bytes = checked_size_add(retained_bytes,
-            operation_logical_retained_size(operation, metadata_measure,
-                NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit),
+        const std::size_t operation_retained = operation_logical_retained_size(operation, metadata_measure,
             NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
-        projected_references.push_back({&operation, *clipped});
+        largest_operation_retained = std::max(largest_operation_retained, operation_retained);
+        retained_bytes = checked_size_add(retained_bytes, operation_retained,
+            NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
+        const std::size_t operation_section_emissions = section_emission_count(
+            *clipped, NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit);
+        // This is a clipped subset of the manifest's already-admitted section
+        // emissions, so it cannot exceed the manifest working-entry cap.
+        section_emissions += operation_section_emissions;
+    }
+    const std::size_t section_storage_bound = checked_size_multiply(section_emissions, sizeof(CellCoord),
+        NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
+    retained_bytes = checked_size_add(retained_bytes, section_storage_bound,
+        NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
+    retained_bytes = checked_size_add(retained_bytes, canonical_size,
+        NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
+    const std::size_t projected_reference_storage = checked_size_multiply(
+        projected_count, sizeof(ProjectedOperationReference),
+        NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit);
+    std::size_t peak_working_bytes = checked_size_add(retained_bytes, projected_reference_storage,
+        NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit);
+    peak_working_bytes = checked_size_add(peak_working_bytes, section_storage_bound,
+        NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit);
+    peak_working_bytes = checked_size_add(peak_working_bytes, largest_operation_retained,
+        NativeGeneratedTerrainPatchFailure::page_peak_working_bytes_limit);
+
+    std::vector<ProjectedOperationReference> projected_references;
+    projected_references.reserve(projected_count);
+    for (const NativeGeneratedTerrainPatchOperation &operation : manifest.operations()) {
+        if (operation.lifecycle == NativeGeneratedTerrainPatchLifecycle::follows_feature_tombstone
+            && tombstoned(tombstoned_feature_ids, operation.owner_feature_id)) continue;
+        const std::optional<NativeInclusiveCellBox> clipped = intersect_boxes(operation.bounds, projected_bounds);
+        if (clipped.has_value()) projected_references.push_back({&operation, *clipped});
     }
     // A page clips a subset of an already-admitted manifest, so it cannot
     // introduce a section not covered by the manifest's admitted section cap.
     std::vector<CellCoord> sections = collect_affected_sections<false>(
         projected_references, [](const ProjectedOperationReference &entry) -> const NativeInclusiveCellBox & {
             return entry.clipped_bounds;
-        }, NativeGeneratedTerrainPatchFailure::affected_sections_limit);
-    retained_bytes = checked_size_add(retained_bytes,
-        checked_size_multiply(sections.size(), sizeof(CellCoord),
-            NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit),
-        NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
-    retained_bytes = checked_size_add(retained_bytes, canonical_size,
-        NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit);
+        }, section_emissions, NativeGeneratedTerrainPatchFailure::affected_sections_limit);
     std::vector<NativeGeneratedTerrainPatchOperation> projected;
     projected.reserve(projected_references.size());
     for (const ProjectedOperationReference &reference : projected_references) {
-        projected.push_back(*reference.operation);
+        projected.push_back(compact_operation_copy(*reference.operation));
         projected.back().bounds = reference.clipped_bounds;
     }
+    projected.shrink_to_fit();
+    NativeGeneratedTerrainPageDomain retained_domain = domain;
+    retained_domain.page_id = compact_string(domain.page_id);
     std::vector<std::uint8_t> canonical = page_binary(
-        manifest, domain, projected_bounds, projected, canonical_size);
+        manifest, retained_domain, projected_bounds, projected, canonical_size);
     const Sha256Digest digest = sha256(canonical);
     return NativeGeneratedTerrainPatchPageSnapshot(
-        domain, projected_bounds, std::move(projected), std::move(sections), std::move(canonical), digest,
-        retained_bytes);
+        std::move(retained_domain), projected_bounds, std::move(projected), std::move(sections),
+        std::move(canonical), digest, retained_bytes, peak_working_bytes);
 }
 
 const NativeGeneratedTerrainPageDomain &NativeGeneratedTerrainPatchPageSnapshot::domain() const noexcept {
@@ -873,6 +901,9 @@ std::string NativeGeneratedTerrainPatchPageSnapshot::projection_digest_hex() con
     return sha256_hex(projection_digest_);
 }
 std::size_t NativeGeneratedTerrainPatchPageSnapshot::retained_bytes() const noexcept { return retained_bytes_; }
+std::size_t NativeGeneratedTerrainPatchPageSnapshot::peak_working_bytes() const noexcept {
+    return peak_working_bytes_;
+}
 
 std::optional<NativeResolvedGeneratedTerrainPatchCell> NativeGeneratedTerrainPatchPageSnapshot::resolve(
     const CellCoord cell) const {
