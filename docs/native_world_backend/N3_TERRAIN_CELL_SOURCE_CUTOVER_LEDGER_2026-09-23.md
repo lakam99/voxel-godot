@@ -518,3 +518,17 @@ pure core only and do not instrument the GDExtension adapter C++. The expanded
 adapter contract is runnable, but the final adapter rebuild and focused Godot
 contract execution remain required on the primary integration worktree; they
 must not be reported as 100% instrumented adapter coverage.
+
+Integration verification at `e24e0af` rebuilt and installed both native
+configurations. `artifacts/native-world-backend/n3-projection-final-integrated-20260923/report.json`
+records 554/554 standalone tests in each configuration and successful adapter
+smokes, but its overall status is `blocked`: full-core LLVM coverage is
+12,552/12,562 lines, 1,591/1,591 functions, and 7,281/7,300 branches.
+The missed branches are in the terrain-volume v2 import builder and ordered
+surface-prop stream. This is a coverage-gate failure, not a native test pass.
+The freshly installed debug adapter separately passed the audio-disabled
+projection contract at
+`artifacts/native-world-backend/n3-terrain-projection-1790215474218-f704ef2a/report.json`;
+the owned Godot process receipt is
+`artifacts/node-tools/process-runs/godot-uq74aE/watchdog.json`.
+That fixture remains shadow-only and does not establish production cutover.
