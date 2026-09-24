@@ -543,11 +543,23 @@ now have standalone tests. The current-source recheck at
 `artifacts/native-world-backend/n3-projection-reviewed-gap-20260923/report.json`
 passes 558/558 tests in debug and release, but remains `blocked` on strict
 full-core coverage: 12,552/12,562 lines, 1,591/1,591 functions and
-7,298/7,300 branches. The two missed branch outcomes are importer checks at
-lines 69 and 84 that appear unreachable under current construction invariants;
-the ten missed executable lines still require review and deterministic failure
-injection where they protect exception cleanup. No N3 exit or Gate 5 claim is
-made from this receipt.
+7,298/7,300 branches. An audit of its coverage payload found
+`coverage.core.uncovered.lines` was not trustworthy: it listed 38 lines from
+14 files whose own LLVM summaries were 100%, while omitting the ten true
+uncovered lines in `native_terrain_volume_v2_import_builder.cpp` (108–112,
+165–169). The two actual missed branch outcomes are builder checks at lines
+69 and 84. The line-69 same-section/revision-change branch is reachable and a
+focused rejection/drain test has been added; the line-84 typed-snapshot
+equality check is a defensive invariant not reachable through ordinary public
+construction, so no production test seam was introduced. A corrected runner
+now serializes uncovered lines from LLVM's LCOV DA records, requires every
+manifest source and reconciles per-file line totals; replaying the existing
+raw coverage export/profile reports exactly the ten importer lines and no
+false positives. Its focused Node runner tests pass 13/13, and the importer
+translation-unit test passes 10/10. The existing report is still tied to its
+original source snapshot and the new reachable branch test has not yet been
+covered by a regenerated full-core receipt. Strict coverage verification, N3
+exit and Gate 5 remain open.
 
 The staged collision-demand snapshot is now consumed by both
 `NativeTerrainArtifactRequests` and `NativeTerrainTriangleArtifactProducer`;
