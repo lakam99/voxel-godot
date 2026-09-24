@@ -85,14 +85,18 @@ struct NativeGeneratedTerrainPatchLimits final {
     static constexpr std::size_t MAX_MANIFEST_OPERATIONS = 4096U;
     static constexpr std::size_t MAX_TEXT_FIELD_BYTES = 1024U;
     static constexpr std::size_t MAX_MANIFEST_UTF8_BYTES = 1024U * 1024U;
-    static constexpr std::size_t MAX_MANIFEST_CANONICAL_BYTES = 8U * 1024U * 1024U;
+    // Compact boxes make 1 MiB ample for the hard 4096-operation ceiling
+    // while keeping canonical preflight independently testable before the
+    // larger retained-representation ceiling.
+    static constexpr std::size_t MAX_MANIFEST_CANONICAL_BYTES = 1024U * 1024U;
+    static constexpr std::size_t MAX_MANIFEST_RETAINED_BYTES = 16U * 1024U * 1024U;
     static constexpr std::uint64_t MAX_OPERATION_CELL_VOLUME = 4ULL * 1024ULL * 1024ULL;
     static constexpr std::uint64_t MAX_AGGREGATE_CELL_VOLUME = 64ULL * 1024ULL * 1024ULL;
     static constexpr std::size_t MAX_AFFECTED_SECTIONS = 65536U;
     static constexpr std::size_t MAX_PAGE_PROJECTED_OPERATIONS = 2048U;
     static constexpr std::size_t MAX_PAGE_TOMBSTONES = 4096U;
     static constexpr std::uint64_t MAX_PAGE_PROJECTED_CELL_VOLUME = 8ULL * 1024ULL * 1024ULL;
-    static constexpr std::size_t MAX_PAGE_RETAINED_BYTES = 512U * 1024U;
+    static constexpr std::size_t MAX_PAGE_RETAINED_BYTES = 4U * 1024U * 1024U;
     static constexpr std::uint8_t MAX_MESH_HALO_CELLS = 16U;
     static constexpr std::int32_t SECTION_SIZE = 16;
 };
@@ -117,16 +121,17 @@ enum class NativeGeneratedTerrainPatchFailure : std::uint8_t {
     aggregate_volume_limit = 17,
     utf8_bytes_limit = 18,
     canonical_bytes_limit = 19,
-    affected_sections_limit = 20,
-    duplicate_operation_identity = 21,
-    conflicting_operation_identity = 22,
-    ambiguous_precedence_key = 23,
-    invalid_page_domain = 24,
-    invalid_halo = 25,
-    invalid_tombstone = 26,
-    page_operation_limit = 27,
-    page_volume_limit = 28,
-    page_retained_bytes_limit = 29,
+    manifest_retained_bytes_limit = 20,
+    affected_sections_limit = 21,
+    mixed_owner_recipe_revision = 22,
+    duplicate_operation_identity = 23,
+    conflicting_operation_identity = 24,
+    invalid_page_domain = 25,
+    invalid_halo = 26,
+    invalid_tombstone = 27,
+    page_operation_limit = 28,
+    page_volume_limit = 29,
+    page_retained_bytes_limit = 30,
 };
 
 class NativeGeneratedTerrainPatchError final : public std::runtime_error {
@@ -155,7 +160,7 @@ struct NativeGeneratedTerrainPatchManifestDescriptor final {
 class NativeGeneratedTerrainPatchManifest final {
 public:
     static NativeGeneratedTerrainPatchManifest admit(
-        NativeGeneratedTerrainPatchManifestDescriptor descriptor);
+        const NativeGeneratedTerrainPatchManifestDescriptor &descriptor);
 
     NativeGeneratedTerrainPatchManifest(const NativeGeneratedTerrainPatchManifest &) = default;
     NativeGeneratedTerrainPatchManifest(NativeGeneratedTerrainPatchManifest &&) noexcept = default;
@@ -173,18 +178,21 @@ public:
     const std::vector<std::uint8_t> &canonical_binary() const noexcept;
     const Sha256Digest &content_digest() const noexcept;
     std::string content_digest_hex() const;
+    std::size_t retained_bytes() const noexcept;
 
 private:
     NativeGeneratedTerrainPatchManifest(
         NativeGeneratedTerrainPatchManifestDescriptor descriptor,
         std::vector<CellCoord> affected_sections,
         std::vector<std::uint8_t> canonical_binary,
-        Sha256Digest content_digest);
+        Sha256Digest content_digest,
+        std::size_t retained_bytes);
 
     NativeGeneratedTerrainPatchManifestDescriptor descriptor_;
     std::vector<CellCoord> affected_sections_;
     std::vector<std::uint8_t> canonical_binary_;
     Sha256Digest content_digest_{};
+    std::size_t retained_bytes_ = 0U;
 };
 
 struct NativeGeneratedTerrainPatchHalo final {
@@ -225,8 +233,8 @@ class NativeGeneratedTerrainPatchPageSnapshot final {
 public:
     static NativeGeneratedTerrainPatchPageSnapshot project(
         const NativeGeneratedTerrainPatchManifest &manifest,
-        NativeGeneratedTerrainPageDomain domain,
-        std::vector<std::string> tombstoned_feature_ids = {});
+        const NativeGeneratedTerrainPageDomain &domain,
+        const std::vector<std::string> &tombstoned_feature_ids = {});
 
     NativeGeneratedTerrainPatchPageSnapshot(const NativeGeneratedTerrainPatchPageSnapshot &) = default;
     NativeGeneratedTerrainPatchPageSnapshot(NativeGeneratedTerrainPatchPageSnapshot &&) noexcept = default;
@@ -240,6 +248,7 @@ public:
     const std::vector<std::uint8_t> &canonical_binary() const noexcept;
     const Sha256Digest &projection_digest() const noexcept;
     std::string projection_digest_hex() const;
+    std::size_t retained_bytes() const noexcept;
     std::optional<NativeResolvedGeneratedTerrainPatchCell> resolve(CellCoord cell) const;
 
 private:
@@ -249,7 +258,8 @@ private:
         std::vector<NativeGeneratedTerrainPatchOperation> operations,
         std::vector<CellCoord> affected_sections,
         std::vector<std::uint8_t> canonical_binary,
-        Sha256Digest projection_digest);
+        Sha256Digest projection_digest,
+        std::size_t retained_bytes);
 
     NativeGeneratedTerrainPageDomain domain_;
     NativeInclusiveCellBox projected_bounds_;
@@ -257,6 +267,7 @@ private:
     std::vector<CellCoord> affected_sections_;
     std::vector<std::uint8_t> canonical_binary_;
     Sha256Digest projection_digest_{};
+    std::size_t retained_bytes_ = 0U;
 };
 
 } // namespace voxel::world_backend

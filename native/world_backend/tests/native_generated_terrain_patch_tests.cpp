@@ -107,6 +107,59 @@ NativeValue numeric_metadata() {
     return NativeValue::object({{"values", NativeValue::array(std::move(values))}});
 }
 
+NativeValue null_array(const std::size_t count = NativeValueLimits::MAX_CONTAINER_ENTRIES) {
+    NativeValue::Array values;
+    values.reserve(count);
+    for (std::size_t index = 0U; index < count; ++index) values.push_back(NativeValue::null());
+    return NativeValue::array(std::move(values));
+}
+
+NativeValue null_array_metadata(const std::size_t extra_count = 0U, const bool include_extra = false) {
+    NativeValue::Object entries;
+    entries.reserve(include_extra ? 2U : 1U);
+    if (include_extra) entries.emplace_back("more", null_array(extra_count));
+    entries.emplace_back("values", null_array());
+    return NativeValue::object(std::move(entries));
+}
+
+NativeValue null_object_metadata() {
+    NativeValue::Object values;
+    values.reserve(NativeValueLimits::MAX_CONTAINER_ENTRIES);
+    for (std::size_t index = 0U; index < NativeValueLimits::MAX_CONTAINER_ENTRIES; ++index) {
+        const std::string digits = std::to_string(10000U + index).substr(1U);
+        values.emplace_back(digits, NativeValue::null());
+    }
+    return NativeValue::object({{"values", NativeValue::object(std::move(values))}});
+}
+
+NativeValue retained_capacity_padding_metadata(const NativeValue &values, const std::size_t padding_length) {
+    std::string padding(NativeValueLimits::MAX_STRING_BYTES, 'p');
+    padding.resize(padding_length);
+    NativeValue::Object entries;
+    entries.reserve(2U);
+    entries.emplace_back("pad", NativeValue::string(std::move(padding)));
+    entries.emplace_back("values", values);
+    return NativeValue::object(std::move(entries));
+}
+
+std::vector<NativeGeneratedTerrainPatchOperation> null_array_operations(
+    const std::size_t count, const std::size_t full_extra_count = 0U,
+    const std::size_t partial_extra_count = 0U) {
+    std::vector<NativeGeneratedTerrainPatchOperation> result;
+    result.reserve(count);
+    for (std::size_t index = 0U; index < count; ++index) {
+        NativeGeneratedTerrainCellTemplate state = solid_state();
+        const bool full_extra = index < full_extra_count;
+        const bool partial_extra = index == full_extra_count && partial_extra_count != 0U;
+        state.metadata = null_array_metadata(
+            full_extra ? NativeValueLimits::MAX_CONTAINER_ENTRIES : partial_extra_count,
+            full_extra || partial_extra);
+        result.push_back(operation("null-retained:" + std::to_string(index),
+            static_cast<std::uint32_t>(index), {{0, 0, 0}, {0, 0, 0}}, std::move(state)));
+    }
+    return result;
+}
+
 } // namespace
 
 VWB_TEST(generated_patch_models_current_three_box_structure_geometry_without_save_or_overlay_authority) {
@@ -161,6 +214,100 @@ VWB_TEST(generated_patch_models_current_three_box_structure_geometry_without_sav
     VWB_EXPECT_EQ(NativeGeneratedTerrainPatchLifecycle::follows_feature_tombstone, room->lifecycle);
 }
 
+VWB_TEST(generated_patch_frozen_structure_system_three_box_authority_is_byte_exact) {
+    NativeGeneratedTerrainCellTemplate foundation_state_value;
+    foundation_state_value.material = TerrainMaterialId::stone;
+    foundation_state_value.biome = TerrainBiomeId::town;
+    foundation_state_value.solid = true;
+    foundation_state_value.density = 2.2275;
+    foundation_state_value.fluid = TerrainFluidId::none;
+    foundation_state_value.light = {0U, 0U};
+    foundation_state_value.metadata = NativeValue::object({
+        {"source", NativeValue::string("structure_foundation")},
+        {"structureSource", NativeValue::string("town_home")},
+    });
+    NativeGeneratedTerrainCellTemplate cap_state_value;
+    cap_state_value.material = TerrainMaterialId::stone;
+    cap_state_value.biome = TerrainBiomeId::town;
+    cap_state_value.solid = true;
+    cap_state_value.density = 0.108;
+    cap_state_value.fluid = TerrainFluidId::none;
+    cap_state_value.light = {0U, 0U};
+    cap_state_value.metadata = NativeValue::object({
+        {"source", NativeValue::string("structure_floor_cap")},
+        {"structureSource", NativeValue::string("town_home")},
+    });
+    NativeGeneratedTerrainCellTemplate air_state_value;
+    air_state_value.material = TerrainMaterialId::air;
+    air_state_value.biome = TerrainBiomeId::town;
+    air_state_value.solid = false;
+    air_state_value.density = -1.35;
+    air_state_value.fluid = TerrainFluidId::none;
+    air_state_value.light = {15U, 0U};
+    air_state_value.metadata = NativeValue::object({
+        {"source", NativeValue::string("structure_reserved_air")},
+        {"structureSource", NativeValue::string("town_home")},
+    });
+
+    NativeGeneratedTerrainPatchOperation foundation_value;
+    foundation_value.owner_feature_id = "structure:town_home:4,8";
+    foundation_value.recipe_revision = 1U;
+    foundation_value.deterministic_order = 100U;
+    foundation_value.operation_ordinal = 0U;
+    foundation_value.role = NativeGeneratedTerrainPatchRole::foundation_fill;
+    foundation_value.lifecycle = NativeGeneratedTerrainPatchLifecycle::permanent_site_shaping;
+    foundation_value.bounds = {{3, 9, 7}, {14, 11, 16}};
+    foundation_value.state = foundation_state_value;
+    NativeGeneratedTerrainPatchOperation cap_value = foundation_value;
+    cap_value.operation_ordinal = 1U;
+    cap_value.role = NativeGeneratedTerrainPatchRole::floor_cap;
+    cap_value.bounds = {{3, 12, 7}, {14, 12, 16}};
+    cap_value.state = cap_state_value;
+    NativeGeneratedTerrainPatchOperation air_value = foundation_value;
+    air_value.operation_ordinal = 2U;
+    air_value.role = NativeGeneratedTerrainPatchRole::interior_clearance;
+    air_value.lifecycle = NativeGeneratedTerrainPatchLifecycle::follows_feature_tombstone;
+    air_value.bounds = {{5, 13, 9}, {12, 16, 14}};
+    air_value.state = air_state_value;
+
+    NativeGeneratedTerrainPatchManifestDescriptor frozen_input;
+    frozen_input.world_physical_identity = world_identity(41U);
+    frozen_input.region_id = "structure-system-fixture:town:0,0";
+    frozen_input.complete_region_bounds = {{0, 0, 0}, {31, 31, 31}};
+    frozen_input.producer_revision = 1U;
+    frozen_input.feature_source_revision = 27U;
+    frozen_input.operations = {air_value, foundation_value, cap_value};
+    const auto manifest = NativeGeneratedTerrainPatchManifest::admit(frozen_input);
+    VWB_EXPECT_EQ(3U, manifest.operations().size());
+    VWB_EXPECT_EQ(601U, manifest.canonical_binary().size());
+    VWB_EXPECT_EQ(std::string("ef5a3d80a0d55e4b3ed833c22f53c2cd566f60bdba591028080bd944c0989501"),
+        manifest.content_digest_hex());
+
+    NativeGeneratedTerrainPageDomain frozen_page{
+        "structure-system-fixture-page", {0, 0, 0}, {{0, 0, 0}, {31, 31, 31}}, {0U, 0U, 0U}};
+    const auto snapshot = NativeGeneratedTerrainPatchPageSnapshot::project(manifest, frozen_page);
+    const auto foundation_cell = snapshot.resolve({3, 9, 7});
+    const auto cap_cell = snapshot.resolve({14, 12, 16});
+    const auto interior_cell = snapshot.resolve({5, 13, 9});
+    VWB_EXPECT(foundation_cell.has_value());
+    VWB_EXPECT(cap_cell.has_value());
+    VWB_EXPECT(interior_cell.has_value());
+    VWB_EXPECT_EQ(NativeGeneratedTerrainPatchRole::foundation_fill, foundation_cell->role);
+    VWB_EXPECT_EQ(NativeGeneratedTerrainPatchRole::floor_cap, cap_cell->role);
+    VWB_EXPECT_EQ(NativeGeneratedTerrainPatchRole::interior_clearance, interior_cell->role);
+    VWB_EXPECT_EQ(2.2275, foundation_cell->state.density);
+    VWB_EXPECT_EQ(0.108, cap_cell->state.density);
+    VWB_EXPECT_EQ(-1.35, interior_cell->state.density);
+    VWB_EXPECT_EQ(15U, interior_cell->state.light.sky);
+    VWB_EXPECT_EQ(TerrainMaterialId::stone, foundation_cell->state.material);
+    VWB_EXPECT_EQ(TerrainBiomeId::town, cap_cell->state.biome);
+    VWB_EXPECT_EQ(TerrainFluidId::none, interior_cell->state.fluid);
+    VWB_EXPECT_EQ(std::string("structure_reserved_air"),
+        interior_cell->state.metadata.as_object()[0].second.as_string());
+    VWB_EXPECT_EQ(std::string("town_home"),
+        interior_cell->state.metadata.as_object()[1].second.as_string());
+}
+
 VWB_TEST(generated_patch_negative_coordinates_and_inclusive_edges_are_exact) {
     const NativeGeneratedTerrainPatchManifest manifest = admit({operation("negative", 0U,
         {{-17, -16, -1}, {-16, -1, 0}})});
@@ -208,8 +355,21 @@ VWB_TEST(generated_patch_rejects_duplicate_conflicting_and_ambiguous_keys) {
         [&]() { static_cast<void>(admit({base, conflict})); });
     auto ambiguous = base;
     ambiguous.recipe_revision = 8U;
-    expect_failure(NativeGeneratedTerrainPatchFailure::ambiguous_precedence_key,
+    expect_failure(NativeGeneratedTerrainPatchFailure::mixed_owner_recipe_revision,
         [&]() { static_cast<void>(admit({base, ambiguous})); });
+}
+
+VWB_TEST(generated_patch_requires_one_recipe_revision_per_owner_across_complete_manifest) {
+    auto revision_seven = operation("one-owner", 0U, {{0, 0, 0}, {0, 0, 0}});
+    auto revision_eight = operation("one-owner", 99U, {{100, 100, 100}, {100, 100, 100}});
+    revision_eight.recipe_revision = 8U;
+    revision_eight.deterministic_order = 900U;
+    expect_failure(NativeGeneratedTerrainPatchFailure::mixed_owner_recipe_revision,
+        [&]() { static_cast<void>(admit({revision_seven, revision_eight})); });
+    expect_failure(NativeGeneratedTerrainPatchFailure::mixed_owner_recipe_revision,
+        [&]() { static_cast<void>(admit({revision_eight, revision_seven})); });
+    revision_eight.owner_feature_id = "other-owner";
+    VWB_EXPECT_EQ(2U, admit({revision_eight, revision_seven}).operations().size());
 }
 
 VWB_TEST(generated_patch_page_crop_crosses_seams_and_explicit_sixteen_cell_halo) {
@@ -286,6 +446,78 @@ VWB_TEST(generated_patch_complete_manifest_is_independent_of_unloaded_page_proje
     VWB_EXPECT_EQ(2U, manifest.operations().size());
 }
 
+VWB_TEST(generated_patch_page_requires_complete_expanded_domain_coverage) {
+    NativeGeneratedTerrainPatchManifestDescriptor input = descriptor({operation("inside", 0U,
+        {{0, 0, 0}, {31, 31, 31}})});
+    input.complete_region_bounds = {{0, 0, 0}, {31, 31, 31}};
+    const auto manifest = NativeGeneratedTerrainPatchManifest::admit(input);
+    VWB_EXPECT_EQ(1U, NativeGeneratedTerrainPatchPageSnapshot::project(
+        manifest, page({{0, 0, 0}, {15, 15, 15}})).operations().size());
+    VWB_EXPECT_EQ(1U, NativeGeneratedTerrainPatchPageSnapshot::project(
+        manifest, page({{16, 16, 16}, {31, 31, 31}})).operations().size());
+    VWB_EXPECT_EQ(1U, NativeGeneratedTerrainPatchPageSnapshot::project(
+        manifest, page({{1, 1, 1}, {30, 30, 30}}, 1U)).operations().size());
+    expect_failure(NativeGeneratedTerrainPatchFailure::invalid_page_domain,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(
+            manifest, page({{32, 0, 0}, {47, 15, 15}}))); });
+    expect_failure(NativeGeneratedTerrainPatchFailure::invalid_page_domain,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(
+            manifest, page({{-1, 0, 0}, {15, 15, 15}}))); });
+    expect_failure(NativeGeneratedTerrainPatchFailure::invalid_page_domain,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(
+            manifest, page({{0, 0, 0}, {15, 15, 15}}, 1U))); });
+    auto cross_region = page({{16, 16, 16}, {31, 31, 31}});
+    cross_region.mesh_halo = {1U, 0U, 1U};
+    expect_failure(NativeGeneratedTerrainPatchFailure::invalid_page_domain,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(manifest, cross_region)); });
+}
+
+VWB_TEST(generated_patch_empty_manifest_is_complete_only_inside_its_region) {
+    NativeGeneratedTerrainPatchManifestDescriptor input = descriptor({});
+    input.complete_region_bounds = {{-16, -16, -16}, {15, 15, 15}};
+    const auto manifest = NativeGeneratedTerrainPatchManifest::admit(input);
+    VWB_EXPECT(manifest.operations().empty());
+    VWB_EXPECT(manifest.affected_sections().empty());
+    VWB_EXPECT(manifest.retained_bytes() > manifest.canonical_binary().size());
+    const auto snapshot = NativeGeneratedTerrainPatchPageSnapshot::project(
+        manifest, page({{-16, -16, -16}, {15, 15, 15}}));
+    VWB_EXPECT(snapshot.operations().empty());
+    VWB_EXPECT(snapshot.affected_sections().empty());
+    VWB_EXPECT(!snapshot.resolve({0, 0, 0}).has_value());
+    VWB_EXPECT(snapshot.retained_bytes() > snapshot.canonical_binary().size());
+    expect_failure(NativeGeneratedTerrainPatchFailure::invalid_page_domain,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(
+            manifest, page({{16, -16, -16}, {31, 15, 15}}))); });
+}
+
+VWB_TEST(generated_patch_admission_and_projection_are_immutable_after_caller_mutation) {
+    NativeGeneratedTerrainPatchManifestDescriptor input = descriptor({operation("immutable", 0U)});
+    input.complete_region_bounds = {{0, 0, 0}, {15, 15, 15}};
+    const auto manifest = NativeGeneratedTerrainPatchManifest::admit(input);
+    const auto manifest_digest = manifest.content_digest();
+    input.region_id = "mutated";
+    input.operations[0].owner_feature_id = "mutated";
+    input.operations[0].state.density = 99.0;
+    input.operations.clear();
+    VWB_EXPECT_EQ(std::string("region:test"), manifest.region_id());
+    VWB_EXPECT_EQ(std::string("immutable"), manifest.operations()[0].owner_feature_id);
+    VWB_EXPECT_EQ(1.35, manifest.operations()[0].state.density);
+    VWB_EXPECT_EQ(manifest_digest, manifest.content_digest());
+
+    NativeGeneratedTerrainPageDomain caller_domain = page();
+    std::vector<std::string> caller_tombstones;
+    const auto snapshot = NativeGeneratedTerrainPatchPageSnapshot::project(
+        manifest, caller_domain, caller_tombstones);
+    const auto projection_digest = snapshot.projection_digest();
+    caller_domain.page_id = "mutated";
+    caller_domain.owned_bounds = {{8, 8, 8}, {9, 9, 9}};
+    caller_tombstones.push_back("immutable");
+    VWB_EXPECT_EQ(std::string("page:test"), snapshot.domain().page_id);
+    VWB_EXPECT((snapshot.domain().owned_bounds == NativeInclusiveCellBox{{0, 0, 0}, {15, 15, 15}}));
+    VWB_EXPECT(snapshot.resolve({0, 0, 0}).has_value());
+    VWB_EXPECT_EQ(projection_digest, snapshot.projection_digest());
+}
+
 VWB_TEST(generated_patch_rejects_invalid_manifest_identity_revisions_region_and_operation_fields) {
     NativeGeneratedTerrainPatchManifestDescriptor input = descriptor({operation("valid", 0U)});
     input.world_physical_identity = {};
@@ -349,6 +581,11 @@ VWB_TEST(generated_patch_validates_exact_cell_state_semantics) {
     NativeGeneratedTerrainCellTemplate state = solid_state();
     state.block_identity = "building.foundation";
     state.light = {15U, 15U};
+    state.metadata = NativeValue::object({
+        {"false", NativeValue::boolean(false)},
+        {"number", NativeValue::number(42.5)},
+        {"true", NativeValue::boolean(true)},
+    });
     auto valid = operation("valid", 0U, {{0, 0, 0}, {0, 0, 0}}, state);
     VWB_EXPECT_EQ(std::string("building.foundation"), admit({valid}).operations()[0].state.block_identity.value());
 
@@ -488,6 +725,24 @@ VWB_TEST(generated_patch_operation_count_and_utf8_caps_are_bounded_before_admiss
 }
 
 VWB_TEST(generated_patch_canonical_and_page_retained_byte_caps_are_enforced) {
+    NativeValue::Array excessive_capacity_values;
+    excessive_capacity_values.reserve(
+        NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES / sizeof(NativeValue) + 1U);
+    NativeValue::Object excessive_capacity_metadata;
+    excessive_capacity_metadata.reserve(1U);
+    excessive_capacity_metadata.emplace_back(
+        "values", NativeValue::array(std::move(excessive_capacity_values)));
+    NativeGeneratedTerrainCellTemplate excessive_capacity_state = solid_state();
+    excessive_capacity_state.metadata = NativeValue::object(std::move(excessive_capacity_metadata));
+    std::vector<NativeGeneratedTerrainPatchOperation> excessive_capacity_operations;
+    excessive_capacity_operations.push_back(operation("excessive-capacity", 0U,
+        {{0, 0, 0}, {0, 0, 0}}, std::move(excessive_capacity_state)));
+    NativeGeneratedTerrainPatchManifestDescriptor excessive_capacity_descriptor =
+        descriptor(std::move(excessive_capacity_operations));
+    expect_failure(NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchManifest::admit(
+            excessive_capacity_descriptor)); });
+
     const NativeValue bulky = numeric_metadata();
     std::vector<NativeGeneratedTerrainPatchOperation> canonical_heavy;
     canonical_heavy.reserve(920U);
@@ -500,10 +755,105 @@ VWB_TEST(generated_patch_canonical_and_page_retained_byte_caps_are_enforced) {
     expect_failure(NativeGeneratedTerrainPatchFailure::canonical_bytes_limit,
         [&]() { static_cast<void>(admit(canonical_heavy)); });
 
-    canonical_heavy.resize(64U);
-    const auto manifest = admit(canonical_heavy);
+    // A null encodes as one byte but occupies a complete NativeValue node.
+    // The retained cap must therefore reject this adversarial shape long
+    // before its canonical-byte cap is reached.
+    expect_failure(NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit,
+        [&]() { static_cast<void>(admit(null_array_operations(400U))); });
+
+    std::vector<NativeGeneratedTerrainPatchOperation> object_heavy;
+    object_heavy.reserve(210U);
+    const NativeValue object_metadata = null_object_metadata();
+    NativeGeneratedTerrainCellTemplate one_object_state = solid_state();
+    one_object_state.metadata = object_metadata;
+    const auto one_object_manifest = admit({operation("object-retained:single", 0U,
+        {{0, 0, 0}, {0, 0, 0}}, std::move(one_object_state))});
+    VWB_EXPECT(one_object_manifest.retained_bytes() > one_object_manifest.canonical_binary().size() * 4U);
+    for (std::uint32_t index = 0U; index < 210U; ++index) {
+        NativeGeneratedTerrainCellTemplate state = solid_state();
+        state.metadata = object_metadata;
+        object_heavy.push_back(operation("object-retained:" + std::to_string(index), index,
+            {{0, 0, 0}, {0, 0, 0}}, std::move(state)));
+    }
+    expect_failure(NativeGeneratedTerrainPatchFailure::canonical_bytes_limit,
+        [&]() { static_cast<void>(admit(object_heavy)); });
+
+    auto manifest_retained_boundary = null_array_operations(300U);
+    const NativeValue values = null_array();
+    constexpr std::size_t PADDED_OPERATIONS = 61U;
+    for (std::size_t index = 0U; index < PADDED_OPERATIONS; ++index) {
+        manifest_retained_boundary[index].state.metadata =
+            retained_capacity_padding_metadata(values, 0U);
+    }
+    NativeGeneratedTerrainPatchManifestDescriptor retained_descriptor =
+        descriptor(std::move(manifest_retained_boundary));
+    const auto reserved_capacity_manifest = NativeGeneratedTerrainPatchManifest::admit(retained_descriptor);
+    const std::size_t manifest_padding = NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES
+        - reserved_capacity_manifest.retained_bytes();
+    VWB_EXPECT(manifest_padding < NativeValueLimits::MAX_STRING_BYTES);
+    retained_descriptor.operations[PADDED_OPERATIONS - 1U].state.metadata =
+        retained_capacity_padding_metadata(values, manifest_padding);
+    const auto exact_retained_manifest = NativeGeneratedTerrainPatchManifest::admit(retained_descriptor);
+    VWB_EXPECT_EQ(NativeGeneratedTerrainPatchLimits::MAX_MANIFEST_RETAINED_BYTES,
+        exact_retained_manifest.retained_bytes());
+    retained_descriptor.operations[PADDED_OPERATIONS - 1U].state.metadata =
+        retained_capacity_padding_metadata(values, manifest_padding + 1U);
+    expect_failure(NativeGeneratedTerrainPatchFailure::manifest_retained_bytes_limit,
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchManifest::admit(retained_descriptor)); });
+
+    // Tune the page to within one NativeValue node of its cap using compact
+    // null arrays, then use a fixed-capacity page ID to supply the exact final
+    // byte count without retaining another operation copy first.
+    constexpr std::size_t PAGE_OPERATION_COUNT = 80U;
+    const auto base_page_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT));
+    NativeGeneratedTerrainPageDomain fixed_capacity_domain = page();
+    fixed_capacity_domain.page_id.assign(NativeGeneratedTerrainPatchLimits::MAX_TEXT_FIELD_BYTES, 'p');
+    fixed_capacity_domain.page_id.resize(1U);
+    const auto base_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        base_page_manifest, fixed_capacity_domain);
+
+    auto one_full_extra = null_array_operations(PAGE_OPERATION_COUNT, 1U);
+    const auto one_full_manifest = admit(one_full_extra);
+    const auto one_full_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        one_full_manifest, fixed_capacity_domain);
+    const std::size_t full_extra_delta = one_full_page.retained_bytes() - base_page.retained_bytes();
+    const std::size_t full_extra_count =
+        (NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - base_page.retained_bytes()) / full_extra_delta;
+    VWB_EXPECT(full_extra_count < PAGE_OPERATION_COUNT);
+
+    const auto full_extra_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT, full_extra_count));
+    const auto full_extra_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        full_extra_manifest, fixed_capacity_domain);
+    const auto one_node_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT, full_extra_count, 1U));
+    const auto one_node_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        one_node_manifest, fixed_capacity_domain);
+    const auto two_node_manifest = admit(null_array_operations(PAGE_OPERATION_COUNT, full_extra_count, 2U));
+    const auto two_node_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        two_node_manifest, fixed_capacity_domain);
+    const std::size_t first_node_delta = one_node_page.retained_bytes() - full_extra_page.retained_bytes();
+    const std::size_t additional_node_delta = two_node_page.retained_bytes() - one_node_page.retained_bytes();
+    const std::size_t remaining_after_full =
+        NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - full_extra_page.retained_bytes();
+    VWB_EXPECT(remaining_after_full >= first_node_delta);
+    const std::size_t partial_extra_count = 1U
+        + (remaining_after_full - first_node_delta) / additional_node_delta;
+    VWB_EXPECT(partial_extra_count <= NativeValueLimits::MAX_CONTAINER_ENTRIES);
+
+    const auto partial_manifest = admit(
+        null_array_operations(PAGE_OPERATION_COUNT, full_extra_count, partial_extra_count));
+    const auto partial_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        partial_manifest, fixed_capacity_domain);
+    const std::size_t page_id_padding =
+        NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES - partial_page.retained_bytes();
+    VWB_EXPECT(page_id_padding + 1U < NativeGeneratedTerrainPatchLimits::MAX_TEXT_FIELD_BYTES);
+    fixed_capacity_domain.page_id.resize(1U + page_id_padding);
+    const auto exact_page = NativeGeneratedTerrainPatchPageSnapshot::project(
+        partial_manifest, fixed_capacity_domain);
+    VWB_EXPECT_EQ(NativeGeneratedTerrainPatchLimits::MAX_PAGE_RETAINED_BYTES, exact_page.retained_bytes());
+    fixed_capacity_domain.page_id.push_back('p');
     expect_failure(NativeGeneratedTerrainPatchFailure::page_retained_bytes_limit,
-        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(manifest, page())); });
+        [&]() { static_cast<void>(NativeGeneratedTerrainPatchPageSnapshot::project(
+            partial_manifest, fixed_capacity_domain)); });
 }
 
 VWB_TEST(generated_patch_page_validates_domain_halo_tombstone_and_coordinate_overflow) {
