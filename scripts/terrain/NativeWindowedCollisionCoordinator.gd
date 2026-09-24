@@ -215,6 +215,10 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 		if not other_active_token.is_empty():
 			return {"status":"pending", "reason":"physical_window_candidate_layout_ambiguous",
 				"activeReplacementToken":other_active_token, "drain":drained}
+		if not String(stage.get("retirementLeaseId", "")).is_empty():
+			return {"status":"failed", "reason":"physical_window_candidate_reactivated_after_drain",
+				"drain":drained, "layout":layout,
+				"leaseId":String(stage.retirementLeaseId)}
 		_staged_owners.erase(id)
 		stage.owner.queue_free()
 		return {"status":"ready", "windowId":id, "candidateOwnerEpoch":owner_epoch,
@@ -230,15 +234,24 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 	if layout_token.is_empty():
 		return {"status":"pending", "reason":"physical_window_candidate_retirement_layout_missing",
 			"drain":drained}
-	var claim: Dictionary = _broker.claim_collision_window_retirement(
-		String(stage.windowToken), layout_token, String(stage.ownerEpoch))
-	if claim.get("status") != "ready" \
-			or claim.get("windowToken") != String(stage.windowToken) \
-			or claim.get("physicalOwnerEpoch") != String(stage.ownerEpoch) \
-			or String(claim.get("leaseId", "")).is_empty():
-		return {"status":"pending", "reason":"physical_window_candidate_retirement_lease_pending",
-			"drain":drained, "lease":claim}
-	var lease_id := String(claim.leaseId)
+	var lease_id := String(stage.get("retirementLeaseId", ""))
+	var claim: Dictionary = {"status":"ready", "leaseId":lease_id,
+		"windowToken":String(stage.windowToken),
+		"physicalOwnerEpoch":String(stage.ownerEpoch),
+		"reused":true}
+	if lease_id.is_empty():
+		claim = _broker.claim_collision_window_retirement(
+			String(stage.windowToken), layout_token, String(stage.ownerEpoch))
+		if claim.get("status") != "ready" \
+				or claim.get("windowToken") != String(stage.windowToken) \
+				or claim.get("physicalOwnerEpoch") != String(stage.ownerEpoch) \
+				or String(claim.get("leaseId", "")).is_empty():
+			return {"status":"pending", "reason":"physical_window_candidate_retirement_lease_pending",
+				"drain":drained, "lease":claim}
+		lease_id = String(claim.leaseId)
+		stage["retirementLeaseId"] = lease_id
+		stage["retirementLeaseLayoutToken"] = layout_token
+		_staged_owners[id] = stage
 	var valid_lease: Dictionary = _broker.validate_collision_window_retirement(
 		String(stage.windowToken), lease_id, String(stage.ownerEpoch))
 	if valid_lease.get("status") != "ready" \
@@ -250,11 +263,15 @@ func cancel_staged_replacement(id: Vector3i, owner_epoch: String) -> Dictionary:
 	var final_telemetry: Dictionary = final_layout.get("retirementTelemetry", {})
 	var final_retired: Array = final_layout.get("retiredWindowTokens",
 		final_telemetry.get("retiredWindowTokens", []))
-	if final_layout.get("status") != "ready" \
-			or final_layout.get("layoutToken") != layout_token \
+	var final_active := false
+	for final_window in final_layout.get("windows", []):
+		if final_window.get("id") == id and final_window.get("windowToken") \
+				== String(stage.windowToken): final_active = true
+	if final_layout.get("status") != "ready" or final_active \
 			or not final_retired.has(String(stage.windowToken)):
-		# A changed layout invalidates the lease's retirement context. Keep the
-		# stopped candidate and its exact tuple staged so a later retry can prove it.
+		# Keep the exact lease and owner tuple while later layout revisions are
+		# revalidated. The immutable retired token and broker record are the proof;
+		# the expected layout token is not refreshed after physical drain.
 		return {"status":"pending", "reason":"physical_window_candidate_retirement_layout_changed",
 			"drain":drained, "layout":final_layout}
 	var candidate_drain_receipt: Dictionary = drained.get("drain", {}).duplicate(true)
