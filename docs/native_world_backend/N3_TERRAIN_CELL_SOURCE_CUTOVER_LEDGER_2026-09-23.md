@@ -672,3 +672,23 @@ and immutable/cheap snapshot transfer. Focused tests must assert repeated
 getters do not advance work or mutate ownership, and that all producer kinds
 combined stay within one frame budget. No aggregate frame-boundedness or N3
 promotion claim is made yet.
+
+The first N5 cursorized resident-validation slice (`3107c93`, integrated as
+`525bf68`) passed its focused resident-owner test on primary at
+`artifacts/native-world-backend/n5-resident-collision-owner-1790222879381-dffe08f1/report.json`
+and aggregate cursor test at
+`artifacts/native-world-backend/n5-window-aggregate-1790222900086-a7a8cf67/report.json`.
+The resident fixture covers a 4,096-block request, early 4,097/oversized
+rejection, cursor operation/time limits, source-ticket drift and cancellation;
+the aggregate fixture covers 4,913 blocks / eight windows and early rejection
+at 65,537. An independent review found a correctness blocker before any
+promotion: the optimized `physical_receipt()` removed the prior per-entry
+`_entry_live()` proof. A matching member count and current source ticket do
+not prove each collider body is alive, enabled, and shaped. The receipt must
+restore a reliable health proof without reintroducing an unbounded 4,096-entry
+synchronous scan; tests must include invalid/freed body, disabled collision,
+and missing shapes. The exact 65,536 aggregate ceiling and a meaningful time
+budget assertion also remain untested. The N3N5 physical runner stopped at its
+25-second diagnostic cap without a report, so it is inconclusive, not a pass.
+These findings keep N5 physical readiness, N3N5 integration, and production
+cutover open.
