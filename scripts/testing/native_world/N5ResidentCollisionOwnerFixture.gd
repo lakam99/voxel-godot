@@ -598,7 +598,8 @@ func _disposal_failure_contract() -> Dictionary:
 		"shapes":[committed_shape], "retiredShapes":[],
 		"memoryToken":"post-commit-new-token", "expectedHit":true}
 	post_commit.owner._live = {Vector3i(4104, 0, 0):committed_entry}
-	post_commit.owner._resident_blocks = [Vector3i(4104, 0, 0)]
+	post_commit.owner._resident_blocks.clear()
+	post_commit.owner._resident_blocks.append(Vector3i(4104, 0, 0))
 	post_commit.owner._pending_candidates = {Vector3i(4104, 0, 0):committed_entry}
 	post_commit.owner._pending_candidate_keys = [Vector3i(4104, 0, 0)]
 	post_commit.owner.request_stop()
@@ -745,7 +746,8 @@ func _make_deferred_release_fault_owner(block: Vector3i, token: String) -> Dicti
 		"probeFrom":Vector3(float(block.x) * 3.0 + 0.5, 2.8, 0.5),
 		"probeTo":Vector3(float(block.x) * 3.0 + 0.5, 0.2, 0.5)}
 	owner._live = {block:entry}
-	owner._resident_blocks = [block]
+	owner._resident_blocks.clear()
+	owner._resident_blocks.append(block)
 	admission.cancel_body = body
 	return {"owner":owner, "admission":admission, "entry":entry}
 
