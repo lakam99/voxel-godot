@@ -31,6 +31,15 @@ Verification on the isolated `codex/n3-save-disposal` branch:
   The retirement cursor finished in 1,025 advances, with a largest advance of
   1,344 µs and final release of 10 µs. Owned-process receipt:
   `artifacts/node-tools/process-runs/godot-npfJmS/watchdog.json`.
+- Independent review found that empty section removals initially consumed no
+  step budget. They now count as work units. The repeated diagnostic passed:
+  `artifacts/native-world-backend/n3-decoded-save-retirement-1790225022643-2f63acc2/report.json`,
+  owned receipt `artifacts/node-tools/process-runs/godot-fw8iDb/watchdog.json`.
+  It processed 257 empty sections and one legacy record in five advances;
+  only 64 sections disappeared in the first advance and the legacy entry
+  remained pending. The 65,536-record case still passed, with a 1,140 µs
+  largest advance and 16 µs final release. The raw last-alias drop in this
+  process took 160,759 µs.
 - `node tools/run-n3-private-main-load-headed.mjs` passed real-menu New Game,
   runtime Continue with a borrowed override, and fresh-process file-backed
   Continue in Forward+. Reports and pending/ready captures:
@@ -58,6 +67,7 @@ gameplay readiness, and its fresh save has no edited terrain. The synthetic
 disposal result does not prove exclusive ownership for every file-load path or
 maximum-size file-backed gameplay. An early load failure can still release a
 decoded save outside this successful retirement path. External snapshot
-overrides intentionally retain their terrain aliases. Native terrain query,
+overrides intentionally retain their terrain aliases. The 3 ms Main work
+target is cooperative; one individual advance cannot be preempted. Native terrain query,
 collision and save authority cutover, N3 acceptance and final Gate 5 remain
 open.

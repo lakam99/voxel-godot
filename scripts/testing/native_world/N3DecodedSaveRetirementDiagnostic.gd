@@ -55,15 +55,42 @@ func run() -> void:
 	owned_sections = []
 	retirement = null
 	var owned_release_usec := Time.get_ticks_usec() - owned_release_started
+	var empty_sections: Array = []
+	for index in range(257):
+		empty_sections.append({"sectionKey":[index, 0, 0], "cells":[]})
+	var empty_save := {"version":2, "seed":"n3-decoded-save-retirement",
+		"terrainVolume":{"schemaVersion":1, "sectionSize":16,
+			"revision":1, "sections":empty_sections}, "terrain":[{"x":0, "z":0}]}
+	var empty_retirement = RETIREMENT.new()
+	var empty_started: Dictionary = empty_retirement.start_owned_file_save(empty_save)
+	var empty_first: Dictionary = empty_retirement.advance()
+	var empty_after_first: Dictionary = empty_retirement.snapshot()
+	var empty_steps := 1
+	var empty_last: Dictionary = empty_first
+	while empty_last.get("status") == "pending" and empty_steps < 8:
+		empty_last = empty_retirement.advance()
+		empty_steps += 1
+	var empty_bounded: bool = empty_started.get("status") == "pending" \
+		and empty_first.get("status") == "pending" \
+		and int(empty_after_first.get("sectionsRemaining", -1)) == 193 \
+		and int(empty_after_first.get("legacyRemaining", -1)) == 1 \
+		and empty_last.get("status") == "ready" \
+		and int(empty_last.get("removedRecords", -1)) == 1 \
+		and empty_steps == 5
 	var passed: bool = started.get("status") == "pending" \
 		and last.get("status") == "ready" \
 		and int(last.get("removedRecords", -1)) == expected_cells \
 		and expected_cells == SECTION_CELLS * SECTION_COUNT \
-		and prior_to_outer_release.get("state") == "ready"
+		and prior_to_outer_release.get("state") == "ready" \
+		and empty_bounded
 	var report := {"schema":"n3-decoded-save-retirement-diagnostic/v1",
 		"passed":passed, "records":expected_cells, "steps":steps,
 		"rawReleaseUsec":raw_release_usec, "ownedReleaseUsec":owned_release_usec,
-		"retirement":last, "evidenceLevel":"synthetic service diagnostic",
+		"retirement":last, "emptySections":{"passed":empty_bounded,
+			"initialSections":257, "remainingAfterFirst":empty_after_first.get("sectionsRemaining", -1),
+			"legacyAfterFirst":empty_after_first.get("legacyRemaining", -1),
+			"steps":empty_steps, "final":empty_last},
+		"evidenceLevel":"synthetic service diagnostic",
 		"doesNotProve":["exclusive ownership in Main", "real file-backed save parity",
 			"whole-game frame cadence", "external snapshot override disposal"]}
 	var path := OS.get_environment("VWB_DECODED_SAVE_RETIREMENT_REPORT")

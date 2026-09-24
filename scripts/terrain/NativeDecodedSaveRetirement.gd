@@ -35,7 +35,8 @@ func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 		return {"status":"failed", "reason":"retirement_budget_or_state_invalid"}
 	var started := Time.get_ticks_usec()
 	var removed := 0
-	while removed < max_records and not _sections.is_empty():
+	var work_units := 0
+	while work_units < max_records and not _sections.is_empty():
 		var section_value = _sections.back()
 		if not section_value is Dictionary:
 			return {"status":"failed", "reason":"terrain_section_invalid", "ownerMustBeRetained":true}
@@ -45,12 +46,15 @@ func advance(max_records: int = MAX_RECORDS_PER_ADVANCE) -> Dictionary:
 		var cells: Array = cells_value
 		if cells.is_empty():
 			_sections.pop_back()
+			work_units += 1
 			continue
 		cells.pop_back()
 		removed += 1
-	while removed < max_records and not _legacy.is_empty():
+		work_units += 1
+	while work_units < max_records and not _legacy.is_empty():
 		_legacy.pop_back()
 		removed += 1
+		work_units += 1
 	_removed_records += removed
 	_max_advance_usec = maxi(_max_advance_usec, Time.get_ticks_usec() - started)
 	if not _sections.is_empty() or not _legacy.is_empty():
