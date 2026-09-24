@@ -379,19 +379,32 @@ async function findGodot() {
   throw new Error('Godot console executable is unavailable for the N1 adapter smoke.');
 }
 
-async function runAdapterSmoke({ project, output, toolchainLock, projectInputs }) {
-  const godot = await findGodot();
-  const godotSha256 = await hashFile(godot);
-  if (godotSha256 !== toolchainLock.godot.consoleSha256) {
-    throw new Error('Godot console binary does not match the N1 toolchain lock.');
+const nativeAdapterExtensionPath = 'res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension';
+
+export function validateAdapterSmokeReport(value, toolchainLock = expectedToolchainLockValue) {
+  const version = value?.engineVersion ?? {};
+  const core = value?.core ?? {};
+  const n3Status = value?.n3OwnerStatus ?? {};
+  if (!value || value.schema !== 'native-world-backend-adapter-smoke-report/v1'
+      || value.passed !== true
+      || value.extensionPath !== nativeAdapterExtensionPath
+      || value.resourceExists !== true
+      || value.extensionManagerSingleton !== true
+      || ![0, 2].includes(value.explicitLoadStatus)
+      || !Array.isArray(value.loadedExtensions)
+      || value.loadedExtensions.some(path => typeof path !== 'string')
+      || !value.loadedExtensions.includes(nativeAdapterExtensionPath)
+      || value.classExists !== true || value.instantiated !== true
+      || value.n3OwnerClassExists !== true || value.n3PageClassExists !== true
+      || core.schema !== 'native-world-backend-adapter-smoke/v1'
+      || Number(core.floorDivide) !== -2 || Number(core.euclideanModulo) !== 15
+      || Number(core.emptySeedHash) !== 2166136261 || core.coreLinked !== true
+      || core.sourceDigest !== 'abbd66bd21010fe6f0a4b9406264fdefefa05bc793ed8a27ce2c7c59424736bf'
+      || n3Status.schema !== 'n3-native-world-backend-adapter/v1'
+      || n3Status.status !== 'uninitialized' || n3Status.shadowOnly !== true
+      || n3Status.productionCutover !== false) {
+    throw new Error('Native world backend Godot adapter smoke report is invalid.');
   }
-  const reportPath = join(output, 'adapter-smoke-report.json');
-  const run = await runOwned({ project, output, label: 'adapter-smoke', executable: godot,
-    args: ['--headless', '--path', project, '--script', 'res://scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'], timeoutSeconds: 120,
-    env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1', VWB_ADAPTER_SMOKE_REPORT: reportPath } });
-  const value = JSON.parse(await readFile(reportPath, 'utf8'));
-  if (!value.passed) throw new Error('Native world backend Godot adapter smoke did not pass.');
-  const version = value.engineVersion ?? {};
   if (Number(version.major) !== toolchainLock.godot.major
       || Number(version.minor) !== toolchainLock.godot.minor
       || Number(version.patch) !== toolchainLock.godot.patch
@@ -399,10 +412,48 @@ async function runAdapterSmoke({ project, output, toolchainLock, projectInputs }
       || String(version.hash) !== toolchainLock.godot.engineCommitSha) {
     throw new Error('Godot runtime version does not match the N1 toolchain lock.');
   }
+  return value;
+}
+
+async function runAdapterSmoke({ project, output, toolchainLock, projectInputs, installed }) {
+  const godot = await findGodot();
+  const godotSha256 = await hashFile(godot);
+  if (godotSha256 !== toolchainLock.godot.consoleSha256) {
+    throw new Error('Godot console binary does not match the N1 toolchain lock.');
+  }
+  const descriptorPath = join(project, 'addons', 'terrain_meshing_backend', 'terrain_meshing_backend.gdextension');
+  const descriptor = await fileRecord(project, descriptorPath);
+  const frozenDescriptor = projectInputs.extensionBuildInputs.find(item => item.path === descriptor.path);
+  if (!frozenDescriptor || !isDeepStrictEqual(descriptor, frozenDescriptor)) {
+    throw new Error('Adapter extension descriptor does not match the frozen project input.');
+  }
+  const installedDebug = installed.filter(item => item.configuration === 'debug' && item.kind === 'dll');
+  if (installedDebug.length !== 1) throw new Error('Adapter smoke requires exactly one installed Debug DLL receipt.');
+  const installedDebugPath = join(project, 'addons', 'terrain_meshing_backend', 'bin', installedDebug[0].name);
+  const installedDebugRecord = await fileRecord(project, installedDebugPath);
+  if (installedDebugRecord.sha256 !== installedDebug[0].sha256
+      || installedDebugRecord.bytes !== installedDebug[0].bytes) {
+    throw new Error('Adapter smoke installed Debug DLL differs from its installation receipt.');
+  }
+  const reportPath = join(output, 'adapter-smoke-report.json');
+  const run = await runOwned({ project, output, label: 'adapter-smoke', executable: godot,
+    args: ['--headless', '--path', project, '--script', 'res://scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'], timeoutSeconds: 120,
+    env: { ...process.env, VOXEL_DISABLE_AUDIO_PLAYBACK: '1', VWB_ADAPTER_SMOKE_REPORT: reportPath } });
+  const value = validateAdapterSmokeReport(JSON.parse(await readFile(reportPath, 'utf8')), toolchainLock);
   return {
     evidenceScope: 'Godot 4.6.1 load, explicit adapter invocation, and unload integration smoke.',
     standaloneCoverage: false,
     inputsDigestSha256: projectInputs.digestSha256,
+    extensionLoadBinding: {
+      extensionPath: nativeAdapterExtensionPath,
+      descriptor,
+      installedDebugDll: {
+        ...installedDebugRecord,
+        buildManifestSha256: installedDebug[0].buildManifestSha256,
+        inputsDigestSha256: installedDebug[0].inputsDigestSha256,
+        pureCoreInputsDigestSha256: installedDebug[0].pureCoreInputsDigestSha256,
+      },
+    },
     adapterInputs: [
       'native/terrain_meshing/src/terrain_meshing_backend.cpp',
       'native/terrain_meshing/src/terrain_meshing_backend.h',
@@ -1185,6 +1236,7 @@ export async function runNativeWorldBackend(argv, dependencies = {}) {
     receipt.installed = await installExtensions(project, receipt.configurations, receipt.projectInputs.before, receipt.source);
     receipt.adapterSmoke = await runAdapterSmoke({
       project, output, toolchainLock: toolchainLockValue, projectInputs: receipt.projectInputs.before,
+      installed: receipt.installed,
     });
     receipt.releaseAdapterSmoke = await runReleaseAdapterSmoke({
       project, output, toolchainLock: toolchainLockValue, projectInputs: receipt.projectInputs.before,

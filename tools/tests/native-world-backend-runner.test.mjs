@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
@@ -13,6 +14,7 @@ import {
   nativeTestTimeoutSeconds,
   normalizedUpstreamTextSha256,
   releaseSaveV2ProbeChecks,
+  validateAdapterSmokeReport,
   validateInstalledProvenance,
   validateReleaseSaveV2ProbeReport,
   validateToolchainLockValue,
@@ -43,6 +45,66 @@ test('coverage execution inherits the native test timeout and validates bounded 
     assert.throws(() => coverageExecutionTimeoutMilliseconds({ coverageExecuteTimeoutMs: value }),
       /coverageExecuteTimeoutMs/);
   }
+});
+
+function validAdapterSmokeReport() {
+  const extensionPath = 'res://addons/terrain_meshing_backend/terrain_meshing_backend.gdextension';
+  return {
+    schema: 'native-world-backend-adapter-smoke-report/v1', passed: true,
+    extensionPath, resourceExists: true, extensionManagerSingleton: true,
+    explicitLoadStatus: 0, loadedExtensions: [extensionPath],
+    classExists: true, instantiated: true, n3OwnerClassExists: true, n3PageClassExists: true,
+    core: {
+      schema: 'native-world-backend-adapter-smoke/v1', floorDivide: -2, euclideanModulo: 15,
+      emptySeedHash: 2166136261, coreLinked: true,
+      sourceDigest: 'abbd66bd21010fe6f0a4b9406264fdefefa05bc793ed8a27ce2c7c59424736bf',
+    },
+    n3OwnerStatus: {
+      schema: 'n3-native-world-backend-adapter/v1', status: 'uninitialized',
+      shadowOnly: true, productionCutover: false,
+    },
+    engineVersion: {
+      major: expectedToolchainLockValue.godot.major, minor: expectedToolchainLockValue.godot.minor,
+      patch: expectedToolchainLockValue.godot.patch, status: expectedToolchainLockValue.godot.status,
+      hash: expectedToolchainLockValue.godot.engineCommitSha,
+    },
+  };
+}
+
+test('adapter smoke validation requires exact explicit-load and adapter evidence', () => {
+  const valid = validAdapterSmokeReport();
+  assert.equal(validateAdapterSmokeReport(valid), valid);
+  assert.doesNotThrow(() => validateAdapterSmokeReport({ ...valid, explicitLoadStatus: 2 }));
+  for (const mutate of [
+    value => { value.passed = false; },
+    value => { value.extensionPath = 'res://addons/wrong.gdextension'; },
+    value => { value.resourceExists = false; },
+    value => { value.extensionManagerSingleton = false; },
+    value => { value.explicitLoadStatus = 1; },
+    value => { value.loadedExtensions = []; },
+    value => { value.classExists = false; },
+    value => { value.core.coreLinked = false; },
+    value => { value.n3OwnerStatus.productionCutover = true; },
+  ]) {
+    const fabricated = structuredClone(valid);
+    mutate(fabricated);
+    assert.throws(() => validateAdapterSmokeReport(fabricated), /adapter smoke report is invalid/);
+  }
+  const wrongVersion = structuredClone(valid);
+  wrongVersion.engineVersion.hash = 'wrong';
+  assert.throws(() => validateAdapterSmokeReport(wrongVersion), /runtime version/);
+});
+
+test('adapter smoke source explicitly loads the exact frozen extension before class checks', () => {
+  const source = readFileSync(resolve(project,
+    'scripts/testing/native_world/NativeWorldBackendAdapterSmoke.gd'), 'utf8');
+  assert.match(source,
+    /const EXTENSION_PATH := "res:\/\/addons\/terrain_meshing_backend\/terrain_meshing_backend\.gdextension"/);
+  const load = source.indexOf('manager.call("load_extension", EXTENSION_PATH)');
+  const classQuery = source.indexOf('ClassDB.class_exists("TerrainMeshingBackend")');
+  assert(load >= 0 && classQuery > load);
+  assert.match(source, /explicit_load_status in \[EXTENSION_LOAD_STATUS_OK, EXTENSION_LOAD_STATUS_ALREADY_LOADED\]/);
+  assert.match(source, /EXTENSION_PATH in loaded_extensions/);
 });
 
 test('pinned upstream text identity normalizes CRLF only and rejects changed content', () => {
