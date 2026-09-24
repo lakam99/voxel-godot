@@ -69,9 +69,10 @@ These reports prove only the private Main loading candidate and the existing
 script-backed gameplay readiness. They do not prove a native gameplay query or
 physical publication, actor admission on native collision, save export from
 native deltas, frame cadence across the whole load, or final Gate 5. The
-private backend's committed release is synchronous; its observed release time
-is recorded in service receipts but no bounded retirement contract for a
-maximum-sized save has been established. The snapshot lease is cooperative:
+private backend now uses acknowledged worker retirement after a maximum-size
+release diagnostic found an 8–11 ms Main-thread destructor. The focused fix
+and its limits are in `N3_PRIVATE_MAX_SAVE_RETIREMENT_2026-09-24.md`.
+The snapshot lease is cooperative:
 `snapshot_override` callers can still hold writable nested aliases and must
 not mutate them during import. The private stage therefore cannot be promoted
 to save or gameplay authority without a stronger owner boundary. N3 Stages

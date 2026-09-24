@@ -101,6 +101,8 @@ protected:
 
 public:
 	~NativeWorldBackend() override;
+	godot::Dictionary start_private_staged_save_retirement(std::int64_t p_generation);
+	godot::Dictionary poll_private_staged_save_retirement();
 	godot::Dictionary initialize(const godot::Dictionary &p_request);
 	godot::Dictionary initialize_from_save_v2(const godot::Dictionary &p_request);
 	godot::Dictionary export_terrain_volume_v2() const;
@@ -178,6 +180,7 @@ public:
 	 godot::Dictionary voxel_block_shadow_mesh_exited(const godot::Dictionary &p_key);
 
 private:
+	struct PrivateStagedSaveRetirementJob;
 	std::vector<voxel::world_backend::NativeTownRegionOverride> town_overrides_for_page(
 		voxel::world_backend::NativeTerrainPageKey p_page) const;
 	std::string canonical_worker_source_key(
@@ -194,6 +197,9 @@ private:
 	bool initialization_attempted_ = false;
 	std::string initialization_failure_;
 	std::unique_ptr<voxel::world_backend::NativeWorldBackendState> state_;
+	std::int64_t private_staged_save_generation_ = 0;
+	std::shared_ptr<PrivateStagedSaveRetirementJob> private_retirement_job_;
+	std::thread private_retirement_worker_;
 	std::optional<voxel::world_backend::NativeWorldBackendTransaction> staged_durable_cells_;
 	std::unique_ptr<voxel::world_backend::NativeTerrainVolumeV2ImportBuilder> terrain_volume_import_;
 	std::string terrain_volume_import_failure_;

@@ -1791,6 +1791,10 @@ void NativeWorldBackend::_bind_methods() {
 		&NativeWorldBackend::drain_staged_save_v2_initialization);
 	ClassDB::bind_method(D_METHOD("commit_staged_save_v2_initialization", "generation", "expected_source_identity"),
 		&NativeWorldBackend::commit_staged_save_v2_initialization);
+	ClassDB::bind_method(D_METHOD("start_private_staged_save_retirement", "generation"),
+		&NativeWorldBackend::start_private_staged_save_retirement);
+	ClassDB::bind_method(D_METHOD("poll_private_staged_save_retirement"),
+		&NativeWorldBackend::poll_private_staged_save_retirement);
 	ClassDB::bind_method(D_METHOD("request_voxel_block_shadow", "request", "consumer_id", "priority"), &NativeWorldBackend::request_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("configure_voxel_block_shadow_capacity", "max_entries"), &NativeWorldBackend::configure_voxel_block_shadow_capacity);
 	ClassDB::bind_method(D_METHOD("release_voxel_block_shadow", "request", "consumer_id"), &NativeWorldBackend::release_voxel_block_shadow);
@@ -1812,6 +1816,59 @@ NativeWorldBackend::~NativeWorldBackend() {
 	if (terrain_volume_finalize_job_)
 		terrain_volume_finalize_job_->cancel_requested.store(true, std::memory_order_relaxed);
 	if (terrain_volume_finalize_worker_.joinable()) terrain_volume_finalize_worker_.join();
+	if (private_retirement_worker_.joinable()) private_retirement_worker_.join();
+}
+
+struct NativeWorldBackend::PrivateStagedSaveRetirementJob {
+	std::unique_ptr<NativeWorldBackendState> state;
+	std::unique_ptr<NativeTerrainShapingRegistry> registry;
+	std::atomic<bool> finished{false};
+};
+
+Dictionary NativeWorldBackend::start_private_staged_save_retirement(const std::int64_t p_generation) {
+	constexpr const char *operation = "start_private_staged_save_retirement";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (private_retirement_job_) return envelope(operation, "failed", "retirement_already_started");
+	if (p_generation <= 0 || p_generation != private_staged_save_generation_
+			|| !initialization_attempted_ || !state_ || !shaping_registry_
+			|| terrain_volume_import_ || terrain_volume_finalize_job_
+			|| terrain_volume_finalize_worker_.joinable()
+			|| voxel_worker_.joinable() || rock_source_worker_.joinable()
+			|| staged_durable_cells_.has_value() || voxel_demand_.size() != 0
+			|| !voxel_demand_requests_.empty() || !voxel_demand_results_.empty()
+			|| !voxel_demand_tickets_.empty() || !voxel_demand_dependencies_.empty()
+			|| voxel_demand_worker_.has_value() || voxel_demand_capture_.has_value()
+			|| voxel_worker_result_.has_value() || rock_source_worker_result_
+			|| rock_source_worker_page_.is_valid() || rock_source_worker_exclusions_.is_valid())
+		return envelope(operation, "failed", "private_committed_owner_not_idle");
+	auto job = std::make_shared<PrivateStagedSaveRetirementJob>();
+	job->state = std::move(state_);
+	job->registry = std::move(shaping_registry_);
+	try {
+		private_retirement_worker_ = std::thread([job]() {
+			job->state.reset();
+			job->registry.reset();
+			job->finished.store(true, std::memory_order_release);
+		});
+	} catch (const std::exception &error) {
+		state_ = std::move(job->state);
+		shaping_registry_ = std::move(job->registry);
+		return failure(operation, error);
+	}
+	private_retirement_job_ = std::move(job);
+	private_staged_save_generation_ = 0;
+	return envelope(operation, "pending", "private_retirement_worker_in_flight");
+}
+
+Dictionary NativeWorldBackend::poll_private_staged_save_retirement() {
+	constexpr const char *operation = "poll_private_staged_save_retirement";
+	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (!private_retirement_job_) return envelope(operation, "failed", "private_retirement_not_started");
+	if (!private_retirement_job_->finished.load(std::memory_order_acquire))
+		return envelope(operation, "pending", "private_retirement_worker_in_flight");
+	if (private_retirement_worker_.joinable()) private_retirement_worker_.join();
+	private_retirement_job_.reset();
+	return envelope(operation, "ready", "private_retirement_drained");
 }
 
 Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
@@ -2490,6 +2547,7 @@ Dictionary NativeWorldBackend::commit_staged_save_v2_initialization(
 		}
 		state_ = std::move(job->candidate_state);
 		shaping_registry_ = std::move(job->candidate_registry);
+		private_staged_save_generation_ = p_generation;
 		town_overrides_ = std::move(job->town_overrides);
 		initialization_attempted_ = true;
 		terrain_volume_import_.reset();

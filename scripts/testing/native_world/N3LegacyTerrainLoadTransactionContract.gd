@@ -71,6 +71,14 @@ func _drive_private_stage(stage, max_frames := 1200) -> Dictionary:
 		await process_frame
 	return {"status":"timeout", "reason":"private_stage_contract_timeout"}
 
+func _stop_private_stage(stage, max_frames := 300) -> Dictionary:
+	var result: Dictionary = stage.stop()
+	for _frame in range(max_frames):
+		if result.get("drained", false) or result.get("status") == "failed": return result
+		await process_frame
+		result = stage.advance_stop()
+	return {"status":"timeout", "reason":"private_stage_stop_timeout"}
+
 func run() -> void:
 	var started_usec := Time.get_ticks_usec()
 	var main = MAIN.new()
@@ -156,7 +164,7 @@ func run() -> void:
 	var private_new_start: Dictionary = private_new.start(main)
 	var private_new_ready: Dictionary = await _drive_private_stage(private_new)
 	var private_new_retained: bool = private_new.snapshot().get("backendRetained") == true
-	var private_new_stopped: Dictionary = private_new.stop()
+	var private_new_stopped: Dictionary = await _stop_private_stage(private_new)
 	check(private_new_start.get("status") == "pending"
 		and private_new_ready.get("status") == "ready"
 		and private_new_retained
@@ -181,7 +189,7 @@ func run() -> void:
 	var private_continue = PRIVATE_STAGE.new()
 	var private_continue_start: Dictionary = private_continue.start(main, canonical_save)
 	var private_continue_ready: Dictionary = await _drive_private_stage(private_continue)
-	var private_continue_stopped: Dictionary = private_continue.stop()
+	var private_continue_stopped: Dictionary = await _stop_private_stage(private_continue)
 	check(private_continue_start.get("status") == "pending"
 		and private_continue_ready.get("status") == "ready"
 		and private_continue_stopped.get("drained") == true,
@@ -191,7 +199,7 @@ func run() -> void:
 	var private_historical_start: Dictionary = private_historical.start(main, decoded_historical)
 	var private_historical_ready: Dictionary = await _drive_private_stage(private_historical)
 	var historical_admitted := int(private_historical.snapshot().get("transaction", {}).get("recordsAdmitted", 0))
-	var private_historical_stopped: Dictionary = private_historical.stop()
+	var private_historical_stopped: Dictionary = await _stop_private_stage(private_historical)
 	check(private_historical_start.get("reason") == "legacy_v2_conversion_pending"
 		and private_historical_ready.get("status") == "ready"
 		and historical_admitted > 0

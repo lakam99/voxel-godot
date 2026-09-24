@@ -18,6 +18,11 @@ var _source_seed := ""
 var _state := "new"
 var _failure := ""
 var _last_release_usec := 0
+var _last_backend_release_usec := 0
+var _last_transaction_release_usec := 0
+var _last_retirement_request_usec := 0
+var _max_retirement_poll_usec := 0
+var _retirement_polls := 0
 
 func start(main, save_snapshot: Dictionary = {}) -> Dictionary:
 	if _state != "new": return _failed("private_stage_already_started")
@@ -69,15 +74,17 @@ func advance() -> Dictionary:
 
 func stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
+	if _state == "stopping_retirement": return advance_stop()
 	if _state == "ready":
-		var release_started := Time.get_ticks_usec()
-		_backend = null
-		_transaction = null
-		_last_release_usec = Time.get_ticks_usec() - release_started
-		_receipt = {}
-		_main = null
-		_state = "drained"
-		return {"status":"ready", "drained":true, "releaseUsec":_last_release_usec}
+		var request_started := Time.get_ticks_usec()
+		var started: Dictionary = _backend.start_private_staged_save_retirement(
+			int(_receipt.get("generation", -1)))
+		_last_retirement_request_usec = Time.get_ticks_usec() - request_started
+		if started.get("status") != "pending":
+			return {"status":"failed", "reason":String(started.get("reason", "private_retirement_start_failed")),
+				"ownerMustBeRetained":true}
+		_state = "stopping_retirement"
+		return started
 	if _converter != null:
 		var requested: Dictionary = _converter.cancel()
 		_state = "stopping_converter"
@@ -94,6 +101,32 @@ func stop() -> Dictionary:
 	return _finish_drain()
 
 func advance_stop() -> Dictionary:
+	if _state == "stopping_retirement" and _backend != null:
+		var poll_started := Time.get_ticks_usec()
+		var retired: Dictionary = _backend.poll_private_staged_save_retirement()
+		_max_retirement_poll_usec = maxi(_max_retirement_poll_usec,
+			Time.get_ticks_usec() - poll_started)
+		_retirement_polls += 1
+		if retired.get("status") == "pending": return retired
+		if retired.get("status") != "ready":
+			return {"status":"failed", "reason":String(retired.get("reason", "private_retirement_poll_failed")),
+				"ownerMustBeRetained":true}
+		var release_started := Time.get_ticks_usec()
+		_backend = null
+		_last_backend_release_usec = Time.get_ticks_usec() - release_started
+		var transaction_release_started := Time.get_ticks_usec()
+		_transaction = null
+		_last_transaction_release_usec = Time.get_ticks_usec() - transaction_release_started
+		_last_release_usec = Time.get_ticks_usec() - release_started
+		_receipt = {}
+		_main = null
+		_state = "drained"
+		return {"status":"ready", "drained":true, "releaseUsec":_last_release_usec,
+			"backendReleaseUsec":_last_backend_release_usec,
+			"transactionReleaseUsec":_last_transaction_release_usec,
+			"retirementRequestUsec":_last_retirement_request_usec,
+			"maxRetirementPollUsec":_max_retirement_poll_usec,
+			"retirementPolls":_retirement_polls}
 	if _state == "stopping_converter" and _converter != null:
 		var result: Dictionary = _converter.advance()
 		if result.get("cancelled", false): return _finish_drain()
@@ -108,7 +141,12 @@ func snapshot() -> Dictionary:
 	return {"state":_state, "failure":_failure,
 		"transaction":_transaction.snapshot() if _transaction != null else {},
 		"backendRetained":_backend != null, "saveRetained":not _save.is_empty(),
-		"lastReleaseUsec":_last_release_usec}
+		"lastReleaseUsec":_last_release_usec,
+		"lastBackendReleaseUsec":_last_backend_release_usec,
+		"lastTransactionReleaseUsec":_last_transaction_release_usec,
+		"lastRetirementRequestUsec":_last_retirement_request_usec,
+		"maxRetirementPollUsec":_max_retirement_poll_usec,
+		"retirementPolls":_retirement_polls}
 
 func current_source_valid() -> bool:
 	if _main == null or not is_instance_valid(_main): return false
