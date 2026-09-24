@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <string>
@@ -52,7 +53,7 @@ public:
     }
 
     Sha256Digest snapshot_digest() const noexcept override { return digest_; }
-    std::uint64_t source_revision() const noexcept override { return 73U; }
+    std::uint64_t source_revision() const noexcept override { return revision_; }
 
     std::optional<NativeCellState> cell_at(const CellCoord &cell) const override {
         ++reads_;
@@ -85,6 +86,7 @@ public:
 
     void add(NativeCellState state) { overrides_.push_back(std::move(state)); }
     void mismatch(const bool value) { mismatch_ = value; }
+    void revision(const std::uint64_t value) { revision_ = value; }
     std::size_t read_count() const noexcept { return reads_; }
 
 private:
@@ -93,6 +95,7 @@ private:
     std::vector<NativeCellState> overrides_;
     bool mismatch_ = false;
     mutable std::size_t reads_ = 0;
+    std::uint64_t revision_ = 73U;
 };
 
 class DriftingPinnedSource final : public NativeTerrainEditPinnedSource {
@@ -125,7 +128,7 @@ NativeTerrainEditStateTemplate stone_template(const double density = 1.0) {
     target.biome = TerrainBiomeId::forest;
     target.solid = true;
     target.density = density;
-    target.light = {0, 0};
+    target.light = NativeCellLight{0, 0};
     target.metadata = NativeValue::object({{"saveDelta", NativeValue::boolean(false)}});
     return target;
 }
@@ -136,7 +139,7 @@ NativeTerrainEditStateTemplate air_template() {
     target.biome = TerrainBiomeId::forest;
     target.solid = false;
     target.density = -1.0;
-    target.light = {15, 0};
+    target.light = NativeCellLight{15, 0};
     target.metadata = NativeValue::object({{"source", NativeValue::string("player_dig")}});
     return target;
 }
@@ -167,6 +170,13 @@ const NativeValue *metadata_value(const NativeValue &metadata, const std::string
         return entry.first == key;
     });
     return found == object.end() ? nullptr : &found->second;
+}
+
+std::uint64_t double_bits(const double value) {
+    std::uint64_t result = 0;
+    static_assert(sizeof(result) == sizeof(value));
+    std::memcpy(&result, &value, sizeof(result));
+    return result;
 }
 
 } // namespace
@@ -215,6 +225,47 @@ VWB_TEST(native_terrain_edit_box_is_inclusive_reorders_negative_endpoints_and_em
     VWB_EXPECT_EQ(operations.size(), transaction.operations.size());
 }
 
+VWB_TEST(native_terrain_edit_template_defaults_derive_solidity_density_and_light_after_material) {
+    NativeTerrainEditStateTemplate stone;
+    stone.material = TerrainMaterialId::stone;
+    NativeTerrainEditStateTemplate air;
+    air.material = TerrainMaterialId::air;
+    const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request_without_filter({
+        NativeTerrainEditShape::inclusive_box({0, 0, 0}, {0, 0, 0}, stone, ""),
+        NativeTerrainEditShape::inclusive_box({1, 0, 0}, {1, 0, 0}, air, ""),
+    }));
+    const NativeCellState &solid = *batch.compiled_operations()[0].operation.state;
+    VWB_EXPECT(solid.solid);
+    VWB_EXPECT_EQ(1.0, solid.density);
+    VWB_EXPECT_EQ(0U, solid.light.sky);
+    VWB_EXPECT_EQ(0U, solid.light.block);
+    VWB_EXPECT(solid.edit_reason.has_value());
+    VWB_EXPECT_EQ(std::string(""), *solid.edit_reason);
+    const NativeCellState &empty = *batch.compiled_operations()[1].operation.state;
+    VWB_EXPECT(!empty.solid);
+    VWB_EXPECT_EQ(-1.0, empty.density);
+    VWB_EXPECT_EQ(15U, empty.light.sky);
+    VWB_EXPECT_EQ(0U, empty.light.block);
+}
+
+VWB_TEST(native_terrain_edit_nonpositive_sphere_is_empty_before_state_or_source_validation) {
+    NativeTerrainEditStateTemplate invalid;
+    invalid.material = static_cast<TerrainMaterialId>(255U);
+    NativeTerrainEditCompileRequest request = request_without_filter({
+        NativeTerrainEditShape::sphere(
+            {std::numeric_limits<double>::infinity(), 0.0, 0.0}, 0.0, invalid, std::string("bad\0id", 6)),
+        NativeTerrainEditShape::sphere(
+            {0.0, std::numeric_limits<double>::quiet_NaN(), 0.0}, -1.0, invalid, ""),
+        NativeTerrainEditShape::sphere(
+            {0.0, 0.0, 0.0}, -std::numeric_limits<double>::infinity(), invalid, ""),
+    });
+    const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
+    VWB_EXPECT(batch.compiled_operations().empty());
+    VWB_EXPECT_EQ(3U, batch.summary().shape_count);
+    VWB_EXPECT_EQ(0U, batch.summary().candidate_visits);
+    VWB_EXPECT_EQ(0U, batch.summary().emitted_operations);
+}
+
 VWB_TEST(native_terrain_edit_shapes_are_later_wins_unique_and_changed_only_against_exact_pin) {
     FakePinnedSource source(FakePinnedSource::Fallback::air);
     source.add(cell_state({0, 0, 0}, TerrainMaterialId::air, false, -1.0, "second",
@@ -241,6 +292,42 @@ VWB_TEST(native_terrain_edit_shapes_are_later_wins_unique_and_changed_only_again
     VWB_EXPECT_EQ(73U, batch.summary().source_revision);
     VWB_EXPECT_EQ(0xa5U, batch.summary().source_snapshot_digest[0]);
     VWB_EXPECT_EQ(0x5aU, batch.summary().source_snapshot_digest[31]);
+}
+
+VWB_TEST(native_terrain_edit_pinned_transaction_binds_revision_and_real_store_rejects_post_compile_drift) {
+    FakePinnedSource source(FakePinnedSource::Fallback::air);
+    source.revision(0U);
+    NativeTerrainEditCompileRequest request;
+    request.cell_size = 1.0;
+    request.source = &source;
+    request.shapes = {NativeTerrainEditShape::inclusive_box(
+        {0, 0, 0}, {0, 0, 0}, stone_template(), "pinned-store")};
+    const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
+
+    WorldDeltaStore store;
+    const WorldDeltaCommitReceipt exact = store.commit_typed_cells(
+        batch.make_transaction("pinned:exact", 0U));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, exact.status);
+    VWB_EXPECT_EQ(1U, exact.revision);
+    VWB_EXPECT_EQ(1U, store.revision());
+    VWB_EXPECT(store.pin().durable_terrain_at({0, 0, 0}).has_value());
+
+    try {
+        static_cast<void>(batch.make_transaction("pinned:relabeled", 1U));
+        VWB_EXPECT(false);
+    } catch (const NativeTerrainEditCompileRejected &error) {
+        VWB_EXPECT_EQ(NativeTerrainEditCompileRejectReason::source_revision_mismatch, error.reason());
+    }
+    VWB_EXPECT_EQ(1U, store.revision());
+
+    const WorldTypedCellTransaction stale = batch.make_transaction("pinned:after-store-drift", 0U);
+    try {
+        static_cast<void>(store.commit_typed_cells(stale));
+        VWB_EXPECT(false);
+    } catch (const WorldDeltaRejected &error) {
+        VWB_EXPECT_EQ(WorldDeltaRejectReason::revision_conflict, error.reason());
+    }
+    VWB_EXPECT_EQ(1U, store.revision());
 }
 
 VWB_TEST(native_terrain_edit_transition_summary_counts_final_removals_once_and_reuses_source_reads) {
@@ -282,13 +369,17 @@ VWB_TEST(native_terrain_edit_air_sphere_matches_inclusive_boundary_negative_boun
     request.cell_size = 1.0;
     request.source = &source;
     request.omit_unchanged = false;
+    NativeTerrainEditStateTemplate deferred_air = air_template();
+    deferred_air.metadata = NativeValue::object({
+        {"deferSkyLight", NativeValue::boolean(true)},
+        {"source", NativeValue::string("player_dig")},
+    });
     request.shapes = {NativeTerrainEditShape::sphere(
-        {-0.5, -0.5, -0.5}, 1.0, air_template(), "dig:negative-boundary", true)};
+        {-0.5, -0.5, -0.5}, 1.0, deferred_air, "dig:negative-boundary")};
     const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
     const auto &summary = batch.summary();
     VWB_EXPECT_EQ(216U, summary.candidate_visits);
     VWB_EXPECT_EQ(7U, summary.direct_target_operations);
-    VWB_EXPECT_EQ(6U, summary.normalized_air_boundary_densities);
     VWB_EXPECT(summary.excavation_boundary_operations > 0U);
     VWB_EXPECT_EQ(summary.emitted_operations,
         summary.direct_target_operations + summary.excavation_boundary_operations);
@@ -303,9 +394,11 @@ VWB_TEST(native_terrain_edit_air_sphere_matches_inclusive_boundary_negative_boun
     for (const auto &compiled : batch.compiled_operations()) {
         const NativeCellState &state = *compiled.operation.state;
         if (compiled.classification == NativeTerrainEditCellClassification::direct_target
-            && state.density < 0.0 && std::abs(state.density) < std::numeric_limits<double>::min()) {
+            && state.density == 0.0) {
             ++exact_boundary;
         }
+        const NativeValue *direct_defer = metadata_value(state.metadata, "deferSkyLight");
+        VWB_EXPECT(direct_defer != nullptr && direct_defer->as_boolean());
         if (compiled.classification == NativeTerrainEditCellClassification::excavation_boundary) {
             const NativeValue *source_value = metadata_value(state.metadata, "source");
             const NativeValue *defer_value = metadata_value(state.metadata, "deferSkyLight");
@@ -320,6 +413,44 @@ VWB_TEST(native_terrain_edit_air_sphere_matches_inclusive_boundary_negative_boun
     VWB_EXPECT_EQ(summary.excavation_boundary_operations, shell_with_defer);
 }
 
+VWB_TEST(native_terrain_edit_sphere_matches_godot_4_6_1_float32_vector_bit_oracle) {
+    // Fixed independently by Godot 4.6.1 stable (14d19694e) using the exact
+    // production expressions: Vector3 cell-center construction,
+    // distance_squared_to(), sqrt(), and sphere_edit_density(). This case is
+    // intentionally far from the origin so binary64 geometry would disagree.
+    FakePinnedSource source;
+    NativeTerrainEditCompileRequest request;
+    request.cell_size = 1.35;
+    request.source = &source;
+    request.omit_unchanged = false;
+    request.shapes = {NativeTerrainEditShape::sphere(
+        {1'350'000.625, -1'350'000.375, 675'000.3125}, 1.35,
+        air_template(), "godot-float32-oracle")};
+    const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
+    struct Expected {
+        CellCoord cell;
+        NativeTerrainEditCellClassification classification;
+        std::uint64_t density_bits;
+    };
+    const std::vector<Expected> expected = {
+        {{1'000'000, -1'000'001, 500'000}, NativeTerrainEditCellClassification::direct_target,
+            UINT64_C(0xbfecc71d9102863a)},
+        {{1'000'001, -1'000'001, 500'000}, NativeTerrainEditCellClassification::excavation_boundary,
+            UINT64_C(0x3fb8d3a7e9907240)},
+        {{999'999, -1'000'001, 500'000}, NativeTerrainEditCellClassification::direct_target,
+            UINT64_C(0xbf95bdc831b25900)},
+        {{1'000'000, -1'000'002, 500'000}, NativeTerrainEditCellClassification::excavation_boundary,
+            UINT64_C(0x3fd45553f806ba78)},
+    };
+    for (const Expected &oracle : expected) {
+        const auto found = std::find_if(batch.compiled_operations().begin(), batch.compiled_operations().end(),
+            [&oracle](const auto &compiled) { return compiled.operation.cell == oracle.cell; });
+        VWB_EXPECT(found != batch.compiled_operations().end());
+        VWB_EXPECT_EQ(oracle.classification, found->classification);
+        VWB_EXPECT_EQ(oracle.density_bits, double_bits(found->operation.state->density));
+    }
+}
+
 VWB_TEST(native_terrain_edit_sphere_reads_prior_coincident_state_and_skips_air_shell) {
     FakePinnedSource source(FakePinnedSource::Fallback::air);
     NativeTerrainEditCompileRequest request;
@@ -328,7 +459,7 @@ VWB_TEST(native_terrain_edit_sphere_reads_prior_coincident_state_and_skips_air_s
     request.omit_unchanged = false;
     request.shapes = {
         NativeTerrainEditShape::inclusive_box({1, 0, 0}, {1, 0, 0}, stone_template(), "prior-solid"),
-        NativeTerrainEditShape::sphere({0.5, 0.5, 0.5}, 0.4, air_template(), "dig:small", false),
+        NativeTerrainEditShape::sphere({0.5, 0.5, 0.5}, 0.4, air_template(), "dig:small"),
     };
     const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
     VWB_EXPECT_EQ(2U, batch.compiled_operations().size());
@@ -338,6 +469,75 @@ VWB_TEST(native_terrain_edit_sphere_reads_prior_coincident_state_and_skips_air_s
     VWB_EXPECT(found != batch.compiled_operations().end());
     VWB_EXPECT_EQ(NativeTerrainEditCellClassification::excavation_boundary, found->classification);
     VWB_EXPECT_EQ(std::string("dig:small"), found->provenance_id);
+}
+
+VWB_TEST(native_terrain_edit_sphere_uses_godot_truthiness_for_deferred_skylight) {
+    FakePinnedSource source;
+    const std::vector<std::pair<NativeValue, bool>> cases = {
+        {NativeValue::null(), false},
+        {NativeValue::boolean(false), false},
+        {NativeValue::boolean(true), true},
+        {NativeValue::number(0.0), false},
+        {NativeValue::number(-1.0), true},
+        {NativeValue::string(""), false},
+        {NativeValue::string("true"), true},
+        {NativeValue::array({}), false},
+        {NativeValue::array({NativeValue::null()}), true},
+        {NativeValue::object({}), false},
+        {NativeValue::object({{"value", NativeValue::null()}}), true},
+    };
+    for (const auto &entry : cases) {
+        NativeTerrainEditStateTemplate target = air_template();
+        target.metadata = NativeValue::object({
+            {"deferSkyLight", entry.first},
+            {"source", NativeValue::string("player_dig")},
+        });
+        NativeTerrainEditCompileRequest request;
+        request.cell_size = 1.0;
+        request.source = &source;
+        request.omit_unchanged = false;
+        request.shapes = {NativeTerrainEditShape::sphere(
+            {0.5, 0.5, 0.5}, 0.2, target, "truthy-defer")};
+        const NativeTerrainEditCompiledBatch batch = NativeTerrainEditShapeCompiler::compile(request);
+        const auto shell = std::find_if(batch.compiled_operations().begin(), batch.compiled_operations().end(),
+            [](const auto &compiled) {
+                return compiled.classification == NativeTerrainEditCellClassification::excavation_boundary;
+            });
+        VWB_EXPECT(shell != batch.compiled_operations().end());
+        const NativeValue *defer = metadata_value(shell->operation.state->metadata, "deferSkyLight");
+        VWB_EXPECT_EQ(entry.second, defer != nullptr && defer->as_boolean());
+    }
+}
+
+VWB_TEST(native_terrain_edit_box_preserves_explicit_air_fluid_metadata_without_sphere_classification) {
+    FakePinnedSource air_source(FakePinnedSource::Fallback::air);
+    NativeTerrainEditStateTemplate water;
+    water.material = TerrainMaterialId::water;
+    water.biome = TerrainBiomeId::forest;
+    water.solid = false;
+    water.density = -1.0;
+    water.fluid = TerrainFluidId::water;
+    water.light = NativeCellLight{15, 0};
+    water.metadata = NativeValue::object({});
+    NativeTerrainEditCompileRequest request;
+    request.cell_size = 1.0;
+    request.source = &air_source;
+    request.omit_unchanged = false;
+    request.shapes = {NativeTerrainEditShape::inclusive_box(
+        {0, 0, 0}, {0, 0, 0}, water, "box:water")};
+    const NativeTerrainEditCompiledBatch water_box = NativeTerrainEditShapeCompiler::compile(request);
+    VWB_EXPECT(metadata_value(
+        water_box.compiled_operations()[0].operation.state->metadata, "terrainMeshAffects") == nullptr);
+
+    FakePinnedSource water_source(FakePinnedSource::Fallback::air);
+    water_source.add(cell_state({0, 0, 0}, TerrainMaterialId::water, false, -1.0,
+        {}, NativeValue::object({}), true, std::nullopt, TerrainFluidId::water));
+    request.source = &water_source;
+    request.shapes = {NativeTerrainEditShape::inclusive_box(
+        {0, 0, 0}, {0, 0, 0}, air_template(), "box:air")};
+    const NativeTerrainEditCompiledBatch air_box = NativeTerrainEditShapeCompiler::compile(request);
+    VWB_EXPECT(metadata_value(
+        air_box.compiled_operations()[0].operation.state->metadata, "terrainMeshAffects") == nullptr);
 }
 
 VWB_TEST(native_terrain_edit_solid_sphere_and_fluid_only_normalization_are_typed) {
@@ -358,7 +558,7 @@ VWB_TEST(native_terrain_edit_solid_sphere_and_fluid_only_normalization_are_typed
     water.biome = TerrainBiomeId::forest;
     water.solid = false;
     water.fluid = TerrainFluidId::water;
-    water.light = {15, 0};
+    water.light = NativeCellLight{15, 0};
     water.metadata = NativeValue::object({});
     NativeTerrainEditCompileRequest fluid_request;
     fluid_request.cell_size = 1.0;
@@ -416,10 +616,11 @@ VWB_TEST(native_terrain_edit_material_normalization_covers_every_persisted_mater
         target.material = materials[index];
         target.biome = TerrainBiomeId::plains;
         target.solid = index > 0U && materials[index] != TerrainMaterialId::water && materials[index] != TerrainMaterialId::lava;
-        target.density = target.solid ? 1.0 : -1.0;
+        target.density = target.solid.value() ? 1.0 : -1.0;
         target.fluid = materials[index] == TerrainMaterialId::water ? TerrainFluidId::water
             : materials[index] == TerrainMaterialId::lava ? TerrainFluidId::lava : TerrainFluidId::none;
-        target.light = {target.solid ? std::uint8_t{0} : std::uint8_t{15}, 0};
+        target.light = NativeCellLight{
+            target.solid.value() ? std::uint8_t{0} : std::uint8_t{15}, 0};
         shapes.push_back(NativeTerrainEditShape::inclusive_box(
             {static_cast<std::int32_t>(index), 0, 0}, {static_cast<std::int32_t>(index), 0, 0},
             target, "materials"));
@@ -469,7 +670,8 @@ VWB_TEST(native_terrain_edit_rejects_invalid_requests_sources_shapes_and_limits_
     request = request_without_filter({
         NativeTerrainEditShape::inclusive_box({0, 0, 0}, {0, 0, 0}, stone_template(), ""),
     });
-    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    const NativeTerrainEditCompiledBatch empty_reason = NativeTerrainEditShapeCompiler::compile(request);
+    VWB_EXPECT_EQ(std::string(""), *empty_reason.compiled_operations()[0].operation.state->edit_reason);
     request.shapes[0].provenance_id = std::string("bad\0id", 6);
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
     request.shapes[0].provenance_id = std::string("bad\xc0\x80", 5);
@@ -510,11 +712,24 @@ VWB_TEST(native_terrain_edit_rejects_invalid_requests_sources_shapes_and_limits_
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
     request.shapes[0].center = {0.0, 0.0, 0.0};
     request.shapes[0].radius = 0.0;
-    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    VWB_EXPECT(NativeTerrainEditShapeCompiler::compile(request).compiled_operations().empty());
     request.shapes[0].radius = std::numeric_limits<double>::quiet_NaN();
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].radius = 0.2;
+    request.shapes[0].target = air_template();
+    request.shapes[0].target.metadata = NativeValue::object({
+        {"deferSkyLight", NativeValue::string("true")},
+    });
+    VWB_EXPECT(!NativeTerrainEditShapeCompiler::compile(request).compiled_operations().empty());
+    request.shapes[0].target = air_template();
     request.shapes[0].radius = std::numeric_limits<double>::max();
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].radius = 1.0;
+    request.cell_size = std::numeric_limits<double>::max();
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.cell_size = std::numeric_limits<double>::denorm_min();
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.cell_size = 1.0;
     request.shapes[0].radius = 1.0;
     request.shapes[0].center = {-std::numeric_limits<double>::max(), 0.0, 0.0};
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);

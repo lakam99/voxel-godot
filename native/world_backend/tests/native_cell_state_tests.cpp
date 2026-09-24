@@ -131,7 +131,7 @@ VWB_TEST(native_cell_state_accepts_lava_as_non_solid_typed_fluid) {
     VWB_EXPECT(!state.solid);
 }
 
-VWB_TEST(native_cell_state_accepts_only_fluid_zero_density_as_a_non_solid_v2_exception) {
+VWB_TEST(native_cell_state_accepts_fluid_and_narrow_edited_air_zero_density) {
     NativeCellStateInput water = air({2, -55, 3});
     water.material = TerrainMaterialId::water;
     water.fluid = TerrainFluidId::water;
@@ -144,6 +144,15 @@ VWB_TEST(native_cell_state_accepts_only_fluid_zero_density_as_a_non_solid_v2_exc
     NativeCellStateInput air_zero = air();
     air_zero.density = 0.0;
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(air_zero));
+    air_zero.generated = false;
+    air_zero.edited = true;
+    air_zero.edit_reason = "sphere_boundary";
+    VWB_EXPECT_EQ(0.0, make_native_cell_state(
+        air_zero, NativeCellStateNamespace::durable_terrain).density);
+    VWB_EXPECT_EQ(0.0, make_native_cell_state(
+        air_zero, NativeCellStateNamespace::scene_overlay).density);
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(
+        air_zero, static_cast<NativeCellStateNamespace>(255U)));
     NativeCellStateInput stone_zero = stone({1, 2, 3});
     stone_zero.density = 0.0;
     // The pre-existing solid rule deliberately permits a zero-density solid;

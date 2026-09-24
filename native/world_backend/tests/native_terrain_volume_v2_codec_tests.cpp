@@ -381,6 +381,36 @@ VWB_TEST(native_terrain_volume_v2_codec_round_trips_exact_current_v2_structure) 
     VWB_EXPECT_EQ(encoded.canonical_binary(), reencoded.canonical_binary());
 }
 
+VWB_TEST(native_terrain_volume_v2_codec_round_trips_exact_edited_air_zero_density) {
+    NativeCellStateInput input;
+    input.cell = {-1, 2, 3};
+    input.material = TerrainMaterialId::air;
+    input.biome = TerrainBiomeId::underground_air;
+    input.solid = false;
+    input.density = 0.0;
+    input.fluid = TerrainFluidId::none;
+    input.light = {0, 0};
+    input.metadata = NativeValue::object({{"saveDelta", NativeValue::boolean(true)}});
+    input.block_id = NativeBlockIdentity::create("air");
+    input.edit_reason = "";
+    input.generated = false;
+    input.edited = true;
+    NativeTerrainVolumeV2 volume;
+    volume.revision = 1U;
+    volume.durable_snapshot = NativeTypedWorldStateSnapshot::create({{
+        NativeCellStateNamespace::durable_terrain,
+        NativeTypedWorldStatePersistence::durable,
+        make_native_cell_state(input),
+    }});
+    volume.section_revisions = {{{-1, 0, 0}, 1U}};
+    const NativeValue encoded = encode_native_terrain_volume_v2(volume);
+    const NativeTerrainVolumeV2 decoded = decode_native_terrain_volume_v2(encoded);
+    VWB_EXPECT(decoded == volume);
+    VWB_EXPECT_EQ(0.0, decoded.durable_snapshot.records()[0].state.density);
+    VWB_EXPECT(decoded.durable_snapshot.records()[0].state.edit_reason.has_value());
+    VWB_EXPECT_EQ(std::string(""), *decoded.durable_snapshot.records()[0].state.edit_reason);
+}
+
 VWB_TEST(native_terrain_volume_v2_codec_value_equality_covers_each_structural_field) {
     const NativeTerrainVolumeV2 original = sample_volume();
     VWB_EXPECT(original.section_revisions[0] == original.section_revisions[0]);

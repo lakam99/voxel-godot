@@ -80,12 +80,18 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
         || !valid_biome(input.biome) || !valid_fluid(input.fluid) || input.light.sky > 15 || input.light.block > 15) {
         throw NativeCellStateRejected();
     }
-    // v2 terrain edits preserve zero as the fluid surface density while water
-    // and lava remain non-solid. Zero may not become a general non-solid
-    // terrain exception: it is valid only for an actual non-solid fluid.
+    // v2 terrain edits preserve exact zero at fluid and edited-air surfaces.
+    // Air zero is deliberately narrower than the fluid exception: it must be
+    // an actual edit in one of the two edit namespaces. Generated air remains
+    // sign-unambiguous and cannot acquire zero density.
     const bool zero_density_fluid = !input.solid && input.density == 0.0
         && (input.fluid == TerrainFluidId::water || input.fluid == TerrainFluidId::lava);
-    if ((!zero_density_fluid && input.solid != (input.density >= 0.0))
+    const bool zero_density_edited_air = !input.solid && input.density == 0.0
+        && input.material == TerrainMaterialId::air && input.fluid == TerrainFluidId::none
+        && input.edited && !input.generated
+        && (name_space == NativeCellStateNamespace::durable_terrain
+            || name_space == NativeCellStateNamespace::scene_overlay);
+    if ((!zero_density_fluid && !zero_density_edited_air && input.solid != (input.density >= 0.0))
         || (input.solid && input.fluid != TerrainFluidId::none)) {
         throw NativeCellStateRejected();
     }

@@ -63,6 +63,29 @@ bool metadata_has_key(const NativeValue &metadata, const std::string &key) {
     return position != object.end() && position->first == key;
 }
 
+bool metadata_boolean_or_false(const NativeValue &metadata, const std::string &key) {
+    const NativeValue::Object &object = metadata.as_object();
+    const auto position = std::lower_bound(object.begin(), object.end(), key,
+        [](const auto &entry, const std::string &needle) { return entry.first < needle; });
+    if (position == object.end() || position->first != key) return false;
+    const NativeValue &value = position->second;
+    if (value.kind() == NativeValueKind::null_value) return false;
+    if (value.kind() == NativeValueKind::boolean) return value.as_boolean();
+    if (value.kind() == NativeValueKind::number) return value.as_number() != 0.0;
+    if (value.kind() == NativeValueKind::string) return !value.as_string().empty();
+    if (value.kind() == NativeValueKind::array) return !value.as_array().empty();
+    return !value.as_object().empty();
+}
+
+bool resolved_solid(const NativeTerrainEditStateTemplate &target) noexcept {
+    return target.solid.value_or(target.material != TerrainMaterialId::air);
+}
+
+NativeCellLight resolved_light(const NativeTerrainEditStateTemplate &target) noexcept {
+    return target.light.value_or(NativeCellLight{
+        resolved_solid(target) ? std::uint8_t{0} : std::uint8_t{15}, std::uint8_t{0}});
+}
+
 NativeValue metadata_with(const NativeValue &metadata, std::string key, NativeValue value) {
     NativeValue::Object object = metadata.as_object();
     const auto position = std::lower_bound(object.begin(), object.end(), key,
@@ -85,10 +108,10 @@ NativeCellStateInput target_input(
     input.cell = cell;
     input.material = target.material;
     input.biome = target.biome;
-    input.solid = target.solid;
+    input.solid = resolved_solid(target);
     input.density = density;
     input.fluid = target.fluid;
-    input.light = target.light;
+    input.light = resolved_light(target);
     input.metadata = std::move(metadata);
     input.block_id = target.block_id.has_value()
         ? target.block_id
@@ -120,6 +143,14 @@ NativeCellStateInput cloned_input(
     input.generated = false;
     input.edited = true;
     return input;
+}
+
+NativeCellState make_compiled_cell_state(NativeCellStateInput input) {
+    try {
+        return make_native_cell_state(std::move(input));
+    } catch (const std::invalid_argument &) {
+        reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
 }
 
 const NativeCellState &source_cell(
@@ -187,19 +218,46 @@ std::int32_t checked_ceil_cell(const double value) {
 std::pair<CellCoord, CellCoord> sphere_bounds(
     const NativeTerrainEditShape &shape,
     const double cell_size) {
-    const double shell_radius = shape.target.solid ? shape.radius : shape.radius + cell_size * 1.15;
+    const float center_x = static_cast<float>(shape.center.x);
+    const float center_y = static_cast<float>(shape.center.y);
+    const float center_z = static_cast<float>(shape.center.z);
+    const double shell_radius = resolved_solid(shape.target)
+        ? shape.radius
+        : shape.radius + cell_size * 1.15;
     return {
         {
-            checked_floor_cell((shape.center.x - shell_radius) / cell_size),
-            checked_floor_cell((shape.center.y - shell_radius) / cell_size),
-            checked_floor_cell((shape.center.z - shell_radius) / cell_size),
+            checked_floor_cell((static_cast<double>(center_x) - shell_radius) / cell_size),
+            checked_floor_cell((static_cast<double>(center_y) - shell_radius) / cell_size),
+            checked_floor_cell((static_cast<double>(center_z) - shell_radius) / cell_size),
         },
         {
-            checked_ceil_cell((shape.center.x + shell_radius) / cell_size),
-            checked_ceil_cell((shape.center.y + shell_radius) / cell_size),
-            checked_ceil_cell((shape.center.z + shell_radius) / cell_size),
+            checked_ceil_cell((static_cast<double>(center_x) + shell_radius) / cell_size),
+            checked_ceil_cell((static_cast<double>(center_y) + shell_radius) / cell_size),
+            checked_ceil_cell((static_cast<double>(center_z) + shell_radius) / cell_size),
         },
     };
+}
+
+float godot_distance_squared(
+    const CellCoord &cell,
+    const double cell_size,
+    const float center_x,
+    const float center_y,
+    const float center_z) {
+    // GDScript arithmetic constructs a default-precision Godot Vector3 after
+    // the binary64 cell-center expression. Vector3 subtraction, products, and
+    // additions then round in real_t (binary32 in this project) in this order.
+    const float cell_x = static_cast<float>((static_cast<double>(cell.x) + 0.5) * cell_size);
+    const float cell_y = static_cast<float>((static_cast<double>(cell.y) + 0.5) * cell_size);
+    const float cell_z = static_cast<float>((static_cast<double>(cell.z) + 0.5) * cell_size);
+    const float dx = cell_x - center_x;
+    const float dy = cell_y - center_y;
+    const float dz = cell_z - center_z;
+    const float dx_squared = dx * dx;
+    const float dy_squared = dy * dy;
+    const float dz_squared = dz * dz;
+    const float xy_squared = dx_squared + dy_squared;
+    return xy_squared + dz_squared;
 }
 
 double clamp_density(const double value, const double minimum, const double maximum) {
@@ -211,7 +269,7 @@ NativeValue classify_fluid_only_metadata(
     const NativeCellState &before,
     const NativeTerrainEditStateTemplate &after) {
     if (metadata_has_key(metadata, "terrainMeshAffects")) return metadata;
-    if (before.fluid != after.fluid && !before.solid && !after.solid) {
+    if (before.fluid != after.fluid && !before.solid && !resolved_solid(after)) {
         return metadata_with(metadata, "terrainMeshAffects", NativeValue::boolean(false));
     }
     return metadata;
@@ -227,12 +285,13 @@ void stage(
 }
 
 void validate_shape(const NativeTerrainEditShape &shape, const double cell_size) {
-    if (shape.provenance_id.empty() || shape.provenance_id.find('\0') != std::string::npos) {
+    if (shape.provenance_id.find('\0') != std::string::npos) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
     }
     try {
         static_cast<void>(NativeValue::string(shape.provenance_id));
-        const double density = shape.target.density.value_or(shape.target.solid ? cell_size : -cell_size);
+        const double density = shape.target.density.value_or(
+            resolved_solid(shape.target) ? cell_size : -cell_size);
         static_cast<void>(make_native_cell_state(target_input(
             shape.target, {}, density, shape.provenance_id, shape.target.metadata)));
     } catch (const NativeTerrainEditCompileRejected &) {
@@ -242,8 +301,17 @@ void validate_shape(const NativeTerrainEditShape &shape, const double cell_size)
     }
     if (shape.kind == NativeTerrainEditShapeKind::sphere
         && (!std::isfinite(shape.center.x) || !std::isfinite(shape.center.y) || !std::isfinite(shape.center.z)
-            || !std::isfinite(shape.radius) || shape.radius <= 0.0)) {
+            || !std::isfinite(shape.radius))) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    if (shape.kind == NativeTerrainEditShapeKind::sphere
+        && (!std::isfinite(static_cast<float>(shape.center.x))
+            || !std::isfinite(static_cast<float>(shape.center.y))
+            || !std::isfinite(static_cast<float>(shape.center.z)))) {
+        reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    if (shape.kind == NativeTerrainEditShapeKind::sphere) {
+        static_cast<void>(metadata_boolean_or_false(shape.target.metadata, "deferSkyLight"));
     }
     if (shape.kind != NativeTerrainEditShapeKind::inclusive_box
         && shape.kind != NativeTerrainEditShapeKind::sphere) {
@@ -256,7 +324,6 @@ void compile_box(
     const NativeTerrainEditShape &shape,
     const std::size_t shape_index,
     std::map<CellCoord, PendingOperation, CellLess> &pending,
-    SourceCellCache &source_cache,
     NativeTerrainEditCompileSummary &summary) {
     const CellCoord minimum{
         std::min(shape.first.x, shape.second.x),
@@ -268,19 +335,15 @@ void compile_box(
         std::max(shape.first.y, shape.second.y),
         std::max(shape.first.z, shape.second.z),
     };
-    const double density = shape.target.density.value_or(shape.target.solid ? request.cell_size : -request.cell_size);
+    const double density = shape.target.density.value_or(
+        resolved_solid(shape.target) ? request.cell_size : -request.cell_size);
     for (std::int64_t z = minimum.z; z <= static_cast<std::int64_t>(maximum.z); ++z) {
         for (std::int64_t y = minimum.y; y <= static_cast<std::int64_t>(maximum.y); ++y) {
             for (std::int64_t x = minimum.x; x <= static_cast<std::int64_t>(maximum.x); ++x) {
                 const CellCoord cell{
                     static_cast<std::int32_t>(x), static_cast<std::int32_t>(y), static_cast<std::int32_t>(z)};
-                NativeValue metadata = shape.target.metadata;
-                if (request.source != nullptr) {
-                    const NativeCellState before = effective_cell(request, pending, source_cache, cell);
-                    metadata = classify_fluid_only_metadata(metadata, before, shape.target);
-                }
-                NativeCellState state = make_native_cell_state(target_input(
-                    shape.target, cell, density, shape.provenance_id, std::move(metadata)));
+                NativeCellState state = make_compiled_cell_state(target_input(
+                    shape.target, cell, density, shape.provenance_id, shape.target.metadata));
                 stage(pending, {std::move(state), shape.kind,
                     NativeTerrainEditCellClassification::direct_target, shape_index, shape.provenance_id}, summary);
             }
@@ -298,50 +361,48 @@ void compile_sphere(
     SourceCellCache &source_cache,
     NativeTerrainEditCompileSummary &summary) {
     const double radius_squared = shape.radius * shape.radius;
-    const double shell_radius = shape.target.solid ? shape.radius : shape.radius + request.cell_size * 1.15;
+    const bool target_solid = resolved_solid(shape.target);
+    const double shell_radius = target_solid
+        ? shape.radius
+        : shape.radius + request.cell_size * 1.15;
     const double shell_squared = shell_radius * shell_radius;
+    const float center_x = static_cast<float>(shape.center.x);
+    const float center_y = static_cast<float>(shape.center.y);
+    const float center_z = static_cast<float>(shape.center.z);
+    const bool defer_sky_light = metadata_boolean_or_false(shape.target.metadata, "deferSkyLight");
     for (std::int64_t z = minimum.z; z <= static_cast<std::int64_t>(maximum.z); ++z) {
         for (std::int64_t y = minimum.y; y <= static_cast<std::int64_t>(maximum.y); ++y) {
             for (std::int64_t x = minimum.x; x <= static_cast<std::int64_t>(maximum.x); ++x) {
                 const CellCoord cell{
                     static_cast<std::int32_t>(x), static_cast<std::int32_t>(y), static_cast<std::int32_t>(z)};
-                const double dx = (static_cast<double>(cell.x) + 0.5) * request.cell_size - shape.center.x;
-                const double dy = (static_cast<double>(cell.y) + 0.5) * request.cell_size - shape.center.y;
-                const double dz = (static_cast<double>(cell.z) + 0.5) * request.cell_size - shape.center.z;
-                const double distance_squared = dx * dx + dy * dy + dz * dz;
+                const float distance_squared_f = godot_distance_squared(
+                    cell, request.cell_size, center_x, center_y, center_z);
+                const double distance_squared = static_cast<double>(distance_squared_f);
                 if (distance_squared > shell_squared) continue;
                 const double distance = std::sqrt(distance_squared);
-                const bool direct = shape.target.solid || distance_squared <= radius_squared;
+                const bool direct = target_solid || distance_squared <= radius_squared;
                 std::optional<NativeCellState> state;
                 if (direct) {
                     double density = clamp_density(
-                        shape.target.solid ? shape.radius - distance : distance - shape.radius,
+                        target_solid ? shape.radius - distance : distance - shape.radius,
                         -request.cell_size * 2.0,
                         request.cell_size * 2.0);
-                    // NativeCellState deliberately forbids non-solid zero
-                    // density. The script sphere can produce exactly zero on
-                    // its inclusive boundary, so normalize only that single
-                    // representational edge to the nearest negative value.
-                    if (!shape.target.solid && density == 0.0) {
-                        density = std::nextafter(0.0, -1.0);
-                        ++summary.normalized_air_boundary_densities;
-                    }
                     const NativeCellState before = effective_cell(request, pending, source_cache, cell);
                     NativeValue metadata = classify_fluid_only_metadata(shape.target.metadata, before, shape.target);
-                    state = make_native_cell_state(target_input(
+                    state = make_compiled_cell_state(target_input(
                         shape.target, cell, density, shape.provenance_id, std::move(metadata)));
                 } else {
                     const NativeCellState existing = effective_cell(request, pending, source_cache, cell);
                     if (!existing.solid) continue;
                     NativeValue metadata = metadata_with(
                         existing.metadata, "source", NativeValue::string("excavation_boundary"));
-                    if (shape.defer_sky_light) {
+                    if (defer_sky_light) {
                         metadata = metadata_with(
                             metadata, "deferSkyLight", NativeValue::boolean(true));
                     }
                     const double density = clamp_density(
                         distance - shape.radius, request.cell_size * 0.05, request.cell_size * 1.35);
-                    state = make_native_cell_state(cloned_input(
+                    state = make_compiled_cell_state(cloned_input(
                         existing, density, shape.provenance_id, std::move(metadata)));
                 }
                 stage(pending, {std::move(*state), shape.kind,
@@ -373,15 +434,13 @@ NativeTerrainEditShape NativeTerrainEditShape::sphere(
     const Vec3d center,
     const double radius,
     NativeTerrainEditStateTemplate target,
-    std::string provenance_id,
-    const bool defer_sky_light) {
+    std::string provenance_id) {
     NativeTerrainEditShape result;
     result.kind = NativeTerrainEditShapeKind::sphere;
     result.center = center;
     result.radius = radius;
     result.target = std::move(target);
     result.provenance_id = std::move(provenance_id);
-    result.defer_sky_light = defer_sky_light;
     return result;
 }
 
@@ -405,6 +464,9 @@ WorldTypedCellTransaction NativeTerrainEditCompiledBatch::make_transaction(
     if (operations_.empty()) reject(NativeTerrainEditCompileRejectReason::empty_transaction);
     if (transaction_id.empty() || transaction_id.find('\0') != std::string::npos) {
         reject(NativeTerrainEditCompileRejectReason::invalid_request);
+    }
+    if (summary_.source_pinned && expected_revision != summary_.source_revision) {
+        reject(NativeTerrainEditCompileRejectReason::source_revision_mismatch);
     }
     WorldTypedCellTransaction transaction;
     transaction.transaction_id = std::move(transaction_id);
@@ -446,6 +508,13 @@ NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
     bounds.reserve(request.shapes.size());
     std::size_t remaining = request.limits.max_candidate_visits;
     for (const NativeTerrainEditShape &shape : request.shapes) {
+        // TerrainVolumeService.apply_sphere_edit treats every non-positive
+        // radius, including negative infinity, as a successful empty edit
+        // before consulting the target state or effective source.
+        if (shape.kind == NativeTerrainEditShapeKind::sphere && shape.radius <= 0.0) {
+            bounds.push_back({{}, {}});
+            continue;
+        }
         validate_shape(shape, request.cell_size);
         std::pair<CellCoord, CellCoord> shape_bounds{shape.first, shape.second};
         if (shape.kind == NativeTerrainEditShapeKind::sphere) {
@@ -462,8 +531,9 @@ NativeTerrainEditCompiledBatch NativeTerrainEditShapeCompiler::compile(
     SourceCellCache source_cache;
     for (std::size_t index = 0; index < request.shapes.size(); ++index) {
         const NativeTerrainEditShape &shape = request.shapes[index];
+        if (shape.kind == NativeTerrainEditShapeKind::sphere && shape.radius <= 0.0) continue;
         if (shape.kind == NativeTerrainEditShapeKind::inclusive_box) {
-            compile_box(request, shape, index, pending, source_cache, summary);
+            compile_box(request, shape, index, pending, summary);
         } else {
             compile_sphere(request, shape, index, bounds[index].first, bounds[index].second,
                 pending, source_cache, summary);

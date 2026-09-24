@@ -32,10 +32,12 @@ enum class NativeTerrainEditCellClassification : std::uint8_t {
 struct NativeTerrainEditStateTemplate {
     TerrainMaterialId material = TerrainMaterialId::air;
     TerrainBiomeId biome = TerrainBiomeId::plains;
-    bool solid = false;
+    // Absent values follow TerrainVolumeService.normalize_cell_state():
+    // solidity derives from material and light derives from resolved solidity.
+    std::optional<bool> solid;
     std::optional<double> density;
     TerrainFluidId fluid = TerrainFluidId::none;
-    NativeCellLight light{15, 0};
+    std::optional<NativeCellLight> light;
     NativeValue metadata = NativeValue::object({});
     // TerrainVolumeService defaults blockId to material when absent. The
     // compiler performs the same normalization so every emitted durable set
@@ -51,7 +53,6 @@ struct NativeTerrainEditShape {
     double radius = 0.0;
     NativeTerrainEditStateTemplate target;
     std::string provenance_id;
-    bool defer_sky_light = false;
 
     static NativeTerrainEditShape inclusive_box(
         CellCoord first,
@@ -62,8 +63,7 @@ struct NativeTerrainEditShape {
         Vec3d center,
         double radius,
         NativeTerrainEditStateTemplate target,
-        std::string provenance_id,
-        bool defer_sky_light = false);
+        std::string provenance_id);
 };
 
 // Implementations must retain one immutable effective-world snapshot for the
@@ -124,7 +124,6 @@ struct NativeTerrainEditCompileSummary {
     std::size_t emitted_operations = 0;
     std::size_t direct_target_operations = 0;
     std::size_t excavation_boundary_operations = 0;
-    std::size_t normalized_air_boundary_densities = 0;
     std::size_t solid_operations = 0;
     std::size_t nonsolid_operations = 0;
     std::vector<NativeTerrainEditMaterialCount> material_counts;
@@ -166,6 +165,7 @@ enum class NativeTerrainEditCompileRejectReason : std::uint8_t {
     source_cell_mismatch = 7,
     empty_transaction = 8,
     source_drift = 9,
+    source_revision_mismatch = 10,
 };
 
 class NativeTerrainEditCompileRejected final : public std::invalid_argument {
