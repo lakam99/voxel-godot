@@ -1,17 +1,17 @@
 # N4 tree-artifact shadow checkpoint
 
-Status: **verified pure-core Norway-spruce artifact; no production cutover**.
+Status: **verified pure-core Norway-spruce and umbrella-thorn artifacts; no production cutover**.
 
 `NativeTreeArtifactBuilder` binds an immutable `NativeTreeDefinition` to a
 revisioned render/collision artifact without changing the shared 28-attempt
 surface-prop RNG sequence. For the native `norway_spruce` worker recipe, the
 artifact carries tier-specific branch, foliage or impostor render input,
-source/recipe identity, conservative bounds, and the definition-owned trunk
-cylinder. Completion fails closed unless the worker consumes the definition's
-visual height, trunk radius, canopy radius, collision radius and collision
-height exactly. Broadleaf/oak and savanna definitions remain explicit
-`broadleaf_recipe_pending` and `savanna_recipe_pending` results with
-provisional render bounds rather than being reported complete.
+source/recipe identity, bounds, and the definition-owned trunk cylinder.
+Completion fails closed unless the worker consumes the definition's visual
+height, trunk radius, canopy radius, collision radius and collision height
+exactly. Norway spruce and umbrella thorn now compile complete pure-core
+artifacts; broadleaf/oak remains `broadleaf_recipe_pending` with provisional
+render bounds.
 
 ## Provenance and focused evidence
 
@@ -22,6 +22,12 @@ provisional render bounds rather than being reported complete.
 - Focused MSVC `/W4 /WX`: 5/5 passed. Focused LLVM: 5/5 passed.
 - Changed component coverage: 301/301 lines, 52/52 functions and 62/62
   branches.
+- Savanna integration: worker commit
+  `5fe8cb04d436ba97a80ce2abdaad5e064e5c15ca`, primary integration `75fbd73`.
+  Its focused MSVC and LLVM test executables each report 11/11 passed when run
+  against the reviewed candidate checkout. The tests cover the umbrella-thorn
+  worker recipe and all four artifact render tiers; this is focused candidate
+  evidence, not a fresh complete primary-manifest build receipt.
 - Source-manifest inventory: 213 discovered files equal 213 declared files;
   the artifact source, header and test source are registered.
 - Independent review: ignored evidence at
@@ -41,7 +47,12 @@ world render bounds and translation.
 
 - There is no Godot consumer or adapter for this artifact.
 - There is no production authority cutover or deprecated-code deletion.
-- Broadleaf/oak and savanna render recipes remain pending.
+- Broadleaf/oak render recipe remains pending.
+- Savanna parity hardening is still needed before production promotion: retain
+  defensive degenerate-segment/heading fallbacks or prove their preconditions
+  over the accepted domain. The added GDScript oracle sources are not invoked by
+  a registered differential runner, and worker topology-completeness booleans
+  need independent graph-property checks.
 - Live tree visual publication and physics installation are unproven.
 - Durable tree removal/tombstone publication and save/reload are unproven.
 
