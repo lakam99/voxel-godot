@@ -3,6 +3,7 @@
 #include "../core/native_terrain_volume_v2_import_builder.hpp"
 
 #include <string>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -209,6 +210,7 @@ VWB_TEST(native_terrain_volume_v2_import_builder_abandons_only_unfinalized_input
     VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
     VWB_EXPECT_EQ(0U, builder.record_count());
     VWB_EXPECT_EQ(1U, builder.section_count());
+    VWB_EXPECT(!builder.disposal_complete());
     VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
     VWB_EXPECT(builder.disposal_complete());
     VWB_EXPECT_EQ(0U, builder.dispose_step(1U));
@@ -245,4 +247,70 @@ VWB_TEST(native_terrain_volume_v2_import_builder_defers_finalize_failure_cleanup
     VWB_EXPECT_EQ(1U, builder.section_count());
     VWB_EXPECT_EQ(1U, builder.dispose_step(1U));
     VWB_EXPECT(builder.disposal_complete());
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_rejects_each_envelope_identity_boundary) {
+    const std::vector<NativeTerrainVolumeV2ImportIdentity> invalid = {
+        {"terrainVolume", 2U, 16U, 7U},
+        {"terrainVolume", 1U, 8U, 7U},
+        identity(9007199254740993ULL),
+    };
+    for (const auto &candidate : invalid) {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.begin(candidate));
+        VWB_EXPECT(!builder.active());
+        VWB_EXPECT(builder.disposal_complete());
+    }
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+        NativeTerrainVolumeV2ImportBuilder(1U, NativeTerrainVolumeV2Limits::DEFAULT_MAX_RECORDS + 1U));
+    NativeTerrainVolumeV2ImportBuilder already_started;
+    already_started.begin(identity());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, already_started.begin(identity()));
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_rejects_invalid_chunk_boundaries) {
+    const auto first = record({0, 0, 0});
+    const auto second = record({1, 0, 0});
+    const std::vector<NativeTerrainVolumeV2ImportChunk> invalid_chunks = {
+        chunk({0, 0, 0}, 9007199254740993ULL, {first}),
+        chunk({std::numeric_limits<std::int32_t>::max(), 0, 0}, 1U, {first}),
+        chunk({0, 0, 0}, 1U, {record({16, 0, 0})}),
+    };
+    for (const auto &invalid : invalid_chunks) {
+        NativeTerrainVolumeV2ImportBuilder builder;
+        builder.begin(identity());
+        VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, builder.append({invalid}));
+        VWB_EXPECT(!builder.active());
+        VWB_EXPECT(builder.disposal_complete());
+    }
+    NativeTerrainVolumeV2ImportBuilder over_batch(2U);
+    over_batch.begin(identity());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+        over_batch.append({chunk({0, 0, 0}, 1U, {first, second}),
+            chunk({0, 0, 1}, 2U, {record({0, 0, 16})})}));
+    VWB_EXPECT_EQ(0U, over_batch.record_count());
+
+    NativeTerrainVolumeV2ImportBuilder empty_append;
+    empty_append.begin(identity());
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected, empty_append.append({}));
+    VWB_EXPECT_EQ(0U, empty_append.dispose_step(0U));
+}
+
+VWB_TEST(native_terrain_volume_v2_import_builder_caps_total_even_for_first_append) {
+    NativeTerrainVolumeV2ImportBuilder builder(2U, 1U);
+    VWB_EXPECT(!builder.disposal_complete());
+    VWB_EXPECT_EQ(0U, builder.dispose_step(1U));
+    builder.begin(identity());
+    VWB_EXPECT(!builder.disposal_complete());
+    VWB_EXPECT_EQ(0U, builder.dispose_step(1U));
+    VWB_EXPECT_THROW(NativeTerrainVolumeV2ImportBuilderRejected,
+        builder.append({chunk({0, 0, 0}, 1U, {record({0, 0, 0}), record({1, 0, 0})})}));
+    VWB_EXPECT(builder.disposal_complete());
+    VWB_EXPECT_EQ(0U, builder.record_count());
+
+    NativeTerrainVolumeV2ImportBuilder finalized;
+    finalized.begin(identity());
+    finalized.finalize();
+    VWB_EXPECT(!finalized.disposal_complete());
+    VWB_EXPECT_EQ(0U, finalized.dispose_step(1U));
 }

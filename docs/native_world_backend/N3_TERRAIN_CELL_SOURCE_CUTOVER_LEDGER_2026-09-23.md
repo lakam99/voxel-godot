@@ -532,3 +532,19 @@ projection contract at
 the owned Godot process receipt is
 `artifacts/node-tools/process-runs/godot-uq74aE/watchdog.json`.
 That fixture remains shadow-only and does not establish production cutover.
+
+A follow-up independent review found that the adapter contract did not compare
+pre-edit and old-pin projection content or require a negative page. Both
+assertions now pass in the audio-disabled fixture at
+`artifacts/native-world-backend/n3-terrain-projection-1790215676898-60614256/report.json`
+(owned-process receipt `artifacts/node-tools/process-runs/godot-XBhmWe/watchdog.json`).
+Reachable import-validation, disposal and surface-stream cancellation branches
+now have standalone tests. The current-source recheck at
+`artifacts/native-world-backend/n3-projection-reviewed-gap-20260923/report.json`
+passes 558/558 tests in debug and release, but remains `blocked` on strict
+full-core coverage: 12,552/12,562 lines, 1,591/1,591 functions and
+7,298/7,300 branches. The two missed branch outcomes are importer checks at
+lines 69 and 84 that appear unreachable under current construction invariants;
+the ten missed executable lines still require review and deterministic failure
+injection where they protect exception cleanup. No N3 exit or Gate 5 claim is
+made from this receipt.

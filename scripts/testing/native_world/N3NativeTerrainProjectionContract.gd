@@ -24,8 +24,8 @@ func initialization() -> Dictionary:
 			"ordinaryRegionCells":140,"ordinarySpawnChance":0.08,"townOverrides":[]}}
 
 func find_ready_page(backend) -> Dictionary:
-	for z in range(-12, 13):
-		for x in range(-12, 13):
+	for z in range(-12, 0):
+		for x in range(-12, 0):
 			var key := Vector2i(x, z)
 			if backend.shaping_requests(key).get("status") == "ready":
 				return {"key":key,"pin":backend.pin_effective_page(key)}
@@ -95,9 +95,15 @@ func run_contract() -> Dictionary:
 	if old_pin.get("status") != "ready":
 		return {}
 	var page_key: Vector2i = ready.get("key", Vector2i.ZERO)
+	check(page_key.x < 0 and page_key.y < 0, "negative page selected")
 	var x := page_key.x * 280 + 5
 	var z := page_key.y * 280 + 7
 	var old_page = old_pin.page
+	var old_request := empty_request()
+	old_request.surfaceProjections = [scan(Vector3i(x,10,z))]
+	var before_commit: Dictionary = old_page.project_surfaces(old_request)
+	check(before_commit.get("status") == "ready" and before_commit.terrainDeltaRevision == 0,
+		"precommit negative-page projection ready")
 	var commit: Dictionary = backend.commit_typed_cells(transaction(page_key))
 	check(commit.get("status") == "ready" and commit.get("revision") == 1, "commit revision")
 	var new_pin: Dictionary = backend.pin_effective_page(page_key)
@@ -146,10 +152,12 @@ func run_contract() -> Dictionary:
 	check(known_result.position == Vector3(float(x+1)*CELL,10.25*CELL,float(z)*CELL), "known corner/exact position")
 	check(known_result.requested.columnCell == Vector3i(x+1,999,z), "known caller column retained")
 
-	var old_request := empty_request()
-	old_request.surfaceProjections = [surface]
 	var old_result: Dictionary = old_page.project_surfaces(old_request)
 	check(old_result.get("status") == "ready" and old_result.terrainDeltaRevision == 0, "old pin immutable revision")
+	check(old_result.surfaceProjections == before_commit.surfaceProjections,
+		"old pin preserves precommit negative-page content")
+	check(old_result.surfaceProjections != result.surfaceProjections.slice(0, 1),
+		"new pin projects edited negative-page content")
 	check(old_result.pinIdentity != result.pinIdentity and old_result.sourceIdentity == result.sourceIdentity, "identity/revision split")
 	var no_result_request := empty_request()
 	no_result_request.surfaceProjections = [scan(Vector3i(x,-1000,z))]

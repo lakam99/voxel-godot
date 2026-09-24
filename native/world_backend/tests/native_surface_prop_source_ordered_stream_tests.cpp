@@ -103,6 +103,35 @@ VWB_TEST(native_source_ordered_prop_stream_checks_cancellation_between_attempts)
     VWB_EXPECT_EQ(3U, checks);
 }
 
+VWB_TEST(native_source_ordered_prop_stream_checks_cancellation_before_and_after_attempts) {
+    const auto definition = surface_prop_test_fixture::definition("ordered-props-cancel-boundaries");
+    const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
+        definition, {0,0}, surface_prop_test_fixture::empty_deltas()));
+    const auto catalog = NativeBiomeEnvironmentCatalog::create(tests::godot_oracle_environment_profiles());
+    const auto structure = exclusions();
+    const auto removed = NativeFeatureDeltaSnapshot::create({}, {});
+    const auto wildlife = wildlife_catalog();
+    std::size_t checks = 0U;
+    VWB_EXPECT_THROW(NativeSurfacePropSourceOrderedStreamCancelled,
+        NativeSurfacePropSourceOrderedStream::create(definition.raw_terrain_seed(),
+            0, 0, world_digest(), 1U, terrain, catalog, structure, removed, wildlife,
+            [&checks]() { return ++checks == 1U; }));
+    VWB_EXPECT_EQ(1U, checks);
+    checks = 0U;
+    VWB_EXPECT_THROW(NativeSurfacePropSourceOrderedStreamCancelled,
+        NativeSurfacePropSourceOrderedStream::create(definition.raw_terrain_seed(),
+            0, 0, world_digest(), 1U, terrain, catalog, structure, removed, wildlife,
+            [&checks]() { return ++checks == NativeSurfacePropAttemptStream::ATTEMPT_COUNT + 2U; }));
+    VWB_EXPECT_EQ(NativeSurfacePropAttemptStream::ATTEMPT_COUNT + 2U, checks);
+
+    checks = 0U;
+    const auto completed = NativeSurfacePropSourceOrderedStream::create(definition.raw_terrain_seed(),
+        0, 0, world_digest(), 1U, terrain, catalog, structure, removed, wildlife,
+        [&checks]() { ++checks; return false; });
+    VWB_EXPECT_EQ(NativeSurfacePropAttemptStream::ATTEMPT_COUNT, completed.attempts().size());
+    VWB_EXPECT_EQ(NativeSurfacePropAttemptStream::ATTEMPT_COUNT + 2U, checks);
+}
+
 VWB_TEST(native_source_ordered_prop_stream_interleaves_all_28_attempts_and_parent_tombstone) {
     const auto definition = surface_prop_test_fixture::definition("ordered-props");
     const NativeEffectiveTerrainSource terrain(surface_prop_test_fixture::ready_pin(
