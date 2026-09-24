@@ -548,3 +548,23 @@ lines 69 and 84 that appear unreachable under current construction invariants;
 the ten missed executable lines still require review and deterministic failure
 injection where they protect exception cleanup. No N3 exit or Gate 5 claim is
 made from this receipt.
+
+The staged collision-demand snapshot is now consumed by both
+`NativeTerrainArtifactRequests` and `NativeTerrainTriangleArtifactProducer`;
+their production call paths no longer take the planner's synchronous full
+`required_collision_mesh_blocks()` snapshot. The integrated focused contracts
+pass on commit `f8b0e74`: demand replacement at
+`artifacts/native-world-backend/n3-terrain-demand-replacement-1790216714204-f12581fe/report.json`
+and triangle artifact at
+`artifacts/native-world-backend/n3-triangle-artifact-1790216730988-45a5d177/report.json`.
+The demand contract observed 1,247 advances / 383,030 work operations with a
+256-operation maximum; triangle artifact observed 943 advances / 199,587 work
+operations with the same 256 maximum. Both report no failures. The Godot
+runner loaded the primary debug GDExtension with SHA-256
+`026A4F2423D9B8748D9ED0DF91550A05B57410FA8232B183005FF62DBAE83D40`;
+the worker's original focused reports used the same copied binary, not a
+worker-built DLL. These are focused planner and Voxel Tools service-contract
+receipts only (`productionCutover: false`): no VoxelTerrain runtime wiring,
+publication/collision, or headed gameplay/performance acceptance is proven.
+Synchronous `collision_mesh_window_layout()` remains an explicitly recorded
+follow-up before VTR wiring.
