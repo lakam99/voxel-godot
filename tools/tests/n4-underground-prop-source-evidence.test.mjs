@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { acquireN4UndergroundPropLease, assertN4CleanGitState,
   expandN4UndergroundPropSourcePaths, godotCompanionExecutable,
   n4GitState, n4GodotRuntimeInventory, N4_UNDERGROUND_PROP_SOURCE_PATHS,
-  n4UndergroundPropWatchdogIdentity, resolveN4ImportedArtifacts,
+  n4UndergroundPropWatchdogIdentity, n4WindowsCommandLine, resolveN4ImportedArtifacts,
   withN4UndergroundPropLease } from '../lib/n4-underground-prop-source-evidence.mjs';
 
 const project = fileURLToPath(new URL('../../', import.meta.url));
@@ -71,6 +71,12 @@ test('N4 source freeze covers every direct underground oracle owner and capture 
     assert.equal(path.includes('\\'), false, `source path must be canonical: ${path}`);
     assert.ok(existsSync(resolve(project, path)), `source input must exist: ${path}`);
   }
+});
+
+test('N4 exact command reconstruction matches Windows CreateProcess quoting', () => {
+  assert.equal(n4WindowsCommandLine(['C:\\Program Files\\Godot.exe', '--path',
+    'C:\\a path\\', 'quoted"value', '']),
+  '"C:\\Program Files\\Godot.exe" --path "C:\\a path\\\\" "quoted\\"value" ""');
 });
 
 test('N4 source freeze pairs every consumed generated scene with its import descriptor', () => {
@@ -248,7 +254,7 @@ test('N4 watchdog identity rejects missing, malformed, or cross-receipt fields',
     result => { result.summary.executable = 'P:\\other.exe'; },
     result => { result.summary.godotExe = 'P:\\other.exe'; },
     result => { result.summary.args = ['--headless']; },
-    result => { result.summary.exactCommandLine = ''; },
+    result => { result.summary.exactCommandLine = 'P:\\other.exe --headless'; },
   ]) {
     const result = cleanResult();
     mutate(result);

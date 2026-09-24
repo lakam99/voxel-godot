@@ -228,11 +228,12 @@ launch/completion timestamps, Windows Job Object ownership authority, natural
 root exit and authoritative zero membership.
 
 Focused Node command `node --test
-tools/tests/n4-underground-prop-source-evidence.test.mjs` passes `9/9`. These
+tools/tests/n4-underground-prop-source-evidence.test.mjs` passes `10/10`. These
 tests cover complete source/build expansion, imported-artifact resolution and
 missing/path-mismatch rejection, runtime binary/version identity, clean-status
 rejection, concurrent zero-launch exclusion, release/reacquire, stale-owner
-recovery and watchdog receipt binding. They do not execute GDScript or replace
+recovery, exact Windows command-line reconstruction and watchdog receipt
+binding. They do not execute GDScript or replace
 the newly required coordinated exact-commit differential.
 
 Independent review is diagnostic-only **GO**, with no P0/P1 finding, and

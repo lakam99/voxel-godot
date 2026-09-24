@@ -328,6 +328,30 @@ const timestamp = (value, field) => {
   return milliseconds;
 };
 
+export function n4WindowsCommandLine(argumentsList) {
+  demand(Array.isArray(argumentsList) && argumentsList.length > 0
+    && argumentsList.every(value => typeof value === 'string'),
+  'Command line requires a nonempty string argv');
+  const quote = value => {
+    if (value.length === 0) return '""';
+    if (!/[\s"]/.test(value)) return value;
+    let result = '"', slashes = 0;
+    for (const character of value) {
+      if (character === '\\') { slashes++; continue; }
+      if (character === '"') {
+        result += '\\'.repeat(slashes * 2 + 1) + '"';
+        slashes = 0;
+        continue;
+      }
+      if (slashes) { result += '\\'.repeat(slashes); slashes = 0; }
+      result += character;
+    }
+    if (slashes) result += '\\'.repeat(slashes * 2);
+    return `${result}"`;
+  };
+  return argumentsList.map(quote).join(' ');
+}
+
 export function n4UndergroundPropWatchdogIdentity(processResult, expected = {}) {
   demand(processResult && typeof processResult === 'object', 'Missing owned-process result');
   const summary = processResult.summary;
@@ -362,8 +386,9 @@ export function n4UndergroundPropWatchdogIdentity(processResult, expected = {}) 
   if (expected.args)
     demand(JSON.stringify(summary.args) === JSON.stringify(expected.args),
       'Watchdog arguments do not match the exact runner command');
-  demand(typeof summary.exactCommandLine === 'string' && summary.exactCommandLine.length > 0,
-    'Missing watchdog exactCommandLine');
+  demand(summary.exactCommandLine === n4WindowsCommandLine(
+    [summary.executable, ...summary.args]),
+  'Watchdog exactCommandLine does not match executable and arguments');
   return Object.freeze({ schema: summary.schema, runId: summary.runId,
     rootPid: summary.rootPid, launchTimeUtc: summary.launchTimeUtc,
     completedTimeUtc: summary.completedTimeUtc, zeroProofSource: summary.zeroProofSource,
