@@ -222,6 +222,26 @@ func take_backend():
 	_state = "transferred"
 	return transferred
 
+## A private loading stage may retain a non-consuming reference solely to
+## retire an unadopted committed candidate. This does not release the snapshot
+## lease or change the one-shot take_backend() ownership boundary.
+func borrow_committed_backend(commit_receipt: Dictionary) -> Dictionary:
+	if _state != "committed" or _backend == null or not _snapshot_lease_is_valid():
+		return {"status":"failed", "reason":"committed_backend_unavailable"}
+	if commit_receipt.get("status") != "ready" \
+			or commit_receipt.get("committed") != true \
+			or int(commit_receipt.get("generation", -1)) != _generation \
+			or int(commit_receipt.get("backendInstanceId", 0)) != _backend.get_instance_id() \
+			or commit_receipt.get("sourceIdentity") != _candidate_source_identity:
+		return {"status":"failed", "reason":"committed_backend_receipt_mismatch"}
+	var status: Dictionary = _backend.status()
+	if status.get("status") != "ready" \
+			or status.get("sourceIdentity") != _candidate_source_identity:
+		return {"status":"failed", "reason":"committed_backend_source_mismatch"}
+	return {"status":"ready", "backend":_backend,
+		"backendInstanceId":_backend.get_instance_id(),
+		"sourceIdentity":_candidate_source_identity.duplicate(true)}
+
 func cancel() -> Dictionary:
 	if _state == "drained": return {"status": "ready", "drained": true}
 	if _state == "new":

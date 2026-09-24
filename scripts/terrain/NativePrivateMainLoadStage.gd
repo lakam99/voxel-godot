@@ -6,6 +6,7 @@ class_name NativePrivateMainLoadStage
 const SourceRequest = preload("res://scripts/terrain/NativeWorldSourceRequest.gd")
 const LoadTransaction = preload("res://scripts/terrain/NativeTerrainLoadTransaction.gd")
 const LegacyConverter = preload("res://scripts/terrain/NativeV2LegacyTerrainConverter.gd")
+const RuntimeOwner = preload("res://scripts/terrain/NativeTerrainRuntimeOwner.gd")
 
 var _main
 var _save: Dictionary = {}
@@ -13,6 +14,10 @@ var _converter
 var _transaction
 var _backend
 var _receipt: Dictionary = {}
+var _transferred_owner: WeakRef
+var _transfer_identity: Dictionary = {}
+var _adopted_owner_id := 0
+var _adopted_owner_generation := 0
 var _source_descriptor: Dictionary = {}
 var _source_seed := ""
 var _state := "new"
@@ -65,17 +70,170 @@ func advance() -> Dictionary:
 	if not current_source_valid(): return _failed("private_source_changed_during_import")
 	var committed: Dictionary = _transaction.commit(identity)
 	if committed.get("status") != "ready": return _failed(String(committed.get("reason", "private_commit_failed")))
-	_backend = _transaction.take_backend()
-	if _backend == null: return _failed("private_backend_transfer_failed")
+	# Retain a non-consuming backend alias for private retirement diagnostics.
+	# The transaction keeps its single-use transfer and immutable save lease.
+	var borrowed: Dictionary = _borrow_committed_backend(committed)
+	if borrowed.get("status") != "ready":
+		# Commit already happened. Keep the transaction and receipt so stop() can
+		# take and retire the real backend even if non-consuming borrow failed.
+		_receipt = committed.duplicate(true)
+		_save = {}
+		_failure = String(borrowed.get("reason", "private_committed_backend_missing"))
+		_state = "committed_borrow_failed"
+		return {"status":"failed", "reason":_failure, "ownerMustBeRetained":true}
+	_backend = borrowed.backend
 	_receipt = committed.duplicate(true)
 	_save = {}
 	_state = "ready"
 	return {"status":"ready", "receipt":_receipt.duplicate(true)}
 
+func _borrow_committed_backend(committed: Dictionary) -> Dictionary:
+	return _transaction.borrow_committed_backend(committed)
+
+## Transfer the actual committed transaction once. The receiver must pass this
+## exact transaction and receipt to NativeTerrainRuntimeOwner's adoption API;
+## it then owns take_backend() and every subsequent stop/drain obligation.
+func take_committed_transaction() -> Dictionary:
+	if _state != "ready" or _transaction == null or _backend == null:
+		return {"status":"failed", "reason":"private_committed_transfer_unavailable"}
+	if not current_source_valid():
+		return {"status":"failed", "reason":"private_source_changed_before_transfer",
+			"ownerMustBeRetained":true}
+	var transaction_state: Dictionary = _transaction.snapshot()
+	if transaction_state.get("state") != "committed" \
+			or transaction_state.get("snapshotLeaseValid") != true \
+			or int(transaction_state.get("generation", 0)) != int(_receipt.get("generation", -1)) \
+			or int(transaction_state.get("backendInstanceId", 0)) != _backend.get_instance_id() \
+			or transaction_state.get("sourceIdentity") != _receipt.get("sourceIdentity") \
+			or int(_receipt.get("backendInstanceId", 0)) != _backend.get_instance_id():
+		return {"status":"failed", "reason":"private_committed_transfer_receipt_mismatch",
+			"ownerMustBeRetained":true}
+	var transferred = _transaction
+	var receipt := _receipt.duplicate(true)
+	_transfer_identity = {"transactionId":transferred.get_instance_id(),
+		"backendInstanceId":int(transaction_state.get("backendInstanceId", 0)),
+		"generation":int(receipt.get("generation", 0)),
+		"sourceIdentity":receipt.get("sourceIdentity", {}).duplicate(true)}
+	_transaction = null
+	_backend = null
+	_receipt = {}
+	_save = {}
+	_main = null
+	_source_descriptor = {}
+	_source_seed = ""
+	_state = "transferred"
+	return {"status":"ready", "transaction":transferred, "receipt":receipt,
+		"transactionId":transferred.get_instance_id(),
+		"backendInstanceId":int(transaction_state.get("backendInstanceId", 0))}
+
+## If receiver setup failed before consuming the committed transaction, take
+## back this exact still-private owner. Once adoption has started or completed,
+## the stage must not reclaim or retire the receiver's backend.
+func reclaim_unadopted_transaction(transaction: RefCounted,
+		commit_receipt: Dictionary) -> Dictionary:
+	if _state != "transferred" or _adopted_owner_id != 0 \
+			or not transaction is LoadTransaction \
+			or not transaction.has_method("snapshot") \
+			or not transaction.has_method("borrow_committed_backend") \
+			or transaction.get_instance_id() != int(_transfer_identity.get("transactionId", 0)):
+		return {"status":"failed", "reason":"transferred_owner_reclaim_unavailable",
+			"ownerMustBeRetained":true}
+	var state: Dictionary = transaction.snapshot()
+	if state.get("state") != "committed" or state.get("snapshotLeaseValid") != true \
+			or int(state.get("generation", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or int(state.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or state.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or commit_receipt.get("status") != "ready" \
+			or commit_receipt.get("committed") != true \
+			or int(commit_receipt.get("generation", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or int(commit_receipt.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or commit_receipt.get("sourceIdentity") != _transfer_identity.get("sourceIdentity"):
+		return {"status":"failed", "reason":"transferred_owner_reclaim_identity_mismatch",
+			"ownerMustBeRetained":true}
+	var borrowed: Dictionary = transaction.borrow_committed_backend(commit_receipt)
+	if borrowed.get("status") != "ready":
+		return {"status":"failed", "reason":"transferred_owner_reclaim_borrow_failed",
+			"ownerMustBeRetained":true}
+	_transaction = transaction
+	_backend = borrowed.backend
+	_receipt = commit_receipt.duplicate(true)
+	_transfer_identity = {}
+	_transferred_owner = null
+	_state = "reclaimed"
+	return {"status":"ready", "reclaimed":true, "drained":false,
+		"ownerMustBeRetained":true}
+
+## Join the receiving runtime owner while its exact backend is still active.
+## A dictionary alone cannot attest to adoption; the live owner snapshot must
+## match the committed backend, source and owner generation.
+func bind_transferred_owner(owner: RefCounted, adoption_receipt: Dictionary) -> Dictionary:
+	if _state != "transferred" or _adopted_owner_id != 0 \
+			or not owner is RuntimeOwner \
+			or not owner.has_method("snapshot"):
+		return {"status":"failed", "reason":"transferred_owner_bind_unavailable"}
+	var live: Dictionary = owner.snapshot()
+	var owner_generation := int(adoption_receipt.get("ownerGeneration", 0))
+	if adoption_receipt.get("status") != "ready" \
+			or adoption_receipt.get("adoptedCommittedBackend") != true \
+			or int(adoption_receipt.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or int(adoption_receipt.get("loadGeneration", 0)) != int(_transfer_identity.get("generation", 0)) \
+			or adoption_receipt.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or owner_generation <= 0 or live.get("state") != "active" \
+			or int(live.get("backendInstanceId", 0)) != int(_transfer_identity.get("backendInstanceId", 0)) \
+			or int(live.get("ownerGeneration", 0)) != owner_generation \
+			or live.get("sourceIdentity") != _transfer_identity.get("sourceIdentity"):
+		return {"status":"failed", "reason":"transferred_owner_adoption_mismatch",
+			"ownerMustBeRetained":true}
+	_transferred_owner = weakref(owner)
+	_adopted_owner_id = owner.get_instance_id()
+	_adopted_owner_generation = owner_generation
+	return {"status":"ready", "stageReleased":true, "ownershipTransferred":true,
+		"ownerInstanceId":_adopted_owner_id, "ownerGeneration":owner_generation}
+
+## The stage reports drained only after the exact adopted owner has completed
+## its physical, worker, demand and lease retirement. Wrong or early receipts
+## leave the transfer join pending so Main cannot mistake it for global drain.
+func acknowledge_transferred_owner_drain(owner: RefCounted,
+		drain_receipt: Dictionary) -> Dictionary:
+	if _state != "transferred" or _adopted_owner_id == 0 \
+			or owner == null or _transferred_owner == null \
+			or _transferred_owner.get_ref() != owner \
+			or owner.get_instance_id() != _adopted_owner_id:
+		return {"status":"pending", "reason":"transferred_owner_not_bound_or_changed",
+			"drained":false, "ownerMustBeRetained":true}
+	var live: Dictionary = owner.snapshot()
+	var actual: Dictionary = live.get("asyncStopReceipt", {})
+	if live.get("state") != "drained" or int(live.get("backendInstanceId", -1)) != 0 \
+			or int(live.get("ownerGeneration", 0)) != _adopted_owner_generation \
+			or actual != drain_receipt or actual.get("status") != "ready" \
+			or actual.get("drained") != true \
+			or int(actual.get("ownerGeneration", 0)) != _adopted_owner_generation \
+			or actual.get("sourceIdentity") != _transfer_identity.get("sourceIdentity") \
+			or actual.get("physicalBlocksUnloaded") != true \
+			or actual.get("nativeWorkersDrained") != true \
+			or actual.get("demandReleased") != true \
+			or actual.get("leasesReleased") != true:
+		return {"status":"pending", "reason":"transferred_owner_drain_unverified",
+			"drained":false, "ownerMustBeRetained":true}
+	_transferred_owner = null
+	_transfer_identity = {}
+	_adopted_owner_id = 0
+	_adopted_owner_generation = 0
+	_state = "drained"
+	return {"status":"ready", "drained":true, "ownershipTransferred":true}
+
 func stop() -> Dictionary:
 	if _state == "drained": return {"status":"ready", "drained":true}
+	if _state == "transferred":
+		return {"status":"pending", "reason":"transferred_owner_drain_external",
+			"drained":false, "stageReleased":true,
+			"ownershipTransferred":true, "ownerMustBeRetained":true}
 	if _state == "stopping_retirement": return advance_stop()
-	if _state == "ready":
+	if _state in ["ready", "committed_borrow_failed", "reclaimed"]:
+		_backend = _transaction.take_backend() if _transaction != null else null
+		if _backend == null:
+			return {"status":"failed", "reason":"private_retirement_backend_transfer_failed",
+				"ownerMustBeRetained":true}
 		var request_started := Time.get_ticks_usec()
 		var started: Dictionary = _backend.start_private_staged_save_retirement(
 			int(_receipt.get("generation", -1)))
@@ -101,6 +259,8 @@ func stop() -> Dictionary:
 	return _finish_drain()
 
 func advance_stop() -> Dictionary:
+	if _state == "transferred":
+		return stop()
 	if _state == "stopping_retirement" and _backend != null:
 		var poll_started := Time.get_ticks_usec()
 		var retired: Dictionary = _backend.poll_private_staged_save_retirement()
@@ -140,7 +300,10 @@ func advance_stop() -> Dictionary:
 func snapshot() -> Dictionary:
 	return {"state":_state, "failure":_failure,
 		"transaction":_transaction.snapshot() if _transaction != null else {},
-		"backendRetained":_backend != null, "saveRetained":not _save.is_empty(),
+		"backendRetained":_backend != null,
+		"saveRetained":not _save.is_empty(),
+		"transferIdentity":_transfer_identity.duplicate(true),
+		"transferredOwnerBound":_adopted_owner_id != 0,
 		"lastReleaseUsec":_last_release_usec,
 		"lastBackendReleaseUsec":_last_backend_release_usec,
 		"lastTransactionReleaseUsec":_last_transaction_release_usec,
