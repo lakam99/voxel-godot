@@ -248,6 +248,24 @@ VWB_TEST(native_terrain_edit_template_defaults_derive_solidity_density_and_light
     VWB_EXPECT_EQ(0U, empty.light.block);
 }
 
+VWB_TEST(native_terrain_edit_positive_sphere_rejects_ambiguous_absent_solid_for_stone_and_air) {
+    FakePinnedSource source;
+    NativeTerrainEditStateTemplate stone_without_solid;
+    stone_without_solid.material = TerrainMaterialId::stone;
+    NativeTerrainEditCompileRequest request;
+    request.cell_size = 1.0;
+    request.source = &source;
+    request.omit_unchanged = false;
+    request.shapes = {NativeTerrainEditShape::sphere(
+        {0.5, 0.5, 0.5}, 1.0, stone_without_solid, "absent-solid-stone")};
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    NativeTerrainEditStateTemplate air_without_solid;
+    air_without_solid.material = TerrainMaterialId::air;
+    request.shapes = {NativeTerrainEditShape::sphere(
+        {0.5, 0.5, 0.5}, 1.0, air_without_solid, "absent-solid-air")};
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+}
+
 VWB_TEST(native_terrain_edit_nonpositive_sphere_is_empty_before_state_or_source_validation) {
     NativeTerrainEditStateTemplate invalid;
     invalid.material = static_cast<TerrainMaterialId>(255U);
@@ -602,6 +620,33 @@ VWB_TEST(native_terrain_edit_solid_sphere_and_fluid_only_normalization_are_typed
         fluid_before_solid.compiled_operations()[0].operation.state->metadata, "terrainMeshAffects") == nullptr);
 }
 
+VWB_TEST(native_terrain_edit_translates_compiler_added_metadata_overflow_to_public_rejection) {
+    NativeValue::Object maximum_metadata;
+    maximum_metadata.reserve(NativeValueLimits::MAX_CONTAINER_ENTRIES);
+    for (std::size_t index = 0; index < NativeValueLimits::MAX_CONTAINER_ENTRIES; ++index) {
+        std::string digits = std::to_string(index);
+        maximum_metadata.push_back({
+            "k" + std::string(4U - digits.size(), '0') + digits,
+            NativeValue::boolean(false),
+        });
+    }
+    NativeTerrainEditStateTemplate water;
+    water.material = TerrainMaterialId::water;
+    water.solid = false;
+    water.fluid = TerrainFluidId::water;
+    water.density = -1.0;
+    water.light = NativeCellLight{15, 0};
+    water.metadata = NativeValue::object(std::move(maximum_metadata));
+    FakePinnedSource source(FakePinnedSource::Fallback::air);
+    NativeTerrainEditCompileRequest request;
+    request.cell_size = 1.0;
+    request.source = &source;
+    request.omit_unchanged = false;
+    request.shapes = {NativeTerrainEditShape::sphere(
+        {0.5, 0.5, 0.5}, 0.25, water, "metadata-overflow")};
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+}
+
 VWB_TEST(native_terrain_edit_material_normalization_covers_every_persisted_material_id) {
     std::vector<NativeTerrainEditShape> shapes;
     const std::vector<TerrainMaterialId> materials = {
@@ -610,6 +655,10 @@ VWB_TEST(native_terrain_edit_material_normalization_covers_every_persisted_mater
         TerrainMaterialId::clay, TerrainMaterialId::gravel, TerrainMaterialId::coal_ore, TerrainMaterialId::iron_ore,
         TerrainMaterialId::crystal_ore, TerrainMaterialId::copper_ore, TerrainMaterialId::mud,
         TerrainMaterialId::water, TerrainMaterialId::lava,
+    };
+    const std::vector<std::string> block_ids = {
+        "air", "grass", "dirt", "stone", "sand", "snow", "deepStone", "bedrock",
+        "clay", "gravel", "coalOre", "ironOre", "crystalOre", "copperOre", "mud", "water", "lava",
     };
     for (std::size_t index = 0; index < materials.size(); ++index) {
         NativeTerrainEditStateTemplate target;
@@ -632,6 +681,7 @@ VWB_TEST(native_terrain_edit_material_normalization_covers_every_persisted_mater
     for (std::size_t index = 0; index < materials.size(); ++index) {
         VWB_EXPECT_EQ(materials[index], batch.compiled_operations()[index].operation.state->material);
         VWB_EXPECT(batch.compiled_operations()[index].operation.state->block_id.has_value());
+        VWB_EXPECT_EQ(block_ids[index], batch.compiled_operations()[index].operation.state->block_id->value());
     }
 }
 
@@ -727,13 +777,35 @@ VWB_TEST(native_terrain_edit_rejects_invalid_requests_sources_shapes_and_limits_
     request.shapes[0].radius = 1.0;
     request.cell_size = std::numeric_limits<double>::max();
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].target = stone_template();
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].target = air_template();
     request.cell_size = std::numeric_limits<double>::denorm_min();
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].target = stone_template();
+    request.cell_size = 1.0e-100;
+    request.shapes[0].center = {1.0, 1.0, 1.0};
+    request.shapes[0].radius = 1.0e-100;
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    const double float_max = static_cast<double>(std::numeric_limits<float>::max());
+    request.cell_size = std::numeric_limits<double>::denorm_min();
+    request.shapes[0].center = {float_max, float_max, float_max};
+    request.shapes[0].radius = float_max;
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].center = {0.0, 0.0, 0.0};
+    request.shapes[0].radius = 1.0e200;
+    request.cell_size = std::numeric_limits<double>::max();
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
     request.cell_size = 1.0;
+    request.shapes[0].target = air_template();
     request.shapes[0].radius = 1.0;
     request.shapes[0].center = {-std::numeric_limits<double>::max(), 0.0, 0.0};
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
     request.shapes[0].center = {std::numeric_limits<double>::max(), 0.0, 0.0};
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].center = {0.0, std::numeric_limits<double>::max(), 0.0};
+    expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
+    request.shapes[0].center = {0.0, 0.0, std::numeric_limits<double>::max()};
     expect_reason(NativeTerrainEditCompileRejectReason::invalid_request, request);
     request.shapes[0].radius = std::numeric_limits<double>::max();
     request.shapes[0].center = {std::numeric_limits<double>::max(), 0.0, 0.0};

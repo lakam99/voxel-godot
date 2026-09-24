@@ -85,19 +85,25 @@ function nativeTestResult(step) {
   return parsed;
 }
 
-function coverageSummary(exportValue, expectedPath) {
-  const normalized = resolve(expectedPath).toLowerCase();
+function coverageSummary(exportValue, expectedPaths) {
   const files = exportValue?.data?.[0]?.files;
   if (!Array.isArray(files)) throw new Error('llvm-cov export schema is not recognized');
-  const selected = files.find(file => resolve(file.filename).toLowerCase() === normalized);
-  if (!selected) throw new Error('llvm-cov omitted the edit-shape compiler source');
   const result = {};
-  for (const metric of ['lines', 'functions', 'branches']) {
-    const summary = selected.summary?.[metric];
-    if (!summary || summary.count < 1 || summary.covered !== summary.count) {
-      throw new Error(`edit-shape compiler ${metric} coverage is not 100%`);
+  for (const expectedPath of expectedPaths) {
+    const normalized = resolve(expectedPath).toLowerCase();
+    const selected = files.find(file => resolve(file.filename).toLowerCase() === normalized);
+    if (!selected) throw new Error(`llvm-cov omitted ${expectedPath}`);
+    const source = relative(project, expectedPath).replaceAll('\\', '/');
+    result[source] = {};
+    for (const metric of ['lines', 'functions', 'branches']) {
+      const summary = selected.summary?.[metric];
+      if (!summary || summary.count < 1 || summary.covered !== summary.count) {
+        throw new Error(`${source} ${metric} coverage is not 100%`);
+      }
+      result[source][metric] = {
+        count: summary.count, covered: summary.covered, percent: summary.percent,
+      };
     }
-    result[metric] = { count: summary.count, covered: summary.covered, percent: summary.percent };
   }
   return result;
 }
@@ -226,9 +232,10 @@ try {
   requirePassed(exported);
   const exportValue = JSON.parse(readFileSync(resolve(project, exported.stdout.path), 'utf8'));
   const compilerPath = join(core, 'native_terrain_edit_shape_compiler.cpp');
-  coverage = coverageSummary(exportValue, compilerPath);
+  const cellStatePath = join(core, 'native_cell_state.cpp');
+  coverage = coverageSummary(exportValue, [compilerPath, cellStatePath]);
   const textReport = run('llvm-report', cov,
-    ['report', llvmExe, `-instr-profile=${data}`, '--show-branch-summary', compilerPath], output);
+    ['report', llvmExe, `-instr-profile=${data}`, '--show-branch-summary', compilerPath, cellStatePath], output);
   steps.push(textReport);
   requirePassed(textReport);
   status = 'passed';

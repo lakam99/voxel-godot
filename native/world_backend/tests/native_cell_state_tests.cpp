@@ -144,6 +144,9 @@ VWB_TEST(native_cell_state_accepts_fluid_and_narrow_edited_air_zero_density) {
     NativeCellStateInput air_zero = air();
     air_zero.density = 0.0;
     VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(air_zero));
+    NativeCellStateInput zero_air_with_fluid = air_zero;
+    zero_air_with_fluid.fluid = TerrainFluidId::water;
+    VWB_EXPECT_THROW(NativeCellStateRejected, make_native_cell_state(zero_air_with_fluid));
     air_zero.generated = false;
     air_zero.edited = true;
     air_zero.edit_reason = "sphere_boundary";

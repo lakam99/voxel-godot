@@ -88,7 +88,9 @@ NativeCellState make_native_cell_state(const NativeCellStateInput &input, const 
         && (input.fluid == TerrainFluidId::water || input.fluid == TerrainFluidId::lava);
     const bool zero_density_edited_air = !input.solid && input.density == 0.0
         && input.material == TerrainMaterialId::air && input.fluid == TerrainFluidId::none
-        && input.edited && !input.generated
+        // generated != edited was validated above, so edited already proves
+        // that this is not generated state.
+        && input.edited
         && (name_space == NativeCellStateNamespace::durable_terrain
             || name_space == NativeCellStateNamespace::scene_overlay);
     if ((!zero_density_fluid && !zero_density_edited_air && input.solid != (input.density >= 0.0))

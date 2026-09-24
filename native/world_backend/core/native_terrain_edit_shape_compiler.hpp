@@ -34,6 +34,10 @@ struct NativeTerrainEditStateTemplate {
     TerrainBiomeId biome = TerrainBiomeId::plains;
     // Absent values follow TerrainVolumeService.normalize_cell_state():
     // solidity derives from material and light derives from resolved solidity.
+    // Positive-radius spheres deliberately require solid to be present because
+    // script geometry defaults the missing key differently from state
+    // normalization. Audited production sphere callers are explicit; rejecting
+    // the ambiguous form preserves the typed density/solid invariant.
     std::optional<bool> solid;
     std::optional<double> density;
     TerrainFluidId fluid = TerrainFluidId::none;
