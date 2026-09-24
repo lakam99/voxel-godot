@@ -205,6 +205,26 @@ These are observed source references, not an exhaustive deletion proof. The
 final audit must also search indirect dynamic calls and compare real callers
 after the native owner replaces the Voxel Tools generator/collision path.
 
+### Script sampler paths that remain active with a volume owner
+
+`WorldGenerationSystem.generate_sample_without_volume` is more than a
+missing-service fallback. `generate_cell_state` calls it directly for every
+generated cell, and `TerrainVolumeService.generated_cell_state` reaches that
+method through the generation owner. Also,
+`volume_surface_numeric_sample_at_grid_cell` uses script generation for every
+non-edited query even when a volume service exists; it reads the volume only
+for an edit that affects surface projection. The same method feeds
+`volume_surface_y_for_cell`'s solid/air boundary scan. Deleting only the
+`sample_world` missing-service fallback would leave a production GDScript
+terrain sampler and projection source.
+
+At the N3 authority switch, the generated-cell and both numeric projection
+callers need native batch results from the same pinned source/delta revision.
+The `terrain_reference_surface_y_for_cell` result used when the boundary scan
+finds no crossing must be classified as a placement/projection failure or a
+documented source result; it cannot silently become a second heightfield
+authority. This is a caller/deletion observation, not a changed runtime rule.
+
 The caller audit used `rg` across production `scripts/*.gd` (excluding
 `scripts/testing/**`), then inspected `WorldGenerationSystem`'s public
 forwarders and `TerrainVolumeService`'s owner methods. `NpcNavigationTestRunner`
