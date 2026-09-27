@@ -37,7 +37,6 @@ struct TransferSlot {
     std::size_t origin_role, destination_role, destination_session, artifact;
     std::uint64_t artifact_cookie, origin_epoch;
     TransferState state;
-    bool invalidated;
 };
 struct HoldSlot { Base base; std::size_t artifact; std::uint64_t artifact_cookie; };
 struct Credit { std::size_t next; bool occupied; };
@@ -297,6 +296,7 @@ void *allocate_payload(Control &c, std::size_t bytes) {
     auto *p = allocate_raw(bytes, c.config.allocation_alignment);
     const auto q = requested(bytes, c.config.allocation_alignment);
     c.used += q; c.reserved -= q;
+    c.peak = c.peak > c.used ? c.peak : c.used;
     return p;
 }
 bool triangle_finite(const ArtifactTriangle &t) noexcept {
@@ -333,7 +333,8 @@ template class ArtifactToken<ArtifactHoldTag>;
 NativeCollisionArtifactDomain::NativeCollisionArtifactDomain(const ArtifactDomainConfig &cfg, ArtifactAllocationPolicy policy) : control_(nullptr) {
     alignment_valid(cfg.allocation_alignment);
     if (!cfg.byte_limit || cfg.byte_limit > byte_ceiling || !cfg.session_slots || !cfg.artifact_slots
-        || !cfg.role_slots || !cfg.transfer_slots || !cfg.hold_slots || !cfg.token_slots || !cfg.maximum_references)
+        || !cfg.role_slots || !cfg.transfer_slots || !cfg.hold_slots || !cfg.token_slots
+        || !cfg.maximum_references || !cfg.incarnation)
         throw std::invalid_argument("artifact configuration");
     std::size_t bytes = sizeof(Control);
     const auto so = region<SessionSlot>(bytes, cfg.session_slots);
@@ -404,7 +405,8 @@ ArtifactResult<ArtifactBuilder> NativeCollisionArtifactDomain::begin(const Artif
     why = session_current(c, si, session.base.cookie);
     if (why != ArtifactReason::none) return failed<ArtifactBuilder>(why);
     if (session.kind != ArtifactOwnerKind::producer) return failed<ArtifactBuilder>(ArtifactReason::wrong_owner);
-    if (!stamp.incarnation || stamp.through_revision < stamp.original_revision) return failed<ArtifactBuilder>(ArtifactReason::invalid_configuration);
+    if (stamp.incarnation != c.config.incarnation || stamp.through_revision < stamp.original_revision)
+        return failed<ArtifactBuilder>(ArtifactReason::invalid_configuration);
     if (c.artifacts.free == absent || c.free_credit == absent) return failed<ArtifactBuilder>(ArtifactReason::capacity);
     if (!room(c, session.base)) return failed<ArtifactBuilder>(ArtifactReason::reference_exhausted);
     std::size_t output_size, output_q, scratch_q, total;
@@ -419,7 +421,6 @@ ArtifactResult<ArtifactBuilder> NativeCollisionArtifactDomain::begin(const Artif
     why = next_cookie(c, cookie); if (why != ArtifactReason::none) return failed<ArtifactBuilder>(why);
     const auto i = open(c.artifacts, cookie); auto &a = c.artifacts.items[i];
     const auto prior_reserved = c.reserved; c.reserved += total;
-    c.peak = c.peak > c.used + c.reserved ? c.peak : c.used + c.reserved;
     try {
         if (output_size) { a.triangles = static_cast<ArtifactTriangle *>(allocate_payload(c, output_size)); a.output_bytes = output_q; }
         if (r.scratch_capacity_bytes) { a.scratch = allocate_payload(c, r.scratch_capacity_bytes); a.scratch_bytes = scratch_q; }
@@ -528,7 +529,7 @@ ArtifactResult<ArtifactRole> NativeCollisionArtifactDomain::commit_transfer(Arti
     why = role_current(c, origin); if (why != ArtifactReason::none) return failed<ArtifactRole>(why);
     why = session_current(c, t.destination_session, c.roles.items[t.destination_role].session_cookie);
     if (why != ArtifactReason::none) return failed<ArtifactRole>(why);
-    if (t.invalidated || a.pending_cookie != t.base.cookie || a.pending_epoch != t.origin_epoch
+    if (a.pending_cookie != t.base.cookie || a.pending_epoch != t.origin_epoch
         || a.owner_epoch != t.origin_epoch || a.base.cookie != t.artifact_cookie) return failed<ArtifactRole>(ArtifactReason::stale_token);
     if (a.owner_epoch == std::numeric_limits<std::uint64_t>::max()) return failed<ArtifactRole>(ArtifactReason::cookie_exhausted);
     if (c.free_credit == absent) return failed<ArtifactRole>(ArtifactReason::capacity);

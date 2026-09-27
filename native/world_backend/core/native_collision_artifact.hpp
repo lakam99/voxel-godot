@@ -31,6 +31,7 @@ struct ArtifactDomainConfig {
     std::size_t byte_limit, session_slots, artifact_slots, role_slots;
     std::size_t transfer_slots, hold_slots, token_slots, allocation_alignment;
     std::size_t maximum_references;
+    std::uint64_t incarnation;
 };
 struct ArtifactAllocationPolicy { std::size_t fail_allocation_ordinal; };
 struct ArtifactReservation { std::size_t triangle_capacity, scratch_capacity_bytes; };
