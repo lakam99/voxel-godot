@@ -84,6 +84,65 @@ VWB_TEST(resumable_sha256_published_vectors_and_partition_boundaries) {
     }
 }
 
+VWB_TEST(resumable_sha256_rfc6234_multiblock_oracles_with_partial_quotas) {
+    // Independent expected digests: RFC6234 section8.5, SHA256 TEST3/TEST4.
+    // https://www.rfc-editor.org/rfc/rfc6234.txt
+    // TEST3 is one million 'a'; TEST4 is "01234567" repeated80 (640 bytes).
+    std::string repeated_digits;
+    repeated_digits.reserve(640U);
+    for (std::size_t repetition = 0U; repetition < 80U; ++repetition)
+        repeated_digits += "01234567";
+    const std::array<std::string, 2> inputs{{std::string(1000000U, 'a'), repeated_digits}};
+    const std::array<const char *, 2> expected{{
+        "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+        "594847328451bdfa85056225462cc1d867d877fb388df0ce35f25ab5562bfbb5",
+    }};
+    for (std::size_t vector = 0U; vector < inputs.size(); ++vector) {
+        const auto &input = inputs[vector];
+        const auto *data = reinterpret_cast<const std::uint8_t *>(input.data());
+        Sha256State state;
+        std::size_t offset = 0U;
+        std::size_t calls = 0U;
+        std::size_t message_blocks = 0U;
+        bool observed_partial = false;
+        bool observed_zero = false;
+        while (offset < input.size()) {
+            // Every third call has positive byte and block quotas. Thus the
+            // bounded call count detects stalls; zero-quota steps cannot loop
+            // indefinitely while hiding lack of progress.
+            VWB_EXPECT(calls < input.size() * 3U + 3U);
+            const auto mode = calls % 3U;
+            const std::size_t byte_quota = mode == 0U ? 0U : (mode == 1U ? 97U : 193U);
+            const std::size_t block_quota = mode == 1U ? 0U : 1U;
+            const std::size_t offered = input.size() - offset;
+            const auto step = state.update_step(data + offset, offered, byte_quota, block_quota);
+            VWB_EXPECT(step.consumed_bytes <= byte_quota);
+            VWB_EXPECT(step.consumed_bytes <= offered);
+            VWB_EXPECT(step.compressed_blocks <= block_quota);
+            VWB_EXPECT_EQ(step.consumed_bytes == offered, step.input_complete);
+            VWB_EXPECT_EQ((offset + step.consumed_bytes) / 64U - offset / 64U,
+                step.compressed_blocks);
+            if (mode == 2U) VWB_EXPECT(step.consumed_bytes > 0U);
+            observed_partial = observed_partial || !step.input_complete;
+            observed_zero = observed_zero || step.consumed_bytes == 0U;
+            message_blocks += step.compressed_blocks;
+            offset += step.consumed_bytes;
+            ++calls;
+        }
+        VWB_EXPECT(observed_partial);
+        VWB_EXPECT(observed_zero);
+        VWB_EXPECT_EQ(input.size() / 64U, message_blocks);
+        VWB_EXPECT(message_blocks >= 10U);
+        const auto final = state.finish_step(1U);
+        VWB_EXPECT(final.digest_ready);
+        VWB_EXPECT_EQ(1U, final.compressed_blocks);
+        VWB_EXPECT_EQ(std::string(expected[vector]), sha256_hex(state.digest()));
+        // One-shot is also checked against the published digest, never used
+        // as the oracle for the resumable path.
+        VWB_EXPECT_EQ(std::string(expected[vector]), sha256_hex(sha256(data, input.size())));
+    }
+}
+
 VWB_TEST(resumable_sha256_quotas_receipts_and_no_work_atomicity) {
     const std::array<std::uint8_t, 129> bytes{};
     Sha256State state;
