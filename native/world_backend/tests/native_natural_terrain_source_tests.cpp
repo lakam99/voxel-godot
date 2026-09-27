@@ -11,10 +11,12 @@
 #include <utility>
 #include <vector>
 #include <algorithm>
+#include <array>
 
 using namespace voxel::world_backend;
 static_assert(!std::is_convertible_v<NativeCellState, NativeLatticeNumericFacts>);
 static_assert(!std::is_convertible_v<NativeCellState, NativeSurfaceColumnFacts>);
+static_assert(std::is_trivially_copyable_v<NaturalScalarStageState>);
 
 namespace {
 WorldSourceDefinition atlas_definition() {
@@ -82,13 +84,29 @@ struct NumericNoiseFixture {
         }
         VWB_EXPECT_EQ(EvalStatus::ready, noise.status());
     }
-    NumericNaturalSample evaluate(const WorldSourceDefinition &definition, const NaturalRequest request) {
+    NumericNaturalSample evaluate(const WorldSourceDefinition &definition, const NaturalRequest request,
+        const std::array<std::size_t, 4> budgets = {4U, 4U, 4U, 4U}) {
         NaturalCursor cursor; WorkQuota begin(1U);
         VWB_EXPECT_EQ(EvalStatus::pending, begin_natural(cursor, context.stamp, context, request, begin).status);
+        WorkQuota zero(0U);
+        const auto no_work = advance_natural(cursor, context.stamp, definition, noise, storage, zero);
+        VWB_EXPECT_EQ(EvalStatus::pending, no_work.step.status);
+        VWB_EXPECT_EQ(0U, no_work.step.consumed_work);
+        VWB_EXPECT_EQ(0U, cursor.stage);
         for (std::size_t calls = 0U; cursor.status == EvalStatus::pending && calls < 20000U; ++calls) {
-            WorkQuota quota(4U); const auto step = advance_natural(cursor, context.stamp, definition, noise, storage, quota);
-            VWB_EXPECT_EQ(4U - quota.remaining(), step.step.consumed_work);
-            VWB_EXPECT(step.step.consumed_work != 0U || step.step.next_atomic_work > 4U || step.step.status != EvalStatus::pending);
+            const std::size_t offered = budgets[calls % budgets.size()];
+            WorkQuota quota(offered);
+            const auto before_stage = cursor.stage;
+            const auto before_scalars = cursor.scalars;
+            const auto step = advance_natural(cursor, context.stamp, definition, noise, storage, quota);
+            VWB_EXPECT_EQ(offered - quota.remaining(), step.step.consumed_work);
+            VWB_EXPECT(step.step.consumed_work != 0U || step.step.next_atomic_work > offered
+                || step.step.status != EvalStatus::pending);
+            if (step.step.status == EvalStatus::pending && step.step.consumed_work == 0U) {
+                VWB_EXPECT_EQ(before_stage, cursor.stage);
+                VWB_EXPECT(before_scalars.values == cursor.scalars.values);
+                VWB_EXPECT_EQ(before_scalars.result, cursor.scalars.result);
+            }
         }
         VWB_EXPECT_EQ(EvalStatus::ready, cursor.status);
         WorkQuota repeat(0U); const auto ready = advance_natural(cursor, context.stamp, definition, noise, storage, repeat);
@@ -122,6 +140,50 @@ VWB_TEST(borrowed_natural_surface_and_cave_match_independent_script_numeric_gold
     }
     request.component = NaturalComponent::regional_biome; request.x = 9; request.z = -1;
     VWB_EXPECT_EQ(RegionalBiome::swamp, fixture.evaluate(definition, request).regional.biome);
+}
+
+VWB_TEST(shared_natural_scalar_stages_match_synchronous_source_across_quota_partitions) {
+    const auto definition = atlas_definition();
+    const NativeNaturalTerrainSource synchronous(definition);
+    NumericNoiseFixture fixture(definition);
+    const std::array<std::array<std::size_t, 4>, 4> partitions{{
+        {{4U, 4U, 4U, 4U}}, {{1U, 2U, 3U, 4U}},
+        {{2U, 1U, 4U, 3U}}, {{3U, 4U, 1U, 2U}}
+    }};
+    for (const auto &partition : partitions) {
+        for (const CellCoord cell : {CellCoord{-1, 0, -2000}, CellCoord{-2, 0, -2000}}) {
+            NaturalRequest request; request.x = cell.x; request.z = cell.z;
+            const double expected = synchronous.sample_surface_column({cell.x, cell.z,
+                WorldQueryIntent::terrain_mesh}).reference_surface_y;
+            VWB_EXPECT_EQ(expected, fixture.evaluate(definition, request, partition).value);
+        }
+        for (const CellCoord cell : {CellCoord{-33, -2, -5}, CellCoord{-32, -2, -5}}) {
+            NaturalRequest request; request.component = NaturalComponent::underground_density;
+            request.position = resolve_world_query(definition,
+                WorldLatticeQuery{cell, WorldQueryIntent::terrain_mesh}).lattice_position;
+            const double cell_size = definition.constants().cell_size_meters;
+            const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.x) / cell_size));
+            const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.z) / cell_size));
+            const double surface = synchronous.sample_surface_column({x, z,
+                WorldQueryIntent::terrain_mesh}).reference_surface_y;
+            request.depth_cells = std::max(0.0, surface - static_cast<double>(request.position.y))
+                / std::max(0.001, cell_size);
+            const double expected = synchronous.sample_lattice_numeric({cell,
+                WorldQueryIntent::terrain_mesh}).density;
+            VWB_EXPECT_EQ(expected, fixture.evaluate(definition, request, partition).value);
+            request.depth_cells = 3.0;
+            VWB_EXPECT_EQ(cell_size, fixture.evaluate(definition, request, partition).value);
+        }
+        NaturalRequest region; region.component = NaturalComponent::regional_biome;
+        region.x = 9; region.z = -1;
+        VWB_EXPECT_EQ(RegionalBiome::swamp, fixture.evaluate(definition, region, partition).regional.biome);
+    }
+    // The synchronous height override selects water biomes; the cursor's
+    // regional_biome component deliberately remains regional-only.
+    VWB_EXPECT_EQ(TerrainBiomeId::ocean,
+        synchronous.sample_surface_biome({0, 0, WorldQueryIntent::gameplay}));
+    VWB_EXPECT_EQ(TerrainBiomeId::beach,
+        synchronous.sample_surface_biome({-30208, -65536, WorldQueryIntent::gameplay}));
 }
 
 VWB_TEST(borrowed_natural_zero_quota_reentry_cancel_and_sticky_context_contract) {

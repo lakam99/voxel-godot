@@ -139,6 +139,62 @@ double native_underground_density_from_raw(
     return lerp(cell_size, raw_density, fade);
 }
 
+namespace {
+// One fixed, pure scalar stage owner for both evaluation schedules. Callers
+// supply genuine noise/hash values and choose when a stage may run; this code
+// neither samples terrain nor spends quota. The ordered expressions and double
+// boundaries mirror the original synchronous natural formulas.
+NaturalScalarStageState surface_scalar_stage(NaturalScalarStageState state,
+    const std::uint8_t stage, const WorldSourceConstants &constants) noexcept {
+    auto &v = state.values;
+    switch (stage) {
+    case 4: v[3] = std::abs(v[3] - 0.5) * 2.0; v[7] = smoothstep(v[2], 0.42, 0.68); break;
+    case 5: v[8] = smoothstep(v[4], 0.58, 0.82); break;
+    case 6: v[9] = smoothstep(v[5], 0.74, 0.93) * v[8]; break;
+    case 7: v[10] = 6.0 + v[0] * 10.0 + (v[1] - 0.5) * 2.0; break;
+    case 8: v[11] = 7.2 + v[0] * 15.5 + std::pow(std::max(v[1] - 0.18, 0.0), 1.45) * 12.0; break;
+    case 9: v[12] = 10.0 + v[0] * 21.0 + std::pow(v[3], 1.92) * (16.0 + v[8] * 44.0)
+        + std::pow(v[9], 2.05) * 34.0; break;
+    case 10: v[13] = (v[6] - 0.5) * lerp(0.28, 1.35, v[8]); break;
+    case 11: v[14] = constants.minimum_surface_meters
+        + lerp(lerp(v[11], v[10], v[7]), v[12], v[8]) + v[13]; break;
+    case 12: v[15] = lerp(constants.cell_size_meters * 0.34,
+        constants.cell_size_meters * 1.15, v[8]); break;
+    case 13: state.result = std::clamp(std::round(v[14] / v[15]) * v[15],
+        constants.minimum_surface_meters, constants.maximum_surface_meters); break;
+    default: break;
+    }
+    return state;
+}
+NaturalScalarStageState cave_scalar_stage(NaturalScalarStageState state,
+    const std::uint8_t stage, const WorldSourceConstants &constants,
+    const double depth_cells, const double minimum_overburden_cells) noexcept {
+    auto &v = state.values;
+    switch (stage) {
+    case 22: v[7] = smoothstep(1.0 - std::abs(v[3] - v[4]), 0.44, 0.82); break;
+    case 23: v[8] = smoothstep(v[0] * 0.66 + v[1] * 0.34, 0.48, 0.72); break;
+    case 24: v[9] = smoothstep(v[2], 0.48, 0.66);
+        v[10] = v[7] * smoothstep(v[1], 0.52, 0.82); break;
+    case 25: v[11] = smoothstep(depth_cells, 8.0, 18.0)
+        * (1.0 - smoothstep(depth_cells, 48.0, 64.0)); break;
+    case 26: v[12] = clamp01(std::max({v[8], v[9] * 0.96, v[10] * 0.90})
+        + v[11] * 0.10 + v[6] * 0.025); break;
+    case 27: v[13] = (lerp(0.50, 0.60, v[5]) - v[11] * 0.04 - v[12])
+        * constants.cell_size_meters * 4.25; break;
+    case 28: state.result = native_underground_density_from_raw(v[13], constants.cell_size_meters,
+        depth_cells, minimum_overburden_cells); break;
+    default: break;
+    }
+    return state;
+}
+enum class SurfaceWaterThreshold : std::uint8_t { ocean, beach, regional };
+SurfaceWaterThreshold surface_water_threshold(const double surface, const double water_level) noexcept {
+    if (surface < water_level + 0.3) return SurfaceWaterThreshold::ocean;
+    if (surface < water_level + 1.7) return SurfaceWaterThreshold::beach;
+    return SurfaceWaterThreshold::regional;
+}
+} // namespace
+
 struct NativeNaturalTerrainSource::GeneratedSample {
     CellCoord source_cell; double surface_y = 0.0; double density = 0.0; bool solid = false;
     TerrainBiomeId surface_biome = TerrainBiomeId::plains; TerrainBiomeId biome = TerrainBiomeId::plains;
@@ -155,26 +211,32 @@ const WorldSourceDefinition &NativeNaturalTerrainSource::definition() const noex
 
 double NativeNaturalTerrainSource::natural_surface_y(const std::int32_t x, const std::int32_t z) const {
     const FastNoiseCompat noise(seed_hash_);
-    const double continent = noise.sample_2d_01(TerrainNoiseChannel::height, x, z);
-    const double broad = noise.sample_2d_01(TerrainNoiseChannel::height, x + 12000.0, z - 12200.0);
-    const double plain = noise.sample_2d_01(TerrainNoiseChannel::flat, x - 8400.0, z + 7200.0);
-    const double ridges = std::abs(noise.sample_2d_01(TerrainNoiseChannel::ridge, x - 200.0, z + 510.0) - 0.5) * 2.0;
-    const double flat_mask = smoothstep(plain, 0.42, 0.68);
-    const double mountain_mask = smoothstep(noise.sample_2d_01(TerrainNoiseChannel::height, x + 1800.0, z - 1500.0), 0.58, 0.82);
-    const double peak_mask = smoothstep(noise.sample_2d_01(TerrainNoiseChannel::ridge, x - 3900.0, z + 2600.0), 0.74, 0.93) * mountain_mask;
-    const double plains = 6.0 + continent * 10.0 + (broad - 0.5) * 2.0;
-    const double hills = 7.2 + continent * 15.5 + std::pow(std::max(broad - 0.18, 0.0), 1.45) * 12.0;
-    const double mountains = 10.0 + continent * 21.0 + std::pow(ridges, 1.92) * (16.0 + mountain_mask * 44.0) + std::pow(peak_mask, 2.05) * 34.0;
-    const double detail = (noise.sample_2d_01(TerrainNoiseChannel::ridge, x + 7800.0, z - 9100.0) - 0.5) * lerp(0.28, 1.35, mountain_mask);
-    const double raw = definition_.constants().minimum_surface_meters + lerp(lerp(hills, plains, flat_mask), mountains, mountain_mask) + detail;
-    const double terrace = lerp(definition_.constants().cell_size_meters * 0.34, definition_.constants().cell_size_meters * 1.15, mountain_mask);
-    return std::clamp(std::round(raw / terrace) * terrace, definition_.constants().minimum_surface_meters, definition_.constants().maximum_surface_meters);
+    NaturalScalarStageState state{};
+    auto &v = state.values;
+    v[0] = noise.sample_2d_01(TerrainNoiseChannel::height, x, z);
+    v[1] = noise.sample_2d_01(TerrainNoiseChannel::height, x + 12000.0, z - 12200.0);
+    v[2] = noise.sample_2d_01(TerrainNoiseChannel::flat, x - 8400.0, z + 7200.0);
+    v[3] = noise.sample_2d_01(TerrainNoiseChannel::ridge, x - 200.0, z + 510.0);
+    state = surface_scalar_stage(state, 4U, definition_.constants());
+    v[4] = noise.sample_2d_01(TerrainNoiseChannel::height, x + 1800.0, z - 1500.0);
+    state = surface_scalar_stage(state, 5U, definition_.constants());
+    v[5] = noise.sample_2d_01(TerrainNoiseChannel::ridge, x - 3900.0, z + 2600.0);
+    state = surface_scalar_stage(state, 6U, definition_.constants());
+    for (std::uint8_t stage = 7U; stage <= 9U; ++stage)
+        state = surface_scalar_stage(state, stage, definition_.constants());
+    v[6] = noise.sample_2d_01(TerrainNoiseChannel::ridge, x + 7800.0, z - 9100.0);
+    for (std::uint8_t stage = 10U; stage <= 13U; ++stage)
+        state = surface_scalar_stage(state, stage, definition_.constants());
+    return state.result;
 }
 
 TerrainBiomeId NativeNaturalTerrainSource::natural_surface_biome(const std::int32_t x, const std::int32_t z) const {
     const double surface = natural_surface_y(x, z);
-    if (surface < definition_.constants().water_level_meters + 0.3) return TerrainBiomeId::ocean;
-    if (surface < definition_.constants().water_level_meters + 1.7) return TerrainBiomeId::beach;
+    switch (surface_water_threshold(surface, definition_.constants().water_level_meters)) {
+    case SurfaceWaterThreshold::ocean: return TerrainBiomeId::ocean;
+    case SurfaceWaterThreshold::beach: return TerrainBiomeId::beach;
+    case SurfaceWaterThreshold::regional: break;
+    }
     return regional_surface_biome(x, z);
 }
 
@@ -191,22 +253,21 @@ double NativeNaturalTerrainSource::underground_air_density(const WorldFloat32Pos
     const float x = static_cast<float>(static_cast<double>(position.x) / cell_size);
     const float y = static_cast<float>(static_cast<double>(position.y) / cell_size);
     const float z = static_cast<float>(static_cast<double>(position.z) / cell_size);
-    const double broad = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.44 + 4100.0, y * 0.58 - 2300.0, z * 0.44 + 1700.0);
-    const double local = noise.sample_3d_01(TerrainNoiseChannel::height, x * 0.82 - 6200.0, y * 0.76 + 910.0, z * 0.82 + 3600.0);
-    const double chamber = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.23 + 8100.0, y * 0.30 - 5400.0, z * 0.23 + 2600.0);
-    const double porous_a = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.92 - 7100.0, y * 0.46 + 1900.0, z * 0.74 + 800.0);
-    const double porous_b = noise.sample_3d_01(TerrainNoiseChannel::height, x * 0.62 + 2200.0, y * 0.68 - 3600.0, z - 4900.0);
-    const double porous = smoothstep(1.0 - std::abs(porous_a - porous_b), 0.44, 0.82);
-    const double cellular = script_hash01(definition_.raw_terrain_seed(), "underground-volume:", ":" + cell_text(source));
-    const double broad_strength = smoothstep(broad * 0.66 + local * 0.34, 0.48, 0.72);
-    const double chamber_strength = smoothstep(chamber, 0.48, 0.66);
-    const double porous_strength = porous * smoothstep(local, 0.52, 0.82);
-    const double chamber_depth = smoothstep(depth_cells, 8.0, 18.0) * (1.0 - smoothstep(depth_cells, 48.0, 64.0));
-    const double signal = clamp01(std::max({broad_strength, chamber_strength * 0.96, porous_strength * 0.90}) + chamber_depth * 0.10 + cellular * 0.025);
-    const double strata = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.38 - 1400.0, y * 0.62 + 2500.0, z * 0.38 - 3700.0);
-    const double raw_density = (lerp(0.50, 0.60, strata) - chamber_depth * 0.04 - signal) * cell_size * 4.25;
-    return native_underground_density_from_raw(
-        raw_density, cell_size, depth_cells, minimum_overburden_cells);
+    NaturalScalarStageState state{};
+    auto &v = state.values;
+    v[0] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.44 + 4100.0, y * 0.58 - 2300.0, z * 0.44 + 1700.0);
+    v[1] = noise.sample_3d_01(TerrainNoiseChannel::height, x * 0.82 - 6200.0, y * 0.76 + 910.0, z * 0.82 + 3600.0);
+    v[2] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.23 + 8100.0, y * 0.30 - 5400.0, z * 0.23 + 2600.0);
+    v[3] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.92 - 7100.0, y * 0.46 + 1900.0, z * 0.74 + 800.0);
+    v[4] = noise.sample_3d_01(TerrainNoiseChannel::height, x * 0.62 + 2200.0, y * 0.68 - 3600.0, z - 4900.0);
+    state = cave_scalar_stage(state, 22U, definition_.constants(), depth_cells, minimum_overburden_cells);
+    v[6] = script_hash01(definition_.raw_terrain_seed(), "underground-volume:", ":" + cell_text(source));
+    for (std::uint8_t stage = 23U; stage <= 26U; ++stage)
+        state = cave_scalar_stage(state, stage, definition_.constants(), depth_cells, minimum_overburden_cells);
+    v[5] = noise.sample_3d_01(TerrainNoiseChannel::ridge, x * 0.38 - 1400.0, y * 0.62 + 2500.0, z * 0.38 - 3700.0);
+    state = cave_scalar_stage(state, 27U, definition_.constants(), depth_cells, minimum_overburden_cells);
+    state = cave_scalar_stage(state, 28U, definition_.constants(), depth_cells, minimum_overburden_cells);
+    return state.result;
 }
 
 TerrainMaterialId NativeNaturalTerrainSource::solid_material_for(
@@ -289,7 +350,7 @@ NativeCellState NativeNaturalTerrainSource::sample_cell_state(const WorldCellCen
 }
 
 NaturalCursor::NaturalCursor() noexcept : stamp{}, context{}, status(EvalStatus::idle), reason(EvalReason::none),
-    request{}, key{}, biome{}, values{}, cells{}, source{}, result{}, stage(0), sample(0) {}
+    request{}, key{}, biome{}, scalars{}, cells{}, source{}, result{}, stage(0), sample(0) {}
 EvalStep begin_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
     const ContextIdentity context, const NaturalRequest request, WorkQuota &quota) noexcept {
     if (cursor.status != EvalStatus::idle && cursor.status != EvalStatus::drained)
@@ -397,7 +458,7 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
             if (cursor.stage == 1U && hash.value != cursor.context.legacy_hash) {
                 cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; break;
             }
-            if (cursor.stage == 21U) cursor.values[6] = static_cast<double>(hash.value % 100000U) / 100000.0;
+            if (cursor.stage == 21U) cursor.scalars.values[6] = static_cast<double>(hash.value % 100000U) / 100000.0;
             ++cursor.stage; continue;
         }
         if (cursor.stage == 3U || cursor.stage == 19U) {
@@ -405,7 +466,7 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
             const auto sampled = sample_noise(use, storage, cursor.context, arguments.channel,
                 arguments.x, arguments.y, arguments.z, cursor.stage == 19U, quota);
             if (sampled.step.status != EvalStatus::ready) { next = sampled.step.next_atomic_work; break; }
-            cursor.values[cursor.sample++] = sampled.value;
+            cursor.scalars.values[cursor.sample++] = sampled.value;
             if (cursor.sample == (cursor.stage == 3U ? 7U : 6U)) ++cursor.stage;
             continue;
         }
@@ -427,7 +488,6 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
         // absolute/overburden stages atomically before effects.
         next = natural_next_work(cursor);
         if (!quota.try_debit(next)) break;
-        auto &v = cursor.values;
         const auto &constants = definition.constants();
         switch (cursor.stage) {
         case 2:
@@ -448,29 +508,21 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
                 cursor.stage = 19U;
             }
             break;
-        case 4: v[3] = std::abs(v[3] - 0.5) * 2.0; v[7] = smoothstep(v[2], 0.42, 0.68); break;
-        case 5: v[8] = smoothstep(v[4], 0.58, 0.82); break;
-        case 6: v[9] = smoothstep(v[5], 0.74, 0.93) * v[8]; break;
-        case 7: v[10] = 6.0 + v[0] * 10.0 + (v[1] - 0.5) * 2.0; break;
-        case 8: v[11] = 7.2 + v[0] * 15.5 + std::pow(std::max(v[1] - 0.18, 0.0), 1.45) * 12.0; break;
-        case 9: v[12] = 10.0 + v[0] * 21.0 + std::pow(v[3], 1.92) * (16.0 + v[8] * 44.0) + std::pow(v[9], 2.05) * 34.0; break;
-        case 10: v[13] = (v[6] - 0.5) * lerp(0.28, 1.35, v[8]); break;
-        case 11: v[14] = constants.minimum_surface_meters + lerp(lerp(v[11], v[10], v[7]), v[12], v[8]) + v[13]; break;
-        case 12: v[15] = lerp(constants.cell_size_meters * 0.34, constants.cell_size_meters * 1.15, v[8]); break;
-        case 13:
-            cursor.result.value = std::clamp(std::round(v[14] / v[15]) * v[15], constants.minimum_surface_meters, constants.maximum_surface_meters);
-            cursor.status = EvalStatus::ready; break;
-        case 22: v[7] = smoothstep(1.0 - std::abs(v[3] - v[4]), 0.44, 0.82); break;
-        case 23: v[8] = smoothstep(v[0] * 0.66 + v[1] * 0.34, 0.48, 0.72); break;
-        case 24: v[9] = smoothstep(v[2], 0.48, 0.66); v[10] = v[7] * smoothstep(v[1], 0.52, 0.82); break;
-        case 25: v[11] = smoothstep(cursor.request.depth_cells, 8.0, 18.0)
-            * (1.0 - smoothstep(cursor.request.depth_cells, 48.0, 64.0)); break;
-        case 26: v[12] = clamp01(std::max({v[8], v[9] * 0.96, v[10] * 0.90}) + v[11] * 0.10 + v[6] * 0.025); break;
-        case 27: v[13] = (lerp(0.50, 0.60, v[5]) - v[11] * 0.04 - v[12]) * constants.cell_size_meters * 4.25; break;
-        case 28:
-            cursor.result.value = native_underground_density_from_raw(v[13], constants.cell_size_meters,
+        case 4: case 5: case 6: case 7: case 8: case 9: case 10: case 11: case 12: case 13:
+            cursor.scalars = surface_scalar_stage(cursor.scalars, cursor.stage, constants);
+            if (cursor.stage == 13U) {
+                cursor.result.value = cursor.scalars.result;
+                cursor.status = EvalStatus::ready;
+            }
+            break;
+        case 22: case 23: case 24: case 25: case 26: case 27: case 28:
+            cursor.scalars = cave_scalar_stage(cursor.scalars, cursor.stage, constants,
                 cursor.request.depth_cells, cursor.request.minimum_overburden_cells);
-            cursor.status = EvalStatus::ready; break;
+            if (cursor.stage == 28U) {
+                cursor.result.value = cursor.scalars.result;
+                cursor.status = EvalStatus::ready;
+            }
+            break;
         default: cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::phase; break;
         }
         // Branching stages set their own successor; scalar pipelines advance.

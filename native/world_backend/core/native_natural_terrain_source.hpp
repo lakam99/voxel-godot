@@ -4,6 +4,7 @@
 #include "world_source.hpp"
 #include "fast_noise_compat.hpp"
 
+#include <array>
 #include <cstdint>
 #include <stdexcept>
 
@@ -91,6 +92,9 @@ struct NaturalRequest {
     double minimum_overburden_cells = 3.0;
 };
 struct NumericNaturalSample { double value; NumericBiomeSample regional; };
+// Fixed scalar intermediates shared by the synchronous natural sampler and
+// its quota-driven cursor. No source, noise object or generated cell is owned.
+struct NaturalScalarStageState { std::array<double, 16> values; double result; };
 struct NaturalCursor {
     NaturalCursor() noexcept;
     EvaluatorStamp stamp;
@@ -100,7 +104,7 @@ struct NaturalCursor {
     NaturalRequest request;
     SeedKeyCursor key;
     BiomeCursor biome;
-    std::array<double, 16> values;
+    NaturalScalarStageState scalars;
     WorldFloat32Position cells;
     CellCoord source;
     NumericNaturalSample result;
