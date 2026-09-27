@@ -16,6 +16,188 @@
 
 using namespace voxel::world_backend;
 
+namespace voxel::world_backend {
+// Narrow overflow witness only; no production setter or oversized read.
+struct Sha256TestAccess {
+    static void set_accepted_bytes(Sha256State &state, std::uint64_t bytes) {
+        state.accepted_bytes_ = bytes;
+    }
+    static bool equal(const Sha256State &left, const Sha256State &right) {
+        return left.words_ == right.words_ && left.partial_ == right.partial_
+            && left.accepted_bytes_ == right.accepted_bytes_
+            && left.partial_bytes_ == right.partial_bytes_ && left.phase_ == right.phase_;
+    }
+};
+} // namespace voxel::world_backend
+
+VWB_TEST(resumable_sha256_published_vectors_and_partition_boundaries) {
+    struct Vector { const char *input; const char *digest; };
+    const std::array<Vector, 3> vectors{{
+        {"", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"abc", "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"},
+        {"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+         "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"},
+    }};
+    for (const auto &vector : vectors) {
+        const std::string input(vector.input);
+        Sha256State state;
+        std::size_t offset = 0U;
+        while (offset < input.size()) {
+            const auto step = state.update_step(
+                reinterpret_cast<const std::uint8_t *>(input.data()) + offset,
+                input.size() - offset, 1U, 1U);
+            VWB_EXPECT_EQ(1U, step.consumed_bytes);
+            VWB_EXPECT(step.compressed_blocks <= 1U);
+            offset += step.consumed_bytes;
+        }
+        auto finish = state.finish_step(1U);
+        VWB_EXPECT_EQ(1U, finish.compressed_blocks);
+        if (!finish.digest_ready) {
+            finish = state.finish_step(1U);
+            VWB_EXPECT_EQ(1U, finish.compressed_blocks);
+        }
+        VWB_EXPECT(finish.digest_ready);
+        VWB_EXPECT_EQ(std::string(vector.digest), sha256_hex(state.digest()));
+    }
+    constexpr std::array<std::size_t, 10> sizes{{55U, 56U, 63U, 64U, 65U,
+        119U, 120U, 127U, 128U, 129U}};
+    for (const auto size : sizes) {
+        std::vector<std::uint8_t> bytes(size);
+        for (std::size_t index = 0U; index < size; ++index)
+            bytes[index] = static_cast<std::uint8_t>(index * 29U + 7U);
+        const auto expected = sha256(bytes);
+        // Every partition crosses the partial-buffer/padding boundaries.
+        for (std::size_t split = 0U; split <= size; ++split) {
+            Sha256State state;
+            const auto first = state.update_step(bytes.data(), split, split, 3U);
+            VWB_EXPECT(first.input_complete);
+            VWB_EXPECT_EQ(split, first.consumed_bytes);
+            const auto second = state.update_step(bytes.data() + split,
+                size - split, size - split, 3U);
+            VWB_EXPECT(second.input_complete);
+            VWB_EXPECT_EQ(size - split, second.consumed_bytes);
+            const auto final = state.finish_step(2U);
+            VWB_EXPECT(final.digest_ready);
+            VWB_EXPECT_EQ(size % 64U < 56U ? 1U : 2U, final.compressed_blocks);
+            VWB_EXPECT_EQ(expected, state.digest());
+        }
+    }
+}
+
+VWB_TEST(resumable_sha256_quotas_receipts_and_no_work_atomicity) {
+    const std::array<std::uint8_t, 129> bytes{};
+    Sha256State state;
+    const auto initial = state;
+    const auto empty = state.update_step(nullptr, 0U, 0U, 0U);
+    VWB_EXPECT(empty.input_complete);
+    VWB_EXPECT_EQ(0U, empty.consumed_bytes);
+    VWB_EXPECT_EQ(0U, empty.compressed_blocks);
+    const auto zero = state.update_step(bytes.data(), bytes.size(), 0U, 1U);
+    VWB_EXPECT(!zero.input_complete);
+    VWB_EXPECT(Sha256TestAccess::equal(initial, state));
+    const auto buffered = state.update_step(bytes.data(), bytes.size(), bytes.size(), 0U);
+    VWB_EXPECT_EQ(63U, buffered.consumed_bytes);
+    VWB_EXPECT_EQ(0U, buffered.compressed_blocks);
+    VWB_EXPECT(!buffered.input_complete);
+    const auto full_partial = state;
+    const auto blocked = state.update_step(bytes.data() + 63U, 66U, 66U, 0U);
+    VWB_EXPECT_EQ(0U, blocked.consumed_bytes);
+    VWB_EXPECT_EQ(0U, blocked.compressed_blocks);
+    VWB_EXPECT(Sha256TestAccess::equal(full_partial, state));
+    const auto compressed = state.update_step(bytes.data() + 63U, 66U, 66U, 1U);
+    VWB_EXPECT_EQ(64U, compressed.consumed_bytes); // compress one, then buffer63
+    VWB_EXPECT_EQ(1U, compressed.compressed_blocks);
+    VWB_EXPECT(!compressed.input_complete);
+    const auto tail = state.update_step(bytes.data() + 127U, 2U, 1U, 1U);
+    VWB_EXPECT_EQ(1U, tail.consumed_bytes);
+    VWB_EXPECT_EQ(1U, tail.compressed_blocks);
+    VWB_EXPECT(!tail.input_complete);
+    const auto last = state.update_step(bytes.data() + 128U, 1U, 1U, 0U);
+    VWB_EXPECT(last.input_complete);
+    VWB_EXPECT_EQ(0U, last.compressed_blocks);
+    const auto before_finish = state;
+    const auto none = state.finish_step(0U);
+    VWB_EXPECT(!none.digest_ready);
+    VWB_EXPECT_EQ(0U, none.compressed_blocks);
+    VWB_EXPECT(Sha256TestAccess::equal(before_finish, state));
+    VWB_EXPECT_THROW(std::logic_error, state.digest());
+    VWB_EXPECT(state.finish_step(1U).digest_ready);
+    VWB_EXPECT_EQ(sha256(bytes.data(), bytes.size()), state.digest());
+    const auto finished = state;
+    const auto again = state.finish_step(0U);
+    VWB_EXPECT(again.digest_ready);
+    VWB_EXPECT_EQ(0U, again.compressed_blocks);
+    VWB_EXPECT(Sha256TestAccess::equal(finished, state));
+    VWB_EXPECT_EQ(finished.digest(), state.digest());
+}
+
+VWB_TEST(resumable_sha256_pending_padding_copy_and_reset) {
+    const std::array<std::uint8_t, 56> bytes{};
+    Sha256State state;
+    state.update_step(bytes.data(), bytes.size(), bytes.size(), 0U);
+    const auto first = state.finish_step(1U);
+    VWB_EXPECT_EQ(1U, first.compressed_blocks);
+    VWB_EXPECT(!first.digest_ready);
+    const auto pending = state;
+    VWB_EXPECT_THROW(std::logic_error, state.digest());
+    VWB_EXPECT_THROW(std::logic_error, state.update_step(nullptr, 0U, 0U, 0U));
+    VWB_EXPECT_THROW(std::logic_error, state.update_step(nullptr, 1U, 0U, 0U));
+    VWB_EXPECT_EQ(0U, state.finish_step(0U).compressed_blocks);
+    VWB_EXPECT(Sha256TestAccess::equal(pending, state));
+    auto copy = state;
+    const auto copied_finish = copy.finish_step(1U);
+    VWB_EXPECT(copied_finish.digest_ready);
+    VWB_EXPECT_EQ(1U, copied_finish.compressed_blocks);
+    const auto original_finish = state.finish_step(2U);
+    VWB_EXPECT(original_finish.digest_ready);
+    VWB_EXPECT_EQ(1U, original_finish.compressed_blocks);
+    VWB_EXPECT_EQ(copy.digest(), state.digest());
+    VWB_EXPECT_EQ(sha256(bytes.data(), bytes.size()), state.digest());
+    VWB_EXPECT_THROW(std::logic_error, state.update_step(nullptr, 0U, 0U, 0U));
+    VWB_EXPECT_THROW(std::logic_error, state.update_step(nullptr, 1U, 1U, 1U));
+    VWB_EXPECT_THROW(std::logic_error, state.update_step(bytes.data(),
+        std::numeric_limits<std::size_t>::max(), 0U, 0U));
+    for (auto restarting : {Sha256State{}, pending, state}) {
+        restarting.reset();
+        VWB_EXPECT(Sha256TestAccess::equal(Sha256State{}, restarting));
+        VWB_EXPECT_THROW(std::logic_error, restarting.digest());
+        const auto finish = restarting.finish_step(1U);
+        VWB_EXPECT(finish.digest_ready);
+        VWB_EXPECT_EQ(1U, finish.compressed_blocks);
+        VWB_EXPECT_EQ(sha256(nullptr, 0U), restarting.digest());
+    }
+    Sha256State accepting;
+    accepting.update_step(bytes.data(), 7U, 7U, 0U);
+    accepting.reset();
+    VWB_EXPECT(Sha256TestAccess::equal(Sha256State{}, accepting));
+}
+
+VWB_TEST(resumable_sha256_validation_precedence_and_overflow_are_atomic) {
+    const std::uint8_t byte = 0U;
+    Sha256State state;
+    const auto original = state;
+    VWB_EXPECT_THROW(std::invalid_argument, state.update_step(nullptr, 1U, 0U, 0U));
+    VWB_EXPECT_THROW(std::invalid_argument, state.update_step(nullptr,
+        std::numeric_limits<std::size_t>::max(), 0U, 0U));
+    VWB_EXPECT_THROW(std::length_error, state.update_step(&byte,
+        std::numeric_limits<std::size_t>::max(), 0U, 0U));
+    VWB_EXPECT(Sha256TestAccess::equal(original, state));
+    constexpr auto maximum = std::numeric_limits<std::uint64_t>::max() >> 3U;
+    Sha256TestAccess::set_accepted_bytes(state, maximum - 1U);
+    const auto almost_full = state;
+    VWB_EXPECT_THROW(std::length_error, state.update_step(&byte, 2U, 0U, 0U));
+    VWB_EXPECT_THROW(std::length_error, state.update_step(&byte, 2U, 1U, 1U));
+    VWB_EXPECT(Sha256TestAccess::equal(almost_full, state));
+    const auto limit = state.update_step(&byte, 1U, 1U, 0U);
+    VWB_EXPECT(limit.input_complete);
+    const auto at_limit = state;
+    VWB_EXPECT_THROW(std::length_error, state.update_step(&byte, 1U, 0U, 0U));
+    VWB_EXPECT(Sha256TestAccess::equal(at_limit, state));
+    VWB_EXPECT(state.update_step(nullptr, 0U, 0U, 0U).input_complete);
+    state.reset();
+    VWB_EXPECT(Sha256TestAccess::equal(original, state));
+}
+
 VWB_TEST(coordinates_use_mathematical_floor_and_euclidean_modulo) {
     VWB_EXPECT_EQ(0, *floor_divide(0, 16));
     VWB_EXPECT_EQ(0, *floor_divide(15, 16));
