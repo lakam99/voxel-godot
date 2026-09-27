@@ -51,6 +51,8 @@
 #define FASTNOISELITE_H
 
 #include <cmath>
+#include <cstdint>
+#include <limits>
 
 namespace fastnoiselite {
 
@@ -490,21 +492,29 @@ private:
     static const int PrimeY = 1136930381;
     static const int PrimeZ = 1720413743;
 
+    // Preserve FastNoiseLite's modulo-2^32 hash lattice without signed
+    // overflow or an out-of-range unsigned-to-signed conversion.
+    static int WrapSigned(std::uint32_t bits)
+    {
+        static_assert(sizeof(int) == sizeof(std::uint32_t), "FastNoiseLite requires 32-bit int");
+        static_assert(std::numeric_limits<int>::min() == (-2147483647 - 1), "FastNoiseLite requires int32 range");
+        return bits <= 0x7fffffffu ? static_cast<int>(bits)
+            : static_cast<int>(static_cast<std::int64_t>(bits) - 0x100000000ll);
+    }
+
+    static int WrapAdd(int a, int b) { return WrapSigned(static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b)); }
+    static int WrapSub(int a, int b) { return WrapSigned(static_cast<std::uint32_t>(a) - static_cast<std::uint32_t>(b)); }
+    static int WrapMul(int a, int b) { return WrapSigned(static_cast<std::uint32_t>(a) * static_cast<std::uint32_t>(b)); }
+
     static int Hash(int seed, int xPrimed, int yPrimed)
     {
-        int hash = seed ^ xPrimed ^ yPrimed;
-
-        hash *= 0x27d4eb2d;
-        return hash;
+        return WrapMul(seed ^ xPrimed ^ yPrimed, 0x27d4eb2d);
     }
 
 
     static int Hash(int seed, int xPrimed, int yPrimed, int zPrimed)
     {
-        int hash = seed ^ xPrimed ^ yPrimed ^ zPrimed;
-
-        hash *= 0x27d4eb2d;
-        return hash;
+        return WrapMul(seed ^ xPrimed ^ yPrimed ^ zPrimed, 0x27d4eb2d);
     }
 
 
@@ -512,8 +522,8 @@ private:
     {
         int hash = Hash(seed, xPrimed, yPrimed);
 
-        hash *= hash;
-        hash ^= hash << 19;
+        hash = WrapMul(hash, hash);
+        hash = WrapSigned(static_cast<std::uint32_t>(hash) ^ (static_cast<std::uint32_t>(hash) << 19));
         return hash * (1 / 2147483648.0f);
     }
 
@@ -522,8 +532,8 @@ private:
     {
         int hash = Hash(seed, xPrimed, yPrimed, zPrimed);
 
-        hash *= hash;
-        hash ^= hash << 19;
+        hash = WrapMul(hash, hash);
+        hash = WrapSigned(static_cast<std::uint32_t>(hash) ^ (static_cast<std::uint32_t>(hash) << 19));
         return hash * (1 / 2147483648.0f);
     }
 
@@ -852,7 +862,8 @@ private:
 
         for (int i = 0; i < mOctaves; i++)
         {
-            float noise = GenNoiseSingle(seed++, x, y);
+            float noise = GenNoiseSingle(seed, x, y);
+            seed = WrapAdd(seed, 1);
             sum += noise * amp;
             amp *= Lerp(1.0f, FastMin(noise + 1, 2) * 0.5f, mWeightedStrength);
 
@@ -873,7 +884,8 @@ private:
 
         for (int i = 0; i < mOctaves; i++)
         {
-            float noise = GenNoiseSingle(seed++, x, y, z);
+            float noise = GenNoiseSingle(seed, x, y, z);
+            seed = WrapAdd(seed, 1);
             sum += noise * amp;
             amp *= Lerp(1.0f, (noise + 1) * 0.5f, mWeightedStrength);
 
@@ -898,7 +910,8 @@ private:
 
         for (int i = 0; i < mOctaves; i++)
         {
-            float noise = FastAbs(GenNoiseSingle(seed++, x, y));
+            float noise = FastAbs(GenNoiseSingle(seed, x, y));
+            seed = WrapAdd(seed, 1);
             sum += (noise * -2 + 1) * amp;
             amp *= Lerp(1.0f, 1 - noise, mWeightedStrength);
 
@@ -919,7 +932,8 @@ private:
 
         for (int i = 0; i < mOctaves; i++)
         {
-            float noise = FastAbs(GenNoiseSingle(seed++, x, y, z));
+            float noise = FastAbs(GenNoiseSingle(seed, x, y, z));
+            seed = WrapAdd(seed, 1);
             sum += (noise * -2 + 1) * amp;
             amp *= Lerp(1.0f, 1 - noise, mWeightedStrength);
 
@@ -944,7 +958,8 @@ private:
 
         for (int i = 0; i < mOctaves; i++)
         {
-            float noise = PingPong((GenNoiseSingle(seed++, x, y) + 1) * mPingPongStrength);
+            float noise = PingPong((GenNoiseSingle(seed, x, y) + 1) * mPingPongStrength);
+            seed = WrapAdd(seed, 1);
             sum += (noise - 0.5f) * 2 * amp;
             amp *= Lerp(1.0f, noise, mWeightedStrength);
 
@@ -965,7 +980,8 @@ private:
 
         for (int i = 0; i < mOctaves; i++)
         {
-            float noise = PingPong((GenNoiseSingle(seed++, x, y, z) + 1) * mPingPongStrength);
+            float noise = PingPong((GenNoiseSingle(seed, x, y, z) + 1) * mPingPongStrength);
+            seed = WrapAdd(seed, 1);
             sum += (noise - 0.5f) * 2 * amp;
             amp *= Lerp(1.0f, noise, mWeightedStrength);
 
@@ -1005,8 +1021,8 @@ private:
         float x0 = (float)(xi - t);
         float y0 = (float)(yi - t);
 
-        i *= PrimeX;
-        j *= PrimeY;
+        i = WrapMul(i, PrimeX);
+        j = WrapMul(j, PrimeY);
 
         float n0, n1, n2;
 
@@ -1023,7 +1039,7 @@ private:
         {
             float x2 = x0 + (2 * (float)G2 - 1);
             float y2 = y0 + (2 * (float)G2 - 1);
-            n2 = (c * c) * (c * c) * GradCoord(seed, i + PrimeX, j + PrimeY, x2, y2);
+            n2 = (c * c) * (c * c) * GradCoord(seed, WrapAdd(i, PrimeX), WrapAdd(j, PrimeY), x2, y2);
         }
 
         if (y0 > x0)
@@ -1034,7 +1050,7 @@ private:
             if (b <= 0) n1 = 0;
             else
             {
-                n1 = (b * b) * (b * b) * GradCoord(seed, i, j + PrimeY, x1, y1);
+                n1 = (b * b) * (b * b) * GradCoord(seed, i, WrapAdd(j, PrimeY), x1, y1);
             }
         }
         else
@@ -1045,7 +1061,7 @@ private:
             if (b <= 0) n1 = 0;
             else
             {
-                n1 = (b * b) * (b * b) * GradCoord(seed, i + PrimeX, j, x1, y1);
+                n1 = (b * b) * (b * b) * GradCoord(seed, WrapAdd(i, PrimeX), j, x1, y1);
             }
         }
 
@@ -1079,9 +1095,9 @@ private:
         float ay0 = yNSign * -y0;
         float az0 = zNSign * -z0;
 
-        i *= PrimeX;
-        j *= PrimeY;
-        k *= PrimeZ;
+        i = WrapMul(i, PrimeX);
+        j = WrapMul(j, PrimeY);
+        k = WrapMul(k, PrimeZ);
 
         float value = 0;
         float a = (0.6f - x0 * x0) - (y0 * y0 + z0 * z0);
@@ -1105,19 +1121,19 @@ private:
             {
                 x1 += xNSign;
                 b -= xNSign * 2 * x1;
-                i1 -= xNSign * PrimeX;
+                i1 = WrapSub(i1, WrapMul(xNSign, PrimeX));
             }
             else if (ay0 > ax0 && ay0 >= az0)
             {
                 y1 += yNSign;
                 b -= yNSign * 2 * y1;
-                j1 -= yNSign * PrimeY;
+                j1 = WrapSub(j1, WrapMul(yNSign, PrimeY));
             }
             else
             {
                 z1 += zNSign;
                 b -= zNSign * 2 * z1;
-                k1 -= zNSign * PrimeZ;
+                k1 = WrapSub(k1, WrapMul(zNSign, PrimeZ));
             }
 
             if (b > 0)
@@ -1137,9 +1153,9 @@ private:
 
             a += (0.75f - ax0) - (ay0 + az0);
 
-            i += (xNSign >> 1) & PrimeX;
-            j += (yNSign >> 1) & PrimeY;
-            k += (zNSign >> 1) & PrimeZ;
+            i = WrapAdd(i, xNSign < 0 ? PrimeX : 0);
+            j = WrapAdd(j, yNSign < 0 ? PrimeY : 0);
+            k = WrapAdd(k, zNSign < 0 ? PrimeZ : 0);
 
             xNSign = -xNSign;
             yNSign = -yNSign;

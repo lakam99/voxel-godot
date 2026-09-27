@@ -164,6 +164,7 @@
   ],
   "testSources": [
     "tests/biome_region_field_tests.cpp",
+    "tests/fast_noise_lite_overflow_tests.cpp",
     "tests/native_biome_environment_catalog_tests.cpp",
     "tests/godot_pcg_compat_tests.cpp",
     "tests/native_effective_terrain_batch_tests.cpp",
