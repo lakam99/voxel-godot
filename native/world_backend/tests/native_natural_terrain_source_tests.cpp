@@ -180,10 +180,30 @@ VWB_TEST(shared_natural_scalar_stages_match_synchronous_source_across_quota_part
     }
     // The synchronous height override selects water biomes; the cursor's
     // regional_biome component deliberately remains regional-only.
+    const auto with_water_level = [&](const double level) {
+        WorldSourceDescriptor descriptor;
+        descriptor.raw_terrain_seed = definition.raw_terrain_seed();
+        descriptor.admitted_biome_seed = definition.admitted_biome_seed();
+        descriptor.revisions = definition.revisions();
+        descriptor.constants = definition.constants();
+        descriptor.constants.water_level_meters = level;
+        return WorldSourceDefinition(std::move(descriptor));
+    };
+    // The established high-water golden guarantees the surface at (0, 0) is
+    // below the ocean threshold without assuming the default sea level does.
+    const NativeNaturalTerrainSource ocean(with_water_level(1000.0));
     VWB_EXPECT_EQ(TerrainBiomeId::ocean,
-        synchronous.sample_surface_biome({0, 0, WorldQueryIntent::gameplay}));
+        ocean.sample_surface_biome({0, 0, WorldQueryIntent::gameplay}));
+    // Keep the same coast coordinate, with its water level one meter below
+    // the measured surface: 0.3 < surface - water < 1.7 is strictly beach.
+    constexpr WorldSurfaceColumnQuery coast{-30208, -65536, WorldQueryIntent::gameplay};
+    const double coast_surface = synchronous.sample_surface_column(coast).reference_surface_y;
+    const NativeNaturalTerrainSource beach(with_water_level(coast_surface - 1.0));
+    VWB_EXPECT_EQ(coast_surface, beach.sample_surface_column(coast).reference_surface_y);
+    VWB_EXPECT(coast_surface - beach.definition().constants().water_level_meters > 0.3);
+    VWB_EXPECT(coast_surface - beach.definition().constants().water_level_meters < 1.7);
     VWB_EXPECT_EQ(TerrainBiomeId::beach,
-        synchronous.sample_surface_biome({-30208, -65536, WorldQueryIntent::gameplay}));
+        beach.sample_surface_biome(coast));
 }
 
 VWB_TEST(borrowed_natural_zero_quota_reentry_cancel_and_sticky_context_contract) {
