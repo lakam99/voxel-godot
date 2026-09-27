@@ -287,4 +287,197 @@ NativeCellState NativeNaturalTerrainSource::sample_cell_state(const WorldCellCen
     NativeCellStateInput state; state.cell = query.coordinate; state.material = material; state.biome = biome; state.solid = solid; state.density = density; state.fluid = fluid; state.light = {sky, 0}; state.generated = true; state.edited = false;
     return make_native_cell_state(state);
 }
+
+NaturalCursor::NaturalCursor() noexcept : stamp{}, context{}, status(EvalStatus::idle), reason(EvalReason::none),
+    request{}, key{}, biome{}, values{}, cells{}, source{}, result{}, stage(0), sample(0) {}
+EvalStep begin_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
+    const ContextIdentity context, const NaturalRequest request, WorkQuota &quota) noexcept {
+    if (cursor.status != EvalStatus::idle && cursor.status != EvalStatus::drained)
+        return {EvalStatus::rejected, EvalReason::phase, 0U, 0U};
+    if (!(context.stamp == stamp) || context.generation == 0U) {
+        if (quota.remaining() != 0U) { cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; }
+        return {EvalStatus::rejected, EvalReason::identity, 0U, 0U};
+    }
+    if (static_cast<std::uint8_t>(request.component) > static_cast<std::uint8_t>(NaturalComponent::underground_density)
+        || !std::isfinite(request.position.x) || !std::isfinite(request.position.y) || !std::isfinite(request.position.z)
+        || !std::isfinite(request.depth_cells) || !std::isfinite(request.minimum_overburden_cells))
+        return {EvalStatus::rejected, EvalReason::input, 0U, 0U};
+    if (!quota.try_debit(1U)) return {EvalStatus::pending, EvalReason::quota, 0U, 1U};
+    cursor = NaturalCursor{}; cursor.stamp = stamp; cursor.context = context; cursor.request = request;
+    cursor.status = EvalStatus::pending;
+    return {cursor.status, EvalReason::none, 1U, 1U};
+}
+namespace {
+struct NoiseArguments { TerrainNoiseChannel channel; double x; double y; double z; };
+NoiseArguments surface_arguments(const NaturalCursor &cursor) noexcept {
+    const double x = cursor.request.x, z = cursor.request.z;
+    switch (cursor.sample) {
+    case 0: return {TerrainNoiseChannel::height, x, 0, z};
+    case 1: return {TerrainNoiseChannel::height, x + 12000.0, 0, z - 12200.0};
+    case 2: return {TerrainNoiseChannel::flat, x - 8400.0, 0, z + 7200.0};
+    case 3: return {TerrainNoiseChannel::ridge, x - 200.0, 0, z + 510.0};
+    case 4: return {TerrainNoiseChannel::height, x + 1800.0, 0, z - 1500.0};
+    case 5: return {TerrainNoiseChannel::ridge, x - 3900.0, 0, z + 2600.0};
+    default: return {TerrainNoiseChannel::ridge, x + 7800.0, 0, z - 9100.0};
+    }
+}
+NoiseArguments cave_arguments(const NaturalCursor &cursor) noexcept {
+    const float x = cursor.cells.x, y = cursor.cells.y, z = cursor.cells.z;
+    switch (cursor.sample) {
+    case 0: return {TerrainNoiseChannel::ridge, x * 0.44 + 4100.0, y * 0.58 - 2300.0, z * 0.44 + 1700.0};
+    case 1: return {TerrainNoiseChannel::height, x * 0.82 - 6200.0, y * 0.76 + 910.0, z * 0.82 + 3600.0};
+    case 2: return {TerrainNoiseChannel::ridge, x * 0.23 + 8100.0, y * 0.30 - 5400.0, z * 0.23 + 2600.0};
+    case 3: return {TerrainNoiseChannel::ridge, x * 0.92 - 7100.0, y * 0.46 + 1900.0, z * 0.74 + 800.0};
+    case 4: return {TerrainNoiseChannel::height, x * 0.62 + 2200.0, y * 0.68 - 3600.0, z - 4900.0};
+    default: return {TerrainNoiseChannel::ridge, x * 0.38 - 1400.0, y * 0.62 + 2500.0, z * 0.38 - 3700.0};
+    }
+}
+bool cave_cell_domain(const WorldFloat32Position position, const double cell_size) noexcept {
+    const double components[3] = {position.x / cell_size, position.y / cell_size, position.z / cell_size};
+    for (const auto component : components)
+        if (!std::isfinite(component) || component < static_cast<double>(std::numeric_limits<std::int32_t>::min())
+            || component >= static_cast<double>(std::numeric_limits<std::int32_t>::max())) return false;
+    return true;
+}
+std::size_t natural_next_work(const NaturalCursor &cursor) noexcept {
+    if (cursor.stage == 3U || cursor.stage == 19U) {
+        const auto arguments = cursor.stage == 3U ? surface_arguments(cursor) : cave_arguments(cursor);
+        return static_cast<std::size_t>(terrain_noise_configurations()[static_cast<std::size_t>(arguments.channel)].octaves);
+    }
+    if (cursor.stage == 4U || cursor.stage == 9U || cursor.stage == 22U
+        || cursor.stage == 24U || cursor.stage == 25U) return 2U;
+    if (cursor.stage == 28U && cursor.request.depth_cells > cursor.request.minimum_overburden_cells) return 3U;
+    return 1U;
+}
+}
+NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
+    const WorldSourceDefinition &definition, NoiseCursor &noise,
+    const StorageSpan storage, WorkQuota &quota) noexcept {
+    // Reentry has precedence over sticky identity rejection; the active outer
+    // evaluation must remain unchanged even when reentrant arguments are bad.
+    if (noise.in_use()) return {{EvalStatus::rejected, EvalReason::in_use, 0U, 0U}, {}};
+    if (!(cursor.stamp == stamp) || stamp.definition_digest != definition.physical_content_identity().digest) {
+        if (quota.remaining() != 0U) { cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; }
+        return {{EvalStatus::rejected, EvalReason::identity, 0U, 0U}, {}};
+    }
+    const auto validated = validate_noise(noise, storage, cursor.context, quota);
+    if (validated.status != EvalStatus::ready) {
+        if (validated.status == EvalStatus::rejected && quota.remaining() != 0U && validated.reason != EvalReason::in_use) {
+            cursor.status = EvalStatus::rejected; cursor.reason = validated.reason;
+        }
+        return {validated, {}};
+    }
+    if (cursor.status != EvalStatus::pending) return {{cursor.status, cursor.reason, 0U, 0U}, cursor.result};
+    if (quota.remaining() == 0U) return {{EvalStatus::pending, EvalReason::quota, 0U, natural_next_work(cursor)}, {}};
+    NoiseUse use(noise);
+    if (!use.acquired()) return {{EvalStatus::rejected, EvalReason::in_use, 0U, 0U}, {}};
+    const auto before = quota.remaining();
+    std::size_t next = 1U;
+    while (quota.remaining() != 0U && cursor.status == EvalStatus::pending) {
+        if (cursor.stage == 0U || cursor.stage == 20U) {
+            const auto begun = begin_seed_key(cursor.key, stamp,
+                cursor.stage == 0U ? SeedKeyKind::raw : SeedKeyKind::underground,
+                cursor.source.x, cursor.source.y, cursor.source.z, quota);
+            if (begun.consumed_work == 0U) break;
+            ++cursor.stage; continue;
+        }
+        if (cursor.stage == 1U || cursor.stage == 21U) {
+            const auto &seed = definition.raw_terrain_seed().code_points;
+            const auto hash = advance_seed_key(cursor.key, stamp, {seed.data(), seed.size()}, quota);
+            if (hash.step.status == EvalStatus::rejected) { cursor.status = hash.step.status; cursor.reason = hash.step.reason; break; }
+            if (hash.step.status != EvalStatus::ready) break;
+            if (cursor.stage == 1U && hash.value != cursor.context.legacy_hash) {
+                cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; break;
+            }
+            if (cursor.stage == 21U) cursor.values[6] = static_cast<double>(hash.value % 100000U) / 100000.0;
+            ++cursor.stage; continue;
+        }
+        if (cursor.stage == 3U || cursor.stage == 19U) {
+            const auto arguments = cursor.stage == 3U ? surface_arguments(cursor) : cave_arguments(cursor);
+            const auto sampled = sample_noise(use, storage, cursor.context, arguments.channel,
+                arguments.x, arguments.y, arguments.z, cursor.stage == 19U, quota);
+            if (sampled.step.status != EvalStatus::ready) { next = sampled.step.next_atomic_work; break; }
+            cursor.values[cursor.sample++] = sampled.value;
+            if (cursor.sample == (cursor.stage == 3U ? 7U : 6U)) ++cursor.stage;
+            continue;
+        }
+        if (cursor.stage == 30U) {
+            const auto position = regional_biome_position(cursor.request.x, cursor.request.z,
+                definition.constants().cell_size_meters);
+            const auto begun = begin_biome(cursor.biome, stamp, {position.x, position.z}, quota);
+            if (begun.status == EvalStatus::rejected) { cursor.status = begun.status; cursor.reason = begun.reason; break; }
+            if (begun.consumed_work == 0U) break;
+            ++cursor.stage; continue;
+        }
+        if (cursor.stage == 31U) {
+            const auto regional = advance_biome(cursor.biome, stamp, definition, quota);
+            if (regional.step.status == EvalStatus::ready) { cursor.result.regional = regional.value; cursor.status = EvalStatus::ready; }
+            else if (regional.step.status == EvalStatus::rejected) { cursor.status = regional.step.status; cursor.reason = regional.step.reason; }
+            break;
+        }
+        // Composite scalar leaves debit all their constituent pow/smooth/
+        // absolute/overburden stages atomically before effects.
+        next = natural_next_work(cursor);
+        if (!quota.try_debit(next)) break;
+        auto &v = cursor.values;
+        const auto &constants = definition.constants();
+        switch (cursor.stage) {
+        case 2:
+            if (cursor.request.component == NaturalComponent::regional_biome) cursor.stage = 30U;
+            else if (cursor.request.component == NaturalComponent::surface_height) cursor.stage = 3U;
+            else {
+                if (!cave_cell_domain(cursor.request.position, constants.cell_size_meters)) {
+                    cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::input; break;
+                }
+                if (static_cast<double>(cursor.request.position.y)
+                    <= static_cast<double>(constants.world_bottom_cell_y + 2) * constants.cell_size_meters) {
+                    cursor.result.value = constants.cell_size_meters; cursor.status = EvalStatus::ready; break;
+                }
+                cursor.source = source_cell(cursor.request.position, constants.cell_size_meters);
+                cursor.cells = {static_cast<float>(static_cast<double>(cursor.request.position.x) / constants.cell_size_meters),
+                    static_cast<float>(static_cast<double>(cursor.request.position.y) / constants.cell_size_meters),
+                    static_cast<float>(static_cast<double>(cursor.request.position.z) / constants.cell_size_meters)};
+                cursor.stage = 19U;
+            }
+            break;
+        case 4: v[3] = std::abs(v[3] - 0.5) * 2.0; v[7] = smoothstep(v[2], 0.42, 0.68); break;
+        case 5: v[8] = smoothstep(v[4], 0.58, 0.82); break;
+        case 6: v[9] = smoothstep(v[5], 0.74, 0.93) * v[8]; break;
+        case 7: v[10] = 6.0 + v[0] * 10.0 + (v[1] - 0.5) * 2.0; break;
+        case 8: v[11] = 7.2 + v[0] * 15.5 + std::pow(std::max(v[1] - 0.18, 0.0), 1.45) * 12.0; break;
+        case 9: v[12] = 10.0 + v[0] * 21.0 + std::pow(v[3], 1.92) * (16.0 + v[8] * 44.0) + std::pow(v[9], 2.05) * 34.0; break;
+        case 10: v[13] = (v[6] - 0.5) * lerp(0.28, 1.35, v[8]); break;
+        case 11: v[14] = constants.minimum_surface_meters + lerp(lerp(v[11], v[10], v[7]), v[12], v[8]) + v[13]; break;
+        case 12: v[15] = lerp(constants.cell_size_meters * 0.34, constants.cell_size_meters * 1.15, v[8]); break;
+        case 13:
+            cursor.result.value = std::clamp(std::round(v[14] / v[15]) * v[15], constants.minimum_surface_meters, constants.maximum_surface_meters);
+            cursor.status = EvalStatus::ready; break;
+        case 22: v[7] = smoothstep(1.0 - std::abs(v[3] - v[4]), 0.44, 0.82); break;
+        case 23: v[8] = smoothstep(v[0] * 0.66 + v[1] * 0.34, 0.48, 0.72); break;
+        case 24: v[9] = smoothstep(v[2], 0.48, 0.66); v[10] = v[7] * smoothstep(v[1], 0.52, 0.82); break;
+        case 25: v[11] = smoothstep(cursor.request.depth_cells, 8.0, 18.0)
+            * (1.0 - smoothstep(cursor.request.depth_cells, 48.0, 64.0)); break;
+        case 26: v[12] = clamp01(std::max({v[8], v[9] * 0.96, v[10] * 0.90}) + v[11] * 0.10 + v[6] * 0.025); break;
+        case 27: v[13] = (lerp(0.50, 0.60, v[5]) - v[11] * 0.04 - v[12]) * constants.cell_size_meters * 4.25; break;
+        case 28:
+            cursor.result.value = native_underground_density_from_raw(v[13], constants.cell_size_meters,
+                cursor.request.depth_cells, cursor.request.minimum_overburden_cells);
+            cursor.status = EvalStatus::ready; break;
+        default: cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::phase; break;
+        }
+        // Branching stages set their own successor; scalar pipelines advance.
+        if ((cursor.stage >= 4U && cursor.stage <= 12U) || (cursor.stage >= 22U && cursor.stage <= 27U)) ++cursor.stage;
+    }
+    if (cursor.status == EvalStatus::pending) next = natural_next_work(cursor);
+    return {{cursor.status, cursor.status == EvalStatus::pending ? EvalReason::quota : cursor.reason,
+        before - quota.remaining(), cursor.status == EvalStatus::pending ? next : 0U}, cursor.result};
+}
+ControlResult cancel_natural(NaturalCursor &cursor) noexcept {
+    cursor.status = EvalStatus::cancelled; (void)cancel_hash(cursor.key.hash); (void)cancel_biome(cursor.biome);
+    return {cursor.status, EvalReason::none, 1U};
+}
+ControlResult reset_natural(NaturalCursor &cursor) noexcept {
+    if (cursor.status == EvalStatus::pending) return {EvalStatus::rejected, EvalReason::phase, 1U};
+    cursor = NaturalCursor{}; return {cursor.status, EvalReason::none, 1U};
+}
 } // namespace voxel::world_backend

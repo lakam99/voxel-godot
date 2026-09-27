@@ -84,6 +84,82 @@ VWB_TEST(resumable_sha256_published_vectors_and_partition_boundaries) {
     }
 }
 
+VWB_TEST(borrowed_hash_quota_unicode_drift_and_fresh_key_reset_contract) {
+    EvaluatorStamp stamp{}; stamp.incarnation = 17U; stamp.generation = 4U;
+    std::vector<std::uint32_t> text(1000U, 0x1f332U);
+    text.push_back(':'); text.push_back(0x00e9U);
+    LegacyCursor cursor;
+    WorkQuota zero(0U);
+    VWB_EXPECT_EQ(0U, begin_hash(cursor, stamp, zero).consumed_work);
+    VWB_EXPECT_EQ(EvalStatus::idle, cursor.status);
+    WorkQuota start(1U); VWB_EXPECT_EQ(1U, begin_hash(cursor, stamp, start).consumed_work);
+    std::size_t offset = 0U;
+    for (std::size_t calls = 0U; offset != text.size() && calls < 2000U; ++calls) {
+        WorkQuota quota(3U);
+        const auto step = append_hash(cursor, stamp, {text.data() + offset, text.size() - offset}, quota);
+        VWB_EXPECT(step.consumed_scalars > 0U);
+        VWB_EXPECT_EQ(step.step.consumed_work, 3U - quota.remaining());
+        offset += step.consumed_scalars;
+    }
+    VWB_EXPECT_EQ(text.size(), offset);
+    WorkQuota finish(1U); VWB_EXPECT_EQ(legacy_seed_hash(text), finish_hash(cursor, stamp, finish).value);
+    WorkQuota repeat(0U); VWB_EXPECT_EQ(legacy_seed_hash(text), finish_hash(cursor, stamp, repeat).value);
+    VWB_EXPECT_EQ(EvalStatus::idle, reset_hash(cursor).status);
+    WorkQuota again(1U); VWB_EXPECT_EQ(EvalStatus::pending, begin_hash(cursor, stamp, again).status);
+    const auto before = cursor.value;
+    auto other = stamp; ++other.revision;
+    WorkQuota no_work(0U);
+    VWB_EXPECT_EQ(EvalReason::identity, append_hash(cursor, other, {nullptr, 100U}, no_work).step.reason);
+    VWB_EXPECT_EQ(EvalStatus::pending, cursor.status);
+    VWB_EXPECT_EQ(before, cursor.value);
+    WorkQuota drift(1U);
+    VWB_EXPECT_EQ(EvalReason::identity, append_hash(cursor, other, {nullptr, 100U}, drift).step.reason);
+    VWB_EXPECT_EQ(EvalStatus::rejected, cursor.status);
+    VWB_EXPECT_EQ(stamp, cursor.stamp);
+    WorkQuota invalid(1U); const std::uint32_t surrogate = 0xd800U;
+    (void)reset_hash(cursor); WorkQuota restart(1U); (void)begin_hash(cursor, stamp, restart);
+    VWB_EXPECT_EQ(EvalReason::scalar, append_hash(cursor, stamp, {&surrogate, 1U}, invalid).step.reason);
+    VWB_EXPECT_EQ(0U, invalid.remaining());
+    VWB_EXPECT_EQ(EvalStatus::cancelled, cancel_hash(cursor).status);
+    VWB_EXPECT_EQ(EvalStatus::idle, reset_hash(cursor).status);
+}
+
+VWB_TEST(borrowed_decimal_and_seed_recipes_preserve_signed_and_duplicate_raw_seed_format) {
+    for (const auto value : {0, -1, 127, std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()}) {
+        DecimalCursor cursor; WorkQuota start(1U); (void)begin_decimal(cursor, value, start);
+        std::string output;
+        for (std::size_t calls = 0U; cursor.status != EvalStatus::ready && calls < 40U; ++calls) {
+            char byte = 0; WorkQuota quota(1U);
+            const auto step = advance_decimal(cursor, {&byte, 1U}, quota);
+            VWB_EXPECT_EQ(1U - quota.remaining(), step.step.consumed_work);
+            if (step.written_bytes != 0U) output.push_back(byte);
+        }
+        VWB_EXPECT_EQ(EvalStatus::ready, cursor.status);
+        VWB_EXPECT_EQ(std::to_string(value), output);
+        VWB_EXPECT_EQ(EvalStatus::idle, reset_decimal(cursor).status);
+        WorkQuota zero(0U); (void)begin_decimal(cursor, value, zero);
+        VWB_EXPECT_EQ(EvalStatus::idle, cursor.status);
+    }
+    const std::vector<std::uint32_t> seed{' ', 0x1f332U, 0x00e9U, ' '};
+    auto expected = seed;
+    const auto ascii = [&expected](const std::string &value) {
+        for (const unsigned char byte : value) expected.push_back(byte);
+    };
+    ascii(":underground-volume:"); expected.insert(expected.end(), seed.begin(), seed.end());
+    ascii(":-2147483648,0,2147483647");
+    EvaluatorStamp stamp{}; stamp.generation = 1U;
+    SeedKeyCursor cursor; WorkQuota begin(1U);
+    (void)begin_seed_key(cursor, stamp, SeedKeyKind::underground,
+        std::numeric_limits<std::int32_t>::min(), 0, std::numeric_limits<std::int32_t>::max(), begin);
+    HashStep step{{EvalStatus::pending, EvalReason::none, 0U, 1U}, 0U, 0U};
+    for (std::size_t calls = 0U; step.step.status == EvalStatus::pending && calls < 1000U; ++calls) {
+        WorkQuota quota(1U); step = advance_seed_key(cursor, stamp, {seed.data(), seed.size()}, quota);
+        VWB_EXPECT_EQ(1U - quota.remaining(), step.step.consumed_work);
+    }
+    VWB_EXPECT_EQ(EvalStatus::ready, step.step.status);
+    VWB_EXPECT_EQ(legacy_seed_hash(expected), step.value);
+}
+
 VWB_TEST(resumable_sha256_rfc6234_multiblock_oracles_with_partial_quotas) {
     // Independent expected digests: RFC6234 section8.5, SHA256 TEST3/TEST4.
     // https://www.rfc-editor.org/rfc/rfc6234.txt

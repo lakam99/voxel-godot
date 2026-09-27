@@ -1,6 +1,7 @@
 #include "test_harness.hpp"
 
 #include "../core/biome_region_field.hpp"
+#include "../core/world_source.hpp"
 
 #include <cmath>
 #include <cstdint>
@@ -8,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <utility>
 
 namespace voxel::world_backend::tests {
 namespace {
@@ -297,4 +299,74 @@ VWB_TEST(biome_region_field_value_noise_and_failure_boundaries_are_total) {
             * BiomeRegionField::REGION_SPACING_METERS, 0.0}));
 }
 
+} // namespace voxel::world_backend::tests
+
+namespace voxel::world_backend::tests {
+VWB_TEST(borrowed_regional_numeric_cursor_matches_independent_script_goldens) {
+    WorldSourceDescriptor descriptor;
+    descriptor.raw_terrain_seed = admit_raw_terrain_seed("atlas-1492");
+    descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed("atlas-1492");
+    const WorldSourceDefinition definition(std::move(descriptor));
+    EvaluatorStamp stamp{}; stamp.incarnation = 11U; stamp.generation = 1U;
+    stamp.definition_digest = definition.physical_content_identity().digest;
+    struct Golden { BiomeVec2 position; BiomeRegion region; double temperature; double moisture; double edge; };
+    // Same independently captured script facts as the existing field tests.
+    const std::array<Golden, 2> goldens{{
+        {{14250.75F, -8810.25F}, {2, -2}, 0.646733634051165, 0.584567430750002, 2212.86477661133},
+        {{-16100.125F, -7340.875F}, {-3, -2}, 0.508754403198706, 0.505056611180023, 1244.63323974609}
+    }};
+    for (const auto &golden : goldens) {
+        BiomeCursor cursor; WorkQuota zero(0U);
+        VWB_EXPECT_EQ(0U, begin_biome(cursor, stamp, golden.position, zero).consumed_work);
+        VWB_EXPECT_EQ(EvalStatus::idle, cursor.status);
+        WorkQuota start(1U); (void)begin_biome(cursor, stamp, golden.position, start);
+        for (std::size_t calls = 0U; cursor.status == EvalStatus::pending && calls < 20000U; ++calls) {
+            WorkQuota quota(1U); const auto step = advance_biome(cursor, stamp, definition, quota);
+            VWB_EXPECT_EQ(1U - quota.remaining(), step.step.consumed_work);
+            VWB_EXPECT(step.step.consumed_work > 0U || step.step.status != EvalStatus::pending);
+        }
+        VWB_EXPECT_EQ(EvalStatus::ready, cursor.status);
+        VWB_EXPECT_EQ(golden.region, cursor.result.region);
+        VWB_EXPECT(near(golden.temperature, cursor.result.temperature));
+        VWB_EXPECT(near(golden.moisture, cursor.result.moisture));
+        VWB_EXPECT(near(golden.edge, cursor.result.edge_distance_meters, 1.0e-8));
+        VWB_EXPECT_EQ(RegionalBiome::plains, cursor.result.biome);
+        const auto original = BiomeRegionField::sample(definition.admitted_biome_seed(), golden.position);
+        VWB_EXPECT_EQ(original.site_position, cursor.result.site_position);
+        VWB_EXPECT_EQ(original.second_distance_meters, cursor.result.second_distance_meters);
+        VWB_EXPECT_EQ(original.ecotone_weight, cursor.result.ecotone_weight);
+        WorkQuota repeat(0U); const auto ready = advance_biome(cursor, stamp, definition, repeat);
+        VWB_EXPECT_EQ(EvalStatus::ready, ready.step.status); VWB_EXPECT_EQ(0U, ready.step.consumed_work);
+        VWB_EXPECT_EQ(EvalStatus::idle, reset_biome(cursor).status);
+    }
+}
+
+VWB_TEST(borrowed_regional_parent_stamp_survives_nested_key_reset_and_rejects_drift) {
+    WorldSourceDescriptor descriptor;
+    descriptor.raw_terrain_seed = admit_raw_terrain_seed(" \xF0\x9F\x8C\xB2 ");
+    descriptor.admitted_biome_seed = BiomeRegionField::admit_utf8_seed(" \xF0\x9F\x8C\xB2 ");
+    const WorldSourceDefinition definition(std::move(descriptor));
+    EvaluatorStamp stamp{}; stamp.incarnation = 12U; stamp.generation = 2U;
+    stamp.definition_digest = definition.physical_content_identity().digest;
+    BiomeCursor cursor; WorkQuota start(1U); (void)begin_biome(cursor, stamp, {-500.0F, -900.0F}, start);
+    WorkQuota prefix(200U); (void)advance_biome(cursor, stamp, definition, prefix);
+    VWB_EXPECT_EQ(stamp, cursor.stamp);
+    auto other = stamp; ++other.revision;
+    const auto old_stage = cursor.stage;
+    const auto old_key = cursor.key.hash.value;
+    WorkQuota zero(0U);
+    VWB_EXPECT_EQ(EvalReason::identity, advance_biome(cursor, other, definition, zero).step.reason);
+    VWB_EXPECT_EQ(EvalStatus::pending, cursor.status); VWB_EXPECT_EQ(old_stage, cursor.stage);
+    VWB_EXPECT_EQ(old_key, cursor.key.hash.value);
+    WorkQuota positive(1U);
+    VWB_EXPECT_EQ(EvalReason::identity, advance_biome(cursor, other, definition, positive).step.reason);
+    VWB_EXPECT_EQ(EvalStatus::rejected, cursor.status); VWB_EXPECT_EQ(stamp, cursor.stamp);
+    VWB_EXPECT_EQ(old_key, cursor.key.hash.value);
+    VWB_EXPECT_EQ(EvalStatus::cancelled, cancel_biome(cursor).status);
+    VWB_EXPECT_EQ(EvalStatus::idle, reset_biome(cursor).status);
+    WorkQuota invalid(1U);
+    VWB_EXPECT_EQ(EvalReason::input, begin_biome(cursor, stamp,
+        {std::numeric_limits<float>::infinity(), 0.0F}, invalid).reason);
+    VWB_EXPECT_EQ(1U, invalid.remaining());
+}
 } // namespace voxel::world_backend::tests

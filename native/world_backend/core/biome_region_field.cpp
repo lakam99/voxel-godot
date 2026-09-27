@@ -1,6 +1,7 @@
 #include "biome_region_field.hpp"
 
 #include "legacy_seed_hash.hpp"
+#include "world_source.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -342,6 +343,157 @@ BiomeRegionSample BiomeRegionField::sample(const AdmittedBiomeSeed &seed, const 
         biome_for_climate(temperature, moisture), temperature, moisture, second_distance, edge_distance,
         1.0 - ecotone_smoothstep(edge_distance),
         MINIMUM_CORE_RADIUS_METERS, MINIMUM_CORE_DIAMETER_METERS};
+}
+
+BiomeCursor::BiomeCursor() noexcept : stamp{}, status(EvalStatus::idle), reason(EvalReason::none),
+    position{}, grid{}, candidate{}, result{}, key{}, values{},
+    nearest_distance(std::numeric_limits<double>::infinity()), second_distance(std::numeric_limits<double>::infinity()),
+    tx(0), tz(0), lattice{}, stage(0), visit(0), axis(0), channel(0), value_index(0) {}
+namespace {
+RegionalBiome numeric_biome(const double temperature, const double moisture) noexcept {
+    if (temperature < 0.19) return RegionalBiome::snow;
+    if (temperature < 0.33) return moisture >= 0.42 ? RegionalBiome::taiga : RegionalBiome::tundra;
+    if (moisture > 0.79) return RegionalBiome::swamp;
+    if (temperature > 0.70 && moisture < 0.30) return RegionalBiome::desert;
+    if (temperature > 0.60 && moisture < 0.49) return RegionalBiome::savanna;
+    if (moisture > 0.62) return RegionalBiome::forest;
+    return RegionalBiome::plains;
+}
+bool complete_grid(const BiomeVec2 position) noexcept {
+    const double x = position.x / BiomeRegionField::REGION_SPACING_METERS;
+    const double z = position.z / BiomeRegionField::REGION_SPACING_METERS;
+    return std::isfinite(x) && std::isfinite(z)
+        && x > static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        && x < static_cast<double>(std::numeric_limits<std::int32_t>::max())
+        && z > static_cast<double>(std::numeric_limits<std::int32_t>::min())
+        && z < static_cast<double>(std::numeric_limits<std::int32_t>::max());
+}
+}
+EvalStep begin_biome(BiomeCursor &cursor, const EvaluatorStamp stamp,
+    const BiomeVec2 position, WorkQuota &quota) noexcept {
+    if (cursor.status != EvalStatus::idle && cursor.status != EvalStatus::drained)
+        return {EvalStatus::rejected, EvalReason::phase, 0U, 0U};
+    if (!complete_grid(position)) return {EvalStatus::rejected, EvalReason::input, 0U, 0U};
+    if (!quota.try_debit(1U)) return {EvalStatus::pending, EvalReason::quota, 0U, 1U};
+    cursor = BiomeCursor{}; cursor.stamp = stamp; cursor.position = position; cursor.status = EvalStatus::pending;
+    return {cursor.status, EvalReason::none, 1U, 1U};
+}
+BiomeStep advance_biome(BiomeCursor &cursor, const EvaluatorStamp stamp,
+    const WorldSourceDefinition &definition, WorkQuota &quota) noexcept {
+    // Immutable definition is caller-authenticated, not admitted or copied here.
+    if (!(cursor.stamp == stamp) || stamp.definition_digest != definition.physical_content_identity().digest) {
+        if (quota.remaining() != 0U) { cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; }
+        return {{EvalStatus::rejected, EvalReason::identity, 0U, 0U}, {}};
+    }
+    if (cursor.status != EvalStatus::pending) return {{cursor.status, cursor.reason, 0U, 0U}, cursor.result};
+    const auto before = quota.remaining();
+    while (quota.remaining() != 0U && cursor.status == EvalStatus::pending) {
+        if (cursor.stage == 2U || cursor.stage == 9U) {
+            const auto &seed = definition.admitted_biome_seed().code_points;
+            const auto step = advance_seed_key(cursor.key, stamp, {seed.data(), seed.size()}, quota);
+            if (step.step.status == EvalStatus::rejected) {
+                cursor.status = step.step.status; cursor.reason = step.step.reason; break;
+            }
+            if (step.step.status != EvalStatus::ready) break;
+            cursor.values[cursor.stage == 2U ? cursor.axis : cursor.value_index]
+                = static_cast<double>(step.value & 0x7fffffffU) / UNIT_DENOMINATOR;
+            ++cursor.stage;
+            continue;
+        }
+        if (cursor.stage == 1U || cursor.stage == 8U) {
+            SeedKeyKind kind;
+            BiomeRegion coordinate;
+            if (cursor.stage == 1U) {
+                kind = cursor.axis == 0U ? SeedKeyKind::site_x : SeedKeyKind::site_z;
+                coordinate = cursor.candidate;
+            } else {
+                const bool temperature = cursor.channel == 0U;
+                kind = cursor.value_index == 4U
+                    ? (temperature ? SeedKeyKind::climate_temperature : SeedKeyKind::climate_moisture)
+                    : (temperature ? SeedKeyKind::lattice_temperature : SeedKeyKind::lattice_moisture);
+                coordinate = cursor.value_index == 4U ? cursor.result.region : BiomeRegion{
+                    cursor.lattice.x + static_cast<std::int32_t>(cursor.value_index % 2U),
+                    cursor.lattice.z + static_cast<std::int32_t>(cursor.value_index / 2U)};
+            }
+            const auto begun = begin_seed_key(cursor.key, stamp, kind, coordinate.x, 0, coordinate.z, quota);
+            if (begun.consumed_work == 0U) break;
+            ++cursor.stage; continue;
+        }
+        if (!quota.try_debit(1U)) break;
+        switch (cursor.stage) {
+        case 0:
+            cursor.grid = {static_cast<std::int32_t>(std::floor(cursor.position.x / BiomeRegionField::REGION_SPACING_METERS)),
+                static_cast<std::int32_t>(std::floor(cursor.position.z / BiomeRegionField::REGION_SPACING_METERS))};
+            cursor.candidate = {cursor.grid.x - 1, cursor.grid.z - 1}; cursor.stage = 1U; break;
+        case 3:
+            if (cursor.axis == 0U) { cursor.axis = 1U; cursor.stage = 1U; }
+            else cursor.stage = 4U;
+            break;
+        case 4: {
+            const float base_x = static_cast<float>((static_cast<double>(cursor.candidate.x) + 0.5) * BiomeRegionField::REGION_SPACING_METERS);
+            const float base_z = static_cast<float>((static_cast<double>(cursor.candidate.z) + 0.5) * BiomeRegionField::REGION_SPACING_METERS);
+            const float jitter_x = static_cast<float>(-BiomeRegionField::REGION_SITE_JITTER_METERS
+                + 2.0 * BiomeRegionField::REGION_SITE_JITTER_METERS * cursor.values[0]);
+            const float jitter_z = static_cast<float>(-BiomeRegionField::REGION_SITE_JITTER_METERS
+                + 2.0 * BiomeRegionField::REGION_SITE_JITTER_METERS * cursor.values[1]);
+            const BiomeVec2 site{base_x + jitter_x, base_z + jitter_z};
+            const float dx = cursor.position.x - site.x, dz = cursor.position.z - site.z;
+            const float distance = std::sqrt(dx * dx + dz * dz);
+            if (distance < cursor.nearest_distance) {
+                cursor.second_distance = cursor.nearest_distance; cursor.nearest_distance = distance;
+                cursor.result.region = cursor.candidate; cursor.result.site_position = site;
+            } else if (distance < cursor.second_distance) cursor.second_distance = distance;
+            cursor.stage = 5U; break;
+        }
+        case 5:
+            ++cursor.visit;
+            if (cursor.visit == 9U) cursor.stage = 7U;
+            else {
+                cursor.candidate = {cursor.grid.x - 1 + static_cast<std::int32_t>(cursor.visit % 3U),
+                    cursor.grid.z - 1 + static_cast<std::int32_t>(cursor.visit / 3U)};
+                cursor.axis = 0U; cursor.stage = 1U;
+            }
+            break;
+        case 7: {
+            const BiomeVec2 point{cursor.result.site_position.x / static_cast<float>(BiomeRegionField::CLIMATE_LATTICE_METERS),
+                cursor.result.site_position.z / static_cast<float>(BiomeRegionField::CLIMATE_LATTICE_METERS)};
+            // Sites in the supported 3x3 grid imply representable lattice floors.
+            cursor.lattice = {static_cast<std::int32_t>(std::floor(point.x)), static_cast<std::int32_t>(std::floor(point.z))};
+            cursor.tx = smooth_curve_unit(point.x - static_cast<double>(cursor.lattice.x));
+            cursor.tz = smooth_curve_unit(point.z - static_cast<double>(cursor.lattice.z));
+            cursor.value_index = 0U; cursor.stage = 8U; break;
+        }
+        case 10:
+            if (++cursor.value_index < 5U) cursor.stage = 8U; else cursor.stage = 11U;
+            break;
+        case 11: {
+            const double ab = cursor.values[0] + (cursor.values[1] - cursor.values[0]) * cursor.tx;
+            const double cd = cursor.values[2] + (cursor.values[3] - cursor.values[2]) * cursor.tx;
+            const double broad = ab + (cd - ab) * cursor.tz;
+            const double climate = std::clamp(broad * 0.72 + cursor.values[4] * 0.28, 0.0, 1.0);
+            if (cursor.channel == 0U) { cursor.result.temperature = climate; cursor.channel = 1U; cursor.stage = 7U; }
+            else { cursor.result.moisture = climate; cursor.stage = 12U; }
+            break;
+        }
+        case 12:
+            cursor.result.biome = numeric_biome(cursor.result.temperature, cursor.result.moisture);
+            cursor.result.second_distance_meters = cursor.second_distance;
+            cursor.result.edge_distance_meters = std::fmax(0.0, (cursor.second_distance - cursor.nearest_distance) * 0.5);
+            cursor.result.ecotone_weight = 1.0 - ecotone_smoothstep(cursor.result.edge_distance_meters);
+            cursor.status = EvalStatus::ready; break;
+        default: cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::phase; break;
+        }
+    }
+    return {{cursor.status, cursor.status == EvalStatus::pending ? EvalReason::quota : cursor.reason,
+        before - quota.remaining(), cursor.status == EvalStatus::pending ? 1U : 0U}, cursor.result};
+}
+ControlResult cancel_biome(BiomeCursor &cursor) noexcept {
+    cursor.status = EvalStatus::cancelled; (void)cancel_hash(cursor.key.hash);
+    return {cursor.status, EvalReason::none, 1U};
+}
+ControlResult reset_biome(BiomeCursor &cursor) noexcept {
+    if (cursor.status == EvalStatus::pending) return {EvalStatus::rejected, EvalReason::phase, 1U};
+    cursor = BiomeCursor{}; return {cursor.status, EvalReason::none, 1U};
 }
 
 } // namespace voxel::world_backend

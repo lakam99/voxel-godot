@@ -14,6 +14,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <type_traits>
 
 namespace voxel::world_backend::tests {
 namespace {
@@ -140,6 +141,117 @@ VWB_TEST(fast_noise_configuration_and_seed_contract_are_explicit) {
         VWB_EXPECT_EQ(0.0F, configurations[index].weighted_strength);
         VWB_EXPECT_EQ(seeds[index], noise.seed(configurations[index].channel));
     }
+}
+
+VWB_TEST(placement_noise_preserves_pinned_samples_and_atomic_quota) {
+    static_assert(!std::is_copy_constructible_v<NoiseCursor>);
+    static_assert(!std::is_move_constructible_v<NoiseCursor>);
+    std::vector<std::byte> bytes(noise_storage_size() + noise_storage_alignment());
+    void *base = bytes.data(); auto space = bytes.size();
+    VWB_EXPECT(std::align(noise_storage_alignment(), noise_storage_size(), base, space) != nullptr);
+    const StorageSpan storage{base, noise_storage_size()};
+    NoiseCursor cursor;
+    ContextIdentity identity{}; identity.generation = 1U; identity.legacy_hash = 1769472797U;
+    WorkQuota zero(0U); VWB_EXPECT_EQ(0U, begin_noise(cursor, storage, identity, zero).consumed_work);
+    VWB_EXPECT_EQ(EvalStatus::idle, cursor.status());
+    WorkQuota begin(1U); (void)begin_noise(cursor, storage, identity, begin);
+    // Constructor + first four setters, then the 4-octave setter is next.
+    WorkQuota prefix(5U); const auto prefix_step = advance_noise(cursor, storage, identity, prefix);
+    VWB_EXPECT_EQ(5U, prefix_step.consumed_work);
+    VWB_EXPECT_EQ(4U, prefix_step.next_atomic_work);
+    const auto constructed = cursor.constructed_count();
+    WorkQuota insufficient(3U); const auto refused = advance_noise(cursor, storage, identity, insufficient);
+    VWB_EXPECT_EQ(0U, refused.consumed_work); VWB_EXPECT_EQ(4U, refused.next_atomic_work);
+    VWB_EXPECT_EQ(3U, insufficient.remaining()); VWB_EXPECT_EQ(constructed, cursor.constructed_count());
+    for (std::size_t calls = 0U; cursor.status() == EvalStatus::pending && calls < 100U; ++calls) {
+        WorkQuota quota(4U); const auto step = advance_noise(cursor, storage, identity, quota);
+        VWB_EXPECT_EQ(4U - quota.remaining(), step.consumed_work);
+    }
+    VWB_EXPECT_EQ(EvalStatus::ready, cursor.status());
+    const std::array<std::uint32_t, 5> expected_2d{{1054991575U, 3200512682U, 3206307141U, 3193515022U, 1035827032U}};
+    const std::array<std::uint32_t, 5> expected_3d{{3196712140U, 1045121409U, 3197985548U, 1048590768U, 1021684448U}};
+    {
+        NoiseUse use(cursor); VWB_EXPECT(use.acquired());
+        WorkQuota no_sample(0U);
+        const auto deferred = sample_noise(use, storage, identity, TerrainNoiseChannel::height, 0, 0, 0, false, no_sample);
+        VWB_EXPECT_EQ(EvalStatus::pending, deferred.step.status); VWB_EXPECT_EQ(4U, deferred.step.next_atomic_work);
+        WorkQuota short_sample(2U);
+        VWB_EXPECT_EQ(0U, sample_noise(use, storage, identity, TerrainNoiseChannel::ridge, 0, 0, 0, true, short_sample).step.consumed_work);
+        VWB_EXPECT_EQ(2U, short_sample.remaining());
+        for (std::size_t index = 0U; index < 5U; ++index) {
+            WorkQuota quota(8U); const auto channel = static_cast<TerrainNoiseChannel>(index);
+            const auto two = sample_noise(use, storage, identity, channel, -3900.25, 0, 2600.75, false, quota);
+            const auto three = sample_noise(use, storage, identity, channel, -7100.125, 1899.875, 799.625, true, quota);
+            VWB_EXPECT_EQ(EvalStatus::ready, two.step.status); VWB_EXPECT_EQ(EvalStatus::ready, three.step.status);
+            VWB_EXPECT_EQ(expected_2d[index], float_bits(static_cast<float>((two.value - 0.5) * 2.0)));
+            VWB_EXPECT_EQ(expected_3d[index], float_bits(static_cast<float>((three.value - 0.5) * 2.0)));
+        }
+        NoiseUse nested(cursor); VWB_EXPECT(!nested.acquired());
+        WorkQuota quota(5U);
+        VWB_EXPECT_EQ(EvalReason::in_use, advance_noise(cursor, storage, identity, quota).reason);
+        VWB_EXPECT_EQ(EvalReason::in_use, cancel_noise(cursor).reason);
+        VWB_EXPECT_EQ(EvalReason::in_use, drain_noise(cursor, storage, quota).reason);
+        VWB_EXPECT_EQ(EvalReason::in_use, reset_noise(cursor).reason);
+        VWB_EXPECT_EQ(5U, quota.remaining());
+    }
+    (void)cancel_noise(cursor);
+    WorkQuota empty(0U); const auto before = cursor.constructed_count();
+    (void)drain_noise(cursor, storage, empty); VWB_EXPECT_EQ(before, cursor.constructed_count());
+    WorkQuota drain(6U); VWB_EXPECT_EQ(EvalStatus::drained, drain_noise(cursor, storage, drain).status);
+    VWB_EXPECT_EQ(EvalStatus::idle, reset_noise(cursor).status);
+    WorkQuota reused(1U); VWB_EXPECT_EQ(EvalReason::generation, begin_noise(cursor, storage, identity, reused).reason);
+    ++identity.generation; WorkQuota next(1U); VWB_EXPECT_EQ(EvalStatus::pending, begin_noise(cursor, storage, identity, next).status);
+    (void)cancel_noise(cursor); WorkQuota final_drain(1U);
+    VWB_EXPECT_EQ(EvalStatus::drained, drain_noise(cursor, storage, final_drain).status);
+}
+
+VWB_TEST(placement_noise_storage_substitution_is_sticky_but_original_binding_drains) {
+    std::vector<std::byte> bytes(noise_storage_size() + noise_storage_alignment());
+    std::vector<std::byte> foreign(noise_storage_size() + noise_storage_alignment());
+    void *base = bytes.data(); auto space = bytes.size(); (void)std::align(noise_storage_alignment(), noise_storage_size(), base, space);
+    void *other = foreign.data(); auto other_space = foreign.size(); (void)std::align(noise_storage_alignment(), noise_storage_size(), other, other_space);
+    const StorageSpan storage{base, noise_storage_size()}; NoiseCursor cursor;
+    ContextIdentity identity{}; identity.generation = 1U;
+    WorkQuota begin(1U); (void)begin_noise(cursor, storage, identity, begin);
+    WorkQuota construct(1U); (void)advance_noise(cursor, storage, identity, construct);
+    std::memcpy(other, base, noise_storage_size()); // Deliberate invalid caller byte-copy witness.
+    WorkQuota zero(0U);
+    VWB_EXPECT_EQ(EvalReason::storage, advance_noise(cursor, {other, noise_storage_size()}, identity, zero).reason);
+    VWB_EXPECT_EQ(EvalStatus::pending, cursor.status());
+    WorkQuota positive(1U);
+    VWB_EXPECT_EQ(EvalReason::storage, advance_noise(cursor, {other, noise_storage_size()}, identity, positive).reason);
+    VWB_EXPECT_EQ(EvalStatus::rejected, cursor.status()); VWB_EXPECT_EQ(identity, cursor.identity());
+    WorkQuota wrong_drain(4U);
+    VWB_EXPECT_EQ(EvalReason::storage, drain_noise(cursor, {other, noise_storage_size()}, wrong_drain).reason);
+    VWB_EXPECT_EQ(1U, cursor.constructed_count());
+    WorkQuota proper(2U); VWB_EXPECT_EQ(EvalStatus::drained, drain_noise(cursor, storage, proper).status);
+    VWB_EXPECT_EQ(0U, cursor.constructed_count());
+    // A second placement generation must not accept the old copied header.
+    ++identity.generation; WorkQuota second_begin(1U); (void)begin_noise(cursor, storage, identity, second_begin);
+    std::vector<std::byte> current(noise_storage_size());
+    std::memcpy(current.data(), base, current.size());
+    std::memcpy(base, other, noise_storage_size());
+    WorkQuota stale(1U);
+    VWB_EXPECT_EQ(EvalReason::storage, advance_noise(cursor, storage, identity, stale).reason);
+    VWB_EXPECT_EQ(0U, cursor.constructed_count());
+    std::memcpy(base, current.data(), current.size()); // Restore original binding for genuine cleanup.
+    WorkQuota restored(1U); VWB_EXPECT_EQ(EvalStatus::drained, drain_noise(cursor, storage, restored).status);
+    ++identity.generation; WorkQuota third_begin(1U); (void)begin_noise(cursor, storage, identity, third_begin);
+    auto substituted = identity; ++substituted.legacy_hash;
+    WorkQuota zero_context(0U);
+    VWB_EXPECT_EQ(EvalReason::identity, advance_noise(cursor, storage, substituted, zero_context).reason);
+    VWB_EXPECT_EQ(EvalStatus::pending, cursor.status());
+    WorkQuota changed_context(1U);
+    VWB_EXPECT_EQ(EvalReason::identity, advance_noise(cursor, storage, substituted, changed_context).reason);
+    VWB_EXPECT_EQ(identity, cursor.identity()); VWB_EXPECT_EQ(EvalStatus::rejected, cursor.status());
+    WorkQuota context_drain(1U); VWB_EXPECT_EQ(EvalStatus::drained, drain_noise(cursor, storage, context_drain).status);
+    NoiseCursor uninitialized;
+    WorkQuota invalid(1U);
+    VWB_EXPECT_EQ(EvalReason::storage, begin_noise(uninitialized, {nullptr, noise_storage_size()}, identity, invalid).reason);
+    VWB_EXPECT_EQ(EvalReason::storage, begin_noise(uninitialized, {base, noise_storage_size() - 1U}, identity, invalid).reason);
+    VWB_EXPECT_EQ(EvalReason::storage, begin_noise(uninitialized,
+        {static_cast<std::byte *>(base) + 1U, noise_storage_size()}, identity, invalid).reason);
+    VWB_EXPECT_EQ(1U, invalid.remaining());
 }
 
 VWB_TEST(fast_noise_float_boundary_is_deterministic_for_all_channels) {

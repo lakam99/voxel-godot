@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <algorithm>
 
 using namespace voxel::world_backend;
 static_assert(!std::is_convertible_v<NativeCellState, NativeLatticeNumericFacts>);
@@ -57,6 +58,102 @@ VWB_TEST(native_natural_terrain_rejects_unmigrated_shaping_input) {
     }
     const NativeNaturalTerrainSource source(definition);
     VWB_EXPECT_EQ(definition.physical_content_identity(), source.definition().physical_content_identity());
+}
+
+namespace {
+// Storage is test-owned and outlives its nonmovable cursor. Allocations here
+// are fixture setup, not an allocation witness for production stepping.
+struct NumericNoiseFixture {
+    std::vector<std::byte> bytes;
+    StorageSpan storage;
+    NoiseCursor noise;
+    ContextIdentity context;
+    explicit NumericNoiseFixture(const WorldSourceDefinition &definition)
+        : bytes(noise_storage_size() + noise_storage_alignment()), storage{}, noise{}, context{} {
+        void *base = bytes.data(); auto extent = bytes.size();
+        VWB_EXPECT(std::align(noise_storage_alignment(), noise_storage_size(), base, extent) != nullptr);
+        storage = {base, noise_storage_size()};
+        context.generation = 1U; context.stamp.generation = 1U; context.stamp.incarnation = 29U;
+        context.stamp.definition_digest = definition.physical_content_identity().digest;
+        context.legacy_hash = legacy_seed_hash(definition.raw_terrain_seed().code_points);
+        WorkQuota begin(1U); (void)begin_noise(noise, storage, context, begin);
+        for (std::size_t calls = 0U; noise.status() == EvalStatus::pending && calls < 100U; ++calls) {
+            WorkQuota quota(4U); (void)advance_noise(noise, storage, context, quota);
+        }
+        VWB_EXPECT_EQ(EvalStatus::ready, noise.status());
+    }
+    NumericNaturalSample evaluate(const WorldSourceDefinition &definition, const NaturalRequest request) {
+        NaturalCursor cursor; WorkQuota begin(1U);
+        VWB_EXPECT_EQ(EvalStatus::pending, begin_natural(cursor, context.stamp, context, request, begin).status);
+        for (std::size_t calls = 0U; cursor.status == EvalStatus::pending && calls < 20000U; ++calls) {
+            WorkQuota quota(4U); const auto step = advance_natural(cursor, context.stamp, definition, noise, storage, quota);
+            VWB_EXPECT_EQ(4U - quota.remaining(), step.step.consumed_work);
+            VWB_EXPECT(step.step.consumed_work != 0U || step.step.next_atomic_work > 4U || step.step.status != EvalStatus::pending);
+        }
+        VWB_EXPECT_EQ(EvalStatus::ready, cursor.status);
+        WorkQuota repeat(0U); const auto ready = advance_natural(cursor, context.stamp, definition, noise, storage, repeat);
+        VWB_EXPECT_EQ(EvalStatus::ready, ready.step.status); VWB_EXPECT_EQ(0U, ready.step.consumed_work);
+        return ready.value;
+    }
+};
+}
+
+VWB_TEST(borrowed_natural_surface_and_cave_match_independent_script_numeric_goldens) {
+    const auto definition = atlas_definition(); NumericNoiseFixture fixture(definition);
+    NaturalRequest request; request.x = -1; request.z = -2000;
+    VWB_EXPECT(near(25.088331637806284, fixture.evaluate(definition, request).value));
+    request.x = -2;
+    VWB_EXPECT(near(25.111184615739269, fixture.evaluate(definition, request).value));
+    const NativeNaturalTerrainSource legacy(definition);
+    const std::array<std::pair<CellCoord, double>, 2> caves{{
+        {{-33, -2, -5}, -0.6017665929014142}, {{-32, -2, -5}, -0.35286612593816424}
+    }};
+    for (const auto &golden : caves) {
+        request.component = NaturalComponent::underground_density;
+        request.position = resolve_world_query(definition, WorldLatticeQuery{golden.first, WorldQueryIntent::terrain_mesh}).lattice_position;
+        const auto cell_size = definition.constants().cell_size_meters;
+        const auto x = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.x) / cell_size));
+        const auto z = static_cast<std::int32_t>(std::floor(static_cast<double>(request.position.z) / cell_size));
+        const double surface = legacy.sample_surface_column({x, z, WorldQueryIntent::terrain_mesh}).reference_surface_y;
+        request.depth_cells = std::max(0.0, surface - static_cast<double>(request.position.y)) / std::max(0.001, cell_size);
+        VWB_EXPECT(near(golden.second, fixture.evaluate(definition, request).value));
+        request.depth_cells = 3.0;
+        VWB_EXPECT_EQ(cell_size, fixture.evaluate(definition, request).value);
+    }
+    request.component = NaturalComponent::regional_biome; request.x = 9; request.z = -1;
+    VWB_EXPECT_EQ(RegionalBiome::swamp, fixture.evaluate(definition, request).regional.biome);
+}
+
+VWB_TEST(borrowed_natural_zero_quota_reentry_cancel_and_sticky_context_contract) {
+    const auto definition = atlas_definition(); NumericNoiseFixture fixture(definition);
+    NaturalCursor cursor; NaturalRequest request;
+    WorkQuota zero(0U); (void)begin_natural(cursor, fixture.context.stamp, fixture.context, request, zero);
+    VWB_EXPECT_EQ(EvalStatus::idle, cursor.status);
+    WorkQuota begin(1U); (void)begin_natural(cursor, fixture.context.stamp, fixture.context, request, begin);
+    {
+        NoiseUse held(fixture.noise); WorkQuota quota(8U);
+        VWB_EXPECT_EQ(EvalReason::in_use, advance_natural(cursor, fixture.context.stamp, definition,
+            fixture.noise, fixture.storage, quota).step.reason);
+        auto invalid_stamp = fixture.context.stamp; ++invalid_stamp.revision;
+        VWB_EXPECT_EQ(EvalReason::in_use, advance_natural(cursor, invalid_stamp, definition,
+            fixture.noise, fixture.storage, quota).step.reason);
+        VWB_EXPECT_EQ(8U, quota.remaining()); VWB_EXPECT_EQ(EvalStatus::pending, cursor.status);
+    }
+    auto other = fixture.context.stamp; ++other.configuration;
+    WorkQuota no_work(0U);
+    VWB_EXPECT_EQ(EvalReason::identity, advance_natural(cursor, other, definition,
+        fixture.noise, fixture.storage, no_work).step.reason);
+    VWB_EXPECT_EQ(EvalStatus::pending, cursor.status);
+    WorkQuota positive(1U);
+    VWB_EXPECT_EQ(EvalReason::identity, advance_natural(cursor, other, definition,
+        fixture.noise, fixture.storage, positive).step.reason);
+    VWB_EXPECT_EQ(EvalStatus::rejected, cursor.status); VWB_EXPECT_EQ(fixture.context.stamp, cursor.stamp);
+    VWB_EXPECT_EQ(fixture.context, cursor.context);
+    VWB_EXPECT_EQ(EvalStatus::cancelled, cancel_natural(cursor).status);
+    VWB_EXPECT_EQ(EvalStatus::idle, reset_natural(cursor).status);
+    request.position.x = std::numeric_limits<float>::infinity(); WorkQuota invalid(1U);
+    VWB_EXPECT_EQ(EvalReason::input, begin_natural(cursor, fixture.context.stamp, fixture.context, request, invalid).reason);
+    VWB_EXPECT_EQ(1U, invalid.remaining());
 }
 
 // These fixed natural-only cases were captured by

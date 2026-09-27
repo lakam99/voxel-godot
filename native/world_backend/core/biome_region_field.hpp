@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "legacy_seed_hash.hpp"
 
 namespace voxel::world_backend {
 
@@ -88,5 +89,45 @@ public:
     static double stable_unit(const std::vector<std::uint32_t> &text);
     static BiomeRegionSample sample(const AdmittedBiomeSeed &seed, BiomeVec2 world_position);
 };
+
+class WorldSourceDefinition;
+enum class RegionalBiome : std::uint8_t { snow, taiga, tundra, swamp, desert, savanna, forest, plains };
+struct NumericBiomeSample {
+    BiomeRegion region;
+    BiomeVec2 site_position;
+    RegionalBiome biome;
+    double temperature;
+    double moisture;
+    double second_distance_meters;
+    double edge_distance_meters;
+    double ecotone_weight;
+};
+struct BiomeCursor {
+    BiomeCursor() noexcept;
+    EvaluatorStamp stamp;
+    EvalStatus status;
+    EvalReason reason;
+    BiomeVec2 position;
+    BiomeRegion grid;
+    BiomeRegion candidate;
+    NumericBiomeSample result;
+    SeedKeyCursor key;
+    std::array<double, 5> values;
+    double nearest_distance;
+    double second_distance;
+    double tx;
+    double tz;
+    BiomeRegion lattice;
+    std::uint8_t stage;
+    std::uint8_t visit;
+    std::uint8_t axis;
+    std::uint8_t channel;
+    std::uint8_t value_index;
+};
+struct BiomeStep { EvalStep step; NumericBiomeSample value; };
+EvalStep begin_biome(BiomeCursor &, EvaluatorStamp, BiomeVec2, WorkQuota &) noexcept;
+BiomeStep advance_biome(BiomeCursor &, EvaluatorStamp, const WorldSourceDefinition &, WorkQuota &) noexcept;
+ControlResult cancel_biome(BiomeCursor &) noexcept;
+ControlResult reset_biome(BiomeCursor &) noexcept;
 
 } // namespace voxel::world_backend

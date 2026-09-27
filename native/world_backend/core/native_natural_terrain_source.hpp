@@ -2,6 +2,7 @@
 
 #include "native_cell_state.hpp"
 #include "world_source.hpp"
+#include "fast_noise_compat.hpp"
 
 #include <cstdint>
 #include <stdexcept>
@@ -78,5 +79,39 @@ private:
     WorldSourceDefinition definition_;
     std::uint32_t seed_hash_ = 0;
 };
+
+// Numeric prerequisite only: no material/fluid or generated-cell-state API.
+enum class NaturalComponent : std::uint8_t { surface_height, regional_biome, underground_density };
+struct NaturalRequest {
+    NaturalComponent component = NaturalComponent::surface_height;
+    std::int32_t x = 0;
+    std::int32_t z = 0;
+    WorldFloat32Position position{};
+    double depth_cells = 0.0;
+    double minimum_overburden_cells = 3.0;
+};
+struct NumericNaturalSample { double value; NumericBiomeSample regional; };
+struct NaturalCursor {
+    NaturalCursor() noexcept;
+    EvaluatorStamp stamp;
+    ContextIdentity context;
+    EvalStatus status;
+    EvalReason reason;
+    NaturalRequest request;
+    SeedKeyCursor key;
+    BiomeCursor biome;
+    std::array<double, 16> values;
+    WorldFloat32Position cells;
+    CellCoord source;
+    NumericNaturalSample result;
+    std::uint8_t stage;
+    std::uint8_t sample;
+};
+struct NaturalStep { EvalStep step; NumericNaturalSample value; };
+EvalStep begin_natural(NaturalCursor &, EvaluatorStamp, ContextIdentity, NaturalRequest, WorkQuota &) noexcept;
+NaturalStep advance_natural(NaturalCursor &, EvaluatorStamp, const WorldSourceDefinition &,
+    NoiseCursor &, StorageSpan, WorkQuota &) noexcept;
+ControlResult cancel_natural(NaturalCursor &) noexcept;
+ControlResult reset_natural(NaturalCursor &) noexcept;
 
 } // namespace voxel::world_backend
