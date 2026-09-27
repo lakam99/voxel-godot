@@ -149,11 +149,61 @@ VWB_TEST(borrowed_natural_zero_quota_reentry_cancel_and_sticky_context_contract)
         fixture.noise, fixture.storage, positive).step.reason);
     VWB_EXPECT_EQ(EvalStatus::rejected, cursor.status); VWB_EXPECT_EQ(fixture.context.stamp, cursor.stamp);
     VWB_EXPECT_EQ(fixture.context, cursor.context);
+    VWB_EXPECT_EQ(EvalStatus::cancelled, cancel_noise(fixture.noise).status);
+    WorkQuota rejected_repeat(8U);
+    const auto rejected_terminal = advance_natural(cursor, fixture.context.stamp, definition,
+        fixture.noise, fixture.storage, rejected_repeat);
+    VWB_EXPECT_EQ(EvalStatus::rejected, rejected_terminal.step.status);
+    VWB_EXPECT_EQ(EvalReason::identity, rejected_terminal.step.reason);
+    VWB_EXPECT_EQ(8U, rejected_repeat.remaining());
     VWB_EXPECT_EQ(EvalStatus::cancelled, cancel_natural(cursor).status);
+    WorkQuota cancelled_repeat(8U);
+    VWB_EXPECT_EQ(EvalStatus::cancelled, advance_natural(cursor, fixture.context.stamp, definition,
+        fixture.noise, fixture.storage, cancelled_repeat).step.status);
+    VWB_EXPECT_EQ(8U, cancelled_repeat.remaining());
     VWB_EXPECT_EQ(EvalStatus::idle, reset_natural(cursor).status);
     request.position.x = std::numeric_limits<float>::infinity(); WorkQuota invalid(1U);
     VWB_EXPECT_EQ(EvalReason::input, begin_natural(cursor, fixture.context.stamp, fixture.context, request, invalid).reason);
     VWB_EXPECT_EQ(1U, invalid.remaining());
+}
+
+VWB_TEST(borrowed_natural_refuses_pending_noise_dependency_without_advancing_its_prefix) {
+    const auto definition = atlas_definition();
+    std::vector<std::byte> bytes(noise_storage_size() + noise_storage_alignment());
+    void *base = bytes.data(); auto extent = bytes.size();
+    VWB_EXPECT(std::align(noise_storage_alignment(), noise_storage_size(), base, extent) != nullptr);
+    const StorageSpan storage{base, noise_storage_size()};
+    NoiseCursor noise; ContextIdentity identity{};
+    identity.generation = 1U; identity.stamp.generation = 1U; identity.stamp.incarnation = 31U;
+    identity.stamp.definition_digest = definition.physical_content_identity().digest;
+    identity.legacy_hash = legacy_seed_hash(definition.raw_terrain_seed().code_points);
+    WorkQuota noise_begin(1U); (void)begin_noise(noise, storage, identity, noise_begin);
+    NaturalCursor cursor; NaturalRequest request; request.x = -1; request.z = -2000;
+    WorkQuota natural_begin(1U); (void)begin_natural(cursor, identity.stamp, identity, request, natural_begin);
+    WorkQuota premature(8U);
+    const auto pending_dependency = advance_natural(cursor, identity.stamp, definition, noise, storage, premature);
+    VWB_EXPECT_EQ(EvalStatus::rejected, pending_dependency.step.status);
+    VWB_EXPECT_EQ(EvalReason::phase, pending_dependency.step.reason);
+    VWB_EXPECT_EQ(0U, pending_dependency.step.consumed_work);
+    VWB_EXPECT_EQ(0U, pending_dependency.step.next_atomic_work);
+    VWB_EXPECT_EQ(8U, premature.remaining()); VWB_EXPECT_EQ(EvalStatus::pending, cursor.status);
+    VWB_EXPECT_EQ(0U, cursor.stage); VWB_EXPECT_EQ(EvalStatus::idle, cursor.key.hash.status);
+    for (std::size_t calls = 0U; noise.status() == EvalStatus::pending && calls < 100U; ++calls) {
+        WorkQuota quota(4U); (void)advance_noise(noise, storage, identity, quota);
+    }
+    VWB_EXPECT_EQ(EvalStatus::ready, noise.status());
+    for (std::size_t calls = 0U; cursor.status == EvalStatus::pending && calls < 20000U; ++calls) {
+        WorkQuota quota(4U); (void)advance_natural(cursor, identity.stamp, definition, noise, storage, quota);
+    }
+    VWB_EXPECT_EQ(EvalStatus::ready, cursor.status);
+    VWB_EXPECT(near(25.088331637806284, cursor.result.value));
+    const auto completed_value = cursor.result.value;
+    VWB_EXPECT_EQ(EvalStatus::cancelled, cancel_noise(noise).status);
+    WorkQuota ready_repeat(8U);
+    const auto terminal = advance_natural(cursor, identity.stamp, definition, noise, storage, ready_repeat);
+    VWB_EXPECT_EQ(EvalStatus::ready, terminal.step.status);
+    VWB_EXPECT(near(completed_value, terminal.value.value));
+    VWB_EXPECT_EQ(8U, ready_repeat.remaining());
 }
 
 // These fixed natural-only cases were captured by

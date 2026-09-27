@@ -122,5 +122,8 @@ EvalStep validate_noise(NoiseCursor &, StorageSpan, ContextIdentity, const WorkQ
 NoiseStep sample_noise(NoiseUse &, StorageSpan, ContextIdentity,
     TerrainNoiseChannel, double x, double y, double z, bool three_dimensional,
     WorkQuota &) noexcept;
+// Sampling rejects nonfinite or |coordinate|>2^32 on all three arguments,
+// including Y for 2D. Input/enum faults are retryable with no owner/quota
+// mutation; identity/storage faults with positive quota remain sticky.
 
 } // namespace voxel::world_backend

@@ -360,14 +360,22 @@ NaturalStep advance_natural(NaturalCursor &cursor, const EvaluatorStamp stamp,
         if (quota.remaining() != 0U) { cursor.status = EvalStatus::rejected; cursor.reason = EvalReason::identity; }
         return {{EvalStatus::rejected, EvalReason::identity, 0U, 0U}, {}};
     }
+    // A terminal natural evaluation is independent of subsequent noise setup
+    // or cancellation. Preserve its own result/reason before testing the dependency.
+    if (cursor.status != EvalStatus::pending) return {{cursor.status, cursor.reason, 0U, 0U}, cursor.result};
     const auto validated = validate_noise(noise, storage, cursor.context, quota);
+    if (validated.status == EvalStatus::pending) {
+        // Dependency setup belongs to the caller, not this natural cursor.
+        // A typed terminal refusal leaves its prefix and quota unchanged;
+        // the caller can advance_noise, then retry this same request.
+        return {{EvalStatus::rejected, EvalReason::phase, 0U, 0U}, {}};
+    }
     if (validated.status != EvalStatus::ready) {
         if (validated.status == EvalStatus::rejected && quota.remaining() != 0U && validated.reason != EvalReason::in_use) {
             cursor.status = EvalStatus::rejected; cursor.reason = validated.reason;
         }
         return {validated, {}};
     }
-    if (cursor.status != EvalStatus::pending) return {{cursor.status, cursor.reason, 0U, 0U}, cursor.result};
     if (quota.remaining() == 0U) return {{EvalStatus::pending, EvalReason::quota, 0U, natural_next_work(cursor)}, {}};
     NoiseUse use(noise);
     if (!use.acquired()) return {{EvalStatus::rejected, EvalReason::in_use, 0U, 0U}, {}};

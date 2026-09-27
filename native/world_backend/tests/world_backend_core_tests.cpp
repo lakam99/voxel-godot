@@ -127,6 +127,10 @@ VWB_TEST(borrowed_hash_quota_unicode_drift_and_fresh_key_reset_contract) {
 VWB_TEST(borrowed_decimal_and_seed_recipes_preserve_signed_and_duplicate_raw_seed_format) {
     for (const auto value : {0, -1, 127, std::numeric_limits<std::int32_t>::min(), std::numeric_limits<std::int32_t>::max()}) {
         DecimalCursor cursor; WorkQuota start(1U); (void)begin_decimal(cursor, value, start);
+        WorkQuota bad_output(1U), zero_output(0U);
+        VWB_EXPECT_EQ(EvalReason::input, advance_decimal(cursor, {nullptr, 1U}, bad_output).step.reason);
+        VWB_EXPECT_EQ(EvalReason::input, advance_decimal(cursor, {nullptr, 1U}, zero_output).step.reason);
+        VWB_EXPECT_EQ(1U, bad_output.remaining()); VWB_EXPECT_EQ(EvalStatus::pending, cursor.status);
         std::string output;
         for (std::size_t calls = 0U; cursor.status != EvalStatus::ready && calls < 40U; ++calls) {
             char byte = 0; WorkQuota quota(1U);

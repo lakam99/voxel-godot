@@ -178,6 +178,45 @@ VWB_TEST(placement_noise_preserves_pinned_samples_and_atomic_quota) {
         WorkQuota short_sample(2U);
         VWB_EXPECT_EQ(0U, sample_noise(use, storage, identity, TerrainNoiseChannel::ridge, 0, 0, 0, true, short_sample).step.consumed_work);
         VWB_EXPECT_EQ(2U, short_sample.remaining());
+        const double invalid_values[] = {
+            std::numeric_limits<double>::quiet_NaN(),
+            std::numeric_limits<double>::infinity(),
+            -std::numeric_limits<double>::infinity(),
+            std::numeric_limits<double>::max(),
+            4294967297.0,
+        };
+        for (const double invalid : invalid_values) {
+            WorkQuota zero_input(0U), positive_input(4U);
+            const auto rejected_zero = sample_noise(use, storage, identity, TerrainNoiseChannel::height,
+                invalid, 0.0, 0.0, false, zero_input);
+            const auto rejected_positive = sample_noise(use, storage, identity, TerrainNoiseChannel::height,
+                0.0, invalid, 0.0, false, positive_input);
+            WorkQuota z_input(4U);
+            const auto rejected_z = sample_noise(use, storage, identity, TerrainNoiseChannel::height,
+                0.0, 0.0, invalid, false, z_input);
+            VWB_EXPECT_EQ(EvalReason::input, rejected_zero.step.reason);
+            VWB_EXPECT_EQ(EvalReason::input, rejected_positive.step.reason);
+            VWB_EXPECT_EQ(EvalReason::input, rejected_z.step.reason);
+            VWB_EXPECT_EQ(0U, rejected_zero.step.consumed_work);
+            VWB_EXPECT_EQ(0U, rejected_positive.step.consumed_work);
+            VWB_EXPECT_EQ(0U, rejected_z.step.consumed_work);
+            VWB_EXPECT_EQ(0U, zero_input.remaining()); VWB_EXPECT_EQ(4U, positive_input.remaining());
+            VWB_EXPECT_EQ(4U, z_input.remaining());
+            VWB_EXPECT_EQ(EvalStatus::ready, cursor.status()); VWB_EXPECT_EQ(identity, cursor.identity());
+        }
+        WorkQuota invalid_channel_quota(4U);
+        WorkQuota zero_channel(0U);
+        VWB_EXPECT_EQ(EvalReason::input, sample_noise(use, storage, identity,
+            static_cast<TerrainNoiseChannel>(255U), 0.0, 0.0, 0.0, true, zero_channel).step.reason);
+        VWB_EXPECT_EQ(EvalReason::input, sample_noise(use, storage, identity,
+            static_cast<TerrainNoiseChannel>(255U), 0.0, 0.0, 0.0, true, invalid_channel_quota).step.reason);
+        VWB_EXPECT_EQ(4U, invalid_channel_quota.remaining()); VWB_EXPECT_EQ(EvalStatus::ready, cursor.status());
+        WorkQuota valid_boundary(4U);
+        const auto legitimate = sample_noise(use, storage, identity, TerrainNoiseChannel::height,
+            static_cast<double>(std::numeric_limits<std::int32_t>::max()) + 12200.0,
+            0.0, -static_cast<double>(std::numeric_limits<std::int32_t>::max()), false, valid_boundary);
+        VWB_EXPECT_EQ(EvalStatus::ready, legitimate.step.status);
+        VWB_EXPECT(std::isfinite(legitimate.value));
         for (std::size_t index = 0U; index < 5U; ++index) {
             WorkQuota quota(8U); const auto channel = static_cast<TerrainNoiseChannel>(index);
             const auto two = sample_noise(use, storage, identity, channel, -3900.25, 0, 2600.75, false, quota);

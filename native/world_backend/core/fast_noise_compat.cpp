@@ -6,6 +6,7 @@
 #include <new>
 #include <cstring>
 #include <limits>
+#include <cmath>
 
 namespace voxel::world_backend {
 namespace {
@@ -114,6 +115,17 @@ struct NoiseHeader {
 struct NoiseSlot { alignas(Noise) std::byte bytes[sizeof(Noise)]; };
 struct NoiseStorage { NoiseHeader header; NoiseSlot slots[5]; };
 constexpr std::uint32_t NOISE_MAGIC = 0x4e35464eU;
+// Pinned OpenSimplex2 FBm: among the five paired frequency/octave settings,
+// the largest frequency * 2^octaves (including the extra post-final multiply)
+// is ridge .014 * 8 = .112; height's four octaves yield only .0058 * 16.
+// A conservative factor 3 for either the 2D skew or default 3D rotation
+// gives .112 * 3 * 2^32 < 1.45e9. FastFloor/FastRound and their
+// +/-0.5 conversion stay comfortably inside int32. Natural int32 cell inputs
+// plus all fixed surface/cave offsets are inside this argument envelope.
+constexpr double SAFE_NOISE_ARGUMENT = 4294967296.0;
+bool safe_noise_argument(const double value) noexcept {
+    return std::isfinite(value) && std::abs(value) <= SAFE_NOISE_ARGUMENT;
+}
 bool valid_span(const StorageSpan span) noexcept {
     return span.data != nullptr && span.size == sizeof(NoiseStorage)
         && reinterpret_cast<std::uintptr_t>(span.data) % alignof(NoiseStorage) == 0U;
@@ -178,6 +190,10 @@ struct NoiseAccess {
             return {{cursor.status_, cursor.reason_, 0U, 0U}, 0.0};
         const auto index = static_cast<std::size_t>(channel);
         if (index >= 5U) return {{EvalStatus::rejected, EvalReason::input, 0U, 0U}, 0.0};
+        // Validate all three values, including Y for a 2D call. Malformed
+        // numeric input is retryable and never changes the owner or quota.
+        if (!safe_noise_argument(x) || !safe_noise_argument(y) || !safe_noise_argument(z))
+            return {{EvalStatus::rejected, EvalReason::input, 0U, 0U}, 0.0};
         const auto cost = static_cast<std::size_t>(CONFIGURATIONS[index].octaves);
         if (!quota.try_debit(cost)) return {{EvalStatus::pending, EvalReason::quota, 0U, cost}, 0.0};
         auto *noise = slot(static_cast<NoiseStorage *>(span.data), index);
