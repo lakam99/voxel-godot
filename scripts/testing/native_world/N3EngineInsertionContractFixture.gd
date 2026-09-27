@@ -27,6 +27,7 @@ var _pages: RefCounted
 var _publisher: RefCounted
 var _admission: RefCounted
 var _publisher_ready: bool = false
+var _frozen_geometry: Dictionary = {}
 
 func _init() -> void:
 	call_deferred("_run")
@@ -72,17 +73,28 @@ func _serialize(value: Variant, budget: Dictionary, depth: int) -> Variant:
 	if value == null or value is bool or value is int or value is float: return value
 	return str(value).left(256)
 
-func _area(block: Vector3i) -> Dictionary:
+func _accepted_control_area(event: Dictionary) -> Dictionary:
 	var size: int = _terrain.get_data_block_size()
-	var origin: Vector3i = block * size
+	var origin: Vector3i = CONTROL * size
 	var extent: Vector3i = Vector3i.ONE * size
 	var available: bool = _terrain.has_method("get_viewer_network_peer_ids_in_area")
-	var result: Dictionary = {"block":block, "origin":origin, "size":extent,
+	var result: Dictionary = {"block":CONTROL, "origin":origin, "size":extent,
 		"coordinateSpace":"terrain-local voxel grid", "dataBlockSize":size,
 		"queryAvailable":available, "pairedDataBoxCoverage":null, "peerEntryCount":null,
+		"queryPerformed":false,
 		"scope":"paired data-box intersection only; not full rejection cause or physics",
+		"timing":"synchronous after exact accepted public receipt, not atomic with insertion",
 		"processFrame":Engine.get_process_frames(), "physicsFrame":Engine.get_physics_frames()}
-	if not available: return result
+	var geometry: Dictionary = _range_proof(CONTROL)
+	var eligible: bool = event.get("block") == CONTROL and event.get("status") == "ready" \
+		and event.get("state") == "inserted_waiting_mesh" and event.get("insertionReceipt") == "ready" \
+		and _terrain.has_data_block(CONTROL) and int(_publisher.call("installed_generation", CONTROL)) > 0 \
+		and bool(geometry.get("supported", false)) and bool(geometry.get("identityUnchanged", false))
+	result.acceptedReceiptEligibility = eligible
+	# No query unless this SAME pump iteration installed the covered control.
+	# No await, gate.advance or viewer mutation occurs before this one call.
+	if not eligible or not available: return result
+	result.queryPerformed = true
 	var peer_ids: PackedInt32Array = _terrain.call("get_viewer_network_peer_ids_in_area", origin, extent)
 	var sample: Array[int] = []
 	for index in range(mini(peer_ids.size(), SAMPLE_CAP)):
@@ -95,6 +107,7 @@ func _area(block: Vector3i) -> Dictionary:
 	return result
 
 func _geometry() -> Dictionary:
+	var backend_state: Dictionary = _backend.call("status")
 	return {"terrainIdText":str(_terrain.get_instance_id()),
 		"viewerIdText":str(_viewer.get_instance_id()), "backendIdText":str(_backend.get_instance_id()),
 		"consumerId":CONSUMER_ID, "terrainWorldPosition":_terrain.global_position,
@@ -110,23 +123,125 @@ func _geometry() -> Dictionary:
 		"viewerRequiresVisuals":_viewer.requires_visuals, "viewerRequiresCollisions":_viewer.requires_collisions,
 		"automaticLoading":_terrain.automatic_loading_enabled,
 		"engineCollisionGeneration":_terrain.generate_collisions,
+		"sourceIdentity":backend_state.get("sourceIdentity"),
+		"sourceSeedText":backend_state.get("sourceSeedText"),
+		"terrainDeltaRevision":backend_state.get("terrainDeltaRevision"),
+		"shapingPolicyIdentity":backend_state.get("shapingPolicyIdentity"),
 		"physicsScope":"collision generation disabled for both cases; viewer flags are not N5 proof"}
+
+func _viewer_count(node: Node, budget: Dictionary, depth: int = 0) -> int:
+	if int(budget.remaining) <= 0 or depth > 16:
+		budget.truncated = true
+		return 0
+	budget.remaining -= 1
+	var count: int = 1 if node is VoxelViewer else 0
+	for child: Node in node.get_children():
+		if int(budget.remaining) <= 0:
+			budget.truncated = true
+			break
+		count += _viewer_count(child, budget, depth + 1)
+	return count
+
+func _range_proof(block: Vector3i) -> Dictionary:
+	var transform: Transform3D = _terrain.global_transform
+	var data_size: int = _terrain.get_data_block_size()
+	var mesh_size: int = _terrain.get_mesh_block_size()
+	var budget: Dictionary = {"remaining":128, "truncated":false}
+	var viewers: int = _viewer_count(root, budget)
+	var current_geometry: Dictionary = _geometry()
+	var drifted_fields: Array[String] = []
+	for field: String in current_geometry:
+		if current_geometry[field] != _frozen_geometry.get(field): drifted_fields.append(field)
+	var supported: bool = data_size == 16 and mesh_size == 16 \
+		and transform.basis.x.is_equal_approx(Vector3(1.35, 0, 0)) \
+		and transform.basis.y.is_equal_approx(Vector3(0, 1.35, 0)) \
+		and transform.basis.z.is_equal_approx(Vector3(0, 0, 1.35)) \
+		and transform.origin.is_equal_approx(Vector3.ZERO) \
+		and _viewer.global_position.is_equal_approx(Vector3.ZERO) \
+		and _viewer.view_distance == VIEW_DISTANCE and _terrain.max_view_distance >= 0 \
+		and _viewer.requires_visuals and _viewer.requires_collisions and _terrain.mesher != null \
+		and _viewer.is_inside_tree() and _viewer.get_parent() == _scene \
+		and viewers == 1 and not bool(budget.truncated) \
+		and String(_gate.call("failure_reason")).is_empty() and bool(_gate.call("current")) \
+		and not _terrain.automatic_loading_enabled and not _terrain.generate_collisions
+	var result: Dictionary = {"supported":supported, "block":block,
+		"identityUnchanged":not _frozen_geometry.is_empty() and current_geometry == _frozen_geometry,
+		"driftedIdentityFields":drifted_fields,
+		"identity":{"backendIdText":current_geometry.backendIdText,
+			"terrainIdText":current_geometry.terrainIdText, "viewerIdText":current_geometry.viewerIdText,
+			"sourceIdentity":current_geometry.sourceIdentity, "sourceSeedText":current_geometry.sourceSeedText,
+			"terrainDeltaRevision":current_geometry.terrainDeltaRevision,
+			"shapingPolicyIdentity":current_geometry.shapingPolicyIdentity},
+		"rootViewerCount":viewers, "viewerCensusNodeCap":128, "viewerCensusDepthCap":16,
+		"viewerCensusTruncated":budget.truncated,
+		"measuredPairedCoverage":null, "queryPerformed":false,
+		"scope":"conservative geometry-derived envelope, not API-measured pairing or unique rejection cause"}
+	if not supported: return result
+	var inverse: Transform3D = transform.affine_inverse()
+	var inverse_scale: float = (inverse.basis * Vector3.RIGHT).length()
+	var local_viewer: Vector3 = inverse * _viewer.global_position
+	var raw_radius: float = float(_viewer.view_distance) * inverse_scale
+	var int_radius: int = mini(int(raw_radius), _terrain.max_view_distance)
+	var upper_radius: int = mini(ceili(raw_radius), _terrain.max_view_distance)
+	var factor: int = int(mesh_size / data_size)
+	var exact_extent: int = ceili(float(int_radius) / float(mesh_size)) * factor + 1
+	var upper_extent: int = ceili(float(upper_radius) / float(mesh_size)) * factor + 1
+	var center_x: int = floori(float(floori(local_viewer.x)) / float(mesh_size)) * factor
+	var lower_x: int = (center_x - upper_extent) * data_size
+	var upper_x: int = (center_x + upper_extent) * data_size
+	var actual_block: AABB = AABB(Vector3(block * data_size), Vector3.ONE * data_size)
+	var predicted_x: Vector2i = Vector2i(lower_x, upper_x)
+	var terrain_bounds: AABB = _terrain.get_bounds()
+	var bounds_lower_x: int = floori(terrain_bounds.position.x / float(data_size)) * data_size
+	var bounds_upper_x: int = ceili(terrain_bounds.end.x / float(data_size)) * data_size
+	var separation: float = maxf(actual_block.position.x - float(upper_x),
+		float(lower_x) - actual_block.end.x)
+	result.inverseScale = inverse_scale
+	result.localViewerPosition = local_viewer
+	result.actualViewDistance = _viewer.view_distance
+	result.actualMaxViewDistance = _terrain.max_view_distance
+	result.dataBlockSize = data_size
+	result.meshBlockSize = mesh_size
+	result.meshToDataFactor = factor
+	result.rawLocalRadius = raw_radius
+	result.exactTruncatedRadius = int_radius
+	result.conservativeCeiledRadius = upper_radius
+	result.exactDataExtent = exact_extent
+	result.conservativeDataExtent = upper_extent
+	result.neighborPaddingDataBlocks = 1
+	result.centerDataBlockX = center_x
+	result.unclippedLocalXInterval = predicted_x
+	result.terrainVoxelBounds = terrain_bounds
+	result.conservativeClippedLocalXInterval = Vector2i(maxi(lower_x, bounds_lower_x), mini(upper_x, bounds_upper_x))
+	result.clippingScope = "outward-rounded bounds intersection; separation tested against the larger unclipped upper envelope"
+	result.actualLocalBlockAabb = actual_block
+	result.actualWorldBlockAabb = transform * actual_block
+	result.localSeparation = separation
+	result.worldSeparation = separation * transform.basis.x.length()
+	result.outsideConservativeEnvelope = separation > 0.0
+	return result
 
 func _pump_case(block: Vector3i, accepted_case: bool, frame_cap: int) -> Dictionary:
 	var deadline: int = Time.get_ticks_msec() + (30000 if accepted_case else 15000)
 	var samples: Array[Dictionary] = []
 	var result: Dictionary = {"frameCap":frame_cap, "sampleCap":SAMPLE_CAP,
 		"calls":0, "rejectedReceipts":0, "acceptedReceipts":0, "omittedSamples":0,
-		"coveredAcceptedReceipts":0, "uncoveredRejectedReceipts":0,
-		"first":{}, "latest":{}, "terminal":"deadline", "timing":"queries bracket pump but are not atomic with insertion"}
+		"rangeProvedRejectedReceipts":0,
+		"first":{}, "latest":{}, "terminal":"deadline",
+		"timing":"range geometry brackets pump; single positive control query follows accepted receipt, not atomic"}
 	for frame in range(frame_cap):
 		if Time.get_ticks_msec() >= deadline: break
 		_gate.call("advance")
-		var before: Dictionary = _area(block)
+		var before: Dictionary = _range_proof(block)
 		var event: Dictionary = _publisher.call("pump")
-		var after: Dictionary = _area(block)
-		var sample: Dictionary = {"attempt":frame, "beforePumpCoverage":before,
-			"afterPumpCoverage":after, "publisherReceipt":event,
+		var control_query: Dictionary = {"queryPerformed":false, "pairedDataBoxCoverage":null}
+		if accepted_case and block == CONTROL and event.get("block") == CONTROL \
+				and event.get("status") == "ready" and event.get("insertionReceipt") == "ready" \
+				and event.get("state") == "inserted_waiting_mesh":
+			control_query = _accepted_control_area(event)
+		var after: Dictionary = _range_proof(block)
+		var sample: Dictionary = {"attempt":frame, "beforePumpRangeProof":before,
+			"afterPumpRangeProof":after, "acceptedControlQuery":control_query, "publisherReceipt":event,
 			"hasEngineData":_terrain.has_data_block(block),
 			"installedGeneration":_publisher.call("installed_generation", block)}
 		result.calls += 1
@@ -138,16 +253,16 @@ func _pump_case(block: Vector3i, accepted_case: bool, frame_cap: int) -> Diction
 			if event.get("status") == "ready" and event.get("insertionReceipt") == "ready" \
 					and event.get("state") == "inserted_waiting_mesh":
 				result.acceptedReceipts += 1
-				if before.get("pairedDataBoxCoverage") == true and after.get("pairedDataBoxCoverage") == true:
-					result.coveredAcceptedReceipts += 1
+				result.acceptedControlQuery = control_query
 				result.acceptedObservation = _bounded(sample)
 				result.engineAccepted = true
 				result.engineAcceptedEvidence = "inferred from public Publisher ready insertion receipt/state, not direct engine return"
 			if event.get("status") == "pending" and event.get("insertionReceipt") == "rejected" \
 					and event.get("state") == "prepared":
 				result.rejectedReceipts += 1
-				if before.get("pairedDataBoxCoverage") == false and after.get("pairedDataBoxCoverage") == false:
-					result.uncoveredRejectedReceipts += 1
+				if before.get("outsideConservativeEnvelope") == true and after.get("outsideConservativeEnvelope") == true \
+						and before.get("identityUnchanged") == true and after.get("identityUnchanged") == true:
+					result.rangeProvedRejectedReceipts += 1
 				result.rejectedObservation = _bounded(sample)
 				if not result.has("firstRejectedObservation"):
 					result.firstRejectedObservation = _bounded(sample)
@@ -164,7 +279,7 @@ func _pump_case(block: Vector3i, accepted_case: bool, frame_cap: int) -> Diction
 			break
 		await process_frame
 	result.samples = samples
-	result.finalCoverage = _area(block)
+	result.finalRangeProof = _range_proof(block)
 	result.finalPublisher = _publisher.call("snapshot")
 	result.finalHasEngineData = _terrain.has_data_block(block)
 	result.finalInstalledGeneration = _publisher.call("installed_generation", block)
@@ -242,6 +357,8 @@ func _run() -> void:
 		"archiveSha256":"dfee985a0cff7059a31ada665e88a634fdcc3eab51f83fe5f6dd48939dd5372a",
 		"sourceUrl":"https://github.com/Zylann/godot_voxel/blob/595f52ee4e23203a865eeb981f115909f7aa92f4/terrain/fixed_lod/voxel_terrain.cpp",
 		"queryLines":"316-326,2243-2260", "insertionLines":"1691-1716,2222-2240",
+		"rangeGeometryLines":"1230-1272,1285-1296,1313-1321",
+		"emptyQueryHazardLines":"2247-2253; no query except immediately accepted control",
 		"installedBinarySourceMatch":"unverified", "rejectionReason":"not exposed by public publisher"}
 	_main = MAIN.new()
 	_main.set("seed_text", "n3-n5-trusted-edit-release")
@@ -321,15 +438,11 @@ func _run() -> void:
 	if not bool(_checks.public_publisher_setup):
 		await _finish()
 		return
-	_evidence.geometryBefore = _bounded(_geometry())
-	var coverage: Dictionary = _area(CONTROL)
-	var coverage_deadline: int = Time.get_ticks_msec() + 10000
-	for frame in range(120):
-		if coverage.get("pairedDataBoxCoverage") == true or Time.get_ticks_msec() >= coverage_deadline: break
+	_frozen_geometry = _geometry()
+	_evidence.geometryBefore = _bounded(_frozen_geometry)
+	for frame in range(2):
 		await process_frame
-		coverage = _area(CONTROL)
-	_check("actual_control_data_box_coverage", coverage.get("pairedDataBoxCoverage") == true)
-	_check("actual_outside_data_box_not_covered", _area(OUTSIDE).get("pairedDataBoxCoverage") == false)
+	_evidence.settle = {"unqueriedProcessFrames":2, "scope":"scheduling opportunity only; not pairing proof"}
 	_check("native_and_engine_data_size_match", _terrain.get_data_block_size() == 16)
 	var control_add: Array[Vector3i] = [CONTROL]
 	var no_remove: Array[Vector3i] = []
@@ -337,18 +450,25 @@ func _run() -> void:
 	_check("control_demand_ready", control_demand.get("status") == "ready")
 	var control_result: Dictionary = await _pump_case(CONTROL, true, 600)
 	_evidence.control = control_result
+	var control_query: Dictionary = control_result.get("acceptedControlQuery", {})
 	_check("covered_control_accepted_via_publisher", control_result.terminal == "accepted"
-		and int(control_result.coveredAcceptedReceipts) > 0
-		and control_result.finalCoverage.get("pairedDataBoxCoverage") == true
+		and control_query.get("acceptedReceiptEligibility") == true
+		and control_query.get("queryPerformed") == true and control_query.get("pairedDataBoxCoverage") == true
 		and bool(control_result.finalHasEngineData) and int(control_result.finalInstalledGeneration) > 0)
+	if not bool(_checks.covered_control_accepted_via_publisher):
+		_evidence.outside = {"status":"skipped", "reason":"covered_control_not_confirmed",
+			"queryPerformed":false, "measuredPairedCoverage":null}
+		await _finish()
+		return
 	var outside_add: Array[Vector3i] = [OUTSIDE]
 	var outside_demand: Dictionary = _publisher.call("apply_data_block_delta", outside_add, no_remove)
 	_check("outside_demand_ready", outside_demand.get("status") == "ready")
 	var outside_result: Dictionary = await _pump_case(OUTSIDE, false, 240)
 	_evidence.outside = outside_result
-	_check("uncovered_block_rejected_via_publisher", outside_result.terminal == "three_rejections"
-		and int(outside_result.uncoveredRejectedReceipts) == 3
-		and outside_result.finalCoverage.get("pairedDataBoxCoverage") == false
+	_check("geometry_outside_block_rejected_via_publisher", outside_result.terminal == "three_rejections"
+		and int(outside_result.rangeProvedRejectedReceipts) == 3
+		and outside_result.finalRangeProof.get("outsideConservativeEnvelope") == true
+		and outside_result.finalRangeProof.get("identityUnchanged") == true
 		and not bool(outside_result.finalHasEngineData) and int(outside_result.acceptedReceipts) == 0)
 	_check("covered_control_still_resident", _terrain.has_data_block(CONTROL)
 		and int(_publisher.call("installed_generation", CONTROL)) > 0)
