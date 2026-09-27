@@ -127,7 +127,7 @@ Sha256FinishStep Sha256State::finish_step(const std::size_t block_quota) {
     if (phase_ == 0U) {
         const std::size_t length = partial_bytes_;
         partial_[length] = 0x80U;
-        std::fill(partial_.begin() + length + 1U, partial_.end(), 0U);
+        std::fill(partial_.begin() + length + 1U, partial_.end(), std::uint8_t{0});
         phase_ = 1U;
         if (length >= 56U) {
             process_block(partial_.data());
