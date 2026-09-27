@@ -27,7 +27,7 @@ struct ArtifactSlot {
 };
 struct RoleSlot {
     Base base;
-    std::size_t artifact, session;
+    std::size_t artifact, session, external_tokens;
     std::uint64_t artifact_cookie, session_cookie, epoch;
     bool released;
 };
@@ -224,6 +224,11 @@ struct Access {
     template<class Tag> static std::size_t index(const ArtifactToken<Tag> &t) noexcept { return t.slot_; }
     template<class Tag> static ArtifactToken<Tag> issue(Control &c, std::size_t i) noexcept {
         auto *b = base(c, kind<Tag>(), i);
+        if (kind<Tag>() == Kind::role) {
+            auto &r = c.roles.items[i];
+            if (r.external_tokens >= c.config.maximum_references) std::terminate();
+            ++r.external_tokens;
+        }
         const auto credit = c.free_credit;
         c.free_credit = c.credits[credit].next;
         c.credits[credit].occupied = true;
@@ -244,6 +249,13 @@ struct Access {
         c->credits[credit].occupied = false;
         c->credits[credit].next = c->free_credit; c->free_credit = credit;
         --c->live_tokens;
+        if (kind<Tag>() == Kind::role) {
+            auto &r = c->roles.items[slot];
+            if (!r.external_tokens) std::terminate();
+            // Transfer edges retain lifetime, never external origin authority.
+            // Moves do not issue/reset a token; another alias keeps authority.
+            if (!--r.external_tokens) r.released = true;
+        }
         release_slot(*c, kind<Tag>(), slot);
         drop(c); // Token's actual control reference.
         drop(c); // Cascade fence.
@@ -283,6 +295,8 @@ template<class Tag> ArtifactResult<ArtifactToken<Tag>> clone(Control *c, const A
     if (extra != ArtifactReason::none) return failed<ArtifactToken<Tag>>(extra);
     if (c->free_credit == absent) return failed<ArtifactToken<Tag>>(ArtifactReason::capacity);
     if (!room(*c, *base(*c, kind<Tag>(), Access::index(t)))) return failed<ArtifactToken<Tag>>(ArtifactReason::reference_exhausted);
+    if (kind<Tag>() == Kind::role && c->roles.items[Access::index(t)].external_tokens >= c->config.maximum_references)
+        return failed<ArtifactToken<Tag>>(ArtifactReason::reference_exhausted);
     return {ArtifactStatus::ready, ArtifactReason::none, Access::issue<Tag>(*c, Access::index(t))};
 }
 ArtifactAccounting accounting(const Control &c) noexcept {
@@ -534,7 +548,8 @@ ArtifactResult<ArtifactRole> NativeCollisionArtifactDomain::commit_transfer(Arti
     if (a.owner_epoch == std::numeric_limits<std::uint64_t>::max()) return failed<ArtifactRole>(ArtifactReason::cookie_exhausted);
     if (c.free_credit == absent) return failed<ArtifactRole>(ArtifactReason::capacity);
     auto &r = c.roles.items[t.destination_role];
-    if (!room(c, r.base)) return failed<ArtifactRole>(ArtifactReason::reference_exhausted);
+    if (!room(c, r.base) || r.external_tokens >= c.config.maximum_references)
+        return failed<ArtifactRole>(ArtifactReason::reference_exhausted);
     clear_pending(c, t); ++a.owner_epoch; a.owner_session = r.session; a.owner_session_cookie = r.session_cookie;
     r.epoch = a.owner_epoch; t.state = TransferState::committed;
     return {ArtifactStatus::ready, ArtifactReason::none, Access::issue<ArtifactRoleTag>(c, t.destination_role)};

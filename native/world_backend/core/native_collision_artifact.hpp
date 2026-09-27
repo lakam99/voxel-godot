@@ -46,6 +46,8 @@ struct ArtifactHoldTag;
 // Move/destruction is owner-thread only. Wrong-thread noexcept destruction is
 // a fatal contract violation, not a concurrent worker integration guarantee.
 // Every issued/explicitly cloned token consumes one precharged token slot.
+// A role's last external token release revokes its authority even when a
+// staged transfer retains an internal lifetime reference to that role.
 template<class Tag> class ArtifactToken {
 public:
     ArtifactToken() noexcept;

@@ -545,4 +545,72 @@ VWB_TEST(synthetic_collision_artifact_abandoned_builder_and_transfer_roots_relea
     transfer = ArtifactTransfer{};
     same_live_allocations(before);
 }
+
+VWB_TEST(synthetic_collision_artifact_last_external_origin_drop_revokes_but_retains_backing) {
+    const auto before = Domain::allocation_totals();
+    for (int variant = 0; variant != 3; ++variant) {
+        Domain d(config(), {0}); auto p = d.issue_session(Owner::producer), r = d.issue_session(Owner::receiver);
+        auto a = artifact(d, p.value);
+        ArtifactTransfer transfer;
+        if (variant == 0) {
+            // Pure scope destruction of the only external origin handle.
+            auto role = d.acquire_role(a, p.value);
+            transfer = std::move(d.begin_transfer(role.value, r.value).value);
+        } else {
+            auto role = d.acquire_role(a, p.value); auto alias = d.clone_role(role.value);
+            transfer = std::move(d.begin_transfer(role.value, r.value).value);
+            if (variant == 1) {
+                role.value = ArtifactRole{};
+                alias.value = ArtifactRole{};
+            } else {
+                // Overwriting by another genuine role also releases the old
+                // external identity; the unrelated replacement is no alias.
+                auto other = artifact(d, p.value); auto replacement = d.acquire_role(other, p.value);
+                role.value = std::move(replacement.value);
+                alias.value = ArtifactRole{};
+            }
+        }
+        const auto bytes = d.accounting().value.requested_bytes;
+        const auto allocations = Domain::allocation_totals();
+        VWB_EXPECT_EQ(Reason::stale_token, d.commit_transfer(transfer).reason);
+        VWB_EXPECT_EQ(bytes, d.accounting().value.requested_bytes);
+        VWB_EXPECT_EQ(allocations.allocations, Domain::allocation_totals().allocations);
+        VWB_EXPECT_EQ(allocations.deallocations, Domain::allocation_totals().deallocations);
+        a = CollisionArtifact{};
+        VWB_EXPECT_EQ(bytes, d.accounting().value.requested_bytes);
+        VWB_EXPECT_EQ(Reason::none, d.abort_transfer(transfer));
+        VWB_EXPECT_EQ(bytes, d.accounting().value.requested_bytes);
+        transfer = ArtifactTransfer{};
+        VWB_EXPECT_EQ(0u, d.accounting().value.occupied_artifacts);
+        VWB_EXPECT_EQ(0u, d.accounting().value.backing_bytes);
+    }
+    same_live_allocations(before);
+}
+
+VWB_TEST(synthetic_collision_artifact_surviving_alias_and_moves_preserve_origin_authority) {
+    const auto before = Domain::allocation_totals();
+    {
+        Domain d(config(), {0}); auto p = d.issue_session(Owner::producer), r = d.issue_session(Owner::receiver);
+        auto a = artifact(d, p.value); auto role = d.acquire_role(a, p.value); auto alias = d.clone_role(role.value);
+        auto transfer = d.begin_transfer(role.value, r.value);
+        const auto tokens = d.accounting().value.live_tokens;
+        ArtifactRole moved(std::move(alias.value));
+        ArtifactRole assigned; assigned = std::move(moved);
+        VWB_EXPECT_EQ(tokens, d.accounting().value.live_tokens);
+        role.value = ArtifactRole{}; // one external alias remains
+        VWB_EXPECT_EQ(Status::ready, d.clone_role(assigned).status);
+        VWB_EXPECT_EQ(Status::ready, d.commit_transfer(transfer.value).status);
+        VWB_EXPECT_EQ(Reason::stale_token, d.clone_role(assigned).reason);
+    }
+    {
+        Domain d(config(), {0}); auto p = d.issue_session(Owner::producer), r = d.issue_session(Owner::receiver);
+        auto a = artifact(d, p.value); auto role = d.acquire_role(a, p.value); auto alias = d.clone_role(role.value);
+        auto transfer = d.begin_transfer(role.value, r.value);
+        VWB_EXPECT_EQ(Reason::none, d.release_role(alias.value)); // explicit release revokes all aliases
+        VWB_EXPECT_EQ(Reason::stale_token, d.clone_role(role.value).reason);
+        VWB_EXPECT_EQ(Reason::stale_token, d.commit_transfer(transfer.value).reason);
+        VWB_EXPECT_EQ(Reason::none, d.abort_transfer(transfer.value));
+    }
+    same_live_allocations(before);
+}
 }
