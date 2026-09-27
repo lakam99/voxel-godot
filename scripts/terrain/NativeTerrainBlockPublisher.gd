@@ -449,6 +449,11 @@ func _shutdown_drain_step() -> Dictionary:
 				return {"status":"pending", "reason":"native_shutdown_release_pending",
 					"block":retiring_block, "receipt":release}
 			_requested.erase(retiring_block)
+			_edit_blocked.erase(retiring_block)
+			_edit_probes.erase(retiring_block)
+			_old_edit_sdf.erase(retiring_block)
+			_changed_sdf.erase(retiring_block)
+			_sdf_bytes.erase(retiring_block)
 		_retiring.erase(retiring_block)
 		return {"status":"pending", "reason":"native_block_release_acknowledged",
 			"block":retiring_block}

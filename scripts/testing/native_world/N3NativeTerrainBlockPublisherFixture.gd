@@ -447,6 +447,8 @@ func run() -> void:
 		and planned_publisher.snapshot().registered == 0
 		and planned_publisher.stop().get("status") == "ready",
 		"unregistered_union_retires_without_native_requests")
+	await async_shutdown_contract(backend,terrain,bridge,viewer,
+		int(first_commit.get("revision",revision)))
 	admission.request_shutdown()
 	for i in range(240):
 		if admission.advance().get("shutdownComplete", false):
@@ -454,6 +456,89 @@ func run() -> void:
 		await process_frame
 	check(admission.stats().get("shutdownComplete", false), "source_worker_drained")
 	finish()
+
+func async_shutdown_contract(backend, terrain: VoxelTerrain, bridge, viewer: VoxelViewer,
+		revision: int) -> void:
+	# Exercise both producers of retained bookkeeping through the public API:
+	# an edit before insertion, then accepted unedited data with cached SDF.
+	var block := Vector3i(9,3,8)
+	var cases := {}
+	for installed_case in [false,true]:
+		var label: String = "installed_unedited" if installed_case else "edited_uninstalled"
+		var shutdown_publisher = Publisher.new()
+		check(shutdown_publisher.setup(backend,terrain,bridge,2,10).get("status") == "ready",
+			"async_shutdown_%s_configured" % label)
+		if installed_case:
+			viewer.position = Vector3(144,50,128)*CELL
+			viewer.view_distance = 40
+			for i in range(4): await physics_frame
+		var blocks: Array[Vector3i] = [block]
+		check(shutdown_publisher.apply_data_block_delta(blocks,[]).get("status") == "ready",
+			"async_shutdown_%s_demanded" % label)
+		var prepared: Dictionary = {}
+		for i in range(180):
+			prepared = shutdown_publisher.pump()
+			if prepared.get("status") == "failed": break
+			if installed_case and shutdown_publisher.installed_generation(block) > 0: break
+			if not installed_case and shutdown_publisher.has_native_request(block): break
+			await process_frame
+		check(shutdown_publisher.has_native_request(block)
+			and (shutdown_publisher.installed_generation(block) > 0) == installed_case,
+			"async_shutdown_%s_registered_state" % label)
+		var committed: Dictionary = {}
+		if not installed_case:
+			var changed := Vector3i(145,52,129)
+			committed = backend.commit_typed_cells({
+				"schema":"n3-native-typed-cell-transaction/v1",
+				"transactionId":"publisher-async-stop-before-insertion",
+				"expectedRevision":revision,"operations":[{
+					"namespace":"durable_terrain","kind":"set","cell":changed,
+					"state":{"materialId":13,"biomeId":0,"solid":true,"density":1.35,
+						"fluidId":0,"light":Vector2i.ZERO,
+						"metadata":{"source":"terrain_edit","terrainMeshAffects":true},
+						"blockId":"publisher_async_stop","editReason":"shutdown-before-insertion"}}]})
+			check(committed.get("commitStatus") == "committed", "async_shutdown_edit_committed")
+			var probes := {}
+			probes[block] = {"rayFrom":Vector3(145,60,129)*CELL,
+				"rayTo":Vector3(145,-24,129)*CELL,"expectedMinimumY":53.0*CELL,
+				"changedCells":[changed]}
+			check(shutdown_publisher.observe_committed_edit(blocks,probes).get("status") == "ready"
+				and shutdown_publisher.snapshot().editBlocked == 1,
+				"async_shutdown_uninstalled_edit_retained")
+		else:
+			check(terrain.has_data_block(block) and shutdown_publisher.snapshot().editBlocked == 0,
+				"async_shutdown_unedited_data_resident")
+		var before: Dictionary = shutdown_publisher.snapshot()
+		var requested: Dictionary = shutdown_publisher.request_stop()
+		var queued: Dictionary = shutdown_publisher.drain_step()
+		check(requested.get("status") == "pending"
+			and queued.get("reason") == "native_block_retirement_queued"
+			and shutdown_publisher.snapshot().registered == 1
+			and shutdown_publisher.snapshot().editBlocked == before.editBlocked,
+			"async_shutdown_%s_retains_state_before_release" % label)
+		var resident_guard: Dictionary = {}
+		if installed_case:
+			resident_guard = shutdown_publisher.drain_step()
+			check(resident_guard.get("reason") == "viewer_detach_or_physical_unload_required"
+				and shutdown_publisher.snapshot().registered == 1,
+				"async_shutdown_resident_data_blocks_release")
+			viewer.position = Vector3(2000,12,2000)*CELL
+		var terminal: Dictionary = {}
+		for i in range(240):
+			terminal = shutdown_publisher.drain_step()
+			if terminal.get("status") != "pending": break
+			await physics_frame
+		var after: Dictionary = shutdown_publisher.snapshot()
+		check(terminal.get("status") == "ready" and bool(terminal.get("drained",false))
+			and bool(terminal.get("nativeWorkersDrained",false)) and not bool(after.active)
+			and after.registered == 0 and after.inserted == 0 and after.editBlocked == 0,
+			"async_shutdown_%s_all_tracked_state_drained" % label)
+		check(shutdown_publisher.request_stop() == terminal
+			and shutdown_publisher.drain_step() == terminal,
+			"async_shutdown_%s_terminal_receipt_replayed" % label)
+		cases[label] = {"prepared":prepared,"committed":committed,"before":before,
+			"residentGuard":resident_guard,"terminal":terminal,"after":after}
+	observations.asyncShutdown = cases
 
 func finish() -> void:
 	var report := {"schema":"n3-native-terrain-block-publisher-fixture/v1",
