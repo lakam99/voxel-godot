@@ -65,11 +65,14 @@ Every mismatched cell reports its coordinate and each mismatched field.
 
 ## 3. Frozen dependency and precision contract
 
-Do not rewrite the noise algorithm. Vendor the exact Godot 4.6.1 patched
-`thirdparty/misc/FastNoiseLite.h` from engine commit
-`14d19694e0c88a3f9e82d899a0400f27a24c176e` behind one private first-party
-wrapper translation unit. The patched header SHA-256 is
+Do not rewrite the noise algorithm. The vendor baseline is Godot 4.6.1's
+patched `thirdparty/misc/FastNoiseLite.h` from engine commit
+`14d19694e0c88a3f9e82d899a0400f27a24c176e`, behind one private
+first-party wrapper translation unit. Its original header SHA-256 was
 `38b24b9b04aa5e9f1e63336d4acbbbb73b11f15b697bb08a25f5ec0c6c274901`.
+The local source-only modulo-2^32 arithmetic repair for the production
+OpenSimplex2/FBm path retains that provenance and pins the maintained header
+at SHA-256 `6e96dcf7b2f7e968e1b47337b2f54a5e7ecf70a32cdab55d6158510629ab248c`.
 Godot pins upstream FastNoiseLite 1.1.0 commit
 `f7af54b56518aa659e1cf9fb103c0b6e36a833d9`; its license is MIT/Expat.
 

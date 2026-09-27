@@ -35,7 +35,7 @@ export const expectedToolchainLockValue = {
     license: 'MIT', licenseFile: 'core/thirdparty/fast_noise_lite/LICENSE',
     licenseSha256: 'c08da3239b919c12f4ec616b457a8dd0fc923c8102c8a742c4006fcb5de28fb0',
     patchedHeaderFile: 'core/thirdparty/fast_noise_lite/FastNoiseLite.h',
-    patchedHeaderSha256: '38b24b9b04aa5e9f1e63336d4acbbbb73b11f15b697bb08a25f5ec0c6c274901',
+    patchedHeaderSha256: '6e96dcf7b2f7e968e1b47337b2f54a5e7ecf70a32cdab55d6158510629ab248c',
     godotPatchSha256: '123ec6a215a20154b5f33c0f63d04e1442fa6d98db0ddca4fa2960d0c3354a7c',
     upstreamHeaderSha256: '3faf87ccfa1b46a2d5af402ba0439a13a73a3e567b80c375be1dcf700d86fc6e',
   },
