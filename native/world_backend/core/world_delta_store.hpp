@@ -233,6 +233,7 @@ private:
     std::uint64_t overlay_count_ = 0;
     std::uint64_t metadata_bytes_ = 0;
     std::uint64_t metadata_emitted_ = 0;
+    std::uint32_t metadata_next_atomic_ = 1U;
     std::uint64_t source_token_ = 0;
     std::uint64_t source_revision_ = 0;
     Sha256Digest source_content_{};

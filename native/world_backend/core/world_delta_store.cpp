@@ -766,6 +766,7 @@ void BorrowedTypedProjectionCursor::reset(const WorldDeltaHorizontalBounds bound
     selection_x_ = 0; active_x_ = 0; selection_stage_ = 0U;
     record_selected_ = false;
     metadata_bytes_ = 0U; metadata_emitted_ = 0U; source_token_ = 0U;
+    metadata_next_atomic_ = 1U;
     source_revision_ = 0U; source_content_ = {}; byte_offset_ = 0U;
     phase_ = Phase::count_durable; record_phase_ = RecordPhase::start;
     status_ = Status::idle;
@@ -1208,6 +1209,7 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
             case Cursor::RecordPhase::start:
                 cursor.metadata_.reset(); cursor.metadata_bytes_ = 0U;
                 cursor.metadata_emitted_ = 0U;
+                cursor.metadata_next_atomic_ = 1U;
                 cursor.byte_offset_ = 0U; cursor.record_phase_ = Cursor::RecordPhase::fixed;
                 result.consumed_ops = 1U; break;
             case Cursor::RecordPhase::fixed:
@@ -1233,12 +1235,14 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
                 cursor.metadata_bytes_ += sink.count;
                 result.consumed_ops = static_cast<std::uint32_t>(step.work_units + sink.count);
                 result.next_atomic_ops = static_cast<std::uint32_t>(step.next_atomic_units + 1U);
+                cursor.metadata_next_atomic_ = result.next_atomic_ops;
                 if (step.status == NativeValueCanonicalCursorStatus::complete)
                     cursor.record_phase_ = Cursor::RecordPhase::metadata_reset;
                 break;
             }
             case Cursor::RecordPhase::metadata_reset:
                 cursor.metadata_.reset(); cursor.byte_offset_ = 0U;
+                cursor.metadata_next_atomic_ = 1U;
                 cursor.record_phase_ = Cursor::RecordPhase::metadata_length;
                 result.consumed_ops = 1U; break;
             case Cursor::RecordPhase::metadata_length:
@@ -1266,6 +1270,7 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
                 result.consumed_ops = static_cast<std::uint32_t>(
                     step.work_units + step.bytes_written + sink.compressed);
                 result.next_atomic_ops = static_cast<std::uint32_t>(step.next_atomic_units + 2U);
+                cursor.metadata_next_atomic_ = result.next_atomic_ops;
                 if (step.status == NativeValueCanonicalCursorStatus::complete) {
                     if (cursor.metadata_emitted_ != cursor.metadata_bytes_)
                         throw std::logic_error("borrowed projection metadata length changed");
@@ -1349,8 +1354,55 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
     const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
     BorrowedTypedProjectionCursor::Step aggregate;
     aggregate.status = cursor.status_;
+    const auto current_next_atom = [&]() -> std::uint32_t {
+        using Cursor = BorrowedTypedProjectionCursor;
+        if (cursor.status_ == Cursor::Status::ready
+            || cursor.status_ == Cursor::Status::failed
+            || cursor.status_ == Cursor::Status::source_changed) return 0U;
+        if (cursor.status_ == Cursor::Status::idle) return 1U;
+        switch (cursor.phase_) {
+        case Cursor::Phase::count_durable:
+        case Cursor::Phase::count_overlay:
+        case Cursor::Phase::finish: return 1U;
+        case Cursor::Phase::header:
+        case Cursor::Phase::durable_count:
+        case Cursor::Phase::overlay_count: return 3U;
+        case Cursor::Phase::durable_records:
+        case Cursor::Phase::overlay_records: {
+            const std::size_t layer = cursor.phase_ == Cursor::Phase::durable_records ? 0U : 1U;
+            const std::size_t record_count = layer == 0U
+                ? state_->terrain_volume.durable_snapshot.records().size()
+                : state_->typed_transient_overlays.size();
+            if (record_count <= Cursor::SELECTOR_WORDS * 64U) {
+                if (cursor.selection_stage_ != 3U || cursor.selected_count_ == 0U
+                    || cursor.emit_word_ < cursor.selected_min_word_
+                    || cursor.emit_word_ >= Cursor::SELECTOR_WORDS) return 1U;
+                if (!cursor.record_selected_) {
+                    const std::uint64_t word = cursor.selected_generations_[cursor.emit_word_]
+                        == cursor.selection_generation_ ? cursor.selected_words_[cursor.emit_word_] : 0U;
+                    return word == 0U ? 1U : 7U;
+                }
+            } else if (cursor.scan_index_ == record_count) return 1U;
+            switch (cursor.record_phase_) {
+            case Cursor::RecordPhase::start:
+            case Cursor::RecordPhase::metadata_reset:
+            case Cursor::RecordPhase::end: return 1U;
+            case Cursor::RecordPhase::metadata_count:
+                return std::max(2U, cursor.metadata_next_atomic_);
+            case Cursor::RecordPhase::metadata_emit:
+                return std::max(3U, cursor.metadata_next_atomic_);
+            default: return 3U; // one outer byte and possible SHA compression
+            }
+        }
+        case Cursor::Phase::complete: return 0U;
+        }
+        return 1U;
+    };
     const std::uint32_t limit = std::min(offered_ops, 64U);
-    if (limit == 0U) return aggregate;
+    if (limit == 0U) {
+        aggregate.next_atomic_ops = current_next_atom();
+        return aggregate;
+    }
     while (aggregate.consumed_ops < limit) {
         const auto prior_phase = cursor.phase_;
         const auto prior_record_phase = cursor.record_phase_;
@@ -1393,6 +1445,7 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
         }
         if (aggregate.next_atomic_ops > limit - aggregate.consumed_ops) break;
     }
+    aggregate.next_atomic_ops = current_next_atom();
     return aggregate;
 }
 
