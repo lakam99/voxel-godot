@@ -960,15 +960,15 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
         cursor.status_ = Cursor::Status::source_changed;
         result.status = cursor.status_; return result;
     }
+    if (source_mutation_fence_ && (!source_mutation_fence_->on_owner_thread()
+        || !source_mutation_fence_->read_active())) {
+        cursor.status_ = Cursor::Status::failed; result.status = cursor.status_; return result;
+    }
     if (cursor.status_ != Cursor::Status::idle
         && (cursor.source_revision_ != state_->revision
             || cursor.source_content_ != state_->content_digest)) {
         cursor.status_ = Cursor::Status::source_changed;
         result.status = cursor.status_; return result;
-    }
-    if (source_mutation_fence_ && (!source_mutation_fence_->on_owner_thread()
-        || !source_mutation_fence_->read_active())) {
-        cursor.status_ = Cursor::Status::failed; result.status = cursor.status_; return result;
     }
     if (cursor.status_ == Cursor::Status::ready) return result;
     if (bounds.width <= 0 || bounds.depth <= 0
