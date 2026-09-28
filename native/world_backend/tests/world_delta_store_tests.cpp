@@ -3,6 +3,7 @@
 #include "../core/world_delta_store.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
 #include <memory>
@@ -1437,6 +1438,121 @@ VWB_TEST(world_delta_store_imported_max_revision_refuses_an_overflowing_commit) 
             set(WorldDeltaNamespace::terrain_override, {0, 0, 0}, stone()),
         }), store);
     VWB_EXPECT(store.pin().durable_terrain_snapshot().records().empty());
+}
+
+// Contract oracle for the forthcoming borrowed WDP1 cursor. These tests use
+// the existing synchronous projection only as the independent digest oracle;
+// the cursor must do its own bounded count, metadata-length, and emit passes.
+VWB_TEST(world_delta_store_borrowed_projection_matches_durable_overlay_and_nested_metadata) {
+    WorldDeltaStore store;
+    NativeTypedWorldStateRecord nested = typed_stone({-1, 2, 3});
+    nested.state.metadata = NativeValue::object({
+        {"payload", NativeValue::array({NativeValue::null(), NativeValue::object({
+            {"label", NativeValue::string("nested")},
+            {"weight", NativeValue::number(7.5)},
+        })})},
+    });
+    NativeTypedWorldStateRecord overlay = typed_overlay_without_persistence_metadata({-1, 2, 3});
+    overlay.state.metadata = NativeValue::object({{"overlay", NativeValue::boolean(true)}});
+    const auto admitted = store.admit_typed_state(typed_admission("wdp1:mixed", 0,
+        {typed_stone({16, 0, 0}), typed_durable({15, 1, 15}), nested},
+        {typed_overlay({0, 0, 16}), overlay}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    const WorldDeltaHorizontalBounds clipped{-16, 0, 32, 16};
+    const WorldDeltaPinnedSnapshot pin = store.pin();
+    VWB_EXPECT_EQ(3U, pin.durable_terrain_snapshot().records().size());
+    VWB_EXPECT_EQ(2U, pin.scene_overlays().size());
+    const Sha256Digest expected = pin.typed_projection_digest(clipped);
+
+    BorrowedTypedProjectionCursor cursor;
+    cursor.reset(clipped);
+    constexpr std::uint64_t source_token = 0x574450310001ULL;
+    const auto zero = store.advance_borrowed_projection(cursor, clipped, source_token, 0U);
+    VWB_EXPECT_EQ(0U, zero.consumed_ops);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, cursor.status());
+    const auto one = store.advance_borrowed_projection(cursor, clipped, source_token, 1U);
+    VWB_EXPECT(one.consumed_ops <= 1U);
+    const std::array<std::uint32_t, 8> quotas{0U, 1U, 2U, 3U, 7U, 8U, 31U, 64U};
+    std::size_t resumed = 0U;
+    for (std::size_t call = 0U;
+         call < 200000U && cursor.status() == BorrowedTypedProjectionCursor::Status::pending;
+         ++call) {
+        const std::uint32_t offered = quotas[call % quotas.size()];
+        const auto step = store.advance_borrowed_projection(cursor, clipped, source_token, offered);
+        VWB_EXPECT(step.consumed_ops <= offered);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+        if (step.consumed_ops != 0U) ++resumed;
+    }
+    VWB_EXPECT(resumed > 1U);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, cursor.status());
+    VWB_EXPECT_EQ(expected, cursor.digest());
+    const auto repeat = store.advance_borrowed_projection(cursor, clipped, source_token, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, repeat.status);
+    VWB_EXPECT_EQ(0U, repeat.consumed_ops);
+    VWB_EXPECT_EQ(expected, cursor.digest());
+}
+
+VWB_TEST(world_delta_store_borrowed_projection_clips_remote_records_without_reordering_local_layers) {
+    WorldDeltaStore store;
+    const auto admitted = store.admit_typed_state(typed_admission("wdp1:clip", 0,
+        {typed_stone({16, 0, 0}), typed_stone({-1, 0, 0}), typed_durable({0, 1, 0})},
+        {typed_overlay({16, 0, 0}), typed_overlay_without_persistence_metadata({-1, 0, 0})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    const WorldDeltaHorizontalBounds clipped{-16, 0, 32, 16};
+    const WorldDeltaHorizontalBounds wider{-16, 0, 48, 16};
+    const Sha256Digest local_before = store.pin().typed_projection_digest(clipped);
+    const Sha256Digest wide_before = store.pin().typed_projection_digest(wider);
+    const auto changed = store.commit_typed_cells(transaction("wdp1:remote", 1, {
+        set(WorldDeltaNamespace::terrain_override, {16, 0, 0}, water()),
+        set(WorldDeltaNamespace::scene_overlay, {16, 0, 0}, stone()),
+    }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, changed.status);
+    VWB_EXPECT_EQ(local_before, store.pin().typed_projection_digest(clipped));
+    VWB_EXPECT(!(wide_before == store.pin().typed_projection_digest(wider)));
+
+    BorrowedTypedProjectionCursor cursor;
+    cursor.reset(clipped);
+    constexpr std::uint64_t token = 0x574450310002ULL;
+    for (std::size_t call = 0U;
+         call < 200000U && cursor.status() == BorrowedTypedProjectionCursor::Status::pending;
+         ++call) {
+        const std::uint32_t offered = (call % 3U == 0U) ? 1U : 64U;
+        const auto step = store.advance_borrowed_projection(cursor, clipped, token, offered);
+        VWB_EXPECT(step.consumed_ops <= offered);
+    }
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, cursor.status());
+    VWB_EXPECT_EQ(local_before, cursor.digest());
+}
+
+VWB_TEST(world_delta_store_borrowed_projection_rejects_changed_source_token_midstream) {
+    WorldDeltaStore store;
+    const auto admitted = store.admit_typed_state(typed_admission("wdp1:token", 0,
+        {typed_stone({0, 0, 0})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    const WorldDeltaHorizontalBounds bounds{0, 0, 16, 16};
+    BorrowedTypedProjectionCursor cursor;
+    cursor.reset(bounds);
+    const auto started = store.advance_borrowed_projection(cursor, bounds, 41U, 64U);
+    VWB_EXPECT(started.consumed_ops > 0U);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, cursor.status());
+    const auto changed = store.commit_typed_cells(transaction("wdp1:token-change", 1, {
+        set(WorldDeltaNamespace::scene_overlay, {0, 0, 0}, air()),
+    }));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, changed.status);
+    const auto stale = store.advance_borrowed_projection(cursor, bounds, 42U, 64U);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::source_changed, stale.status);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::source_changed, cursor.status());
+    VWB_EXPECT_THROW(std::logic_error, cursor.digest());
+
+    cursor.reset(bounds);
+    for (std::size_t call = 0U;
+         call < 200000U && cursor.status() == BorrowedTypedProjectionCursor::Status::pending;
+         ++call) {
+        const auto step = store.advance_borrowed_projection(cursor, bounds, 42U, 64U);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+    }
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, cursor.status());
+    VWB_EXPECT_EQ(store.pin().typed_projection_digest(bounds), cursor.digest());
 }
 
 } // namespace voxel::world_backend::tests
