@@ -455,7 +455,10 @@ NativeValueCanonicalCursorProgress NativeValueCanonicalCursor::advance(
             || frame.phase == Phase::array_items || frame.phase == Phase::object_items;
         const bool empty_payload_phase = (frame.phase == Phase::string_bytes && frame.declared_length == 0U)
             || (frame.phase == Phase::object_key_bytes && frame.segment_length == 0U);
-        if (bytes_remaining == 0U && !structural_phase && !empty_payload_phase) break;
+        if (bytes_remaining == 0U && !structural_phase && !empty_payload_phase) {
+            progress.next_atomic_units = depth_ + 2U;
+            break;
+        }
         // resolve_value follows at most MAX_DEPTH parent links. Charge each
         // link plus the phase transition before touching borrowed children.
         const std::size_t phase_cost = depth_ + 2U;
