@@ -315,6 +315,59 @@ VWB_TEST(world_delta_store_borrowed_typed_cell_rejects_unbound_token_and_changed
         finish_borrowed_typed_cell(store, cursor, second, 52U));
 }
 
+VWB_TEST(world_delta_store_borrowed_typed_cell_checks_full_coordinate_and_sorted_layer_misses) {
+    WorldDeltaStore store;
+    const auto admitted = store.admit_typed_state(typed_admission("a2a:lower-bound", 0U,
+        {typed_stone({2, 1, 1}), typed_durable({4, 1, 1}), typed_stone({8, 1, 1})},
+        {typed_overlay_without_persistence_metadata({1, 2, 2}),
+            typed_overlay_without_persistence_metadata({5, 2, 2}),
+            typed_overlay_without_persistence_metadata({9, 2, 2})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
+    constexpr std::uint64_t token = 0x41326103U;
+
+    // Each layer has a miss before, between, and after its three records.
+    // The final two queries share a section and two coordinates with a real
+    // record, so a section-only or XZ-only match would be a false positive.
+    const std::array<CellCoord, 8> misses{{
+        {0, 2, 2}, {3, 2, 2}, {10, 2, 2},
+        {1, 1, 1}, {3, 1, 1}, {10, 1, 1},
+        {4, 2, 1}, {5, 2, 3},
+    }};
+    for (const CellCoord cell : misses) {
+        VWB_EXPECT(!store.pin().effective_typed_cell_at(cell));
+        BorrowedTypedCellCursor cursor;
+        VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_absent,
+            finish_borrowed_typed_cell(store, cursor, cell, token));
+        VWB_EXPECT(!store.borrowed_typed_cell_header(cursor, token));
+    }
+
+    // Explicit typed air is a present edit. Its material and solidity match
+    // an absent terrain cell, while the source layer and record presence do not.
+    const CellCoord durable_air{4, 1, 1};
+    BorrowedTypedCellCursor air_cursor;
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present,
+        finish_borrowed_typed_cell(store, air_cursor, durable_air, token));
+    const auto air_header = store.borrowed_typed_cell_header(air_cursor, token);
+    VWB_EXPECT(air_header.has_value());
+    expect_borrowed_scalar_header(*air_header,
+        store.pin().effective_typed_cell_at(durable_air).value(),
+        BorrowedTypedCellHeader::SourceLayer::durable);
+    VWB_EXPECT_EQ(TerrainMaterialId::air, air_header->material);
+    VWB_EXPECT(!air_header->solid);
+
+    const CellCoord overlay_air{5, 2, 2};
+    BorrowedTypedCellCursor overlay_cursor;
+    VWB_EXPECT_EQ(BorrowedTypedCellCursor::Status::ready_present,
+        finish_borrowed_typed_cell(store, overlay_cursor, overlay_air, token));
+    const auto overlay_header = store.borrowed_typed_cell_header(overlay_cursor, token);
+    VWB_EXPECT(overlay_header.has_value());
+    expect_borrowed_scalar_header(*overlay_header,
+        store.pin().effective_typed_cell_at(overlay_air).value(),
+        BorrowedTypedCellHeader::SourceLayer::overlay);
+    VWB_EXPECT_EQ(TerrainMaterialId::air, overlay_header->material);
+    VWB_EXPECT(!overlay_header->solid);
+}
+
 VWB_TEST(borrowed_typed_projection_wdp1_matches_immutable_pin_with_nested_metadata_and_remote_rows) {
     WorldDeltaStore store;
     const auto receipt = store.admit_typed_state(typed_admission("borrowed:projection", 0U,
