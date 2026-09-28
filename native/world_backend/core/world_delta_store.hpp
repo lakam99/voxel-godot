@@ -211,6 +211,7 @@ private:
     Sha256State hash_;
     NativeValueCanonicalCursor metadata_;
     std::size_t scan_index_ = 0;
+    std::array<std::size_t, 2> bound_layer_sizes_{};
     // One fixed 65,536-record selector is reused for durable then overlay.
     // Words plus generation tags occupy exactly 16 KiB on every platform;
     // tags avoid clearing 1,024 words for an empty projected page.

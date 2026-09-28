@@ -759,7 +759,8 @@ static_assert(std::is_nothrow_move_assignable_v<std::shared_ptr<const WorldDelta
 void BorrowedTypedProjectionCursor::reset(const WorldDeltaHorizontalBounds bounds) noexcept {
     bounds_ = bounds;
     hash_.reset(); metadata_.reset();
-    scan_index_ = 0U; durable_count_ = 0U; overlay_count_ = 0U;
+    scan_index_ = 0U; bound_layer_sizes_ = {};
+    durable_count_ = 0U; overlay_count_ = 0U;
     selection_low_ = 0U; selection_high_ = 0U; selection_index_ = 0U;
     selected_count_ = 0U; selected_min_word_ = SELECTOR_WORDS;
     selected_max_word_ = 0U; emit_word_ = 0U;
@@ -983,6 +984,9 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
         cursor.source_token_ = source_token;
         cursor.source_revision_ = state_->revision;
         cursor.source_content_ = state_->content_digest;
+        cursor.bound_layer_sizes_ = {
+            state_->terrain_volume.durable_snapshot.records().size(),
+            state_->typed_transient_overlays.size()};
         cursor.status_ = Cursor::Status::pending;
         result.status = cursor.status_; result.consumed_ops = 1U;
         return result;
@@ -1370,9 +1374,9 @@ BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection
         case Cursor::Phase::durable_records:
         case Cursor::Phase::overlay_records: {
             const std::size_t layer = cursor.phase_ == Cursor::Phase::durable_records ? 0U : 1U;
-            const std::size_t record_count = layer == 0U
-                ? state_->terrain_volume.durable_snapshot.records().size()
-                : state_->typed_transient_overlays.size();
+            // This helper is also used by an observational zero-quota call.
+            // Never reborrow the store outside the positive-step read guard.
+            const std::size_t record_count = cursor.bound_layer_sizes_[layer];
             if (record_count <= Cursor::SELECTOR_WORDS * 64U) {
                 if (cursor.selection_stage_ != 3U || cursor.selected_count_ == 0U
                     || cursor.emit_word_ < cursor.selected_min_word_
