@@ -1466,12 +1466,14 @@ VWB_TEST(world_delta_store_borrowed_projection_matches_durable_overlay_and_neste
 
     BorrowedTypedProjectionCursor cursor;
     cursor.reset(clipped);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::idle, cursor.status());
     constexpr std::uint64_t source_token = 0x574450310001ULL;
     const auto zero = store.advance_borrowed_projection(cursor, clipped, source_token, 0U);
     VWB_EXPECT_EQ(0U, zero.consumed_ops);
-    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, cursor.status());
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::idle, cursor.status());
     const auto one = store.advance_borrowed_projection(cursor, clipped, source_token, 1U);
-    VWB_EXPECT(one.consumed_ops <= 1U);
+    VWB_EXPECT_EQ(1U, one.consumed_ops);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, cursor.status());
     const std::array<std::uint32_t, 8> quotas{0U, 1U, 2U, 3U, 7U, 8U, 31U, 64U};
     std::size_t resumed = 0U;
     for (std::size_t call = 0U;
@@ -1512,7 +1514,11 @@ VWB_TEST(world_delta_store_borrowed_projection_clips_remote_records_without_reor
 
     BorrowedTypedProjectionCursor cursor;
     cursor.reset(clipped);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::idle, cursor.status());
     constexpr std::uint64_t token = 0x574450310002ULL;
+    const auto begun = store.advance_borrowed_projection(cursor, clipped, token, 1U);
+    VWB_EXPECT_EQ(1U, begun.consumed_ops);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, cursor.status());
     for (std::size_t call = 0U;
          call < 200000U && cursor.status() == BorrowedTypedProjectionCursor::Status::pending;
          ++call) {
@@ -1545,6 +1551,10 @@ VWB_TEST(world_delta_store_borrowed_projection_rejects_changed_source_token_mids
     VWB_EXPECT_THROW(std::logic_error, cursor.digest());
 
     cursor.reset(bounds);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::idle, cursor.status());
+    const auto begun = store.advance_borrowed_projection(cursor, bounds, 42U, 1U);
+    VWB_EXPECT_EQ(1U, begun.consumed_ops);
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, cursor.status());
     for (std::size_t call = 0U;
          call < 200000U && cursor.status() == BorrowedTypedProjectionCursor::Status::pending;
          ++call) {
