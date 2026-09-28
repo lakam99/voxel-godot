@@ -315,7 +315,7 @@ Sha256Digest expect_borrowed_projection_parity(
 
     // Small offers exercise refusal and resume; the fifth offer pays the
     // reported atomic cost so a legitimately indivisible step can complete.
-    const std::array<std::uint32_t, 4> small{0U, 1U, 2U, 3U};
+    const std::array<std::uint32_t, 4> small{1U, 2U, 3U, 0U};
     std::size_t positive_calls = 0U;
     std::size_t small_calls = 0U;
     std::uint32_t next_atomic = initial_zero.next_atomic_ops;
@@ -1717,44 +1717,67 @@ VWB_TEST(world_delta_store_borrowed_projection_nested_nv1_prefix_honors_three_fo
         if (marker == 2U) after_marker_hint = step.next_atomic_units;
     }
     VWB_EXPECT_EQ((std::vector<std::uint8_t>{'N', 'V', '1'}), sink.bytes);
-    VWB_EXPECT_EQ(2U, after_marker_hint);
+    // The next root phase costs two traversal units plus its tag byte.
+    VWB_EXPECT_EQ(3U, after_marker_hint);
     const auto after_prefix = direct.advance(metadata, token, 0U, 64U, 64U, sink);
     VWB_EXPECT_EQ(0U, after_prefix.bytes_written);
 
-    NativeTypedWorldStateRecord nested = typed_stone({0, 0, 0});
-    nested.state.metadata = metadata;
-    WorldDeltaStore store;
-    const auto admitted = store.admit_typed_state(typed_admission("wdp1:nv1-boundary", 0, {nested}));
+    // A null root isolates the NV1 marker boundary: metadata_count adds one
+    // sink atom (hint 4), while metadata_emit adds two (hint 5). Nested
+    // metadata below is checked separately against the pinned digest.
+    NativeTypedWorldStateRecord root = typed_stone({0, 0, 0});
+    root.state.metadata = NativeValue::null();
+    WorldDeltaStore root_store;
+    const auto admitted = root_store.admit_typed_state(typed_admission("wdp1:nv1-boundary", 0, {root}));
     VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, admitted.status);
     const WorldDeltaHorizontalBounds bounds{0, 0, 16, 16};
-    const Sha256Digest expected = store.pin().typed_projection_digest(bounds);
+    const Sha256Digest expected = root_store.pin().typed_projection_digest(bounds);
     BorrowedTypedProjectionCursor cursor;
     cursor.reset(bounds);
-    bool saw_wrapped_four_atom_boundary = false;
+    bool saw_count_boundary = false;
+    bool saw_emit_boundary = false;
     for (std::size_t call = 0U;
          call < 200000U && cursor.status() != BorrowedTypedProjectionCursor::Status::ready;
          ++call) {
-        const auto preview = store.advance_borrowed_projection(cursor, bounds, token, 0U);
+        const auto preview = root_store.advance_borrowed_projection(cursor, bounds, token, 0U);
         VWB_EXPECT_EQ(0U, preview.consumed_ops);
-        if (preview.next_atomic_ops == 4U) {
-            const auto blocked = store.advance_borrowed_projection(cursor, bounds, token, 3U);
+        if (!saw_count_boundary && preview.next_atomic_ops == 4U) {
+            const auto blocked = root_store.advance_borrowed_projection(cursor, bounds, token, 3U);
             VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, blocked.status);
             VWB_EXPECT_EQ(0U, blocked.consumed_ops);
             VWB_EXPECT_EQ(4U, blocked.next_atomic_ops);
-            const auto resumed = store.advance_borrowed_projection(cursor, bounds, token, 4U);
+            const auto resumed = root_store.advance_borrowed_projection(cursor, bounds, token, 4U);
             VWB_EXPECT(resumed.consumed_ops > 0U && resumed.consumed_ops <= 4U);
-            saw_wrapped_four_atom_boundary = true;
+            saw_count_boundary = true;
+        } else if (saw_count_boundary && !saw_emit_boundary && preview.next_atomic_ops == 5U) {
+            const auto blocked = root_store.advance_borrowed_projection(cursor, bounds, token, 4U);
+            VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::pending, blocked.status);
+            VWB_EXPECT_EQ(0U, blocked.consumed_ops);
+            VWB_EXPECT_EQ(5U, blocked.next_atomic_ops);
+            const auto resumed = root_store.advance_borrowed_projection(cursor, bounds, token, 5U);
+            VWB_EXPECT(resumed.consumed_ops > 0U && resumed.consumed_ops <= 5U);
+            saw_emit_boundary = true;
         } else {
-            const auto step = store.advance_borrowed_projection(
+            const auto step = root_store.advance_borrowed_projection(
                 cursor, bounds, token, std::max(1U, preview.next_atomic_ops));
             VWB_EXPECT(step.consumed_ops <= std::max(1U, preview.next_atomic_ops));
         }
         VWB_EXPECT(cursor.status() == BorrowedTypedProjectionCursor::Status::pending
             || cursor.status() == BorrowedTypedProjectionCursor::Status::ready);
     }
-    VWB_EXPECT(saw_wrapped_four_atom_boundary);
+    VWB_EXPECT(saw_count_boundary);
+    VWB_EXPECT(saw_emit_boundary);
     VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, cursor.status());
     VWB_EXPECT_EQ(expected, cursor.digest());
+
+    NativeTypedWorldStateRecord nested = typed_stone({0, 0, 0});
+    nested.state.metadata = metadata;
+    WorldDeltaStore nested_store;
+    const auto nested_admitted = nested_store.admit_typed_state(
+        typed_admission("wdp1:nested-nv1", 0, {nested}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, nested_admitted.status);
+    VWB_EXPECT_EQ(nested_store.pin().typed_projection_digest(bounds),
+        expect_borrowed_projection_parity(nested_store, cursor, bounds, token + 1U));
 }
 
 } // namespace voxel::world_backend::tests
