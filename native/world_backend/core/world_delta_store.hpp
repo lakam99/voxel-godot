@@ -5,6 +5,7 @@
 #include "native_generated_feature_footprint_catalog.hpp"
 #include "native_terrain_volume_v2_codec.hpp"
 #include "native_typed_world_state_snapshot.hpp"
+#include "native_value.hpp"
 #include "sha256.hpp"
 
 #include <cstddef>
@@ -14,6 +15,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace voxel::world_backend {
@@ -179,6 +181,78 @@ struct WorldDeltaHorizontalBounds {
     std::int32_t depth = 0;
 };
 
+// A borrowed WDP1/v1 projection has fixed owner storage. Record indices and
+// byte offsets are reacquired only during a guarded, same-incarnation step;
+// no WorldDeltaSnapshotState, NativeValue, string or iterator is retained.
+class BorrowedTypedProjectionCursor final {
+public:
+    enum class Status : std::uint8_t { idle, pending, source_changed, failed, ready };
+    struct Step {
+        Status status = Status::idle;
+        std::uint32_t consumed_ops = 0;
+        std::uint32_t next_atomic_ops = 1;
+    };
+    void reset(WorldDeltaHorizontalBounds bounds) noexcept;
+    Status status() const noexcept;
+    Sha256Digest digest() const;
+private:
+    friend class WorldDeltaStore;
+    enum class Phase : std::uint8_t {
+        count_durable, count_overlay, header, durable_count, durable_records,
+        overlay_count, overlay_records, finish, complete
+    };
+    enum class RecordPhase : std::uint8_t {
+        start, fixed, metadata_count, metadata_reset, metadata_length, metadata_emit,
+        block_flag, block_length, block_text,
+        reason_flag, reason_length, reason_text, end
+    };
+    WorldDeltaHorizontalBounds bounds_{};
+    Sha256State hash_;
+    NativeValueCanonicalCursor metadata_;
+    std::size_t scan_index_ = 0;
+    std::uint64_t durable_count_ = 0;
+    std::uint64_t overlay_count_ = 0;
+    std::uint64_t metadata_bytes_ = 0;
+    std::uint64_t metadata_emitted_ = 0;
+    std::uint64_t source_token_ = 0;
+    std::size_t byte_offset_ = 0;
+    Phase phase_ = Phase::count_durable;
+    RecordPhase record_phase_ = RecordPhase::start;
+    Status status_ = Status::idle;
+};
+
+// A live borrowed source reader uses this single-owner fence. Detached save
+// candidates are built without one and bind only when the adapter publishes
+// them. The guard is serialized on the adapter's main thread; it never owns a
+// delta snapshot or lets a pointer escape an advance call.
+class WorldSourceMutationFence final {
+public:
+    class ReadGuard final {
+    public:
+        explicit ReadGuard(WorldSourceMutationFence &fence);
+        ReadGuard(const ReadGuard &) = delete;
+        ReadGuard &operator=(const ReadGuard &) = delete;
+        ~ReadGuard();
+    private:
+        WorldSourceMutationFence &fence_;
+    };
+
+    void require_writer_entry() const;
+    void published() noexcept;
+    void revoke() noexcept;
+    void reset_after_owner_drain();
+    std::uint64_t epoch() const noexcept;
+    bool read_active() const noexcept;
+    bool writer_available() const noexcept;
+    bool exhausted() const noexcept;
+    bool on_owner_thread() const noexcept;
+private:
+    const std::thread::id owner_thread_ = std::this_thread::get_id();
+    bool read_active_ = false;
+    bool revoked_ = false;
+    std::uint64_t epoch_ = 1U;
+};
+
 // A pin owns an immutable store revision. Later commits replace the store's
 // state rather than mutating this snapshot, so section builders can retain it
 // without observing a mixed revision.
@@ -244,7 +318,13 @@ public:
     ~WorldDeltaStore();
 
     std::uint64_t revision() const noexcept;
+    const Sha256Digest &current_content_digest() const noexcept;
+    BorrowedTypedProjectionCursor::Step advance_borrowed_projection(
+        BorrowedTypedProjectionCursor &cursor, WorldDeltaHorizontalBounds bounds,
+        std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
     WorldDeltaPinnedSnapshot pin() const;
+    bool bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept;
+    void require_source_writer_entry() const;
     // Strong exception guarantee: validation, replacement-state construction,
     // receipt allocation, and durable transaction journaling all complete
     // before the immutable state pointer is published.
@@ -268,6 +348,7 @@ private:
     // before a v2 snapshot containing tombstones is admitted.
     std::shared_ptr<const NativeGeneratedFeatureFootprintCatalog> feature_footprint_catalog_;
     std::shared_ptr<const WorldDeltaSnapshotState> state_;
+    WorldSourceMutationFence *source_mutation_fence_ = nullptr;
     struct TransactionRecord;
     std::vector<TransactionRecord> transactions_;
 };

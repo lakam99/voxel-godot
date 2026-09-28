@@ -63,6 +63,11 @@ public:
     const WorldSourceDefinition &definition() const noexcept;
     const WorldPhysicalContentIdentity &source_identity() const noexcept;
     std::uint64_t terrain_delta_revision() const noexcept;
+    const Sha256Digest &terrain_delta_content_digest() const noexcept;
+    BorrowedTypedProjectionCursor::Step advance_borrowed_typed_projection(
+        BorrowedTypedProjectionCursor &cursor, WorldDeltaHorizontalBounds bounds,
+        std::uint64_t source_token, std::uint32_t offered_ops) const noexcept;
+    bool bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept;
     // One immutable snapshot for a composite multi-page admission. Callers
     // must serialize this with registry/town-owner mutation and recheck before
     // publication; this accessor is not a cross-authority transaction.

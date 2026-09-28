@@ -442,6 +442,63 @@ VWB_TEST(world_source_effective_pin_canonicalizes_and_binds_float32_dependency_p
         world_effective_shaping_dependencies(WorldSourceDefinition(subnormal_cell), {-7669582, 0}));
 }
 
+VWB_TEST(world_source_borrowed_dependency_cursor_matches_complete_canonical_pages_and_rewind) {
+    const auto compare = [](const WorldSourceDefinition &definition, const NativeTerrainPageKey primary) {
+        const auto expected = world_effective_shaping_dependencies(definition, primary);
+        WorldShapingDependencyCursor cursor;
+        cursor.reset(primary);
+        const std::uint32_t axis_quotas[] = {0U, 1U, 7U, 8U, 63U, 64U};
+        bool axes_ready = false;
+        for (std::size_t call = 0; call < 100000U && !axes_ready; ++call) {
+            const std::uint32_t offered = axis_quotas[call % 6U];
+            const auto step = cursor.advance_axes(definition, offered);
+            VWB_EXPECT(step.consumed_ops <= offered);
+            VWB_EXPECT(step.consumed_ops <= 64U);
+            axes_ready = step.ready;
+        }
+        VWB_EXPECT(axes_ready);
+        const std::uint32_t page_quotas[] = {0U, 1U, 7U, 8U, 23U, 24U, 25U, 47U, 48U, 63U, 64U};
+        const auto zero = cursor.next_page(0U);
+        VWB_EXPECT_EQ(0U, zero.consumed_ops);
+        VWB_EXPECT(!zero.has_page);
+        for (std::size_t index = 1U; index < 5U; ++index) {
+            const auto insufficient = cursor.next_page(page_quotas[index]);
+            VWB_EXPECT_EQ(0U, insufficient.consumed_ops);
+            VWB_EXPECT(!insufficient.has_page);
+            VWB_EXPECT_EQ(24U, insufficient.next_atomic_ops);
+        }
+        const auto collect = [&]() {
+            std::vector<NativeTerrainPageKey> pages;
+            bool complete = false;
+            for (std::size_t call = 0; call < 100000U && !complete; ++call) {
+                const auto step = cursor.next_page(page_quotas[5U + call % 6U]);
+                VWB_EXPECT(step.consumed_ops <= page_quotas[5U + call % 6U]);
+                VWB_EXPECT(step.consumed_ops <= 64U);
+                if (step.has_page) pages.push_back({step.page_x, step.page_z});
+                complete = step.complete;
+            }
+            VWB_EXPECT(complete);
+            return pages;
+        };
+        const auto first = collect();
+        VWB_EXPECT_EQ(expected, first);
+        VWB_EXPECT_EQ(0U, cursor.rewind_pages(0U).consumed_ops);
+        VWB_EXPECT_EQ(1U, cursor.rewind_pages(1U).consumed_ops);
+        VWB_EXPECT_EQ(first, collect());
+    };
+    const WorldSourceDefinition ordinary(atlas_descriptor());
+    for (const NativeTerrainPageKey page : {
+            NativeTerrainPageKey{0, 0}, NativeTerrainPageKey{-1, -1},
+            NativeTerrainPageKey{7, 0}, NativeTerrainPageKey{44384, 0},
+            NativeTerrainPageKey{88769, 0}}) compare(ordinary, page);
+    WorldSourceDescriptor small_cells = atlas_descriptor();
+    small_cells.constants.cell_size_meters = 0.02;
+    compare(WorldSourceDefinition(small_cells), {0, -1});
+    WorldShapingDependencyCursor invalid;
+    invalid.reset({std::numeric_limits<std::int32_t>::max(), 0});
+    VWB_EXPECT_THROW(std::invalid_argument, invalid.advance_axes(ordinary, 64U));
+}
+
 VWB_TEST(world_source_effective_pin_includes_extreme_center_only_dependency_identity) {
     const WorldSourceDefinition definition(atlas_descriptor());
     const NativeTerrainPageKey primary{44384, 0};

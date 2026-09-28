@@ -52,6 +52,18 @@ const WorldPhysicalContentIdentity &NativeWorldBackendState::source_identity() c
 std::uint64_t NativeWorldBackendState::terrain_delta_revision() const noexcept {
     return deltas_.revision();
 }
+const Sha256Digest &NativeWorldBackendState::terrain_delta_content_digest() const noexcept {
+    return deltas_.current_content_digest();
+}
+BorrowedTypedProjectionCursor::Step NativeWorldBackendState::advance_borrowed_typed_projection(
+    BorrowedTypedProjectionCursor &cursor, const WorldDeltaHorizontalBounds bounds,
+    const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
+    return deltas_.advance_borrowed_projection(cursor, bounds, source_token, offered_ops);
+}
+
+bool NativeWorldBackendState::bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept {
+    return deltas_.bind_source_mutation_fence(fence);
+}
 
 WorldDeltaPinnedSnapshot NativeWorldBackendState::pin_deltas() const {
     return deltas_.pin();
@@ -85,6 +97,9 @@ NativeWorldDeltasV2Payload NativeWorldBackendState::export_world_deltas_v2(
 }
 
 WorldDeltaCommitReceipt NativeWorldBackendState::commit(const NativeWorldBackendTransaction &transaction) {
+    // Reject a wrong-thread or reentrant writer before touching even the
+    // immutable definition; the store repeats this at its direct entry.
+    deltas_.require_source_writer_entry();
     if (!(transaction.source_identity == source_identity())) {
         throw NativeWorldBackendRejected(NativeWorldBackendRejectReason::source_identity_mismatch);
     }

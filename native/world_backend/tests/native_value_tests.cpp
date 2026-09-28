@@ -27,6 +27,76 @@ public:
     std::vector<std::uint8_t> bytes;
 };
 
+class ThrowingSink final : public NativeValueCanonicalSink {
+public:
+    void append(const std::uint8_t *, std::size_t) override {
+        ++calls;
+        throw std::runtime_error("sink rejected canonical bytes");
+    }
+    std::size_t calls = 0U;
+};
+
+class ReentrantSink final : public NativeValueCanonicalSink {
+public:
+    void append(const std::uint8_t *data, const std::size_t size) override {
+        if (!attempted) {
+            attempted = true;
+            nested_progress = cursor->advance(*root, token, 1U, 1U, 4U, *this);
+        }
+        bytes.insert(bytes.end(), data, data + size);
+    }
+    NativeValueCanonicalCursor *cursor = nullptr;
+    const NativeValue *root = nullptr;
+    std::uint64_t token = 0U;
+    bool attempted = false;
+    NativeValueCanonicalCursorProgress nested_progress;
+    std::vector<std::uint8_t> bytes;
+};
+
+class ObservationalReentrantSink final : public NativeValueCanonicalSink {
+public:
+    void append(const std::uint8_t *data, const std::size_t size) override {
+        if (!attempted) {
+            attempted = true;
+            nested_progress = cursor->advance(*root, token + 1U, 0U, 0U, 0U, *this);
+        }
+        bytes.insert(bytes.end(), data, data + size);
+    }
+    NativeValueCanonicalCursor *cursor = nullptr;
+    const NativeValue *root = nullptr;
+    std::uint64_t token = 0U;
+    bool attempted = false;
+    NativeValueCanonicalCursorProgress nested_progress;
+    std::vector<std::uint8_t> bytes;
+};
+
+class ResettingSink final : public NativeValueCanonicalSink {
+public:
+    void append(const std::uint8_t *data, const std::size_t size) override {
+        ++calls;
+        cursor->reset();
+        bytes.insert(bytes.end(), data, data + size);
+    }
+    NativeValueCanonicalCursor *cursor = nullptr;
+    std::size_t calls = 0U;
+    std::vector<std::uint8_t> bytes;
+};
+
+std::vector<std::uint8_t> encode_with_cursor(const NativeValue &value,
+    const std::size_t byte_budget, const std::size_t node_budget, const std::uint64_t source_token) {
+    NativeValueCanonicalCursor cursor;
+    CollectingSink sink;
+    for (std::size_t call = 0U; call < 200000U; ++call) {
+        const NativeValueCanonicalCursorProgress progress = cursor.advance(
+            value, source_token, byte_budget, node_budget, 4096U, sink);
+        VWB_EXPECT(progress.bytes_written <= byte_budget);
+        VWB_EXPECT(progress.nodes_started <= node_budget);
+        if (progress.status == NativeValueCanonicalCursorStatus::complete) return sink.bytes;
+        VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    }
+    ::voxel::world_backend::tests::fail("cursor completed within bounded calls", __FILE__, __LINE__);
+}
+
 std::size_t actual_compact_dynamic_bytes(const NativeValue &value) {
     switch (value.kind()) {
     case NativeValueKind::null_value:
@@ -196,6 +266,213 @@ VWB_TEST(native_value_canonical_binary_has_exact_versioned_wire_goldens) {
         {"a", NativeValue::number(1.0)},
         {"\xc3\xa9", NativeValue::array({NativeValue::null(), NativeValue::boolean(true)})},
     }).canonical_binary());
+}
+
+VWB_TEST(native_value_canonical_cursor_preserves_wire_bytes_across_byte_and_node_budgets) {
+    const std::vector<NativeValue> values = {
+        NativeValue::null(),
+        NativeValue::boolean(false),
+        NativeValue::boolean(true),
+        NativeValue::number(-17.25),
+        NativeValue::string("a split multibyte value: \xf0\x9f\x8c\xb2"),
+        NativeValue::array({}),
+        NativeValue::object({}),
+        NativeValue::array({NativeValue::boolean(false), NativeValue::string("A"),
+            NativeValue::object({{"a", NativeValue::number(1.0)},
+                {"\xc3\xa9", NativeValue::array({NativeValue::null(), NativeValue::boolean(true)})}})}),
+        nested_arrays(NativeValueLimits::MAX_DEPTH),
+    };
+    const std::vector<std::size_t> byte_budgets = {1U, 2U, 3U, 4U, 7U, 8U, 9U, 17U};
+    const std::vector<std::size_t> node_budgets = {1U, 2U, 7U};
+    std::uint64_t token = 0U;
+    for (const NativeValue &value : values) {
+        const std::vector<std::uint8_t> expected = value.canonical_binary();
+        for (const std::size_t bytes : byte_budgets) {
+            for (const std::size_t nodes : node_budgets) {
+                VWB_EXPECT_EQ(expected, encode_with_cursor(value, bytes, nodes, ++token));
+            }
+        }
+    }
+}
+
+VWB_TEST(native_value_canonical_cursor_bounds_maximum_string_and_node_counts) {
+    const NativeValue largest_string = NativeValue::string(
+        std::string(NativeValueLimits::MAX_STRING_BYTES, 's'));
+    VWB_EXPECT_EQ(largest_string.canonical_binary(), encode_with_cursor(largest_string, 257U, 1U, 101U));
+
+    NativeValue::Array branches;
+    for (std::size_t branch = 0U; branch < 3U; ++branch) {
+        NativeValue::Array leaves;
+        leaves.resize(NativeValueLimits::MAX_CONTAINER_ENTRIES, NativeValue::null());
+        branches.push_back(NativeValue::array(std::move(leaves)));
+    }
+    NativeValue::Array last_branch;
+    last_branch.resize(1019U, NativeValue::null());
+    branches.push_back(NativeValue::array(std::move(last_branch)));
+    const NativeValue maximum_nodes = NativeValue::array(std::move(branches));
+    VWB_EXPECT_EQ(maximum_nodes.canonical_binary(), encode_with_cursor(maximum_nodes, 19U, 7U, 102U));
+    static_assert(sizeof(NativeValueCanonicalCursor) <= 2304U,
+        "The cursor's complete retained state must remain a small fixed-depth value.");
+}
+
+VWB_TEST(native_value_canonical_cursor_handles_zero_budgets_reset_and_source_replacement) {
+    const NativeValue value = NativeValue::object({{"name", NativeValue::string("tree")}});
+    NativeValueCanonicalCursor cursor;
+    CollectingSink sink;
+
+    NativeValueCanonicalCursorProgress progress = cursor.advance(value, 17U, 0U, 0U, 4096U, sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    VWB_EXPECT_EQ(0U, progress.bytes_written);
+    VWB_EXPECT_EQ(0U, progress.nodes_started);
+
+    NativeValueCanonicalCursor zero_probe;
+    CollectingSink zero_probe_sink;
+    const auto zero = zero_probe.advance(value, 17U, 0U, 0U, 0U, zero_probe_sink);
+    VWB_EXPECT_EQ(0U, zero.work_units);
+    const auto changed_after_no_work = zero_probe.advance(
+        value, 18U, 3U, 1U, 3U, zero_probe_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, changed_after_no_work.status);
+    VWB_EXPECT_EQ(3U, changed_after_no_work.bytes_written);
+
+    progress = cursor.advance(value, 17U, 3U, 0U, 4096U, sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    VWB_EXPECT_EQ(3U, progress.bytes_written);
+    VWB_EXPECT_EQ(0U, progress.nodes_started);
+
+    NativeValueCanonicalCursor bounded_work_cursor;
+    CollectingSink bounded_work_sink;
+    const auto one_work = bounded_work_cursor.advance(
+        value, 23U, 64U, 64U, 1U, bounded_work_sink);
+    VWB_EXPECT_EQ(1U, one_work.work_units);
+    VWB_EXPECT_EQ(1U, one_work.bytes_written);
+    const auto no_work = bounded_work_cursor.advance(
+        value, 23U, 64U, 64U, 0U, bounded_work_sink);
+    VWB_EXPECT_EQ(0U, no_work.work_units);
+    VWB_EXPECT_EQ(1U, bounded_work_sink.bytes.size());
+    const auto changed_without_work = bounded_work_cursor.advance(
+        value, 24U, 0U, 0U, 0U, bounded_work_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, changed_without_work.status);
+    VWB_EXPECT_EQ(0U, changed_without_work.work_units);
+    const auto resumed_original = bounded_work_cursor.advance(
+        value, 23U, 64U, 64U, 64U, bounded_work_sink);
+    VWB_EXPECT(resumed_original.status == NativeValueCanonicalCursorStatus::in_progress
+        || resumed_original.status == NativeValueCanonicalCursorStatus::complete);
+    VWB_EXPECT(resumed_original.bytes_written > 0U);
+    NativeValueCanonicalCursor observational_cursor;
+    ObservationalReentrantSink observational_sink;
+    observational_sink.cursor = &observational_cursor;
+    observational_sink.root = &value;
+    observational_sink.token = 27U;
+    const auto outer = observational_cursor.advance(
+        value, 27U, 64U, 64U, 64U, observational_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress,
+        observational_sink.nested_progress.status);
+    VWB_EXPECT_EQ(0U, observational_sink.nested_progress.work_units);
+    VWB_EXPECT(outer.status == NativeValueCanonicalCursorStatus::in_progress
+        || outer.status == NativeValueCanonicalCursorStatus::complete);
+    progress = cursor.advance(value, 17U, 0U, 1U, 4096U, sink);
+    VWB_EXPECT_EQ(0U, progress.bytes_written);
+    VWB_EXPECT_EQ(0U, progress.nodes_started);
+
+    progress = cursor.advance(value, 18U, 32U, 8U, 4096U, sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::source_changed, progress.status);
+    const std::size_t bytes_after_source_change = sink.bytes.size();
+    progress = cursor.advance(value, 17U, 32U, 8U, 4096U, sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::source_changed, progress.status);
+    VWB_EXPECT_EQ(bytes_after_source_change, sink.bytes.size());
+
+    cursor.reset();
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, cursor.status());
+    CollectingSink restarted_sink;
+    for (std::size_t call = 0U; call < 100U; ++call) {
+        progress = cursor.advance(value, 18U, 5U, 1U, 4096U, restarted_sink);
+        VWB_EXPECT(progress.bytes_written <= 5U);
+        VWB_EXPECT(progress.nodes_started <= 1U);
+        if (progress.status == NativeValueCanonicalCursorStatus::complete) break;
+        VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    }
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::complete, progress.status);
+    VWB_EXPECT_EQ(value.canonical_binary(), restarted_sink.bytes);
+
+    const NativeValue exact_budget_value = NativeValue::number(1.0);
+    NativeValueCanonicalCursor exact_budget_cursor;
+    CollectingSink exact_budget_sink;
+    progress = exact_budget_cursor.advance(exact_budget_value, 19U, 4U, 1U, 4096U, exact_budget_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    VWB_EXPECT_EQ(4U, progress.bytes_written);
+    progress = exact_budget_cursor.advance(exact_budget_value, 19U, 0U, 1U, 4096U, exact_budget_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    VWB_EXPECT_EQ(0U, progress.bytes_written);
+    progress = exact_budget_cursor.advance(exact_budget_value, 19U, 8U, 0U, 4096U, exact_budget_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::complete, progress.status);
+    VWB_EXPECT_EQ(8U, progress.bytes_written);
+    VWB_EXPECT_EQ(exact_budget_value.canonical_binary(), exact_budget_sink.bytes);
+
+    const NativeValue empty_string = NativeValue::string("");
+    NativeValueCanonicalCursor empty_string_cursor;
+    CollectingSink empty_string_sink;
+    progress = empty_string_cursor.advance(empty_string, 20U, 8U, 1U, 4096U, empty_string_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::complete, progress.status);
+    VWB_EXPECT_EQ(empty_string.canonical_binary(), empty_string_sink.bytes);
+
+    const NativeValue empty_key = NativeValue::object({{"", NativeValue::null()}});
+    NativeValueCanonicalCursor empty_key_cursor;
+    CollectingSink empty_key_sink;
+    progress = empty_key_cursor.advance(empty_key, 21U, 13U, 2U, 4096U, empty_key_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::complete, progress.status);
+    VWB_EXPECT_EQ(empty_key.canonical_binary(), empty_key_sink.bytes);
+
+    NativeValueCanonicalCursor split_empty_key_cursor;
+    CollectingSink split_empty_key_sink;
+    progress = split_empty_key_cursor.advance(empty_key, 22U, 12U, 1U, 4096U, split_empty_key_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::in_progress, progress.status);
+    VWB_EXPECT_EQ(12U, progress.bytes_written);
+    progress = split_empty_key_cursor.advance(empty_key, 22U, 1U, 1U, 4096U, split_empty_key_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::complete, progress.status);
+    VWB_EXPECT_EQ(1U, progress.bytes_written);
+    VWB_EXPECT_EQ(empty_key.canonical_binary(), split_empty_key_sink.bytes);
+}
+
+VWB_TEST(native_value_canonical_cursor_fails_closed_for_invalid_values_and_sinks) {
+    NativeValue valueless = NativeValue::null();
+    VWB_EXPECT(NativeValueTestAccess::force_valueless_by_exception(valueless));
+    NativeValueCanonicalCursor invalid_cursor;
+    CollectingSink invalid_sink;
+    NativeValueCanonicalCursorProgress progress = invalid_cursor.advance(valueless, 1U, 64U, 64U, 4096U, invalid_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::invalid_value, progress.status);
+    VWB_EXPECT_EQ(0U, progress.nodes_started);
+    progress = invalid_cursor.advance(valueless, 1U, 64U, 64U, 4096U, invalid_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::invalid_value, progress.status);
+
+    const NativeValue valid = NativeValue::string("sink-error");
+    NativeValueCanonicalCursor throwing_cursor;
+    ThrowingSink throwing_sink;
+    progress = throwing_cursor.advance(valid, 2U, 64U, 64U, 4096U, throwing_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::sink_failed, progress.status);
+    VWB_EXPECT_EQ(1U, throwing_sink.calls);
+    progress = throwing_cursor.advance(valid, 2U, 64U, 64U, 4096U, throwing_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::sink_failed, progress.status);
+    VWB_EXPECT_EQ(1U, throwing_sink.calls);
+
+    NativeValueCanonicalCursor reentrant_cursor;
+    ReentrantSink reentrant_sink;
+    reentrant_sink.cursor = &reentrant_cursor;
+    reentrant_sink.root = &valid;
+    reentrant_sink.token = 3U;
+    progress = reentrant_cursor.advance(valid, 3U, 64U, 64U, 4096U, reentrant_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::invalid_state, progress.status);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::invalid_state, reentrant_sink.nested_progress.status);
+    const std::size_t bytes_after_reentry = reentrant_sink.bytes.size();
+    progress = reentrant_cursor.advance(valid, 3U, 64U, 64U, 4096U, reentrant_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::invalid_state, progress.status);
+    VWB_EXPECT_EQ(bytes_after_reentry, reentrant_sink.bytes.size());
+
+    NativeValueCanonicalCursor resetting_cursor;
+    ResettingSink resetting_sink;
+    resetting_sink.cursor = &resetting_cursor;
+    progress = resetting_cursor.advance(valid, 4U, 64U, 64U, 4096U, resetting_sink);
+    VWB_EXPECT_EQ(NativeValueCanonicalCursorStatus::invalid_state, progress.status);
+    VWB_EXPECT_EQ(1U, resetting_sink.calls);
 }
 
 VWB_TEST(native_value_rejects_the_variant_exceptional_state_before_tag_dispatch) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
@@ -109,11 +110,96 @@ public:
 
 private:
     friend struct NativeValueTestAccess;
+    friend class NativeValueCanonicalCursor;
     using Storage = std::variant<std::monostate, bool, double, std::string, Array, Object>;
 
     explicit NativeValue(Storage storage);
 
     Storage storage_;
+};
+
+enum class NativeValueCanonicalCursorStatus : std::uint8_t {
+    in_progress = 0U,
+    complete = 1U,
+    source_changed = 2U,
+    invalid_value = 3U,
+    sink_failed = 4U,
+    invalid_state = 5U,
+};
+
+struct NativeValueCanonicalCursorProgress final {
+    NativeValueCanonicalCursorStatus status = NativeValueCanonicalCursorStatus::in_progress;
+    std::size_t bytes_written = 0U;
+    std::size_t nodes_started = 0U;
+    std::size_t work_units = 0U;
+    std::size_t next_atomic_units = 1U;
+};
+
+// Resumable, allocation-free traversal of the existing NV1 canonical wire
+// format. The source token must identify one immutable semantic root version;
+// change it whenever that root can change. The cursor retains only indices,
+// scalar encoding state, and a fixed depth stack. It never stores a NativeValue,
+// container, string, or pointer between advance() calls. The caller must also
+// ensure that the same source version remains borrowed for the duration of an
+// individual call and serialize calls for a given cursor.
+class NativeValueCanonicalCursor final {
+public:
+    static constexpr std::size_t MAX_FRAMES = NativeValueLimits::MAX_DEPTH + 1U;
+
+    NativeValueCanonicalCursor() noexcept;
+    NativeValueCanonicalCursor(const NativeValueCanonicalCursor &) = delete;
+    NativeValueCanonicalCursor &operator=(const NativeValueCanonicalCursor &) = delete;
+    NativeValueCanonicalCursor(NativeValueCanonicalCursor &&) = delete;
+    NativeValueCanonicalCursor &operator=(NativeValueCanonicalCursor &&) = delete;
+
+    void reset() noexcept;
+    NativeValueCanonicalCursorProgress advance(
+        const NativeValue &root,
+        std::uint64_t source_token,
+        std::size_t byte_budget,
+        std::size_t node_budget,
+        std::size_t work_budget,
+        NativeValueCanonicalSink &sink) noexcept;
+
+    NativeValueCanonicalCursorStatus status() const noexcept;
+
+private:
+    enum class Phase : std::uint8_t {
+        start_value,
+        number_bytes,
+        string_length,
+        string_bytes,
+        container_count,
+        array_items,
+        object_items,
+        object_key_length,
+        object_key_bytes,
+        complete_value,
+    };
+
+    struct Frame final {
+        Phase phase = Phase::start_value;
+        NativeValueKind kind = NativeValueKind::null_value;
+        std::size_t parent_index = 0U;
+        std::size_t next_child = 0U;
+        std::size_t offset = 0U;
+        std::size_t declared_length = 0U;
+        std::size_t segment_length = 0U;
+        std::uint64_t number_bits = 0U;
+        bool length_ready = false;
+    };
+
+    const NativeValue *resolve_value(const NativeValue &root, std::size_t depth) noexcept;
+    void fail(NativeValueCanonicalCursorStatus status) noexcept;
+
+    std::array<Frame, MAX_FRAMES> frames_{};
+    std::size_t depth_ = 0U;
+    std::size_t nodes_total_ = 0U;
+    std::size_t prefix_offset_ = 0U;
+    std::uint64_t source_token_ = 0U;
+    NativeValueCanonicalCursorStatus status_ = NativeValueCanonicalCursorStatus::in_progress;
+    bool source_started_ = false;
+    bool advancing_ = false;
 };
 
 } // namespace voxel::world_backend

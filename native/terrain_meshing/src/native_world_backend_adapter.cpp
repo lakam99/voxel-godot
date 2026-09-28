@@ -1844,6 +1844,14 @@ void NativeWorldBackend::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("configure_voxel_block_shadow_capacity", "max_entries"), &NativeWorldBackend::configure_voxel_block_shadow_capacity);
 	ClassDB::bind_method(D_METHOD("release_voxel_block_shadow", "request", "consumer_id"), &NativeWorldBackend::release_voxel_block_shadow);
 	ClassDB::bind_method(D_METHOD("pump_voxel_block_shadow"), &NativeWorldBackend::pump_voxel_block_shadow);
+	ClassDB::bind_method(D_METHOD("begin_borrowed_source_lease", "primary_page"),
+		&NativeWorldBackend::begin_borrowed_source_lease);
+	ClassDB::bind_method(D_METHOD("advance_borrowed_source_lease", "issue", "offered_ops"),
+		&NativeWorldBackend::advance_borrowed_source_lease);
+	ClassDB::bind_method(D_METHOD("cancel_borrowed_source_lease", "issue"),
+		&NativeWorldBackend::cancel_borrowed_source_lease);
+	ClassDB::bind_method(D_METHOD("drain_borrowed_source_lease", "issue"),
+		&NativeWorldBackend::drain_borrowed_source_lease);
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_insertion_receipt", "key", "generation", "accepted"), &NativeWorldBackend::voxel_block_shadow_insertion_receipt);
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_mesh_receipt", "key", "generation", "mesh_ready", "physics_ready", "physics_required"), &NativeWorldBackend::voxel_block_shadow_mesh_receipt, DEFVAL(true));
 	ClassDB::bind_method(D_METHOD("voxel_block_shadow_unloaded", "key"), &NativeWorldBackend::voxel_block_shadow_unloaded);
@@ -1851,6 +1859,12 @@ void NativeWorldBackend::_bind_methods() {
 }
 
 NativeWorldBackend::~NativeWorldBackend() {
+	// This RefCounted owner and its source fence are main-thread confined. A
+	// last Ref released by a worker is a lifecycle violation, not a license to
+	// race the plain-bool mutation fence with an active source writer.
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread()) std::terminate();
+	borrowed_source_seal();
+	source_mutation_fence_.revoke();
 	// An import owner must remain retained until its bounded disposal calls
 	// complete. Any residual cleanup here is teardown-only, never a frame API.
 	if (voxel_worker_cancel_token_) voxel_worker_cancel_token_->store(true, std::memory_order_relaxed);
@@ -1864,6 +1878,41 @@ NativeWorldBackend::~NativeWorldBackend() {
 	if (private_retirement_worker_.joinable()) private_retirement_worker_.join();
 }
 
+bool NativeWorldBackend::borrowed_source_stamp_matches(const BorrowedSourceLeaseSlot &slot) const noexcept {
+	return source_mutation_fence_.on_owner_thread() && state_ && shaping_registry_
+		&& slot.incarnation == source_lease_incarnation_
+		&& slot.epoch == source_mutation_fence_.epoch()
+		&& slot.source_identity == state_->source_identity().digest
+		&& slot.delta_revision == state_->terrain_delta_revision()
+		&& slot.delta_content == state_->terrain_delta_content_digest()
+		&& slot.registry_revision == shaping_registry_->revision()
+		&& slot.registry_content == shaping_registry_->content_identity().digest
+		&& slot.policy_content == shaping_registry_->policy_content_identity().digest;
+}
+
+std::uint32_t NativeWorldBackend::borrowed_source_frame_budget() noexcept {
+	Engine *engine = Engine::get_singleton();
+	if (!engine) return 0U;
+	const std::uint64_t frame = static_cast<std::uint64_t>(engine->get_process_frames());
+	if (frame != source_lease_frame_) {
+		source_lease_frame_ = frame;
+		source_lease_frame_ops_ = 0U;
+	}
+	return 64U - source_lease_frame_ops_;
+}
+
+void NativeWorldBackend::borrowed_source_charge(const std::uint32_t ops) noexcept {
+	if (ops > 64U - source_lease_frame_ops_) std::terminate();
+	source_lease_frame_ops_ += ops;
+}
+
+void NativeWorldBackend::borrowed_source_seal() noexcept {
+	// Fixed owner storage contains no source refs, but no old issue may resume
+	// after owner destruction or publication into a new incarnation.
+	borrowed_source_lease_.phase = BorrowedSourceLeaseSlot::Phase::empty;
+	borrowed_source_lease_.issue = 0U;
+}
+
 struct NativeWorldBackend::PrivateStagedSaveRetirementJob {
 	std::unique_ptr<NativeWorldBackendState> state;
 	std::unique_ptr<NativeTerrainShapingRegistry> registry;
@@ -1873,6 +1922,12 @@ struct NativeWorldBackend::PrivateStagedSaveRetirementJob {
 Dictionary NativeWorldBackend::start_private_staged_save_retirement(const std::int64_t p_generation) {
 	constexpr const char *operation = "start_private_staged_save_retirement";
 	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active()) return envelope(operation, "failed", "borrowed_source_read_in_progress");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::empty)
+		return envelope(operation, "pending", "borrowed_source_lease_not_drained");
+	if (!source_mutation_fence_.writer_available()
+			|| source_lease_incarnation_ == std::numeric_limits<std::uint64_t>::max())
+		return envelope(operation, "failed", "borrowed_source_owner_unavailable");
 	if (private_retirement_job_) return envelope(operation, "failed", "retirement_already_started");
 	if (p_generation <= 0 || p_generation != private_staged_save_generation_
 			|| !initialization_attempted_ || !state_ || !shaping_registry_
@@ -1887,6 +1942,7 @@ Dictionary NativeWorldBackend::start_private_staged_save_retirement(const std::i
 			|| rock_source_worker_page_.is_valid() || rock_source_worker_exclusions_.is_valid())
 		return envelope(operation, "failed", "private_committed_owner_not_idle");
 	auto job = std::make_shared<PrivateStagedSaveRetirementJob>();
+	source_mutation_fence_.revoke();
 	job->state = std::move(state_);
 	job->registry = std::move(shaping_registry_);
 	try {
@@ -1898,6 +1954,11 @@ Dictionary NativeWorldBackend::start_private_staged_save_retirement(const std::i
 	} catch (const std::exception &error) {
 		state_ = std::move(job->state);
 		shaping_registry_ = std::move(job->registry);
+		// The launch failed before a worker could observe the moved owners.
+		// Change incarnation so any old between-call lease cannot resume, then
+		// reopen the same live owner only after both pointers are restored.
+		++source_lease_incarnation_;
+		source_mutation_fence_.reset_after_owner_drain();
 		return failure(operation, error);
 	}
 	private_retirement_job_ = std::move(job);
@@ -1918,10 +1979,16 @@ Dictionary NativeWorldBackend::poll_private_staged_save_retirement() {
 
 Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 	if (!Thread::is_main_thread()) return envelope("initialize", "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active()) return envelope("initialize", "failed", "borrowed_source_read_in_progress");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::empty)
+		return envelope("initialize", "pending", "borrowed_source_lease_not_drained");
 	if (initialization_attempted_) return envelope("initialize", "failed", "initialization_is_one_shot");
+	if (source_lease_incarnation_ == std::numeric_limits<std::uint64_t>::max())
+		return envelope("initialize", "failed", "source_lease_incarnation_exhausted");
 	if (terrain_volume_import_ && !terrain_volume_import_->disposal_complete())
 		return envelope("initialize", "failed", "terrain_volume_import_owner_not_drained");
 	terrain_volume_import_.reset();
+	source_mutation_fence_.reset_after_owner_drain();
 	initialization_attempted_ = true;
 	try {
 		WorldSourceDefinition definition(parse_source_descriptor(p_request, INITIALIZE_SCHEMA));
@@ -1931,9 +1998,13 @@ Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 		NativeSiteSourcePolicy site_policy = parse_site_policy(p_request, towns);
 		auto state = std::make_unique<NativeWorldBackendState>(definition);
 		auto registry = std::make_unique<NativeTerrainShapingRegistry>(definition, std::move(site_policy));
+		if (!state->bind_source_mutation_fence(&source_mutation_fence_)
+				|| !registry->bind_source_mutation_fence(&source_mutation_fence_))
+			throw std::logic_error("live source mutation fence binding failed");
 		town_overrides_ = std::move(towns);
 		state_ = std::move(state);
 		shaping_registry_ = std::move(registry);
+		++source_lease_incarnation_;
 		return status();
 	} catch (const std::exception &error) {
 		initialization_failure_ = error.what();
@@ -1943,6 +2014,11 @@ Dictionary NativeWorldBackend::initialize(const Dictionary &p_request) {
 
 Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_request) {
 	if (!Thread::is_main_thread()) return envelope("initialize_from_save_v2", "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active()) return envelope("initialize_from_save_v2", "failed", "borrowed_source_read_in_progress");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::empty)
+		return envelope("initialize_from_save_v2", "pending", "borrowed_source_lease_not_drained");
+	if (source_lease_incarnation_ == std::numeric_limits<std::uint64_t>::max())
+		return envelope("initialize_from_save_v2", "failed", "source_lease_incarnation_exhausted");
 	if (initialization_attempted_) {
 		return envelope("initialize_from_save_v2", "failed", "initialization_is_one_shot");
 	}
@@ -1950,6 +2026,7 @@ Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_reque
 		return envelope("initialize_from_save_v2", "failed", "terrain_volume_import_owner_not_drained");
 	}
 	terrain_volume_import_.reset();
+	source_mutation_fence_.reset_after_owner_drain();
 	initialization_attempted_ = true;
 	try {
 		WorldSourceDefinition definition(parse_source_descriptor(p_request, INITIALIZE_FROM_SAVE_V2_SCHEMA));
@@ -1977,12 +2054,16 @@ Dictionary NativeWorldBackend::initialize_from_save_v2(const Dictionary &p_reque
 		initial.deltas.terrain_volume = std::move(terrain_volume);
 		auto state = std::make_unique<NativeWorldBackendState>(definition, std::move(initial));
 		auto registry = std::make_unique<NativeTerrainShapingRegistry>(definition, std::move(site_policy));
+		if (!state->bind_source_mutation_fence(&source_mutation_fence_)
+				|| !registry->bind_source_mutation_fence(&source_mutation_fence_))
+			throw std::logic_error("live source mutation fence binding failed");
 
 		// Publish only after the source, policy, complete save payload, state, and
 		// shaping registry have all validated and constructed successfully.
 		town_overrides_ = std::move(towns);
 		state_ = std::move(state);
 		shaping_registry_ = std::move(registry);
+		++source_lease_incarnation_;
 		return status();
 	} catch (const std::exception &error) {
 		initialization_failure_ = error.what();
@@ -2568,6 +2649,11 @@ Dictionary NativeWorldBackend::commit_staged_save_v2_initialization(
 		const std::int64_t p_generation, const Dictionary &p_expected_source_identity) {
 	constexpr const char *operation = "commit_staged_save_v2_initialization";
 	if (!Thread::is_main_thread()) return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active()) return envelope(operation, "failed", "borrowed_source_read_in_progress");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::empty)
+		return envelope(operation, "pending", "borrowed_source_lease_not_drained");
+	if (source_lease_incarnation_ == std::numeric_limits<std::uint64_t>::max())
+		return envelope(operation, "failed", "source_lease_incarnation_exhausted");
 	auto job = terrain_volume_finalize_job_;
 	if (!job || p_generation != job->generation)
 		return envelope(operation, "failed", "stale_import_generation");
@@ -2590,11 +2676,16 @@ Dictionary NativeWorldBackend::commit_staged_save_v2_initialization(
 			cancel_staged_save_v2_initialization(p_generation);
 			return envelope(operation, "failed", "candidate_source_identity_mismatch_owner_retained");
 		}
+		source_mutation_fence_.reset_after_owner_drain();
+		if (!job->candidate_state->bind_source_mutation_fence(&source_mutation_fence_)
+				|| !job->candidate_registry->bind_source_mutation_fence(&source_mutation_fence_))
+			throw std::logic_error("adopted source mutation fence binding failed");
 		state_ = std::move(job->candidate_state);
 		shaping_registry_ = std::move(job->candidate_registry);
 		private_staged_save_generation_ = p_generation;
 		town_overrides_ = std::move(job->town_overrides);
 		initialization_attempted_ = true;
+		++source_lease_incarnation_;
 		terrain_volume_import_.reset();
 		terrain_volume_import_failure_.clear();
 		job->phase.store(NativeTerrainVolumeV2FinalizeJob::Phase::committed, std::memory_order_release);
@@ -4479,6 +4570,7 @@ Dictionary NativeWorldBackend::shaping_requests(const Vector2i &p_primary_page) 
 }
 
 Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resolutions) {
+	if (!source_mutation_fence_.writer_available()) return envelope("apply_shaping_resolutions", "failed", "borrowed_source_owner_unavailable");
 	if (!state_ || !shaping_registry_) return envelope("apply_shaping_resolutions", "failed", "backend_not_ready");
 	try {
 		if (static_cast<std::size_t>(p_resolutions.size()) > MAX_SHAPING_RESOLUTIONS) {
@@ -4556,6 +4648,7 @@ Dictionary NativeWorldBackend::apply_shaping_resolutions(const Array &p_resoluti
 }
 
 Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
+	if (!source_mutation_fence_.writer_available()) return envelope("commit_typed_cells", "failed", "borrowed_source_owner_unavailable");
 	if (!state_ || !shaping_registry_) return envelope("commit_typed_cells", "failed", "backend_not_ready");
 	if (staged_durable_cells_) return envelope("commit_typed_cells", "failed", "staged_durable_transaction_pending");
 	try {
@@ -4569,6 +4662,7 @@ Dictionary NativeWorldBackend::commit_typed_cells(const Dictionary &p_request) {
 }
 
 Dictionary NativeWorldBackend::commit_durable_cells(const Dictionary &p_request) {
+	if (!source_mutation_fence_.writer_available()) return envelope("commit_durable_cells", "failed", "borrowed_source_owner_unavailable");
 	if (!state_ || !shaping_registry_) return envelope("commit_durable_cells", "failed", "backend_not_ready");
 	if (staged_durable_cells_) return envelope("commit_durable_cells", "failed", "staged_durable_transaction_pending");
 	try {
@@ -4582,6 +4676,7 @@ Dictionary NativeWorldBackend::commit_durable_cells(const Dictionary &p_request)
 }
 
 Dictionary NativeWorldBackend::begin_staged_durable_cells(const Dictionary &p_request) {
+	if (!source_mutation_fence_.writer_available()) return envelope("begin_staged_durable_cells", "failed", "borrowed_source_owner_unavailable");
 	if (!state_ || !shaping_registry_) return envelope("begin_staged_durable_cells", "failed", "backend_not_ready");
 	if (staged_durable_cells_) return envelope("begin_staged_durable_cells", "failed", "staged_durable_transaction_pending");
 	try {
@@ -4606,6 +4701,7 @@ Dictionary NativeWorldBackend::begin_staged_durable_cells(const Dictionary &p_re
 }
 
 Dictionary NativeWorldBackend::append_staged_durable_cells(const Array &p_operations) {
+	if (!source_mutation_fence_.writer_available()) return envelope("append_staged_durable_cells", "failed", "borrowed_source_owner_unavailable");
 	if (!state_ || !staged_durable_cells_) return envelope("append_staged_durable_cells", "failed", "staged_durable_transaction_missing");
 	try {
 		if (p_operations.is_empty()) throw std::invalid_argument("staged durable batch is empty");
@@ -4623,6 +4719,7 @@ Dictionary NativeWorldBackend::append_staged_durable_cells(const Array &p_operat
 }
 
 Dictionary NativeWorldBackend::commit_staged_durable_cells() {
+	if (!source_mutation_fence_.writer_available()) return envelope("commit_staged_durable_cells", "failed", "borrowed_source_owner_unavailable");
 	if (!state_ || !staged_durable_cells_) return envelope("commit_staged_durable_cells", "failed", "staged_durable_transaction_missing");
 	try {
 		if (staged_durable_cells_->deltas.operations.empty())
@@ -4643,9 +4740,380 @@ Dictionary NativeWorldBackend::commit_staged_durable_cells() {
 }
 
 Dictionary NativeWorldBackend::abort_staged_durable_cells() {
+	if (!source_mutation_fence_.writer_available()) return envelope("abort_staged_durable_cells", "failed", "borrowed_source_owner_unavailable");
 	staged_durable_cells_.reset();
 	Dictionary result = envelope("abort_staged_durable_cells", "ready");
 	result["aborted"] = true;
+	return result;
+}
+
+Dictionary NativeWorldBackend::begin_borrowed_source_lease(const Vector2i &p_primary_page) {
+	constexpr const char *operation = "begin_borrowed_source_lease";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (!state_ || !shaping_registry_ || !source_mutation_fence_.writer_available())
+		return envelope(operation, "failed", "source_owner_unavailable");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::empty)
+		return envelope(operation, "pending", "prior_lease_not_drained");
+	if (source_lease_incarnation_ == 0U
+		|| source_lease_next_issue_ > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+		return envelope(operation, "failed", "lease_issue_exhausted");
+	const NativeTerrainPageKey primary{p_primary_page.x, p_primary_page.y};
+	if (!native_terrain_page_bounds(primary))
+		return envelope(operation, "failed", "invalid_primary_page");
+	if (borrowed_source_frame_budget() == 0U)
+		return envelope(operation, "pending", "shared_frame_budget_exhausted");
+	try {
+		WorldSourceMutationFence::ReadGuard guard(source_mutation_fence_);
+		auto &slot = borrowed_source_lease_;
+		slot.issue = source_lease_next_issue_++;
+		slot.incarnation = source_lease_incarnation_;
+		slot.epoch = source_mutation_fence_.epoch();
+		slot.source_identity = state_->source_identity().digest;
+		slot.delta_revision = state_->terrain_delta_revision();
+		slot.delta_content = state_->terrain_delta_content_digest();
+		slot.registry_revision = shaping_registry_->revision();
+		slot.registry_content = shaping_registry_->content_identity().digest;
+		slot.policy_content = shaping_registry_->policy_content_identity().digest;
+		slot.primary = primary;
+		slot.primary_bounds = *native_terrain_page_bounds(primary);
+		slot.page_count = 0U;
+		slot.pin_byte_offset = 0U;
+		slot.town_count = 0U;
+		slot.town_scan_index = 0U;
+		slot.dependencies.reset(primary);
+		slot.page.reset();
+		slot.shaping.reset();
+		slot.pin_hash.reset();
+		slot.phase = BorrowedSourceLeaseSlot::Phase::axes;
+		if (!borrowed_source_stamp_matches(slot)) {
+			slot.phase = BorrowedSourceLeaseSlot::Phase::stale;
+		}
+	} catch (const std::exception &error) {
+		borrowed_source_seal();
+		return failure(operation, error);
+	}
+	borrowed_source_charge(1U);
+	Dictionary result = envelope(operation,
+		borrowed_source_lease_.phase == BorrowedSourceLeaseSlot::Phase::axes ? "pending" : "failed",
+		borrowed_source_lease_.phase == BorrowedSourceLeaseSlot::Phase::axes
+			? "borrowed_source_lease_started" : "source_changed_during_begin");
+	result["issue"] = static_cast<std::int64_t>(borrowed_source_lease_.issue);
+	result["consumedOps"] = 1;
+	result["nextAtomicOps"] = 1;
+	return result;
+}
+
+Dictionary NativeWorldBackend::advance_borrowed_source_lease(
+	const std::int64_t p_issue, const std::int64_t p_offered_ops) {
+	constexpr const char *operation = "advance_borrowed_source_lease";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	if (p_issue <= 0 || borrowed_source_lease_.phase == BorrowedSourceLeaseSlot::Phase::empty
+		|| borrowed_source_lease_.issue != static_cast<std::uint64_t>(p_issue))
+		return envelope(operation, "failed", "lease_issue_mismatch");
+	if (p_offered_ops < 0) return envelope(operation, "failed", "invalid_work_quota");
+	auto &slot = borrowed_source_lease_;
+	if (slot.phase == BorrowedSourceLeaseSlot::Phase::cancelled
+		|| slot.phase == BorrowedSourceLeaseSlot::Phase::stale
+		|| slot.phase == BorrowedSourceLeaseSlot::Phase::failed)
+		return envelope(operation, "failed", "lease_terminal_drain_required");
+	if (slot.phase == BorrowedSourceLeaseSlot::Phase::ready) {
+		bool current = false;
+		try {
+			WorldSourceMutationFence::ReadGuard guard(source_mutation_fence_);
+			current = borrowed_source_stamp_matches(slot);
+		} catch (const std::exception &) {}
+		if (!current) {
+			slot.phase = BorrowedSourceLeaseSlot::Phase::stale;
+			return envelope(operation, "failed", "source_changed");
+		}
+		Dictionary result = envelope(operation, "ready", "source_identity_complete");
+		result["issue"] = p_issue;
+		result["pinIdentity"] = identity_dictionary(WorldPhysicalContentIdentity{slot.pin_digest});
+		result["sourceIdentity"] = identity_dictionary(WorldPhysicalContentIdentity{slot.source_identity});
+		result["terrainDeltaRevision"] = static_cast<std::int64_t>(slot.delta_revision);
+		result["shapingRegistryRevision"] = static_cast<std::int64_t>(slot.registry_revision);
+		result["dependencyCount"] = static_cast<std::int64_t>(slot.page_count);
+		result["consumedOps"] = 0;
+		result["nextAtomicOps"] = 0;
+		return result;
+	}
+	const std::uint32_t limit = std::min<std::uint32_t>(
+		static_cast<std::uint32_t>(std::min<std::int64_t>(p_offered_ops, 64)),
+		borrowed_source_frame_budget());
+	if (limit == 0U) {
+		Dictionary result = envelope(operation, "pending", "work_quota_or_frame_budget_exhausted");
+		result["issue"] = p_issue;
+		result["consumedOps"] = 0;
+		result["nextAtomicOps"] = 1;
+		return result;
+	}
+	std::uint32_t consumed = 0U;
+	std::uint32_t next_atomic = 1U;
+	const char *reason = "borrowed_source_progress_pending";
+	// A helper may throw after doing some work without returning a Step.
+	// Reserve the whole offered slice first. Only a successful return proves
+	// how many atoms can safely be refunded to this process frame.
+	borrowed_source_charge(limit);
+	bool completed_quantum = false;
+	try {
+		WorldSourceMutationFence::ReadGuard guard(source_mutation_fence_);
+		if (!borrowed_source_stamp_matches(slot)) {
+			slot.phase = BorrowedSourceLeaseSlot::Phase::stale;
+			reason = "source_changed";
+		} else {
+			const auto pin_emit_byte = [&](const std::uint8_t byte) {
+				if (limit < 3U) { next_atomic = 3U; return false; }
+				const auto step = slot.pin_hash.update_step(&byte, 1U, 1U, 1U);
+				if (!step.input_complete) throw std::logic_error("pin identity byte refused");
+				consumed = 2U + static_cast<std::uint32_t>(step.compressed_blocks);
+				return true;
+			};
+			const auto le_byte = [](const std::uint64_t value, const std::size_t offset) {
+				return static_cast<std::uint8_t>(value >> (8U * offset));
+			};
+			switch (slot.phase) {
+			case BorrowedSourceLeaseSlot::Phase::axes: {
+				const auto step = slot.dependencies.advance_axes(state_->definition(), limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.ready) slot.phase = BorrowedSourceLeaseSlot::Phase::count_pages;
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::count_pages: {
+				const auto step = slot.dependencies.next_page(limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.has_page) {
+					if (slot.page_count == std::numeric_limits<std::uint64_t>::max()) {
+						slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+						reason = "dependency_count_exhausted";
+					} else ++slot.page_count;
+				} else if (step.complete) slot.phase = BorrowedSourceLeaseSlot::Phase::rewind_pages;
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::rewind_pages: {
+				const auto step = slot.dependencies.rewind_pages(limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.ready) slot.phase = BorrowedSourceLeaseSlot::Phase::pin_header;
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::pin_header: {
+				const std::size_t offset = slot.pin_byte_offset;
+				std::uint8_t byte = 0U;
+				if (offset < 4U) byte = static_cast<std::uint8_t>("VWPP"[offset]);
+				else if (offset < 8U) byte = le_byte(4U, offset - 4U);
+				else if (offset < 40U) byte = slot.source_identity[offset - 8U];
+				else if (offset < 56U) {
+					const std::int32_t fields[4] = {slot.primary_bounds.x, slot.primary_bounds.z,
+						slot.primary_bounds.width, slot.primary_bounds.depth};
+					byte = le_byte(static_cast<std::uint32_t>(fields[(offset - 40U) / 4U]),
+						(offset - 40U) % 4U);
+				} else byte = le_byte(slot.page_count, offset - 56U);
+				if (pin_emit_byte(byte) && ++slot.pin_byte_offset == 64U) {
+					slot.pin_byte_offset = 0U;
+					slot.phase = BorrowedSourceLeaseSlot::Phase::next_page;
+				}
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::next_page: {
+				const auto step = slot.dependencies.next_page(limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.has_page) {
+					slot.current_page = {step.page_x, step.page_z};
+					const auto bounds = native_terrain_page_bounds(slot.current_page);
+					if (!bounds) {
+						slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+						reason = "invalid_dependency_bounds";
+						break;
+					}
+					slot.current_bounds = *bounds;
+					slot.town_count = 0U; slot.town_scan_index = 0U;
+					slot.page.reset(); slot.shaping.reset();
+					slot.phase = BorrowedSourceLeaseSlot::Phase::town_scan;
+				} else if (step.complete) slot.phase = BorrowedSourceLeaseSlot::Phase::pin_finish;
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::town_scan: {
+				if (slot.town_scan_index == town_overrides_.size()) {
+					slot.phase = BorrowedSourceLeaseSlot::Phase::shaping_ready;
+					break;
+				}
+				const NativeTownRegionOverride &town = town_overrides_[slot.town_scan_index++];
+				const std::int64_t dx = static_cast<std::int64_t>(town.region_x) - slot.current_page.x;
+				const std::int64_t dz = static_cast<std::int64_t>(town.region_z) - slot.current_page.z;
+				if (dx >= -1 && dx <= 1 && dz >= -1 && dz <= 1) {
+					if (slot.town_count == slot.towns.size()) {
+						slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+						reason = "town_dependency_capacity_exceeded";
+					} else slot.towns[slot.town_count++] = town;
+				}
+				consumed = 1U;
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::shaping_ready: {
+				BorrowedShapingPageCursor::Step step;
+				if (slot.page.status() == BorrowedShapingPageCursor::Status::idle)
+					step = slot.page.begin(slot.current_page, limit);
+				else step = shaping_registry_->advance_borrowed_page(slot.page, limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.status == BorrowedShapingPageCursor::Status::ready)
+					slot.phase = BorrowedSourceLeaseSlot::Phase::shaping_digest;
+				else if (step.status == BorrowedShapingPageCursor::Status::failed) {
+					slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+					reason = "shaping_dependency_failed";
+				} else if (step.status == BorrowedShapingPageCursor::Status::unresolved) {
+					// A resolving write changes the captured epoch. This issue cannot
+					// resume after that write, so require drain and a fresh begin.
+					slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+					reason = "shaping_dependency_unresolved_drain_required";
+				}
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::shaping_digest: {
+				const auto step = shaping_registry_->advance_borrowed_page_identity(
+					slot.page, slot.shaping, slot.towns, slot.town_count, limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.status == BorrowedShapingIdentityCursor::Status::ready) {
+					slot.current_shaping_digest = slot.shaping.digest();
+					slot.phase = BorrowedSourceLeaseSlot::Phase::projection_reset;
+				} else if (step.status == BorrowedShapingIdentityCursor::Status::failed) {
+					slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+					reason = "shaping_identity_failed";
+				}
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::projection_reset:
+				slot.projection.reset({slot.current_bounds.x, slot.current_bounds.z,
+					slot.current_bounds.width, slot.current_bounds.depth});
+				consumed = 1U;
+				slot.phase = BorrowedSourceLeaseSlot::Phase::typed_projection;
+				break;
+			case BorrowedSourceLeaseSlot::Phase::typed_projection: {
+				const auto step = state_->advance_borrowed_typed_projection(slot.projection,
+					{slot.current_bounds.x, slot.current_bounds.z,
+						slot.current_bounds.width, slot.current_bounds.depth}, slot.issue, limit);
+				consumed = step.consumed_ops; next_atomic = step.next_atomic_ops;
+				if (step.status == BorrowedTypedProjectionCursor::Status::ready) {
+					slot.current_projection_digest = slot.projection.digest();
+					slot.pin_byte_offset = 0U;
+					slot.phase = BorrowedSourceLeaseSlot::Phase::page_emit;
+				} else if (step.status == BorrowedTypedProjectionCursor::Status::failed
+					|| step.status == BorrowedTypedProjectionCursor::Status::source_changed) {
+					slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+					reason = step.status == BorrowedTypedProjectionCursor::Status::source_changed
+						? "typed_projection_source_changed" : "typed_projection_failed";
+				}
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::page_emit: {
+				const std::size_t offset = slot.pin_byte_offset;
+				std::uint8_t byte = 0U;
+				if (offset < 8U) {
+					const std::int32_t fields[2] = {slot.current_page.x, slot.current_page.z};
+					byte = le_byte(static_cast<std::uint32_t>(fields[offset / 4U]), offset % 4U);
+				} else if (offset < 24U) {
+					const std::int32_t fields[4] = {slot.current_bounds.x, slot.current_bounds.z,
+						slot.current_bounds.width, slot.current_bounds.depth};
+					byte = le_byte(static_cast<std::uint32_t>(fields[(offset - 8U) / 4U]),
+						(offset - 8U) % 4U);
+				} else if (offset < 56U) byte = slot.current_shaping_digest[offset - 24U];
+				else byte = slot.current_projection_digest[offset - 56U];
+				if (pin_emit_byte(byte) && ++slot.pin_byte_offset == 88U) {
+					slot.pin_byte_offset = 0U;
+					slot.phase = BorrowedSourceLeaseSlot::Phase::next_page;
+				}
+				break;
+			}
+			case BorrowedSourceLeaseSlot::Phase::pin_finish: {
+				const auto step = slot.pin_hash.finish_step(limit);
+				consumed = static_cast<std::uint32_t>(step.compressed_blocks);
+				next_atomic = step.digest_ready ? 0U : 1U;
+				if (step.digest_ready) {
+					slot.pin_digest = slot.pin_hash.digest();
+					slot.phase = BorrowedSourceLeaseSlot::Phase::ready;
+				}
+				break;
+			}
+			default:
+				slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+				reason = "invalid_lease_phase";
+				break;
+			}
+			if (!borrowed_source_stamp_matches(slot)) {
+				slot.phase = BorrowedSourceLeaseSlot::Phase::stale;
+				reason = "source_changed_during_advance";
+			}
+		}
+		completed_quantum = true;
+	} catch (const std::exception &) {
+		slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+		reason = "borrowed_source_advance_failed";
+	}
+	if (completed_quantum && consumed <= limit) source_lease_frame_ops_ -= limit - consumed;
+	else {
+		if (completed_quantum) {
+			slot.phase = BorrowedSourceLeaseSlot::Phase::failed;
+			reason = "borrowed_source_step_overreported_work";
+		}
+		consumed = limit;
+	}
+	if (slot.phase == BorrowedSourceLeaseSlot::Phase::ready)
+		reason = "source_identity_complete";
+	Dictionary result = envelope(operation,
+		slot.phase == BorrowedSourceLeaseSlot::Phase::failed
+			|| slot.phase == BorrowedSourceLeaseSlot::Phase::stale ? "failed"
+			: slot.phase == BorrowedSourceLeaseSlot::Phase::ready ? "ready" : "pending", reason);
+	result["issue"] = p_issue;
+	result["consumedOps"] = static_cast<std::int64_t>(consumed);
+	result["nextAtomicOps"] = static_cast<std::int64_t>(next_atomic);
+	result["sharedFrameWorkOps"] = static_cast<std::int64_t>(source_lease_frame_ops_);
+	result["dependencyCount"] = static_cast<std::int64_t>(slot.page_count);
+	if (slot.phase == BorrowedSourceLeaseSlot::Phase::ready) {
+		result["pinIdentity"] = identity_dictionary(WorldPhysicalContentIdentity{slot.pin_digest});
+		result["sourceIdentity"] = identity_dictionary(WorldPhysicalContentIdentity{slot.source_identity});
+		result["terrainDeltaRevision"] = static_cast<std::int64_t>(slot.delta_revision);
+		result["shapingRegistryRevision"] = static_cast<std::int64_t>(slot.registry_revision);
+	}
+	return result;
+}
+
+Dictionary NativeWorldBackend::cancel_borrowed_source_lease(const std::int64_t p_issue) {
+	constexpr const char *operation = "cancel_borrowed_source_lease";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	if (p_issue <= 0 || borrowed_source_lease_.phase == BorrowedSourceLeaseSlot::Phase::empty
+		|| borrowed_source_lease_.issue != static_cast<std::uint64_t>(p_issue))
+		return envelope(operation, "failed", "lease_issue_mismatch");
+	borrowed_source_lease_.phase = BorrowedSourceLeaseSlot::Phase::cancelled;
+	Dictionary result = envelope(operation, "ready", "lease_cancelled");
+	result["issue"] = p_issue;
+	return result;
+}
+
+Dictionary NativeWorldBackend::drain_borrowed_source_lease(const std::int64_t p_issue) {
+	constexpr const char *operation = "drain_borrowed_source_lease";
+	if (!Thread::is_main_thread() || !source_mutation_fence_.on_owner_thread())
+		return envelope(operation, "failed", "main_thread_required");
+	if (source_mutation_fence_.read_active())
+		return envelope(operation, "pending", "borrowed_source_read_in_progress");
+	if (p_issue <= 0 || borrowed_source_lease_.phase == BorrowedSourceLeaseSlot::Phase::empty
+		|| borrowed_source_lease_.issue != static_cast<std::uint64_t>(p_issue))
+		return envelope(operation, "failed", "lease_issue_mismatch");
+	if (borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::cancelled
+		&& borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::stale
+		&& borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::failed
+		&& borrowed_source_lease_.phase != BorrowedSourceLeaseSlot::Phase::ready)
+		return envelope(operation, "pending", "cancel_before_drain");
+	// Cursor storage is fixed and owns no source pointer. Do not zero the
+	// 64-KiB slot as one uncharged control operation; next begin lazily resets
+	// only live scalar cursor state and later page scan clears occupancy by atom.
+	borrowed_source_seal();
+	Dictionary result = envelope(operation, "ready", "lease_drained");
+	result["issue"] = p_issue;
 	return result;
 }
 

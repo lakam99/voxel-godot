@@ -188,6 +188,273 @@ WorldPhysicalContentIdentity page_identity(
 
 } // namespace
 
+void BorrowedShapingIdentityCursor::reset() noexcept {
+    hash_.reset(); page_ = {}; bounds_ = {};
+    town_count_ = 0U; profile_count_ = 0U;
+    index_ = 0U; compare_index_ = 0U; sample_index_ = 0U;
+    byte_offset_ = 0U; fragment_index_ = 0U;
+    phase_ = 0U; emit_part_ = 0U; crop_ready_ = false;
+    status_ = Status::idle;
+}
+BorrowedShapingIdentityCursor::Status BorrowedShapingIdentityCursor::status() const noexcept {
+    return status_;
+}
+Sha256Digest BorrowedShapingIdentityCursor::digest() const {
+    if (status_ != Status::ready) throw std::logic_error("borrowed shaping digest is not complete");
+    return hash_.digest();
+}
+BorrowedShapingIdentityCursor::Step BorrowedShapingIdentityCursor::begin(
+    const NativeTerrainPageKey page, const NativeHorizontalRect bounds,
+    const std::array<NativeTownRegionOverride, 9> &towns, const std::size_t town_count,
+    const std::size_t profile_count, const std::uint32_t offered_ops) noexcept {
+    Step result; result.status = status_;
+    if (status_ != Status::idle || offered_ops < 16U) {
+        result.next_atomic_ops = 16U; return result;
+    }
+    if (town_count > towns_.size() || profile_count > MAX_PROFILES
+        || !native_terrain_page_bounds(page)
+        || !(bounds == *native_terrain_page_bounds(page))) {
+        status_ = Status::failed; result.status = status_; return result;
+    }
+    page_ = page; bounds_ = bounds; town_count_ = town_count; profile_count_ = profile_count;
+    for (std::size_t i = 0U; i < town_count_; ++i) towns_[i] = towns[i];
+    for (std::size_t i = 0U; i < profile_count_; ++i) site_order_[i] = static_cast<std::uint8_t>(i);
+    hash_.reset(); index_ = 1U; sample_index_ = 1U;
+    compare_index_ = 0U; byte_offset_ = 0U; fragment_index_ = 0U;
+    crop_ready_ = false; phase_ = 0U; emit_part_ = 0U; status_ = Status::pending;
+    result.status = status_; result.consumed_ops = 16U; return result;
+}
+
+BorrowedShapingIdentityCursor::Step BorrowedShapingIdentityCursor::advance(
+    const WorldSourceDefinition &definition,
+    const std::array<const NativeAdmittedSiteTerrainProfile *, MAX_PROFILES> &profiles,
+    const std::uint32_t offered_ops) noexcept {
+    Step result; result.status = status_;
+    if (status_ != Status::pending) return result;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    while (result.consumed_ops < limit && status_ == Status::pending) {
+        if (phase_ == 0U) {
+            if (index_ >= town_count_) {
+                index_ = 0U; phase_ = 1U; continue;
+            }
+            if (sample_index_ > 0U && region_less(towns_[sample_index_], towns_[sample_index_ - 1U])) {
+                std::swap(towns_[sample_index_], towns_[sample_index_ - 1U]);
+                --sample_index_;
+            } else { ++index_; sample_index_ = index_; }
+            ++result.consumed_ops;
+        } else if (phase_ == 1U) {
+            if (index_ >= town_count_) {
+                index_ = 1U; sample_index_ = 1U; phase_ = 2U; continue;
+            }
+            const auto &record = towns_[index_];
+            if ((index_ > 0U && record.region_x == towns_[index_ - 1U].region_x
+                    && record.region_z == towns_[index_ - 1U].region_z)
+                || record.region_x < page_.x - 1 || record.region_x > page_.x + 1
+                || record.region_z < page_.z - 1 || record.region_z > page_.z + 1
+                || (record.has_town && (record.town.region_x != record.region_x
+                    || record.town.region_z != record.region_z
+                    || record.town.center_x != static_cast<std::int64_t>(record.region_x) * 280
+                    || record.town.center_z != static_cast<std::int64_t>(record.region_z) * 280
+                    || record.town.radius_cells <= 0
+                    || record.town.radius_cells > 280 - NativeTerrainShapingSnapshot::MAX_TOWN_APRON_CELLS
+                    || !std::isfinite(record.town.level_meters)))) status_ = Status::failed;
+            ++index_; ++result.consumed_ops;
+        } else if (phase_ == 2U) {
+            if (index_ >= profile_count_) {
+                index_ = 0U; phase_ = 3U; continue;
+            }
+            if (sample_index_ == 0U) {
+                ++index_; sample_index_ = index_; compare_index_ = 0U;
+                ++result.consumed_ops; continue;
+            }
+            const auto *left = profiles[site_order_[sample_index_ - 1U]];
+            const auto *right = profiles[site_order_[sample_index_]];
+            if (!left || !right
+                || !(left->source_definition_identity() == definition.physical_content_identity())
+                || !(right->source_definition_identity() == definition.physical_content_identity())) {
+                status_ = Status::failed; break;
+            }
+            const auto &a = left->site_id(); const auto &b = right->site_id();
+            if (compare_index_ < a.size() && compare_index_ < b.size()
+                && a[compare_index_] == b[compare_index_]) ++compare_index_;
+            else {
+                const bool less = compare_index_ < a.size() && compare_index_ < b.size()
+                    ? b[compare_index_] < a[compare_index_]
+                    : b.size() < a.size();
+                if (a.size() == b.size() && compare_index_ == a.size()) {
+                    status_ = Status::failed; break;
+                }
+                if (less && sample_index_ > 0U) {
+                    std::swap(site_order_[sample_index_], site_order_[sample_index_ - 1U]);
+                    --sample_index_;
+                } else { ++index_; sample_index_ = index_; }
+                compare_index_ = 0U;
+            }
+            ++result.consumed_ops;
+        } else if (phase_ == 3U) {
+            if (index_ == occupied_.size()) {
+                index_ = 0U; sample_index_ = 0U; phase_ = 4U; continue;
+            }
+            occupied_[index_++] = 0U; ++result.consumed_ops;
+        } else if (phase_ == 4U) {
+            if (index_ >= profile_count_) {
+                index_ = 1U; sample_index_ = 1U; phase_ = 5U; continue;
+            }
+            const auto *site = profiles[site_order_[index_]];
+            if (!site || !(site->source_definition_identity() == definition.physical_content_identity())) {
+                status_ = Status::failed; break;
+            }
+            if (!crop_ready_) {
+                const auto crop = intersection(site->envelope_cells(), bounds_);
+                if (!crop) { status_ = Status::failed; break; }
+                fragments_[index_] = {*crop, site_order_[index_]};
+                crop_ready_ = true; ++result.consumed_ops; continue;
+            }
+            const auto crop = fragments_[index_].crop;
+            const std::size_t area = static_cast<std::size_t>(crop.width) * crop.depth;
+            const std::int32_t x = crop.x + static_cast<std::int32_t>(sample_index_ % crop.width);
+            const std::int32_t z = crop.z + static_cast<std::int32_t>(sample_index_ / crop.width);
+            const std::size_t bit = static_cast<std::size_t>(z - bounds_.z) * 280U
+                + static_cast<std::size_t>(x - bounds_.x);
+            const std::uint64_t mask = std::uint64_t{1} << (bit % 64U);
+            if ((occupied_[bit / 64U] & mask) != 0U) { status_ = Status::failed; break; }
+            occupied_[bit / 64U] |= mask;
+            ++sample_index_; ++result.consumed_ops;
+            if (sample_index_ == area) {
+                ++index_; sample_index_ = 0U; crop_ready_ = false;
+            }
+        } else if (phase_ == 5U) {
+            if (index_ >= profile_count_) {
+                hash_.reset(); phase_ = 6U; emit_part_ = 0U;
+                byte_offset_ = 0U; fragment_index_ = 0U; continue;
+            }
+            if (sample_index_ == 0U) {
+                ++index_; sample_index_ = index_;
+                ++result.consumed_ops; continue;
+            }
+            const auto &a = fragments_[sample_index_ - 1U].crop;
+            const auto &b = fragments_[sample_index_].crop;
+            if (std::tie(b.x, b.z, b.width, b.depth) < std::tie(a.x, a.z, a.width, a.depth)) {
+                std::swap(fragments_[sample_index_], fragments_[sample_index_ - 1U]);
+                --sample_index_;
+            } else { ++index_; sample_index_ = index_; }
+            ++result.consumed_ops;
+        } else if (phase_ == 6U) {
+            if (limit - result.consumed_ops < 3U) { result.next_atomic_ops = 3U; break; }
+            if (emit_part_ >= 3U
+                && profiles[fragments_[fragment_index_].profile_index] == nullptr) {
+                status_ = Status::failed; break;
+            }
+            const std::uint8_t byte = canonical_byte(definition, profiles);
+            const auto updated = hash_.update_step(&byte, 1U, 1U, 1U);
+            if (!updated.input_complete) { status_ = Status::failed; break; }
+            result.consumed_ops += 3U;
+            advance_byte_cursor();
+        } else {
+            const auto finished = hash_.finish_step(1U);
+            ++result.consumed_ops;
+            if (finished.digest_ready) status_ = Status::ready;
+        }
+    }
+    result.status = status_;
+    if (status_ == Status::pending) result.next_atomic_ops = phase_ == 6U ? 3U : 1U;
+    return result;
+}
+
+std::uint8_t BorrowedShapingIdentityCursor::canonical_byte(
+    const WorldSourceDefinition &definition,
+    const std::array<const NativeAdmittedSiteTerrainProfile *, MAX_PROFILES> &profiles) const noexcept {
+    const auto byte32 = [](const std::int32_t value, const std::size_t offset) {
+        return static_cast<std::uint8_t>(static_cast<std::uint32_t>(value) >> (offset * 8U));
+    };
+    const auto byte64 = [](const std::uint64_t value, const std::size_t offset) {
+        return static_cast<std::uint8_t>(value >> (offset * 8U));
+    };
+    const auto double_byte = [&](const double value, const std::size_t offset) {
+        std::uint64_t bits = 0U; std::memcpy(&bits, &value, sizeof(bits));
+        return byte64(bits, offset);
+    };
+    if (emit_part_ == 0U) {
+        static constexpr std::uint8_t magic[] = {'V', 'W', 'S', 'H'};
+        if (byte_offset_ < 4U) return magic[byte_offset_];
+        if (byte_offset_ < 8U) return byte32(2, byte_offset_ - 4U);
+        if (byte_offset_ < 40U)
+            return definition.physical_content_identity().digest[byte_offset_ - 8U];
+        if (byte_offset_ < 44U) return byte32(page_.x, byte_offset_ - 40U);
+        if (byte_offset_ < 48U) return byte32(page_.z, byte_offset_ - 44U);
+        if (byte_offset_ < 52U) return byte32(bounds_.x, byte_offset_ - 48U);
+        if (byte_offset_ < 56U) return byte32(bounds_.z, byte_offset_ - 52U);
+        if (byte_offset_ < 60U) return byte32(bounds_.width, byte_offset_ - 56U);
+        if (byte_offset_ < 64U) return byte32(bounds_.depth, byte_offset_ - 60U);
+        return byte64(town_count_, byte_offset_ - 64U);
+    }
+    if (emit_part_ == 1U) {
+        const auto &town = towns_[fragment_index_];
+        if (byte_offset_ < 4U) return byte32(town.region_x, byte_offset_);
+        if (byte_offset_ < 8U) return byte32(town.region_z, byte_offset_ - 4U);
+        if (byte_offset_ == 8U) return town.has_town ? 1U : 0U;
+        if (byte_offset_ < 13U) return byte32(town.town.center_x, byte_offset_ - 9U);
+        if (byte_offset_ < 17U) return byte32(town.town.center_z, byte_offset_ - 13U);
+        if (byte_offset_ < 21U) return byte32(town.town.radius_cells, byte_offset_ - 17U);
+        return double_byte(town.town.level_meters, byte_offset_ - 21U);
+    }
+    if (emit_part_ == 2U) return byte64(profile_count_, byte_offset_);
+    const Fragment &fragment = fragments_[fragment_index_];
+    const auto *site = profiles[fragment.profile_index];
+    const NativeHorizontalRect crop = fragment.crop;
+    const std::size_t area = static_cast<std::size_t>(crop.width) * crop.depth;
+    if (emit_part_ == 3U) {
+        if (byte_offset_ < 4U) return byte32(crop.x, byte_offset_);
+        if (byte_offset_ < 8U) return byte32(crop.z, byte_offset_ - 4U);
+        if (byte_offset_ < 12U) return byte32(crop.width, byte_offset_ - 8U);
+        if (byte_offset_ < 16U) return byte32(crop.depth, byte_offset_ - 12U);
+        if (byte_offset_ < 24U) return double_byte(site->level_meters(), byte_offset_ - 16U);
+        if (byte_offset_ < 28U) return byte32(site->apron_cells(), byte_offset_ - 24U);
+        return byte64(area, byte_offset_ - 28U);
+    }
+    const std::size_t sample = emit_part_ == 4U ? byte_offset_ : byte_offset_ / 4U;
+    const NativeHorizontalRect envelope = site->envelope_cells();
+    const std::size_t source = static_cast<std::size_t>(crop.z - envelope.z
+        + static_cast<std::int32_t>(sample / crop.width)) * envelope.width
+        + static_cast<std::size_t>(crop.x - envelope.x)
+        + sample % crop.width;
+    if (emit_part_ == 4U) return site->support_mask()[source];
+    std::uint32_t bits = 0U;
+    const float distance = site->distance_cells()[source];
+    std::memcpy(&bits, &distance, sizeof(bits));
+    return static_cast<std::uint8_t>(bits >> ((byte_offset_ % 4U) * 8U));
+}
+
+void BorrowedShapingIdentityCursor::advance_byte_cursor() noexcept {
+    ++byte_offset_;
+    if (emit_part_ == 0U && byte_offset_ == 72U) {
+        emit_part_ = town_count_ == 0U ? 2U : 1U;
+        byte_offset_ = 0U; fragment_index_ = 0U;
+    } else if (emit_part_ == 1U
+        && byte_offset_ == (towns_[fragment_index_].has_town ? 29U : 9U)) {
+        byte_offset_ = 0U;
+        if (++fragment_index_ == town_count_) { fragment_index_ = 0U; emit_part_ = 2U; }
+    } else if (emit_part_ == 2U && byte_offset_ == 8U) {
+        byte_offset_ = 0U; fragment_index_ = 0U;
+        if (profile_count_ == 0U) phase_ = 7U;
+        else emit_part_ = 3U;
+    } else if (emit_part_ == 3U && byte_offset_ == 36U) {
+        emit_part_ = 4U; byte_offset_ = 0U;
+    } else if (emit_part_ == 4U) {
+        const auto crop = fragments_[fragment_index_].crop;
+        const std::size_t area = static_cast<std::size_t>(crop.width) * crop.depth;
+        if (byte_offset_ == area) { emit_part_ = 5U; byte_offset_ = 0U; }
+    } else if (emit_part_ == 5U) {
+        const auto crop = fragments_[fragment_index_].crop;
+        const std::size_t area = static_cast<std::size_t>(crop.width) * crop.depth;
+        if (byte_offset_ == area * 4U) {
+            byte_offset_ = 0U;
+            if (++fragment_index_ == profile_count_) phase_ = 7U;
+            else emit_part_ = 3U;
+        }
+    }
+}
+
 bool NativeHorizontalRect::operator==(const NativeHorizontalRect &other) const noexcept {
     return x == other.x && z == other.z && width == other.width && depth == other.depth;
 }

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <set>
 #include <type_traits>
@@ -659,7 +660,115 @@ struct WorldDeltaStore::TransactionRecord {
     WorldDeltaCommitReceipt receipt;
 };
 
+WorldSourceMutationFence::ReadGuard::ReadGuard(WorldSourceMutationFence &fence)
+    : fence_(fence) {
+    if (!fence_.on_owner_thread() || fence_.read_active_ || fence_.revoked_ || fence_.exhausted())
+        throw std::logic_error("borrowed world source reader is unavailable");
+    fence_.read_active_ = true;
+}
+
+std::uint8_t projection_le32(const std::int32_t value, const std::size_t byte) noexcept {
+    return static_cast<std::uint8_t>(static_cast<std::uint32_t>(value) >> (8U * byte));
+}
+std::uint8_t projection_le64(const std::uint64_t value, const std::size_t byte) noexcept {
+    return static_cast<std::uint8_t>(value >> (8U * byte));
+}
+std::uint8_t projection_fixed_record_byte(
+    const NativeTypedWorldStateRecord &record, const std::size_t offset) noexcept {
+    if (offset == 0U) return static_cast<std::uint8_t>(record.name_space);
+    if (offset == 1U) return static_cast<std::uint8_t>(record.persistence);
+    const NativeCellState &state = record.state;
+    if (offset < 38U) {
+        std::int32_t coordinate = 0;
+        switch ((offset - 2U) / 4U) {
+        case 0U: coordinate = state.cell.x; break;
+        case 1U: coordinate = state.cell.y; break;
+        case 2U: coordinate = state.cell.z; break;
+        case 3U: coordinate = state.section.x; break;
+        case 4U: coordinate = state.section.y; break;
+        case 5U: coordinate = state.section.z; break;
+        case 6U: coordinate = state.local_cell.x; break;
+        case 7U: coordinate = state.local_cell.y; break;
+        case 8U: coordinate = state.local_cell.z; break;
+        default: break;
+        }
+        return projection_le32(coordinate, (offset - 2U) % 4U);
+    }
+    if (offset == 38U) return static_cast<std::uint8_t>(state.material);
+    if (offset == 39U) return static_cast<std::uint8_t>(state.biome);
+    if (offset == 40U) return state.solid ? 1U : 0U;
+    if (offset < 49U) {
+        std::uint64_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(state.density));
+        std::memcpy(&bits, &state.density, sizeof(bits));
+        return projection_le64(bits, offset - 41U);
+    }
+    if (offset == 49U) return static_cast<std::uint8_t>(state.fluid);
+    if (offset == 50U) return state.light.sky;
+    if (offset == 51U) return state.light.block;
+    return offset == 52U ? 0U : 1U;
+}
+
+WorldSourceMutationFence::ReadGuard::~ReadGuard() {
+    fence_.read_active_ = false;
+}
+
+void WorldSourceMutationFence::require_writer_entry() const {
+    if (!on_owner_thread() || read_active_ || revoked_ || exhausted())
+        throw std::logic_error("borrowed world source writer is unavailable");
+}
+
+void WorldSourceMutationFence::published() noexcept {
+    // require_writer_entry is the nonwrapping preflight before a writer does
+    // any validation, allocation, journaling, or state publication.
+    if (!on_owner_thread()) std::terminate();
+    ++epoch_;
+}
+
+void WorldSourceMutationFence::revoke() noexcept {
+    if (!on_owner_thread()) std::terminate();
+    revoked_ = true;
+}
+
+void WorldSourceMutationFence::reset_after_owner_drain() {
+    if (!on_owner_thread() || read_active_)
+        throw std::logic_error("borrowed world source owner is unavailable");
+    revoked_ = false;
+    epoch_ = 1U;
+}
+
+std::uint64_t WorldSourceMutationFence::epoch() const noexcept {
+    return on_owner_thread() ? epoch_ : 0U;
+}
+bool WorldSourceMutationFence::read_active() const noexcept {
+    return !on_owner_thread() || read_active_;
+}
+bool WorldSourceMutationFence::writer_available() const noexcept {
+    // Check thread identity before reading the owner-thread-only flags.
+    return on_owner_thread() && !read_active_ && !revoked_ && !exhausted();
+}
+bool WorldSourceMutationFence::exhausted() const noexcept {
+    return !on_owner_thread() || epoch_ == std::numeric_limits<std::uint64_t>::max();
+}
+bool WorldSourceMutationFence::on_owner_thread() const noexcept {
+    return owner_thread_ == std::this_thread::get_id();
+}
+
 static_assert(std::is_nothrow_move_assignable_v<std::shared_ptr<const WorldDeltaSnapshotState>>);
+
+void BorrowedTypedProjectionCursor::reset(const WorldDeltaHorizontalBounds bounds) noexcept {
+    bounds_ = bounds;
+    hash_.reset(); metadata_.reset();
+    scan_index_ = 0U; durable_count_ = 0U; overlay_count_ = 0U;
+    metadata_bytes_ = 0U; metadata_emitted_ = 0U; source_token_ = 0U; byte_offset_ = 0U;
+    phase_ = Phase::count_durable; record_phase_ = RecordPhase::start;
+    status_ = Status::idle;
+}
+BorrowedTypedProjectionCursor::Status BorrowedTypedProjectionCursor::status() const noexcept { return status_; }
+Sha256Digest BorrowedTypedProjectionCursor::digest() const {
+    if (status_ != Status::ready) throw std::logic_error("borrowed typed projection is incomplete");
+    return hash_.digest();
+}
 
 bool WorldDeltaSectionKey::operator==(const WorldDeltaSectionKey &other) const noexcept {
     return section == other.section;
@@ -823,10 +932,279 @@ WorldDeltaStore::WorldDeltaStore(
 WorldDeltaStore::~WorldDeltaStore() = default;
 
 std::uint64_t WorldDeltaStore::revision() const noexcept { return state_->revision; }
+const Sha256Digest &WorldDeltaStore::current_content_digest() const noexcept {
+    return state_->content_digest;
+}
+
+BorrowedTypedProjectionCursor::Step WorldDeltaStore::advance_borrowed_projection(
+    BorrowedTypedProjectionCursor &cursor, const WorldDeltaHorizontalBounds bounds,
+    const std::uint64_t source_token, const std::uint32_t offered_ops) const noexcept {
+    using Cursor = BorrowedTypedProjectionCursor;
+    Cursor::Step result; result.status = cursor.status_;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    if (limit == 0U) return result;
+    if (cursor.status_ == Cursor::Status::failed || cursor.status_ == Cursor::Status::source_changed)
+        return result;
+    if (source_token == 0U) {
+        cursor.status_ = Cursor::Status::failed; result.status = cursor.status_; return result;
+    }
+    if (cursor.status_ != Cursor::Status::idle && cursor.source_token_ != source_token) {
+        cursor.status_ = Cursor::Status::source_changed;
+        result.status = cursor.status_; return result;
+    }
+    if (source_mutation_fence_ && (!source_mutation_fence_->on_owner_thread()
+        || !source_mutation_fence_->read_active())) {
+        cursor.status_ = Cursor::Status::failed; result.status = cursor.status_; return result;
+    }
+    if (cursor.status_ == Cursor::Status::ready) return result;
+    if (bounds.width <= 0 || bounds.depth <= 0
+        || static_cast<std::int64_t>(bounds.x) + bounds.width > std::numeric_limits<std::int32_t>::max()
+        || static_cast<std::int64_t>(bounds.z) + bounds.depth > std::numeric_limits<std::int32_t>::max()
+        || (cursor.status_ != Cursor::Status::idle
+            && (cursor.bounds_.x != bounds.x || cursor.bounds_.z != bounds.z
+                || cursor.bounds_.width != bounds.width || cursor.bounds_.depth != bounds.depth))) {
+        cursor.status_ = Cursor::Status::failed; result.status = cursor.status_; return result;
+    }
+    if (cursor.status_ == Cursor::Status::idle) {
+        cursor.reset(bounds);
+        cursor.source_token_ = source_token;
+        cursor.status_ = Cursor::Status::pending;
+        result.status = cursor.status_; result.consumed_ops = 1U;
+        return result;
+    }
+    const auto &durable = state_->terrain_volume.durable_snapshot.records();
+    const auto &overlay = state_->typed_transient_overlays;
+    struct CountSink final : NativeValueCanonicalSink {
+        std::size_t count = 0U;
+        void append(const std::uint8_t *, const std::size_t size) override { count += size; }
+    };
+    struct HashSink final : NativeValueCanonicalSink {
+        Sha256State &hash;
+        std::size_t compressed = 0U;
+        std::size_t bytes = 0U;
+        explicit HashSink(Sha256State &value) : hash(value) {}
+        void append(const std::uint8_t *data, const std::size_t size) override {
+            const auto step = hash.update_step(data, size, size, 1U);
+            if (!step.input_complete) throw std::logic_error("borrowed projection hash byte refused");
+            compressed += step.compressed_blocks;
+            bytes += step.consumed_bytes;
+        }
+    };
+    try {
+        const auto emit = [&](const std::uint8_t byte) {
+            if (limit - result.consumed_ops < 3U) {
+                result.next_atomic_ops = 3U; return false;
+            }
+            const auto step = cursor.hash_.update_step(&byte, 1U, 1U, 1U);
+            if (!step.input_complete) throw std::logic_error("borrowed projection hash byte refused");
+            result.consumed_ops += 2U + static_cast<std::uint32_t>(step.compressed_blocks);
+            return true;
+        };
+        const auto emit_length = [&](const std::uint64_t length) {
+            if (!emit(projection_le64(length, cursor.byte_offset_))) return false;
+            ++cursor.byte_offset_;
+            return cursor.byte_offset_ == 8U;
+        };
+        if (cursor.phase_ == Cursor::Phase::count_durable || cursor.phase_ == Cursor::Phase::count_overlay) {
+            const auto &records = cursor.phase_ == Cursor::Phase::count_durable ? durable : overlay;
+            if (cursor.scan_index_ == records.size()) {
+                cursor.scan_index_ = 0U;
+                cursor.phase_ = cursor.phase_ == Cursor::Phase::count_durable
+                    ? Cursor::Phase::count_overlay : Cursor::Phase::header;
+                return result;
+            }
+            if (cell_inside_horizontal_bounds(records[cursor.scan_index_].state.cell, bounds)) {
+                std::uint64_t &count = cursor.phase_ == Cursor::Phase::count_durable
+                    ? cursor.durable_count_ : cursor.overlay_count_;
+                if (count == std::numeric_limits<std::uint64_t>::max())
+                    throw std::overflow_error("borrowed projection record count exhausted");
+                ++count;
+            }
+            ++cursor.scan_index_; result.consumed_ops = 1U;
+        } else if (cursor.phase_ == Cursor::Phase::header) {
+            std::uint8_t byte = 0U;
+            if (cursor.byte_offset_ < 4U) byte = static_cast<std::uint8_t>("WDP1"[cursor.byte_offset_]);
+            else {
+                const std::size_t part = (cursor.byte_offset_ - 4U) / 4U;
+                const std::int32_t values[4] = {bounds.x, bounds.z, bounds.width, bounds.depth};
+                byte = projection_le32(values[part], (cursor.byte_offset_ - 4U) % 4U);
+            }
+            if (emit(byte) && ++cursor.byte_offset_ == 20U) {
+                cursor.byte_offset_ = 0U; cursor.phase_ = Cursor::Phase::durable_count;
+            }
+        } else if (cursor.phase_ == Cursor::Phase::durable_count) {
+            if (emit_length(cursor.durable_count_)) {
+                cursor.byte_offset_ = 0U; cursor.scan_index_ = 0U;
+                cursor.phase_ = Cursor::Phase::durable_records;
+            }
+        } else if (cursor.phase_ == Cursor::Phase::overlay_count) {
+            if (emit_length(cursor.overlay_count_)) {
+                cursor.byte_offset_ = 0U; cursor.scan_index_ = 0U;
+                cursor.phase_ = Cursor::Phase::overlay_records;
+            }
+        } else if (cursor.phase_ == Cursor::Phase::durable_records
+            || cursor.phase_ == Cursor::Phase::overlay_records) {
+            const auto &records = cursor.phase_ == Cursor::Phase::durable_records ? durable : overlay;
+            if (cursor.scan_index_ == records.size()) {
+                cursor.scan_index_ = 0U;
+                cursor.phase_ = cursor.phase_ == Cursor::Phase::durable_records
+                    ? Cursor::Phase::overlay_count : Cursor::Phase::finish;
+                return result;
+            }
+            const NativeTypedWorldStateRecord &record = records[cursor.scan_index_];
+            if (!cell_inside_horizontal_bounds(record.state.cell, bounds)) {
+                ++cursor.scan_index_; result.consumed_ops = 1U;
+                return result;
+            }
+            const NativeCellState &state = record.state;
+            switch (cursor.record_phase_) {
+            case Cursor::RecordPhase::start:
+                cursor.metadata_.reset(); cursor.metadata_bytes_ = 0U;
+                cursor.metadata_emitted_ = 0U;
+                cursor.byte_offset_ = 0U; cursor.record_phase_ = Cursor::RecordPhase::fixed;
+                result.consumed_ops = 1U; break;
+            case Cursor::RecordPhase::fixed:
+                if (emit(projection_fixed_record_byte(record, cursor.byte_offset_))
+                    && ++cursor.byte_offset_ == 54U) {
+                    cursor.byte_offset_ = 0U; cursor.record_phase_ = Cursor::RecordPhase::metadata_count;
+                }
+                break;
+            case Cursor::RecordPhase::metadata_count: {
+                if (limit < 2U) { result.next_atomic_ops = 2U; break; }
+                CountSink sink;
+                // byte_budget=1 bounds sink.count independently of the
+                // cursor's structural work. Reserve that one extra atom.
+                const auto step = cursor.metadata_.advance(
+                    state.metadata, source_token, 1U, limit - 1U, limit - 1U, sink);
+                if (step.status != NativeValueCanonicalCursorStatus::in_progress
+                    && step.status != NativeValueCanonicalCursorStatus::complete)
+                    throw std::logic_error("borrowed projection metadata measure failed");
+                if (sink.count > 1U || step.work_units > limit - 1U)
+                    throw std::logic_error("borrowed projection metadata count exceeded quota");
+                if (cursor.metadata_bytes_ > std::numeric_limits<std::uint64_t>::max() - sink.count)
+                    throw std::overflow_error("borrowed projection metadata length exhausted");
+                cursor.metadata_bytes_ += sink.count;
+                result.consumed_ops = static_cast<std::uint32_t>(step.work_units + sink.count);
+                result.next_atomic_ops = static_cast<std::uint32_t>(step.next_atomic_units + 1U);
+                if (step.status == NativeValueCanonicalCursorStatus::complete)
+                    cursor.record_phase_ = Cursor::RecordPhase::metadata_reset;
+                break;
+            }
+            case Cursor::RecordPhase::metadata_reset:
+                cursor.metadata_.reset(); cursor.byte_offset_ = 0U;
+                cursor.record_phase_ = Cursor::RecordPhase::metadata_length;
+                result.consumed_ops = 1U; break;
+            case Cursor::RecordPhase::metadata_length:
+                if (emit_length(cursor.metadata_bytes_)) {
+                    cursor.byte_offset_ = 0U; cursor.record_phase_ = Cursor::RecordPhase::metadata_emit;
+                }
+                break;
+            case Cursor::RecordPhase::metadata_emit: {
+                if (limit < 3U) { result.next_atomic_ops = 3U; break; }
+                HashSink sink(cursor.hash_);
+                // One emitted byte costs at most one sink atom and one SHA
+                // compression atom beyond NativeValue's own work units.
+                const auto step = cursor.metadata_.advance(state.metadata, source_token,
+                    1U, limit - 2U, limit - 2U, sink);
+                if (step.status != NativeValueCanonicalCursorStatus::in_progress
+                    && step.status != NativeValueCanonicalCursorStatus::complete)
+                    throw std::logic_error("borrowed projection metadata emit failed");
+                if (step.bytes_written > 1U || sink.compressed > 1U
+                    || step.work_units > limit - 2U)
+                    throw std::logic_error("borrowed projection metadata emit exceeded quota");
+                if (sink.bytes != step.bytes_written
+                    || cursor.metadata_emitted_ > std::numeric_limits<std::uint64_t>::max() - sink.bytes)
+                    throw std::logic_error("borrowed projection metadata emit length mismatch");
+                cursor.metadata_emitted_ += sink.bytes;
+                result.consumed_ops = static_cast<std::uint32_t>(
+                    step.work_units + step.bytes_written + sink.compressed);
+                result.next_atomic_ops = static_cast<std::uint32_t>(step.next_atomic_units + 2U);
+                if (step.status == NativeValueCanonicalCursorStatus::complete) {
+                    if (cursor.metadata_emitted_ != cursor.metadata_bytes_)
+                        throw std::logic_error("borrowed projection metadata length changed");
+                    cursor.record_phase_ = Cursor::RecordPhase::block_flag;
+                }
+                break;
+            }
+            case Cursor::RecordPhase::block_flag:
+                if (emit(state.block_id ? 1U : 0U)) {
+                    cursor.record_phase_ = state.block_id
+                        ? Cursor::RecordPhase::block_length : Cursor::RecordPhase::reason_flag;
+                    cursor.byte_offset_ = 0U;
+                }
+                break;
+            case Cursor::RecordPhase::block_length:
+                if (emit_length(state.block_id->value().size())) {
+                    cursor.byte_offset_ = 0U;
+                    cursor.record_phase_ = state.block_id->value().empty()
+                        ? Cursor::RecordPhase::reason_flag : Cursor::RecordPhase::block_text;
+                }
+                break;
+            case Cursor::RecordPhase::block_text:
+                if (emit(static_cast<std::uint8_t>(state.block_id->value()[cursor.byte_offset_]))
+                    && ++cursor.byte_offset_ == state.block_id->value().size()) {
+                    cursor.byte_offset_ = 0U; cursor.record_phase_ = Cursor::RecordPhase::reason_flag;
+                }
+                break;
+            case Cursor::RecordPhase::reason_flag:
+                if (emit(state.edit_reason ? 1U : 0U)) {
+                    cursor.record_phase_ = state.edit_reason
+                        ? Cursor::RecordPhase::reason_length : Cursor::RecordPhase::end;
+                    cursor.byte_offset_ = 0U;
+                }
+                break;
+            case Cursor::RecordPhase::reason_length:
+                if (emit_length(state.edit_reason->size())) {
+                    cursor.byte_offset_ = 0U;
+                    cursor.record_phase_ = state.edit_reason->empty()
+                        ? Cursor::RecordPhase::end : Cursor::RecordPhase::reason_text;
+                }
+                break;
+            case Cursor::RecordPhase::reason_text:
+                if (emit(static_cast<std::uint8_t>((*state.edit_reason)[cursor.byte_offset_]))
+                    && ++cursor.byte_offset_ == state.edit_reason->size())
+                    cursor.record_phase_ = Cursor::RecordPhase::end;
+                break;
+            case Cursor::RecordPhase::end:
+                ++cursor.scan_index_; cursor.record_phase_ = Cursor::RecordPhase::start;
+                cursor.byte_offset_ = 0U; result.consumed_ops = 1U; break;
+            }
+        } else if (cursor.phase_ == Cursor::Phase::finish) {
+            const auto step = cursor.hash_.finish_step(limit);
+            result.consumed_ops = static_cast<std::uint32_t>(step.compressed_blocks);
+            result.next_atomic_ops = step.digest_ready ? 0U : 1U;
+            if (step.digest_ready) {
+                cursor.phase_ = Cursor::Phase::complete;
+                cursor.status_ = Cursor::Status::ready;
+            }
+        }
+    } catch (const std::exception &) {
+        cursor.status_ = Cursor::Status::failed;
+        result.consumed_ops = limit; // Conservatively debit unreported partial work.
+    }
+    result.status = cursor.status_;
+    if (result.consumed_ops > limit) {
+        cursor.status_ = Cursor::Status::failed;
+        result.status = cursor.status_;
+        result.consumed_ops = limit;
+    }
+    return result;
+}
 
 WorldDeltaPinnedSnapshot WorldDeltaStore::pin() const { return WorldDeltaPinnedSnapshot(state_); }
 
+bool WorldDeltaStore::bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept {
+    if (!fence || !fence->on_owner_thread() || source_mutation_fence_) return false;
+    source_mutation_fence_ = fence;
+    return true;
+}
+
+void WorldDeltaStore::require_source_writer_entry() const {
+    if (source_mutation_fence_) source_mutation_fence_->require_writer_entry();
+}
+
 WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCellTransaction &transaction) {
+    require_source_writer_entry();
     static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
     static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
     std::vector<std::uint8_t> canonical = canonical_transaction(transaction);
@@ -919,11 +1297,17 @@ WorldDeltaCommitReceipt WorldDeltaStore::commit_typed_cells(const WorldTypedCell
     // above make this move append nonthrowing.
     TransactionRecord journal{transaction.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));
-    if (!changed_cells.empty()) state_ = std::move(next);
+    if (!changed_cells.empty()) {
+        // All throwing journal work has completed. Advance the authenticated
+        // source epoch immediately before the nonthrowing pointer publication.
+        if (source_mutation_fence_) source_mutation_fence_->published();
+        state_ = std::move(next);
+    }
     return std::move(receipt);
 }
 
 WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedStateAdmission &admission) {
+    require_source_writer_entry();
     static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
     static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
     const ValidatedTypedAdmission validated = validate_typed_admission(admission);
@@ -985,11 +1369,15 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_typed_state(const WorldTypedState
     }
     TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));
-    if (!changed_cells.empty()) state_ = std::move(next);
+    if (!changed_cells.empty()) {
+        if (source_mutation_fence_) source_mutation_fence_->published();
+        state_ = std::move(next);
+    }
     return receipt;
 }
 
 WorldDeltaCommitReceipt WorldDeltaStore::admit_feature_deltas(const WorldFeatureDeltaAdmission &admission) {
+    require_source_writer_entry();
     static_assert(std::is_nothrow_move_constructible_v<TransactionRecord>);
     static_assert(std::is_nothrow_move_constructible_v<WorldDeltaCommitReceipt>);
     const ValidatedFeatureAdmission validated = validate_feature_admission(
@@ -1055,7 +1443,10 @@ WorldDeltaCommitReceipt WorldDeltaStore::admit_feature_deltas(const WorldFeature
     }
     TransactionRecord journal{admission.transaction_id, std::move(canonical), receipt};
     transactions_.push_back(std::move(journal));
-    if (changed) state_ = std::move(next);
+    if (changed) {
+        if (source_mutation_fence_) source_mutation_fence_->published();
+        state_ = std::move(next);
+    }
     return receipt;
 }
 

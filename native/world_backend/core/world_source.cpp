@@ -297,6 +297,120 @@ std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
     return result;
 }
 
+void WorldShapingDependencyCursor::reset(const NativeTerrainPageKey primary) noexcept {
+    primary_x_ = primary.x; primary_z_ = primary.z;
+    counts_ = {}; product_x_ = {}; product_z_ = {};
+    collect_index_ = 0; sort_axis_ = 0; sort_i_ = 1; sort_j_ = 1;
+    compact_axis_ = 0; compact_index_ = 0;
+    primary_pending_ = true; last_page_valid_ = false; phase_ = 0;
+}
+
+bool WorldShapingDependencyCursor::axes_ready() const noexcept { return phase_ == 3U; }
+
+WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::advance_axes(
+    const WorldSourceDefinition &definition, const std::uint32_t offered_ops) {
+    Step result;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    if (phase_ == 3U) { result.ready = true; return result; }
+    const auto bounds = native_terrain_page_bounds({primary_x_, primary_z_});
+    if (!bounds) throw std::invalid_argument("borrowed source primary page is invalid");
+    while (result.consumed_ops < limit && phase_ != 3U) {
+        if (phase_ == 0U) {
+            const std::size_t axis = collect_index_ / AXIS_LIMIT;
+            const std::int32_t offset = static_cast<std::int32_t>(collect_index_ % AXIS_LIMIT);
+            const std::int32_t origin = axis < 3U ? bounds->x : bounds->z;
+            const std::int32_t cell = origin + offset;
+            const auto &constants = definition.constants();
+            const std::size_t channel = axis % 3U;
+            const std::int32_t source = channel == 0U
+                ? remapped_lattice_cell(cell, constants.cell_size_meters)
+                : channel == 1U
+                    ? remapped_center_cell(cell, constants.cell_center_offset_cells, constants.cell_size_meters)
+                    : remapped_grid_cell(cell, constants.cell_size_meters);
+            axes_[axis][offset] = floor_page(source);
+            ++collect_index_; ++result.consumed_ops;
+            if (collect_index_ == 6U * AXIS_LIMIT) phase_ = 1U;
+        } else if (phase_ == 1U) {
+            if (sort_i_ >= AXIS_LIMIT) {
+                ++sort_axis_; sort_i_ = 1U; sort_j_ = 1U;
+                if (sort_axis_ == 6U) phase_ = 2U;
+            } else if (sort_j_ > 0U
+                && axes_[sort_axis_][sort_j_ - 1U] > axes_[sort_axis_][sort_j_]) {
+                std::swap(axes_[sort_axis_][sort_j_ - 1U], axes_[sort_axis_][sort_j_]);
+                --sort_j_;
+            } else {
+                ++sort_i_; sort_j_ = sort_i_;
+            }
+            ++result.consumed_ops;
+        } else {
+            const std::int32_t value = axes_[compact_axis_][compact_index_];
+            if (counts_[compact_axis_] == 0U
+                || axes_[compact_axis_][counts_[compact_axis_] - 1U] != value)
+                axes_[compact_axis_][counts_[compact_axis_]++] = value;
+            ++compact_index_; ++result.consumed_ops;
+            if (compact_index_ == AXIS_LIMIT) {
+                ++compact_axis_; compact_index_ = 0U;
+                if (compact_axis_ == 6U) phase_ = 3U;
+            }
+        }
+    }
+    result.ready = phase_ == 3U;
+    return result;
+}
+
+WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::rewind_pages(
+    const std::uint32_t offered_ops) noexcept {
+    Step result;
+    if (!axes_ready()) return result;
+    if (offered_ops == 0U) return result;
+    product_x_ = {}; product_z_ = {};
+    primary_pending_ = true; last_page_valid_ = false;
+    result.consumed_ops = 1U; result.ready = true;
+    return result;
+}
+
+WorldShapingDependencyCursor::Step WorldShapingDependencyCursor::next_page(
+    const std::uint32_t offered_ops) noexcept {
+    Step result;
+    if (!axes_ready()) return result;
+    result.ready = true;
+    // One fixed merge visits at most four heads, then at most three matching
+    // product cursors. Reserve 24 scalar comparisons/loads/advances rather
+    // than charging one operation for the whole bounded loop.
+    result.next_atomic_ops = 24U;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    while (limit - result.consumed_ops >= 24U) {
+        bool found = false;
+        NativeTerrainPageKey minimum{};
+        if (primary_pending_) { minimum = {primary_x_, primary_z_}; found = true; }
+        for (std::size_t stream = 0; stream < 3U; ++stream) {
+            if (product_z_[stream] >= counts_[stream + 3U]) continue;
+            const NativeTerrainPageKey candidate{
+                axes_[stream][product_x_[stream]], axes_[stream + 3U][product_z_[stream]]};
+            if (!found || page_key_less(candidate, minimum)) { minimum = candidate; found = true; }
+        }
+        if (!found) { result.complete = true; result.next_atomic_ops = 0U; return result; }
+        if (primary_pending_ && primary_x_ == minimum.x && primary_z_ == minimum.z)
+            primary_pending_ = false;
+        for (std::size_t stream = 0; stream < 3U; ++stream) {
+            if (product_z_[stream] >= counts_[stream + 3U]) continue;
+            if (axes_[stream][product_x_[stream]] != minimum.x
+                || axes_[stream + 3U][product_z_[stream]] != minimum.z) continue;
+            ++product_x_[stream];
+            if (product_x_[stream] == counts_[stream]) {
+                product_x_[stream] = 0U; ++product_z_[stream];
+            }
+        }
+        result.consumed_ops += 24U;
+        if (!last_page_valid_ || minimum.x != last_page_x_ || minimum.z != last_page_z_) {
+            last_page_valid_ = true; last_page_x_ = minimum.x; last_page_z_ = minimum.z;
+            result.has_page = true; result.page_x = minimum.x; result.page_z = minimum.z;
+            return result;
+        }
+    }
+    return result;
+}
+
 WorldSourcePin::WorldSourcePin(
     WorldSourceDefinition definition,
     WorldDeltaPinnedSnapshot deltas,

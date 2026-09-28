@@ -2,6 +2,7 @@
 
 #include "world_source.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -78,6 +79,57 @@ struct NativeSiteTerrainFragment {
     NativeHorizontalRect cropped_cells;
     std::vector<std::uint8_t> support_mask;
     std::vector<float> distance_cells;
+};
+
+class NativeAdmittedSiteTerrainProfile;
+
+// Fixed-storage reconstruction of a ready page's VWSH/v2 physical digest.
+// Profiles are borrowed only for one synchronous advance call; the cursor
+// stores numeric indices and crop descriptors, never a profile reference.
+class BorrowedShapingIdentityCursor final {
+public:
+    static constexpr std::size_t MAX_PROFILES = 4U;
+    enum class Status : std::uint8_t { idle, pending, failed, ready };
+    struct Step {
+        Status status = Status::idle;
+        std::uint32_t consumed_ops = 0;
+        std::uint32_t next_atomic_ops = 1;
+    };
+    Step begin(NativeTerrainPageKey page, NativeHorizontalRect bounds,
+        const std::array<NativeTownRegionOverride, 9> &towns, std::size_t town_count,
+        std::size_t profile_count, std::uint32_t offered_ops) noexcept;
+    Step advance(const WorldSourceDefinition &definition,
+        const std::array<const NativeAdmittedSiteTerrainProfile *, MAX_PROFILES> &profiles,
+        std::uint32_t offered_ops) noexcept;
+    void reset() noexcept;
+    Status status() const noexcept;
+    Sha256Digest digest() const;
+private:
+    std::uint8_t canonical_byte(const WorldSourceDefinition &definition,
+        const std::array<const NativeAdmittedSiteTerrainProfile *, MAX_PROFILES> &profiles) const noexcept;
+    void advance_byte_cursor() noexcept;
+    struct Fragment {
+        NativeHorizontalRect crop;
+        std::uint8_t profile_index = 0U;
+    };
+    NativeTerrainPageKey page_{};
+    NativeHorizontalRect bounds_{};
+    std::array<NativeTownRegionOverride, 9> towns_{};
+    std::array<Fragment, MAX_PROFILES> fragments_{};
+    std::array<std::uint8_t, MAX_PROFILES> site_order_{};
+    std::array<std::uint64_t, 1225> occupied_{};
+    Sha256State hash_;
+    std::size_t town_count_ = 0U;
+    std::size_t profile_count_ = 0U;
+    std::size_t index_ = 0U;
+    std::size_t compare_index_ = 0U;
+    std::size_t sample_index_ = 0U;
+    std::size_t byte_offset_ = 0U;
+    std::size_t fragment_index_ = 0U;
+    std::uint8_t phase_ = 0U;
+    std::uint8_t emit_part_ = 0U;
+    bool crop_ready_ = false;
+    Status status_ = Status::idle;
 };
 
 enum class NativeTerrainShapingAdmissionFailure : std::uint8_t {

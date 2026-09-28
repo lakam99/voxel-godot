@@ -2,6 +2,7 @@
 
 #include "native_terrain_shaping_snapshot.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -31,6 +32,83 @@ struct NativeSiteSourceCandidate {
 
 std::optional<NativeSiteSourceCandidate> native_site_source_candidate_for_region(
     const WorldSourceDefinition &definition, NativeSiteSourceRegionKey region);
+
+// Allocation-free scalar candidate for a borrowed shaping-page admission.
+// It streams the exact site-id text through the four original SHA channels;
+// no std::string, registry pin, or source-owned pointer survives a step. The
+// caller binds an immutable source stamp across calls and supplies the shared
+// frame quota. Decimal conversion and SHA input are both resumable.
+class BorrowedSiteCandidateCursor final {
+public:
+    enum class Status : std::uint8_t { idle, pending, absent, ready, failed };
+    struct Step {
+        Status status = Status::idle;
+        std::uint32_t consumed_ops = 0;
+        std::uint32_t next_atomic_ops = 1;
+    };
+    Step begin(const WorldSourceDefinition &definition, NativeSiteSourceRegionKey region,
+        std::uint32_t offered_ops) noexcept;
+    Step advance(const WorldSourceDefinition &definition, std::uint32_t offered_ops) noexcept;
+    void reset() noexcept;
+    Status status() const noexcept;
+    NativeSiteSourceRegionKey region() const noexcept;
+    std::int32_t center_x() const noexcept;
+    std::int32_t center_z() const noexcept;
+    std::uint32_t recipe_seed() const noexcept;
+    NativeHorizontalRect declared_influence_cells() const noexcept;
+private:
+    std::uint8_t text_byte(const WorldSourceDefinition &definition, std::size_t offset) const noexcept;
+    std::size_t text_size(const WorldSourceDefinition &definition) const noexcept;
+    std::array<std::array<char, 24>, 3> numbers_{};
+    std::array<std::uint8_t, 3> number_lengths_{};
+    Sha256State hash_;
+    NativeSiteSourceRegionKey region_{};
+    std::array<std::uint32_t, 4> channels_{};
+    std::size_t input_offset_ = 0;
+    std::uint8_t channel_ = 0;
+    std::uint8_t phase_ = 0;
+    std::uint8_t decimal_index_ = 0;
+    std::uint8_t decimal_phase_ = 0;
+    std::uint8_t decimal_reverse_index_ = 0;
+    std::uint64_t decimal_remaining_ = 0;
+    bool decimal_negative_ = false;
+    Status status_ = Status::idle;
+};
+
+// Enumerates the same at-most-four source regions as pin_page without
+// constructing a NativeTerrainShapingSnapshot. Stored indices refer only to
+// the registry incarnation stamped by the external borrowed lease; no entry
+// reference or shared_ptr is retained in the cursor.
+class BorrowedShapingPageCursor final {
+public:
+    enum class Status : std::uint8_t { idle, pending, unresolved, failed, ready };
+    struct Step {
+        Status status = Status::idle;
+        std::uint32_t consumed_ops = 0;
+        std::uint32_t next_atomic_ops = 1;
+    };
+    Step begin(NativeTerrainPageKey page, std::uint32_t offered_ops) noexcept;
+    void reset() noexcept;
+    Status status() const noexcept;
+    NativeTerrainPageKey page_key() const noexcept;
+    NativeHorizontalRect page_bounds() const noexcept;
+    std::size_t profile_count() const noexcept;
+private:
+    friend class NativeTerrainShapingRegistry;
+    NativeTerrainPageKey page_{};
+    NativeHorizontalRect bounds_{};
+    NativeSiteSourceRegionKey low_region_{};
+    NativeSiteSourceRegionKey high_region_{};
+    NativeSiteSourceRegionKey region_{};
+    BorrowedSiteCandidateCursor candidate_;
+    std::array<std::size_t, 4> profile_indices_{};
+    std::size_t profile_count_ = 0U;
+    std::size_t entry_scan_index_ = 0U;
+    bool unresolved_seen_ = false;
+    bool failed_seen_ = false;
+    std::uint8_t phase_ = 0U;
+    Status status_ = Status::idle;
+};
 
 // Immutable typed replacement for CitadelSiteBuildQueue._canonical_request's
 // physical inputs. The transitional Godot adapter must still recompute and
@@ -184,6 +262,7 @@ public:
     std::size_t resident_resolution_count() const noexcept;
     std::size_t retired_fingerprint_count() const noexcept;
     const WorldPhysicalContentIdentity &content_identity() const noexcept;
+    bool bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept;
 
     // Strong exception guarantee: the complete batch is validated against one
     // revision before a replacement immutable registry state is published.
@@ -196,6 +275,13 @@ public:
     NativeTerrainShapingPagePin pin_page(
         NativeTerrainPageKey page_key,
         std::vector<NativeTownRegionOverride> town_overrides = {}) const;
+    BorrowedShapingPageCursor::Step advance_borrowed_page(
+        BorrowedShapingPageCursor &cursor, std::uint32_t offered_ops) const noexcept;
+    BorrowedShapingIdentityCursor::Step advance_borrowed_page_identity(
+        const BorrowedShapingPageCursor &page,
+        BorrowedShapingIdentityCursor &identity,
+        const std::array<NativeTownRegionOverride, 9> &towns,
+        std::size_t town_count, std::uint32_t offered_ops) const noexcept;
 
 private:
     WorldSourceDefinition definition_;
@@ -203,6 +289,7 @@ private:
     WorldPhysicalContentIdentity policy_content_identity_;
     NativeTerrainShapingRegistryLimits limits_;
     std::shared_ptr<const NativeTerrainShapingRegistryState> state_;
+    WorldSourceMutationFence *source_mutation_fence_ = nullptr;
 };
 
 } // namespace voxel::world_backend

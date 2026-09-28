@@ -26,6 +26,7 @@
 #include <godot_cpp/variant/vector2i.hpp>
 
 #include <cstdint>
+#include <array>
 #include <atomic>
 #include <exception>
 #include <memory>
@@ -145,6 +146,14 @@ public:
 	godot::Dictionary commit_staged_durable_cells();
 	godot::Dictionary abort_staged_durable_cells();
 	godot::Dictionary pin_effective_page(const godot::Vector2i &p_primary_page) const;
+	// Experimental current-state source identity lease. A ready identity does
+	// not itself own cell samples, shape buffers, or physical collision proof.
+	// The caller must retain this backend Ref until exact-issue cancel/drain;
+	// the numeric issue alone is never a backend-lifetime capability.
+	godot::Dictionary begin_borrowed_source_lease(const godot::Vector2i &p_primary_page);
+	godot::Dictionary advance_borrowed_source_lease(std::int64_t p_issue, std::int64_t p_offered_ops);
+	godot::Dictionary cancel_borrowed_source_lease(std::int64_t p_issue);
+	godot::Dictionary drain_borrowed_source_lease(std::int64_t p_issue);
 	// Serialized, shadow-service-only composite admission. Not a Voxel Tools
 	// worker callback or a production publication authority.
 	godot::Dictionary encode_voxel_block_shadow(const godot::Dictionary &p_request) const;
@@ -200,6 +209,53 @@ private:
 
 	bool initialization_attempted_ = false;
 	std::string initialization_failure_;
+	voxel::world_backend::WorldSourceMutationFence source_mutation_fence_;
+	std::uint64_t source_lease_incarnation_ = 0;
+	struct BorrowedSourceLeaseSlot {
+		enum class Phase : std::uint8_t {
+			empty, axes, count_pages, rewind_pages, pin_header, next_page,
+			town_scan, shaping_ready, shaping_digest, projection_reset, typed_projection,
+			page_emit, pin_finish,
+			cancelled, stale, failed, ready
+		};
+		Phase phase = Phase::empty;
+		std::uint64_t issue = 0;
+		std::uint64_t incarnation = 0;
+		std::uint64_t epoch = 0;
+		std::uint64_t delta_revision = 0;
+		std::uint64_t registry_revision = 0;
+		voxel::world_backend::Sha256Digest source_identity{};
+		voxel::world_backend::Sha256Digest delta_content{};
+		voxel::world_backend::Sha256Digest registry_content{};
+		voxel::world_backend::Sha256Digest policy_content{};
+		voxel::world_backend::NativeTerrainPageKey primary{};
+		voxel::world_backend::NativeTerrainPageKey current_page{};
+		voxel::world_backend::NativeHorizontalRect primary_bounds{};
+		voxel::world_backend::NativeHorizontalRect current_bounds{};
+		voxel::world_backend::WorldShapingDependencyCursor dependencies;
+		voxel::world_backend::BorrowedShapingPageCursor page;
+		voxel::world_backend::BorrowedShapingIdentityCursor shaping;
+		voxel::world_backend::BorrowedTypedProjectionCursor projection;
+		voxel::world_backend::Sha256State pin_hash;
+		std::array<voxel::world_backend::NativeTownRegionOverride, 9> towns{};
+		std::size_t town_count = 0;
+		std::size_t town_scan_index = 0;
+		std::uint64_t page_count = 0;
+		std::size_t pin_byte_offset = 0;
+		voxel::world_backend::Sha256Digest current_shaping_digest{};
+		voxel::world_backend::Sha256Digest current_projection_digest{};
+		voxel::world_backend::Sha256Digest pin_digest{};
+	};
+	static_assert(sizeof(BorrowedSourceLeaseSlot) <= 64U * 1024U,
+		"borrowed source identity slot exceeds its fixed 64 KiB owner capacity");
+	BorrowedSourceLeaseSlot borrowed_source_lease_;
+	std::uint64_t source_lease_next_issue_ = 1;
+	std::uint64_t source_lease_frame_ = 0;
+	std::uint32_t source_lease_frame_ops_ = 0;
+	bool borrowed_source_stamp_matches(const BorrowedSourceLeaseSlot &slot) const noexcept;
+	std::uint32_t borrowed_source_frame_budget() noexcept;
+	void borrowed_source_charge(std::uint32_t ops) noexcept;
+	void borrowed_source_seal() noexcept;
 	std::unique_ptr<voxel::world_backend::NativeWorldBackendState> state_;
 	std::int64_t private_staged_save_generation_ = 0;
 	std::shared_ptr<PrivateStagedSaveRetirementJob> private_retirement_job_;

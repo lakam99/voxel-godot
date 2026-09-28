@@ -5,6 +5,8 @@
 #include "sha256.hpp"
 #include "world_delta_store.hpp"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -191,6 +193,49 @@ std::uint32_t query_revision(const WorldSourceDefinition &definition, const Worl
 // dependency set for each convention participates in this bounded union.
 std::vector<NativeTerrainPageKey> world_effective_shaping_dependencies(
     const WorldSourceDefinition &definition, NativeTerrainPageKey primary_page);
+
+// Fixed-storage version of the three exact float32 remap dependency sets.
+// The caller owns and stamps the immutable definition across calls. Axis
+// preparation charges every remap, insertion-sort comparison, and compaction;
+// page emission merges four sorted streams without allocating a page vector.
+class WorldShapingDependencyCursor final {
+public:
+    static constexpr std::size_t AXIS_LIMIT = 280U;
+    struct Step {
+        std::uint32_t consumed_ops = 0;
+        std::uint32_t next_atomic_ops = 1;
+        bool ready = false;
+        bool complete = false;
+        bool has_page = false;
+        std::int32_t page_x = 0;
+        std::int32_t page_z = 0;
+    };
+
+    void reset(NativeTerrainPageKey primary) noexcept;
+    Step advance_axes(const WorldSourceDefinition &definition, std::uint32_t offered_ops);
+    Step next_page(std::uint32_t offered_ops) noexcept;
+    Step rewind_pages(std::uint32_t offered_ops) noexcept;
+    bool axes_ready() const noexcept;
+
+private:
+    std::array<std::array<std::int32_t, AXIS_LIMIT>, 6> axes_{};
+    std::array<std::uint16_t, 6> counts_{};
+    std::array<std::uint16_t, 3> product_x_{};
+    std::array<std::uint16_t, 3> product_z_{};
+    std::int32_t primary_x_ = 0;
+    std::int32_t primary_z_ = 0;
+    std::int32_t last_page_x_ = 0;
+    std::int32_t last_page_z_ = 0;
+    std::uint16_t collect_index_ = 0;
+    std::uint16_t sort_axis_ = 0;
+    std::uint16_t sort_i_ = 1;
+    std::uint16_t sort_j_ = 1;
+    std::uint16_t compact_axis_ = 0;
+    std::uint16_t compact_index_ = 0;
+    bool primary_pending_ = true;
+    bool last_page_valid_ = false;
+    std::uint8_t phase_ = 0;
+};
 
 // A production pin is page-scoped and requires the complete canonical set of
 // ready shaping dependencies. It retains immutable source, shaping, and delta

@@ -142,6 +142,163 @@ std::int32_t floor_page(const std::int32_t cell) {
 
 } // namespace
 
+VWB_TEST(borrowed_site_candidate_cursor_matches_synchronous_presence_and_scalar_channels) {
+    for (const std::string seed : {std::string("atlas-1492"), std::string("\xf0\x9f\x8c\xb2 seed")}) {
+        const WorldSourceDefinition definition = definition_for(seed);
+        for (const NativeSiteSourceRegionKey region : {
+                NativeSiteSourceRegionKey{0, 0}, NativeSiteSourceRegionKey{1, -1},
+                NativeSiteSourceRegionKey{-19, 7}, NativeSiteSourceRegionKey{101, 101}}) {
+            const auto expected = native_site_source_candidate_for_region(definition, region);
+            BorrowedSiteCandidateCursor cursor;
+            const auto insufficient = cursor.begin(definition, region, 0U);
+            VWB_EXPECT_EQ(0U, insufficient.consumed_ops);
+            VWB_EXPECT_EQ(BorrowedSiteCandidateCursor::Status::idle, cursor.status());
+            const auto begun = cursor.begin(definition, region, 1U);
+            VWB_EXPECT_EQ(1U, begun.consumed_ops);
+            const std::uint32_t quotas[] = {0U, 1U, 2U, 3U, 7U, 63U, 64U};
+            for (std::size_t call = 0U;
+                 call < 100000U && cursor.status() == BorrowedSiteCandidateCursor::Status::pending;
+                 ++call) {
+                const std::uint32_t offered = quotas[call % 7U];
+                const auto step = cursor.advance(definition, offered);
+                VWB_EXPECT(step.consumed_ops <= offered);
+                VWB_EXPECT(step.consumed_ops <= 64U);
+            }
+            VWB_EXPECT(cursor.status() != BorrowedSiteCandidateCursor::Status::pending);
+            if (!expected) {
+                VWB_EXPECT_EQ(BorrowedSiteCandidateCursor::Status::absent, cursor.status());
+                continue;
+            }
+            VWB_EXPECT_EQ(BorrowedSiteCandidateCursor::Status::ready, cursor.status());
+            VWB_EXPECT_EQ(expected->center_x, cursor.center_x());
+            VWB_EXPECT_EQ(expected->center_z, cursor.center_z());
+            VWB_EXPECT_EQ(expected->recipe_seed, cursor.recipe_seed());
+            VWB_EXPECT_EQ(expected->declared_influence_cells, cursor.declared_influence_cells());
+        }
+    }
+}
+
+VWB_TEST(borrowed_shaping_page_cursor_matches_public_registry_readiness) {
+    NativeTerrainShapingRegistry registry(definition_for(), policy_for());
+    const NativeSiteSourceRegionKey region{0, 0};
+    const auto candidate = native_site_source_candidate_for_region(registry.definition(), region);
+    VWB_EXPECT(candidate.has_value());
+    const NativeTerrainPageKey affected{floor_page(candidate->center_x), floor_page(candidate->center_z)};
+    const auto compare = [&](const NativeTerrainPageKey page) {
+        BorrowedShapingPageCursor cursor;
+        VWB_EXPECT_EQ(0U, cursor.begin(page, 0U).consumed_ops);
+        VWB_EXPECT_EQ(1U, cursor.begin(page, 1U).consumed_ops);
+        const std::uint32_t quotas[] = {0U, 1U, 3U, 23U, 24U, 63U, 64U};
+        for (std::size_t call = 0U;
+             call < 100000U && cursor.status() == BorrowedShapingPageCursor::Status::pending;
+             ++call) {
+            const std::uint32_t offered = quotas[call % 7U];
+            const auto step = registry.advance_borrowed_page(cursor, offered);
+            VWB_EXPECT(step.consumed_ops <= offered);
+            VWB_EXPECT(step.consumed_ops <= 64U);
+        }
+        const auto pin = registry.pin_page(page);
+        switch (pin.readiness()) {
+        case NativeTerrainShapingPageReadiness::ready:
+            VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::ready, cursor.status());
+            VWB_EXPECT_EQ(pin.snapshot()->site_fragments().size(), cursor.profile_count());
+            break;
+        case NativeTerrainShapingPageReadiness::unresolved:
+            VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::unresolved, cursor.status()); break;
+        case NativeTerrainShapingPageReadiness::failed:
+            VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::failed, cursor.status()); break;
+        }
+    };
+    compare(affected);
+    compare({0, 0});
+    registry.apply({registry.revision(), {absent_resolution(registry, region)}});
+    compare(affected);
+    NativeTerrainShapingRegistry prepared(definition_for(), policy_for());
+    const auto admitted = admit_native_site_terrain_profile(prepared.definition(), profile_for(*candidate));
+    prepared.apply({prepared.revision(), {prepared_resolution(prepared, region, admitted)}});
+    BorrowedShapingPageCursor prepared_cursor;
+    VWB_EXPECT_EQ(1U, prepared_cursor.begin(affected, 1U).consumed_ops);
+    for (std::size_t call = 0U;
+         call < 100000U && prepared_cursor.status() == BorrowedShapingPageCursor::Status::pending;
+         ++call) (void)prepared.advance_borrowed_page(prepared_cursor, 64U);
+    VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::ready, prepared_cursor.status());
+    VWB_EXPECT_EQ(1U, prepared_cursor.profile_count());
+    NativeTerrainShapingRegistry failed(definition_for(), policy_for());
+    failed.apply({failed.revision(), {failed_resolution(failed, region)}});
+    BorrowedShapingPageCursor failed_cursor;
+    VWB_EXPECT_EQ(1U, failed_cursor.begin(affected, 1U).consumed_ops);
+    for (std::size_t call = 0U;
+         call < 100000U && failed_cursor.status() == BorrowedShapingPageCursor::Status::pending;
+         ++call) {
+        const auto step = failed.advance_borrowed_page(failed_cursor, 64U);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+    }
+    VWB_EXPECT_EQ(NativeTerrainShapingPageReadiness::failed, failed.pin_page(affected).readiness());
+    VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::failed, failed_cursor.status());
+}
+
+VWB_TEST(borrowed_shaping_vwsh_digest_matches_synchronous_empty_and_prepared_pages) {
+    NativeTerrainShapingRegistry registry(definition_for(), policy_for());
+    const NativeSiteSourceRegionKey region{0, 0};
+    const auto candidate = native_site_source_candidate_for_region(registry.definition(), region);
+    VWB_EXPECT(candidate.has_value());
+    const NativeTerrainPageKey page{floor_page(candidate->center_x), floor_page(candidate->center_z)};
+    const auto compare = [&](const std::array<NativeTownRegionOverride, 9> &towns,
+        const std::size_t town_count) {
+        BorrowedShapingPageCursor readiness;
+        VWB_EXPECT_EQ(1U, readiness.begin(page, 1U).consumed_ops);
+        for (std::size_t call = 0U;
+             call < 100000U && readiness.status() == BorrowedShapingPageCursor::Status::pending;
+             ++call) (void)registry.advance_borrowed_page(readiness, 64U);
+        VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::ready, readiness.status());
+        BorrowedShapingIdentityCursor identity;
+        const std::uint32_t quotas[] = {0U, 1U, 7U, 8U, 23U, 24U, 63U, 64U};
+        for (std::size_t call = 0U;
+             call < 100000U && identity.status() != BorrowedShapingIdentityCursor::Status::ready;
+             ++call) {
+            const std::uint32_t offered = quotas[call % 8U];
+            const auto step = registry.advance_borrowed_page_identity(
+                readiness, identity, towns, town_count, offered);
+            VWB_EXPECT(step.consumed_ops <= offered);
+            VWB_EXPECT(step.consumed_ops <= 64U);
+            VWB_EXPECT(step.status != BorrowedShapingIdentityCursor::Status::failed);
+        }
+        VWB_EXPECT_EQ(BorrowedShapingIdentityCursor::Status::ready, identity.status());
+        std::vector<NativeTownRegionOverride> town_list;
+        for (std::size_t index = 0U; index < town_count; ++index) town_list.push_back(towns[index]);
+        const auto pin = registry.pin_page(page, std::move(town_list));
+        VWB_EXPECT_EQ(pin.snapshot()->physical_content_identity().digest, identity.digest());
+    };
+    registry.apply({registry.revision(), {absent_resolution(registry, region)}});
+    std::array<NativeTownRegionOverride, 9> towns{};
+    compare(towns, 0U);
+    towns[0].region_x = page.x; towns[0].region_z = page.z;
+    towns[0].has_town = false;
+    compare(towns, 1U);
+    VWB_EXPECT(!(registry.pin_page(page).snapshot()->physical_content_identity()
+        == registry.pin_page(page, {towns[0]}).snapshot()->physical_content_identity()));
+    NativeTerrainShapingRegistry prepared(definition_for(), policy_for());
+    const auto admitted = admit_native_site_terrain_profile(prepared.definition(), profile_for(*candidate));
+    prepared.apply({prepared.revision(), {prepared_resolution(prepared, region, admitted)}});
+    BorrowedShapingPageCursor readiness;
+    VWB_EXPECT_EQ(1U, readiness.begin(page, 1U).consumed_ops);
+    for (std::size_t call = 0U;
+         call < 100000U && readiness.status() == BorrowedShapingPageCursor::Status::pending;
+         ++call) (void)prepared.advance_borrowed_page(readiness, 64U);
+    VWB_EXPECT_EQ(BorrowedShapingPageCursor::Status::ready, readiness.status());
+    BorrowedShapingIdentityCursor identity;
+    for (std::size_t call = 0U;
+         call < 100000U && identity.status() != BorrowedShapingIdentityCursor::Status::ready;
+         ++call) {
+        const auto step = prepared.advance_borrowed_page_identity(readiness, identity, towns, 1U, 64U);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+        VWB_EXPECT(step.status != BorrowedShapingIdentityCursor::Status::failed);
+    }
+    VWB_EXPECT_EQ(BorrowedShapingIdentityCursor::Status::ready, identity.status());
+    VWB_EXPECT_EQ(prepared.pin_page(page, {towns[0]}).snapshot()->physical_content_identity().digest,
+        identity.digest());
+}
+
 VWB_TEST(native_site_source_field_matches_godot_sha_unicode_negative_and_extreme_goldens) {
     VWB_EXPECT((NativeSiteSourceRegionKey{1, 2} == NativeSiteSourceRegionKey{1, 2}));
     VWB_EXPECT(!(NativeSiteSourceRegionKey{1, 2} == NativeSiteSourceRegionKey{2, 2}));

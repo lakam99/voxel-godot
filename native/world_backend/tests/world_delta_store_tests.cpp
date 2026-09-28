@@ -156,6 +156,40 @@ WorldTypedStateAdmission typed_admission(const std::string &id, const std::uint6
     return {id, expected, NativeTypedWorldStateSnapshot::create(std::move(durable)), std::move(overlays)};
 }
 
+VWB_TEST(borrowed_typed_projection_wdp1_matches_immutable_pin_with_nested_metadata_and_remote_rows) {
+    WorldDeltaStore store;
+    const auto receipt = store.admit_typed_state(typed_admission("borrowed:projection", 0U,
+        {typed_stone({-1, 7, 2}), typed_durable({500, 7, 500})},
+        {typed_overlay_without_persistence_metadata({3, -2, 1})}));
+    VWB_EXPECT_EQ(WorldDeltaCommitStatus::committed, receipt.status);
+    const WorldDeltaHorizontalBounds bounds{-20, -20, 40, 40};
+    const Sha256Digest expected = store.pin().typed_projection_digest(bounds);
+    BorrowedTypedProjectionCursor cursor;
+    const std::uint32_t quotas[] = {0U, 1U, 2U, 3U, 7U, 34U, 63U, 64U};
+    for (std::size_t call = 0U;
+         call < 100000U && cursor.status() != BorrowedTypedProjectionCursor::Status::ready;
+         ++call) {
+        const std::uint32_t offered = quotas[call % 8U];
+        const auto step = store.advance_borrowed_projection(cursor, bounds, 19U, offered);
+        VWB_EXPECT(step.consumed_ops <= offered);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+        VWB_EXPECT(step.status != BorrowedTypedProjectionCursor::Status::failed);
+    }
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, cursor.status());
+    VWB_EXPECT_EQ(expected, cursor.digest());
+    const WorldDeltaHorizontalBounds remote{490, 490, 30, 30};
+    cursor.reset(remote);
+    for (std::size_t call = 0U;
+         call < 100000U && cursor.status() != BorrowedTypedProjectionCursor::Status::ready;
+         ++call) {
+        const auto step = store.advance_borrowed_projection(cursor, remote, 20U, 64U);
+        VWB_EXPECT(step.consumed_ops <= 64U);
+        VWB_EXPECT(step.status != BorrowedTypedProjectionCursor::Status::failed);
+    }
+    VWB_EXPECT_EQ(BorrowedTypedProjectionCursor::Status::ready, cursor.status());
+    VWB_EXPECT_EQ(store.pin().typed_projection_digest(remote), cursor.digest());
+}
+
 void expect_typed_rejection(const WorldDeltaRejectReason expected, const WorldTypedStateAdmission &value,
     WorldDeltaStore &store) {
     try {

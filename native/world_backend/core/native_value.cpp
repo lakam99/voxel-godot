@@ -327,6 +327,372 @@ void NativeValue::write_canonical(NativeValueCanonicalSink &sink) const {
     append_value(sink, *this);
 }
 
+NativeValueCanonicalCursor::NativeValueCanonicalCursor() noexcept { reset(); }
+
+void NativeValueCanonicalCursor::reset() noexcept {
+    if (advancing_) {
+        fail(NativeValueCanonicalCursorStatus::invalid_state);
+        return;
+    }
+    // Child frames are initialized only when entered. Clearing every frame
+    // here would hide MAX_FRAMES work behind an administrative reset.
+    frames_[0] = Frame{};
+    depth_ = 0U;
+    nodes_total_ = 0U;
+    prefix_offset_ = 0U;
+    source_token_ = 0U;
+    status_ = NativeValueCanonicalCursorStatus::in_progress;
+    source_started_ = false;
+}
+
+NativeValueCanonicalCursorStatus NativeValueCanonicalCursor::status() const noexcept {
+    return status_;
+}
+
+void NativeValueCanonicalCursor::fail(const NativeValueCanonicalCursorStatus status) noexcept {
+    if (status_ == NativeValueCanonicalCursorStatus::in_progress) status_ = status;
+}
+
+const NativeValue *NativeValueCanonicalCursor::resolve_value(
+    const NativeValue &root, const std::size_t depth) noexcept {
+    if (depth >= MAX_FRAMES) return nullptr;
+    const NativeValue *value = &root;
+    for (std::size_t level = 1U; level <= depth; ++level) {
+        const Frame &parent = frames_[level - 1U];
+        const Frame &child = frames_[level];
+        if (parent.kind == NativeValueKind::array) {
+            const NativeValue::Array *entries = std::get_if<NativeValue::Array>(&value->storage_);
+            if (entries == nullptr || child.parent_index >= entries->size()) return nullptr;
+            value = &(*entries)[child.parent_index];
+        } else if (parent.kind == NativeValueKind::object) {
+            const NativeValue::Object *entries = std::get_if<NativeValue::Object>(&value->storage_);
+            if (entries == nullptr || child.parent_index >= entries->size()) return nullptr;
+            value = &(*entries)[child.parent_index].second;
+        } else {
+            return nullptr;
+        }
+    }
+    return value;
+}
+
+NativeValueCanonicalCursorProgress NativeValueCanonicalCursor::advance(
+    const NativeValue &root,
+    const std::uint64_t source_token,
+    const std::size_t byte_budget,
+    const std::size_t node_budget,
+    const std::size_t work_budget,
+    NativeValueCanonicalSink &sink) noexcept {
+    NativeValueCanonicalCursorProgress progress;
+    progress.status = status_;
+    if (status_ != NativeValueCanonicalCursorStatus::in_progress) return progress;
+    // An observational probe is also safe from inside a sink callback. It
+    // neither diagnoses a changed token nor alters the outer advance.
+    if (work_budget == 0U || byte_budget == 0U) return progress;
+    if (advancing_) {
+        fail(NativeValueCanonicalCursorStatus::invalid_state);
+        progress.status = status_;
+        return progress;
+    }
+    if (source_started_) {
+        if (source_token_ != source_token) {
+            fail(NativeValueCanonicalCursorStatus::source_changed);
+            progress.status = status_;
+            return progress;
+        }
+    }
+
+    advancing_ = true;
+    std::size_t bytes_remaining = byte_budget;
+    std::size_t nodes_remaining = node_budget;
+    std::size_t work_remaining = work_budget;
+
+    const auto append_limited = [&](const std::uint8_t *data, const std::size_t size,
+        std::size_t &offset) noexcept -> bool {
+        if (offset >= size) return true;
+        if (bytes_remaining == 0U || work_remaining == 0U) return false;
+        const std::size_t chunk = std::min({size - offset, bytes_remaining, work_remaining});
+        try {
+            sink.append(data + offset, chunk);
+        } catch (...) {
+            fail(NativeValueCanonicalCursorStatus::sink_failed);
+            return false;
+        }
+        if (status_ != NativeValueCanonicalCursorStatus::in_progress) return false;
+        offset += chunk;
+        bytes_remaining -= chunk;
+        work_remaining -= chunk;
+        progress.work_units += chunk;
+        progress.bytes_written += chunk;
+        if (!source_started_) {
+            source_token_ = source_token;
+            source_started_ = true;
+        }
+        return offset == size;
+    };
+
+    const auto append_u32_limited = [&](const std::uint32_t value, std::size_t &offset) noexcept -> bool {
+        std::uint8_t bytes[4];
+        for (int index = 0, shift = 24; shift >= 0; ++index, shift -= 8) {
+            bytes[index] = static_cast<std::uint8_t>((value >> shift) & 0xffU);
+        }
+        return append_limited(bytes, sizeof(bytes), offset);
+    };
+
+    static constexpr std::uint8_t marker[] = {'N', 'V', '1'};
+    if (!append_limited(marker, sizeof(marker), prefix_offset_)) {
+        advancing_ = false;
+        progress.status = status_;
+        return progress;
+    }
+
+    while (status_ == NativeValueCanonicalCursorStatus::in_progress) {
+        Frame &frame = frames_[depth_];
+        // Stop at a byte-producing phase when this call's output allowance is
+        // exhausted. Structural completion/child transitions are still safe
+        // to consume, so a value whose last byte exactly fills the budget can
+        // become complete in this same call without spinning on partial data.
+        const bool structural_phase = frame.phase == Phase::complete_value
+            || frame.phase == Phase::array_items || frame.phase == Phase::object_items;
+        const bool empty_payload_phase = (frame.phase == Phase::string_bytes && frame.declared_length == 0U)
+            || (frame.phase == Phase::object_key_bytes && frame.segment_length == 0U);
+        if (bytes_remaining == 0U && !structural_phase && !empty_payload_phase) break;
+        // resolve_value follows at most MAX_DEPTH parent links. Charge each
+        // link plus the phase transition before touching borrowed children.
+        const std::size_t phase_cost = depth_ + 2U;
+        if (work_remaining < phase_cost) {
+            progress.next_atomic_units = phase_cost;
+            break;
+        }
+        work_remaining -= phase_cost;
+        progress.work_units += phase_cost;
+        const NativeValue *value = resolve_value(root, depth_);
+        if (value == nullptr) {
+            fail(NativeValueCanonicalCursorStatus::invalid_value);
+            break;
+        }
+
+        switch (frame.phase) {
+        case Phase::start_value: {
+            if (bytes_remaining == 0U || nodes_remaining == 0U || nodes_total_ >= NativeValueLimits::MAX_NODES) {
+                if (nodes_total_ >= NativeValueLimits::MAX_NODES && bytes_remaining != 0U && nodes_remaining != 0U) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                }
+                advancing_ = false;
+                progress.status = status_;
+                progress.nodes_started = node_budget - nodes_remaining;
+                return progress;
+            }
+            if (value->storage_.valueless_by_exception()) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            const NativeValueKind kind = static_cast<NativeValueKind>(value->storage_.index());
+            std::uint8_t tag = 0U;
+            switch (kind) {
+            case NativeValueKind::null_value:
+                tag = 0U;
+                break;
+            case NativeValueKind::boolean: {
+                const bool *boolean = std::get_if<bool>(&value->storage_);
+                if (boolean == nullptr) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                    break;
+                }
+                tag = *boolean ? 2U : 1U;
+                break;
+            }
+            case NativeValueKind::number: {
+                const double *number = std::get_if<double>(&value->storage_);
+                if (number == nullptr) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                    break;
+                }
+                tag = 3U;
+                std::memcpy(&frame.number_bits, number, sizeof(frame.number_bits));
+                break;
+            }
+            case NativeValueKind::string: {
+                const std::string *text = std::get_if<std::string>(&value->storage_);
+                if (text == nullptr || text->size() > NativeValueLimits::MAX_STRING_BYTES
+                    || text->size() > std::numeric_limits<std::uint32_t>::max()) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                    break;
+                }
+                tag = 4U;
+                frame.declared_length = text->size();
+                break;
+            }
+            case NativeValueKind::array: {
+                const NativeValue::Array *entries = std::get_if<NativeValue::Array>(&value->storage_);
+                if (entries == nullptr || entries->size() > NativeValueLimits::MAX_CONTAINER_ENTRIES) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                    break;
+                }
+                tag = 5U;
+                frame.declared_length = entries->size();
+                break;
+            }
+            case NativeValueKind::object: {
+                const NativeValue::Object *entries = std::get_if<NativeValue::Object>(&value->storage_);
+                if (entries == nullptr || entries->size() > NativeValueLimits::MAX_CONTAINER_ENTRIES) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                    break;
+                }
+                tag = 6U;
+                frame.declared_length = entries->size();
+                break;
+            }
+            default:
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            if (status_ != NativeValueCanonicalCursorStatus::in_progress) break;
+            std::size_t tag_offset = 0U;
+            if (!append_limited(&tag, 1U, tag_offset)) break;
+            if (status_ != NativeValueCanonicalCursorStatus::in_progress) break;
+            frame.kind = kind;
+            if (kind == NativeValueKind::number) frame.phase = Phase::number_bytes;
+            else if (kind == NativeValueKind::string) frame.phase = Phase::string_length;
+            else if (kind == NativeValueKind::array || kind == NativeValueKind::object) frame.phase = Phase::container_count;
+            else frame.phase = Phase::complete_value;
+            frame.offset = 0U;
+            ++nodes_total_;
+            --nodes_remaining;
+            ++progress.nodes_started;
+            break;
+        }
+        case Phase::number_bytes: {
+            static_assert(sizeof(double) == sizeof(std::uint64_t), "NativeValue requires 64-bit double storage");
+            static_assert(std::numeric_limits<double>::is_iec559, "NativeValue requires IEEE-754 double storage");
+            std::uint8_t bytes[8];
+            for (int index = 0, shift = 56; shift >= 0; ++index, shift -= 8) {
+                bytes[index] = static_cast<std::uint8_t>((frame.number_bits >> shift) & 0xffU);
+            }
+            if (append_limited(bytes, sizeof(bytes), frame.offset)) frame.phase = Phase::complete_value;
+            break;
+        }
+        case Phase::string_length:
+            if (append_u32_limited(static_cast<std::uint32_t>(frame.declared_length), frame.offset)) {
+                frame.phase = Phase::string_bytes;
+                frame.offset = 0U;
+            }
+            break;
+        case Phase::string_bytes: {
+            const std::string *text = std::get_if<std::string>(&value->storage_);
+            if (text == nullptr || text->size() != frame.declared_length) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            if (append_limited(reinterpret_cast<const std::uint8_t *>(text->data()), text->size(), frame.offset)) {
+                frame.phase = Phase::complete_value;
+            }
+            break;
+        }
+        case Phase::container_count:
+            if (append_u32_limited(static_cast<std::uint32_t>(frame.declared_length), frame.offset)) {
+                frame.phase = frame.kind == NativeValueKind::array ? Phase::array_items : Phase::object_items;
+                frame.offset = 0U;
+            }
+            break;
+        case Phase::array_items: {
+            const NativeValue::Array *entries = std::get_if<NativeValue::Array>(&value->storage_);
+            if (entries == nullptr || entries->size() != frame.declared_length) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            if (frame.next_child >= frame.declared_length) {
+                frame.phase = Phase::complete_value;
+                break;
+            }
+            if (depth_ + 1U >= MAX_FRAMES) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            Frame child{};
+            child.parent_index = frame.next_child++;
+            frames_[depth_ + 1U] = child;
+            ++depth_;
+            break;
+        }
+        case Phase::object_items: {
+            const NativeValue::Object *entries = std::get_if<NativeValue::Object>(&value->storage_);
+            if (entries == nullptr || entries->size() != frame.declared_length) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            if (frame.next_child >= frame.declared_length) {
+                frame.phase = Phase::complete_value;
+                break;
+            }
+            frame.phase = Phase::object_key_length;
+            frame.offset = 0U;
+            frame.length_ready = false;
+            break;
+        }
+        case Phase::object_key_length: {
+            const NativeValue::Object *entries = std::get_if<NativeValue::Object>(&value->storage_);
+            if (entries == nullptr || entries->size() != frame.declared_length
+                || frame.next_child >= entries->size()) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            const std::string &key = (*entries)[frame.next_child].first;
+            if (!frame.length_ready) {
+                if (key.size() > NativeValueLimits::MAX_OBJECT_KEY_BYTES
+                    || key.size() > std::numeric_limits<std::uint32_t>::max()) {
+                    fail(NativeValueCanonicalCursorStatus::invalid_value);
+                    break;
+                }
+                frame.segment_length = key.size();
+                frame.length_ready = true;
+            }
+            if (append_u32_limited(static_cast<std::uint32_t>(frame.segment_length), frame.offset)) {
+                frame.phase = Phase::object_key_bytes;
+                frame.offset = 0U;
+            }
+            break;
+        }
+        case Phase::object_key_bytes: {
+            const NativeValue::Object *entries = std::get_if<NativeValue::Object>(&value->storage_);
+            if (entries == nullptr || entries->size() != frame.declared_length
+                || frame.next_child >= entries->size()) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            const std::string &key = (*entries)[frame.next_child].first;
+            if (key.size() != frame.segment_length) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            if (!append_limited(reinterpret_cast<const std::uint8_t *>(key.data()), key.size(), frame.offset)) break;
+            if (status_ != NativeValueCanonicalCursorStatus::in_progress) break;
+            if (depth_ + 1U >= MAX_FRAMES) {
+                fail(NativeValueCanonicalCursorStatus::invalid_value);
+                break;
+            }
+            Frame child{};
+            child.parent_index = frame.next_child++;
+            frame.phase = Phase::object_items;
+            frame.length_ready = false;
+            frames_[depth_ + 1U] = child;
+            ++depth_;
+            break;
+        }
+        case Phase::complete_value:
+            if (depth_ == 0U) {
+                status_ = NativeValueCanonicalCursorStatus::complete;
+            } else {
+                --depth_;
+            }
+            break;
+        }
+    }
+
+    advancing_ = false;
+    progress.status = status_;
+    return progress;
+}
+
 NativeValue NativeValue::compact_copy() const {
     if (storage_.valueless_by_exception()) reject("valueless native value");
     validate_root(*this);

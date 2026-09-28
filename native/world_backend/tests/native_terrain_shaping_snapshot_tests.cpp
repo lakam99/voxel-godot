@@ -3,6 +3,7 @@
 #include "../core/native_terrain_shaping_snapshot.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -84,6 +85,68 @@ bool near(const double left, const double right, const double tolerance = 1.0e-9
 }
 
 } // namespace
+
+VWB_TEST(borrowed_shaping_vwsh_stream_preserves_site_and_crop_order_and_rejects_overlap) {
+    const WorldSourceDefinition definition = shaping_definition();
+    const NativeTerrainPageKey page{0, 0};
+    const auto bounds = native_terrain_page_bounds(page);
+    VWB_EXPECT(bounds.has_value());
+    const auto a = admit_site(small_site("a", 12, 0));
+    const auto b = admit_site(small_site("b", 0, 0));
+    const auto prefixed = admit_site(small_site("ab", 25, 0));
+    std::array<const NativeAdmittedSiteTerrainProfile *, 4> profiles{b.get(), prefixed.get(), a.get()};
+    std::array<NativeTownRegionOverride, 9> towns{};
+    towns[0] = empty_town_override(0, 0);
+    towns[1] = town_override(-1, 0, 30, 12.0);
+    const auto drain = [&](BorrowedShapingIdentityCursor &cursor,
+        const std::array<const NativeAdmittedSiteTerrainProfile *, 4> &input) {
+        const std::uint32_t quotas[] = {0U, 1U, 2U, 3U, 63U, 64U};
+        for (std::size_t call = 0U;
+             call < 100000U && cursor.status() == BorrowedShapingIdentityCursor::Status::pending;
+             ++call) {
+            const std::uint32_t offered = quotas[call % 6U];
+            const auto step = cursor.advance(definition, input, offered);
+            VWB_EXPECT(step.consumed_ops <= offered);
+            VWB_EXPECT(step.consumed_ops <= 64U);
+        }
+    };
+    BorrowedShapingIdentityCursor cursor;
+    VWB_EXPECT_EQ(0U, cursor.begin(page, *bounds, towns, 2U, 3U, 15U).consumed_ops);
+    VWB_EXPECT_EQ(16U, cursor.begin(page, *bounds, towns, 2U, 3U, 16U).consumed_ops);
+    VWB_EXPECT_EQ(0U, cursor.begin(page, *bounds, towns, 2U, 3U, 64U).consumed_ops);
+    VWB_EXPECT_EQ(0U, cursor.advance(definition, profiles, 0U).consumed_ops);
+    (void)cursor.advance(definition, profiles, 64U);
+    cursor.reset();
+    VWB_EXPECT_EQ(16U, cursor.begin(page, *bounds, towns, 2U, 3U, 16U).consumed_ops);
+    drain(cursor, profiles);
+    VWB_EXPECT_EQ(BorrowedShapingIdentityCursor::Status::ready, cursor.status());
+    VWB_EXPECT_EQ(0U, cursor.advance(definition, profiles, 64U).consumed_ops);
+    NativeTerrainShapingRequest request = request_for(page);
+    request.town_overrides = {towns[0], towns[1]};
+    request.site_profiles = {b, prefixed, a};
+    const auto sync = snapshot_for(std::move(request));
+    VWB_EXPECT_EQ(sync.physical_content_identity().digest, cursor.digest());
+
+    const auto duplicate = admit_site(small_site("a", 25, 0));
+    profiles = {a.get(), duplicate.get(), nullptr, nullptr};
+    cursor.reset();
+    VWB_EXPECT_EQ(16U, cursor.begin(page, *bounds, towns, 0U, 2U, 16U).consumed_ops);
+    drain(cursor, profiles);
+    VWB_EXPECT_EQ(BorrowedShapingIdentityCursor::Status::failed, cursor.status());
+
+    const auto overlap = admit_site(small_site("c", 13, 0));
+    profiles = {a.get(), overlap.get(), nullptr, nullptr};
+    cursor.reset();
+    VWB_EXPECT_EQ(16U, cursor.begin(page, *bounds, towns, 0U, 2U, 16U).consumed_ops);
+    drain(cursor, profiles);
+    VWB_EXPECT_EQ(BorrowedShapingIdentityCursor::Status::failed, cursor.status());
+
+    cursor.reset();
+    towns[0] = town_override(0, 0, 0, 12.0);
+    VWB_EXPECT_EQ(16U, cursor.begin(page, *bounds, towns, 1U, 0U, 16U).consumed_ops);
+    drain(cursor, {});
+    VWB_EXPECT_EQ(BorrowedShapingIdentityCursor::Status::failed, cursor.status());
+}
 
 VWB_TEST(native_shaping_page_admission_requires_revision_valid_page_and_scoped_unique_town_dependencies) {
     VWB_EXPECT_EQ(NativeTerrainShapingAdmissionFailure::missing_generation_revision, rejected_failure({}));

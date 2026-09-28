@@ -47,6 +47,10 @@ constexpr std::int32_t SITE_FIELD_VERSION = 1;
 constexpr std::int32_t SOURCE_REGION_CELLS = 2048;
 constexpr std::int32_t SOURCE_JITTER_CELLS = 384;
 constexpr std::int32_t MAX_INFLUENCE_RADIUS_CELLS = 384;
+// Adjacent candidates have at least 511 uncovered cells between their
+// inclusive influence rectangles. One 280-cell page cannot intersect both.
+static_assert(SOURCE_REGION_CELLS - 2 * (SOURCE_JITTER_CELLS + MAX_INFLUENCE_RADIUS_CELLS)
+    > NativeTerrainShapingSnapshot::PAGE_CELLS);
 constexpr std::uint32_t SOURCE_OCCUPANCY_PER_THOUSAND = 350;
 constexpr std::int32_t MIN_SOURCE_REGION_COORD = -1048576;
 constexpr std::int32_t MAX_SOURCE_REGION_COORD = 1048575;
@@ -349,6 +353,301 @@ std::optional<NativeSiteSourceCandidate> native_site_source_candidate_for_region
     return candidate;
 }
 
+void BorrowedSiteCandidateCursor::reset() noexcept {
+    hash_.reset();
+    region_ = {};
+    input_offset_ = 0U;
+    channel_ = 0U;
+    phase_ = 0U;
+    decimal_index_ = 0U; decimal_phase_ = 0U; decimal_reverse_index_ = 0U;
+    decimal_remaining_ = 0U; decimal_negative_ = false;
+    status_ = Status::idle;
+}
+
+BorrowedSiteCandidateCursor::Status BorrowedSiteCandidateCursor::status() const noexcept { return status_; }
+NativeSiteSourceRegionKey BorrowedSiteCandidateCursor::region() const noexcept { return region_; }
+std::uint32_t BorrowedSiteCandidateCursor::recipe_seed() const noexcept {
+    return channels_[3] & 0x7fffffffU;
+}
+std::int32_t BorrowedSiteCandidateCursor::center_x() const noexcept {
+    return static_cast<std::int32_t>(static_cast<std::int64_t>(region_.x) * SOURCE_REGION_CELLS
+        + SOURCE_REGION_CELLS / 2 + static_cast<std::int32_t>(channels_[1] % 769U) - SOURCE_JITTER_CELLS);
+}
+std::int32_t BorrowedSiteCandidateCursor::center_z() const noexcept {
+    return static_cast<std::int32_t>(static_cast<std::int64_t>(region_.z) * SOURCE_REGION_CELLS
+        + SOURCE_REGION_CELLS / 2 + static_cast<std::int32_t>(channels_[2] % 769U) - SOURCE_JITTER_CELLS);
+}
+NativeHorizontalRect BorrowedSiteCandidateCursor::declared_influence_cells() const noexcept {
+    return {center_x() - MAX_INFLUENCE_RADIUS_CELLS, center_z() - MAX_INFLUENCE_RADIUS_CELLS,
+        MAX_INFLUENCE_RADIUS_CELLS * 2 + 1, MAX_INFLUENCE_RADIUS_CELLS * 2 + 1};
+}
+
+BorrowedSiteCandidateCursor::Step BorrowedSiteCandidateCursor::begin(
+    const WorldSourceDefinition &definition, const NativeSiteSourceRegionKey region,
+    const std::uint32_t offered_ops) noexcept {
+    Step result; result.status = status_;
+    if (status_ != Status::idle || offered_ops == 0U) return result;
+    region_ = region;
+    if (definition.raw_terrain_seed().utf8.empty() || !region_valid(region)) {
+        status_ = Status::absent; result.status = status_; result.consumed_ops = 1U; return result;
+    }
+    number_lengths_ = {};
+    hash_.reset(); input_offset_ = 0U; channel_ = 0U; phase_ = 0U;
+    decimal_index_ = 0U; decimal_phase_ = 0U; decimal_reverse_index_ = 0U;
+    decimal_remaining_ = 0U; decimal_negative_ = false;
+    status_ = Status::pending; result.status = status_; result.consumed_ops = 1U;
+    return result;
+}
+
+std::size_t BorrowedSiteCandidateCursor::text_size(const WorldSourceDefinition &definition) const noexcept {
+    static constexpr char prefix[] = "citadel-site-v1:";
+    return sizeof(prefix) - 1U + number_lengths_[0] + 1U
+        + definition.raw_terrain_seed().utf8.size() + 1U
+        + number_lengths_[1] + 1U + number_lengths_[2];
+}
+
+std::uint8_t BorrowedSiteCandidateCursor::text_byte(
+    const WorldSourceDefinition &definition, std::size_t offset) const noexcept {
+    static constexpr char prefix[] = "citadel-site-v1:";
+    if (offset < sizeof(prefix) - 1U) return static_cast<std::uint8_t>(prefix[offset]);
+    offset -= sizeof(prefix) - 1U;
+    if (offset < number_lengths_[0]) return static_cast<std::uint8_t>(numbers_[0][offset]);
+    offset -= number_lengths_[0];
+    if (offset-- == 0U) return ':';
+    const std::string &seed = definition.raw_terrain_seed().utf8;
+    if (offset < seed.size()) return static_cast<std::uint8_t>(seed[offset]);
+    offset -= seed.size();
+    if (offset-- == 0U) return ':';
+    if (offset < number_lengths_[1]) return static_cast<std::uint8_t>(numbers_[1][offset]);
+    offset -= number_lengths_[1];
+    if (offset-- == 0U) return ',';
+    return static_cast<std::uint8_t>(numbers_[2][offset]);
+}
+
+BorrowedSiteCandidateCursor::Step BorrowedSiteCandidateCursor::advance(
+    const WorldSourceDefinition &definition, const std::uint32_t offered_ops) noexcept {
+    Step result; result.status = status_;
+    if (status_ != Status::pending) return result;
+    static constexpr const char *names[] = {"presence", "x", "z", "recipe"};
+    static constexpr std::size_t lengths[] = {8U, 1U, 1U, 6U};
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    while (result.consumed_ops < limit && status_ == Status::pending) {
+        if (phase_ == 0U) {
+            if (decimal_index_ >= 3U) { phase_ = 1U; continue; }
+            if (decimal_phase_ == 0U) {
+                const std::int64_t signed_value = decimal_index_ == 0U
+                    ? static_cast<std::int64_t>(definition.raw_terrain_seed().code_points.size())
+                    : decimal_index_ == 1U ? region_.x : region_.z;
+                decimal_negative_ = signed_value < 0;
+                decimal_remaining_ = static_cast<std::uint64_t>(decimal_negative_
+                    ? -signed_value : signed_value);
+                decimal_phase_ = 1U; ++result.consumed_ops;
+            } else if (decimal_phase_ == 1U) {
+                if (limit - result.consumed_ops < 2U) {
+                    result.next_atomic_ops = 2U; break;
+                }
+                const std::uint64_t digit = decimal_remaining_ % 10U;
+                decimal_remaining_ /= 10U;
+                numbers_[decimal_index_][number_lengths_[decimal_index_]++] =
+                    static_cast<char>('0' + digit);
+                result.consumed_ops += 2U;
+                if (decimal_remaining_ == 0U) decimal_phase_ = 2U;
+            } else if (decimal_phase_ == 2U) {
+                if (decimal_negative_)
+                    numbers_[decimal_index_][number_lengths_[decimal_index_]++] = '-';
+                decimal_reverse_index_ = 0U; decimal_phase_ = 3U;
+                ++result.consumed_ops;
+            } else if (decimal_reverse_index_ < number_lengths_[decimal_index_] / 2U) {
+                const std::size_t last = number_lengths_[decimal_index_] - 1U - decimal_reverse_index_;
+                std::swap(numbers_[decimal_index_][decimal_reverse_index_],
+                    numbers_[decimal_index_][last]);
+                ++decimal_reverse_index_; ++result.consumed_ops;
+            } else {
+                ++decimal_index_; decimal_phase_ = 0U; ++result.consumed_ops;
+            }
+        } else if (phase_ == 1U) {
+            if (limit - result.consumed_ops < 3U) { result.next_atomic_ops = 3U; break; }
+            const std::size_t identity_size = text_size(definition);
+            const std::size_t suffix_offset = input_offset_ - std::min(input_offset_, identity_size);
+            const std::uint8_t byte = input_offset_ < identity_size
+                ? text_byte(definition, input_offset_)
+                : suffix_offset == 0U ? static_cast<std::uint8_t>(':')
+                    : static_cast<std::uint8_t>(names[channel_][suffix_offset - 1U]);
+            const auto updated = hash_.update_step(&byte, 1U, 1U, 1U);
+            if (!updated.input_complete) { status_ = Status::failed; break; }
+            ++input_offset_; result.consumed_ops += 3U;
+            if (input_offset_ == identity_size + 1U + lengths[channel_]) phase_ = 2U;
+        } else if (phase_ == 2U) {
+            const auto finished = hash_.finish_step(1U);
+            ++result.consumed_ops;
+            if (finished.digest_ready) {
+                const Sha256Digest digest = hash_.digest();
+                channels_[channel_] = (static_cast<std::uint32_t>(digest[0]) << 24U)
+                    | (static_cast<std::uint32_t>(digest[1]) << 16U)
+                    | (static_cast<std::uint32_t>(digest[2]) << 8U)
+                    | static_cast<std::uint32_t>(digest[3]);
+                if (channel_ == 0U && channels_[0] % 1000U >= SOURCE_OCCUPANCY_PER_THOUSAND)
+                    status_ = Status::absent;
+                else if (channel_ == 3U) status_ = Status::ready;
+                else phase_ = 3U;
+            }
+        } else {
+            hash_.reset(); input_offset_ = 0U; ++channel_; phase_ = 1U;
+            ++result.consumed_ops;
+        }
+    }
+    result.status = status_;
+    if (status_ == Status::pending) result.next_atomic_ops = phase_ == 1U ? 3U
+        : phase_ == 0U && decimal_phase_ == 1U ? 2U : 1U;
+    return result;
+}
+
+void BorrowedShapingPageCursor::reset() noexcept {
+    page_ = {}; bounds_ = {}; low_region_ = {}; high_region_ = {}; region_ = {};
+    candidate_.reset(); profile_count_ = 0U; entry_scan_index_ = 0U;
+    unresolved_seen_ = false; failed_seen_ = false;
+    phase_ = 0U; status_ = Status::idle;
+}
+BorrowedShapingPageCursor::Status BorrowedShapingPageCursor::status() const noexcept { return status_; }
+NativeTerrainPageKey BorrowedShapingPageCursor::page_key() const noexcept { return page_; }
+NativeHorizontalRect BorrowedShapingPageCursor::page_bounds() const noexcept { return bounds_; }
+std::size_t BorrowedShapingPageCursor::profile_count() const noexcept { return profile_count_; }
+
+BorrowedShapingPageCursor::Step BorrowedShapingPageCursor::begin(
+    const NativeTerrainPageKey page, const std::uint32_t offered_ops) noexcept {
+    Step result; result.status = status_;
+    if (status_ != Status::idle || offered_ops == 0U) return result;
+    const auto bounds = native_terrain_page_bounds(page);
+    if (!bounds) { status_ = Status::failed; result.status = status_; return result; }
+    page_ = page; bounds_ = *bounds;
+    const std::int64_t last_x = static_cast<std::int64_t>(bounds->x) + bounds->width - 1;
+    const std::int64_t last_z = static_cast<std::int64_t>(bounds->z) + bounds->depth - 1;
+    low_region_ = {floor_div(bounds->x, SOURCE_REGION_CELLS),
+        floor_div(bounds->z, SOURCE_REGION_CELLS)};
+    high_region_ = {floor_div(last_x, SOURCE_REGION_CELLS),
+        floor_div(last_z, SOURCE_REGION_CELLS)};
+    region_ = low_region_; profile_count_ = 0U; entry_scan_index_ = 0U;
+    candidate_.reset(); phase_ = 0U; status_ = Status::pending;
+    unresolved_seen_ = false; failed_seen_ = false;
+    result.status = status_; result.consumed_ops = 1U; result.next_atomic_ops = 1U;
+    return result;
+}
+
+BorrowedShapingPageCursor::Step NativeTerrainShapingRegistry::advance_borrowed_page(
+    BorrowedShapingPageCursor &cursor, const std::uint32_t offered_ops) const noexcept {
+    BorrowedShapingPageCursor::Step result; result.status = cursor.status_;
+    if (cursor.status_ != BorrowedShapingPageCursor::Status::pending) return result;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    while (result.consumed_ops < limit && cursor.status_ == BorrowedShapingPageCursor::Status::pending) {
+        const std::uint32_t remaining = limit - result.consumed_ops;
+        if (cursor.phase_ == 0U) {
+            const auto begun = cursor.candidate_.begin(definition_, cursor.region_, remaining);
+            if (begun.consumed_ops == 0U
+                && cursor.candidate_.status() == BorrowedSiteCandidateCursor::Status::idle) {
+                result.next_atomic_ops = 1U; break;
+            }
+            result.consumed_ops += begun.consumed_ops;
+            cursor.phase_ = 1U;
+        } else if (cursor.phase_ == 1U) {
+            if (cursor.candidate_.status() == BorrowedSiteCandidateCursor::Status::pending) {
+                const auto advanced = cursor.candidate_.advance(definition_, remaining);
+                result.consumed_ops += advanced.consumed_ops;
+                if (advanced.consumed_ops == 0U) {
+                    result.next_atomic_ops = advanced.next_atomic_ops; break;
+                }
+            }
+            if (cursor.candidate_.status() == BorrowedSiteCandidateCursor::Status::pending) continue;
+            if (cursor.candidate_.status() == BorrowedSiteCandidateCursor::Status::failed) {
+                cursor.status_ = BorrowedShapingPageCursor::Status::failed; break;
+            }
+            if (cursor.candidate_.status() == BorrowedSiteCandidateCursor::Status::absent
+                || !rect_intersects(cursor.candidate_.declared_influence_cells(), cursor.bounds_)) {
+                cursor.phase_ = 3U; continue;
+            }
+            cursor.entry_scan_index_ = 0U; cursor.phase_ = 2U;
+        } else if (cursor.phase_ == 2U) {
+            if (cursor.entry_scan_index_ == state_->entries.size()) {
+                cursor.unresolved_seen_ = true; cursor.phase_ = 3U; continue;
+            }
+            const auto &entry = state_->entries[cursor.entry_scan_index_];
+            ++result.consumed_ops;
+            if (entry.region == cursor.region_) {
+                if (entry.kind == NativeSiteSourceResolutionKind::failed)
+                    cursor.failed_seen_ = true;
+                if (entry.kind == NativeSiteSourceResolutionKind::prepared
+                    && rect_intersects(entry.profile->envelope_cells(), cursor.bounds_)) {
+                    if (cursor.profile_count_ == cursor.profile_indices_.size()) {
+                        cursor.status_ = BorrowedShapingPageCursor::Status::failed; break;
+                    }
+                    cursor.profile_indices_[cursor.profile_count_++] = cursor.entry_scan_index_;
+                }
+                cursor.phase_ = 3U;
+            } else if (region_less(cursor.region_, entry.region)) {
+                cursor.unresolved_seen_ = true; cursor.phase_ = 3U;
+            } else ++cursor.entry_scan_index_;
+        } else {
+            ++result.consumed_ops;
+            if (cursor.region_.x < cursor.high_region_.x) ++cursor.region_.x;
+            else if (cursor.region_.z < cursor.high_region_.z) {
+                cursor.region_.x = cursor.low_region_.x; ++cursor.region_.z;
+            } else {
+                // Keep the synchronous pin_page precedence. With today's
+                // 2048-cell regions, 384-cell jitter/radius and 280-cell
+                // pages, two relevant candidates cannot share a page; the
+                // aggregate also remains correct if those constants change.
+                cursor.status_ = cursor.failed_seen_ ? BorrowedShapingPageCursor::Status::failed
+                    : cursor.unresolved_seen_ ? BorrowedShapingPageCursor::Status::unresolved
+                    : BorrowedShapingPageCursor::Status::ready;
+                break;
+            }
+            cursor.candidate_.reset(); cursor.phase_ = 0U;
+        }
+    }
+    result.status = cursor.status_;
+    if (cursor.status_ == BorrowedShapingPageCursor::Status::pending)
+        result.next_atomic_ops = cursor.phase_ == 0U ? 1U
+            : cursor.phase_ == 1U ? 3U : 1U;
+    return result;
+}
+
+BorrowedShapingIdentityCursor::Step NativeTerrainShapingRegistry::advance_borrowed_page_identity(
+    const BorrowedShapingPageCursor &page, BorrowedShapingIdentityCursor &identity,
+    const std::array<NativeTownRegionOverride, 9> &towns,
+    const std::size_t town_count, const std::uint32_t offered_ops) const noexcept {
+    BorrowedShapingIdentityCursor::Step result; result.status = identity.status();
+    if (page.status_ != BorrowedShapingPageCursor::Status::ready
+        || town_count > towns.size()) return result;
+    if (identity.status() == BorrowedShapingIdentityCursor::Status::ready
+        || identity.status() == BorrowedShapingIdentityCursor::Status::failed) return result;
+    const std::uint32_t limit = std::min(offered_ops, 64U);
+    if (limit < page.profile_count_) {
+        result.next_atomic_ops = static_cast<std::uint32_t>(page.profile_count_); return result;
+    }
+    std::array<const NativeAdmittedSiteTerrainProfile *, BorrowedShapingIdentityCursor::MAX_PROFILES>
+        profiles{};
+    for (std::size_t index = 0U; index < page.profile_count_; ++index) {
+        const std::size_t entry_index = page.profile_indices_[index];
+        if (entry_index >= state_->entries.size()
+            || state_->entries[entry_index].kind != NativeSiteSourceResolutionKind::prepared)
+            return result;
+        profiles[index] = state_->entries[entry_index].profile.get();
+    }
+    result.consumed_ops = static_cast<std::uint32_t>(page.profile_count_);
+    if (identity.status() == BorrowedShapingIdentityCursor::Status::idle) {
+        const auto begun = identity.begin(page.page_, page.bounds_, towns, town_count,
+            page.profile_count_, limit - result.consumed_ops);
+        result.consumed_ops += begun.consumed_ops;
+        result.status = begun.status;
+        result.next_atomic_ops = begun.next_atomic_ops;
+        return result;
+    }
+    const auto advanced = identity.advance(definition_, profiles, limit - result.consumed_ops);
+    result.consumed_ops += advanced.consumed_ops;
+    result.status = advanced.status;
+    result.next_atomic_ops = advanced.next_atomic_ops;
+    return result;
+}
+
 NativeTerrainShapingRegistryRejected::NativeTerrainShapingRegistryRejected(
     const NativeTerrainShapingRegistryRejectReason reason)
     : std::runtime_error("native terrain shaping registry rejected an operation"), reason_(reason) {}
@@ -406,8 +705,15 @@ const WorldPhysicalContentIdentity &NativeTerrainShapingRegistry::content_identi
     return state_->content_identity;
 }
 
+bool NativeTerrainShapingRegistry::bind_source_mutation_fence(WorldSourceMutationFence *fence) noexcept {
+    if (!fence || !fence->on_owner_thread() || source_mutation_fence_) return false;
+    source_mutation_fence_ = fence;
+    return true;
+}
+
 NativeTerrainShapingRegistryReceipt NativeTerrainShapingRegistry::apply(
     const NativeTerrainShapingRegistryBatch &batch) {
+    if (source_mutation_fence_) source_mutation_fence_->require_writer_entry();
     if (batch.expected_revision != state_->revision)
         reject(NativeTerrainShapingRegistryRejectReason::revision_conflict);
     if (batch.resolutions.size() > limits_.max_batch_resolutions)
@@ -484,12 +790,14 @@ NativeTerrainShapingRegistryReceipt NativeTerrainShapingRegistry::apply(
     auto next = std::make_shared<NativeTerrainShapingRegistryState>();
     next->revision = state_->revision + 1; next->entries = std::move(next_entries); next->retired = std::move(next_retired);
     next->content_identity = registry_identity(definition_, policy_content_identity_, next->entries, next->retired);
+    if (source_mutation_fence_) source_mutation_fence_->published();
     state_ = std::move(next);
     return {NativeTerrainShapingRegistryCommitStatus::committed, state_->revision};
 }
 
 NativeTerrainShapingRegistryReceipt NativeTerrainShapingRegistry::retire(
     const NativeTerrainShapingRegistryRetirement &retirement) {
+    if (source_mutation_fence_) source_mutation_fence_->require_writer_entry();
     if (retirement.expected_revision != state_->revision)
         reject(NativeTerrainShapingRegistryRejectReason::revision_conflict);
     if (retirement.regions.size() > limits_.max_batch_resolutions)
@@ -530,6 +838,7 @@ NativeTerrainShapingRegistryReceipt NativeTerrainShapingRegistry::retire(
         next->entries.erase(found);
     }
     next->content_identity = registry_identity(definition_, policy_content_identity_, next->entries, next->retired);
+    if (source_mutation_fence_) source_mutation_fence_->published();
     state_ = std::move(next);
     return {NativeTerrainShapingRegistryCommitStatus::committed, state_->revision};
 }
